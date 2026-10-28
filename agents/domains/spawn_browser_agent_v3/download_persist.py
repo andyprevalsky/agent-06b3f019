@@ -25,9 +25,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
+import hashlib
 import os
 import re
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import unquote, urlparse
 
 import structlog
@@ -36,6 +38,12 @@ from browser_tools.dom_service import (
     KERNEL_DOWNLOADS_PATH,
     STEEL_DOWNLOADS_PATH,
     browser_downloads_path_for_provider,
+)
+from domains.spawn_browser_agent_v3.tilion_worker import (
+    is_single_cdp_client_provider,
+    move_session,
+    record_download,
+    register_download_session,
 )
 
 logger = structlog.get_logger()
@@ -257,8 +265,15 @@ async def persist_bytes_to_session_downloads(
     content: bytes,
     mime_type: str = "application/octet-stream",
     provider: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Write bytes into the session downloads root via the provider-neutral API."""
+    """Write bytes into the session downloads root via the provider-neutral API.
+
+    Tilion has no session file API usable while the worker holds CDP, so its
+    downloads go to the worker ledger and, given ``user_id``, straight to
+    attachment storage, which outlives the activity (write-lock return,
+    Temporal retry, another worker). The ledger then keeps only the pointer.
+    """
     from domains.spawn_browser_agent_v3.repo import upload_file_to_session
 
     if not content:
@@ -273,6 +288,30 @@ async def persist_bytes_to_session_downloads(
         )
         return None
     safe_name = os.path.basename(filename) or "download.bin"
+    if is_single_cdp_client_provider(resolve_browser_provider(provider)):
+        file_pointer = None
+        if user_id:
+            from helpers.attachments import upload_to_storage
+
+            try:
+                file_pointer = await upload_to_storage(
+                    user_id=user_id,
+                    file_content=content,
+                    filename=safe_name,
+                    mime_type=mime_type,
+                    # Activities are at-least-once: the same bytes map to one object.
+                    idempotency_key=f"tilion-download:{session_id}:{hashlib.sha256(content).hexdigest()}",
+                )
+            except Exception as error:
+                logger.warning(
+                    "[DownloadPersist] Durable copy of Tilion download failed; kept in worker memory",
+                    session_id=session_id,
+                    filename=safe_name,
+                    error=str(error)[:200],
+                )
+        return record_download(
+            session_id, filename=safe_name, content=content, mime_type=mime_type, file_pointer=file_pointer
+        )
     downloads_dir = browser_downloads_path_for_provider(provider)
     upload_directory = session_upload_directory_for_provider(provider)
     uploaded = await upload_file_to_session(
@@ -298,6 +337,9 @@ async def persist_bytes_to_session_downloads(
     }
 
 
+_MAX_LISTED_DOWNLOADS = 20
+
+
 class BrowserDownloadPersister:
     """Materialize Chrome Downloads into the provider session root via Browser.download* CDP.
 
@@ -314,19 +356,27 @@ class BrowserDownloadPersister:
         agent_id: str = "",
         task_id: str = "",
         provider: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> None:
         self.browser_session = browser_session
+        self.user_id = user_id
         self.session_id = session_id
         self.config = config
         self.agent_id = agent_id
         self.task_id = task_id
         self.provider = resolve_browser_provider(provider)
         self.downloads_dir = browser_downloads_path_for_provider(self.provider)
+        if is_single_cdp_client_provider(self.provider):
+            register_download_session(session_id)
         self._closed = False
         self._cdp_client: Any = None
         self._tasks: Set[asyncio.Task] = set()
         self._pending_by_guid: Dict[str, Dict[str, Any]] = {}
         self._persisted_keys: Set[str] = set()
+        self._materializing: Dict[str, asyncio.Future] = {}
+        # Files this browser activity downloaded, newest last (bounded), so the
+        # agent's browser state can show them mid-run on every provider.
+        self._downloaded_files: List[Dict[str, Any]] = []
         # Track which CDP client the Browser.download* handlers are bound to.
         # A lifetime boolean would skip re-register after transition_browser
         # swaps the client (proxy rotation / Steel auth restart).
@@ -342,6 +392,7 @@ class BrowserDownloadPersister:
         agent_id: str = "",
         task_id: str = "",
         provider: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> Optional["BrowserDownloadPersister"]:
         if not session_id or config is None:
             return None
@@ -356,6 +407,7 @@ class BrowserDownloadPersister:
             agent_id=agent_id,
             task_id=task_id or "",
             provider=provider,
+            user_id=user_id,
         )
         try:
             await persister.start()
@@ -421,11 +473,21 @@ class BrowserDownloadPersister:
                 downloads_dir=self.downloads_dir,
             )
 
-    async def transition_browser(self, *, browser_session: Any, session_id: str) -> None:
+    async def transition_browser(
+        self, *, browser_session: Any, session_id: str, provider: Optional[str] = None
+    ) -> None:
         if self._closed:
             return
+        previous_session_id = self.session_id
         self.browser_session = browser_session
         self.session_id = session_id
+        move_session(previous_session_id, session_id)
+        if provider:
+            # Rotation/recovery may switch provider; persist where the new one can.
+            self.provider = resolve_browser_provider(provider)
+            self.downloads_dir = browser_downloads_path_for_provider(self.provider)
+        if is_single_cdp_client_provider(self.provider):
+            register_download_session(session_id)
         await self.start()
 
     async def close(self) -> None:
@@ -508,22 +570,61 @@ class BrowserDownloadPersister:
             )
         self._schedule_materialize(meta)
 
+    def _note_downloaded_file(self, result: Dict[str, Any], filename: str) -> None:
+        name = os.path.basename(str(result.get("filename") or result.get("path") or "")) or filename
+        size = result.get("size")
+        # Same basename replaces, as in the session downloads root.
+        self._downloaded_files = [item for item in self._downloaded_files if item["name"] != name]
+        self._downloaded_files.append({"name": name, "size": int(size) if isinstance(size, int) else None})
+        del self._downloaded_files[:-_MAX_LISTED_DOWNLOADS]
+
+    def downloaded_files(self) -> List[Dict[str, Any]]:
+        """Name and size of each file this activity downloaded, oldest first."""
+        return [dict(item) for item in self._downloaded_files]
+
     async def _materialize_chrome_download(self, *, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Materialize one Chrome download exactly once.
+
+        Chrome reports a download twice (downloadWillBegin and the completed
+        downloadProgress), and both schedule this. The key is reserved before
+        any await: a second event for the same download waits for the attempt
+        in flight and only tries again if that attempt produced nothing.
+        """
         if self._closed:
             return None
         url = str(meta.get("url") or "")
         filename = str(meta.get("suggested_filename") or "download.bin")
-        dedupe = f"{meta.get('guid')}|{url}|{filename}"
-        if dedupe in self._persisted_keys:
-            return None
-
-        if self.provider == "browser-use":
-            result = await wait_for_browser_use_download(
-                self.config, self.session_id, filename
-            )
+        # Guid-keyed: the completed event may carry a different file name.
+        dedupe = str(meta.get("guid") or "") or f"{url}|{filename}"
+        while True:
+            if dedupe in self._persisted_keys:
+                return None
+            in_flight = self._materializing.get(dedupe)
+            if in_flight is None:
+                break
+            with contextlib.suppress(Exception):
+                await asyncio.shield(in_flight)
+        attempt: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._materializing[dedupe] = attempt
+        result: Optional[Dict[str, Any]] = None
+        try:
+            result = await self._materialize_chrome_download_once(meta=meta, url=url, filename=filename)
             if result:
                 self._persisted_keys.add(dedupe)
+                self._note_downloaded_file(result, filename)
             return result
+        finally:
+            self._materializing.pop(dedupe, None)
+            if not attempt.done():
+                attempt.set_result(result)
+
+    async def _materialize_chrome_download_once(
+        self, *, meta: Dict[str, Any], url: str, filename: str
+    ) -> Optional[Dict[str, Any]]:
+        if self.provider == "browser-use":
+            return await wait_for_browser_use_download(
+                self.config, self.session_id, filename
+            )
 
         # Do NOT skip solely because a same-basename file already exists in the
         # session. TinyPNG (and similar) upload the source as rs.jpeg under the
@@ -546,7 +647,8 @@ class BrowserDownloadPersister:
         # Fall back to a credentialed page fetch of the Chrome-download URL.
         file_path = str(meta.get("file_path") or "").strip()
         result: Optional[Dict[str, Any]] = None
-        if file_path:
+        # Tilion fails files/fetch while the worker holds CDP; read in-page instead.
+        if file_path and not is_single_cdp_client_provider(self.provider):
             result = await self._materialize_from_provider_file_path(
                 file_path=file_path,
                 filename=filename,
@@ -559,9 +661,9 @@ class BrowserDownloadPersister:
                 config=self.config,
                 provider=self.provider,
                 trust_download=True,
+                **({"user_id": self.user_id} if self.user_id else {}),
             )
         if result:
-            self._persisted_keys.add(dedupe)
             logger.info(
                 "[DownloadPersist] Materialized Chrome download into session downloads",
                 agent_id=self.agent_id,
@@ -614,6 +716,7 @@ async def persist_navigation_download_via_page_fetch(
     config: Any,
     provider: Optional[str] = None,
     trust_download: bool = False,
+    user_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Credentialed in-page fetch + session write for goto ERR_ABORTED / CDP download fallback.
 
@@ -719,6 +822,7 @@ async def persist_navigation_download_via_page_fetch(
         content=file_bytes,
         mime_type=mime_type,
         provider=provider,
+        **({"user_id": user_id} if user_id else {}),
     )
     if not uploaded:
         return None

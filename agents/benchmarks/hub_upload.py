@@ -127,9 +127,10 @@ def fit_bundle_to_upload_limit(body: dict, *, max_bytes: int = HUB_UPLOAD_MAX_BY
     """Keep the upload under the Hub's body limit by removing duplicate logs first.
 
     An owned root can repeat its task's entire transcript and tree. Keep the
-    task's copy and the root's metadata when both refer to the same agent and
-    their logs are identical. Worker log lines are then dropped oldest-first
-    from the task that has the most. The full record stays in ``runs/*.json``.
+    task's copy and the root's metadata when their logs are identical. Keep
+    Hub-rendered transcripts, trees, and evaluator evidence. Drop oldest worker
+    logs first; if needed, omit unrendered custody fields with a marker. The
+    full record stays on disk in ``runs/*.json``.
     """
     if _encoded_size(body) <= max_bytes:
         return body
@@ -176,7 +177,34 @@ def fit_bundle_to_upload_limit(body: dict, *, max_bytes: int = HUB_UPLOAD_MAX_BY
     )
     limit_mb = max_bytes // (1024 * 1024)
     print(f"✂️  Hub upload: left out {omitted} oldest worker log line(s) to fit the {limit_mb}MB body limit")
+    dropped_fields = _drop_unrendered_custody_fields(fitted, tasks, max_bytes)
+    if dropped_fields:
+        print(f"✂️  Hub upload: also left out {', '.join(dropped_fields)} (not rendered by the Hub)")
     return fitted
+
+
+def _drop_unrendered_custody_fields(fitted: dict, tasks: list, max_bytes: int) -> list[str]:
+    """Leave out per-task custody data the Hub never reads, largest first, until the body fits."""
+    fields = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        if isinstance(task.get("owned_roots"), list) and task["owned_roots"]:
+            fields.append((_encoded_size(task["owned_roots"]), task, "owned_roots"))
+        logs = task.get("logs")
+        if isinstance(logs, dict) and logs.get("failure_evidence"):
+            fields.append((_encoded_size(logs["failure_evidence"]), task, "failure_evidence"))
+    dropped = []
+    for size, task, field in sorted(fields, key=lambda item: -item[0]):
+        if _encoded_size(fitted) <= max_bytes:
+            break
+        if field == "owned_roots":
+            task["owned_roots_omitted_for_upload"] = len(task["owned_roots"])
+            task["owned_roots"] = []
+        else:
+            task["logs"]["failure_evidence"] = {"omitted_for_upload_bytes": size}
+        dropped.append(f"{task.get('name')}.{field}")
+    return dropped
 
 
 def hub_upload_enabled() -> bool:

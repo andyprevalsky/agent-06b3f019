@@ -205,6 +205,12 @@ export async function runBrowserRootTeardownSavesStateCases(): Promise<void> {
     }
     if (parent?.filename === browserPath) {
       if (id === '../database') return { prisma: database };
+      // Provider dispatch reads the persisted provider through its own module.
+      if (id === './sessionProvider')
+        return {
+          providerForSession: async () => 'steel',
+          providerForTask: async () => 'steel',
+        };
       if (id === './sessionAuthPersist')
         return {
           persistSignedInBrowserState: async (sessionId: string) => {

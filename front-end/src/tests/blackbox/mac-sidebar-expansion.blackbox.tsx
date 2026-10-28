@@ -23,7 +23,7 @@ describe('Mac sidebar hover and explicit close', () => {
         fireEvent.mouseMove(window, { clientX: 0 });
         fireEvent.mouseEnter(bar);
         expect(bar).toHaveAttribute('data-expanded', 'true');
-        fireEvent.click(screen.getByRole('button', { name: 'Collapse agent sidebar' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Back' }));
         expect(bar).toHaveAttribute('data-expanded', 'false');
         expect(create).not.toHaveBeenCalled();
         fireEvent.mouseEnter(bar);
@@ -32,7 +32,7 @@ describe('Mac sidebar hover and explicit close', () => {
       }
       fireEvent.mouseEnter(bar);
       expect(bar).toHaveAttribute('data-expanded', 'true');
-      fireEvent.click(screen.getByRole('button', { name: /^Home$/ }));
+      fireEvent.click(screen.getByRole('button', { name: 'New agent in Home' }));
       expect(create).toHaveBeenCalledOnce();
     },
   );

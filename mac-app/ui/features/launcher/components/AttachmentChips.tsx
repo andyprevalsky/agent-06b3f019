@@ -25,8 +25,8 @@ const CHIP_STYLE: CSSProperties = {
   maxWidth: 148,
   padding: '5px 9px',
   borderRadius: 9999,
-  background: 'rgba(39, 39, 37, 0.08)',
-  color: '#272725',
+  background: 'var(--launcher-chip-bg)',
+  color: 'var(--launcher-text)',
   fontSize: 11,
   lineHeight: 1.2,
 };
@@ -66,7 +66,7 @@ const AttachmentChips = ({
               display: 'inline-flex',
               cursor: disabled ? 'not-allowed' : 'pointer',
               opacity: disabled ? 0.5 : 1,
-              color: '#272725',
+              color: 'inherit',
             }}
           >
             <X size={12} strokeWidth={2.5} />

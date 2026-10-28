@@ -2567,13 +2567,21 @@ def main():
     # Fly CLI or provider read.
     copies = simultaneous_copies(args, runner)
     capacity = runpy.run_path(str(root/'scripts/cloudbench-provider-capacity.py'))
+    # Provider-scoped limits (the Tilion pilot) bind only fleets on that provider;
+    # the selected backend env names it. A missing or unknown value binds all rows:
+    # a nonempty unknown value makes resolve_browser_provider return None instead of
+    # falling through to CLOUDBENCH_BROWSER_PROVIDER or the repo back-end/.env.
+    browser_provider = (capacity['dotenv_value'](Path(args.backend_env), 'BROWSER_PROVIDER')
+                        or 'unset-in-backend-env')
     try:
-        refused = capacity['check'](copies)
+        refused = capacity['check'](copies, browser_provider=browser_provider)
+        registry = capacity['for_browser_provider'](
+            capacity['load_registry'](), capacity['resolve_browser_provider'](browser_provider))
     except capacity['RegistryError'] as error:
         raise ValueError(str(error)) from None
     if refused:
         print(json.dumps(dict(status='REFUSED_PROVIDER_RATE_LIMITS', source_ref=args.source_ref, copies=copies,
-                              max_concurrent_benches=capacity['load_registry']()['cap'], provider_calls=0)))
+                              max_concurrent_benches=registry['cap'], provider_calls=0)))
         return refused
     if not discover:
         facts_from(runner['read'](args.facts))

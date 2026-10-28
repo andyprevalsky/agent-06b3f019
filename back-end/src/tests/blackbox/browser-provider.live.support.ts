@@ -8,6 +8,7 @@ import jwt from 'jsonwebtoken';
 import { chromium } from 'playwright';
 import { prisma } from '../../providers/database';
 import { browserUseEnabled } from '../../providers/browser/config';
+import { buildPreferredBrowserConfig } from '../../providers/browser/challengeRecovery';
 import { retryWithBackoff } from '../../providers/retry';
 import {
   releaseSteelRemoteSession,
@@ -104,6 +105,17 @@ export async function runLiveProviderParity(): Promise<void> {
     });
 
   await prisma.user.create({ data: { userId, name: 'Kernel Provider Blackbox' } });
+  // Pin Kernel through the persisted preference so this parity still runs on
+  // Kernel when the deployment default is Tilion (BROWSER_PROVIDER=tilion).
+  await prisma.browserContext.create({
+    data: {
+      userId,
+      preferredBrowserConfig: buildPreferredBrowserConfig(
+        { provider: 'kernel', proxyMode: 'residential_city', kernelProxyType: 'residential' },
+        AGENT_LOCATION
+      ),
+    },
+  });
   await prisma.agent.create({
     data: {
       id: agentId,

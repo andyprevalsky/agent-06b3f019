@@ -8,6 +8,7 @@ This module provides:
 """
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -172,22 +173,79 @@ def drop_browser_use_serial_dom_probes() -> None:
     DomService._get_all_trees = _get_all_trees_without_serial_probes
 
 
+VIEWPORT_SCREENSHOT_TIMEOUT_SECONDS = 10.0
+
+
 def browser_downloads_path_for_provider(provider: Optional[str] = None) -> str:
     """Return the CDP download directory for the active browser provider.
 
     ``Browser.setDownloadBehavior`` must write into a directory the provider's
     session-file listing actually exposes. Kernel and Browser Use use
-    ``/tmp/downloads``; Steel uses ``/files``.
+    ``/tmp/downloads``; Steel uses ``/files``. Tilion has no file listing; its
+    Chrome writes to ``/tmp/downloads`` and the worker reads files back over
+    its own CDP socket.
     """
     import os
 
     resolved = (provider if provider is not None else os.getenv("BROWSER_PROVIDER", "kernel")).strip().lower()
     if resolved == "steel":
         return STEEL_DOWNLOADS_PATH
-    if resolved == "browser-use":
+    if resolved in ("browser-use", "tilion"):
         return KERNEL_DOWNLOADS_PATH
     return KERNEL_DOWNLOADS_PATH
 
+
+# Per-activity memory of rendered image URLs (receipt image provenance).
+_MAX_REMEMBERED_IMAGE_URLS = 400
+# document.images read per state observation: browser-use's snapshot tree
+# prunes far-below-viewport <img>s that the page really rendered.
+_DOCUMENT_IMAGES_TIMEOUT_SECONDS = 3.0
+_MAX_DOCUMENT_IMAGES_PER_READ = 200
+_DOCUMENT_IMAGES_JS = f"""(() => {{
+  // HTML srcset parsing: a candidate URL is a run of non-whitespace and may
+  // contain commas; candidates are separated by the comma after descriptors.
+  const srcsetUrls = (text) => {{
+    const urls = [];
+    let i = 0;
+    const n = text.length;
+    const space = (c) => /\\s/.test(c);
+    while (i < n) {{
+      while (i < n && (space(text[i]) || text[i] === ',')) i++;
+      if (i >= n) break;
+      const start = i;
+      while (i < n && !space(text[i])) i++;
+      let url = text.slice(start, i);
+      if (url.endsWith(',')) {{
+        url = url.replace(/,+$/, '');
+      }} else {{
+        let depth = 0;
+        while (i < n) {{
+          const c = text[i];
+          if (c === '(') depth++;
+          else if (c === ')' && depth) depth--;
+          else if (c === ',' && !depth) break;
+          i++;
+        }}
+        i++;
+      }}
+      if (url) urls.push(url);
+    }}
+    return urls;
+  }};
+  const out = [];
+  for (const el of Array.from(document.images).slice(0, {_MAX_DOCUMENT_IMAGES_PER_READ})) {{
+    const src = el.getAttribute('src');
+    if (src) out.push(src);
+    if (el.currentSrc) out.push(el.currentSrc);
+    const srcset = el.getAttribute('srcset');
+    if (srcset) out.push(...srcsetUrls(srcset));
+  }}
+  const sources = Array.from(document.querySelectorAll('picture source[srcset]'));
+  for (const source of sources.slice(0, {_MAX_DOCUMENT_IMAGES_PER_READ})) {{
+    out.push(...srcsetUrls(source.getAttribute('srcset') || ''));
+  }}
+  return {{base: document.baseURI, urls: out}};
+}})()"""
 
 _IMAGE_ATTR_KEYS = (
     "currentSrc",
@@ -203,17 +261,54 @@ _IMAGE_ATTR_KEYS = (
 )
 
 
+def _srcset_candidates(value: str) -> List[Tuple[str, str]]:
+    """``(url, descriptor)`` pairs per the HTML srcset parsing algorithm.
+
+    A candidate URL is a run of non-whitespace and may itself contain commas
+    (image-resizing paths such as ``/cdn-cgi/image/fit=contain,width=600/...``);
+    candidates are separated by the comma after the descriptors. Splitting the
+    whole attribute on every comma produced junk URLs and dropped the real ones.
+    """
+    candidates: List[Tuple[str, str]] = []
+    text = value or ""
+    index, length = 0, len(text)
+    while index < length:
+        while index < length and (text[index].isspace() or text[index] == ","):
+            index += 1
+        if index >= length:
+            break
+        start = index
+        while index < length and not text[index].isspace():
+            index += 1
+        url = text[start:index]
+        descriptor = ""
+        if url.endswith(","):
+            url = url.rstrip(",")
+        else:
+            depth, descriptor_start = 0, index
+            while index < length:
+                char = text[index]
+                if char == "(":
+                    depth += 1
+                elif char == ")" and depth:
+                    depth -= 1
+                elif char == "," and not depth:
+                    break
+                index += 1
+            descriptor = text[descriptor_start:index].strip()
+            index += 1
+        if url:
+            candidates.append((url, descriptor))
+    return candidates
+
+
 def _best_url_from_srcset(value: str) -> Optional[str]:
     candidates: List[Tuple[float, str]] = []
-    for part in value.split(","):
-        tokens = part.strip().split()
-        if not tokens:
-            continue
-        url = tokens[0].strip()
+    for url, descriptor in _srcset_candidates(value):
         weight = 0.0
-        if len(tokens) > 1:
-            descriptor = tokens[-1].strip().lower()
-            match = re.match(r"^(\d+(?:\.\d+)?)(w|x)$", descriptor)
+        tokens = descriptor.lower().split()
+        if tokens:
+            match = re.match(r"^(\d+(?:\.\d+)?)(w|x)$", tokens[-1])
             if match:
                 weight = float(match.group(1))
         candidates.append((weight, url))
@@ -437,7 +532,7 @@ def _extract_image_urls_from_dom_state(dom_state: Any, *, page_url: str) -> List
                 if not value:
                     continue
                 if key in {"srcset", "data-srcset"}:
-                    raw_urls = [part.split()[0] for part in value.split(",") if part.split()]
+                    raw_urls = [url for url, _descriptor in _srcset_candidates(value)]
                 elif key == "data-a-dynamic-image":
                     raw_urls = _urls_from_dynamic_image_attr(value)
                 else:
@@ -762,6 +857,7 @@ class DOMService:
         viewport_width: int = 1280,
         viewport_height: int = 800,
         downloads_path: Optional[str] = None,
+        cdp_multiplexer: Any = None,
     ):
         """Initialize DOM service.
 
@@ -771,14 +867,23 @@ class DOMService:
             viewport_height: Browser viewport height (WXGA default)
             downloads_path: CDP download directory. Defaults to the path for
                 ``BROWSER_PROVIDER`` (Kernel/Browser Use ``/tmp/downloads``, Steel ``/files``).
+            cdp_multiplexer: Loopback single-socket multiplexer for providers that
+                admit one CDP client per session (Tilion). This service owns it and
+                closes it on disconnect, releasing the provider's client slot.
         """
         self.cdp_url = cdp_url
+        self.cdp_multiplexer = cdp_multiplexer
+        self._released_cdp_bytes = 0
         self.viewport_width = viewport_width
         self.viewport_height = viewport_height
         self.downloads_path = downloads_path or browser_downloads_path_for_provider()
         self._session = None
         self._selector_map: Dict[int, Any] = {}
         self._runtime_current_url = ""
+        # Image URLs rendered by any page this browser activity observed, oldest
+        # first. A receipt image is often copied on the product/event page and
+        # submitted from checkout, which does not render it. Bounded per activity.
+        self._rendered_image_urls: Dict[str, None] = {}
         # Execution bindings may change realms. Retain every prior value only
         # for output redaction, scoped to this browser activity/session.
         self._secret_redaction_refs: Dict[str, str] = {}
@@ -1134,12 +1239,69 @@ class DOMService:
 
         self._captcha_indicator_task = asyncio.create_task(_loop())
 
+    @property
+    def cdp_bytes_received(self) -> int:
+        """CDP bytes the provider relayed to this service (Tilion bills them as
+        egress); kept after disconnect for the activity's cost row."""
+        multiplexer = self.cdp_multiplexer
+        live = int(getattr(multiplexer, "upstream_bytes_received", 0) or 0) if multiplexer is not None else 0
+        return self._released_cdp_bytes + live
+
+    @property
+    def single_cdp_client(self) -> bool:
+        """True when the provider admits only this worker's CDP socket (Tilion).
+
+        Such providers fail REST drive calls (screenshot, key press, file fetch)
+        while the worker is attached, so those must go over this connection.
+        """
+        return self.cdp_multiplexer is not None
+
+    async def capture_viewport_png(self) -> str:
+        """Base64 PNG of the focused tab's viewport over this service's CDP socket."""
+        target_id = self._session.agent_focus_target_id
+        if not target_id:
+            raise RuntimeError("No focused browser tab to screenshot")
+        cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
+        started = time.monotonic()
+        try:
+            result = await asyncio.wait_for(
+                cdp_session.cdp_client.send_raw(
+                    "Page.captureScreenshot",
+                    {"format": "png", "fromSurface": True},
+                    session_id=cdp_session.session_id,
+                ),
+                timeout=VIEWPORT_SCREENSHOT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            logger.warning(
+                f"📸 Browser CDP call timed out: Page.captureScreenshot after {elapsed_ms} ms "
+                f"(limit {VIEWPORT_SCREENSHOT_TIMEOUT_SECONDS:g}s)"
+            )
+            raise TimeoutError(
+                f"Page.captureScreenshot timed out after {VIEWPORT_SCREENSHOT_TIMEOUT_SECONDS:g}s"
+            ) from None
+        data = result.get("data")
+        if not data:
+            raise RuntimeError("Page.captureScreenshot returned no image")
+        return data
+
     async def disconnect(self) -> None:
         """Disconnect from the browser.
 
         Remote profiles use keep_alive: this releases our connection while the
         backend owns checkpointing and provider-session release.
         """
+        try:
+            await self._disconnect_session()
+        finally:
+            multiplexer, self.cdp_multiplexer = self.cdp_multiplexer, None
+            if multiplexer is not None:
+                self._released_cdp_bytes += int(getattr(multiplexer, "upstream_bytes_received", 0) or 0)
+                with contextlib.suppress(Exception):
+                    await multiplexer.close()
+
+    async def _disconnect_session(self) -> None:
         if self._session:
             session = self._session
             task = self._captcha_indicator_task
@@ -2337,6 +2499,8 @@ class DOMService:
         viewport_width = geometry["viewport_width"]
         viewport_height = geometry["viewport_height"]
         page_stats = self._extract_page_statistics(state)
+        self._remember_rendered_image_urls(state)
+        await self._remember_document_images()
         media_candidates = _extract_media_candidates_from_dom_state(
             state.dom_state,
             page_url=state.url or "",
@@ -2396,8 +2560,70 @@ class DOMService:
                 visible["id"] = original["id"]
         return safe_result
 
+    async def _remember_document_images(self) -> List[str]:
+        """Record ``document.images`` (src, currentSrc, srcset) of the focused page.
+
+        One bounded Runtime.evaluate over this service's own CDP session (the
+        worker's single socket on Tilion; no Runtime.enable). Never fails a
+        state read: errors and timeouts record nothing.
+        """
+        get_cdp_session = getattr(self._session, "get_or_create_cdp_session", None)
+        if not callable(get_cdp_session):
+            return []
+        try:
+            cdp_session = await asyncio.wait_for(get_cdp_session(focus=False), timeout=_DOCUMENT_IMAGES_TIMEOUT_SECONDS)
+            evaluated = await asyncio.wait_for(
+                cdp_session.cdp_client.send.Runtime.evaluate(
+                    params={"expression": _DOCUMENT_IMAGES_JS, "returnByValue": True},
+                    session_id=cdp_session.session_id,
+                ),
+                timeout=_DOCUMENT_IMAGES_TIMEOUT_SECONDS,
+            )
+        except Exception as error:
+            logger.debug(f"document.images read skipped: {type(error).__name__}: {str(error)[:120]}")
+            return []
+        value = ((evaluated or {}).get("result") or {}).get("value") if isinstance(evaluated, dict) else None
+        if not isinstance(value, dict) or not isinstance(value.get("urls"), list):
+            return []
+        base = str(value.get("base") or "")
+        urls: Dict[str, None] = {}
+        for raw_url in value["urls"][: 3 * _MAX_DOCUMENT_IMAGES_PER_READ]:
+            if isinstance(raw_url, str):
+                url = _resolve_http_image_url(raw_url, base)
+                if url:
+                    urls.setdefault(url, None)
+        resolved = list(urls)
+        self.restore_rendered_image_state(resolved)
+        return resolved
+
+    def rendered_image_state(self) -> List[str]:
+        """Image URLs this activity has seen rendered, oldest first, for a replacement DOMService."""
+        return list(self._rendered_image_urls)
+
+    def restore_rendered_image_state(self, urls: Any) -> None:
+        """Carry receipt-image provenance across a session switch (rotation, challenge
+        recovery): the image was rendered by this activity's browser even if the
+        current session generation never loaded that page."""
+        for url in urls or []:
+            if isinstance(url, str) and url:
+                self._rendered_image_urls.pop(url, None)
+                self._rendered_image_urls[url] = None
+        while len(self._rendered_image_urls) > _MAX_REMEMBERED_IMAGE_URLS:
+            self._rendered_image_urls.pop(next(iter(self._rendered_image_urls)))
+
+    def _remember_rendered_image_urls(self, state: Any) -> List[str]:
+        """Record the images ``state`` renders; return them in page order."""
+        urls = _extract_image_urls_from_dom_state(state.dom_state, page_url=state.url or "")
+        for url in urls:
+            self._rendered_image_urls.pop(url, None)
+            self._rendered_image_urls[url] = None
+        while len(self._rendered_image_urls) > _MAX_REMEMBERED_IMAGE_URLS:
+            self._rendered_image_urls.pop(next(iter(self._rendered_image_urls)))
+        return urls
+
     async def get_page_image_urls(self) -> List[str]:
-        """Every image URL rendered on the current page, read from a fresh DOM snapshot."""
+        """Image URLs this browser activity actually rendered: the current page from a
+        fresh DOM snapshot first, then images rendered by pages observed earlier."""
         if self.secret_values_used:
             return []
         if not self._session:
@@ -2406,7 +2632,9 @@ class DOMService:
         state = await self._session.get_browser_state_summary(include_screenshot=False)
         if state.dom_state and state.dom_state.selector_map:
             self._selector_map = state.dom_state.selector_map
-        return _extract_image_urls_from_dom_state(state.dom_state, page_url=state.url or "")
+        current = self._remember_rendered_image_urls(state)
+        current += await self._remember_document_images()
+        return list(dict.fromkeys([*current, *reversed(self._rendered_image_urls)]))
 
     def _extract_page_statistics(self, state) -> Dict[str, int]:
         """Extract page statistics from DOM tree like browser-use does."""
@@ -2512,11 +2740,45 @@ class DOMService:
 
         return None
 
+    async def _relocate_replaced_element(self, element: Any) -> Optional[Any]:
+        """Find the node that replaced ``element`` after the page re-rendered it.
+
+        A widget that re-renders itself (FCaptcha's checkbox, webdecoy 3d714847)
+        drops the indexed backend node, so every CDP lookup by that id fails with
+        'No node with given id found'. A fresh snapshot is matched by the old node's
+        xpath, then by browser-use's stable hash; only a unique match is used.
+        """
+        if element is None:
+            return None
+        old_id = getattr(element, "backend_node_id", None)
+        xpath = getattr(element, "xpath", None)
+        stable_hash = None
+        with contextlib.suppress(Exception):
+            stable_hash = element.compute_stable_hash()
+        state = await self._session.get_browser_state_summary(include_screenshot=False)
+        selector_map = getattr(getattr(state, "dom_state", None), "selector_map", None) or {}
+        if selector_map:
+            self._selector_map = selector_map
+        nodes = [node for node in selector_map.values() if getattr(node, "backend_node_id", None) != old_id]
+        for matches_old in (
+            (lambda node: bool(xpath) and getattr(node, "xpath", None) == xpath),
+            (lambda node: stable_hash is not None and node.compute_stable_hash() == stable_hash),
+        ):
+            candidates = []
+            for node in nodes:
+                with contextlib.suppress(Exception):
+                    if matches_old(node):
+                        candidates.append(node)
+            if len(candidates) == 1:
+                return candidates[0]
+        return None
+
     async def get_element_rect(
         self,
         index: int,
         *,
         use_associated_label: bool = False,
+        _relocated: bool = False,
     ) -> Optional[Dict[str, int]]:
         """Get the visible viewport rect for an element.
 
@@ -2532,6 +2794,7 @@ class DOMService:
         if not self._session:
             raise RuntimeError("Not connected. Call connect() first.")
 
+        element = None
         try:
             element = await self.get_element_by_index(index)
             backend_node_id = getattr(element, "backend_node_id", index) if element else index
@@ -2621,6 +2884,10 @@ class DOMService:
                             });
                         };
 
+                        if (!this.isConnected) {
+                            // Re-rendered away: a detached node has no layout to click.
+                            return { detached: true };
+                        }
                         const ownRect = visibleViewportRect(this);
                         const inputType = String(this.type || "").toLowerCase();
                         const isCheckableInput = this.tagName === "INPUT"
@@ -2668,6 +2935,8 @@ class DOMService:
             if not rect_data:
                 logger.warning(f"Could not read viewport rect for index {index}")
                 return None
+            if rect_data.get("detached"):
+                raise LookupError("No node with given id found: the indexed node was detached by a re-render")
 
             if not rect_data.get("visible"):
                 logger.warning(
@@ -2691,6 +2960,21 @@ class DOMService:
             }
 
         except Exception as e:
+            stale = "no node with given id" in str(e).lower() or "no node found for given backend id" in str(e).lower()
+            if stale and not _relocated:
+                replacement = None
+                with contextlib.suppress(Exception):
+                    replacement = await self._relocate_replaced_element(element)
+                if replacement is not None:
+                    logger.info(
+                        f"Element index {index} was replaced by a re-render; "
+                        f"relocated to index {replacement.backend_node_id} by its xpath/stable hash"
+                    )
+                    return await self.get_element_rect(
+                        replacement.backend_node_id,
+                        use_associated_label=use_associated_label,
+                        _relocated=True,
+                    )
             logger.warning(f"Failed to get rect for index {index}: {e}")
 
         return None

@@ -12,14 +12,20 @@ import {
   LIVE_VIEW_CONTENT_VIEWPORT,
   STEEL_CHROME_CROP,
   STEEL_LIVE_VIEW_WINDOW,
+  TILION_LIVE_VIEW_REFRESH_MS,
+  TILION_LIVE_VIEW_TOKEN_TTL_MS,
   computeCroppedLiveViewIframe,
   computeLiveViewLetterbox,
+  isTilionLiveViewUrl,
   liveViewStreamFitsPane,
+  nextHeldTilionLiveView,
+  presentHeldLiveViewUrl,
   resolveLiveViewChromeCrop,
   resolveLiveViewDisplaySize,
   resolveLiveViewWindowSize,
   steelLiveViewIframeCropStyle,
   steelLiveViewScaledCropStyle,
+  tilionLiveViewSessionId,
   visibleSteelStreamRect,
 } from '@/features/terminal-component-group/components/browser-status-bar/liveViewDisplay';
 
@@ -176,5 +182,54 @@ describe('Steel chrome crop (display-only)', () => {
     expect(() => computeLiveViewLetterbox(1100, -1, width, height)).toThrow(
       /positive pane and stream dimensions/,
     );
+  });
+});
+
+describe('Tilion live-view URL contract', () => {
+  const TILION =
+    'https://back.tilion.dev/v1/session/sess_3d245e56b86d4bc8ae32095b644117d4/live-view?token=abc';
+
+  it('recognises Tilion viewer pages and treats them as uncropped 1280x800 content', () => {
+    expect(tilionLiveViewSessionId(TILION)).toBe('sess_3d245e56b86d4bc8ae32095b644117d4');
+    expect(isTilionLiveViewUrl(TILION)).toBe(true);
+    expect(resolveLiveViewChromeCrop(TILION)).toBeNull();
+    expect(resolveLiveViewWindowSize(TILION)).toEqual(KERNEL_LIVE_VIEW_WINDOW);
+    expect(resolveLiveViewDisplaySize(TILION)).toEqual(LIVE_VIEW_CONTENT_VIEWPORT);
+  });
+
+  it.each([
+    'https://back.tilion.dev.example/v1/session/s/live-view?token=x',
+    'https://back.tilion.dev/v1/session/s/live?token=x',
+    'https://back.tilion.dev/v1/session/s/cdp?token=x',
+    'https://example.com/v1/session/s/live-view?token=x',
+    'not a url',
+  ])('rejects non-viewer URL %s', (url) => {
+    expect(tilionLiveViewSessionId(url)).toBeNull();
+  });
+
+  it('refreshes before the 1800 s token expiry', () => {
+    expect(TILION_LIVE_VIEW_TOKEN_TTL_MS).toBe(1_800_000);
+    expect(TILION_LIVE_VIEW_REFRESH_MS).toBeLessThan(TILION_LIVE_VIEW_TOKEN_TTL_MS);
+    expect(TILION_LIVE_VIEW_REFRESH_MS).toBeGreaterThan(TILION_LIVE_VIEW_TOKEN_TTL_MS / 2);
+  });
+
+  it('holds one URL per session until due, then adopts the re-minted URL', () => {
+    const first = nextHeldTilionLiveView(null, TILION, 0);
+    expect(first).toEqual({
+      sessionId: 'sess_3d245e56b86d4bc8ae32095b644117d4',
+      url: TILION,
+      adoptedAtMs: 0,
+    });
+    const reminted = TILION.replace('token=abc', 'token=def');
+    expect(nextHeldTilionLiveView(first, reminted, 60_000)).toBe(first);
+    expect(presentHeldLiveViewUrl(first, reminted)).toBe(TILION);
+    const due = nextHeldTilionLiveView(first, reminted, TILION_LIVE_VIEW_REFRESH_MS);
+    expect(due?.url).toBe(reminted);
+    const other = 'https://back.tilion.dev/v1/session/sess_other/live-view?token=zzz';
+    expect(presentHeldLiveViewUrl(first, other)).toBe(other);
+    expect(nextHeldTilionLiveView(first, other, 1)?.sessionId).toBe('sess_other');
+    expect(nextHeldTilionLiveView(first, STEEL_PLAYER, 1)).toBeNull();
+    expect(nextHeldTilionLiveView(first, null, 1)).toBeNull();
+    expect(presentHeldLiveViewUrl(null, KERNEL_LIVE)).toBe(KERNEL_LIVE);
   });
 });

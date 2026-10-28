@@ -204,6 +204,43 @@ def test_oversized_bundle_deduplicates_identical_owned_root_logs():
     assert bundle["tasks"][0]["owned_roots"][0]["logs"] == logs
 
 
+def test_oversized_bundle_drops_unrendered_custody_fields_after_worker_logs():
+    """A skipped mass-agent record was 176MB: owned_roots 73MB and failure_evidence 32MB,
+    worker logs only 5MB. Trimming logs alone left it over the limit, the Hub answered
+    413 and the smoke invocation exited 1 (#1604, 2026-10-28)."""
+    blob = "y" * 1000
+
+    bundle = {
+        "run_id": "r1",
+        "tasks": [
+            {
+                "name": "test-mass-agent-run-0",
+                "passed": False,
+                "owned_roots": [{"agent_id": f"root-{index}", "tree": blob} for index in range(300)],
+                "logs": {
+                    "messages": [{"role": "USER", "text": "goal"}],
+                    "tree": {"root": blob * 20},
+                    "failure_evidence": {"tree": blob * 150},
+                    "worker_logs": [f"{index:06d} {blob}" for index in range(10)],
+                },
+            }
+        ],
+    }
+    limit = 60_000
+    fitted = fit_bundle_to_upload_limit(bundle, max_bytes=limit)
+
+    assert len(json.dumps(fitted).encode("utf-8")) <= limit
+    (task,) = fitted["tasks"]
+    original = bundle["tasks"][0]
+    assert task["logs"]["messages"] == original["logs"]["messages"], "transcripts are never trimmed"
+    assert task["logs"]["tree"] == original["logs"]["tree"], "the rendered tree is never trimmed"
+    assert task["owned_roots"] == [] and task["owned_roots_omitted_for_upload"] == 300
+    assert task["logs"]["failure_evidence"] == {"omitted_for_upload_bytes": len(json.dumps(original["logs"]["failure_evidence"]))}
+    assert len(original["owned_roots"]) == 300 and "tree" in original["logs"]["failure_evidence"], (
+        "the on-disk record is not mutated"
+    )
+
+
 def test_hub_requests_preserve_external_proxy_routing(monkeypatch):
     """Both publication and visibility use the user's route outside loopback."""
     from benchmarks.hub_upload import verify_run_visible

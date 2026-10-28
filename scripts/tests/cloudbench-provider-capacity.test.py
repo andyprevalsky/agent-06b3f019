@@ -48,6 +48,9 @@ PARALLEL_LINE = (
 def clean_env(**extra: str) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("CLOUDBENCH_", "RUN_BENCH_CAMPAIGN_", "BENCHMARK_HUB_GROUP", "FLY_"))}
+    # Pin a Kernel fleet so these exact refusals never depend on this host's
+    # back-end/.env BROWSER_PROVIDER. Tilion-scoped rows have their own tests.
+    env["CLOUDBENCH_BROWSER_PROVIDER"] = "kernel"
     env.update(extra)
     return env
 
@@ -61,12 +64,12 @@ def registry_value() -> dict:
     return json.loads(REGISTRY.read_text())
 
 
-def expected_cap(value: dict) -> tuple[int, dict[str, int]]:
+def expected_cap(value: dict, browser_provider: str = "kernel") -> tuple[int, dict[str, int]]:
     """Independent exact recomputation from the registry's decimal digits."""
     raw = json.loads(json.dumps(value), parse_float=Decimal)
     reserve = Fraction(raw["production_reserve_fraction"])
     caps = {row["id"]: math.floor(Fraction(row["limit"]) * (1 - reserve) / Fraction(row["per_bench_peak"]))
-            for row in raw["enforced"]}
+            for row in raw["enforced"] if row.get("browser_provider") in (None, browser_provider)}
     return min(caps.values()), caps
 
 
@@ -182,13 +185,117 @@ class ProviderCapacityRegistryTests(unittest.TestCase):
 
     def test_provider_capacity_has_no_bypass_option(self) -> None:
         usage = helper("check", "--help").stdout
+        # --browser-provider only selects which provider-scoped rows bind; it
+        # cannot raise any unscoped row's cap.
         self.assertEqual(sorted({word.rstrip(",]") for word in usage.split() if word.startswith("--")}),
-                         ["--benches", "--help"])
+                         ["--benches", "--browser-provider", "--help"])
         for flag in ("--force", "--skip", "--allow-over-cap"):
             self.assertEqual(helper("check", "--benches", "600", flag).returncode, 2)
         # Unrelated env vars change nothing; the refusal is identical.
         self.assertEqual(helper("check", "--benches", "600", CLOUDBENCH_PROVIDER_CAPACITY_SKIP="1",
                                 CLOUDBENCH_SKIP_PROVIDER_LIMITS="1").stderr, REFUSAL_600)
+
+
+class ProviderCapacityBrowserProviderTests(unittest.TestCase):
+    """The Tilion pilot (20 browsers, one shared account) binds Tilion fleets only."""
+
+    TILION_LINE = ("  - Tilion browser sessions: 20 concurrent browsers, pilot plan (TILION_API_KEY) → max 16 "
+                   "concurrent benches (peak 1 sessions per bench, assumed, not yet measured on Tilion)")
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="provider-capacity-browser-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        # A copied root controls back-end/.env, the default provider source.
+        self.root = self.tmp / "root"
+        (self.root / "scripts").mkdir(parents=True)
+        (self.root / "back-end").mkdir()
+        for member in MEMBERS:
+            shutil.copy2(ROOT / "scripts" / member, self.root / "scripts" / member)
+
+    def copied(self, *argv: str, backend_env: str | None = None, **env: str) -> subprocess.CompletedProcess[str]:
+        if backend_env is not None:
+            (self.root / "back-end/.env").write_text(backend_env)
+        environment = clean_env(**env)
+        if "CLOUDBENCH_BROWSER_PROVIDER" not in env:
+            environment.pop("CLOUDBENCH_BROWSER_PROVIDER")
+        return subprocess.run([sys.executable, "-I", "-S", "-B", str(self.root / "scripts" / MEMBERS[0]), *argv],
+                              env=environment, capture_output=True, text=True, timeout=30)
+
+    def test_tilion_row_is_scoped_to_tilion_fleets(self) -> None:
+        rows = {row["id"]: row for row in registry_value()["enforced"]}
+        self.assertEqual(rows["tilion-browser-sessions"]["browser_provider"], "tilion")
+        self.assertEqual(rows["tilion-browser-sessions"]["limit"], 20)
+        self.assertNotIn("browser_provider", rows["kernel-browser-sessions"])
+        self.assertEqual(expected_cap(registry_value(), "tilion")[0], 16)
+        for provider in ("kernel", "steel", "browser-use"):
+            with self.subTest(provider):
+                self.assertEqual(helper("cap", "--browser-provider", provider).stdout, "70\n")
+                fits = helper("check", "--benches", "70", "--browser-provider", provider)
+                self.assertEqual(fits.returncode, 0, fits.stderr)
+                self.assertNotIn("Tilion", fits.stderr)
+        self.assertEqual(helper("cap", "--browser-provider", "tilion").stdout, "16\n")
+        self.assertEqual(helper("check", "--benches", "16", "--browser-provider", "tilion").returncode, 0)
+        over = helper("check", "--benches", "17", "--browser-provider", "tilion")
+        self.assertEqual(over.returncode, 78)
+        self.assertEqual([line for line in over.stderr.splitlines() if line.startswith("  - ")], [self.TILION_LINE])
+        self.assertIn("rerun with a lower concurrency (16 or fewer concurrent benches)", over.stderr)
+        table = json.loads(helper("cap", "--json", "--browser-provider", "tilion").stdout)
+        self.assertEqual((table["browser_provider"], table["max_concurrent_benches"]), ("tilion", 16))
+        kernel = json.loads(helper("cap", "--json").stdout)
+        self.assertNotIn("tilion-browser-sessions", {row["id"] for row in kernel["enforced"]})
+
+    def test_provider_source_order_and_fail_closed_default(self) -> None:
+        cases = [
+            ("env selects tilion", 16, {"CLOUDBENCH_BROWSER_PROVIDER": "tilion"}, 'BROWSER_PROVIDER="kernel"\n'),
+            ("backend env tilion", 16, {}, 'OTHER=1\nBROWSER_PROVIDER="tilion" # default\n'),
+            ("backend env kernel", 70, {}, "BROWSER_PROVIDER=kernel\n"),
+            ("backend env last wins", 16, {}, "BROWSER_PROVIDER=kernel\nBROWSER_PROVIDER='tilion'\n"),
+            ("no provider anywhere binds every row", 16, {}, "OTHER=1\n"),
+            ("unknown provider binds every row", 16, {}, "BROWSER_PROVIDER=browserbase\n"),
+        ]
+        for label, cap, env, backend_env in cases:
+            with self.subTest(label):
+                result = self.copied("cap", backend_env=backend_env, **env)
+                self.assertEqual((result.returncode, result.stdout), (0, f"{cap}\n"), result.stderr)
+        explicit = self.copied("cap", "--browser-provider", "kernel", backend_env="BROWSER_PROVIDER=tilion\n",
+                               CLOUDBENCH_BROWSER_PROVIDER="tilion")
+        self.assertEqual(explicit.stdout, "70\n")
+        self.assertEqual(self.copied("cap", "--browser-provider", "browserbase").returncode, 2)
+
+    def test_scoped_row_validation_fails_closed(self) -> None:
+        value = registry_value()
+        value["enforced"][2]["browser_provider"] = "browserbase"
+        bad = self.tmp / "bad.json"
+        bad.write_text(json.dumps(value))
+        result = helper("check", "--benches", "1", CLOUDBENCH_PROVIDER_LIMITS_FILE=str(bad))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("browser_provider must be one of", result.stderr)
+        value = registry_value()
+        value["informational"][0]["browser_provider"] = "tilion"
+        bad.write_text(json.dumps(value))
+        self.assertEqual(helper("check", "--benches", "1", CLOUDBENCH_PROVIDER_LIMITS_FILE=str(bad)).returncode, 2)
+        value = registry_value()
+        value["enforced"][2]["demand_measurement"] = ""
+        bad.write_text(json.dumps(value))
+        self.assertEqual(helper("check", "--benches", "1", CLOUDBENCH_PROVIDER_LIMITS_FILE=str(bad)).returncode, 2)
+
+    def test_tilion_cap_binds_a_tilion_fleet_before_any_provider_call(self) -> None:
+        fakebin = self.tmp / "bin"
+        fakebin.mkdir()
+        calls = self.tmp / "provider-calls"
+        for name in ("fly", "flyctl", "curl"):
+            path = fakebin / name
+            path.write_text(f'#!/bin/sh\necho "{name} $*" >> {calls}\nexit 99\n')
+            path.chmod(0o700)
+        result = subprocess.run(
+            ["bash", str(FLEET), "demo-fleet-alpha"], cwd=ROOT,
+            env=clean_env(PATH=f"{fakebin}:{os.environ['PATH']}", TMPDIR=str(self.tmp),
+                          CLOUDBENCH_BROWSER_PROVIDER="tilion", CLOUDBENCH_CAMPAIGN_CONCURRENT_GUESTS="17"),
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 78, result.stdout + result.stderr)
+        self.assertIn("requested 17 concurrent benches, maximum 16.", result.stderr)
+        self.assertIn(self.TILION_LINE, result.stderr)
+        self.assertFalse(calls.exists())
 
 
 class ProviderCapacityCampaignTests(unittest.TestCase):

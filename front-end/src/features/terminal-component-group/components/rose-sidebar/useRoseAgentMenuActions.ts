@@ -20,6 +20,12 @@ import type { RoseAgentMenuActions } from './RoseAgentRowMenu';
 export interface RoseSidebarActions {
   onCreateAgentInProject?: (project: Project) => void;
   /**
+   * The project the composer's next new agent is created in (null = Home), as
+   * owned by the message-sending state. When given, it is the source of truth
+   * for the pending project indicator; otherwise the bar tracks its own clicks.
+   */
+  newAgentProjectId?: string | null;
+  /**
    * Open a code agent's conversation/transcript. Default: select the Rose agent
    * that owns the session; its chat holds the code agent's chip and transcript.
    */

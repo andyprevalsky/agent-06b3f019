@@ -11,7 +11,8 @@
  * light mode, captured at ui-integration 511197ab0 just before the dark query
  * box surface / textarea / model chip (FE-13 visual pass) were added.
  * The query fixture also includes the user-requested bottom-left model picker
- * layout (2026-10-21), applied equally in light and dark modes.
+ * layout (2026-10-21), applied equally in light and dark modes, and the
+ * attach paperclip moved immediately left of the model name (2026-10-28).
  * popular-goals-desktop.html is the flagged Popular Goals row in light mode,
  * captured at ui-integration d413b93f5 before its dark pills were added.
  *

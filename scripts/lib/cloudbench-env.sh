@@ -651,11 +651,11 @@ cloudbench_validate_browser_provider_contract() {
   agents_provider="$(cloudbench_env_value "$agents_env" BROWSER_PROVIDER)"
   backend_provider="$(cloudbench_env_value "$backend_env" BROWSER_PROVIDER)"
 
-  case "$prod_backend" in kernel|steel|browser-use) ;; *)
+  case "$prod_backend" in tilion|kernel|steel|browser-use) ;; *)
     echo "FATAL: production backend BROWSER_PROVIDER is invalid: ${prod_backend:-<unset>}" >&2
     return 1
   esac
-  case "$prod_worker" in kernel|steel|browser-use) ;; *)
+  case "$prod_worker" in tilion|kernel|steel|browser-use) ;; *)
     echo "FATAL: production worker BROWSER_PROVIDER is invalid: ${prod_worker:-<unset>}" >&2
     return 1
   esac
@@ -670,6 +670,18 @@ cloudbench_validate_browser_provider_contract() {
   if [ "$agents_provider" != "$prod_worker" ]; then
     echo "FATAL: benchmark worker env does not match production: local=${agents_provider:-<unset>} prod=$prod_worker" >&2
     return 1
+  fi
+  # Guests get provider keys only through the whole-file env blobs (the same
+  # way KERNEL_API_KEY arrives). A Tilion contract without its key would fail
+  # every browser /init on the guest; stop before staging or booting.
+  if [ "$prod_backend" = tilion ]; then
+    local tilion_key
+    tilion_key="$(cloudbench_env_value "$backend_env" TILION_API_KEY)"
+    if [ -z "$tilion_key" ]; then
+      echo "FATAL: back-end/.env has no TILION_API_KEY for BROWSER_PROVIDER=tilion." >&2
+      echo "   Add it to back-end/.env, then: bash scripts/run-bench-cloud --refresh-secrets" >&2
+      return 1
+    fi
   fi
   echo "browser provider contract verified: backend=$prod_backend worker=$prod_worker"
 }

@@ -4,7 +4,7 @@ import {
   closeClaudeCodeSession,
   getClaudeCodeSession,
 } from '../../providers/e2b';
-import { checkGithubRepoAccess } from '../../providers/github';
+import { checkGithubRepoAccess, ensureAgentTreeRepo } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
 import {
   markGptApiKeyOnCooldown,
@@ -67,7 +67,8 @@ async function resolveGithubRepo(
       error: err instanceof Error ? err.message : String(err),
     });
   }
-  return { repoUrl: undefined, userId };
+  // No repo yet: the tree gets one on its first code session.
+  return { repoUrl: await ensureAgentTreeRepo(agentId), userId };
 }
 
 export async function createSession(params: CreateSessionParams) {

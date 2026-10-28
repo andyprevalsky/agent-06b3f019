@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Local kernel/process controls for the registered-owner drain; no provider calls."""
 
+import runpy as _pidfd_runpy
+from pathlib import Path as _PidfdPath
+# Guest payloads use pidfd; run under a python3 that has it (see pidfd_interpreter.py).
+_pidfd_runpy.run_path(str(_PidfdPath(__file__).resolve().with_name("pidfd_interpreter.py")))["require_pidfd_interpreter"](__file__)
+
 import base64
 import contextlib
 import errno

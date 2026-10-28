@@ -160,22 +160,118 @@ export async function checkGithubRepoAccess(
   };
 }
 
+// ── Agent workspace repos ───────────────────────────────────────────────────
+//
+// Every agent repo is created by one token, so every caller shares GitHub's
+// secondary content-creation limit (~80/min, ~500/h per account). On 2026-10-28
+// local, benchmark and devbox stacks running with the production token made 96%
+// of the creates; the account was blocked and production users' code agents got
+// no repo for hours. So:
+//   - only production (Render) creates repos unless GITHUB_AGENT_REPOS=on;
+//   - a repo is created when a tree first starts a code session, not per chat;
+//   - one process-wide pacer spaces creates, and a secondary-limit response
+//     blocks all creates until its Retry-After instead of hammering the limit.
+// No per-user cap: the pacer is global and first-come.
+
+/** Spacing between creates: 480/h, under GitHub's ~500/h content-creation limit. */
+const REPO_CREATE_MIN_INTERVAL_MS = Number(process.env.GITHUB_REPO_CREATE_MIN_INTERVAL_MS ?? 7_500);
+/** A create that cannot start within this wait is skipped; the session runs repo-less. */
+const REPO_CREATE_MAX_QUEUE_WAIT_MS = Number(process.env.GITHUB_REPO_CREATE_MAX_WAIT_MS ?? 20_000);
+/** GitHub asks for at least a minute when a secondary limit carries no Retry-After. */
+const SECONDARY_LIMIT_DEFAULT_BLOCK_MS = 60_000;
+
+const repoCreateState = {
+  nextSlotAt: 0,
+  blockedUntil: 0,
+  login: null as string | null,
+};
+
+/** Test hook: reset the pacer and block between cases. */
+export function resetGithubRepoCreateStateForTests(): void {
+  repoCreateState.nextSlotAt = 0;
+  repoCreateState.blockedUntil = 0;
+  repoCreateState.login = null;
+}
+
+/** Agent repos are created only by production unless explicitly enabled. */
+export function agentRepoCreationEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const flag = (env.GITHUB_AGENT_REPOS ?? '').trim().toLowerCase();
+  if (flag === 'on' || flag === 'true') return true;
+  if (flag === 'off' || flag === 'false') return false;
+  return env.RENDER === 'true';
+}
+
+/** Reserve the next create slot; false when it would wait longer than allowed. */
+async function reserveRepoCreateSlot(): Promise<boolean> {
+  const now = Date.now();
+  const slot = Math.max(now, repoCreateState.nextSlotAt);
+  if (slot - now > REPO_CREATE_MAX_QUEUE_WAIT_MS) return false;
+  repoCreateState.nextSlotAt = slot + REPO_CREATE_MIN_INTERVAL_MS;
+  if (slot > now) await new Promise((resolve) => setTimeout(resolve, slot - now));
+  return true;
+}
+
+function isRateLimited(status: number, body: string): boolean {
+  return (status === 403 || status === 429) && /rate limit/i.test(body);
+}
+
+function retryAfterMs(headers: Headers): number {
+  const retryAfter = Number(headers.get('retry-after'));
+  if (Number.isFinite(retryAfter) && retryAfter > 0) return retryAfter * 1000;
+  const reset = Number(headers.get('x-ratelimit-reset'));
+  if (headers.get('x-ratelimit-remaining') === '0' && Number.isFinite(reset) && reset > 0)
+    return Math.max(0, reset * 1000 - Date.now());
+  return SECONDARY_LIMIT_DEFAULT_BLOCK_MS;
+}
+
+/** The existing repo's URL when a create reports the name is taken (a retry or a race). */
+async function existingRepoUrl(token: string, repoName: string): Promise<string | null> {
+  const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' };
+  if (repoCreateState.login === null) {
+    const me = await fetch('https://api.github.com/user', { headers });
+    if (!me.ok) return null;
+    repoCreateState.login = ((await me.json()) as { login: string }).login;
+  }
+  const response = await fetch(
+    `https://api.github.com/repos/${repoCreateState.login}/${repoName}`,
+    { headers }
+  );
+  return response.ok ? ((await response.json()) as { html_url: string }).html_url : null;
+}
+
 /**
- * Create a fresh public GitHub repo under the rose-gh-agent account.
+ * Create a fresh public GitHub repo under the agent repo account.
  * Prefers GITHUB_TOKEN, then falls back to GITHUB_DISPATCH_TOKEN when the
  * primary PAT is present but rejected (401/403) — same pattern as admin-health
- * velocity commits.
+ * velocity commits. Paced and blocked as described above; an existing repo of
+ * the same name is returned, so the call is idempotent.
  *
  * @param repoName - The repo name (e.g., "agent-a1b2c3d4")
- * @returns The HTTPS URL of the created repo, or null on failure
+ * @returns The HTTPS URL of the created repo, or null on failure, while
+ *   blocked, when the pacer queue is full, or when creation is disabled
  */
 export async function createGithubRepo(repoName: string): Promise<string | null> {
+  if (!agentRepoCreationEnabled()) {
+    log.info('Agent repo creation disabled outside production', { repoName });
+    return null;
+  }
   const candidates = [process.env.GITHUB_TOKEN ?? '', process.env.GITHUB_DISPATCH_TOKEN ?? '']
     .map((token) => token.trim())
     .filter((token) => token !== '');
   const unique = [...new Set(candidates)];
   if (unique.length === 0) {
     log.error('GITHUB_TOKEN not configured — cannot create repo');
+    return null;
+  }
+  if (Date.now() < repoCreateState.blockedUntil) {
+    log.warn('GitHub repo creation blocked by a secondary rate limit', {
+      repoName,
+      retryInMs: repoCreateState.blockedUntil - Date.now(),
+    });
+    return null;
+  }
+  if (!(await reserveRepoCreateSlot())) {
+    log.warn('GitHub repo creation queue is full; continuing without a repo', { repoName });
     return null;
   }
 
@@ -208,6 +304,23 @@ export async function createGithubRepo(repoName: string): Promise<string | null>
 
       lastStatus = response.status;
       lastBody = await response.text();
+      if (isRateLimited(response.status, lastBody)) {
+        const waitMs = retryAfterMs(response.headers);
+        repoCreateState.blockedUntil = Date.now() + waitMs;
+        log.error('GitHub repo creation rate limited; pausing all creates', {
+          repoName,
+          status: response.status,
+          retryInMs: waitMs,
+        });
+        return null;
+      }
+      if (response.status === 422 && /already exists/i.test(lastBody)) {
+        const existing = await existingRepoUrl(token, repoName);
+        if (existing !== null) {
+          log.info('Reusing existing repo', { repoUrl: existing });
+          return existing;
+        }
+      }
       const hasFallback =
         index < unique.length - 1 && (response.status === 401 || response.status === 403);
       if (hasFallback) {
@@ -238,4 +351,47 @@ export async function createGithubRepo(repoName: string): Promise<string | null>
     errorBody: lastBody,
   });
   return null;
+}
+
+const inFlightTreeRepos = new Map<string, Promise<string | undefined>>();
+
+/**
+ * The agent tree's workspace repo, created on first need (a code session).
+ * Idempotent: an existing URL is returned, concurrent callers in a process
+ * share one create, and a conditional write keeps the first URL if two
+ * processes race (the deterministic name makes GitHub return the same repo).
+ * Trees bound to a project return undefined: the project owns the checkout.
+ */
+export async function ensureAgentTreeRepo(agentId: string): Promise<string | undefined> {
+  const agent = await prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { busId: true },
+  });
+  if (!agent) return undefined;
+  const rootId = agent.busId !== null && agent.busId !== '' ? agent.busId : agentId;
+  const pending = inFlightTreeRepos.get(rootId);
+  if (pending) return pending;
+  const work = (async () => {
+    const root = await prisma.agent.findUnique({
+      where: { id: rootId },
+      select: { githubRepoUrl: true, userId: true, projectId: true },
+    });
+    if (!root || root.projectId !== null) return undefined;
+    if (root.githubRepoUrl !== null) return root.githubRepoUrl;
+    const created = await createGithubRepo(`agent-${rootId.substring(0, 8)}`);
+    if (created === null) return undefined;
+    await prisma.agent.updateMany({
+      where: { id: rootId, githubRepoUrl: null },
+      data: { githubRepoUrl: created },
+    });
+    const winner = await prisma.agent.findUnique({
+      where: { id: rootId },
+      select: { githubRepoUrl: true },
+    });
+    const repoUrl = winner?.githubRepoUrl ?? created;
+    if (root.userId !== null) await grantGithubRepoAccess(root.userId, repoUrl);
+    return repoUrl;
+  })().finally(() => inFlightTreeRepos.delete(rootId));
+  inFlightTreeRepos.set(rootId, work);
+  return work;
 }

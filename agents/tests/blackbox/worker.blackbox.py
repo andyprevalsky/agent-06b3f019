@@ -2751,8 +2751,8 @@ print(json.dumps(m.dispatch(request)),flush=True)
             runtime = root / "slot" / module.intent_digest(request) / "runtime" / "home"
             observations = [json.loads(line) for line in (runtime / "observations").read_text().splitlines()]
             assert len(observations) == 3 and len({item["pid"] for item in observations}) == 3, observations
-            assert all(item["limit"] == [1073741824, 1073741824] for item in observations)
-            assert all(item["oom"] == "1000" for item in observations)
+            assert all(item["limit"] == [1073741824, 1073741824] for item in observations), observations
+            assert all(item["oom"] == "1000" for item in observations), observations
             assert all(item["broker"] == request["peopleCredentialBrokerOrigin"] for item in observations)
             assert all(item["activation"] == "1" and item["autoscale"] == "0" for item in observations)
             assert all(item["cwd"].endswith("/source/agents") for item in observations)

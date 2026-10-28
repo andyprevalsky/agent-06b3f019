@@ -5,6 +5,7 @@
  * POST /api/browser-session/rotate-proxy - Advance the IP/provider recovery ladder
  */
 
+import { respondIfCarriedStateRequired } from './routes.carried-state';
 import { type Response, type Router } from 'express';
 import { ZodError } from 'zod';
 import { type AuthRequest, authenticate } from '../../providers/auth';
@@ -50,6 +51,7 @@ export function registerBrowserRotationRoute(router: Router): void {
           res.status(400).json({ error: 'Invalid rotate-proxy request', issues: error.issues });
           return;
         }
+        if (respondIfCarriedStateRequired(error, res)) return;
         if (error instanceof ProxyRotationExhaustedError) {
           log.warn('Proxy rotation budget exhausted', { cap: error.cap });
           res.status(409).json({
