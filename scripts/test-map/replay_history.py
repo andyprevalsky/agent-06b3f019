@@ -32,8 +32,9 @@ def git(*args: str) -> str:
     return subprocess.run(["git", *args], cwd=ROOT, check=True, capture_output=True, text=True).stdout
 
 
-def candidates(since: str, ref: str, limit: int) -> list[tuple[str, str, list[str]]]:
-    out = git("log", "--no-merges", f"--since={since}", "--format=%x00%H%x01%s", "--name-only", ref)
+def candidates(since: str, ref: str, limit: int, until: str = "") -> list[tuple[str, str, list[str]]]:
+    window = [f"--since={since}"] + ([f"--until={until}"] if until else [])
+    out = git("log", "--no-merges", *window, "--format=%x00%H%x01%s", "--name-only", ref)
     rows = []
     for block in out.split("\0")[1:]:
         head, _, names = block.partition("\n")
@@ -79,12 +80,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--since", default="2026-10-01")
     parser.add_argument("--ref", default="main")
+    parser.add_argument("--until", default="")
     parser.add_argument("--limit", type=int, default=150)
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--out", required=True)
     parser.add_argument("--sha", action="append", default=[])
     args = parser.parse_args()
-    rows = candidates(args.since, args.ref, 100000)
+    rows = candidates(args.since, args.ref, 100000, args.until)
     if args.sha:
         rows = [r for r in rows if any(r[0].startswith(s) for s in args.sha)]
     elif len(rows) > args.limit:

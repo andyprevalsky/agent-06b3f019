@@ -459,7 +459,9 @@ class Graph:
                 if not stripped:
                     continue
                 targets: list[str] = []
+                name = stripped
                 if "/" in stripped:
+                    name = ""
                     for base in ("", pkg, here):
                         cand = os.path.normpath(f"{base}/{stripped}") if base else stripped
                         if cand in self.fileset:
@@ -470,29 +472,37 @@ class Graph:
                     # Relative to a computed base (`$ROOT_DIR/...`,
                     # `path.resolve(__dirname, '../..')`): longest suffix that
                     # names real files/dirs, dropping unknown leading parts.
+                    resolved = bool(targets)
                     for i in range(len(parts) - 1 if not targets else 0):
                         tail = "/".join(parts[i:])
                         matches = self.by_suffix.get(tail, ()) or ([tail] if tail in self.fileset else [])
                         if 0 < len(matches) <= MAX_BASENAME_FANOUT:
                             targets.extend(matches)
+                            resolved = True
                             break
                         if allow_dirs:
                             dmatches = self.dir_by_suffix.get(tail, ()) or ([tail] if tail in self.dirs else [])
                             if 0 < len(dmatches) <= MAX_BASENAME_FANOUT:
                                 for d in dmatches:
                                     self.add_data(rel, f"dir:{d}")
+                                resolved = True
                                 break
-                elif "." in stripped and not stripped.startswith("."):
-                    matches = [m for m in self.by_basename.get(stripped, ()) if not m.startswith("docs/")]
-                    if 0 < len(matches) <= MAX_BASENAME_FANOUT and stripped not in BASENAME_STOP:
+                    if not resolved:
+                        # `$SCRIPT_DIR/local-db-container.sh`: fall back to the basename.
+                        name = parts[-1]
+                if name and "." in name and not name.startswith("."):
+                    matches = [m for m in self.by_basename.get(name, ()) if not m.startswith("docs/")]
+                    if 0 < len(matches) <= MAX_BASENAME_FANOUT and name not in BASENAME_STOP:
                         targets.extend(matches)
-                elif len(stripped) >= 6 and ("-" in stripped or "_" in stripped):
+                elif name and len(name) >= 6 and ("-" in name or "_" in name):
                     # Extensionless executables (`run-bench-fleet`) named alone.
-                    matches = [m for m in self.by_basename.get(stripped, ()) if not m.startswith("docs/")]
+                    matches = [m for m in self.by_basename.get(name, ()) if not m.startswith("docs/")]
                     if 0 < len(matches) <= 2:
                         targets.extend(matches)
                 for cand in targets:
-                    runs_it = exec_line or (is_test_file(rel) and is_test_file(cand))
+                    # A test naming a code path runs or loads it (directly, or after
+                    # copying it into a fixture), so its imports count too.
+                    runs_it = exec_line or is_test_file(rel)
                     if runs_it and PurePosixPath(cand).suffix in CODE_EXT | {""}:
                         self.add(rel, cand)
                     else:
