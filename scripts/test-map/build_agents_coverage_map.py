@@ -66,6 +66,10 @@ def main() -> int:
             data = CoverageData(basename=str(data_file))
             data.read()
             for measured in data.measured_files():
+                # `[tool.coverage.run] source` also records never-imported
+                # files with no lines; only executed files are dependencies.
+                if not data.lines(measured):
+                    continue
                 path = Path(measured).resolve()
                 try:
                     rel = path.relative_to(ROOT).as_posix()
