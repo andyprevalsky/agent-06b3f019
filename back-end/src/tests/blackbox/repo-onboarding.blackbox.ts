@@ -247,6 +247,12 @@ async function withLoginApi<T>(fn: (api: string, seen: () => string[]) => Promis
   const server = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    // The boxes.dev daemon probes every new local listener with `HEAD /`; it is
+    // not a CLI request.
+    if (req.method === 'HEAD' && req.url === '/') {
+      res.end();
+      return;
+    }
     seen.push(`${req.method} ${req.url} ${req.headers.authorization ?? ''}`);
     res.setHeader('Content-Type', 'application/json');
     if (req.url === '/api/projects/cli-login-codes/exchange') {
