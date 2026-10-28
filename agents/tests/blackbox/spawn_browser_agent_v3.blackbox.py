@@ -25062,6 +25062,9 @@ async def _run_realm_transition_action_fixture(
     credential_action=None,
     credential_failure=False,
     credential_origin=None,
+    navigation_error=None,
+    navigation_stays_on_old_page=False,
+    reload_error=None,
 ):
     """Drive real activity/action/history with synthetic CDP and private hydration."""
     from contextlib import ExitStack
@@ -25119,6 +25122,9 @@ async def _run_realm_transition_action_fixture(
         return payload
 
     class NavigationEvent:
+        def __init__(self, kind):
+            self.kind = kind
+
         def __await__(self):
             async def done():
                 return None
@@ -25126,16 +25132,20 @@ async def _run_realm_transition_action_fixture(
             return done().__await__()
 
         async def event_result(self, **_kwargs):
+            error = navigation_error if self.kind == "navigate" else reload_error
+            if error is not None:
+                raise RuntimeError(error)
             return None
 
     def dispatch(event):
-        if action_name == "goto" and not any(item[0] == "navigate" for item in events):
+        if action_name in {"goto", "open_new_tab"} and not any(item[0] == "navigate" for item in events):
             events.append(("navigate", event.url))
-            active_page["url"] = final_url
+            active_page["url"] = old_url if navigation_stays_on_old_page else final_url
+            return NavigationEvent("navigate")
         else:
             events.append(("reload", event.url))
             active_page["url"] = event.url
-        return NavigationEvent()
+            return NavigationEvent("reload")
 
     async def evaluate(**_kwargs):
         events.append(("evaluate", _kwargs["params"]["expression"]))
@@ -25171,7 +25181,7 @@ async def _run_realm_transition_action_fixture(
         params = (
             {"code": "(() => window.fixtureReadbackAndNavigate())()"}
             if action == "evaluate"
-            else ({"url": requested_url} if action == "goto" else {})
+            else ({"url": requested_url} if action in {"goto", "open_new_tab"} else {})
         )
         if credential_action is not None and len(model_contexts) == 1:
             action = credential_action["action"]
@@ -25209,6 +25219,10 @@ async def _run_realm_transition_action_fixture(
         patch.object(_FakeDomService, "get_page_identity", identity),
         patch.object(_FakeDomService, "get_browser_state", observe),
         patch.object(_FakeDomSession, "event_bus", SimpleNamespace(dispatch=dispatch), create=True),
+        patch.object(
+            _FakeDomSession, "get_focused_target",
+            return_value=SimpleNamespace(target_id="fixture-tab"), create=True,
+        ),
         patch.object(_FakeDomSession, "get_or_create_cdp_session", AsyncMock(return_value=cdp), create=True),
         patch(prefix + "wait_for_navigation_ready", AsyncMock()),
         patch("domains.spawn_browser_agent_v3.service_actions.wait_for_navigation_ready", AsyncMock()),
@@ -25460,6 +25474,75 @@ async def test_activity_redirected_goto_reloads_prepared_realm_once():
             assert events.index(("prepare", "new.example")) < events.index(("navigate", "https://new.example/login"))
         if restoration_error:
             assert "18000ms" in context["credential_preparation_error"]
+
+
+@_in_browser_activity_context
+async def test_activity_open_new_tab_prepares_realm_before_failed_navigation():
+    """The requested realm is prepared before a new tab, even when TLS fails."""
+    import json
+
+    error = "Navigation failed: net::ERR_SSL_PROTOCOL_ERROR"
+    contexts, saved, events, prior, active = await _run_realm_transition_action_fixture(
+        "open_new_tab", redirect=False, navigation_error=error, reload_error=error,
+    )
+    navigation = ("navigate", "https://new.example/login")
+    assert events.count(navigation) == 1
+    assert events.index(("prepare", "new.example")) < events.index(navigation)
+    assert not any(event[0] == "reload" for event in events), "failed navigation was automatically repeated"
+    assert events.count(("model", 2)) == 1, "the model never received the real navigation error"
+    tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
+    result = json.loads(tools[0]["content"])
+    assert result["success"] is False and error in result["error"]
+    assert result["auth_context"]["auth_realm"] == "new.example"
+    assert prior not in str(contexts) and active not in str(contexts)
+
+
+@_in_browser_activity_context
+async def test_activity_open_new_tab_keeps_observed_realm_after_early_failure():
+    import json
+
+    error = "Navigation failed: net::ERR_SSL_PROTOCOL_ERROR"
+    contexts, _saved, events, _prior, _active = await _run_realm_transition_action_fixture(
+        "open_new_tab", redirect=False, navigation_error=error, navigation_stays_on_old_page=True,
+    )
+    assert events.index(("prepare", "new.example")) < events.index(("navigate", "https://new.example/login"))
+    assert ("reload", "https://new.example/login") not in events
+    assert events.count(("reload", "https://old.example/login")) == 1
+    tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
+    result = json.loads(tools[0]["content"])
+    assert result["success"] is False and error in result["error"]
+    assert result["auth_context"]["auth_realm"] == "old.example", "requested URL replaced observed page identity"
+
+
+@_in_browser_activity_context
+async def test_activity_open_new_tab_success_and_optional_preparation_error():
+    import json
+
+    for restoration_error in (False, True):
+        contexts, _saved, events, _prior, _active = await _run_realm_transition_action_fixture(
+            "open_new_tab", redirect=False, restoration_error=restoration_error,
+        )
+        assert events.index(("prepare", "new.example")) < events.index(("navigate", "https://new.example/login"))
+        assert not any(event[0] == "reload" for event in events)
+        tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
+        result = json.loads(tools[0]["content"])
+        assert result["success"] is True
+        if restoration_error:
+            assert "18000ms" in result["auth_context"]["credential_preparation_error"]
+
+
+@_in_browser_activity_context
+async def test_activity_open_new_tab_preserves_redirect_reload_barrier():
+    for error in (None, "Navigation failed: net::ERR_SSL_PROTOCOL_ERROR"):
+        if error:
+            with pytest.raises(RuntimeError, match="ERR_SSL_PROTOCOL_ERROR"):
+                await _run_realm_transition_action_fixture("open_new_tab", redirect=True, reload_error=error)
+        else:
+            _contexts, _saved, events, _prior, _active = await _run_realm_transition_action_fixture(
+                "open_new_tab", redirect=True,
+            )
+            assert events.index(("prepare", "new.example")) < events.index(("reload", "https://new.example/login"))
+            assert events.index(("reload", "https://new.example/login")) < events.index(("model", 2))
 
 
 @_in_browser_activity_context
@@ -35478,6 +35561,22 @@ async def run_all_tests():
     await r.record_async(
         "activity_redirected_goto_reloads_prepared_realm_once",
         test_activity_redirected_goto_reloads_prepared_realm_once,
+    )
+    await r.record_async(
+        "activity_open_new_tab_prepares_realm_before_failed_navigation",
+        test_activity_open_new_tab_prepares_realm_before_failed_navigation,
+    )
+    await r.record_async(
+        "activity_open_new_tab_keeps_observed_realm_after_early_failure",
+        test_activity_open_new_tab_keeps_observed_realm_after_early_failure,
+    )
+    await r.record_async(
+        "activity_open_new_tab_success_and_optional_preparation_error",
+        test_activity_open_new_tab_success_and_optional_preparation_error,
+    )
+    await r.record_async(
+        "activity_open_new_tab_preserves_redirect_reload_barrier",
+        test_activity_open_new_tab_preserves_redirect_reload_barrier,
     )
     await r.record_async(
         "return_to_quarantined_realm_invalidates_other_auth_context",

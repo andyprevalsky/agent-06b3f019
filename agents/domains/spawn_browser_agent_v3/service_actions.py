@@ -1423,6 +1423,9 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
                 error=guard,
                 params={"url": url},
             )
+    await _prepare_navigation_credentials(
+        url, context.current_auth_realm, context.prepare_credentials_for_url,
+    )
     event = context.session.event_bus.dispatch(NavigateToUrlEvent(url=url, new_tab=True))
     await event
     await event.event_result(raise_if_any=True, raise_if_none=False)
@@ -3985,27 +3988,12 @@ async def _execute_input_text(
     )
 
 
-async def _execute_goto(
-    *,
-    session: Any,
-    dom_service: DOMService,
-    action_history: ActionHistory,
-    params: Dict,
-    thinking: Any,
-    session_id: Optional[str],
-    config: Any,
-    current_auth_realm: str = "",
-    prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
-    wait_for_navigation: Optional[Callable[..., Awaitable[None]]] = None,
-    browser_network_recorder: Optional[Any] = None,
-) -> Dict[str, Any]:
-    """Prepare a target realm's credentials, then execute navigation."""
-    from browser_use.browser.events import NavigateToUrlEvent
-
-    original_url = params.get("url", "")
-    url = _normalize_goto_url(original_url) or ""
-    if url != original_url:
-        logger.info(f"\U0001f517 Auto-added https:// to URL: {url}")
+async def _prepare_navigation_credentials(
+    url: str,
+    current_auth_realm: str,
+    prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]],
+) -> Optional[Dict[str, Any]]:
+    """Prepare the requested realm before either same-tab or new-tab navigation."""
     credential_summary = None
     target_auth_realm = auth_realm_from_url(url)
     if (
@@ -4040,6 +4028,34 @@ async def _execute_goto(
                 )
                 if key in prepared
             }
+
+    return credential_summary
+
+
+async def _execute_goto(
+    *,
+    session: Any,
+    dom_service: DOMService,
+    action_history: ActionHistory,
+    params: Dict,
+    thinking: Any,
+    session_id: Optional[str],
+    config: Any,
+    current_auth_realm: str = "",
+    prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
+    wait_for_navigation: Optional[Callable[..., Awaitable[None]]] = None,
+    browser_network_recorder: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Prepare a target realm's credentials, then execute navigation."""
+    from browser_use.browser.events import NavigateToUrlEvent
+
+    original_url = params.get("url", "")
+    url = _normalize_goto_url(original_url) or ""
+    if url != original_url:
+        logger.info(f"\U0001f517 Auto-added https:// to URL: {url}")
+    credential_summary = await _prepare_navigation_credentials(
+        url, current_auth_realm, prepare_credentials_for_url,
+    )
 
     network_clock = getattr(browser_network_recorder, "network_clock_ms", None)
     navigation_started_ms = network_clock() if callable(network_clock) else None
