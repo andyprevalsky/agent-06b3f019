@@ -532,6 +532,10 @@ async function main() {
       }) as typeof fetch;
       try {
         for (const peer of shardPeers) await publisher.broadcastMessageInsert(peer, message(peer));
+        // Retries are timer-driven: under a loaded coverage run they can take
+        // longer than a fixed sleep to reach the cap. Wait for the cap, then
+        // give a fifth request time to (wrongly) start.
+        for (let waited = 0; active < 4 && waited < 3000; waited += 25) await sleep(25);
         await sleep(150);
         assert.equal(active, 4, 'one shard may issue only four retry requests concurrently');
       } finally {
