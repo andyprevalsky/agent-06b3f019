@@ -33,6 +33,7 @@ import {
 } from './archive-planner-memory.helper';
 import { ids, jsonRoundTrip, request, runTest, type TestResult } from './archive-blackbox.support';
 import { runCostCases } from './archive-run-cost.helper';
+import { testSmsKillDoesNotAwaitRootArchiveFinalization } from './archive-kill-finalize.helper';
 
 config();
 
@@ -590,6 +591,10 @@ async function runAll(): Promise<void> {
     {
       name: 'email provider boundary archived with agent correlation',
       fn: testEmailProviderBoundaryArchivedWithAgentCorrelation,
+    },
+    {
+      name: 'SMS kill_agent does not await root archive finalization',
+      fn: testSmsKillDoesNotAwaitRootArchiveFinalization,
     },
     {
       name: 'cleanup leaves no planner-memory history rows',

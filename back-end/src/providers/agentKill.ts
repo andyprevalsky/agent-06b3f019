@@ -105,6 +105,24 @@ async function retryRootArchiveFinalization(agentId: string, ignoreGrace: boolea
   }
 }
 
+// Root finalization reads every archived artifact, so a long run takes minutes.
+// Callers (UI Archive, SMS kill_agent inside the per-user commit lock, /clear)
+// must not wait for it: the durable TraceArchiveFinalization row is already
+// released and claimable, so run it after the kill returns, one root at a time
+// per process. The row survives a crash for the production retry cron.
+let rootArchiveFinalizationQueue: Promise<void> = Promise.resolve();
+
+function scheduleRootArchiveFinalization(agentId: string, ignoreGrace: boolean): void {
+  rootArchiveFinalizationQueue = rootArchiveFinalizationQueue.then(() =>
+    retryRootArchiveFinalization(agentId, ignoreGrace)
+  );
+}
+
+/** Resolves once every root finalization scheduled so far has settled. */
+export async function waitForScheduledRootArchiveFinalizations(): Promise<void> {
+  await rootArchiveFinalizationQueue;
+}
+
 /** Status written for an archived agent that had not reached a terminal status. */
 export const ARCHIVED_AGENT_STATUS_MESSAGE = 'Archived by user';
 const NON_TERMINAL_AGENT_STATUSES = ['STARTING_UP', 'ACTIVE', 'PAUSED'] as const;
@@ -176,7 +194,7 @@ async function deleteAgentRecursiveInternal(
     return result;
   });
   if (sealed === null) {
-    if (archiveEnabled()) await retryRootArchiveFinalization(agentId, false);
+    if (archiveEnabled()) scheduleRootArchiveFinalization(agentId, false);
     return true;
   }
 
@@ -251,7 +269,7 @@ async function deleteAgentRecursiveInternal(
     if (sealed.traceArchiveDeletionLease !== null && workflowTerminationHandled) {
       try {
         await releaseTraceArchiveDeletion(sealed.traceArchiveDeletionLease);
-        await retryRootArchiveFinalization(agentId, true);
+        scheduleRootArchiveFinalization(agentId, true);
       } catch (error) {
         log.warn('Trace archive deletion lease retained for retry', {
           agent_id: agentId,
