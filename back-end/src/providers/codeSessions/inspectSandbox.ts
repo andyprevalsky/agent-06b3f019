@@ -251,13 +251,31 @@ export interface InspectCliParams {
   workDir: string;
   model: string;
   timeoutS: number;
+  /** Codex only: run on the funded Azure OpenAI provider (no user OAuth leased). */
+  codexAzureBaseUrl?: string;
 }
 
 /** argv (after the binary) of the headless inspector CLI. */
 export function inspectCliArgs(params: InspectCliParams, paths: InspectPaths): string[] {
   if (params.provider === 'codex') {
+    const azure =
+      params.codexAzureBaseUrl !== undefined && params.codexAzureBaseUrl !== ''
+        ? [
+            '-c',
+            'model_provider="azure"',
+            '-c',
+            'model_providers.azure.name="Azure OpenAI"',
+            '-c',
+            `model_providers.azure.base_url=${JSON.stringify(params.codexAzureBaseUrl)}`,
+            '-c',
+            'model_providers.azure.env_key="AZURE_OPENAI_API_KEY"',
+            '-c',
+            'model_providers.azure.wire_api="responses"',
+          ]
+        : [];
     return [
       'exec',
+      ...azure,
       '--ignore-user-config',
       '--skip-git-repo-check',
       '--dangerously-bypass-approvals-and-sandbox',
@@ -309,8 +327,8 @@ export function inspectRunScript(
     ...(params.provider === 'codex'
       ? [
           'mkdir -p "$HOME/.codex"',
-          'if [ -n "${CODEX_AUTH_JSON:-}" ]; then printf %s "$CODEX_AUTH_JSON" > "$HOME/.codex/auth.json"; chmod 600 "$HOME/.codex/auth.json";',
-          'elif [ -n "${OPENAI_API_KEY:-}" ]; then printf %s "$OPENAI_API_KEY" | codex login --with-api-key >/dev/null 2>&1; fi',
+          // Without user OAuth the azure provider reads AZURE_OPENAI_API_KEY itself.
+          'if [ -n "${CODEX_AUTH_JSON:-}" ]; then printf %s "$CODEX_AUTH_JSON" > "$HOME/.codex/auth.json"; chmod 600 "$HOME/.codex/auth.json"; fi',
           'unset CODEX_AUTH_JSON',
         ]
       : [

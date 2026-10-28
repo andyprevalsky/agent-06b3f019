@@ -168,3 +168,14 @@ python3 ../scripts/replicate_llm_dump.py \
 python3 ../scripts/replicate_llm_dump.py \
   ../.llm-dumps/<agent_id>/<ts>-<id>-planner.json --mode rebuild-system
 ```
+
+## Required factory execution metadata
+
+Follow `docs/factory-telemetry.md` for every new factory run. Record exact
+model/provider, effort, speed/service tier, harness/version, scoped token/cache
+usage and cost, worker attribution, resource/concurrency context, disjoint wait
+times and validation provenance. Every known value requires a timestamped source;
+unavailable values stay explicitly unknown. Never guess historical settings or
+publish raw transcripts, secrets or signed URLs. Set `FACTORY_METADATA_FILE`
+before collection, append snapshots for changes and publish the ledger. Final
+scorecards report model/effort/tier and collection gaps alongside timings.
