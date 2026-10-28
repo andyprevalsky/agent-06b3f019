@@ -61,10 +61,8 @@ esac
 # rose_user_ui versions are stored hermetically on local disk for tests (the
 # user-ui blackbox reads back published bytes); prod uses Supabase Storage.
 export USER_UI_STORAGE_BACKEND=local
-export USER_UI_STORAGE_LOCAL_DIR="${USER_UI_STORAGE_LOCAL_DIR:-$ROOT_DIR/.context/user-ui-storage$SHARD_SUFFIX}"
 # display-tool media (domains/display) uses the same hermetic local store.
 export DISPLAY_STORAGE_BACKEND=local
-export DISPLAY_STORAGE_LOCAL_DIR="${DISPLAY_STORAGE_LOCAL_DIR:-$ROOT_DIR/.context/display-storage$SHARD_SUFFIX}"
 # User-tool handlers (POST /api/user-ui/tools/run) run in a local code-session
 # HOME instead of E2B; the backend refuses this mode in production.
 export USER_TOOLS_SESSION_SANDBOX=local
@@ -144,6 +142,10 @@ if [[ -n "$COVERAGE_SHARD" || -n "${BACKEND_COVERAGE_BLACKBOX_DOMAINS:-}" ||
   "${BACKEND_COVERAGE_SKIP_BLACKBOX:-0}" == "1" ]]; then
   COVERAGE_PARTIAL=1
 fi
+
+# Hermetic per-shard local stores (set after SHARD_SUFFIX is known).
+export USER_UI_STORAGE_LOCAL_DIR="${USER_UI_STORAGE_LOCAL_DIR:-$ROOT_DIR/.context/user-ui-storage$SHARD_SUFFIX}"
+export DISPLAY_STORAGE_LOCAL_DIR="${DISPLAY_STORAGE_LOCAL_DIR:-$ROOT_DIR/.context/display-storage$SHARD_SUFFIX}"
 
 # All coverage runs in one worktree share coverage/tmp, coverage/blackbox-run,
 # coverage/server.log, and the workspace database. Hold OS advisory locks in a
