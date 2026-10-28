@@ -171,13 +171,21 @@ def _collapse_node(node: Any) -> Any:
             (kept,) = [branch for branch in branches if branch != _NULL_BRANCH]
             if not isinstance(kept, dict):
                 continue
+            if kept.get("type") == "string":
+                # A string-typed (or string-enum) slot has no way to say "absent"
+                # once the null branch is gone, so qwen fills it with the literal
+                # text "null" (prod root 942d8562: start_phase, condition,
+                # until_timestamp, items_csv, start_url). Keep the null branch
+                # here; only arrays/integers/objects, which qwen string-encodes
+                # inside the union, are collapsed.
+                continue
             # The field's own description/title win over a nested model's docstring.
             props[key] = {**kept, **{name: value for name, value in prop.items() if name not in ("anyOf", "default")}}
     return result
 
 
 def collapse_omittable_nulls(schema: Any) -> Any:
-    """Send an omittable ``Optional[X] = None`` property as plain ``X``.
+    """Send an omittable non-string ``Optional[X] = None`` property as plain ``X``.
 
     qwen on Cerebras serializes arrays and integers inside ``anyOf[X, null]``
     as JSON strings, with or without strict decoding. Omission already

@@ -311,6 +311,35 @@ const tests: BlackboxTest[] = [
       );
     },
   },
+  {
+    name: 'generate-video route: schema, sandbox-token scope and owner checks run before any provider call',
+    fn: async () => {
+      const path = (agentId: string) => `/api/agent-tools/${agentId}/generate-video`;
+      const valid = { prompt: 'a calm sea', idempotency_key: `video-bb-${RUN}` };
+      expectStatus(
+        await call('POST', path(rootA), { prompt: 'x' }, { apiKeyUser: userA }),
+        400,
+        'idempotency_key is required'
+      );
+      expectStatus(
+        await call('POST', path(rootA), { ...valid, duration_seconds: 99 }, { apiKeyUser: userA }),
+        400,
+        'duration is capped'
+      );
+      expectStatus(
+        await call('POST', path(childA), valid, { bearer: codeToken(rootA) }),
+        403,
+        'sandbox token on a different agent'
+      );
+      expectStatus(
+        await call('POST', path(rootA), valid, { apiKeyUser: userB }),
+        403,
+        'non-owner API key'
+      );
+      const anonymous = await call('POST', path(rootA), valid, { noAuth: true });
+      assert(anonymous.status === 401 || anonymous.status === 403, 'no auth refused');
+    },
+  },
   ...displayRendererCases(),
   ...displayRenderCases(),
   ...displayScriptAllCases(),

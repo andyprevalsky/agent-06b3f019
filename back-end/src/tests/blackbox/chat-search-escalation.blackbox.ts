@@ -53,6 +53,7 @@ import { startedWorkflowGoal } from './chat-router-failover.live.support';
 import {
   recordLiveCall,
   replayCall,
+  settleRecordings,
   stalledResponse,
   type RecordedCall,
 } from './chat-search-escalation.network.support';
@@ -588,6 +589,7 @@ async function main(): Promise<number> {
             `searches ${JSON.stringify(turn.network.searched)}\n`
         );
       }
+      await settleRecordings();
       fixture.recordedAt = new Date().toISOString().slice(0, 10);
       writeFileSync(FIXTURE_PATH, `${JSON.stringify(fixture, null, 2)}\n`);
       process.stdout.write(`recorded ${FIXTURE_PATH}\n`);

@@ -94,7 +94,8 @@ async function main() {
       [require.resolve('prisma/build/index.js'), 'db', 'push', '--skip-generate'],
       {
         cwd: process.cwd(),
-        env: process.env,
+        // The schema's directUrl reads PRISMA_CLI_DATABASE_URL (S21 db-push guard).
+        env: { ...process.env, PRISMA_CLI_DATABASE_URL: baseUrl.toString() },
         timeout: 120_000,
         maxBuffer: 2_000_000,
       }

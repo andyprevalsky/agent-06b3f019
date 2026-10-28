@@ -77,7 +77,7 @@ async function testCreate_missingUserId() {
     headers: apiKeyHeaders(),
     body: JSON.stringify({ agent_id: crypto.randomUUID(), goal: 'test' }),
   });
-  assertStatus(res.status, 500, res.data);
+  assertStatus(res.status, 400, res.data);
   ErrorResponse.parse(res.data);
 }
 
