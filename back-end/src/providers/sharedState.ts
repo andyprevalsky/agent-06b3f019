@@ -278,3 +278,69 @@ export async function withSerializedLock<T>(
     await lease.release();
   }
 }
+
+/** A value taken from a shared sequence, with the token that took it. */
+export interface SequenceReservation {
+  value: number;
+  token: string;
+}
+
+/**
+ * Take the next value (0, 1, 2, ...) of a sequence every instance shares.
+ * One atomic UPSERT: a live row increments, an absent or expired row restarts
+ * at 0. The token is minted before the statement, so a query-layer replay of a
+ * committed statement whose reply was lost returns the same value instead of
+ * skipping one.
+ */
+export async function nextSequenceValue(
+  namespace: string,
+  key: string,
+  ttlMs: number
+): Promise<SequenceReservation> {
+  await reapExpired();
+  const token = randomUUID();
+  const rows = await prisma.$queryRaw<Array<{ next: number }>>`
+    INSERT INTO "SharedEphemeralState" (namespace, key, value, "expiresAt")
+    VALUES (${namespace}, ${key}, jsonb_build_object('n', 1, 'token', ${token}::text),
+            now() + ${ttlInterval(ttlMs)})
+    ON CONFLICT (namespace, key) DO UPDATE
+      SET value = CASE
+            WHEN "SharedEphemeralState".value->>'token' = ${token} THEN "SharedEphemeralState".value
+            WHEN "SharedEphemeralState"."expiresAt" <= now() THEN EXCLUDED.value
+            ELSE jsonb_build_object(
+              'n', (("SharedEphemeralState".value->>'n')::int + 1), 'token', ${token}::text)
+          END,
+          "expiresAt" = EXCLUDED."expiresAt"
+    RETURNING (value->>'n')::int AS next
+  `;
+  const next = rows[0]?.next;
+  if (typeof next !== 'number')
+    throw new Error(`sharedState: sequence ${namespace}/${key} not advanced`);
+  return { value: next - 1, token };
+}
+
+/**
+ * Return a taken value when nothing was taken after it: the sequence moves back
+ * only while `token` still holds the latest value. A later reservation (on any
+ * instance) keeps its own value, exactly like the per-process counter it replaces.
+ */
+export async function releaseSequenceValue(
+  namespace: string,
+  key: string,
+  reservation: SequenceReservation
+): Promise<void> {
+  if (reservation.value === 0) {
+    await prisma.$executeRaw`
+      DELETE FROM "SharedEphemeralState"
+      WHERE namespace = ${namespace} AND key = ${key} AND value->>'token' = ${reservation.token}
+        AND (value->>'n')::int = 1
+    `;
+    return;
+  }
+  await prisma.$executeRaw`
+    UPDATE "SharedEphemeralState"
+    SET value = jsonb_build_object('n', ${reservation.value}::int, 'token', NULL)
+    WHERE namespace = ${namespace} AND key = ${key} AND value->>'token' = ${reservation.token}
+      AND (value->>'n')::int = ${reservation.value + 1}
+  `;
+}
