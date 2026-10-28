@@ -3,15 +3,16 @@
  *
  * Stateless apart from which project row is being renamed (owned by the parent).
  *
- * EXPANDED (bar hovered) — created projects on top, the Home project last
- * (Andy, 2026-10-28); a thin divider line separates consecutive groups:
+ * EXPANDED (bar hovered) — "+ New project" first, right under Back | Search,
+ * then the created projects, the Home project last (Andy, 2026-10-28); a thin
+ * divider line separates consecutive groups:
+ *   + New project  (inline: Enter creates, Escape cancels)
  *   [icon] Project A   [+ new agent here] [⚙ settings]   (right-click: rename/settings/delete)
  *       project A agents (indented)
  *   ──────
  *   [icon] Project B   [+] [⚙]
  *   (icon = GitHub repo owner's avatar when connected to a GitHub repo, else folder)
  *       ...
- *   + New project  (inline: Enter creates, Escape cancels)
  *   ──────
  *   [⌂] Home   [+ new agent in Home]     (every agent without a project)
  *       Home agents
@@ -268,6 +269,9 @@ export default function RoseAgentGroups(props: RoseAgentGroupsProps) {
   const showHome = !isFiltering || homeView.shown.length > 0;
   return (
     <div data-testid="rose-agent-groups" className="flex flex-col">
+      {isExpanded && !isFiltering && (
+        <NewProjectRow onCreate={props.projectActions.onCreateProject} />
+      )}
       {isExpanded && props.projectLoading && (
         <p role="status" className="px-5 py-2 text-xs text-muted-foreground">
           Loading projects…
@@ -296,12 +300,7 @@ export default function RoseAgentGroups(props: RoseAgentGroupsProps) {
           </div>
         </Fragment>
       ))}
-      {isExpanded && !isFiltering && (
-        <NewProjectRow onCreate={props.projectActions.onCreateProject} />
-      )}
-      {showHome && (projectViews.length > 0 || (isExpanded && !isFiltering)) && (
-        <GroupDivider isExpanded={isExpanded} />
-      )}
+      {showHome && projectViews.length > 0 && <GroupDivider isExpanded={isExpanded} />}
       {showHome && (
         <HomeProjectRow
           isExpanded={isExpanded}

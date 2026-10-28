@@ -2,6 +2,7 @@
  * STATE MACHINE: RoseProjectRow (Rose left bar project row, UI ledger rows 57/60)
  *
  *   [REST]  icon · name · [+ new agent here] · [⚙ settings]
+ *           every "+" (Home's too): tooltip and aria-label "Create Super Agent"
  *           icon = ProjectIcon: the GitHub repo owner's avatar when repoUrl is a
  *           GitHub repo, else (or after a load error) the folder (UI item 32)
  *   [REST] --right-click--> [MENU] Rename project | Project settings | Delete project (red)
@@ -39,6 +40,7 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { Project } from '@/lib/api/projects';
 import { cn } from '@/lib/utils';
 
@@ -176,17 +178,30 @@ function rowTone(isActive: boolean) {
   };
 }
 
-function NewAgentHereButton({ name, onClick }: { name: string; onClick: () => void }) {
+/** Tooltip and accessible name of every group's "+" (Andy, 2026-10-28). */
+const CREATE_SUPER_AGENT_LABEL = 'Create Super Agent';
+
+function NewAgentHereButton({ onClick }: { onClick: () => void }) {
   return (
-    <button
-      type="button"
-      aria-label={`New agent in ${name}`}
-      title={`New agent in ${name}`}
-      onClick={onClick}
-      className={ICON_BUTTON}
-    >
-      <Plus className="h-[15px] w-[15px]" strokeWidth={1.7} />
-    </button>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={CREATE_SUPER_AGENT_LABEL}
+          onClick={onClick}
+          className={ICON_BUTTON}
+        >
+          <Plus className="h-[15px] w-[15px]" strokeWidth={1.7} />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent
+        data-testid="rose-create-agent-tooltip"
+        side="bottom"
+        className="px-2 py-1 text-xs"
+      >
+        {CREATE_SUPER_AGENT_LABEL}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -217,7 +232,7 @@ export default function RoseProjectRow(props: RoseProjectRowProps) {
           )}
           {isExpanded && (
             <>
-              <NewAgentHereButton name={project.name} onClick={props.onCreateAgent} />
+              <NewAgentHereButton onClick={props.onCreateAgent} />
               <button
                 type="button"
                 aria-label={`${project.name} project settings`}
@@ -261,9 +276,7 @@ export function HomeProjectRow({
         <Home className="h-5 w-5 flex-none" strokeWidth={1.7} />
       </PendingProjectFrame>
       <RowName isExpanded={isExpanded}>Home</RowName>
-      {isExpanded && onCreateAgent !== undefined && (
-        <NewAgentHereButton name="Home" onClick={onCreateAgent} />
-      )}
+      {isExpanded && onCreateAgent !== undefined && <NewAgentHereButton onClick={onCreateAgent} />}
     </div>
   );
 }

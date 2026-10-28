@@ -10,11 +10,11 @@
  *
  * LAYOUT (top → bottom, Andy 2026-10-28):
  *   Back (←, collapses the bar; expanded only) | Search — one row
- *   Created projects: each project row + its agents, divider lines between
- *   groups, then + New project; the Home project last (every agent without a
- *   project; its "+" = a new Home agent). RoseAgentGroups renders them, with
- *   per-agent one-layer disclosures. Collapsed: per group its icon, its agents,
- *   a divider pill; Home last.
+ *   + New project (expanded only), then the created projects: each project row
+ *   + its agents, divider lines between groups; the Home project last (every
+ *   agent without a project; its "+" = a new Home agent). RoseAgentGroups
+ *   renders them, with per-agent one-layer disclosures. Collapsed (no New
+ *   project affordance): per group its icon, its agents, a divider pill; Home last.
  *   The compact rail shows active tree counts >1; code sessions retain their
  *   provider icons. Code reads stay batched per on-screen page of ≤50 roots.
  *   ── Feedback · [Biz health, admins] · Archived · [Browse] · account row.

@@ -24,6 +24,7 @@ import { capturedRequests, clearCaptures } from './msw/capture';
 import { server } from './msw/server';
 import {
   anonymousUser,
+  createAgentButton,
   collapseBar,
   expandBar,
   makeProject,
@@ -191,14 +192,20 @@ describe('Rose left bar (flag on)', () => {
     expect(screen.getByTestId('rose-agent-row-home-run').className).toContain('pl-[34px]');
     // Project rows carry + (new agent here) and ⚙ (settings); Home carries +.
     const project = screen.getByTestId('rose-project-row-p-rose');
-    expect(within(project).getByRole('button', { name: 'New agent in Rose' })).toBeInTheDocument();
+    expect(within(project).getByRole('button', { name: 'Create Super Agent' })).toBeInTheDocument();
     expect(
       within(project).getByRole('button', { name: 'Rose project settings' }),
     ).toBeInTheDocument();
     const home = screen.getByTestId('rose-home-project-row');
     expect(home).toHaveTextContent('Home');
-    expect(within(home).getByRole('button', { name: 'New agent in Home' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '+ New project' })).toBeInTheDocument();
+    expect(within(home).getByRole('button', { name: 'Create Super Agent' })).toBeInTheDocument();
+    // "+ New project" is the first row of the list: right under Back | Search,
+    // above the first project (Andy: "new project above rose").
+    const newProject = screen.getByRole('button', { name: '+ New project' });
+    expect(groups.firstElementChild).toBe(newProject);
+    expect(
+      newProject.compareDocumentPosition(project) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it('Back collapses the bar; the Home project + starts a Home agent (same handler as stock)', async () => {
@@ -207,11 +214,25 @@ describe('Rose left bar (flag on)', () => {
     renderBar({ onCreateAgent });
     expandBar();
     expect(roseBar()).not.toHaveTextContent(/root project/i);
-    await user.click(within(roseBar()).getByRole('button', { name: 'New agent in Home' }));
+    await user.click(within(roseBar()).getByRole('button', { name: 'Create Super Agent' }));
     expect(onCreateAgent).toHaveBeenCalledTimes(1);
     await user.click(within(roseBar()).getByRole('button', { name: 'Back' }));
     expect(roseBar()).toHaveAttribute('data-expanded', 'false');
   });
+
+  it.each(['p-rose', 'home'])(
+    'hovering the %s "+" shows the tooltip "Create Super Agent" (its accessible name too)',
+    async (group) => {
+      const user = userEvent.setup();
+      renderBar();
+      expandBar();
+      await screen.findByTestId('rose-project-row-p-rose');
+      const plus = createAgentButton(group);
+      expect(plus).toHaveAttribute('aria-label', 'Create Super Agent');
+      await user.hover(plus);
+      expect(await screen.findByRole('tooltip')).toHaveTextContent('Create Super Agent');
+    },
+  );
 
   it('collapsed: each project icon, then its agents, then a line pill; the Home project last', async () => {
     renderBar();
@@ -270,7 +291,7 @@ describe('Rose left bar (flag on)', () => {
     await screen.findByTestId('rose-project-row-p-rose');
     expect(screen.queryByTestId('pending-project-frame')).toBeNull();
 
-    await user.click(screen.getByRole('button', { name: 'New agent in Rose' }));
+    await user.click(createAgentButton('p-rose'));
     expect(onCreateAgentInProject).toHaveBeenCalledWith(expect.objectContaining({ id: 'p-rose' }));
     // The terminal clears the selection for the new agent's composer.
     rerender(<AppSidebar {...props(null)} />);
@@ -292,7 +313,7 @@ describe('Rose left bar (flag on)', () => {
 
     // Another project's + moves it.
     expandBar();
-    await user.click(screen.getByRole('button', { name: 'New agent in Habits' }));
+    await user.click(createAgentButton('p-habits'));
     expect(screen.getByTestId('rose-project-row-p-habits')).toHaveAttribute('data-pending', 'true');
     expect(screen.getByTestId('rose-project-row-p-rose')).toHaveAttribute('data-pending', 'false');
 
@@ -324,7 +345,7 @@ describe('Rose left bar (flag on)', () => {
       />,
     );
     expect(screen.queryByTestId('pending-project-frame')).toBeNull();
-    await user.click(screen.getByRole('button', { name: 'New agent in Home' }));
+    await user.click(createAgentButton('home'));
     expect(screen.getByTestId('rose-home-project-row')).toHaveAttribute('data-pending', 'true');
     expect(
       within(screen.getByTestId('rose-home-project-row')).getByTestId('pending-project-ring'),
