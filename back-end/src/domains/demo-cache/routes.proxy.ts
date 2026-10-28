@@ -173,7 +173,7 @@ async function handleAnthropic(req: Request, res: Response, mode: ProxyMode): Pr
       cacheGet,
       cacheSet,
       fetchUpstream: fetchAnthropicUpstream,
-      reserveOrdinal: sharedTraceOrdinalReserver,
+      reserveOrdinal: PROXY_ORDINAL_RESERVER,
     },
     mode.readEnabled,
     { sessionId: trace.sessionId, writeEnabled: mode.writeEnabled }
@@ -235,7 +235,7 @@ codexProxyRouter.use(
         cacheGet,
         cacheSet,
         fetchUpstream: fetchCodexUpstream,
-        reserveOrdinal: sharedTraceOrdinalReserver,
+        reserveOrdinal: PROXY_ORDINAL_RESERVER,
       },
       resolvedPath.readEnabled,
       { sessionId: trace.sessionId, writeEnabled: resolvedPath.writeEnabled }
