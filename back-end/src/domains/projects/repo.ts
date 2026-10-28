@@ -33,6 +33,10 @@ export interface RoseProjectSetupWrite {
   fillProjectId: string | null;
   /** Replace the script only while it is still exactly one of previousStartupScripts. */
   upgradeScriptProjectId: string | null;
+  /** Fill the default sync script into this project while its column is still null. */
+  fillSyncScriptProjectId: string | null;
+  syncScript: string;
+  syncTimeoutS: number;
   name: string;
   defaultBranch: string;
   repoUrl: string;
@@ -89,6 +93,8 @@ export async function writeRoseProjectSetup(
           defaultBranch: write.defaultBranch,
           syncSalt: newSyncSalt(),
           startupTimeoutS: write.startupTimeoutS,
+          maintenanceScript: write.syncScript,
+          maintenanceTimeoutS: write.syncTimeoutS,
           ...settings,
         },
         update: {},
@@ -108,12 +114,19 @@ export async function writeRoseProjectSetup(
           syncRevision: 0,
           envFiles: { none: {} },
         },
-        data: settings,
+        data: { ...settings, maintenanceScript: write.syncScript },
       });
       if (filled.count === 1) {
         await declareEnvFiles(tx, write.fillProjectId, write.envPaths);
         await upgradeDefaultTimeout(tx, userId, write.fillProjectId, write);
       }
+    }
+    if (write.fillSyncScriptProjectId !== null) {
+      // Only while the column was never set: a script cleared on purpose is "".
+      await tx.project.updateMany({
+        where: { id: write.fillSyncScriptProjectId, userId, maintenanceScript: null },
+        data: { maintenanceScript: write.syncScript, maintenanceTimeoutS: write.syncTimeoutS },
+      });
     }
     if (write.upgradeScriptProjectId !== null && write.previousStartupScripts.length > 0) {
       // Conditional on the exact earlier default: a script the user edited

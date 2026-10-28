@@ -44,6 +44,8 @@ export const ROSE_PROJECT_ENV_FILES = [
   "mac-app/.env",
   "research/.env",
 ];
+export const ROSE_SYNC_SCRIPT_PATH =
+  "agents/benchmarks/fixtures/projects/rose-sync.sh";
 export const ROSE_STARTUP_SCRIPT_PATH =
   "agents/benchmarks/fixtures/projects/rose-startup.sh";
 
@@ -288,6 +290,7 @@ async function seedRose(call, opts, root) {
     join(root, ROSE_STARTUP_SCRIPT_PATH),
     "utf8",
   );
+  const syncScript = readFileSync(join(root, ROSE_SYNC_SCRIPT_PATH), "utf8");
   const capture = captureCheckout(root, {
     include: ROSE_PROJECT_ENV_FILES,
     client: "rose-sync seed-rose",
@@ -301,6 +304,7 @@ async function seedRose(call, opts, root) {
     startupScript,
     // = ROSE_PROJECT_STARTUP_TIMEOUT_S (back-end/src/domains/projects/roseProject.ts)
     startupTimeoutS: 900,
+    maintenance: { script: syncScript, timeoutS: 480 },
   });
   const existing = await call("GET", `/api/projects/${project.id}/env-files`);
   const have = new Set(existing.envFiles.map((f) => f.path));

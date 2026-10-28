@@ -11,6 +11,8 @@
  *     or by the Rose repo when renamed)
  *   - pristine (name-only) "Rose"  → set repo + startup script, declare the six
  *                                     env files (paths only, no values)
+ *   - sync script never set (null)  → fill the default sync script (template sync;
+ *                                     triggers stay off: they spend E2B compute)
  *   - startup script still exactly → replace it with the current default
  *     an earlier Rose default          (and a still-default 120 s timeout);
  *                                      an edited script is never touched
@@ -30,7 +32,7 @@ import { fetchGithubRepoVisibility, normalizeGithubUrl } from '../../providers/g
 import { createLogger } from '../../providers/logger';
 import { isRoseRepoOwner } from '../../utils/roseRepoOwners';
 import * as repo from './repo';
-import { DEFAULT_STARTUP_TIMEOUT_S } from './types';
+import { DEFAULT_MAINTENANCE_TIMEOUT_S, DEFAULT_STARTUP_TIMEOUT_S } from './types';
 import type { ProjectWithCount } from './repo';
 
 const log = createLogger('Projects');
@@ -48,6 +50,8 @@ export const ROSE_PROJECT_ENV_FILES = [
   'research/.env',
 ] as const;
 export const ROSE_STARTUP_SCRIPT_PATH = 'agents/benchmarks/fixtures/projects/rose-startup.sh';
+/** The Rose project's template sync script (Andy's boxes Template maintenance script, adapted). */
+export const ROSE_SYNC_SCRIPT_PATH = 'agents/benchmarks/fixtures/projects/rose-sync.sh';
 /**
  * Earlier checked-in defaults, byte-exact. When the default changes, move the
  * old file here: projects still holding it exactly are upgraded on next list.
@@ -94,12 +98,18 @@ export function rosePreviousStartupScripts(): readonly string[] {
   return previousScripts;
 }
 
+export function roseSyncScript(): string {
+  return readFileSync(resolve(REPO_ROOT, ROSE_SYNC_SCRIPT_PATH), 'utf8');
+}
+
 export interface RoseProjectPlan {
   createProject: boolean;
   /** Existing pristine project to fill in (null when creating or nothing to fill). */
   fillProjectId: string | null;
   /** Existing project whose script is still exactly an earlier Rose default. */
   upgradeScriptProjectId: string | null;
+  /** Existing Rose project that never had a sync script (null column). */
+  fillSyncScriptProjectId: string | null;
   grantRepo: boolean;
 }
 
@@ -141,6 +151,7 @@ export function planRoseProjectSetup(
       createProject: true,
       fillProjectId: null,
       upgradeScriptProjectId: null,
+      fillSyncScriptProjectId: null,
       grantRepo: true,
     };
   }
@@ -149,11 +160,13 @@ export function planRoseProjectSetup(
     rose.startupScript !== null && rosePreviousStartupScripts().includes(rose.startupScript);
   const repoUrl = fill ? ROSE_PROJECT_REPO_URL : rose.repoUrl;
   const grantRepo = repoUrl !== null && isRoseRepo(repoUrl) && !connectedRepoUrls.has(repoUrl);
-  if (!fill && !upgrade && !grantRepo) return null;
+  const fillSync = !fill && rose.maintenanceScript === null && isRoseRepo(rose.repoUrl);
+  if (!fill && !upgrade && !fillSync && !grantRepo) return null;
   return {
     createProject: false,
     fillProjectId: fill ? rose.id : null,
     upgradeScriptProjectId: upgrade ? rose.id : null,
+    fillSyncScriptProjectId: fillSync ? rose.id : null,
     grantRepo,
   };
 }
@@ -170,11 +183,19 @@ export async function applyRoseProjectSetup(
   plan: RoseProjectPlan,
   deps: RoseSetupDeps = DEFAULT_ROSE_SETUP
 ): Promise<void> {
-  if (plan.createProject || plan.fillProjectId !== null || plan.upgradeScriptProjectId !== null) {
+  if (
+    plan.createProject ||
+    plan.fillProjectId !== null ||
+    plan.upgradeScriptProjectId !== null ||
+    plan.fillSyncScriptProjectId !== null
+  ) {
     await repo.writeRoseProjectSetup(userId, {
       createProject: plan.createProject,
       fillProjectId: plan.fillProjectId,
       upgradeScriptProjectId: plan.upgradeScriptProjectId,
+      fillSyncScriptProjectId: plan.fillSyncScriptProjectId,
+      syncScript: roseSyncScript(),
+      syncTimeoutS: DEFAULT_MAINTENANCE_TIMEOUT_S,
       name: ROSE_PROJECT_NAME,
       defaultBranch: ROSE_PROJECT_DEFAULT_BRANCH,
       repoUrl: ROSE_PROJECT_REPO_URL,
