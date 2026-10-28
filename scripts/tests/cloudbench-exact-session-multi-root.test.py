@@ -219,7 +219,7 @@ class TilionExactCleanupTest(MultiRootCleanupTest):
             "status=200 attempt=1\n")
         self.assertEqual(events, 0)
 
-    def test_release_deletes_only_the_exact_session_and_retries_503(self):
+    def test_release_deletes_only_the_exact_session_and_retries_transient_gateway_statuses(self):
         calls = []
 
         def urlopen(request, timeout):
@@ -230,8 +230,11 @@ class TilionExactCleanupTest(MultiRootCleanupTest):
                 raise http_error(status)
             return FakeResponse(status)
 
+        # 502/504 are the gateway's transient answers (a 502 failed a passing local
+        # browser-smoke run's release, #1604 RCA 2026-10-28); 503 is Tilion's own.
         for sequence, expected in (([204], 204), ([404], 404), ([410], 410),
-                                   ([503, 503, 204], 204)):
+                                   ([503, 503, 204], 204), ([502, 204], 204),
+                                   ([504, 502, 404], 404), ([502, 503, 504, 410], 410)):
             with self.subTest(sequence=sequence):
                 calls.clear()
                 responses = list(sequence)
@@ -244,7 +247,8 @@ class TilionExactCleanupTest(MultiRootCleanupTest):
                     "DELETE", f"https://back.tilion.dev/v1/session/{TILION_A}",
                     "Bearer tl_fake_cleanup_key")] * len(sequence))
 
-        for sequence in ([503] * cleanup.TILION_RELEASE_ATTEMPTS, [401], [500]):
+        for sequence in ([503] * cleanup.TILION_RELEASE_ATTEMPTS, [502] * cleanup.TILION_RELEASE_ATTEMPTS,
+                         [401], [500]):
             with self.subTest(sequence=sequence):
                 responses = list(sequence)
                 with mock.patch.object(cleanup.urllib.request, "urlopen", urlopen), \

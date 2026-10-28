@@ -21,3 +21,18 @@ export const decodeEncoded = (record: Record<string, unknown>) =>
     text: string;
     metadata: unknown;
   };
+
+export type WireMessage = {
+  topic: string;
+  event: string;
+  payload: { record: Record<string, unknown> & { id?: string } };
+};
+export const bodyMessages = (init?: RequestInit): WireMessage[] =>
+  (JSON.parse(String(init?.body)) as { messages: WireMessage[] }).messages;
+export const message = (id: string) => ({
+  id,
+  timestamp: new Date('2026-10-13T01:34:15.736Z'),
+  text: 'Opening browser',
+  role: 'TOOL',
+  metadata: { toolName: 'spawn_browser_agent', toolStatus: 'IN_PROGRESS', toolCallId: id },
+});

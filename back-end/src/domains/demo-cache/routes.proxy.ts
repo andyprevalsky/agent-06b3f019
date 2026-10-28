@@ -60,11 +60,20 @@ function anthropicHeaders(req: Request): Record<string, string> {
   return headers;
 }
 
+/**
+ * Headers our own edge (Render behind Cloudflare) adds to every inbound request.
+ * Forwarded to chatgpt.com, Cloudflare there rejects cf-connecting-ip/cf-visitor
+ * with a 403 page, so every proxied Codex call failed once the proxy URL moved
+ * from a dev tunnel to production (2026-10-28).
+ */
+const EDGE_HEADER =
+  /^(cf-|x-forwarded-|forwarded$|true-client-ip$|x-real-ip$|cdn-loop$|via$|rndr-|render-|x-request-start$)/;
+
 function codexHeaders(req: Request): Record<string, string> {
   const headers: Record<string, string> = {};
   for (const [rawKey, rawValue] of Object.entries(req.headers)) {
     const key = rawKey.toLowerCase();
-    if (HOP_BY_HOP_HEADERS.has(key)) continue;
+    if (HOP_BY_HOP_HEADERS.has(key) || EDGE_HEADER.test(key)) continue;
     if (rawValue === undefined) continue;
     headers[rawKey] = Array.isArray(rawValue) ? rawValue.join(', ') : rawValue;
   }

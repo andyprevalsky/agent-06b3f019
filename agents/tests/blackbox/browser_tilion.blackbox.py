@@ -354,16 +354,61 @@ async def test_tilion_regional_authorities_and_url_privacy():
 
     suffix = f"/v1/session/{TILION_SESSION}/cdp?token={TILION_TOKEN}&apiKey=private&jwt=private"
     with patch.dict(os.environ, {"TILION_BASE_URL": "https://custom-gateway.example:8443"}):
-        for host in ("back.tilion.dev", "oregon.back.tilion.dev", "OREGON.BACK.TILION.DEV", "custom-gateway.example:8443"):
+        for host in ("back.tilion.dev", "oregon.back.tilion.dev", "OREGON.BACK.TILION.DEV", "custom-gateway.example:8443", "sub.custom-gateway.example"):
             url = "wss://" + host + suffix
             assert is_tilion_cdp_url(url), host
             safe = redact_url_secrets(url)
             assert TILION_TOKEN not in safe and "private" not in safe, host
             assert "token=REDACTED" in safe and "apiKey=REDACTED" in safe and "jwt=REDACTED" in safe
-        for host in ("back.tilion.dev.evil.example", "oregon.back.tilion.dev.evil.example", "evilback.tilion.dev", "back.tilion.dev@evil.example", "sub.custom-gateway.example"):
+        for host in ("back.tilion.dev.evil.example", "oregon.back.tilion.dev.evil.example", "evilback.tilion.dev", "back.tilion.dev@evil.example", "sub.custom-gateway.example.evil.example"):
             assert not is_tilion_cdp_url("wss://" + host + suffix), host
         assert not is_tilion_cdp_url("https://oregon.back.tilion.dev" + suffix)
         assert not is_tilion_cdp_url("wss://oregon.back.tilion.dev/v1/session/x/playwright")
+
+
+async def test_tilion_regional_hosts_use_the_single_client_multiplexer():
+    """Prod 2026-10-28: with Render BROWSER_PROVIDER=tilion every browser agent failed
+    ``connect_over_cdp`` with 4409 "another client is attached". Tilion now serves a
+    session's CDP/live-view URLs from a regional subdomain of its deployment
+    (``east.back.tilion.dev`` in prod, ``oregon.back.tilion.dev`` at diagnosis), but
+    the worker only recognised ``back.tilion.dev`` itself. The URL was treated as a
+    plain provider, so no multiplexer was opened and browser-use and Playwright each
+    dialled Tilion; the second client was refused. Every subdomain of the configured
+    deployment is Tilion; lookalike hosts are not."""
+    from domains.spawn_browser_agent_v3.cdp_urls import is_tilion_cdp_url, open_browser_cdp_connection
+    from utils.url_redaction import redact_url_secrets
+
+    def cdp(host: str) -> str:
+        return f"wss://{host}/v1/session/{TILION_SESSION}/cdp?token={TILION_TOKEN}"
+
+    with patch.dict(os.environ, {"TILION_BASE_URL": "https://back.tilion.dev"}):
+        for host in ("east.back.tilion.dev", "oregon.back.tilion.dev", "EAST.Back.Tilion.Dev"):
+            assert is_tilion_cdp_url(cdp(host)), host
+            masked = redact_url_secrets(f"https://{host}/live/{TILION_SESSION}?token={TILION_TOKEN}")
+            assert TILION_TOKEN not in (masked or "") and "token=REDACTED" in (masked or ""), host
+        for host in (
+            "evilback.tilion.dev",
+            "back.tilion.dev.evil.example",
+            "tilion.dev",
+            "east.tilion.dev",
+            "back-tilion.dev",
+        ):
+            assert not is_tilion_cdp_url(cdp(host)), host
+            assert redact_url_secrets(f"https://{host}/x?token={TILION_TOKEN}") == f"https://{host}/x?token={TILION_TOKEN}"
+        regional = cdp("east.back.tilion.dev")
+        local_url, multiplexer = await open_browser_cdp_connection(regional)
+        try:
+            assert multiplexer is not None and multiplexer._upstream_url == regional
+            assert local_url != regional, "browser-use and Playwright must share the loopback socket"
+        finally:
+            await multiplexer.close()
+
+    # A deployment override (staging, a local fake) keeps working, regional names included.
+    with patch.dict(os.environ, {"TILION_BASE_URL": "https://back.tilion.example"}):
+        assert is_tilion_cdp_url(cdp("back.tilion.example"))
+        assert is_tilion_cdp_url(cdp("east.back.tilion.example"))
+        assert is_tilion_cdp_url(cdp("oregon.back.tilion.dev")), "the production deployment is always recognised"
+        assert not is_tilion_cdp_url(cdp("evilback.tilion.example"))
 
 
 # ----- HTTP fixture site ----------------------------------------------------
@@ -3305,6 +3350,7 @@ async def run_all_tests():
         ("multiplexer_releases_and_reattaches", test_multiplexer_releases_upstream_when_clients_leave_and_reattaches),
         ("multiplexer_propagates_provider_close_code", test_multiplexer_propagates_provider_close_code),
         ("tilion_cdp_url_detection_and_redaction", test_tilion_cdp_url_detection_and_redaction),
+        ("tilion_regional_hosts_use_the_single_client_multiplexer", test_tilion_regional_hosts_use_the_single_client_multiplexer),
         ("worker_logs_never_carry_raw_browser_urls", test_worker_logs_never_carry_raw_browser_urls),
         ("click_coordinates_follow_re_rendered_element", test_click_coordinates_follow_an_element_the_page_re_rendered),
         ("tilion_download_lands_in_worker_ledger", test_tilion_download_lands_in_worker_ledger_not_static_assets),

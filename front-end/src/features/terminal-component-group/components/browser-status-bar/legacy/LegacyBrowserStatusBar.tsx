@@ -78,6 +78,7 @@ import { useBrowserStatusBarState } from '../useBrowserStatusBarState';
 import { type BrowserStatusBarUi, useBrowserStatusBarUi } from './useBrowserStatusBarUi';
 import { useRefreshedAuthAssistanceUrl } from '../useRefreshedAuthAssistanceUrl';
 import type { BrowserStatusBarProps, PendingAuthAssistance } from '../types';
+import { isFinishedAgentStatus } from '../liveViewDisplay';
 
 function presentedControlState(
   isUserControlling: boolean,
@@ -125,6 +126,7 @@ function BrowserStatusBarImpl(props: BrowserStatusBarProps) {
   const sharedViewProps = {
     browserUrl: ui.browserUrl,
     browserLive: ui.isLive,
+    browserEnded: isFinishedAgentStatus(agent?.status),
     outputSchema: vm.outputSchema,
     browserSessionMetadata: vm.browserSessionMetadata,
   };

@@ -1,9 +1,16 @@
 /** Explicit user-facing exceptions; routine tool status/results belong to work history. */
 import type { Message } from '../hooks';
 import { isSendMessageToUserRow, parsePinnedQuestion } from '../hooks/codeAgentContract';
+import { isBrowserAgentResult } from './browserAgentResult';
 
 export function isUserFacingWorkBoundary(message: Message): boolean {
   const metadata = message.metadata;
+  // A finished browser agent (done/failed/stopped) is work: it folds into the
+  // surrounding batch even when its row carries a recording pointer or the
+  // auth-assistance resume block. A live login request (it carries a requestId
+  // the user must answer) stays user-facing.
+  const authRequest = metadata?.requestUserAuthentication as { requestId?: unknown } | undefined;
+  if (isBrowserAgentResult(message) && !authRequest?.requestId) return false;
   const tool = metadata?.toolName;
   const failed = Boolean(
     metadata?.error || /failed|error/i.test(String(metadata?.toolStatus ?? '')),

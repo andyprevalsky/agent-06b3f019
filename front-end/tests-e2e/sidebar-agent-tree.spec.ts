@@ -332,6 +332,8 @@ for (const width of [320, 390, 1280]) {
         modelGap: c.left - a.right,
         expectedGap: parseFloat(getComputedStyle(el.parentElement!).columnGap),
         inset: parseFloat(css.paddingLeft) + parseFloat(css.borderLeftWidth),
+        gap: c.left - a.right,
+        rowGap: parseFloat(getComputedStyle(el.parentElement!).columnGap),
         bottom: row.bottom - c.bottom,
         shellBottom: s.bottom - c.bottom,
         bottomInset: parseFloat(css.paddingBottom) + parseFloat(css.borderBottomWidth),
@@ -340,6 +342,7 @@ for (const width of [320, 390, 1280]) {
     expect(m.attachBeforeModel).toBe(true);
     expect(Math.abs(m.modelGap - m.expectedGap)).toBeLessThan(1);
     expect(Math.abs(m.left - m.inset)).toBeLessThan(1);
+    expect(Math.abs(m.gap - m.rowGap)).toBeLessThan(1);
     expect(Math.abs(m.bottom)).toBeLessThan(1);
     expect(Math.abs(m.shellBottom - m.bottomInset)).toBeLessThan(1);
     await chip.click();

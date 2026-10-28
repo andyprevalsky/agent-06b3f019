@@ -23,7 +23,10 @@
  *     a user-style call without the internal key → refused
  * Usage: bash scripts/run-blackbox-tests.sh agent-tools
  */
+import { createHash } from 'crypto';
+import { putDisplayObject } from '../../providers/agentTools/media';
 import { mintAgentToolsToken } from '../../providers/agentTools/token';
+import { generatedVideoStoragePath } from '../../domains/agent-tools/videoService';
 import { mintUserUiPublishToken } from '../../providers/userUi/publishToken';
 import {
   agentB,
@@ -337,6 +340,39 @@ const tests: BlackboxTest[] = [
         'non-owner API key'
       );
       const anonymous = await call('POST', path(rootA), valid, { noAuth: true });
+      assert(anonymous.status === 401 || anonymous.status === 403, 'no auth refused');
+    },
+  },
+  {
+    name: 'generated-video download: the agent token reads its owner videos only',
+    fn: async () => {
+      const bytes = mp4();
+      const sha = createHash('sha256').update(bytes).digest('hex');
+      await putDisplayObject(generatedVideoStoragePath(userA, sha), bytes, 'video/mp4');
+      const get = (agentId: string, name: string, token: string) =>
+        fetch(`${BASE_URL}/api/agent-tools/${agentId}/generated-video/${name}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      const ok = await get(otherA, sha, codeToken(otherA));
+      assert(ok.status === 200, `owner's sandbox token reads the video: ${ok.status}`);
+      assert(ok.headers.get('content-type')?.startsWith('video/mp4') === true, 'served as MP4');
+      assert(Buffer.from(await ok.arrayBuffer()).equals(bytes), 'byte-identical');
+      expectStatus(
+        { status: (await get(agentB, sha, codeToken(agentB, userB))).status, data: {} },
+        404,
+        "another user's agent cannot read it"
+      );
+      expectStatus(
+        { status: (await get(rootA, sha, codeToken(otherA))).status, data: {} },
+        403,
+        'token scoped to a different agent'
+      );
+      expectStatus(
+        { status: (await get(otherA, '0'.repeat(64), codeToken(otherA))).status, data: {} },
+        404,
+        'missing video'
+      );
+      const anonymous = await fetch(`${BASE_URL}/api/agent-tools/${otherA}/generated-video/${sha}`);
       assert(anonymous.status === 401 || anonymous.status === 403, 'no auth refused');
     },
   },

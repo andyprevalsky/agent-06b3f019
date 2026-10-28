@@ -29,6 +29,8 @@ export interface AgentBrowserTab {
   taskId: string;
   taskLabel?: string;
   live: boolean;
+  /** Owning agent finished: address bar reads "Session ended", never "Connecting…". */
+  ended?: boolean;
   /** Page the agent's browser is on (address bar, UI ledger row 74); null = unknown yet. */
   pageUrl?: string | null;
   /** Latest model reported by this browser task, never the owner model selection. */

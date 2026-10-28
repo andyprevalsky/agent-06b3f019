@@ -53,6 +53,12 @@ export interface BrowserProviderResumeSession {
   proxyLocation: ProxyGeoLocation;
   profileId: string | null;
   profileSource: string;
+  /**
+   * Present only when the exit rotated inside the SAME live browser (Tilion `rotate-ip`). The
+   * worker keeps that session's only CDP socket, so no validation client exists and none is
+   * needed: cookies, storage and tabs never left the browser.
+   */
+  ipRotation?: { rotated: boolean; freshAllocation: boolean; region: string | null };
 }
 
 export interface BrowserSessionHealth {

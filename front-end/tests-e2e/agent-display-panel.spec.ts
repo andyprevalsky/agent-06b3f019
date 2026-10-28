@@ -110,6 +110,7 @@ test('desktop inline display expands real WebGL output and keeps controls in its
   await toggle.click();
   await expect(toggle).toHaveAccessibleName('Collapse display: Orbit Runner');
   await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  expect((await iframe.boundingBox())!.height).toBeGreaterThan(480);
   const game = page.frameLocator(
     '[data-message-id="game-display"] [data-testid="display-html-frame"]',
   );

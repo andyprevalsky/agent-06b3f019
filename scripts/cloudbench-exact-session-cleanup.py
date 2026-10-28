@@ -37,9 +37,14 @@ PROVIDERS = ("kernel", "steel", "tilion")
 ALWAYS_LISTED_PROVIDERS = ("kernel", "steel")
 RELEASED_STATUSES = {"kernel": {204, 404}, "steel": {200, 404}, "tilion": {204, 404, 410}}
 # Tilion answers 503 "session worker unavailable; retry cleanup" when the
-# browser is not confirmed gone. Retry a bounded number of times, then fail.
+# browser is not confirmed gone, and its gateway answers 502/504 when it could
+# not reach the API (a local run's release failed on one 502 while the session
+# was already gone). DELETE is idempotent and 204/404/410 all count as released,
+# so retry these a bounded number of times, then fail. Other statuses (401, 500)
+# are not transient and fail on the first answer.
 TILION_RELEASE_ATTEMPTS = 4
 TILION_RELEASE_RETRY_SECONDS = 2.0
+TILION_RETRYABLE_STATUSES = frozenset({502, 503, 504})
 TILION_SESSION_MARKERS = (
     # Logged right after every POST /v1/session response, before validation.
     "Tilion session allocated",
@@ -1375,7 +1380,7 @@ def provider_request(provider: str, session_id: str, env_paths: tuple[Path, ...]
             ) from error
         if len(response_body) > 65_536:
             raise CleanupEvidenceError(f"{provider} cleanup response is oversized")
-        if status != 503 or attempt == attempts:
+        if status not in TILION_RETRYABLE_STATUSES or attempt == attempts:
             break
         time.sleep(TILION_RELEASE_RETRY_SECONDS)
 
