@@ -253,3 +253,75 @@ Fewer than five consecutive valid finishes show UNMEASURED with n/5 coverage.
 Positive change is green with +, negative red with -, and stationary is 0.0%.
 Keep the full Iterations/Hour and finish-to-finish definition in a secondary
 line/title; the last ten rows and T- clocks are unchanged.
+
+### All /descend scorecards: full-suite outcomes and measured telemetry
+
+For every descent, render one segmented donut (cake) for the entire persisted
+selected task order, using the most recent X scored runs per task. X is the
+acceptance goal's run count, not the current slice size. Green means all X
+historical scored results passed; red means a genuine scored FAIL is present;
+amber means a partial set or unknown evidence; gray requires an explicit
+UNTESTED row with zero known scored runs. Missing rows are unknown, never unrun.
+Label the view as historical outcomes and separately report final-source-qualified
+acceptance from the ledger. Historical green does not grant final-source credit.
+
+Use the full-suite historical rolling coverage as the only time graph: tasks
+with X/X PASS divided by all selected tasks, at original experiment finish
+clocks. Missing snapshots are gaps; do not substitute slice percentages or
+invent earlier history. Preserve the existing greater-than-three-iterations
+threshold and last-ten experiment rows. Remove current-slice outcome bars and
+the lifecycle display section for descents; underlying lifecycle, custody,
+release checks and unresolved issues remain intact. Generic benchmark displays
+retain their existing contract.
+
+Color the descent pass KPI green only above95%, yellow above80%, red otherwise.
+Color infra green only below5%, red at or above5%; unknown is amber/unmeasured.
+Pass uses scored PASS+FAIL as its denominator; infra uses original scheduled jobs.
+Never turn unknown/infra outcomes into a scored PASS or FAIL.
+
+Supply full-scope inputs explicitly:
+`--iterations N --global-acceptance acceptance_ledger.json --selected-tasks selected_tasks.json --selected-tasks-sha256 <raw-file-SHA256> --global-runs X --global-history global_history.json`.
+The selection uses `descend-selected-tasks-v1` ordered `rows[].name`; acceptance
+uses `descend-rolling-acceptance-v1`, matching `task_count` and `k`, unique task
+identities and `last_scored` receipts (legacy `last_two_known_scored` is accepted
+only for X=2). Each scored receipt must carry its original campaign/job/run,
+verdict, source commit, evidence SHA256 and terminal clock. History uses
+`descend-global-history-v1`, matching selection hash/count/k and ordered
+`snapshots[{experiment_id, finished_at, acceptance_ledger}]`; null ledgers are
+gaps. Inputs are read-only and mismatched scope is refused.
+
+Optional `--telemetry telemetry.json --telemetry-membership membership.json --telemetry-sources original-source-packet/ --telemetry-receipt telemetry-receipt.json --telemetry-receipt-sha256 <custodian-receipt-SHA256>` uses `descend-scorecard-telemetry-v1`,
+matching `experiment_id`, `scheduled_jobs`, `covered_run_count`, unique
+`cost_rows[{job_id, cost_cents, run_json_sha256}]` and unique
+`latency_rows[{agent_id, request_id, ttft_seconds, total_seconds, source_sha256}]`.
+Durations come from matched native start/productive-chunk/completion observations;
+null means missing. Show quantiles with sample/run coverage. Cost is user-metered
+agent LLM cost, summed once per original job; it is not total provider expense.
+Azure/provider spend, infra and grounding stay UNMETERED without billing evidence.
+A partial job-cost input cannot replace a full experiment aggregate. Never infer
+latency from a timeout, configuration budget, canary, or unrelated run.
+
+Telemetry membership uses `descend-scorecard-membership-v1` with original
+experiment/job/task/fleet/root identities, raw run SHA256 and allowed source
+log SHA256 entries. The consumer joins every job to canonical result rows and
+checks the original export manifest, campaign summary, and native-log index
+bytes under each shard directory. Numeric charges must match canonical job
+costs. Native root identity must match the canonical agent and log index; no
+child identity is inferred. Missing-agent records may supply no numeric timing.
+The original source packet stays local; missing custody refuses telemetry.
+First-productive-chunk and total-request p50 use the median; p95 uses nearest
+rank, with separate sample coverage. Cake segments are grouped by outcome for
+readability; each retains its original selected-task ordinal and tooltip.
+
+Native timing values require a one-time offline producer replay with
+`scripts/cloudbench_telemetry.py --membership membership.json --source-root 00=<original-export-root> --output telemetry.json --receipt telemetry-receipt.json --replay-owner <artifact-custodian>`.
+Repeat `--source-root` for every recorded shard. The producer verifies full
+manifest and original run file hashes, extracts only embedded native events,
+joins root/request identities, subtracts original UTC timestamps and leaves
+missing or conflicting boundaries null. Selected excerpts alone are not full
+source proof. Its receipt binds input manifests/run hashes, producer code,
+output bytes, custodian and replay time. Obtain the receipt hash from that
+original replay custody handoff; never bless edited telemetry by recomputing
+a receipt in the renderer. Rendering checks the pinned receipt and costs
+without rereading large original run files every refresh. Captured embedded
+logs can be incomplete; timing coverage is per observed request, not all calls.

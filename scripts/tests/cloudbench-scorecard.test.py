@@ -192,6 +192,271 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(CARD["validate_html"](document), [])
         return document
 
+    def test_descent_global_display_default_contract(self):
+        data = render(self.f.fleet(), self.f, iterations=2)
+        document = self.valid(data)
+        self.assertIn('data-section="global-progress"', document)
+        self.assertNotIn('data-section="lifecycle"', document)
+        self.assertNotIn('class="bar"', document)
+
+    def global_inputs(self, count=6, k=2):
+        import hashlib
+        names = [f"global-task-{i}" for i in range(count)]
+        selected = write(self.tmp / "selected.json", {"schema": "descend-selected-tasks-v1", "rows": [{"name": name} for name in names]})
+        digest = hashlib.sha256(selected.read_bytes()).hexdigest()
+        def receipt(i, verdict):
+            return {"campaign_id": "original-global", "job_id": f"job-{i}", "run": i + 1,
+                    "verdict": verdict, "source_commit": "a" * 40, "evidence_sha256": "b" * 64,
+                    "controller_terminal_at": T0 + 100 + i}
+        rows = []
+        for i, name in enumerate(names):
+            records = [receipt(i * k + j, "PASS") for j in range(k)]
+            rows.append({"task": name, "last_scored": records, "known_scored_count": len(records),
+                         "acceptance": "FINAL_SOURCE_REVERIFICATION_REQUIRED", "green": False})
+        ledger = {"schema": "descend-rolling-acceptance-v1", "task_count": count, "k": k, "rows": rows}
+        path = write(self.tmp / "acceptance.json", ledger)
+        args = {"global_acceptance": path, "selected_tasks": selected,
+                "selected_tasks_sha256": digest, "global_runs": k}
+        return ledger, args
+
+    def test_global_cake_uses_full_scope_historical_pairs_and_keeps_audits(self):
+        ledger, args = self.global_inputs()
+        rows = ledger["rows"]
+        rows[1]["last_scored"][0]["verdict"] = "FAIL"
+        rows[2]["last_scored"] = rows[2]["last_scored"][:1]; rows[2]["known_scored_count"] = 1
+        rows[3].update(last_scored=[], known_scored_count=0, acceptance="UNTESTED")
+        rows[4]["last_scored"][0]["verdict"] = "INFRA_ERROR"
+        rows.pop()
+        write(args["global_acceptance"], ledger)
+        before = {str(p): p.read_bytes() for p in (args["global_acceptance"], args["selected_tasks"])}
+        run = self.f.fleet()
+        old = render(run, self.f, iterations=5)
+        data = render(run, self.f, iterations=5, **args)
+        gp = data["global_progress"]
+        self.assertEqual(gp["counts"], {"PASS": 1, "FAIL": 1, "PARTIAL": 1, "UNKNOWN": 2, "UNRUN": 1})
+        self.assertEqual(gp["final_source_qualified"], 0)
+        self.assertEqual(data["experiment"]["outcomes"], old["experiment"]["outcomes"])
+        self.assertEqual(data["experiment"]["lifecycle"], old["experiment"]["lifecycle"])
+        html = self.valid(data)
+        self.assertEqual(html.count('data-task="global-task-'), 6)
+        self.assertEqual(re.findall(r'data-status="([A-Z]+)"', html), ["PASS", "FAIL", "PARTIAL", "UNKNOWN", "UNKNOWN", "UNRUN"])
+        self.assertEqual(sorted(map(int, re.findall(r'data-selected-ordinal="(\d+)"', html))), list(range(1, 7)))
+        self.assertIn("1/6", html)
+        self.assertIn(".trend text{fill:var(--fg);font-size:15px}", html)
+        self.assertNotIn('data-section="lifecycle"', html)
+        self.assertNotIn('class="bar"', html)
+        self.assertIn('data-section="global-trend"', html)
+        self.assertNotIn('data-section="trend"', html)
+        self.assertIn("Historical outcomes are not final-source acceptance", html)
+        self.assertIn("GLOBAL", CARD["render_text"](data))
+        for p, raw in before.items(): self.assertEqual(Path(p).read_bytes(), raw)
+        generic = self.valid(render(run, self.f))
+        self.assertIn('data-section="lifecycle"', generic)
+        self.assertNotIn('data-section="global-progress"', generic)
+
+    def test_global_scope_hash_identity_and_generic_k_contract(self):
+        ledger, args = self.global_inputs()
+        run = self.f.fleet()
+        for bad in ("0" * 64, "", None):
+            with self.subTest(hash=bad), self.assertRaises(ValueError):
+                render(run, self.f, iterations=2, **dict(args, selected_tasks_sha256=bad))
+        for mutate in (lambda d: d.update(task_count=7), lambda d: d.update(k=True),
+                       lambda d: d["rows"].append(dict(d["rows"][0])),
+                       lambda d: d["rows"][0]["last_scored"].append(d["rows"][0]["last_scored"][0])):
+            altered = json.loads(json.dumps(ledger)); mutate(altered); write(args["global_acceptance"], altered)
+            with self.assertRaises(ValueError): render(run, self.f, iterations=2, **args)
+        missing = json.loads(json.dumps(ledger))
+        missing["rows"][0]["last_scored"] = missing["rows"][0]["last_scored"][:1]
+        write(args["global_acceptance"], missing)
+        self.assertEqual(render(run, self.f, iterations=2, **args)["global_progress"]["rows"][0]["status"], "UNKNOWN")
+        with self.assertRaises(ValueError):
+            render(run, self.f, global_runs=0)
+        failed = json.loads(json.dumps(ledger))
+        failed["rows"][0]["last_scored"][0]["verdict"] = "FAIL"
+        failed["rows"][0]["last_scored"][1].pop("evidence_sha256")
+        write(args["global_acceptance"], failed)
+        row = render(run, self.f, iterations=2, **args)["global_progress"]["rows"][0]
+        self.assertEqual(row["status"], "FAIL")
+        self.assertIn("incomplete", row["reason"])
+        failed["rows"][0]["last_scored"] = failed["rows"][0]["last_scored"][:1]
+        write(args["global_acceptance"], failed)
+        self.assertEqual(render(run, self.f, iterations=2, **args)["global_progress"]["rows"][0]["status"], "FAIL")
+        for k in (1, 3):
+            ledger, args = self.global_inputs(k=k)
+            data = render(run, self.f, iterations=2, **args)
+            self.assertEqual(data["global_progress"]["counts"]["PASS"], 6)
+            self.assertIn(f"{k}/{k} PASS", self.valid(data))
+            self.assertIn(f"GLOBAL latest {k} scored runs", CARD["render_text"](data))
+
+    def test_global_history_never_bridges_missing_snapshots_or_uses_slice_rate(self):
+        ledger, args = self.global_inputs()
+        empty = json.loads(json.dumps(ledger))
+        for row in empty["rows"]: row.update(last_scored=[], known_scored_count=0, acceptance="UNTESTED")
+        history = {"schema": "descend-global-history-v1", "selected_tasks_sha256": args["selected_tasks_sha256"],
+                   "task_count": 6, "k": 2, "snapshots": [
+                    {"experiment_id": "one", "finished_at": T0 + 10, "acceptance_ledger": empty},
+                    {"experiment_id": "two", "finished_at": T0 + 500, "acceptance_ledger": None},
+                    {"experiment_id": "three", "finished_at": T0 + 1000, "acceptance_ledger": ledger}]}
+        args["global_history"] = write(self.tmp / "global-history.json", history)
+        data = render(self.f.fleet(), self.f, iterations=5, **args)
+        self.assertEqual([p["rate"] for p in data["global_progress"]["history"]], [0, None, 1])
+        html = self.valid(data)
+        self.assertEqual(html.count('<path class="path"'), 0)
+        self.assertIn("missing snapshots are not bridged", html)
+        history["snapshots"][2]["finished_at"] = T0 + 100
+        write(args["global_history"], history)
+        with self.assertRaises(ValueError): render(self.f.fleet(), self.f, iterations=5, **args)
+
+    def test_descent_strict_color_boundaries_and_unknowns(self):
+        data = render(self.f.fleet(), self.f, iterations=2)
+        exp = data["experiment"]
+        for passed, expected in ((80, "bad"), (81, "warn"), (95, "warn"), (96, "ok")):
+            exp.update(scored=100, scheduled_total=100, infra_jobs=4)
+            exp["outcomes"].update(PASS=passed)
+            html = CARD["render_html"](data)
+            self.assertRegex(html, rf'✅ Pass</div><div class="v {expected}">')
+            self.assertRegex(html, r'🧯 Infra</div><div class="v ok">')
+        exp["infra_jobs"] = 5
+        self.assertRegex(CARD["render_html"](data), r'🧯 Infra</div><div class="v bad">')
+        exp["infra_unattributed_cancelled"] = 1
+        self.assertRegex(CARD["render_html"](data), r'🧯 Infra</div><div class="v warn">')
+
+    def test_observed_telemetry_is_bound_deduplicated_and_never_invented(self):
+        import copy
+        import hashlib
+        run = self.f.sharded()
+        result = json.loads((run / "result.json").read_text())
+        sources = self.tmp / "sources"
+        summary = {"campaign_id": "original-campaign", "jobs": []}
+        manifest = {"archive_sha256": "a" * 64, "files": {}}
+        index, members, costs = [], [], []
+        for i, row in enumerate(result["jobs"]):
+            job, name = row["job_id"], row["task"]
+            agent, fleet, digest = "agent-" + job, "fleet-" + job, str(i) * 64
+            row.update(agent_id=agent, cost_usd=.17 if i == 1 else 0)
+            summary["jobs"].append(dict(job_id=job, task=name, run_id=fleet, task_status=row["task_status"]))
+            entry = {"sha256": digest, "kind": "file", "bytes": 100}
+            manifest["files"]["context/" + fleet + "/" + name + "/run.json"] = entry
+            manifest["files"]["context/" + fleet + "/" + name + "/worker.log"] = entry
+            index.append(dict(job=job, task=name, fleet=fleet, root_agent=agent, file="context/" + fleet + "/" + name + "/worker.log", sha256=digest))
+            members.append(dict(job_id=job, task=name, shard="00", campaign_id=summary["campaign_id"],
+                fleet_run_id=fleet, original_task_status=row["task_status"], root_agent_id=agent,
+                allowed_agent_ids=[agent], run_json_sha256=digest, run_json_path="context/" + fleet + "/" + name + "/run.json",
+                manifest_run_entry=entry, allowed_source_sha256=[digest], binding_status="verified-scored-run",
+                source_log_entries=[dict(path="context/" + fleet + "/" + name + "/worker.log", sha256=digest, manifest_entry=entry)]))
+            costs.append(dict(job_id=job, task=name, cost_cents=17 if i == 1 else 0, run_json_sha256=digest))
+        write(run / "result.json", result)
+        for name, obj in (("export-manifest.json", manifest), ("summary.json", summary), ("native-log-index.json", index)):
+            write(sources / "00" / name, obj)
+        sha = lambda name: hashlib.sha256((sources / "00" / name).read_bytes()).hexdigest()
+        membership = dict(schema="descend-scorecard-membership-v1", experiment_id=run.name, scheduled_jobs=4,
+            proofs={"00": dict(export_manifest_sha256=sha("export-manifest.json"), campaign_summary_sha256=sha("summary.json"),
+                original_export_archive_sha256=manifest["archive_sha256"], campaign_id=summary["campaign_id"])}, rows=members)
+        member_path = write(self.tmp / "membership.json", membership)
+        first = members[0]
+        timing = dict(agent_id=first["root_agent_id"], job_id=first["job_id"], task=first["task"], request_id="one",
+            ttft_seconds=.1, total_seconds=1.2, source_sha256=first["run_json_sha256"], run_json_sha256=first["run_json_sha256"])
+        telemetry = dict(schema="descend-scorecard-telemetry-v1", experiment_id=run.name, scheduled_jobs=4,
+            covered_run_count=4, cost_rows=costs, latency_rows=[timing])
+        path = write(self.tmp / "telemetry.json", telemetry)
+        receipt_path = self.tmp / "producer-receipt.json"
+        def build(refresh_receipt=True, receipt_pin=None):
+            write(path, telemetry)
+            # Isolated consumer fixture; actual extraction is exercised separately.
+            if refresh_receipt:
+                write(receipt_path, dict(schema="descend-telemetry-producer-v1", experiment_id=run.name,
+                    telemetry_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                    membership_sha256=hashlib.sha256(member_path.read_bytes()).hexdigest(),
+                    producer_sha256=hashlib.sha256((ROOT / "scripts/cloudbench_telemetry.py").read_bytes()).hexdigest(),
+                    replay_owner="fixture-custodian", replayed_at=T0, input_manifest_sha256={"00":sha("export-manifest.json")},
+                    inputs=[dict(shard=m["shard"], path=m["run_json_path"], sha256=m["run_json_sha256"]) for m in members]))
+            return render(run, self.f, iterations=2, telemetry=path, telemetry_membership=member_path, telemetry_sources=sources,
+                          telemetry_receipt=receipt_path, telemetry_receipt_sha256=receipt_pin or hashlib.sha256(receipt_path.read_bytes()).hexdigest())
+        data = build()
+        self.assertAlmostEqual(data["experiment"]["cost"]["metered_usd"], .17)
+        self.assertIn("p50 0.10s", self.valid(data))
+        receipt_pin = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+        changed_receipt = json.loads(receipt_path.read_text()); changed_receipt["replay_owner"] = "foreign"
+        write(receipt_path, changed_receipt)
+        with self.assertRaisesRegex(ValueError, "receipt SHA256"):
+            build(refresh_receipt=False, receipt_pin=receipt_pin)
+        build()
+        for key, val in (("request_id", "NEVER_OBSERVED_REQUEST"), ("ttft_seconds", 999999), ("total_seconds", 1000000)):
+            old = timing[key]; timing[key] = val
+            with self.assertRaisesRegex(ValueError, "producer receipt"):
+                build(refresh_receipt=False)
+            timing[key] = old
+        build()
+        self.assertNotIn("LLM latency UNMEASURED", CARD["render_text"](data))
+        for field, value in (("job_id", "FOREIGN_JOB"), ("task", "foreign-task"), ("agent_id", "FOREIGN_AGENT"),
+                             ("run_json_sha256", "f" * 64), ("source_sha256", "e" * 64), ("ttft_seconds", True),
+                             ("total_seconds", float("nan")), ("total_seconds", -1), ("agent_id", None)):
+            with self.subTest(field=field, value=value):
+                original = timing[field]; timing[field] = value
+                with self.assertRaises(ValueError): build()
+                timing[field] = original
+        for field, value in (("job_id", "FOREIGN_JOB"), ("task", "foreign-task"), ("run_json_sha256", "f" * 64), ("cost_cents", 123)):
+            original = costs[0][field]; costs[0][field] = value
+            with self.assertRaises(ValueError): build()
+            costs[0][field] = original
+        telemetry["latency_rows"].append(copy.deepcopy(timing))
+        with self.assertRaises(ValueError): build()
+        telemetry["latency_rows"].pop()
+        orphan = dict(timing, agent_id=None, request_id="orphan", ttft_seconds=None, total_seconds=None)
+        telemetry["latency_rows"].append(orphan)
+        data = build()
+        self.assertEqual(data["observed_telemetry"]["requests"], 2)
+        self.assertEqual(data["observed_telemetry"]["ttft"]["n"], 1)
+        # An internally consistent invented member cannot override canonical root identity.
+        members[0]["root_agent_id"] = "invented"
+        members[0]["allowed_agent_ids"] = ["invented"]
+        write(member_path, membership)
+        with self.assertRaises(ValueError): build()
+        members[0]["root_agent_id"] = timing["agent_id"]
+        members[0]["allowed_agent_ids"] = [timing["agent_id"]]
+        write(member_path, membership)
+        # Original source bytes and proof hashes are checked, not just metadata shape.
+        write(sources / "00/summary.json", dict(summary, campaign_id="foreign"))
+        with self.assertRaises(ValueError): build()
+
+    def test_native_telemetry_producer_uses_original_events_and_hashes(self):
+        import hashlib
+        producer = runpy.run_path(str(ROOT / "scripts/cloudbench_telemetry.py"))
+        raw_path = self.tmp / "original/run.json"
+        start = dict(event="rose.complete.start", agent_id="root", request_id="req", timestamp="2026-10-18T19:00:00Z")
+        first = dict(start, event="rose.complete.first_productive_chunk", timestamp="2026-10-18T19:00:02Z", elapsed_s=999)
+        end = dict(start, event="rose.complete.foundry.done", timestamp="2026-10-18T19:00:05Z")
+        write(raw_path, {"tasks": [{"cost_cents": 17, "logs": {"worker_logs": [json.dumps(start), first, end, end]}}]})
+        digest = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+        member = dict(job_id="job", task="task", shard="00", run_json_path="original/run.json", run_json_sha256=digest,
+                      allowed_agent_ids=["root"], binding_status="verified-scored-run")
+        manifest_path = write(self.tmp / "export-manifest.json", {"files": {"original/run.json": {"sha256":digest}}})
+        membership_path = write(self.tmp / "native-membership.json", dict(proofs={"00": {"export_manifest_sha256":hashlib.sha256(manifest_path.read_bytes()).hexdigest()}}, schema="descend-scorecard-membership-v1", experiment_id="exp",
+                                scheduled_jobs=1, rows=[member]))
+        output, receipt = self.tmp / "native.json", self.tmp / "native-receipt.json"
+        data, proof = producer["produce"](membership_path, {"00": self.tmp}, output, receipt, "fixture-custodian")
+        row = data["latency_rows"][0]
+        self.assertEqual((row["ttft_seconds"], row["total_seconds"]), (2, 5))  # actual clocks, not elapsed_s=999
+        self.assertEqual(data["cost_rows"][0]["cost_cents"], 17)
+        self.assertEqual(proof["telemetry_sha256"], hashlib.sha256(output.read_bytes()).hexdigest())
+        self.assertEqual(proof["inputs"][0]["sha256"], digest)
+        observations = [(o, digest) for o in (start, first, end)]
+        for changed in (dict(first, request_id="foreign"), dict(first, agent_id="other"),
+                        dict(first, timestamp="invalid"), dict(first, timestamp="2026-10-18T18:59:00Z"),
+                        dict(first, timestamp="2026-10-18T19:00:02")):
+            projected = producer["project_events"](member, [(o, digest) for o in (start, changed, end)])
+            own = next(r for r in projected if r["request_id"] == "req")
+            self.assertIsNone(own["ttft_seconds"])
+        changed = producer["project_events"](member, [(o, digest) for o in (start, dict(first, timestamp="2026-10-18T19:00:03Z"), end)])
+        self.assertEqual(changed[0]["ttft_seconds"], 3)
+        conflicting = producer["project_events"](member, observations + [(dict(first, timestamp="2026-10-18T19:00:03Z"), digest)])
+        self.assertIsNone(conflicting[0]["ttft_seconds"])
+        self.assertEqual(conflicting[0]["total_seconds"], 5)
+        self.assertEqual(len(producer["project_events"](member, observations + observations)), 1)
+        raw_path.write_text(raw_path.read_text() + " ")
+        with self.assertRaisesRegex(ValueError, "SHA256"):
+            producer["produce"](membership_path, {"00": self.tmp}, output, receipt, "fixture-custodian")
+
     def test_descent_last_ten_and_finish_speed_include_interexperiment_work(self):
         ids = [f"history-{i:02d}" for i in range(1, 13)]
         for i, ident in enumerate(ids, 1):
@@ -1348,7 +1613,7 @@ class LaunchInstructions(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             base = Path(name)
             (base / "scripts").mkdir()
-            for script in ("cloudbench-scorecard.py", "cloudbench_experiments.py"):
+            for script in ("cloudbench-scorecard.py", "cloudbench_experiments.py", "cloudbench_global_progress.py"):
                 shutil.copy2(ROOT / "scripts" / script, base / "scripts" / script)
             harness = f'''set -euo pipefail
 ROOT_DIR={base}; FLEET_DIR={base}/run; RUN_ID=20261018-1-7; GIT_COMMON_DIR={base}; PROVISION_POOL=""

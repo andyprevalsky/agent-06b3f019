@@ -35,6 +35,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import cloudbench_experiments as ledger_mod
+import cloudbench_global_progress as global_mod
 
 FORMAT = "v8"
 GENERATOR = "cloudbench-scorecard " + FORMAT
@@ -328,6 +329,7 @@ def empty_experiment(kind: str, run_dir: Path) -> dict:
 def finish_experiment(exp: dict) -> dict:
     """Derive progress, outcomes, infra accounting, timing and cost from rows."""
     rows = exp.pop("rows")
+    exp["_telemetry_jobs"] = [{k: r.get(k) for k in ("job_id", "task", "task_status", "agent_id", "cost_usd")} for r in rows]
     scheduled = exp.get("scheduled_total") or len(rows) or None
     exp["scheduled_total"] = scheduled
     states = Counter(classify(r) for r in rows)
@@ -1082,6 +1084,7 @@ def stale_overlay_rows(rows: list[dict], kind: str, *, now: float, evidence_at: 
 
 def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None, iterations: int | None = None,
           agents=None, issues=None, history_ids: list[str] | None = None,
+          global_acceptance=None, selected_tasks=None, selected_tasks_sha256=None, global_history=None, telemetry=None, global_runs=None, telemetry_membership=None, telemetry_sources=None, telemetry_receipt=None, telemetry_receipt_sha256=None,
           now: float | None = None, deep: bool = True) -> dict:
     now = time.time() if now is None else now
     exp = load(run_dir, deep)
@@ -1155,10 +1158,18 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
         raise StaleOverlay("stale overlay; refresh these rows from current evidence before rendering:\n  "
                            + "\n  ".join(stale))
     exp_issues = _issues(exp) + overlay_issues
+    if iterations is None and any(value is not None for value in (global_acceptance, selected_tasks, selected_tasks_sha256, global_history, telemetry, global_runs, telemetry_membership, telemetry_sources, telemetry_receipt, telemetry_receipt_sha256)):
+        raise ValueError("global progress and telemetry inputs require --iterations (descend mode)")
+    if not telemetry and (telemetry_membership or telemetry_sources or telemetry_receipt or telemetry_receipt_sha256):
+        raise ValueError("telemetry membership/source inputs require telemetry")
+    global_progress = global_mod.load(global_acceptance, selected_tasks, selected_tasks_sha256, global_history, now, global_runs) if iterations is not None else None
+    observed_telemetry = global_mod.telemetry(telemetry, exp["id"], exp.get("scheduled_total"), telemetry_membership, telemetry_sources, exp.get("_telemetry_jobs", []), telemetry_receipt, telemetry_receipt_sha256) if telemetry else None
+    if observed_telemetry and observed_telemetry["cost"] is not None:
+        exp["cost"] = observed_telemetry["cost"]
     return {"format": FORMAT, "generated_at": now, "goal": goal, "number": number, "rate": rate,
             "since": since, "experiment": exp, "history": history, "trend": trend,
             "history_limit": history_limit,
-            "iteration_speed": iteration_speed,
+            "iteration_speed": iteration_speed, "global_progress": global_progress, "observed_telemetry": observed_telemetry,
             "speed_change": average_speed_change(history, now, exp["id"] if exp["state"] == "RUNNING" else None)
                             if iterations is not None and mine else None,
             "iterations": iterations, "agents": agents,
@@ -1350,6 +1361,7 @@ section{margin:0 0 14px}h2{font-size:12px;letter-spacing:.06em;text-transform:up
 .ok{color:var(--ok)}.bad{color:var(--bad)}.run{color:var(--run)}.warn{color:var(--warn)}.na{color:var(--na)}
 .agent{color:var(--agent)}.harness{color:var(--harness)}.muted{color:var(--muted)}
 .iteration-speed{font-size:26px;font-weight:800;color:var(--run);padding:10px 12px;border:2px solid var(--run);border-radius:10px;margin-bottom:10px;overflow-wrap:anywhere}
+.global-cake{display:flex;align-items:center;gap:18px;flex-wrap:wrap}.global-cake svg{width:264px;max-width:100%;flex:0 1 264px}.global-cake text{fill:var(--fg);font-size:12px}.global-cake .cake-count{font-size:30px;font-weight:750}.global-cake>div{flex:1 1 220px}
 .title{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline;font-size:19px;font-weight:700}
 .badge{font-size:13px;font-weight:700;padding:1px 8px;border:1px solid currentColor;border-radius:999px}
 .sub{color:var(--muted);font-size:13px;overflow-wrap:anywhere}.sub b{color:var(--fg)}
@@ -1373,7 +1385,7 @@ ul{list-style:none;margin:0;padding:0;font-size:13px}li{margin:2px 0;overflow-wr
 .hist{border-top:1px solid var(--line);padding:6px 0;font-size:13px}.hist:first-of-type{border-top:0}
 .hist .l1{display:flex;flex-wrap:wrap;gap:2px 10px;font-weight:650}.hist .l2,.hist .l3{color:var(--muted);overflow-wrap:anywhere}
 .hist .l3{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center}
-.trend svg{display:block;width:100%;height:auto;max-height:180px}.trend .grid{stroke:var(--line);stroke-width:1}.trend .path{fill:none;stroke:var(--ok);stroke-width:2}.trend .dot{fill:var(--ok);stroke:var(--ok);stroke-width:2}.trend .dot.running{fill:light-dark(#fff,#0d1117)}
+.trend svg{display:block;width:100%;height:auto;max-height:180px}.trend text{fill:var(--fg);font-size:15px}.trend .grid{stroke:var(--line);stroke-width:1}.trend .path{fill:none;stroke:var(--ok);stroke-width:2}.trend .dot{fill:var(--ok);stroke:var(--ok);stroke-width:2}.trend .dot.running{fill:light-dark(#fff,#0d1117)}
 .agents{display:grid;grid-template-columns:1fr auto auto auto;gap:2px 10px;font-size:13px;font-variant-numeric:tabular-nums}
 .agents .h{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em}.agents .life{text-align:right}
 .agents .why{grid-column:1/-1;color:var(--bad);font-size:12px;padding-left:18px}
@@ -1417,10 +1429,15 @@ def _harness(exp) -> tuple[str, str]:
     return ("0", "ok") if exp.get("harness_classified") else ("UNCLASSIFIED", "warn")
 
 
-def _infra_text(exp) -> tuple[str, str, str]:
+def _infra_text(exp, descent=False) -> tuple[str, str, str]:
     if exp.get("infra_unattributed_cancelled"):
         return "UNCLASSIFIED", "warn", (f'{exp.get("infra_confirmed_jobs", 0)} confirmed; '
                                         f'{exp["infra_unattributed_cancelled"]} cancelled flags lack attribution')
+    if descent:
+        jobs, total = exp.get("infra_jobs"), exp.get("scheduled_total")
+        if type(jobs) is not int or type(total) is not int or total <= 0 or not 0 <= jobs <= total:
+            return "UNMEASURED", "warn", "original scheduled job denominator unavailable"
+        return pct(jobs, total), "ok" if jobs / total < .05 else "bad", f"{jobs}/{total} original scheduled jobs"
     attempts, infra = exp.get("terminal_attempts"), exp.get("infra_attempts")
     if not attempts:
         jobs = exp.get("infra_jobs")
@@ -1457,7 +1474,7 @@ def render_html(card: dict) -> str:
     out = ['<!doctype html><html lang="en"><head><meta charset="utf-8">',
            '<meta name="viewport" content="width=device-width,initial-scale=1">',
            f'<meta name="generator" content="{GENERATOR}"><title>{e(exp["label"])} scorecard</title>',
-           f"<style>{CSS}</style></head><body><main>"]
+           f'<style>{CSS}</style></head><body><main data-descend="{str(card.get("iterations") is not None).lower()}">']
     # Descent speed is distinct from the secondary generic launch-rate metric.
     if card.get("iterations") is not None:
         change = (card.get("speed_change") or {}).get("percent")
@@ -1468,6 +1485,8 @@ def render_html(card: dict) -> str:
                    + e(iteration_speed_detail(card)) + '">' + e(rate_text) + ' iter/h '
                    + f'<span class="{cls}">[{e(speed_change_text(card))}]</span>'
                    + '<div class="sub">' + e(iteration_speed_detail(card)) + '</div></section>')
+    if card.get("iterations") is not None:
+        out.append(global_mod.render(card.get("global_progress")))
     # Header
     since = card.get("since") or {}
     since_html = (_span("run", "RUNNING") if since.get("state") == "RUNNING" else
@@ -1490,7 +1509,11 @@ def render_html(card: dict) -> str:
     pass_rate = o["PASS"] / scored if o and scored else None
     pass_cls = "na" if pass_rate is None else "ok" if pass_rate >= 0.9 else "warn" if pass_rate >= 0.5 else "bad"
     pass_sub = f'{o["PASS"]}/{scored} scored' if o and scored else "PASS + AGENT FAIL denominator"
-    infra_value, infra_cls, infra_sub = _infra_text(exp)
+    infra_value, infra_cls, infra_sub = _infra_text(exp, card.get("iterations") is not None)
+    if card.get("iterations") is not None:
+        if scored:
+            pass_sub = f'{o["PASS"]}/{scored} scored (PASS + FAIL)'
+        pass_cls = "warn" if pass_rate is None else "ok" if pass_rate > .95 else "warn" if pass_rate > .80 else "bad"
     progress = exp.get("progress")
     if progress:
         prog_value = f'{progress["completed"]}/{total}' if total else str(progress["completed"])
@@ -1543,7 +1566,7 @@ def render_html(card: dict) -> str:
         + (e(t["agent_url"]) if t.get("agent_url")  # text, not href: cards load nothing remote
            else e(t["agent_id"]) + " · FE link UNRECORDED" if t.get("agent_id") else "agent UNRECORDED") + '</div>'
         for t in exp.get("task_links") or [])
-    out.append(f'<section data-section="outcomes"><h2>Outcomes</h2>{_bar(o, total)}'
+    out.append(f'<section data-section="outcomes"><h2>Outcomes</h2>{_bar(o, total) if card.get("iterations") is None else ""}'
                f'<div class="legend">{"".join(legend)}</div><div class="note">{e(stop_note)}{source}</div>{links}</section>')
     # Failure causes
     reasons = exp.get("reasons") or []
@@ -1570,19 +1593,20 @@ def render_html(card: dict) -> str:
                    if execs else _span("warn", "UNMEASURED")))
     if cost and cost.get("metered_usd") is not None:
         unmetered = " · " + _span("warn", " / ".join(cost["unmetered"]) + " UNMETERED") if cost["unmetered"] else ""
-        timing.append(("💲 Cost", f'{e(money(cost["metered_usd"]))} agent LLM metered · {cost["n"]}/{cost["of"]} runs{unmetered}'))
+        timing.append(("💲 Cost", f'{e(money(cost["metered_usd"]))} {e(cost.get("scope", "agent LLM metered"))} · {cost["n"]}/{cost["of"]} runs{unmetered}'))
     else:
         timing.append(("💲 Cost", _span("warn", "UNMETERED")))
     timing.append(("Cache", f'provider prompt-cache share avg {cache["avg"] * 100:.1f}% · {cache["n"]}/{cache["of"]} runs'
                    if cache else _span("warn", "UNMEASURED")))
-    timing.append(("LLM latency", _span("warn", "UNMEASURED")))
+    timing.append(("LLM latency", e(global_mod.latency_text(card.get("observed_telemetry"))) if card.get("iterations") is not None else _span("warn", "UNMEASURED")))
     out.append('<section data-section="timing"><h2>Timing · Cost</h2><dl>'
                + "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in timing) + "</dl></section>")
     # Lifecycle
     items = "".join(f'<li class="{ {"ok": "ok", "fail": "bad", "warn": "warn", "pending": "run"}[i["state"]] }">'
                     f'{LIFE_ICON[i["state"]]} {e(i["label"])}' + (f' <span class="muted">· {e(i["detail"])}</span>' if i["detail"] else "")
                     + "</li>" for i in exp["lifecycle"])
-    out.append(f'<section data-section="lifecycle"><h2>Lifecycle</h2><ul>{items}</ul></section>')
+    if card.get("iterations") is None:
+        out.append(f'<section data-section="lifecycle"><h2>Lifecycle</h2><ul>{items}</ul></section>')
     agents_html = _agents_html(card)
     if card.get("agents_blocking"):
         out.append(agents_html)
@@ -1612,7 +1636,7 @@ def render_html(card: dict) -> str:
 
 
 def _public(card):
-    exp = {k: v for k, v in card["experiment"].items() if k not in ("unknown_jobs", "unreleased_jobs")}
+    exp = {k: v for k, v in card["experiment"].items() if k not in ("unknown_jobs", "unreleased_jobs", "_telemetry_jobs")}
     return dict(card, experiment=exp)
 
 
@@ -1680,7 +1704,7 @@ def _history_html(card) -> str:
                           else f'<div class="l2">{e(finish_age(h, card["generated_at"]))}</div>')
                          if card.get("iterations") is not None else "")
                       + f'<div class="l2">{e(pacific(h.get("triggered_at")))} → {e(end)} · {e(prog_text)} · {e(cost_text)}</div>'
-                      f'<div class="l3">{_bar(o, total, mini=True, label=str(number) + " outcomes")}<span>{e(stats)}</span></div>'
+                      f'<div class="l3">{_bar(o, total, mini=True, label=str(number) + " outcomes") if card.get("iterations") is None else ""}<span>{e(stats)}</span></div>'
                       + (f'<div class="l2 clip" title="{e(h["state_reason"])}">{e(h["state_reason"])}</div>'
                          if h.get("state_reason") and state != "COMPLETE" else "")
                       + "</div>")
@@ -1690,6 +1714,8 @@ def _history_html(card) -> str:
 
 
 def _trend_html(card: dict) -> str:
+    if card.get("iterations") is not None:
+        return global_mod.curve(card.get("global_progress")) if card["iterations"] > 3 else ""
     trend = card.get("trend") or []
     if not trend or (len(trend) <= 3 and (card.get("iterations") or 0) <= 3):
         return ""
@@ -1738,7 +1764,7 @@ def render_text(card: dict) -> str:
                  + (" · never started (start barrier aborted before release)" if exp.get("never_started") else "")
                  if prog else "QUEUED / IN_PROGRESS / COMPLETED UNMEASURED")
     harness, _ = _harness(exp)
-    infra_value, _, infra_sub = _infra_text(exp)
+    infra_value, _, infra_sub = _infra_text(exp, card.get("iterations") is not None)
     if o:
         scored = exp.get("scored") or 0
         lines.append((f'PASS {o["PASS"]}/{scored} {pct(o["PASS"], scored)} · ' if scored else "PASS 0 · NO SCORED TASKS · ")
@@ -1761,10 +1787,19 @@ def render_text(card: dict) -> str:
                  + (" · " + "/".join(cost["unmetered"]) + " UNMETERED" if cost.get("unmetered") else ""))
     cache = exp.get("cache")
     lines.append("Cache " + (f'provider prompt-cache share avg {cache["avg"] * 100:.1f}% ({cache["n"]}/{cache["of"]})' if cache else "UNMEASURED")
-                 + " · LLM latency UNMEASURED")
-    lines.append("Lifecycle")
-    lines += [f'  {LIFE_ICON[i["state"]]} {i["label"]}' + (f' · {i["detail"]}' if i["detail"] else "") for i in exp["lifecycle"]]
-    if card.get("trend") and (len(card["trend"]) > 3 or (card.get("iterations") or 0) > 3):
+                 + (" · LLM latency UNMEASURED" if card.get("iterations") is None else ""))
+    if card.get("iterations") is None:
+        lines.append("Lifecycle")
+        lines += [f'  {LIFE_ICON[i["state"]]} {i["label"]}' + (f' · {i["detail"]}' if i["detail"] else "") for i in exp["lifecycle"]]
+    else:
+        gp = card.get("global_progress")
+        lines.append(f'GLOBAL latest {gp["k"] if gp else "X"} scored runs (historical outcomes): ' +
+                     (f'{gp["counts"]} / {gp["task_count"]} tasks; final-source-qualified {gp["final_source_qualified"]}/{gp["task_count"]}' if gp else "UNRECORDED"))
+        lines.append("LLM latency " + global_mod.latency_text(card.get("observed_telemetry")))
+        lines.append("GLOBAL SUCCESS RATE OVER TIME: " + (" · ".join(
+            f'{r["id"]}: {r["rate"]*100:.1f}%' if r["rate"] is not None else f'{r["id"]}: gap'
+            for r in (gp or {}).get("history", [])) or "UNMEASURED"))
+    if card.get("iterations") is None and card.get("trend") and (len(card["trend"]) > 3 or (card.get("iterations") or 0) > 3):
         lines.append("SUCCESS RATE OVER TIME")
         lines.append("  " + " · ".join(f'#{t["number"]} {t["rate"]*100:.1f}%{" (running)" if t["running"] else ""}'
                                        if t["rate"] is not None else f'#{t["number"]} gap' for t in card["trend"]))
@@ -1829,12 +1864,13 @@ def validate_html(raw: str) -> list[str]:
     problems = []
     if parser.meta.get("generator") != GENERATOR:
         problems.append(f"not rendered by {GENERATOR} (hand-written cards are non-compliant)")
-    missing = [s for s in REQUIRED_SECTIONS if s not in parser.sections]
+    descent = 'data-descend="true"' in raw
+    missing = [s for s in REQUIRED_SECTIONS if s not in parser.sections and not (descent and s == "lifecycle")]
     if missing:
         problems.append("missing sections: " + ", ".join(missing))
     text = " ".join(" ".join(parser.text).split())
     for label in REQUIRED_TEXT:
-        if label not in text:
+        if label not in text and not (descent and label == "Lifecycle"):
             problems.append(f"missing required field: {label}")
     if not re.search(r"LAST (3|10) EXPERIMENTS", text):
         problems.append("missing required experiment history heading")
@@ -1892,6 +1928,16 @@ def main(argv=None) -> int:
     parser.add_argument("--goal", help="experiment goal for numbering and history")
     parser.add_argument("--history-id", action="append", help="exact recorded experiment ID in this descent (repeat across cohort rotations)")
     parser.add_argument("--iterations", type=int, help="completed descent iterations; controls the >3 trend threshold")
+    parser.add_argument("--global-acceptance", type=Path, help="full selected-suite rolling acceptance ledger")
+    parser.add_argument("--selected-tasks", type=Path, help="persisted ordered descend-selected-tasks-v1 manifest")
+    parser.add_argument("--selected-tasks-sha256", help="SHA256 of exact selected manifest bytes")
+    parser.add_argument("--global-runs", type=int, help="required historical scored runs per selected task; must match artifact k")
+    parser.add_argument("--global-history", type=Path, help="verified full-suite history snapshots; missing snapshots remain gaps")
+    parser.add_argument("--telemetry-receipt-sha256", help="expected SHA256 from the original replay custodian")
+    parser.add_argument("--telemetry-receipt", type=Path, help="hash-bound receipt from the native-event producer")
+    parser.add_argument("--telemetry-membership", type=Path, help="original job/run/source membership projection")
+    parser.add_argument("--telemetry-sources", type=Path, help="original export manifest, summary and native-log-index directories by shard")
+    parser.add_argument("--telemetry", type=Path, help="matched original experiment cost and native LLM timing receipts")
     parser.add_argument("--now", type=float, help=argparse.SUPPRESS)
     parser.add_argument("--shallow", action="store_true", help="skip reading verified export archives")
     parser.add_argument("--validate", type=Path, metavar="HTML", help="check a card against FORMAT v8")
@@ -1915,6 +1961,8 @@ def main(argv=None) -> int:
         card = build(args.run_dir, ledger=args.ledger or ledger_mod.ledger_path(HERE.parent), goal=args.goal,
                      iterations=args.iterations,
                      history_ids=args.history_id,
+                     global_acceptance=args.global_acceptance, selected_tasks=args.selected_tasks,
+                     selected_tasks_sha256=args.selected_tasks_sha256, global_history=args.global_history, telemetry=args.telemetry, global_runs=args.global_runs, telemetry_membership=args.telemetry_membership, telemetry_sources=args.telemetry_sources, telemetry_receipt=args.telemetry_receipt, telemetry_receipt_sha256=args.telemetry_receipt_sha256,
                      agents=agents if isinstance(agents, list) else None,
                      issues=issues if isinstance(issues, list) else None, now=args.now, deep=not args.shallow)
     except (StaleOverlay, ValueError) as error:
