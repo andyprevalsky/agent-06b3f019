@@ -692,6 +692,14 @@ class RoseClient:
         if exclude_anthropic_family != bool(kwargs.get("_exclude_anthropic_family", False)):
             kwargs = {**kwargs, "_exclude_anthropic_family": exclude_anthropic_family}
 
+        # Provider speed comes from the agent row (one memoized read per agent per
+        # process). Browser, explore and sub-agent calls carry their agent's id,
+        # so they inherit it. A call without an agent runs standard.
+        if "speed" not in kwargs:
+            from providers.demo_cache.client import resolve_agent_speed
+
+            kwargs = {**kwargs, "speed": await resolve_agent_speed(agent_id)}
+
         # Browser steps run on their spawning agent's pool, so the explicit
         # flag (set by complete_browser_use) identifies them on any pool.
         browser_use = bool(kwargs.pop("browser_use", False))
@@ -968,7 +976,10 @@ class RoseClient:
         idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
         thinking: Optional[Dict[str, Any]] = None,
         effort: Optional[str] = None,
+        # Legacy Fast Mode bit: DEMO cache key material only, never sent to a provider.
         provider_fast_mode: bool = True,
+        # Provider speed (speed.py). None/unknown = standard.
+        speed: Optional[str] = None,
         dump_context: bool = True,
         dump_extra: Optional[Dict[str, Any]] = None,
         cache_namespace: Optional[str] = None,
@@ -1061,6 +1072,7 @@ class RoseClient:
                             "ttft_timeout_s": ttft_timeout_s,
                             "idle_timeout_s": idle_timeout_s,
                             "provider_fast_mode": provider_fast_mode,
+                            "speed": speed,
                         },
                         # Effective wire effort: callers may omit; body builders
                         # always stamp DEFAULT_REASONING_EFFORT (xhigh).
@@ -1590,7 +1602,7 @@ class RoseClient:
                                 call_site=call_site,
                                 thinking=thinking,
                                 effort=effort,
-                                provider_fast_mode=provider_fast_mode,
+                                speed=speed,
                                 ttft_timeout_s=current_ttft_s,
                                 idle_timeout_s=idle_timeout_s,
                             )
@@ -1609,7 +1621,7 @@ class RoseClient:
                                 agent_id=agent_id,
                                 call_site=call_site,
                                 cache_namespace=cache_namespace,
-                                provider_fast_mode=provider_fast_mode,
+                                speed=speed,
                                 ttft_timeout_s=current_ttft_s,
                                 idle_timeout_s=idle_timeout_s,
                             )
@@ -1810,7 +1822,7 @@ class RoseClient:
                             response_format=None if gpt_api_key_tools else openrouter_response_format,
                             temperature=temperature,
                             effort=effort,
-                            provider_fast_mode=provider_fast_mode,
+                            speed=speed,
                             request_id=rid,
                             agent_id=agent_id,
                             call_site=call_site,
@@ -1894,7 +1906,7 @@ class RoseClient:
                             skip_cache_write=skip_cache_write,
                             thinking=thinking,
                             effort=effort,
-                            provider_fast_mode=provider_fast_mode,
+                            speed=speed,
                             request_id=rid,
                             agent_id=agent_id,
                             call_site=call_site,
@@ -2085,7 +2097,7 @@ class RoseClient:
                                 temperature=temperature,
                                 # A fallback layer: speed pools pin their fast effort (xhigh TTFT is slow).
                                 effort=pool_spec.waterfall_reasoning_effort or effort,
-                                provider_fast_mode=provider_fast_mode,
+                                speed=speed,
                                 request_id=rid,
                                 route_key=foundry_route_key,
                                 agent_id=agent_id,
@@ -2143,7 +2155,7 @@ class RoseClient:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 seed=seed,
-                provider_fast_mode=provider_fast_mode,
+                speed=speed,
                 effort=effort,
                 openrouter_key=self._or_key(),
                 request_id=rid,
@@ -2562,7 +2574,7 @@ async def _try_claude_auth(
     call_site: Optional[str],
     thinking: Optional[Dict[str, Any]] = None,
     effort: Optional[str] = None,
-    provider_fast_mode: bool = True,
+    speed: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:
@@ -2587,7 +2599,7 @@ async def _try_claude_auth(
         call_site=call_site,
         thinking=thinking,
         effort=effort,
-        provider_fast_mode=provider_fast_mode,
+        speed=speed,
         ttft_timeout_s=ttft_timeout_s,
         idle_timeout_s=idle_timeout_s,
     )
@@ -2627,7 +2639,7 @@ async def _try_gpt_auth(
     agent_id: Optional[str],
     call_site: Optional[str],
     cache_namespace: Optional[str] = None,
-    provider_fast_mode: bool = True,
+    speed: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:
@@ -2648,7 +2660,7 @@ async def _try_gpt_auth(
         agent_id=agent_id,
         call_site=call_site,
         cache_namespace=cache_namespace,
-        provider_fast_mode=provider_fast_mode,
+        speed=speed,
         ttft_timeout_s=ttft_timeout_s,
         idle_timeout_s=idle_timeout_s,
     )
@@ -2680,7 +2692,7 @@ async def _try_openai_api_key(
     response_format: Optional[Dict[str, Any]],
     temperature: Optional[float],
     effort: Optional[str],
-    provider_fast_mode: bool = True,
+    speed: Optional[str] = None,
     request_id: str,
     agent_id: Optional[str],
     call_site: Optional[str],
@@ -2709,7 +2721,7 @@ async def _try_openai_api_key(
         agent_id=agent_id,
         call_site=call_site,
         cache_namespace=cache_namespace,
-        provider_fast_mode=provider_fast_mode,
+        speed=speed,
         ttft_timeout_s=ttft_timeout_s,
         idle_timeout_s=idle_timeout_s,
     )
@@ -2745,7 +2757,7 @@ async def _try_anthropic_api_key(
     call_site: Optional[str],
     thinking: Optional[Dict[str, Any]] = None,
     effort: Optional[str] = None,
-    provider_fast_mode: bool = True,
+    speed: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:
@@ -2765,7 +2777,7 @@ async def _try_anthropic_api_key(
         skip_cache_write=skip_cache_write,
         thinking=thinking,
         effort=effort,
-        provider_fast_mode=provider_fast_mode,
+        speed=speed,
         request_id=request_id,
         agent_id=agent_id,
         call_site=call_site,

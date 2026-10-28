@@ -12,6 +12,7 @@ import {
   findAncestorsAcrossRuns,
   findTreeAcrossRuns,
 } from '../../providers/benchmarkHubStore';
+import { agentSpeedFromRow } from '../../providers/rose/speed';
 
 // ---------------------------------------------------------------------------
 // List agents
@@ -46,6 +47,7 @@ function toListItem(agent: ListedAgent) {
     context_size: agent.contextSize,
     message_count: agent.messageCount,
     fast_mode_cache_enabled: agent.fastModeCacheEnabled,
+    speed: agentSpeedFromRow(agent),
     world_model_mode: agent.worldModelMode,
     memory_enabled: agent.memoryEnabled,
     project_id: agent.projectId,
@@ -289,6 +291,7 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
       price_limit_cents: agent.priceLimitCents,
       tree_cost_cents: agent.treeCostCents,
       fast_mode_cache_enabled: agent.fastModeCacheEnabled,
+      speed: agentSpeedFromRow(agent),
       world_model_mode: agent.worldModelMode,
       memory_enabled: agent.memoryEnabled,
       project_id: agent.projectId,
@@ -299,11 +302,7 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
       write_lock_enabled: agent.writeLockEnabled,
       structured_output: agent.structuredResponse,
       failure_context: detailFailureContext(agent),
-      verifier: agent.verifier
-        ? {
-            type: agent.verifier.type,
-          }
-        : null,
+      verifier: agent.verifier ? { type: agent.verifier.type } : null,
       tools: agent.tools.map((at) => ({
         id: at.tool.id,
         name: at.tool.name,

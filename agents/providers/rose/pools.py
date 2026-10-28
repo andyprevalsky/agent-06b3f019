@@ -32,9 +32,10 @@ on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
     rose-1-flash:  (renamed from rose-1-lite; rose-fast)
         direct_auth_enabled = False
         cerebras   = qwen-3.8-27b (high; Cerebras max, xhigh 400s)
-        foundry    = gpt-5.6-luna (when configured; after Cerebras)
+        foundry    = gpt-6-luna only (medium; any region whose
+                     AZURE_FOUNDRY_DEPLOYMENTS* lists it; after Cerebras)
         waterfall  = qwen/qwen3.8-27b -> google/gemini-3.8-flash
-        waterfall effort = low
+        waterfall effort = medium
 
     rose-1-ultra:  (frontier — planner / verifier / param-populator)
         claudeAuth = claude-opus-5-5
@@ -177,11 +178,15 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
             "qwen/qwen3.8-27b",
             "google/gemini-3.8-flash",
         ),
-        waterfall_reasoning_effort="low",
+        # Azure and OpenRouter Qwen/Gemini fallbacks all run at medium.
+        waterfall_reasoning_effort="medium",
         direct_auth_enabled=False,
         cerebras_model="qwen-3.8-27b",
         cerebras_reasoning_effort="high",
         foundry_enabled=True,
+        # Azure serves GPT-6 Luna only (never the 5.6 Luna gpt_auth_model), in
+        # whichever regions list a gpt-6-luna deployment.
+        foundry_model="gpt-6-luna",
     ),
     "rose-1-ultra": PoolSpec(
         name="rose-1-ultra",

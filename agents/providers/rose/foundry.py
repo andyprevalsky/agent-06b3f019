@@ -30,6 +30,7 @@ import structlog
 from providers.rose.errors import RoseAuthError, RoseError, RoseInvalidRequest, RoseRateLimitError, RoseServerError
 from providers.rose.gpt_auth import build_codex_responses_body
 from providers.rose.pools import PoolSpec, foundry_model, foundry_models
+from providers.rose.speed import foundry_service_tier_for
 from providers.rose.streaming import parse_responses_sse
 from providers.rose.truncation import model_key
 from providers.rose.types import StreamChunk
@@ -123,9 +124,33 @@ def foundry_configured(pool_spec: PoolSpec) -> bool:
     now = time.monotonic()
     models = foundry_models(pool_spec)
     listed = _listed(regions, models)
+    if regions and not any(_region_deployments(region, models, listed) for region in regions):
+        _warn_no_deployment(pool_spec, models, regions)
+        return False
     return any(
         now >= _auth_cooldown_until.get(region.endpoint, 0.0) and _region_deployments(region, models, listed)
         for region in regions
+    )
+
+
+# (pool, models, configured deployment lists) already reported, so a missing
+# deployment logs once per process and configuration, not once per LLM call.
+_warned_no_deployment: set[tuple[str, tuple[str, ...], tuple[tuple[int, tuple[str, ...]], ...]]] = set()
+
+
+def _warn_no_deployment(pool_spec: PoolSpec, models: tuple[str, ...], regions: list[FoundryRegion]) -> None:
+    """Name the missing deployment instead of skipping the Foundry leg silently."""
+    configured = tuple((region.slot, region.deployments) for region in regions)
+    key = (pool_spec.name, models, configured)
+    if key in _warned_no_deployment:
+        return
+    _warned_no_deployment.add(key)
+    logger.warning(
+        "foundry.no_deployment_for_model",
+        pool=pool_spec.name,
+        models=list(models),
+        region_slots=[region.slot for region in regions],
+        deployment_envs=[f"AZURE_FOUNDRY_DEPLOYMENTS{_suffix(region.slot)}" for region in regions],
     )
 
 
@@ -238,7 +263,7 @@ async def foundry_complete(
     tool_choice: Any,
     temperature: Optional[float],
     effort: Optional[str],
-    provider_fast_mode: bool,
+    speed: Optional[str],
     request_id: str,
     route_key: Optional[str],
     agent_id: Optional[str],
@@ -282,7 +307,7 @@ async def foundry_complete(
                 tool_choice=tool_choice,
                 temperature=temperature,
                 effort=effort,
-                provider_fast_mode=provider_fast_mode,
+                service_tier=foundry_service_tier_for(speed),
                 cache_namespace=cache_namespace,
                 request_id=request_id,
                 # Foundry Standard deployments honor caller cache markers as breakpoints.

@@ -8,6 +8,8 @@
  * callers iterate. RoseStreamChunk is the typed normalized form used inside
  * the orchestration layer.
  */
+import type { AgentSpeed } from './speed';
+
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
 export interface ContentBlock {
@@ -66,7 +68,11 @@ export interface CompletionOptions {
   cerebras_tools_source?: Array<Record<string, unknown>>;
   tool_choice?: unknown;
   effort?: string;
-  provider_fast_mode?: boolean;
+  /**
+   * Provider speed forwarded to every leg (speed.ts). Omitted = standard:
+   * no Claude fast mode and no service tier on any GPT/Azure leg.
+   */
+  speed?: AgentSpeed;
   /** Stable agent or user identity for distributing Foundry requests. */
   route_key?: string;
   /**

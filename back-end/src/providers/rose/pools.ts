@@ -32,6 +32,11 @@ export interface PoolSpec {
    * does not gate it.
    */
   foundryEnabled?: boolean;
+  /**
+   * Pins the pool to this Foundry model (no stand-ins). Unset, Foundry serves
+   * gptAuthModel and any Sol deployment serves a Sol pool. Mirror: pools.py.
+   */
+  foundryModel?: string;
   /** Provider-prefixed model IDs tried in order if claudeAuth fails. */
   waterfall: readonly string[];
   /**
@@ -73,11 +78,15 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     claudeAuthModel: 'claude-sonnet-5',
     gptAuthModel: 'gpt-5.6-luna',
     waterfall: ['qwen/qwen3.8-27b', 'google/gemini-3.8-flash'],
-    waterfallReasoningEffort: 'low',
+    // Azure and OpenRouter Qwen/Gemini fallbacks all run at medium.
+    waterfallReasoningEffort: 'medium',
     directAuthEnabled: false,
     cerebrasModel: 'qwen-3.8-27b',
     cerebrasReasoningEffort: 'high',
     foundryEnabled: true,
+    // Azure serves GPT-6 Luna only (never the 5.6 Luna gptAuthModel), in
+    // whichever regions list a gpt-6-luna deployment.
+    foundryModel: 'gpt-6-luna',
   },
   'rose-1-ultra': {
     name: 'rose-1-ultra',

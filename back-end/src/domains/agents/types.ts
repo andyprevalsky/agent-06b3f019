@@ -173,6 +173,10 @@ const createAgentBaseSchema = z.object({
   // DEMO cache: record/replay third-party responses for clean demos.
   // Own first-class flag — NOT a context gate. Default off (no read, no write).
   fast_mode_cache_enabled: z.boolean().optional(),
+  // Provider speed forwarded to every LLM leg (providers/rose/speed.ts).
+  // Absent: the legacy fast_mode_cache_enabled=true means fast; otherwise a
+  // sub-agent inherits its parent's speed and a root runs standard.
+  speed: z.enum(['standard', 'fast', 'ultrafast']).optional(),
   // Planner memory: retrieve compressed past trajectories for similar goals and
   // fork a get_memories tool call into the planner context. Own first-class
   // flag (not a context gate). Default off; sub-agents inherit their parent's.

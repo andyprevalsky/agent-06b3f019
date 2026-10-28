@@ -110,7 +110,7 @@ async function* attemptCredential(
           accountId: credential.accountId,
           requestId: params.requestId,
           callSite: params.callSite,
-          providerFastMode: options.provider_fast_mode,
+          speed: options.speed,
           abortSignal: options.abort_signal,
         }),
       emit: params.emit,

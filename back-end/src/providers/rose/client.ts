@@ -43,6 +43,7 @@ import { RoseAllFailed, RoseAuthError, RoseError, RosePaymentRequiredError } fro
 import { openAiApiKeyComplete } from './gptAuth';
 import { runSubscriptionLegs } from './subscriptionLegs';
 import { getPool, poolForModel } from './pools';
+import { normalizeAgentSpeed } from './speed';
 import { localCompletion } from './local';
 import { buildOpenAiResponseFormat } from './schema';
 import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './types';
@@ -113,9 +114,8 @@ export async function createStreamingCompletion(
   if (pool === 'rose-local') return localCompletion(options);
   const normalizedOptions: CompletionOptions = {
     ...options,
-    // Provider Anthropic/OpenRouter speed=fast is on by default; callers opt out
-    // with an explicit false (e.g. Fast Mode toggle off on chat).
-    provider_fast_mode: options.provider_fast_mode ?? true,
+    // Speed is explicit: a call without an agent speed runs standard.
+    speed: normalizeAgentSpeed(options.speed),
     response_format: options.response_model
       ? buildOpenAiResponseFormat(options.response_model)
       : options.response_format,
@@ -199,7 +199,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           reasoning_effort: opts.options.effort,
           response_format: opts.options.response_format,
           tool_choice: opts.options.tool_choice,
-          provider_fast_mode: opts.options.provider_fast_mode,
+          speed: opts.options.speed,
           provider_route: opts.options.provider_route,
         },
         ...(opts.options.dump_context.config ?? {}),
@@ -368,7 +368,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
               openAiKey: sharedOpenAiKey,
               requestId: opts.requestId,
               callSite: opts.callSite,
-              providerFastMode: true,
+              speed: opts.options.speed,
               abortSignal: opts.options.abort_signal,
             }),
           emit: emitChunk,
@@ -446,7 +446,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
               openAiKey: sharedOpenAiKey,
               requestId: opts.requestId,
               callSite: opts.callSite,
-              providerFastMode: true,
+              speed: opts.options.speed,
               abortSignal: opts.options.abort_signal,
             }),
           emit: emitChunk,
@@ -507,7 +507,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
               auth: { mode: 'apiKey', key: anthropicApiKey },
               requestId: opts.requestId,
               callSite: opts.callSite,
-              providerFastMode: opts.options.provider_fast_mode,
+              speed: opts.options.speed,
               abortSignal: opts.options.abort_signal,
             }),
           emit: emitChunk,
@@ -636,7 +636,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             openrouterKey: requiredEnv(OPENROUTER_API_KEY_ENV),
             requestId: opts.requestId,
             callSite: opts.callSite,
-            providerFastMode: opts.options.provider_fast_mode,
+            speed: opts.options.speed,
             abortSignal: opts.options.abort_signal,
           }),
         emit: emitChunk,
