@@ -43,6 +43,7 @@ import {
   waitFor,
   waitForAsync,
 } from './multi-instance.harness';
+import { runProxyOrdinalCases } from './multi-instance.proxy-ordinal.cases';
 import { saveUserToken } from '../../providers/agentcard/store';
 import { claimPlaidItemSync } from '../../domains/integrations/service.plaidTransactions';
 import { markPlaidItemSyncSucceeded } from '../../domains/integrations/repo.plaid';
@@ -83,6 +84,8 @@ async function main(): Promise<void> {
       const [again] = await concurrently([['pkce-take', [state]]]);
       assert(again.found === false, 'PKCE state must stay single-use across instances');
     });
+
+    await runProxyOrdinalCases(test, assert);
 
     await test('the per-user SMS commit lock serializes commits across instances', async () => {
       const lockUser = randomUUID();
