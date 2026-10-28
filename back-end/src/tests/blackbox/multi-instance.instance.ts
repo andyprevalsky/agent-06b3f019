@@ -229,6 +229,23 @@ async function main(): Promise<unknown> {
       await repo.clearSmsSession(args[0]);
       return { dropped: lostAck.dropped() };
     }
+    case 'seq-next-lost-ack': {
+      // The sequence UPSERT commits but its reply is lost; the replay must
+      // return the same value, not skip one.
+      const lostAck = await dropFirstCommitAck(['INSERT 0 1']);
+      const { nextSequenceValue } = await import('../../providers/sharedState');
+      await barrier();
+      const taken = await nextSequenceValue('mi-seq', args[0], 60_000);
+      return { value: taken.value, dropped: lostAck.dropped() };
+    }
+    case 'seq-next': {
+      const { nextSequenceValue, releaseSequenceValue } =
+        await import('../../providers/sharedState');
+      await barrier();
+      const taken = await nextSequenceValue('mi-seq', args[0], 60_000);
+      if (args[1] === 'release') await releaseSequenceValue('mi-seq', args[0], taken);
+      return { value: taken.value };
+    }
     case 'hub-serve': {
       // Owns the Mac's control channel; serves until the parent's next line.
       const served = await serveRoutedHub(Number(args[0]));
@@ -399,6 +416,60 @@ async function main(): Promise<unknown> {
       const foreign = await session.pollConnectSession('someone-else', connectId);
       await session.cancelConnectSession(userId, connectId);
       return { poll, foreign };
+    }
+    case 'proxy-ordinal': {
+      // The production proxy core with the routes' ordinal reserver; only the
+      // upstream and the cache are faked. Reports the slot key it recorded.
+      const [kind, traceHash, sessionId] = args;
+      const routes = await import('../../domains/demo-cache/routes.proxy');
+      const keys: string[] = [];
+      const cacheGet = async () => ({ hit: false, value: null });
+      const cacheSet = async ({ key }: { key: string }) => {
+        keys.push(key);
+      };
+      await barrier();
+      if (kind === 'anthropic') {
+        const { resolveAnthropic } = await import('../../providers/anthropicProxyCore');
+        await resolveAnthropic(
+          traceHash,
+          { messages: [{ role: 'user', content: 'hi' }] },
+          {},
+          {
+            cacheGet,
+            cacheSet,
+            fetchUpstream: async () => ({
+              status: 200,
+              contentType: 'text/event-stream',
+              body: 'ok',
+            }),
+            reserveOrdinal: routes.PROXY_ORDINAL_RESERVER,
+          },
+          false,
+          { sessionId }
+        );
+      } else {
+        const { resolveCodex } = await import('../../providers/codexProxyCore');
+        await resolveCodex(
+          traceHash,
+          'POST',
+          '/backend-api/codex/responses',
+          { input: [{ role: 'user', content: 'hi' }] },
+          {},
+          {
+            cacheGet,
+            cacheSet,
+            fetchUpstream: async () => ({
+              status: 200,
+              contentType: 'text/event-stream',
+              body: 'ok',
+            }),
+            reserveOrdinal: routes.PROXY_ORDINAL_RESERVER,
+          },
+          false,
+          { sessionId }
+        );
+      }
+      return { keys };
     }
     default:
       throw new Error(`unknown op ${op}`);
