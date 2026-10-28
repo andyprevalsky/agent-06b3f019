@@ -7,11 +7,19 @@
  *   rose-sync onboard  [--dir D] [--project NAME|ID]  import keys and configure setup
  *   rose-sync seed-rose [--dir D] [--json]     create/refresh the "Rose" project
  *                                              (startup script + six env files), then push
+ *   rose-sync agent-init --login-code CODE     sign in with a one-time code from Rose and
+ *                                              print the coding agent's setup steps
+ *   rose-sync agent-init [status] [--json]     the steps again / current stage + next action
  *
- * Auth (one of):
+ * Published as the `rose` bin (package.json, bin/rose.mjs); scripts/rose-sync
+ * is the in-repo entry point.
+ *
+ * Auth (first match):
  *   ROSE_TOKEN=<user JWT>
  *   ROSE_API_KEY=<personal API key> (shared backend keys also need ROSE_USER_ID)
- * Backend: --api URL or ROSE_API_URL (default https://navi-j9a9.onrender.com).
+ *   the credential saved by `agent-init --login-code` (agent-init.mjs)
+ * Backend: --api URL, ROSE_API_URL, the saved login's API, else
+ * https://navi-j9a9.onrender.com.
  *
  * Everything secret is encrypted HERE with the backend's public key
  * (GET /api/projects/sync-key) before upload; unchanged files are skipped by
@@ -26,6 +34,14 @@ import {
 } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import {
+  agentGuide,
+  exchangeLoginCode,
+  humanStatus,
+  loadLogin,
+  saveLogin,
+  setupStatus,
+} from "./agent-init.mjs";
 import { captureCheckout, checkoutRoot, dotenvNames } from "./capture.mjs";
 import {
   configureOnboarding,
@@ -50,6 +66,12 @@ export const ROSE_STARTUP_SCRIPT_PATH =
 export function parseArgs(argv) {
   const [command = "help", ...rest] = argv;
   const opts = { command, include: [], setup: [], prune: true, json: false };
+  if (
+    command === "agent-init" &&
+    rest[0] !== undefined &&
+    !rest[0].startsWith("-")
+  )
+    opts.subcommand = rest.shift();
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i];
     const next = () => {
@@ -62,6 +84,7 @@ export function parseArgs(argv) {
     else if (arg === "--include") opts.include.push(next());
     else if (arg === "--setup") opts.setup.push(next());
     else if (arg === "--api") opts.api = next();
+    else if (arg === "--login-code") opts.loginCode = next();
     else if (arg === "--no-prune") opts.prune = false;
     else if (arg === "--json") opts.json = true;
     else throw new Error(`Unknown option ${arg}`);
@@ -100,11 +123,18 @@ export function fingerprint(salt, content) {
   return createHmac("sha256", salt).update(content).digest("hex");
 }
 
-function apiClient(opts) {
-  const base = (opts.api ?? process.env.ROSE_API_URL ?? DEFAULT_API).replace(
-    /\/+$/,
-    "",
+function trimBase(url) {
+  return url.replace(/\/+$/, "");
+}
+
+export function apiBase(opts, login = loadLogin()) {
+  return trimBase(
+    opts.api ?? process.env.ROSE_API_URL ?? login?.apiUrl ?? DEFAULT_API,
   );
+}
+
+function apiClient(opts, login = loadLogin()) {
+  const base = apiBase(opts, login);
   const headers = { "Content-Type": "application/json" };
   if (process.env.ROSE_TOKEN)
     headers.Authorization = `Bearer ${process.env.ROSE_TOKEN}`;
@@ -112,12 +142,17 @@ function apiClient(opts) {
     headers["X-API-Key"] = process.env.ROSE_API_KEY;
     if (process.env.ROSE_USER_ID)
       headers["X-User-Id"] = process.env.ROSE_USER_ID;
+  } else if (login && trimBase(login.apiUrl) === base) {
+    // Never send the saved credential to a different backend than issued it.
+    headers.Authorization = `Bearer ${login.credential}`;
   } else {
     throw new Error(
-      "Set ROSE_TOKEN or your personal ROSE_API_KEY (shared backend keys also require ROSE_USER_ID)",
+      "Not signed in to Rose. Copy the setup prompt from Rose (project settings → " +
+        "Set up with your coding agent), or set ROSE_TOKEN / your personal ROSE_API_KEY " +
+        "(shared backend keys also require ROSE_USER_ID)",
     );
   }
-  return async function call(method, path, body) {
+  const call = async function call(method, path, body) {
     const res = await fetch(`${base}${path}`, {
       method,
       headers,
@@ -140,13 +175,18 @@ function apiClient(opts) {
     }
     return data;
   };
+  call.login = headers.Authorization?.startsWith("Bearer rose_cli_")
+    ? login
+    : null;
+  return call;
 }
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 async function resolveProject(call, opts, root) {
-  const name = opts.project ?? basename(root);
+  // A login minted from one project's settings targets that project by default.
+  const name = opts.project ?? call.login?.project?.id ?? basename(root);
   if (UUID_RE.test(name)) return call("GET", `/api/projects/${name}`);
   return call("PUT", "/api/projects", { name });
 }
@@ -313,9 +353,77 @@ async function seedRose(call, opts, root) {
   return { project, capture };
 }
 
-export async function main(argv) {
+async function agentInit(opts, dir, cli) {
+  const captureFor = () => {
+    try {
+      return captureCheckout(dir, { include: opts.include, setup: opts.setup });
+    } catch {
+      return null;
+    }
+  };
+  if (opts.loginCode !== undefined) {
+    const base = apiBase(opts, null);
+    const exchanged = await exchangeLoginCode(base, opts.loginCode);
+    const login = {
+      apiUrl: base,
+      credential: exchanged.credential,
+      expiresAt: exchanged.expiresAt,
+      userId: exchanged.userId,
+      project: exchanged.project,
+      scope: exchanged.scope,
+      savedAt: new Date().toISOString(),
+    };
+    const capture = captureFor();
+    const path = saveLogin(login, { checkout: capture?.root ?? dir });
+    const guide = agentGuide({ login, capture, cli, path });
+    print(
+      opts,
+      {
+        signedIn: true,
+        credentialPath: path,
+        expiresAt: login.expiresAt,
+        project: login.project,
+        instructions: guide,
+      },
+      guide,
+    );
+    return 0;
+  }
+  const login = loadLogin();
+  const capture = captureFor();
+  if (opts.subcommand === "status") {
+    const status = await setupStatus({
+      call: login ? apiClient(opts, login) : null,
+      login,
+      capture,
+      projectName: opts.project ?? (capture ? basename(capture.root) : null),
+      cli,
+    });
+    print(opts, status, humanStatus(status));
+    return 0;
+  }
+  if (opts.subcommand !== undefined && opts.subcommand !== "guide")
+    throw new Error(`Unknown agent-init command ${opts.subcommand}`);
+  if (!login) {
+    throw new Error(
+      "Not signed in to Rose. Ask the user to copy the setup prompt from Rose " +
+        "(project settings → Set up with your coding agent); it runs " +
+        `${cli} agent-init --login-code <code>.`,
+    );
+  }
+  const guide = agentGuide({ login, capture, cli });
+  print(
+    opts,
+    { signedIn: true, project: login.project, instructions: guide },
+    guide,
+  );
+  return 0;
+}
+
+export async function main(argv, { cli = "rose-sync" } = {}) {
   const opts = parseArgs(argv);
   const dir = opts.dir ?? process.cwd();
+  if (opts.command === "agent-init") return agentInit(opts, dir, cli);
   if (opts.command === "status") {
     const capture = captureCheckout(dir, {
       include: opts.include,
@@ -398,8 +506,9 @@ export async function main(argv) {
     return 0;
   }
   process.stdout.write(
-    "usage: rose-sync status|push|onboard|seed-rose [--dir D] [--project NAME|ID] [--include PATH]... " +
-      "[--setup CMD]... [--no-prune] [--api URL] [--json]\n",
+    `usage: ${cli} status|push|onboard|seed-rose [--dir D] [--project NAME|ID] [--include PATH]... ` +
+      "[--setup CMD]... [--no-prune] [--api URL] [--json]\n" +
+      `       ${cli} agent-init --login-code CODE | agent-init [status] [--json]\n`,
   );
   return opts.command === "help" ? 0 : 2;
 }

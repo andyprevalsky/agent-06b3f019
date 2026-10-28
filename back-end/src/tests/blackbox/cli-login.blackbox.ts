@@ -20,6 +20,9 @@
  *     an unbound credential never reaches another user's project
  *   - rate limit: the 11th attempt from one address is 429 with Retry-After,
  *     before the code is looked up (the code still works from another address)
+ *   - real CLI: `rose-sync agent-init --login-code` stores the credential 0600
+ *     outside the repo, prints the agent steps without the secret, and a
+ *     follow-up `push` syncs through the saved credential
  *
  * Usage: bash scripts/run-blackbox-tests.sh cli-login
  */
@@ -34,10 +37,19 @@ import {
   type Session,
 } from './projects-harness';
 import { createHash, randomBytes } from 'crypto';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { prisma } from '../../providers/database';
 
+const REPO_ROOT = resolve(__dirname, '../../../..');
+const ROSE_SYNC = join(REPO_ROOT, 'scripts', 'rose-sync');
+const scratch = mkdtempSync(join(tmpdir(), 'rose-cli-login-'));
+
 after(async () => {
+  rmSync(scratch, { recursive: true, force: true });
   await prisma.$disconnect();
 });
 
@@ -289,4 +301,85 @@ test('rate limit: the 11th exchange from one address is 429 before the code is c
   assert(wait >= 1 && wait <= 15 * 60, `Retry-After ${wait}`);
   const elsewhere = await exchange(minted.code);
   expectStatus(elsewhere, 200, 'a limited attempt never burned the code');
+});
+
+function git(dir: string, ...args: string[]): void {
+  execFileSync('git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', ...args], {
+    cwd: dir,
+  });
+}
+
+test('real CLI: agent-init stores the credential 0600 outside the repo; push uses it', async () => {
+  const s = await anonymousSession();
+  const project = await createProject(s, 'CLI fixture');
+  const repo = join(scratch, 'checkout');
+  mkdirSync(repo);
+  git(repo, 'init', '-q', '-b', 'main');
+  writeFileSync(join(repo, '.gitignore'), '.env\n');
+  writeFileSync(join(repo, 'README.md'), 'fixture\n');
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-qm', 'fixture');
+  const secret = `cli-login-secret-${randomBytes(8).toString('hex')}`;
+  writeFileSync(join(repo, '.env'), `FIXTURE_TOKEN=${secret}\n`);
+  const configDir = join(scratch, 'config');
+  const env = {
+    ...process.env,
+    ROSE_CONFIG_DIR: configDir,
+    ROSE_TOKEN: '',
+    ROSE_API_KEY: '',
+    ROSE_USER_ID: '',
+    ROSE_API_URL: BASE_URL,
+  };
+  const minted = await mint(s, project.id);
+  const login = spawnSync(
+    process.execPath,
+    [ROSE_SYNC, 'agent-init', '--login-code', minted.code, '--dir', repo],
+    { env, encoding: 'utf8' }
+  );
+  assert(login.status === 0, `agent-init failed: ${login.stderr}${login.stdout}`);
+  const saved = join(configDir, 'credentials.json');
+  assert((statSync(saved).mode & 0o777) === 0o600, 'credential file is 0600');
+  const record = JSON.parse(readFileSync(saved, 'utf8')) as { credential: string };
+  assert(record.credential.startsWith('rose_cli_'), 'credential saved');
+  assert(!login.stdout.includes(record.credential), 'stdout never shows the credential');
+  assert(!login.stdout.includes(secret), 'stdout never shows env values');
+  assert(login.stdout.includes('FIXTURE_TOKEN') === false, 'guide does not dump variables');
+  assert(/APPROVAL: ask before uploading secrets/.test(login.stdout), 'approval step printed');
+  assert(login.stdout.includes(`push --project ${project.id}`), 'push targets the bound project');
+
+  const push = spawnSync(process.execPath, [ROSE_SYNC, 'push', '--dir', repo, '--json'], {
+    env,
+    encoding: 'utf8',
+  });
+  assert(push.status === 0, `push failed: ${push.stderr}${push.stdout}`);
+  assert(!push.stdout.includes(secret), 'push output has names only');
+  const pushed = JSON.parse(push.stdout) as { projectId: string; revision: number };
+  assert(pushed.projectId === project.id && pushed.revision === 1, `pushed ${push.stdout}`);
+
+  const status = spawnSync(
+    process.execPath,
+    [ROSE_SYNC, 'agent-init', 'status', '--dir', repo, '--json'],
+    { env, encoding: 'utf8' }
+  );
+  assert(status.status === 0, `status failed: ${status.stderr}`);
+  const report = JSON.parse(status.stdout) as {
+    stage: string;
+    project: { envFiles: Array<{ path: string; uploaded: boolean; variables: string[] }> };
+  };
+  assert(report.stage === 'synced', `stage ${report.stage}`);
+  assert(
+    report.project.envFiles.some(
+      (f) => f.path === '.env' && f.uploaded && f.variables.includes('FIXTURE_TOKEN')
+    ),
+    `env file uploaded: ${status.stdout}`
+  );
+  assert(!status.stdout.includes(secret), 'status has names only');
+
+  const reuse = spawnSync(
+    process.execPath,
+    [ROSE_SYNC, 'agent-init', '--login-code', minted.code, '--dir', repo],
+    { env: { ...env, ROSE_CONFIG_DIR: join(scratch, 'config-2') }, encoding: 'utf8' }
+  );
+  assert(reuse.status !== 0, 'a used code cannot sign in again');
+  assert(/copy a fresh setup prompt/i.test(reuse.stderr), `reuse guidance: ${reuse.stderr}`);
 });
