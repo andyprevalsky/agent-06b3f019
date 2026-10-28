@@ -158,7 +158,18 @@ const grepCallSchema = z
           status: z.enum(['posted', 'pending', 'all']).nullable(),
           include_pending_in_totals: z.boolean().nullable(),
           person: z.string().nullable(),
-          document_source: z.enum(['chatgpt', 'claude', 'apple_notes', 'obsidian']).nullable(),
+          document_source: z
+            .enum([
+              'chatgpt',
+              'claude',
+              'apple_notes',
+              'obsidian',
+              'granola',
+              'granola_note',
+              'granola_summary',
+              'granola_transcript',
+            ])
+            .nullable(),
           path: z.string().nullable(),
           tag: z.string().nullable(),
         })

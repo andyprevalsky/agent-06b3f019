@@ -238,7 +238,16 @@ Returns:
             person: { type: 'string' as const },
             document_source: {
               type: 'string' as const,
-              enum: ['chatgpt', 'claude', 'apple_notes', 'obsidian'],
+              enum: [
+                'chatgpt',
+                'claude',
+                'apple_notes',
+                'obsidian',
+                'granola',
+                'granola_note',
+                'granola_summary',
+                'granola_transcript',
+              ],
             },
             path: { type: 'string' as const },
             role: { type: 'string' as const, enum: ['USER', 'ASSISTANT', 'TOOL'] },
