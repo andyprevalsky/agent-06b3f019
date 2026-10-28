@@ -369,7 +369,7 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(lite.name, 'rose-1-flash', 'flash.name');
   assert(lite.claudeAuthModel.startsWith('claude-'), 'flash claudeAuthModel');
   assertEqual(lite.gptAuthModel, 'gpt-5.6-luna', 'flash.gptAuthModel');
-  assertEqual(lite.waterfallReasoningEffort, 'low', 'flash waterfall effort');
+  assertEqual(lite.waterfallReasoningEffort, 'medium', 'flash waterfall effort');
   assertEqual(getPool('rose-1-mini').waterfallReasoningEffort, 'low', 'mini waterfall effort');
   assertEqual(ultra.waterfallReasoningEffort, undefined, 'ultra waterfall keeps caller effort');
   assertEqual(lite.directAuthEnabled, false, 'flash skips Claude/GPT auth');
@@ -382,12 +382,12 @@ async function testPool_getPoolRegistryShape() {
   );
   assertEqual(ultra.name, 'rose-1-ultra', 'ultra.name');
   assertEqual(ultra.claudeAuthModel, 'claude-opus-5-5', 'ultra claudeAuthModel');
-  assertEqual(ultra.gptAuthModel, 'gpt-6-sol', 'ultra.gptAuthModel');
+  assertEqual(ultra.gptAuthModel, 'gpt-6.1-sol', 'ultra.gptAuthModel');
   // Anthropic dropped from ultra: opus-4.8 was the priciest layer while scoring
   // below sol on every AA index. Sol leads, kimi-k3 backs it from a different vendor.
   assertEqual(
     ultra.waterfall.join(','),
-    'openai/gpt-6-sol,moonshotai/kimi-k3',
+    'openai/gpt-6.1-sol,moonshotai/kimi-k3',
     'ultra OpenRouter waterfall'
   );
   assertEqual(browserUse.name, 'rose-1-browser-use', 'browserUse.name');
@@ -1925,8 +1925,8 @@ async function testOpenAiApiKey_servesBeforeAnthropicAndOpenRouter() {
     assertEqual(anthropicCalls, 0, 'did NOT fall through to Anthropic');
     assertEqual(openrouterCalls, 0, 'did NOT fall through to OpenRouter');
     assertEqual(capturedHeaders.Authorization, 'Bearer sk-proj-test-key', 'sent OpenAI bearer');
-    assertEqual(capturedBody?.model, 'gpt-6-sol', 'uses Rose Ultra GPT model');
-    assertEqual(capturedBody?.service_tier, 'priority', 'uses GPT fast mode');
+    assertEqual(capturedBody?.model, 'gpt-6.1-sol', 'uses Rose Ultra GPT model');
+    assertEqual(capturedBody?.service_tier, undefined, 'absent speed stays standard');
     assert(chunks[0].actual_model.endsWith('-openai'), 'actual_model marks OpenAI key path');
   } finally {
     delete process.env.GPT_API_KEY;
@@ -2269,6 +2269,7 @@ async function testSharedOpenAiPriorityRoute_isExclusiveAndPreservesRouterConfig
       claude_token: 'claude-oauth-must-not-run',
       gpt_token: 'gpt-oauth-must-not-run',
       provider_route: 'shared-openai-priority',
+      speed: 'fast',
     });
     const chunks = await collect(stream);
 
@@ -2311,6 +2312,7 @@ async function testSharedOpenAiPriorityRoute_missingKeyFailsClosedWithoutProvide
       claude_token: 'claude-oauth-must-not-run',
       gpt_token: 'gpt-oauth-must-not-run',
       provider_route: 'shared-openai-priority',
+      speed: 'fast',
     });
     let thrown: unknown;
     try {
@@ -2354,6 +2356,7 @@ async function testSharedOpenAiPriorityRoute_invalidKeyFailsClosedWithoutFallbac
       claude_token: 'claude-oauth-must-not-run',
       gpt_token: 'gpt-oauth-must-not-run',
       provider_route: 'shared-openai-priority',
+      speed: 'fast',
     });
     let thrown: unknown;
     try {
@@ -4435,7 +4438,7 @@ async function testSubscriptionFirst_limitedLeaseRotatesToFreeSubscriptionBefore
       claude_token: 'claude-a',
       subscription_leases: leases.source,
     });
-    assertEqual(chunks[0].actual_model, 'gpt-6-sol-gpt', 'second subscription served GPT-6 Sol');
+    assertEqual(chunks[0].actual_model, 'gpt-6.1-sol-gpt', 'second subscription served GPT-6 Sol');
     assertEqual(chunks[0].pool_name, 'gpt-token', 'subscription route');
     assertEqual(
       JSON.stringify(calls),
@@ -4465,7 +4468,7 @@ async function testSubscriptionFirst_everySubscriptionBeforeEachPaidTier() {
   }> = [
     {
       legs: { openAiKey: 'ok' },
-      model: 'gpt-6-sol-openai',
+      model: 'gpt-6.1-sol-openai',
       route: 'openai-api-key',
       tail: ['openai-key'],
     },
@@ -4484,7 +4487,7 @@ async function testSubscriptionFirst_everySubscriptionBeforeEachPaidTier() {
     {
       // A Foundry 429 would stamp the shared deployment cooldown row; 500 falls through cleanly.
       legs: { openAiKey: 'credits', anthropicKey: 'credits', foundry: 'down' },
-      model: 'openai/gpt-6-sol',
+      model: 'openai/gpt-6.1-sol',
       route: 'rose-1-ultra',
       tail: ['openai-key', 'anthropic-key', 'foundry', 'openrouter'],
     },
@@ -4551,7 +4554,7 @@ async function testSubscriptionFirst_tokenlessCallerLeasesOnceAndAbortStopsRotat
     const calls = installSubscriptionOrderStub({ codex: { 'codex-b': 'ok' } });
     const leases = fakeSubscriptionLeases([{ type: 'gpt', accessToken: 'codex-b' }]);
     const chunks = await ultraCompletion({ subscription_leases: leases.source });
-    assertEqual(chunks[0].actual_model, 'gpt-6-sol-gpt', 'lazily leased subscription served');
+    assertEqual(chunks[0].actual_model, 'gpt-6.1-sol-gpt', 'lazily leased subscription served');
     assertEqual(chunks[0].pool_name, 'gpt-token', 'subscription route');
     assertEqual(JSON.stringify(leases.requests), '[null]', 'exactly one first-lease lookup');
     assertEqual(JSON.stringify(calls), '["codex:codex-b"]', 'no funded key');

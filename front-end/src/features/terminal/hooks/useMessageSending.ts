@@ -30,6 +30,12 @@ import { canUseFastMode, defaultsFastModeOn } from '@/lib/fastModeAccounts';
 import { getFastModeSessionOverride, setFastModeSessionOverride } from '@/lib/fastModeSession';
 import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 import { getItem, removeItem } from '@/lib/storage';
+import {
+  agentSpeedForLevel,
+  speedLevelOf,
+  setUltraPreferred,
+  useUltraPreferred,
+} from '@/features/terminal-component-group/components/query-input/speedLevel';
 
 import { DEFAULT_MODEL, DEFAULT_PRICE_LIMIT_CENTS } from '../config';
 import { createAgent, postMessage, checkAndRespondToAttention } from '../api';
@@ -118,6 +124,7 @@ export function useMessageSending({
   const fastModeUserOverrideRef = useRef(false);
   const resolvedUser = user ?? (userId != null && userId !== '' ? { id: userId } : null);
   const userCanUseFastMode = canUseFastMode(resolvedUser);
+  const ultraPreferred = useUltraPreferred(userId);
   const userDefaultsFastModeOn = defaultsFastModeOn(resolvedUser);
   const userCanUseSimulator =
     userId != null && userId !== '' && SIMULATOR_USER_IDS.includes(userId);
@@ -149,14 +156,17 @@ export function useMessageSending({
       return;
     }
 
-    if (
-      selectedAgentId !== null &&
-      agentDetail?.agent_id === selectedAgentId &&
-      typeof agentDetail.fast_mode_cache_enabled === 'boolean'
-    ) {
-      fastModeUserOverrideRef.current = false;
-      setFastModeState(agentDetail.fast_mode_cache_enabled);
-      return;
+    if (selectedAgentId !== null && agentDetail?.agent_id === selectedAgentId) {
+      const speed = agentDetail.speed;
+      const legacy = agentDetail.fast_mode_cache_enabled;
+      if (speed !== undefined || typeof legacy === 'boolean') {
+        fastModeUserOverrideRef.current = false;
+        setFastModeState(speed !== undefined ? speed !== 'standard' : legacy === true);
+        if (speed === 'fast' || speed === 'ultrafast') {
+          setUltraPreferred(speed === 'ultrafast', userId);
+        }
+        return;
+      }
     }
 
     if (selectedAgentId !== null) return;
@@ -174,6 +184,7 @@ export function useMessageSending({
   }, [
     agentDetail?.agent_id,
     agentDetail?.fast_mode_cache_enabled,
+    agentDetail?.speed,
     agentDetail?.world_model_mode,
     selectedAgentId,
     user?.id,
@@ -263,7 +274,9 @@ export function useMessageSending({
               source: clientSource as 'WEB' | 'MAC_APP',
               attachments: attachments && attachments.length > 0 ? attachments : undefined,
               price_limit_cents: pendingPriceLimitCents,
-              ...(userCanUseFastMode ? { fast_mode_cache_enabled: fastMode } : {}),
+              ...(userCanUseFastMode
+                ? { speed: agentSpeedForLevel(speedLevelOf(fastMode, ultraPreferred)) }
+                : {}),
               ...(userCanUseSimulator
                 ? { world_model_mode: simulatorMode ? 'simulate' : 'real' }
                 : {}),
@@ -332,6 +345,7 @@ export function useMessageSending({
       selectedAgentId,
       selectedModel,
       fastMode,
+      ultraPreferred,
       simulatorMode,
       canSubmitGoals,
       clientSource,

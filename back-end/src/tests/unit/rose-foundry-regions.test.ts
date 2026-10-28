@@ -398,8 +398,8 @@ async function main(): Promise<void> {
     configure(ok, [R1, R2]);
     process.env.AZURE_FOUNDRY_DEPLOYMENTS_2 = 'gpt-6.1-sol';
     const ultraModels = foundryModels(ULTRA);
-    assert.deepEqual(ultraModels, ['gpt-6-sol', 'gpt-6.1-sol']);
-    assert.deepEqual(foundryModels(POOL_REGISTRY['rose-1-flash']), ['gpt-5.6-luna']);
+    assert.deepEqual(ultraModels, ['gpt-6.1-sol', 'gpt-6-sol']);
+    assert.deepEqual(foundryModels(POOL_REGISTRY['rose-1-flash']), ['gpt-6-luna']);
     let r2First = 0;
     let r1FirstKey = '';
     for (let i = 0; i < 200; i++) {

@@ -77,11 +77,13 @@ from helpers.workflow_generation import WorkflowGenerationSealed
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from loop.activity_helper import call_temporal_activity_from_activity
 from providers.demo_cache.browser_use_cache import cached_browser_decision
+from providers.demo_cache.client import resolve_agent_speed
 from providers.demo_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from providers.rose.browser_use import format_browser_state_for_tool
 from providers.rose.errors import BrowserModelOutputValidationError
 from providers.rose.inter_agent_context import InterAgentText, inter_agent_message, is_inter_agent_message
+from providers.rose.speed import bind_agent_speed
 from providers.rose.types import ComputeTokenSource
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.attention_requests import REJECTION_SENTINEL
@@ -7069,6 +7071,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
     if not output_schema:
         raise ValueError("output_schema is required for browser agent")
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
+    bind_agent_speed(await resolve_agent_speed(agent_id))
     config = load_config()
     started_at = safe_time()
     resume = write_lock_resume_state or {}
@@ -7831,6 +7834,8 @@ async def _spawn_browser_agent_activity_v3_real(
 ) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
+    # Every browser step forwards the spawning agent's provider speed.
+    bind_agent_speed(await resolve_agent_speed(agent_id))
 
     # Fast Mode warm demos (OAi mass-agent): never open Kernel/Steel. Live
     # sessions still hung on YouTube/Instagram navigates after decision

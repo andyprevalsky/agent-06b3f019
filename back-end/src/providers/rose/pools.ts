@@ -6,14 +6,15 @@
  *
  * claudeAuth = direct Anthropic Messages API call (user/pool OAuth token).
  * gptAuth    = direct ChatGPT Codex Responses call (user/pool OAuth token).
- * foundry    = funded Azure fallback for the pool's gptAuthModel (GPT-6 Sol for
- *              ultra, GPT-5.6 Luna for mini/flash/browser-use). It follows
+ * foundry    = funded Azure fallback for the pool's gptAuthModel (GPT-6.1/6 Sol for
+ *              ultra, GPT-6 Luna for flash, GPT-5.6 Luna for mini/browser-use). It follows
  *              direct credentials and the direct Cerebras hop.
  * waterfall  = OpenRouter sequential fallback after the direct routes.
  *
  * rose-1-flash / rose-1-browser-use skip Claude/GPT auth. Primary is
  * Cerebras qwen-3.8-27b (direct). OpenRouter fallback is qwen/qwen3.8-27b
- * then google/gemini-3.8-flash, after the Foundry GPT-5.6 Luna fallback.
+ * then google/gemini-3.8-flash. Flash tries Foundry GPT-6 Luna at medium first;
+ * browser-use retains GPT-5.6 Luna.
  * Planner stays rose-1-ultra (Opus 5.5).
  */
 
@@ -91,11 +92,11 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
   'rose-1-ultra': {
     name: 'rose-1-ultra',
     claudeAuthModel: 'claude-opus-5-5',
-    gptAuthModel: 'gpt-6-sol',
+    gptAuthModel: 'gpt-6.1-sol',
     foundryEnabled: true,
-    // Opus 5.5 leads AA v4.3.2 (58) at $4/$20. Paid waterfall is gpt-6-sol
-    // ($2/$10, index 48) then kimi-k3 (index 44).
-    waterfall: ['openai/gpt-6-sol', 'moonshotai/kimi-k3'],
+    // Opus 5.5 leads AA v4.3.2 (58) at $4/$20. Paid waterfall is gpt-6.1-sol
+    // then kimi-k3.
+    waterfall: ['openai/gpt-6.1-sol', 'moonshotai/kimi-k3'],
   },
   'rose-1-browser-use': {
     name: 'rose-1-browser-use',

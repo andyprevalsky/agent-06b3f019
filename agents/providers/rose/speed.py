@@ -15,6 +15,7 @@ Speed never gates a cache. Mirror: back-end/src/providers/rose/speed.ts.
 
 from __future__ import annotations
 
+from contextvars import ContextVar, Token
 from typing import Any, Literal, Optional, cast
 
 AgentSpeed = Literal["standard", "fast", "ultrafast"]
@@ -29,6 +30,19 @@ ANTHROPIC_FAST_MODE_MODELS = frozenset({"claude-opus-5-5", "claude-opus-5", "cla
 # (live catalog fetched 2026-10-28: gpt-6.1-sol and gpt-6-astra list
 # priority + ultrafast; every other GPT model lists priority only).
 OPENAI_ULTRAFAST_MODELS = frozenset({"gpt-6.1-sol", "gpt-6-astra"})
+
+
+# Speed bound for the current activity (browser agents bind it once at task
+# start), so per-step browser LLM calls never look it up again.
+_CURRENT_AGENT_SPEED: ContextVar[Optional[str]] = ContextVar("rose_agent_speed", default=None)
+
+
+def current_agent_speed() -> Optional[str]:
+    return _CURRENT_AGENT_SPEED.get()
+
+
+def bind_agent_speed(speed: Optional[str]) -> Token[Optional[str]]:
+    return _CURRENT_AGENT_SPEED.set(normalize_agent_speed(speed))
 
 
 def normalize_agent_speed(value: Any) -> AgentSpeed:

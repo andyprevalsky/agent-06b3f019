@@ -230,14 +230,21 @@ test('Rose provider Fast Mode maps to supported downstream request shapes', () =
   const anthropicFast = buildAnthropicBody({
     poolSpec: opusAuth,
     messages,
-    providerFastMode: true,
+    speed: 'fast',
   });
   assert.strictEqual(anthropicFast.speed, 'fast');
 
-  const fableAnthropic = buildAnthropicBody({
+  const opus55Anthropic = buildAnthropicBody({
     poolSpec: ultra,
     messages,
-    providerFastMode: true,
+    speed: 'ultrafast',
+  });
+  assert.strictEqual(opus55Anthropic.speed, 'fast', 'Opus 5.5 supports Claude fast mode');
+
+  const fableAnthropic = buildAnthropicBody({
+    poolSpec: { ...ultra, claudeAuthModel: 'claude-fable-5-1' },
+    messages,
+    speed: 'fast',
   });
   assert.ok(
     !('speed' in fableAnthropic),
@@ -247,7 +254,7 @@ test('Rose provider Fast Mode maps to supported downstream request shapes', () =
   const liteAnthropic = buildAnthropicBody({
     poolSpec: lite,
     messages,
-    providerFastMode: true,
+    speed: 'fast',
   });
   assert.ok(
     !('speed' in liteAnthropic),
@@ -257,14 +264,14 @@ test('Rose provider Fast Mode maps to supported downstream request shapes', () =
   const openrouterFast = buildOpenRouterBody({
     model: 'anthropic/claude-opus-4.8',
     messages,
-    providerFastMode: true,
+    speed: 'fast',
   });
   assert.strictEqual(openrouterFast.speed, 'fast');
 
   const codexBody = buildCodexResponsesBody({
     poolSpec: ultra,
     messages,
-    providerFastMode: true,
+    serviceTier: 'priority',
     requestId: 'rid',
   });
   assert.strictEqual(
@@ -298,11 +305,15 @@ test('backend chat passes provider Fast Mode from the button, not DEMO cache', (
   );
   assert.ok(
     router.includes('provider_fast_mode: providerFastMode'),
-    'router live call and cache key must request provider fast mode from the button'
+    'router cache key keeps the legacy button bit so recorded DEMO keys still hit'
   );
   assert.ok(
     generator.includes('provider_fast_mode: providerFastMode'),
-    'generator live call and cache key must request provider fast mode from the button'
+    'generator cache key keeps the legacy button bit so recorded DEMO keys still hit'
+  );
+  assert.ok(
+    router.includes('speed: fastMode.speed') && generator.includes('speed: fastMode.speed'),
+    'router and generator live calls must forward the agent speed'
   );
 });
 

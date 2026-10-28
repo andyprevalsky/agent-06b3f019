@@ -178,8 +178,8 @@ async function testDirectFailureFallsThroughToWaterfall(): Promise<void> {
     );
     assert.deepEqual(
       waterfallBody.reasoning,
-      { effort: 'low' },
-      'generator fallback maps latency-bounded minimal effort to OpenRouter low'
+      { effort: 'medium' },
+      'flash chat fallback runs the OpenRouter layers at the pool medium effort'
     );
   } finally {
     globalThis.fetch = originalFetch;

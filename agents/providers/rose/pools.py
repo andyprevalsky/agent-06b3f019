@@ -39,9 +39,9 @@ on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
 
     rose-1-ultra:  (frontier — planner / verifier / param-populator)
         claudeAuth = claude-opus-5-5
-        gptAuth    = gpt-6-sol
-        foundry    = gpt-6-sol (when configured)
-        waterfall  = openai/gpt-6-sol -> moonshotai/kimi-k3
+        gptAuth    = gpt-6.1-sol
+        foundry    = gpt-6.1-sol or gpt-6-sol (when configured)
+        waterfall  = openai/gpt-6.1-sol -> moonshotai/kimi-k3
 
     rose-1-browser-use:  (same rose-fast hop as flash; browser agents normally
                           run on their spawning agent's pool, this one serves
@@ -191,13 +191,13 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
     "rose-1-ultra": PoolSpec(
         name="rose-1-ultra",
         claude_auth_model="claude-opus-5-5",
-        gpt_auth_model="gpt-6-sol",
+        gpt_auth_model="gpt-6.1-sol",
         foundry_enabled=True,
         # Opus 5.5 is the AA v4.3.2 leader (58) and cheaper than Fable 5.1
-        # ($4/$20 vs $10/$50). Paid waterfall is gpt-6-sol ($2/$10, index 48)
-        # then kimi-k3 (index 44). Fable stays off this waterfall.
+        # ($4/$20 vs $10/$50). Paid waterfall starts at GPT-6.1 Sol,
+        # then kimi-k3. Fable stays off this waterfall.
         waterfall=(
-            "openai/gpt-6-sol",
+            "openai/gpt-6.1-sol",
             "moonshotai/kimi-k3",
         ),
     ),

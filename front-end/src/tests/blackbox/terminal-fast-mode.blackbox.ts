@@ -8,6 +8,11 @@ import { server } from './msw/server';
 import { clearCaptures, capturedRequests } from './msw/capture';
 import { ADMIN_ACCOUNTS } from '@/lib/adminAccounts';
 import { resetQueryPreferencesMemory } from '@/lib/queryPreferences';
+import {
+  setUltraPreferred,
+  useUltraPreferred,
+  resetSpeedLevelSession,
+} from '@/features/terminal-component-group/components/query-input/speedLevel';
 import { resetFastModeSessionOverride } from '@/lib/fastModeSession';
 
 const mocks = vi.hoisted(() => {
@@ -109,6 +114,7 @@ function messageSendingArgs(overrides: Partial<Parameters<typeof useMessageSendi
 
 afterEach(() => {
   resetQueryPreferencesMemory();
+  resetSpeedLevelSession();
   for (const cookie of document.cookie.split(';')) {
     const key = cookie.trim().split('=')[0]!;
     if (key.startsWith('rose-query-defaults%3A')) document.cookie = `${key}=;Max-Age=0;Path=/`;
@@ -163,7 +169,7 @@ describe('useTerminalAgents Fast Mode bridge', () => {
     await waitFor(() => expect(result.current.fastMode).toBe(true));
   });
 
-  it('sends the current Fast Mode button state in create-agent payloads', async () => {
+  it('sends all three speed levels independently of cache flags', async () => {
     const { result } = renderHook(() => useMessageSending(messageSendingArgs()));
 
     await waitFor(() => expect(result.current.fastMode).toBe(true));
@@ -173,7 +179,22 @@ describe('useTerminalAgents Fast Mode bridge', () => {
     });
 
     const createOn = capturedRequests.find((r) => r.method === 'POST' && r.url.endsWith('/agents'));
-    expect(createOn?.body).toMatchObject({ fast_mode_cache_enabled: true });
+    expect(createOn?.body).toMatchObject({ speed: 'fast' });
+    expect(createOn?.body).not.toHaveProperty('fast_mode_cache_enabled');
+
+    clearCaptures();
+    act(() => {
+      setUltraPreferred(true, mocks.authState.user.id);
+      result.current.setMessageInput('make it fast');
+    });
+    await act(async () => {
+      await result.current.handleSendMessage();
+    });
+    const createFast = capturedRequests.find(
+      (r) => r.method === 'POST' && r.url.endsWith('/agents'),
+    );
+    expect(createFast?.body).toMatchObject({ speed: 'ultrafast' });
+    expect(createFast?.body).not.toHaveProperty('fast_mode_cache_enabled');
 
     clearCaptures();
     act(() => {
@@ -187,8 +208,30 @@ describe('useTerminalAgents Fast Mode bridge', () => {
     const createOff = capturedRequests.find(
       (r) => r.method === 'POST' && r.url.endsWith('/agents'),
     );
-    expect(createOff?.body).toMatchObject({ fast_mode_cache_enabled: false });
+    expect(createOff?.body).toMatchObject({ speed: 'standard' });
+    expect(createOff?.body).not.toHaveProperty('fast_mode_cache_enabled');
   });
+
+  it.each(['standard', 'fast', 'ultrafast'] as const)(
+    'hydrates %s from stored speed even when the legacy flag disagrees',
+    (speed) => {
+      const { result } = renderHook(() => ({
+        sending: useMessageSending(
+          messageSendingArgs({
+            selectedAgentId: 'stored-speed-agent',
+            agentDetail: {
+              agent_id: 'stored-speed-agent',
+              speed,
+              fast_mode_cache_enabled: speed === 'standard',
+            } as never,
+          }),
+        ),
+        ultra: useUltraPreferred(mocks.authState.user.id),
+      }));
+      expect(result.current.sending.fastMode).toBe(speed !== 'standard');
+      if (speed !== 'standard') expect(result.current.ultra).toBe(speed === 'ultrafast');
+    },
+  );
 
   it('hydrates Fast Mode from the loaded agent detail instead of the account default', async () => {
     const agentDetail = {

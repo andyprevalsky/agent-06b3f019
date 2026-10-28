@@ -73,6 +73,7 @@ from providers.rose.schema import (
     build_anthropic_tools_from_response_model,
     build_openai_response_format,
 )
+from providers.rose.speed import current_agent_speed, normalize_agent_speed
 from providers.rose.streaming import _stream_progress
 from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.transforms import messages_contain_images, route_model_accepts_images
@@ -693,12 +694,18 @@ class RoseClient:
             kwargs = {**kwargs, "_exclude_anthropic_family": exclude_anthropic_family}
 
         # Provider speed comes from the agent row (one memoized read per agent per
-        # process). Browser, explore and sub-agent calls carry their agent's id,
-        # so they inherit it. A call without an agent runs standard.
+        # process); explore and sub-agent calls carry their agent's id, so they
+        # inherit it. Browser tasks bind their agent's speed once at task start,
+        # so a browser step never performs a lookup. No agent = standard.
         if "speed" not in kwargs:
-            from providers.demo_cache.client import resolve_agent_speed
+            bound_speed = current_agent_speed()
+            if bound_speed is None and not (
+                kwargs.get("browser_use") or pool == "rose-1-browser-use" or str(call_site).startswith("browser_use")
+            ):
+                from providers.demo_cache.client import resolve_agent_speed
 
-            kwargs = {**kwargs, "speed": await resolve_agent_speed(agent_id)}
+                bound_speed = await resolve_agent_speed(agent_id)
+            kwargs = {**kwargs, "speed": normalize_agent_speed(bound_speed)}
 
         # Browser steps run on their spawning agent's pool, so the explicit
         # flag (set by complete_browser_use) identifies them on any pool.

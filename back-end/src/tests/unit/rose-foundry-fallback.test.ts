@@ -70,6 +70,7 @@ async function main(): Promise<void> {
       model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'Say hi' }],
       effort: 'high',
+      speed: 'fast',
       route_key: 'agent-1',
     });
     const chunks = [];
@@ -145,7 +146,7 @@ async function main(): Promise<void> {
         toolChoice: scenario.toolChoice,
         temperature: 0.7,
         effort: 'xhigh',
-        providerFastMode: scenario.fast,
+        speed: scenario.fast ? ('fast' as const) : ('standard' as const),
         requestId,
         routeKey: 'agent-parity',
       };
@@ -155,7 +156,11 @@ async function main(): Promise<void> {
       assert(captured);
       assert.deepEqual(
         captured,
-        buildCodexResponsesBody({ ...opts, modelOverride: 'gpt-6-sol-parity' })
+        buildCodexResponsesBody({
+          ...opts,
+          modelOverride: 'gpt-6-sol-parity',
+          ...(scenario.fast ? { serviceTier: 'priority' as const } : {}),
+        })
       );
       assert(!('temperature' in captured), 'GPT compute also omits temperature');
     }

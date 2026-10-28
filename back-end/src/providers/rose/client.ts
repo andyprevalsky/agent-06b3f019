@@ -482,7 +482,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     // ANTHROPIC_API_KEY is configured, ahead of the OpenRouter waterfall. Direct Anthropic via
     // x-api-key (billed), reusing the claudeAuth request body.
     let anthropicApiKeyFailed: RoseError | null = null;
-    const anthropicApiKey = process.env[ANTHROPIC_API_KEY_ENV];
+    const anthropicApiKey = allowDirectAuth ? process.env[ANTHROPIC_API_KEY_ENV] : undefined;
     // Shared DB-backed cooldown: skip the key entirely while it's backed off so
     // no worker/workflow hammers an exhausted key. Only query when a key exists.
     const apiKeyOnCooldown = anthropicApiKey ? await isAnthropicApiKeyOnCooldown() : false;
