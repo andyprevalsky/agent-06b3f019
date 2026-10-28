@@ -15,6 +15,7 @@ on:
       - "!agents/benchmarks/**"
       - "!agents/**/*.md"
       - "scripts/prebuild-agents-image.sh"
+      - "scripts/agents-image-context.sh"
 
 permissions:
   contents: read

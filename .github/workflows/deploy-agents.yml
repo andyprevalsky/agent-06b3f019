@@ -21,6 +21,7 @@ on:
       - "!agents/scripts/run_coverage_blackbox_parallel.py"
       - ".github/workflows/deploy-agents.yml"
       - "scripts/deploy-agents-cooperative-cutover.sh"
+      - "scripts/agents-image-context.sh"
       - "scripts/worker_pool_*.py"
       - "scripts/retained_agent_machine.py"
       - "back-end/scripts/worker-deployment-queue.ts"

@@ -35,7 +35,7 @@ fi
 AGENTS_TREE=$(git -C "$ROOT" rev-parse "$SHA:agents")
 [[ "$AGENTS_TREE" =~ ^[a-f0-9]{40}$ ]] || { echo "commit has no agents tree" >&2; exit 2; }
 # Key = hash of exactly the Docker build context (agents/ minus benchmarks and
-# tests, the same exclusion the archive below applies). Top-level entries carry
+# tests, the exclusion scripts/agents-image-context.sh applies). Top-level entries carry
 # their subtree hashes, so any byte change inside the context changes the key,
 # while benchmark/test-only commits keep it and still reuse the image.
 CONTEXT_ENTRIES=$(git -C "$ROOT" ls-tree "$SHA:agents" | awk -F'\t' '$2 != "benchmarks" && $2 != "tests"')
@@ -65,8 +65,7 @@ fi
 CONTEXT=$(mktemp -d)
 trap 'rm -rf "$CONTEXT"' EXIT
 # Identical context to deploy-agents-cooperative-cutover.sh.
-git -C "$ROOT" archive "$SHA:agents" -- . ':(exclude)benchmarks' ':(exclude)tests' |
-  tar -x -C "$CONTEXT" --exclude=benchmarks --exclude=tests
+bash "$ROOT/scripts/agents-image-context.sh" "$SHA" "$CONTEXT"
 cd "$CONTEXT"
 started=$(date +%s)
 flyctl deploy --local-only --build-only --push --image-label "$LABEL" -a "$APP"

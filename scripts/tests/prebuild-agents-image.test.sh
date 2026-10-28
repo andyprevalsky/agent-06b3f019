@@ -11,6 +11,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 REPO="$TMP/repo"
 mkdir -p "$REPO/scripts" "$REPO/agents/tests" "$REPO/agents/benchmarks" "$TMP/bin"
 cp "$ROOT/scripts/prebuild-agents-image.sh" "$REPO/scripts/"
+cp "$ROOT/scripts/agents-image-context.sh" "$REPO/scripts/"
 printf 'app = "test-prod"\n' > "$REPO/agents/fly.toml"
 printf 'FROM scratch\n' > "$REPO/agents/Dockerfile"
 printf 'print(1)\n' > "$REPO/agents/worker.py"
@@ -92,6 +93,23 @@ git -C "$REPO" -c user.email=t@e -c user.name=t add -A
 git -C "$REPO" -c user.email=t@e -c user.name=t commit -qm tests-only
 [ "$(bash "$REPO/scripts/prebuild-agents-image.sh" lookup --sha "$(git -C "$REPO" rev-parse HEAD)")" = "$DIGEST_REF" ] ||
   fail "a tests/benchmarks-only change must reuse the image of the same build context"
+
+# The per-entry context equals the whole-tree archive minus benchmarks/tests,
+# byte for byte and mode for mode (including an executable and nested dirs).
+mkdir -p "$REPO/agents/pkg/tests" "$REPO/agents/pkg/sub"
+printf 'x\n' > "$REPO/agents/pkg/sub/m.py"; printf 'y\n' > "$REPO/agents/pkg/tests/t.py"
+printf '#!/bin/sh\n' > "$REPO/agents/run.sh"; chmod 755 "$REPO/agents/run.sh"
+git -C "$REPO" -c user.email=t@e -c user.name=t add -A
+git -C "$REPO" -c user.email=t@e -c user.name=t commit -qm context
+CTX_SHA=$(git -C "$REPO" rev-parse HEAD)
+mkdir -p "$TMP/ctx-old" "$TMP/ctx-new"
+git -C "$REPO" archive "$CTX_SHA:agents" | tar -x -C "$TMP/ctx-old" --exclude=benchmarks --exclude=tests
+bash "$REPO/scripts/agents-image-context.sh" "$CTX_SHA" "$TMP/ctx-new"
+diff -r "$TMP/ctx-old" "$TMP/ctx-new" > /dev/null || fail "context helper content differs from the whole-tree archive"
+[ "$(cd "$TMP/ctx-old" && find . -printf '%m %y %p\n' | sort)" = "$(cd "$TMP/ctx-new" && find . -printf '%m %y %p\n' | sort)" ] ||
+  fail "context helper modes differ from the whole-tree archive"
+[ ! -e "$TMP/ctx-new/benchmarks" ] && [ ! -e "$TMP/ctx-new/tests" ] && [ ! -e "$TMP/ctx-new/pkg/tests" ] ||
+  fail "context helper kept excluded benchmarks/tests"
 
 # Invalid input never reaches flyctl.
 : > "$JOURNAL"
