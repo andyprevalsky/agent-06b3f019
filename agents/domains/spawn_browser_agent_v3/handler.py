@@ -8553,10 +8553,10 @@ async def _spawn_browser_agent_activity_v3_real(
                 "status": "auth_assistance_declined",
                 "success": False,
                 "user_declined_auth": True,
-                "message": "The user declined sign-in assistance; no member number was retrieved.",
+                "message": "The user declined sign-in assistance. The browser task stopped without retrying authentication.",
                 "task_id": task_id,
                 "session_id": session_id,
-                "browser_url": browser_url,
+                "browser_url": redact_url_secrets(browser_url),
                 "usage_items": [],
                 **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
             })
@@ -13032,7 +13032,7 @@ Based on this feedback, I need to continue working on the task and address the i
             "task_id": task_id,
             "session_id": session_id,
             "browser_url": redact_url_secrets(browser_url),
-            "message": "Browser agent cancelled by user",
+            "message": "Browser activity cancelled",
             **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
             **({"unread_user_messages": list(unread_user_instructions)} if unread_user_instructions else {}),
         }
