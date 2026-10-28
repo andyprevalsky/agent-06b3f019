@@ -7,7 +7,7 @@ const assert = require('node:assert/strict'),
   fs = require('node:fs'),
   path = require('node:path'),
   { randomUUID } = require('node:crypto');
-const root = path.resolve(__dirname, '../../../..');
+const root = path.resolve(__dirname, '../../..');
 const dbURL = new URL(process.env.DATABASE_URL);
 assert(['localhost', '127.0.0.1'].includes(dbURL.hostname));
 assert.match(dbURL.pathname, /^\/victoria_[\w-]+$/);

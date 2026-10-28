@@ -25,10 +25,7 @@ import {
   withBrowserResumeLifecycle,
 } from './steel/lifecycleClaim';
 import { inspectResumeCandidate } from './browser/resumeRecovery';
-import {
-  withOwnedResumeTransport,
-  withAcknowledgedResumeTransport,
-} from './browser/resumeTransport';
+import { withAcknowledgedResumeTransport } from './browser/resumeTransport';
 import { iphoneCapability } from './phoneAccountPolicy';
 /* c8 ignore start -- resumeBrowserSession requires Steel SDK */
 import { prisma } from './database';
@@ -46,30 +43,15 @@ import {
 } from './browser';
 import {
   ROTATION_CAP,
+  ProxyRotationExhaustedError,
+  RotationSessionNotFoundError,
   rotationStepLabel,
   selectRotationStep,
   type RotationStep,
 } from './browser/rotation';
 import { storedBrowserProvider } from './browser/types';
 import { browserUseEnabled } from './browser/config';
-
-export class ProxyRotationExhaustedError extends Error {
-  constructor(public readonly cap: number) {
-    super(
-      `PROXY_ROTATION_EXHAUSTED: rotated ${cap} times and the target is still blocking ` +
-        `our proxy pool for this session. Do not rotate again — try a different approach ` +
-        `or report the target as unreachable.`
-    );
-    this.name = 'ProxyRotationExhaustedError';
-  }
-}
-
-export class RotationSessionNotFoundError extends Error {
-  constructor(taskId: string) {
-    super(`Browser task not found: ${taskId}`);
-    this.name = 'RotationSessionNotFoundError';
-  }
-}
+export { ProxyRotationExhaustedError, RotationSessionNotFoundError } from './browser/rotation';
 
 const log = createLogger('BrowserSessionResume');
 

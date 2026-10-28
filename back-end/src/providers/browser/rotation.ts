@@ -71,3 +71,21 @@ export function rotationStepLabel(step: RotationStep): string {
   if (step.provider === 'steel') return 'rotate_steel_residential_ip';
   return step.proxyType === 'mobile' ? 'rotate_kernel_mobile_ip' : 'rotate_kernel_residential_ip';
 }
+
+export class ProxyRotationExhaustedError extends Error {
+  constructor(public readonly cap: number) {
+    super(
+      `PROXY_ROTATION_EXHAUSTED: rotated ${cap} times and the target is still blocking ` +
+        `our proxy pool for this session. Do not rotate again — try a different approach ` +
+        `or report the target as unreachable.`
+    );
+    this.name = 'ProxyRotationExhaustedError';
+  }
+}
+
+export class RotationSessionNotFoundError extends Error {
+  constructor(taskId: string) {
+    super(`Browser task not found: ${taskId}`);
+    this.name = 'RotationSessionNotFoundError';
+  }
+}
