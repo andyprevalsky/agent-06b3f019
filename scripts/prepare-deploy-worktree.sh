@@ -411,7 +411,7 @@ if $CHECK_ONLY; then
     # Cloud dev boxes have no Conductor-provided CONDUCTOR_WORKSPACE_PATH; their
     # primary checkout is identified by the cloud-build.sh .cloud-env rooted at
     # itself. A linked worktree is never primary, even with a copied .cloud-env.
-    cloud_root="$(sed -n 's/^export CONDUCTOR_ROOT_PATH=//p' "$WORKTREE/.cloud-env" 2>/dev/null | tail -n 1)"
+    cloud_root="$( (sed -n 's/^export CONDUCTOR_ROOT_PATH=//p' "$WORKTREE/.cloud-env" 2>/dev/null || true) | tail -n 1)"
     if grep -qx '# rose-cloud-env' "$WORKTREE/.cloud-env" 2>/dev/null &&
       [ -n "$cloud_root" ] && [ -d "$cloud_root" ] &&
       [ "$(canonical_dir "$cloud_root")" = "$WORKTREE" ] &&

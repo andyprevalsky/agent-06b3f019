@@ -514,6 +514,22 @@ for cloud_root in "$cloud_linked" "$controller"; do
 done
 echo "PASS: a copied .cloud-env cannot make a linked worktree pass as primary"
 
+# A linked worktree with no .cloud-env at all must fail with the actionable
+# message, not die silently under pipefail (exit 2, no output).
+rm -f "$cloud_linked/.cloud-env"
+set +e
+no_cloud_env_output="$(
+  cd "$cloud_linked"
+  env -u CONDUCTOR_WORKSPACE_PATH bash "$PREFLIGHT" --check 2>&1
+)"
+no_cloud_env_status=$?
+set -e
+[ "$no_cloud_env_status" -eq 1 ] \
+  || fail "linked worktree without .cloud-env must exit 1, got $no_cloud_env_status"
+[[ "$no_cloud_env_output" == *"missing .context/deploy-worktree.env"* ]] \
+  || fail "linked worktree without .cloud-env must name the missing preparation"
+echo "PASS: a linked worktree without .cloud-env fails with the preparation message"
+
 # Root dependency install: no root lockfile is committed, so a fresh root
 # `npm install` re-resolves the live registry (npm 10.9's arborist crashed on
 # that graph on 2026-10-12). Preparation seeds the worktree lockfile from the
