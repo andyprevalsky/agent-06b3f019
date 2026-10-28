@@ -1391,7 +1391,7 @@ ul{list-style:none;margin:0;padding:0;font-size:13px}li{margin:2px 0;overflow-wr
 .agents{display:grid;grid-template-columns:1fr auto auto auto;gap:2px 10px;font-size:13px;font-variant-numeric:tabular-nums}
 .agents .h{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em}.agents .life{text-align:right}
 .agents .why{grid-column:1/-1;color:var(--bad);font-size:12px;padding-left:18px}
-@media (max-width:420px){.causes{grid-template-columns:auto 36px minmax(0,1fr)}.tile .v{font-size:20px}}
+@media (max-width:420px){.causes{grid-template-columns:auto 36px minmax(0,1fr)}.tile .v{font-size:20px}.agents{grid-template-columns:minmax(0,2fr) repeat(3,minmax(0,1fr))}.agents>span{min-width:0;overflow-wrap:anywhere}}
 footer{border-top:1px solid var(--line);padding-top:8px;font-weight:650}
 .gen{font-size:11px;color:var(--muted);font-weight:400;margin-top:4px}
 """
