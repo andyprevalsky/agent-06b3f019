@@ -9982,6 +9982,34 @@ exit 0
             assert result.returncode == 0, result.stderr
 
 
+def test_fleet_terminal_card_preserves_prompt_cache_denominator_without_inventing_missing_fields(tmp_path):
+    """I23: a legacy 100% cache ratio is not evidence of DEMO replay."""
+    build = runpy.run_path(str(AGGREGATE_SCRIPT))['_terminal_report_card']
+    metrics = {
+        'prompt_cache_read_input_tokens': 213760,
+        'prompt_cache_creation_input_tokens': 0,
+        'prompt_cache_uncached_input_tokens': 17803,
+    }
+    task = {'name':'polar-bu-016','passed':True,'fast_mode_cache_enabled':True,
+            'duration_seconds':110.4,'cost_cents':1,'world_model_mode':'real',**metrics}
+    result = {'run_id':'fixture','timestamp':'2026-10-28T00:20:00Z','status':'passed',
+              'elapsed_s':111,'summary':{'cache_hit_pct':100},'tasks':[task]}
+    card = build(result,tmp_path)
+    assert {k:card['per_task'][0].get(k) for k in metrics} == metrics
+    assert card['per_task'][0]['fast_mode'] is True
+    assert card['results']['passed'] == 1
+    # Preserve the old measurement for backwards compatibility; it is not the
+    # provider prompt-cache denominator and cannot imply replay eligibility.
+    assert card['cost']['fast_cache_hit_rate'] == 1.0
+    result['tasks']=[{'name':'old','passed':False}]
+    missing=build(result,tmp_path)['per_task'][0]
+    assert not any(key in missing for key in metrics)
+    result['tasks']=[{'name':'partial','passed':True,'prompt_cache_read_input_tokens':42}]
+    partial=build(result,tmp_path)['per_task'][0]
+    assert partial['prompt_cache_read_input_tokens']==42
+    assert 'prompt_cache_uncached_input_tokens' not in partial
+
+
 def _make_execution_provenance(tmp_path: Path) -> tuple[Path, Path, Path]:
     snapshot = tmp_path / "controller-snapshot"
     snapshot.mkdir()
