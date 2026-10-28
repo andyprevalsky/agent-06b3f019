@@ -114,6 +114,8 @@ const MODEL_RATES: Record<string, ModelRates> = {
   'moonshotai/kimi-k3': openRouter(3, 15),
   'openai/gpt-6-luna': openAi(0.1, 0.5, 1.25),
   'openai/gpt-6-sol': openAi(2, 10, 1.25),
+  // Same OpenRouter rate as agents/providers/rose/pricing.py.
+  'openai/gpt-6.1-sol': openAi(2, 10, 1.25),
   // Historical Cerebras chat primary (archived 2026-08-20). Keep for ledger rows.
   'zai-glm-4.7': uncached(2.25, 2.75),
   'z-ai/glm-4.7': openRouter(0.4, 1.75),

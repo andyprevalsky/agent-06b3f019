@@ -75,6 +75,10 @@ if codex_funded_fallback_configured; then printf 0; else printf 1; fi"
 }
 
 WESTUS="https://rose-foundry-westus.openai.azure.com"
+SOUTH="https://rose-foundry-southcentralus.openai.azure.com"
+# The shell default deployment is the codexAzure column of codeAgentModels.ts.
+TABLE_AZURE="$(sed -n "s/.*codexAzure: '\([^']*\)'.*/\1/p" "$ROOT_DIR/back-end/src/providers/codeAgentModels.ts" | sort -u)"
+[ "$TABLE_AZURE" = "gpt-6.1-sol" ] || fail "case 5: codeAgentModels.ts codexAzure is '$TABLE_AZURE', the runners default to gpt-6.1-sol"
 for runner in "$BLACKBOX" "$COVERAGE"; do
   name="$(basename "$runner")"
   expect() {
@@ -83,20 +87,22 @@ for runner in "$BLACKBOX" "$COVERAGE"; do
     got="$(codex_fallback "$runner" "$@")"
     [ "$got" = "$want" ] || fail "case 5: $name: $why (got $got, want $want)"
   }
-  expect 0 "westus region in a later slot, trailing slash" \
-    "$(printf 'AZURE_FOUNDRY_ENDPOINT=https://other.openai.azure.com\nAZURE_FOUNDRY_API_KEY=k1\nAZURE_FOUNDRY_ENDPOINT_3=%s/\nAZURE_FOUNDRY_API_KEY_3="k3"' "$WESTUS")"
+  expect 0 "a later slot lists gpt-6.1-sol, trailing slash" \
+    "$(printf 'AZURE_FOUNDRY_ENDPOINT=https://other.openai.azure.com\nAZURE_FOUNDRY_API_KEY=k1\nAZURE_FOUNDRY_DEPLOYMENTS=gpt-6-sol\nAZURE_FOUNDRY_ENDPOINT_2=%s/\nAZURE_FOUNDRY_API_KEY_2="k2"\nAZURE_FOUNDRY_DEPLOYMENTS_2="gpt-6-sol, gpt-6.1-sol"' "$SOUTH")"
   expect 1 "GPT_API_KEY alone is not a Codex fallback" 'GPT_API_KEY=sk-openai'
-  expect 1 "a region on another host only" \
-    "$(printf 'AZURE_FOUNDRY_ENDPOINT=https://other.openai.azure.com\nAZURE_FOUNDRY_API_KEY=k1')"
+  expect 1 "a region whose deployments omit gpt-6.1-sol" \
+    "$(printf 'AZURE_FOUNDRY_ENDPOINT=%s\nAZURE_FOUNDRY_API_KEY=k1\nAZURE_FOUNDRY_DEPLOYMENTS=gpt-6-sol' "$WESTUS")"
+  expect 0 "CODEX_AZURE_DEPLOYMENT selects a listed deployment" \
+    "$(printf 'CODEX_AZURE_DEPLOYMENT=gpt-6-sol\nAZURE_FOUNDRY_ENDPOINT=%s\nAZURE_FOUNDRY_API_KEY=k1\nAZURE_FOUNDRY_DEPLOYMENTS=gpt-6-sol' "$WESTUS")"
   expect 0 "CODEX_AZURE_FOUNDRY_HOST selects another host" \
     "$(printf 'CODEX_AZURE_FOUNDRY_HOST=other.openai.azure.com\nAZURE_FOUNDRY_ENDPOINT=https://other.openai.azure.com\nAZURE_FOUNDRY_API_KEY=k1')"
   expect 1 "an http endpoint is not usable" \
-    "$(printf 'AZURE_FOUNDRY_ENDPOINT=http://rose-foundry-westus.openai.azure.com\nAZURE_FOUNDRY_API_KEY=k1')"
-  expect 1 "a region without its key" "$(printf 'AZURE_FOUNDRY_ENDPOINT=%s' "$WESTUS")"
+    "$(printf 'AZURE_FOUNDRY_ENDPOINT=http://rose-foundry-southcentralus.openai.azure.com\nAZURE_FOUNDRY_API_KEY=k1\nAZURE_FOUNDRY_DEPLOYMENTS=gpt-6.1-sol')"
+  expect 1 "a region without its key" "$(printf 'AZURE_FOUNDRY_ENDPOINT=%s\nAZURE_FOUNDRY_DEPLOYMENTS=gpt-6.1-sol' "$SOUTH")"
   expect 1 "the last assignment wins (dotenv) and a comment-only key is empty" \
-    "$(printf 'AZURE_FOUNDRY_ENDPOINT=%s\nAZURE_FOUNDRY_API_KEY=k1\nAZURE_FOUNDRY_API_KEY= # unset' "$WESTUS")"
+    "$(printf 'AZURE_FOUNDRY_ENDPOINT=%s\nAZURE_FOUNDRY_API_KEY=k1\nAZURE_FOUNDRY_DEPLOYMENTS=gpt-6.1-sol\nAZURE_FOUNDRY_API_KEY= # unset' "$SOUTH")"
   expect 0 "an exported shell value wins over back-end/.env" 'GPT_API_KEY=sk-openai' \
-    AZURE_FOUNDRY_ENDPOINT_2="$WESTUS" AZURE_FOUNDRY_API_KEY_2=k2
+    AZURE_FOUNDRY_ENDPOINT_2="$SOUTH" AZURE_FOUNDRY_API_KEY_2=k2 AZURE_FOUNDRY_DEPLOYMENTS_2=gpt-6.1-sol
 done
 echo "PASS: case 5 both runners accept the Azure Codex deployment, never GPT_API_KEY, as the Codex fallback"
 

@@ -7,6 +7,7 @@
 
 import { createLogger } from './logger';
 import { foundryRegions } from './rose/foundry';
+import { codexAzureDeployment, type CodeAgentTier } from './codeAgentModels';
 import type { ClaudeCodeCredentialResult } from './claudeCredentials';
 import type { GptCodeCredentialEnvelopeResult } from './gptCredentials';
 
@@ -347,12 +348,8 @@ export function isRefreshOnlyOauthEnvelope(
   );
 }
 
-/** Azure resource and deployment that fund Codex sandboxes when user OAuth is unusable. */
-export const CODEX_AZURE_DEFAULT_HOST = 'rose-foundry-westus.openai.azure.com';
-export const CODEX_AZURE_DEFAULT_DEPLOYMENT = 'gpt-5.6-terra';
-
 export interface CodexAzureFunding {
-  /** Key of the configured AZURE_FOUNDRY_* region whose endpoint is the funding host. */
+  /** Key of the configured AZURE_FOUNDRY_* region that serves the deployment. */
   apiKey: string;
   /** Azure OpenAI v1 base URL, the Codex `model_providers.azure.base_url`. */
   baseUrl: string;
@@ -362,17 +359,19 @@ export interface CodexAzureFunding {
 
 /**
  * The Azure OpenAI deployment that funds Codex sandboxes, read from the same
- * AZURE_FOUNDRY_* regions the Rose router uses (no separate key). The resource
- * defaults to rose-foundry-westus, whose `gpt-5.6-terra` deployment matches the
- * Codex sandbox model; CODEX_AZURE_FOUNDRY_HOST / CODEX_AZURE_DEPLOYMENT
- * override. Null when no configured region serves that host.
+ * AZURE_FOUNDRY_* regions the Rose router uses (no separate key). The
+ * deployment is the tier's Azure Codex model (codeAgentModels.ts), served by
+ * the first HTTPS region whose AZURE_FOUNDRY_DEPLOYMENTS[_n] lists it.
+ * CODEX_AZURE_DEPLOYMENT overrides the deployment and CODEX_AZURE_FOUNDRY_HOST
+ * pins the resource by host. Null when no configured region serves it.
  */
-export function resolveCodexAzureFunding(): CodexAzureFunding | null {
-  const host = (process.env.CODEX_AZURE_FOUNDRY_HOST ?? '').trim() || CODEX_AZURE_DEFAULT_HOST;
-  const deployment =
-    (process.env.CODEX_AZURE_DEPLOYMENT ?? '').trim() || CODEX_AZURE_DEFAULT_DEPLOYMENT;
+export function resolveCodexAzureFunding(tier: CodeAgentTier = 'flash'): CodexAzureFunding | null {
+  const host = (process.env.CODEX_AZURE_FOUNDRY_HOST ?? '').trim();
+  const deployment = codexAzureDeployment(tier);
   const region = foundryRegions().find(
-    (candidate) => candidate.endpoint.startsWith('https://') && candidate.host === host
+    (candidate) =>
+      candidate.endpoint.startsWith('https://') &&
+      (host !== '' ? candidate.host === host : candidate.deployments.includes(deployment))
   );
   if (region === undefined) return null;
   return { apiKey: region.apiKey(), baseUrl: `${region.endpoint}/openai/v1`, deployment };
@@ -420,8 +419,8 @@ export function resolveCodexCodeAuthEnvs(
   // [REDACTED] route returns `error.message` verbatim to the API client.
   const detail =
     'No GPT Code credentials available: no synced user credentials, no available pool tokens, ' +
-    `and no usable Azure Codex deployment (AZURE_FOUNDRY_* region for ${CODEX_AZURE_DEFAULT_HOST} ` +
-    'not configured, or codex_funded_cooldown live)';
+    'and no usable Azure Codex deployment (no AZURE_FOUNDRY_* region lists ' +
+    `${codexAzureDeployment()}, or codex_funded_cooldown live)`;
   log.error('Codex Code credential resolution failed', { detail });
   throw new CodeAgentCredentialError(CODE_AGENT_CREDENTIALS_UNAVAILABLE, detail);
 }

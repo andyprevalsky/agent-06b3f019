@@ -31,23 +31,36 @@ backend_env_value() {
 }
 
 # Returns 0 when the funded Azure Codex deployment is configured for the test
-# backend: an https AZURE_FOUNDRY_ENDPOINT[_n] whose host is
-# CODEX_AZURE_FOUNDRY_HOST (default rose-foundry-westus.openai.azure.com), with
-# its AZURE_FOUNDRY_API_KEY[_n]. Mirrors resolveCodexAzureFunding
-# (src/providers/claudeCodeSandboxAuth.ts): resolveCodexCodeAuthEnvs serves a
-# Codex session from that deployment when no gpt_code login is leasable, so the
-# codex-code smoke can still run (and self-SKIP when it is out of quota).
-# GPT_API_KEY never reaches a Codex sandbox, so it is not a Codex fallback.
+# backend: an https AZURE_FOUNDRY_ENDPOINT[_n] with its AZURE_FOUNDRY_API_KEY[_n]
+# whose AZURE_FOUNDRY_DEPLOYMENTS[_n] lists CODEX_AZURE_DEPLOYMENT (default
+# gpt-6.1-sol, the codexAzure column of src/providers/codeAgentModels.ts), or
+# whose host is CODEX_AZURE_FOUNDRY_HOST when that pins the resource. Mirrors
+# resolveCodexAzureFunding (src/providers/claudeCodeSandboxAuth.ts):
+# resolveCodexCodeAuthEnvs serves a Codex session from that deployment when no
+# gpt_code login is leasable, so the codex-code smoke can still run (and
+# self-SKIP when it is out of quota). GPT_API_KEY never reaches a Codex
+# sandbox, so it is not a Codex fallback.
 codex_funded_fallback_configured() {
-  local host slot endpoint key
+  local host deployment slot endpoint key name
+  local -a names
   host="$(backend_env_value CODEX_AZURE_FOUNDRY_HOST)"
-  host="${host:-rose-foundry-westus.openai.azure.com}"
+  deployment="$(backend_env_value CODEX_AZURE_DEPLOYMENT)"
+  deployment="${deployment:-gpt-6.1-sol}"
   for slot in "" _2 _3 _4 _5 _6 _7 _8 _9; do
     endpoint="$(backend_env_value "AZURE_FOUNDRY_ENDPOINT$slot")"
     key="$(backend_env_value "AZURE_FOUNDRY_API_KEY$slot")"
     [[ -n "$endpoint" && -n "$key" && "$endpoint" == https://* ]] || continue
     endpoint="${endpoint#https://}"
-    [[ "${endpoint%%/*}" == "$host" ]] && return 0
+    if [[ -n "$host" ]]; then
+      [[ "${endpoint%%/*}" == "$host" ]] && return 0
+      continue
+    fi
+    IFS=',' read -r -a names <<< "$(backend_env_value "AZURE_FOUNDRY_DEPLOYMENTS$slot")"
+    for name in "${names[@]}"; do
+      name="${name#"${name%%[![:space:]]*}"}"
+      name="${name%"${name##*[![:space:]]}"}"
+      [[ "$name" == "$deployment" ]] && return 0
+    done
   done
   return 1
 }
@@ -388,9 +401,9 @@ SQL
           # deploy-approved out-of-funds SKIP if it is out of quota): a missing
           # seeded credential must not hard-fail the run. Only fail when NO
           # credential path exists at all (handled by the else below).
-          echo "No seeded gpt_code credential; the funded Azure Codex deployment (AZURE_FOUNDRY_* region for the Codex host) is configured, so the Codex smoke will run on it (and SKIP if it is out of quota)."
+          echo "No seeded gpt_code credential; the funded Azure Codex deployment (an AZURE_FOUNDRY_* region listing the Codex deployment) is configured, so the Codex smoke will run on it (and SKIP if it is out of quota)."
         else
-          echo "❌ Codex auth is not ChatGPT mode, the isolated test database has no connected gpt_code credential, and no funded Azure Codex deployment (AZURE_FOUNDRY_* region for the Codex host) is configured." >&2
+          echo "❌ Codex auth is not ChatGPT mode, the isolated test database has no connected gpt_code credential, and no funded Azure Codex deployment (no AZURE_FOUNDRY_* region lists the Codex deployment) is configured." >&2
           echo "   Run codex login, seed the integration, configure the Azure Codex deployment, or set BACKEND_CODEX_TOKEN_SYNC_SKIP=1 only when the caller already seeded it." >&2
           exit 1
         fi

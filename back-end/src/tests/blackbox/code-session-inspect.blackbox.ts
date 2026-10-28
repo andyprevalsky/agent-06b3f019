@@ -69,6 +69,17 @@ const ENV_KEYS = [
   'GPT_API_KEY',
   'AZURE_FOUNDRY_ENDPOINT_3',
   'AZURE_FOUNDRY_API_KEY_3',
+  'AZURE_FOUNDRY_DEPLOYMENTS_3',
+  'CODEX_AZURE_FOUNDRY_HOST',
+  'CODEX_AZURE_DEPLOYMENT',
+  'CODE_INSPECT_CODEX_MODEL',
+  'CODEX_CODE_MODEL',
+  'CODEX_REASONING_EFFORT',
+  // Only the test-owned slot 3 may serve the Codex deployment.
+  ...['', '_2', '_4', '_5', '_6', '_7', '_8', '_9'].flatMap((slot) => [
+    `AZURE_FOUNDRY_ENDPOINT${slot}`,
+    `AZURE_FOUNDRY_API_KEY${slot}`,
+  ]),
   'CLAUDE_CODE_ANTHROPIC_API_KEY',
   'OPENROUTER_API_KEY',
   'ANTHROPIC_BASE_URL',
@@ -257,9 +268,17 @@ before(async () => {
   // Fake funded keys; no decryption key, so no stored credential is ever decrypted.
   process.env.ANTHROPIC_API_KEY = 'sk-ant-inspect-test-key-0000000000000000';
   process.env.GPT_API_KEY = 'sk-inspect-test-openai';
-  // The funded Codex provider is the westus Azure deployment, never GPT_API_KEY.
-  process.env.AZURE_FOUNDRY_ENDPOINT_3 = 'https://rose-foundry-westus.openai.azure.com';
+  // The funded Codex provider is the region deploying gpt-6.1-sol, never GPT_API_KEY.
+  process.env.AZURE_FOUNDRY_ENDPOINT_3 = 'https://rose-foundry-southcentralus.openai.azure.com';
   process.env.AZURE_FOUNDRY_API_KEY_3 = 'azure-inspect-test-key';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS_3 = 'gpt-6.1-sol';
+  for (const key of ENV_KEYS) {
+    if (
+      !/^(AZURE_FOUNDRY_(ENDPOINT|API_KEY)(_[24-9])?|CODEX_\w+|CODE_INSPECT_CODEX_MODEL)$/.test(key)
+    )
+      continue;
+    delete process.env[key];
+  }
   for (const key of [
     'CLAUDE_CODE_ANTHROPIC_API_KEY',
     'OPENROUTER_API_KEY',
@@ -587,6 +606,21 @@ test('C15: a Claude usage limit backs that credential off and the inspection ans
       [runs[1].openai_key, runs[1].azure_key, runs[1].argv.includes('model_provider="azure"')],
       [false, 'azure-inspect-test-key', true],
       'codex runs on the Azure funding, never the unfunded OpenAI key'
+    );
+    // agentA is a Rose Ultra agent with the Fast Mode button on (Agent defaults):
+    // gpt-6.1-sol at xhigh, Azure priority, the shipped catalog loaded.
+    for (const flag of [
+      'gpt-6.1-sol',
+      'service_tier="priority"',
+      'model_reasoning_effort="xhigh"',
+    ]) {
+      assert.ok(runs[1].argv.includes(flag), `codex argv has ${flag}: ${runs[1].argv.join(' ')}`);
+    }
+    assert.ok(
+      runs[1].argv.some((arg: string) =>
+        /^model_catalog_json=".*azure-model-catalog\.json"$/.test(arg)
+      ),
+      'the Azure catalog describes gpt-6.1-sol'
     );
     assert.deepEqual(
       sandboxes.slice(before).map((sandbox) => [sandbox.provider, sandbox.kills]),

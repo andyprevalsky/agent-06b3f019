@@ -550,7 +550,7 @@ def test_parity_cli_end_to_end_raw_only(tmp_path, monkeypatch, capsys):
         archive = next((sandbox / "attachments").iterdir())
         fixture = cb.load_fixture(archive.name[: -len(cb.ARCHIVE_SUFFIX)])
         assert stdin == cb.render_code_task(fixture, str(sandbox / "attachments"), str(sandbox / "output"))
-        assert argv[argv.index("--model") + 1] == "claude-sonnet-5"
+        assert argv[argv.index("--model") + 1] == parity.DEFAULT_MODELS["claude"]
         subprocess.run(["tar", "-xzf", str(archive)], cwd=sandbox, check=True)
         cb.apply_reference(fixture, sandbox / fixture.id / "repo")
         out = sandbox / "output" / cb.RESULT_ARCHIVE
@@ -811,9 +811,10 @@ def test_parity_openrouter_gateway_matches_the_rose_sandbox_transport(tmp_path, 
     assert parity.describe_transport({}) == "cli-managed-login"
     sandbox_auth = (parity.REPO_ROOT / "back-end/src/providers/claudeCodeSandboxAuth.ts").read_text()
     assert f"OPENROUTER_ANTHROPIC_COMPAT_BASE_URL = '{parity.OPENROUTER_ANTHROPIC_BASE_URL}'" in sandbox_auth
-    e2b = (parity.REPO_ROOT / "back-end/src/providers/e2b.ts").read_text()
-    assert f"process.env.CLAUDE_CODE_MODEL || '{parity.DEFAULT_MODELS['claude']}'" in e2b
-    assert f"process.env.CODEX_CODE_MODEL || '{parity.DEFAULT_MODELS['codex']}'" in e2b
+    models = (parity.REPO_ROOT / "back-end/src/providers/codeAgentModels.ts").read_text()
+    flash = models[models.index("  flash: {") :]
+    assert f"claude: '{parity.DEFAULT_MODELS['claude']}'" in flash
+    assert f"codex: '{parity.DEFAULT_MODELS['codex']}'" in flash
     with pytest.raises(SystemExit):
         parity._parse_args(["--openrouter-gateway", "--lease-claude-token"])
 

@@ -31,8 +31,10 @@ test('Claude Code sandbox enables Fast Mode through a live Claude Code model ali
     'utf8'
   );
   assert.ok(
-    e2bProvider.includes("const model = process.env.CLAUDE_CODE_MODEL || 'claude-sonnet-5'"),
-    'backend must use the upgraded Claude Code model by default'
+    e2bProvider.includes(
+      "const { envs: cliSettings } = await codeAgentCliEnvs('claude', agentId);"
+    ),
+    'backend must pick the Claude Code model from the shared tier table (codeAgentModels.ts)'
   );
   assert.ok(
     e2bProvider.includes('shouldEnableClaudeCodeFastMode'),
@@ -56,14 +58,21 @@ test('Claude Code sandbox enables Fast Mode through a live Claude Code model ali
     !e2bProvider.includes('ANTHROPIC_DEFAULT_OPUS_MODEL'),
     'backend must not pin a model alias to a stale concrete model'
   );
-  assert.ok(e2bProvider.includes('CLAUDE_CODE_MODEL: model'));
+  assert.ok(e2bProvider.includes('...cliSettings,'), 'the tier settings reach the sandbox env');
+  // Speed and cache are separate: the DEMO-cache tee-proxy never turns on
+  // provider fast mode; the spawning agent's speed does (codeAgentModels.ts).
   assert.ok(
-    e2bProvider.includes("CLAUDE_CODE_FAST_MODE = '1'"),
-    'backend must tell Claude Code to enable provider fast mode'
+    !e2bProvider.includes("CLAUDE_CODE_FAST_MODE = '1'"),
+    'the Fast Mode cache proxy must not set Claude Code provider speed'
+  );
+  const codeAgentModels = readFileSync(
+    join(process.cwd(), 'src', 'providers', 'codeAgentModels.ts'),
+    'utf8'
   );
   assert.ok(
-    e2bProvider.includes("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK = '1'"),
-    'backend must let Claude Code attempt Fast Mode so Anthropic can reject/fallback by quota'
+    codeAgentModels.includes("CLAUDE_CODE_SPEED: fast ? 'fast' : 'standard'") &&
+      codeAgentModels.includes("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK: '1'"),
+    'a fast agent tells Claude Code to attempt provider fast mode so Anthropic can reject/fall back by quota'
   );
   assert.ok(
     e2bProvider.includes('overlayClaudeCodeWsServer'),
@@ -96,7 +105,7 @@ test('Claude Code sandbox enables Fast Mode through a live Claude Code model ali
       ),
     'backend must overlay the checked-in Claude Code ws-server before launch'
   );
-  assert.match(wsServer, /process\.env\.CLAUDE_CODE_MODEL\s*\|\|\s*["']claude-sonnet-5["']/);
+  assert.match(wsServer, /process\.env\.CLAUDE_CODE_MODEL\s*\|\|\s*["']claude-opus-5-5["']/);
   assert.ok(
     !wsServer.includes('ANTHROPIC_DEFAULT_OPUS_MODEL'),
     'wrapper must not pin a model alias to a stale concrete model'

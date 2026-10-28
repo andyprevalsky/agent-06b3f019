@@ -84,7 +84,7 @@ export function registerCodexAzureFallbackCases(ctx: CodexAzureFallbackContext):
     const azureEnvs = {
       AZURE_OPENAI_API_KEY: 'azure-key-not-a-secret-here',
       CODEX_AZURE_BASE_URL: 'https://codex-funded.blackbox.invalid/openai/v1',
-      CODEX_AZURE_MODEL: 'gpt-5.6-terra',
+      CODEX_AZURE_MODEL: 'gpt-6.1-sol',
     };
     const rejectsAsPaused = async (why: string) => {
       await assert.rejects(

@@ -31,6 +31,7 @@
  * accounts); no shared row is written except the exhausted credential itself.
  */
 import { prisma } from '../database';
+import type { CodeAgentTier } from '../codeAgentModels';
 import { createLogger } from '../logger';
 import { markPoolTokenRateLimited, markUserTokenRateLimited } from '../claudeCredentials';
 import {
@@ -228,8 +229,11 @@ export async function __resetCodexFundedCooldown(): Promise<void> {
 }
 
 /** The funded Azure Codex deployment a spawn may use now: configured and not backed off. */
-export async function usableCodexAzureFunding(now = new Date()): Promise<CodexAzureFunding | null> {
-  const funding = resolveCodexAzureFunding();
+export async function usableCodexAzureFunding(
+  now = new Date(),
+  tier: CodeAgentTier = 'flash'
+): Promise<CodexAzureFunding | null> {
+  const funding = resolveCodexAzureFunding(tier);
   if (funding === null) return null;
   return (await codexFundedCooldownUntil(now)) === null ? funding : null;
 }
@@ -265,10 +269,11 @@ export interface CodexSpawnAuth {
  */
 export async function resolveCodexSpawnAuth(
   userId: string,
-  now = new Date()
+  now = new Date(),
+  tier: CodeAgentTier = 'flash'
 ): Promise<CodexSpawnAuth> {
   const credentialMeta = await fetchGptCodeCredentialsWithMeta(userId);
-  const funding = await usableCodexAzureFunding(now);
+  const funding = await usableCodexAzureFunding(now, tier);
   const leasedId = credentialMeta?.integrationId ?? credentialMeta?.poolTokenId;
   const azureFunding =
     credentialMeta !== null &&

@@ -61,9 +61,10 @@ PROD_BACKEND_URL = "https://navi-j9a9.onrender.com"
 OPENROUTER_ANTHROPIC_BASE_URL = "https://openrouter.ai/api"  # claudeCodeSandboxAuth.ts
 BENCH_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"  # run_benchmark.USER_ID
 
-# Mirror back-end/src/providers/e2b.ts (CLAUDE_CODE_MODEL / CODEX_CODE_MODEL defaults)
-# and e2b-templates/*/ws-server.mjs so both legs run the same model and flags.
-DEFAULT_MODELS = {"claude": "claude-sonnet-5", "codex": "gpt-5.6-terra"}
+# Mirror the flash row of back-end/src/providers/codeAgentModels.ts (the
+# unknown-tier default e2b.ts and e2b-templates/*/ws-server.mjs use) so both
+# legs run the same model and flags.
+DEFAULT_MODELS = {"claude": "claude-opus-5-5", "codex": "gpt-6.1-sol"}
 MODEL_ENV = {"claude": "CLAUDE_CODE_MODEL", "codex": "CODEX_CODE_MODEL"}
 CLAUDE_ALLOWED_TOOLS = "Bash,Read,Write,Edit,MultiEdit,Glob,Grep,LS,TodoWrite"
 CREDENTIAL_ENV = {

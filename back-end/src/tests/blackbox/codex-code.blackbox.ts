@@ -13,8 +13,15 @@ import {
 } from './codex-code-oauth-feedback.case';
 import { testCodexWsServerOverlayUsesLocalSource } from './codex-code-overlay.case';
 import {
+  testCodeAgentModels_createAgentRequestReachesCodeAgent,
+  testCodeAgentModels_inspectAzureTierFollowsSpeed,
+  testCodeAgentModels_overridesWin,
+  testCodeAgentModels_tierTableAndUnknownIsFlash,
+  testCodeAgentModels_wsServerFallbacksMatchFlash,
+} from './codex-code-model.case';
+import {
   testResolveCodexAuthEnvs_apiKeyFallback,
-  testResolveCodexAzureFunding_selectsWestusRegion,
+  testResolveCodexAzureFunding_selectsRegionByDeployment,
   testResolveCodexAuthEnvs_noCredsNoKeyThrows,
   testResolveCodexAuthEnvs_oauthPrimaryWithApiKeyRuntimeFallback,
   testResolveCodexAuthEnvs_oauthWithoutFundedKey,
@@ -49,6 +56,12 @@ import {
   testDetectCreditExhaustion_positive,
 } from './codex-credit-skip';
 import { waitForCodexOutput } from './codex-ws-output.support';
+import {
+  assertSmokeSettings,
+  deleteSmokeParent,
+  liveSessionSettings,
+  smokeParentAgent,
+} from './code-agent-settings-smoke.support';
 import { assert, assertStatus, request } from './codex-sandbox.support';
 config();
 
@@ -189,7 +202,9 @@ async function testSmoke_codexCompletesE2bTask() {
     process.env.E2B_API_KEY !== undefined && process.env.E2B_API_KEY !== '',
     'E2B_API_KEY is required'
   );
-  const agentId = crypto.randomUUID();
+  // The parent's tier and Fast Mode button decide the CLI model, effort and speed.
+  const parent = await smokeParentAgent(DEV_USER_ID);
+  const agentId = parent.agentId;
   let taskId: string | undefined;
   let sandboxId: string | undefined;
   let closed = false;
@@ -340,6 +355,42 @@ async function testSmoke_codexCompletesE2bTask() {
     const sandbox = await Sandbox.connect(sandboxId!, {
       apiKey: process.env.E2B_API_KEY,
     });
+    // What the run really served: the session's own effective settings, and on
+    // Azure the funded provider's host and tier from the sandbox log.
+    const onAzure = servedBy === 'azure' || sawAuthFallback;
+    const proof = assertSmokeSettings(
+      'codex',
+      parent,
+      await liveSessionSettings(body.ws_url!, taskId),
+      {
+        azure: onAzure,
+      }
+    );
+    console.log(`    ↳ codex smoke ${proof}`);
+    if (onAzure) {
+      const wsLog = String(
+        await sandbox.files.read('/tmp/codex-ws-server.log', { format: 'text' })
+      );
+      const funded = wsLog
+        .split('\n')
+        .map((line) => {
+          try {
+            return JSON.parse(line) as Record<string, unknown>;
+          } catch {
+            return null;
+          }
+        })
+        .find((line) => line?.message === 'Using the Azure OpenAI funded provider');
+      assert(funded !== undefined && funded !== null, 'the sandbox logged the Azure provider');
+      console.log(
+        `    ↳ codex smoke Azure host=${String(funded.host)} model=${String(funded.model)} service_tier=${String(funded.service_tier)} effort=${String(funded.effort)}`
+      );
+      assert(
+        String(funded.host).includes('southcentralus') ||
+          process.env.CODEX_AZURE_FOUNDRY_HOST !== undefined,
+        `Azure host ${String(funded.host)} is the region deploying gpt-6.1-sol`
+      );
+    }
     const promptFile = await sandbox.files.read('/home/user/AGENTS.md', {
       format: 'text',
     });
@@ -372,6 +423,7 @@ async function testSmoke_codexCompletesE2bTask() {
         body: JSON.stringify({ task_id: taskId }),
       });
     }
+    await deleteSmokeParent(parent);
   }
 }
 
@@ -428,8 +480,32 @@ async function runAll() {
       fn: async () => testResolveCodexAuthEnvs_apiKeyFallback(),
     },
     {
-      name: 'auth -- Azure funding resolves from the westus Foundry region',
-      fn: async () => testResolveCodexAzureFunding_selectsWestusRegion(),
+      name: 'auth -- Azure funding resolves from the region that deploys gpt-6.1-sol',
+      fn: async () => testResolveCodexAzureFunding_selectsRegionByDeployment(),
+    },
+    {
+      name: 'model -- tier table: Opus 5.5 / GPT-6.1 Sol, ultra xhigh, flash medium, unknown = flash',
+      fn: async () => testCodeAgentModels_tierTableAndUnknownIsFlash(),
+    },
+    {
+      name: 'model -- env overrides win over every tier',
+      fn: async () => testCodeAgentModels_overridesWin(),
+    },
+    {
+      name: 'model -- ws-server fallbacks equal the flash row; Azure catalog is priority-only',
+      fn: async () => testCodeAgentModels_wsServerFallbacksMatchFlash(),
+    },
+    {
+      name: 'model -- Azure exec asks for priority only when the agent is fast',
+      fn: async () => testCodeAgentModels_inspectAzureTierFollowsSpeed(),
+    },
+    {
+      name: 'model -- POST /api/agents model + fast_mode_cache_enabled reach the code agent and Azure tier',
+      fn: () =>
+        testCodeAgentModels_createAgentRequestReachesCodeAgent(BASE_URL, {
+          'X-API-Key': API_KEY,
+          'X-User-Id': DEV_USER_ID,
+        }),
     },
     {
       name: 'credit-skip -- live "no credits remaining" wording is recognized',

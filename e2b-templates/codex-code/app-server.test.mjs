@@ -38,6 +38,7 @@ const {
   strictOutputSchema,
   handoffFromFinalMessage,
   handoffSchemaFromGoal,
+  setUsingApiKey,
 } = vm.runInNewContext(
   // The real credential-failure classifier and usage-limit reporter the class calls.
   "let oauthFallbackReason = null;\nlet usingApiKey = false;\nconst FUNDED_PROVIDER = false;\n" +
@@ -50,7 +51,7 @@ const {
       source.indexOf("function codexUsageLimit() {"),
     ) +
     block +
-    "\n({ Native: CodexAppServer, strictOutputSchema, handoffFromFinalMessage, handoffSchemaFromGoal })",
+    "\n({ Native: CodexAppServer, strictOutputSchema, handoffFromFinalMessage, handoffSchemaFromGoal, setUsingApiKey: (value) => { usingApiKey = value; } })",
   sandbox,
 );
 function fixture(options = {}) {
@@ -83,10 +84,12 @@ function fixture(options = {}) {
       )
         result = {
           thread: { id: "thread" },
-          model: "model",
+          model: request.params.model ?? "model",
           reasoningEffort:
             request.params.config?.model_reasoning_effort ?? "high",
-          serviceTier: request.params.serviceTier,
+          serviceTier: options.echoTier
+            ? options.echoTier(request.params.serviceTier)
+            : request.params.serviceTier,
         };
       if (request.method === "turn/start")
         result = { turn: { id: `turn-${++serial}` } };
@@ -152,10 +155,22 @@ test("native initialization, active steer and idle start preserve settings and t
     false,
   );
 });
-test("new sessions select medium and fastest advertised tier before the first turn", async () => {
-  for (const tiers of [["priority", "ultrafast"], ["fast"], ["priority"], []]) {
+// Speed is the spawning agent's request (CODEX_SPEED), never "the fastest
+// tier by default". Each request takes the nearest tier the model really
+// offers: ultrafast -> fast/priority, fast -> priority (Codex's "Fast").
+test("new sessions select medium and map the requested speed onto the catalog", async () => {
+  for (const [tiers, requested, expectedTier] of [
+    [["priority", "ultrafast"], null, null],
+    [["priority", "ultrafast"], "standard", null],
+    [["priority", "ultrafast"], "ultrafast", "ultrafast"],
+    [["priority", "ultrafast"], "fast", "priority"],
+    [["priority"], "ultrafast", "priority"],
+    [["fast"], "ultrafast", "fast"],
+    [["fast"], "fast", "fast"],
+    [[], "ultrafast", null],
+  ]) {
     const { native, calls } = fixture({
-      settings: { model: "model", effort: null, speed: null },
+      settings: { model: "model", effort: null, speed: requested },
       models: [
         {
           id: "model",
@@ -169,20 +184,42 @@ test("new sessions select medium and fastest advertised tier before the first tu
       ],
     });
     await native.initialize(null, "hello");
-    const expectedTier = tiers.includes("ultrafast")
-      ? "ultrafast"
-      : tiers.includes("fast")
-        ? "fast"
-        : tiers.includes("priority")
-          ? "priority"
-          : null;
+    const why = `${JSON.stringify(tiers)} ${requested}`;
     const startup = calls.find((c) => c.method === "thread/start");
     assert.equal(startup.params.config.model_reasoning_effort, "medium");
-    assert.equal(startup.params.serviceTier, expectedTier);
+    assert.equal(startup.params.serviceTier, expectedTier, why);
     assert.equal(calls.at(-1).params.effort, "medium");
-    assert.equal(calls.at(-1).params.serviceTier, expectedTier);
-    assert.equal(native.settings.speed, expectedTier || "standard");
+    assert.equal(calls.at(-1).params.serviceTier, expectedTier, why);
+    assert.equal(native.settings.speed, expectedTier || "standard", why);
   }
+});
+// Live 2026-10-28: Codex 0.159.0 answers a standard (null) request for
+// gpt-6.1-sol with serviceTier "default", its explicit-standard sentinel.
+test('Codex\'s explicit standard tier "default" reports as standard', async () => {
+  const echoTier = (tier) => tier ?? "default";
+  for (const resumeId of [null, "saved-thread"]) {
+    const { native } = fixture({
+      settings: { model: "model", effort: "high", speed: "standard" },
+      echoTier,
+    });
+    await native.initialize(resumeId, "hello");
+    assert.equal(native.settings.speed, "standard", String(resumeId));
+  }
+  const { native, events } = fixture({ echoTier });
+  await native.initialize(null, "hello");
+  native.receive({
+    method: "thread/settings/updated",
+    params: {
+      threadId: "thread",
+      threadSettings: {
+        model: "model",
+        effort: "high",
+        serviceTier: "default",
+      },
+    },
+  });
+  assert.equal(native.settings.speed, "standard");
+  assert.equal(events.at(-1).effective_settings.speed, "standard");
 });
 test("startup preserves explicit settings and never invents unsupported effort", async () => {
   const explicit = fixture();
@@ -244,6 +281,55 @@ test("catalog rejects invented tiers, invalid effort and settings changes during
     native.deliver({ settings: { speed: "fast" } }, []),
     /settings_change_requires_idle/,
   );
+});
+// Azure OpenAI sells priority processing only; fast and ultrafast are ChatGPT
+// plan tiers. The funded provider's catalog advertises priority, so a Fast or
+// Ultrafast agent gets priority there and a standard agent gets none.
+test("the funded Azure provider maps fast and ultrafast to priority and standard to none", async () => {
+  const azureModels = [
+    {
+      id: "gpt-6.1-sol",
+      model: "gpt-6.1-sol",
+      supportedReasoningEfforts: [
+        { reasoningEffort: "medium" },
+        { reasoningEffort: "high" },
+        { reasoningEffort: "xhigh" },
+      ],
+      serviceTiers: [{ id: "priority" }],
+    },
+  ];
+  setUsingApiKey(true);
+  try {
+    for (const [resumeId, speed, expectedTier] of [
+      [null, "ultrafast", "priority"],
+      [null, "fast", "priority"],
+      [null, "standard", null],
+      [null, null, null],
+      ["saved-thread", "ultrafast", "priority"],
+      ["saved-thread", "standard", null],
+    ]) {
+      const { native, calls } = fixture({
+        settings: { model: "gpt-6.1-sol", effort: "xhigh", speed },
+        models: azureModels,
+      });
+      await native.initialize(resumeId, "hello");
+      const why = `${resumeId} ${speed}`;
+      const startup = calls.find((c) =>
+        /^thread\/(start|resume)$/.test(c.method),
+      );
+      assert.equal(startup.params.serviceTier, expectedTier, why);
+      assert.equal(startup.params.config.model_reasoning_effort, "xhigh", why);
+      assert.equal(calls.at(-1).params.serviceTier, expectedTier, why);
+      assert.equal(calls.at(-1).params.effort, "xhigh", why);
+      assert.equal(native.settings.speed, expectedTier || "standard", why);
+      await assert.rejects(
+        native.deliver({ settings: { speed: "ultrafast" } }, []),
+        /unsupported_speed/,
+      );
+    }
+  } finally {
+    setUsingApiKey(false);
+  }
 });
 test("real notification deltas accumulate on stable rows and preserve lifecycle outcomes and tool kinds", async () => {
   const { native, events } = fixture();
@@ -713,7 +799,19 @@ function freePort() {
 // Runs the real ws-server (app-server transport) over a fake Codex whose ChatGPT
 // OAuth turns fail with `oauthError` and whose Azure-provider turns succeed.
 // Returns the streamed events and the fake Codex's call journal.
-async function runOAuthFailureFixture(oauthError, settled, { funded = true } = {}) {
+async function runOAuthFailureFixture(
+  oauthError,
+  settled,
+  {
+    funded = true,
+    oauth = true,
+    model = "model",
+    azureModel = "azure-terra",
+    oauthTiers = [],
+    speed = "",
+    effort = "",
+  } = {},
+) {
   const directory = mkdtempSync(join(tmpdir(), "rose-native-codex-fallback-"));
   const fixturePath = join(directory, "codex");
   const journal = join(directory, "journal.jsonl");
@@ -729,9 +827,12 @@ const apiKey=argv.includes('model_provider="azure"')&&argv.includes('model_provi
 const readline=require('node:readline');let turn=0;const send=x=>process.stdout.write(JSON.stringify(x)+'\\n');
 readline.createInterface({input:process.stdin}).on('line',line=>{
  const m=JSON.parse(line);if(m.id===undefined)return;let result={};
- if(m.method==='model/list')result={data:[{id:'model',model:'model',supportedReasoningEfforts:[],serviceTiers:[]}]};
- if(m.method==='thread/start'||m.method==='thread/resume'){note({method:m.method,threadId:m.params.threadId,model:m.params.model,apiKey});result={thread:{id:'thread'},model:'model',reasoningEffort:null,serviceTier:null};}
- if(m.method==='turn/start'){note({method:m.method,input:m.params.input,model:m.params.model,apiKey,auth:fs.existsSync(path.join(home,'auth.json'))});result={turn:{id:(apiKey?'key-':'oauth-')+(++turn)}};}
+ const flag=name=>{const at=process.argv.findIndex(a=>a.startsWith(name+'='));return at<0?null:JSON.parse(process.argv[at].slice(name.length+1));};
+ const catalog=apiKey&&flag('model_catalog_json');
+ const listed=catalog?JSON.parse(fs.readFileSync(catalog,'utf8')).models.map(e=>({id:e.slug,model:e.slug,supportedReasoningEfforts:[],serviceTiers:e.service_tiers})):[{id:process.env.CODEX_MODEL,model:process.env.CODEX_MODEL,supportedReasoningEfforts:[],serviceTiers:apiKey?[]:JSON.parse(process.env.FIXTURE_OAUTH_TIERS).map(id=>({id}))}];
+ if(m.method==='model/list')result={data:listed};
+ if(m.method==='thread/start'||m.method==='thread/resume'){note({method:m.method,threadId:m.params.threadId,model:m.params.model,serviceTier:m.params.serviceTier,effort:m.params.config?.model_reasoning_effort??null,defaultTier:apiKey?flag('service_tier'):null,defaultEffort:flag('model_reasoning_effort'),catalog,apiKey});result={thread:{id:'thread'},model:m.params.model,reasoningEffort:null,serviceTier:m.params.serviceTier??null};}
+ if(m.method==='turn/start'){note({method:m.method,input:m.params.input,model:m.params.model,serviceTier:m.params.serviceTier,effort:m.params.effort??null,apiKey,auth:fs.existsSync(path.join(home,'auth.json'))});result={turn:{id:(apiKey?'key-':'oauth-')+(++turn)}};}
  send({id:m.id,result});
  if(m.method!=='turn/start')return;
  const id=result.turn.id;send({method:'turn/started',params:{threadId:'thread',turn:{id}}});
@@ -754,14 +855,19 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         ...process.env,
         PATH: `${directory}:${process.env.PATH}`,
         HOME: directory,
-        CODEX_AUTH_JSON: JSON.stringify({ auth_mode: "chatgpt", tokens: {} }),
+        CODEX_AUTH_JSON: oauth
+          ? JSON.stringify({ auth_mode: "chatgpt", tokens: {} })
+          : "",
         OPENAI_API_KEY: "",
         // Not armed (another subscription is leasable): no funded provider in the sandbox.
         AZURE_OPENAI_API_KEY: funded ? "azure-fixture-key" : "",
         CODEX_AZURE_BASE_URL: funded ? "https://azure.example/openai/v1" : "",
-        CODEX_AZURE_MODEL: funded ? "azure-terra" : "",
+        CODEX_AZURE_MODEL: funded ? azureModel : "",
         CODEX_GOAL: "write the sentinel",
-        CODEX_MODEL: "model",
+        CODEX_MODEL: model,
+        FIXTURE_OAUTH_TIERS: JSON.stringify(oauthTiers),
+        CODEX_SPEED: speed,
+        CODEX_REASONING_EFFORT: effort,
         CODE_SESSION_TURN_TOKEN: "native-token",
         PORT: String(port),
         GITHUB_REPO_URL: "",
@@ -837,13 +943,21 @@ test("app-server reports a ChatGPT usage limit for the pause and does not switch
     ["failed"],
     `the limited turn ends; the pause saves the session\n${logs}`,
   );
-  const limits = seen.filter((e) => e.type === "error").map((e) => e.usage_limit);
+  const limits = seen
+    .filter((e) => e.type === "error")
+    .map((e) => e.usage_limit);
   assert.ok(limits.length > 0, "the usage-limit error is reported");
   assert.ok(
-    limits.every((limit) => limit?.reached_type === null && limit?.resets_at === null),
+    limits.every(
+      (limit) => limit?.reached_type === null && limit?.resets_at === null,
+    ),
     `every error carries the structured limit the activity pauses on: ${JSON.stringify(limits)}`,
   );
-  assert.equal(seen.some((e) => e.type === "auth_fallback"), false, "no in-sandbox switch");
+  assert.equal(
+    seen.some((e) => e.type === "auth_fallback"),
+    false,
+    "no in-sandbox switch",
+  );
   assert.deepEqual(
     calls.map((c) => c.method),
     ["thread/start", "turn/start"],
@@ -858,24 +972,37 @@ test("app-server reports a ChatGPT usage limit for the pause and does not switch
 // leases credentials only at session create), so this switch goes to Azure.
 test("app-server switches to the funded Azure OpenAI provider when the ChatGPT login is unusable", async () => {
   const { seen, calls, logs } = await runOAuthFailureFixture(
-    { message: "Your access token could not be refreshed: refresh_token_invalidated" },
-    (events) => events.some((e) => e.type === "turn_ended" && e.status === "completed"),
+    {
+      message:
+        "Your access token could not be refreshed: refresh_token_invalidated",
+    },
+    (events) =>
+      events.some((e) => e.type === "turn_ended" && e.status === "completed"),
   );
   assert.deepEqual(
     seen.filter((e) => e.type === "turn_ended").map((e) => e.status),
     ["completed"],
     `the OAuth failure must not end the run before the funded retry\n${logs}\n${JSON.stringify(seen)}`,
   );
-  const oauthErrors = seen.filter((e) => e.type === "error" && /refresh_token_invalidated/.test(e.message ?? ""));
+  const oauthErrors = seen.filter(
+    (e) =>
+      e.type === "error" && /refresh_token_invalidated/.test(e.message ?? ""),
+  );
   assert.ok(oauthErrors.length > 0, "the OAuth error is still reported");
   assert.ok(
-    oauthErrors.every((e) => e.usage_limit === null && e.login_unusable === undefined),
+    oauthErrors.every(
+      (e) => e.usage_limit === null && e.login_unusable === undefined,
+    ),
     "an unusable login with the switch armed is neither a usage limit nor a pause",
   );
   const fallback = seen.find((e) => e.type === "auth_fallback");
   assert.equal(fallback?.to, "openai_api_key");
   assert.equal(fallback?.funded_provider, "azure");
-  assert.equal(fallback?.provider, "codex", "the envelope provider stays codex for the worker");
+  assert.equal(
+    fallback?.provider,
+    "codex",
+    "the envelope provider stays codex for the worker",
+  );
   assert.equal(fallback?.reason, "oauth_refresh_invalid");
   assert.deepEqual(
     calls.map((c) => c.login ?? c.method),
@@ -883,11 +1010,27 @@ test("app-server switches to the funded Azure OpenAI provider when the ChatGPT l
     "no codex login: the azure provider reads its key from the environment",
   );
   assert.equal(calls[0].apiKey, false, "user OAuth is tried first");
-  assert.equal(calls[2].threadId, "thread", "the funded retry resumes the same thread");
-  assert.equal(calls[2].model, "azure-terra", "the retry runs on the Azure deployment");
-  assert.deepEqual(calls[3].input, calls[1].input, "the funded retry re-sends the same turn input");
+  assert.equal(
+    calls[2].threadId,
+    "thread",
+    "the funded retry resumes the same thread",
+  );
+  assert.equal(
+    calls[2].model,
+    "azure-terra",
+    "the retry runs on the Azure deployment",
+  );
+  assert.deepEqual(
+    calls[3].input,
+    calls[1].input,
+    "the funded retry re-sends the same turn input",
+  );
   assert.equal(calls[3].apiKey, true, "the retry selects the azure provider");
-  assert.equal(calls[3].auth, false, "the ChatGPT auth.json is removed before the retry");
+  assert.equal(
+    calls[3].auth,
+    false,
+    "the ChatGPT auth.json is removed before the retry",
+  );
 });
 
 // Subscriptions first (C15): with another subscription leasable the backend does
@@ -896,7 +1039,10 @@ test("app-server switches to the funded Azure OpenAI provider when the ChatGPT l
 // the next credential); nothing runs on Azure and nothing is a usage limit.
 test("app-server reports an unusable login for the pause when no Azure switch is armed", async () => {
   const { seen, calls, logs } = await runOAuthFailureFixture(
-    { message: "Your access token could not be refreshed: refresh_token_invalidated" },
+    {
+      message:
+        "Your access token could not be refreshed: refresh_token_invalidated",
+    },
     (events) => events.some((e) => e.type === "final"),
     { funded: false },
   );
@@ -905,14 +1051,133 @@ test("app-server reports an unusable login for the pause when no Azure switch is
     ["failed"],
     `the turn on the unusable login ends; the pause saves the session\n${logs}`,
   );
-  const oauthErrors = seen.filter((e) => e.type === "error" && /refresh_token_invalidated/.test(e.message ?? ""));
+  const oauthErrors = seen.filter(
+    (e) =>
+      e.type === "error" && /refresh_token_invalidated/.test(e.message ?? ""),
+  );
   assert.ok(oauthErrors.length > 0, "the OAuth error is reported");
   assert.ok(
     oauthErrors.every(
-      (e) => e.login_unusable?.reason === "oauth_refresh_invalid" && e.usage_limit === null,
+      (e) =>
+        e.login_unusable?.reason === "oauth_refresh_invalid" &&
+        e.usage_limit === null,
     ),
     `every OAuth error carries login_unusable, never a usage limit: ${JSON.stringify(oauthErrors)}`,
   );
-  assert.equal(seen.some((e) => e.type === "auth_fallback"), false, "no in-sandbox switch");
-  assert.deepEqual(calls.map((c) => c.method), ["thread/start", "turn/start"], "nothing runs on Azure");
+  assert.equal(
+    seen.some((e) => e.type === "auth_fallback"),
+    false,
+    "no in-sandbox switch",
+  );
+  assert.deepEqual(
+    calls.map((c) => c.method),
+    ["thread/start", "turn/start"],
+    "nothing runs on Azure",
+  );
 });
+
+// GPT-6.1 Sol on both paths at the fastest tier each really offers: the
+// ChatGPT catalog grants ultrafast; Azure sells priority only. Codex 0.159.0
+// bundles no gpt-6.1-sol metadata, so the funded provider loads the shipped
+// catalog (model_catalog_json) that advertises priority, and the login's
+// ultrafast never reaches Azure after the switch.
+test("the Azure switch continues GPT-6.1 Sol at priority, never the login's ultrafast", async () => {
+  const { seen, calls, logs } = await runOAuthFailureFixture(
+    {
+      message:
+        "Your access token could not be refreshed: refresh_token_invalidated",
+    },
+    (events) =>
+      events.some((e) => e.type === "turn_ended" && e.status === "completed"),
+    {
+      model: "gpt-6.1-sol",
+      azureModel: "gpt-6.1-sol",
+      oauthTiers: ["priority", "ultrafast"],
+      speed: "ultrafast",
+      effort: "xhigh",
+    },
+  );
+  assert.deepEqual(
+    calls.map((c) => c.method),
+    ["thread/start", "turn/start", "thread/resume", "turn/start"],
+    `${logs}\n${JSON.stringify(seen)}`,
+  );
+  assert.equal(
+    calls[0].serviceTier,
+    "ultrafast",
+    "the requested tier the ChatGPT catalog offers",
+  );
+  assert.equal(calls[0].effort, "xhigh");
+  assert.equal(calls[2].model, "gpt-6.1-sol");
+  assert.equal(calls[2].serviceTier, "priority", "Azure resumes at priority");
+  assert.equal(
+    calls[2].defaultTier,
+    "priority",
+    "exec turns default to priority too",
+  );
+  assert.match(String(calls[2].catalog), /azure-model-catalog\.json$/);
+  assert.equal(calls[3].serviceTier, "priority");
+  assert.equal(
+    calls[3].effort,
+    "xhigh",
+    "the tier's effort passes through to Azure",
+  );
+  assert.equal(calls[2].defaultEffort, "xhigh");
+  const settings = seen.filter((e) => e.type === "settings").at(-1);
+  assert.deepEqual(
+    {
+      model: settings?.effective_settings?.model,
+      speed: settings?.effective_settings?.speed,
+    },
+    { model: "gpt-6.1-sol", speed: "priority" },
+    "the reported speed after the switch is Azure's",
+  );
+  assert.match(logs, /"host":"azure\.example".*"service_tier":"priority"/);
+});
+
+for (const [speed, expectedTier] of [
+  ["fast", "priority"],
+  ["ultrafast", "priority"],
+  ["standard", null],
+]) {
+  test(`a ${speed} session funded by Azure alone starts GPT-6.1 Sol at ${expectedTier ?? "standard"}`, async () => {
+    const { seen, calls, logs } = await runOAuthFailureFixture(
+      {},
+      (events) =>
+        events.some((e) => e.type === "turn_ended" && e.status === "completed"),
+      {
+        oauth: false,
+        model: "gpt-6.1-sol",
+        azureModel: "gpt-6.1-sol",
+        speed,
+        effort: "medium",
+      },
+    );
+    assert.deepEqual(
+      calls.map((c) => c.method),
+      ["thread/start", "turn/start"],
+      logs,
+    );
+    assert.equal(calls[0].apiKey, true);
+    assert.equal(calls[0].model, "gpt-6.1-sol");
+    assert.equal(calls[0].serviceTier, expectedTier);
+    assert.equal(
+      calls[0].defaultTier,
+      expectedTier,
+      "exec default tier follows the request",
+    );
+    assert.equal(calls[0].effort, "medium");
+    assert.equal(calls[1].serviceTier, expectedTier);
+    const ready = seen.find(
+      (e) => e.type === "session" && e.status === "ready",
+    );
+    assert.deepEqual(
+      { ...ready?.effective_settings },
+      {
+        model: "gpt-6.1-sol",
+        effort: "medium",
+        speed: expectedTier ?? "standard",
+      },
+    );
+  });
+}

@@ -16,6 +16,7 @@ import { timingSafeEqual } from "crypto";
 import { createServer } from "http";
 import { homedir } from "os";
 import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 
 const LOG_FILE = "/tmp/codex-ws-server.log";
 function log(level, message, data = {}) {
@@ -42,7 +43,23 @@ const CODEX_AZURE_MODEL = process.env.CODEX_AZURE_MODEL || "";
 const FUNDED_PROVIDER = Boolean(
   AZURE_OPENAI_API_KEY && CODEX_AZURE_BASE_URL && CODEX_AZURE_MODEL,
 );
-const CODEX_MODEL = process.env.CODEX_MODEL || "gpt-5.6-terra";
+// The backend sets CODEX_MODEL from the parent's tier; this fallback is the
+// flash row of back-end/src/providers/codeAgentModels.ts (codex-code-model.case.ts).
+const CODEX_MODEL = process.env.CODEX_MODEL || "gpt-6.1-sol";
+// The speed the spawning agent asked for (standard | fast | ultrafast, from its
+// Fast Mode button); catalogSpeed maps it onto the model's real tiers. Azure
+// OpenAI has priority only: fast or ultrafast -> priority, standard -> none.
+const CODEX_SPEED = process.env.CODEX_SPEED || "";
+const CODEX_AZURE_SERVICE_TIER = "priority";
+const CODEX_REASONING_EFFORT = process.env.CODEX_REASONING_EFFORT || "";
+// Codex model catalog for the funded provider (codexTemplate.ts
+// CODEX_AZURE_MODEL_CATALOG_FILE), shipped next to this file. The CLI's bundled
+// catalog has no gpt-6.1-sol, so without it Codex uses generic metadata that
+// drops the priority tier and reasoning effort.
+const CODEX_AZURE_MODEL_CATALOG = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "azure-model-catalog.json",
+);
 const CODE_AGENT_SYSTEM_PROMPT = process.env.CODE_AGENT_SYSTEM_PROMPT || "";
 // Backend-provided Mobbin MCP bearer (design references); unset = no Mobbin server.
 const MOBBIN_MCP_TOKEN = process.env.MOBBIN_MCP_TOKEN || "";
@@ -781,12 +798,44 @@ function useFundedProvider() {
   }
   log("info", "Using the Azure OpenAI funded provider", {
     model: CODEX_AZURE_MODEL,
+    host: azureHost(),
+    service_tier: azureServiceTier(),
+    effort: CODEX_REASONING_EFFORT || null,
+    model_catalog: azureModelCatalogPath(),
   });
   return true;
 }
 
+/** Exec-transport default tier on Azure; app-server turns name theirs explicitly. */
+function azureServiceTier() {
+  return CODEX_SPEED === "fast" || CODEX_SPEED === "ultrafast"
+    ? CODEX_AZURE_SERVICE_TIER
+    : null;
+}
+
+function azureHost() {
+  try {
+    return new URL(CODEX_AZURE_BASE_URL).host;
+  } catch {
+    return null;
+  }
+}
+
+/** The shipped catalog when it describes the Azure deployment; otherwise the CLI's own. */
+function azureModelCatalogPath() {
+  try {
+    const catalog = JSON.parse(readFileSync(CODEX_AZURE_MODEL_CATALOG, "utf8"));
+    return (catalog.models || []).some((m) => m.slug === CODEX_AZURE_MODEL)
+      ? CODEX_AZURE_MODEL_CATALOG
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Codex -c flags that select the Azure OpenAI funded provider. */
 function fundedProviderArgs() {
+  const catalog = azureModelCatalogPath();
   return [
     "-c",
     'model_provider="azure"',
@@ -798,6 +847,11 @@ function fundedProviderArgs() {
     'model_providers.azure.env_key="AZURE_OPENAI_API_KEY"',
     "-c",
     'model_providers.azure.wire_api="responses"',
+    // Default tier for exec turns; app-server turns pass it explicitly.
+    ...(azureServiceTier()
+      ? ["-c", `service_tier=${JSON.stringify(azureServiceTier())}`]
+      : []),
+    ...(catalog ? ["-c", `model_catalog_json=${JSON.stringify(catalog)}`] : []),
   ];
 }
 
@@ -1032,6 +1086,13 @@ function buildCodexArgs({ useFastModeProxy, resume = null }) {
     // codex-rs/features/src/lib.rs:1761). runCodexAppServer copies every -c.
     "-c",
     "features.default_mode_request_user_input=false",
+    // The tier's effort for exec turns; app-server turns name it explicitly.
+    ...(CODEX_REASONING_EFFORT
+      ? [
+          "-c",
+          `model_reasoning_effort=${JSON.stringify(CODEX_REASONING_EFFORT)}`,
+        ]
+      : []),
     "--json",
     "--cd",
     workDir,
@@ -1237,7 +1298,7 @@ class CodexAppServer {
       this.settings = {
         model: settings.model,
         effort: settings.effort,
-        speed: settings.serviceTier || "standard",
+        speed: reportedSpeed(settings.serviceTier),
       };
       this.settingsVersion++;
       this.emit({
@@ -1474,19 +1535,42 @@ class CodexAppServer {
     const catalog = await this.request("model/list", { includeHidden: true });
     this.models = catalog.data || [];
   }
+  catalogModel(name) {
+    return (
+      this.models.find((m) => m.model === name || m.id === name) ||
+      this.models.find((m) => m.isDefault)
+    );
+  }
   // Re-send a failed turn on a new app-server process (same thread, same input).
   async resumeTurn(threadId, turnStart) {
     await this.connect();
+    // The new provider's catalog decides the tier: a ChatGPT-only tier
+    // (ultrafast) carried over from the failed login becomes Azure's priority.
+    const speed = catalogSpeed(
+      this.catalogModel(this.settings.model),
+      this.settings.speed,
+    );
     const response = await this.request("thread/resume", {
       threadId,
       model: this.settings.model,
-      serviceTier:
-        this.settings.speed === "standard" ? null : this.settings.speed,
+      serviceTier: speed === "standard" ? null : speed,
       cwd: workDir,
       approvalPolicy: "never",
       sandbox: "danger-full-access",
     });
     this.threadId = response.thread.id;
+    this.settings = {
+      ...this.settings,
+      model: response.model || this.settings.model,
+      speed: reportedSpeed(response.serviceTier),
+    };
+    this.settingsVersion++;
+    this.emit({
+      type: "settings",
+      thread_id: this.threadId,
+      effective_settings: this.settings,
+      reason: "auth_fallback",
+    });
     const turnId = await this.start(
       turnStart.input,
       this.settings,
@@ -1499,26 +1583,22 @@ class CodexAppServer {
   async initialize(resumeId, goal) {
     await this.connect();
     // Catalog -> supported defaults -> native ACK -> first turn.
-    const model =
-      this.models.find(
-        (m) => m.model === this.settings.model || m.id === this.settings.model,
-      ) || this.models.find((m) => m.isDefault);
+    const model = this.catalogModel(this.settings.model);
     const efforts = (model?.supportedReasoningEfforts || []).map(
       (e) => e.reasoningEffort,
     );
-    const tiers = (model?.serviceTiers || []).map((t) => t.id);
     this.settings = {
       ...this.settings,
       effort:
         this.settings.effort ??
         (!resumeId && efforts.includes("medium") ? "medium" : null),
-      speed:
-        this.settings.speed ??
-        (!resumeId
-          ? ["ultrafast", "fast", "priority"].find((tier) =>
-              tiers.includes(tier),
-            ) || "standard"
-          : null),
+      // The agent's request mapped onto this catalog (never "the fastest
+      // tier by default"); no request is standard, or the saved tier on resume.
+      speed: this.settings.speed
+        ? catalogSpeed(model, this.settings.speed)
+        : resumeId
+          ? null
+          : "standard",
     };
     const response = await this.request(
       resumeId ? "thread/resume" : "thread/start",
@@ -1539,7 +1619,7 @@ class CodexAppServer {
     this.settings = {
       model: response.model,
       effort: response.reasoningEffort ?? this.settings.effort,
-      speed: response.serviceTier || "standard",
+      speed: reportedSpeed(response.serviceTier),
     };
     const goalTurnId = await this.start(
       [{ type: "text", text: goal, text_elements: [] }],
@@ -1706,6 +1786,29 @@ function handoffFromFinalMessage(text, schema) {
     return out;
   };
   return `${JSON.stringify(prune(value, schema), null, 2)}\n`;
+}
+
+// A requested speed -> the catalog tiers that satisfy it, nearest first. Codex
+// names priority processing "Fast"; ultrafast falls back to it when a model
+// (gpt-6.1-terra, the Azure catalog) does not offer ultrafast.
+const SPEED_TIERS = {
+  ultrafast: ["ultrafast", "fast", "priority"],
+  fast: ["priority", "fast"],
+  priority: ["priority", "fast"],
+};
+
+/** Codex reports explicit standard routing as "default"; Rose calls it standard. */
+function reportedSpeed(serviceTier) {
+  return !serviceTier || serviceTier === "default" ? "standard" : serviceTier;
+}
+
+/** The tier this catalog model really offers for `requested`; standard when none. */
+function catalogSpeed(model, requested) {
+  const tiers = (model?.serviceTiers || []).map((t) => t.id);
+  return (
+    (SPEED_TIERS[requested] || []).find((tier) => tiers.includes(tier)) ||
+    "standard"
+  );
 }
 
 function stageDirectAttachments(id, attachments = []) {
