@@ -22,6 +22,8 @@ import type { BrowserSessionMetadata, OutputSchemaRef } from './types';
 interface MinimizedProps {
   browserUrl: string;
   browserLive?: boolean;
+  /** The owning agent finished: show a terminal "session ended" state, never "Connecting…". */
+  browserEnded?: boolean;
   forceMinimized: boolean;
   /** False while the session is shown in the Browser drawer. */
   showThumbnail?: boolean;
@@ -58,6 +60,7 @@ function LastActionRow({
 export function BrowserStatusBarMinimized({
   browserUrl,
   browserLive = true,
+  browserEnded = false,
   forceMinimized,
   showThumbnail = true,
   lastActionType,
@@ -82,6 +85,7 @@ export function BrowserStatusBarMinimized({
           <BrowserThumbnail
             browserUrl={browserUrl}
             live={browserLive}
+            ended={browserEnded}
             width={128}
             height={80}
             wrapperClassName={thumbnailWrapperClass}
