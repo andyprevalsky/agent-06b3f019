@@ -411,8 +411,9 @@ assert.match(
   'parallel unit children must retain V8 coverage instrumentation'
 );
 assert.ok(
-  blackboxRunner.indexOf('runWithConcurrency(parallelDomains') <
-    blackboxRunner.indexOf('runWithConcurrency(lateExclusiveDomains'),
+  blackboxRunner.search(/runWithConcurrency\(\s*parallelDomains/) >= 0 &&
+    blackboxRunner.search(/runWithConcurrency\(\s*parallelDomains/) <
+      blackboxRunner.search(/runWithConcurrency\(\s*lateExclusiveDomains/),
   'aggregate blackbox domains must run after parallel fixture writers'
 );
 assert.match(
