@@ -22,6 +22,7 @@ import {
   waitTarget,
 } from '@/features/terminal-component-group/components/waitForPhrase';
 import { markdownPreview } from '@/features/terminal-component-group/components/browser-agent-chip/resultPreview';
+import { buildAgentToolData } from '@/features/terminal-component-group/components/message-bubble/agentToolData';
 import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
 import { isRoseDesktopSession } from '@/lib/roseDesktopSession';
 import type { Message } from '@/lib/api';
@@ -207,6 +208,27 @@ describe('wait_for row label', () => {
       createElement(TrajectoryWorkGroup, { group: runningGroup([row]), renderMessage: () => null }),
     );
     expect(screen.getByTestId('trajectory-activity-line')).toHaveTextContent(expected);
+  });
+
+  it('the expanded wait card names the same task as the work row', () => {
+    const card = (toolStatus: string, text = '') =>
+      buildAgentToolData(
+        msg(
+          {
+            toolName: 'wait_for',
+            toolStatus,
+            waitForMode: 'agents',
+            agents: ['/root/x'],
+            targetNames: ['pull_bank_data'],
+            description: 'pull_bank_data',
+          },
+          { message_id: `w-${toolStatus}`, text },
+        ),
+      );
+    expect(card('IN_PROGRESS')?.title).toBe('Waiting for pull_bank_data');
+    expect(card('FINISHED', 'Woken by a sub-agent finishing.')?.title).toBe(
+      'Waited for pull_bank_data · woken by a sub-agent finishing',
+    );
   });
 
   it('normalizes a model-written description to the waited-on target', () => {
