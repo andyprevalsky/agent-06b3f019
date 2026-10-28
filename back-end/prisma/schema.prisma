@@ -2165,16 +2165,71 @@ model Project {
   /// Monotonic snapshot revision; bumped by every accepted sync.
   syncRevision    Int                  @default(0)
   lastSyncedAt    DateTime?
+  /// Template sync ("maintenance") script, run on the project's ONE template sandbox.
+  /// null = never configured (the Rose default is filled in); "" = cleared on purpose.
+  maintenanceScript         String?
+  maintenanceTimeoutS       Int       @default(480)
+  /// Run nightly (fixed UTC slot, see providers/projects/maintenanceSchedule.ts).
+  maintenanceNightly        Boolean   @default(false)
+  /// Run when the repo's default branch head changes on GitHub (cron polls the head sha).
+  maintenanceOnGithubChange Boolean   @default(false)
+  maintenanceWatchedSha     String?
+  maintenanceWatchCheckedAt DateTime?
+  /// Lease: at most one maintenance run per project; an expired lease is reclaimable.
+  maintenanceRunId          String?
+  maintenanceLeaseUntil     DateTime?
+  /// Latest successful template snapshot (E2B snapshot id); new code sessions start from it.
+  templateSnapshotId         String?
+  /// The one before it, kept until the next publish so sessions already starting from it finish.
+  templatePrevSnapshotId     String?
+  templateSnapshotAt         DateTime?
+  templateSnapshotSha        String?
+  templateSnapshotRunId      String?
+  /// {cpu, memoryGb} of the template sandbox the snapshot came from.
+  templateSnapshotSize       Json?
   createdAt       DateTime             @default(now())
   updatedAt       DateTime             @updatedAt
   user            User                 @relation(fields: [userId], references: [userId], onDelete: Cascade)
   envFiles        ProjectEnvFile[]
   syncSnapshot    ProjectSyncSnapshot?
+  maintenanceRuns ProjectMaintenanceRun[]
   agents          Agent[]
   cliLogins       ProjectCliLogin[]
 
   @@unique([userId, name])
   @@index([userId, updatedAt])
+}
+
+/// One run of a project's template sync script (trigger: manual | snapshot |
+/// nightly | github). A scheduled or GitHub trigger carries a deterministic
+/// `slotKey` (nightly:<date>, github:<sha>): the unique (projectId, slotKey)
+/// makes duplicate triggers from several backend replicas a no-op.
+model ProjectMaintenanceRun {
+  id             String    @id @default(uuid())
+  projectId      String
+  trigger        String
+  /// "sync" runs the script; "snapshot" re-snapshots the latest code without it.
+  mode           String    @default("sync")
+  /// RUNNING | SUCCEEDED | FAILED | TIMED_OUT
+  status         String
+  slotKey        String?
+  startedAt      DateTime  @default(now())
+  finishedAt     DateTime?
+  durationMs     Int?
+  exitCode       Int?
+  headSha        String?
+  sandboxId      String?
+  /// Snapshot published by this run (SUCCEEDED only).
+  snapshotId     String?
+  /// Snapshot the run's sandbox started from (null = base template + fresh clone).
+  fromSnapshotId String?
+  error          String?
+  /// Redacted, bounded tail of the run output.
+  logTail        String?
+  project        Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, slotKey])
+  @@index([projectId, startedAt])
 }
 
 /// One secret-bearing file materialized into a project checkout with 0600

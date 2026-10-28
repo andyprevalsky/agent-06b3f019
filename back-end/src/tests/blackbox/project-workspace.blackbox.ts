@@ -408,6 +408,11 @@ test('seed-rose: Rose project gets its startup script and six env files (PJ4)', 
   sh(fixture, `git init -q -b main ${repo}`);
   mkdirSync(join(repo, 'agents/benchmarks/fixtures/projects'), { recursive: true });
   writeFileSync(join(repo, 'agents/benchmarks/fixtures/projects/rose-startup.sh'), fixtureScript);
+  const syncScript = readFileSync(
+    join(REPO_ROOT, 'agents/benchmarks/fixtures/projects/rose-sync.sh'),
+    'utf8'
+  );
+  writeFileSync(join(repo, 'agents/benchmarks/fixtures/projects/rose-sync.sh'), syncScript);
   writeFileSync(join(repo, '.gitignore'), '.env\n.env.*\n');
   sh(repo, 'git -c user.name=t -c user.email=t@example.com add -A');
   sh(repo, 'git -c user.name=t -c user.email=t@example.com commit -qm init');
@@ -430,6 +435,9 @@ test('seed-rose: Rose project gets its startup script and six env files (PJ4)', 
   );
   assert(rose, 'Rose project created');
   assert(rose.startupScript === fixtureScript, 'startup script is the checked-in fixture');
+  const maintenance = rose.maintenance as { script: string; timeoutS: number };
+  assert(maintenance.script === syncScript, 'sync script is the checked-in fixture');
+  assert(maintenance.timeoutS === 480, `sync timeout ${maintenance.timeoutS}`);
   assert(rose.defaultBranch === 'main' && rose.startupTimeoutS === 900, 'Rose defaults');
   const files = await call(`/api/projects/${String(rose.id)}/env-files`, { auth: s.token });
   leakTexts.push(['Rose env-files response', files.text]);

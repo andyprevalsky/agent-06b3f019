@@ -9,6 +9,9 @@ export const DEFAULT_STARTUP_TIMEOUT_S = 120;
 export const MIN_STARTUP_TIMEOUT_S = 1;
 export const MAX_STARTUP_TIMEOUT_S = 3600;
 export const MAX_STARTUP_SCRIPT_BYTES = 64 * 1024;
+/** Template sync script: default and ceiling (boxes.dev Template maintenance: 8 minutes). */
+export const DEFAULT_MAINTENANCE_TIMEOUT_S = 480;
+export const MAX_MAINTENANCE_TIMEOUT_S = 480;
 /** Plaintext size cap for one env/config file. */
 export const MAX_ENV_FILE_BYTES = 256 * 1024;
 
@@ -43,6 +46,20 @@ const sandboxSizeSchema = z
   })
   .nullable();
 
+/**
+ * Template sync settings (providers/projects/maintenanceRunner.ts): the script
+ * run on the project's template sandbox, its timeout, and the two automatic
+ * triggers. A null or empty script clears it on purpose.
+ */
+const maintenanceSchema = z
+  .object({
+    script: z.string().max(MAX_STARTUP_SCRIPT_BYTES).nullable().optional(),
+    timeoutS: z.number().int().min(1).max(MAX_MAINTENANCE_TIMEOUT_S).optional(),
+    nightly: z.boolean().optional(),
+    onGithubChange: z.boolean().optional(),
+  })
+  .strict();
+
 const settingsShape = {
   repoUrl: repoUrlSchema.optional(),
   defaultBranch: branchSchema.optional(),
@@ -55,6 +72,7 @@ const settingsShape = {
     .optional(),
   lifecycle: lifecycleSchema.optional(),
   sandboxSize: sandboxSizeSchema.optional(),
+  maintenance: maintenanceSchema.optional(),
 };
 
 const projectNameSchema = z.string().trim().min(1).max(100);
@@ -145,6 +163,10 @@ export const mintCliLoginCodeSchema = z.object({ projectId: projectIdSchema.opti
 /** POST /api/projects/cli-login-codes/exchange — the CLI trades its code once. */
 export const exchangeCliLoginCodeSchema = z
   .object({ code: z.string().trim().min(1).max(200) })
+  .strict();
+
+export const maintenanceRunSchema = z
+  .object({ mode: z.enum(['sync', 'snapshot']).optional() })
   .strict();
 
 export type CreateProjectBody = z.infer<typeof createProjectSchema>;

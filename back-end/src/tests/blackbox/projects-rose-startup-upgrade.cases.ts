@@ -12,6 +12,7 @@ import {
   applyRoseProjectSetup,
   planRoseProjectSetup,
   ROSE_PREVIOUS_STARTUP_SCRIPTS_DIR,
+  roseSyncScript,
   ROSE_PROJECT_STARTUP_TIMEOUT_S,
   type RoseSetupDeps,
 } from '../../domains/projects/roseProject';
@@ -165,6 +166,61 @@ export function registerRoseStartupUpgradeCases(ctx: {
       assert(row.startupTimeoutS === 120, `timeout untouched, got ${row.startupTimeoutS}`);
     } finally {
       await owner.cleanup();
+    }
+  });
+
+  /** The first slimmed default (2026-10-28): what a project that picked up the previous branch holds. */
+  const ROSE_STARTUP_2026_10_28 = readFileSync(
+    resolve(__dirname, '../../../..', ROSE_PREVIOUS_STARTUP_SCRIPTS_DIR, '2026-10-28.sh'),
+    'utf8'
+  );
+
+  test('Rose out of the box: the sync script is filled once (new, pristine and configured Rose projects); a cleared one stays cleared', async () => {
+    const syncScript = roseSyncScript();
+    assert(
+      syncScript.includes('npm install --include=dev') && syncScript.includes('3.11.9'),
+      'the default sync script installs JS deps and Python 3.11.9 deps'
+    );
+    // 1. A Rose project configured before template sync existed: column never set.
+    const owner = await roseOwner();
+    try {
+      const created = await prisma.project.create({
+        data: {
+          userId: owner.userId,
+          name: 'Rose',
+          syncSalt: 'blackbox-salt',
+          repoUrl: roseRepo,
+          startupScript: ROSE_STARTUP_2026_10_28,
+        },
+      });
+      const rose = await owner.rose();
+      assert(rose.id === created.id, 'same project');
+      const row = await prisma.project.findUniqueOrThrow({ where: { id: created.id } });
+      assert(row.maintenanceScript === syncScript, 'default sync script filled');
+      assert(row.maintenanceTimeoutS === 480, `sync timeout ${row.maintenanceTimeoutS}`);
+      assert(!row.maintenanceNightly && !row.maintenanceOnGithubChange, 'triggers stay off');
+      assert(row.startupScript === roseStartup, 'the 2026-10-28 startup default is upgraded too');
+      // 2. The user clears it: stored as "", never refilled.
+      await updateProject(owner.userId, created.id, { maintenance: { script: null } });
+      await owner.rose();
+      const cleared = await prisma.project.findUniqueOrThrow({ where: { id: created.id } });
+      assert(cleared.maintenanceScript === '', 'a cleared sync script stays cleared');
+      // 3. An edited one is kept.
+      await updateProject(owner.userId, created.id, { maintenance: { script: 'echo mine\n' } });
+      await owner.rose();
+      const edited = await prisma.project.findUniqueOrThrow({ where: { id: created.id } });
+      assert(edited.maintenanceScript === 'echo mine\n', 'an edited sync script is kept');
+    } finally {
+      await owner.cleanup();
+    }
+    // 4. A brand-new Rose project is created with the script.
+    const fresh = await roseOwner();
+    try {
+      const rose = await fresh.rose();
+      const row = await prisma.project.findUniqueOrThrow({ where: { id: rose.id } });
+      assert(row.maintenanceScript === syncScript, 'new Rose project has the sync script');
+    } finally {
+      await fresh.cleanup();
     }
   });
 }

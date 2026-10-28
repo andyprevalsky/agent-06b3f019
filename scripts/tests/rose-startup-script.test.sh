@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Rose project startup script (agents/benchmarks/fixtures/projects/rose-startup.sh)
-# end to end in a checkout with no node_modules and no agents/venv, with npm,
-# npx, uv, node and sudo stubbed. Asserts which installs run, that the JS and
-# Python branches overlap, and that a resumed session skips every install.
+# and sync script (rose-sync.sh) end to end in a checkout with no node_modules
+# and no agents/venv, with npm, npx, uv, node and sudo stubbed. Asserts which
+# installs run, that the JS and Python branches overlap, that a resumed session
+# skips every install, and that a session started from the sync script's
+# snapshot (its stamps) skips them too.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT="$ROOT_DIR/agents/benchmarks/fixtures/projects/rose-startup.sh"
+SYNC_SCRIPT="$ROOT_DIR/agents/benchmarks/fixtures/projects/rose-sync.sh"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/rose-startup-test.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 STUB_SLEEP=3
@@ -71,7 +74,7 @@ EOF
 
 make_repo() {
   REPO="$1"
-  rm -rf "$REPO"
+  rm -rf "$REPO" "$HOME/.cache"
   mkdir -p "$REPO"/{back-end/prisma,back-end/scripts,front-end,agents,scripts/lib}
   echo '{"name":"root","workspaces":["back-end","front-end","agents"]}' >"$REPO/package.json"
   echo '{"name":"back-end"}' >"$REPO/back-end/package.json"
@@ -160,10 +163,7 @@ run_startup "$TMP_ROOT/uv-bin"
 expect_count '^npm install' 1 "manifest change: npm install"
 expect_count '^npx --no-install prisma generate' 1 "manifest change: prisma generate"
 expect_count '^uv ' 0 "manifest change: no uv"
-# A Node upgrade changes native modules: reinstall too.
-FAKE_NODE_VERSION=v22.13.0 run_startup "$TMP_ROOT/uv-bin"
-expect_count '^npm install' 1 "node upgrade: npm install"
-pass "manifest or Node change reinstalls JS deps only"
+pass "a manifest change reinstalls JS deps only"
 
 # 5. npm fails: reported, Python still installed, no stamp, next run retries.
 make_repo "$TMP_ROOT/npm-fail"
@@ -223,5 +223,80 @@ run_startup "$TMP_ROOT/no-uv-bin"
 expect_count '^python3 -m pip install --user --quiet --disable-pip-version-check uv==' 1 "no uv: pinned uv installed"
 expect_count '^uv venv --quiet --seed --python 3.11.9' 1 "no uv: venv created with installed uv"
 pass "missing uv is installed for the user and used"
+
+# 9. The sync script (template sandbox) followed by a session start: the snapshot's
+# stamps make the session skip every install; a later lockfile change reinstalls.
+make_git_repo() {
+  make_repo "$1"
+  git init -q -b main --bare "$1.remote.git"
+  (cd "$REPO" && git init -q -b main && git remote add origin "$1.remote.git" \
+    && git add -A && git -c user.name=t -c user.email=t@example.com commit -qm init \
+    && git push -q origin main)
+}
+run_sync() {
+  : >"$CALLS"
+  set +e
+  (cd "$REPO" && PATH="$1:$BASE_PATH" bash "$SYNC_SCRIPT" </dev/null >"$TMP_ROOT/out" 2>&1)
+  RC=$?
+  set -e
+}
+make_git_repo "$TMP_ROOT/snap"
+run_sync "$TMP_ROOT/uv-bin"
+[ "$RC" = 0 ] || fail "sync exits 0 (rc=$RC)"
+expect_count '^npm install --include=dev --no-audit --no-fund --legacy-peer-deps @$' 1 "sync: npm install"
+expect_count '^npx --no-install prisma generate @/back-end$' 0 "sync: prisma generate uses npx without --no-install"
+expect_count '^npx prisma generate @/back-end$' 1 "sync: prisma generate"
+expect_count '^uv venv --quiet --seed --python 3.11.9 agents/venv @$' 1 "sync: venv on Python 3.11.9"
+expect_count "^node --import tsx -e require('./scripts/seed-dump-cache.ts') @/back-end$" 1 "sync: import check"
+expect_out '\[rose-sync\] ready at ' "sync"
+run_sync "$TMP_ROOT/uv-bin"
+[ "$RC" = 0 ] || fail "second sync exits 0 (rc=$RC)"
+expect_count '^npm ' 0 "second sync: incremental, no npm"
+expect_count '^uv ' 0 "second sync: incremental, no uv"
+expect_count '^npx prisma generate' 1 "second sync: prisma generate always runs"
+# A new session starts from that snapshot: nothing to install.
+FAKE_NPM_SLEEP=$STUB_SLEEP FAKE_UV_SLEEP=$STUB_SLEEP run_startup "$TMP_ROOT/uv-bin"
+[ "$RC" = 0 ] || fail "session start after sync exits 0 (rc=$RC)"
+expect_count '^npm ' 0 "snapshot start: no npm"
+expect_count '^npx ' 0 "snapshot start: no prisma generate"
+expect_count '^uv ' 0 "snapshot start: no uv"
+expect_out 'js: dependencies unchanged; skipped' "snapshot start"
+expect_out 'prisma: client up to date; skipped' "snapshot start"
+expect_out 'py: agents/venv satisfies requirements.txt; skipped' "snapshot start"
+faster_than 2 "snapshot start is fast"
+pass "a session started from the sync snapshot skips every install (${ELAPSED}s)"
+# main moved a lockfile since the snapshot: the startup falls back to installing.
+echo '{"lockfileVersion":3,"changed":true}' >"$REPO/back-end/package-lock.json"
+run_startup "$TMP_ROOT/uv-bin"
+[ "$RC" = 0 ] || fail "stale snapshot start exits 0 (rc=$RC)"
+expect_count '^npm install' 1 "stale snapshot: npm install fallback"
+expect_count '^npx --no-install prisma generate' 1 "stale snapshot: prisma regenerated after an install"
+expect_count '^uv ' 0 "stale snapshot: venv kept"
+pass "a stale snapshot falls back to the stamp-guarded install"
+
+# 10. A small sandbox (the default 1 GB E2B template) gets a swapfile before the
+# install that was OOM-killed there; the sync script removes it before the
+# snapshot. A big sandbox, or a start with nothing to install, touches no swap.
+printf 'MemTotal:        1008000 kB\nSwapTotal:             0 kB\n' >"$TMP_ROOT/meminfo-small"
+printf 'MemTotal:       16000000 kB\nSwapTotal:             0 kB\n' >"$TMP_ROOT/meminfo-big"
+make_git_repo "$TMP_ROOT/small"
+ROSE_MEMINFO="$TMP_ROOT/meminfo-small" run_sync "$TMP_ROOT/uv-bin"
+[ "$RC" = 0 ] || fail "sync on a small sandbox exits 0 (rc=$RC)"
+expect_count '^sudo -n fallocate -l 3G /swapfile' 1 "small sync: swapfile allocated"
+expect_count '^sudo -n swapon /swapfile' 1 "small sync: swap enabled"
+expect_count '^sudo -n swapoff /swapfile' 1 "small sync: swap removed before the snapshot"
+expect_count '^sudo -n rm -f /swapfile' 1 "small sync: swapfile deleted"
+expect_out 'added 3 GB swap' "small sync"
+make_git_repo "$TMP_ROOT/big"
+ROSE_MEMINFO="$TMP_ROOT/meminfo-big" run_sync "$TMP_ROOT/uv-bin"
+expect_count '^sudo ' 0 "big sync: no swap"
+make_repo "$TMP_ROOT/small-start"
+ROSE_MEMINFO="$TMP_ROOT/meminfo-small" run_startup "$TMP_ROOT/uv-bin"
+[ "$RC" = 0 ] || fail "startup install on a small sandbox exits 0 (rc=$RC)"
+expect_count '^sudo -n swapon /swapfile' 1 "small startup: swap before the install"
+expect_count '^sudo -n swapoff' 0 "small startup: swap stays for the session"
+ROSE_MEMINFO="$TMP_ROOT/meminfo-small" run_startup "$TMP_ROOT/uv-bin"
+expect_count '^sudo -n fallocate' 0 "small startup with nothing to install: no swap"
+pass "small sandboxes get swap for the install (sync removes it before the snapshot)"
 
 echo "rose-startup-script: all tests passed"

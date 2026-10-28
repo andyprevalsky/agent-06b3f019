@@ -11,9 +11,12 @@
  * Sections (Rose light styles): Code repo (repository URL + Change, default
  * branch, GitHub "Connected"/"Not connected" — never an error — and Last synced)
  * · Set up with your coding agent (copyable one-time setup prompt; its own
- * state machine in ProjectAgentSetupSection) · Startup script · Startup timeout · Environment files (own resource, saved
- * immediately; header count = project.envFileCount) · Lifecycle (Auto-wake,
- * Startup script set/not set).
+ * state machine in ProjectAgentSetupSection) · Startup script · Startup timeout
+ * · Template sync (ProjectMaintenanceSection: Last snapshot + Snapshot now, sync
+ * script + timeout ≤ 480 s, Run on a schedule, Run when files change on GitHub,
+ * Run now, Recent runs) · Environment files (own resource, saved immediately;
+ * header count = project.envFileCount) · Lifecycle (Auto-wake, Startup script
+ * set/not set).
  */
 
 import { useState } from 'react';
@@ -23,6 +26,7 @@ import { cn } from '@/lib/utils';
 
 import LeftPanelShell from './LeftPanelShell';
 import { ProjectAgentSetupSection } from './ProjectAgentSetupSection';
+import { ProjectMaintenanceSection } from './ProjectMaintenanceSection';
 import { ProjectEnvFilesSection } from './ProjectEnvFilesSection';
 import { ROSE_ACTIVE_COLOR } from './roseSidebarLayout';
 import { useProjectSettingsForm, type ProjectDraft } from './useProjectSettingsForm';
@@ -211,6 +215,13 @@ export default function RoseProjectSettingsPanel({
         draft={form.draft}
         setField={form.setField}
         isTimeoutValid={form.isTimeoutValid}
+      />
+      <ProjectMaintenanceSection
+        project={project}
+        draft={form.draft}
+        setField={form.setField}
+        isSyncTimeoutValid={form.isSyncTimeoutValid}
+        isDirty={form.isDirty}
       />
       <ProjectEnvFilesSection projectId={project.id} envFileCount={project.envFileCount} />
       <LifecycleSection draft={form.draft} setField={form.setField} />

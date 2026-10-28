@@ -13,6 +13,9 @@
  *   DELETE /api/projects/:id/env-files/:fileId -> 204
  *   POST   /api/projects/cli-login-codes { projectId } -> 201 CliLoginCode
  *                                                 (one-time code for `rose agent-init`)
+ *   GET    /api/projects/:id/maintenance       -> MaintenanceState (template sync)
+ *   POST   /api/projects/:id/maintenance/runs {mode} -> 202 MaintenanceRun
+ *   GET    /api/projects/:id/maintenance/runs/:runId -> MaintenanceRun with its log
  *
  * Agents carry `project_id`; agents without one (or with an id that is not in
  * the list) belong to Home, the root project. POST /api/agents takes
@@ -20,6 +23,21 @@
  */
 
 import { API_BASE_WITH_PATH, getAuthHeaders } from './client';
+
+/** Template sync: the script run on the project's template sandbox (boxes.dev "Template maintenance"). */
+export interface ProjectMaintenance {
+  /** null = no script. */
+  script: string | null;
+  /** 1..480. */
+  timeoutS: number;
+  nightly: boolean;
+  onGithubChange: boolean;
+  /** Next nightly run; null when the schedule is off. */
+  nextRunAt: string | null;
+  /** Last GitHub head poll; null when not watching or never checked. */
+  watchCheckedAt: string | null;
+  running: boolean;
+}
 
 export interface Project {
   id: string;
@@ -34,6 +52,9 @@ export interface Project {
   startupTimeoutS: number;
   lifecycle: { autoWake: boolean };
   sync: { revision: number; lastSyncedAt: string | null };
+  maintenance: ProjectMaintenance;
+  /** Latest published template snapshot new code sessions start from; null: none yet. */
+  snapshot: { takenAt: string; sha: string | null } | null;
   envFileCount: number;
   createdAt: string;
   updatedAt: string;
@@ -47,10 +68,56 @@ export interface ProjectUpdate {
   startupScript?: string;
   startupTimeoutS?: number;
   lifecycle?: { autoWake?: boolean };
+  /** `script: null` clears the script. */
+  maintenance?: {
+    script?: string | null;
+    timeoutS?: number;
+    nightly?: boolean;
+    onGithubChange?: boolean;
+  };
 }
 
 export const MIN_STARTUP_TIMEOUT_S = 1;
 export const MAX_STARTUP_TIMEOUT_S = 3600;
+export const MIN_MAINTENANCE_TIMEOUT_S = 1;
+/** Boxes.dev Template maintenance allows up to 8 minutes. */
+export const MAX_MAINTENANCE_TIMEOUT_S = 480;
+
+export type MaintenanceRunStatus = 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'TIMED_OUT';
+export type MaintenanceMode = 'sync' | 'snapshot';
+
+export interface MaintenanceRun {
+  id: string;
+  trigger: 'manual' | 'snapshot' | 'nightly' | 'github';
+  mode: MaintenanceMode;
+  status: MaintenanceRunStatus;
+  startedAt: string;
+  finishedAt: string | null;
+  durationMs: number | null;
+  exitCode: number | null;
+  headSha: string | null;
+  snapshotId: string | null;
+  fromSnapshot: boolean;
+  error: string | null;
+  /** Redacted output tail; only on the single-run response. */
+  log?: string;
+}
+
+export interface MaintenanceState {
+  snapshot: { takenAt: string; sha: string | null } | null;
+  running: boolean;
+  nextRunAt: string | null;
+  watchCheckedAt: string | null;
+  runs: MaintenanceRun[];
+}
+
+/** POST …/maintenance/runs answered 409: a sync is already running for this project. */
+export class MaintenanceRunningError extends Error {
+  constructor() {
+    super('A sync is already running for this project');
+    this.name = 'MaintenanceRunningError';
+  }
+}
 
 export interface ProjectEnvVariable {
   name: string;
@@ -174,4 +241,43 @@ export async function createCliLoginCode(projectId: string): Promise<CliLoginCod
   });
   if (!response.ok) throw new Error(`Failed to create a setup code (${response.status})`);
   return (await response.json()) as CliLoginCode;
+}
+
+function maintenanceUrl(projectId: string): string {
+  return `${projectUrl(projectId)}/maintenance`;
+}
+
+export async function fetchMaintenance(projectId: string): Promise<MaintenanceState> {
+  const response = await fetch(maintenanceUrl(projectId), { headers: getAuthHeaders() });
+  if (!response.ok) throw new Error(`Failed to load sync status (${response.status})`);
+  return (await response.json()) as MaintenanceState;
+}
+
+/** Run now (`sync`) or Snapshot now (`snapshot`). Resolves with the started run. */
+export async function startMaintenanceRun(
+  projectId: string,
+  mode: MaintenanceMode,
+): Promise<MaintenanceRun> {
+  const response = await fetch(`${maintenanceUrl(projectId)}/runs`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ mode }),
+  });
+  if (response.status === 409) throw new MaintenanceRunningError();
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Failed to start the sync (${response.status})`);
+  }
+  return (await response.json()) as MaintenanceRun;
+}
+
+export async function fetchMaintenanceRun(
+  projectId: string,
+  runId: string,
+): Promise<MaintenanceRun> {
+  const response = await fetch(`${maintenanceUrl(projectId)}/runs/${encodeURIComponent(runId)}`, {
+    headers: getAuthHeaders(),
+  });
+  if (!response.ok) throw new Error(`Failed to load the run (${response.status})`);
+  return (await response.json()) as MaintenanceRun;
 }

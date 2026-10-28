@@ -16,6 +16,7 @@
  */
 import { createLogger } from '../../providers/logger';
 import type { EnvVariableMeta } from '../../providers/projects/envFile';
+import { nextNightlyRun } from '../../providers/projects/maintenanceSchedule';
 import { sandboxSizeColumn } from '../../providers/projects/store';
 import * as repo from './repo';
 import {
@@ -49,6 +50,19 @@ export interface ProjectDto {
   /** Default code-sandbox size of new sessions (C16); null = deployment default. */
   sandboxSize: { cpu?: number; memoryGb?: number } | null;
   sync: { revision: number; lastSyncedAt: string | null };
+  /** Template sync (Rose's equivalent of a Template box's maintenance script). */
+  maintenance: {
+    script: string | null;
+    timeoutS: number;
+    nightly: boolean;
+    onGithubChange: boolean;
+    /** Next nightly run (UTC slot); null when the schedule is off. */
+    nextRunAt: string | null;
+    watchCheckedAt: string | null;
+    running: boolean;
+  };
+  /** Latest published template snapshot new code sessions start from; null: none yet. */
+  snapshot: { takenAt: string; sha: string | null } | null;
   envFileCount: number;
   createdAt: string;
   updatedAt: string;
@@ -88,6 +102,27 @@ export function toProjectDto(
       revision: project.syncRevision,
       lastSyncedAt: project.lastSyncedAt ? project.lastSyncedAt.toISOString() : null,
     },
+    maintenance: {
+      script: project.maintenanceScript === '' ? null : project.maintenanceScript,
+      timeoutS: project.maintenanceTimeoutS,
+      nightly: project.maintenanceNightly,
+      onGithubChange: project.maintenanceOnGithubChange,
+      nextRunAt: project.maintenanceNightly ? nextNightlyRun(new Date()).toISOString() : null,
+      watchCheckedAt: project.maintenanceOnGithubChange
+        ? (project.maintenanceWatchCheckedAt?.toISOString() ?? null)
+        : null,
+      running:
+        project.maintenanceRunId !== null &&
+        project.maintenanceLeaseUntil !== null &&
+        project.maintenanceLeaseUntil.getTime() > Date.now(),
+    },
+    snapshot:
+      project.templateSnapshotId !== null && project.templateSnapshotAt !== null
+        ? {
+            takenAt: project.templateSnapshotAt.toISOString(),
+            sha: project.templateSnapshotSha,
+          }
+        : null,
     envFileCount,
     createdAt: project.createdAt.toISOString(),
     updatedAt: project.updatedAt.toISOString(),
@@ -171,6 +206,20 @@ function settingsData(body: UpdateProjectBody) {
     ...(body.startupTimeoutS !== undefined ? { startupTimeoutS: body.startupTimeoutS } : {}),
     ...(body.lifecycle?.autoWake !== undefined ? { autoWake: body.lifecycle.autoWake } : {}),
     ...(body.sandboxSize !== undefined ? { sandboxSize: sandboxSizeColumn(body.sandboxSize) } : {}),
+    ...maintenanceData(body.maintenance),
+  };
+}
+
+/** A cleared script is stored as "" (null means never configured: the Rose default fills in). */
+function maintenanceData(maintenance: UpdateProjectBody['maintenance']) {
+  if (maintenance === undefined) return {};
+  return {
+    ...(maintenance.script !== undefined ? { maintenanceScript: maintenance.script ?? '' } : {}),
+    ...(maintenance.timeoutS !== undefined ? { maintenanceTimeoutS: maintenance.timeoutS } : {}),
+    ...(maintenance.nightly !== undefined ? { maintenanceNightly: maintenance.nightly } : {}),
+    ...(maintenance.onGithubChange !== undefined
+      ? { maintenanceOnGithubChange: maintenance.onGithubChange }
+      : {}),
   };
 }
 
