@@ -39,7 +39,7 @@ import { runProjectStartupForOwner } from '../../providers/projects/workspace';
 import { asyncHandler } from '../../utils/asyncHandler';
 import * as cliLogin from './cliLoginService';
 import * as envFiles from './envFileService';
-import * as maintenance from './maintenanceService';
+import { registerMaintenanceRoutes } from './routes.maintenance';
 import * as service from './service';
 import * as sync from './syncService';
 import {
@@ -47,7 +47,6 @@ import {
   createProjectSchema,
   exchangeCliLoginCodeSchema,
   mintCliLoginCodeSchema,
-  maintenanceRunSchema,
   projectIdSchema,
   syncPushSchema,
   updateEnvFileSchema,
@@ -336,33 +335,7 @@ router.post(
   })
 );
 
-router.get(
-  '/:id/maintenance',
-  handle(async (req, res, userId) => {
-    const id = idParam(req, res);
-    if (id !== null) res.json(await maintenance.getMaintenance(userId, id));
-  })
-);
-
-router.post(
-  '/:id/maintenance/runs',
-  handle(async (req, res, userId) => {
-    const id = idParam(req, res);
-    const body = id !== null ? parse(maintenanceRunSchema, req.body ?? {}, res) : null;
-    if (id === null || body === null) return;
-    const { run } = await maintenance.triggerRun(userId, id, body.mode ?? 'sync');
-    res.status(202).json(run);
-  })
-);
-
-router.get(
-  '/:id/maintenance/runs/:runId',
-  handle(async (req, res, userId) => {
-    const id = idParam(req, res);
-    const runId = id !== null ? idParam(req, res, 'runId') : null;
-    if (id !== null && runId !== null) res.json(await maintenance.getRun(userId, id, runId));
-  })
-);
+registerMaintenanceRoutes(router, { handle, idParam, parse });
 
 router.post(
   '/:id/sessions/:sessionId/startup',
