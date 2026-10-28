@@ -1,9 +1,10 @@
+import { buildBrowserSessionMetadata, logicalHasPrivateState } from './service.metadata';
+export { buildBrowserSessionMetadata } from './service.metadata';
 import { initLegacySession } from './service.init-legacy';
 import { closeBrowserSession } from './service.close';
 import { resumeOwnedBrowserSession } from './service.control';
 import { getTaskInfo } from './service.task-info';
 import { ensureLogicalBrowser } from '../../providers/browser/logicalSession';
-import { EMPTY_BROWSER_BASELINE } from '../../providers/browser/checkpoint';
 import {
   initializeLogicalBrowser,
   waitForBrowserInitialization,
@@ -13,7 +14,6 @@ import {
  */
 
 import type { Browser } from 'playwright';
-import { type ProxyGeoLocation } from '../../providers/geoip';
 import { createLogger } from '../../providers/logger';
 import {
   getSession,
@@ -35,9 +35,8 @@ import { canonicalAuthRealm } from '../../providers/authRealm';
 import { prepareWorldStateFork } from './service.world-fork';
 import { getAuthOptions } from '../../providers/authOptions';
 import * as repo from './repo';
-import { storedBrowserProvider, type BrowserGeoTargeting } from '../../providers/browser/types';
+import { storedBrowserProvider } from '../../providers/browser/types';
 import { validateBrowserKeySymbols } from './service.browser-input';
-import { validateSessionFilePath } from './service.file-path';
 import {
   injectLocalStorage,
   SessionNoUserError,
@@ -69,64 +68,6 @@ async function requireSessionOwner(sessionId: string, userId?: string): Promise<
   if (session === null || session.context.userId !== userId) throw new SessionNotFoundError();
 }
 
-interface BrowserSessionMetadataInput {
-  provider: string;
-  providerSelection?: { requestedProvider: string; fallbackReason: string };
-  geoTargeting?: BrowserGeoTargeting;
-  proxySource: string;
-  proxyLocation: ProxyGeoLocation;
-  profileId: string | null;
-  profileSource: string;
-}
-
-interface BrowserSessionInjectionMetadataInput {
-  cookies: { injected: boolean; cookieCount: number; authSource: string };
-  localStorage: { originCount: number };
-  indexedDB: { originCount: number };
-  permissions: { grantCount: number };
-  cacheStorage: { originCount: number };
-}
-
-export function buildBrowserSessionMetadata(
-  session: BrowserSessionMetadataInput,
-  injectionResult: BrowserSessionInjectionMetadataInput
-) {
-  return {
-    provider: session.provider,
-    // Benchmarks and the worker tell a real run on the requested provider from a fallback.
-    requested_provider: session.providerSelection?.requestedProvider ?? session.provider,
-    provider_fallback_reason: session.providerSelection?.fallbackReason ?? null,
-    ...(session.geoTargeting !== undefined
-      ? {
-          geo_targeting: {
-            requested: session.geoTargeting.requested,
-            applied: session.geoTargeting.applied,
-            requested_location: session.geoTargeting.requestedLocation,
-            geo_applied: session.geoTargeting.geoApplied,
-            geo_unsupported: session.geoTargeting.geoUnsupported,
-          },
-        }
-      : {}),
-    proxy_source: session.proxySource,
-    proxy_location: session.proxyLocation,
-    profile_id: session.profileId,
-    profile_source: session.profileSource,
-    auth_source: injectionResult.cookies.authSource,
-    cookies_injected: injectionResult.cookies.injected,
-    cookies_count: injectionResult.cookies.cookieCount,
-    local_storage_origin_count: injectionResult.localStorage.originCount,
-    indexed_db_origin_count: injectionResult.indexedDB.originCount,
-    permission_grant_count: injectionResult.permissions.grantCount,
-    cache_storage_origin_count: injectionResult.cacheStorage.originCount,
-    ...(session.provider === 'steel'
-      ? {
-          steel_profile_id: session.profileId,
-          steel_profile_source: session.profileSource,
-        }
-      : {}),
-  };
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -136,16 +77,6 @@ export function buildBrowserSessionMetadata(
  * a non-empty Home baseline. Until then it is a new browser and follows the
  * normal init contract: provider profile, saved realm credentials, full metadata.
  */
-function logicalHasPrivateState(session: {
-  logicalOwnerKey: string | null;
-  checkpointRef: string | null;
-  baselineCheckpointRef: string | null;
-}): boolean {
-  return (
-    session.logicalOwnerKey !== null &&
-    (session.checkpointRef !== null || session.baselineCheckpointRef !== EMPTY_BROWSER_BASELINE)
-  );
-}
 
 export async function prepareSessionCredentials(
   sessionId: string,
@@ -417,7 +348,6 @@ export async function listFiles(sessionId: string) {
 
 export async function downloadFile(sessionId: string, filePath: string, userId?: string) {
   await requireSessionOwner(sessionId, userId);
-  validateSessionFilePath(filePath);
   const content = await readSessionFile(sessionId, filePath);
   const filename = filePath.split('/').pop();
   return {
