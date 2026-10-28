@@ -13,10 +13,6 @@ import {
   type ClaudeCodeCredentialResult,
 } from './claudeCredentials';
 import { isAnthropicApiKeyOnCooldown } from './computeCredentials';
-import {
-  fetchGptCodeCredentialsWithMeta,
-  type GptCodeCredentialEnvelopeResult,
-} from './gptCredentials';
 import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './codeAgentPrompt';
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
@@ -38,6 +34,7 @@ import {
   releaseSandboxAfterFailedStart,
 } from './e2bCodeSessionSandbox';
 import { type CodeSessionRow } from './codeSessions/store';
+import { resolveCodexSpawnAuth } from './codeSessions/usageLimit';
 import type { ProjectWorkspace } from './projects/types';
 import { restoreSandboxProject } from './projects/workspace';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
@@ -53,8 +50,6 @@ import {
   resolveClaudeCodeAuthEnvs,
   resolveClaudeCodeSandboxApiKey,
   resolveClaudeCodeTokenSource,
-  resolveCodexAzureFunding,
-  resolveCodexCodeAuthEnvs,
   shouldEnableClaudeCodeFastMode,
   shouldIgnoreAnthropicApiKeyCooldownForSandbox,
   shouldInjectClaudeCodeFastModeProxy,
@@ -532,12 +527,14 @@ export async function createCodexCodeSession(
           ...promptFlagsForUser(userId),
         });
 
-  const credentialMeta: GptCodeCredentialEnvelopeResult | null =
-    await fetchGptCodeCredentialsWithMeta(userId);
-  // User OAuth first; the funded fallback is our Azure Codex deployment (the
-  // OpenAI GPT_API_KEY is not funded). Mirrors the Claude Code path.
-  const azureFunding = resolveCodexAzureFunding();
-  const authEnvs = resolveCodexCodeAuthEnvs(credentialMeta, azureFunding);
+  // User OAuth → shared pool → our funded Azure Codex deployment unless it is
+  // backed off (the OpenAI GPT_API_KEY is not funded). Mirrors the Claude Code path.
+  const {
+    credentialMeta,
+    azureFunding,
+    envs: authEnvs,
+    servedBy,
+  } = await resolveCodexSpawnAuth(userId);
 
   const envs: Record<string, string> = {
     CODEX_GOAL: goal,
@@ -684,7 +681,8 @@ export async function createCodexCodeSession(
       streamUrl: wsUrl,
       goal,
       status: 'ACTIVE',
-      claudeTokenSource: credentialMeta?.source ?? null,
+      // What serves the run: 'user' | 'pool' login, or 'azure' (the funded deployment alone).
+      claudeTokenSource: servedBy,
       claudeTokenIntegrationId:
         credentialMeta?.integrationId ?? credentialMeta?.poolTokenId ?? null,
       ...codeSessionTaskFields(codeSession, 'codex'),

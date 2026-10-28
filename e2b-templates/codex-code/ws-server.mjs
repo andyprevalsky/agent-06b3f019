@@ -69,10 +69,15 @@ let eventBuffer = [];
 let exitCode = null;
 let processExited = false;
 let stdoutLineBuffer = "";
-// Set when a Codex turn proves the ChatGPT OAuth credential unusable. Drives the
-// runtime fallback to the funded OpenAI API key (see the run-with-fallback block
-// below). A credential can be DB-valid yet revoked or over quota, so this only
-// surfaces mid-run — a null-credential fallback in the backend cannot catch it.
+// The first credential failure a typed Codex error classifies. Only an unusable
+// login (oauth_refresh_invalid: revoked, refresh failed) switches the run to the
+// funded Azure deployment in the sandbox (see the run-with-fallback block below).
+// A usage limit or out of credits (usage_limit_reached) is reported as a
+// structured usage_limit instead: the code-agent activity pauses the session and
+// the parent's retry rotates own login -> shared pool -> Azure (C15), so the
+// sandbox never starts an Azure continuation that the pause would throw away.
+// The sandbox cannot lease a shared pool login itself (the backend leases
+// credentials only at session create), so its own switch goes straight to Azure.
 let oauthFallbackReason = null;
 const clients = new Set();
 
@@ -158,6 +163,28 @@ function newestCodexRollout() {
   };
   walk(root, 0);
   return newest?.path ?? null;
+}
+
+/**
+ * The usage limit to report on a failed Codex turn, or null. A limit pauses the
+ * session (C15), so none is reported while an unusable-login switch is pending.
+ * Codex's own snapshot (rate limits, codexErrorInfo) wins; a typed error whose
+ * complete message reports plan or credit exhaustion is a limit without a reset.
+ * The ChatGPT snapshot is ignored once the funded Azure provider serves the run.
+ */
+function reportedUsageLimit(snapshot, error, message) {
+  if (oauthFallbackReason === "oauth_refresh_invalid" && !usingApiKey)
+    return null;
+  if (snapshot && !usingApiKey) return snapshot;
+  const info = error?.codexErrorInfo ?? error?.codex_error_info;
+  if (
+    info === "usageLimitExceeded" ||
+    info === "usage_limit_exceeded" ||
+    classifyOAuthFallbackReason(message) === "usage_limit_reached"
+  ) {
+    return { reached_type: null, resets_at: null };
+  }
+  return null;
 }
 
 function codexUsageLimit() {
@@ -277,7 +304,11 @@ function renderCodexJsonLine(line) {
   if (event.type === "turn.failed") {
     const message = event.error?.message || event.message || "unknown error";
     oauthFallbackReason ??= classifyOAuthFallbackReason(message);
-    const usageLimit = codexUsageLimit();
+    const usageLimit = reportedUsageLimit(
+      codexUsageLimit(),
+      event.error,
+      message,
+    );
     appendEvent({
       type: "error",
       raw_type: event.type,
@@ -291,7 +322,11 @@ function renderCodexJsonLine(line) {
     const message =
       event.message || event.error?.message || JSON.stringify(event);
     oauthFallbackReason ??= classifyOAuthFallbackReason(message);
-    const usageLimit = codexUsageLimit();
+    const usageLimit = reportedUsageLimit(
+      codexUsageLimit(),
+      event.error,
+      message,
+    );
     appendEvent({
       type: "error",
       raw_type: event.type,
@@ -1220,7 +1255,7 @@ class CodexAppServer {
           type: "error",
           message: p.turn.error?.message || "Codex turn failed",
           error: p.turn.error,
-          usage_limit: this.usageLimit(),
+          usage_limit: null,
         });
         return;
       }
@@ -1258,7 +1293,10 @@ class CodexAppServer {
           type: "error",
           message: p.turn.error?.message || "Codex turn failed",
           error: p.turn.error,
-          usage_limit: this.usageLimit(),
+          usage_limit: this.usageLimit(
+            p.turn.error,
+            p.turn.error?.message || "Codex turn failed",
+          ),
         });
       this.emit({
         ...common,
@@ -1377,10 +1415,14 @@ class CodexAppServer {
         type: "error",
         message: p.error?.message || p.message,
         error: p.error,
-        usage_limit: this.usageLimit(),
+        usage_limit: this.usageLimit(p.error, p.error?.message || p.message),
       });
   }
-  usageLimit() {
+  usageLimit(error, message) {
+    oauthFallbackReason ??= classifyOAuthFallbackReason(message || "");
+    return reportedUsageLimit(this.rateLimitSnapshot(), error, message);
+  }
+  rateLimitSnapshot() {
     const limits = this.rateLimits;
     if (!limits) return null;
     const windows = [limits.primary, limits.secondary].filter(Boolean);
@@ -1729,19 +1771,23 @@ async function runCodexAppServer() {
   let fallback = null;
   nativeCodex.recoverFailedTurn = (turn, error) => {
     const reason = classifyOAuthFallbackReason(error?.message || "");
-    if (fallback || usingApiKey || !FUNDED_PROVIDER || !reason) return false;
+    // A usage limit pauses the session instead (C15); see oauthFallbackReason.
+    if (fallback || usingApiKey || !FUNDED_PROVIDER) return false;
+    if (reason !== "oauth_refresh_invalid") return false;
+    if ((oauthFallbackReason ?? reason) !== "oauth_refresh_invalid")
+      return false;
     const failed = nativeCodex;
     const turnStart = failed.turnStarts.get(turn.id) ?? failed.pendingTurnStart;
     const threadId = failed.threadId;
     if (!turnStart || !threadId) return false;
     oauthFallbackReason = reason;
     fallback = (async () => {
-      log("info", "Codex OAuth unavailable; retrying on the Azure provider", {
+      log("info", "Codex OAuth unusable; continuing on the Azure provider", {
         reason,
       });
       appendOutput(
         "stdout",
-        "[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n",
+        "[Codex] ChatGPT OAuth unusable — continuing on the funded Azure OpenAI deployment\n",
       );
       appendEvent({
         type: "auth_fallback",
@@ -1819,14 +1865,20 @@ if (CODEX_TRANSPORT === "app-server") {
   // Runtime fallback: the ChatGPT OAuth token became unusable mid-run. Retry
   // ONCE on the funded Azure OpenAI provider (no ChatGPT proxy). Mirrors the
   // Rose compute-token→funded fallback.
-  if (code !== 0 && !usingApiKey && FUNDED_PROVIDER && oauthFallbackReason) {
+  // Only an unusable login switches here; a usage limit already paused the run (C15).
+  if (
+    code !== 0 &&
+    !usingApiKey &&
+    FUNDED_PROVIDER &&
+    oauthFallbackReason === "oauth_refresh_invalid"
+  ) {
     const fallbackReason = oauthFallbackReason;
-    log("info", "Codex OAuth unavailable; retrying on the Azure provider", {
+    log("info", "Codex OAuth unusable; continuing on the Azure provider", {
       reason: fallbackReason,
     });
     appendOutput(
       "stdout",
-      "[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n",
+      "[Codex] ChatGPT OAuth unusable — continuing on the funded Azure OpenAI deployment\n",
     );
     appendEvent({
       type: "auth_fallback",

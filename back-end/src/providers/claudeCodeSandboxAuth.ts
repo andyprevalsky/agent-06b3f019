@@ -399,6 +399,9 @@ function codexAzureEnvs(funding: CodexAzureFunding): Record<string, string> {
  *   2. No OAuth credential → the Azure deployment alone.
  *   3. Otherwise throw — nothing usable.
  *
+ * `funding` is null when the deployment is not configured OR backed off
+ * (resolveCodexSpawnAuth in codeSessions/usageLimit.ts reads the cooldown).
+ *
  * The Azure key goes only to E2B sandboxes (the same exposure the funded OpenAI
  * key had); local-device sessions never call this.
  */
@@ -417,7 +420,8 @@ export function resolveCodexCodeAuthEnvs(
   // [REDACTED] route returns `error.message` verbatim to the API client.
   const detail =
     'No GPT Code credentials available: no synced user credentials, no available pool tokens, ' +
-    `and no Azure Codex deployment (AZURE_FOUNDRY_* region for ${CODEX_AZURE_DEFAULT_HOST} not configured)`;
+    `and no usable Azure Codex deployment (AZURE_FOUNDRY_* region for ${CODEX_AZURE_DEFAULT_HOST} ` +
+    'not configured, or codex_funded_cooldown live)';
   log.error('Codex Code credential resolution failed', { detail });
   throw new CodeAgentCredentialError(CODE_AGENT_CREDENTIALS_UNAVAILABLE, detail);
 }

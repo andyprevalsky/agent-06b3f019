@@ -1834,7 +1834,7 @@ CLAUDE_CODE_CREDENTIAL_SKIP_REASON = (
     "Claude Code credentials unavailable: no synced Claude token and no available pool token"
 )
 CODEX_HARNESS_CREDENTIAL_SKIP_REASON = (
-    "Codex harness credentials unavailable: no synced GPT compute token and no funded OpenAI API key"
+    "Codex harness credentials unavailable: no synced GPT compute token and no funded Azure Codex deployment"
 )
 
 
@@ -16768,7 +16768,13 @@ async def _check_compute_code_credentials(base_url: str) -> bool:
 
 
 async def _check_codex_harness_credentials(base_url: str) -> bool:
-    """Codex harness requires a usable GPT compute token or funded OpenAI API key."""
+    """Codex harness requires a usable GPT compute token or the funded Azure Codex deployment.
+
+    The funded Codex path is the backend's Azure deployment; GPT_API_KEY never
+    reaches a Codex sandbox. The backend's code credential-availability plan
+    (own login, shared login, then Azure unless backed off) is what a Codex
+    session create leases, so it decides the funded fallback.
+    """
     try:
         headers = await _api_headers()
         async with httpx.AsyncClient() as client:
@@ -16781,7 +16787,15 @@ async def _check_codex_harness_credentials(base_url: str) -> bool:
                 data = resp.json()
                 if bool(data.get("accessToken")):
                     return True
-        return bool(os.environ.get("GPT_API_KEY", "").strip())
+            if not API_KEY:
+                return False
+            plan = await client.get(
+                f"{base_url}/api/claude-code-session/credential-availability",
+                headers={"X-API-Key": API_KEY},
+                params={"user_id": _current_benchmark_user_id()},
+                timeout=10.0,
+            )
+            return plan.status_code == 200 and plan.json().get("codex") is True
     except Exception:
         return False
 

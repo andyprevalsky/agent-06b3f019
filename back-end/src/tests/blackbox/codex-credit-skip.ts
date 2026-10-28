@@ -115,8 +115,8 @@ const CODEX_CREATE_UNAVAILABLE_BODY =
 
 /**
  * Create-time 500 with a generic "credentials unavailable" body is a hard
- * failure when a credential path still exists. When the funded GPT key is
- * already on its out-of-credits/bad-key cooldown and create still cannot
+ * failure when a credential path still exists. When the funded Azure Codex
+ * deployment is already backed off (codex_funded_cooldown) and create still cannot
  * start a session, every Codex path is unusable — same deploy-approved SKIP
  * as mid-run exhaustion. Observed 2026-10-02: leftover cooldown from a prior
  * coverage process plus no synced OAuth/pool token hard-failed Step 4a.
@@ -128,7 +128,7 @@ export function codexCreateUnavailableSkipReason(
   const exhaustion = detectCodexCreditExhaustion(createBody, []);
   if (exhaustion) return exhaustion;
   if (onCooldown && createBody.includes(CODEX_CREATE_UNAVAILABLE_BODY)) {
-    return 'funded GPT key on out-of-credits/bad-key cooldown and session create reported credentials unavailable';
+    return 'funded Azure Codex deployment backed off and session create reported credentials unavailable';
   }
   return null;
 }
