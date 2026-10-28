@@ -44,12 +44,24 @@ export async function findSessionById(taskId: string) {
   });
 }
 
-export async function findAgentDemoCache(agentId: string): Promise<boolean> {
+/** Fast Mode button + query-box speed for an agent (speed falls back to its tree root's). */
+export async function findAgentCodexSpeedSource(
+  agentId: string
+): Promise<{ fastModeEnabled: boolean; speed: string | null }> {
   const agent = await prisma.agent.findUnique({
     where: { id: agentId },
-    select: { fastModeCacheEnabled: true },
+    select: { fastModeCacheEnabled: true, fastModeSpeed: true, busId: true },
   });
-  return agent?.fastModeCacheEnabled ?? false;
+  if (agent === null) return { fastModeEnabled: true, speed: null };
+  let speed = agent.fastModeSpeed;
+  if (speed === null && agent.busId !== null && agent.busId !== agentId) {
+    const root = await prisma.agent.findUnique({
+      where: { id: agent.busId },
+      select: { fastModeSpeed: true },
+    });
+    speed = root?.fastModeSpeed ?? null;
+  }
+  return { fastModeEnabled: agent.fastModeCacheEnabled, speed };
 }
 
 /** Recover the selected credential's owner, including pooled credentials. */

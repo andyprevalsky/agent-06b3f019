@@ -434,7 +434,6 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         PORT: String(port),
         GITHUB_REPO_URL: "",
         ROSE_PROJECT_WORKDIR: "",
-        CODEX_FAST_MODE_PROXY_URL: "",
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -745,7 +744,6 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         PORT: String(port),
         GITHUB_REPO_URL: "",
         ROSE_PROJECT_WORKDIR: "",
-        CODEX_FAST_MODE_PROXY_URL: "",
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -804,7 +802,11 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     const fallback = seen.find((e) => e.type === "auth_fallback");
     assert.equal(fallback?.to, "openai_api_key");
     assert.equal(fallback?.funded_provider, "azure");
-    assert.equal(fallback?.provider, "codex", "the envelope provider stays codex for the worker");
+    assert.equal(
+      fallback?.provider,
+      "codex",
+      "the envelope provider stays codex for the worker",
+    );
     assert.equal(fallback?.reason, "usage_limit_reached");
     const calls = readFileSync(journal, "utf8")
       .trim()
@@ -842,5 +844,94 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     child.kill("SIGTERM");
     await new Promise((resolve) => child.once("close", resolve));
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// S30 (2026-10-28): the query box's speed reaches Codex as its native service
+// tier. Fast → priority ("Fast"), Ultrafast → ultrafast, Normal → standard. A
+// model without ultrafast runs Ultrafast on the catalog model that offers it.
+const SPEED_CATALOG = [
+  {
+    id: "gpt-5.6-terra",
+    model: "gpt-5.6-terra",
+    supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
+    serviceTiers: [{ id: "priority" }],
+  },
+  {
+    id: "gpt-6.1-sol",
+    model: "gpt-6.1-sol",
+    isDefault: true,
+    supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
+    serviceTiers: [{ id: "priority" }, { id: "ultrafast" }],
+  },
+];
+test("the requested query-box speed starts Codex on its native service tier", async () => {
+  const cases = [
+    { speed: "standard", model: "gpt-5.6-terra", tier: null },
+    { speed: "priority", model: "gpt-5.6-terra", tier: "priority" },
+    { speed: "ultrafast", model: "gpt-6.1-sol", tier: "ultrafast" },
+  ];
+  for (const expected of cases) {
+    const { native, calls } = fixture({
+      settings: { model: "gpt-5.6-terra", effort: null, speed: expected.speed },
+      models: SPEED_CATALOG,
+    });
+    await native.initialize(null, "hello");
+    const startup = calls.find((c) => c.method === "thread/start");
+    assert.equal(
+      startup.params.model,
+      expected.model,
+      `${expected.speed}: model`,
+    );
+    assert.equal(
+      startup.params.serviceTier,
+      expected.tier,
+      `${expected.speed}: tier`,
+    );
+    const turn = calls.find((c) => c.method === "turn/start");
+    assert.equal(
+      turn.params.serviceTier,
+      expected.tier,
+      `${expected.speed}: first turn tier`,
+    );
+  }
+});
+test("an unavailable requested tier degrades to the next slower tier, never faster", async () => {
+  const onlyPriority = SPEED_CATALOG.slice(0, 1).map((m) => ({
+    ...m,
+    isDefault: true,
+  }));
+  const ultra = fixture({
+    settings: { model: "gpt-5.6-terra", effort: null, speed: "ultrafast" },
+    models: onlyPriority,
+  });
+  await ultra.native.initialize(null, "hello");
+  assert.equal(
+    ultra.calls.find((c) => c.method === "thread/start").params.serviceTier,
+    "priority",
+  );
+  const noTiers = fixture({
+    settings: { model: "model", effort: null, speed: "priority" },
+    models: [{ id: "model", model: "model", serviceTiers: [] }],
+  });
+  await noTiers.native.initialize(null, "hello");
+  assert.equal(
+    noTiers.calls.find((c) => c.method === "thread/start").params.serviceTier,
+    null,
+  );
+});
+test("Codex never routes through a Rose proxy or the demo cache", () => {
+  for (const forbidden of [
+    "chatgpt_base_url",
+    "CODEX_FAST_MODE_PROXY_URL",
+    "model_providers.fastmode",
+    "codex-proxy",
+    "fast_cache_proxy",
+  ]) {
+    assert.equal(
+      source.includes(forbidden),
+      false,
+      `ws-server must not contain ${forbidden}: Codex talks to its provider directly`,
+    );
   }
 });

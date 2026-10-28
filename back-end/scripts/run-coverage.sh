@@ -382,7 +382,6 @@ export CONTRACT_TEST_SKIP_DOMAINS="$(
 # calls unless the caller explicitly opts into a known-live tunnel.
 if [[ "${BACKEND_COVERAGE_USE_FAST_MODE_PROXY:-0}" != "1" ]]; then
   export FAST_MODE_ANTHROPIC_PROXY_URL=""
-  export FAST_MODE_CODEX_PROXY_URL=""
 fi
 
 # Pin the blackbox artifact dir so failures leave a known log path. Without this

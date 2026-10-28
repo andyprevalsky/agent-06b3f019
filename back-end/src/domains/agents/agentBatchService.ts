@@ -96,6 +96,7 @@ function buildBatchItem(
     ...(body.fast_mode_cache_enabled !== undefined
       ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
       : {}),
+    ...(body.fast_mode_speed !== undefined ? { fastModeSpeed: body.fast_mode_speed } : {}),
     ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
     ...(body.memory_enabled !== undefined ? { memoryEnabled: body.memory_enabled } : {}),
     ...(typeof body.project_id === 'string' ? { projectId: body.project_id } : {}),

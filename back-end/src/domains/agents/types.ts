@@ -173,6 +173,9 @@ const createAgentBaseSchema = z.object({
   // DEMO cache: record/replay third-party responses for clean demos.
   // Own first-class flag — NOT a context gate. Default off (no read, no write).
   fast_mode_cache_enabled: z.boolean().optional(),
+  // Query-box speed while Fast Mode is on. Code agents map it to their native
+  // speed (Codex: fast → priority tier, ultra → ultrafast tier).
+  fast_mode_speed: z.enum(['fast', 'ultra']).optional(),
   // Planner memory: retrieve compressed past trajectories for similar goals and
   // fork a get_memories tool call into the planner context. Own first-class
   // flag (not a context gate). Default off; sub-agents inherit their parent's.
