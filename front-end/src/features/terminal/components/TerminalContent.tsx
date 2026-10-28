@@ -56,7 +56,7 @@ import {
 import { useAppData } from '@/hooks/appDataContext';
 import { IS_DEV_MODE } from '@/features/terminal-component-group/config';
 import { isAdminOperator } from '@/lib/adminAccounts';
-import { isRoseDesktopSession, roseDesktopAccountId } from '@/lib/roseDesktop';
+import { isRoseDesktopSession, roseDesktopAccountId } from '@/lib/roseDesktopSession';
 import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
 import { RoseThemeProvider } from '@/features/rose-theme';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';

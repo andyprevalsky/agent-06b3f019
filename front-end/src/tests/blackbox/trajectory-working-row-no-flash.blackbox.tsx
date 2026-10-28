@@ -23,7 +23,7 @@ import {
 } from '@/features/terminal-component-group/components/waitForPhrase';
 import { markdownPreview } from '@/features/terminal-component-group/components/browser-agent-chip/resultPreview';
 import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
-import { isRoseDesktopSession } from '@/lib/roseDesktop';
+import { isRoseDesktopSession } from '@/lib/roseDesktopSession';
 import type { Message } from '@/lib/api';
 import { msg, WithAgent } from './code-agent-steering.fixtures';
 import { renderWithProviders } from './test-wrapper';
