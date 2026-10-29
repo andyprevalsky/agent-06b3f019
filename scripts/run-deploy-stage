@@ -14,6 +14,7 @@ usage() {
     echo "       scripts/run-deploy-stage --summary" >&2
     echo "       scripts/run-deploy-stage --finish" >&2
     echo "       scripts/run-deploy-stage --history" >&2
+    echo "       scripts/run-deploy-stage --wait --since EPOCH [--timeout S] [--stall-seconds S] STAGE [STAGE ...]" >&2
 }
 
 if [ "${1:-}" = "--start" ]; then
@@ -49,6 +50,13 @@ if [ "${1:-}" = "--history" ]; then
     [ "$#" -eq 1 ] || { usage; exit 2; }
     python3 "$TIMING_SCRIPT" history --run-root "$RUN_ROOT"
     exit $?
+fi
+
+if [ "${1:-}" = "--wait" ]; then
+    # Event wake: block until the named stages write their finish receipts.
+    shift
+    [ "$#" -gt 0 ] || { usage; exit 2; }
+    exec python3 "$ROOT_DIR/scripts/deploy_stage_wait.py" --run-root "$RUN_ROOT" "$@"
 fi
 
 if [ ! -f "$CURRENT_RUN_FILE" ]; then

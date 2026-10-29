@@ -13,15 +13,9 @@ import {
  */
 
 import type { Browser } from 'playwright';
-import { createLogger } from '../../providers/logger';
 import {
   injectUserData,
-  uploadSessionFile,
-  listFiles as listProviderFiles,
-  readSessionFile,
   resizeSessionViewport,
-  captureScreenshot,
-  pressSessionKeys,
   type BrowserViewport,
 } from '../../providers/browser';
 import {
@@ -35,8 +29,6 @@ import { getAuthOptions } from '../../providers/authOptions';
 import * as repo from './repo';
 import { storedBrowserProvider } from '../../providers/browser/types';
 import { buildBrowserSessionMetadata } from './service.metadata';
-import { validateBrowserKeySymbols } from './service.browser-input';
-import { validateSessionFilePath } from './service.file-path';
 import {
   injectLocalStorage,
   SessionNoUserError,
@@ -60,14 +52,6 @@ export { injectLocalStorage, SessionNotFoundError, SessionNoUserError };
 export { InvalidSessionFilePathError } from './service.file-path';
 export { CdpInjectionError, SessionNoWsUrlError } from './types';
 export { buildBrowserSessionMetadata } from './service.metadata';
-
-const log = createLogger('BrowserSession');
-
-async function requireSessionOwner(sessionId: string, userId?: string): Promise<void> {
-  if (userId === undefined) return;
-  const session = await repo.findSessionBySessionId(sessionId);
-  if (session === null || session.context.userId !== userId) throw new SessionNotFoundError();
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -255,64 +239,11 @@ export async function resizeBrowserViewport(
   return resizeSessionViewport(session.sessionId, viewport, provider);
 }
 
-// ---------------------------------------------------------------------------
-// Get session by Steel ID
-// ---------------------------------------------------------------------------
-
-/* c8 ignore start -- getSessionById, uploadFile, listFiles require Steel SDK */
-export { getSession as getSessionById } from '../../providers/browser';
-
-// ---------------------------------------------------------------------------
-// Upload file
-// ---------------------------------------------------------------------------
-
-export async function uploadFile(
-  sessionId: string,
-  buffer: Buffer,
-  originalname: string,
-  mimetype: string,
-  options: { directory?: string } = {}
-) {
-  log.info('Uploading file to session', {
-    sessionId,
-    originalname,
-    sizeBytes: buffer.length,
-    directory: options.directory,
-  });
-
-  const result = await uploadSessionFile(sessionId, buffer, originalname, mimetype, options);
-
-  return { path: result.path, size: result.size, filename: originalname };
-}
-
-// ---------------------------------------------------------------------------
-// List files
-// ---------------------------------------------------------------------------
-
-export async function listFiles(sessionId: string) {
-  log.info('Listing files for session', { sessionId });
-
-  const files = await listProviderFiles(sessionId);
-
-  return { session_id: sessionId, files, count: files.length };
-}
-
-export async function downloadFile(sessionId: string, filePath: string, userId?: string) {
-  await requireSessionOwner(sessionId, userId);
-  validateSessionFilePath(filePath);
-  const content = await readSessionFile(sessionId, filePath);
-  const name = filePath.split('/').pop();
-  return { content, filename: name !== undefined && name !== '' ? name : 'download' };
-}
-
-export async function takeScreenshot(sessionId: string, userId?: string) {
-  await requireSessionOwner(sessionId, userId);
-  return captureScreenshot(sessionId);
-}
-
-export async function pressKeys(sessionId: string, keys: string[], userId: string) {
-  await requireSessionOwner(sessionId, userId);
-  validateBrowserKeySymbols(keys);
-  return pressSessionKeys(sessionId, keys);
-}
-/* c8 ignore stop */
+export {
+  getSessionById,
+  uploadFile,
+  listFiles,
+  downloadFile,
+  takeScreenshot,
+  pressKeys,
+} from './service.session-io';

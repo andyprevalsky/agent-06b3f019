@@ -411,7 +411,7 @@ if $CHECK_ONLY; then
     # Cloud dev boxes have no Conductor-provided CONDUCTOR_WORKSPACE_PATH; their
     # primary checkout is identified by the cloud-build.sh .cloud-env rooted at
     # itself. A linked worktree is never primary, even with a copied .cloud-env.
-    cloud_root="$(sed -n 's/^export CONDUCTOR_ROOT_PATH=//p' "$WORKTREE/.cloud-env" 2>/dev/null | tail -n 1)"
+    cloud_root="$( (sed -n 's/^export CONDUCTOR_ROOT_PATH=//p' "$WORKTREE/.cloud-env" 2>/dev/null || true) | tail -n 1)"
     if grep -qx '# rose-cloud-env' "$WORKTREE/.cloud-env" 2>/dev/null &&
       [ -n "$cloud_root" ] && [ -d "$cloud_root" ] &&
       [ "$(canonical_dir "$cloud_root")" = "$WORKTREE" ] &&
@@ -427,6 +427,14 @@ if $CHECK_ONLY; then
   . "$CONFIG"
   [ "${ROSE_DEPLOY_WORKTREE_PATH:-}" = "$WORKTREE" ] || {
     echo "❌ Deploy worktree config belongs to ${ROSE_DEPLOY_WORKTREE_PATH:-unknown}, not $WORKTREE." >&2
+    exit 1
+  }
+  # The owned ten-port range must not be exposed to kernel ephemeral autobind:
+  # an outbound connection that takes one of its ports makes a later listen()
+  # fail with EADDRINUSE (backend coverage shard 1 lost 56022 on 2026-10-28).
+  # New claims avoid the live window; an older claim must be reserved by the host.
+  python3 "$SCRIPT_DIR/deploy-worktree-port.py" check --base-port "$CONDUCTOR_PORT" || {
+    echo "❌ Deploy worktree base port $CONDUCTOR_PORT is exposed to kernel ephemeral autobind; see the remedy above." >&2
     exit 1
   }
   check_env_files "$WORKTREE" "$ROSE_DEPLOY_SOURCE_WORKSPACE"

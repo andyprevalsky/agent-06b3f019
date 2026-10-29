@@ -1394,12 +1394,117 @@ def _assert_publication_process_retired(pid, birth):
     except ProcessLookupError:
         return {"pid": pid, "birth": birth, "state": "absent"}
     observed = subprocess.run(["ps", "-p", str(pid), "-o", "stat=,ppid=,pgid="], capture_output=True, text=True)
+    if observed.returncode != 0 or not observed.stdout.strip():
+        # Native probes are separate observations: the owned process may have
+        # been reaped since kill(0). Only confirmed absence permits retirement.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return {"pid": pid, "birth": birth, "state": "absent"}
     assert observed.returncode == 0 and observed.stdout.strip(), f"unknown publication state for {pid}"
     identity = subprocess.run([sys.executable, str(ROOT / "scripts/process-identity.py"), str(pid)], capture_output=True, text=True)
+    if identity.returncode != 0 or not identity.stdout.strip():
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return {"pid": pid, "birth": birth, "state": "absent"}
     assert identity.returncode == 0 and identity.stdout.strip() == birth, f"publication birth changed or unreadable for {pid}"
     assert observed.stdout.strip().startswith("Z"), f"owned publication process {pid} remains executing: {observed.stdout.strip()}"
     state, ppid, pgid = observed.stdout.split()
     return {"pid": pid, "birth": birth, "state": state, "ppid": int(ppid), "pgid": int(pgid)}
+
+
+@pytest.mark.parametrize("boundary", ["ps", "identity"])
+def test_campaign_inventory_publication_retirement_rechecks_reaped_process(monkeypatch, boundary):
+    """A real child can disappear between separate native observations."""
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    native_run = subprocess.run
+    identity = ROOT / "scripts/process-identity.py"
+    try:
+        birth = subprocess.check_output([sys.executable, str(identity), str(child.pid)], text=True).strip()
+        reached = []
+        def reap_at_boundary(command, *args, **kwargs):
+            target = command[0] == "ps" if boundary == "ps" else str(identity) in command
+            if target and not reached:
+                reached.append(boundary)
+                child.stdin.close()
+                child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+            return native_run(command, *args, **kwargs)
+        monkeypatch.setattr(subprocess, "run", reap_at_boundary)
+        result = _assert_publication_process_retired(child.pid, birth)
+        assert reached == [boundary]
+        assert result == {"pid": child.pid, "birth": birth, "state": "absent"}
+    finally:
+        if child.stdin is not None and not child.stdin.closed:
+            child.stdin.close()
+        child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+
+
+@pytest.mark.parametrize("boundary", ["ps", "identity"])
+def test_campaign_inventory_publication_retirement_rejects_unreadable_live_process(monkeypatch, boundary):
+    """Observer failure must never turn a live owned process into retirement."""
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    native_run = subprocess.run
+    identity = ROOT / "scripts/process-identity.py"
+    try:
+        birth = subprocess.check_output([sys.executable, str(identity), str(child.pid)], text=True).strip()
+        def unreadable_at_boundary(command, *args, **kwargs):
+            target = command[0] == "ps" if boundary == "ps" else str(identity) in command
+            if target:
+                return subprocess.CompletedProcess(command, 1, "", "")
+            return native_run(command, *args, **kwargs)
+        monkeypatch.setattr(subprocess, "run", unreadable_at_boundary)
+        message = "unknown publication state" if boundary == "ps" else "birth changed or unreadable"
+        with pytest.raises(AssertionError, match=message):
+            _assert_publication_process_retired(child.pid, birth)
+        assert child.poll() is None
+    finally:
+        child.stdin.close()
+        child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+
+
+def test_campaign_inventory_publication_retirement_rejects_changed_live_birth():
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    try:
+        identity = ROOT / "scripts/process-identity.py"
+        birth = subprocess.check_output([sys.executable, str(identity), str(child.pid)], text=True).strip()
+        with pytest.raises(AssertionError, match="birth changed or unreadable"):
+            _assert_publication_process_retired(child.pid, birth + "-foreign")
+        assert child.poll() is None
+    finally:
+        child.stdin.close()
+        child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+
+
+@pytest.mark.parametrize("boundary", ["ps", "identity"])
+def test_campaign_inventory_publication_retirement_rejects_permission_denied_recheck(monkeypatch, boundary):
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    native_run, native_kill = subprocess.run, os.kill
+    identity = ROOT / "scripts/process-identity.py"
+    try:
+        birth = subprocess.check_output([sys.executable, str(identity), str(child.pid)], text=True).strip()
+        observed = []
+        def unreadable_at_boundary(command, *args, **kwargs):
+            target = command[0] == "ps" if boundary == "ps" else str(identity) in command
+            if target:
+                observed.append(boundary)
+                return subprocess.CompletedProcess(command, 1, "", "")
+            return native_run(command, *args, **kwargs)
+        def denied_recheck(pid, sig):
+            if pid == child.pid and sig == 0 and observed:
+                raise PermissionError("controlled unreadable owner")
+            return native_kill(pid, sig)
+        monkeypatch.setattr(subprocess, "run", unreadable_at_boundary)
+        monkeypatch.setattr(os, "kill", denied_recheck)
+        # Both an explicit unknown observation (old helper) and permission
+        # denial (recheck) are failures; neither may report retirement.
+        with pytest.raises((AssertionError, PermissionError)):
+            _assert_publication_process_retired(child.pid, birth)
+        assert observed == [boundary]
+        assert child.poll() is None
+    finally:
+        child.stdin.close()
+        child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
 
 
 def test_campaign_inventory_publication_retirement_distinguishes_owned_zombie():

@@ -145,6 +145,26 @@ class DescendStepLogTest(unittest.TestCase):
         self.assertTrue(second["run_terminal"])
         self.assertFalse((self.state_root / "run-a" / "timing").exists())
 
+    def test_step_detail_records_counts_and_rejects_unsafe_values(self) -> None:
+        common = ("--run-id", "run-d")
+        self.run_logger("start", *common, "--slice", "full", "--step", "RUN_SLICE",
+                        "--epoch", "1", "--task-count", "600", "--at", "2026-07-22T00:00:00Z")
+        rejected = self.run_logger("finish", *common, "--detail", "secret=x",
+                                   "--at", "2026-07-22T00:10:00Z", check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.run_logger(
+            "finish", *common, "--run-terminal", "--status", "failed",
+            "--detail", "infra_failed=30", "--detail", "scheduled_total=600",
+            "--detail", "failed_count=41", "--at", "2026-07-22T00:10:00Z",
+        )
+        finish, outcome = (r for r in self.records() if r["event"] in {"stage-finish", "outcome"})
+        for record in (finish, outcome):
+            self.assertEqual(
+                record["detail"],
+                {"schema_version": 1, "infra_failed": 30, "scheduled_total": 600, "failed_count": 41},
+            )
+        self.assertNotIn("detail", self.records()[0])
+
     def test_active_lane_cannot_be_restarted_or_closed_backwards(self) -> None:
         start = (
             "start",

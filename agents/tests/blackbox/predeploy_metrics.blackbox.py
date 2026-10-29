@@ -534,6 +534,15 @@ def test_deploy_summary_separates_parallel_overlap_from_gaps() -> None:
     assert "Unrecorded/gap time: 100.0s" in rendered
 
 
+def test_resource_exhaustion_receipt_policy() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    completed = subprocess.run(
+        [sys.executable, str(repo_root / "scripts/tests/predeploy-receipts.test.py")],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 async def run_all_tests():
     print("predeploy-metrics blackbox tests:")
     result = BlackboxResult()
@@ -573,6 +582,7 @@ async def run_all_tests():
         "live_log_streaming",
         test_logged_command_streams_output_before_child_exit,
     )
+    result.record("resource_exhaustion_receipts", test_resource_exhaustion_receipt_policy)
     teardown_mock()
     return result.all_passed
 

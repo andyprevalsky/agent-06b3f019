@@ -1,6 +1,6 @@
 import { createLogger } from '../logger';
 import { releaseSteelRemoteSession } from '../steel/session';
-import { releaseKernelRemoteSession } from './kernel';
+import { releaseKernelRemoteSession } from './kernelSessionDelete';
 import { releaseBrowserUseRemoteSession } from './browserUse';
 import { releaseTilionRemoteSession } from './tilion';
 import type { BrowserProviderName } from './types';

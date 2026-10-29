@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+REVIEW_PROVIDERS = {"coderabbit", "claude", "codex", "human"}
 VALID_EVENTS = {
     "deploy": {
         "approval-request": {
@@ -52,9 +53,15 @@ VALID_EVENTS = {
             "agentcard",
         },
         "outcome": {"completed", "blocked"},
+        # Review providers: request when the review is asked for, arrival when
+        # its verdict lands; their difference is review wait, not agent time.
+        "review-request": REVIEW_PROVIDERS,
+        "review-arrival": REVIEW_PROVIDERS,
     },
     "rca": {
         "stage": {"evidence-trace", "reproduce-diagnose", "verify-handoff"},
+        # One event per local repro run; detail repro_attempt=N counts them.
+        "repro-attempt": {"reproduced", "not-reproduced", "fix-verified", "fix-failed"},
         "outcome": {"fixed", "diagnosis-ready", "blocked"},
     },
     "descend": {
@@ -132,6 +139,7 @@ def factory_event_payload(
     *,
     recorded_epoch: float | None = None,
     metadata: dict[str, object] | None = None,
+    detail: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the canonical factory-event envelope with optional dimensions."""
     from factory_metadata import load_metadata, normalize_metadata
@@ -158,6 +166,8 @@ def factory_event_payload(
         if key in payload:
             raise ValueError(f"metadata cannot override canonical field {key!r}")
         payload[key] = metadata_value
+    if detail:
+        payload["detail"] = detail
     return payload
 
 
@@ -170,10 +180,18 @@ def parse_args() -> argparse.Namespace:
         "--metadata-file",
         help="Allowlisted evidence-backed JSON; defaults to FACTORY_METADATA_FILE",
     )
+    parser.add_argument(
+        "--detail",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Allowlisted outcome detail (see factory_detail.EVENT_DETAIL_FIELDS); repeatable",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
+    from factory_detail import parse_event_detail
     from factory_metadata import load_metadata
 
     args = parse_args()
@@ -183,6 +201,7 @@ def main() -> int:
             args.event,
             args.value,
             metadata={"telemetry": load_metadata(args.metadata_file)},
+            detail=parse_event_detail(args.detail),
         )
     except ValueError as error:
         raise SystemExit(str(error)) from error

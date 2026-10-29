@@ -6,6 +6,7 @@ import importlib.util
 import json
 import io
 import runpy
+import threading
 from types import SimpleNamespace
 import sys
 import unittest
@@ -877,6 +878,120 @@ class WorkerPoolCutoverTests(unittest.TestCase):
         self.assertFalse(ledger.released)
         native.fail_health_after = None
         self.assertEqual(self.run_job(ledger, native)["stage"], "SUCCEEDED")
+
+    def managed_bank_native(self):
+        """Eight released spares replacing an eight-Machine managed bank."""
+        native = Native(managed=True)
+        template = native.machines.pop()
+        for index in range(8):
+            old = copy.deepcopy(template)
+            old["id"] = f"{100 + index:014x}"
+            old["instance_id"] = f"old-version-{index}"
+            native.machines.append(old)
+        return native
+
+    def test_serving_health_loss_between_retirement_waves_retains_remaining_bank(self):
+        ledger, native = Ledger(), self.managed_bank_native()
+        retire, healthy = native.retire, native.healthy
+        lost_health = threading.Event()
+        completed = threading.Lock()
+
+        def record_retirement(expected, previous):
+            with completed:
+                result = retire(expected, previous)
+                if len(native.retired) >= 4:
+                    lost_health.set()
+                return result
+
+        native.retire = record_retirement
+        native.healthy = lambda machine_id: not lost_health.is_set() and healthy(machine_id)
+        failure = None
+        try:
+            self.run_job(ledger, native)
+        except Exception as error:
+            failure = error
+        first_wave = [f"{100 + index:014x}" for index in range(4)]
+        self.assertEqual(sorted(native.retired), first_wave)
+        self.assertIsInstance(failure, cutover.PoolCapacityPending)
+        self.assertRegex(str(failure), "remaining old workers")
+        self.assertEqual(ledger.job["stage"], "DRAINING")
+        self.assertFalse(ledger.released)
+
+    def test_bank_machines_are_prepared_and_retired_concurrently(self):
+        # Preparation admits eight peers; retirement admits four peers per
+        # health-gated wave. A serial controller cannot pass either barrier.
+        ledger, native = Ledger(), self.managed_bank_native()
+        prepare_barrier = threading.Barrier(8, timeout=5)
+        retire_barrier = threading.Barrier(4, timeout=5)
+        prepare, retire = native.prepare, native.retire
+
+        def concurrent_prepare(expected, previous):
+            prepare(expected, previous)
+            if ledger.job["stage"] == "PREPARING":
+                prepare_barrier.wait()
+
+        def concurrent_retire(expected, previous):
+            retire_barrier.wait()
+            return retire(expected, previous)
+
+        native.prepare, native.retire = concurrent_prepare, concurrent_retire
+        result = self.run_job(ledger, native)
+        self.assertEqual(result["stage"], "SUCCEEDED")
+        self.assertEqual(len(native.prepared), 8)
+        old_ids = [f"{100 + index:014x}" for index in range(8)]
+        self.assertEqual(sorted(native.retired), old_ids)
+        self.assertEqual([row["id"] for row in result["evidence"]["retiredMachines"]], old_ids)
+        self.assertEqual(sorted(ledger.released[0][1]), old_ids)
+
+    def test_concurrent_preparation_failure_completes_siblings_and_resumes_same_bank(self):
+        ledger, native = Ledger(), Native()
+        prepare, failed = native.prepare, []
+
+        def flaky_prepare(expected, previous):
+            if not failed and expected["id"] == ledger.job["candidateMachineIds"][3]:
+                failed.append(expected["id"])
+                raise RuntimeError("native response was lost after configuration")
+            prepare(expected, previous)
+
+        native.prepare = flaky_prepare
+        with self.assertRaisesRegex(RuntimeError, "response was lost"):
+            self.run_job(ledger, native)
+        self.assertEqual(ledger.job["stage"], "PREPARING")
+        reserved = ledger.job["candidateMachineIds"][:]
+        self.assertEqual(native.prepared, set(reserved) - set(failed))
+        result = self.run_job(ledger, native)
+        self.assertEqual(result["stage"], "SUCCEEDED")
+        self.assertEqual(result["candidateMachineIds"], reserved)
+        self.assertEqual(native.prepared, set(reserved))
+
+    def test_concurrent_retirement_failure_releases_nothing_and_hard_error_wins(self):
+        ledger, native = Ledger(), self.managed_bank_native()
+        retire = native.retire
+
+        def failing_retire(expected, previous):
+            if expected["id"] == f"{101:014x}":
+                raise cutover.PoolCapacityPending("Certified old bank is still stopping")
+            if expected["id"] == f"{103:014x}":
+                raise ValueError("Old bank changed before its certified retirement")
+            return retire(expected, previous)
+
+        native.retire = failing_retire
+        with self.assertRaisesRegex(ValueError, "changed before its certified retirement"):
+            self.run_job(ledger, native)
+        self.assertEqual(ledger.job["stage"], "DRAINING")
+        self.assertEqual(sorted(native.retired), [f"{100:014x}", f"{102:014x}"])
+        self.assertFalse(ledger.released)
+        native.retire = retire
+        self.assertEqual(self.run_job(ledger, native)["stage"], "SUCCEEDED")
+        self.assertEqual(len(ledger.released[0][1]), 8)
+
+    def test_unhealthy_serving_bank_retires_no_old_machine(self):
+        ledger, native = Ledger(), self.managed_bank_native()
+        native.fail_health_after = 24
+        with self.assertRaisesRegex(cutover.PoolCapacityPending, "remaining old workers"):
+            self.run_job(ledger, native)
+        self.assertFalse(native.retired)
+        self.assertFalse(ledger.released)
 
     def test_every_deployment_has_a_stable_distinct_queue_even_for_identical_code(self):
         identity = Ledger().job["identity"]

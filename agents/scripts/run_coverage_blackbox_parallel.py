@@ -52,6 +52,14 @@ class DomainResult:
 
 def discover_domains() -> list[str]:
     domains = sorted(path.stem.replace(".blackbox", "").replace("_", "-") for path in TESTS_DIR.glob("*.blackbox.py"))
+    # Affected-test selection (scripts/select_affected_tests.py --format
+    # lane:agents-blackbox) may narrow the run; unset or empty runs every domain.
+    selected = {d for d in os.environ.get("AGENTS_BLACKBOX_DOMAINS", "").replace(",", " ").split() if d}
+    if selected:
+        unknown = selected - set(domains)
+        if unknown:
+            raise ValueError(f"AGENTS_BLACKBOX_DOMAINS names unknown domain(s): {sorted(unknown)}")
+        domains = [d for d in domains if d in selected]
     priority = {domain: index for index, domain in enumerate(LONG_DOMAIN_ORDER)}
     return sorted(domains, key=lambda domain: (priority.get(domain, len(priority)), domain))
 
@@ -129,6 +137,7 @@ async def run_domain(
 
 async def async_main() -> int:
     domains = discover_domains()
+    partial = bool(os.environ.get("AGENTS_BLACKBOX_DOMAINS", "").strip())
     if not domains:
         print(f"No blackbox domains found in {TESTS_DIR}", file=sys.stderr)
         return 1
@@ -147,6 +156,8 @@ async def async_main() -> int:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     print(f"Running {len(domains)} agents blackbox domains in {concurrency} isolated coverage processes")
     print(f"Artifacts: {artifact_dir}")
+    if partial:
+        print("Partial diagnostic scope: AGENTS_BLACKBOX_DOMAINS is set")
 
     semaphore = asyncio.Semaphore(concurrency)
     results: list[DomainResult] = []
@@ -169,6 +180,8 @@ async def async_main() -> int:
     failures = [result for result in results if not result.passed]
     summary = {
         "run_id": run_id,
+        "partial": partial,
+        "selected_domains": domains if partial else [],
         "concurrency": concurrency,
         "passed": len(domains) - len(failures),
         "failed": len(failures),
@@ -177,6 +190,14 @@ async def async_main() -> int:
     }
     (artifact_dir / "results.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"Agents blackbox: {summary['passed']} passed, {summary['failed']} failed, {summary['total']} total")
+    if failures:
+        # Machine-readable terminal inventory excludes expected failures in
+        # domain logs from the factory's stage classification.
+        print("FACTORY_TEST_FAILURE " + json.dumps({
+            "runner": "agents-blackbox-domains", "passed": summary["passed"],
+            "failed": summary["failed"], "total": summary["total"],
+            "failing": [result.domain for result in failures],
+        }, sort_keys=True))
     return 1 if failures else 0
 
 

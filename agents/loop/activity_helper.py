@@ -10,12 +10,12 @@ import asyncio
 from datetime import timedelta
 from typing import Any, Callable, List, Optional, TypeVar
 
-import structlog
 from temporalio.exceptions import ApplicationError
 
 from utils.error_utils import extract_error_message
+from helpers.workflow_safe import context_logger
 
-logger = structlog.get_logger()
+logger = context_logger()
 
 T = TypeVar("T")
 
