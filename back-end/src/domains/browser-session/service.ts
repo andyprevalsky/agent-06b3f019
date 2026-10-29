@@ -13,7 +13,6 @@ import {
  */
 
 import type { Browser } from 'playwright';
-import { type ProxyGeoLocation } from '../../providers/geoip';
 import { createLogger } from '../../providers/logger';
 import {
   injectUserData,
@@ -34,7 +33,8 @@ import { canonicalAuthRealm } from '../../providers/authRealm';
 import { prepareWorldStateFork } from './service.world-fork';
 import { getAuthOptions } from '../../providers/authOptions';
 import * as repo from './repo';
-import { storedBrowserProvider, type BrowserGeoTargeting } from '../../providers/browser/types';
+import { storedBrowserProvider } from '../../providers/browser/types';
+import { buildBrowserSessionMetadata } from './service.metadata';
 import { validateBrowserKeySymbols } from './service.browser-input';
 import { validateSessionFilePath } from './service.file-path';
 import {
@@ -59,6 +59,7 @@ export {
 export { injectLocalStorage, SessionNotFoundError, SessionNoUserError };
 export { InvalidSessionFilePathError } from './service.file-path';
 export { CdpInjectionError, SessionNoWsUrlError } from './types';
+export { buildBrowserSessionMetadata } from './service.metadata';
 
 const log = createLogger('BrowserSession');
 
@@ -66,61 +67,6 @@ async function requireSessionOwner(sessionId: string, userId?: string): Promise<
   if (userId === undefined) return;
   const session = await repo.findSessionBySessionId(sessionId);
   if (session === null || session.context.userId !== userId) throw new SessionNotFoundError();
-}
-
-interface BrowserSessionMetadataInput {
-  provider: string;
-  providerSelection?: { requestedProvider: string; fallbackReason: string };
-  geoTargeting?: BrowserGeoTargeting;
-  proxySource: string;
-  proxyLocation: ProxyGeoLocation;
-  profileId: string | null;
-  profileSource: string;
-}
-
-type BrowserSessionInjectionMetadataInput = {
-  cookies: { injected: boolean; cookieCount: number; authSource: string };
-  permissions: { grantCount: number };
-} & Record<'localStorage' | 'indexedDB' | 'cacheStorage', { originCount: number }>;
-
-export function buildBrowserSessionMetadata(
-  session: BrowserSessionMetadataInput,
-  injection: BrowserSessionInjectionMetadataInput
-) {
-  return {
-    provider: session.provider,
-    // Benchmarks and the worker tell a real run on the requested provider from a fallback.
-    requested_provider: session.providerSelection?.requestedProvider ?? session.provider,
-    provider_fallback_reason: session.providerSelection?.fallbackReason ?? null,
-    ...(session.geoTargeting !== undefined
-      ? {
-          geo_targeting: {
-            requested: session.geoTargeting.requested,
-            applied: session.geoTargeting.applied,
-            requested_location: session.geoTargeting.requestedLocation,
-            geo_applied: session.geoTargeting.geoApplied,
-            geo_unsupported: session.geoTargeting.geoUnsupported,
-          },
-        }
-      : {}),
-    proxy_source: session.proxySource,
-    proxy_location: session.proxyLocation,
-    profile_id: session.profileId,
-    profile_source: session.profileSource,
-    auth_source: injection.cookies.authSource,
-    cookies_injected: injection.cookies.injected,
-    cookies_count: injection.cookies.cookieCount,
-    local_storage_origin_count: injection.localStorage.originCount,
-    indexed_db_origin_count: injection.indexedDB.originCount,
-    permission_grant_count: injection.permissions.grantCount,
-    cache_storage_origin_count: injection.cacheStorage.originCount,
-    ...(session.provider === 'steel'
-      ? {
-          steel_profile_id: session.profileId,
-          steel_profile_source: session.profileSource,
-        }
-      : {}),
-  };
 }
 
 // ---------------------------------------------------------------------------

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Owning regression for sharded benchmark controllers: planning, global barrier, merge."""
 from pathlib import Path
-import json, os, runpy, signal, tempfile, unittest
+import ast, copy, json, math, os, runpy, signal, subprocess, sys, tempfile, time, unittest
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
-C = runpy.run_path(str(ROOT / 'scripts/cloudbench-shard-coordinator.py'))
+C = runpy.run_path(os.environ.get('SAME_CLI_COORDINATOR_SOURCE', str(ROOT / 'scripts/cloudbench-shard-coordinator.py')))
+R = runpy.run_path(str(ROOT / 'scripts/cloudbench-original600-runner.py'))
 TASKS = [f'task-{i:03d}' for i in range(200)]
 
 
@@ -22,7 +24,7 @@ class FakeRunner:
             return
         status, infra, exit_code = current
         row = dict(schema='original600-shard-status-v1', state='LIVE', observed_at=n,
-                   barrier=None if status is None else dict(status=status), infra=dict(infra_true=infra))
+                   barrier=None if status is None else dict(status=status,ready_count=3,failed_count=0,expected_count=3,survivor_count=3), infra=dict(infra_true=infra))
         (self.out / 'shard-status.json').write_text(json.dumps(row))
         if exit_code is not None and self.code is None:
             self.code = exit_code
@@ -46,7 +48,7 @@ class World:
         for i, script in enumerate(scripts):
             out = self.root / f'shard-{i:02d}'
             out.mkdir()
-            self.shards.append(dict(index=i, out=out))
+            self.shards.append(dict(index=i, out=out, expected_count=3))
             self.runners[i] = FakeRunner(out, script)
         self.release_seen_at = {}
 
@@ -68,6 +70,181 @@ class World:
         return C['coordinate'](self.shards, self.spawn, self.root / 'coordination.json', sleep=self.sleep,
                                clock=lambda: float(self.n), poll_seconds=0, **kwargs)
 
+
+class FullCohort(unittest.TestCase):
+    def test_remote_failed_member_aborts_strict_but_preserves_ordinary_survivors(self):
+        source=Path(os.environ.get('SAME_CLI_CAMPAIGN_SOURCE',str(ROOT/'scripts/run-bench-campaign.py'))).read_text()
+        tree=ast.parse(source)
+        functions=[copy.deepcopy(next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name==name))
+                   for name in ('abort_startup_cohort','exclude_startup_holdouts','release_ready_cohort')]
+        for fn in functions:
+            fn.body=[ast.Global(names=n.names) if isinstance(n,ast.Nonlocal) else n for n in fn.body]
+        for strict in (True,False):
+            with self.subTest(strict=strict),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);(root/'ready').mkdir()
+                child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])
+                try:
+                    (root/'ready/healthy.json').write_text(json.dumps(dict(cohort_id='c001',job_id='healthy',controller_pid=child.pid,ready_at='now')))
+                    cohort=dict(status='waiting',cohort_id='c001',_jobs=[dict(job_id='failed',startup_failed_before_release=True),dict(job_id='healthy',_process=child)],_directory=root,ready_count=0,failed_count=0,expected_count=2)
+                    ns=dict(subprocess=subprocess,json=json,math=math,time=time,holdout_margin_seconds=300.0,barrier_failure=False,first_failure=0,startup_expired=lambda:False,observe_external_abort=lambda:False,publish_external_barrier=lambda *a:None,external_barrier=object() if strict else None,external_barrier_release_id=lambda _:'receipt',utc_now=lambda:'now',write_json_atomic=lambda p,v:Path(p).write_text(json.dumps(v,default=str)),summary_path=root/'summary',state={'external_barrier':{}})
+                    exec(compile(ast.fix_missing_locations(ast.Module(body=functions,type_ignores=[])),'production-partial-cohort','exec'),ns)
+                    ns['release_ready_cohort'](cohort)
+                    self.assertEqual((root/'release.json').exists(),not strict)
+                    self.assertEqual((root/'abort.json').exists(),strict)
+                    self.assertEqual(cohort['status'],'aborted' if strict else 'released')
+                finally:
+                    child.terminate();child.wait(timeout=5)
+
+    def test_retry_rejoins_same_barrier_and_archives_previous_readiness(self):
+        campaign=runpy.run_path(str(ROOT/'scripts/run-bench-campaign.py'))
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'ready').mkdir()
+            receipt=dict(job_id='j1',controller_pid=123,ready_at='old')
+            (root/'ready/j1.json').write_text(json.dumps(receipt))
+            job=dict(job_id='j1',controller_pid=123,attempt=2,startup_failed_before_release=True,
+                     _independent_retry=True,_cohort={'_directory':root,'epoch':1000})
+            campaign['rejoin_required_cohort'](job)
+            self.assertFalse(job['_independent_retry'])
+            self.assertNotIn('startup_failed_before_release',job)
+            self.assertFalse((root/'ready/j1.json').exists())
+            self.assertEqual(json.loads((root/'ready/j1.attempt-1.json').read_text()),receipt)
+            self.assertEqual(job['_cohort']['epoch'],1000)
+
+    def test_ready_envelope_requires_all_counts_and_bound_membership(self):
+        full=dict(status='ready',ready_count=2,failed_count=0,expected_count=2,survivor_count=2)
+        self.assertTrue(C['full_cohort_ready'](full,2))
+        for change in ({'failed_count':1},{'ready_count':1},{'survivor_count':1},{'ready_count':True},{'expected_count':1}):
+            self.assertFalse(C['full_cohort_ready']({**full,**change},2),change)
+        self.assertFalse(C['full_cohort_ready']({'status':'ready'},2))
+        self.assertFalse(C['full_cohort_ready'](full,3))
+        self.assertFalse(C['full_cohort_ready'](full))
+
+    def test_host_refuses_partial_ready_counts_and_joins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);shards=[dict(index=0,out=root/'shard',expected_count=2)]
+            class Process:
+                pid=999
+                code=None
+                def poll(self):
+                    if (shards[0]['out']/'global-release.json').exists(): self.code=0
+                    return self.code
+                def wait(self): return self.code
+                def send_signal(self,number): self.code=143
+            process=Process()
+            def spawn(shard):
+                shard['out'].mkdir()
+                (shard['out']/'shard-status.json').write_text(json.dumps(dict(state='LIVE',barrier=dict(status='ready',ready_count=1,failed_count=1,expected_count=2,survivor_count=1),infra={})))
+                return process
+            record=C['coordinate'](shards,spawn,root/'journal',scheduled_total=2,clock=lambda:899,sleep=lambda _:None,startup_deadline=900)
+            self.assertIsNone(record['released_at'])
+            self.assertTrue((shards[0]['out']/'global-abort.json').exists())
+            self.assertEqual(record['exit_codes'],{'0':143})
+            self.assertEqual(record['infra_true'],0)
+
+class ExplicitBudget(unittest.TestCase):
+    def test_generated_shard_argv_and_absolute_startup_budget(self):
+        tasks = TASKS[:20]
+        shard = dict(index=0, count=2, tasks=tasks[::2], task_indexes=list(range(0,20,2)),
+                     tasks_sha256=R['manifest_sha'](tasks[::2]), runs=3, group_run_id='budget-fixture',
+                     group_total=60, group_started_at=1000, manifest_sha256=R['manifest_sha'](tasks),
+                     task_timeout=7200, e2e_timeout=9300)
+        argv = R['campaign_argv'](tasks, 1000, shard)
+        self.assertEqual(argv[argv.index('--timeout')+1], '7200')
+        self.assertEqual(argv[argv.index('--e2e-timeout')+1], '9300')
+        self.assertEqual(argv[argv.index('--e2e-started-at')+1], '1000')
+        self.assertEqual(R['startup_deadline_epoch'](1000,7200,9300), 3100)
+        self.assertEqual(1000+9300-3100, 7200)
+        S = runpy.run_path(str(ROOT/'scripts/cloudbench-original600-supervisor.py'))
+        self.assertEqual(S['shard_timeouts'](shard), (7200,9300))
+
+    def test_remote_deadline_does_not_restart_startup_clock(self):
+        campaign = runpy.run_path(str(ROOT/'scripts/run-bench-campaign.py'))
+        deadline = R['startup_deadline_epoch'](1000,7200,9300)
+        # Remote starts 800 seconds into the common admission clock, leaving 1300.
+        value = campaign['startup_deadline_monotonic'](
+            {'RUN_BENCH_CAMPAIGN_STARTUP_DEADLINE_EPOCH':str(deadline)}, 1000,9300,
+            now_epoch=1800,now_monotonic=50)
+        self.assertEqual(value,1350)
+        self.assertEqual(campaign['startup_deadline_monotonic']({},1000,9300,now_epoch=1800,now_monotonic=50),None)
+
+    def test_actual_remote_barrier_rechecks_absolute_deadline(self):
+        source = Path(os.environ.get('SAME_CLI_CAMPAIGN_SOURCE', str(ROOT/'scripts/run-bench-campaign.py'))).read_text()
+        tree = ast.parse(source)
+        functions = [copy.deepcopy(next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name))
+                     for name in ('abort_startup_cohort','exclude_startup_holdouts','release_ready_cohort')]
+        for fn in functions:
+            fn.body = [ast.Global(names=n.names) if isinstance(n,ast.Nonlocal) else n for n in fn.body]
+        for phase in ('early','expired','expires_during_external_release'):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);(root/'ready').mkdir()
+                child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)'])
+                try:
+                    deadline=R['startup_deadline_epoch'](1000,7200,9300)
+                    clock=[2351 if phase=='early' else deadline-1 if phase=='expires_during_external_release' else deadline]
+                    job=dict(job_id='j1',_process=child)
+                    (root/'ready/j1.json').write_text(json.dumps(dict(cohort_id='c001',job_id='j1',controller_pid=child.pid,ready_at='now')))
+                    cohort=dict(status='waiting',cohort_id='c001',_jobs=[job],_directory=root,ready_count=1,failed_count=0,expected_count=1)
+                    def external_release(_):
+                        if phase=='expires_during_external_release': clock[0]=deadline+1
+                        return 'receipt'
+                    def write(path,value): Path(path).write_text(json.dumps(value))
+                    ns=dict(subprocess=subprocess,json=json,math=math,time=time,holdout_margin_seconds=300.0,barrier_failure=False,first_failure=0,
+                            startup_expired=lambda:clock[0]>=deadline,observe_external_abort=lambda:False,
+                            publish_external_barrier=lambda *a:None,external_barrier=object(),
+                            external_barrier_release_id=external_release,utc_now=lambda:'now',
+                            write_json_atomic=write,summary_path=root/'summary.json',state={'external_barrier':{}})
+                    exec(compile(ast.fix_missing_locations(ast.Module(body=functions,type_ignores=[])),'actual-remote-barrier','exec'),ns)
+                    ns['release_ready_cohort'](cohort)
+                    self.assertEqual((root/'release.json').exists(),phase=='early')
+                    self.assertEqual((root/'abort.json').exists(),phase!='early')
+                finally:
+                    child.terminate();child.wait(timeout=5)
+
+
+    def test_original_explicit_7200_9300_is_preserved(self):
+        self.assertEqual(R['campaign_timeouts'](7200, 9300), (7200, 9300))
+        self.assertEqual(R['default_e2e_timeout'](7200), 10020)
+        self.assertEqual(R['gate_watchdog_seconds'](9300), 11100)
+
+    def test_barrier_deadline_aborts_and_joins_without_release(self):
+        with tempfile.TemporaryDirectory() as root:
+            world = World(root, [{0: ('ready', 0, None)}, {0: ('ready', 0, None)}])
+            record = world.run(scheduled_total=60, startup_deadline=0)
+            self.assertIsNone(record['released_at'])
+            self.assertEqual(record['terminate_cause'], 'startup_budget')
+            self.assertEqual(set(record['exit_codes'].values()), {143})
+            for shard in world.shards:
+                self.assertFalse((shard['out'] / 'global-release.json').exists())
+                self.assertTrue((shard['out'] / 'global-abort.json').exists())
+
+    def test_original_observed_startup_releases_without_clipping_task_window(self):
+        # Original cloud run released at admission + 1350.573692s. Round up;
+        # execute the real coordinator, preserving the original 7200/9300 argv.
+        with tempfile.TemporaryDirectory() as root:
+            world = World(root, [{0: ('ready', 0, None), 1353: ('released', 0, 0)}], max_ticks=1400)
+            world.n = 1351
+            deadline = R['startup_deadline_epoch'](0,7200,9300)
+            record = world.run(scheduled_total=60, startup_deadline=deadline)
+            self.assertEqual(record['released_at'],1351)
+            self.assertEqual(record['exit_codes'],{'0':0})
+            self.assertGreaterEqual(9300-record['released_at'],7200)
+            self.assertEqual(9300-(record['released_at']+7200),749)
+
+    def test_no_release_after_full_task_window_no_longer_fits(self):
+        with tempfile.TemporaryDirectory() as root:
+            world = World(root, [{0: ('ready', 0, None)}], max_ticks=2200)
+            world.n = 2100
+            record = world.run(scheduled_total=60, startup_deadline=R['startup_deadline_epoch'](0,7200,9300))
+            self.assertIsNone(record['released_at'])
+            self.assertEqual(record['terminate_cause'],'startup_budget')
+            self.assertEqual(record['exit_codes'],{'0':143})
+
+    def test_barrier_with_remaining_full_window_releases(self):
+        with tempfile.TemporaryDirectory() as root:
+            world = World(root, [{0: ('ready', 0, None), 2: ('released', 0, 0)}])
+            record = world.run(scheduled_total=60, startup_deadline=900)
+            self.assertEqual(record['released_at'], 0)
+            self.assertEqual(record['exit_codes'], {'0': 0})
 
 class Planning(unittest.TestCase):
     def test_original_600_on_performance_8x_uses_twenty_controllers_of_thirty_copies(self):
@@ -369,6 +546,329 @@ class Merge(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'duplicate'):
             C['merge']([a, a], scheduled_total=2)
 
+
+# 2026-10-20: a boxes.dev service restart killed the sharded operator (coordinator)
+# and both host runners after the global release while 60 guests ran on Fly. Only
+# the guest supervisors survived: the cross-shard 5% stop (3/60), the live
+# shard-status counters (scorecard frozen at "COMPLETED 0/60") and the exact
+# supervisor TERM path had no owner.
+ADOPTER = r"""
+import json,os,runpy,shlex,subprocess,sys
+from pathlib import Path
+R=runpy.run_path(sys.argv[1])
+class ExecAPI:
+    def __init__(self,mid):self.mid=mid
+    def api(self,method,path,body,timeout):
+        assert method=='POST' and path=='/machines/'+self.mid+'/exec'
+        p=subprocess.run(shlex.split(body['cmd']),capture_output=True,text=True,env=dict(os.environ,FLY_MACHINE_ID=self.mid),timeout=10)
+        return dict(stdout=p.stdout,stderr=p.stderr,exit_code=p.returncode)
+raise SystemExit(R['adopt_live'](Path(sys.argv[2]),api=ExecAPI(sys.argv[3]),probe_interval=0.2,lock_dir=sys.argv[4]))
+"""
+SUPERVISOR = r"""
+import json,signal,sys,time
+from pathlib import Path
+identity=Path(sys.argv[1])
+def joined(*unused):
+    row=json.loads(identity.read_text());row.update(supervisor_joined=True,supervisor_exit_code=7)
+    identity.with_suffix('.terminal.json').write_text(json.dumps(row));sys.exit(7)
+signal.signal(signal.SIGTERM,joined);print('ready',flush=True)
+while True:time.sleep(.05)
+"""
+
+
+def killed_process():
+    """A process that existed with a recorded birth and was then killed (service restart)."""
+    import subprocess, sys
+    process = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(60)'])
+    born = R['birth'](process.pid)
+    process.kill()
+    process.wait(timeout=5)
+    return process.pid, born
+
+
+class HostDeathAdoption(unittest.TestCase):
+    """The global infra stop and live observation are re-adoptable after host death."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.lock_dir = self.root / 'locks'
+        self.adopters, self.supervisors = [], []
+        self.addCleanup(self.close)
+
+    def fixture(self, infra_per_shard, scheduled_total=60, **journal):
+        import subprocess, sys, time
+        admission = self.root / 'admission'
+        admission.mkdir(mode=0o700)
+        shards, release_id = [], 'ab' * 12
+        for index, infra in enumerate(infra_per_shard):
+            mid = '1234567890abc%d' % index
+            guest = self.root / ('guest-%d' % index)
+            guest.mkdir()
+            identity = guest / 'original600-supervisor.fixture.json'
+            process = subprocess.Popen([sys.executable, '-c', SUPERVISOR, str(identity), 'cloudbench-original600-supervisor.py'],
+                                       stdout=subprocess.PIPE, text=True)
+            row = dict(schema='original600-supervisor-identity-v1', pid=process.pid, birth=R['birth'](process.pid),
+                       machine=mid, source_ref='a' * 40, epoch=1.0)
+            R['save'](identity, row)
+            self.assertEqual(process.stdout.readline().strip(), 'ready')
+            self.supervisors.append((process, identity))
+            barrier = identity.with_suffix('.barrier')
+            barrier.mkdir(mode=0o700)
+            (barrier / 'ready.json').write_text(json.dumps(dict(schema='campaign-external-barrier-ready-v1', status='released')))
+            self.set_infra(identity, infra, index)
+            out = admission / ('shard-%02d' % index) / 'run'
+            out.mkdir(mode=0o700, parents=True)
+            R['save'](out / 'authority.private.json', dict(allowed=True, source_ref='a' * 40, protected_machines=['8ed16dc75ee958']))
+            auth_sha = R['sha'](R['read'](out / 'authority.private.json'))
+            runner_pid, runner_birth = killed_process()
+            gate_pid, gate_birth = killed_process()
+            R['save'](out / 'caller.json', dict(pid=runner_pid, birth=runner_birth, gate_pid=gate_pid, gate_birth=gate_birth,
+                                                source_ref='a' * 40, task_ref='b' * 40, epoch=1.0, deadline=time.time() + 3600,
+                                                identity_path=str(identity), authority_sha256=auth_sha))
+            R['save'](out / 'controller.identity.json', dict(machine=mid, instance='01FIXTURE', source_ref='a' * 40,
+                                                             authority_sha256=auth_sha))
+            R['save'](out / 'global-release.json', dict(release_id=release_id, reason='all 2 shards ready'))
+            # The dead runner's last status: frozen before any task finished.
+            R['save'](out / 'shard-status.json', dict(schema='original600-shard-status-v1', state='LIVE', machine=mid,
+                                                     observed_at=1.0, barrier=dict(status='released'),
+                                                     infra=dict(infra_true=0, progress=dict(combos=[['running', None, None, 30]]))))
+            shards.append(dict(index=index, out=Path(out), pid=runner_pid, mid=mid))
+        journal_path = admission / 'coordination.json'
+        original = dict(schema='original600-shard-coordination-v1', release_id=release_id, controllers=len(shards),
+                        scheduled_total=scheduled_total, infra_early_stop='enabled', started_at=100.0, released_at=200.0,
+                        aborted_at=None, abort_reason=None, terminated_at=None, terminate_reason=None, retries=[], infra_true=0,
+                        shards={str(s['index']): dict(out=str(s['out']), pid=s['pid']) for s in shards})
+        original.update(journal)
+        C['save'](journal_path, original)
+        self.shards = shards
+        return admission, journal_path, shards
+
+    def set_infra(self, identity, infra, index=0):
+        import time
+        path = identity.with_suffix('.infra.json')
+        if path.exists():
+            path.unlink()
+        progress = dict(combos=[['passed', 'PASSED', False, 9 - index], ['running', None, None, 21 + index]], jobs=30,
+                        terminal_attempts=9 - index, infra_attempts=0, reasons=[])
+        R['save'](path, dict(schema='original600-shard-infra-v1', infra_true=infra, unique_jobs=30, observed_at=time.time(),
+                             progress=progress))
+
+    def spawn(self, shard):
+        import subprocess, sys
+        mid = next(s['mid'] for s in self.shards if s['index'] == shard['index'])
+        process = subprocess.Popen([sys.executable, '-c', ADOPTER, str(ROOT / 'scripts/cloudbench-original600-runner.py'),
+                                    str(shard['out']), mid, str(self.lock_dir)],
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.adopters.append(process)
+        return process
+
+    def refreshed(self):
+        """Every adopter has written a fresh shard-status.json from its own PROBE."""
+        return all((json.loads((s['out'] / 'shard-status.json').read_bytes()).get('observed_at') or 0) > 1.0
+                   for s in self.shards)
+
+    def close(self):
+        for process in self.adopters:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5)
+            process.stdout.close()
+        for process, unused in self.supervisors:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5)
+            process.stdout.close()
+
+    def shard_args(self, shards):
+        return [dict(index=s['index'], out=s['out']) for s in shards]
+
+    def test_cross_shard_infra_threshold_survives_killed_operator_and_runners(self):
+        scorecard = runpy.run_path(str(ROOT / 'scripts/cloudbench-scorecard.py'))
+        # 2 + 1 = 3 of 60: only the cross-shard sum reaches the 5% threshold.
+        admission, journal, shards = self.fixture((2, 1))
+        self.assertEqual(scorecard['load_sharded'](admission, deep=False)['outcomes']['PASS'], 0)
+        original = json.loads(journal.read_bytes())
+        record = C['adopt_coordinate'](self.shard_args(shards), self.spawn, journal, poll_seconds=0.1)
+        for process, identity in self.supervisors:
+            self.assertEqual(process.wait(timeout=10), 7, 'adopted owner TERMed the exact supervisor')
+        self.assertEqual((record['terminate_cause'], record['terminate_reason']), ('threshold', 'infra 3/60 reached the 5% threshold'))
+        self.assertEqual((record['release_id'], record['started_at'], record['released_at']),
+                         (original['release_id'], 100.0, 200.0), 'original clocks and release identity preserved')
+        self.assertEqual(record['infra_true'], 3)
+        self.assertEqual({k: v['pid'] for k, v in record['adoptions'][0]['previous_shards'].items()},
+                         {str(s['index']): s['pid'] for s in shards})
+        self.assertEqual(record['exit_codes'], {'0': 0, '1': 0})
+        self.assertIsNotNone(record.get('finished_at'), 'finished only after every supervisor joined')
+        for shard in shards:
+            out = shard['out']
+            intent = json.loads(R['read'](out / 'supervisor-term.intent.json'))
+            self.assertEqual((intent['machine'], intent['signal']), (shard['mid'], 'SIGTERM'))
+            self.assertEqual(json.loads(R['read'](out / 'owner-stop.json'))['reason'], 'infra 3/60 reached the 5% threshold')
+            self.assertEqual(json.loads(R['read'](out / 'adoption-01.json'))['original_owner_pid'], shard['pid'])
+            self.assertEqual(json.loads(R['read'](out / 'adoption-01.terminal.json'))['supervisor_state'], 'JOINED')
+            self.assertFalse((out / 'terminal.json').exists(), 'cleanup stays with the dead-owner release route')
+        live = scorecard['load_sharded'](admission, deep=False)
+        self.assertEqual(live['rows_source'], 'live shard-status counters')
+        self.assertEqual(live['outcomes']['PASS'], 17, 'the scorecard resumes the supervisors\' live counters')
+
+    def test_restart_signal_detaches_without_stopping_and_the_run_stays_adoptable(self):
+        import os, signal, time
+        admission, journal, shards = self.fixture((0, 0))
+
+        def sleep(unused):
+            time.sleep(0.1)
+            if self.refreshed():
+                os.kill(os.getpid(), signal.SIGTERM)  # host/service restart TERM to the adopting coordinator
+
+        record = C['adopt_coordinate'](self.shard_args(shards), self.spawn, journal, poll_seconds=0.1, sleep=sleep)
+        for (process, unused), shard in zip(self.supervisors, shards):
+            self.assertIsNone(process.poll(), 'healthy supervisor keeps running')
+            self.assertFalse((shard['out'] / 'supervisor-term.intent.json').exists())
+        self.assertIsNone(record['terminated_at'], 'a restart signal is never recorded as a campaign stop')
+        self.assertIsNone(record.get('finished_at'))
+        adoption = record['adoptions'][-1]
+        self.assertEqual((adoption['detached']['signal'], adoption['exit_codes']), ('SIGTERM', {'0': 75, '1': 75}))
+        for shard in shards:
+            self.assertFalse((shard['out'] / 'owner-stop.json').exists())
+            self.assertEqual(json.loads(R['read'](shard['out'] / 'adoption-01.detached.json'))['signal'], 'SIGTERM')
+        # Re-adoption continues the same journal; the cross-shard threshold still stops the run.
+        for (unused, identity), infra in zip(self.supervisors, (2, 1)):
+            self.set_infra(identity, infra)
+        record = C['adopt_coordinate'](self.shard_args(shards), self.spawn, journal, poll_seconds=0.1)
+        self.assertEqual((len(record['adoptions']), record['terminate_cause']), (2, 'threshold'))
+        self.assertIsNotNone(record.get('finished_at'))
+        for process, unused in self.supervisors:
+            self.assertEqual(process.wait(timeout=10), 7)
+        for shard in shards:
+            self.assertTrue((shard['out'] / 'adoption-02.terminal.json').exists())
+
+    def test_dead_adopter_alerts_and_never_finishes_the_journal(self):
+        import os, signal, subprocess, sys
+        admission, journal, shards = self.fixture((0, 0))
+        alerts = []
+
+        def spawn(shard):
+            if shard['index'] == 1:  # an adopter that dies at startup
+                process = subprocess.Popen([sys.executable, '-c', 'raise SystemExit(3)'], stdout=subprocess.PIPE, text=True)
+                self.adopters.append(process)
+                return process
+            return self.spawn(shard)
+
+        def alert(line):
+            alerts.append(line)
+            if line.startswith('ADOPTER_LOST'):
+                os.kill(os.getpid(), signal.SIGTERM)  # the operator detaches after the alert
+
+        record = C['adopt_coordinate'](self.shard_args(shards), spawn, journal, poll_seconds=0.1, alert=alert)
+        self.assertIsNone(record.get('finished_at'), 'a lost adopter leaves the run adoptable')
+        lost = record['adoptions'][-1]['lost']
+        self.assertEqual([(x['shard'], x['exit_code']) for x in lost], [(1, 3)])
+        self.assertTrue(any(line.startswith('ADOPTER_LOST {') for line in alerts))
+        self.assertIsNone(record.get('finished_at'), 'a lost adopter leaves the run adoptable')
+        self.assertTrue(all(p.poll() is None for p, unused in self.supervisors))
+        C['adoptable'](json.loads(journal.read_bytes()), self.shard_args(shards))
+
+    def test_internal_error_detaches_adopters_without_abort_or_supervisor_term(self):
+        import time
+        admission, journal, shards = self.fixture((0, 0))
+
+        def sleep(unused):
+            time.sleep(0.1)
+            if self.refreshed():
+                raise RuntimeError('injected coordinator failure')
+
+        with self.assertRaisesRegex(RuntimeError, 'injected'):
+            C['adopt_coordinate'](self.shard_args(shards), self.spawn, journal, poll_seconds=0.1, sleep=sleep)
+        record = json.loads(journal.read_bytes())
+        for (process, unused), shard in zip(self.supervisors, shards):
+            self.assertIsNone(process.poll(), 'a recovery-tool failure never stops a healthy campaign')
+            self.assertFalse((shard['out'] / 'global-abort.json').exists())
+            self.assertFalse((shard['out'] / 'supervisor-term.intent.json').exists())
+        self.assertIsNone(record.get('finished_at'))
+        self.assertEqual((record['adoptions'][-1]['error'], record['adoptions'][-1]['exit_codes']),
+                         ('RuntimeError', {'0': 75, '1': 75}))
+        C['adoptable'](record, self.shard_args(shards))
+
+    def test_explicit_operator_stop_is_durable_and_a_signal_stop_is_not_replayed(self):
+        admission, journal, shards = self.fixture((0, 0), terminated_at=300.0, terminate_reason='operator SIGTERM')
+        alerts = []
+        import os, signal, time
+
+        def sleep(unused):
+            time.sleep(0.1)
+            if self.refreshed():
+                os.kill(os.getpid(), signal.SIGTERM)
+
+        record = C['adopt_coordinate'](self.shard_args(shards), self.spawn, journal, poll_seconds=0.1, sleep=sleep,
+                                       alert=alerts.append)
+        for (process, unused), shard in zip(self.supervisors, shards):
+            self.assertIsNone(process.poll(), 'the original restart TERM is not replayed into the campaign')
+            self.assertFalse((shard['out'] / 'owner-stop.json').exists())
+        self.assertEqual(record['adoptions'][-1]['unreplayed_stop'], dict(cause='signal', reason='operator SIGTERM'))
+        self.assertTrue(alerts[0].startswith('ADOPTION_UNREPLAYED_STOP'))
+        record = C['adopt_coordinate'](self.shard_args(shards), self.spawn, journal, stop_reason='user requested',
+                                       poll_seconds=0.1)
+        self.assertEqual((record['terminate_cause'], record['terminate_reason']), ('operator', 'operator stop: user requested'))
+        self.assertIsNotNone(record.get('finished_at'))
+        for process, unused in self.supervisors:
+            self.assertEqual(process.wait(timeout=10), 7)
+
+    def test_one_adopting_coordinator_and_one_adopter_per_controller(self):
+        import fcntl, os
+        admission, journal, shards = self.fixture((0,))
+        held = os.open(journal.with_name('coordination.adopt.lock'), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(ValueError, 'another adopting coordinator'):
+                C['adopt_coordinate'](self.shard_args(shards), self.spawn, journal)
+        finally:
+            os.close(held)
+        self.assertEqual(self.adopters, [], 'nothing spawned while another coordinator adopts')
+        first = R['controller_lock'](shards[0]['mid'], self.lock_dir)
+        try:
+            with self.assertRaisesRegex(ValueError, 'another adopter owns this controller'):
+                R['controller_lock'](shards[0]['mid'], self.lock_dir)
+        finally:
+            os.close(first)
+        os.close(R['controller_lock'](shards[0]['mid'], self.lock_dir))
+
+    def test_operator_adopt_live_check_binds_the_original_run_without_writing(self):
+        import contextlib, io
+        operator = runpy.run_path(str(ROOT / 'scripts/run-original600-controller.py'))
+        admission, journal, shards = self.fixture((0, 0))
+        before = sorted(str(p) for p in admission.rglob('*'))
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            code = operator['adopt_live_sharded'](['--adopt-live', str(admission), '--check', '--workspace', str(self.root)])
+        self.assertEqual(code, 0)
+        plan = json.loads(printed.getvalue().splitlines()[-1])
+        self.assertEqual((plan['status'], plan['scheduled_total'], plan['release_id']), ('ADOPT_LIVE_PLAN', 60, 'ab' * 12))
+        self.assertEqual([s['dead_runner_pid'] for s in plan['shards']], [s['pid'] for s in shards])
+        self.assertEqual(sorted(str(p) for p in admission.rglob('*')), before, '--check writes nothing')
+
+    def test_adoption_refuses_a_live_original_owner_terminal_runner_or_finished_coordination(self):
+        import os, time
+        admission, journal, shards = self.fixture((0,))
+        out = shards[0]['out']
+        caller = json.loads(R['read'](out / 'caller.json'))
+        self.assertEqual(R['adoption_binding'](out)['machine'], shards[0]['mid'])
+        (out / 'caller.json').unlink()
+        R['save'](out / 'caller.json', dict(caller, pid=os.getpid(), birth=R['birth'](os.getpid())))
+        with self.assertRaisesRegex(ValueError, 'original runner owner still live'):
+            R['adoption_binding'](out)
+        (out / 'caller.json').unlink()
+        R['save'](out / 'caller.json', caller)
+        R['save'](out / 'terminal.json', dict(status='CONTROLLER_RELEASE_VERIFIED'))
+        with self.assertRaisesRegex(ValueError, 'already terminal'):
+            R['adoption_binding'](out)
+        finished = dict(json.loads(journal.read_bytes()), finished_at=time.time(), exit_codes={})
+        with self.assertRaisesRegex(ValueError, 'already finished'):
+            C['adoptable'](finished, self.shard_args(shards))
+        undecided = dict(json.loads(journal.read_bytes()), released_at=None)
+        with self.assertRaisesRegex(ValueError, 'after its global barrier decision'):
+            C['adoptable'](undecided, self.shard_args(shards))
 
 if __name__ == '__main__':
     unittest.main()

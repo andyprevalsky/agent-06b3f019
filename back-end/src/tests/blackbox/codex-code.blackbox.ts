@@ -254,16 +254,10 @@ async function testSmoke_codexCompletesE2bTask() {
     sandboxId = body.sandbox_id;
 
     const { output, events, exitCode } = await waitForCodexOutput(body.ws_url);
-    // The app-server transport reports a failed turn only as events, so the
-    // transcript can be empty; the classification below still has to run.
-    if (output !== '') {
-      const outputRes = await request(`${BASE_URL}/api/codex-code-session/${taskId}/output`, {
-        method: 'POST',
-        headers: apiKeyHeaders(),
-        body: JSON.stringify({ output }),
-      });
-      assertStatus(outputRes.status, 200, outputRes.data);
-    }
+    // Classify the run before persisting its output: an exhausted run can end
+    // with no output at all, and the output route rejects an empty body, which
+    // would hide the deploy-approved credit SKIP (and any real failure) behind
+    // a 400.
     // Before treating a missing sentinel as a hard failure, check whether the
     // run simply ran out of credits on EVERY credential path (OAuth + funded
     // key). That is an external funding state, not a code regression, so it is
@@ -297,6 +291,16 @@ async function testSmoke_codexCompletesE2bTask() {
       succeeded,
       `Codex turn did not complete. exit=${exitCode ?? 'unknown'} oauth_revocation=${JSON.stringify(codexOauthRevocationSignal(output, events))} events=${JSON.stringify(events).slice(-800)} Tail: ${output.slice(-1200)}`
     );
+    // App-server can complete a turn with an empty transcript; persist only
+    // populated output after the outcome has been classified.
+    if (output !== '') {
+      const outputRes = await request(`${BASE_URL}/api/codex-code-session/${taskId}/output`, {
+        method: 'POST',
+        headers: apiKeyHeaders(),
+        body: JSON.stringify({ output }),
+      });
+      assertStatus(outputRes.status, 200, outputRes.data);
+    }
     assert(
       events.some((event) => {
         const typed = event as { type?: string; provider?: string };

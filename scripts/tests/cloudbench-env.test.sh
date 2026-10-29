@@ -3975,3 +3975,54 @@ PYWIRE
   [ "$(effective true "$dir/agents/.env")" = "https://navi-j9a9.onrender.com" ] \
     || { echo "a missing agents/.env has no explicit Lantern credential" >&2; exit 1; }
 ) || fail "benchmark stacks must give workers the central people credential broker"
+# A1 (approved 2026-10-20): every cloud guest delegates compute-token lease,
+# cooldown and Foundry rate-limit state to one authority (the production
+# backend by default), so N guests cannot run N copies of one token's
+# semaphore (RCA 2026-10-20-bench-guests-ran-independent-compute-token-semaphores).
+# Fresh and pooled Machines both receive the value explicitly (also when opted
+# out, so a pooled Machine never keeps an older run's authority), and the guest
+# hands it to the stack with its own BACKEND_API_KEY or refuses to start.
+(
+  dir="$TMP_ROOT/compute-token-authority"
+  mkdir -p "$dir"
+  [ "$(env -u CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL -u BENCHMARK_COMPUTE_TOKEN_AUTHORITY bash -c 'source "$1"; cloudbench_compute_token_authority_url' _ "$HELPER_SRC")" = "https://navi-j9a9.onrender.com" ] \
+    || { echo "guests must default to the production compute-token authority" >&2; exit 1; }
+  [ "$(CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=https://authority.example bash -c 'source "$1"; cloudbench_compute_token_authority_url' _ "$HELPER_SRC")" = "https://authority.example" ] \
+    || { echo "an explicit authority URL must win" >&2; exit 1; }
+  [ -z "$(BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=https://authority.example bash -c 'source "$1"; cloudbench_compute_token_authority_url' _ "$HELPER_SRC")" ] \
+    || { echo "BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off must opt the guests out" >&2; exit 1; }
+  fragment="$(sed -n '/^# Compute-token authority (A1)/,/^fi$/p' "$ROOT_DIR/scripts/cloudbench-run.sh")"
+  [ -n "$fragment" ] || { echo "cloudbench-run.sh has no compute-token authority fragment" >&2; exit 1; }
+  mkdir -p "$dir/repo/back-end"
+  run_fragment() {  # <authority-url> -> STACK_ENV entries, one per line
+    env -i PATH="$PATH" CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL="$1" BENCHMARK_COMPUTE_TOKEN_AUTHORITY="${2:-on}" bash -c '
+      set -eo pipefail
+      source "$1"; REPO_DIR="$2"; STACK_ENV=()
+      log() { echo "$*" >&2; }; finish() { exit "$1"; }
+      eval "$3"
+      printf "%s\n" "${STACK_ENV[@]}"
+    ' _ "$HELPER_SRC" "$dir/repo" "$fragment"
+  }
+  printf 'DATABASE_URL=x\nBACKEND_API_KEY="guest-internal-key"\n' > "$dir/repo/back-end/.env"
+  [ "$(run_fragment https://navi-j9a9.onrender.com)" = "$(printf 'BENCHMARK_COMPUTE_TOKEN_AUTHORITY=on\nCOMPUTE_TOKEN_AUTHORITY_URL=https://navi-j9a9.onrender.com\nCOMPUTE_TOKEN_AUTHORITY_API_KEY=guest-internal-key')" ] \
+    || { echo "the stack must receive the authority URL and the guest's BACKEND_API_KEY" >&2; exit 1; }
+  [ "$(run_fragment '')" = "$(printf 'BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off\nCOMPUTE_TOKEN_AUTHORITY_URL=\nCOMPUTE_TOKEN_AUTHORITY_API_KEY=')" ] || { echo "an opted-out guest must disable local-stack defaults too" >&2; exit 1; }
+  [ "$(run_fragment https://authority.example off)" = "$(run_fragment '')" ] \
+    || { echo "explicit diagnostic opt-out must override a saved authority URL" >&2; exit 1; }
+  printf 'DATABASE_URL=x\n' > "$dir/repo/back-end/.env"
+  ! run_fragment https://navi-j9a9.onrender.com > /dev/null 2> "$dir/missing.err" \
+    || { echo "a guest without BACKEND_API_KEY must refuse to start" >&2; exit 1; }
+  grep -q 'needs BACKEND_API_KEY' "$dir/missing.err"
+  python3 - "$ROOT_DIR/scripts/run-bench-cloud" "$ROOT_DIR/scripts/cloudbench-run.sh" <<'PYWIRE'
+import sys
+from pathlib import Path
+cloud, run = (Path(path).read_text() for path in sys.argv[1:])
+fresh = '--env "CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=$(cloudbench_compute_token_authority_url)"'
+pooled = 'echo "export CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=$(printf \'%q\' "$(cloudbench_compute_token_authority_url)")"'
+assert cloud.count(fresh) == 1, 'fresh Machines must receive the authority explicitly'
+assert cloud.count(pooled) == 1, 'pooled Machines must receive the authority explicitly'
+start = run.index('# Compute-token authority (A1)')
+assert run.index('STACK_ENV=(') < start < run.index('env "${STACK_ENV[@]}" bash "$REPO_DIR/scripts/run.sh" --benchmark'), \
+    'the authority must be in the stack env before run.sh starts'
+PYWIRE
+) || fail "cloud guests must delegate compute-token state to the shared authority"
