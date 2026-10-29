@@ -8530,6 +8530,16 @@ async def _spawn_browser_agent_activity_v3_real(
                         session_id=exact_session_id,
                     )
             await _stop_kernel_replay_before_session_close(browser_recorder)
+            if (
+                pause
+                and exact_session_id == session_id
+                and dom_service is not None
+                and browser_session_metadata.get("provider") == "tilion"
+            ):
+                # Tilion admits one CDP client. The backend checkpoint must own
+                # that slot after passkey/recorder capture, before provider release.
+                if not await _disconnect_browser(dom_service):
+                    raise BrowserSessionCloseError(exact_session_id, pause)
             options: Dict[str, Any] = {"pause": pause}
             if current_url:
                 options["current_url"] = current_url

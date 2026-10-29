@@ -26723,6 +26723,181 @@ async def test_terminal_passkey_failure_still_pauses_without_weakening_approval(
     assert not failures, failures
 
 
+async def test_tilion_terminal_pause_detaches_after_optional_passkey_capture():
+    from browser_approval_lifecycle_support import TerminalPasskeyCaptureProbe
+    from domains.spawn_browser_agent_v3 import handler
+
+    class TilionTerminalProbe(TerminalPasskeyCaptureProbe):
+        session_provider = "tilion"
+
+        async def close(self, config, session_id, **options):
+            assert "reset_cdp" in self.events, ("terminal checkpoint still has worker CDP", self.events)
+            assert self.alive, self.events
+            return await super().close(config, session_id, **options)
+
+    for scenario in ("completed", "max_steps", "cancelled", "error"):
+        probe = TilionTerminalProbe("tilion", "missing_credential", scenario)
+        if scenario == "error":
+            with pytest.raises(RuntimeError, match="fixture terminal model failure"):
+                await test_private_browser_pause_urls_use_protected_continuity(probe)
+        else:
+            await test_private_browser_pause_urls_use_protected_continuity(probe)
+        await handler.drain_background_browser_cleanups(timeout=2)
+        assert not probe.alive, probe.events
+        assert probe.events.count("checkpoint") == probe.events.count("backend_release") == 1
+        assert "sdk_provider_stop" not in probe.events and "recording_finalized" in probe.events
+        assert "Passkey usage capture incomplete; continuing terminal browser pause" in probe.warnings
+        assert probe.events.index("replay_stop") < probe.events.index("reset_cdp") < probe.events.index("checkpoint")
+        if probe.result is not None:
+            assert probe.result["status"] == {"completed": "completed", "max_steps": "max_iterations", "cancelled": "cancelled"}[scenario]
+            assert "browser_cleanup" not in probe.result
+
+
+async def test_tilion_approval_call_sites_transfer_cdp_without_releasing_source():
+    from browser_approval_lifecycle_support import ApprovalLifecycleProbe
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.repo import BrowserSessionCloseError
+
+    class TilionProbe(ApprovalLifecycleProbe):
+        session_provider = "tilion"
+
+        def install(self, stack, handler):
+            super().install(stack, handler)
+            if self.mode == "detach_false":
+                async def failed_detach(_dom):
+                    self.events.append("detach_unconfirmed")
+                    return False
+                stack.enter_context(patch.object(handler, "_disconnect_browser", side_effect=failed_detach))
+
+        async def close(self, config, session_id, **options):
+            assert "detach_unconfirmed" not in self.events, self.events
+            assert "reset_cdp" in self.events, ("worker still owns CDP", self.events)
+            assert self.alive, ("detach must not release the native", self.events)
+            return await super().close(config, session_id, **options)
+
+        async def observe(self, result, handler):
+            await handler.drain_background_browser_cleanups(timeout=2)
+            assert "sdk_provider_stop" not in self.events, self.events
+            assert self.events.index("passkey_capture") < self.events.index("replay_stop")
+            assert self.events.index("replay_stop") < self.events.index("reset_cdp")
+            assert self.events.index("reset_cdp") < self.events.index("checkpoint")
+            assert self.events.index("checkpoint") < self.events.index("backend_release")
+            assert "recording_finalized" in self.events
+            assert not self.alive
+            assert result["status"] in {"awaiting_write_approval", "awaiting_payment_card_approval"}, result["status"]
+
+    for scenario in ("write", "payment"):
+        probe = TilionProbe("tilion", "ok", scenario)
+        await test_private_browser_pause_urls_use_protected_continuity(probe)
+        probe = TilionProbe("tilion", "checkpoint_failure", scenario)
+        with pytest.raises(BrowserSessionCloseError):
+            await test_private_browser_pause_urls_use_protected_continuity(probe)
+        await handler.drain_background_browser_cleanups(timeout=2)
+        assert probe.alive and "backend_release" not in probe.events, probe.events
+        assert "reset_cdp" in probe.events and "recording_finalized" in probe.events
+        probe = TilionProbe("tilion", "detach_false", scenario)
+        with pytest.raises(BrowserSessionCloseError):
+            await test_private_browser_pause_urls_use_protected_continuity(probe)
+        await handler.drain_background_browser_cleanups(timeout=2)
+        assert probe.alive and "checkpoint" not in probe.events and "backend_release" not in probe.events, probe.events
+        assert "detach_unconfirmed" in probe.events and "recording_finalized" in probe.events
+
+
+async def test_tilion_pause_transfers_exclusive_cdp_before_backend_checkpoint():
+    """Actual helper: preserve passkeys and fail closed without a proven CDP detach."""
+    from domains.spawn_browser_agent_v3.repo import BrowserSessionCloseError
+
+    tree = ast.parse((AGENTS_ROOT / "domains/spawn_browser_agent_v3/handler.py").read_text())
+    helper = next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef)
+                  and node.name == "_close_browser_with_cleanup_receipt")
+    factory = ast.parse("def factory():\n    cleanup_failure = None\n").body[0]
+    factory.body.append(helper)
+    factory.body.extend(ast.parse("return _close_browser_with_cleanup_receipt, lambda: cleanup_failure").body)
+    for mode in ("ok", "capture_fail", "capture_optional", "recorder_fail", "detach_false",
+                 "detach_error", "detach_cancel", "close_409", "close_500", "close_cancel",
+                 "other_session", "not_pause", "no_dom", "kernel", "unknown_provider"):
+        events = []
+        attached = True
+        exact = "other" if mode == "other_session" else "current"
+        pause = mode != "not_pause"
+        provider = "kernel" if mode == "kernel" else "" if mode == "unknown_provider" else "tilion"
+        dom = None if mode == "no_dom" else object()
+        transfers = pause and exact == "current" and dom is not None and provider == "tilion"
+
+        async def capture(_callback):
+            events.append("capture")
+            return mode not in {"capture_fail", "capture_optional"}
+
+        async def stop(_recorder):
+            events.append("recorder")
+            if mode == "recorder_fail":
+                raise RuntimeError("recorder failed")
+
+        async def detach(actual):
+            nonlocal attached
+            assert actual is dom
+            events.append("detach")
+            if mode == "detach_false":
+                return False
+            if mode == "detach_error":
+                raise RuntimeError("detach failed")
+            if mode == "detach_cancel":
+                raise asyncio.CancelledError()
+            attached = False
+            return True
+
+        async def close(_config, actual, **options):
+            assert actual == exact
+            assert options == {"pause": pause, "current_url": "https://shop.example/checkout"}
+            events.append("checkpoint")
+            if transfers:
+                assert not attached, "backend checkpoint collided with worker CDP owner"
+                assert events.index("capture") < events.index("recorder") < events.index("detach")
+            else:
+                assert "detach" not in events, "do not detach unrelated/provider-owned sessions"
+            if mode in {"close_409", "close_500"}:
+                raise BrowserSessionCloseError(actual, pause, int(mode[-3:]))
+            if mode == "close_cancel":
+                raise asyncio.CancelledError()
+            events.append("backend_release")
+
+        namespace = {
+            "Dict": dict, "Any": object, "asyncio": asyncio,
+            "BrowserSessionCloseError": BrowserSessionCloseError,
+            "session_id": "current", "dom_service": dom,
+            "browser_session_metadata": {"provider": provider},
+            "_capture_browser_passkey_usage": capture, "record_passkey_usage_once": AsyncMock(),
+            "_stop_kernel_replay_before_session_close": stop, "browser_recorder": object(),
+            "_disconnect_browser": detach, "close_browser_session": close, "config": object(),
+            "credential_signin_realms": set(), "task_id": "task",
+            "world_state_receipt_summary": lambda _receipt: [],
+            "logger": SimpleNamespace(info=lambda *a, **kw: None, warning=lambda *a, **kw: None),
+        }
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[factory], type_ignores=[])),
+                     "actual-tilion-pause-helper", "exec"), namespace)
+        call, receipt = namespace["factory"]()
+        if mode in {"recorder_fail", "detach_error"}:
+            with pytest.raises(RuntimeError):
+                await call(exact, pause=pause, current_url="https://shop.example/checkout", require_complete_passkeys=True)
+        elif mode in {"detach_cancel", "close_cancel"}:
+            with pytest.raises(asyncio.CancelledError):
+                await call(exact, pause=pause, current_url="https://shop.example/checkout", require_complete_passkeys=True)
+        else:
+            await call(exact, pause=pause, current_url="https://shop.example/checkout",
+                       require_complete_passkeys=mode != "capture_optional")
+        if mode in {"capture_fail", "recorder_fail", "detach_false", "detach_error", "detach_cancel"}:
+            assert "checkpoint" not in events and "backend_release" not in events, (mode, events)
+        if mode in {"close_409", "close_500", "close_cancel"}:
+            assert "checkpoint" in events and "backend_release" not in events
+        failed = mode in {"capture_fail", "recorder_fail", "detach_false", "detach_error", "detach_cancel",
+                          "close_409", "close_500", "close_cancel"}
+        assert (receipt() is not None) == failed, (mode, receipt(), events)
+        if mode in {"close_409", "close_500"}:
+            assert receipt()["http_status"] == int(mode[-3:])
+        if not failed:
+            assert "backend_release" in events
+
+
 async def test_approval_pause_checkpoint_failures_do_not_acknowledge_parking():
     """Run the actual nested close/park helpers, including failed HTTP and cancellation."""
     from domains.spawn_browser_agent_v3.repo import BrowserSessionCloseError
@@ -26760,6 +26935,7 @@ async def test_approval_pause_checkpoint_failures_do_not_acknowledge_parking():
             "_capture_browser_passkey_usage": AsyncMock(return_value=True),
             "record_passkey_usage_once": AsyncMock(),
             "dom_service": object(),
+            "browser_session_metadata": {},
         }
         exec(compile(ast.fix_missing_locations(ast.Module(body=[factory], type_ignores=[])), "approval-parking-helpers", "exec"), namespace)
         pause = namespace["factory"]()
@@ -27012,7 +27188,7 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
             "debug_url": "https://kernel.fixture/view",
             "same_session_available": True,
             "auth_options": {"realm": realm},
-            "browser_session_metadata": {"provider": "kernel"},
+            "browser_session_metadata": {"provider": getattr(_lifecycle_probe, "session_provider", "kernel")},
             "passwords": [],
         }
         fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
@@ -36285,6 +36461,18 @@ async def run_all_tests():
     await r.record_async(
         "private_browser_pause_urls_use_protected_continuity",
         test_private_browser_pause_urls_use_protected_continuity,
+    )
+    await r.record_async(
+        "tilion_terminal_pause_detaches_after_optional_passkey_capture",
+        test_tilion_terminal_pause_detaches_after_optional_passkey_capture,
+    )
+    await r.record_async(
+        "tilion_approval_call_sites_transfer_cdp_without_releasing_source",
+        test_tilion_approval_call_sites_transfer_cdp_without_releasing_source,
+    )
+    await r.record_async(
+        "tilion_pause_transfers_exclusive_cdp_before_backend_checkpoint",
+        test_tilion_pause_transfers_exclusive_cdp_before_backend_checkpoint,
     )
     await r.record_async(
         "approval_pause_checkpoint_failures_do_not_acknowledge_parking",
