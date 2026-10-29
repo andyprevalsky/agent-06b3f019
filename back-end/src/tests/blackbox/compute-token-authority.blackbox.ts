@@ -19,6 +19,7 @@ import {
   GUEST_KEY,
   USER_ID,
   backendDir,
+  writeAuthorityFixtureSchema,
   localServerUrl,
   databaseUrl,
   encryptEnvelope,
@@ -58,21 +59,7 @@ async function main() {
     for (const name of Object.values(names)) {
       await admin.$executeRawUnsafe(`CREATE DATABASE "${name}"`);
     }
-    const schemaSql = execFileSync(
-      'npx',
-      [
-        'prisma',
-        'migrate',
-        'diff',
-        '--from-empty',
-        '--to-schema-datamodel',
-        'prisma/schema.prisma',
-        '--script',
-      ],
-      { cwd: backendDir, encoding: 'utf8' }
-    );
-    const schemaFile = path.join(tmp, 'schema.sql');
-    fs.writeFileSync(schemaFile, schemaSql);
+    const schemaFile = writeAuthorityFixtureSchema(tmp);
 
     const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
     const privatePem = privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
