@@ -628,6 +628,37 @@ def cleanup_ticket_command(root: Path, action: str, cohort: dict[str, object],
     return getattr(module, action)(args)
 
 
+def cleanup_ticket_failure_detail(error: BaseException) -> dict[str, object]:
+    """Keep bounded diagnostic identity without exception payloads or paths."""
+    reasons = {
+        "cleanup parent identity changed": "parent_identity_changed",
+        "invalid cleanup ticket policy": "invalid_policy",
+        "invalid cleanup cohort membership": "invalid_membership",
+        "invalid cleanup member": "invalid_member",
+        "cleanup parent lock not held": "parent_lock_not_held",
+        "changed incomplete cleanup grant": "incomplete_grant_changed",
+        "insufficient physical cleanup cohort floors": "insufficient_physical_floors",
+        "cleanup member ticket changed": "member_ticket_changed",
+    }
+    category = next((kind.__name__ for kind in (
+        subprocess.CalledProcessError, subprocess.TimeoutExpired,
+        subprocess.SubprocessError, OSError, ValueError,
+    ) if isinstance(error, kind)), "Exception")
+    message = error.args[0] if error.args and type(error.args[0]) is str else ""
+    if isinstance(error, OSError) and type(error.strerror) is str:
+        message = error.strerror
+    reason = reasons.get(message) if type(error) is ValueError else None
+    detail: dict[str, object] = {"error_class": category, "reason_code": reason or "unknown"}
+    number = getattr(error, "errno", None)
+    if isinstance(error, OSError) and type(number) is int and 0 < number < 4096:
+        detail["errno"] = number
+    if reason is None:
+        detail["message_prefix_sha256"] = hashlib.sha256(
+            message[:4096].encode("utf-8", errors="replace")
+        ).hexdigest()
+    return detail
+
+
 def stress_inventory_baseline(root: Path, authority: str) -> tuple[int, list[dict[str, object]] | None]:
     """Borrow the exact parent feed with existing checks; temporary absence never fans out."""
     expected = json.loads(authority)
@@ -1916,11 +1947,12 @@ def main() -> int:
                                 "--canary-lock", policy.get("FLEET_INFRA_CANARY_LOCK", str(workspace / ".context/fleet-infra-canary-preflight.transaction.lock")),
                                 "--canary-source-ref", subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip())
                             current_cohort["_cleanup_tickets_prepared"] = True
-                        except (OSError, ValueError, subprocess.SubprocessError):
+                        except (OSError, ValueError, subprocess.SubprocessError) as error:
                             # End through normal summary/Hub finalization, never a traceback.
                             first_failure = first_failure or 1
                             barrier_failure = True
                             state["cleanup_ticket_failure"] = "prepare"
+                            state["cleanup_ticket_failure_detail"] = cleanup_ticket_failure_detail(error)
                             abort_startup_cohort(current_cohort, "cleanup ticket preparation failed before child admission")
                             write_json_atomic(summary_path, state)
                             continue

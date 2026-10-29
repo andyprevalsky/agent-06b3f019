@@ -2,6 +2,7 @@
 """Actual canonical campaign producer -> child reserve/release -> next cohort."""
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import runpy
@@ -30,7 +31,7 @@ def write_exclusive(path, value):
 
 
 class CampaignTickets(unittest.TestCase):
-    def campaign_fixture(self, mode="pass", old=False, old_mutation=False, old_relay=False):
+    def campaign_fixture(self, mode="pass", old=False, old_mutation=False, old_relay=False, prepare_error=None, after_first=False):
         with tempfile.TemporaryDirectory(
             prefix="cleanup-ticket-campaign-"
         ) as temporary:
@@ -52,10 +53,12 @@ class CampaignTickets(unittest.TestCase):
                 # child exit or a ticket refusal would, keeping child CLIs real.
                 action = mode.split("-")[1]
                 with (scripts / "cloudbench-cleanup-tickets.py").open("a") as helper:
+                    failure = prepare_error or "ValueError('fixture cleanup ticket " + action + " refusal')"
+                    guard = " and args.cohort_id.endswith('002')" if after_first else ""
                     helper.write("\n_fixture_original_" + action + " = " + action + "\n"
                                  "def " + action + "(args):\n"
-                                 "    if __name__ == 'cleanup_parent_identity':\n"
-                                 "        raise ValueError('fixture cleanup ticket " + action + " refusal')\n"
+                                 "    if __name__ == 'cleanup_parent_identity'" + guard + ":\n"
+                                 "        raise " + failure + "\n"
                                  "    return _fixture_original_" + action + "(args)\n")
             if "external" in mode:
                 # External modes join the actual per-fleet barrier helper.
@@ -472,11 +475,20 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 self.assertEqual(summary["status"], "failed")
                 self.assertEqual(summary["cleanup_ticket_failure"], mode.split("-")[1])
                 self.assertIn("finished_at", summary)
-                self.assertTrue(all(job["status"] in ("failed", "cancelled") for job in summary["jobs"]), summary["jobs"])
+                if not after_first:
+                    self.assertTrue(all(job["status"] in ("failed", "cancelled") for job in summary["jobs"]), summary["jobs"])
                 if mode == "ticket-prepare-fail":
-                    self.assertNotIn("TASK_START", events)
-                    self.assertNotIn("CANARY_ENTER", events)
-                return
+                    if after_first:
+                        self.assertEqual(events.count("TASK_START"), 3)
+                        self.assertEqual([job["status"] for job in summary["jobs"][:3]], ["passed"] * 3)
+                        first = summaries[0].parent / "startup-cohorts/c001/cleanup-budget"
+                        self.assertTrue((first / "retired.json").is_file())
+                        self.assertTrue((first / "budget.json").is_file())
+                    else:
+                        self.assertNotIn("TASK_START", events)
+                        self.assertNotIn("CANARY_ENTER", events)
+                    self.assertEqual([job["status"] for job in summary["jobs"][-3:]], ["cancelled"] * 3)
+                return summary
             if mode not in ("pass", "fresh", "explicit") or old:
                 self.assertNotEqual(
                     result.returncode, 0, result.stdout + result.stderr + details
@@ -804,6 +816,37 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
 
     def test_cleanup_ticket_prepare_failure_finalizes_failed_summary(self):
         self.campaign_fixture("ticket-prepare-fail")
+
+    def test_prepare_failure_diagnostics_keep_unknown_payloads_private(self):
+        errors = [
+            ("ValueError('insufficient physical cleanup cohort floors')",
+             {"error_class": "ValueError", "reason_code": "insufficient_physical_floors"}),
+            ("ValueError('secret-token=/private/路徑')",
+             {"error_class": "ValueError", "reason_code": "unknown",
+              "message_prefix_sha256": hashlib.sha256("secret-token=/private/路徑".encode()).hexdigest()}),
+            ("OSError(28, 'secret-token=/private/path')",
+             {"error_class": "OSError", "reason_code": "unknown", "errno": 28,
+              "message_prefix_sha256": hashlib.sha256(b"secret-token=/private/path").hexdigest()}),
+        ]
+        for error, expected in errors:
+            with self.subTest(error_class=expected["error_class"], reason=expected["reason_code"]):
+                summary = self.campaign_fixture("ticket-prepare-fail", prepare_error=error)
+                self.assertEqual(summary["cleanup_ticket_failure_detail"], expected)
+                self.assertNotIn("secret-token", json.dumps(summary))
+                self.assertNotIn("/private/", json.dumps(summary))
+        # Unknown text is hashed at a fixed limit; no payload or arbitrary class name escapes.
+        class CustomError(ValueError):
+            pass
+        text = "x" * 5000
+        detail = CAMPAIGN["cleanup_ticket_failure_detail"](CustomError(text))
+        self.assertEqual(detail, {"error_class": "ValueError", "reason_code": "unknown",
+                                 "message_prefix_sha256": hashlib.sha256(b"x" * 4096).hexdigest()})
+
+    def test_later_prepare_failure_preserves_retired_cohort_and_pending_members(self):
+        summary = self.campaign_fixture("ticket-prepare-fail",
+            prepare_error="ValueError('cleanup parent identity changed')", after_first=True)
+        self.assertEqual(summary["cleanup_ticket_failure_detail"],
+                         {"error_class": "ValueError", "reason_code": "parent_identity_changed"})
 
     def test_cleanup_ticket_assign_failure_joins_child_and_finalizes_failed(self):
         self.campaign_fixture("ticket-assign-fail")

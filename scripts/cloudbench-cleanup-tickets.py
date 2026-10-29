@@ -173,6 +173,42 @@ def legacy_liability(root):
         total+=max(0,amount-max(0,info.st_blocks*512))
     return total
 
+def retire_legacy_standalone_accounting(root):
+    """Caller holds admission.lock; retire only positively dead, nondebited rows.
+
+    No reserve file or provider resource is touched. A live or uncertain PID,
+    including a reused PID, conservatively retains its existing accounting.
+    """
+    path=root/'state.json'
+    if not path.exists():return
+    state=read(path)
+    expected={'version','groups'} if state.get('version')==1 else {'version','groups','inflight','failures'}
+    if type(state.get('version')) is not int or state['version'] not in (1,2) or set(state)!=expected:return
+    groups=state.get('groups');inflight=state.get('inflight',{})
+    if type(groups) is not dict or type(inflight) is not dict:return
+    # Even an unrelated or malformed debit may describe an unresolved writer.
+    if inflight:return
+    changed=False
+    for identifier,group in list(groups.items()):
+        if type(identifier) is not str or not re.fullmatch('[0-9a-f]{64}',identifier):continue
+        if type(group) is not dict or set(group)!={'directory','parent_lock_identity','members','consumed','preferred','minimum','headroom'}:continue
+        member='standalone-'+identifier
+        if group['directory'] is not None or group['parent_lock_identity'] is not None:continue
+        if group['members']!=[member] or type(group['consumed']) is not dict or set(group['consumed'])!={member}:continue
+        if any(type(group[name]) is not int for name in ('preferred','minimum','headroom')):continue
+        if not 1<=group['minimum']<=group['preferred']<=4096 or not 0<=group['headroom']<=16384:continue
+        owner=group['consumed'][member]
+        if type(owner) is not dict or set(owner)!={'pid','birth'}:continue
+        if type(owner['pid']) is not int or owner['pid']<=1 or type(owner['birth']) is not str or not owner['birth']:continue
+        try:
+            os.kill(owner['pid'],0)
+        except ProcessLookupError:
+            del groups[identifier];changed=True
+        except OSError:
+            pass
+    if changed:write(path,state,replace=True)
+
+
 def prepare(args):
     cohort=Path(args.cohort).absolute();base=base_for(cohort);physical(cohort,True)
     need(args.parent_pid>1 and birth(args.parent_pid)==args.parent_start,'cleanup parent identity changed')
@@ -199,6 +235,7 @@ def prepare(args):
                 budget=read(base/'budget.json')
                 need(read(grant_path)=={'base':str(base),'budget_sha256':digest(budget)},'changed incomplete cleanup grant')
             else:
+                retire_legacy_standalone_accounting(root)
                 liability=cold_grant_liability(root)+legacy_liability(root)
                 slots=len(jobs)+1
                 available=free_bytes(reserve_root)-liability-slots*args.headroom*MB
