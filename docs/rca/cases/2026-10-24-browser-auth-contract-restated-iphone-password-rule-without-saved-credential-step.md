@@ -81,3 +81,17 @@ None recorded.
 ## Reusable lesson
 
 When a live-model control flips between two tools, A/B each competing instruction on the exact request at n≥20 before editing; remove the restatement whose preconditions diverge from the owning skill, but keep restatements that measure as helpful.
+
+## Recurrence observed during PR1634 deployment
+
+On 2026-10-29 at00:29:48 UTC, the unchanged native saved-credential control
+again received request_user_assistance_for_authentication(iphone, password)
+on the server_available scenario from gpt-5.6-luna-foundry. The full
+rose-browser-use domain reported116 passed and1 failed. The captured request
+still included the existing mitigation. This is evidence that the documented
+residual behavior remains, not a new fix or an infrastructure timeout.
+
+Evidence: /var/tmp/rose-final-agents-coverage-verified.log and
+.context/test-runs/agents-coverage-20261029-002931-1793374/rose-browser-use.log.
+No assertion, scenario, timeout, browser default, or approval gate was changed;
+the failed run is retained and blocks deployment without a valid gate override.
