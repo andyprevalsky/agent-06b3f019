@@ -1010,9 +1010,7 @@ class RoseClient:
         _exclude_anthropic_family = anthropic_family_excluded(_exclude_anthropic_family)
         pool_spec = pool_for_call(pool, call_site)
         if is_flash_agent_call(pool, call_site):
-            # Terra is a compute-token-only lead; chat/browser retain their own policy.
-            claude_auth = None
-            _exclude_anthropic_family = True
+            # Terra and Opus are compute-token-only leads; chat/browser keep their policy.
             prefer_azure = False
             if effort is None:
                 effort = "medium"
@@ -1243,7 +1241,11 @@ class RoseClient:
         elif _exclude_anthropic_family:
             direct_auth = None
         else:
-            direct_auth = eligible_claude_auth or eligible_gpt_auth
+            direct_auth = (
+                (eligible_gpt_auth or eligible_claude_auth)
+                if is_flash_agent_call(pool, call_site)
+                else (eligible_claude_auth or eligible_gpt_auth)
+            )
 
         logger.info(
             "rose.complete.start",
@@ -1621,7 +1623,7 @@ class RoseClient:
                                 agent_id=agent_id,
                                 call_site=call_site,
                                 thinking=thinking,
-                                effort=effort,
+                                effort="low" if is_flash_agent_call(pool, call_site) else effort,
                                 speed=speed,
                                 ttft_timeout_s=current_ttft_s,
                                 idle_timeout_s=idle_timeout_s,
@@ -1775,11 +1777,18 @@ class RoseClient:
                 if token_error == "stall":
                     within_budget = stall_rotations < direct_auth.max_rotations
                 else:
-                    within_budget = token_error in ("auth_error", "rate_limit") and direct_auth.max_rotations > 0
+                    within_budget = (
+                        token_error in ("auth_error", "rate_limit") or is_flash_agent_call(pool, call_site)
+                    ) and direct_auth.max_rotations > 0
                 can_rotate = within_budget and direct_auth.fetch_fresh is not None and remaining() > 0
-                if not can_rotate:
-                    break
-                fresh = await direct_auth.fetch_fresh(direct_auth.user_id)
+                fresh = await direct_auth.fetch_fresh(direct_auth.user_id) if can_rotate else None
+                if (fresh is None or fresh.token in tried_tokens) and is_flash_agent_call(pool, call_site):
+                    if (
+                        not _exclude_anthropic_family
+                        and eligible_claude_auth is not None
+                        and eligible_claude_auth.token not in tried_tokens
+                    ):
+                        fresh = eligible_claude_auth
                 if fresh is None:
                     break
                 if fresh.token in tried_tokens:

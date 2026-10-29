@@ -727,42 +727,55 @@ def _build_compute_auth_context(
     )
 
 
-async def _flash_agent_gpt_context(
-    current: Optional[GptAuthContext],
+async def _flash_agent_auth_contexts(
+    claude: Optional[ClaudeAuthContext],
+    gpt: Optional[GptAuthContext],
     *,
     user_id: Optional[str],
     lineage_key: Optional[str],
     agent_id: Optional[str],
     demo_cache_affinity_key: Optional[str],
-) -> Optional[GptAuthContext]:
-    """Acquire and rotate only GPT leases for the Flash Terra lead."""
-    async def fetch_gpt(fetch_user_id: str) -> Optional[ComputeAuthContext]:
-        result = await fetch_compute_token_activity(
-            fetch_user_id,
-            lineage_key=lineage_key,
-            agent_id=agent_id,
-            root_agent_id=agent_id,
-            demo_cache_affinity_key=demo_cache_affinity_key,
-            token_type="gpt",
-        )
-        if not result or result.get("type") != "gpt":
-            return None
-        context = _build_compute_auth_context(
-            result, fetch_user_id, agent_id=agent_id, root_agent_id=agent_id,
-            demo_cache_affinity_key=demo_cache_affinity_key,
-        )
-        if isinstance(context, GptAuthContext):
-            context.fetch_fresh = fetch_gpt
+) -> Tuple[Optional[ClaudeAuthContext], Optional[GptAuthContext]]:
+    """Reuse a lease; otherwise try Terra then Opus, with broker-owned cooldowns."""
+    seen_tokens = {context.token for context in (gpt, claude) if context is not None}
+
+    async def fetch_next(
+        fetch_user_id: str, current: Optional[ComputeAuthContext] = None,
+    ) -> Optional[ComputeAuthContext]:
+        # Once on Claude, never cycle back to GPT within this call.
+        kinds = ("claude",) if isinstance(current, ClaudeAuthContext) else ("gpt", "claude")
+        for kind in kinds:
+            result = await fetch_compute_token_activity(
+                fetch_user_id, lineage_key=lineage_key, agent_id=agent_id,
+                root_agent_id=agent_id, demo_cache_affinity_key=demo_cache_affinity_key,
+                token_type=kind,
+            )
+            if not result or result.get("type") != kind:
+                continue
+            context = _build_compute_auth_context(
+                result, fetch_user_id, agent_id=agent_id, root_agent_id=agent_id,
+                demo_cache_affinity_key=demo_cache_affinity_key,
+            )
+            if context is None or context.token in seen_tokens:
+                continue
+            seen_tokens.add(context.token)
+            bind_rotation(context)
             return context
         return None
 
+    def bind_rotation(context: ComputeAuthContext) -> None:
+        async def refresh(fetch_user_id: str):
+            return await fetch_next(fetch_user_id, context)
+        context.fetch_fresh = refresh if context.user_id and context.max_rotations > 0 else None
+
+    current = gpt or claude
     if current is not None:
-        current.fetch_fresh = fetch_gpt if current.user_id else None
-        return current
-    if not user_id:
-        return None
-    context = await fetch_gpt(user_id)
-    return context if isinstance(context, GptAuthContext) else None
+        bind_rotation(current)
+    elif user_id:
+        current = await fetch_next(user_id)
+    if isinstance(current, ClaudeAuthContext):
+        return current, None
+    return None, current if isinstance(current, GptAuthContext) else None
 
 
 def _build_compute_auth_context_from_payload(
@@ -3032,9 +3045,8 @@ async def call_llm_structured_streaming(
         )
 
         if is_flash_agent_call(pool, call_site):
-            claude_auth_context = None
-            gpt_auth_context = await _flash_agent_gpt_context(
-                gpt_auth_context,
+            claude_auth_context, gpt_auth_context = await _flash_agent_auth_contexts(
+                claude_auth_context, gpt_auth_context,
                 user_id=gpt_token_user_id or claude_token_user_id,
                 lineage_key=compute_token_lineage_key,
                 agent_id=agent_id,
@@ -4320,9 +4332,8 @@ async def call_llm(
                 demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
             )
             if is_flash_agent_call(pool, call_site):
-                claude_auth_context = None
-                gpt_auth_context = await _flash_agent_gpt_context(
-                    gpt_auth_context,
+                claude_auth_context, gpt_auth_context = await _flash_agent_auth_contexts(
+                    claude_auth_context, gpt_auth_context,
                     user_id=gpt_token_user_id or claude_token_user_id,
                     lineage_key=compute_token_lineage_key,
                     agent_id=agent_id,

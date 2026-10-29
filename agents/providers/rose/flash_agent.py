@@ -18,6 +18,7 @@ def pool_for_call(pool: str, call_site: str) -> PoolSpec:
     return replace(
         spec,
         gpt_auth_model="gpt-6.1-terra",
+        claude_auth_model="claude-opus-5-5",
         subscription_auth_enabled=True,
         direct_auth_enabled=False,
     )

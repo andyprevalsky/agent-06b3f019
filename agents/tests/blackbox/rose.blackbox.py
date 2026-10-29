@@ -9128,7 +9128,7 @@ async def _run_subscription_order(first, limited: set[str], fetch_fresh_leases: 
     return calls, fetches, metadata, text
 
 
-async def test_flash_root_explore_terra_compute_only_and_speed():
+async def test_flash_root_explore_compute_only_and_speed():
     from providers.rose.speed import bind_agent_speed, current_agent_speed
     from providers.rose.errors import RoseServerError
 
@@ -9143,6 +9143,11 @@ async def test_flash_root_explore_terra_compute_only_and_speed():
         yield StreamChunk(kind="content", data={"text": "ok"})
         yield StreamChunk(kind="done", data={})
 
+    async def claude(**kwargs):
+        calls.append(("claude", kwargs["pool_spec"].claude_auth_model, kwargs.get("effort"), kwargs.get("speed")))
+        yield StreamChunk(kind="content", data={"text": "opus"})
+        yield StreamChunk(kind="done", data={})
+
     async def cerebras(**kwargs):
         calls.append(("cerebras", kwargs["pool_spec"].cerebras_model))
         yield StreamChunk(kind="content", data={"text": "fallback"})
@@ -9150,7 +9155,7 @@ async def test_flash_root_explore_terra_compute_only_and_speed():
 
     with (
         patch("providers.rose.client.gpt_auth_complete", gpt),
-        patch("providers.rose.client.claude_auth_complete", side_effect=AssertionError("Claude must not lead")),
+        patch("providers.rose.client.claude_auth_complete", claude),
         patch("providers.rose.client.cerebras_complete", cerebras),
         patch("providers.rose.client._cerebras_api_key", return_value="fixture"),
         patch("providers.rose.client._openai_api_key", side_effect=AssertionError("no paid Terra")),
@@ -9178,7 +9183,15 @@ async def test_flash_root_explore_terra_compute_only_and_speed():
             await _drain(RoseClient().complete(pool="rose-1-flash", call_site=site,
                 messages=[{"role": "user", "content": "hi"}],
                 claude_auth=_pool_lease("claude", "fixture")))
-            assert [call[0] for call in calls] == ["cerebras"], calls
+            assert calls[0][:3] == ("claude", "claude-opus-5-5", "low"), calls
+            failing = True
+            calls.clear()
+            await _drain(RoseClient().complete(pool="rose-1-flash", call_site=site,
+                messages=[{"role": "user", "content": "hi"}],
+                gpt_auth=_pool_lease("gpt", "fixture"), claude_auth=_pool_lease("claude", "alternate")))
+            assert [call[0] for call in calls] == ["gpt", "claude"], calls
+            assert calls[-1][1:3] == ("claude-opus-5-5", "low"), calls
+            failing = False
         for pool, site in (("rose-1-flash", "chat"), ("rose-1-flash", "browser_use"),
                            ("rose-1-browser-use", "browser_use")):
             calls.clear()
@@ -9209,22 +9222,96 @@ async def test_flash_terra_actual_codex_request_preserves_speed():
     assert [body.get("service_tier") for body in requests] == [None, "priority", "priority"]
 
 
-async def test_flash_root_gpt_acquisition_and_rotation_are_pinned():
-    from helpers.llm import _flash_agent_gpt_context
-    fetch = AsyncMock(return_value={"type": "gpt", "accessToken": "fixture", "source": "pool",
-                                   "poolTokenId": "fixture-id", "lineageKey": "fixture-lineage"})
+async def test_flash_compute_acquisition_and_rotation_are_ordered():
+    from helpers.llm import _flash_agent_auth_contexts
+    calls = []
+    gpt_available = True
+    claude_available = True
+
+    async def fetch(user_id, **kwargs):
+        kind = kwargs["token_type"]
+        calls.append(kind)
+        assert kwargs["lineage_key"] == "fixture-lineage"
+        if (kind == "gpt" and not gpt_available) or (kind == "claude" and not claude_available):
+            return None
+        return {"type": kind, "accessToken": kind + "-fixture", "source": "pool",
+                "poolTokenId": kind + "-id", "lineageKey": "fixture-lineage"}
+
     with patch("helpers.llm.fetch_compute_token_activity", fetch):
-        auth = await _flash_agent_gpt_context(None, user_id="fixture-user", lineage_key="fixture-lineage",
-            agent_id="fixture-agent", demo_cache_affinity_key=None)
-        assert isinstance(auth, GptAuthContext)
-        assert fetch.call_args.kwargs["token_type"] == "gpt"
-        assert fetch.call_args.kwargs["lineage_key"] == "fixture-lineage"
-        rotated = await auth.fetch_fresh("fixture-user")
-        assert isinstance(rotated, GptAuthContext)
-        assert fetch.call_count == 2
-        assert fetch.call_args.kwargs["token_type"] == "gpt"
-        fetch.return_value = None
-        assert await auth.fetch_fresh("fixture-user") is None
+        claude, gpt = await _flash_agent_auth_contexts(None, None, user_id="fixture-user",
+            lineage_key="fixture-lineage", agent_id="fixture-agent", demo_cache_affinity_key=None)
+        assert claude is None and isinstance(gpt, GptAuthContext)
+        assert calls == ["gpt"]
+        # Even an unmarked server failure must not retry the identical GPT lease.
+        rotated = await gpt.fetch_fresh("fixture-user")
+        assert isinstance(rotated, ClaudeAuthContext)
+        assert calls == ["gpt", "gpt", "claude"]
+        claude_available = False
+        assert await rotated.fetch_fresh("fixture-user") is None
+        assert calls[-1] == "claude", "do not cycle back to GPT"
+        gpt_available = False
+        claude_available = True
+        calls.clear()
+        claude, gpt = await _flash_agent_auth_contexts(None, None, user_id="fixture-user",
+            lineage_key="fixture-lineage", agent_id="fixture-agent", demo_cache_affinity_key=None)
+        assert isinstance(claude, ClaudeAuthContext) and gpt is None
+        assert calls == ["gpt", "claude"]
+        calls.clear()
+        reused, _ = await _flash_agent_auth_contexts(claude, None, user_id="fixture-user",
+            lineage_key="fixture-lineage", agent_id="fixture-agent", demo_cache_affinity_key=None)
+        assert reused is claude and calls == [], "reuse active leases"
+
+
+async def test_flash_opus_actual_request_low_effort_and_speed():
+    import providers.rose.claude_auth as transport
+    requests = []
+
+    async def capture(**kwargs):
+        requests.append(kwargs["body"])
+        yield StreamChunk(kind="metadata", data={"actual_model": "claude-opus-5-5-claude"})
+        yield StreamChunk(kind="content", data={"text": "ok"})
+        yield StreamChunk(kind="done", data={})
+
+    with patch.object(transport, "_attempt_with_token", capture):
+        for speed in ("standard", "fast", "ultrafast"):
+            await _drain(RoseClient().complete(pool="rose-1-flash", call_site="execute_loop",
+                messages=[{"role": "user", "content": "hello"}], effort="xhigh",
+                claude_auth=_pool_lease("claude", "fixture"), speed=speed))
+    assert [body["model"] for body in requests] == ["claude-opus-5-5"] * 3
+    assert [body["output_config"]["effort"] for body in requests] == ["low"] * 3
+    assert [body.get("speed") for body in requests] == [None, "fast", "fast"]
+
+
+async def test_flash_compute_failures_reach_cerebras():
+    from helpers.llm import _flash_agent_auth_contexts
+    calls = []
+
+    async def fetch(user_id, **kwargs):
+        kind = kwargs["token_type"]
+        return {"type": kind, "accessToken": kind + "-fixture", "source": "pool",
+                "poolTokenId": kind + "-id", "lineageKey": "fixture-lineage"}
+
+    async def failing(**kwargs):
+        calls.append(kwargs["auth"].token_type)
+        raise RoseServerError("fixture unavailable", status=503)
+        yield
+
+    async def cerebras(**kwargs):
+        calls.append("cerebras")
+        yield StreamChunk(kind="content", data={"text": "fallback"})
+        yield StreamChunk(kind="done", data={})
+
+    with (patch("helpers.llm.fetch_compute_token_activity", fetch),
+          patch("providers.rose.client.gpt_auth_complete", failing),
+          patch("providers.rose.client.claude_auth_complete", failing),
+          patch("providers.rose.client.cerebras_complete", cerebras),
+          patch("providers.rose.client._cerebras_api_key", return_value="fixture"),
+          patch("providers.rose.client._openai_api_key", side_effect=AssertionError("no funded key"))):
+        claude, gpt = await _flash_agent_auth_contexts(None, None, user_id="fixture-user",
+            lineage_key="fixture-lineage", agent_id="fixture-agent", demo_cache_affinity_key=None)
+        await _drain(RoseClient().complete(pool="rose-1-flash", call_site="explore_agent",
+            messages=[{"role": "user", "content": "hi"}], claude_auth=claude, gpt_auth=gpt))
+    assert calls == ["gpt", "claude", "cerebras"], calls
 
 
 async def test_flash_and_browser_subscriptions_before_cerebras():
@@ -12273,9 +12360,11 @@ async def run_all_tests():
         "client_compute_rotates_across_providers",
         test_client_rotates_compute_token_across_providers_before_waterfall,
     )
-    await r.record_async("flash_root_explore_terra_compute_only_speed", test_flash_root_explore_terra_compute_only_and_speed)
-    await r.record_async("flash_root_gpt_acquisition_rotation_pinned", test_flash_root_gpt_acquisition_and_rotation_are_pinned)
+    await r.record_async("flash_root_explore_compute_only_speed", test_flash_root_explore_compute_only_and_speed)
+    await r.record_async("flash_compute_acquisition_rotation_ordered", test_flash_compute_acquisition_and_rotation_are_ordered)
     await r.record_async("flash_terra_actual_codex_request_speed", test_flash_terra_actual_codex_request_preserves_speed)
+    await r.record_async("flash_opus_actual_request_low_effort_speed", test_flash_opus_actual_request_low_effort_and_speed)
+    await r.record_async("flash_compute_failures_reach_cerebras", test_flash_compute_failures_reach_cerebras)
     await r.record_async("flash_and_browser_subscriptions_first", test_flash_and_browser_subscriptions_before_cerebras)
     await r.record_async(
         "client_rotates_every_subscription_before_funded_key",
