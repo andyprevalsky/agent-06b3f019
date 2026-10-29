@@ -20,16 +20,26 @@ RESOURCE_CODES = frozenset({"billing_credit_exhausted", "compute_quota_exhausted
 def strict_json(value):
     def reject_constant(constant):
         raise ValueError("non-finite JSON constant")
-    return json.loads(value, parse_constant=reject_constant)
+    def parse_finite_float(token):
+        result = float(token)
+        if not math.isfinite(result):
+            raise ValueError("non-finite JSON number")
+        return result
+    return json.loads(value, parse_constant=reject_constant, parse_float=parse_finite_float)
 
 
 def finite(value):
-    return type(value) in (int, float) and math.isfinite(value)
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _validate(summary, bundles, confirmations, bindings, wrapper_explanation=None, wrapper_observation=None):
     problems, warnings, rows = [], [], []
     planned = summary.get("tasks")
+    if not isinstance(summary.get("run_id"), str) or not summary["run_id"].strip():
+        problems.append("invalid planned run identity")
     source_sha = summary.get("git_sha")
     if not isinstance(source_sha, str) or len(source_sha) != 40 or any(c not in "0123456789abcdef" for c in source_sha):
         problems.append("invalid planned source identity")
@@ -79,7 +89,7 @@ def _validate(summary, bundles, confirmations, bindings, wrapper_explanation=Non
             raw_start = datetime.fromisoformat(run["timestamp"]).timestamp()
             if not (plan_start <= raw_start <= card["finished_at"] <= plan_end):
                 problems.append("run timestamps outside plan")
-        except (KeyError, ValueError, TypeError):
+        except (KeyError, ValueError, TypeError, ArithmeticError, OSError):
             problems.append("unknown plan/run timestamps")
         if bundle.get("cleanup_verified") is not True:
             problems.append("run or stack cleanup unverified")
@@ -162,7 +172,7 @@ def _validate(summary, bundles, confirmations, bindings, wrapper_explanation=Non
         skipped = sorted((r["run_id"], r["task"]) for r in rows if r["classification"] == "SKIPPED")
         try:
             finished_epoch = datetime.fromisoformat(summary["finished_at"]).timestamp()
-        except (TypeError, ValueError, KeyError):
+        except (TypeError, ValueError, KeyError, ArithmeticError, OSError):
             finished_epoch = float("inf")
         explained = (bool(skipped) and not problems
                      and proof.get("kind") == "task_result_exit"
@@ -198,8 +208,11 @@ def _validate(summary, bundles, confirmations, bindings, wrapper_explanation=Non
 
 def validate(summary, bundles, confirmations, bindings, wrapper_explanation=None, wrapper_observation=None):
     try:
-        return _validate(summary, bundles, confirmations, bindings, wrapper_explanation, wrapper_observation)
-    except (TypeError, ValueError, KeyError, AttributeError):
+        result = _validate(summary, bundles, confirmations, bindings, wrapper_explanation, wrapper_observation)
+        # Direct callers can supply values that did not pass the JSON parser.
+        json.dumps(result, allow_nan=False)
+        return result
+    except (TypeError, ValueError, KeyError, AttributeError, ArithmeticError, OSError):
         return {"status": "BLOCKED", "problems": ["malformed receipt structure"], "warnings": []}
 
 
@@ -259,9 +272,14 @@ def main():
                            "runner_log_sha256": log_digest.hexdigest()}
         result = validate(summary, bundles, strict_json(args.confirmations.read_text()),
                           strict_json(args.bindings.read_text()), explanation, observation)
-    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, ArithmeticError) as exc:
         result = {"status": "BLOCKED", "problems": ["invalid or unreadable receipt input: " + type(exc).__name__], "warnings": []}
-    print(json.dumps(result, indent=2, allow_nan=False))
+    try:
+        output = json.dumps(result, indent=2, allow_nan=False)
+    except (TypeError, ValueError, ArithmeticError):
+        result = {"status": "BLOCKED", "problems": ["non-serializable receipt value"], "warnings": []}
+        output = json.dumps(result, indent=2)
+    print(output)
     return 1 if result["status"] == "BLOCKED" else 0
 
 

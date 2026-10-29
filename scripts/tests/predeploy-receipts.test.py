@@ -201,4 +201,55 @@ class ReceiptPolicy(unittest.TestCase):
         self.assertEqual(check(s,b,[],e,o)['status'],'BLOCKED')
 
 
+
+    def test_planned_run_identity_is_required(self):
+        for value in (None, "", " ", 3, [], {}):
+            with self.subTest(value=value):
+                s,b,p=fixture();s["run_id"]=value
+                self.assertEqual(check(s,b,p)["status"],"BLOCKED")
+        s,b,p,e,o=nonzero_fixture();s.pop("run_id");e.pop("plan_run_id")
+        self.assertEqual(check(s,b,p,e,o)["status"],"BLOCKED")
+
+    def test_numeric_overflow_returns_serializable_blocked(self):
+        s,b,p=fixture();p[0]["confirmed_at"]=10**400
+        self.assertEqual(check(s,b,p)["status"],"BLOCKED")
+        for field in ("passed", "failure_reason"):
+            with self.subTest(field=field):
+                s,b,p=fixture();b[0]["run"]["tasks"][0][field]=float("inf")
+                result=check(s,b,p)
+                self.assertEqual(result["status"],"BLOCKED")
+                json.dumps(result,allow_nan=False)
+
+    def test_json_exponent_overflow_is_rejected(self):
+        with self.assertRaises(ValueError):
+            v.strict_json('{"original_reason":1e999}')
+        with self.assertRaises(ValueError):
+            v.strict_json('{"original_reason":-1e999}')
+        self.assertEqual(v.strict_json('{"value":1.25}'), {"value":1.25})
+
+    def test_cli_serialization_failure_emits_blocked_json(self):
+        import contextlib, io
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);run=root/"run";run.mkdir()
+            for name,value in (("run.json",{}),("report-card.json",{})):
+                (run/name).write_text(json.dumps(value))
+            for name,value in (("summary.json",{}),("confirmations.json",[]),("bindings.json",[])):
+                (root/name).write_text(json.dumps(value))
+            argv=["validator", "--summary",str(root/"summary.json"),"--run-dir",str(run),"--confirmations",str(root/"confirmations.json"),"--bindings",str(root/"bindings.json")]
+            for value in (float("inf"), {"not-json"}):
+                with self.subTest(value=value), patch("sys.argv",argv), patch.object(v,"verify_cleanup",return_value=True), patch.object(v,"validate",return_value={"status":"PASS","unexpected":value}), contextlib.redirect_stdout(io.StringIO()) as stream:
+                    self.assertEqual(v.main(),1)
+                    result=json.loads(stream.getvalue())
+                    self.assertEqual(result["status"],"BLOCKED")
+
+
+    def test_timestamp_os_error_is_structured_blocked(self):
+        from unittest.mock import patch
+        s,b,p=fixture()
+        with patch.object(v,"datetime") as clock:
+            clock.fromisoformat.side_effect=OSError("unrepresentable timestamp")
+            self.assertEqual(check(s,b,p)["status"],"BLOCKED")
+
+
 if __name__=='__main__': unittest.main()

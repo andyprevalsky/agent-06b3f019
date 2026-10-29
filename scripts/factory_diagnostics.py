@@ -64,6 +64,14 @@ def _detail(row: dict[str, Any]) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _obj(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _label(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
 def _top(counter: Counter, limit: int = TOP) -> list[dict[str, Any]]:
     return [{"name": name, "count": count} for name, count in counter.most_common(limit)]
 
@@ -85,18 +93,20 @@ def gate_diagnostics(stages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         mem_min: list[float] = []
         for row in detailed:
             detail = _detail(row)
-            outcome = detail.get("outcome") or {}
+            outcome = _obj(detail.get("outcome"))
             if row.get("status") == "failed":
-                classes[outcome.get("failure_class") or "unclassified"] += 1
-                names.update(outcome.get("failing") or [])
-            cause = (detail.get("attempt") or {}).get("retry_cause")
+                classes[_label(outcome.get("failure_class")) or "unclassified"] += 1
+                failing = outcome.get("failing")
+                if isinstance(failing, list):
+                    names.update(name for name in failing if isinstance(name, str))
+            cause = _label(_obj(detail.get("attempt")).get("retry_cause"))
             if cause:
                 causes[cause] += 1
-            timing = detail.get("timing") or {}
+            timing = _obj(detail.get("timing"))
             for key, bucket in (("setup_seconds", setup), ("queue_seconds", queue), ("exec_seconds", execute)):
                 if _finite_number(timing.get(key)):
                     bucket.append(float(timing[key]))
-            host = detail.get("host") or {}
+            host = _obj(detail.get("host"))
             if _finite_number(host.get("load1_peak")):
                 load_peak.append(float(host["load1_peak"]))
             if _finite_number(host.get("mem_available_min_mb")):
@@ -331,7 +341,7 @@ def analyze_ledger(
             gap_seconds[gap["cause"]] += gap["seconds"]
             largest.append({"run_id": run_id, **gap})
         source = next(
-            (_detail(row).get("source") for row in run_stages if _detail(row).get("source")), None
+            (_obj(_detail(row).get("source")) for row in run_stages if _obj(_detail(row).get("source"))), None
         )
         if source:
             sources.append(
@@ -347,7 +357,7 @@ def analyze_ledger(
     largest.sort(key=lambda gap: -gap["seconds"])
     reuse = Counter()
     for row in stages:
-        info = _detail(row).get("reuse") or {}
+        info = _obj(_detail(row).get("reuse"))
         if info.get("requested"):
             reuse["hit" if info.get("hit") else f"miss:{info.get('miss_reason') or 'unknown'}"] += 1
     detailed = sum(1 for row in stages if _detail(row))
@@ -357,9 +367,9 @@ def analyze_ledger(
         "gates": gate_diagnostics(stages),
         "retry_causes": _top(
             Counter(
-                (_detail(row).get("attempt") or {}).get("retry_cause")
+                _label(_obj(_detail(row).get("attempt")).get("retry_cause"))
                 for row in stages
-                if (_detail(row).get("attempt") or {}).get("retry_cause")
+                if _label(_obj(_detail(row).get("attempt")).get("retry_cause"))
             ),
             limit=10,
         ),

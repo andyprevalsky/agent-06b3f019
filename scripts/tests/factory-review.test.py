@@ -2026,6 +2026,41 @@ def detailed(row: dict, **detail: object) -> dict:
 
 
 class DiagnosticsTest(unittest.TestCase):
+
+    def test_invalid_nested_measurements_remain_unmeasured(self):
+        row=detailed(stage("run", "gate", 0, 10, "failed"), timing=[1], host="unknown")
+        result=DIAGNOSTICS.analyze_ledger([row])["gates"][0]
+        for field in ("median_setup_seconds", "median_queue_seconds", "median_exec_seconds", "max_load1", "min_mem_available_mb"):
+            self.assertIsNone(result[field])
+
+    def test_nested_detail_shapes_are_unknown_without_losing_valid_metrics(self):
+        base = detailed(stage("run-1", "gate", 0, 10, "failed"),
+                        outcome={"failure_class": "assertion", "failing": ["kept"]},
+                        timing={"exec_seconds": 10}, source={"sha": "a" * 40})
+        for field in ("outcome", "attempt", "timing", "host", "source", "reuse"):
+            for value in (["wrong"], "wrong", 1):
+                with self.subTest(field=field, value=value):
+                    broken = {**base, "detail": {**base["detail"], field: value}}
+                    result = DIAGNOSTICS.analyze_ledger([base, broken])
+                    self.assertEqual(result["coverage"]["stage_rows"], 2)
+                    self.assertEqual(result["gates"][0]["failed"], 2)
+                    self.assertEqual(result["gates"][0]["median_exec_seconds"], 10)
+                    self.assertIn({"name": "kept", "count": 1 if field == "outcome" else 2}, result["gates"][0]["failing_names"])
+
+    def test_nested_counter_keys_and_names_are_type_checked(self):
+        for failing in (123, "word", [["nested"]], {"name": "bad"}):
+            with self.subTest(failing=failing):
+                row = detailed(stage("run", "gate", 0, 10, "failed"),
+                               outcome={"failure_class": ["bad"], "failing": failing},
+                               attempt={"retry_cause": {"bad": True}})
+                result = DIAGNOSTICS.analyze_ledger([row])
+                self.assertEqual(result["gates"][0]["failure_classes"], [{"name": "unclassified", "count": 1}])
+                self.assertEqual(result["gates"][0]["failing_names"], [])
+                self.assertEqual(result["retry_causes"], [])
+        row = detailed(stage("run", "gate", 0, 10, "failed"), outcome={"failure_class": "assertion", "failing": ["good", ["bad"], 42]})
+        self.assertEqual(DIAGNOSTICS.analyze_ledger([row])["gates"][0]["failing_names"], [{"name":"good", "count":1}])
+
+
     """Failure reasons, rerun causes, reuse, queue/exec and gap attribution."""
 
     def rows(self) -> list[dict]:
