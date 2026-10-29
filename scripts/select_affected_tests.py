@@ -236,7 +236,13 @@ def discover_lanes() -> dict[str, Lane]:
         for path in _glob(pattern):
             lanes["mac-app-vitest"].units.append(Unit("mac-app-vitest", _rel(path), [_rel(path)]))
     for name, args in _structural_gates():
-        roots = [a for a in args if src().exists(a)]
+        roots = []
+        for argument in args:
+            normalized = os.path.normpath(argument)
+            if normalized in src().fileset:
+                roots.append(normalized)
+            elif normalized in src().dirs:
+                roots.extend(path for path in src().files if path.startswith(normalized + "/"))
         lanes["deploy-structural-gates"].units.append(Unit("deploy-structural-gates", name, roots))
     gate = "scripts/run-cloudbench-controller-gate"
     if gate in src().fileset:
@@ -790,7 +796,8 @@ def changed_files(base: str | None, head: str | None) -> list[str]:
 
     if head:
         revisions = [f"{base}...{head}"] if base else [f"{head}^", head]
-        return sorted(set(git("diff", "--no-renames", "--name-only", *revisions)))
+        changed = set(git("diff", "--no-renames", "--name-only", *revisions))
+        return sorted(path for path in changed if not path.startswith(EXCLUDED_TOP))
     base = base or "origin/main"
     files = set(git("diff", "--no-renames", "--name-only", f"{base}...HEAD"))
     files |= set(git("diff", "--no-renames", "--name-only", "HEAD"))
@@ -845,7 +852,7 @@ def main(argv: list[str] | None = None) -> int:
     changed = list(args.changed_file)
     if args.changed_files_from:
         changed += [line.strip() for line in Path(args.changed_files_from).read_text().splitlines() if line.strip()]
-    if not changed:
+    if not args.changed_file and not args.changed_files_from:
         changed = changed_files(args.base, args.head)
     sel = selector.select(changed)
     if args.format == "json":

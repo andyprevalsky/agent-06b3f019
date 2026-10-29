@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { join } from 'node:path';
+import ts from 'typescript';
 import { execTypeScript, typeScriptProcess } from '../../providers/processSafety';
 
 test('TypeScript fixtures directly own their interpreter process', async () => {
@@ -73,4 +75,53 @@ test('TypeScript preload supports every declared Node generation and file URL en
   } finally {
     Object.defineProperty(process.versions, 'node', descriptor);
   }
+});
+
+test('UTF-8 fixture output rejects binary and incompatible encoding requests at the type boundary', () => {
+  const fixture = join(__dirname, 'processSafety.encoding-contract.ts');
+  const source = `
+    import type { ExecFileOptions } from 'node:child_process';
+    import { execTypeScript } from '../../providers/processSafety';
+    type Options = NonNullable<Parameters<typeof execTypeScript>[1]>;
+    const defaults: Options = { timeout: 5000 };
+    const utf8: Options = { encoding: 'utf8', cwd: '.', env: {} };
+    const utfDash: Options = { encoding: 'utf-8' };
+    // @ts-expect-error binary output is unsupported
+    const binary: Options = { encoding: 'buffer' };
+    // @ts-expect-error null requests binary output
+    const nullEncoding: Options = { encoding: null };
+    // @ts-expect-error non-UTF-8 text is unsupported
+    const ascii: Options = { encoding: 'ascii' };
+    declare const broad: ExecFileOptions;
+    // @ts-expect-error a broad options variable could request an incompatible encoding
+    const unchecked: Options = broad;
+    declare const output: Awaited<ReturnType<typeof execTypeScript>>;
+    const stdout: string = output.stdout;
+    const stderr: string = output.stderr;
+  `;
+  const options: ts.CompilerOptions = {
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.CommonJS,
+    moduleResolution: ts.ModuleResolutionKind.Node10,
+    strict: true,
+    noEmit: true,
+    skipLibCheck: true,
+    types: ['node'],
+  };
+  const host = ts.createCompilerHost(options);
+  const originalRead = host.readFile.bind(host);
+  const originalExists = host.fileExists.bind(host);
+  host.readFile = (path) => (path === fixture ? source : originalRead(path));
+  host.fileExists = (path) => path === fixture || originalExists(path);
+  const program = ts.createProgram([fixture], options, host);
+  const diagnostics = ts.getPreEmitDiagnostics(program);
+  assert.equal(
+    diagnostics.length,
+    0,
+    ts.formatDiagnosticsWithColorAndContext(diagnostics, {
+      getCanonicalFileName: (path) => path,
+      getCurrentDirectory: () => process.cwd(),
+      getNewLine: () => '\n',
+    })
+  );
 });

@@ -50,6 +50,7 @@ class ApprovalBatchTest(unittest.TestCase):
         self.git("checkout", "-q", "-b", "feature")
         self.env = dict(
             os.environ,
+            DEPLOY_APPROVAL_BATCH_TEST_MODE="1",
             DEPLOY_APPROVAL_GUARDS=json.dumps(
                 {
                     "prompt-approval": ["bash", str(guard), "prompt"],
@@ -167,6 +168,7 @@ class ApprovalBatchTest(unittest.TestCase):
         env = dict(
             self.env,
             PROMPT_APPROVAL_BASE_REF="main",
+            DEPLOY_APPROVAL_BATCH_TEST_MODE="1",
             DEPLOY_APPROVAL_GUARDS=json.dumps(
                 {"prompt-approval": ["bash", "scripts/check-prompt-human-approval.sh", "--base-ref=main"]}
             ),

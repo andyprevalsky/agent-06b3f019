@@ -46,6 +46,15 @@ def valid_ledger_row(row: dict[str, Any]) -> bool:
         return False
 
 
+def _finite_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def _median(values: Sequence[float]) -> float | None:
     return round(statistics.median(values), 1) if values else None
 
@@ -85,12 +94,12 @@ def gate_diagnostics(stages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
                 causes[cause] += 1
             timing = detail.get("timing") or {}
             for key, bucket in (("setup_seconds", setup), ("queue_seconds", queue), ("exec_seconds", execute)):
-                if isinstance(timing.get(key), (int, float)):
+                if _finite_number(timing.get(key)):
                     bucket.append(float(timing[key]))
             host = detail.get("host") or {}
-            if isinstance(host.get("load1_peak"), (int, float)):
+            if _finite_number(host.get("load1_peak")):
                 load_peak.append(float(host["load1_peak"]))
-            if isinstance(host.get("mem_available_min_mb"), (int, float)):
+            if _finite_number(host.get("mem_available_min_mb")):
                 mem_min.append(float(host["mem_available_min_mb"]))
         reruns = sum(
             max(0, count - 1)
@@ -246,7 +255,7 @@ def benchmark_diagnostics(attempts_path: Path, limit: int = TOP) -> dict[str, An
     for run_id, rows in runs.items():
         statuses = Counter(str(row.get("status")) for row in rows)
         outcomes = Counter(str(row.get("outcome_class") or "unrecorded") for row in rows)
-        durations = [float(row["duration_seconds"]) for row in rows if isinstance(row.get("duration_seconds"), (int, float))]
+        durations = [float(row["duration_seconds"]) for row in rows if _finite_number(row.get("duration_seconds"))]
         summaries.append(
             {
                 "run_id": run_id,

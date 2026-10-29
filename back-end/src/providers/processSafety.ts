@@ -21,7 +21,11 @@ export function typeScriptProcess(args: string[]): [string, string[]] {
   ];
 }
 
-export async function execTypeScript(args: string[], options: ExecFileOptions = {}) {
+/** Execute a fixture as UTF-8 text; binary/other encodings are not supported. */
+export async function execTypeScript(
+  args: string[],
+  options: Omit<ExecFileOptions, 'encoding'> & { encoding?: 'utf8' | 'utf-8' } = {}
+) {
   const [command, argv] = typeScriptProcess(args);
   try {
     return await promisify(execFile)(command, argv, { ...options, encoding: 'utf8' });

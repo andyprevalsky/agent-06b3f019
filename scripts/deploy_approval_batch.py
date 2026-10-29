@@ -68,7 +68,19 @@ def guard_commands() -> dict[str, tuple[str, ...]]:
     """The real guards, or a JSON override (tests) from DEPLOY_APPROVAL_GUARDS."""
     override = os.environ.get("DEPLOY_APPROVAL_GUARDS")
     if override:
-        return {name: tuple(command) for name, command in json.loads(override).items()}
+        if os.environ.get("DEPLOY_APPROVAL_BATCH_TEST_MODE") != "1":
+            raise BatchError("guard overrides require explicit test mode")
+        try:
+            commands = json.loads(override)
+        except json.JSONDecodeError as error:
+            raise BatchError("invalid test guard override") from error
+        if not isinstance(commands, dict) or not commands or any(
+            not isinstance(name, str) or not name or not isinstance(command, list)
+            or not command or not all(isinstance(arg, str) and arg for arg in command)
+            for name, command in commands.items()
+        ):
+            raise BatchError("test guard overrides require a nonempty command map")
+        return {name: tuple(command) for name, command in commands.items()}
     return dict(GUARDS)
 
 

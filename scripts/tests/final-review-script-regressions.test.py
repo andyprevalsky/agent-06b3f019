@@ -291,4 +291,67 @@ class C8ScriptRegressionTest(unittest.TestCase):
      try:os.kill(pid,signal.SIGKILL)
      except ProcessLookupError:pass
 
+
+class Main338ScriptRegressionTest(unittest.TestCase):
+ def test_guard_override_requires_explicit_test_mode(self):
+  for raw in ['{}','{"x":["true"]}']:
+   with self.subTest(raw=raw),patch.dict(os.environ,{'DEPLOY_APPROVAL_GUARDS':raw},clear=True):
+    with self.assertRaises(approval.BatchError):approval.guard_commands()
+ def test_guard_override_test_mode_rejects_empty_map(self):
+  with patch.dict(os.environ,{'DEPLOY_APPROVAL_GUARDS':'{}','DEPLOY_APPROVAL_BATCH_TEST_MODE':'1'},clear=True):
+   with self.assertRaises(approval.BatchError):approval.guard_commands()
+  with patch.dict(os.environ,{'DEPLOY_APPROVAL_GUARDS':'{"x":["true"]}','DEPLOY_APPROVAL_BATCH_TEST_MODE':'1'},clear=True):
+   self.assertEqual(approval.guard_commands(),{'x':('true',)})
+ def test_git_invalid_utf8_remains_observed(self):
+  with tempfile.TemporaryDirectory() as raw:
+   root=Path(raw)
+   def git(*args):return subprocess.run(['git','-c','commit.gpgsign=false',*args],cwd=root,capture_output=True,check=True)
+   git('init','-q');git('config','user.email','fixture@example.invalid');git('config','user.name','fixture')
+   (root/'f').write_text('plain\n');git('add','.');git('commit','-qm','base')
+   (root/'f').write_bytes(b'nonutf \xff\n')
+   value=detail._git(root,'diff','--no-ext-diff','HEAD')
+   self.assertIsInstance(value,str);self.assertIn('\ufffd',value)
+   state=detail.source_detail(root,'HEAD');self.assertTrue(state['dirty']);self.assertIn('dirty_digest',state)
+ def test_nonfinite_and_bool_metrics_are_unmeasured(self):
+  for invalid in [float('nan'),float('inf'),-float('inf'),True,False]:
+   with self.subTest(value=str(invalid)):
+    row={'kind':'deploy-stage','stage':'gate','status':'passed','run_id':'run','detail':{'timing':{'setup_seconds':invalid,'queue_seconds':invalid,'exec_seconds':invalid},'host':{'load1_peak':invalid,'mem_available_min_mb':invalid}}}
+    result=diag.gate_diagnostics([row])[0]
+    for key in ['median_setup_seconds','median_queue_seconds','median_exec_seconds','max_load1','min_mem_available_mb']:self.assertIsNone(result[key],key)
+    with tempfile.TemporaryDirectory() as raw:
+     path=Path(raw)/'attempts';path.write_text(json.dumps({'run_id':'run','task':'task','timestamp':'now','duration_seconds':invalid})+'\n')
+     result=diag.benchmark_diagnostics(path)['runs'][0]
+     self.assertIsNone(result['median_seconds']);self.assertIsNone(result['max_seconds'])
+     json.dumps(result,allow_nan=False)
+ def test_head_range_excludes_non_source_trees(self):
+  with patch.object(sat.subprocess,'run',return_value=types.SimpleNamespace(stdout='codex/a.py\nopenclaw/b.py\ndocs/handoffs/c.md\nagents/x.py\n')):
+   self.assertEqual(sat.changed_files('base','head'),['agents/x.py'])
+ def test_explicit_empty_changes_do_not_query_git(self):
+  selected=[]
+  class Selector:
+   def select(self,changed):
+    selected.append(changed);return types.SimpleNamespace(all_lanes=False,reasons=[],selected={},totals={},full_lanes=set())
+  with tempfile.TemporaryDirectory() as raw:
+   path=Path(raw)/'empty';path.write_text('')
+   with patch.object(sat,'Selector',Selector),patch.object(sat,'changed_files',side_effect=AssertionError('unexpected git selection')),contextlib.redirect_stdout(io.StringIO()):
+    self.assertEqual(sat.main(['--changed-files-from',str(path),'--format','json']),0)
+  self.assertEqual(selected,[[]])
+ def test_structural_directory_roots_expand_to_files(self):
+  files=['scripts/live_display/server.py','scripts/live_display/view.html','scripts/other.py']
+  source=types.SimpleNamespace(files=files,fileset=set(files),dirs={'scripts','scripts/live_display'},exists=lambda name:name in files or name in {'scripts','scripts/live_display'})
+  with patch.object(sat,'src',return_value=source),patch.object(sat,'_glob',return_value=[]),patch.object(sat,'_backend_structural',return_value=[]),patch.object(sat,'_structural_gates',return_value=[('display',('python3','-m','pytest','scripts/live_display'))]):
+   lanes=sat.discover_lanes()
+  self.assertEqual(lanes['deploy-structural-gates'].units[0].roots,files[:2])
+  selector=sat.Selector.__new__(sat.Selector)
+  selector.graph=sat.Graph(files);selector.rev={};selector.rev_data={}
+  selector.lanes=lanes;selector.config={'run_all':[],'no_tests':[],'edges':[]};selector.coverage={}
+  from collections import defaultdict
+  selector.root_units=defaultdict(list)
+  for lane in lanes.values():
+   for unit in lane.units:
+    for root in unit.roots:selector.root_units[root].append(unit)
+  result=selector.select(['scripts/live_display/view.html'])
+  self.assertIn('display',result.selected['deploy-structural-gates'])
+  self.assertFalse(result.all_lanes,'directory root should be mapped, not require fallback')
+
 if __name__=='__main__':unittest.main()

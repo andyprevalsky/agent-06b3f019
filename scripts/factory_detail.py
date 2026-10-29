@@ -254,7 +254,8 @@ def outcome_detail(exit_code: int, log_text: str) -> dict[str, Any]:
 def _git(repo: Path, *args: str) -> str | None:
     try:
         return subprocess.run(
-            ["git", *args], cwd=repo, check=True, capture_output=True, text=True, timeout=30
+            ["git", *args], cwd=repo, check=True, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=30
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return None

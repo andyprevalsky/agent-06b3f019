@@ -5,11 +5,7 @@ import {
   type SerializedPassword,
   type SerializedPasskey,
 } from './browser/resumeCredentials';
-export type {
-  UserSettings,
-  SerializedPassword,
-  SerializedPasskey,
-} from './browser/resumeCredentials';
+export type { UserSettings, SerializedPassword, SerializedPasskey };
 import {
   checkpointLogicalBrowser,
   loadLogicalBrowserCheckpoint,
