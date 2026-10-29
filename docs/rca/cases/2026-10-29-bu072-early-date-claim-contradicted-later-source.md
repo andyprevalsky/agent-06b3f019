@@ -70,3 +70,51 @@ than grouping by task ID, and original native/evaluation/infra axes unchanged.
 
 Keep a corrected final answer distinct from an evaluator's retained-trajectory
 fact-consistency verdict until an actual mechanical defect is demonstrated.
+
+## R81 related C3 sourcing variant: original It21 BU082r1
+
+This is a related retained-trajectory C3 outcome, not a claim that the earlier
+BU072 date assumption and this source assertion have an identical causal
+mechanism. It21 BU082r1/r001-j0002 root4cf6391e-916d-46b7-b852-eb3d595a0dfb
+executed47a0e9d6c9a89e2d97933935509343372d565250/patchnone. All seven normal
+members were verified from archive
+c9b995a279082b95a79abd151ac16db49c846759f7ac50dee90408d8292a20bb,
+manifest8ffe943b7693a46062defcf9dbcc72631f29fc954133ebe12c145ff5892b5900,
+run95f74a5a765daafe3b22e21723b0861c2286128cbe95926b36b140fa5b9957c9.
+
+The goal asks for the company whose prior-year annual report was published in
+June2023, with2022 cereal production66,852.92tons, owned land942.62hectares,
+and voting shares in14portfolio companies. NativeCOMPLETED1159.9s/progress1
+returned DN AGRAR GROUP S.A.; C1/C2/C4 pass, while C3 fails. ProducerinfraFALSE
+and the original3/4FAIL remain unchanged.
+
+Worker line7784 is the complete, hash-verified native output dump a5183506f6df,
+browser_use_step_4/request177f46b3b2ae. Its reasoning asserts that it found the
+SIF Banat-Crisana2022 report mentioning14controlled companies. That exact text
+is persisted as assistant message28. The captured input before this response
+contains no SIF Banat-Crisana, Comcereal or Holding Nov Vek occurrence. This is
+an unsupported model-authored source assertion at the observed boundary, not
+text introduced by a renderer, missing field or schema converter. No claim
+about model-internal cause or deliberate intent is established.
+
+Worker line9595, complete output dump97edcbc89521/browser_use_step_6, explicitly
+acknowledges that the earlier “I also found” claim was ungrounded and it should
+not pretend to have sources. Its reasoning exactly matches persisted assistant
+message33. The subsequent corrected final identification is separately
+supported by the retained official PDF extractions and BVB publication record,
+which the declared evaluator accepts for C1/C2/C4. Later correction does not
+erase the earlier record or change C3's required criterion.
+
+No mechanical runtime candidate or model-only counterfactual was justified in
+this bounded intake. A generic anti-fabrication nudge, task-specific expected
+company, or removal of the earlier text would not constitute a demonstrated
+transport repair. The original outcome stays OPEN; no task/rubric/prompt/model,
+budget or grade change was made. Selected native input/output equality and
+line/payload hashes are retained in .context/r81/proof.json.
+
+Cleanup is independently complete in the normal records: exact Tilion session
+sess_98241cd2fece455d8f0dad19ef0a776c DELETE204, root deleted/sealed, and no
+cleanup errors or warnings. No positive operational infrastructure failure was
+found. There was no new provider/model/native/DB call, live probe or benchmark
+execution in R81. Only this comparison appendix was added; the earlier case's
+specific first-bad boundary, missing-dump limits and original grades are kept.
