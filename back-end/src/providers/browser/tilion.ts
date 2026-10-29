@@ -627,7 +627,10 @@ async function replaceSession(
     await announceBrowserSessionBinding({ id: taskId });
 
     const savedUrl = old.currentUrl || old.startUrl || undefined;
-    if (savedUrl) {
+    // Logical resume restores cookies, localStorage and IndexedDB before its
+    // tabs navigate. Opening the merchant first can hold IndexedDB open while
+    // Playwright's storage restore waits for that same database to close.
+    if (savedUrl && !old.logicalOwnerKey) {
       try {
         const context = remote.browser.contexts()[0];
         const page = context.pages()[0] ?? (await context.newPage());

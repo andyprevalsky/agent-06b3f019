@@ -305,6 +305,9 @@ async function assembleResumeResponse(
   dependencies: BrowserSessionResumeDependencies,
   carriedState?: TilionCarriedState
 ) {
+  // Tilion keeps the same browser and its worker-owned CDP connection.
+  if (result.profileSource === 'tilion_rotated_in_place')
+    return assembleResumeResponseWithTransport(taskId, result, dependencies, true);
   return withOwnedResumeTransport(result, async () => {
     const response = await assembleResumeResponseWithTransport(taskId, result, dependencies);
     await applyCarriedStateToReplacement(

@@ -61,3 +61,9 @@ release remains backend-owned; failed close retains native/source and cleanup
 receipt. Parent independent review and full integrated/live validation remain
 open. The separate setStorageState pending operation is still UNKNOWN and
 is not claimed fixed by this correction.
+
+## Incoming-main reconciliation
+
+Incoming main `338af27aed5927742fa48b2654e65df3cdaa4ee3` (PR1599) already contains the exact-current pause CDP ownership transfer, including leave-session bookkeeping and clearing the detached DOMService reference. The integration retains that helper byte-for-byte and removes the earlier branch candidate's now-unreachable duplicate. The historical CDP4409 failure is evidence against the pre-sync source, not a claim that this branch supplied a new runtime fix beyond incoming main.
+
+Kernel recorder shutdown uses the native REST interface, not CDP readback. No native replay-loss failure was demonstrated, so an intermediate proposal to reorder it was rejected and preserved only as temporary evidence. New regression expectations follow the incoming-main contract: passkey capture before detach, both captures and detach before checkpoint, failed detach never checkpointing, and native release only through the backend. Existing incoming-main SDK expectations remain unchanged. Final merged-source full agents and the original four AgentCard tasks remain required. The later pending hydration operation is still UNKNOWN; no custody receipt was cleared.

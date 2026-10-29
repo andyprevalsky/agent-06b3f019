@@ -2789,6 +2789,21 @@ cloudbench_people_credential_broker_default() {  # <agents-env-file>
   printf '%s\n' "$CLOUDBENCH_PEOPLE_CREDENTIAL_BROKER_ORIGIN"
 }
 
+# Compute-token authority for benchmark guests (A1, approved 2026-10-20).
+# Each guest restores its own database with copies of the same real compute
+# tokens, so lease capacity, rate-limit marks and the shared Foundry cooldown
+# are only correct when every guest delegates them to one backend
+# (RCA 2026-10-20-bench-guests-ran-independent-compute-token-semaphores).
+# Prints the authority URL, or nothing for BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off
+# (diagnostics only: the guest then keeps its own copied token state).
+CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_ORIGIN="https://navi-j9a9.onrender.com"
+cloudbench_compute_token_authority_url() {
+  case "${BENCHMARK_COMPUTE_TOKEN_AUTHORITY:-on}" in
+    off|OFF|Off|0|false|no) return 0 ;;
+  esac
+  printf '%s\n' "${CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL-$CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_ORIGIN}"
+}
+
 # Production Temporal namespace (mirror of agents/temporal_connection.py and
 # back-end/src/providers/temporalNamespaceIsolation.ts). Not a secret.
 ROSE_PRODUCTION_TEMPORAL_NAMESPACE=rose-labs-us-east-1.tch2n

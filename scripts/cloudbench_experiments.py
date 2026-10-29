@@ -160,9 +160,8 @@ def experiments(entries: list[dict], goal: str | None = None) -> list[dict]:
     return merged
 
 
-# A per-day rate over less than one goal day extrapolates beyond the observed launches
-# (1 launch after 1 hour would read 24/day). Until the goal clock spans a full day the
-# card shows ``warming <age>`` with the verified launch count instead of a number.
+# Keep the observed launch rate numeric even in the first goal day; the display
+# marks that short observation window as warming without changing its clock.
 RATE_MIN_DAYS = 1.0
 
 
@@ -171,9 +170,9 @@ def launch_rate(goal_experiments: list[dict], now: float) -> dict | None:
     starts = [e.get("triggered_at") for e in goal_experiments if isinstance(e.get("triggered_at"), (int, float))]
     if not starts:
         return None
-    days = max(now - min(starts), 60.0) / 86400.0
+    days = max(now - min(starts), 0.0) / 86400.0
     count = len(goal_experiments)
-    return {"launches": count, "days": days, "per_day": count / days, "goal_started_at": min(starts),
+    return {"launches": count, "days": days, "per_day": count / days if days else None, "goal_started_at": min(starts),
             "backfilled": sum(bool(e.get("backfilled")) for e in goal_experiments),
             "warming": days < RATE_MIN_DAYS}
 

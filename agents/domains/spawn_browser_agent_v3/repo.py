@@ -951,7 +951,9 @@ async def close_browser_session(
     if signed_in_sites:
         payload["signed_in_sites"] = sorted(set(signed_in_sites))
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        # A logical-browser pause checkpoints state before releasing the native
+        # session; live checkpoint + provider cleanup can exceed ten seconds.
+        async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 f"{config.backend.api_url}/api/browser-session/close",
                 headers={"x-api-key": config.backend.api_key or ""},

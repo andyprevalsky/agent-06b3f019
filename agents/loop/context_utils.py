@@ -10,6 +10,35 @@ from helpers.context_scope import filter_internal_subagent_messages
 logger = context_logger()
 
 
+def user_pause_recorded_at(message: Dict) -> str:
+    pause = (message.get("metadata") or {}).get("userPause")
+    if isinstance(pause, dict) and pause.get("reason") == "user":
+        return str(pause.get("recordedAt") or "")
+    return ""
+
+
+def refresh_user_pause(context: List[Dict], incoming: Dict) -> None:
+    """Apply the one supported in-place lifecycle annotation, never reorder it."""
+    message_id = incoming.get("message_id") or incoming.get("id")
+    updated = user_pause_recorded_at(incoming)
+    if not message_id or not updated:
+        return
+    for index, previous in enumerate(context):
+        if (previous.get("message_id") or previous.get("id")) != message_id:
+            continue
+        if updated <= user_pause_recorded_at(previous):
+            return
+        old_meta, new_meta = previous.get("metadata") or {}, incoming.get("metadata") or {}
+        if (previous.get("timestamp") != incoming.get("timestamp") or
+                old_meta.get("toolCallId") != new_meta.get("toolCallId") or
+                old_meta.get("workflowGeneration") != new_meta.get("workflowGeneration")):
+            return
+        replacement = dict(incoming)
+        annotate_with_pointer(replacement)
+        context[index] = replacement
+        return
+
+
 async def poll_and_update_context(
     poll_messages: Callable[[datetime], Awaitable[List[Dict]]],
     context: List[Dict],
@@ -29,7 +58,7 @@ async def poll_and_update_context(
 
     if new_msgs:
         for msg in new_msgs:
-            ts_str = msg.get("timestamp", "")
+            ts_str = max(msg.get("timestamp", ""), user_pause_recorded_at(msg))
             if ts_str:
                 try:
                     msg_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
@@ -65,6 +94,7 @@ async def poll_and_update_context(
             message_id = msg.get("message_id") or msg.get("id")
             if message_id:
                 if message_id in seen_message_ids:
+                    refresh_user_pause(context, msg)
                     continue
                 seen_message_ids.add(message_id)
             else:

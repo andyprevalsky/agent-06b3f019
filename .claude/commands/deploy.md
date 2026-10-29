@@ -746,6 +746,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-primary-exact-shape-reuse.test.py`,
 `python3 scripts/tests/cloudbench-maintenance-env.test.py`,
 `python3 scripts/tests/cloudbench-resume-controller-export.test.py`,
+`python3 scripts/tests/cloudbench-shard-coordinator.test.py`,
 `python3 scripts/tests/cloudbench-controller-orphan-drain.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
 `python3 scripts/tests/claude-review-fallback-diagnose.test.py`,
