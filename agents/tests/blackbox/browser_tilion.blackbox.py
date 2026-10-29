@@ -103,6 +103,58 @@ class FakeTilionGateway:
             await self._server.wait_closed()
 
 
+async def _chromium_version(client: httpx.AsyncClient, port: int) -> Dict[str, Any]:
+    """The local endpoint is ready only when it advertises its CDP socket."""
+    payload: Any = {}
+    for _ in range(100):
+        try:
+            version = await client.get(f"http://127.0.0.1:{port}/json/version")
+            version.raise_for_status()
+            payload = version.json()
+            endpoint = payload.get("webSocketDebuggerUrl") if isinstance(payload, dict) else None
+            if isinstance(endpoint, str) and endpoint.startswith(("ws://", "wss://")):
+                return payload
+        except (httpx.HTTPError, ValueError):
+            pass
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"/json/version on 127.0.0.1:{port} -> {str(payload)[:300]}")
+
+
+async def test_chromium_fixture_waits_for_semantic_cdp_readiness():
+    replies = [httpx.Response(200, json={}), httpx.Response(503, json={}),
+               httpx.Response(200, text="not-json"), httpx.Response(200, json={"webSocketDebuggerUrl": ""}),
+               httpx.Response(200, json={"webSocketDebuggerUrl": "ws://127.0.0.1:1/devtools/browser/ready"})]
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return replies.pop(0)
+
+    async def no_sleep(_seconds):
+        return None
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with patch("asyncio.sleep", no_sleep):
+            result = await _chromium_version(client, 1)
+    assert result["webSocketDebuggerUrl"].endswith("/ready")
+    assert len(requests) == 5, "fixture must not accept a listening but unready endpoint"
+    polls = []
+
+    def never_ready(request):
+        polls.append(request)
+        return httpx.Response(200, json={})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(never_ready)) as client:
+        with patch("asyncio.sleep", no_sleep):
+            try:
+                await _chromium_version(client, 1)
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError("an endpoint without a CDP socket must fail")
+    assert len(polls) == 100, "the existing readiness poll budget must stay bounded"
+
+
 @contextlib.asynccontextmanager
 async def _chromium(full: bool = False):
     """Local Chromium with a CDP endpoint.
@@ -136,15 +188,8 @@ async def _chromium(full: bool = False):
         else:
             browser = await playwright.chromium.launch(headless=True, args=[f"--remote-debugging-port={port}"])
         try:
-            payload: Dict[str, Any] = {}
             async with httpx.AsyncClient(trust_env=False) as client:
-                for _ in range(100):
-                    with contextlib.suppress(httpx.HTTPError):
-                        version = await client.get(f"http://127.0.0.1:{port}/json/version")
-                        payload = version.json()
-                        break
-                    await asyncio.sleep(0.1)
-            assert "webSocketDebuggerUrl" in payload, f"/json/version on 127.0.0.1:{port} -> {str(payload)[:300]}"
+                payload = await _chromium_version(client, port)
             yield playwright, browser, payload["webSocketDebuggerUrl"]
         finally:
             if browser is not None:
@@ -3282,6 +3327,7 @@ async def test_click_coordinates_follow_an_element_the_page_re_rendered():
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
+        ("chromium_fixture_waits_for_cdp", test_chromium_fixture_waits_for_semantic_cdp_readiness),
         ("fake_gateway_rejects_second_direct_client", test_fake_gateway_rejects_second_direct_client),
         ("tilion_worker_attach_uses_one_upstream_socket", test_tilion_worker_attach_uses_one_upstream_socket),
         ("multiplexer_releases_and_reattaches", test_multiplexer_releases_upstream_when_clients_leave_and_reattaches),
