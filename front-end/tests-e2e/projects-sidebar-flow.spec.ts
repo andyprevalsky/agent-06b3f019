@@ -1,6 +1,7 @@
 /** Existing project rows/settings in the real desktop and mobile sidebar. Controlled API only. */
 import { expect, test } from '@playwright/test';
 import { FRONTEND_URL } from './helpers';
+import type { MaintenanceState, Project } from '../src/lib/api/projects';
 for (const width of [1280, 390]) {
   test(`original project flow at ${width}px`, async ({ page }) => {
     test.setTimeout(60000);
@@ -22,7 +23,7 @@ for (const width of [1280, 390]) {
       );
     });
     const now = new Date().toISOString();
-    let project = {
+    let project: Project = {
       id: 'p-rose',
       name: 'Rose',
       repoUrl: 'https://github.com/Rose-Ai-Labs/rose',
@@ -32,6 +33,16 @@ for (const width of [1280, 390]) {
       startupTimeoutS: 120,
       lifecycle: { autoWake: true },
       sync: { revision: 0, lastSyncedAt: null },
+      maintenance: {
+        script: null,
+        timeoutS: 480,
+        nightly: false,
+        onGithubChange: false,
+        nextRunAt: null,
+        watchCheckedAt: null,
+        running: false,
+      },
+      snapshot: null,
       envFileCount: 0,
       createdAt: now,
       updatedAt: now,
@@ -81,6 +92,14 @@ for (const width of [1280, 390]) {
         project = { ...project, ...input };
         projects = projects.map((p) => (p.id === project.id ? project : p));
         body = project;
+      } else if (path === '/api/projects/p-rose/maintenance') {
+        body = {
+          snapshot: project.snapshot,
+          running: project.maintenance.running,
+          nextRunAt: project.maintenance.nextRunAt,
+          watchCheckedAt: project.maintenance.watchCheckedAt,
+          runs: [],
+        } satisfies MaintenanceState;
       } else if (path.endsWith('/env-files')) body = { envFiles: [] };
       else if (path === '/api/agents') body = { agents: [agent] };
       else if (path === '/api/agents/code-agents') body = { code_agents: [] };
