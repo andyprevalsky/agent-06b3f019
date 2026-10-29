@@ -13,11 +13,16 @@ import {
  */
 
 import type { Browser } from 'playwright';
-import { type ProxyGeoLocation } from '../../providers/geoip';
+import { createLogger } from '../../providers/logger';
 import {
   getSession,
   injectUserData,
+  uploadSessionFile,
+  listFiles as listProviderFiles,
+  readSessionFile,
   resizeSessionViewport,
+  captureScreenshot,
+  pressSessionKeys,
   type BrowserViewport,
 } from '../../providers/browser';
 import {
@@ -29,7 +34,10 @@ import { canonicalAuthRealm } from '../../providers/authRealm';
 import { prepareWorldStateFork } from './service.world-fork';
 import { getAuthOptions } from '../../providers/authOptions';
 import * as repo from './repo';
-import { storedBrowserProvider, type BrowserGeoTargeting } from '../../providers/browser/types';
+import { storedBrowserProvider } from '../../providers/browser/types';
+import { buildBrowserSessionMetadata } from './service.metadata';
+import { validateBrowserKeySymbols } from './service.browser-input';
+import { validateSessionFilePath } from './service.file-path';
 import {
   injectLocalStorage,
   SessionNoUserError,
@@ -51,71 +59,15 @@ export {
 } from './service.control';
 export { injectLocalStorage, SessionNotFoundError, SessionNoUserError };
 export { InvalidSessionFilePathError } from './service.file-path';
-export {
-  uploadFile,
-  listFiles,
-  downloadFile,
-  takeScreenshot,
-  pressKeys,
-} from './service.session-io';
 export { CdpInjectionError, SessionNoWsUrlError } from './types';
+export { buildBrowserSessionMetadata } from './service.metadata';
 
-interface BrowserSessionMetadataInput {
-  provider: string;
-  providerSelection?: { requestedProvider: string; fallbackReason: string };
-  geoTargeting?: BrowserGeoTargeting;
-  proxySource: string;
-  proxyLocation: ProxyGeoLocation;
-  profileId: string | null;
-  profileSource: string;
-}
+const log = createLogger('BrowserSession');
 
-interface BrowserSessionInjectionMetadataInput {
-  cookies: { injected: boolean; cookieCount: number; authSource: string };
-  localStorage: { originCount: number };
-  indexedDB: { originCount: number };
-  permissions: { grantCount: number };
-  cacheStorage: { originCount: number };
-}
-
-export function buildBrowserSessionMetadata(
-  session: BrowserSessionMetadataInput,
-  injectionResult: BrowserSessionInjectionMetadataInput
-) {
-  return {
-    provider: session.provider,
-    // Benchmarks and the worker tell a real run on the requested provider from a fallback.
-    requested_provider: session.providerSelection?.requestedProvider ?? session.provider,
-    provider_fallback_reason: session.providerSelection?.fallbackReason ?? null,
-    ...(session.geoTargeting !== undefined
-      ? {
-          geo_targeting: {
-            requested: session.geoTargeting.requested,
-            applied: session.geoTargeting.applied,
-            requested_location: session.geoTargeting.requestedLocation,
-            geo_applied: session.geoTargeting.geoApplied,
-            geo_unsupported: session.geoTargeting.geoUnsupported,
-          },
-        }
-      : {}),
-    proxy_source: session.proxySource,
-    proxy_location: session.proxyLocation,
-    profile_id: session.profileId,
-    profile_source: session.profileSource,
-    auth_source: injectionResult.cookies.authSource,
-    cookies_injected: injectionResult.cookies.injected,
-    cookies_count: injectionResult.cookies.cookieCount,
-    local_storage_origin_count: injectionResult.localStorage.originCount,
-    indexed_db_origin_count: injectionResult.indexedDB.originCount,
-    permission_grant_count: injectionResult.permissions.grantCount,
-    cache_storage_origin_count: injectionResult.cacheStorage.originCount,
-    ...(session.provider === 'steel'
-      ? {
-          steel_profile_id: session.profileId,
-          steel_profile_source: session.profileSource,
-        }
-      : {}),
-  };
+async function requireSessionOwner(sessionId: string, userId?: string): Promise<void> {
+  if (userId === undefined) return;
+  const session = await repo.findSessionBySessionId(sessionId);
+  if (session === null || session.context.userId !== userId) throw new SessionNotFoundError();
 }
 
 // ---------------------------------------------------------------------------
@@ -318,9 +270,73 @@ export async function resizeBrowserViewport(
 // Get session by Steel ID
 // ---------------------------------------------------------------------------
 
-/* c8 ignore start -- getSessionById requires Steel SDK */
+/* c8 ignore start -- getSessionById, uploadFile, listFiles require Steel SDK */
 export async function getSessionById(sessionId: string) {
   return getSession(sessionId);
 }
 
+// ---------------------------------------------------------------------------
+// Upload file
+// ---------------------------------------------------------------------------
+
+export async function uploadFile(
+  sessionId: string,
+  buffer: Buffer,
+  originalname: string,
+  mimetype: string,
+  options: { directory?: string } = {}
+) {
+  log.info('Uploading file to session', {
+    sessionId,
+    originalname,
+    sizeBytes: buffer.length,
+    directory: options.directory,
+  });
+
+  const result = await uploadSessionFile(sessionId, buffer, originalname, mimetype, options);
+
+  return {
+    path: result.path,
+    size: result.size,
+    filename: originalname,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// List files
+// ---------------------------------------------------------------------------
+
+export async function listFiles(sessionId: string) {
+  log.info('Listing files for session', { sessionId });
+
+  const files = await listProviderFiles(sessionId);
+
+  return {
+    session_id: sessionId,
+    files,
+    count: files.length,
+  };
+}
+
+export async function downloadFile(sessionId: string, filePath: string, userId?: string) {
+  await requireSessionOwner(sessionId, userId);
+  validateSessionFilePath(filePath);
+  const content = await readSessionFile(sessionId, filePath);
+  const filename = filePath.split('/').pop();
+  return {
+    content,
+    filename: filename !== undefined && filename !== '' ? filename : 'download',
+  };
+}
+
+export async function takeScreenshot(sessionId: string, userId?: string) {
+  await requireSessionOwner(sessionId, userId);
+  return captureScreenshot(sessionId);
+}
+
+export async function pressKeys(sessionId: string, keys: string[], userId: string) {
+  await requireSessionOwner(sessionId, userId);
+  validateBrowserKeySymbols(keys);
+  return pressSessionKeys(sessionId, keys);
+}
 /* c8 ignore stop */

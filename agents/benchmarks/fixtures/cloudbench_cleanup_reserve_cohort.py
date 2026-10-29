@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Exercise the owning shell reserve function at a bounded storage transport."""
+import atexit
 import concurrent.futures
 import fcntl
 import hashlib
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -136,7 +138,11 @@ processes = []
 job_processes = {}
 process_lock = threading.Lock()
 retiring = threading.Event()
-namespace = int(hashlib.sha256(str(work).encode()).hexdigest()[:14], 16)
+# Each run gets its own admission-ledger namespace. A reused pytest basetemp path must not
+# inherit an earlier run's admission groups, whose recorded parent-lock identity no longer
+# matches the recreated lock ("campaign parent lock identity changed" for every owner).
+namespace = int(hashlib.sha256(f"{work}:{os.getpid()}:{time.time_ns()}".encode()).hexdigest()[:14], 16)
+atexit.register(shutil.rmtree, Path("/tmp") / f"rose-cloudbench-cleanup-admission-{os.getuid()}" / str(namespace), True)
 owner_births = {}
 
 

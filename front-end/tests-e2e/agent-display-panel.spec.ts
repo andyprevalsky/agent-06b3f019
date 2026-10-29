@@ -1,4 +1,4 @@
-/** Real inline display + opaque WebGL iframe, with deterministic local API fixtures. */
+/** Inline, expandable agent display + opaque WebGL iframe, with deterministic local API fixtures. */
 import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { FRONTEND_URL } from './helpers';
@@ -6,7 +6,7 @@ const OWNER = 'display-preview';
 const GAME_URL = 'https://display-preview.rose.test/game.html';
 const html = readFileSync(new URL('./fixtures/agent-display-game.html', import.meta.url), 'utf8');
 
-test('desktop inline display runs real WebGL output and keeps controls in its sandbox', async ({
+test('desktop agent display runs real WebGL inline, expands in place and keeps controls in its sandbox', async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -91,28 +91,17 @@ test('desktop inline display runs real WebGL output and keeps controls in its sa
     await route.fulfill({ json: body });
   });
   await page.goto(`${FRONTEND_URL}/?agent-id=${OWNER}`, { waitUntil: 'domcontentloaded' });
-  // 134fc78cc removed the Agent Display icon/panel: every display renders
-  // inline in the chat, collapsed to a preview with a chevron disclosure.
+  // Displays render inline in the chat (0490bb1cc): no Agent Display icon or panel.
   await expect(page.getByRole('button', { name: 'Browser', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Agent Display', exact: true })).toHaveCount(0);
   await expect(page.getByTestId('agent-display-drawer')).toHaveCount(0);
-  const toggle = page.getByRole('button', { name: 'Expand display: Orbit Runner', exact: true });
-  await expect(toggle).toBeVisible();
+  const toggle = page.getByTestId('display-toggle');
+  await expect(toggle).toHaveAccessibleName('Expand display: Orbit Runner');
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
-  const item = page.locator('[data-message-kind="display-media"]');
-  const iframe = item.getByTestId('display-html-frame');
+  const iframe = page.getByTitle('game.html');
   await expect(iframe).toHaveAttribute('sandbox', 'allow-scripts allow-pointer-lock allow-popups');
-  const game = page.frameLocator('[data-message-kind="display-media"] iframe');
+  const game = page.frameLocator('[data-testid="display-html-frame"]');
   const canvas = game.locator('canvas');
-  // The collapsed preview already runs the live frame.
-  await expect(canvas).toHaveAttribute('data-ready', 'true');
-  await iframe.evaluate((el) => el.setAttribute('data-probe', 'same-frame'));
-  await toggle.click();
-  const collapse = page.getByRole('button', { name: 'Collapse display: Orbit Runner' });
-  await expect(collapse).toHaveAttribute('aria-expanded', 'true');
-  await expect(item).toHaveAttribute('data-expanded', 'true');
-  // Expanding resizes the same frame element instead of remounting it.
-  await expect(iframe).toHaveAttribute('data-probe', 'same-frame');
   await expect(canvas).toHaveAttribute('data-ready', 'true');
   await canvas.click();
   const x = Number(await canvas.getAttribute('data-x'));
@@ -124,16 +113,16 @@ test('desktop inline display runs real WebGL output and keeps controls in its sa
   await expect
     .poll(async () => Number(await canvas.getAttribute('data-frames')))
     .toBeGreaterThan(3);
-  // Collapsing back to the preview keeps the same live frame running.
-  await collapse.click();
-  await expect(item).toHaveAttribute('data-expanded', 'false');
-  await expect(iframe).toHaveAttribute('data-probe', 'same-frame');
+  // Expanding keeps the same running frame (no remount, no reload).
   const frames = Number(await canvas.getAttribute('data-frames'));
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(toggle).toHaveAccessibleName('Collapse display: Orbit Runner');
   await expect
     .poll(async () => Number(await canvas.getAttribute('data-frames')))
     .toBeGreaterThan(frames);
+  expect((await iframe.boundingBox())!.height).toBeGreaterThan(480);
   // The final segment is retained as a user-facing clip with the display expanded.
-  await page.getByRole('button', { name: 'Expand display: Orbit Runner' }).click();
   await page.waitForTimeout(1500);
   await canvas.click();
   await page.keyboard.down('ArrowLeft');

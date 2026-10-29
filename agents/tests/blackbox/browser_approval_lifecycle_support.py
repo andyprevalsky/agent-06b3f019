@@ -105,7 +105,7 @@ class ApprovalLifecycleProbe:
             assert result["status"] == "awaiting_auth_assistance"
             assert self.alive and "checkpoint" not in self.events, self.events
         else:
-            assert self.events.index("passkey_capture") < self.events.index("replay_stop") < self.events.index("checkpoint") < self.events.index("backend_release") < self.events.index("reset_cdp"), self.events
+            assert self.events.index("passkey_capture") < self.events.index("reset_cdp") < self.events.index("replay_stop") < self.events.index("checkpoint") < self.events.index("backend_release"), self.events
         assert "sdk_provider_stop" not in self.events, self.events
 
 
@@ -284,7 +284,7 @@ class TerminalPasskeyCaptureProbe(RealPasskeyCaptureProbe):
         assert "recording_finalized" in self.events and "reset_cdp" in self.events, self.events
         assert "sdk_provider_stop" not in self.events, self.events
         assert "Passkey usage capture incomplete; continuing terminal browser pause" in self.warnings, self.warnings
-        assert self.events.index("backend_release") < self.events.index("reset_cdp"), self.events
+        assert self.events.index("reset_cdp") < self.events.index("backend_release"), self.events
         if self.result is not None:
             assert self.result["status"] == {
                 "completed": "completed", "max_steps": "max_iterations", "cancelled": "cancelled",

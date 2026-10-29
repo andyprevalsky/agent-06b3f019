@@ -97,8 +97,6 @@ export type TilionReplacementSession = BrowserProviderResumeSession & {
   /** Null when the row was an unmaterialized logical browser (no provider session). */
   previousSessionId: string | null;
   previousProvider: BrowserProviderName;
-  /** Present when the exit rotated in place (`POST rotate-ip`); record it in the rotation log. */
-  ipRotation?: { rotated: boolean; freshAllocation: boolean; region: string | null };
   /** Requested vs applied exit placement of a newly created replacement. */
   geoTargeting?: TilionGeoTargeting;
 };
@@ -505,7 +503,7 @@ async function reattachLiveSession(
     const debugUrl = await mintTilionLiveViewUrl(old.sessionId);
     const updated = await prisma.browserSession.updateMany({
       where: { id: old.id, sessionId: old.sessionId },
-      data: { wsUrl, debugUrl, status: 'ACTIVE', closedAt: null },
+      data: { wsUrl, debugUrl, status: old.logicalOwnerKey ? 'PAUSED' : 'ACTIVE', closedAt: null },
     });
     if (updated.count !== 1) throw new Error(`Browser task ${old.id} changed during reattach`);
     await announceBrowserSessionBinding({ id: old.id });
@@ -612,7 +610,8 @@ async function replaceSession(
         sessionId: remote.sessionId,
         debugUrl: remote.debugUrl,
         wsUrl: remote.wsUrl,
-        status: 'ACTIVE',
+        // Logical rows go ACTIVE only after the checkpoint restore (same contract as Kernel).
+        status: old.logicalOwnerKey ? 'PAUSED' : 'ACTIVE',
         closedAt: null,
         provider: 'tilion',
         providerProfileId: null,
@@ -628,7 +627,10 @@ async function replaceSession(
     await announceBrowserSessionBinding({ id: taskId });
 
     const savedUrl = old.currentUrl || old.startUrl || undefined;
-    if (savedUrl) {
+    // Logical resume restores cookies, localStorage and IndexedDB before its
+    // tabs navigate. Opening the merchant first can hold IndexedDB open while
+    // Playwright's storage restore waits for that same database to close.
+    if (savedUrl && !old.logicalOwnerKey) {
       try {
         const context = remote.browser.contexts()[0];
         const page = context.pages()[0] ?? (await context.newPage());

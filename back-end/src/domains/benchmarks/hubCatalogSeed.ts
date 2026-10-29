@@ -60,9 +60,12 @@ export async function seedBenchmarkTasks(): Promise<{
     if (known.has(task.name)) {
       await repo.updateTask(task.name, { ...columns, updatedBy: 'catalog-seed' });
       updated += 1;
-    } else {
-      await repo.createTask({ name: task.name, ...columns });
+    } else if (await repo.insertTaskIfAbsent({ name: task.name, ...columns })) {
       inserted += 1;
+    } else {
+      // Another instance inserted it while this one seeded; still mirror git.
+      await repo.updateTask(task.name, { ...columns, updatedBy: 'catalog-seed' });
+      updated += 1;
     }
   }
   log.info('Benchmark task seed complete', { inserted, updated, total: tasks.length });

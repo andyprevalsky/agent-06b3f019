@@ -1,24 +1,35 @@
 /**
  * Direct-to-Slack failure alerting.
  *
- * DESIGN — this path deliberately does NOT route through our own backend/DB.
+ * DESIGN — delivery deliberately does NOT route through our own backend/DB.
  * The failures we most want to hear about are exactly the ones where the
  * backend or DB is unhealthy, so an alert that depends on our infra can't
  * fire when it matters. `alertError` posts straight to a Slack incoming
- * webhook or bot (external). No Prisma, no internal route.
+ * webhook or bot (external), never through an internal route.
+ *
+ * Dedupe spans instances: a signature already alerted by another backend
+ * instance within the window (a shared TTL lease in sharedState) is skipped.
+ * That check fails OPEN — if the database is slow or down, the alert is sent
+ * anyway, so a DB outage can at worst double an alert, never silence one.
  *
  * Auto RCA runs on Rose: Slack delivers the bot's card to
  * `/api/webhooks/slack/auto-rca`, which creates (or appends to) one Rose RCA
  * root agent per error signature window and replies in the card's thread.
- * The in-memory throttle is best-effort noise control, never a correctness
- * boundary. At 10k agents this stays O(1) per failure with a bounded map.
+ * The in-memory throttle is the first, free filter (one shared-lease query per
+ * signature per window per instance); both are noise control, never a
+ * correctness boundary. At 10k agents this stays O(1) per failure.
  *
  * `alertError` is fire-and-forget and NEVER throws — it lives in callers' error
  * paths and must not turn a handled failure into an unhandled one.
  */
 import { createLogger } from './logger';
+import { acquireLease, releaseLease } from './sharedState';
 
 const log = createLogger('ErrorAlert');
+
+const SHARED_DEDUPE_NAMESPACE = 'error-alert';
+// The shared check must never hold an alert hostage to a slow database.
+const SHARED_DEDUPE_TIMEOUT_MS = 1500;
 
 export type FailureSource =
   | 'chat'
@@ -48,7 +59,7 @@ const MAX_THROTTLE_ENTRIES = 5000;
 const FE_BASE = process.env.PUBLIC_FRONTEND_URL ?? 'https://roselabs.ai';
 const PROD_BACKEND = 'https://navi-j9a9.onrender.com';
 
-// signature -> last-sent epoch ms. Per-process only, by design (see file header).
+// signature -> last-sent epoch ms in this process; the shared lease covers other instances.
 const lastSentAt = new Map<string, number>();
 const inFlight = new Set<string>();
 
@@ -222,10 +233,47 @@ async function postSlackBot(
   }
 }
 
+/**
+ * Claim this signature's alert window across instances. Returns the lease token
+ * when this instance should send, 'held' when another instance already alerted
+ * it within the window, or 'unavailable' when the shared store could not be
+ * reached in time (fail open: send).
+ */
+async function claimSharedAlertWindow(key: string): Promise<string | 'held' | 'unavailable'> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const token = await Promise.race([
+      acquireLease(SHARED_DEDUPE_NAMESPACE, key, THROTTLE_WINDOW_MS),
+      new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), SHARED_DEDUPE_TIMEOUT_MS);
+      }),
+    ]);
+    if (token === 'timeout') {
+      log.warn('Shared alert dedupe timed out; sending without it', { key: key.slice(0, 120) });
+      return 'unavailable';
+    }
+    return token ?? 'held';
+  } catch (err: unknown) {
+    log.warn('Shared alert dedupe unavailable; sending without it', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return 'unavailable';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function sendAlert(input: AlertErrorInput): Promise<void> {
   const signature = fingerprint(input.source, input.message);
   const key = `alert:${input.agentId ?? '-'}:${signature}`;
   if (!acquireAlertSlot(key, Date.now())) return;
+
+  const shared = await claimSharedAlertWindow(key);
+  if (shared === 'held') {
+    // Another instance posted this signature within the window.
+    finishAlertSlot(key, true, Date.now());
+    return;
+  }
 
   let delivered = false;
   try {
@@ -251,6 +299,9 @@ async function sendAlert(input: AlertErrorInput): Promise<void> {
   } finally {
     // Failed transports remain eligible for the next occurrence to retry.
     finishAlertSlot(key, delivered, Date.now());
+    if (!delivered && shared !== 'unavailable') {
+      await releaseLease(SHARED_DEDUPE_NAMESPACE, key, shared).catch(() => undefined);
+    }
   }
 }
 
@@ -275,8 +326,10 @@ export function alertError(input: AlertErrorInput): void {
   }
 }
 
-/** Test-only: reset the in-memory throttle between cases. */
-export function __resetAlertThrottleForTests(): void {
+/** Test-only: reset the in-memory throttle and the shared dedupe window between cases. */
+export async function __resetAlertThrottleForTests(): Promise<void> {
   lastSentAt.clear();
   inFlight.clear();
+  const { prisma } = await import('./database');
+  await prisma.$executeRaw`DELETE FROM "SharedEphemeralState" WHERE namespace = ${SHARED_DEDUPE_NAMESPACE}`;
 }

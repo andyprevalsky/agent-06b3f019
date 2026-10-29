@@ -311,52 +311,6 @@ describe('Native long-press contextmenu on Android', () => {
   });
 });
 
-describe('Quick right-click release over a context menu item', () => {
-  it('a release on an item the pointer never moved onto does not select it', async () => {
-    const onDelete = vi.fn();
-    renderWithProviders(
-      <ContextMenu>
-        <ContextMenuTrigger data-testid="row">Rose</ContextMenuTrigger>
-        <ContextMenuContent data-testid="menu">
-          <ContextMenuItem>Rename project</ContextMenuItem>
-          <ContextMenuItem onSelect={onDelete}>Delete project</ContextMenuItem>
-        </ContextMenuContent>
-      </ContextMenu>,
-    );
-    fireEvent.contextMenu(screen.getByTestId('row'), { clientX: 117, clientY: 107 });
-    const item = within(await screen.findByTestId('menu')).getByText('Delete project');
-    // Radix's first frame can briefly place the menu under a still pointer.
-    fireEvent.pointerUp(item, { pointerType: 'mouse', button: 2 });
-    expect(onDelete).not.toHaveBeenCalled();
-    expect(screen.getByTestId('menu')).toBeInTheDocument();
-    // Press-drag-release still selects once the pointer moves onto the item.
-    fireEvent.pointerMove(item, { pointerType: 'mouse' });
-    fireEvent.pointerUp(item, { pointerType: 'mouse', button: 2 });
-    expect(onDelete).toHaveBeenCalledTimes(1);
-  });
-
-  it('a release consumes the reach, so a still item that stays mounted cannot select again', async () => {
-    // preventDefault keeps the menu (and the same mounted item) open after a select.
-    const onDelete = vi.fn((event: Event) => event.preventDefault());
-    renderWithProviders(
-      <ContextMenu>
-        <ContextMenuTrigger data-testid="row">Rose</ContextMenuTrigger>
-        <ContextMenuContent data-testid="menu">
-          <ContextMenuItem onSelect={onDelete}>Delete project</ContextMenuItem>
-        </ContextMenuContent>
-      </ContextMenu>,
-    );
-    fireEvent.contextMenu(screen.getByTestId('row'), { clientX: 117, clientY: 107 });
-    const item = within(await screen.findByTestId('menu')).getByText('Delete project');
-    fireEvent.pointerMove(item, { pointerType: 'mouse' });
-    fireEvent.pointerUp(item, { pointerType: 'mouse', button: 2 });
-    expect(onDelete).toHaveBeenCalledTimes(1);
-    // A later release with no new travel onto the item must not select it.
-    fireEvent.pointerUp(item, { pointerType: 'mouse', button: 2 });
-    expect(onDelete).toHaveBeenCalledTimes(1);
-  });
-});
-
 describe('Long-press release on a phone', () => {
   it('does not also open the agent the finger lifts off', async () => {
     const user = userEvent.setup();

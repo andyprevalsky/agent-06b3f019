@@ -880,6 +880,13 @@ async def test_handler_execute_tool_happy_path():
     assert summary_call["args"][-3] == "agent:a-1:tool:tc-wf:call:summarize_web_fetch"
     assert summary_call["args"][-2] == "agent:lineage-1"
     assert summary_call["args"][-1] == {}
+    # The activity wrapper appends its task ID after these explicit arguments.
+    # Keep the page facts bound to page_metadata, not session_id.
+    import inspect
+    from helpers.summarize import summarize_and_filter_links
+    bound = inspect.signature(summarize_and_filter_links).bind(*summary_call["args"], "task-1")
+    assert bound.arguments["page_metadata"] == {}
+    assert bound.arguments["session_id"] == "task-1"
     download_call = next(call for call in calls if call["activity"] == "web_fetch_download_activity")
     assert download_call["args"] == [
         ["https://example.com/file.pdf"],

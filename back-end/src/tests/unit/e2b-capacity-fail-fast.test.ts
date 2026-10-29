@@ -70,7 +70,7 @@ beforeEach(async () => {
   // Let a previous case's fire-and-forget alert POST finish before resetting.
   await new Promise((resolve) => setTimeout(resolve, 150));
   alerts.length = 0;
-  __resetAlertThrottleForTests();
+  await __resetAlertThrottleForTests();
 });
 
 test('an E2B 429 fails fast with the typed capacity error and fires the alert', async () => {

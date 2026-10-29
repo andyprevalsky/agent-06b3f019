@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { blockedRecord, decodeEncoded } from './committed-message-broadcast.fixtures';
+import { blockedRecord, decodeEncoded, message } from './committed-message-broadcast.fixtures';
 
 import { config as loadEnv } from 'dotenv';
 
@@ -38,14 +38,6 @@ async function main() {
   };
   const bodyMessages = (init?: RequestInit): WireMessage[] =>
     (JSON.parse(String(init?.body)) as { messages: WireMessage[] }).messages;
-  const message = (id: string) => ({
-    id,
-    timestamp: new Date('2026-10-13T01:34:15.736Z'),
-    text: 'Opening browser',
-    role: 'TOOL',
-    metadata: { toolName: 'spawn_browser_agent', toolStatus: 'IN_PROGRESS', toolCallId: id },
-  });
-
   let failed = 0;
   let total = 0;
   async function test(name: string, run: () => Promise<void>) {
@@ -126,6 +118,48 @@ async function main() {
       );
       await publisher.__flushBroadcastQueueForTests();
       assert(delivered.indexOf('ordered-a') < delivered.indexOf('ordered-b'));
+    });
+
+    // Semantic gate 2026-10-28 (agent d631f487): a generator burst filled the
+    // topic's 64-message initial queue while one request was in flight, so the
+    // canonical final-answer INSERT was refused for 'capacity' and dropped.
+    await test('a stream-delta burst cannot crowd out the committed final answer', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let started!: () => void;
+      const firstStarted = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const delivered: string[] = [];
+      globalThis.fetch = (async (_url, init) => {
+        const rows = bodyMessages(init);
+        started();
+        await gate;
+        delivered.push(...rows.map((row) => row.payload.record.id ?? row.event));
+        return new Response('', { status: 202 });
+      }) as typeof fetch;
+      try {
+        await publisher.broadcastAssistantStream('burst-agent', 'gen', 'first', false, 1);
+        await firstStarted;
+        for (let sequence = 2; sequence <= 120; sequence += 1) {
+          await publisher.broadcastAssistantStream('burst-agent', 'gen', 'delta', false, sequence);
+        }
+        await publisher.broadcastMessageInsert('burst-agent', message('burst-final-answer'));
+      } finally {
+        release();
+      }
+      await publisher.__flushBroadcastQueueForTests();
+      assert(
+        delivered.includes('burst-final-answer'),
+        'droppable stream deltas must never cost the committed INSERT its delivery'
+      );
+      assert.equal(
+        delivered.at(-1),
+        'burst-final-answer',
+        'the committed INSERT must stay ordered after the deltas it replaces'
+      );
     });
 
     await test('ephemeral stream failures are not retried', async () => {
@@ -532,6 +566,10 @@ async function main() {
       }) as typeof fetch;
       try {
         for (const peer of shardPeers) await publisher.broadcastMessageInsert(peer, message(peer));
+        // Retries are timer-driven: under a loaded coverage run they can take
+        // longer than a fixed sleep to reach the cap. Wait for the cap, then
+        // give a fifth request time to (wrongly) start.
+        for (let waited = 0; active < 4 && waited < 3000; waited += 25) await sleep(25);
         await sleep(150);
         assert.equal(active, 4, 'one shard may issue only four retry requests concurrently');
       } finally {

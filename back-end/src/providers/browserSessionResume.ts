@@ -303,6 +303,9 @@ async function assembleResumeResponse(
   dependencies: BrowserSessionResumeDependencies,
   carriedState?: TilionCarriedState
 ) {
+  // Tilion keeps the same browser and its worker-owned CDP connection.
+  if (result.profileSource === 'tilion_rotated_in_place')
+    return assembleResumeResponseWithTransport(taskId, result, dependencies, true);
   return withOwnedResumeTransport(result, async () => {
     const response = await assembleResumeResponseWithTransport(taskId, result, dependencies);
     await applyCarriedStateToReplacement(
@@ -354,7 +357,10 @@ async function assembleResumeResponseWithTransport(
     }
     await browserResumeScope()?.beforeHydration(result.sessionId);
   }
-  if (!readOnly && session?.logicalOwnerKey) {
+  // An in-place exit rotation keeps the same browser (the worker holds its only CDP socket), so
+  // there is no replacement to restore the checkpoint into and no transport to validate.
+  const sameBrowser = result.ipRotation !== undefined;
+  if (!readOnly && session?.logicalOwnerKey && !sameBrowser) {
     if (!result.validationBrowser)
       throw new Error('Logical browser restore requires validated transport');
     await restoreLogicalBrowserCheckpoint(taskId, result.validationBrowser);
@@ -421,7 +427,7 @@ async function assembleResumeResponseWithTransport(
     throw new Error('Resumed browser ended before readiness');
 
   if (!readOnly) await browserResumeScope()?.assertOwned();
-  if (!readOnly && session?.logicalOwnerKey && !browserResumeScope()) {
+  if (!readOnly && session?.logicalOwnerKey && !sameBrowser && !browserResumeScope()) {
     const ready = await prisma.browserSession.updateMany({
       where: { id: taskId, sessionId: result.sessionId, status: 'PAUSED' },
       data: { status: 'ACTIVE' },

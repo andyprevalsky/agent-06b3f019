@@ -3,7 +3,7 @@
  */
 
 import { deliverUserMessageToWorkflow, signalUserResponse } from '../../providers/agentResume';
-import { broadcastAgentUpdate, handleChatMessage } from '../../providers/chat';
+import { handleChatMessage } from '../../providers/chat';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
 import {
   broadcastCreatedMessage,
@@ -20,10 +20,8 @@ import {
 import type { PostMessageBody } from './types';
 import * as repo from './repo';
 import { withActiveBrowserSessionShareLock } from './repoBrowserTargetedMessages';
-import { withPiggybackedInbox } from './agentInboxPiggyback';
-import { createLogger } from '../../providers/logger';
-
-const log = createLogger('Agents');
+import { readTaskInboxMessages } from './agentToAgentService';
+import { broadcastChatReactivation } from './agentMessageReactivation';
 
 /**
  * Agent statuses whose Temporal workflow has already ended. A follow-up message
@@ -109,21 +107,7 @@ async function routeUserMessage(
       agentForChat.status = 'ACTIVE';
       // Clients still hold the finished run's status; tell them before the chat
       // turn streams (the chat Start agent button is gated on ACTIVE).
-      await broadcastAgentUpdate(
-        agentId,
-        {
-          status: 'ACTIVE',
-          temporalWorkflowId: null,
-          progress: 0,
-          updatedAt: new Date().toISOString(),
-        },
-        agentForChat.busId ?? undefined
-      ).catch((error: unknown) =>
-        log.warn('Failed to broadcast chat reactivation', {
-          agent_id: agentId,
-          error: error instanceof Error ? error.message : String(error),
-        })
-      );
+      await broadcastChatReactivation(agentId, agentForChat.busId ?? undefined);
     } else {
       const fresh = await repo.findAgentUnique(agentId);
       if (fresh !== null) {
@@ -294,6 +278,21 @@ async function createBrowserTargetedMessage(
  */
 function staleWorkerRejection(): { error: string; status: number } {
   return { error: 'Workflow generation is no longer current', status: 409 };
+}
+
+/**
+ * Explore progress posts carry their task's inbox read (one bounded indexed
+ * query) instead of a separate per-step GET /:id/agent-inbox.
+ */
+async function withPiggybackedInbox<T extends object>(
+  agentId: string,
+  body: PostMessageBody,
+  isInternal: boolean,
+  posted: T
+): Promise<T & { pending_inbox?: Awaited<ReturnType<typeof readTaskInboxMessages>> }> {
+  if (!isInternal || body.inbox === undefined) return posted;
+  const pending = await readTaskInboxMessages(agentId, body.inbox.task_id, body.inbox.since);
+  return { ...posted, pending_inbox: pending };
 }
 
 /** Post a message to an agent (user or internal). */

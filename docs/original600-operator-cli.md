@@ -587,11 +587,59 @@ into private staging and verifies every original archive member. It publishes
 the canonical verified-export marker only after all remote helpers have joined.
 An uncertain export dispatch never authorizes repeating that export.
 
-If a host or service restart killed the operator, a shard's runner and its gate
-while the controller was still running, nothing remains to verify the export
-or run controller cleanup: the run's pinned disposable helper refuses every
-action for a dead cleanup owner. First stop new work through the runner's own
-barrier ABORT and wait for the supervisor to report JOINED. Then write one
+If a host or service restart killed the sharded operator and its host runners
+after the global release, the guest supervisors keep running. Each supervisor
+still stops its own shard at the group threshold (5% of the original scheduled
+group total, for example 3 of 60), because any one shard reaching it implies
+the group did. Re-adopt the cross-shard stop, the live `shard-status.json`
+counters that the scorecard reads, barrier delivery, and the exact supervisor
+TERM path over the original journal, release ID, and clocks:
+
+```bash
+python3 scripts/run-original600-controller.py --adopt-live "$ADMISSION_DIR" --check   # local only
+python3 scripts/run-original600-controller.py --adopt-live "$ADMISSION_DIR"
+```
+
+Run it from a checkout that includes this mode. `--workspace` selects the
+checkout whose env files resolve the Fly credential. The default is the shards'
+original source root.
+
+Refusals and locks:
+- Every shard refuses unless the PID and birth of its recorded runner and gate
+  are gone, and no `terminal.json` exists.
+- Only one adopter may hold each controller lock and each output's
+  `adoption.lock`. Only one coordinator may hold `coordination.adopt.lock`.
+- An undecided (pre-release) barrier is refused. Abort it through the
+  runner's barrier ABORT instead.
+
+Stops:
+- Each adopter sends at most one never-replayed supervisor TERM.
+- It does so only for a durable `owner-stop.json` (the cross-shard threshold,
+  or `--stop REASON`) or the original deadline.
+
+Detaching:
+- A signal to the adopting operator or an adopter, such as a host or service
+  restart, only detaches. It sends no barrier abort and no supervisor TERM.
+- An adopter that dies is reported as `ADOPTER_LOST`. An internal error also
+  only detaches.
+- In each of these cases the journal stays unfinished. Run `--adopt-live`
+  again.
+- An earlier journal stop caused by a signal (`operator SIGTERM`) is reported
+  as `ADOPTION_UNREPLAYED_STOP` and is not replayed.
+
+The adopter exits once the supervisor reports JOINED. It never signals a gate,
+VM, or process group, and never runs cleanup. Launch it under a process manager
+that survives the session; `setsid nohup` did not survive the 2026-10-20
+boxes.dev service restart.
+
+Dead-owner export recovery binds the shard's own deadline. That is the epoch
+plus the shard's bound e2e timeout, for example 10020 s for `--timeout 7200`, or
+5400 s when unbound.
+
+Nothing remains to verify the export or run controller cleanup: the run's
+pinned disposable helper refuses every action for a dead cleanup owner. Without
+an adopter, first stop new work through the runner's own barrier ABORT. In
+either case, wait for the supervisor to report JOINED. Then write one
 private `controller-export-dead-owner-window-v1` window per controller: the
 ordinary cleanup-window fields (at most one hour, `cleanup_only: true`,
 `benchmark_credit: 0`) plus `dead_owner_pid`/`dead_owner_birth` from the run's
@@ -673,3 +721,37 @@ Unselected credentials and unrelated Fly config metadata do not invalidate a
 waiting check. A change to the selected credential, environment files, source
 or owner still refuses reuse. A private `identity-mismatch-*.json` receipt records
 the differing field names and hashed bindings, without token or config contents.
+
+
+### Recovered classifications without rewriting terminal receipts
+
+When verified exports still contain stale unknown/cancelled observations, the
+scorecard can consume a separately sealed reconciliation. This never writes
+`result.json` or changes accepted grades. Keep the sidecar outside the original
+run directory. Supply the original per-task/K results CSV, cumulative accepted
+grades CSV, raw job JSONL and raw Hub-row JSON captured for the same run:
+
+```bash
+scripts/run-bench scorecard "$ORIGINAL_RUN" \
+  --write-recovered-results "$SIDECAR" \
+  --results-csv "$RESULTS_CSV" --accepted-grades "$ACCEPTED_CSV" \
+  --recovery-jobs "$JOBS_JSONL" --recovery-hub "$HUB_ROWS_JSON"
+```
+
+The command prints the sidecar SHA256. Use that exact value on every read:
+
+```bash
+scripts/run-bench scorecard "$ORIGINAL_RUN" \
+  --recovered-results "$SIDECAR" --recovered-sha256 "$SIDECAR_SHA256" \
+  --html "$CARD_HTML" --json
+```
+
+Preparation and consumption validate complete unique task/K/job membership,
+original source/controller/group bindings, source-file hashes, fleet/Hub/agent
+identities and accepted PASS/FAIL grades. An INFRA classification requires a
+matching Hub INFRA_ERROR and an UNGRADED accepted slot. Any mismatch fails
+closed. Input updates require a newly validated sidecar and new hash; never
+change an old hash to mask a discrepancy. The normalized output retains the
+original observations alongside the recovered classifications and provenance.
+Without valid reconciliation, unresolved jobs cannot establish a green INFRA
+zero. This import performs no provider calls and is not a benchmark rerun.
