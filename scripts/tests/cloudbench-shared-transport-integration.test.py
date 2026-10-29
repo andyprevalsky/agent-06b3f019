@@ -495,13 +495,33 @@ cloudbench_proxy_stop legacy_proxy_pid
             self.assertIn('proxy 19001:3001 fd00::1234',(root/'fly-args').read_text())
 
 
+    def app_metadata_endpoint(self, payload=None, status=200):
+        import http.server
+        requests = []
+        payload = payload if payload is not None else dict(name='fixture', organization=dict(slug='fixture-org'), network='default')
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                requests.append((self.path, self.headers.get('Authorization')))
+                raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers(); self.wfile.write(raw)
+            def log_message(self, *unused): pass
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.metadata_requests = requests
+        return 'http://127.0.0.1:' + str(server.server_port)
+
     def test_actual_campaign_parent_starts_one_bootstrap_and_joins_before_archive(self):
         import runpy,shutil
         from unittest.mock import patch
         from types import SimpleNamespace
         f=RelayFixture(self,start_broker=False)
         repo=f.root/'controller';(repo/'scripts/lib').mkdir(parents=True)
-        for relative,source in [('scripts/cloudbench-shared-relay.py',BROKER),('scripts/cloudbench-cleanup-tickets.py',ROOT/'scripts/cloudbench-cleanup-tickets.py'),('scripts/lib/cloudbench-inventory.sh',ROOT/'scripts/lib/cloudbench-inventory.sh'),('scripts/run-bench-cloud',ROOT/'scripts/run-bench-cloud'),('scripts/run-bench-fleet',ROOT/'scripts/run-bench-fleet')]:
+        for relative,source in [('scripts/cloudbench-campaign-machines.py',ROOT/'scripts/cloudbench-campaign-machines.py'),('scripts/cloudbench-shared-relay.py',BROKER),('scripts/cloudbench-cleanup-tickets.py',ROOT/'scripts/cloudbench-cleanup-tickets.py'),('scripts/lib/cloudbench-inventory.sh',ROOT/'scripts/lib/cloudbench-inventory.sh'),('scripts/run-bench-cloud',ROOT/'scripts/run-bench-cloud'),('scripts/run-bench-fleet',ROOT/'scripts/run-bench-fleet')]:
             shutil.copyfile(source,repo/relative)
         def git(*args):
             return subprocess.run(['git','-C',str(repo),*args],capture_output=True,text=True,check=True)
@@ -515,7 +535,7 @@ root=Path(os.environ['PARENT_RELAY_CASE'])
 with (root/'fly-calls').open('a')as stream:stream.write(json.dumps(sys.argv[1:])+'\\n')
 args=sys.argv[1:]
 if args==['status','-a','fixture','--json']:
- print(json.dumps(dict(Name='fixture',Organization=dict(Slug='fixture-org'),Network='default')));raise SystemExit()
+ raise SystemExit('aggregate status unavailable: original dependency')
 assert args==['proxy','0:1','::1','-a','fixture','--bind-addr','127.0.0.1','-q'],args
 assert os.environ['FLY_AGENT_ISOLATED']=='1'
 code="import importlib.machinery,importlib.util,os,sys;from pathlib import Path;l=importlib.machinery.SourceFileLoader('relay_fixture',os.environ['PARENT_RELAY_TEST']);s=importlib.util.spec_from_loader(l.name,l);m=importlib.util.module_from_spec(s);l.exec_module(m);a=m.FakeUnixAgent(Path(os.environ['FLY_AGENT_SOCKET_PATH']).parent,path=os.environ['FLY_AGENT_SOCKET_PATH']);Path(os.environ['PARENT_RELAY_CASE'],'agent.pid').write_text(str(os.getpid()));sys.stdin.read();a.close();Path(os.environ['PARENT_RELAY_CASE'],'agent-eof-joined').write_text('true')"
@@ -537,16 +557,22 @@ finally:
         # A private HOME: the relay claims that HOME's single WireGuard peer.
         home=f.root/'home';home.mkdir(mode=0o700)
         module=runpy.run_path(str(ROOT/'scripts/run-bench-campaign.py'))
-        environment=dict(os.environ,PATH=str(bin_path)+os.pathsep+os.environ['PATH'],HOME=str(home),FLY_BENCH_API_TOKEN='fixture-bench-token-over-twenty-characters',PARENT_RELAY_CASE=str(f.root),PARENT_RELAY_TEST=str(Path(__file__).resolve()))
+        environment=dict(os.environ,PATH=str(bin_path)+os.pathsep+os.environ['PATH'],HOME=str(home),FLY_BENCH_API_TOKEN='fixture-bench-token-over-twenty-characters',PARENT_RELAY_CASE=str(f.root),PARENT_RELAY_TEST=str(Path(__file__).resolve()), FLY_FLAPS_BASE_URL=self.app_metadata_endpoint())
         value=None
+        run = subprocess.run
+        def run_without_aggregate_status(argv, *args, **kwargs):
+            if argv[:2] == ['flyctl', 'status']:
+                raise subprocess.TimeoutExpired(argv, 30)
+            return run(argv, *args, **kwargs)
         try:
-            with patch.dict(os.environ,environment,clear=True):
+            with patch.dict(os.environ,environment,clear=True), patch('subprocess.run', side_effect=run_without_aggregate_status):
                 value=module['start_shared_relay'](repo,campaign,repo,f.feed,time.monotonic()+15)
                 f.directory=value['directory'];f.authority=value['authority'];f.broker=value['process']
                 self.assertIsNone(value['bootstrap'].poll())
                 self.assertIsNone(value['process'].poll())
                 calls=[json.loads(line)for line in (f.root/'fly-calls').read_text().splitlines()]
-                self.assertEqual(len(calls),2,calls)
+                self.assertEqual(len(calls),1,calls)
+                self.assertEqual(self.metadata_requests, [('/v1/apps/fixture', 'Bearer fixture-bench-token-over-twenty-characters')])
                 owner=f.owner();lease=f.acquire(owner,'d'*32)
                 refusal=f.call('shutdown',SimpleNamespace(pid=os.getpid()),'campaign-shutdown')
                 self.assertNotEqual(refusal.returncode,0,'parent stopped relay while a live child still owned a route')
@@ -578,7 +604,7 @@ finally:
         import runpy,shutil
         f=RelayFixture(self,start_broker=False)
         repo=f.root/'controller';(repo/'scripts/lib').mkdir(parents=True)
-        for relative,source in [('scripts/cloudbench-shared-relay.py',BROKER),('scripts/cloudbench-cleanup-tickets.py',ROOT/'scripts/cloudbench-cleanup-tickets.py'),('scripts/lib/cloudbench-inventory.sh',ROOT/'scripts/lib/cloudbench-inventory.sh'),('scripts/run-bench-cloud',ROOT/'scripts/run-bench-cloud'),('scripts/run-bench-fleet',ROOT/'scripts/run-bench-fleet')]:
+        for relative,source in [('scripts/cloudbench-campaign-machines.py',ROOT/'scripts/cloudbench-campaign-machines.py'),('scripts/cloudbench-shared-relay.py',BROKER),('scripts/cloudbench-cleanup-tickets.py',ROOT/'scripts/cloudbench-cleanup-tickets.py'),('scripts/lib/cloudbench-inventory.sh',ROOT/'scripts/lib/cloudbench-inventory.sh'),('scripts/run-bench-cloud',ROOT/'scripts/run-bench-cloud'),('scripts/run-bench-fleet',ROOT/'scripts/run-bench-fleet')]:
             shutil.copyfile(source,repo/relative)
         def git(*args):
             return subprocess.run(['git','-C',str(repo),*args],capture_output=True,text=True,check=True)
@@ -592,7 +618,7 @@ root=Path(os.environ['PARENT_RELAY_CASE'])
 args=sys.argv[1:]
 agent_code="import importlib.machinery,importlib.util,os,sys,time;from pathlib import Path;l=importlib.machinery.SourceFileLoader('relay_fixture',os.environ['PARENT_RELAY_TEST']);s=importlib.util.spec_from_loader(l.name,l);m=importlib.util.module_from_spec(s);l.exec_module(m);p=Path(sys.argv[1]);a=m.FakeUnixAgent(p.parent,path=p);mode=sys.argv[2]\\nif mode=='bootstrap':sys.stdin.read();a.close();Path(os.environ['PARENT_RELAY_CASE'],'agent-eof-joined').write_text('true')\\nelse:\\n while True:time.sleep(1)"
 if args==['status','-a','fixture','--json']:
- print(json.dumps(dict(Name='fixture',Organization=dict(Slug='fixture-org'),Network='default')));raise SystemExit()
+ raise SystemExit('aggregate status unavailable: original dependency')
 if args[:1]==['proxy']:
  assert args==['proxy','0:1','::1','-a','fixture','--bind-addr','127.0.0.1','-q'],args
  assert os.environ['FLY_AGENT_ISOLATED']=='1'
@@ -645,7 +671,7 @@ with (root/'wireguard-calls').open('a')as stream:
         fake.chmod(0o700)
         campaign=f.root/'campaign';campaign.mkdir()
         module=runpy.run_path(str(ROOT/'scripts/run-bench-campaign.py'))
-        environment=dict(os.environ,PATH=str(bin_path)+os.pathsep+os.environ['PATH'],HOME=str(home),FLY_BENCH_API_TOKEN='fixture-bench-token-over-twenty-characters',PARENT_RELAY_CASE=str(f.root),PARENT_RELAY_TEST=str(Path(__file__).resolve()))
+        environment=dict(os.environ,PATH=str(bin_path)+os.pathsep+os.environ['PATH'],HOME=str(home),FLY_BENCH_API_TOKEN='fixture-bench-token-over-twenty-characters',PARENT_RELAY_CASE=str(f.root),PARENT_RELAY_TEST=str(Path(__file__).resolve()), FLY_FLAPS_BASE_URL=self.app_metadata_endpoint())
         for key in ('FLY_AGENT_SOCKET_PATH','FLY_AGENT_ISOLATED'):environment.pop(key,None)
         def retire_started_agents():
             # Fixture-owned exact PIDs only; never a pattern or process group.
@@ -654,6 +680,48 @@ with (root/'wireguard-calls').open('a')as stream:
                 except ProcessLookupError:pass
         self.addCleanup(retire_started_agents)
         return f,repo,home,module,environment
+
+    def test_metadata_refusals_never_spawn_relay(self):
+        from unittest.mock import patch
+        f, repo, home, module, environment = self.campaign_relay_fixture()
+        cases = [({}, 200),
+                 (dict(name='foreign', organization=dict(slug='fixture-org'), network='default'), 200),
+                 (dict(name='fixture', organization={}, network='default'), 200),
+                 (dict(name='fixture', organization=dict(slug='fixture-org')), 200),
+                 (dict(name='fixture', organization=dict(slug='fixture-org'), network=5), 200),
+                 (dict(message='not authorized'), 403), (b'<html>provider error</html>', 200), (None, 500)]
+        for payload, status in cases:
+            with self.subTest(payload=payload, status=status):
+                environment['FLY_FLAPS_BASE_URL'] = self.app_metadata_endpoint(payload, status)
+                with patch.dict(os.environ, environment, clear=True):
+                    with self.assertRaisesRegex(ValueError, 'app metadata unavailable'):
+                        module['start_shared_relay'](repo, f.root/'campaign', repo, f.feed, time.monotonic()+15)
+                self.assertFalse((f.root/'proxy-calls').exists())
+        f.close()
+
+    def test_metadata_reader_preserves_custom_network_and_escaped_app(self):
+        environment = dict(os.environ, FLY_API_TOKEN='fixture-bearer',
+                           FLY_FLAPS_BASE_URL=self.app_metadata_endpoint(dict(name='a/b', organization=dict(slug='org'), network='private-net')))
+        environment.pop('FLY_FORCE_INSTANCE_ID', None)
+        result = subprocess.run([sys.executable, '-S', str(ROOT/'scripts/cloudbench-campaign-machines.py'),
+                                 'a/b', '2', '--app-metadata'], env=environment, capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), dict(Name='a/b', Organization=dict(Slug='org'), Network='private-net'))
+        self.assertEqual(self.metadata_requests, [('/v1/apps/a%2Fb', 'Bearer fixture-bearer')])
+
+    def test_metadata_cancellation_and_timeout_do_not_spawn_relay(self):
+        from unittest.mock import patch
+        f, repo, home, module, environment = self.campaign_relay_fixture()
+        run = subprocess.run
+        for failure in (KeyboardInterrupt(), subprocess.TimeoutExpired(['metadata-reader'], 30)):
+            def interrupted(argv, *args, **kwargs):
+                if '--app-metadata' in argv: raise failure
+                return run(argv, *args, **kwargs)
+            with patch.dict(os.environ, environment, clear=True), patch('subprocess.run', side_effect=interrupted):
+                with self.assertRaises(type(failure)):
+                    module['start_shared_relay'](repo, f.root/'campaign', repo, f.feed, time.monotonic()+15)
+            self.assertFalse((f.root/'proxy-calls').exists())
+        f.close()
 
     def test_campaign_child_wireguard_flyctl_reuses_the_relay_agent(self):
         """Children's ssh/sftp must share the campaign agent, never start another.

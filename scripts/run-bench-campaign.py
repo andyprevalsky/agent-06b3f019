@@ -952,7 +952,7 @@ def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
                         inventory: Path, deadline: float | None, peer_claim: int) -> dict:
     ref = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
     checked = {}
-    for relative in ['scripts/cloudbench-shared-relay.py', 'scripts/lib/cloudbench-inventory.sh', 'scripts/run-bench-cloud', 'scripts/run-bench-fleet']:
+    for relative in ['scripts/cloudbench-shared-relay.py', 'scripts/cloudbench-campaign-machines.py', 'scripts/lib/cloudbench-inventory.sh', 'scripts/run-bench-cloud', 'scripts/run-bench-fleet']:
         raw = subprocess.check_output(['git', '-C', str(root), 'show', ref + ':' + relative])
         if (root / relative).read_bytes() != raw:
             raise ValueError('shared relay source differs from reviewed controller')
@@ -977,7 +977,11 @@ def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
     agent_socket = directory / 'fly-agent.sock'
     environment['FLY_AGENT_SOCKET_PATH'] = str(agent_socket)
     environment['FLY_AGENT_ISOLATED'] = '1'
-    metadata = subprocess.run(['flyctl', 'status', '-a', app, '--json'], cwd=workspace,
+    environment['CLOUDBENCH_INVENTORY_PHASE_FILE'] = str(directory / 'app-metadata-phase.private')
+    # Query only the native App identity. `flyctl status --json` also waits
+    # for all active Machines and the latest release, neither used by the relay.
+    metadata = subprocess.run([sys.executable, '-S', str(root / 'scripts/cloudbench-campaign-machines.py'),
+                               app, '30', '--app-metadata'], cwd=workspace,
                               env=environment, capture_output=True, timeout=30)
     metadata_path = directory / 'app-metadata.private.json'
     metadata_path.write_bytes(metadata.stdout); metadata_path.chmod(0o600)

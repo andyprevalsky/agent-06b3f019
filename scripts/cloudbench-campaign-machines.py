@@ -199,7 +199,20 @@ def validate(value: object) -> list[dict]:
             machine['checks'] = [x for x in checks if not x.get('name', '').startswith('bg_deployments_compat')]
     return value
 
-def fetch(app: str, seconds: float, machine_id: str | None = None) -> bytes:
+def app_metadata(value: object, app: str) -> dict:
+    """The native App contract; no Machine or release inventory is needed."""
+    if not isinstance(value, dict) or value.get('name') != app:
+        raise Refusal('app metadata identity invalid')
+    organization = value.get('organization')
+    network = value.get('network')
+    if (not isinstance(organization, dict) or not isinstance(organization.get('slug'), str)
+            or not organization['slug'] or not isinstance(network, str)):
+        raise Refusal('app metadata identity invalid')
+    return {'Name': app, 'Organization': {'Slug': organization['slug']},
+            'Network': '' if network == 'default' else network}
+
+
+def fetch(app: str, seconds: float, machine_id: str | None = None, *, metadata: bool = False) -> bytes:
     deadline = time.monotonic() + seconds
     def expired(signum, frame):
         _d_signal(signum)
@@ -219,7 +232,9 @@ def fetch(app: str, seconds: float, machine_id: str | None = None) -> bytes:
         headers = {'Authorization': header, 'Accept': 'application/json', 'Accept-Encoding': 'gzip'}
         if os.environ.get('FLY_FORCE_INSTANCE_ID'):
             raise Refusal('unsupported forced instance override')
-        url = base + '/v1/apps/' + urllib.parse.quote(app, safe='') + '/machines'
+        url = base + '/v1/apps/' + urllib.parse.quote(app, safe='')
+        if not metadata:
+            url += '/machines'
         if machine_id is not None:
             if not re.fullmatch('[0-9a-f]+', machine_id):
                 raise Refusal('invalid or duplicate Machine identity')
@@ -255,7 +270,9 @@ def fetch(app: str, seconds: float, machine_id: str | None = None) -> bytes:
         _d_phase('json_parse',decoded_bytes=len(raw))
         parsed_value = json.loads(raw)
         _d_phase('validate')
-        if machine_id is None:
+        if metadata:
+            value = app_metadata(parsed_value, app)
+        elif machine_id is None:
             value = validate(parsed_value)
         else:
             value = validate([parsed_value])[0]
@@ -275,9 +292,10 @@ def fetch(app: str, seconds: float, machine_id: str | None = None) -> bytes:
 if __name__ == '__main__':
     _d_init()
     try:
-        if len(sys.argv) != 3 or not float(sys.argv[2]) > 0:
+        metadata = len(sys.argv) == 4 and sys.argv[3] == '--app-metadata'
+        if (len(sys.argv) != 3 and not metadata) or not float(sys.argv[2]) > 0:
             raise Refusal('invalid bounded Machines arguments')
-        output = fetch(sys.argv[1], float(sys.argv[2]))
+        output = fetch(sys.argv[1], float(sys.argv[2]), metadata=metadata)
         _d_phase('stdout_write',output_bytes=len(output))
         sys.stdout.buffer.write(output)
         _d_phase('complete')
