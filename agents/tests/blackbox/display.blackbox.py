@@ -477,18 +477,18 @@ def _home():
         shutil.rmtree(home, ignore_errors=True)
 
 
-async def test_mcp_server_lists_the_three_rose_tools():
+async def test_mcp_server_lists_the_rose_tools():
     with FakeAgentTools() as fake, _home() as home:
         async with _mcp_server(fake, home) as mcp:
             listed = await mcp.response(await mcp.send("tools/list"))
             names = sorted(tool["name"] for tool in listed["result"]["tools"])
-            assert names == ["change_environment_size", "display", "send_message_to_user"], names
+            assert names == ["change_environment_size", "cli", "display", "send_message_to_user"], names
             unknown = await mcp.response(await mcp.send("tools/call", {"name": "nope", "arguments": {}}))
             assert "error" in unknown, unknown
 
 
 async def test_code_agent_cannot_ask_a_question():
-    """No approval, pinned question or wait: nothing asks the user or the spawning agent."""
+    """No user approval, pinned question or wait; CLI auth coordinates with its parent."""
     with FakeAgentTools() as fake, _home() as home:
         for rose_desktop in (True, False):
             async with _mcp_server(fake, home, rose_desktop=rose_desktop) as mcp:
@@ -596,8 +596,11 @@ async def test_stock_session_tools_have_no_pinned_questions_or_inline_views():
         async with _mcp_server(fake, home, rose_desktop=False) as mcp:
             listed = await mcp.response(await mcp.send("tools/list"))
             tools = {tool["name"]: tool for tool in listed["result"]["tools"]}
-            assert sorted(tools) == ["change_environment_size", "display", "send_message_to_user"], tools
+            assert sorted(tools) == ["change_environment_size", "cli", "display", "send_message_to_user"], tools
             assert set(tools["change_environment_size"]["inputSchema"]["properties"]) == {"cpu", "memory_gb", "reason"}
+            assert tools["cli"]["inputSchema"]["properties"]["action"]["enum"] == ["list", "run", "publish"]
+            assert "immediate parent Rose agent" in tools["cli"]["description"]
+            assert "question" not in tools["cli"]["inputSchema"]["properties"]
             assert list(tools["display"]["inputSchema"]["properties"]) == ["paths", "urls", "html", "caption"]
             assert list(tools["send_message_to_user"]["inputSchema"]["properties"]) == ["message"]
             blob = json.dumps(listed)
@@ -643,7 +646,7 @@ async def run_all_tests():
         await r.record_async(
             "inline_display_runs_in_production_sandbox", test_inline_display_runs_in_production_sandbox
         )
-        await r.record_async("mcp_server_lists_the_three_rose_tools", test_mcp_server_lists_the_three_rose_tools)
+        await r.record_async("mcp_server_lists_the_rose_tools", test_mcp_server_lists_the_rose_tools)
         await r.record_async("code_agent_cannot_ask_a_question", test_code_agent_cannot_ask_a_question)
         await r.record_async("cli_display_dedupes_by_content_hash", test_cli_display_dedupes_by_content_hash)
         await r.record_async("cli_and_mcp_display_inline_html", test_cli_and_mcp_display_inline_html)
