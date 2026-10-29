@@ -21,7 +21,11 @@ export type SpeedLevel = 'normal' | 'fast' | 'ultra';
 export type AgentSpeed = 'standard' | 'fast' | 'ultrafast';
 
 export function agentSpeedForLevel(level: SpeedLevel): AgentSpeed {
-  const speeds: Record<SpeedLevel, AgentSpeed> = { normal: 'standard', fast: 'fast', ultra: 'ultrafast' };
+  const speeds: Record<SpeedLevel, AgentSpeed> = {
+    normal: 'standard',
+    fast: 'fast',
+    ultra: 'ultrafast',
+  };
   return speeds[level];
 }
 
