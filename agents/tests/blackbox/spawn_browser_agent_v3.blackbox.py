@@ -36455,6 +36455,20 @@ async def run_all_tests():
     await r.record_async("execute_switch_tab_no_id", test_execute_switch_tab_missing_id)
     await r.record_async("execute_close_tab_explicit_id", test_execute_close_tab_with_explicit_id)
 
+    from terminal_visual_evidence_fixture import (
+        test_terminal_capture_reaches_polar, test_terminal_privacy_identity_and_restore,
+        test_terminal_invalid_receipts_fail_closed, test_terminal_failed_write_cancel_and_revocation,
+        test_terminal_body_budget_and_no_authority,
+    )
+    for name, fn in (
+        ("terminal_visual_original_to_polar", test_terminal_capture_reaches_polar),
+        ("terminal_visual_privacy_identity_restore", test_terminal_privacy_identity_and_restore),
+        ("terminal_visual_invalid_receipts", test_terminal_invalid_receipts_fail_closed),
+        ("terminal_visual_failed_write_cancel_revocation", test_terminal_failed_write_cancel_and_revocation),
+        ("terminal_visual_budget_no_authority", test_terminal_body_budget_and_no_authority),
+    ):
+        await r.record_async(name, fn)
+
     await r.record_async("execute_screenshot_success", test_execute_screenshot_success)
     from browser_visual_receipt_fixture import (
         test_original_capture_admitted, test_private_and_session, test_identity_and_tamper,

@@ -11956,6 +11956,13 @@ async def _spawn_browser_agent_activity_v3_real(
                             )
 
                     if completion_ready:
+                        from domains.spawn_browser_agent_v3.visual_evidence import persist_terminal_visual_evidence
+
+                        visual_evidence = await persist_terminal_visual_evidence(
+                            action_history=action_history, dom_service=dom_service,
+                            session_id=session_id, task_id=task_id, agent_id=agent_id,
+                            redact=_redact_activity_value,
+                        )
                         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
                         await _disconnect_browser(dom_service)
                         _tilion_leave_session()
@@ -11986,7 +11993,10 @@ async def _spawn_browser_agent_activity_v3_real(
                             tool_call_id=tool_call_id,
                             is_completion_message=True,
                             output_schema=response_schema,
-                            extra_metadata={"browser_cleanup": cleanup_failure} if cleanup_failure else None,
+                            extra_metadata={
+                                "historical_visual_evidence": visual_evidence,
+                                **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
+                            },
                         )
 
                         usage_items = build_usage_items(
