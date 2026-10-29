@@ -95,4 +95,124 @@ exit $rc
                 self.assertEqual(lines,['TOKEN-status-9023 --lease '+value for value in released])
                 self.assertEqual((Path(tmp)/'published').read_text(),'|\n','an unusable lease is never published')
 
+
+
+class NativeReadinessTests(unittest.TestCase):
+    """A live tunnel must retain its initialization progress until the deadline."""
+
+    def run_native_proxy(self, scenario):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Path(os.environ.get('READINESS_TEST_SOURCE', str(ROOT / 'scripts/lib/cloudbench-env.sh')))
+            script = r'''set -uo pipefail
+source "$1"
+APP=offline-readiness
+CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0
+proxy_pid=
+printf '0\n' > "$FIXTURE/clock"
+date() {
+    if [ "$1" = +%s ]; then
+        local ticks
+        ticks=$(cat "$FIXTURE/clock")
+        printf '%s\n' "$((ticks / 10))"
+    else
+        command date "$@"
+    fi
+}
+sleep() {
+    local ticks delta child="${!:-}" observed= remaining=500
+    # Synchronize with the exact launched child without using wall time as
+    # the controller's clock. Busy-host scheduling cannot spend its budget.
+    if [ "$1" = 0.5 ]; then
+        while [ "$remaining" -gt 0 ]; do
+            observed=$(cat "$FIXTURE/current-pid" 2>/dev/null || true)
+            [ "$observed" != "$child" ] || break
+            command sleep 0.01
+            remaining=$((remaining - 1))
+        done
+        [ "$observed" = "$child" ] || exit 91
+        if [ "$SCENARIO" = dead-first ] && [ "$(wc -l < "$FIXTURE/launches")" = 1 ]; then
+            wait "$child" || true
+        fi
+    fi
+    case "$1" in 0.5) delta=5 ;; *) delta=$(($1 * 10)) ;; esac
+    ticks=$(cat "$FIXTURE/clock")
+    printf '%s\n' "$((ticks + delta))" > "$FIXTURE/clock"
+}
+flyctl() {
+    printf '%s\n' "$BASHPID" >> "$FIXTURE/launches"
+    printf '%s\n' "$BASHPID" > "$FIXTURE/current-pid"
+    trap 'exit 0' TERM
+    if [ "$SCENARIO" = dead-first ] && [ "$(wc -l < "$FIXTURE/launches")" = 1 ]; then
+        return 1
+    fi
+    while :; do command sleep 0.05; done
+}
+curl() {
+    local pid n=0 code=000
+    pid=$(cat "$FIXTURE/current-pid")
+    [ ! -f "$FIXTURE/probes-$pid" ] || n=$(cat "$FIXTURE/probes-$pid")
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$FIXTURE/probes-$pid"
+    # Model a WireGuard handshake which needs three observations in one
+    # process incarnation; relaunching cannot inherit partial initialization.
+    if [ "$SCENARIO" = rejected ]; then
+        code=503
+    elif [ "$n" -ge 3 ]; then
+        code=425
+    fi
+    case " $* " in *" %{http_code} "*) printf '%s' "$code" ;; esac
+    [ "$code" != 000 ]
+}
+# Real child ownership and reaping, without the production 5s grace interval.
+cloudbench_terminate_and_wait() {
+    shift
+    local pid
+    for pid in "$@"; do
+        [ -n "$pid" ] || continue
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    done
+}
+cleanup() { cloudbench_terminate_and_wait 1 "${proxy_pid:-}"; }
+trap cleanup EXIT
+rc=0
+cloudbench_start_data_plane_proxy 19023 8011 fd00::1 "$FIXTURE/proxy.log" proxy_pid status 5 || rc=$?
+printf '%s\n' "$rc" > "$FIXTURE/result"
+printf '%s\n' "$proxy_pid" > "$FIXTURE/published"
+exit 0
+'''
+            environment = {key: value for key, value in os.environ.items()
+                           if not key.startswith('CLOUDBENCH_SHARED_RELAY_')}
+            environment.update(FIXTURE=temporary, SCENARIO=scenario)
+            result = subprocess.run(['bash', '-c', script, 'native-readiness', str(source)],
+                                    env=environment, capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            launches = (root / 'launches').read_text().splitlines()
+            for pid in launches:
+                with self.assertRaises(ProcessLookupError, msg='owned proxy was not reaped'):
+                    os.kill(int(pid), 0)
+            return (int((root / 'result').read_text()), launches,
+                    (root / 'published').read_text().strip(),
+                    (root / 'proxy.log').read_text())
+
+    def test_initializing_tunnel_survives_unavailable_lifecycle(self):
+        rc, launches, published, log = self.run_native_proxy('initializing')
+        self.assertEqual(rc, 0, 'live tunnel initialization was repeatedly cancelled:\n' + log)
+        self.assertEqual(len(launches), 1, 'HTTP 000 must not restart a live tunnel')
+        self.assertEqual(published, launches[0])
+
+    def test_dead_tunnel_is_replaced_before_readiness(self):
+        rc, launches, published, log = self.run_native_proxy('dead-first')
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(len(launches), 2)
+        self.assertEqual(published, launches[1])
+
+    def test_rejected_lifecycle_still_fails_and_reaps_at_deadline(self):
+        rc, launches, published, log = self.run_native_proxy('rejected')
+        self.assertEqual(rc, 1, log)
+        self.assertEqual(len(launches), 1, 'HTTP failures do not prove process failure')
+        self.assertEqual(published, '')
+
+
 if __name__ == '__main__':unittest.main()

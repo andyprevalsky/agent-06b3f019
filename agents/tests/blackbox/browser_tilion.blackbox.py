@@ -1382,8 +1382,11 @@ async def _webauthn_site():
 
     popup = (
         "<title>popup</title><script>window.webauthn='pending';"
+        "window.webauthnStart={url:location.href,focused:document.hasFocus(),"
+        "visibility:document.visibilityState,readyState:document.readyState};"
         "navigator.credentials.get({publicKey:{challenge:new Uint8Array(32),timeout:60000}})"
-        ".then(()=>{window.webauthn='resolved'}).catch(e=>{window.webauthn=e.name});</script>"
+        ".then(()=>{window.webauthn='resolved'}).catch(e=>{"
+        "window.webauthnError={name:e.name,message:e.message};window.webauthn=e.name});</script>"
     )
     app = web.Application()
     app.router.add_get("/", lambda _r: web.Response(content_type="text/html", text="<title>main</title>"))
@@ -1420,6 +1423,12 @@ async def _popup_webauthn_outcome(arm_webauthn: bool) -> str:
                     if outcome != "pending":
                         break
                     await asyncio.sleep(0.1)
+                if outcome != ("NotAllowedError" if arm_webauthn else "pending"):
+                    details = await popup.evaluate(
+                        "({outcome:window.webauthn,start:window.webauthnStart,error:window.webauthnError,"
+                        "url:location.href,readyState:document.readyState,focused:document.hasFocus()})"
+                    )
+                    print(f"WebAuthn popup arm={arm_webauthn}: {details!r}")
                 return outcome
             finally:
                 await browser.close()
@@ -1429,8 +1438,10 @@ async def _popup_webauthn_outcome(arm_webauthn: bool) -> str:
 async def test_multiplexer_arms_webauthn_so_unarmed_popups_reject_instead_of_hanging():
     """D4: a page the worker never armed opened Chrome's native passkey chooser,
     which Tilion cannot dismiss. The multiplexer arms every new target first."""
-    assert await _popup_webauthn_outcome(arm_webauthn=False) == "pending", "control: unarmed chooser hangs"
-    assert await _popup_webauthn_outcome(arm_webauthn=True) == "NotAllowedError"
+    unarmed = await _popup_webauthn_outcome(arm_webauthn=False)
+    assert unarmed == "pending", f"control: unarmed chooser hangs; outcome={unarmed!r}"
+    armed = await _popup_webauthn_outcome(arm_webauthn=True)
+    assert armed == "NotAllowedError", f"armed popup outcome={armed!r}"
 
 
 async def test_multiplexer_webauthn_arming_keeps_seeded_passkeys_working():

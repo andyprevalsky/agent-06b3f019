@@ -435,7 +435,9 @@ class StructuralGateRunnerTests(unittest.TestCase):
 
             try:
                 with (
+                    patch.object(module.os, "cpu_count", return_value=14),
                     patch.object(module, "GATES", gates),
+                    patch.object(module, "FAILURE_STATE", root / "failures.json"),
                     patch.object(sys, "argv", [str(RUNNER)]),
                     patch.object(module.subprocess, "Popen", side_effect=launch),
                     patch.object(module.time, "sleep", side_effect=observe_admission),
@@ -453,7 +455,59 @@ class StructuralGateRunnerTests(unittest.TestCase):
                 patch.object(sys, "argv", [str(RUNNER), "--max-workers", "3"]),
             ):
                 self.assertEqual(module.main(), 0)
-                run.assert_called_once_with(module.GATES, max_workers=3)
+                run.assert_called_once_with(
+                    module.GATES,
+                    max_workers=3,
+                    failure_state=module.ROOT / module.FAILURE_STATE,
+                )
+
+    def test_gates_start_under_the_documented_umask_not_the_invokers(self) -> None:
+        """The deploy lane runs the registry inside a transient systemd service
+        (UMask 0022) while interactive devbox shells use 077. A gate must see
+        the same umask from either invoker, or a fixture can pass only where
+        the inherited umask happened to make its files private."""
+        spec = importlib.util.spec_from_file_location("deploy_runner_umask", RUNNER)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        self.assertEqual(module.GATE_UMASK, 0o022)
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-umask-") as temporary:
+            root = Path(temporary)
+            observed = root / "observed.json"
+            gates = (
+                module.Gate(
+                    "umask-probe",
+                    (
+                        sys.executable,
+                        "-c",
+                        (
+                            "import json, os, stat; from pathlib import Path; "
+                            f"probe = Path({str(root / 'probe')!r}); probe.write_text('x'); "
+                            f"Path({str(observed)!r}).write_text(json.dumps(dict("
+                            "umask=os.umask(0), probe_mode=stat.S_IMODE(probe.stat().st_mode))))"
+                        ),
+                    ),
+                ),
+            )
+            for inherited in (0o077, 0o000):
+                observed.unlink(missing_ok=True)
+                (root / "probe").unlink(missing_ok=True)
+                previous = os.umask(inherited)
+                try:
+                    with (
+                        patch.object(module, "GATES", gates),
+                        patch.object(module, "FAILURE_STATE", root / "failures.json"),
+                        patch.object(sys, "argv", [str(RUNNER)]),
+                        contextlib.redirect_stdout(io.StringIO()),
+                        contextlib.redirect_stderr(io.StringIO()),
+                    ):
+                        result = module.main()
+                finally:
+                    os.umask(previous)
+                self.assertEqual(result, 0)
+                seen = json.loads(observed.read_text())
+                self.assertEqual(seen["umask"], module.GATE_UMASK, f"inherited umask {inherited:#o}")
+                self.assertEqual(seen["probe_mode"], 0o666 & ~module.GATE_UMASK)
 
     def test_missing_host_tool_fails_before_any_gate_runs(self) -> None:
         spec = importlib.util.spec_from_file_location("deploy_runner_host_tools", RUNNER)
@@ -1215,6 +1269,200 @@ Path(sys.argv[2]).touch();time.sleep(30)
         finally:
             writer.terminate();writer.wait(timeout=10)
 
+def _load_runner(name: str):
+    spec = importlib.util.spec_from_file_location(name, RUNNER)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class StructuralGateSchedulingTests(unittest.TestCase):
+    """Sharding, longest-first admission, hard timeouts and failed-first retries."""
+
+    def test_shards_partition_the_selection_exactly_once(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts" / "tests"))
+        try:
+            import deploy_gate_shard as shard
+        finally:
+            sys.path.pop(0)
+        items = list(range(1117))
+        for count in (1, 2, 4, 6, 7):
+            union = []
+            for index in range(1, count + 1):
+                with patch.dict(os.environ, {shard.ENV: f"{index}/{count}"}):
+                    kept, dropped = shard.select(items)
+                self.assertTrue(kept)
+                self.assertEqual(sorted(kept + dropped), items)
+                union += kept
+            self.assertEqual(sorted(union), items, f"{count} shards")
+        with patch.dict(os.environ, {shard.ENV: "3/2"}), self.assertRaises(ValueError):
+            shard.select(items)
+        env = dict(os.environ)
+        env.pop(shard.ENV, None)
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(shard.select(items), (items, []))
+
+    def test_registered_shards_expand_with_their_environment(self) -> None:
+        module = _load_runner("deploy_runner_shards")
+        sharded = [gate for gate in module.GATES if gate.shards > 1]
+        self.assertTrue(sharded, "the long suites must stay sharded")
+        jobs = module.expand_jobs(module.GATES)
+        self.assertEqual(
+            len(jobs), sum(max(gate.shards, 1) for gate in module.GATES)
+        )
+        for gate in sharded:
+            specs = sorted(
+                job.environment()[module.SHARD_ENV] for job in jobs if job.gate is gate
+            )
+            self.assertEqual(
+                specs, sorted(f"{i}/{gate.shards}" for i in range(1, gate.shards + 1))
+            )
+        unsharded = next(job for job in jobs if job.gate.shards == 1)
+        with patch.dict(os.environ, {module.SHARD_ENV: "1/9"}):
+            self.assertNotIn(module.SHARD_ENV, unsharded.environment())
+        expected = [job.expected_seconds for job in jobs]
+        self.assertEqual(expected, sorted(expected, reverse=True), "longest first")
+
+    def test_sharded_gate_runs_every_shard_through_the_runner(self) -> None:
+        module = _load_runner("deploy_runner_shard_run")
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-shard-run-") as temporary:
+            seen = Path(temporary) / "seen"
+            gates = (
+                module.Gate(
+                    "split",
+                    ("bash", "-c", f'echo "$DEPLOY_GATE_SHARD" >> {seen}; [ "$DEPLOY_GATE_SHARD" != 2/3 ]'),
+                    expected_seconds=30,
+                    shards=3,
+                ),
+                module.Gate("whole", ("bash", "-c", f'echo "whole:${{DEPLOY_GATE_SHARD:-none}}" >> {seen}')),
+            )
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = module.run_gates(gates, max_workers=2)
+            self.assertEqual(result, 1, "one failing shard fails the gate")
+            self.assertEqual(
+                sorted(seen.read_text().split()), ["1/3", "2/3", "3/3", "whole:none"]
+            )
+            self.assertIn("split[2/3]", stderr.getvalue())
+            self.assertIn("== split[1/3]: exit=0", stdout.getvalue())
+
+    def test_hung_gate_is_killed_with_its_process_group_and_fails_by_name(self) -> None:
+        module = _load_runner("deploy_runner_timeout")
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-timeout-") as temporary:
+            child_pid = Path(temporary) / "child.pid"
+            gates = (
+                module.Gate(
+                    "hangs-forever",
+                    (
+                        "bash",
+                        "-c",
+                        f"trap '' TERM; sleep 300 & echo $! > {child_pid}; wait",
+                    ),
+                ),
+                module.Gate("quick", ("bash", "-c", "exit 0")),
+            )
+            stdout, stderr = io.StringIO(), io.StringIO()
+            started = time.monotonic()
+            with (
+                patch.object(module, "DEFAULT_GATE_TIMEOUT_SECONDS", 2.0),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                result = module.run_gates(gates, max_workers=2)
+            elapsed = time.monotonic() - started
+            self.assertEqual(result, 1)
+            self.assertLess(elapsed, 60, "the hung gate must not hold the runner")
+            self.assertIn("hangs-forever (timed out)", stderr.getvalue())
+            self.assertIn("TIMEOUT: deploy structural gate hangs-forever", stderr.getvalue())
+            self.assertIn("== hangs-forever: exit=124", stdout.getvalue())
+            self.assertIn("== quick: exit=0", stdout.getvalue())
+            pid = int(child_pid.read_text())
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("the hung gate's background child survived the timeout")
+
+    def test_timeout_scales_with_recorded_cost(self) -> None:
+        module = _load_runner("deploy_runner_timeout_scale")
+        quick = module.Job(module.Gate("quick", ("true",)), 0)
+        slow = module.Job(module.Gate("slow", ("true",), expected_seconds=700, shards=2), 1)
+        self.assertEqual(quick.timeout_seconds, module.DEFAULT_GATE_TIMEOUT_SECONDS)
+        self.assertEqual(slow.timeout_seconds, max(module.DEFAULT_GATE_TIMEOUT_SECONDS, 3 * 350))
+
+    def test_retry_runs_previous_failures_first_then_the_full_sweep(self) -> None:
+        module = _load_runner("deploy_runner_failed_first")
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-failed-first-") as temporary:
+            root = Path(temporary)
+            order = root / "order"
+            broken = root / "broken"
+            state = root / "state.json"
+
+            def gate(name: str, seconds: float) -> object:
+                body = f"echo {name} >> {order}; test ! -e {broken}.{name}"
+                return module.Gate(name, ("bash", "-c", body), expected_seconds=seconds)
+
+            gates = (gate("long", 100), gate("middle", 50), gate("short", 1))
+
+            def run() -> tuple[int, list[str], str]:
+                order.write_text("")
+                stderr = io.StringIO()
+                with (
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    result = module.run_gates(gates, max_workers=1, failure_state=state)
+                return result, order.read_text().split(), stderr.getvalue()
+
+            Path(f"{broken}.short").touch()
+            result, ran, _ = run()
+            self.assertEqual((result, ran), (1, ["long", "middle", "short"]))
+            self.assertEqual(json.loads(state.read_text())["failed"], ["short"])
+
+            # Still broken: the retry signals within the first job and stops.
+            result, ran, stderr = run()
+            self.assertEqual((result, ran), (1, ["short"]))
+            self.assertIn("previously failed short failed again", stderr)
+            self.assertEqual(json.loads(state.read_text())["failed"], ["short"])
+
+            # Fixed, but the fix broke another gate: the full sweep catches it.
+            Path(f"{broken}.short").unlink()
+            Path(f"{broken}.long").touch()
+            result, ran, _ = run()
+            self.assertEqual((result, ran), (1, ["short", "long", "middle"]))
+            self.assertEqual(json.loads(state.read_text())["failed"], ["long"])
+
+            # Everything fixed: only a complete sweep passes, and clears state.
+            Path(f"{broken}.long").unlink()
+            result, ran, _ = run()
+            self.assertEqual((result, ran), (0, ["long", "middle", "short"]))
+            self.assertEqual(json.loads(state.read_text())["failed"], [])
+
+            # Without a recorded state the order is plain longest-first.
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                order.write_text("")
+                self.assertEqual(module.run_gates(gates, max_workers=1), 0)
+            self.assertEqual(order.read_text().split(), ["long", "middle", "short"])
+
+    def test_unreadable_failure_state_runs_the_normal_order(self) -> None:
+        module = _load_runner("deploy_runner_failed_first_state")
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-state-") as temporary:
+            state = Path(temporary) / "state.json"
+            self.assertEqual(module.load_previous_failures(state), set())
+            state.write_text("{not json")
+            self.assertEqual(module.load_previous_failures(state), set())
+            state.write_text('{"failed": "short"}')
+            self.assertEqual(module.load_previous_failures(state), set())
+            module.record_failures(state, ["b", "a"])
+            self.assertEqual(module.load_previous_failures(state), {"a", "b"})
 
 if __name__ == "__main__":
     unittest.main()

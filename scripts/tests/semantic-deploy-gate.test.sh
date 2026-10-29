@@ -186,9 +186,19 @@ require_text "$DEPLOY_COMMAND" "-f frontend_url=https://www.roselabs.ai" "/deplo
 require_text "$WORKFLOW" "SEMANTIC_GREP_INVERT: chat full-lifecycle latency" "UI semantic job must exclude the separately gated latency spec"
 require_text "$WORKFLOW" "SEMANTIC_WORKERS: 1" "latency ratchet must avoid renderer contention"
 require_text "$WORKFLOW" "--prod chat-lifecycle-latency" "production gate must run the lifecycle ratchet"
-if grep -Fq "matrix:" "$WORKFLOW"; then
-  fail "production semantic gate must not split paths into separate sessions"
-fi
+# The lifecycle ratchet shards one chat path per runner (one browser, one worker
+# each). The shard list must cover every path the spec defines, exactly once, and
+# each shard must select its path; the UI job stays one four-worker session.
+LIFECYCLE_SPEC_PATHS=$(sed -nE "s/^    id: '([a-z_]+)',$/\1/p" "$LIFECYCLE_SPEC" | sort | tr '\n' ' ')
+WORKFLOW_MATRIX_PATHS=$(sed -nE 's/^        path: \[(.*)\]$/\1/p' "$WORKFLOW" | tr -d ' ' | tr ',' '\n' | sort | tr '\n' ' ')
+[ -n "$LIFECYCLE_SPEC_PATHS" ] || fail "could not read CHAT_PATHS ids from the lifecycle spec"
+[ "$LIFECYCLE_SPEC_PATHS" = "$WORKFLOW_MATRIX_PATHS" ] ||
+  fail "lifecycle shard matrix ($WORKFLOW_MATRIX_PATHS) must equal the spec's chat paths ($LIFECYCLE_SPEC_PATHS)"
+require_count "$WORKFLOW" "matrix:" "1" "only the lifecycle ratchet may shard; the UI semantic job keeps one shared session"
+require_text "$WORKFLOW" 'CHAT_LIFECYCLE_PATH: ${{ matrix.path }}' "each lifecycle shard must run exactly its own chat path"
+require_text "$WORKFLOW" "fail-fast: false" "one failing lifecycle shard must not cancel the evidence of the others"
+require_count "$WORKFLOW" "filter: blob:none" "2" "both semantic jobs must use the blob-filtered checkout"
+require_text "$WORKFLOW" "/agents/benchmarks/tasks.json" "sparse semantic checkout must keep the benchmark task catalog the specs read"
 if grep -Fq 'npm run dev > frontend-logs.log' "$DEPLOY_COMMAND"; then
   fail "/deploy must not start a second frontend; run.sh --benchmark already owns it"
 fi
@@ -225,7 +235,28 @@ require_text "$DEPLOY_COMMAND" 'bash scripts/tests/run-deploy-stage.test.sh' "/d
 require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/deploy-live-probes.test.py' "/deploy must protect concurrent live-probe scheduling"
 require_text "$DEPLOY_COMMAND" 'python3 scripts/run-deploy-structural-gates.py' "/deploy must schedule independent command-structural suites concurrently"
 require_text "$DEPLOY_STRUCTURAL_RUNNER" 'DEFAULT_MAX_WORKERS = 8' "command-structural runner must bound default host admission"
-require_text "$DEPLOY_STRUCTURAL_RUNNER" 'max_workers=DEFAULT_MAX_WORKERS' "command-structural runner must use bounded default admission"
+# Exercise the default CLI branch; source spelling is not admission behavior.
+python3 - "$DEPLOY_STRUCTURAL_RUNNER" <<'PY_ADMISSION'
+import importlib.util
+import sys
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location('structural_admission_contract', sys.argv[1])
+runner = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = runner
+spec.loader.exec_module(runner)
+assert runner.DEFAULT_MAX_WORKERS == 8
+for cpus, expected in ((None, 1), (1, 1), (8, 4), (14, 8), (128, 8)):
+    with patch.object(runner.os, 'cpu_count', return_value=cpus):
+        assert runner.default_max_workers() == expected
+        for status in (0, 1):
+            with patch.object(sys, 'argv', [str(runner.__file__)]), patch.object(runner.shutil, 'which', return_value='/fixture/tool'), patch.object(runner, 'run_gates', return_value=status) as run:
+                assert runner.main() == status
+                run.assert_called_once_with(runner.GATES, max_workers=expected, failure_state=runner.ROOT / runner.FAILURE_STATE)
+with patch.object(sys, 'argv', [str(runner.__file__), '--max-workers', '3']), patch.object(runner.shutil, 'which', return_value='/fixture/tool'), patch.object(runner, 'run_gates', return_value=1) as run:
+    assert runner.main() == 1
+    run.assert_called_once_with(runner.GATES, max_workers=3, failure_state=runner.ROOT / runner.FAILURE_STATE)
+print('PASS: scaled bounded defaults, explicit override, full registry, failure propagation')
+PY_ADMISSION
 require_text "$DEPLOY_STRUCTURAL_RUNNER" '"kill-services"' "command-structural runner must retain the benchmark-controller cleanup regression"
 require_text "$DEPLOY_STRUCTURAL_RUNNER" '"deploy-structural-runner"' "command-structural runner must retain its signal-handling regression"
 require_text "$DEPLOY_STRUCTURAL_RUNNER" '"seed-memory-ratchet"' "command-structural runner must protect the seed-memory deploy wiring"
@@ -233,6 +264,18 @@ require_text "$DEPLOY_COMMAND" 'bash scripts/measure-seed-memory.sh 5 0 0 --enfo
 require_text "$CODERABBIT_CONFIG" 'auto_incremental_review: false' "CodeRabbit must not review every intermediate deploy push"
 require_text "$CODERABBIT_CONFIG" 'auto_pause_after_reviewed_commits: 2' "CodeRabbit must retain a defensive automatic review cap"
 require_text "$DEPLOY_COMMAND" 'scripts/wait-for-code-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD"' "/deploy must wait for CodeRabbit on one exact HEAD"
+require_text "$DEPLOY_COMMAND" 'python3 scripts/deploy_approval_batch.py freeze --head "$FREEZE_SHA"' "/deploy must batch approval-scoped hunks at the source freeze"
+require_text "$DEPLOY_COMMAND" 'python3 scripts/deploy_approval_batch.py check' "/deploy must prove the approval still covers the merged bytes"
+require_text "$DEPLOY_COMMAND" 'npm run test:coverage:sharded' "/deploy backend coverage must run as merged-threshold shards"
+require_text "$DEPLOY_COMMAND" 'BACKEND_COVERAGE_FAILED_FIRST=1' "/deploy backend coverage retries must be failed-first full sweeps"
+require_text "$ROOT_DIR/back-end/package.json" '"test:coverage:sharded": "bash scripts/run-coverage-sharded.sh 2 &&' "backend sharded coverage must keep two shards and the teardown check"
+require_text "$ROOT_DIR/back-end/scripts/run-coverage-sharded.sh" '--check-coverage' "sharded backend coverage must enforce thresholds on the merged report"
+require_text "$DEPLOY_COMMAND" 'bash scripts/run-deploy-stage --wait --since "$GROUP_SINCE"' "/deploy gate waits must wake on stage receipts, not fixed polls"
+require_text "$DEPLOY_COMMAND" 'The applicable Mac release remains a required production gate' "/deploy must retain required applicable Mac release completion"
+require_text "$DEPLOY_COMMAND" 'including the Mac release, remains a hard gate' "parallel production checks must retain the Mac release gate"
+require_text "$DEPLOY_COMMAND" 'never close it `clean` merely because the Claude fallback is disabled' "disabled fallback must not waive substantive CodeRabbit review"
+require_text "$ROOT_DIR/CLAUDE.md" 'Selected subsets are diagnostic-only and cannot satisfy a deploy gate' "affected subsets must not replace full deploy coverage"
+require_text "$DEPLOY_COMMAND" 'Promoting prebuilt worker image' "/deploy must document prebuilt worker-image promotion"
 require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py start --reset --kind initial' "/deploy must initialize a bounded review ledger"
 require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py require-mergeable --head' "/deploy must reject an unreviewed merge HEAD"
 require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py inherit-sync --head' "/deploy must record main-sync-only HEADs through the audited ledger path"

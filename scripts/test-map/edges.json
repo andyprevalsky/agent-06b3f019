@@ -1,0 +1,135 @@
+{
+  "_comment": "Explicit change->test edges for /deploy test selection (scripts/select_affected_tests.py). Static imports, file-path references and the agents coverage map are derived automatically; declare here ONLY dependencies the selector cannot see (HTTP, Temporal names, subprocess by computed path, env). Globs use fnmatch on repo-relative paths. Over-include: when unsure, add the edge or a run_all trigger.",
+  "run_all": [
+    "package.json",
+    "package-lock.json",
+    "back-end/prisma/schema.prisma",
+    ".github/*",
+    "*.env.example",
+    "*/.env.example",
+    "conductor.json",
+    ".conductor/*",
+    "render.yaml",
+    "*/render.yaml",
+    "Dockerfile*",
+    "scripts/run.sh",
+    "scripts/setup-db.sh",
+    "scripts/lib/*",
+    "scripts/select_affected_tests.py",
+    "scripts/test-map/edges.json",
+    "shared/*"
+  ],
+  "run_lanes": [
+    {
+      "_why": "Backend package config, runners, shared test helpers and migrations: every backend lane plus the gates that seed/validate the DB.",
+      "from": [
+        "back-end/package.json", "back-end/package-lock.json", "back-end/tsconfig*.json", "back-end/.c8rc.json",
+        "back-end/eslint.config.*", "back-end/prisma/migrations/*", "back-end/scripts/run-blackbox-tests.sh",
+        "back-end/scripts/run-coverage.sh", "back-end/scripts/run-unit-tests.ts",
+        "back-end/scripts/unit-test-database-isolation.ts", "back-end/src/tests/blackbox/run.ts",
+        "back-end/src/tests/helpers/*", "back-end/Dockerfile*", "back-end/.env.example"
+      ],
+      "lanes": ["backend-blackbox", "backend-unit", "backend-structural", "deploy-structural-gates"]
+    },
+    {
+      "_why": "Front-end package config and test setup; mac-app reuses front-end sources through the '@' alias.",
+      "from": [
+        "front-end/package.json", "front-end/package-lock.json", "front-end/tsconfig*.json", "front-end/vitest.config.*",
+        "front-end/vite.config.*", "front-end/eslint.config.*", "front-end/src/tests/blackbox/setup.ts",
+        "front-end/src/tests/blackbox/msw/*"
+      ],
+      "lanes": ["frontend-vitest", "mac-app-vitest"]
+    },
+    {
+      "_why": "Mac-app package config and test setup.",
+      "from": [
+        "mac-app/package.json", "mac-app/package-lock.json", "mac-app/tsconfig*.json", "mac-app/vitest.config.*",
+        "mac-app/vite.config.*", "mac-app/eslint.config.*", "mac-app/tests/blackbox/setup*"
+      ],
+      "lanes": ["mac-app-vitest"]
+    },
+    {
+      "_why": "Agents dependencies, config, runners and shared test utilities; cloud guests install the same requirements.",
+      "from": [
+        "agents/requirements*.txt", "agents/pyproject.toml", "agents/conftest.py", "agents/config.py", "agents/config/*",
+        "agents/tests/blackbox/_test_utils.py", "agents/tests/env_defaults.py", "agents/scripts/run_blackbox_tests.py",
+        "agents/scripts/run_coverage_blackbox_parallel.py", "agents/scripts/run-coverage.sh", "agents/Dockerfile*",
+        "agents/fly.toml"
+      ],
+      "lanes": ["agents-blackbox", "agents-pytest", "cloudbench-controller", "deploy-structural-gates"]
+    },
+    {
+      "_why": "Structural gate registry and selector tooling are verified by the structural gates.",
+      "from": ["scripts/run-deploy-structural-gates.py", "scripts/test-map/*"],
+      "lanes": ["deploy-structural-gates"]
+    }
+  ],
+  "no_tests": [
+    "*.md",
+    "docs/plans/*",
+    "agents/benchmarks/history/*",
+    "agents/benchmarks/runs/*",
+    "claude-code-src/*",
+    "pitch-deck/*",
+    "research/*",
+    "public/*",
+    "*.png",
+    "*.jpg",
+    "*.svg",
+    "*.gif",
+    "*.mp4"
+  ],
+  "edges": [
+    {
+      "_why": "Backend starts/signals agent workflows by Temporal name and payload; agents tests own the workflow side of that contract.",
+      "from": [
+        "back-end/src/providers/temporal*",
+        "back-end/src/providers/workflow*",
+        "back-end/src/domains/agents/agentLifecycleService.ts",
+        "back-end/src/domains/agents/agentControlService.ts"
+      ],
+      "to_lanes": {
+        "agents-blackbox": ["workflow*", "generation-*", "activity-generation-drain", "agent-control", "background-agents"]
+      }
+    },
+    {
+      "_why": "Agent workflows/activities are started and observed by the backend (Temporal names, generation headers).",
+      "from": ["agents/workflows/*", "agents/worker.py", "agents/activities/*"],
+      "to_lanes": {
+        "backend-blackbox": ["agents*", "agent-*", "*generation*", "*cutover*", "*worker*"]
+      }
+    },
+    {
+      "_why": "Both Rose clients implement one LLM stream contract.",
+      "from": ["back-end/src/providers/rose/*", "agents/providers/rose/*"],
+      "to_lanes": {
+        "agents-blackbox": ["llm-stream-contract", "rose", "rose-browser-use", "llm"]
+      }
+    },
+    {
+      "_why": "Front-end realtime types mirror backend/agents broadcast payloads (no static import across packages).",
+      "from": [
+        "back-end/src/**/realtime*",
+        "back-end/src/**/broadcast*",
+        "agents/**/broadcast*",
+        "agents/**/stream_broadcaster*"
+      ],
+      "to_files": [
+        "front-end/src/lib/realtime-types.ts"
+      ]
+    },
+    {
+      "_why": "Prompts/commands are text read by structural gates and agent prompt-invariant domains.",
+      "from": [
+        ".claude/commands/*",
+        ".claude/shared/*",
+        ".claude/skills/*"
+      ],
+      "to_lanes": {
+        "deploy-structural-gates": [
+          "*"
+        ]
+      }
+    }
+  ]
+}

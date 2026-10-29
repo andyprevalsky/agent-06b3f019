@@ -83,6 +83,7 @@ async def _run_single_iteration(
     poll_inbox_override=None,
     build_messages_override=None,
     get_pending_background_status_override=None,
+    completion_handoff_override=None,
 ):
     from loop.run_agent import run_agent
 
@@ -204,6 +205,7 @@ async def _run_single_iteration(
             post_message=mock_post_message,
             poll_messages=poll_messages_override,
             execute_tool=default_execute_tool,
+            **({"completion_handoff": completion_handoff_override} if "completion_handoff" in inspect.signature(run_agent).parameters else {}),
             build_messages=build_messages_override or (lambda context, prompt: [{"role": "system", "content": prompt}]),
             **({"poll_inbox": poll_inbox_override} if poll_inbox_override is not None else {}),
             **(
@@ -4085,11 +4087,159 @@ async def test_attempt_completion_result_reaches_the_verifier_as_authored_work()
             assert authored == [], seen[-1]
 
 
+async def _exercise_explore_terminal_handoff(kind):
+    import helpers.agent_inbox as inbox_module
+
+    inbox = inbox_module.AgentInbox("owner", "same-task")
+    stored, seen, calls = [], [], []
+    waits = []
+    original_wait = asyncio.wait
+    release_stale = asyncio.Event()
+    fetch_count = 0
+    row = {
+        "id": "marker",
+        "text": "Forwarded marker: HTTP core document",
+        "created_at": "2026-10-29T17:47:49.682Z",
+    }
+
+    async def count_wait(*args, **kwargs):
+        waits.append(kwargs.get("timeout"))
+        return await original_wait(*args, **kwargs)
+
+    async def fetch(*args):
+        nonlocal fetch_count
+        fetch_count += 1
+        snapshot = list(stored)
+        if kind == "stale-read" and fetch_count == 1:
+            await release_stale.wait()
+        if kind == "failed-read":
+            raise RuntimeError("controlled read failure")
+        return snapshot
+
+    async def poll():
+        rows = await inbox.next_step_messages()
+        seen.extend(item["id"] for item in rows)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)  # Let the model turn's nonblocking read finish empty.
+        return [{"role": "USER", "text": item["text"], "metadata": {"agentMessage": True}} for item in rows]
+
+    async def execute(*args):
+        calls.append(args[0])
+        if len(calls) == 1 and kind not in ("no-message", "failed-read", "cancel"):
+            stored.extend([row, row] if kind == "duplicate" else [row])
+        deferred = await inbox.unread_before_finish()
+        release_stale.set()
+        if deferred:
+            return {"error": True, "message": "existing deferred message"}
+        return {"success": True}
+
+    async def handoff():
+        if kind == "cancel":
+            raise asyncio.CancelledError()
+        if await inbox.settle_for_handoff():
+            return "existing deferred message"
+        return None
+
+    kwargs = dict(
+        tool_calls=[{"tool": "attempt_completion", "result": "done"}],
+        detected_tools_ordered=[("attempt_completion", "tc", 1.0)],
+        max_iterations=1 if kind == "last-budget" else 2,
+        execute_tool_override=execute,
+        poll_inbox_override=poll,
+        completion_handoff_override=handoff,
+    )
+    with (
+        patch.object(inbox_module, "fetch_agent_inbox", fetch),
+        patch.object(asyncio, "wait", count_wait),
+        patch("providers.demo_cache.client.resolve_agent_fast_mode", new=AsyncMock(return_value=(False, None, False, None, None, True))),
+        patch("providers.demo_cache.client.ensure_position_context", new=AsyncMock()),
+    ):
+        if kind == "cancel":
+            try:
+                await _run_single_iteration(**kwargs)
+            except asyncio.CancelledError:
+                return
+            raise AssertionError("cancellation swallowed")
+        result, _, _ = await _run_single_iteration(**kwargs)
+        waits_before_finish = len(waits)
+        late = await inbox.finish()
+        assert len(waits) == waits_before_finish, "finish spent the terminal read wait twice"
+        assert not inbox._reads, "finish left an unsettled read"
+        assert not inbox._fetched, "finish left a message without custody"
+
+    if kind in ("no-message", "failed-read"):
+        assert result["status"] == "completed" and len(calls) == 1 and seen == []
+    elif kind == "last-budget":
+        assert result["status"] == "max_iterations" and len(calls) == 1
+        assert [item["id"] for item in late] == ["marker"], "iteration cap must retain parent handoff"
+    else:
+        assert seen == ["marker"], (kind, "same task must consume once", seen, [item["id"] for item in late])
+        assert result["status"] == "completed" and len(calls) == 2
+        assert not late, late
+    assert len(waits) == len(calls), "each completion attempt settles its existing read once"
+
+
+async def test_explore_consumes_final_call_message_before_terminal_handoff():
+    await _exercise_explore_terminal_handoff("final-call")
+
+
+async def test_explore_terminal_handoff_deduplicates_message_id():
+    await _exercise_explore_terminal_handoff("duplicate")
+
+
+async def test_explore_terminal_handoff_no_message_finishes():
+    await _exercise_explore_terminal_handoff("no-message")
+
+
+async def test_explore_terminal_handoff_failed_read_preserves_completion():
+    await _exercise_explore_terminal_handoff("failed-read")
+
+
+async def test_explore_terminal_handoff_does_not_refund_last_iteration():
+    await _exercise_explore_terminal_handoff("last-budget")
+
+
+async def test_explore_terminal_handoff_propagates_cancellation():
+    await _exercise_explore_terminal_handoff("cancel")
+
+
+async def test_explore_terminal_handoff_refreshes_stale_pending_snapshot():
+    await _exercise_explore_terminal_handoff("stale-read")
+
+
 async def run_all_tests():
     from helpers.messages import flush_realtime_broadcasts_for_tests
 
     print("run-agent blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "explore_terminal_handoff_refreshes_stale_pending_snapshot",
+        test_explore_terminal_handoff_refreshes_stale_pending_snapshot,
+    )
+    await r.record_async(
+        "explore_consumes_final_call_message_before_terminal_handoff",
+        test_explore_consumes_final_call_message_before_terminal_handoff,
+    )
+    await r.record_async(
+        "explore_terminal_handoff_deduplicates_message_id",
+        test_explore_terminal_handoff_deduplicates_message_id,
+    )
+    await r.record_async(
+        "explore_terminal_handoff_no_message_finishes",
+        test_explore_terminal_handoff_no_message_finishes,
+    )
+    await r.record_async(
+        "explore_terminal_handoff_failed_read_preserves_completion",
+        test_explore_terminal_handoff_failed_read_preserves_completion,
+    )
+    await r.record_async(
+        "explore_terminal_handoff_does_not_refund_last_iteration",
+        test_explore_terminal_handoff_does_not_refund_last_iteration,
+    )
+    await r.record_async(
+        "explore_terminal_handoff_propagates_cancellation",
+        test_explore_terminal_handoff_propagates_cancellation,
+    )
     await r.record_async("jev_schedules_every_turn", test_jev_schedules_every_turn_without_changing_decisions)
     await r.record_async("workflow_output_retention_activity", test_workflow_output_retention_uses_activity)
     await r.record_async("workflow_marker_verification_activity", test_workflow_marker_verification_uses_activity)

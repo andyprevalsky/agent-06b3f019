@@ -38,6 +38,7 @@ async function main() {
   };
   const bodyMessages = (init?: RequestInit): WireMessage[] =>
     (JSON.parse(String(init?.body)) as { messages: WireMessage[] }).messages;
+
   let failed = 0;
   let total = 0;
   async function test(name: string, run: () => Promise<void>) {
