@@ -254,3 +254,70 @@ The reviewer independently verified the original captured request and same four
 intended baseline failures/candidate passes. Postapplication owning gates passed:
 21 Polar/evidence/identity controls, six check_progress controls and four browser
 privacy/context/cancellation controls. Original outcomes remain unchanged.
+
+
+## R53: original It14 BU060 run2 authoring boundary
+
+The normal sealed packet for r002-j0030/root
+`f9138110-f912-4a30-a4f5-f07877092e49` binds executed source
+`85d37fc8ab8e284459977debdef34348d825ef84`, workspace patch none. Archive SHA256
+`b0126bfe07775ff4a9b90c0d0a02acbf9a65e86f4a488f57733979a0864fadb7`;
+normal manifest SHA256
+`9f73da1f2990e529264c62cba4ac93d7b786a9adaabe53df9744b994f6bfa5cd`.
+All seven normal member lengths and hashes were independently verified. Native
+COMPLETED after290.3seconds is distinct from canonical FAILED/infraFALSE: C1
+and C2 pass, while C3 rejects a contradictory intermediate factual claim.
+
+The task asks for current non-promotional Apple Music and Spotify Student and
+Individual prices, local currencies and official country links for Singapore,
+United Kingdom, Australia, Canada, New Zealand and Ireland. It does not authorize
+fabricated facts. The unchanged C3 rubric explicitly requires no fabricated
+facts contradicting the trajectory evidence; a correct final table does not
+erase an earlier claim under that contract. No rubric reinterpretation follows.
+
+The original author input/output is retained, unlike the older initial BU033
+availability floor. Worker line9945 contains browser_use_step_11 dump60b62109d648
+SHA256`94a4140a99bb85e4ced65fc78ae74953d025a703ff4d1bb80ec794723de3fe10`,
+with request_id1126f19ae88f. Its model-facing messages contain11.98 at positions
+10,11,34,38,40 and no12.98. In particular the preceding Spotify native extraction
+returns its Singapore Individual recurring price as11.98/month after the trial.
+The output's action.thinking and reasoning nevertheless say Spotify Singapore's
+new price12.98 seems to match Apple, while selecting the next country URL. The
+source configuration records gpt-6.1-sol-foundry; this is source attribution, not
+a controlled model-capability diagnosis.
+
+Persisted ASSISTANT index52/outer Polar step53 at03:24:40.364Z contains that same
+claim. It is already wrong before the deterministic browser context summary
+quotes it under Agent Reasoning. Preceding TOOL index51 at03:24:32.081Z has text
+SHA256`1b1fa56e2333e221c8620296325a67cf4f063bfafb5129f9c0f4ea1f010bac6d`;
+claim text SHA256
+`5694c387ef6f7859e8f3ad0d662185631a3fd1f3ee312f24180040e0105d8a97`.
+No evidence-loss or summary-rewrite mechanism is established.
+
+Later internal verifier536b9f245e14 request SHA256
+`f5000cf7642752f06a53e49620ad04903b1109c990ed2368469f9d6b53fd0e2e`
+and response SHA256
+`84a4e9da5b056a530c1e23d4637346d418c552a9c2ec382362c5d3dbb7cc6196`
+produce task_completed=true, score1 and the correct Singapore Individual11.98
+for both services. The completed root output retains the correct table. That
+verifier request does not include the wrong reasoning string; it independently
+checks task data, while the declared C3 judge assesses the full trajectory.
+These different consumers and outcomes must not be collapsed.
+
+A bounded offline call to the unchanged build_polar_trajectory over the supplied
+root messages retains the11.98 native evidence,12.98 claim and correct final
+table. Resulting text SHA256
+`31610d2634ac0fcbac5b29c4e1721bea84ecf0a2492518dcee90434ccafd379f`, with
+zero images. This verifies projection continuity only, not original judge HTTP
+byte parity or a controlled semantic replay. The original declared result
+explicitly cites all three and scores C1=1,C2=1,C3=0. Separate raw judge request
+bytes were not identified in the normal packet.
+
+Searches used `Spotify Singapore 12.98 contradiction` and
+`correct final answer intermediate reasoning factual error`. This is an additional
+observed author-claim occurrence related to the BU033 boundary above, not a
+regression of R9's admitted-verifier-text transport repair. No runtime candidate,
+new test lane, price-specific filter, reasoning deletion, prompt nudge, criterion
+change, model replay or regrade is proposed. The deeper cause remains OPEN; no
+model-intelligence classification is supported. The live source and original
+outcomes remain unchanged. Tokens UNMETERED.

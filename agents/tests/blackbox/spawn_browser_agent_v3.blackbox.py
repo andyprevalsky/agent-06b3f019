@@ -15973,7 +15973,7 @@ async def test_execute_action_switch_tab_found():
 
     dom = MagicMock()
     dom.ensure_browser_overlays_suppressed = AsyncMock()
-    session = _fake_session_with_event_bus()
+    session = _fake_session_with_event_bus(event_result="xxxxxxxx1122")
     session.get_tabs = AsyncMock(
         return_value=[
             SimpleNamespace(target_id="xxxxxxxx1122", title="t", url="u"),
@@ -21639,10 +21639,79 @@ async def test_execute_upload_file_not_file_input():
 # ── _execute_switch_tab / _execute_close_tab ─────────────────────────
 
 
+
+async def test_switch_tab_observes_native_event_result():
+    """A completed EventBus event may still contain the original handler error."""
+    from bubus import EventBus
+    from browser_use.browser.events import SwitchTabEvent
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    for outcome in ("success", "timeout", "missing", "foreign"):
+        bus = EventBus(name=f"switch_result_{outcome}")
+        original = TimeoutError("Target.activateTarget did not respond")
+        async def handle(event):
+            if outcome == "timeout":
+                raise original
+            if outcome == "cancelled":
+                raise asyncio.CancelledError()
+            if outcome == "missing":
+                return None
+            return "foreign-target" if outcome == "foreign" else event.target_id
+        bus.on(SwitchTabEvent, handle)
+        session = SimpleNamespace(event_bus=bus, get_tabs=AsyncMock(return_value=[SimpleNamespace(target_id="owned1234", title="Owned tab", url="https://example.test")]))
+        history = SimpleNamespace(record_action=AsyncMock())
+        try:
+            try:
+                result = await service_actions._execute_switch_tab(
+                    session=session, dom_service=SimpleNamespace(), action_history=history,
+                    params={"tab_id": "1234"}, thinking=None,
+                )
+            except BaseException as exc:
+                assert outcome != "success", repr(exc)
+                if outcome == "timeout":
+                    assert isinstance(exc, TimeoutError)
+                if outcome == "cancelled":
+                    assert isinstance(exc, asyncio.CancelledError)
+                history.record_action.assert_not_awaited()
+            else:
+                assert outcome == "success", f"Handler {outcome} was recorded as a successful switch"
+                assert result["success"] is True
+                history.record_action.assert_awaited_once()
+        finally:
+            await bus.stop(timeout=2, clear=True)
+
+
+async def test_switch_tab_cancellation_propagates_without_success():
+    from bubus import EventBus
+    from browser_use.browser.events import SwitchTabEvent
+    from domains.spawn_browser_agent_v3 import service_actions
+    bus = EventBus(name="switch_cancel")
+    entered = asyncio.Event()
+    async def handler(event):
+        entered.set()
+        await asyncio.Event().wait()
+    bus.on(SwitchTabEvent, handler)
+    history = SimpleNamespace(record_action=AsyncMock())
+    session = SimpleNamespace(event_bus=bus, get_tabs=AsyncMock(return_value=[SimpleNamespace(target_id="owned1234",title="tab",url="https://example.test")]))
+    task = asyncio.create_task(service_actions._execute_switch_tab(session=session,dom_service=SimpleNamespace(),action_history=history,params={"tab_id":"1234"},thinking=None))
+    try:
+        await asyncio.wait_for(entered.wait(),timeout=2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("Switch caller cancellation was swallowed")
+        history.record_action.assert_not_awaited()
+    finally:
+        await bus.stop(timeout=0.01,clear=True)
+
+
 async def test_execute_switch_tab_success():
     from domains.spawn_browser_agent_v3 import service_actions
 
-    session = _fake_session_with_event_bus()
+    session = _fake_session_with_event_bus(event_result="aaaaaaaa1234")
     session.get_tabs = AsyncMock(return_value=[SimpleNamespace(target_id="aaaaaaaa1234", title="t", url="u")])
     dom = MagicMock()
     ah = MagicMock()
@@ -36381,6 +36450,8 @@ async def run_all_tests():
     await r.record_async("execute_upload_file_not_file_input", test_execute_upload_file_not_file_input)
 
     await r.record_async("execute_switch_tab_success", test_execute_switch_tab_success)
+    await r.record_async("switch_tab_observes_native_event_result", test_switch_tab_observes_native_event_result)
+    await r.record_async("switch_tab_cancellation_propagates_without_success", test_switch_tab_cancellation_propagates_without_success)
     await r.record_async("execute_switch_tab_no_id", test_execute_switch_tab_missing_id)
     await r.record_async("execute_close_tab_explicit_id", test_execute_close_tab_with_explicit_id)
 

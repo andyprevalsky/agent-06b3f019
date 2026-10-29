@@ -4318,6 +4318,9 @@ async def _execute_switch_tab(
 
     event = session.event_bus.dispatch(SwitchTabEvent(target_id=target.target_id))
     await event
+    switched_target = await event.event_result(raise_if_any=True, raise_if_none=True)
+    if switched_target != target.target_id:
+        raise RuntimeError("Tab switch did not acknowledge the requested target")
 
     await action_history.record_action(
         dom_service=dom_service,
