@@ -8501,7 +8501,7 @@ async def _spawn_browser_agent_activity_v3_real(
         *,
         require_complete_passkeys: bool = False,
     ) -> None:
-        nonlocal cleanup_failure
+        nonlocal cleanup_failure, dom_service
         try:
             if pause and exact_session_id == session_id and dom_service is not None:
                 captured = await _capture_browser_passkey_usage(
@@ -8515,19 +8515,28 @@ async def _spawn_browser_agent_activity_v3_real(
                         task_id=task_id,
                         session_id=exact_session_id,
                     )
-            await _stop_kernel_replay_before_session_close(browser_recorder)
-            if pause and dom_service is not None and getattr(dom_service, "single_cdp_client", False):
-                # Preserve the recording before relinquishing the one CDP slot
-                # that the backend needs to capture the logical checkpoint.
-                if browser_recorder is not None:
-                    await browser_recorder.close(include_steel_media=False, archive_artifacts=False)
-                if not await _await_bounded_browser_cleanup(
-                    dom_service.cdp_multiplexer.disconnect_confirmed(dom_service.disconnect),
-                    timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
-                    timeout_message="Checkpoint CDP release timed out",
-                    failure_message="Checkpoint CDP release failed",
-                ):
+            replay_stopped = False
+            if pause and exact_session_id == session_id and dom_service is not None:
+                if getattr(dom_service, "single_cdp_client", False):
+                    # Capture the recording before releasing Tilion's one CDP slot.
+                    await _stop_kernel_replay_before_session_close(browser_recorder)
+                    replay_stopped = True
+                    if browser_recorder is not None:
+                        await browser_recorder.close(include_steel_media=False, archive_artifacts=False)
+                    if not await _await_bounded_browser_cleanup(
+                        dom_service.cdp_multiplexer.disconnect_confirmed(dom_service.disconnect),
+                        timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+                        timeout_message="Checkpoint CDP release timed out",
+                        failure_message="Checkpoint CDP release failed",
+                    ):
+                        raise BrowserSessionCloseError(exact_session_id, pause)
+                elif not await _disconnect_browser(dom_service):
                     raise BrowserSessionCloseError(exact_session_id, pause)
+                # Bank the departed native once, before clearing the live reference.
+                _tilion_leave_session()
+                dom_service = None
+            if not replay_stopped:
+                await _stop_kernel_replay_before_session_close(browser_recorder)
             options: Dict[str, Any] = {"pause": pause}
             if current_url:
                 options["current_url"] = current_url

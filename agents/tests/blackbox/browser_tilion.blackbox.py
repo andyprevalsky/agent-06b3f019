@@ -3378,7 +3378,7 @@ async def test_tilion_pause_releases_socket_before_backend_checkpoint():
     names = {"_await_bounded_browser_cleanup", "_capture_browser_passkey_usage", "_disconnect_browser"}
     definitions = [node for node in source.body if isinstance(node, ast.AsyncFunctionDef) and node.name in names]
     helper = next(node for node in ast.walk(source) if isinstance(node, ast.AsyncFunctionDef) and node.name == "_close_browser_with_cleanup_receipt")
-    factory = ast.parse("def factory():\n    cleanup_failure = None\n").body[0]
+    factory = ast.parse("def factory():\n    cleanup_failure = None\n    dom_service = initial_dom_service\n").body[0]
     factory.body.append(helper)
     factory.body.extend(ast.parse('async def pause():\n    await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url, require_complete_passkeys=True)\n    if cleanup_failure is not None:\n        raise BrowserSessionCloseError(session_id, True, cleanup_failure.get("http_status"))\nreturn pause').body)
 
@@ -3469,7 +3469,8 @@ async def test_tilion_pause_releases_socket_before_backend_checkpoint():
                             "browser_recorder":recorder,"config":SimpleNamespace(backend=SimpleNamespace(api_url=f"http://127.0.0.1:{port}",api_key="")),
                             "session_id":TILION_SESSION,"current_url":"https://fixture.test/","credential_signin_realms":set(),"task_id":"pause-fixture",
                             "world_state_receipt_summary":lambda _receipt:[],"logger":SimpleNamespace(info=lambda *a,**k:None,warning=lambda *a,**k:None),
-                            "record_passkey_usage_once":passkeys,"dom_service":service,
+                            "record_passkey_usage_once":passkeys,"initial_dom_service":service,
+                            "_tilion_leave_session":lambda: events.append("usage_banked"),
                             "BROWSER_DISCONNECT_TIMEOUT_SECONDS":BROWSER_DISCONNECT_TIMEOUT_SECONDS,
                             "_EXPIRED_OPTIONAL_CDP_TASK_NAME":"fixture-cdp-cleanup","_background_browser_cleanup_tasks":set(),
                             "extract_error_message":str,
@@ -3480,6 +3481,8 @@ async def test_tilion_pause_releases_socket_before_backend_checkpoint():
                             await pause()
                             assert events.index("passkeys_captured") < events.index("recording_captured") < events.index("socket_released") < events.index("backend_checkpoint")
                             assert events[-1] == "backend_checkpoint_complete"
+                            assert events.count("usage_banked") == 1
+                            assert events.index("socket_released") < events.index("usage_banked") < events.index("backend_checkpoint")
                             assert requests == [{"session_id":TILION_SESSION,"pause":True,"current_url":"https://fixture.test/"}]
                         else:
                             try:
@@ -3489,6 +3492,7 @@ async def test_tilion_pause_releases_socket_before_backend_checkpoint():
                             else:
                                 raise AssertionError("failed local capture/release must reject the pause")
                             assert not requests, "unconfirmed local release issued backend pause"
+                            assert "usage_banked" not in events, "unconfirmed release must retain unbanked live custody"
                         assert "passkeys_captured" in events
                         if failure in ("disconnect_error","disconnect_hung"):
                             assert "recording_captured" in events
