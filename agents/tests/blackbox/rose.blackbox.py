@@ -9128,6 +9128,105 @@ async def _run_subscription_order(first, limited: set[str], fetch_fresh_leases: 
     return calls, fetches, metadata, text
 
 
+async def test_flash_root_explore_terra_compute_only_and_speed():
+    from providers.rose.speed import bind_agent_speed, current_agent_speed
+    from providers.rose.errors import RoseServerError
+
+    calls = []
+    failing = False
+
+    async def gpt(**kwargs):
+        calls.append(("gpt", kwargs["pool_spec"].gpt_auth_model, kwargs.get("effort"), kwargs.get("speed")))
+        if failing:
+            raise RoseServerError("fixture unavailable", status=503)
+        yield StreamChunk(kind="metadata", data={"actual_model": kwargs["pool_spec"].gpt_auth_model})
+        yield StreamChunk(kind="content", data={"text": "ok"})
+        yield StreamChunk(kind="done", data={})
+
+    async def cerebras(**kwargs):
+        calls.append(("cerebras", kwargs["pool_spec"].cerebras_model))
+        yield StreamChunk(kind="content", data={"text": "fallback"})
+        yield StreamChunk(kind="done", data={})
+
+    with (
+        patch("providers.rose.client.gpt_auth_complete", gpt),
+        patch("providers.rose.client.claude_auth_complete", side_effect=AssertionError("Claude must not lead")),
+        patch("providers.rose.client.cerebras_complete", cerebras),
+        patch("providers.rose.client._cerebras_api_key", return_value="fixture"),
+        patch("providers.rose.client._openai_api_key", side_effect=AssertionError("no paid Terra")),
+    ):
+        for site in ("plan_loop", "execute_loop", "explore_agent"):
+            for speed in ("standard", "fast", "ultrafast"):
+                previous_speed = current_agent_speed()
+                bind_agent_speed(speed)
+                try:
+                    calls.clear()
+                    await _drain(RoseClient().complete(pool="rose-1-flash", call_site=site,
+                        messages=[{"role": "user", "content": "hi"}],
+                        gpt_auth=_pool_lease("gpt", "fixture")))
+                    assert calls == [("gpt", "gpt-6.1-terra", "medium", speed)], calls
+                finally:
+                    bind_agent_speed(previous_speed)
+            failing = True
+            calls.clear()
+            await _drain(RoseClient().complete(pool="rose-1-flash", call_site=site,
+                messages=[{"role": "user", "content": "hi"}],
+                gpt_auth=_pool_lease("gpt", "fixture")))
+            assert [call[0] for call in calls] == ["gpt", "cerebras"], calls
+            failing = False
+            calls.clear()
+            await _drain(RoseClient().complete(pool="rose-1-flash", call_site=site,
+                messages=[{"role": "user", "content": "hi"}],
+                claude_auth=_pool_lease("claude", "fixture")))
+            assert [call[0] for call in calls] == ["cerebras"], calls
+        for pool, site in (("rose-1-flash", "chat"), ("rose-1-flash", "browser_use"),
+                           ("rose-1-browser-use", "browser_use")):
+            calls.clear()
+            await _drain(RoseClient().complete(pool=pool, call_site=site,
+                messages=[{"role": "user", "content": "hi"}],
+                gpt_auth=_pool_lease("gpt", "fixture")))
+            assert calls[0][1] == "gpt-5.6-luna", calls
+
+
+async def test_flash_terra_actual_codex_request_preserves_speed():
+    import providers.rose.gpt_auth as transport
+
+    requests = []
+
+    async def capture(**kwargs):
+        requests.append(kwargs["body"])
+        yield StreamChunk(kind="metadata", data={"actual_model": kwargs["actual_model"]})
+        yield StreamChunk(kind="content", data={"text": "ok"})
+        yield StreamChunk(kind="done", data={})
+
+    with patch.object(transport, "_attempt_with_token", capture):
+        for speed in ("standard", "fast", "ultrafast"):
+            await _drain(RoseClient().complete(pool="rose-1-flash", call_site="execute_loop",
+                messages=[{"role": "user", "content": "hello"}],
+                gpt_auth=_pool_lease("gpt", "fixture"), speed=speed))
+    assert [body["model"] for body in requests] == ["gpt-6.1-terra"] * 3
+    assert [body["reasoning"]["effort"] for body in requests] == ["medium"] * 3
+    assert [body.get("service_tier") for body in requests] == [None, "priority", "priority"]
+
+
+async def test_flash_root_gpt_acquisition_and_rotation_are_pinned():
+    from helpers.llm import _flash_agent_gpt_context
+    fetch = AsyncMock(return_value={"type": "gpt", "accessToken": "fixture", "source": "pool",
+                                   "poolTokenId": "fixture-id", "lineageKey": "fixture-lineage"})
+    with patch("helpers.llm.fetch_compute_token_activity", fetch):
+        auth = await _flash_agent_gpt_context(None, user_id="fixture-user", lineage_key="fixture-lineage",
+            agent_id="fixture-agent", demo_cache_affinity_key=None)
+        assert isinstance(auth, GptAuthContext)
+        assert fetch.call_args.kwargs["token_type"] == "gpt"
+        assert fetch.call_args.kwargs["lineage_key"] == "fixture-lineage"
+        rotated = await auth.fetch_fresh("fixture-user")
+        assert isinstance(rotated, GptAuthContext)
+        assert fetch.call_count == 2
+        assert fetch.call_args.kwargs["token_type"] == "gpt"
+        fetch.return_value = None
+        assert await auth.fetch_fresh("fixture-user") is None
+
+
 async def test_flash_and_browser_subscriptions_before_cerebras():
     async def _ok_stream(model, pool_name, text):
         yield StreamChunk(kind="metadata", data={"actual_model": model, "pool_name": pool_name})
@@ -12174,6 +12273,9 @@ async def run_all_tests():
         "client_compute_rotates_across_providers",
         test_client_rotates_compute_token_across_providers_before_waterfall,
     )
+    await r.record_async("flash_root_explore_terra_compute_only_speed", test_flash_root_explore_terra_compute_only_and_speed)
+    await r.record_async("flash_root_gpt_acquisition_rotation_pinned", test_flash_root_gpt_acquisition_and_rotation_are_pinned)
+    await r.record_async("flash_terra_actual_codex_request_speed", test_flash_terra_actual_codex_request_preserves_speed)
     await r.record_async("flash_and_browser_subscriptions_first", test_flash_and_browser_subscriptions_before_cerebras)
     await r.record_async(
         "client_rotates_every_subscription_before_funded_key",

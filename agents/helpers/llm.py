@@ -75,6 +75,7 @@ from providers.planner_memory.inject import (
 )
 from providers.planner_memory.retrieval import DEFAULT_CONFIG as PLANNER_MEMORY_CONFIG
 from providers.planner_memory.retrieval import MemoryRetrieval
+from providers.rose.flash_agent import is_flash_agent_call
 from providers.rose import (
     ClaudeAuthContext,
     ComputeAuthContext,
@@ -724,6 +725,44 @@ def _build_compute_auth_context(
         demo_cache_affinity_key=demo_cache_affinity_key or result.get("fastCacheAffinityKey"),
         max_rotations=max_rotations,
     )
+
+
+async def _flash_agent_gpt_context(
+    current: Optional[GptAuthContext],
+    *,
+    user_id: Optional[str],
+    lineage_key: Optional[str],
+    agent_id: Optional[str],
+    demo_cache_affinity_key: Optional[str],
+) -> Optional[GptAuthContext]:
+    """Acquire and rotate only GPT leases for the Flash Terra lead."""
+    async def fetch_gpt(fetch_user_id: str) -> Optional[ComputeAuthContext]:
+        result = await fetch_compute_token_activity(
+            fetch_user_id,
+            lineage_key=lineage_key,
+            agent_id=agent_id,
+            root_agent_id=agent_id,
+            demo_cache_affinity_key=demo_cache_affinity_key,
+            token_type="gpt",
+        )
+        if not result or result.get("type") != "gpt":
+            return None
+        context = _build_compute_auth_context(
+            result, fetch_user_id, agent_id=agent_id, root_agent_id=agent_id,
+            demo_cache_affinity_key=demo_cache_affinity_key,
+        )
+        if isinstance(context, GptAuthContext):
+            context.fetch_fresh = fetch_gpt
+            return context
+        return None
+
+    if current is not None:
+        current.fetch_fresh = fetch_gpt if current.user_id else None
+        return current
+    if not user_id:
+        return None
+    context = await fetch_gpt(user_id)
+    return context if isinstance(context, GptAuthContext) else None
 
 
 def _build_compute_auth_context_from_payload(
@@ -2992,6 +3031,16 @@ async def call_llm_structured_streaming(
             demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
         )
 
+        if is_flash_agent_call(pool, call_site):
+            claude_auth_context = None
+            gpt_auth_context = await _flash_agent_gpt_context(
+                gpt_auth_context,
+                user_id=gpt_token_user_id or claude_token_user_id,
+                lineage_key=compute_token_lineage_key,
+                agent_id=agent_id,
+                demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
+            )
+
         def _native_visible_text() -> str:
             reasoning = accumulated_reasoning.strip()
             if reasoning and text_buffer:
@@ -4270,6 +4319,15 @@ async def call_llm(
                 root_agent_id=agent_id,
                 demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
             )
+            if is_flash_agent_call(pool, call_site):
+                claude_auth_context = None
+                gpt_auth_context = await _flash_agent_gpt_context(
+                    gpt_auth_context,
+                    user_id=gpt_token_user_id or claude_token_user_id,
+                    lineage_key=compute_token_lineage_key,
+                    agent_id=agent_id,
+                    demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
+                )
             try:
                 rose_response = await rose_client.collect(
                     pool=pool,

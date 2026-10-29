@@ -68,6 +68,7 @@ from providers.rose.inter_agent_context import settle_trailing_inter_agent_messa
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
 from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import PoolName, foundry_model, get_pool
+from providers.rose.flash_agent import is_flash_agent_call, pool_for_call
 from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
     build_anthropic_tools_from_response_model,
@@ -1007,7 +1008,14 @@ class RoseClient:
         # cannot consume Anthropic credit. This complements the existing
         # call-scoped flag and covers nested browser/evaluator calls as well.
         _exclude_anthropic_family = anthropic_family_excluded(_exclude_anthropic_family)
-        pool_spec = get_pool(pool)
+        pool_spec = pool_for_call(pool, call_site)
+        if is_flash_agent_call(pool, call_site):
+            # Terra is a compute-token-only lead; chat/browser retain their own policy.
+            claude_auth = None
+            _exclude_anthropic_family = True
+            prefer_azure = False
+            if effort is None:
+                effort = "medium"
         rid = request_id or uuid.uuid4().hex[:12]
         auth_identity = claude_auth or gpt_auth
         foundry_route_key = agent_id or (auth_identity.user_id if auth_identity else rid)
