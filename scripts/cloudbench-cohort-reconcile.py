@@ -38,7 +38,7 @@ def main():
     a=p.parse_args()
     source=Path(__file__).with_name('cloudbench-cleanup-tickets.py')
     raw=source.read_bytes()
-    if hashlib.sha256(raw).hexdigest()!='29c2f6e4c71bf45a182f2beb59298e63f7a82e1e0bddd3956ac7d603a823c81b':raise ValueError('cleanup reconciliation dependency source changed')
+    if hashlib.sha256(raw).hexdigest()!='78afbdbb0fd70ebd13e0b2edf498f225848fd0602cd0b07a8b7d2079f4a65b0d':raise ValueError('cleanup reconciliation dependency source changed')
     T=types.ModuleType('cleanup_tickets');T.__file__=str(source);exec(compile(raw,str(source),'exec'),T.__dict__)
     cohort=Path(a.cohort).resolve(strict=True);base=T.base_for(cohort)
     lock_path=cohort/'stale-reconcile.lock'
