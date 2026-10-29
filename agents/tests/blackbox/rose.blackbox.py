@@ -314,7 +314,7 @@ def test_pool_registry_lookup():
     assert flash.waterfall_reasoning_effort == "medium"
     assert flash.foundry_model == "gpt-6-luna"
     assert flash.direct_auth_enabled is False
-    assert flash.subscription_auth_enabled is True
+    assert flash.subscription_auth_enabled is False
     assert flash.cerebras_model == "qwen-3.8-27b"
     assert flash.cerebras_reasoning_effort == "high"
     assert flash.cerebras_reasoning_effort in {"none", "low", "medium", "high"}
@@ -333,7 +333,7 @@ def test_pool_registry_lookup():
     assert browser_use.waterfall == ("qwen/qwen3.8-27b", "google/gemini-3.8-flash")
     assert browser_use.waterfall_reasoning_effort == "low"
     assert browser_use.direct_auth_enabled is False
-    assert browser_use.subscription_auth_enabled is True
+    assert browser_use.subscription_auth_enabled is False
     assert browser_use.cerebras_model == "qwen-3.8-27b"
     assert browser_use.cerebras_reasoning_effort == "high"
     assert ultra.waterfall_reasoning_effort is None
@@ -9198,7 +9198,7 @@ async def test_flash_root_explore_compute_only_and_speed():
             await _drain(RoseClient().complete(pool=pool, call_site=site,
                 messages=[{"role": "user", "content": "hi"}],
                 gpt_auth=_pool_lease("gpt", "fixture")))
-            assert calls[0][1] == "gpt-5.6-luna", calls
+            assert calls[0][0] == "cerebras", calls
 
 
 async def test_flash_terra_actual_codex_request_preserves_speed():
@@ -9314,7 +9314,7 @@ async def test_flash_compute_failures_reach_cerebras():
     assert calls == ["gpt", "claude", "cerebras"], calls
 
 
-async def test_flash_and_browser_subscriptions_before_cerebras():
+async def test_flash_chat_and_browser_keep_cerebras_first():
     async def _ok_stream(model, pool_name, text):
         yield StreamChunk(kind="metadata", data={"actual_model": model, "pool_name": pool_name})
         yield StreamChunk(kind="content", data={"text": text})
@@ -9344,7 +9344,7 @@ async def test_flash_and_browser_subscriptions_before_cerebras():
                     pool=pool, messages=[{"role": "user", "content": "hi"}],
                     gpt_auth=_pool_lease("gpt", "flash-token") if available else None,
                 ))
-            assert calls == (["subscription"] if available else ["cerebras"]), (pool, calls)
+            assert calls == ["cerebras"], (pool, calls)
             assert chunks
 
 
@@ -12365,7 +12365,7 @@ async def run_all_tests():
     await r.record_async("flash_terra_actual_codex_request_speed", test_flash_terra_actual_codex_request_preserves_speed)
     await r.record_async("flash_opus_actual_request_low_effort_speed", test_flash_opus_actual_request_low_effort_and_speed)
     await r.record_async("flash_compute_failures_reach_cerebras", test_flash_compute_failures_reach_cerebras)
-    await r.record_async("flash_and_browser_subscriptions_first", test_flash_and_browser_subscriptions_before_cerebras)
+    await r.record_async("flash_chat_and_browser_cerebras_first", test_flash_chat_and_browser_keep_cerebras_first)
     await r.record_async(
         "client_rotates_every_subscription_before_funded_key",
         test_client_rotates_through_every_subscription_before_funded_key,

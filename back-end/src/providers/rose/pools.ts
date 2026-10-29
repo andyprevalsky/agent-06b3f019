@@ -84,7 +84,7 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     // Azure and OpenRouter Qwen/Gemini fallbacks all run at medium.
     waterfallReasoningEffort: 'medium',
     directAuthEnabled: false,
-    subscriptionAuthEnabled: true,
+    subscriptionAuthEnabled: false,
     cerebrasModel: 'qwen-3.8-27b',
     cerebrasReasoningEffort: 'high',
     foundryEnabled: true,
@@ -109,7 +109,7 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     waterfall: ['qwen/qwen3.8-27b', 'google/gemini-3.8-flash'],
     waterfallReasoningEffort: 'low',
     directAuthEnabled: false,
-    subscriptionAuthEnabled: true,
+    subscriptionAuthEnabled: false,
     cerebrasModel: 'qwen-3.8-27b',
     cerebrasReasoningEffort: 'high',
     foundryEnabled: true,

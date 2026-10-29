@@ -379,7 +379,7 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(getPool('rose-1-mini').waterfallReasoningEffort, 'low', 'mini waterfall effort');
   assertEqual(ultra.waterfallReasoningEffort, undefined, 'ultra waterfall keeps caller effort');
   assertEqual(lite.directAuthEnabled, false, 'flash skips funded API keys');
-  assertEqual(lite.subscriptionAuthEnabled, true, 'flash permits compute tokens');
+  assertEqual(lite.subscriptionAuthEnabled, false, 'flash chat retains Cerebras first');
   assertEqual(lite.cerebrasModel, 'qwen-3.8-27b', 'flash Cerebras primary');
   assertEqual(lite.cerebrasReasoningEffort, 'high', 'flash Cerebras effort');
   assertEqual(
@@ -401,7 +401,7 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(browserUse.claudeAuthModel, 'claude-sonnet-5', 'browserUse.claudeAuthModel');
   assertEqual(browserUse.gptAuthModel, 'gpt-5.6-luna', 'browserUse.gptAuthModel');
   assertEqual(browserUse.directAuthEnabled, false, 'browser skips funded API keys');
-  assertEqual(browserUse.subscriptionAuthEnabled, true, 'browser permits compute tokens');
+  assertEqual(browserUse.subscriptionAuthEnabled, false, 'browser retains Cerebras first');
   assertEqual(browserUse.cerebrasModel, 'qwen-3.8-27b', 'browser Cerebras primary');
   assertEqual(
     browserUse.waterfall.join(','),
@@ -4585,7 +4585,7 @@ async function testSubscriptionFirst_tokenlessCallerLeasesOnceAndAbortStopsRotat
   });
 }
 
-async function testFlashSubscriptionsBeforeCerebras() {
+async function testFlashChatAndBrowserKeepCerebrasFirst() {
   await withFundedCredentials(async () => {
     process.env.CEREBRAS_API_KEY = 'test-cerebras';
     try {
@@ -4613,12 +4613,8 @@ async function testFlashSubscriptionsBeforeCerebras() {
               subscription_leases: leases.source,
             })
           );
-          assertEqual(
-            JSON.stringify(calls),
-            available ? '["subscription"]' : '["cerebras"]',
-            model
-          );
-          assertEqual(leases.requests.length, 1, 'one availability lookup');
+          assertEqual(JSON.stringify(calls), '["cerebras"]', model);
+          assertEqual(leases.requests.length, 0, 'chat/browser do not acquire subscriptions');
           assert(chunks.length > 0, 'selected route returns content');
         }
       }
@@ -5070,7 +5066,7 @@ async function main(): Promise<void> {
     },
     {
       name: 'subscription-first / Flash and browser try compute tokens before Cerebras',
-      fn: testFlashSubscriptionsBeforeCerebras,
+      fn: testFlashChatAndBrowserKeepCerebrasFirst,
     },
     {
       name: 'subscription-first / pool without subscription legs never leases',

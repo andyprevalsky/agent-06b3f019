@@ -17,9 +17,9 @@ Intelligence Index v4.3.2. Speed numbers are our OpenRouter medians
                                 is downgraded like Fable until a credited call
                                 proves Opus accepts forced tool_choice.
 
-rose-1-flash / rose-1-browser-use try Claude/GPT subscriptions, then Cerebras;
-funded OpenAI/Anthropic API keys remain disabled.
-First paid provider is Cerebras ``qwen-3.8-27b`` (direct, not OpenRouter). OpenRouter
+Flash chat and browser-use keep their Cerebras-first policy. Root/explore
+overrides in flash_agent.py enable compute subscriptions only for those roles.
+Funded OpenAI/Anthropic API keys remain disabled. Primary is Cerebras ``qwen-3.8-27b`` (direct, not OpenRouter). OpenRouter
 fallback is qwen/qwen3.8-27b then google/gemini-3.8-flash. Planner stays
 on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
 
@@ -31,7 +31,7 @@ on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
         waterfall effort = low
 
     rose-1-flash:  (renamed from rose-1-lite; rose-fast)
-        subscription_auth_enabled = True
+        subscription_auth_enabled = False
         direct_auth_enabled = False
         cerebras   = qwen-3.8-27b (high; Cerebras max, xhigh 400s)
         foundry    = gpt-6-luna only (medium; any region whose
@@ -48,7 +48,7 @@ on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
     rose-1-browser-use:  (same rose-fast hop as flash; browser agents normally
                           run on their spawning agent's pool, this one serves
                           non-Rose agent models)
-        subscription_auth_enabled = True
+        subscription_auth_enabled = False
         direct_auth_enabled = False
         cerebras   = qwen-3.8-27b (high; Cerebras max, xhigh 400s)
         foundry    = gpt-5.6-luna (when configured; after Cerebras)
@@ -188,7 +188,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         # Azure and OpenRouter Qwen/Gemini fallbacks all run at medium.
         waterfall_reasoning_effort="medium",
         direct_auth_enabled=False,
-        subscription_auth_enabled=True,
+        subscription_auth_enabled=False,
         cerebras_model="qwen-3.8-27b",
         cerebras_reasoning_effort="high",
         foundry_enabled=True,
@@ -227,7 +227,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         ),
         waterfall_reasoning_effort="low",
         direct_auth_enabled=False,
-        subscription_auth_enabled=True,
+        subscription_auth_enabled=False,
         cerebras_model="qwen-3.8-27b",
         cerebras_reasoning_effort="high",
         foundry_enabled=True,

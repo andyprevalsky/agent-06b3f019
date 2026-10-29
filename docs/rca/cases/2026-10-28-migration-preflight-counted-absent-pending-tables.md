@@ -10,23 +10,30 @@ first_bad_boundary: Foreign-key validation bypassed pending-table state before q
 symptoms:
   - Three orphan-count queries failed with PostgreSQL 42P01
   - Pending ProjectCliLogin and ProjectMaintenanceRun migrations failed preflight
+tags:
+  - migrations
+  - preflight
+  - pending-tables
 sources:
-  - PR 1634
+  - PR #1634
 repro: back-end/src/tests/blackbox/migration-preflight.blackbox.ts
 status: fixed
 ---
 
-## Problem and diagnosis
+## Problem
 
 The read-only production preflight knew that pending migrations create two new
 empty tables, but its foreign-key checks queried those absent relations anyway.
+
+## Diagnosis
+
 The unchanged pending migration files reproduced all three 42P01 errors against
 an isolated local database. Existing unique checks handled pending tables
 separately and could also incorrectly assume emptiness after pending writes.
 Archive searches for orphan counts and pending tables led to the earlier
 production-data preflight case; this was a distinct defect in the checker.
 
-## Fix
+## Solution
 
 Classify pending tables at a shared constraint boundary. A table is safely empty
 only when it is newly created, absent on the target, and has no pending population.
@@ -48,6 +55,10 @@ backfill and scan controls. Logs: `/var/tmp/preflight-rca-before.log` and
 The normal production read-only preflight then passed all three pending
 migrations. Existing lock-timeout warnings remain visible. Receipt:
 `/var/tmp/rose-final-migration-preflight-fixed.log`. This check applies no DDL.
+
+## Human feedback
+
+The user requested that all fixes be included in PR1634 and deployment be completed. No case-specific waiver of migration validation was given.
 
 ## Reusable lesson
 
