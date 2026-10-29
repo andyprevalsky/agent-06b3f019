@@ -1474,8 +1474,10 @@ async def _popup_webauthn_outcome(arm_webauthn: bool) -> str:
 async def test_multiplexer_arms_webauthn_so_unarmed_popups_reject_instead_of_hanging():
     """D4: a page the worker never armed opened Chrome's native passkey chooser,
     which Tilion cannot dismiss. The multiplexer arms every new target first."""
-    assert await _popup_webauthn_outcome(arm_webauthn=False) == "pending", "control: unarmed chooser hangs"
-    assert await _popup_webauthn_outcome(arm_webauthn=True) == "NotAllowedError"
+    unarmed = await _popup_webauthn_outcome(arm_webauthn=False)
+    assert unarmed == "pending", f"control: unarmed chooser hangs; observed {unarmed!r}"
+    armed = await _popup_webauthn_outcome(arm_webauthn=True)
+    assert armed == "NotAllowedError", f"armed popup WebAuthn outcome: {armed!r}"
 
 
 async def test_multiplexer_webauthn_arming_keeps_seeded_passkeys_working():

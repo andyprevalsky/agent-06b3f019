@@ -2,6 +2,18 @@ import assert from 'node:assert/strict';
 import { mock } from 'node:test';
 import { Prisma } from '@prisma/client';
 
+const templateEnvironment = {
+  CODE_SANDBOX_GRID: JSON.stringify({ cpu: [2], memoryGb: [4] }),
+  CODE_SANDBOX_DEFAULT_CPU: '2',
+  CODE_SANDBOX_DEFAULT_MEMORY_GB: '4',
+  E2B_SANDBOX_TEMPLATES: '',
+  E2B_CLAUDE_CODE_TEMPLATE_ID: 'fixture-claude-template',
+  E2B_CODEX_CODE_TEMPLATE_ID: 'fixture-codex-template',
+};
+const originalTemplateEnvironment = Object.fromEntries(
+  Object.keys(templateEnvironment).map((key) => [key, process.env[key]])
+);
+
 type Row = {
   id: string;
   userId: string;
@@ -133,6 +145,8 @@ const db = {
 };
 
 async function main() {
+  // database is mocked, so no dotenv side effects may supply this fixture's templates.
+  Object.assign(process.env, templateEnvironment);
   await mock.module('../../providers/database', {
     namedExports: {
       prisma: db,
@@ -164,7 +178,26 @@ async function main() {
           recipes: [superseded ? { ...recipe, connectionId: 'newer-connection' } : recipe],
         };
         assert.equal(recipe.install, 'official-installer');
-        assert(variants.length >= 2, 'builds both providers');
+        assert.deepEqual(
+          variants,
+          [
+            {
+              key: 'claude-2x4',
+              provider: 'claude',
+              cpu: 2,
+              memoryGb: 4,
+              baseTemplateId: 'fixture-claude-template',
+            },
+            {
+              key: 'codex-2x4',
+              provider: 'codex',
+              cpu: 2,
+              memoryGb: 4,
+              baseTemplateId: 'fixture-codex-template',
+            },
+          ],
+          'builds the configured template for each provider'
+        );
         await builder();
         return { revision: 1 };
       },
@@ -329,7 +362,14 @@ async function main() {
     'CLI integrations: ownership, setup dedupe, verified publication, unavailable template, receipt replay and uncertain execution passed\n'
   );
 }
-main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
-  process.exitCode = 1;
-});
+main()
+  .catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    for (const [key, value] of Object.entries(originalTemplateEnvironment)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
