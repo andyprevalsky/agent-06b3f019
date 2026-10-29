@@ -89,3 +89,45 @@ separate. Existing future docs composition remains independent. Tokens UNMETERED
 A preserved, explicit comparison can disagree with an imported answer without
 proving transport loss or a grader defect. Record the exact source basis and
 verifier decision before proposing any general repair.
+
+
+## R74: original It20 BU077 run1 comparison
+
+A separate original run on source4016ffaf50aeee0eff1b242d9e348f54896fdc02,
+patchnone, repeats the observed comparison/reference disagreement. Root
+bd7c0ddb-2745-4c5f-aeb2-8703670d216f, jobr001-j0007, completed natively
+in1477.9seconds; the benchmark failed C4 while C1/C2/C3 passed, infraFALSE.
+No original grade is changed. All seven normal member sizes and hashes were
+independently verified against manifest
+ aa787f80ea0579f2b146e289667a77005efb9a2299a0f21ea07d7e6015ed0686.
+Archive SHA256 is
+62bce7470d8c38301d52cb895990006b9c816de962279c214ef2fc74d9c61602;
+run SHA256 is ebbbeafa45975e86e350e9f614f94a91e117723ce0ddea41c11ef66495ce3e48.
+
+Original message52 captures the MIT transcript's unnamed SCIENTIST2 predicting
+robots in ten or fifteen years. Original message182 captures
+https://voiceinthemachine.com/2012/06/18/can-machines-really-think/ attributing a
+four-or-five-year thinking-machine prediction to Jerome Wiesner. It embeds the
+named video. These are retained page observations, not newly verified video
+identity or independent proof that the imported reference answer is wrong.
+
+The final actual actor call at worker22322 has encoded payload SHA256
+5b872e0503916415bcee565b7128b211455395217e6dd1e2aae7bcbf974f623e.
+Its messages contain both time ranges; its output calls attempt_completion.
+Message184 retains the browser verifier's input-text projection and reasoning:
+the page names Wiesner, whose four/five-year estimate is sooner under the
+user's same-year assumption. Message191 retains scientist_name=Jerome Wiesner;
+root verifier196 and final summary198 preserve that name. No downstream
+substitution or omitted final value is demonstrated. Separately encoded raw
+browser-verifier request/response was not located in the supplied worker log;
+the persisted input projection and result are not claimed as raw wire parity.
+
+The recorded C4 result explicitly rejects Wiesner against Claude Shannon.
+Archive searches for Wiesner/Shannon and reference/comparison disagreement led
+to this case, whose Solution and Human feedback were reread. The original
+comparison now has more direct recorded transcript evidence, but the unresolved
+semantic/reference relationship is the same observed boundary. No general
+runtime repair follows. No forced scientist answer, prompt nudge, task/rubric
+change, model replay, remote browsing, or new provider call was performed.
+Native completion, benchmark failure and the OPEN outcome remain distinct.
+Tokens UNMETERED.

@@ -78,3 +78,45 @@ without a speculative answer patch or policy change.
 
 Verify both the typed answer and its delivered presentation when a user asks
 for only a scalar, without rewriting evaluator evidence to hide the carrier.
+
+
+## R75: original It20 BU071 run1 carrier
+
+Independent normal packet verification for root
+d8d6a92f-a83a-4ef4-b83a-51210db08b5c/job r001-j0001 confirms the same observed
+presentation boundary on source4016ffaf50aeee0eff1b242d9e348f54896fdc02,
+patchnone. All seven normal member sizes and hashes match manifest
+91bdaa634c160470cbbc1803fb240061a420f7307de2d39adce2e6679eb4bf2f.
+Archive SHA256 is
+55a79d211e1eb37676dbc72074fddbd9e6ec2776d29ae657dc96785f07a9a224;
+run JSON SHA256 is 3beab7fbe67c4ccf0dd94a117370b6c762296d4cac6d9773abc9f0cd79a5c6a6.
+Native COMPLETED in1168.1seconds remains distinct from the canonical
+three-of-four FAILED/infraFALSE result. C1/C3/C4 passed; C2 rejected the visible
+report and structured field instead of the requested bare day.
+
+Original user message0 ends “Just give the day of the month.” Message6's
+required integer wikipedia_access_day schema retains the requested quantity.
+Message224 explains the day is4 using the recorded endnote; message225 contains
+the ordinary Goal/Status/Outcome/URLs/reasoning report. Message231's completed
+child structured_response is wikipedia_access_day:4. Message236 presents the
+root's labeled “Wikipedia Access Day:4” extraction. Final message238 stores4
+under completionSummary.outputs. There is no later bare-day reply, altered
+integer, truncated scalar or wrong declared type.
+
+Exact-source helpers.llm.check_progress checks completed child fields, returns
+their structured data, and supplies a generic reasoning message; ordinary
+browser build_context_summary and final summary retain the labeled carrier.
+This source mapping agrees with the original persisted outputs. It is not a
+replayed model outcome or an independently captured declared-judge HTTP request.
+The record's C2 explanation explicitly identifies the presentation mismatch;
+C3 notes that no screenshots were attached for independent date reading. We
+retain that evidence limitation rather than claiming to revalidate the date
+from remote images or reread the PDF.
+
+The R71 Solution and Human feedback were reread and archive searches used
+bare-answer/labeled-carrier and day-only vocabulary. This is the same observed
+contract boundary, appended here rather than starting another fix lane. A
+broader answer-only output contract remains unimplemented and would require
+its own general design and causal proof. No task-specific scalar override,
+trajectory filtering, prompt change, model replay, runtime edit or regrade was
+performed. Original grades and active source remain unchanged. Tokens UNMETERED.

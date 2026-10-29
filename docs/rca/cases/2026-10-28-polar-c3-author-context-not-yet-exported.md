@@ -321,3 +321,58 @@ new test lane, price-specific filter, reasoning deletion, prompt nudge, criterio
 change, model replay or regrade is proposed. The deeper cause remains OPEN; no
 model-intelligence classification is supported. The live source and original
 outcomes remain unchanged. Tokens UNMETERED.
+
+
+## R73: original It20 BU073 run2 bibliography claim
+
+Original job r002-j0013/root dd5b8525-f0e8-4ea7-9238-d93b54e41d51 binds
+executed source4016ffaf50aeee0eff1b242d9e348f54896fdc02 with no patch.
+All seven normal manifest members were independently verified by size and hash.
+Archive SHA256 is
+4dce41558ad057a40175821a022f0b6c5d948f87c33eb181668d7ac093107eb2;
+manifest SHA256 is
+0c7dbfb11a32aa9e2aea3b97b01c274b3ee1cc84bccee3aa1bf5a43c0dd4566e;
+run JSON SHA256 is
+811949a019c5fd8804636a5d52997645571e5f1e807f71a2cc02a74c9e9398e4.
+Native COMPLETED in1473.8seconds is distinct from canonical FAILED/infraFALSE
+at19:30:38.425541Z. C1/C2/C4 pass; C3 rejects the intermediate factual claim.
+
+The task asks for animals mentioned outside bibliographies in the relevant
+Lagkouvardos and Tapia papers and in the cited2021 study. The generated animals
+list schema preserves that restriction. Persisted assistant message69 at
+19:04:08.001Z says “The article doesn’t include a bibliography” while planning
+the next PubMed lookup. Earlier message64 contains References navigation for
+Tapia's paper; later message117 contains the explicit References heading on its
+MDPI full-text page. The later successful animal extraction does not erase
+that earlier claim under the unchanged C3 criterion.
+
+The original browser_use_step_21 request and actual output are retained together
+in worker line6418, payload SHA256
+ a37d93df698ba0c4ccb03babc7ef86964948e84248eb56ee55a4e21bf8954a30.
+Its input message52 includes “navigate to References section”; its actual
+output.action.thinking and output.reasoning contain the disputed sentence.
+Thus the claim originates in the actor response before any deterministic
+summary projection. The original encoded input/output supplies a narrower
+boundary than an inference from the eventual judge explanation. It does not
+establish a general model-capability cause or prove why the actor made it.
+
+The later browser verifier request (worker13240, SHA256
+f0d1d2a6cdb7aaa50081763b4d8ab8d18c5ff81c4bbb25288e57903b32d630cc)
+does not contain that reasoning sentence. Its corresponding response
+(worker13269, SHA256
+1cb823a6ed5562de44a5a084a81d2c9ed5cc9cc0ba29981d3a8d052cda9b4f45)
+returns animals=[mice], task_completed=true, score1. The final root output
+preserves mice. The internal task-data verifier and declared full-trajectory
+C3 judge have different inputs and contracts; their results are not collapsed.
+The recorded C3 explanation explicitly names the early claim and later heading.
+Independent raw declared-judge HTTP request parity is not established.
+
+Archive searches used bibliography/Tapia and early-claim/trajectory-contradiction
+vocabulary. The BU072 early-date case and this case's BU033/R53 Solution and
+Human feedback were read. This is another observed retained-author-claim
+occurrence, not proof of regression in a prior transport repair. No missing
+output, overwritten answer or stripped author input is demonstrated. OPEN:
+no safe general runtime candidate is justified. No reasoning deletion,
+bibliography keyword rule, summary rewrite, criterion change, prompt nudge,
+model replay or task regrade was performed. The correct final animal and
+original C3 failure both remain. Live source unchanged; tokens UNMETERED.
