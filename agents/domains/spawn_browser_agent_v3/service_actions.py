@@ -1492,18 +1492,23 @@ async def classify_evaluate_cdp_stall(
         t0 = time_module.monotonic()
         page_cdp = None
         try:
-            page_cdp = await context.new_cdp_session(input_page)
-            await asyncio.wait_for(
-                page_cdp.send(
+            # Attachment itself sends CDP commands and can hang on the same
+            # dead transport we are diagnosing. Share the existing probe budget.
+            async with asyncio.timeout(timeout_s):
+                page_cdp = await context.new_cdp_session(input_page)
+                await page_cdp.send(
                     "Runtime.evaluate",
                     {"expression": "1+1", "returnByValue": True},
-                ),
-                timeout=timeout_s,
-            )
+                )
             classification["renderer_ms"] = round((time_module.monotonic() - t0) * 1000)
             return "ok"
         except asyncio.TimeoutError:
             classification["renderer_ms"] = round((time_module.monotonic() - t0) * 1000)
+            if page_cdp is None:
+                # No renderer probe was sent: do not authorize hard renderer
+                # recovery merely because its CDP session could not attach.
+                classification["renderer_error"] = "TimeoutError:CDP session attachment timed out"
+                return "error"
             return "frozen"
         except Exception as exc:
             classification["renderer_error"] = f"{type(exc).__name__}:{extract_error_message(exc)[:120]}"
@@ -1519,12 +1524,16 @@ async def classify_evaluate_cdp_stall(
         t0 = time_module.monotonic()
         browser_cdp = None
         try:
-            browser_cdp = await playwright_browser.new_browser_cdp_session()
-            await asyncio.wait_for(browser_cdp.send("Browser.getVersion"), timeout=timeout_s)
+            async with asyncio.timeout(timeout_s):
+                browser_cdp = await playwright_browser.new_browser_cdp_session()
+                await browser_cdp.send("Browser.getVersion")
             classification["browser_ms"] = round((time_module.monotonic() - t0) * 1000)
             return "ok"
         except asyncio.TimeoutError:
             classification["browser_ms"] = round((time_module.monotonic() - t0) * 1000)
+            if browser_cdp is None:
+                classification["browser_error"] = "TimeoutError:CDP session attachment timed out"
+                return "error"
             return "frozen"
         except Exception as exc:
             classification["browser_error"] = f"{type(exc).__name__}:{extract_error_message(exc)[:120]}"

@@ -17327,6 +17327,116 @@ async def test_alchemy_evaluate_js_completes_on_healthy_canvas():
             await browser.close()
 
 
+async def test_cdp_stall_probe_bounds_session_attachment():
+    """R84: a dead CDP attachment must not trap post-action diagnostics."""
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+    for blocked in ("renderer", "browser", "both"):
+        cancelled = []
+        async def hang(label):
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.append(label)
+        renderer = SimpleNamespace(send=AsyncMock(return_value={}), detach=AsyncMock())
+        browser = SimpleNamespace(send=AsyncMock(return_value={}), detach=AsyncMock())
+        async def page_attach(page):
+            if blocked in ("renderer", "both"):
+                await hang("renderer")
+            return renderer
+        async def browser_attach():
+            if blocked in ("browser", "both"):
+                await hang("browser")
+            return browser
+        page = SimpleNamespace(context=SimpleNamespace(new_cdp_session=page_attach))
+        host = SimpleNamespace(new_browser_cdp_session=browser_attach)
+        try:
+            result = await asyncio.wait_for(classify_evaluate_cdp_stall(
+                input_page=page, playwright_browser=host, timeout_s=0.02), timeout=0.3)
+        except asyncio.TimeoutError:
+            raise AssertionError(f"unbounded CDP attachment: {blocked}")
+        assert result["verdict"] != "renderer_main_thread_blocked", result
+        for name, session in (("renderer", renderer), ("browser", browser)):
+            if blocked in (name, "both"):
+                assert result[name] == "error"
+                assert result[name + "_error"] == "TimeoutError:CDP session attachment timed out"
+                assert name in cancelled
+                session.send.assert_not_awaited()
+                session.detach.assert_not_awaited()
+            else:
+                assert result[name] == "ok"
+                session.detach.assert_awaited_once()
+
+
+async def test_cdp_stall_probe_preserves_send_and_cancellation():
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+    for stage in ("healthy", "send", "cancel", "foreign_error"):
+        entered = asyncio.Event()
+        detached = []
+        async def send(*args):
+            if stage == "send":
+                await asyncio.Future()
+            return {}
+        async def detach():
+            detached.append(True)
+        cdp = SimpleNamespace(send=send, detach=detach)
+        async def attach(page):
+            if stage == "cancel":
+                entered.set()
+                await asyncio.Future()
+            if stage == "foreign_error":
+                raise RuntimeError("attach unavailable")
+            return cdp
+        page = SimpleNamespace(context=SimpleNamespace(new_cdp_session=attach))
+        task = asyncio.create_task(classify_evaluate_cdp_stall(input_page=page, timeout_s=0.02))
+        if stage == "cancel":
+            await entered.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert detached == []
+            continue
+        result = await asyncio.wait_for(task, 0.3)
+        assert result["renderer"] == {"healthy": "ok", "send": "frozen", "foreign_error": "error"}[stage]
+        assert result["browser"] == "skipped"
+        assert bool(detached) == (stage != "foreign_error")
+
+
+async def test_cdp_stall_probe_keeps_renderer_browser_distinction():
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+    for browser_frozen in (False, True):
+        async def renderer_send(*args):
+            await asyncio.Future()
+        async def browser_send(*args):
+            if browser_frozen:
+                await asyncio.Future()
+            return {}
+        renderer = SimpleNamespace(send=renderer_send, detach=AsyncMock())
+        browser = SimpleNamespace(send=browser_send, detach=AsyncMock())
+        page = SimpleNamespace(context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=renderer)))
+        host = SimpleNamespace(new_browser_cdp_session=AsyncMock(return_value=browser))
+        result = await asyncio.wait_for(classify_evaluate_cdp_stall(
+            input_page=page, playwright_browser=host, timeout_s=0.02), 0.3)
+        assert result["renderer"] == "frozen"
+        assert result["browser"] == ("frozen" if browser_frozen else "ok")
+        assert result["verdict"] == ("cdp_or_browser_process_unresponsive" if browser_frozen
+                                    else "renderer_main_thread_blocked")
+        renderer.detach.assert_awaited_once()
+        browser.detach.assert_awaited_once()
+    # Cancellation after attachment must detach that exact acquired session.
+    entered = asyncio.Event()
+    async def pending_send(*args):
+        entered.set()
+        await asyncio.Future()
+    renderer = SimpleNamespace(send=pending_send, detach=AsyncMock())
+    page = SimpleNamespace(context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=renderer)))
+    task = asyncio.create_task(classify_evaluate_cdp_stall(input_page=page, timeout_s=1))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    renderer.detach.assert_awaited_once()
+
+
 async def test_renderer_block_matches_evaluate_timeout_recovery_signature():
     """Renderer main-thread freeze reproduces the live evaluate-timeout recovery shape.
 
@@ -34607,6 +34717,9 @@ async def run_all_tests():
     )
 
     r = BlackboxResult()
+    await r.record_async("cdp_stall_probe_bounds_session_attachment", test_cdp_stall_probe_bounds_session_attachment)
+    await r.record_async("cdp_stall_probe_preserves_send_and_cancellation", test_cdp_stall_probe_preserves_send_and_cancellation)
+    await r.record_async("cdp_stall_probe_keeps_renderer_browser_distinction", test_cdp_stall_probe_keeps_renderer_browser_distinction)
     await r.record_async(
         "kernel replay stopped before browser session close",
         test_kernel_replay_is_stopped_before_the_browser_session_is_closed,
