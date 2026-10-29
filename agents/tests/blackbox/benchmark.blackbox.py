@@ -5788,6 +5788,7 @@ async def test_agentcard_cleanup_preserves_the_typed_release_skip():
             )
 
 
+@patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"})
 async def test_agentcard_release_skip_retires_execution_without_repeating_financial_cleanup():
     from copy import deepcopy
     from benchmarks import run_benchmark as bench
@@ -25347,6 +25348,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             assert not descendant_live(), "native control descendant survived exact cleanup"
 
 
+@patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"})
 async def test_agentcard_release_skip_rejects_independent_native_retirement_failure():
     """A typed payment waiver cannot waive an independently failed owned provider join."""
     from copy import deepcopy
