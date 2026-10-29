@@ -433,3 +433,60 @@ rewrite the rubric, or claim clean independent task success from the exposed
 answer source. No runtime, prompt, criteria, budget, model route or grade
 changed. Original FAILED/infraFALSE and native COMPLETED remain intact.
 Tokens UNMETERED.
+
+
+## R87: original It22 BU084 run1 conference-title claim
+
+Original job r001-j0004/root83af8d4e-5d1f-44d8-81c9-be0f2421a6ac ran
+source573847c1ea6ffbc28405d3ec29e39d8f86a5c2e8 with patchnone. NativeCOMPLETED
+in872.2seconds and rootprogress1 are distinct from the canonical three-of-four
+FAILED/infraFALSE result. C1/C2/C4 pass; C3 rejects a retained intermediate
+claim. cleanup_failure is null. These facts do not indicate a recurrence of
+R84's unresponsive CDP or diagnostic attachment failure.
+
+All seven normal members independently match sizes and hashes under manifest
+d4ec47b7424fff2efed26bea37f503df54d48d1752cec47684faae62eb0690b7.
+Archive SHA256 is
+d04eed997caf6efbf08a8655bce27d57f43c9036e7374bc4d600654f2dcea638.
+The task asks for the name of a virtual conference using the organizer, dates
+and a former foreign minister's biographical clues; it supplies no event title.
+
+The exact actor request browser_use_step_17/requeste1fee06dae16 is retained at
+worker line17727. Its decoded request/output bytes match
+156c2e888b907d1f454c438fab100cd76109cf784842069f35c8e700a8fa2dfb.
+The input retains the complete original task, and a case-insensitive scan of
+that exact message array finds neither "together" nor "coronavirus". It does
+include prior COVID-related search material, which is not the fabricated event
+title or evidence that the user supplied one. The captured output's thinking
+says the user's question concerns the conference titled "Together against
+coronavirus." It then selects a DuckDuckGo search rather than completion.
+Persisted assistant message85 at23:22:13.346Z carries that same reasoning. The
+judge's step86 numbering is not the raw zero-based message index.
+
+Later native article text in message107 at23:23:25.465Z explicitly names the
+virtual "The Future of Media" conference, Egypt's Ministry of State for
+Information, and participant Miguel Ángel Moratinos. Browser verifier input at
+worker18425 has SHA256
+89eab3fd69a75b69cd50a5da99c1e3f1d6a3c524f157547236c071283a53b7ef;
+no separate encoded response bytes are claimed here. Persisted child success
+and root completion return The Future of Media. Final message124 at23:24:02.547Z
+uses the explicit value policy and actual answerText/body The Future of Media,
+with the same structured output. Thus the R78 value delivery capability worked
+on this execution; the original C3 failure is a different retained-claim axis.
+
+The earlier claim also remains in child reports111/118 and the delivered child
+notification119. Exact-source build_context_summary incorporates the last
+three authored reasoning messages; it does not invent this text. Polar's
+build_polar_trajectory retains assistant response text and tool evidence.
+The recorded C3 result agrees with this retained contradiction, but no raw
+independently captured judge HTTP request is claimed. Removing earlier
+reasoning, overriding the expected answer or rewriting the judge projection
+would hide the symptom without fixing the authored claim.
+
+Archive searches used "intermediate claim correct final C3" and "invented user
+question title"; this case's Solution/Human feedback and R73/R76 entries were
+read. This is another observed authored-claim/retained-trajectory boundary,
+appended without a duplicate repair lane. No mechanical schema, formatter or
+transport defect is established, and no controlled model-only cause was tested.
+OPEN: no runtime/prompt/criteria change, new model/provider/browser/DB call,
+replay or regrade. Original task outcome remainsFAILED. Tokens UNMETERED.
