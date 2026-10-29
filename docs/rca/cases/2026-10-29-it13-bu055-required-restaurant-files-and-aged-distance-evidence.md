@@ -202,3 +202,51 @@ change, task rewrite or model replay is proposed here. Whether either repair
 changes this task's actual outcome remains OPEN. The last-call, artifact,
 semantic coverage and final-timeout limits remain distinct. No new browser,
 provider, model, DB, capture or image operation was performed. TokensUNMETERED.
+
+## It14 BU055 run1 positive control (2026-10-29)
+
+Bounded comparison began03:11UTC. Original R37/R43 clocks and failures remain
+unchanged. This independent run uses85d37fc8ab8e284459977debdef34348d825ef84,
+workspace_patch_sha256=none, root aeb20b17-7262-411a-8d22-37d96ea9afd1,
+jobr001-j0005. NativeCOMPLETED/passed=true after2066.2seconds; canonical
+TASKPASSED at03:05:41.922054, infraFALSE. Archive SHA256
+5012b85a5b4a09d429ae02c52a44c7dcda01d81291df727200d8ab2744914dc6,
+normal manifest7435b5d8daac4a1bbf75f2f4919fcba94b7aea1c8eb9b3d6248e861c9e0c300b,
+and all seven original member sizes/hashes independently verify. Run SHA256
+0981d594469e58f8feb842c4499004d4d2262bfbc8412e1b85c7feeb2810ad3d.
+
+Actual schema generator798f2cb0d7ad emits the finite node wire with
+superchargers:list[object] and nested restaurants:list[object], minItems=maxItems3,
+then name/address/google_maps_url string children. It does not request restaurant
+file pointers. The captured reasoning explicitly chooses a bounded inline
+collection. This is observed use of the new representation, not inference from
+an aggregate PASS. Generator request payload SHA256
+8a558e0b054309d091b132f91df7d592ad3d0e2f62ed1afa9fd1880033634a0a.
+
+Actual encoded verifier request543a199bca18, payload SHA256
+9c553f93b71cb5dfcb31802dd02f33710ce9e323cc1728d19a332e9ad4327c7e,
+advertises that nested schema and admits eighteen separate evaluate receipts:
+43,41,39,34,32,30,27,25,23,21,19,17,15,14,13,11,9,8. Its compact action-history
+text reports30 actions shown but is itself bounded; its surviving step headings
+are10,15,16,17,33 through43. Receipts8 and9 are independently retained
+beyond even its earliest surviving step.
+Those older receipts contain the alternate-source Supercharger dataset and
+filtered city/address records. The final input also retains actual route
+results at23/25/27,30/32/34,39/41/43: respectively0.3/0.3/0.6mile,
+0.6mile/479ft/0.3mile, and0.1/0.2/0.2mile. These are captured tool observations,
+not fresh external verification. Separate route receipts23/25/27/30/32 are
+also absent from the surviving bounded action-history text. This distinguishes
+full receipt admission from the compact text, but does not by itself separate
+original action selection from per-tool head/tail truncation for those routes.
+Tesla's site returned Access Denied; the actual verifier acknowledges alternate
+sources rather than pretending Tesla access succeeded.
+
+The paired verifier response returns score1/task_completed=true and inline
+three Superchargers with three named/addressed/Maps-linked restaurants each.
+The separate declared evaluator returns C1/C2/C3 allPASS with no screenshots
+sent. The source's schema and full-history changes were both present, alongside
+other source/model/trajectory differences. No controlled ablation establishes
+which change caused the PASS or that either would repair originalR37/R43.
+Original required-file, upload400, missing-evidence and timeout observations
+remain OPEN. No runtime edit, new test, model/API/browser/provider/DB call,
+image viewing, fresh capture or regrade was performed for this comparison.
