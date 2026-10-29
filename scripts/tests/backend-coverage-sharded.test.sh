@@ -29,6 +29,7 @@ fail() {
 REPO="$TMP/repo"
 mkdir -p "$REPO/back-end/scripts" "$REPO/back-end/coverage" "$REPO/bin"
 cp "$ROOT_DIR/back-end/scripts/run-coverage-sharded.sh" "$REPO/back-end/scripts/"
+cp "$ROOT_DIR/back-end/scripts/coverage-shard-durations.mjs" "$REPO/back-end/scripts/"
 
 # Fake shard: records its env, hands raw coverage to the merge dir on success,
 # fails when told to, and sleeps (until TERM) when told to.
@@ -42,6 +43,7 @@ log="$FAKE_RECORD_DIR/shard-$index.env"
   echo "ports=$BACKEND_COVERAGE_START_PORT-$BACKEND_COVERAGE_END_PORT"
   echo "priority=${BLACKBOX_TEST_PRIORITY_DOMAINS:-}"
   echo "abort=${BLACKBOX_TEST_ABORT_ON_PRIORITY_FAILURE:-}"
+  echo "durations=${BACKEND_COVERAGE_SHARD_DURATIONS:-}"
   echo "unit_selector=${BACKEND_UNIT_TEST_FILES-unset}"
 } >"$log"
 child=""
@@ -180,5 +182,87 @@ node -e '
   if (byDomain["admin-health"].aborted !== true || byDomain["admin-health"].passed !== false) process.exit(1);
   if (byDomain.writer.aborted !== false || byDomain.writer.passed !== false) process.exit(1);
 ' "$TMP/art-b/summary.json" || fail "summary.json does not record the aborted domain as an unpassed NOT RUN"
+
+# 5. Timing-balanced shards: every sharded run records the shards' observed
+#    domain durations into the per-worktree ledger (aborted domains are not
+#    observations) and the next run hands that ledger to the shard planner,
+#    unless an explicit BACKEND_COVERAGE_SHARD_DURATIONS wins.
+LEDGER="$REPO/.context/deploy-durations/backend-blackbox.json"
+rm -f "$LEDGER"
+echo '{"results":[{"domain":"code-preview","passed":true,"duration":250000},{"domain":"health","passed":true,"duration":900}]}' \
+  >"$REPO/back-end/coverage/blackbox-run-shard1/summary.json"
+echo '{"results":[{"domain":"user-ui","passed":false,"duration":4000},{"domain":"skipped","passed":false,"aborted":true,"duration":0}]}' \
+  >"$REPO/back-end/coverage/blackbox-run-shard2/summary.json"
+records
+bash "$RUNNER" 2 >"$TMP/out5" 2>&1 || fail "ledger run failed: $(cat "$TMP/out5")"
+grep -q '^durations=$' "$TMP/rec/shard-1.env" || fail "first run must not use a ledger that did not exist yet"
+[[ -s "$LEDGER" ]] || fail "shard durations were not recorded"
+node -e '
+  const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).results;
+  const m = new Map(r.map((x) => [x.domain, x.duration]));
+  if (m.get("code-preview") !== 250000 || m.get("health") !== 900 || m.get("user-ui") !== 4000) process.exit(1);
+  if (m.has("skipped")) process.exit(2);
+' "$LEDGER" || fail "ledger content wrong: $(cat "$LEDGER")"
+records
+bash "$RUNNER" 2 >"$TMP/out5b" 2>&1 || fail "second ledger run failed: $(cat "$TMP/out5b")"
+grep -q "^durations=$LEDGER$" "$TMP/rec/shard-2.env" || fail "recorded ledger not handed to the shards: $(cat "$TMP/rec/shard-2.env")"
+records
+BACKEND_COVERAGE_SHARD_DURATIONS=/explicit/summary.json bash "$RUNNER" 2 >"$TMP/out5c" 2>&1 || fail "explicit durations run failed"
+grep -q '^durations=/explicit/summary.json$' "$TMP/rec/shard-1.env" || fail "explicit durations file must win"
+
+# 6. The real shard planner packs by simulated shard wall: with one recorded
+#    250 s domain every blackbox domain is still planned exactly once and the
+#    heavy domain's shard takes fewer siblings than the other shard.
+PLAN="$ROOT_DIR/back-end/scripts/coverage-shard-plan.mjs"
+(cd "$ROOT_DIR/back-end" && node "$PLAN" 1/2 "$LEDGER" >"$TMP/p1" && node "$PLAN" 2/2 "$LEDGER" >"$TMP/p2" &&
+  node "$PLAN" 1/2 >"$TMP/q1" && node "$PLAN" 2/2 >"$TMP/q2") || fail "shard planner failed"
+node -e '
+  const fs = require("fs");
+  const read = (p) => fs.readFileSync(p, "utf8").trim().split(",").filter(Boolean);
+  const [p1, p2, q1, q2] = process.argv.slice(1).map(read);
+  const all = [...q1, ...q2].sort();
+  const planned = [...p1, ...p2].sort();
+  if (JSON.stringify(all) !== JSON.stringify(planned)) { console.error("planned set differs"); process.exit(1); }
+  if (new Set(planned).size !== planned.length) { console.error("a domain was planned twice"); process.exit(2); }
+  const [heavy, light] = p1.includes("code-preview") ? [p1, p2] : [p2, p1];
+  if (heavy.length >= light.length) { console.error("heavy shard not relieved", heavy.length, light.length); process.exit(3); }
+' "$TMP/p1" "$TMP/p2" "$TMP/q1" "$TMP/q2" || fail "wall-aware shard plan is wrong"
+
+# 7. Sharding on the isolated deploy (system-PG) path: the prepared
+#    BACKEND_COVERAGE_DATABASE_URL is the base; shard i/N owns `<base>_s<i>`
+#    on the same server (one database per shard), the base is still validated
+#    against the exact deploy marker, and run-coverage.sh derives it through
+#    the helper instead of refusing shards (which forced the 2026-10-29 deploy
+#    into one unsharded 1,505 s sweep).
+HELPER="$ROOT_DIR/back-end/scripts/coverage-database-url.mjs"
+WT="$TMP/deploy-wt"
+mkdir -p "$WT/.context"
+IDENT="agent-a0f677519b4ea0db3_90ed8ea3551a"
+BASE_DB="victoria_deploy_agent_a0f677519b4ea0db3_90ed8ea3551a"
+printf '%s\n' "$BASE_DB" >"$WT/.context/deploy-system-pg.db"
+resolve() {  # <shard> [url]
+  BACKEND_COVERAGE_DATABASE_URL="${2:-postgresql://postgres:postgres@localhost:5432/$BASE_DB}" \
+    ROSE_DEPLOY_WORKTREE=1 ROSE_DEPLOY_WORKTREE_PATH="$WT" node "$HELPER" "$IDENT" "$WT" "$1"
+}
+[[ "$(resolve "" | sed -n 1p)" == "postgresql://postgres:postgres@localhost:5432/$BASE_DB" ]] || fail "unsharded prepared URL must resolve to itself"
+[[ -z "$(resolve "" | sed -n 2p)" ]] || fail "unsharded run derives no database"
+[[ "$(resolve 1/2 | sed -n 1p)" == "postgresql://postgres:postgres@localhost:5432/${BASE_DB}_s1" ]] || fail "shard 1/2 must own ${BASE_DB}_s1"
+[[ "$(resolve 2/2 | sed -n 2p)" == "${BASE_DB}_s2" ]] || fail "shard 2/2 must own ${BASE_DB}_s2"
+[[ "$(resolve 1/2)" != "$(resolve 2/2)" ]] || fail "shards must never share a database"
+resolve 3/2 >/dev/null 2>&1 && fail "shard index above count must be refused"
+resolve 1/2 "postgresql://postgres:postgres@localhost:5432/${BASE_DB}_s1" >/dev/null 2>&1 && fail "an already derived shard URL is not the prepared base"
+resolve 1/2 "postgresql://postgres:postgres@localhost:5432/victoria_deploy_other" >/dev/null 2>&1 && fail "another worktree's database must be refused"
+resolve 1/2 "postgresql://postgres:postgres@db.example.com:5432/$BASE_DB" >/dev/null 2>&1 && fail "a remote host must be refused"
+printf 'victoria_deploy_someone_else\n' >"$WT/.context/deploy-system-pg.db"
+resolve "" >/dev/null 2>&1 && fail "a marker naming another database must be refused"
+printf '%s\n' "$BASE_DB" >"$WT/.context/deploy-system-pg.db"
+# Generic (non-isolated) system-PG path keeps the workspace naming.
+[[ "$(BACKEND_COVERAGE_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/victoria_myws node "$HELPER" myws "$WT" 2/3 | sed -n 2p)" == "victoria_myws_s2" ]] \
+  || fail "generic workspace shards derive victoria_<ws>_s<i>"
+# run-coverage.sh binds to the helper and no longer refuses shards with a prepared URL.
+RC="$ROOT_DIR/back-end/scripts/run-coverage.sh"
+grep -q 'coverage-database-url.mjs" "\$WORKSPACE_HINT" "\$ROOT_DIR" "\$COVERAGE_SHARD"' "$RC" || fail "run-coverage.sh must resolve the prepared URL per shard through the helper"
+grep -q 'Coverage shards need one prepared database each' "$RC" && fail "run-coverage.sh must not refuse shards on the prepared-URL path"
+grep -q 'ENSURE_SYSTEM_DB_NAME="\$COVERAGE_SHARD_DB_NAME"' "$RC" || fail "a derived shard database must be created through ensure_workspace_system_db"
 
 echo "All backend coverage shard gate checks passed."

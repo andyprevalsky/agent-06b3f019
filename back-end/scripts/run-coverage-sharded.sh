@@ -79,6 +79,21 @@ fi
 
 BASE_PORT="${CONDUCTOR_PORT:-55000}"
 DURATIONS="${BACKEND_COVERAGE_SHARD_DURATIONS:-}"
+# Timing-balanced shards: without an explicit durations file, reuse the
+# per-worktree ledger of recorded blackbox domain durations (written by
+# record_domain_durations after every sharded run, pass or fail) so the shard
+# plan packs by observed cost instead of by name. The ledger only changes
+# which shard runs a domain; every domain still runs exactly once.
+DURATIONS_LEDGER="$ROOT_DIR/.context/deploy-durations/backend-blackbox.json"
+if [[ -z "$DURATIONS" && -s "$DURATIONS_LEDGER" ]]; then
+  DURATIONS="$DURATIONS_LEDGER"
+  echo "Shard balancing: recorded domain durations from $DURATIONS_LEDGER"
+fi
+
+record_domain_durations() {
+  node "$SCRIPT_DIR/coverage-shard-durations.mjs" "$DURATIONS_LEDGER" \
+    "$BACKEND_DIR"/coverage/blackbox-run-shard*/summary.json || true
+}
 declare -a PIDS=()
 for ((i = 1; i <= SHARDS; i++)); do
   # Each shard gets a disjoint two-port range above the unsharded one.
@@ -128,6 +143,7 @@ while ((DONE_COUNT < SHARDS)); do
   if ((DONE_COUNT < SHARDS)); then sleep 1; fi
 done
 trap - INT TERM
+record_domain_durations
 if [[ "$FAILED" -ne 0 ]]; then
   # Archive the passing shards' raw coverage so the next run is not blocked.
   ARCHIVE="$ROOT_DIR/.context/test-runs/backend-coverage-merged-failed-$(date -u +%Y%m%d-%H%M%S)-$$"

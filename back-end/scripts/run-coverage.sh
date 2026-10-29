@@ -501,39 +501,29 @@ if [[ "${ROSE_DEPLOY_WORKTREE:-0}" == "1" && "${ROSE_USE_SYSTEM_PG:-false}" == "
   echo "❌ Isolated deploy coverage requires an explicit prepared BACKEND_COVERAGE_DATABASE_URL; refusing shared database fallback." >&2
   exit 1
 fi
-if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" && -n "$COVERAGE_SHARD" ]]; then
-  echo "❌ Coverage shards need one prepared database each; BACKEND_COVERAGE_DATABASE_URL names only one." >&2
-  exit 1
-fi
 if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
-  if ! node -e '
-    const fs = require("node:fs");
-    const path = require("node:path");
-    const url = new URL(process.env.BACKEND_COVERAGE_DATABASE_URL);
-    const identity = process.argv[1];
-    const isolated = process.env.ROSE_DEPLOY_WORKTREE === "1";
-    let expectedName = `victoria_${identity}`;
-    if (isolated) {
-      const root = fs.realpathSync(process.argv[2]);
-      if (!process.env.ROSE_DEPLOY_WORKTREE_PATH ||
-          fs.realpathSync(process.env.ROSE_DEPLOY_WORKTREE_PATH) !== root) process.exit(1);
-      const safe = identity.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 48);
-      expectedName = `victoria_deploy_${safe}`;
-      const marker = fs.readFileSync(path.join(root, ".context", "deploy-system-pg.db"), "utf8");
-      if (marker !== `${expectedName}\n` || (url.port && url.port !== "5432")) process.exit(1);
-    }
-    if (!["postgres:", "postgresql:"].includes(url.protocol) ||
-        !["localhost", "127.0.0.1"].includes(url.hostname) ||
-        decodeURIComponent(url.pathname.slice(1)) !== expectedName ||
-        url.search !== "" || url.hash !== "") process.exit(1);
-  ' "$WORKSPACE_HINT" "$ROOT_DIR"; then
+  # The prepared URL names this workspace's own database (the exact deploy
+  # marker on an isolated worktree). A shard i/N of a sharded run owns the
+  # derived `<prepared>_s<i>` database on the same server, created below by
+  # ensure_workspace_system_db like every other per-shard database, so the
+  # sharded coordinator (test:coverage:sharded) also runs on the system-PG
+  # deploy path instead of falling back to one unsharded sweep.
+  if ! COVERAGE_DB_RESOLUTION="$(node "$SCRIPT_DIR/coverage-database-url.mjs" "$WORKSPACE_HINT" "$ROOT_DIR" "$COVERAGE_SHARD")"; then
     echo "❌ BACKEND_COVERAGE_DATABASE_URL must name this workspace's local database (the exact prepared marker for an isolated deploy worktree)." >&2
     exit 1
   fi
-  LOCAL_PSQL_URL="$BACKEND_COVERAGE_DATABASE_URL"
-  if ! psql "$LOCAL_PSQL_URL" -At -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; then
+  LOCAL_PSQL_URL="$(printf '%s\n' "$COVERAGE_DB_RESOLUTION" | sed -n '1p')"
+  COVERAGE_SHARD_DB_NAME="$(printf '%s\n' "$COVERAGE_DB_RESOLUTION" | sed -n '2p')"
+  # Reachability is proven on the prepared database; a shard's derived
+  # database is created from that same server on demand.
+  if ! psql "$BACKEND_COVERAGE_DATABASE_URL" -At -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; then
     echo "❌ Isolated coverage database is not reachable." >&2
     exit 1
+  fi
+  if [[ -n "$COVERAGE_SHARD_DB_NAME" ]]; then
+    LOCAL_DB_PORT="$(node -e 'process.stdout.write(new URL(process.argv[1]).port || "5432")' "$BACKEND_COVERAGE_DATABASE_URL")"
+    ENSURE_SYSTEM_DB_NAME="$COVERAGE_SHARD_DB_NAME"
+    echo "Coverage shard $COVERAGE_SHARD database: $COVERAGE_SHARD_DB_NAME (derived from the prepared workspace database)"
   fi
   DB_FOUND=true
   echo "Using explicitly validated workspace system Postgres database"
