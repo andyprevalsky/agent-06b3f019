@@ -7443,6 +7443,8 @@ async def test_client_foundry_opaque_reasoning_stall_uses_next_leg():
                     tools=[{"name": "attempt_completion", "description": "Finish", "input_schema": {"type": "object"}}],
                     _exclude_anthropic_family=True,
                     call_site="test-foundry-opaque-reasoning-stall",
+                    # Keep synchronous trace-archive I/O outside this offline stall check.
+                    dump_context=False,
                     deadline_s=5.0,
                     ttft_timeout_s=1.0,
                     idle_timeout_s=0.2,
@@ -11382,7 +11384,7 @@ async def test_foundry_rate_limit_cooldown_hint_ladder_and_shared_store():
                     tool_choice=None,
                     temperature=None,
                     effort=None,
-                    provider_fast_mode=True,
+                    speed=None,
                     request_id="foundry-cooldown",
                     route_key="foundry-cooldown-route",
                     agent_id=None,
@@ -11579,7 +11581,7 @@ async def test_foundry_unrepresentable_retry_hint_uses_ladder_and_fails_over():
                     tool_choice=None,
                     temperature=None,
                     effort=None,
-                    provider_fast_mode=True,
+                    speed=None,
                     request_id="foundry-unrepresentable",
                     route_key="foundry-unrepresentable-route",
                     agent_id=None,
@@ -12362,6 +12364,7 @@ async def test_ultra_foundry_pinned_production_model():
     r2 = "https://ultra-current.openai.azure.com"
     env = {name: "" for name in foundry.FOUNDRY_REGION_ENV_NAMES}
     env.update({
+        "BACKEND_API_URL": "https://backend.example.test", "BACKEND_API_KEY": "offline-test-key",
         "GPT_API_KEY": "", "OPENAI_API_KEY": "", "ANTHROPIC_API_KEY": "",
         "AZURE_FOUNDRY_ENDPOINT": r1, "AZURE_FOUNDRY_API_KEY": "test-old",
         "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
@@ -12369,9 +12372,17 @@ async def test_ultra_foundry_pinned_production_model():
         "AZURE_FOUNDRY_DEPLOYMENTS_2": "gpt-6.1-sol",
     })
     calls = []
+    cooldown_reads = []
     failed = False
 
     def handler(req):
+        if req.url.host == "backend.example.test":
+            assert req.method == "GET"
+            assert req.url.path == "/api/integrations/compute-code/foundry-deployment/cooldown"
+            assert req.headers["x-api-key"] == "offline-test-key"
+            cooldown_reads.append(req.url.params["keys"])
+            assert cooldown_reads[-1] == "ultra-current.openai.azure.com:gpt-6.1-sol"
+            return httpx.Response(200, json={"cooldowns": {}})
         if req.url.host.endswith(".openai.azure.com"):
             assert req.url.host == "ultra-current.openai.azure.com"
             assert json.loads(req.content)["model"] == "gpt-6.1-sol"
@@ -12391,27 +12402,33 @@ async def test_ultra_foundry_pinned_production_model():
         raise AssertionError(str(req.url))
 
     set_mock_handler(handler)
-    with patch.dict(os.environ, env):
-        models = foundry.foundry_models(get_pool("rose-1-ultra"))
-        for i in range(200):
-            plan = foundry._route_plan(foundry.foundry_regions(), models, f"ultra-pin-{i}")
-            assert [(r.endpoint, d) for r, d in plan] == [(r2, "gpt-6.1-sol")]
+    foundry._reset_foundry_cooldown_cache()
+    try:
+        with patch.dict(os.environ, env):
+            models = foundry.foundry_models(get_pool("rose-1-ultra"))
+            for i in range(200):
+                plan = foundry._route_plan(foundry.foundry_regions(), models, f"ultra-pin-{i}")
+                assert [(r.endpoint, d) for r, d in plan] == [(r2, "gpt-6.1-sol")]
 
-        async def run():
-            return await _drain(RoseClient(openrouter_key="ork-test").complete(
-                pool="rose-1-ultra", messages=[{"role": "user", "content": "hi"}],
-                agent_id="ultra-pin", dump_context=False, _exclude_anthropic_family=True,
-            ))
+            async def run():
+                return await _drain(RoseClient(openrouter_key="ork-test").complete(
+                    pool="rose-1-ultra", messages=[{"role": "user", "content": "hi"}],
+                    agent_id="ultra-pin", dump_context=False, _exclude_anthropic_family=True,
+                ))
 
-        chunks = await run()
-        assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-6.1-sol-foundry"
-        failed = True
-        calls.clear()
-        await run()
-        assert calls == ["foundry", "openrouter"]
-        os.environ["AZURE_FOUNDRY_DEPLOYMENTS_2"] = "gpt-6-sol"
-        plan = foundry._route_plan(foundry.foundry_regions(), models, "unlisted-6.1")
-        assert [(r.endpoint, d) for r, d in plan] == [(r1, "gpt-6.1-sol")]
+            chunks = await run()
+            assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-6.1-sol-foundry"
+            failed = True
+            calls.clear()
+            await run()
+            assert calls == ["foundry", "openrouter"]
+            os.environ["AZURE_FOUNDRY_DEPLOYMENTS_2"] = "gpt-6-sol"
+            plan = foundry._route_plan(foundry.foundry_regions(), models, "unlisted-6.1")
+            assert [(r.endpoint, d) for r, d in plan] == [(r1, "gpt-6.1-sol")]
+
+            assert cooldown_reads, "the pinned route must consult the shared cooldown authority"
+    finally:
+        foundry._reset_foundry_cooldown_cache()
 
 
 async def run_all_tests():

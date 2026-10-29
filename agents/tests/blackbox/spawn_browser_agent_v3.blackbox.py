@@ -27965,6 +27965,8 @@ async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step):
     from contextlib import ExitStack
 
     from temporalio.testing import ActivityEnvironment
+    from temporalio import activity
+    from helpers import activity_generation_drain
 
     from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -27999,7 +28001,14 @@ async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step):
     native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
     resume_mock = AsyncMock()
     close_mock = AsyncMock()
+    async def fixture_queue_pointer(**_kwargs):
+        return {"task_queue": activity.info().task_queue, "surface_hash": None}
+
     patch_targets = [
+        # Session lifetime is independent of another fixture's worker generation.
+        patch.object(activity_generation_drain, "_cached_at", None),
+        patch.object(activity_generation_drain, "_cached_queue", None),
+        patch.object(activity_generation_drain, "read_agent_queue_pointer", fixture_queue_pointer),
         patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[native_start])),
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
         patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", AsyncMock(return_value=session_info)),
@@ -28125,6 +28134,18 @@ async def test_browser_task_keeps_stepping_on_a_reused_session_with_time_left():
     assert result["step_count"] == 5, result
     resume_mock.assert_not_awaited()
     close_mock.assert_not_awaited()
+
+
+async def test_reused_session_lifetime_fixture_isolates_cached_generation():
+    from helpers import activity_generation_drain
+
+    with (
+        patch.object(activity_generation_drain, "_cached_at", time_module.monotonic()),
+        patch.object(activity_generation_drain, "_cached_queue", "other-worker-generation"),
+    ):
+        await test_browser_task_on_reused_session_yields_before_the_provider_releases_it()
+        await test_browser_task_keeps_stepping_on_a_reused_session_with_time_left()
+        assert activity_generation_drain._cached_queue == "other-worker-generation"
 
 
 async def test_session_lifetime_is_tracked_only_for_the_reused_session():
@@ -36921,6 +36942,10 @@ async def run_all_tests():
     await r.record_async(
         "reused_session_with_time_left_keeps_stepping",
         test_browser_task_keeps_stepping_on_a_reused_session_with_time_left,
+    )
+    await r.record_async(
+        "reused_session_lifetime_fixture_isolates_cached_generation",
+        test_reused_session_lifetime_fixture_isolates_cached_generation,
     )
     await r.record_async(
         "session_lifetime_tracked_only_for_reused_session",
