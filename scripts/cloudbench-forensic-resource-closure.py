@@ -35,9 +35,39 @@ def prepare(run, inventory, owner):
             data=stream.extractfile(member).read(1048577)
             need(sha(data)==expected['sha256'],'forensic member changed')
             selected[member.name]=data
+    meta=S['fields'](selected[prefix+'/meta'])
+    need(audit+'/provider-teardown-verified.epoch' not in manifest['files'] and not any(name.startswith('context/fleet/runs/'+str(meta.get('run_id'))+'/teardown-ownership/') and name.endswith('/provider-teardown-verified.epoch') for name in manifest['files']),'historical provider epoch already exists')
+    run_id=meta.get('run_id')
+    cleanup_path='context/fleet/runs/'+run_id+'/_batch/disposable-cleanup.json'
+    cleanup_entry=manifest['files'].get(cleanup_path)
+    need(cleanup_entry is not None,'missing disposable cleanup proof')
+    with S['tarfile'].open(archive,'r:gz') as stream:
+        member=stream.getmember(cleanup_path);need(member.isfile() and member.size<=1048576,'unsafe cleanup proof')
+        data=stream.extractfile(member).read(1048577)
+        need(sha(data)==cleanup_entry['sha256'],'cleanup proof differs')
+        cleanup=json.loads(data)
+    bound=_disposable_bindings(plan,selected,owner,cleanup)
+    resources=bound['resources']; runtime_evidence_missing=bound['runtime_evidence_missing']; guest_cleanup_missing=bound['guest_cleanup_missing']
+    controller_identity = _identity(obj(run/'export/disposable-controller.ownership.json')['machine'])
+    need(controller_identity['id'] == plan['controller'], 'controller creation identity differs')
+    plan.update(controller_identity=controller_identity,forensic_owner=owner,forensic_resources=resources,run_id=run_id,runtime_sealed=False,original_release_epoch=None)
+    # Legacy plans admitted only True and bind that original cleanup via inputs.
+    # Preserve their exact shape; explicitly carry the newly admitted False fact.
+    if runtime_evidence_missing is False:
+        plan['historical_runtime_evidence_missing'] = False
+    if meta['cleanup_policy'] == 'retain' or guest_cleanup_missing:
+        plan.update(historical_cleanup_policy=meta['cleanup_policy'],
+                    historical_guest_cleanup_missing=guest_cleanup_missing)
+    return plan
+
+
+
+def _disposable_bindings(plan, selected, owner, cleanup):
+    """Shared exact terminal ownership validation for archived and local custody."""
+    prefix='git-common/cloudbench-fleet-ownership/'+owner
+    audit='git-common/cloudbench-fleet-audits/'+owner
     def fields(name):return S['fields'](selected[name])
     meta=fields(prefix+'/meta'); shared=fields(audit+'/meta')
-    need(audit+'/provider-teardown-verified.epoch' not in manifest['files'] and not any(name.startswith('context/fleet/runs/'+str(meta.get('run_id'))+'/teardown-ownership/') and name.endswith('/provider-teardown-verified.epoch') for name in manifest['files']),'historical provider epoch already exists')
     need(meta.get('version')=='2' and meta.get('host')==plan['controller'] and meta.get('app')==plan['app'] and meta.get('fleet_owner_token')==owner and meta.get('cleanup_policy') in {'reap','retain'},'forensic owner differs')
     run_id=meta.get('run_id')
     need(isinstance(run_id,str) and re.fullmatch('[A-Za-z0-9._-]+',run_id) and shared.get('run_id')==run_id and shared.get('fleet_owner_token')==owner and shared.get('app')==plan['app'] and shared.get('status')=='incomplete','forensic audit differs')
@@ -77,30 +107,11 @@ def prepare(run, inventory, owner):
     need(actual_ids==mids,'incomplete identity index')
     for ledger in ('owned-clones.ids','owned-clones.names'):
         need(selected.get(audit+'/'+ledger)==b'','unclosed owned ledger')
-    cleanup_path='context/fleet/runs/'+run_id+'/_batch/disposable-cleanup.json'
-    cleanup_entry=manifest['files'].get(cleanup_path)
-    need(cleanup_entry is not None,'missing disposable cleanup proof')
-    with S['tarfile'].open(archive,'r:gz') as stream:
-        member=stream.getmember(cleanup_path);need(member.isfile() and member.size<=1048576,'unsafe cleanup proof')
-        data=stream.extractfile(member).read(1048577)
-        need(sha(data)==cleanup_entry['sha256'],'cleanup proof differs')
-        cleanup=json.loads(data)
     need(type(cleanup.get('guest_cleanup_missing')) is bool, 'guest cleanup fact must be boolean')
     runtime_evidence_missing = cleanup.get('runtime_evidence_missing')
     need(type(runtime_evidence_missing) is bool, 'runtime evidence fact must be boolean')
     need(cleanup==dict(schema='disposable-cleanup-v1',owner=owner,guest_cleanup_missing=guest_cleanup_missing,runtime_evidence_missing=runtime_evidence_missing,successful_runtime_inferred=False),'forensic failure facts differ')
-    controller_identity = _identity(obj(run/'export/disposable-controller.ownership.json')['machine'])
-    need(controller_identity['id'] == plan['controller'], 'controller creation identity differs')
-    plan.update(controller_identity=controller_identity,forensic_owner=owner,forensic_resources=resources,run_id=run_id,runtime_sealed=False,original_release_epoch=None)
-    # Legacy plans admitted only True and bind that original cleanup via inputs.
-    # Preserve their exact shape; explicitly carry the newly admitted False fact.
-    if runtime_evidence_missing is False:
-        plan['historical_runtime_evidence_missing'] = False
-    if meta['cleanup_policy'] == 'retain' or guest_cleanup_missing:
-        plan.update(historical_cleanup_policy=meta['cleanup_policy'],
-                    historical_guest_cleanup_missing=guest_cleanup_missing)
-    return plan
-
+    return dict(resources=resources, run_id=run_id, runtime_evidence_missing=runtime_evidence_missing, guest_cleanup_missing=guest_cleanup_missing, meta=meta)
 
 def _identity(machine):
     keys = ('id', 'instance_id', 'name', 'region', 'created_at')
