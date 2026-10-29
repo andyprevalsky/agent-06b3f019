@@ -28,8 +28,9 @@ ROOT = sat.ROOT
 FIX_RE = re.compile(r"\b(fix|fixes|fixed|rca|regression|repro)\b", re.I)
 
 
-def git(*args: str) -> str:
-    return subprocess.run(["git", *args], cwd=ROOT, check=True, capture_output=True, text=True).stdout
+def git(*args: str) -> str | bytes:
+    # NUL-delimited Git path records are byte identities, not UTF-8 text.
+    return subprocess.run(["git", *args], cwd=ROOT, check=True, capture_output=True, text="-z" not in args).stdout
 
 
 def candidates(since: str, ref: str, limit: int, until: str = "") -> list[tuple[str, str, list[str]]]:
@@ -41,7 +42,7 @@ def candidates(since: str, ref: str, limit: int, until: str = "") -> list[tuple[
         if not FIX_RE.search(subject):
             continue
         raw = git("diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "--no-renames", "-z", sha)
-        files = [name for name in raw.split("\0") if name]
+        files = [name.decode("utf-8", "surrogateescape") for name in raw.split(b"\0") if name]
         tests = [f for f in files if sat.is_test_file(f)]
         product = [f for f in files if not sat.is_test_file(f) and not f.startswith(sat.EXCLUDED_TOP)]
         if tests and product:

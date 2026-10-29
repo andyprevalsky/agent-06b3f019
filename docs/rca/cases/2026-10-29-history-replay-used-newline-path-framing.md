@@ -41,3 +41,17 @@ Parent required exact before/after proof, temporary-only source copies, existing
 ## Reusable lesson
 
 Read Git file identities with NUL framing and explicit rename behavior.
+
+## Recurrence — invalid UTF-8 path bytes, frozen2237
+
+Review4416856472 found the remaining serialization boundary: subprocess text=True
+strictly decoded the new NUL-delimited diff-tree output before path filtering.
+A real temporary Git commit with filename bytes ff/fe reproduces UnicodeDecodeError.
+The temporary candidate returns bytes for -z and decodes each nonempty path with
+UTF-8 surrogateescape; exact byte identity round-trips without replacement.
+Unicode/newline/rename/exclusions remain covered. The new real-Git test is
+identical before/after; only an existing mock path output changes str to bytes
+to match the corrected interface, with assertions unchanged. Full48-test owner
+suite fails before, passes five times after. Evidence and commands are in
+/var/tmp/deploy-1627/2237-replay-bytes-rca/report.md. No integration/provider action
+was taken; parent review/application/full gates remain OPEN.

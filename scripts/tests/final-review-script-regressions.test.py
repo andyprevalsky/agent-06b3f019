@@ -433,7 +433,7 @@ class Main338ScriptRegressionTest(unittest.TestCase):
   history=module('review_history_excluded','scripts/test-map/replay_history.py')
   def git(*args):
    if args[0]=='log':return 'abc\x01fix excluded\n' if '--name-only' not in args else '\0abc\x01fix excluded\ncodex/a.py\nagents/tests/test_a.py\n'
-   return 'codex/a.py\0agents/tests/test_a.py\0'
+   return b'codex/a.py\0agents/tests/test_a.py\0'
   with patch.object(history,'git',side_effect=git):self.assertEqual(history.candidates('2000','HEAD',1),[])
  def test_replay_excluded_input_never_reaches_selector(self):
   history=module('review_history_inputs','scripts/test-map/replay_history.py');seen=[]
@@ -446,5 +446,31 @@ class Main338ScriptRegressionTest(unittest.TestCase):
    p=Path(tmp)/'attempts';p.write_text('\n'.join(json.dumps({'run_id':'r','task':task}) for task in ['valid',['bad'],{'bad':1},None]))
    result=diag.benchmark_diagnostics(p)
    self.assertEqual(result['runs'][0]['tasks'],1);self.assertEqual(result['runs'][0]['attempts'],4)
+
+ def test_replay_invalid_utf8_git_paths_round_trip_before_filtering(self):
+  history=module('review_history_bytes','scripts/test-map/replay_history.py')
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp)
+   def git(*args):
+    return subprocess.run(['git',*args],cwd=root,check=True,capture_output=True).stdout
+   git('init','-q');git('config','user.email','fixture@example.invalid');git('config','user.name','fixture')
+   names=[b'agents/code_\xff.py',b'agents/tests/test_code_\xfe.py']
+   for name in names:
+    full=os.fsencode(root)+b'/'+name;os.makedirs(os.path.dirname(full),exist_ok=True)
+    with open(full,'wb') as file:file.write(b'initial')
+   git('add','.');git('commit','-qm','initial')
+   for name in names:
+    with open(os.fsencode(root)+b'/'+name,'wb') as file:file.write(b'fixed')
+   git('commit','-qam','fix invalid utf8 filenames')
+   with patch.object(history,'ROOT',root):rows=history.candidates('2000-01-01','HEAD',10)
+   self.assertEqual(len(rows),1)
+   self.assertEqual({name.encode('utf-8','surrogateescape') for name in rows[0][2]},set(names))
+   self.assertTrue(any(history.sat.is_test_file(name) for name in rows[0][2]))
+   os.makedirs(os.fsencode(root)+b'/codex',exist_ok=True)
+   with open(os.fsencode(root)+b'/codex/ignored_\xff.py','wb') as file:file.write(b'ignored')
+   with open(os.fsencode(root)+b'/'+names[1],'wb') as file:file.write(b'changed')
+   git('add','.');git('commit','-qm','fix excluded invalid utf8')
+   with patch.object(history,'ROOT',root):rows=history.candidates('2000-01-01','HEAD',10)
+   self.assertEqual(len(rows),1,'invalid-byte excluded path must not qualify as product')
 
 if __name__=='__main__':unittest.main()

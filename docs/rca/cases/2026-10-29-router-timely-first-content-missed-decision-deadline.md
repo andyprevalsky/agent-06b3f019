@@ -5,8 +5,8 @@ title: Timely first content did not produce a router decision within the attempt
 surface: back-end
 component: chat-router-live-failover
 classification: unresolved
-problem_class: observability-trace-capture-gap
-first_bad_boundary: first router attempt reached15000ms with103chunks and1026JSON chars but no actionable decision; missing response bytes prevent deeper causal classification
+problem_class: other
+first_bad_boundary: first router attempt reached 15000ms with 103 chunks and 1026 JSON chars but no actionable decision; retained output ends inside required goal string before mode arrives
 symptoms:
   - the live GLM failover must serve inside the first router attempt's bounds
   - Completion deadline expired without a decision
@@ -26,22 +26,25 @@ status: open
 
 ## Problem
 
-One live domain failed on attempts2 versus required1. First Wafer first content
-arrived12351ms into its request, inside14200ms precontent budget. Router deadline
-expired with103chunks and1026JSON characters; second attempt escalated19994ms.
+One live domain failed on attempts 2 versus required 1. First Wafer first content
+arrived 12351ms into its request, inside 14200ms precontent budget. Router deadline
+expired with 103 chunks and 1026 JSON characters; second attempt escalated 19994ms.
 
 ## Diagnosis
 
 Exact unchanged live-support functions replay the recorded metadata and reject
 it after one sample, as required. Runtime typed retry is intentional; the gate
-requires first-attempt completion. Full first-attempt SSE/partial JSON is not
-retained, so provider incomplete fields versus parser recovery defect or
-postcontent scheduling remains unproven. Existing request dumps lack output.
+requires first-attempt completion. Existing dump extra.output retains the exact 1026-character first response,
+truncated inside goal before mode. Unchanged production parser returns null for
+that response and parses the second complete 1417-character output. Initial
+top-level-only dump inspection was wrong and has been corrected. Why provider
+required fields arrived too late remains unknown; per-chunk timing is absent.
 
 ## Solution
 
-No fix proposed without original stream proof. Empty proposed.patch explicitly
-records no justified candidate. Preserve original failure and all thresholds.
+No fix is justified by this incomplete provider response. Exact retained output
+proves the parser correctly lacked complete goal/mode; empty proposed.patch
+records no candidate. Preserve original failure and all thresholds.
 Owner may authorize later evidence collection; this worker made no live call.
 
 ## Human feedback
