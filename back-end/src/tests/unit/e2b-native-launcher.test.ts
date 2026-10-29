@@ -77,7 +77,21 @@ async function configure() {
     overlayCodexCodeWsServer: async () => {},
   });
   await boundary('../../providers/e2bCodeSessionSandbox', {
-    acquireCodeSandbox: async () => ({ sandbox, resumedFrom: 'new', cliSessionId: null }),
+    acquireCodeSandbox: async (
+      session: unknown,
+      _template: string,
+      _env: unknown,
+      _label: string,
+      sizing: { userId?: string }
+    ) => {
+      assert.equal(session, null);
+      assert.equal(sizing.userId, 'owner', 'stateless launcher forwards authenticated caller');
+      return { sandbox, resumedFrom: 'new', cliSessionId: null };
+    },
+    codeSandboxUserId: (session: { userId: string } | null, userId?: string) => {
+      if (session && session.userId !== userId) throw new Error('foreign session');
+      return session?.userId ?? userId;
+    },
     codeSessionBranchEnvs: () => ({}),
     codeSessionTaskFields: () => ({}),
     recordE2bCodeSessionSandbox: async () => {},
@@ -150,6 +164,30 @@ function checkLaunch(provider: string) {
 async function exercise(modulePath: string, provider: string) {
   launches.length = 0;
   const runtime = await import(modulePath);
+  const foreignSession = { userId: 'someone-else' };
+  if (provider === 'claude') {
+    await assert.rejects(
+      runtime.createClaudeCodeSession('agent', 'fixture task', [], undefined, 'owner', false, {
+        codeSession: foreignSession,
+      }),
+      /foreign session/
+    );
+  } else {
+    await assert.rejects(
+      runtime.createCodexCodeSession(
+        'agent',
+        'fixture task',
+        [],
+        undefined,
+        'owner',
+        false,
+        undefined,
+        foreignSession
+      ),
+      /foreign session/
+    );
+  }
+  assert.equal(launches.length, 0, 'foreign session rejected before launch');
   if (provider === 'claude')
     await runtime.createClaudeCodeSession('agent', 'fixture task', [], undefined, 'owner', false);
   else await runtime.createCodexCodeSession('agent', 'fixture task', [], undefined, 'owner', false);

@@ -1,9 +1,10 @@
 /** Clean installation images: no agent home, auth, browser state or conversation is copied. */
 import { createSandboxWithRetry } from './e2bSandboxCreate';
 import { shellQuote } from './codeSessions/sandboxFs';
-import type { SandboxSize, SandboxProvider } from './codeSessions/sandboxSize';
+import { sizeKey, type SandboxSize, type SandboxProvider } from './codeSessions/sandboxSize';
 import {
   readUserCodeTemplate,
+  repairUserCodeTemplateVariant,
   type TemplateRecipe,
   type TemplateVariant,
   type TemplateVariantDefinition,
@@ -124,10 +125,29 @@ export async function resolveNativeCliTemplate(
   provider: SandboxProvider,
   size: SandboxSize,
   baseTemplateId: string,
-  read = readUserCodeTemplate
+  read = readUserCodeTemplate,
+  repair = repairUserCodeTemplateVariant
 ): Promise<string> {
   const head = await read(userId);
-  return head === null || head.revision === 0
-    ? baseTemplateId
-    : selectNativeCliTemplate(head.variants, provider, size, baseTemplateId);
+  if (head === null || head.revision === 0) return baseTemplateId;
+  const existing = head.variants.find(
+    (entry) =>
+      entry.provider === provider &&
+      entry.cpu === size.cpu &&
+      entry.memoryGb === size.memoryGb &&
+      entry.baseTemplateId === baseTemplateId &&
+      entry.snapshotId
+  );
+  if (existing) return existing.snapshotId;
+  const rebuilt = await repair(
+    userId,
+    {
+      key: `${provider}-${sizeKey(size)}`,
+      provider,
+      ...size,
+      baseTemplateId,
+    },
+    buildNativeCliTemplate
+  );
+  return selectNativeCliTemplate(rebuilt.variants, provider, size, baseTemplateId);
 }

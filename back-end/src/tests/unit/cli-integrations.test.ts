@@ -33,6 +33,8 @@ let nativeHead: { recipes: unknown[] } = { recipes: [] };
 let verificationGate: Promise<void> | null = null;
 let superseded = false;
 let nativeBuilds = 0;
+let revokePublisher = false;
+let beforeSessionRead: (() => void) | undefined;
 let secured = 0;
 let agentStatus = 'ACTIVE';
 const requests: Array<Record<string, unknown>> = [];
@@ -75,6 +77,7 @@ const db = {
         id?: string | { in: string[] };
         config?: { equals?: unknown; path?: string[] };
         status?: string | { not: string };
+        AND?: Array<{ config: { path: string[]; equals?: unknown; gt?: number } }>;
       };
       data: Partial<Row>;
     }) => {
@@ -88,6 +91,14 @@ const db = {
       }
       const row = rows.find((item) => item.id === where.id);
       if (!row) return { count: 0 };
+      if (
+        where.AND?.some(({ config }) =>
+          config.equals !== undefined
+            ? row.config[config.path[0]] !== config.equals
+            : !(Number(row.config[config.path[0]]) > Number(config.gt))
+        )
+      )
+        return { count: 0 };
       if (typeof where.status === 'string' && row.status !== where.status) return { count: 0 };
       if (typeof where.status === 'object' && row.status === where.status.not) return { count: 0 };
       if (where.config?.path && row.config[where.config.path[0]] !== where.config.equals)
@@ -115,8 +126,9 @@ const db = {
     }),
   },
   codeSession: {
-    findUnique: async () =>
-      templateAvailable
+    findUnique: async () => {
+      beforeSessionRead?.();
+      return templateAvailable
         ? {
             id: 'template',
             userId: 'owner',
@@ -124,7 +136,8 @@ const db = {
             sandboxKind: 'e2b',
             sandboxId: 'sandbox',
           }
-        : null,
+        : null;
+    },
     findMany: async () => (templateAvailable ? [{ id: 'template' }] : []),
     updateMany: async (args: Record<string, unknown>) => {
       requests.push(args);
@@ -199,6 +212,14 @@ async function main() {
           'builds the configured template for each provider'
         );
         await builder();
+        if (revokePublisher) {
+          const row = rows.find((item) => item.id === _id)!;
+          row.config = {
+            ...row.config,
+            publishing_token: 'successor',
+            publishing_expires_at: Date.now() + 90_000,
+          };
+        }
         return { revision: 1 };
       },
     },
@@ -255,6 +276,18 @@ async function main() {
     }),
     /not found/
   );
+  const beforeInvalidPublish = executions;
+  await assert.rejects(
+    cli.publishCliIntegration(caller, first.id, {
+      name: 'YC',
+      command: '/home/user/bin/yc',
+      verify: ['whoami'],
+      install: 'installer',
+    }),
+    /Installation verification and credential paths are required/
+  );
+  assert.equal(executions, beforeInvalidPublish, 'invalid install input cannot execute auth');
+  assert.equal(rows[0].config.publishing_auth_inflight, undefined);
   exitCode = 1;
   await assert.rejects(
     cli.publishCliIntegration(caller, first.id, {
@@ -265,6 +298,11 @@ async function main() {
     /verification command failed/
   );
   assert.equal(rows[0].status, 'SYNCING');
+  assert.equal(
+    rows[0].config.publishing_auth_inflight,
+    undefined,
+    'known failed verification releases auth fence'
+  );
   exitCode = 0;
   const published = await cli.publishCliIntegration(caller, first.id, {
     name: 'YC',
@@ -358,6 +396,72 @@ async function main() {
     'CONNECTED',
     'late older publication cannot revoke newer login'
   );
+  const fencedSetup = await cli.createCliIntegration('owner', 'YC CLI', 'fenced-setup', launch);
+  const fencedRow = rows.find((item) => item.id === fencedSetup.id)!;
+  fencedRow.config.agent_id = 'setup-agent';
+  superseded = false;
+  revokePublisher = true;
+  await assert.rejects(
+    cli.publishCliIntegration(caller, fencedSetup.id, nativeBody),
+    /lease expired or was replaced/
+  );
+  assert.equal(fencedRow.status, 'SYNCING', 'lost publisher cannot promote connection');
+  assert.equal(
+    fencedRow.config.publishing_token,
+    'successor',
+    'lost publisher cannot erase successor claim'
+  );
+  assert.equal(
+    replacementRow.status,
+    'CONNECTED',
+    'lost publisher cannot expire current connection'
+  );
+  const delayedSetup = await cli.createCliIntegration(
+    'owner',
+    'Delayed CLI',
+    'delayed-auth',
+    launch
+  );
+  const delayedRow = rows.find((item) => item.id === delayedSetup.id)!;
+  delayedRow.config.agent_id = 'setup-agent';
+  beforeSessionRead = () => {
+    delayedRow.config = {
+      ...delayedRow.config,
+      publishing_token: 'new-owner',
+      publishing_expires_at: Date.now() + 90_000,
+    };
+  };
+  const beforeStaleExecution = executions;
+  await assert.rejects(
+    cli.publishCliIntegration(caller, delayedSetup.id, nativeBody),
+    /lease expired or was replaced/
+  );
+  assert.equal(
+    executions,
+    beforeStaleExecution,
+    'lost owner during DB reads cannot execute authenticated command'
+  );
+  assert.equal(delayedRow.config.publishing_token, 'new-owner');
+  beforeSessionRead = undefined;
+  const ambiguousSetup = await cli.createCliIntegration(
+    'owner',
+    'Unknown CLI',
+    'unknown-auth',
+    launch
+  );
+  const ambiguousRow = rows.find((item) => item.id === ambiguousSetup.id)!;
+  ambiguousRow.config.agent_id = 'setup-agent';
+  transportFailure = true;
+  await assert.rejects(
+    cli.publishCliIntegration(caller, ambiguousSetup.id, nativeBody),
+    /connection lost/
+  );
+  assert.equal(
+    ambiguousRow.config.publishing_auth_inflight,
+    true,
+    'unknown execution preserves auth fence'
+  );
+  transportFailure = false;
   process.stdout.write(
     'CLI integrations: ownership, setup dedupe, verified publication, unavailable template, receipt replay and uncertain execution passed\n'
   );

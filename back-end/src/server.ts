@@ -279,6 +279,9 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
 
 // Health check endpoint (no auth required)
 app.get('/health', (req, res) => {
+  if (Reflect.get(globalThis, Symbol.for('rose.test.kernelProxyCustody')) === true) {
+    res.setHeader('X-Rose-Kernel-Proxy-Custody', 'enforced-v1');
+  }
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 

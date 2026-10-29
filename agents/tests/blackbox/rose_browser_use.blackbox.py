@@ -3200,10 +3200,10 @@ async def test_phone_setup_settings_actual_handler_observation():
         assert "Preserve the original authorized phone task" in wire
         import hashlib
         from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
-        # Reviewed ordinary guidance from 1493b7e4a (AUTOFILL-REJECTION-20261029)
-        # includes the rejection-precedence fix. Pin those exact bytes while the
+        # Reviewed ordinary guidance (AUTOFILL-CURRENT-SCREEN-20261029)
+        # includes rejection precedence and current-screen applicability. Pin those exact bytes while the
         # checks below still exclude privileged setup guidance from ordinary use.
-        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "e4466e58ec67b585e3673051d15bbc2e3aa21e25e2aa20b15fce7e8acd2ed511", "Ordinary enabled guide must match reviewed base guidance bytes"
+        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "300e7453759cf33bf2e69b49de588c742854241c954d63653c115ec5b70e0a12", "Ordinary enabled guide must match reviewed base guidance bytes"
         for marker in (None, False, "true"):
             plain_setup = {key: value for key, value in setup.items() if key != "googlePasscodeExceptionAllowed"}
             if marker is not None:

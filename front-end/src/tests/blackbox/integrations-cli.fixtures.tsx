@@ -59,32 +59,42 @@ export function registerCliIntegrationTests() {
       expect(new URL(window.location.href).searchParams.get('agent-id')).toBe('yc-setup-agent');
     });
 
-    it('keeps an ambiguous failed request retry id and presents an explicit setup failure', async () => {
-      const ids: unknown[] = [];
-      server.use(
-        http.post(`${API_BASE}/integrations/cli`, async ({ request }) => {
-          const body = (await request.json()) as Record<string, unknown>;
-          ids.push(body.request_id);
-          return ids.length === 1
-            ? HttpResponse.json({ error: 'Connection interrupted' }, { status: 503 })
-            : HttpResponse.json({
-                integration: { ...settingUp, status: 'failed', error: 'Sign-in needs attention' },
-              });
-        }),
-      );
-      renderWithProviders(<Integrations />, { roseDesktop });
-      const user = userEvent.setup();
-      await user.click(await screen.findByRole('button', { name: 'Add CLI' }));
-      await user.type(screen.getByLabelText('Enter the CLI you want to connect'), 'YC CLI');
-      await user.click(screen.getByRole('button', { name: 'Connect' }));
-      expect(await screen.findByRole('alert')).toHaveTextContent('Connection interrupted');
-      await user.click(screen.getByRole('button', { name: 'Connect' }));
-      expect(await screen.findByText('Sign-in needs attention')).toBeVisible();
-      expect(ids).toHaveLength(2);
-      expect(ids[1]).toBe(ids[0]);
-      await user.click(screen.getByRole('button', { name: 'Retry' }));
-      expect(screen.getByLabelText('Enter the CLI you want to connect')).toHaveValue('YC CLI');
-    });
+    it.each(['json', 'html'])(
+      'keeps an ambiguous %s failure retry id and presents an explicit setup failure',
+      async (format) => {
+        const ids: unknown[] = [];
+        server.use(
+          http.post(`${API_BASE}/integrations/cli`, async ({ request }) => {
+            const body = (await request.json()) as Record<string, unknown>;
+            ids.push(body.request_id);
+            return ids.length === 1
+              ? format === 'html'
+                ? new HttpResponse('<html>Bad gateway</html>', {
+                    status: 502,
+                    headers: { 'Content-Type': 'text/html' },
+                  })
+                : HttpResponse.json({ error: 'Connection interrupted' }, { status: 503 })
+              : HttpResponse.json({
+                  integration: { ...settingUp, status: 'failed', error: 'Sign-in needs attention' },
+                });
+          }),
+        );
+        renderWithProviders(<Integrations />, { roseDesktop });
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('button', { name: 'Add CLI' }));
+        await user.type(screen.getByLabelText('Enter the CLI you want to connect'), 'YC CLI');
+        await user.click(screen.getByRole('button', { name: 'Connect' }));
+        expect(await screen.findByRole('alert')).toHaveTextContent(
+          format === 'html' ? 'Could not connect CLI' : 'Connection interrupted',
+        );
+        await user.click(screen.getByRole('button', { name: 'Connect' }));
+        expect(await screen.findByText('Sign-in needs attention')).toBeVisible();
+        expect(ids).toHaveLength(2);
+        expect(ids[1]).toBe(ids[0]);
+        await user.click(screen.getByRole('button', { name: 'Retry' }));
+        expect(screen.getByLabelText('Enter the CLI you want to connect')).toHaveValue('YC CLI');
+      },
+    );
 
     it('polls pending setup until verification and stops on completion or unmount', async () => {
       let calls = 0;

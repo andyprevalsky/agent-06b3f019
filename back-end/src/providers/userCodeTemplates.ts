@@ -1,4 +1,4 @@
-/** Immutable native-CLI template revisions. Readers never acquire the publisher lease. */
+/** Immutable native-CLI revisions. Healthy readers are lock-free; repairs share the publisher lease. */
 import { createHash, randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from './database';
@@ -31,6 +31,10 @@ export interface UserCodeTemplate {
   recipes: TemplateRecipe[];
   lease?: { token: string; operationId: string; expiresAt: number };
 }
+export interface PublicationFence {
+  integrationId: string;
+  token: string;
+}
 interface PublishReceipt {
   fingerprint: string;
   revision: number;
@@ -44,7 +48,8 @@ export interface UserTemplateStore {
     userId: string,
     expected: UserCodeTemplate,
     next: UserCodeTemplate,
-    receipt?: PublishReceipt & { operationId: string }
+    receipt?: PublishReceipt & { operationId: string },
+    fence?: PublicationFence
   ): Promise<boolean>;
 }
 export interface UserTemplateDependencies {
@@ -131,8 +136,23 @@ const databaseStore: UserTemplateStore = {
       throw new UserCodeTemplateError(409, 'Stored template publication receipt is invalid');
     return { fingerprint: value.fingerprint, revision: value.revision };
   },
-  async compareAndSet(userId, expected, next, receipt) {
+  async compareAndSet(userId, expected, next, receipt, fence) {
     const swap = async (db: Pick<Prisma.TransactionClient, 'integration'>) => {
+      if (fence) {
+        const owner = await db.integration.updateMany({
+          where: {
+            id: fence.integrationId,
+            userId,
+            name: 'cli',
+            AND: [
+              { config: { path: ['publishing_token'], equals: fence.token } },
+              { config: { path: ['publishing_expires_at'], gt: Date.now() } },
+            ],
+          },
+          data: { updatedAt: new Date() },
+        });
+        if (owner.count !== 1) return false;
+      }
       const changed = await db.integration.updateMany({
         where: { userId, name: HEAD_NAME, accountId: '', config: { equals: json(expected) } },
         data: {
@@ -155,7 +175,7 @@ const databaseStore: UserTemplateStore = {
         });
       return true;
     };
-    return receipt ? runTransactionWithRetry(swap) : swap(prisma);
+    return receipt || fence ? runTransactionWithRetry(swap) : swap(prisma);
   },
 };
 const defaults: UserTemplateDependencies = {
@@ -272,7 +292,64 @@ export async function publishUserCodeTemplate(
   recipe: TemplateRecipe,
   variants: TemplateVariantDefinition[],
   builder: TemplateBuilder,
+  deps: UserTemplateDependencies = defaults,
+  fence?: PublicationFence
+): Promise<UserCodeTemplate> {
+  return commitTemplateOperation(
+    userId,
+    operationId,
+    recipe,
+    variants,
+    builder,
+    deps,
+    false,
+    fence
+  );
+}
+
+/** Repair exactly one environment while retaining every installed recipe and other variant. */
+export async function repairUserCodeTemplateVariant(
+  userId: string,
+  variant: TemplateVariantDefinition,
+  builder: TemplateBuilder,
   deps: UserTemplateDependencies = defaults
+): Promise<UserCodeTemplate> {
+  const head = await deps.store.read(userId);
+  if (!head || head.revision === 0 || !head.recipes.length)
+    throw new UserCodeTemplateError(409, 'No published CLI recipes are available to rebuild');
+  if (
+    head.variants.some(
+      (entry) =>
+        entry.key === variant.key &&
+        entry.provider === variant.provider &&
+        entry.cpu === variant.cpu &&
+        entry.memoryGb === variant.memoryGb &&
+        entry.baseTemplateId === variant.baseTemplateId &&
+        entry.snapshotId
+    )
+  )
+    return head;
+  const operationId = `repair:${head.revision}:${createHash('sha256').update(JSON.stringify(variant)).digest('hex')}`;
+  return commitTemplateOperation(
+    userId,
+    operationId,
+    head.recipes[0]!,
+    [variant],
+    builder,
+    deps,
+    true
+  );
+}
+
+async function commitTemplateOperation(
+  userId: string,
+  operationId: string,
+  recipe: TemplateRecipe,
+  variants: TemplateVariantDefinition[],
+  builder: TemplateBuilder,
+  deps: UserTemplateDependencies,
+  repair: boolean,
+  fence?: PublicationFence
 ): Promise<UserCodeTemplate> {
   validatePublication(operationId, recipe, variants);
   const operationFingerprint = fingerprint(recipe, variants);
@@ -289,14 +366,14 @@ export async function publishUserCodeTemplate(
   if (racedCompletion) return racedCompletion;
   if (previous.lease && previous.lease.expiresAt > deps.now())
     throw new UserCodeTemplateError(409, 'Another template update is in progress');
-  const recipes = [
-    ...previous.recipes.filter((item) => item.id !== recipe.id),
-    structuredClone(recipe),
-  ];
+  const recipes = repair
+    ? structuredClone(previous.recipes)
+    : [...previous.recipes.filter((item) => item.id !== recipe.id), structuredClone(recipe)];
   if (recipes.length > 200)
     throw new UserCodeTemplateError(400, 'At most 200 native CLI recipes are supported');
   const basename = recipe.command.split('/').at(-1);
   if (
+    !repair &&
     previous.recipes.some(
       (item) =>
         item.id !== recipe.id &&
@@ -313,7 +390,7 @@ export async function publishUserCodeTemplate(
     ...previous,
     lease: { token, operationId, expiresAt: deps.now() + LEASE_MS },
   };
-  if (!(await deps.store.compareAndSet(userId, previous, current)))
+  if (!(await deps.store.compareAndSet(userId, previous, current, undefined, fence)))
     throw new UserCodeTemplateError(409, 'Another template update won the lease');
   let leaseError: unknown;
   let writes = Promise.resolve();
@@ -340,7 +417,7 @@ export async function publishUserCodeTemplate(
           ...current,
           lease: { token, operationId, expiresAt: deps.now() + LEASE_MS },
         };
-        if (!(await deps.store.compareAndSet(userId, current, renewed)))
+        if (!(await deps.store.compareAndSet(userId, current, renewed, undefined, fence)))
           throw new UserCodeTemplateError(409, 'Template publication lease was replaced');
         current = renewed;
       })
@@ -369,13 +446,26 @@ export async function publishUserCodeTemplate(
       kind: EMPTY.kind,
       revision: previous.revision + 1,
       recipes,
-      variants: built,
+      variants: repair
+        ? [
+            ...previous.variants.filter(
+              (entry) => !variants.some((variant) => variant.key === entry.key)
+            ),
+            ...built,
+          ]
+        : built,
     };
-    const committed = await deps.store.compareAndSet(userId, current, next, {
-      operationId,
-      fingerprint: operationFingerprint,
-      revision: next.revision,
-    });
+    const committed = await deps.store.compareAndSet(
+      userId,
+      current,
+      next,
+      {
+        operationId,
+        fingerprint: operationFingerprint,
+        revision: next.revision,
+      },
+      fence
+    );
     if (!committed)
       throw new UserCodeTemplateError(409, 'Another template revision superseded this publication');
     return next;

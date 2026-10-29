@@ -6,6 +6,8 @@ const clock = mock.method(Date, 'now', () => now);
 let connectionStatus = 'SYNCING';
 let state: Record<string, unknown> | null = null;
 let native = true;
+const publicationToken = 'publisher';
+let publicationExpiry = 100_000;
 let live = true;
 const paths = ['.yc/credentials.json'];
 const db = {
@@ -30,10 +32,22 @@ const db = {
       where,
       data,
     }: {
-      where: { name: string; config?: { equals: unknown } };
+      where: {
+        name: string;
+        config?: { equals: unknown };
+        AND?: Array<{ config: { path: string[]; equals?: unknown; gt?: number } }>;
+      };
       data: { config?: Record<string, unknown> };
     }) => {
-      if (where.name === 'cli') return { count: connectionStatus === 'CONNECTED' ? 0 : 1 };
+      if (where.name === 'cli') {
+        const matches =
+          where.AND?.every(({ config }) =>
+            config.path[0] === 'publishing_token'
+              ? config.equals === publicationToken
+              : publicationExpiry > (config.gt ?? Infinity)
+          ) ?? true;
+        return { count: connectionStatus === 'CONNECTED' || !matches ? 0 : 1 };
+      }
       if (JSON.stringify(where.config?.equals) !== JSON.stringify(state)) return { count: 0 };
       state = structuredClone(data.config!);
       return { count: 1 };
@@ -103,6 +117,29 @@ async function main() {
   );
   assert(!JSON.stringify(state).includes('first-secret'));
   await credentials.initializeCliCredentials('owner', 'cli', file('setup-refresh'));
+  const beforeRejectedPublisher = structuredClone(state);
+  await assert.rejects(
+    credentials.initializeCliCredentials('owner', 'cli', file('stale-secret'), 'old-publisher'),
+    /lease expired or was replaced/
+  );
+  assert.deepEqual(
+    state,
+    beforeRejectedPublisher,
+    'stale publisher cannot overwrite encrypted auth'
+  );
+  publicationExpiry = now;
+  await assert.rejects(
+    credentials.initializeCliCredentials('owner', 'cli', file('stale-secret'), publicationToken),
+    /lease expired or was replaced/
+  );
+  publicationExpiry = now + 100_000;
+  await credentials.initializeCliCredentials(
+    'owner',
+    'cli',
+    file('setup-refresh'),
+    publicationToken
+  );
+
   connectionStatus = 'CONNECTED';
   assert.equal(
     (await credentials.initializeCliCredentials('owner', 'cli', file('stale-secret'))).initialized,

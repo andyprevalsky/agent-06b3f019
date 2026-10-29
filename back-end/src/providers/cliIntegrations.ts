@@ -5,15 +5,20 @@
  * ambiguous transport failures are never retried implicitly.
  */
 import { Prisma } from '@prisma/client';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { prisma, runTransactionWithRetry } from './database';
 import { basename } from 'node:path';
 import { createLogger } from './logger';
 import { executeTemplateCli, readTemplateCredentials, type CliResult } from './cliTemplate';
 import { availableSizes, sandboxTemplateFor, sizeKey } from './codeSessions/sandboxSize';
-import { publishUserCodeTemplate, UserCodeTemplateError } from './userCodeTemplates';
+import {
+  publishUserCodeTemplate,
+  UserCodeTemplateError,
+  type PublicationFence,
+} from './userCodeTemplates';
 import { buildNativeCliTemplate } from './nativeCliTemplateBuilder';
 import { initializeCliCredentials } from './cliNativeCredentials';
+import { withCliPublicationLease, type CliPublicationAuth } from './cliPublicationLease';
 
 const log = createLogger('CliIntegrations');
 
@@ -240,48 +245,24 @@ export interface CliPublishBody {
 
 /** Fence verification/capture too: two publishers must never race rotating login tokens. */
 export async function publishCliIntegration(caller: CliCaller, id: string, body: CliPublishBody) {
-  if (body.install === undefined) return publishClaimedCliIntegration(caller, id, body);
   const row = await ownedIntegration(caller.userId, id);
   const config = cliConfig(row.config)!;
   if (config.agent_id !== caller.agentId || caller.taskId === null)
     throw new CliIntegrationError(403, 'Only this connection’s setup code agent can publish it');
   if (row.status === 'CONNECTED' && config.native_template) return { integration: cliView(row) };
-  if ('publishing_token' in config)
-    throw new CliIntegrationError(
-      409,
-      'This CLI publication is already running; if its setup stopped, reconnect the CLI'
-    );
-  const token = randomUUID();
-  const claimed = await prisma.integration.updateMany({
-    where: {
-      id,
-      userId: caller.userId,
-      status: row.status,
-      config: { equals: row.config as Prisma.InputJsonValue },
-    },
-    data: { config: { ...config, publishing_token: token } },
-  });
-  if (claimed.count !== 1)
-    throw new CliIntegrationError(
-      409,
-      'Another setup publication is running; retry after it finishes'
-    );
-  try {
-    return await publishClaimedCliIntegration(caller, id, body);
-  } finally {
-    await prisma.integration.updateMany({
-      where: {
-        id,
-        userId: caller.userId,
-        status: { not: 'CONNECTED' },
-        config: { path: ['publishing_token'], equals: token },
-      },
-      data: { config: { ...config } },
-    });
-  }
+  return withCliPublicationLease(caller.userId, id, async (token, assertOwned, auth) =>
+    publishClaimedCliIntegration(caller, id, body, { integrationId: id, token }, assertOwned, auth)
+  );
 }
 
-async function publishClaimedCliIntegration(caller: CliCaller, id: string, body: CliPublishBody) {
+async function publishClaimedCliIntegration(
+  caller: CliCaller,
+  id: string,
+  body: CliPublishBody,
+  fence?: PublicationFence,
+  assertOwned?: () => Promise<void>,
+  auth?: CliPublicationAuth
+) {
   const row = await ownedIntegration(caller.userId, id);
   const config = cliConfig(row.config)!;
   if (row.status === 'CONNECTED' && config.native_template && config.agent_id === caller.agentId)
@@ -305,6 +286,13 @@ async function publishClaimedCliIntegration(caller: CliCaller, id: string, body:
     session.sandboxId === null
   )
     throw new CliIntegrationError(409, 'CLI connections require a persistent cloud template');
+  if (body.install !== undefined && (!body.install_verify || !body.credential_files))
+    throw new CliIntegrationError(
+      400,
+      'Installation verification and credential paths are required'
+    );
+  await auth?.beginAuth();
+  await assertOwned?.();
   const result = await executeTemplateCli({
     sandboxId: session.sandboxId,
     command: body.command,
@@ -312,21 +300,21 @@ async function publishClaimedCliIntegration(caller: CliCaller, id: string, body:
     conversation: caller.taskId,
     pauseAfter: false,
   });
-  if (result.exit_code !== 0)
+  if (result.exit_code !== 0) {
+    await auth?.endAuth();
     throw new CliIntegrationError(
       422,
       'The authenticated verification command failed; finish login before publishing'
     );
+  }
   let templateRevision: number | undefined;
   if (body.install !== undefined) {
-    if (!body.install_verify || !body.credential_files)
-      throw new CliIntegrationError(
-        400,
-        'Installation verification and credential paths are required'
-      );
     // Capture login separately before publishing. No authenticated sandbox is ever snapshotted.
-    const credentials = await readTemplateCredentials(session.sandboxId, body.credential_files);
-    await initializeCliCredentials(caller.userId, id, credentials);
+    await assertOwned?.();
+    const credentials = await readTemplateCredentials(session.sandboxId, body.credential_files!);
+    await initializeCliCredentials(caller.userId, id, credentials, fence?.token);
+    await auth?.endAuth();
+    await assertOwned?.();
     const variants = (['claude', 'codex'] as const).flatMap((provider) =>
       availableSizes(provider).map((size) => ({
         key: `${provider}-${sizeKey(size)}`,
@@ -345,10 +333,12 @@ async function publishClaimedCliIntegration(caller: CliCaller, id: string, body:
           name: body.name,
           command: body.command,
           install: body.install,
-          verify: body.install_verify,
+          verify: body.install_verify!,
         },
         variants,
-        buildNativeCliTemplate
+        buildNativeCliTemplate,
+        undefined,
+        fence
       );
       templateRevision = head.revision;
     } catch (error) {
@@ -364,8 +354,15 @@ async function publishClaimedCliIntegration(caller: CliCaller, id: string, body:
       throw error;
     }
   }
-  const committedConfig = { ...config } as CliConfig & { publishing_token?: string };
+  if (body.install === undefined) await auth?.endAuth();
+  const committedConfig = { ...config } as CliConfig & {
+    publishing_token?: string;
+    publishing_expires_at?: number;
+    publishing_auth_inflight?: boolean;
+  };
   delete committedConfig.publishing_token;
+  delete committedConfig.publishing_expires_at;
+  delete committedConfig.publishing_auth_inflight;
   const update = (db: Pick<Prisma.TransactionClient, 'integration'>) =>
     db.integration.update({
       where: { id },
@@ -407,47 +404,60 @@ async function publishClaimedCliIntegration(caller: CliCaller, id: string, body:
       );
     })
     .map((row) => row.id);
-  const updated =
-    templateRevision !== undefined
-      ? await runTransactionWithRetry(async (tx) => {
-          // Serialize this final login promotion against snapshot pointer writes. A newer
-          // setup of the same CLI must not be displaced by an older publisher finishing late.
-          await tx.integration.updateMany({
-            where: { userId: caller.userId, name: 'code_template', accountId: '' },
-            data: { updatedAt: new Date() },
-          });
-          const head = await tx.integration.findUnique({
-            where: {
-              userId_name_accountId: {
-                userId: caller.userId,
-                name: 'code_template',
-                accountId: '',
-              },
-            },
-            select: { config: true },
-          });
-          const manifest = head?.config as unknown as
-            { recipes?: Array<{ id: string; connectionId?: string }> } | undefined;
-          const activeRecipe = manifest?.recipes?.find(
-            (recipe) => recipe.id === cliStableId(`native-command:${basename(body.command)}`)
-          );
-          if (activeRecipe?.connectionId !== id)
-            throw new CliIntegrationError(
-              409,
-              'A newer setup of this CLI was published; use that connection'
-            );
-          if (replaced.length)
-            await tx.integration.updateMany({
-              where: { id: { in: replaced }, userId: caller.userId },
-              data: {
-                status: 'EXPIRED',
-                isActive: false,
-                failureReason: 'Replaced by a new CLI connection.',
-              },
-            });
-          return update(tx);
-        })
-      : await update(prisma);
+  const updated = await runTransactionWithRetry(async (tx) => {
+    if (fence) {
+      const owned = await tx.integration.updateMany({
+        where: {
+          id,
+          userId: caller.userId,
+          AND: [
+            { config: { path: ['publishing_token'], equals: fence.token } },
+            { config: { path: ['publishing_expires_at'], gt: Date.now() } },
+          ],
+        },
+        data: { updatedAt: new Date() },
+      });
+      if (owned.count !== 1)
+        throw new CliIntegrationError(409, 'CLI publication lease expired or was replaced');
+    }
+    if (templateRevision === undefined) return update(tx);
+    // Serialize this final login promotion against snapshot pointer writes. A newer
+    // setup of the same CLI must not be displaced by an older publisher finishing late.
+    await tx.integration.updateMany({
+      where: { userId: caller.userId, name: 'code_template', accountId: '' },
+      data: { updatedAt: new Date() },
+    });
+    const head = await tx.integration.findUnique({
+      where: {
+        userId_name_accountId: {
+          userId: caller.userId,
+          name: 'code_template',
+          accountId: '',
+        },
+      },
+      select: { config: true },
+    });
+    const manifest = head?.config as unknown as
+      { recipes?: Array<{ id: string; connectionId?: string }> } | undefined;
+    const activeRecipe = manifest?.recipes?.find(
+      (recipe) => recipe.id === cliStableId(`native-command:${basename(body.command)}`)
+    );
+    if (activeRecipe?.connectionId !== id)
+      throw new CliIntegrationError(
+        409,
+        'A newer setup of this CLI was published; use that connection'
+      );
+    if (replaced.length)
+      await tx.integration.updateMany({
+        where: { id: { in: replaced }, userId: caller.userId },
+        data: {
+          status: 'EXPIRED',
+          isActive: false,
+          failureReason: 'Replaced by a new CLI connection.',
+        },
+      });
+    return update(tx);
+  });
   return { integration: cliView(updated), verification: result };
 }
 

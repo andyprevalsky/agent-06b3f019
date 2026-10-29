@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   publishUserCodeTemplate,
+  repairUserCodeTemplateVariant,
   readUserCodeTemplate,
   UserCodeTemplateError,
   type UserCodeTemplate,
@@ -275,6 +276,117 @@ async function main() {
     ),
     /Invalid native CLI template variants/
   );
+  const repairs = harness();
+  await publishUserCodeTemplate(
+    'owner',
+    'seed-yc',
+    recipe('yc'),
+    variants,
+    async (_r, v) => `old-${v.provider}`,
+    repairs.deps
+  );
+  await publishUserCodeTemplate(
+    'owner',
+    'seed-gh',
+    recipe('gh'),
+    variants,
+    async (_r, v) => `old-${v.provider}`,
+    repairs.deps
+  );
+  const rotated = { ...variants[0], baseTemplateId: 'base-new' };
+  let builds = 0;
+  const repaired = await repairUserCodeTemplateVariant(
+    'owner',
+    rotated,
+    async (recipes, variant) => {
+      builds++;
+      assert.deepEqual(
+        recipes.map((item) => item.id),
+        ['yc', 'gh']
+      );
+      assert.deepEqual(variant, rotated);
+      return 'repaired-claude';
+    },
+    repairs.deps
+  );
+  assert.equal(builds, 1);
+  assert.deepEqual(repaired.variants.map((item) => item.snapshotId).sort(), [
+    'old-codex',
+    'repaired-claude',
+  ]);
+  await repairUserCodeTemplateVariant(
+    'owner',
+    rotated,
+    async () => {
+      throw new Error('must reuse');
+    },
+    repairs.deps
+  );
+  const beforeFailure = structuredClone(repairs.head());
+  await assert.rejects(
+    repairUserCodeTemplateVariant(
+      'owner',
+      { ...rotated, key: 'new-size', cpu: 16 },
+      async () => {
+        throw new Error('build failed');
+      },
+      repairs.deps
+    ),
+    /build failed/
+  );
+  assert.deepEqual(repairs.head(), beforeFailure);
+  const repairEntered = gate();
+  const repairRelease = gate();
+  const pendingRepair = repairUserCodeTemplateVariant(
+    'owner',
+    { ...rotated, key: 'new-size', cpu: 16 },
+    async () => {
+      repairEntered.open();
+      await repairRelease.promise;
+      return 'new-size';
+    },
+    repairs.deps
+  );
+  await repairEntered.promise;
+  await rejection(
+    publishUserCodeTemplate(
+      'owner',
+      'concurrent-add',
+      recipe('new'),
+      variants,
+      async () => 'unreachable',
+      repairs.deps
+    ),
+    /in progress/
+  );
+  repairRelease.open();
+  assert.equal((await pendingRepair).variants.length, 3);
+  const fenced = harness();
+  const baseSwap = fenced.deps.store.compareAndSet;
+  let ownsIntegration = true;
+  fenced.deps.store.compareAndSet = async (user, expected, next, receipt, fence) => {
+    if (fence) {
+      assert.deepEqual(fence, { integrationId: 'cli', token: 'current' });
+      if (!ownsIntegration) return false;
+    }
+    return baseSwap(user, expected, next, receipt, fence);
+  };
+  await assert.rejects(
+    publishUserCodeTemplate(
+      'owner',
+      'fenced',
+      recipe('yc'),
+      variants,
+      async () => {
+        ownsIntegration = false;
+        return 'unpublished';
+      },
+      fenced.deps,
+      { integrationId: 'cli', token: 'current' }
+    ),
+    /superseded/
+  );
+  assert.equal(fenced.head()?.revision, 0, 'lost integration owner cannot publish a head');
   process.stdout.write(
     'Native templates: contention, immutable variants, recipe replay, failure retention, orphan receipts, stale fencing, renewal, idempotency and bounds passed\n'
   );

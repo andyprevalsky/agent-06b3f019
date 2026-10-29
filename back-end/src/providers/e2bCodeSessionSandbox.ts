@@ -66,6 +66,16 @@ export interface CodeAgentSessionResult {
   sandboxSize?: SandboxSize | null;
 }
 
+/** Persistent workspace and conversation controls for a Claude code spawn. */
+export interface ClaudeCodeSessionOptions {
+  /** Project restored into `~/workspace` before the CLI starts (PJ3 / C9). */
+  projectWorkspace?: ProjectWorkspace | null;
+  /** Persistent code session to resume or start (C1, C13). */
+  codeSession?: CodeSessionRow | null;
+  /** Keep the session's sandbox and files but start a new CLI conversation. */
+  freshConversation?: boolean;
+}
+
 /** Sizing of a spawn (C16): the size it wants and the agent to attribute checkpoints to. */
 export interface SpawnSizing {
   size?: SandboxSize;
@@ -187,6 +197,17 @@ async function retireReplacedSandbox(
   }
 }
 
+/** Caller identity may supply a new spawn owner but never replace session authority. */
+export function codeSandboxUserId(
+  codeSession: CodeSessionRow | null,
+  userId?: string
+): string | undefined {
+  if (codeSession !== null && userId !== undefined && codeSession.userId !== userId) {
+    throw new Error('Code session does not belong to the spawning user');
+  }
+  return codeSession?.userId ?? userId;
+}
+
 /**
  * Acquire the sandbox for a spawn: resume the session's paused sandbox, else
  * create one (restoring the latest checkpoint). With a `provider`, the
@@ -199,13 +220,19 @@ export async function acquireCodeSandbox(
   templateId: string,
   envs: Record<string, string>,
   label: string,
-  sizing: { provider?: SandboxProvider; projectSize?: unknown; agentId?: string } = {}
+  sizing: {
+    provider?: SandboxProvider;
+    projectSize?: unknown;
+    agentId?: string;
+    userId?: string;
+  } = {}
 ): Promise<{
   sandbox: Sandbox;
   resumedFrom: ResumedFrom;
   cliSessionId: string | null;
   size?: SandboxSize;
 }> {
+  const userId = codeSandboxUserId(codeSession, sizing.userId);
   const sized =
     sizing.provider !== undefined
       ? await resolveSpawnSandbox(codeSession, sizing.provider, sizing.projectSize ?? null)
@@ -215,9 +242,9 @@ export async function acquireCodeSandbox(
     async () => {
       const baseTemplateId = sized?.templateId ?? templateId;
       const selectedTemplateId =
-        codeSession?.userId && sizing.provider
+        userId && sizing.provider
           ? await resolveNativeCliTemplate(
-              codeSession.userId,
+              userId,
               sizing.provider,
               sized?.size ?? defaultSandboxSize(),
               baseTemplateId

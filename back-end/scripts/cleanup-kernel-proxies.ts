@@ -3,7 +3,11 @@
 import Kernel from '@onkernel/sdk';
 import { PrismaClient } from '@prisma/client';
 import { writeFile } from 'node:fs/promises';
-import { deletePlannedKernelProxy, planKernelProxyCleanup } from './kernel-proxy-cleanup-plan';
+import {
+  deletePlannedKernelProxy,
+  planKernelProxyCleanup,
+  protectBrowserProxies,
+} from './kernel-proxy-cleanup-plan';
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -32,9 +36,7 @@ async function main(): Promise<void> {
     });
     const protectedSet = new Set(rows.map((row) => row.proxyId));
     for await (const browser of kernel.browsers.list({ status: 'active', limit: 100 })) {
-      if (browser.proxy_id) protectedSet.add(browser.proxy_id);
-      // An unreported proxy reference cannot safely prove that any proxy is idle.
-      else throw new Error(`Active browser ${browser.session_id} has no proxy_id; cleanup stopped`);
+      protectBrowserProxies(protectedSet, [browser]);
     }
     return protectedSet;
   };

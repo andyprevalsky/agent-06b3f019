@@ -11,8 +11,13 @@ export interface CliIntegration {
 }
 
 async function cliResponse<T>(response: Response): Promise<T> {
-  const payload = (await response.json()) as T & { error?: string };
-  if (!response.ok) throw new Error(payload.error || 'Could not connect CLI');
+  let payload: T & { error?: string };
+  try {
+    payload = (await response.json()) as T & { error?: string };
+  } catch {
+    throw new Error(response.ok ? 'Unexpected CLI response' : 'Could not connect CLI');
+  }
+  if (!response.ok) throw new Error(payload?.error || 'Could not connect CLI');
   return payload;
 }
 

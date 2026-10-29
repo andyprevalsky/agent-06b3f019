@@ -5,10 +5,18 @@
 function isKernelProxyCreate(input, init) {
   const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
   const configured = process.env.KERNEL_BASE_URL;
-  const hosts = new Set(['api.onkernel.com', 'api.kernel.sh']);
-  if (configured) hosts.add(new URL(configured).host);
+  const endpoints = ['https://api.onkernel.com/proxies', 'https://api.kernel.sh/proxies'];
+  if (configured) endpoints.push(`${configured.replace(/\/+$/, '')}/proxies`);
   const method = String(init?.method ?? input?.method ?? 'GET').toUpperCase();
-  return hosts.has(url.host) && /^\/proxies\/?$/.test(url.pathname) && method === 'POST';
+  return (
+    method === 'POST' &&
+    endpoints.some((endpoint) => {
+      const expected = new URL(endpoint);
+      return (
+        url.origin === expected.origin && url.pathname.replace(/\/$/, '') === expected.pathname
+      );
+    })
+  );
 }
 
 function installKernelProxyCustody(originalFetch = globalThis.fetch) {
@@ -27,6 +35,7 @@ function installKernelProxyCustody(originalFetch = globalThis.fetch) {
     }
     return originalFetch(input, init);
   };
+  globalThis[Symbol.for('rose.test.kernelProxyCustody')] = true;
 }
 
 installKernelProxyCustody();

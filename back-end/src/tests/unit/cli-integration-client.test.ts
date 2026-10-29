@@ -164,6 +164,76 @@ test('publish forwards reproducible installation and credential metadata', async
   }
 });
 
+test('publication waits for delayed headers once and bounds ambiguous responses', async () => {
+  let calls = 0;
+  let delay = 180;
+  let interruptBody = false;
+  const server = createServer((req, res) => {
+    if (!acceptsCliRequest(req, res, '/cli/fixture/publish')) return;
+    calls += 1;
+    if (interruptBody) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.write('{');
+      setTimeout(() => res.destroy(), 30);
+      return;
+    }
+    setTimeout(() => res.end(JSON.stringify({ status: 'connected' })), delay);
+  });
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const args = [
+    cli,
+    'cli',
+    'publish',
+    'fixture',
+    '--name',
+    'YC',
+    '--command',
+    '/usr/bin/yc',
+    '--verify',
+    '["me"]',
+    '--install-script',
+    'true',
+    '--install-verify',
+    '["--version"]',
+    '--credential-files',
+    '[]',
+  ];
+  const env = {
+    ...process.env,
+    ROSE_TOOLS_URL: `http://127.0.0.1:${address.port}`,
+    ROSE_TOOLS_TOKEN: 'fixture-token',
+  };
+  try {
+    const result = await exec(process.execPath, args, {
+      env: { ...env, ROSE_CLI_PUBLISH_TIMEOUT_MS: '1000' },
+    });
+    assert.equal(JSON.parse(result.stdout).status, 'connected');
+    assert.equal(calls, 1);
+    delay = 250;
+    await assert.rejects(
+      exec(process.execPath, args, { env: { ...env, ROSE_CLI_PUBLISH_TIMEOUT_MS: '100' } }),
+      (error: unknown) => {
+        assert.match(
+          (error as { stderr: string }).stderr,
+          /outcome is unknown.*publication was not retried/
+        );
+        return true;
+      }
+    );
+    assert.equal(calls, 2, 'ambiguous publication must never be replayed');
+    interruptBody = true;
+    await assert.rejects(exec(process.execPath, args, { env, timeout: 2000 }), (error: unknown) => {
+      assert.match((error as { stderr: string }).stderr, /response interrupted.*not retried/);
+      return true;
+    });
+    assert.equal(calls, 3, 'an interrupted response body is not replayed');
+  } finally {
+    await new Promise<void>((done) => server.close(() => done()));
+  }
+});
+
 import { mkdtemp, mkdir, writeFile, readFile, stat, rm, symlink, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 

@@ -236,7 +236,8 @@ function assertLease(state: CredentialState, caller: CliCaller, token: string): 
 export async function initializeCliCredentials(
   userId: string,
   integrationId: string,
-  value: CliCredentialFile[]
+  value: CliCredentialFile[],
+  publishingToken?: string
 ): Promise<{ initialized: boolean }> {
   const connection = await ownedCli(userId, integrationId);
   const config = connection.config;
@@ -258,9 +259,24 @@ export async function initializeCliCredentials(
   return runTransactionWithRetry(async (tx) => {
     // Serialize setup initialization with the final connection publication.
     const setup = await tx.integration.updateMany({
-      where: { id: integrationId, userId, name: 'cli', status: { not: 'CONNECTED' } },
+      where: {
+        id: integrationId,
+        userId,
+        name: 'cli',
+        status: { not: 'CONNECTED' },
+        ...(publishingToken
+          ? {
+              AND: [
+                { config: { path: ['publishing_token'], equals: publishingToken } },
+                { config: { path: ['publishing_expires_at'], gt: Date.now() } },
+              ],
+            }
+          : {}),
+      },
       data: { updatedAt: new Date() },
     });
+    if (publishingToken && setup.count !== 1)
+      throw new CliIntegrationError(409, 'CLI publication lease expired or was replaced');
     const existing = await tx.integration.findUnique({
       where: credentialsWhere(userId, integrationId),
       select: { config: true },

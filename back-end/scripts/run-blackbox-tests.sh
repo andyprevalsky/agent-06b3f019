@@ -124,6 +124,8 @@ fi
 # reach a live provider. Capture-only benchmark stacks deliberately fail this
 # contract; callers must relaunch them with the explicit replay opt-in.
 if [[ "$USE_EXISTING_BACKEND" == "1" ]]; then
+  # A separate running process cannot be protected by this runner's NODE_OPTIONS.
+  node "$SCRIPT_DIR/verify-kernel-proxy-custody.cjs" "$TEST_BASE_URL"
   if [[ -z "${TEST_BASE_URL:-}" ]]; then
     echo "❌ TEST_BASE_URL must be set when BLACKBOX_TEST_USE_EXISTING_BACKEND=1 or CONTRACT_TEST_USE_EXISTING_BACKEND=1"
     exit 1
@@ -543,7 +545,7 @@ EOF
 
   PORT="$PORT" \
   DISABLE_GMAIL_SYNC=1 \
-  NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require=$SCRIPT_DIR/blackbox-kernel-proxy-custody.cjs" \
+  NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require=$(node -p 'JSON.stringify(process.argv[1])' "$SCRIPT_DIR/blackbox-kernel-proxy-custody.cjs")" \
   npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
   BACKEND_PID=$!
   trap 'exit 130' INT

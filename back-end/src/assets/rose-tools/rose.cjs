@@ -37,6 +37,8 @@ const {
 const { cpus, freemem, homedir, loadavg, totalmem } = require('node:os');
 const { basename, dirname, join, posix, resolve } = require('node:path');
 const { createInterface } = require('node:readline');
+const http = require('node:http');
+const https = require('node:https');
 
 const VERSION = '1';
 const MAX_ITEMS = 20;
@@ -47,6 +49,69 @@ const MAX_BUNDLE_BYTES = 50 * 1024 * 1024;
 const SEND_ATTEMPTS = 6;
 
 class ToolError extends Error {}
+
+// Publication can build up to 18 clean template variants. Use a bounded
+// one-attempt transport without fetch's shorter response-header deadline.
+function publishRequest(url, token, body) {
+  const maximum = 12 * 60 * 60 * 1000;
+  const configured = Number(process.env.ROSE_CLI_PUBLISH_TIMEOUT_MS || maximum);
+  if (!Number.isInteger(configured) || configured < 100 || configured > maximum) {
+    throw new ToolError('ROSE_CLI_PUBLISH_TIMEOUT_MS must be between 100 and 43200000');
+  }
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const transport = target.protocol === 'https:' ? https : http;
+    const payload = JSON.stringify(body);
+    const request = transport.request(
+      target,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+          'Content-Length': Buffer.byteLength(payload),
+        },
+      },
+      (response) => {
+        const chunks = [];
+        response.on('data', (chunk) => chunks.push(chunk));
+        response.on('error', (error) => {
+          clearTimeout(deadline);
+          reject(
+            new ToolError(
+              `publication response interrupted: ${error.message}; outcome is unknown; publication was not retried`
+            )
+          );
+        });
+        response.on('end', () => {
+          clearTimeout(deadline);
+          const text = Buffer.concat(chunks).toString('utf8');
+          let data;
+          try {
+            data = text ? JSON.parse(text) : {};
+          } catch {
+            data = { error: text.slice(0, 500) };
+          }
+          if (response.statusCode >= 200 && response.statusCode < 300) resolve(data);
+          else
+            reject(
+              new ToolError(
+                `${data.error || `HTTP ${response.statusCode}`} (HTTP ${response.statusCode})`
+              )
+            );
+        });
+      }
+    );
+    const deadline = setTimeout(() => {
+      request.destroy(new Error('CLI publication response deadline exceeded; outcome is unknown'));
+    }, configured);
+    request.on('error', (error) => {
+      clearTimeout(deadline);
+      reject(new ToolError(`could not reach Rose: ${error.message}; publication was not retried`));
+    });
+    request.end(payload);
+  });
+}
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
@@ -148,19 +213,15 @@ async function cliTool(args) {
   }
   const path = `/cli/${encodeURIComponent(args.integration_id)}`;
   if (action === 'publish') {
-    const data = await call(
-      'POST',
-      `${path}/publish`,
-      {
-        name: args.name,
-        command: args.command,
-        verify: args.verify,
-        install: args.install,
-        install_verify: args.install_verify,
-        credential_files: args.credential_files,
-      },
-      1
-    );
+    const { url, token } = config();
+    const data = await publishRequest(`${url}${path}/publish`, token, {
+      name: args.name,
+      command: args.command,
+      verify: args.verify,
+      install: args.install,
+      install_verify: args.install_verify,
+      credential_files: args.credential_files,
+    });
     return { text: JSON.stringify(data), rejected: false };
   }
   if (action !== 'run') throw new ToolError('CLI action must be list, run or publish');

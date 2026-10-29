@@ -3,6 +3,7 @@ import {
   deletePlannedKernelProxy,
   planKernelProxyCleanup,
   roseProxyGroup,
+  protectBrowserProxies,
   type CleanupProxy,
 } from '../../../scripts/kernel-proxy-cleanup-plan';
 
@@ -16,6 +17,14 @@ const proxy = (id: string, overrides: Partial<CleanupProxy> = {}): CleanupProxy 
 });
 
 async function main() {
+  const protectedBrowsers = new Set(['database-reference']);
+  protectBrowserProxies(protectedBrowsers, [
+    {},
+    { proxy_id: null },
+    { proxy_id: 'active-browser' },
+  ]);
+  assert.deepEqual([...protectedBrowsers], ['database-reference', 'active-browser']);
+  assert.throws(() => protectBrowserProxies(protectedBrowsers, [{ proxy_id: '' }]), /Malformed/);
   const inventory = ['a', 'b', 'c', 'd'].map((id) => proxy(id));
   inventory.push(proxy('bad', { status: 'unavailable' }));
   assert.deepEqual(

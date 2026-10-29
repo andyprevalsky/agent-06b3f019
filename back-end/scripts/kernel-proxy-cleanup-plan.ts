@@ -16,6 +16,20 @@ export interface ProxyCleanupCandidate {
   keepIds: string[];
 }
 
+/** No proxy reference is normal for a browser created without a proxy. */
+export function protectBrowserProxies(
+  protectedIds: Set<string>,
+  browsers: Iterable<{ proxy_id?: string | null }>
+): void {
+  for (const browser of browsers) {
+    if (browser.proxy_id === undefined || browser.proxy_id === null) continue;
+    if (typeof browser.proxy_id !== 'string' || !browser.proxy_id.trim()) {
+      throw new Error('Malformed active browser proxy reference; cleanup stopped');
+    }
+    protectedIds.add(browser.proxy_id);
+  }
+}
+
 function stable(value: unknown): string {
   if (Array.isArray(value)) return JSON.stringify(value.map(stable));
   if (value !== null && typeof value === 'object') {

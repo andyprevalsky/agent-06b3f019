@@ -87,8 +87,9 @@ phone_credential_unavailable receipt means request the protected user step if an
 actual critical password screen blocks progress. Binding/stale errors mean
 observe again, never supply a secret or blindly retry. UNKNOWN means inspect
 status/receipts, never replay. A saved-password rejection ends autonomous password attempts for that current
-sign-in. Request the protected user step; do not try another saved-password source,
-including credentials.fill_saved after native AutoFill rejection. This rejection
+sign-in. Request the protected user step only if the current observation confirms
+that a critical password step still blocks progress. Do not try another saved-password
+source, including credentials.fill_saved after native AutoFill rejection. This rejection
 rule takes precedence over every saved-credential fallback below or above.
 When user presence is required, request the protected step rather than bypassing
 biometric/device authentication.

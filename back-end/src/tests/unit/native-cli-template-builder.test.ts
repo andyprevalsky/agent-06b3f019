@@ -189,8 +189,32 @@ async function main() {
     'snapshot-v1'
   );
   await assert.rejects(
-    resolveNativeCliTemplate('owner', 'claude', { cpu: 2, memoryGb: 4 }, 'base-v2', existingHead),
-    /missing or stale/
+    resolveNativeCliTemplate(
+      'owner',
+      'claude',
+      { cpu: 2, memoryGb: 4 },
+      'base-v2',
+      existingHead,
+      async () => {
+        throw new Error('repair failed');
+      }
+    ),
+    /repair failed/
+  );
+  assert.equal(
+    await resolveNativeCliTemplate(
+      'owner',
+      'claude',
+      { cpu: 2, memoryGb: 4 },
+      'base-v2',
+      existingHead,
+      async (userId, requested) => {
+        assert.equal(userId, 'owner');
+        assert.equal(requested.baseTemplateId, 'base-v2');
+        return { ...(await existingHead()), variants: [{ ...requested, snapshotId: 'rebuilt' }] };
+      }
+    ),
+    'rebuilt'
   );
   process.stdout.write(
     'Native CLI builder: clean env, immutable filesystem snapshot, owned cleanup, sanitized failures and exact variant provisioning passed\n'

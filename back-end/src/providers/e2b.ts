@@ -31,14 +31,15 @@ import {
 import {
   acquireCodeSandbox,
   codeSessionBranchEnvs,
+  codeSandboxUserId,
   codeSessionTaskFields,
   type CodeAgentSessionResult,
+  type ClaudeCodeSessionOptions,
   createLocalCodeSessionFallback,
   recordE2bCodeSessionSandbox,
   releaseSandboxAfterFailedStart,
 } from './e2bCodeSessionSandbox';
 import { type CodeSessionRow } from './codeSessions/store';
-import type { ProjectWorkspace } from './projects/types';
 import { restoreSandboxProject } from './projects/workspace';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import { waitForSandboxWsServer } from './e2bWsReady';
@@ -62,7 +63,7 @@ import {
   shouldSkipSandboxAnthropicGatewayForOauth,
 } from './claudeCodeSandboxAuth';
 export { createSandboxWithRetry, isTransientSandboxCreateError } from './e2bSandboxCreate';
-export type { CodeAgentSessionResult } from './e2bCodeSessionSandbox';
+export type { CodeAgentSessionResult, ClaudeCodeSessionOptions } from './e2bCodeSessionSandbox';
 export {
   closeClaudeCodeSession,
   connectToSandbox,
@@ -116,15 +117,6 @@ const WS_READY_POLL_INTERVAL_MS = 100;
  * @param githubRepoUrl - Optional GitHub repo URL to clone before starting Claude
  * @returns Session info including WebSocket URL for terminal streaming
  */
-export interface ClaudeCodeSessionOptions {
-  /** Project restored into `~/workspace` before the CLI starts (PJ3 / C9). */
-  projectWorkspace?: ProjectWorkspace | null;
-  /** Persistent code session to resume or start (C1, C13). */
-  codeSession?: CodeSessionRow | null;
-  /** Keep the session's sandbox and files but start a new CLI conversation. */
-  freshConversation?: boolean;
-}
-
 export async function createClaudeCodeSession(
   agentId: string,
   goal: string,
@@ -159,6 +151,7 @@ async function createClaudeCodeSessionUnlocked(
 ): Promise<CodeAgentSessionResult> {
   const projectWorkspace = options.projectWorkspace ?? null;
   const codeSession = options.codeSession ?? null;
+  codeSandboxUserId(codeSession, userId);
   log.info(`Creating Claude Code session for agent ${agentId}`);
 
   if (!process.env.E2B_API_KEY || !process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
@@ -374,6 +367,7 @@ async function createClaudeCodeSessionUnlocked(
   try {
     acquired = await acquireCodeSandbox(codeSession, templateIdForCreate, envs, 'Claude Code', {
       provider: 'claude',
+      userId,
       projectSize: projectWorkspace?.project.sandboxSize,
       agentId,
     });
@@ -496,6 +490,7 @@ export async function createCodexCodeSession(
   },
   codeSession: CodeSessionRow | null = null
 ): Promise<CodeAgentSessionResult> {
+  codeSandboxUserId(codeSession, userId);
   log.info(`Creating Codex Code session for agent ${agentId}`);
 
   if (!process.env.E2B_API_KEY) {
@@ -629,6 +624,7 @@ export async function createCodexCodeSession(
 
   const acquired = await acquireCodeSandbox(codeSession, templateId, envs, 'Codex Code', {
     provider: 'codex',
+    userId,
     agentId,
   });
   const { sandbox, resumedFrom, cliSessionId } = acquired;
