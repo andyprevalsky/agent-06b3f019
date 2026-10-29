@@ -21,6 +21,8 @@ tags:
 sources:
   - commit 66eb9ccc4e39237bdd99b08f697180c7097a39bd
   - agent db3ffc42-942c-42e3-956b-04ab9a75ce25
+  - agent 07eb24c5-bb7a-4ae3-8146-af08d9de1512
+  - plan: R42 archive e2eb0d335c8f78d0cd8ddc372736ad094db60961c1f8105795ea4cf2e77ed597
   - fleet run 20261028-214843-2725262
   - plan: normal archive 1c7226ec3b50ddcaab7684a0c074660a27f2f235105502d30cacf22fc3bad981
   - plan: normal manifest c3f7e6f81a778dd5dc14638d6a4c3cf0607a37d3b61e2d0214dce86afee9230b
@@ -138,6 +140,121 @@ separately grounded admission policy and does not guarantee step33 survives the
 actual full context. No such repair was implemented. The two independent
 eligibility failures remain even if that one amount is restored. Stop at this
 concrete floor; do not reopen R25 finalization or claim full-task repair.
+
+## R42 original SWE-date omission (2026-10-29)
+
+The R42 intake began at01:11:31.782901Z. Original It13 BU059r2/j0024/root
+07eb24c5-bb7a-4ae3-8146-af08d9de1512 used source765caac with no patch.
+All seven normal members match archive
+e2eb0d335c8f78d0cd8ddc372736ad094db60961c1f8105795ea4cf2e77ed597 and
+manifest9766d467be32b8104e967b653b110bd1fdec771b15a8dbc7e728c7f5bd9a81d5.
+Native status is COMPLETED after1805.9seconds; the declared judge reports
+C1=1,C2=1,C3=0, and original taskFAILED/infraFALSE are preserved.
+
+The original SWE sponsor evaluations at action steps15 and17 state that the
+Collegiate/Graduate application opens December1,2026 and closes February1,2027.
+They follow the actual goto requests for swe.org/scholarships-overview/ and
+swe.org/apply/. The receipts are5021 and3187characters, with hashes
+545b038d2f2dca7ad5a1dc1f4f51cdd040ad07a68d58d6d425a42658c5373a6e and
+b2ac6396d83e662964c0e7c4171fb71645385c3e4a7d63a7e685b103a22fcc08.
+Later action55 reads a WIGSAT guide with a typical March/April deadline.
+
+The final actor prose at01:02:58.558Z correctly repeats the sponsor's dates.
+Neither date nor that prose is present in the captured preconversion verifier
+context or its encoded model messages. The compact history starts at35 and
+ends at64. Its fifteen separate evaluate receipts are exactly
+64,62,60,58,57,55,53,51,48,46,44,42,40,38,36. Therefore the sponsor actions15/17
+are excluded before TOOL_RESULT admission, while the later guide55 survives.
+The original765 service still takes all_action_entries[-30:] and derives its
+evaluate evidence from that same window, matching the mechanism above.
+
+An offline call to the actual text converter exactly reproduces the captured
+model messages after excluding the separately inserted schema-system block.
+The converter reports60295/160000 tool-result characters and one truncated
+result. The missing dates were already absent before conversion, so this is
+not attribution to the12k result cap or exhausted160k budget. This replay
+proves conversion custody only, not a model or full-task repair.
+
+Native verifier request2ea5b9f6e48c has SHA256
+2337edd132f17b8f13d3b31467dae3867ce8dc034ec4bc2175546cbe33f589d4; response SHA256
+b04a2d6909aa65bdb7c5dd57432d00f384adef537ee1f488c070096640368694. The response explicitly selects the surviving guide's
+typical March/April date and returns task_completed=true, score1.0. Its
+structured output replaces the actor's current SWE date with that typical
+window. The declared judge rejects this contradiction against the earlier
+sponsor evidence. That is distinct from R38, where the contrary eligibility
+facts were retained in the final native request and expressly discounted.
+
+This is another observed omission under the same bounded selection policy,
+not a regression of a claimed R31 repair: no such repair was applied. It does
+not prove restoring one receipt would make the unchanged task pass. A larger
+window, scholarship-specific preference, automatic trust in actor prose or
+schema/prompt change is not justified by this intake. The existing general
+admission-policy and outcome-proof gaps remain OPEN. No new runtime patch,
+model/browser/provider call, capture, cap change or duplicate fix/test lane.
+Tokens UNMETERED.
+
+## Scoped source repair: full-history candidates under unchanged budgets
+
+The earlier intake floors describe the source before this repair. On exact
+source765caac00ce085dd0359b8342161a8717be7446d, the complete action history was
+already privacy-projected and available. Native observation receipts used it,
+but separate evaluate receipts were inadvertently selected from the compact
+30-action view. The scoped repair changes only that evaluate comprehension to
+use all_action_entries. It does not expand the compact log, model context,
+per-tool12000-character cap or aggregate160000-character cap.
+
+The existing latest-native-first and stable descending-step merge remains.
+Native observations win equal-step ties; JavaScript results keep their explicit
+untrusted attribution, original request/result pair and success/error state.
+Missing values or unowned steps are not synthesized. History and final-context
+privacy projections remain intact. Under pressure, a newer old-JavaScript
+receipt can displace an even older native receipt. This tradeoff is explicitly
+tested; neither lossless history nor universal preservation is claimed.
+
+The new registered test
+`test_browser_evaluate_receipts_outlive_compact_window_with_fixed_budgets`
+fails on baseline because the expected steps46,3,2,1 become only46. The exact
+candidate passes that same test and nine relevant existing controls covering
+small histories, provider message bodies, native authority, privacy, failed and
+conflicting results, payment/auth carry and bounded checkpoints. Both author
+and independent reviewer ran all10 under pinned Python3.11.9 with no sockets.
+The test also demonstrates oversized truncation, identical newer admitted
+output despite an old-result flood, and possible oldest-native displacement.
+After exact application, the registered new control passes on the actual
+checkout in0.484s; compilation and archive validation are recorded separately.
+
+Saved-input admission checks reproduce the original R31/R37/R42 converter
+messages before modification, excluding the separately inserted schema system
+message. R31 and R42 actor histories reproduce the original evaluate payloads
+exactly. R37 has only the earlier actor history through44; its later selection
+uses the exact captured final evaluate receipts plus non-evaluate placeholders,
+so complete final ActionHistory parity is not claimed. The candidate projection
+preserves all previously admitted tool-result lines in these three inputs and
+changes actual tool-budget use from59306 to124720,35919 to66907, and60295 to103292
+characters respectively. It restores the recorded AAUW stipend, restaurant
+distances, and current SWE dates within the existing cap. These are deterministic
+input projections, not model reruns or proof of factual correctness, eligibility,
+file delivery, changed final answers or an unchanged task passing.
+
+Approval BROWSER-EVALUATE-HISTORY-V1 exact two-file patch SHA256
+6c5e16e36383402fbf0d268748529a3994885220380c6bfa5963599c15026fba was
+GROUNDED before application by independent reviewer ph7eq6. The reviewer checked
+the exact base/output hashes, independent baseline RED and candidate10/10 GREEN,
+and portable supplied-text admission proof. The full original historical
+custody remains investigator evidence, not claimed independently reopened by
+the reviewer. Personally opened Codex context_manager/history.rs503–530,
+554–573,680–690, Hermes context_compressor.py3311–3408, and Claude Code
+services/compact/compact.ts230–286 support call identity and pressure-driven
+bounded retention; none dictates Rose's exact limits or JS/native authority.
+Their summarization/grouping differences are not imported here.
+
+The source repair remains isolated from the executing765 checkout. Parent
+integration must preserve R35's separate additions to the shared test file.
+Older-context assembly and input cost can increase up to the unchanged limits;
+production exposure and10k-agent cost are unmeasured. All original R31/R37/R42
+FAIL grades, independent semantic gaps and full-task outcome remain OPEN.
+No provider/model/browser/DB call, new capture, image or paid replay was made.
+Original case and phase clocks are retained; token usage is UNMETERED.
 
 ## Human feedback
 

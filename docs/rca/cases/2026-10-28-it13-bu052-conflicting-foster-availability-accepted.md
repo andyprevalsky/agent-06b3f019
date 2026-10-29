@@ -19,6 +19,8 @@ tags:
 sources:
   - commit 765caac00ce085dd0359b8342161a8717be7446d
   - agent 4775d90b-1e44-4a89-87a8-216fbc6c78eb
+  - agent 375dfc00-5ea3-4762-82ca-e42dfd90b0be
+  - fleet run 20261029-002842-2095851
   - fleet run 20261028-230247-3988091
 repro: none-recorded; original evidence proves the semantic decision but no safe general runtime repair
 status: open
@@ -110,6 +112,55 @@ and fresh exact grounding. This report does not stop at missingpacket: it binds
 original goal/schema, profile contradiction, admitted verifier evidence and all
 three judge results. Full task outcome remainsFAILED. Tokens UNMETERED.
 
+
+## R41 original run2 occurrence (2026-10-29)
+
+R41 began at00:53:26.099621Z. Original jobr002-j0017/root
+375dfc00-5ea3-4762-82ca-e42dfd90b0be used the same765caac source with no patch.
+All seven normal members match archive
+f1a38439f2c50d8ecd84a146f83a7590b0df25964065904b6287ff256b7e4243 and
+manifest3fcc1547ed64e16aecadb9f094610b518506eace235a1ac5022d744d4705ed4f.
+The original prompt equals that source's catalog prompt. Native status is
+COMPLETED after471.7seconds; benchmark outcome is FAILED with0/3 declared
+rubrics and infra_failure=false. No values are regraded.
+
+The original step21 receipt at00:38:10.062Z contains the full1551-character
+Malyk profile, including both FOSTER ME placement and the statement that he is
+in a foster home, not at the shelter, with instructions to inquire about
+adoption. That contrary statement remains in the final actor request
+04f107c706dc (SHA256
+8289239daf123378cdf1c622ab264de2e9985d0c407d0dec78cd4d1391b06749).
+
+Unlike run1's raw-response availability floor above, run2 has a
+captured native verifier request/response pair a13007f651ab. The request
+SHA256 isdb9c1b7ef66501c1659ab360f1a51fe299172a31ab4e1906d16aaea0d5e9e728;
+the response SHA256 is
+9fe497acee3abfd2fb292b5f8c50dd46e5816bef3a13bc2408f1ab3d53f7db81.
+Their compressed payload hashes were verified against the original worker
+records before decoding. The request includes the contrary profile statement
+and the explicit currently-available requirement. The response literally
+contains task_completed=true and score1.0, includes Malyk in foster_dogs,
+and acknowledges his existing foster placement as a minor caveat before
+preferring the board category. This is captured raw evidence for run2 only;
+run1's absent raw boolean remains UNKNOWN.
+
+The declared judge rejects the unresolved availability conflict under C1,
+C2 and C3. The original response's actual_model is
+claude-opus-5-5-claude on the existing rose-1-ultra route. No model-only replay
+was performed, and no model-intelligence classification follows. The full
+external judge request was not independently reconstructed. These limits do
+not erase the positive proof that the native verifier received and expressly
+considered the conflicting profile fact.
+
+This is another occurrence of the semantic-acceptance boundary recorded in
+R33, not evidence loss, schema-field stripping, R27 navigation failure, or a
+regression of unexecuted R35/schema changes. The two archive searches were
+Malyk/already-in-foster/availability and foster/currently-available/structured
+output; the parent supplied the exact R33 case for comparison (original case
+SHA256366fbeb8dee66805180113d9ecef51167bf4025504e1d8c21031f06a24eb11ac).
+No new runtime patch, heuristic, test lane, provider call, capture or task
+rerun was introduced. The original semantic decision and task failure stay
+OPEN; the existing next-proof requirement remains. Tokens UNMETERED.
 
 ## Human feedback
 

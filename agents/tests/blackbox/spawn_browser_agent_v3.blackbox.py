@@ -910,6 +910,95 @@ async def test_browser_receipt_budget_keeps_recent_evaluations_and_native_author
     assert len(body) < VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS + 15000
 
 
+async def test_browser_evaluate_receipts_outlive_compact_window_with_fixed_budgets():
+    from browser_tools.dom_service import ActionHistory, DOMService
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from helpers.llm import build_verifier_context_messages, VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+
+    async def project(rows):
+        policy = DOMService("ws://unused.test")
+        policy.register_secret_refs({"secret:fixture": "private-old-value"})
+        history = ActionHistory()
+        history.bind_dom_service(policy)
+        history.restore_entries(rows)
+        with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+            ctx = await bsvc.build_browser_verifier_context(
+                goal="Inspect", current_url="https://example.test/current",
+                browser_state={"dom_tree": "Independent current page: count=3"},
+                action_history=history, config=SimpleNamespace(), session_id="fixture")
+        body = json.dumps(build_verifier_context_messages(ctx, "Verify", call_site="verifier_browser"))
+        return ctx, body
+
+    old = [
+        {"step": 1, "action": "evaluate", "params": {"code": "readOld()"},
+         "result": {"success": True, "value": "old-independent-request-result"}},
+        {"step": 2, "action": "evaluate", "params": {"code": "private-old-value"},
+         "result": {"success": False, "error": "denied", "value": "private-old-value"}},
+        {"step": 3, "action": "evaluate", "params": {"code": "readLarge()"},
+         "result": {"success": True, "value": "old-large-head " + "x" * 20000 + " old-large-tail"}},
+        {"step": None, "action": "evaluate", "params": {},
+         "result": {"success": True, "value": "unknown-step-not-evidence"}},
+        {"step": 4, "action": "evaluate", "params": {}, "result": {"success": True}},
+    ]
+    recent = [{"step": step, "action": "scroll", "params": {}, "result": {"success": True}}
+              for step in range(5, 45)] + [
+        {"step": 45, "action": "read_browser_state", "params": {},
+         "result": {"success": True, "formatted_state": "latest-native: count=3"}},
+        {"step": 46, "action": "evaluate", "params": {"code": "readRecent()"},
+         "result": {"success": True, "value": "recent-request-result: count=4"}},
+    ]
+    ctx, body = await project(old + recent)
+    receipts = [m for m in ctx if m.get("metadata", {}).get("toolName") == "evaluate"]
+    assert [m["metadata"]["browser_action_step"] for m in receipts] == [46, 3, 2, 1], "Older executed receipts lost before budget admission"
+    compact = next(m["text"] for m in ctx if m.get("metadata", {}).get("toolName") == "action_history")
+    assert "Step 1:" not in compact and "Step 46:" in compact  # History stays at 30 entries.
+    assert "old-independent-request-result" in body and "recent-request-result" in body
+    assert "old-large-head" in body and "old-large-tail" in body and "verifier truncated" in body
+    assert "private-old-value" not in json.dumps(ctx) and "unknown-step-not-evidence" not in body
+    failed = next(m for m in receipts if m["metadata"]["browser_action_step"] == 2)
+    assert failed["metadata"]["toolStatus"] == "ERROR" and failed["metadata"]["structured_response"]["result"]["success"] is False
+    assert "not independent DOM confirmation" in body and "latest-native: count=3" in body
+    assert len(body) < VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS + 15000
+
+    # Old evidence cannot push newer receipts out of the unchanged total budget.
+    flood = [{"step": step, "action": "evaluate", "params": {"code": "oldRead()"},
+              "result": {"success": True, "value": f"old-flood-{step}: " + "o" * 20000}}
+             for step in range(1, 21)]
+    recent = [{"step": step, "action": "evaluate", "params": {"code": "recentRead()"},
+               "result": {"success": True, "value": f"recent-flood-{step}: " + "r" * 20000}}
+              for step in range(51, 66)] + [
+        {"step": step, "action": "scroll", "params": {}, "result": {"success": True}}
+        for step in range(21, 51)
+    ] + [{"step": 66, "action": "read_browser_state", "params": {},
+           "result": {"success": True, "formatted_state": "latest-native-flood: count=3"}}]
+    recent.sort(key=lambda entry: entry["step"])
+    _, recent_body = await project(recent)
+    ctx, body = await project(flood + recent)
+    assert body == recent_body, "Old evidence displaced a previously admitted recent receipt"
+    assert "latest-native-flood: count=3" in body and "recent-flood-65:" in body
+    assert "old-flood-1:" not in body, "Old receipts bypassed the existing budget"
+    assert len(body) < VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS + 15000
+    ordered = [m["metadata"]["browser_action_step"] for m in ctx
+               if m.get("metadata", {}).get("toolName") in {"evaluate", "read_browser_state"}]
+    assert ordered == sorted(ordered, reverse=True)
+
+
+    # Same shared recency policy may retire an older native row; it never
+    # promotes JavaScript output into native evidence or retires the latest DOM.
+    native_old = {"step": 0, "action": "read_browser_state", "params": {},
+                  "result": {"success": True, "formatted_state": "older-native-displaced"}}
+    tail = [{"step": step, "action": "scroll", "params": {}, "result": {"success": True}}
+            for step in range(21, 62)] + [
+        {"step": 62, "action": "read_browser_state", "params": {},
+         "result": {"success": True, "formatted_state": "latest-native-retained"}}]
+    _, baseline_native_body = await project([native_old] + tail)
+    _, crowded_body = await project([native_old] + flood + tail)
+    assert "older-native-displaced" in baseline_native_body and "older-native-displaced" not in crowded_body
+    assert "latest-native-retained" in crowded_body and "not independent DOM confirmation" in crowded_body
+
+
+
+
 async def test_browser_verifier_context_grounds_in_final_state():
     """The extracted verifier-context builder (shared by attempt_completion AND
     the new max-steps final synthesis pass) grounds in final-state DOM +
@@ -37330,6 +37419,7 @@ async def run_all_tests():
     r.record("browser_file_delivery_schema_boundaries", test_browser_file_delivery_schema_boundaries)
     await r.record_async("browser_replayed_verifier_requires_explicit_completion_before_terminal", test_browser_replayed_verifier_requires_explicit_completion_before_terminal)
     await r.record_async("browser_evaluate_receipts_survive_compact_history_truncation", test_browser_evaluate_receipts_survive_compact_history_truncation)
+    await r.record_async("browser_evaluate_receipts_outlive_compact_window_with_fixed_budgets", test_browser_evaluate_receipts_outlive_compact_window_with_fixed_budgets)
     await r.record_async("browser_receipt_budget_keeps_recent_evaluations_and_native_authority", test_browser_receipt_budget_keeps_recent_evaluations_and_native_authority)
     await r.record_async("browser_evaluate_receipts_keep_failure_conflict_privacy_and_caps", test_browser_evaluate_receipts_keep_failure_conflict_privacy_and_caps)
     await r.record_async("browser_verifier_target_attempt_survives_admission_and_provider_bodies", test_browser_verifier_target_attempt_survives_admission_and_provider_bodies)

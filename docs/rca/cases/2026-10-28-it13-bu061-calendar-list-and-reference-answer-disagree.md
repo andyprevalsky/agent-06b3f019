@@ -18,6 +18,8 @@ tags:
   - r32
   - list-basis
 sources:
+  - agent ea21b86b-c081-4992-a1f6-7f0a5227d0c1
+  - plan: R32 run2 control archive 558476e3722793af600c8887029c61f6cb90ce8b985a63bb961cf5ed4508afd4
   - commit 765caac00ce085dd0359b8342161a8717be7446d
   - agent 9ab57116-b82e-42c3-a2ae-bab21d4c79ff
   - fleet run 20261028-230246-3988127
@@ -106,6 +108,52 @@ No provider/model/API/browser/DB/image/publication calls occurred. No original
 source, clocks, task definition or cleanup receipt changed. Exact source and
 packet inspection suffice to exclude a missing-table transport claim at the
 captured native verifier input; they do not prove the task would pass unchanged.
+
+## Later original PASS control (2026-10-29)
+
+The existing BU061r2/j0026 control arrived at01:06:26.500301Z. This is new
+available original evidence, not a reset of the R32 investigation clock.
+Rootea21b86b-c081-4992-a1f6-7f0a5227d0c1 also executed source765caac with no patch.
+Its archive558476e3722793af600c8887029c61f6cb90ce8b985a63bb961cf5ed4508afd4
+and all seven normal members were verified against manifest
+ebaa844951c8b8782483a502d50d0790ecae8931ba90cc355d7ee6389a8e889b.
+Native status is COMPLETED in161.5seconds, and the original declared judge
+passes4/4. Original run1 FAIL and run2 PASS remain unchanged.
+
+The two runs captured exactly the same ordered worldwide top10 and the same
+ordered domestic calendar top10. Independent set intersection of those rows
+is still3: Bad Boys for Life, Dolittle and Sonic the Hedgehog. The new control
+does not invalidate run1's arithmetic or retroactively supply its missing view.
+
+Run2 additionally captured these distinct selectors and complete top10 rows:
+
+- Step5: `/year/2020/`, domestic calendar grosses. Intersection with worldwide:3.
+- Step8: `/year/2020/?grossesOption=totalGrosses`, in-year releases. Intersection:5,
+  adding Tenet and The Croods: A New Age to those three.
+- Step10: `/year/world/2020/?sort=domesticGrossToDate`, the worldwide year list
+  ordered by its Domestic column. Intersection:6, also adding Demon Slayer.
+
+The last table's numeric domestic grosses are descending; its displayed
+worldwide ranks remain3,6,11,7,15,19,16,10,5,1, as expected for a differently
+sorted view. The six-title intersection is independently recomputed from the
+captured rows, not inferred from PASS or from the model's answer. The exact
+same worldwide top10 is used for all three calculations.
+
+The original run2 native verifier request retains the worldwide and domestic
+column-sorted titles; its response returns movies_in_both_top10=6. Request
+SHA256d4d19e461f30b5560c3c0a8d3e2908f5079f8ceee97dcdc911a355c6f16e38fa; response
+SHA256697b08685387ddce40210062e3174334bfd56162b21b54a9130e5b73489e5ff1. Its reasoning explicitly discusses
+all three interpretations and selects the same worldwide list's Domestic
+column because the question anchors to that list. The declared judge accepts
+that choice and the six value. This is an observed difference in selected
+view, not a newly proved universal interpretation rule or a task regrade.
+
+Thus the new control explains why the original outputs differ: the input
+selection differs while arithmetic over each selected pair is consistent.
+No runtime defect, current-site mutation or stale-ground-truth verdict is
+established. No task, rubric, prompt, model, provider or budget change is
+proposed; no paid replay or new web/API/browser capture was performed.
+The original case remains OPEN for any stronger causal claim. Tokens UNMETERED.
 
 ## Human feedback
 

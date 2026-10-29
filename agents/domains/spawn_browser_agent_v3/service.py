@@ -466,7 +466,7 @@ async def build_browser_verifier_context(
                       "browser_action_step": entry["step"],
                       "structured_response": {"step": entry["step"], "params": entry.get("params", {}),
                                               "result": {key: entry["result"][key] for key in ("success", "error", "value") if key in entry["result"]}}}}
-        for entry in reversed(action_entries)
+        for entry in reversed(all_action_entries)
         if type(entry.get("step")) is int and entry.get("action") == "evaluate"
         and isinstance(entry.get("result"), dict) and "value" in entry["result"]
     ]

@@ -21,6 +21,9 @@ tags:
 sources:
   - commit 765caac00ce085dd0359b8342161a8717be7446d
   - agent 1af3070d-3f15-4061-9768-bf7a632b221b
+  - agent 72d9fb63-4c33-4cfe-9389-06b3042bb0df
+  - fleet run 20261029-002843-2095983
+  - plan: R40 archive fef0874443f83820635450e70328c62247122816fc57c77a274df9c79e93928d
   - fleet run 20261028-230247-3988155
   - plan: archive 3f6284577ff96715bf83af3a24d314ed453f34d20dfb7a6668d4f9c7ecd3efa7
   - plan: normal manifest 4ae6f3ee3ebdb0214928a911cf8d59f5b2282d73e600a7e33844796c463dee74
@@ -174,6 +177,59 @@ extensions/browser/src/browser/pw-session-navigation.ts436-475 preserves
 navigation error/policy ownership (contrary to blindly swallowing denial);
 OpenClaw structured-output-tool.ts33-42 illustrates acknowledgement-before-state
 advancement only. These support ownership/order, not a claim of task success.
+
+## Additional original occurrence: R40 BU065r2 (2026-10-29)
+
+The bounded intake began at00:45:16.985800Z. Original r002-j0030/root
+72d9fb63-4c33-4cfe-9389-06b3042bb0df ran source
+765caac00ce085dd0359b8342161a8717be7446d with no workspace patch. Its normal
+archive SHA256 is
+fef0874443f83820635450e70328c62247122816fc57c77a274df9c79e93928d;
+normal manifest SHA256 is
+ee04fd4a6c112bb4425720c9c3aa84901ee6bfb90d4d32f0244dba1bc3b6035e.
+All seven member sizes and hashes were verified. The original worker SHA256 is
+4cc97d601a618569c1ecc5a0bc3ece2ef60332d476558023df2596706a4e65f7;
+run.json SHA256 is
+7e8ad19b10ba305c1c3624522e68aac560499cbf308e4b39432c897d73d0a343.
+The original task prompt equals the executed catalog prompt byte-for-byte
+(SHA25629a6610da00cd4eeda3cb7ef01e397e7820739d9393d71010a9d636c35a9dda7).
+
+The native task is FAILED after306.8seconds, and its original campaign row
+records taskFAILED, controller exit1 and infra_failure=false. Preserve these
+values; this is not an infrastructure reclassification or a new task verdict.
+
+The full original worker establishes the same owned terminal boundary:
+
+- At00:35:29.053056Z an evaluate wait times out; classification and one hard
+  recovery follow. This remains a distinct earlier renderer observation.
+- At00:38:06.232835Z, worker line9139 records successful credential preparation
+  for raw.githubusercontent.com, password_count1, cookies_injected=false.
+  These are metadata, not a claim about credential correctness or contents.
+- At00:39:06.235255Z the mandatory navigation fails. The event wrapper reports
+ 63.01seconds; its inner CDP wait reports60seconds while the configured label
+  says300.0seconds. These clocks must not be conflated.
+- At00:39:12.250625Z, worker line14312 records Browser automation failed. Its
+  full traceback reaches the original handler.py10310 await of
+  reload_event.event_result(raise_if_any=True, raise_if_none=False). The
+  NavigateToUrlEvent target is the raw dictionary URL. This identifies the
+  mandatory credential-reload owner, rather than inferring ownership from
+  the logged last_action=goto.
+
+The handler bytes at the recorded765 source have SHA256
+7105cc40dfd87cc1e54339c1fd685e031f64c7e79e721c586504b6e87c0a6198,
+matching the original R35 source. That source has this mandatory reload outside
+the guarded recovery block. R35's reviewed repair was not in765. Thus this is a
+second original occurrence of the same terminal escape on the unfixed source,
+not a regression of the qualified R35 fix. No duplicate repair or test lane was
+opened. The original renderer stall and unchanged benchmark outcome remain OPEN.
+
+Archive searches used `reload_event event_result credential Page.navigate timed
+out` and `mandatory credential reload renderer hangs browser RuntimeError`.
+Those broad hits are relatives only; the source-bound R35 case and original
+traceback establish the precise match. The read-only inspect_original.py
+verifies custody, exact catalog equality and traceback membership. It is not a
+new causal repair test or a real model replay. No new calls, captures, image
+reads, source modifications or task reruns were performed. Tokens UNMETERED.
 
 ## Human feedback
 
