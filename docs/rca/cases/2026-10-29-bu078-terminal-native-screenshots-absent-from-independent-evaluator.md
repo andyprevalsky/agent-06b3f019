@@ -110,3 +110,54 @@ An image present in one verifier's private context is not evidence delivered to
 an independent judge. Trace capture, identity/privacy admission, persistence,
 and actual consumer extraction separately; make delivery failures explicit
 without promoting screenshot content into completion authority.
+
+## R79 original second-run recurrence: independent transport confirmation
+
+It20 BU078r2 j0018 root7e3730de-4d1d-494c-a38a-16f231795528 executed the
+same original4016ffaf50aeee0eff1b242d9e348f54896fdc02 with no patch. Its
+archive4801cc8f85eba66e16d62363dd570ec626bd5731b6693d5a51a9a51c0199f806
+and normal manifest52593c805d3579d826134444210feab05ee7eb0b5a636c457d473d3d9f803a18
+were verified against every one of the seven original member sizes/hashes.
+This original did not execute the qualified R72 repair; it is not a regression
+of5237d0f638705eb4169798d7b93d1f93bcc3d721.
+
+Native statusCOMPLETED887.4s/progress1 differs from declared taskFAILED2/4,
+infra_failure=false. The declared evaluator passes C3/C4 and fails C1/C2;
+the final typed field max_length_meters is1.8. There is no observed scalar or
+schema conversion loss. The independent evaluator records zero screenshots.
+
+Worker log15987 contains raw verifier context with four native historical
+receipts for task0a54fa68-31ef-531c-ab0b-b1df4dfb26af, plus a final screenshot.
+Each historical PNG decoded hash matches the receipt:
+
+| Native action step | Origin | PNG SHA256 |
+|---|---|---|
+|9|YouTube NatGeo Shorts|821b91ddea7f91b6b25dba96619bfe49e85a739db2c731a4ad020ed4ecb958f2|
+|29|Facebook NatGeo video1350085852147208|4d1895b6f675b5a83898d2ce6e7b684ddf25fcf5daa8750f02912ed9a77949e7|
+|31|Same Facebook video|e15a9e9cbb06a44e2d05ec46f8413ee002954fab088cf5cda2ec7bf890bd2b05|
+|33|Same Facebook video|781c460a1a00245068d1c4fa658f938402a1bbb5e9d5fc59c300501b05ac67d1|
+
+All119 public messages lack supported screenshot payload fields. The existing
+Polar extractor therefore cannot receive those images. This is an independent
+recurrence of this case's owned sidecar-to-persisted-message omission; it does
+not justify another fix or test lane. The second-run PNG contents were not
+visually interpreted in this intake. The exact encoded verifier dump was
+skipped at3271189bytes, so raw context is not full provider-wire proof.
+
+Other gaps remain separate. Action12's recorded JavaScript literally assigns
+selectedEarliest to a string asserting the first item in the Oldest-sorted tab;
+its actual sortOptions result is an empty list. The returned displayed-order
+list does not establish the selected chronological sorting basis. Recorded
+YouTube unavailability and a subsequent Facebook video also do not establish
+that it is the earliest YouTube Short. The final labeled report still fails
+the requested bare-number format. Neither additional pixels nor this recurrence
+prove those separate requirements satisfied.
+
+Cleanup is not the evaluator failure: although an intermediate completion
+message reports a session cleanup problem, the normal final receipts record
+DELETE204 for exactly sess_b28038e2fe334bd2bab5129821a4f151, root deletion,
+a sealed root-only tree and no cleanup errors. Those original lifecycle axes
+remain intact. No live request, replay, model call, source change, new test or
+regrade was performed during R79. Preserve the original second-run failure and
+all clocks; full task outcome stays OPEN. Hash-bound intake proof is retained
+in .context/r79/proof.json.
