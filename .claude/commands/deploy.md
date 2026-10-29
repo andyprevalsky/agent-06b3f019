@@ -99,6 +99,51 @@ end and stays active for the user's reply. Only the user ends it early, with
 
 **DEFAULT RULE: 100% of tests must pass before proceeding to Phase 2.** "Pre-existing failure", "not related to my changes", "performance issue", "local resource contention", and "flaky test" are not automatic excuses. If a test fails, fix it or stop and ask the user unless the user explicitly overrides that specific gate under the policy below.
 
+## Third-party credits or storage exhaustion: skip and warn
+
+**Standing user instruction, October 29, 2026:** tests blocked by a third-party
+provider being out of credits or storage capacity must be **SKIPPED**, reported
+in the final scorecard's warnings, and must never stop a deploy. Do not ask for
+a top-up, wait for billing changes, or mutate paid quota. This instruction
+applies to every test, including required smoke tasks and their model judges.
+
+Require explicit provider/resource-exhaustion evidence for the affected test.
+Preserve its original failure/skip receipt, source, timestamps and cleanup;
+record the provider, test, reason and evidence time as `⚠️ Skipped`, never PASS.
+Keep all other tests running. Missing evidence, assertions, authentication or
+permission errors, local disk exhaustion and generic outages do not qualify;
+handle those under their existing rules. The provider-outage retry cadence
+above does not apply to confirmed credit/storage exhaustion.
+
+Validate terminal task outcomes, not just a successful launcher exit. A skipped
+task is not a passed task. The final report and generated scorecard warnings
+must identify every resource-exhausted skip and the resulting unverified
+coverage; no other skipped or missing task may silently satisfy a required gate.
+This section takes precedence over any contrary provider credit/storage
+escalation or limited-skip rule elsewhere in this command. CodeRabbit's ledger
+mechanics remain governed by Step 9a.
+
+For the smoke gate, validate its exact terminal receipts before recording the
+release result (repeat `--run-dir` for every batch):
+
+```bash
+python3 scripts/validate_predeploy_receipts.py --summary "$SMOKE_SUMMARY" \
+  --run-dir "$SMOKE_RUN_DIR" --confirmations "$RESOURCE_CONFIRMATIONS" \
+  --bindings "$SMOKE_RECEIPT_BINDINGS" > "$SMOKE_POLICY_RESULT"
+```
+
+Use the validator's `PASS`, `SKIPPED_WITH_WARNING` or `BLOCKED` projection,
+not the launcher's process-status summary, in `TEST_REPORT`, the PR and final
+scorecard. Include its warning rows with provider, task, reason and evidence
+time. Confirmations are reviewed evidence bound to exact receipts, not an
+automatically generated exception from matching log text. An unexplained
+nonzero launcher exit, missing task or unverified cleanup still blocks.
+For a nonzero exit caused exclusively by the confirmed resource-failed tasks,
+pass `--wrapper-explanation "$RESOURCE_EXIT_EXPLANATION"` as well. That reviewed
+explanation must bind the exact original summary, runner log, exit code and
+terminal receipt cohort and exclude independent launcher failures. Preserve
+the original nonzero exit in the warning; never relabel it as a process pass.
+
 ## Explicit user gate overrides (highest-precedence deploy rule)
 
 An explicit user message may override **any** `/deploy` gate, including tests,
