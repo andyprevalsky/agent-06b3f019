@@ -354,4 +354,97 @@ class Main338ScriptRegressionTest(unittest.TestCase):
   self.assertIn('display',result.selected['deploy-structural-gates'])
   self.assertFalse(result.all_lanes,'directory root should be mapped, not require fallback')
 
+ def test_claude_mixed_permission_exhaustion_blocks(self):
+  claude=module('review_claude','scripts/claude_review_fallback_diagnose.py')
+  for status,message in [(403,'permission denied'),(None,'access denied'),(429,'forbidden')]:
+   self.assertEqual(claude.classify({'is_error':True,'api_error_status':status,'result':message,'errors':['usage limit reached']}),claude.PROVIDER_ERROR)
+  self.assertEqual(claude.classify({'is_error':True,'api_error_status':429,'result':'usage limit reached'}),claude.USAGE_EXHAUSTED)
+ def test_stage_finish_published_between_snapshot_and_dead_pid(self):
+  waiter=module('review_waiter','scripts/deploy_stage_wait.py')
+  row={'stage':'owned','started_epoch':20,'status':'passed'}
+  for final,expected in [(row,waiter.EXIT_PASSED),({**row,'status':'failed'},waiter.EXIT_FAILED),(None,waiter.EXIT_DIED),({**row,'started_epoch':1},waiter.EXIT_DIED)]:
+   with self.subTest(final=final),patch.object(waiter,'_rows',side_effect=[[],[final] if final else []]),patch.object(waiter,'_admissions',return_value={'owned':[123]}),patch.object(waiter,'_pid_alive',return_value=False):
+    code,event=waiter.wait_for_stages(Path('/unused'),['owned'],since=10,timeout=1)
+    self.assertEqual(code,expected)
+ def test_factory_rca_labels_and_benchmark_task_shapes(self):
+  for key in ['outcome_class','failure_class']:
+   for bad in [['bad'],{'bad':1}]:
+    row={'kind':'factory-event','workflow':'rca','event':'outcome','detail':{key:bad}}
+    self.assertEqual(diag.rca_diagnostics([row])['outcome_classes'],[{'name':'unrecorded','count':1}])
+  with tempfile.TemporaryDirectory() as tmp:
+   p=Path(tmp)/'attempts';p.write_text('\n'.join(json.dumps({'run_id':'r','task':task}) for task in ['valid',['bad'],{'bad':1},None]))
+   result=diag.benchmark_diagnostics(p)
+   self.assertEqual(result['runs'][0]['tasks'],1)
+   self.assertEqual(result['runs'][0]['attempts'],4)
+ def test_replay_paths_are_nul_framed_and_excluded_inputs_filtered(self):
+  import shutil
+  history=module('review_history','scripts/test-map/replay_history.py')
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp)
+   def git(*args):
+    return subprocess.run(['git',*args],cwd=root,check=True,capture_output=True,text=True).stdout
+   git('init','-q');git('config','user.email','fixture@example.invalid');git('config','user.name','fixture')
+   product='agents/naïve\nname.py';test='agents/tests/test_naïve\nname.py'
+   for name in [product,test]:
+    p=root/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('initial')
+   git('add','.');git('commit','-qm','initial')
+   for name in [product,test]:(root/name).write_text('fixed')
+   git('commit','-qam','fix unicode newline boundary')
+   with patch.object(history,'ROOT',root):
+    rows=history.candidates('2000-01-01','HEAD',10)
+   self.assertEqual(len(rows),1)
+   self.assertEqual(set(rows[0][2]),{product,test})
+   (root/product).rename(root/'agents/renamed.py');(root/test).write_text('fixed again');git('add','-A');git('commit','-qm','fix rename')
+   with patch.object(history,'ROOT',root):rows=history.candidates('2000-01-01','HEAD',10)
+   self.assertIn(product,rows[0][2]);self.assertIn('agents/renamed.py',rows[0][2])
+   (root/'codex').mkdir();(root/'codex/a.py').write_text('excluded');(root/test).write_text('excluded edit');git('add','-A');git('commit','-qm','fix excluded only')
+   with patch.object(history,'ROOT',root):rows=history.candidates('2000-01-01','HEAD',10)
+   self.assertEqual(len(rows),2)
+  seen=[]
+  selector=types.SimpleNamespace(lanes={},select=lambda files:(seen.append(files) or types.SimpleNamespace(selected={},all_lanes=False,reasons=[],totals={})))
+  with patch.object(history.sat,'Source',return_value=object()),patch.object(history.sat,'Selector',return_value=selector):
+   history.replay(('a','fix',['agents/code.py','codex/excluded.py','agents/tests/test_code.py']))
+  self.assertEqual(seen,[['agents/code.py']])
+ def test_pipeline_blocked_lanes_share_sample_without_unbounded_receipts(self, end_tick=10):
+  import signal
+  from contextlib import ExitStack
+  tick=[0];started=[];samples=[];high={'cpus':8,'mem_available_mb':10000};low={'cpus':8,'mem_available_mb':0}
+  class Process:
+   def __init__(self,*args,**kwargs):self.pid=100+len(started);self.returncode=None;started.append(self)
+  def sample():samples.append(tick[0]);return high if tick[0]>=end_tick or not started else low
+  def wait4(pid,flags):
+   return (pid,0,types.SimpleNamespace(ru_maxrss=1024)) if tick[0]>=end_tick else (0,0,None)
+  def sleep(delay):tick[0]+=1;self.assertLess(tick[0],end_tick+10)
+  with tempfile.TemporaryDirectory() as tmp,ExitStack() as stack:
+   root=Path(tmp);plan=root/'plan.json';plan.write_text(json.dumps({'lanes':[{'name':str(i),'command':['true'],'memory_mb':1} for i in range(4)]}))
+   for obj,name,value in [(pipeline,'host_resources',lambda:high),(pipeline,'runtime_host_resources',sample),(pipeline,'memory_budget_mb',lambda host:host['mem_available_mb']),(pipeline,'source_digest',lambda:{}),(pipeline,'_stage_run_dir',lambda:str(root)),(pipeline,'watchdog_terminations',lambda *args:[]),(pipeline,'_now',lambda:str(tick[0])),(pipeline.signal,'signal',lambda *args:None),(pipeline.subprocess,'Popen',Process),(pipeline.os,'wait4',wait4),(pipeline.time,'monotonic',lambda:tick[0]*.2),(pipeline.time,'sleep',sleep)]:stack.enter_context(patch.object(obj,name,value))
+   self.assertEqual(pipeline.run(plan,root/'state',max_parallel=4,budget_mb=10000),0)
+   receipt=json.loads((root/'state/receipt.json').read_text())
+  self.assertLessEqual(len(receipt['host_samples']),end_tick//5+8,'blocked lane samples grew per tick instead of bounded cadence')
+  self.assertLessEqual(max(samples.count(i) for i in range(1,end_tick)),2,'each blocked lane resampled the same scheduling pass')
+  self.assertEqual(len(started),4)
+  low_ticks=[int(row['at']) for row in receipt['host_samples'] if row.get('mem_available_mb')==0]
+  self.assertGreaterEqual(len(low_ticks),(end_tick-1)//5,'periodic known-low evidence lost')
+  self.assertTrue(all(b-a<=6 for a,b in zip(low_ticks,low_ticks[1:])),low_ticks)
+ def test_pipeline_prolonged_low_headroom_keeps_periodic_evidence(self):
+  self.test_pipeline_blocked_lanes_share_sample_without_unbounded_receipts(end_tick=30)
+
+ def test_replay_excluded_only_commit_not_candidate(self):
+  history=module('review_history_excluded','scripts/test-map/replay_history.py')
+  def git(*args):
+   if args[0]=='log':return 'abc\x01fix excluded\n' if '--name-only' not in args else '\0abc\x01fix excluded\ncodex/a.py\nagents/tests/test_a.py\n'
+   return 'codex/a.py\0agents/tests/test_a.py\0'
+  with patch.object(history,'git',side_effect=git):self.assertEqual(history.candidates('2000','HEAD',1),[])
+ def test_replay_excluded_input_never_reaches_selector(self):
+  history=module('review_history_inputs','scripts/test-map/replay_history.py');seen=[]
+  selector=types.SimpleNamespace(lanes={},select=lambda files:(seen.append(files) or types.SimpleNamespace(selected={},all_lanes=False,reasons=[],totals={})))
+  with patch.object(history.sat,'Source',return_value=object()),patch.object(history.sat,'Selector',return_value=selector):
+   history.replay(('a','fix',['agents/code.py','codex/excluded.py','agents/tests/test_code.py']))
+  self.assertEqual(seen,[['agents/code.py']])
+ def test_benchmark_malformed_task_names_not_counted_as_tasks(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   p=Path(tmp)/'attempts';p.write_text('\n'.join(json.dumps({'run_id':'r','task':task}) for task in ['valid',['bad'],{'bad':1},None]))
+   result=diag.benchmark_diagnostics(p)
+   self.assertEqual(result['runs'][0]['tasks'],1);self.assertEqual(result['runs'][0]['attempts'],4)
+
 if __name__=='__main__':unittest.main()

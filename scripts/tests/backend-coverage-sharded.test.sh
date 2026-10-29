@@ -42,6 +42,7 @@ log="$FAKE_RECORD_DIR/shard-$index.env"
   echo "ports=$BACKEND_COVERAGE_START_PORT-$BACKEND_COVERAGE_END_PORT"
   echo "priority=${BLACKBOX_TEST_PRIORITY_DOMAINS:-}"
   echo "abort=${BLACKBOX_TEST_ABORT_ON_PRIORITY_FAILURE:-}"
+  echo "unit_selector=${BACKEND_UNIT_TEST_FILES-unset}"
 } >"$log"
 child=""
 trap 'echo terminated >>"$log"; [[ -z "$child" ]] || kill "$child" 2>/dev/null; exit 143' TERM
@@ -73,7 +74,10 @@ records() {
 
 # 1. Two shards pass -> merged check runs once and decides the exit.
 records
-bash "$RUNNER" 2 >"$TMP/out1" 2>&1 || fail "all-pass run failed: $(cat "$TMP/out1")"
+BACKEND_UNIT_TEST_FILES="stale-failed-only.test.ts" bash "$RUNNER" 2 >"$TMP/out1" 2>&1 || fail "all-pass run failed: $(cat "$TMP/out1")"
+grep -q 'unit_selector=unset' "$TMP/rec/shard-1.env" &&
+  grep -q 'unit_selector=unset' "$TMP/rec/shard-2.env" ||
+  fail "full shards inherited the failed-only unit selector"
 grep -q 'shard=1/2' "$TMP/rec/shard-1.env" && grep -q 'shard=2/2' "$TMP/rec/shard-2.env" ||
   fail "shards did not receive distinct indices"
 [[ "$(sed -n 's/^ports=//p' "$TMP/rec/shard-1.env")" != "$(sed -n 's/^ports=//p' "$TMP/rec/shard-2.env")" ]] ||

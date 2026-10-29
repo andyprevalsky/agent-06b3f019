@@ -485,6 +485,7 @@ def run(
             reserved = sum(
                 by_name[name].memory_mb for name, p in processes.items() if p.returncode is None
             )
+            pass_sample = None
             for lane in list(pending):
                 if max_parallel and running >= max_parallel:
                     break
@@ -504,19 +505,24 @@ def run(
                         continue
                     if reserved + lane.memory_mb > budget_mb:
                         continue  # admitted when running lanes release their share
-                sample = runtime_host_resources()
+                if pass_sample is None:
+                    pass_sample = runtime_host_resources()
+                    sample_host_peak(receipt["host_peak"], pass_sample)
+                sample = pass_sample
                 headroom = memory_budget_mb(sample)
-                sample_host_peak(receipt["host_peak"], sample)
-                receipt["host_samples"].append({"at": _now(), **sample, "headroom_mb": headroom})
                 if headroom is None or reserved + lane.memory_mb > headroom:
+                    if headroom is None and receipt["host_samples"][-1].get("error") != sample.get("error"):
+                        receipt["host_samples"].append({"at": _now(), **sample, "headroom_mb": headroom})
                     if running:
                         continue  # this run can still release reservations
+                    receipt["host_samples"].append({"at": _now(), **sample, "headroom_mb": headroom})
                     pending.remove(lane)
                     receipt["lanes"][lane.name].update(
                         status="failed", exit=None, finished_epoch=time.time(),
                         note=f"refused: needs {lane.memory_mb} MB, live headroom {headroom} MB",
                     )
                     continue
+                receipt["host_samples"].append({"at": _now(), **sample, "headroom_mb": headroom})
                 pending.remove(lane)
                 argv = ["bash", str(STAGE_WRAPPER), lane.name]
                 if lane.reuse_passed:
@@ -549,6 +555,7 @@ def run(
                         note=f"spawn failed: {error}",
                     )
                     continue
+                pass_sample = None  # a successful spawn changes live headroom
                 receipt["lanes"][lane.name].update(
                     status="running", started_epoch=time.time(), log=str(log_path)
                 )

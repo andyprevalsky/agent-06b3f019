@@ -133,9 +133,13 @@ def wait_for_stages(
                 if _pid_alive(pid):
                     running.setdefault(stage, []).append(pid)
                 elif stage not in finished:
-                    # The runner appends its row before releasing admission, so
-                    # a dead PID without a row means no receipt will ever come.
-                    return EXIT_DIED, {"event": "died", "stage": stage, "pid": pid}
+                    # Re-read after observing death: publication can happen
+                    # after this tick's initial snapshot, before runner exit.
+                    for row in _rows(run_dir):
+                        if row.get("stage") == stage and float(row.get("started_epoch") or 0) >= since:
+                            finished[stage] = row
+                    if stage not in finished:
+                        return EXIT_DIED, {"event": "died", "stage": stage, "pid": pid}
         # A rerun admitted after a failed row supersedes that row.
         failed = [
             s for s, row in finished.items() if row.get("status") not in PASSING_STATUSES and s not in running

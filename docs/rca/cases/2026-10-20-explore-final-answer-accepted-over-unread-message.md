@@ -243,3 +243,31 @@ workflow task-message ledger from this deploy. The source/deploy owner must
 still apply the approved candidate and validate the unchanged live task and
 required full gate. This note records candidate evidence, not an integrated or
 production fix.
+
+## Recurrence 2026-10-29: stale pending read suppresses terminal snapshot
+
+Review5702909858 identified a remaining source385c boundary in the same inbox
+acceptance path: an earlier background read may still be pending after taking
+an empty snapshot. `unread_before_finish` called `start_read()` without `fresh`,
+so that pending read suppressed the terminal read. The existing terminal
+handoff settled the old snapshot and accepted completion; neither the explore
+nor its parent received the message stored during the final call.
+
+A new registered control holds the first snapshot pending, stores the marker,
+and releases that stale response only after the actual completion call. The
+complete owning run-agent suite fails before:96pass/1fail, with neither model
+nor parent delivery. Changing only this call to `start_read(fresh=True)` makes
+the same97-test suite pass in five consecutive runs. It preserves per-step
+nonblocking behavior, the existing terminal wait, one wait per completion,
+message deduplication and cursor custody, cancellation and original iteration
+limits. The original six terminal-handoff tests remain unchanged.
+
+Exact temporary proof and commands are in
+`/var/tmp/deploy-1627/review385c-runtime/report.md` and `proof-receipt.json`;
+the combined four-boundary candidate patch SHA256 is
+`f1d4e045cf2c52d5a9d74fddac31ce9c7bf1b9cffedd45af912bf463c4ef18b0`.
+The candidate has parent conditional technical approval. Source application,
+integrated gates and exact live smoke outcome remain pending. This is a
+source-level reproduction, not a new live incident attribution. Messages
+stored after the fresh terminal snapshot remain explicitly OPEN; no complete
+race-closure or live benchmark pass is claimed.

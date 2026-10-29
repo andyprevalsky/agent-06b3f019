@@ -249,7 +249,7 @@ class AgentInbox:
         self._settle_reads()
         if self._fetched:
             return True
-        self.start_read()
+        self.start_read(fresh=True)
         return False
 
     async def next_step_messages(self) -> List[Dict[str, Any]]:

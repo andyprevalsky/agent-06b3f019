@@ -137,6 +137,7 @@ async def run_domain(
 
 async def async_main() -> int:
     domains = discover_domains()
+    partial = bool(os.environ.get("AGENTS_BLACKBOX_DOMAINS", "").strip())
     if not domains:
         print(f"No blackbox domains found in {TESTS_DIR}", file=sys.stderr)
         return 1
@@ -155,6 +156,8 @@ async def async_main() -> int:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     print(f"Running {len(domains)} agents blackbox domains in {concurrency} isolated coverage processes")
     print(f"Artifacts: {artifact_dir}")
+    if partial:
+        print("Partial diagnostic scope: AGENTS_BLACKBOX_DOMAINS is set")
 
     semaphore = asyncio.Semaphore(concurrency)
     results: list[DomainResult] = []
@@ -177,6 +180,8 @@ async def async_main() -> int:
     failures = [result for result in results if not result.passed]
     summary = {
         "run_id": run_id,
+        "partial": partial,
+        "selected_domains": domains if partial else [],
         "concurrency": concurrency,
         "passed": len(domains) - len(failures),
         "failed": len(failures),

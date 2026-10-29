@@ -34,16 +34,16 @@ def git(*args: str) -> str:
 
 def candidates(since: str, ref: str, limit: int, until: str = "") -> list[tuple[str, str, list[str]]]:
     window = [f"--since={since}"] + ([f"--until={until}"] if until else [])
-    out = git("log", "--no-merges", *window, "--format=%x00%H%x01%s", "--name-only", ref)
+    out = git("log", "--no-merges", *window, "--format=%H%x01%s", ref)
     rows = []
-    for block in out.split("\0")[1:]:
-        head, _, names = block.partition("\n")
-        sha, _, subject = head.partition("\x01")
-        files = [n for n in names.splitlines() if n.strip()]
+    for line in out.splitlines():
+        sha, _, subject = line.partition("\x01")
         if not FIX_RE.search(subject):
             continue
+        raw = git("diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "--no-renames", "-z", sha)
+        files = [name for name in raw.split("\0") if name]
         tests = [f for f in files if sat.is_test_file(f)]
-        product = [f for f in files if not sat.is_test_file(f)]
+        product = [f for f in files if not sat.is_test_file(f) and not f.startswith(sat.EXCLUDED_TOP)]
         if tests and product:
             rows.append((sha, subject, files))
     return rows[:limit]
@@ -54,7 +54,7 @@ def replay(row: tuple[str, str, list[str]]) -> dict:
     sat.SRC = sat.Source(sha)
     selector = sat.Selector()
     tests_changed = {f for f in files if sat.is_test_file(f)}
-    product = [f for f in files if not sat.is_test_file(f)]
+    product = [f for f in files if not sat.is_test_file(f) and not f.startswith(sat.EXCLUDED_TOP)]
     expected: dict[str, set[str]] = {}
     for lane in selector.lanes.values():
         for unit in lane.units:

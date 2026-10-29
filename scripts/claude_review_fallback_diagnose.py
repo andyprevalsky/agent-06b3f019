@@ -79,6 +79,8 @@ def classify(result: Optional[dict], action_outcome: Optional[str] = None) -> st
         r"|(?:token|api[ _-]*key)[^.;]{0,40}(?:invalid|expired|revoked)", evidence
     ):
         return CREDENTIAL_INVALID
+    if status == 403 or re.search(r"permission[ _-]+denied|access[ _-]+denied|forbidden", evidence):
+        return PROVIDER_ERROR
     if re.search(r"you(?:'|\\u2019)ve hit your session limit|usage limit reached|usage[^.;]{0,40}exhausted|credit balance is too low|insufficient credits", evidence):
         return USAGE_EXHAUSTED
     subtype = str(result.get("subtype") or "")

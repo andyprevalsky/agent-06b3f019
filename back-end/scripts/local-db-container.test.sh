@@ -141,8 +141,10 @@ unset -f psql
 # coverage shard appends its own suffix to the same workspace hint
 # ("$WORKSPACE_HINT$SHARD_DB_SUFFIX"), which stays workspace-scoped.
 for runner in run-blackbox-tests.sh run-coverage.sh; do
-  grep -Eq 'workspace_system_db_name "\$WORKSPACE_HINT(\$SHARD_DB_SUFFIX)?"' "$SCRIPT_DIR/$runner" || {
-    echo "Expected $runner's system Postgres fallback to use workspace_system_db_name" >&2
+  hint='$WORKSPACE_HINT'
+  [[ "$runner" != "run-coverage.sh" ]] || hint='$WORKSPACE_HINT$SHARD_DB_SUFFIX'
+  grep -Fq "workspace_system_db_name \"$hint\"" "$SCRIPT_DIR/$runner" || {
+    echo "Expected $runner's system Postgres fallback to use workspace_system_db_name with $hint" >&2
     exit 1
   }
 done

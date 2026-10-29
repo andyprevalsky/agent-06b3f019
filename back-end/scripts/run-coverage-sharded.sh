@@ -83,7 +83,7 @@ declare -a PIDS=()
 for ((i = 1; i <= SHARDS; i++)); do
   # Each shard gets a disjoint two-port range above the unsharded one.
   start=$((BASE_PORT + 20 + 2 * i))
-  env BACKEND_COVERAGE_SHARD="$i/$SHARDS" \
+  env -u BACKEND_UNIT_TEST_FILES BACKEND_COVERAGE_SHARD="$i/$SHARDS" \
     BACKEND_COVERAGE_SHARD_DURATIONS="$DURATIONS" \
     BACKEND_COVERAGE_MERGE_DIR="$MERGED_TMP" \
     BACKEND_COVERAGE_START_PORT="$start" BACKEND_COVERAGE_END_PORT="$((start + 1))" \

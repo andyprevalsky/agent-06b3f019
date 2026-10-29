@@ -238,7 +238,7 @@ def rca_diagnostics(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
         if row.get("event") == "repro-attempt":
             repro[str(row.get("value"))] += 1
         if row.get("event") == "outcome":
-            classes[_detail(row).get("outcome_class") or _detail(row).get("failure_class") or "unrecorded"] += 1
+            classes[_label(_detail(row).get("outcome_class")) or _label(_detail(row).get("failure_class")) or "unrecorded"] += 1
     return {"repro_attempts": dict(repro), "outcome_classes": _top(classes)}
 
 
@@ -271,7 +271,7 @@ def benchmark_diagnostics(attempts_path: Path, limit: int = TOP) -> dict[str, An
                 "run_id": run_id,
                 "first": min(str(row.get("timestamp")) for row in rows),
                 "attempts": len(rows),
-                "tasks": len({row.get("task") for row in rows}),
+                "tasks": len({row["task"] for row in rows if _label(row.get("task"))}),
                 "passed": sum(1 for row in rows if row.get("passed")),
                 "statuses": dict(statuses),
                 "outcome_classes": dict(outcomes),

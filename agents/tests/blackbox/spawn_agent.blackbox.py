@@ -4505,7 +4505,23 @@ async def test_explore_message_landing_after_the_final_answer_reaches_the_parent
     assert steps["final"] == {"success": True, "message": "Completion accepted"}, "completion never waits on a read"
     assert [m["id"] for m in result["undelivered_agent_messages"]] == ["m-late"]
     assert "Also say who led each round." in result["final_response"]
-    assert reads["n"] == 1, "one completion-time read, started in the background"
+    assert reads["n"] == 2, "one turn read plus one fresh completion-time read"
+
+
+async def test_agent_inbox_completion_without_prior_read_fetches_once():
+    from unittest.mock import AsyncMock, patch
+
+    from helpers.agent_inbox import AgentInbox
+
+    fetch = AsyncMock(return_value=[])
+    inbox = AgentInbox("root-1", "call_bg")
+    with patch("helpers.agent_inbox.fetch_agent_inbox", new=fetch):
+        assert await inbox.unread_before_finish() is False
+        assert fetch.await_count == 0, "completion starts its read without waiting"
+        assert await inbox.finish() == []
+    assert fetch.await_count == 1, "no prior turn means only the terminal read"
+    assert not inbox._reads
+    assert not inbox._fetched
 
 
 async def test_explore_hung_inbox_read_never_delays_completion():
@@ -7046,6 +7062,10 @@ async def run_all_tests():
     await r.record_async(
         "explore_hung_inbox_read_never_delays_completion",
         test_explore_hung_inbox_read_never_delays_completion,
+    )
+    await r.record_async(
+        "agent_inbox_completion_without_prior_read_fetches_once",
+        test_agent_inbox_completion_without_prior_read_fetches_once,
     )
     await r.record_async(
         "explore_message_landing_after_the_final_answer_reaches_the_parent",

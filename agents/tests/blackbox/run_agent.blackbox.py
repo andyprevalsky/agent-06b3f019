@@ -4094,6 +4094,8 @@ async def _exercise_explore_terminal_handoff(kind):
     stored, seen, calls = [], [], []
     waits = []
     original_wait = asyncio.wait
+    release_stale = asyncio.Event()
+    fetch_count = 0
     row = {
         "id": "marker",
         "text": "Forwarded marker: HTTP core document",
@@ -4105,9 +4107,14 @@ async def _exercise_explore_terminal_handoff(kind):
         return await original_wait(*args, **kwargs)
 
     async def fetch(*args):
+        nonlocal fetch_count
+        fetch_count += 1
+        snapshot = list(stored)
+        if kind == "stale-read" and fetch_count == 1:
+            await release_stale.wait()
         if kind == "failed-read":
             raise RuntimeError("controlled read failure")
-        return list(stored)
+        return snapshot
 
     async def poll():
         rows = await inbox.next_step_messages()
@@ -4120,7 +4127,9 @@ async def _exercise_explore_terminal_handoff(kind):
         calls.append(args[0])
         if len(calls) == 1 and kind not in ("no-message", "failed-read", "cancel"):
             stored.extend([row, row] if kind == "duplicate" else [row])
-        if await inbox.unread_before_finish():
+        deferred = await inbox.unread_before_finish()
+        release_stale.set()
+        if deferred:
             return {"error": True, "message": "existing deferred message"}
         return {"success": True}
 
@@ -4194,11 +4203,19 @@ async def test_explore_terminal_handoff_propagates_cancellation():
     await _exercise_explore_terminal_handoff("cancel")
 
 
+async def test_explore_terminal_handoff_refreshes_stale_pending_snapshot():
+    await _exercise_explore_terminal_handoff("stale-read")
+
+
 async def run_all_tests():
     from helpers.messages import flush_realtime_broadcasts_for_tests
 
     print("run-agent blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "explore_terminal_handoff_refreshes_stale_pending_snapshot",
+        test_explore_terminal_handoff_refreshes_stale_pending_snapshot,
+    )
     await r.record_async(
         "explore_consumes_final_call_message_before_terminal_handoff",
         test_explore_consumes_final_call_message_before_terminal_handoff,
