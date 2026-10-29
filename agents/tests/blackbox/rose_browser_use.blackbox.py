@@ -245,7 +245,9 @@ def test_build_browser_use_system_prompt_uses_native_tools_not_action_list():
     assert "# Available Actions" not in prompt
     assert "- click:" not in prompt
     assert "- goto:" not in prompt
-    assert "call exactly one available browser action tool" in prompt
+    assert "Call one or more available browser action tools" in prompt
+    assert "execute in\norder, never concurrently" in prompt
+    assert "observation_ref" in prompt
     assert "# Screenshot Tool" not in prompt
     assert "Use the `screenshot` action" not in prompt
     assert "do not open cancellation, return, edit, or modification flows" in prompt
@@ -2642,6 +2644,10 @@ async def run_all_tests():
         "normalize_provider_input_text_batch_mixed_indexes",
         test_normalize_provider_input_text_batch_mixed_indexes_keeps_first_action,
     )
+    from benchmarks.browser_action_batch_test import form_chain, observe_chain, full_activity_batch
+    await r.record_async("ordered native batch uses one model decision", form_chain)
+    await r.record_async("same-turn observed target binds before click", observe_chain)
+    await r.record_async("actual browser activity consumes ordered batch", full_activity_batch)
     r.record("normalize_request_auth_assistance", test_normalize_request_user_assistance)
     await r.record_async("native_autofill_actual_enabled_request", test_native_autofill_preference_reaches_actual_enabled_request)
     r.record("native_autofill_fixture_current_dto", test_native_autofill_control_fixture_matches_current_backend_dto)

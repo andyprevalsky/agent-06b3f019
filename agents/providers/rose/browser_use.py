@@ -6,7 +6,7 @@ and rose-1-ultra (see `pools.py:rose-1-browser-use`). What's specific:
   - The user message bundles a full browser snapshot (URL, viewport,
     DOM tree, action history, optional screenshot).
   - Available browser actions are passed as provider tools generated from the
-    Pydantic models in `BROWSER_TOOL_MODELS`, then the first native tool call
+    Pydantic models in `BROWSER_TOOL_MODELS`, then every native tool call
     is validated and normalized into the `UnifiedAction` shape the browser
     handler expects.
   - Legacy JSON text replies are still normalized defensively for old dumps
@@ -830,8 +830,25 @@ Use `screenshot` when you need a viewport image. Re-read state after navigation,
 
 # Output Format
 
-You must call exactly one available browser action tool. Do not write a JSON
-action envelope in text; use the provided tool call.
+Call one or more available browser action tools. Batch ordered actions whose
+arguments are already known from the current page, such as filling several
+visible form fields and then clicking their submit control. Calls execute in
+order, never concurrently. Do not write a JSON action envelope in text.
+
+For an exact same-page observe-then-click dependency, use named observation
+bindings: read_browser_state(observation_id="checkout", targets=[{{"key":"pay",
+"role":"button","name":"Pay"}}]) then click(observation_ref={{"observation_id":
+"checkout","target":"pay"}}) in the same response. The runtime binds only one
+exact visible role/name match in that read result and rechecks its current node;
+missing or ambiguous matches stop the remainder. This never approves payment.
+For other dependencies requiring interpretation of a result, finish this turn
+and inspect that result first; do not guess indexes or future values. Use
+only indexes from the current observed document. Navigation, tab changes,
+scrolling, an error, user intervention, or a changed document stops the remaining
+calls; inspect fresh state before continuing. Put arbitrary JavaScript last: its unknown page effects end the batch. Keep
+completion, authentication assistance, payment and recovery actions in separate
+turns. Do not batch autocomplete choices whose suggestions are not yet observed. Never batch past a submit/commit control: it still needs the normal write
+approval, and later calls cannot assume approval or success.
 
 {VERIFICATION_RULES.strip()}
 
@@ -1186,15 +1203,9 @@ def normalize_browser_use_tool_calls(
     *,
     thinking: Optional[str] = None,
     validation_context: Optional[Dict[str, Any]] = None,
+    available_actions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Normalize one provider turn without discarding a printable key batch.
-
-    Browser execution consumes one unified action per turn. Providers can still
-    emit several native calls in one response, though. A sequence made entirely
-    of single printable ``press_key`` calls is one text-entry operation against
-    the already-focused element, so preserve it as focused ``input_text``. Mixed
-    or stateful batches retain the historical first-call-only behavior.
-    """
+    """Validate the entire ordered turn; keep printable typing coalescing."""
     if not tool_calls:
         raise ValueError("normalize_browser_use_tool_calls: no tool calls")
 
@@ -1205,11 +1216,12 @@ def normalize_browser_use_tool_calls(
                     tool_call,
                     thinking=thinking,
                     validation_context=validation_context,
+                    available_actions=available_actions,
                 )
                 for tool_call in tool_calls
             ]
         except ValueError:
-            normalized_calls = []
+            raise
 
         keys = [call.get("params", {}).get("key") for call in normalized_calls]
         if normalized_calls and all(
@@ -1248,10 +1260,11 @@ def normalize_browser_use_tool_calls(
                 },
             }
 
+    if len(tool_calls) > 1:
+        return {**normalized_calls[0], "batch_actions": normalized_calls}
     return normalize_browser_use_tool_call(
-        tool_calls[0],
-        thinking=thinking,
-        validation_context=validation_context,
+        tool_calls[0], thinking=thinking, validation_context=validation_context,
+        available_actions=available_actions,
     )
 
 
@@ -1335,6 +1348,13 @@ def normalize_browser_use_response(
     if not actions:
         raise ValueError("normalize_browser_use_response: No actions returned in completion")
 
+    if not isinstance(actions, list):
+        raise ValueError("Browser action envelope must contain a list")
+    if len(actions) > 1:
+        normalized = [normalize_browser_use_response(
+            {**completion, "action": [action]}, available_actions=available_actions,
+        ) for action in actions]
+        return {**normalized[0], "batch_actions": normalized}
     first_action = actions[0]
     if not isinstance(first_action, dict):
         raise ValueError(
@@ -1396,7 +1416,7 @@ def normalize_browser_use_response(
             "params": drag_params,
         }
 
-    if normalized_action == "click" and index is None:
+    if normalized_action == "click" and index is None and not params.get("observation_ref"):
         raise ValueError(
             f"normalize_browser_use_response: click action requires element index, got none. Raw action: {first_action}"
         )
@@ -1472,6 +1492,12 @@ def _normalize_action_params(
         return network_params
 
     out: Dict[str, Any] = {}
+    if normalized_action == "read_browser_state" and (params.get("observation_id") or params.get("targets")):
+        from browser_tools.schemas import validate_browser_tool_args
+        out.update(validate_browser_tool_args("read_browser_state", params))
+    if normalized_action == "click" and params.get("observation_ref"):
+        from browser_tools.schemas import validate_browser_tool_args
+        out.update(validate_browser_tool_args("click", params))
 
     if params.get("url"):
         out["url"] = params["url"]

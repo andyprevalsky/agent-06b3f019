@@ -179,3 +179,36 @@ A verifier can retain and acknowledge contradictory evidence yet still make an
 unsupported semantic completion judgment. Distinguish that failure from lost
 context or an absent schema constraint before choosing a repair, and never
 substitute a keyword rule for unresolved task semantics.
+
+## R47 It14 run1 recurrence
+
+New intake began2026-10-29 02:38UTC; the original R33/R41 family clocks above
+remain. It14 r001-j0002, root52c025d2-8040-4bd0-af52-137457084308, executed
+85d37fc8ab8e284459977debdef34348d825ef84 with patchnone. Archive
+ eec7f2e56832af9e08f89429a86964e037aa4aa85958d6f4852b75455e5cfe7c and
+normalmanifest36524651db0aef59fbd8f3beef264b6444e7cd2c93ab49e8cc462b01eacb3d1e
+match supplied originals; all seven member sizes/hashes independently verified.
+RunSHA83de8f7443b00f6649bebcf49bb4545fd0de6023126b1d29a794e786b480a15e.
+NativeCOMPLETED281.7s remains distinct from taskFAILED0/3 and infraFALSE.
+
+The actual schema retains three currently available foster dogs under six.
+Original verifier request SHA
+44190ea6f2d4a9a84bf25dd5936f98e2a195455833a0747c3d3c4f247a14ab98 includes
+the explicit profile sentence that Malyk is in a foster home and directs the
+reader to inquire about adoption. It also retains FOSTER ME board categories.
+Original verifier response SHA
+37fb7cca134e52d4658377010e0c13e5ca082b7c718db5a87bd920fb88bb1559,
+request2a60bb8b on the recorded claude-opus-5-5-claude route, explicitly calls
+that sentence a caveat but favors the board category over it. It includes
+Malyk among the three dogs and returns task_completed=true and score1.0.
+Both compressed payloads were independently decoded and SHAchecked. No model
+call was replayed. The final structured answer preserves that selection.
+
+All three declared rubric results reject the unresolved foster/adopt conflict.
+Thus this is a directly observed recurrence of R33/R41's retained-contradiction
+semantic decision, not missing evidence, finite-schema conversion, JS-history
+loss or credential-reload failure. The full prior case including Solution and
+Human feedback was read before classification. No new deterministic guard is
+justified by matching dog names, caveat words or board categories. No duplicate
+fix/test lane, task/prompt/criterion change, runtime edit or regrade. The same
+OPEN semantic-remedy floor remains; tokensUNMETERED.

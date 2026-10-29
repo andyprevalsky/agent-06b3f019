@@ -166,3 +166,49 @@ the exact qualified source ref when it was missing locally.
 ## Reusable lesson
 
 Pin the captured list basis and reference-answer provenance before treating a numerical disagreement as either a transport bug or a stale benchmark answer.
+
+## R45: It14 original BU061 r1 recurrence (2026-10-29)
+
+The new phase was assigned at02:34UTC; original R32 clock
+2026-10-28T23:14:06.655977Z is retained. Original root
+59772c4a-aa48-46fc-ad22-45ed9248e476 executed
+85d37fc8ab8e284459977debdef34348d825ef84, patchnone. Native COMPLETED in59.5s,
+original taskFAILED at02:29:04.916948Z, infraFALSE. Declared C1–C3 pass and C4
+fails because output3 differs from the unchanged supplied answer6. No outcome,
+source, mode, criterion or original clock was changed.
+
+Archive f14c5b987b255b458afb39337da68b63c505d5410244b9732eb22b9906355491
+and all seven normal member sizes/SHA256 were independently verified. Normal
+manifest a760d7b1f0cc3784759198fb836f2e8953ec4d5f2a75e698db1e658a26473aa4;
+run833176e777a2d4a1e88f71bcc90472b546cda530b39f1bc4b2cfb4fa56000078.
+Supplemental provenance/driver/lifecycle remain separately labelled evidence.
+
+Messages16 and20 retain successful native evaluate results for
+`/year/world/2020/` and `/year/2020/`. Their ordered worldwide and domestic
+calendar top-ten titles match the preceding R32 observations. Independent
+intersection is exactly Bad Boys for Life, Dolittle and Sonic the Hedgehog.
+The only recorded current URLs are these two paths. No release-year or
+`sort=domesticGrossToDate` observation is present in this new run.
+
+The original five-message native verifier dump5a19172f7c97 at02:25:56.329583Z
+has payload SHA256
+22b6c741e4c77625d75ca4b69c4c59dfabf9799cdc7f18fc9f8766588a8d980e.
+It retains all20 table titles and the final DOM's Calendar grosses heading.
+Its response at02:26:04.460314Z, SHA256
+f63056adfa549b46374caa1d865a51a5eeda011c2df3444fa5a6852932786707,
+returns overlap_count3, task_completedtrue, score1.0. Both compressed payloads
+were decoded and checked against their recorded SHA; no image was opened.
+There is no evidence of table loss at this boundary. A separately retained
+final declared-judge HTTP body is not established; the normal run does retain
+all four actual judge decisions, including the C4 failure.
+
+This is a list-selection recurrence, supported by actual inputs rather than
+the shared task ID. The earlier same-source PASS control's domestic-column
+sort yielded6, but does not prove a universal interpretation rule or authorize
+forcing that selector/value. The new source catalog still imports answer6.
+No deterministic general runtime repair is grounded here; the original task
+outcome remains OPEN with respect to stronger causal claims. No duplicate
+fix/test lane, prompt nudge, rubric change, live web/model/API/browser/DB call
+or main synchronization was performed. Next useful evidence would establish
+the task-authoritative list basis rather than regrade this original failure.
+Investigator tokens remain UNMETERED.

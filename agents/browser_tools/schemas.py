@@ -82,8 +82,33 @@ _READ_BROWSER_STATE_TOOL_DESCRIPTION = (
 )
 
 
+class ObservedBrowserTarget(BaseModel):
+    """A named, exact-match target to bind from this observation's visible DOM."""
+    model_config = {"extra": "forbid"}
+    key: str = Field(min_length=1)
+    role: Literal["button", "link", "textbox", "checkbox", "combobox", "radio"]
+    name: str = Field(min_length=1)
+
+
+class BrowserObservationRef(BaseModel):
+    """Reference to one target from an earlier read in this same model batch."""
+    model_config = {"extra": "forbid"}
+    observation_id: str = Field(min_length=1)
+    target: str = Field(min_length=1)
+
+
 class ReadBrowserStateTool(BaseModel):
     tool: Literal["read_browser_state"]
+    observation_id: Optional[str] = Field(default=None, min_length=1)
+    targets: List[ObservedBrowserTarget] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_targets(self):
+        if self.targets and not self.observation_id:
+            raise ValueError("Named targets require observation_id")
+        if len({target.key for target in self.targets}) != len(self.targets):
+            raise ValueError("Observed target keys must be unique")
+        return self
 
 
 ReadBrowserStateTool.__doc__ = _READ_BROWSER_STATE_TOOL_DESCRIPTION
@@ -193,10 +218,16 @@ class ReadNetworkRequestsBrowserTool(BaseModel):
 
 
 class ClickTool(BaseModel):
-    """Click an element by its index in the DOM tree."""
-
+    """Click a current DOM index or a bound target from an earlier read in this batch."""
     tool: Literal["click"]
-    index: int = Field(description="Element index from the DOM tree (e.g., 4 for '[4] button \"Submit\"')")
+    index: Optional[int] = Field(default=None, description="Current observed DOM element index")
+    observation_ref: Optional[BrowserObservationRef] = None
+
+    @model_validator(mode="after")
+    def validate_target(self):
+        if (self.index is None) == (self.observation_ref is None):
+            raise ValueError("Supply exactly one of index or observation_ref")
+        return self
 
 
 class InputTextTool(BaseModel):

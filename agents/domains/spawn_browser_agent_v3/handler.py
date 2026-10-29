@@ -3901,6 +3901,8 @@ def _browser_tool_result_for_history(action_name: str, result: Dict[str, Any]) -
             "success": result.get("success", True),
             "message": result.get("message", ""),
             "formatted_state": result["formatted_state"],
+            **({"observation_id": result["observation_id"], "target_refs": result["target_refs"]}
+               if "observation_id" in result else {}),
             **({"auth_context": result["auth_context"]} if "auth_context" in result else {}),
         }
     clean: Dict[str, Any] = {}
@@ -3923,6 +3925,14 @@ def _append_browser_turn_messages(
     tool_call_id: str,
 ) -> None:
     """Append assistant tool call and tool result to the next LLM context."""
+    coalesced = unified_action.get("coalesced_calls")
+    if coalesced:
+        for call, native_id in zip(coalesced, unified_action["coalesced_tool_call_ids"]):
+            _append_browser_turn_messages(
+                turn_messages, unified_action=call,
+                result={**result, "coalesced_operation": True}, tool_call_id=native_id,
+            )
+        return
     action_name = unified_action.get("action") or "unknown"
     thinking = unified_action.get("thinking") or ""
     args = _browser_tool_arguments(unified_action)
@@ -7243,7 +7253,13 @@ async def _spawn_browser_agent_activity_v3_simulated(
             _require_browser_instruction_state(instruction_state, current_schema=require_current_schema)
         return instruction_state.get("_user_instruction_poll_confirmed") is True
 
+    from .action_batch import BrowserActionBatch
+    simulated_batch = BrowserActionBatch(lambda action, result, call_id: _append_browser_turn_messages(
+        turn_messages, unified_action=action, result=result, tool_call_id=call_id,
+    ))
+
     def resume_payload() -> Dict[str, Any]:
+        simulated_batch.discard_pending("Batch remainder skipped before simulated pause.")
         return {
             key: instruction_state.get(key)
             for key in (
@@ -7394,31 +7410,37 @@ async def _spawn_browser_agent_activity_v3_simulated(
                     browser_state=browser_state,
                     action_entries=action_entries,
                 )
-            browser_stream = BrowserThinkingStream(agent_id=agent_id, task_id=task_id, iteration=iteration)
+            simulated_state = (world_model_session_id, json_dumps_compact(browser_state),
+                               instruction_state.get("delivered_user_instruction_count"))
+            queued_result = await simulated_batch.next(None, simulated_state)
+            browser_stream = simulated_batch.stream if queued_result is not None else BrowserThinkingStream(agent_id=agent_id, task_id=task_id, iteration=iteration)
             await browser_stream.start()
             rose_client.set_thinking_stream(browser_stream)
             try:
-                llm_result = await _call_browser_use_with_rotation(
-                    rose_client=rose_client,
-                    task=task_prompt,
-                    dynamic_system_context=dynamic_system_context,
-                    turn_messages=turn_messages,
-                    browser_state={},
-                    action_entries=action_entries,
-                    config=config,
-                    user_id=user_id,
-                    agent_id=agent_id,
-                    iteration=iteration,
-                    token_state=token_state,
-                    gpt_token=gpt_token,
-                    gpt_account_id=gpt_account_id,
-                    gpt_token_source=gpt_token_source,
-                    gpt_token_pool_id=gpt_token_pool_id,
-                    browser_use_mode=browser_use_mode,
-                    call_site=f"browser_use_simulated_step_{iteration}",
-                    dump_extra={"browser_session_metadata": {"provider": "wmh", "simulated": True}},
-                    pool=browser_pool,
-                )
+                llm_result = queued_result
+                if llm_result is None:
+                    llm_result = await _call_browser_use_with_rotation(
+                        rose_client=rose_client,
+                        task=task_prompt,
+                        dynamic_system_context=dynamic_system_context,
+                        turn_messages=turn_messages,
+                        browser_state={},
+                        action_entries=action_entries,
+                        config=config,
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        iteration=iteration,
+                        token_state=token_state,
+                        gpt_token=gpt_token,
+                        gpt_account_id=gpt_account_id,
+                        gpt_token_source=gpt_token_source,
+                        gpt_token_pool_id=gpt_token_pool_id,
+                        browser_use_mode=browser_use_mode,
+                        call_site=f"browser_use_simulated_step_{iteration}",
+                        dump_extra={"browser_session_metadata": {"provider": "wmh", "simulated": True}},
+                        pool=browser_pool,
+                    )
+                    llm_result = simulated_batch.begin(llm_result, None, simulated_state, browser_stream)
             finally:
                 rose_client.set_thinking_stream(None)
                 await browser_stream.finish()
@@ -7439,6 +7461,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
                 cache_sequence_id=usage.get("cache_sequence_id"),
             )
             action = dict(llm_result.get("action") or {})
+            simulated_batch.started()
             action_name = str(action.get("action") or "")
             thinking = str(action.get("thinking") or "")
             action_call_id = str(llm_result.get("tool_call_id") or uuid_module.uuid4())
@@ -7666,6 +7689,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
                 result=history_result,
                 tool_call_id=action_call_id,
             )
+            await simulated_batch.completed(action, history_result)
             browser_state = next_state
             current_url = str(browser_state.get("url") or "")
             if current_url and (not visited_urls or visited_urls[-1] != current_url):
@@ -7768,6 +7792,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
             "simulated_latest_frame": latest_frame,
         }
     finally:
+        await simulated_batch.discard("Batch remainder skipped when simulated activity ended.")
         jev_session.close()
 
 
@@ -8101,6 +8126,7 @@ async def _spawn_browser_agent_activity_v3_real(
     agent_inbox = AgentInbox.create(agent_id, inbox_address, (write_lock_resume_state or {}).get("agent_inbox_state"))
 
     def _pause_continuity_state(approval_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        action_batch.discard_pending("Batch remainder skipped before durable pause; replan on resume.")
         state = _pause_continuity_state_without_inbox(approval_result)
         if agent_inbox is not None:
             state["agent_inbox_state"] = agent_inbox.state()
@@ -8446,6 +8472,10 @@ async def _spawn_browser_agent_activity_v3_real(
     _heartbeat_token = start_browser_activity_heartbeat()
     action_entries: List[Dict[str, Any]] = []
     browser_turn_messages: List[Dict[str, Any]] = _restore_browser_turn_messages(write_lock_resume_state)
+    from .action_batch import BrowserActionBatch, context as batch_context
+    action_batch = BrowserActionBatch(lambda action, result, call_id: _append_browser_turn_messages(
+        browser_turn_messages, unified_action=action, result=result, tool_call_id=call_id,
+    ))
     if (write_lock_resume_state or {}).get("approval_type") == "payment":
         _resolve_payment_card_tool_result_for_resume(
             browser_turn_messages,
@@ -9976,6 +10006,11 @@ async def _spawn_browser_agent_activity_v3_real(
             """Observe every real action and retain its secrets through redaction."""
             nonlocal action_redaction_refs
             action = kwargs.get("action") or (args[2] if len(args) > 2 else {})
+            if action_batch.is_continuation and not action_batch.current_matches(
+                dom_service, batch_context(dom_service, current_url, browser_turn_messages,
+                    (_credential_binding(), auth_realm, instruction_state.get("delivered_user_instruction_count"), schema_user_instruction_count)),
+            ):
+                return {"success": False, "error": "Batch target or authority changed before action dispatch"}
             if action.get("action") == "phone" and not (kwargs.get("phone_snapshot") or {}).get("enabled"):
                 return {"success": False, "error": "Phone unavailable for this decision"}
             redaction_refs = [dict(secret_refs)]
@@ -10157,6 +10192,7 @@ async def _spawn_browser_agent_activity_v3_real(
             step_timer.start_step(iteration)
             browser_activity_checkpoint(f"Step {iteration}")
             if await _wait_for_browser_user_control(config, task_id):
+                await action_batch.discard("Batch remainder skipped after user control.")
                 tab_focus_cache.foreground = None
                 state_prefetch.discard()
             step_timer.mark("user_control_wait")
@@ -10240,7 +10276,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     )
                 step_timer.mark("overlay_suppress")
                 observe_needs_dom = _step_observe_needs_dom(
-                    fast_mode_replay=bool(fast_mode_cache_enabled),
+                    fast_mode_replay=bool(fast_mode_cache_enabled) or bool(action_batch.pending),
                     browser_recorder=browser_recorder,
                     restored_indexes_unresolved=_restored_indexes_unresolved(
                         dom_service,
@@ -10425,7 +10461,10 @@ async def _spawn_browser_agent_activity_v3_real(
                 instruction_state["acted_user_instruction_count"] = int(
                     instruction_state.get("delivered_user_instruction_count") or 0
                 )
-                browser_stream = BrowserThinkingStream(
+                batch_state = batch_context(dom_service, current_url, browser_turn_messages,
+                                            (_credential_binding(), auth_realm, instruction_state.get("delivered_user_instruction_count"), schema_user_instruction_count))
+                queued_result = await action_batch.next(dom_service, batch_state)
+                browser_stream = action_batch.stream if queued_result is not None else BrowserThinkingStream(
                     agent_id=agent_id,
                     task_id=task_id,
                     iteration=iteration,
@@ -10439,34 +10478,39 @@ async def _spawn_browser_agent_activity_v3_real(
                     # soft-complete with done (see browser_use_cache) so we never
                     # fall through to live rose-1-browser-use (verify13 stall).
                     fm_write_through = write_through_enabled_for_user(user_id)
-                    llm_result = await asyncio.wait_for(
-                        cached_browser_decision(
-                            enabled=bool(fast_mode_cache_enabled) and not phone_before_decision.get("enabled"),
-                            goal=goal,
-                            request={
-                                "task": task_prompt,
-                                "dynamic_system_context": dynamic_system_context,
-                                "turn_messages": browser_turn_messages,
-                                # url/title enter the DEMO cache key via
-                                # canonical_browser_use_request — empty {} would
-                                # replay a stale decision after a page change.
-                                "browser_state": {
-                                    "url": observe_page_state.get("url") or current_url,
-                                    "title": observe_page_state.get("title"),
+                    llm_result = queued_result
+                    if llm_result is None:
+                        llm_result = await asyncio.wait_for(
+                            cached_browser_decision(
+                                enabled=bool(fast_mode_cache_enabled) and not phone_before_decision.get("enabled"),
+                                goal=goal,
+                                request={
+                                    "task": task_prompt,
+                                    "dynamic_system_context": dynamic_system_context,
+                                    "turn_messages": browser_turn_messages,
+                                    # url/title enter the DEMO cache key via
+                                    # canonical_browser_use_request — empty {} would
+                                    # replay a stale decision after a page change.
+                                    "browser_state": {
+                                        "url": observe_page_state.get("url") or current_url,
+                                        "title": observe_page_state.get("title"),
+                                    },
+                                    "action_entries": action_entries,
+                                    "config": {
+                                        "browser_use_mode": browser_use_mode,
+                                    },
                                 },
-                                "action_entries": action_entries,
-                                "config": {
-                                    "browser_use_mode": browser_use_mode,
-                                },
-                            },
-                            call_llm=_live_browser_decision,
-                            write_enabled=bool(
-                                (fast_mode_cache_enabled or fm_write_through) and not phone_before_decision.get("enabled")
+                                call_llm=_live_browser_decision,
+                                write_enabled=bool(
+                                    (fast_mode_cache_enabled or fm_write_through) and not phone_before_decision.get("enabled")
+                                ),
+                                agent_id=agent_id,
                             ),
-                            agent_id=agent_id,
-                        ),
-                        timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
-                    )
+                            timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+                        )
+                        llm_result = action_batch.begin(
+                            llm_result, dom_service, batch_state, browser_stream,
+                        )
                     decision_succeeded = True
                     step_timer.mark("llm_decision")
                 finally:
@@ -10618,6 +10662,7 @@ async def _spawn_browser_agent_activity_v3_real(
             _rose_request_id = llm_result.get("request_id", "unknown")
 
             if await _wait_for_browser_user_control(config, task_id):
+                await action_batch.discard("Batch remainder skipped after user control.")
                 # Never execute an action planned against the pre-handoff DOM.
                 tab_focus_cache.foreground = None
                 state_prefetch.discard()
@@ -10625,6 +10670,11 @@ async def _spawn_browser_agent_activity_v3_real(
                 continue
 
             # 4. Extract action from response
+            if llm_result.get("_batch_continuation") and not action_batch.current_matches(
+                dom_service, batch_context(dom_service, current_url, browser_turn_messages, (_credential_binding(), auth_realm, instruction_state.get("delivered_user_instruction_count"), schema_user_instruction_count)),
+            ):
+                await action_batch.discard("Batch remainder skipped after authority changed.")
+                continue
             unified_action = llm_result.get("action", {})
             unified_action = _remap_cached_browser_action_target(
                 unified_action,
@@ -10680,6 +10730,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     tool_call_id=recovery_tool_call_id,
                 )
             action_name = unified_action.get("action", "")
+            action_batch.started()
             thinking = unified_action.get("thinking", "")
 
             # Finish the already-owned inbox poll before transferring control,
@@ -12375,6 +12426,12 @@ Based on this feedback, I need to continue working on the task and address the i
                     "origin": str(current_url or ""),
                 }
 
+            if unified_action.get("observation_source_call_id"):
+                result = {**result, "observation_source_call_id": unified_action["observation_source_call_id"]}
+            result = action_batch.bind_observation(
+                unified_action, result, dom_service,
+                batch_context(dom_service, current_url, browser_turn_messages, (_credential_binding(), auth_realm, instruction_state.get("delivered_user_instruction_count"), schema_user_instruction_count)),
+            )
             _append_browser_turn_messages(
                 browser_turn_messages,
                 unified_action=unified_action,
@@ -12845,8 +12902,10 @@ Based on this feedback, I need to continue working on the task and address the i
                     consecutive_keystroke_free=consecutive_keystroke_free,
                 )
 
+            await action_batch.completed(unified_action, result)
             step_timer.mark("post_action_bookkeeping")
 
+        await action_batch.discard("Batch remainder skipped at step budget boundary.")
         step_timer.finish()
         # Step budget exhausted, or the loop stopped early on repeated model failures.
         terminal_reason = loop_abort_reason or f"Max iterations ({MAX_ITERATIONS}) reached"
@@ -13049,6 +13108,7 @@ Based on this feedback, I need to continue working on the task and address the i
         )
 
     except asyncio.CancelledError as cancellation:
+        await action_batch.discard("Batch remainder skipped on cancellation.")
         logger.info("\U0001f534 Browser agent activity cancelled (paused)")
 
         if isinstance(cancellation, _BrowserSessionPreparationCancelled):
@@ -13268,6 +13328,7 @@ Based on this feedback, I need to continue working on the task and address the i
         raise safe_error from None
 
     finally:
+        await action_batch.discard("Batch remainder skipped when the activity ended.")
         jev_session.close()
         try:
             generation_sealed = generation_sealed or isinstance(sys.exception(), WorkflowGenerationSealed)

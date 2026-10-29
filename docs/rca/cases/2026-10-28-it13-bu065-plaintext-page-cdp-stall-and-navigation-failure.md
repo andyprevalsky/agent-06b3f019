@@ -241,3 +241,33 @@ recurrence. The bounded result preserves those distinctions.
 ## Reusable lesson
 
 Separate page-target CDP silence, browser-process responsiveness, script execution and queued navigation identity before assigning a renderer timeout to a single workload or provider.
+
+
+## R50: original It14 occurrence on source85
+
+The parent supplied a hash-bound intake of the original It14 root
+`4793dfe5-0a1c-4c2c-ad12-82f1b4ba1336`, executed on
+`85d37fc8ab8e284459977debdef34348d825ef84` without a patch. The original native
+result remains FAILED after1026.4seconds, infraFALSE. This appendix relies on
+the parent's seven-member byte/hash verification, not a new independent raw-log
+audit or a replay. Archive SHA256
+`4f67afd12823ed71cffda5100e017e6bbd420e700aadb546b75e3855ad7d287f`;
+normal manifest SHA256
+`73123051043d5c1b7f86c41c6cba34692ca34cadea67542eb08e4b835656fef9`;
+run.json SHA256
+`2565c7a8146269efaddb24c65e807d1e92524e8074eef2116d4e6b77c4e1c86e`.
+
+Two evaluate timeouts at02:26:39.829Z and02:28:02.417Z precede classifications
+at02:26:42.368Z and02:28:04.951Z: renderer frozen, browser ok,
+renderer_main_thread_blocked. Hard recoveries at02:27:18.901Z and02:28:41.275Z
+report new_context_page, goto_resume_url, close_playwright_page and recycled=true.
+Six subsequent credential_reload_error recoveries occur at02:31:57.355Z,
+02:33:43.560Z,02:35:29.778Z,02:37:15.968Z,02:39:02.157Z and02:40:48.361Z.
+The existing shared eight-recovery budget is exhausted at02:42:13.506Z. The
+reported navigation targets the original raw words_alpha.txt dictionary URL.
+
+The R35 guard handles these credential-reload errors through recovery instead
+of allowing the old unguarded escape. That confirms this narrow guard is
+executing; it does not establish renderer recovery or task success. The
+renderer/session failure remains OPEN. No new runtime repair, budget increase,
+regression claim, task regrade or provider diagnosis follows from this intake.

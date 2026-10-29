@@ -11266,7 +11266,7 @@ async def test_browser_streaming_rose_client_forwards_and_folds_chunks():
         )
         yield StreamChunk(
             kind="tool_call",
-            data={"id": "call-2", "name": "wait", "arguments": '{"seconds":1}'},
+            data={"id": "call-2", "name": "wait", "arguments": '{"time_ms":1000}'},
         )
         yield StreamChunk(kind="usage", data={"prompt_tokens": 10, "completion_tokens": 4})
         yield StreamChunk(kind="done", data={})
@@ -11282,11 +11282,12 @@ async def test_browser_streaming_rose_client_forwards_and_folds_chunks():
     assert result["actual_model"] == "gpt-5.6-sol-gpt"
     assert result["action"]["action"] == "click"
     assert result["tool_call_id"] == "call-1"
-    assert sink.on_chunk.await_count == 5
+    assert sink.on_chunk.await_count == 6
     forwarded_tools = [
         call.args[0].data["id"] for call in sink.on_chunk.await_args_list if call.args[0].kind == "tool_call"
     ]
-    assert forwarded_tools == ["call-1"]
+    assert forwarded_tools == ["call-1", "call-2"]
+    assert [item["tool_call_ids"] for item in result["batch_actions"]] == [["call-1"], ["call-2"]]
 
 
 @_in_browser_activity_context
