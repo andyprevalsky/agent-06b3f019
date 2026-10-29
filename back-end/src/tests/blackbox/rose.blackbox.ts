@@ -5065,7 +5065,7 @@ async function main(): Promise<void> {
       fn: testSubscriptionFirst_tokenlessCallerLeasesOnceAndAbortStopsRotation,
     },
     {
-      name: 'subscription-first / Flash and browser try compute tokens before Cerebras',
+      name: 'role scope / Flash chat and browser retain Cerebras first',
       fn: testFlashChatAndBrowserKeepCerebrasFirst,
     },
     {
