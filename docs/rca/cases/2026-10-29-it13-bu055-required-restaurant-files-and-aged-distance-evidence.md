@@ -250,3 +250,69 @@ which change caused the PASS or that either would repair originalR37/R43.
 Original required-file, upload400, missing-evidence and timeout observations
 remain OPEN. No runtime edit, new test, model/API/browser/provider/DB call,
 image viewing, fresh capture or regrade was performed for this comparison.
+
+
+## R57: It14 run2 expires while still researching (2026-10-29)
+
+Original intake clock04:18UTC is retained. Jobr002-j0025, root
+1184b372-217b-4dbf-8d23-6f03ea03d90f, browser task
+76f080f4-26c6-55eb-bd25-5a8f777febe6 executed unchanged source
+85d37fc8ab8e284459977debdef34348d825ef84, patchnone. Archive SHA256
+4b0d512dc5fd48a85b4a7102c31535449c417ccfa7994402eba369e7aeafefe5;
+manifest32af5819e6bf450c8d26875f4f77c467c450e9d3765102209662f28c3704194c.
+All seven member lengths and hashes were independently verified. Run SHA256
+05b89b56db3f07d9226107f40bf479a9d9afbb821831d2e7a1529b6cf924a583.
+The root is nativeFAILED after3016.5seconds, benchmarkFAILED/infraFALSE.
+There is no declared-judge result and no attempted completion verifier in the
+original191-message trajectory or full normal worker log. Summary progress1
+and stop_metadata0calls are not proof of completion or no model execution.
+The full worker records73 rose.complete.start and72 foundry.done events.
+
+The generator's actual response requests one required nonnullable
+supercharger_restaurant_directory:file_pointer, described as containing every
+charger and three restaurants per charger with the requested facts. That is a
+representation choice, not proof of this timeout's cause: the actor never
+reaches a missing-file completion rejection or attempts a download here.
+Consequently this is a distinct observation in the same task case, not a
+recurrence claim for R37/R43's proven verifier-rejection sequence. The same-source
+run1 PASS control above uses nested inline data; it is not a controlled ablation.
+
+At04:12:17.839Z, outer184/native step71 still reads actual Google Maps driving
+directions from the eastern Bloomington charger to Chick-fil-A, with a236ft
+route. At04:12:24.891433Z the next model call starts; at04:12:25.032858Z the
+browser_activity_wait span ends in error after3003034ms, followed by the exact
+Temporal activity StartToClose timeout. The child reports failure and the root
+reports Native browser task did not complete successfully. Later cleanup text
+says Agent paused by user; it is not independent evidence of a new human pause.
+The source schedules its existing step-scaled50-minute activity timeout for
+100steps, with its existing cancellation/join and ownership rules unchanged.
+
+Timing coverage is limited. Matched visible action start/finish records cover
+25goto actions totaling1277.547seconds,32read_browser_state actions totaling
+32.998seconds, and8click actions totaling21.225seconds. These are message-boundary
+intervals including intervening credential/realtime work, not per-request CDP
+wire latency or a complete nonoverlapping wall-time decomposition. The first
+long goto spans03:23:50.865–03:27:17.676 and contains a03:26:53.511 credential
+reference event. Its206.811seconds cannot be assigned wholly to navigation.
+The original full log has DOM snapshot/dom_tree/device_pixel_ratio failures at
+03:28:52 and04:03:19, plus several user-agent-override no-reply timeouts; useful
+navigation and observations continue afterwards. It does not establish which
+remote renderer, transport, client, credential work or model wait caused the
+aggregate delay. A new timeout, provider change or batching-success claim is
+not justified by these timestamps. R48 was not executed in source85.
+
+Later raw model requests are unavailable in this packet because the original
+logger emits51 llm.context.dump_skipped events. The first is browser step12,
+reason payload_too_large,1341869bytes against max_bytes1000000. Earlier captured
+requests and persisted later actions remain usable evidence; skipped dumps do
+not imply no model call, nor prove lost runtime input. This limits exact late
+actor-request reconstruction without manufacturing a capture.
+
+Archive comparisons after original inspection included this case's complete
+R37/R43 and positive-control sections, and the CDP-latency evidence-gap case.
+Their Solution/Human-feedback boundaries preserve the same distinction between
+observed waits and proven cause. No new runtime candidate, duplicate test lane,
+model replay, task/prompt/schema/criterion/cap change, provider query, browser
+capture or DB call was made. OPEN: original active-research timeout is proved;
+its safely repairable upstream cause and changed-task outcome are not.
+TokensUNMETERED; all prior outcomes and original clocks remain unchanged.

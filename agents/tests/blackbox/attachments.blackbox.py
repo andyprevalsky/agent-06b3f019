@@ -551,6 +551,74 @@ async def test_build_multimodal_user_message_text_attachment_merged():
     assert "[File:" not in msg["content"][0]["text"]
 
 
+
+async def test_storage_failure_diagnostic_is_safe_and_typed():
+    import json
+    from helpers import attachments
+    secret = "private-file-body-secret-token"
+    cases = [
+        (400, {"code": "InvalidMimeType", "message": secret}, "application/json", "json_object", "InvalidMimeType"),
+        (403, {"code": "AccessDenied", "message": secret}, "application/json", "json_object", "AccessDenied"),
+        (500, {"code": secret, "nested": {"authorization": secret}}, "application/json", "json_object", "unrecognized"),
+        (400, [secret], "application/json", "json_other", None),
+        (400, {"code": "\ud800", "message": secret}, "application/json", "json_object", "unrecognized"),
+        (400, b"{bad " + secret.encode(), "application/json", "invalid_json", None),
+        (400, b"<html>" + secret.encode(), "text/html", "non_json", None),
+        (400, b"x" * 4097, "application/json", "oversized", None),
+        (400, b"[" * 1100 + b"]" * 1100, "application/json", "invalid_json", None),
+    ]
+    config = SimpleNamespace(supabase=SimpleNamespace(url="https://storage.invalid", service_role_key=secret))
+    for status, body, media, expected_class, code in cases:
+        raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+        response = httpx.Response(status, content=raw, headers={"content-type": media, "x-request-id": secret})
+        requests = []
+        def serve(request):
+            requests.append(request)
+            return response
+        setup_mock_fn(serve)
+        with patch.object(attachments, "load_config", return_value=config), patch.object(attachments.logger, "warning") as warning:
+            try:
+                await attachments.upload_to_storage("private-user", secret.encode(), "private-name.txt", "text/plain")
+            except httpx.HTTPStatusError as exc:
+                assert exc.response.status_code == status and exc.response.content == raw
+            else:
+                raise AssertionError("Upload failure was swallowed")
+        assert len(requests) == 1
+        assert warning.call_count == 1, "HTTP failure lost typed diagnostic"
+        diagnostic = json.loads(warning.call_args.args[1])
+        assert diagnostic["http_status"] == status
+        assert diagnostic["response_class"] == expected_class
+        assert diagnostic.get("provider_error_code") == code
+        assert len(diagnostic["request_id_sha256"]) == 64
+        assert secret not in str(warning.call_args)
+        assert "private-user" not in str(warning.call_args)
+        assert "private-name" not in str(warning.call_args)
+        assert "storage.invalid" not in str(warning.call_args)
+        assert "message" not in diagnostic and "body" not in diagnostic
+
+
+async def test_storage_diagnostic_success_and_cancel_unchanged():
+    from helpers import attachments
+    config = SimpleNamespace(supabase=SimpleNamespace(url="https://storage.invalid", service_role_key="fake"))
+    for cancelled in [False, True]:
+        requests = []
+        def serve(request):
+            requests.append(request)
+            if cancelled:
+                raise asyncio.CancelledError()
+            return httpx.Response(200, json={"Key": "ok"})
+        setup_mock_fn(serve)
+        with patch.object(attachments, "load_config", return_value=config), patch.object(attachments.logger, "warning") as warning:
+            try:
+                result = await attachments.upload_to_storage("user", b"original-bytes", "file.txt", "text/plain", idempotency_key="same")
+            except asyncio.CancelledError:
+                assert cancelled
+            else:
+                assert not cancelled and result["size_bytes"] == 14
+            warning.assert_not_called()
+        assert len(requests) == 1 and requests[0].content == b"original-bytes"
+        assert requests[0].headers["x-upsert"] == "true"
+
 async def test_upload_to_storage_missing_key():
     """upload_to_storage raises ValueError when service role key missing."""
     import os
@@ -681,7 +749,6 @@ async def test_parent_attachment_success_preserves_metadata_and_logs():
         def emit(self, record):
             self.records.append(record)
 
-    original_client = httpx.AsyncClient
     for pointers in [[], [{
         "id": "parent-file-1", "storage_path": "offline/brief.txt",
         "original_filename": "brief.txt", "mime_type": "text/plain",
@@ -1102,6 +1169,8 @@ async def run_all_tests():
     await r.record_async("mm_user_text_merged", test_build_multimodal_user_message_text_attachment_merged)
     await r.record_async("upload_missing_key", test_upload_to_storage_missing_key)
     await r.record_async("upload_happy", test_upload_to_storage_happy)
+    await r.record_async("storage_safe_error_diagnostic", test_storage_failure_diagnostic_is_safe_and_typed)
+    await r.record_async("storage_success_cancel_unchanged", test_storage_diagnostic_success_and_cancel_unchanged)
     await r.record_async(
         "upload_idempotency_key_reuses_path",
         test_upload_to_storage_idempotency_key_reuses_path_and_upserts,

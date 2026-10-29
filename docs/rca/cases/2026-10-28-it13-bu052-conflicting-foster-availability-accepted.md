@@ -212,3 +212,66 @@ Human feedback was read before classification. No new deterministic guard is
 justified by matching dog names, caveat words or board categories. No duplicate
 fix/test lane, task/prompt/criterion change, runtime edit or regrade. The same
 OPEN semantic-remedy floor remains; tokensUNMETERED.
+## R60 It14 run2: retained conflict rejected, then native activity timed out
+
+R60 intake began at the original04:22 phase (interrupted by higher-priority
+independent R58 review). Jobr002-j0022, root01c341fb-98a1-4719-980c-6bee70ababff,
+executed85d37fc8ab8e284459977debdef34348d825ef84 with patchnone. Assembled
+archive291e783d5240ba16e57b72c968d4c72194c1868431612729de1b92d597714217,
+132877057bytes; both source parts independently hashed. Normal manifest
+9e7770240b638d80722f54c55b5482a56c525569a20fa7cf01a2ec8180eb8a79 and all7
+normal-runtime member sizes/hashes verified. Run file SHA
+f0a95a2276558ac66e11be6d7150537f86763d4b07e88dbe66e49279378afdec.
+
+This is contrasting evidence, NOT another observed false acceptance. The exact
+same currently-available requirement survives in schema and verifier input.
+The actor explicitly recognizes the existing-foster conflict by persisted
+message90 at03:26:11.888Z and subsequently searches for an alternative.
+Verifier request2997f45afd66 at worker17021, decoded SHA
+bb4f38326c6bf08e4791d9b54b40e6530a6ccf54e4de9e7213ee4ae171c032e1,
+retains the Malyk profile's already-in-foster/adoption contradiction. Its updated
+raw response at worker17039 independently decompresses to SHA
+826221f8fe13cae4471091724b991df2122493236bf7f11e9b21fda8f5a1e90a.
+The captured JSON returns task_completed=false and score0.5, explicitly saying
+Malyk cannot be verified as currently available for foster and a third eligible
+dog remains unverified. The output object still contains Heidi/Frito/Malyk;
+that extraction shape is distinct from the explicit false completion verdict.
+The recorded serving model is gpt-6-sol-foundry, unlike R47's recorded route;
+this observation is not a controlled model comparison.
+
+The negative reasoning reaches persisted message170, actor feedback171 and
+verifier message172 at03:42:41Z. Later actor messages295/328 continue to reject
+Malyk as the missing third and search alternatives. There is no subsequent
+successful verdict in the supplied original. The child activity starts at
+03:22:29.466924Z and its browser_activity_wait ends at04:12:30.256418Z,
+duration3000805ms, with the exact ActivityError caused by StartToClose timeout
+(worker29301-29302). Persisted message373 records the timeout;374 notifies the
+root. Root marked FAILED at04:12:38.028737Z; completion summary375 says native
+browser task did not complete. A later cancellation says “Agent paused by user”
+and cleanup HTTP500 appears afterward; those are not evidence that the original
+root completed, nor the initial cause of this run's failure. Normal packet
+custody still includes stopped services and cleanup evidence; these are separate
+from task success.
+
+Canonical run remains FAILED, passedfalse, infraFALSE as supplied binding.
+progress_score1 is not a successful task verdict. No declared rubric result is
+present in the task data; source85 run_benchmark.py6263-6272 rejects a FAILED
+native status before ordinary declared judging (except the separate explicit
+Polar step-budget pause case). This was an activity timeout, not that exception.
+No0/3rubric claim is made for R60.
+
+The observed failure boundary is unmet third-candidate evidence followed by
+native deadline expiration, not the previous family's acknowledged-conflict
+acceptance. The current source passes a configured browser_start_to_close
+budget to Temporal; the50-minute observed duration is consistent with that
+boundary. The complete runtime environment for the selected timeout value was
+not extracted, so no new timeout configuration diagnosis is claimed. The
+underlying reason the research failed to establish a third eligible candidate
+remains OPEN; the pages may be ambiguous or the search may be incomplete.
+No proof of a general deterministic transport, schema or evidence-loss defect
+was found. No model-intelligence classification follows.
+
+No runtime patch, prompt nudge, dog-name/availability heuristic, task edit,
+criteria relaxation, timeout increase, live browser/model call or regrade is
+proposed. This contrasting original should be retained alongside R33/R41/R47,
+not counted as another confirmed recurrence of their false-completion decision.
