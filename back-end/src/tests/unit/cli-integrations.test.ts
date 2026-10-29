@@ -36,6 +36,8 @@ let nativeBuilds = 0;
 let revokePublisher = false;
 let beforeSessionRead: (() => void) | undefined;
 let secured = 0;
+let captureFailure = false;
+let initializationFailure = false;
 let agentStatus = 'ACTIVE';
 const requests: Array<Record<string, unknown>> = [];
 const db = {
@@ -168,7 +170,10 @@ async function main() {
   });
   await mock.module('../../providers/cliTemplate', {
     namedExports: {
-      readTemplateCredentials: async () => [{ path: '.yc/credentials.json', data: 'e30=' }],
+      readTemplateCredentials: async () => {
+        if (captureFailure) throw new Error('capture failed');
+        return [{ path: '.yc/credentials.json', data: 'e30=' }];
+      },
       executeTemplateCli: async () => {
         executions += 1;
         if (verificationGate) await verificationGate;
@@ -235,6 +240,7 @@ async function main() {
   await mock.module('../../providers/cliNativeCredentials', {
     namedExports: {
       initializeCliCredentials: async () => {
+        if (initializationFailure) throw new Error('initialization failed');
         secured++;
       },
     },
@@ -349,6 +355,23 @@ async function main() {
     install_verify: ['--version'],
     credential_files: ['.yc/credentials.json'],
   };
+  captureFailure = true;
+  await assert.rejects(cli.publishCliIntegration(caller, first.id, nativeBody), /capture failed/);
+  assert.equal(rows[0].config.publishing_auth_inflight, undefined);
+  assert.equal(
+    rows[0].config.publishing_token,
+    undefined,
+    'capture failure permits corrected retry'
+  );
+  captureFailure = false;
+  initializationFailure = true;
+  await assert.rejects(
+    cli.publishCliIntegration(caller, first.id, nativeBody),
+    /initialization failed/
+  );
+  assert.equal(rows[0].config.publishing_auth_inflight, undefined);
+  assert.equal(rows[0].config.publishing_token, undefined, 'persistence failure permits retry');
+  initializationFailure = false;
   let allowVerification!: () => void;
   verificationGate = new Promise<void>((resolve) => {
     allowVerification = resolve;

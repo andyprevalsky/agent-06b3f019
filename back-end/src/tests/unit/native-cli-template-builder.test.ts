@@ -7,6 +7,11 @@ import { join } from 'node:path';
 import type { TemplateRecipe, TemplateVariant } from '../../providers/userCodeTemplates';
 
 async function main() {
+  await mock.module('../../providers/sharedState', {
+    namedExports: {
+      withSerializedLock: async (_key: string, run: () => Promise<unknown>) => run(),
+    },
+  });
   await mock.module('../../providers/userCodeTemplates', {
     namedExports: { readUserCodeTemplate: async () => null },
   });
@@ -216,6 +221,33 @@ async function main() {
     ),
     'rebuilt'
   );
+  // A long installation must not retain the global Claude reservation slot.
+  const { withClaudeCodeCreateSlot } = await import('../../providers/e2bCreateSlot');
+  let installationStarted!: () => void;
+  let releaseInstall!: () => void;
+  const installed = new Promise<void>((resolve) => {
+    installationStarted = resolve;
+  });
+  const installGate = new Promise<void>((resolve) => {
+    releaseInstall = resolve;
+  });
+  const slowBuild = buildNativeCliTemplate([recipe], variant, 'slow-install', async () => ({
+    ...sandbox,
+    commands: {
+      run: async () => {
+        installationStarted();
+        await installGate;
+      },
+    },
+  }));
+  await installed;
+  let unrelatedReserved = false;
+  await withClaudeCodeCreateSlot(async () => {
+    unrelatedReserved = true;
+  });
+  assert(unrelatedReserved, 'another user reserves while this installation waits');
+  releaseInstall();
+  await slowBuild;
   process.stdout.write(
     'Native CLI builder: clean env, immutable filesystem snapshot, owned cleanup, sanitized failures and exact variant provisioning passed\n'
   );

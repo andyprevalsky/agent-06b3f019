@@ -2,6 +2,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from './database';
+import { retryWithBackoff } from './retry';
 
 export interface TemplateRecipe {
   id: string;
@@ -57,6 +58,7 @@ export interface UserTemplateDependencies {
   now: () => number;
   token: () => string;
   every: (callback: () => void, milliseconds: number) => () => void;
+  wait?: (milliseconds: number) => Promise<void>;
 }
 export type TemplateBuilder = (
   recipes: TemplateRecipe[],
@@ -73,6 +75,14 @@ export class UserCodeTemplateError extends Error {
     super(message, options);
   }
 }
+class TemplateLeaseContentionError extends UserCodeTemplateError {
+  constructor(message: string) {
+    super(409, message);
+  }
+}
+const REPAIR_WAIT_MS = 30 * 60_000;
+const repairQueues = new WeakMap<UserTemplateStore, Map<string, Promise<UserCodeTemplate>>>();
+const matchingRepairs = new WeakMap<UserTemplateStore, Map<string, Promise<UserCodeTemplate>>>();
 const LEASE_MS = 90_000;
 const RENEW_MS = 20_000;
 const HEAD_NAME = 'code_template';
@@ -314,31 +324,72 @@ export async function repairUserCodeTemplateVariant(
   builder: TemplateBuilder,
   deps: UserTemplateDependencies = defaults
 ): Promise<UserCodeTemplate> {
-  const head = await deps.store.read(userId);
-  if (!head || head.revision === 0 || !head.recipes.length)
-    throw new UserCodeTemplateError(409, 'No published CLI recipes are available to rebuild');
-  if (
-    head.variants.some(
-      (entry) =>
-        entry.key === variant.key &&
-        entry.provider === variant.provider &&
-        entry.cpu === variant.cpu &&
-        entry.memoryGb === variant.memoryGb &&
-        entry.baseTemplateId === variant.baseTemplateId &&
-        entry.snapshotId
-    )
-  )
-    return head;
-  const operationId = `repair:${head.revision}:${createHash('sha256').update(JSON.stringify(variant)).digest('hex')}`;
-  return commitTemplateOperation(
-    userId,
-    operationId,
-    head.recipes[0]!,
-    [variant],
-    builder,
-    deps,
-    true
-  );
+  const queues = repairQueues.get(deps.store) ?? new Map<string, Promise<UserCodeTemplate>>();
+  const matches = matchingRepairs.get(deps.store) ?? new Map<string, Promise<UserCodeTemplate>>();
+  repairQueues.set(deps.store, queues);
+  matchingRepairs.set(deps.store, matches);
+  const key = JSON.stringify([userId, variant]);
+  const matching = matches.get(key);
+  if (matching) return matching;
+  const previous = queues.get(userId);
+  const deadline = deps.now() + REPAIR_WAIT_MS;
+  const operation = (async () => {
+    // Different variants queue behind the same user's writer, then reread all recipes.
+    if (previous) await previous.catch(() => undefined);
+    return retryWithBackoff(
+      async () => {
+        const head = await deps.store.read(userId);
+        if (!head || head.revision === 0 || !head.recipes.length)
+          throw new UserCodeTemplateError(409, 'No published CLI recipes are available to rebuild');
+        if (
+          head.variants.some(
+            (entry) =>
+              entry.key === variant.key &&
+              entry.provider === variant.provider &&
+              entry.cpu === variant.cpu &&
+              entry.memoryGb === variant.memoryGb &&
+              entry.baseTemplateId === variant.baseTemplateId &&
+              entry.snapshotId
+          )
+        )
+          return head;
+        if (deps.now() >= deadline)
+          throw new UserCodeTemplateError(
+            409,
+            'CLI template repair is still in progress; retry shortly'
+          );
+        if (head.lease && head.lease.expiresAt > deps.now())
+          throw new TemplateLeaseContentionError('Another template update is in progress');
+        const operationId = `repair:${head.revision}:${createHash('sha256').update(JSON.stringify(variant)).digest('hex')}`;
+        return commitTemplateOperation(
+          userId,
+          operationId,
+          head.recipes[0]!,
+          [variant],
+          builder,
+          deps,
+          true
+        );
+      },
+      {
+        maxRetries: Math.ceil(REPAIR_WAIT_MS / 1000) + 1,
+        isRetryable: (error) =>
+          error instanceof TemplateLeaseContentionError && deps.now() < deadline,
+        getBackoffDelayMs: (_error, attempt) =>
+          Math.max(0, Math.min(1000 * 2 ** Math.min(attempt - 1, 3), 5000, deadline - deps.now())),
+        sleep: deps.wait,
+        component: 'NativeCliTemplateRepair',
+      }
+    );
+  })();
+  queues.set(userId, operation);
+  matches.set(key, operation);
+  try {
+    return await operation;
+  } finally {
+    if (queues.get(userId) === operation) queues.delete(userId);
+    if (matches.get(key) === operation) matches.delete(key);
+  }
 }
 
 async function commitTemplateOperation(
@@ -365,7 +416,7 @@ async function commitTemplateOperation(
   );
   if (racedCompletion) return racedCompletion;
   if (previous.lease && previous.lease.expiresAt > deps.now())
-    throw new UserCodeTemplateError(409, 'Another template update is in progress');
+    throw new TemplateLeaseContentionError('Another template update is in progress');
   const recipes = repair
     ? structuredClone(previous.recipes)
     : [...previous.recipes.filter((item) => item.id !== recipe.id), structuredClone(recipe)];
@@ -391,7 +442,7 @@ async function commitTemplateOperation(
     lease: { token, operationId, expiresAt: deps.now() + LEASE_MS },
   };
   if (!(await deps.store.compareAndSet(userId, previous, current, undefined, fence)))
-    throw new UserCodeTemplateError(409, 'Another template update won the lease');
+    throw new TemplateLeaseContentionError('Another template update won the lease');
   let leaseError: unknown;
   let writes = Promise.resolve();
   const snapshots: string[] = [];

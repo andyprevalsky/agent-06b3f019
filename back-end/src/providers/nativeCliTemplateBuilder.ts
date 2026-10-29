@@ -1,5 +1,6 @@
 /** Clean installation images: no agent home, auth, browser state or conversation is copied. */
 import { createSandboxWithRetry } from './e2bSandboxCreate';
+import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import { shellQuote } from './codeSessions/sandboxFs';
 import { sizeKey, type SandboxSize, type SandboxProvider } from './codeSessions/sandboxSize';
 import {
@@ -41,16 +42,20 @@ export async function buildNativeCliTemplate(
   uniqueName: string,
   create: CreateBuilder = createSandboxWithRetry
 ): Promise<string> {
-  const sandbox = await create(
-    variant.baseTemplateId,
-    {
-      apiKey: process.env.E2B_API_KEY,
-      timeoutMs: BUILDER_TIMEOUT_MS,
-      envs: { HOME: '/home/user', PATH: NATIVE_CLI_PATH, LANG: 'C.UTF-8' },
-      metadata: { purpose: 'native-cli-template-builder', operation: uniqueName },
-    },
-    'CLI template builder'
-  );
+  const reserve = () =>
+    create(
+      variant.baseTemplateId,
+      {
+        apiKey: process.env.E2B_API_KEY,
+        timeoutMs: BUILDER_TIMEOUT_MS,
+        envs: { HOME: '/home/user', PATH: NATIVE_CLI_PATH, LANG: 'C.UTF-8' },
+        metadata: { purpose: 'native-cli-template-builder', operation: uniqueName },
+      },
+      'CLI template builder'
+    );
+  const sandbox = await (variant.provider === 'claude'
+    ? withClaudeCodeCreateSlot(reserve)
+    : reserve());
   let phase = 'installation';
   let snapshotId: string | undefined;
   let failed = false;

@@ -361,6 +361,112 @@ async function main() {
   );
   repairRelease.open();
   assert.equal((await pendingRepair).variants.length, 3);
+  // Same-user callers share a repair; another requested variant queues and retains it.
+  const concurrent = harness();
+  await publishUserCodeTemplate(
+    'owner',
+    'seed',
+    recipe('yc'),
+    variants,
+    async (_r, v) => `old-${v.provider}`,
+    concurrent.deps
+  );
+  const started = gate();
+  const finish = gate();
+  let concurrentBuilds = 0;
+  const build = async () => {
+    concurrentBuilds++;
+    started.open();
+    await finish.promise;
+    return 'shared-new';
+  };
+  const firstRepair = repairUserCodeTemplateVariant('owner', rotated, build, concurrent.deps);
+  await started.promise;
+  const joined = repairUserCodeTemplateVariant('owner', rotated, build, concurrent.deps);
+  const secondVariant = { ...variants[1], baseTemplateId: 'new-codex' };
+  const queued = repairUserCodeTemplateVariant(
+    'owner',
+    secondVariant,
+    async (recipes) => {
+      assert.equal(recipes[0].id, 'yc');
+      concurrentBuilds++;
+      return 'new-codex';
+    },
+    concurrent.deps
+  );
+  finish.open();
+  assert.equal((await firstRepair).revision, (await joined).revision);
+  const finalHead = await queued;
+  assert.equal(concurrentBuilds, 2);
+  assert.deepEqual(finalHead.variants.map((v) => v.snapshotId).sort(), ['new-codex', 'shared-new']);
+
+  // Another backend's store identity has its own queue but observes the same fenced head.
+  const remote = harness();
+  await publishUserCodeTemplate(
+    'owner',
+    'seed',
+    recipe('yc'),
+    variants,
+    async (_r, v) => `old-${v.provider}`,
+    remote.deps
+  );
+  const remoteStarted = gate();
+  const remoteFinish = gate();
+  const writer = repairUserCodeTemplateVariant(
+    'owner',
+    rotated,
+    async () => {
+      remoteStarted.open();
+      await remoteFinish.promise;
+      return 'remote-result';
+    },
+    remote.deps
+  );
+  await remoteStarted.promise;
+  let polls = 0;
+  const readerDeps = {
+    ...remote.deps,
+    store: { ...remote.deps.store },
+    wait: async () => {
+      polls++;
+      remoteFinish.open();
+      await writer;
+    },
+  };
+  const observer = await repairUserCodeTemplateVariant(
+    'owner',
+    rotated,
+    async () => {
+      throw new Error('another backend must reuse the winner');
+    },
+    readerDeps
+  );
+  assert.equal(polls, 1);
+  assert(observer.variants.some((v) => v.snapshotId === 'remote-result'));
+
+  const held = {
+    ...observer,
+    lease: { token: 'remote', operationId: 'held', expiresAt: 99_999_999 },
+  };
+  const bounded = {
+    ...remote.deps,
+    store: { ...remote.deps.store, read: async () => held },
+    wait: async (ms: number) => {
+      remote.advance(ms);
+    },
+  };
+  await assert.rejects(
+    repairUserCodeTemplateVariant(
+      'owner',
+      secondVariant,
+      async () => {
+        throw new Error('must not build through held lease');
+      },
+      bounded
+    ),
+    /still in progress/
+  );
+
   const fenced = harness();
   const baseSwap = fenced.deps.store.compareAndSet;
   let ownsIntegration = true;

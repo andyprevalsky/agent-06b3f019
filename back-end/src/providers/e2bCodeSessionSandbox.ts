@@ -30,6 +30,7 @@ import {
 } from './codeSessions/sandboxSize';
 import { e2bSandboxFs } from './codeSessions/sandboxFs';
 import { createSandboxWithRetry } from './e2bSandboxCreate';
+import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import { NATIVE_CLI_PATH, resolveNativeCliTemplate } from './nativeCliTemplateBuilder';
 import {
   linkClaudeCodeSession,
@@ -78,6 +79,7 @@ export interface ClaudeCodeSessionOptions {
 
 /** Sizing of a spawn (C16): the size it wants and the agent to attribute checkpoints to. */
 export interface SpawnSizing {
+  provider?: SandboxProvider;
   size?: SandboxSize;
   agentId?: string;
 }
@@ -100,7 +102,11 @@ export async function acquireCodeSessionSandbox(
   let session = codeSession;
   let replaced: Sandbox | null = null;
   if (session?.sandboxKind === 'e2b' && session.sandboxId !== null) {
-    const resumed = await connectPausedSandbox(session.sandboxId, SANDBOX_TIMEOUT_MS);
+    const sandboxId = session.sandboxId;
+    const resume = () => connectPausedSandbox(sandboxId, SANDBOX_TIMEOUT_MS);
+    const resumed = await (sizing.provider === 'claude'
+      ? withClaudeCodeCreateSlot(resume)
+      : resume());
     if (resumed !== null) {
       await stopStaleWsServer(resumed);
       if (sizing.size === undefined || sameSize(sizing.size, heldSandboxSize(session))) {
@@ -250,18 +256,25 @@ export async function acquireCodeSandbox(
               baseTemplateId
             )
           : baseTemplateId;
-      return createSandboxWithRetry(
-        selectedTemplateId,
-        {
-          apiKey: process.env.E2B_API_KEY,
-          timeoutMs: SANDBOX_TIMEOUT_MS,
-          envs: { ...envs, PATH: NATIVE_CLI_PATH },
-          ...codeSessionCreateOptions(codeSession),
-        },
-        label
-      );
+      const create = () =>
+        createSandboxWithRetry(
+          selectedTemplateId,
+          {
+            apiKey: process.env.E2B_API_KEY,
+            timeoutMs: SANDBOX_TIMEOUT_MS,
+            envs: { ...envs, PATH: NATIVE_CLI_PATH },
+            ...codeSessionCreateOptions(codeSession),
+          },
+          label
+        );
+      // Serialize only reservations, never template installation or checkpoint work.
+      return sizing.provider === 'claude' ? withClaudeCodeCreateSlot(create) : create();
     },
-    { ...(sized !== null ? { size: sized.size } : {}), agentId: sizing.agentId }
+    {
+      ...(sized !== null ? { size: sized.size } : {}),
+      agentId: sizing.agentId,
+      provider: sizing.provider,
+    }
   );
   return { ...acquired, ...(sized !== null ? { size: sized.size } : {}) };
 }

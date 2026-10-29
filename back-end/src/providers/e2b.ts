@@ -41,7 +41,6 @@ import {
 } from './e2bCodeSessionSandbox';
 import { type CodeSessionRow } from './codeSessions/store';
 import { restoreSandboxProject } from './projects/workspace';
-import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import { waitForSandboxWsServer } from './e2bWsReady';
 import { codeSessionTurnToken } from './codeSessionTurns';
 import { applyUserUiSandboxEnvs, writeUserUiWorkspaceToSandboxSafe } from './userUi/workspace';
@@ -126,17 +125,14 @@ export async function createClaudeCodeSession(
   fastModeCacheEnabled?: boolean,
   options: ClaudeCodeSessionOptions = {}
 ): Promise<CodeAgentSessionResult> {
-  // Serialize creates — concurrent reserve-script calls stampede E2B redis.
-  return withClaudeCodeCreateSlot(() =>
-    createClaudeCodeSessionUnlocked(
-      agentId,
-      goal,
-      attachments,
-      githubRepoUrl,
-      userId,
-      fastModeCacheEnabled,
-      options
-    )
+  return createClaudeCodeSessionUnlocked(
+    agentId,
+    goal,
+    attachments,
+    githubRepoUrl,
+    userId,
+    fastModeCacheEnabled,
+    options
   );
 }
 

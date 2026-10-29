@@ -310,10 +310,15 @@ async function publishClaimedCliIntegration(
   let templateRevision: number | undefined;
   if (body.install !== undefined) {
     // Capture login separately before publishing. No authenticated sandbox is ever snapshotted.
-    await assertOwned?.();
-    const credentials = await readTemplateCredentials(session.sandboxId, body.credential_files!);
-    await initializeCliCredentials(caller.userId, id, credentials, fence?.token);
-    await auth?.endAuth();
+    try {
+      await assertOwned?.();
+      const credentials = await readTemplateCredentials(session.sandboxId, body.credential_files!);
+      await initializeCliCredentials(caller.userId, id, credentials, fence?.token);
+    } finally {
+      // Verification completed: capture/persistence cannot rotate the sandbox login.
+      // The lease still fences this clear; an unknown verification outcome stays above.
+      await auth?.endAuth();
+    }
     await assertOwned?.();
     const variants = (['claude', 'codex'] as const).flatMap((provider) =>
       availableSizes(provider).map((size) => ({
