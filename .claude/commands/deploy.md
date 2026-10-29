@@ -144,6 +144,18 @@ explanation must bind the exact original summary, runner log, exit code and
 terminal receipt cohort and exclude independent launcher failures. Preserve
 the original nonzero exit in the warning; never relabel it as a process pass.
 
+## Treasury failures: skip and warn permanently
+
+**Standing user instruction, October 29, 2026:** treasury test failures are
+always **SKIPPED**, reported in the final scorecard's warnings, and must never
+block this or any future deploy. Preserve the original failure receipt and
+record the test, reason, affected treasury record or mint when available, and
+evidence time as `⚠️ Skipped`, never PASS. Do not mutate treasury or financial
+records to manufacture a passing result, reclaim or delete records as part of
+the skip, or hide pending and overdue obligations. Continue every unrelated
+gate. Any independent non-treasury failure remains blocking under its existing
+rule, including when it occurs in the same process or test cohort.
+
 ## Explicit user gate overrides (highest-precedence deploy rule)
 
 An explicit user message may override **any** `/deploy` gate, including tests,

@@ -213,6 +213,7 @@ async def run_agent(
     # agent-to-agent context rows to append before each LLM call.
     poll_inbox: Optional[Callable[[], Awaitable[List[Dict]]]] = None,
     execute_tool: Optional[Callable[[str, Dict, str], Awaitable[Dict]]] = None,
+    completion_handoff: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
     # Factual status of this agent's still-running background agents, appended
     # to the completion verifier's evidence (None when nothing is pending).
     get_pending_background_status: Optional[Callable[[], Optional[str]]] = None,
@@ -2217,6 +2218,9 @@ async def run_agent(
                     completion_tool_error = str(
                         completion_tool_result.get("message") or "Completion was rejected by the tool executor"
                     )
+
+                if skip_verification and completion_handoff and not completion_tool_error:
+                    completion_tool_error = await completion_handoff()
 
                 # Completion is a normal tool boundary. If its executor rejects
                 # the call, show that error to the same model and continue the

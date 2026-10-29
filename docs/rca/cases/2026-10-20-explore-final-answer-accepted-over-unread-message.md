@@ -170,3 +170,76 @@ When reads are batched one step late, every turn, the terminal one included,
 must see messages stored before it started. With non-blocking reads, start
 one read alongside each model turn rather than relying on a read that
 predates the turn's tools.
+
+## Recurrence 2026-10-29: message stored during the final model call
+
+This is the same final-call inbox boundary, not a new case identity. On source
+`6271b5ba2652c913b4b377120e60ae8dff64759c`, live smoke run
+`2498f3e8-7d1e-4fe8-8b09-75aa961cdc7d`, agent
+`26dcc9bf-25b0-4143-8997-e4f0600c06cf`, failed `smoke_rfc_semantics`.
+The original evidence is
+`.context/deploy-pipeline-g4-final-6271/logs/smoke.log:11037` and
+`.context/benchmarks/1793295380-3521047-72351/logs/worker.log`.
+The root started one background explore at 17:47:36.406 UTC. Its final model
+call began at 17:47:48.752894; the forwarded marker was stored at
+17:47:49.682, while that task was still running. The send completed at
+17:47:49.925 without a wake. The inbox handed the message to the parent at
+17:47:53.319474; the only completion notification followed at 17:47:54.255.
+The explore's answer did not contain the marker. The root added it to its own
+final records, without verified continued exploration. The semantic rejection
+was valid; neither criteria nor the original 180-second/75-cent limits changed.
+
+The per-turn nonblocking read had completed before the message was stored.
+`AgentInbox.unread_before_finish` started another background read but accepted
+completion immediately. `finish` later delivered the unread row to the parent.
+The send handler correctly saw a still-running task and did not invoke its
+finished-task wake. This differs from the October 21 notification-identity case:
+there was no second run whose notification could have been mislabelled.
+
+The temporary candidate at
+`/var/tmp/deploy-1627/bg-message-rca/proposed.patch`, SHA256
+`2068ceed2a0dcb8e01c733efc71e47d1578d9a954cf81c1980d1610406e3ef7c`,
+adds an unverified-completion handoff callback. It settles only already-started
+reads with the existing terminal handoff wait, without acknowledging messages.
+A fetched message uses the existing deferred-completion text and continues the
+same `run_agent` loop, context, iteration counter and activity deadline. The
+next poll consumes it exactly once. Per-step reads remain nonblocking; no new
+provider/model call, read timeout, iteration budget or notification is invented.
+A later `finish` does not spend that attempt's wait again.
+
+Six new tests are registered in the existing run-agent owner domain before its
+`__main__` runner: final-call delivery, duplicate ID, no message, read failure,
+last-iteration parent custody, and cancellation. The same complete registered
+96-test suite reported 90 pass/6 fail before and 96/96 pass in five consecutive
+after runs. Exact commands, original/final logs, source hashes and receipts are
+in `/var/tmp/deploy-1627/bg-message-rca/report.md` and `proof-receipt.json`:
+
+```bash
+. /var/tmp/deploy-env.sh
+agents/venv/bin/python /var/tmp/deploy-1627/bg-message-rca/normal-run.py before
+agents/venv/bin/python /var/tmp/deploy-1627/bg-message-rca/normal-run.py after
+```
+
+The wrapper imports the selected original or temporary runtime modules and
+executes the complete registered `run_all_tests`; it mocks only the unit
+fixture's model/tool services and demo-cache metadata lookup. The original
+inbox, notification/wake, pause and cost controls also passed in a separate
+13-control supporting run. Explore has no paused-conversation resumption mode;
+cancellation covers its activity stop path. The iteration-cap control retains
+the exact unread marker for the parent instead of refunding a turn.
+
+Independent parent review technically approved the exact candidate. The first
+`4cfcb` packaging draft had appended unregistered tests and was rejected; it is
+not the accepted proof. The initial wait-count assertion incorrectly counted
+two separate completion attempts as one; the final control checks one existing
+wait per attempt and zero additional waits in `finish`.
+
+**Recurrence remains OPEN for outcome validation and the residual boundary.**
+No exact live benchmark rerun was performed by the RCA worker, no source was
+changed by that worker, and no passing smoke/full-gate outcome is claimed.
+Messages stored after the terminal read snapshot remain an explicit open race;
+this candidate is not complete race closure. Parent scope excludes a new
+workflow task-message ledger from this deploy. The source/deploy owner must
+still apply the approved candidate and validate the unchanged live task and
+required full gate. This note records candidate evidence, not an integrated or
+production fix.
