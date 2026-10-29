@@ -421,7 +421,7 @@ Selecting a product URL, adding an item to cart, or reaching checkout is not eno
 
 Given a goal, return JSON with:
   - reasoning: 1-3 sentences on what concrete outputs the goal requires.
-  - fields: a compact list with at least one required field, specific names and concrete types. For object/list[object], include explicit `properties`. A zero-length `fields` array is invalid.
+  - nodes: encode the conceptual fields above as the response schema node table. Use parent_id=null for root fields and each object field's id as its property nodes' parent_id. Assign contiguous zero-based positions among siblings. Preserve every field's type, requirement, nullable flag, description and bounds. At least one root field must be required.
 
 Output JSON only. Do not include prose outside the JSON envelope."""
 
@@ -460,23 +460,12 @@ _SchemaFieldType = Literal[
     "list[session_file_pointer]",
 ]
 
-_SchemaNestedFieldType = Literal[
-    "str",
-    "int",
-    "float",
-    "bool",
-    "list[str]",
-    "list[int]",
-    "file_pointer",
-    "list[file_pointer]",
-    "session_file_pointer",
-    "list[session_file_pointer]",
-]
-
+_SchemaNestedFieldType = _SchemaFieldType
 
 class _GeneratedResponseSchemaNestedField(BaseModel):
     name: str = Field(description="Nested field name in snake_case.")
     type: _SchemaNestedFieldType = Field(description="Nested field type.")
+    properties: Optional[List["_GeneratedResponseSchemaNestedField"]] = None
     constraints: List[ResponseSchemaBound] = Field(
         default_factory=list, description="Bounds: minItems/maxItems for lists; minLength/maxLength for strings."
     )
@@ -491,6 +480,8 @@ class _GeneratedResponseSchemaNestedField(BaseModel):
 
     @model_validator(mode="after")
     def _validate_constraints(self):
+        if self.type in ("object", "list[object]") and not self.properties:
+            raise ValueError("object schema fields require explicit properties")
         bounds_from_entries(self.type, self.constraints)
         return self
 
@@ -528,6 +519,19 @@ class _GeneratedResponseSchema(BaseModel):
         min_length=1,
         description="Output fields with at least one required key; optional keys may be omitted.",
     )
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema, handler):
+        if handler.mode == "serialization":
+            return handler(core_schema)
+        from utils.response_schema_wire import wire_json_schema
+        return wire_json_schema(internal=True, reasoning=True, title="title" in cls.model_fields)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _decode_wire(cls, value):
+        from utils.response_schema_wire import decode_wire
+        return decode_wire(value, internal=True, reasoning=True, title="title" in cls.model_fields)
 
     @model_validator(mode="after")
     def _at_least_one_required_field(self):
@@ -757,32 +761,16 @@ def _build_compute_auth_context_from_payload(
 
 
 def _schema_from_generated_model(generated: _GeneratedResponseSchema) -> Dict[str, Any]:
-    fields: List[Dict[str, Any]] = []
-    for field in generated.fields:
-        item: Dict[str, Any] = {
-            "name": field.name,
-            "type": field.type,
-            "required": field.required,
-        }
+    def project(field):
+        item = {"name": field.name, "type": field.type, "required": field.required}
         item.update(bounds_from_entries(field.type, field.constraints))
         item.update(
             {key: getattr(field, key) for key in ("description", "nullable") if getattr(field, key) is not None}
         )
         if field.properties is not None:
-            item["properties"] = [
-                {
-                    "name": prop.name,
-                    "type": prop.type,
-                    "required": prop.required,
-                    **bounds_from_entries(prop.type, prop.constraints),
-                    **{
-                        key: getattr(prop, key) for key in ("description", "nullable") if getattr(prop, key) is not None
-                    },
-                }
-                for prop in field.properties
-            ]
-        fields.append(item)
-    return {"fields": fields}
+            item["properties"] = [project(child) for child in field.properties]
+        return item
+    return {"fields": [project(field) for field in generated.fields]}
 
 
 def _normalize_generated_agent_title(raw: str) -> Optional[str]:
