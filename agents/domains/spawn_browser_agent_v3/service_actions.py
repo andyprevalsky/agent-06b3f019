@@ -4395,6 +4395,12 @@ async def _execute_screenshot(
     if not session_id:
         raise RuntimeError("Browser session id is required for screenshot capture")
 
+    capture_identity = None
+    try:
+        capture_identity = dom_service.get_parked_page_identity()
+    except RuntimeError:
+        pass  # Capture behavior stays unchanged; incoherent evidence is not retained.
+
     single_cdp_client = getattr(dom_service, "single_cdp_client", False) is True
     if single_cdp_client:
         # Tilion: REST screenshots fail while the worker holds CDP; its
@@ -4436,6 +4442,14 @@ async def _execute_screenshot(
         params={},
         result={"success": True, "file_path": saved_path or "screenshot.png"},
     )
+    capture_evidence = getattr(action_history, "capture_screenshot_evidence", None)
+    if callable(capture_evidence):
+        after_identity = None
+        try:
+            after_identity = dom_service.get_parked_page_identity()
+        except RuntimeError:
+            pass
+        capture_evidence(dom_service, session_id, screenshot_b64, capture_identity, after_identity)
 
     return {
         "success": True,

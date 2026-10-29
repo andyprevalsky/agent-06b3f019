@@ -1342,7 +1342,7 @@ def _model_visible_browser_turn_messages(
     return visible
 
 
-def _model_visible_browser_verifier_context(context: Any, dom_service: Any, browser_state: Dict[str, Any]) -> Any:
+def _model_visible_browser_verifier_context(context: Any, dom_service: Any, browser_state: Dict[str, Any], *, action_history: Any = None, session_id: str = "", task_id: str = "") -> Any:
     """Keep only the builder's final trusted raster intact before private entry."""
     visible = (
         [
@@ -1383,6 +1383,24 @@ def _model_visible_browser_verifier_context(context: Any, dom_service: Any, brow
                         },
                     },
                 }
+    # Only this task's native capture owner can reintroduce raster bytes after
+    # text redaction. A model-authored metadata dictionary cannot authorize one.
+    if not getattr(dom_service, "secret_values_used", False) and isinstance(visible, list):
+        receipts = (action_history.screenshot_evidence(session_id, task_id)
+                    if action_history is not None and callable(getattr(action_history, "screenshot_evidence", None)) else [])
+        for original, safe_message in zip(context, visible):
+            metadata = original.get("metadata") if isinstance(original, dict) else None
+            if not isinstance(metadata, dict) or not isinstance(safe_message, dict):
+                continue
+            if metadata.get("toolName") != "historical_screenshot":
+                continue
+            evidence = metadata.get("structured_response")
+            trusted = next((r for r in receipts if evidence == {k: r[k] for k in ("step", "url", "target_id", "task_id", "sha256")}
+                            and metadata.get("screenshot_b64") == r["screenshot_b64"]), None)
+            if trusted is not None:
+                safe_message["metadata"]["screenshot_b64"] = trusted["screenshot_b64"]
+            else:
+                safe_message.get("metadata", {}).pop("screenshot_b64", None)
     screenshot = browser_state.get("screenshot")
     if (
         getattr(dom_service, "secret_values_used", False)
@@ -8062,7 +8080,7 @@ async def _spawn_browser_agent_activity_v3_real(
     download_persister_task: Optional[asyncio.Task] = None
     interaction_layer_task: Optional[asyncio.Task] = None
     cursor_streamer: Optional[BrowserCursorRealtimeStreamer] = None
-    action_history = ActionHistory()
+    action_history = ActionHistory(visual_task_id=task_id)
     jev_session = JEVSession(agent_id, task_id, "browser")
 
     def _redact_activity_value(value: Any) -> Any:
@@ -11754,13 +11772,14 @@ async def _spawn_browser_agent_activity_v3_real(
                         action_history=action_history,
                         config=config,
                         session_id=session_id,
+                        task_id=task_id,
                         payment_card_evidence=_build_payment_card_verifier_evidence(payment_card_last4),
                         browser_checkpoints=verifier_checkpoints,
                     )
 
                     if hasattr(dom_service, "model_visible_value"):
                         verifier_context = _model_visible_browser_verifier_context(
-                            verifier_context, dom_service, verifier_browser_state
+                            verifier_context, dom_service, verifier_browser_state, action_history=action_history, session_id=session_id, task_id=task_id
                         )
 
                     remote_session_schema = transform_schema_for_remote_session(
@@ -12951,11 +12970,12 @@ Based on this feedback, I need to continue working on the task and address the i
                     action_history=action_history,
                     config=config,
                     session_id=session_id,
+                    task_id=task_id,
                     browser_checkpoints=verifier_checkpoints,
                 )
                 if hasattr(dom_service, "model_visible_value"):
                     final_verifier_context = _model_visible_browser_verifier_context(
-                        final_verifier_context, dom_service, final_browser_state
+                        final_verifier_context, dom_service, final_browser_state, action_history=action_history, session_id=session_id, task_id=task_id
                     )
                 final_remote_schema = transform_schema_for_remote_session(
                     _model_visible_browser_output_schema(response_schema, _redact_activity_value)

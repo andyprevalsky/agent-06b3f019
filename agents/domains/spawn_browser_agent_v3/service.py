@@ -366,6 +366,7 @@ async def build_browser_verifier_context(
     browser_checkpoints: Optional[List[Dict[str, Any]]] = None,
     user_instruction_messages: Optional[List[Dict[str, str]]] = None,
     verification_goal: Optional[str] = None,
+    task_id: str = "",
 ) -> List[Dict[str, Any]]:
     """Assemble the verifier context from final-state browser ground truth.
 
@@ -621,6 +622,23 @@ async def build_browser_verifier_context(
                 "screenshot_b64": final_screenshot_b64 or "",
             },
         },
+    ] + [
+        {
+            "role": "TOOL",
+            "text": "Bounded historical native viewport capture; other captures may be unavailable. Not current state or completion authority.",
+            "metadata": {
+                "toolName": "historical_screenshot", "toolStatus": "FINISHED",
+                "browser_action_step": receipt["step"],
+                "screenshot_b64": receipt["screenshot_b64"],
+                "structured_response": {key: receipt[key] for key in ("step", "url", "target_id", "task_id", "sha256")},
+                "title": "Historical native screenshot; not current state or completion authority",
+            },
+        }
+        for receipt in (
+            action_history.screenshot_evidence(session_id, task_id)
+            if callable(getattr(action_history, "screenshot_evidence", None)) else []
+        )
+        if receipt["screenshot_b64"] != final_screenshot_b64
     ] + observation_evidence[:1] + sorted(
         # Keep the latest independent native observation first. Admit remaining
         # step-owned receipts newest first across both kinds, so old native

@@ -36385,6 +36385,21 @@ async def run_all_tests():
     await r.record_async("execute_close_tab_explicit_id", test_execute_close_tab_with_explicit_id)
 
     await r.record_async("execute_screenshot_success", test_execute_screenshot_success)
+    from browser_visual_receipt_fixture import (
+        test_original_capture_admitted, test_private_and_session, test_identity_and_tamper,
+        test_dedup_and_recent, test_byte_budget, test_restore_and_failure, test_capture_cancellation,
+    )
+    for name, fn in (
+        ("historical_visual_original", test_original_capture_admitted),
+        ("historical_visual_private_session", test_private_and_session),
+        ("historical_visual_identity_tamper", test_identity_and_tamper),
+        ("historical_visual_dedup_recent", test_dedup_and_recent),
+        ("historical_visual_byte_budget", test_byte_budget),
+        ("historical_visual_restore_failure", test_restore_and_failure),
+        ("historical_visual_cancellation", test_capture_cancellation),
+    ):
+        await r.record_async(name, fn)
+
     await r.record_async(
         "browser_use_screenshots_get_distinct_remote_names",
         test_browser_use_screenshots_get_distinct_remote_names,

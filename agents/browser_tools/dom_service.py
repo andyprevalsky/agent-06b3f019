@@ -626,9 +626,11 @@ class ActionHistory:
         entries = history.get_entries()
     """
 
-    def __init__(self):
+    def __init__(self, *, visual_task_id: str = ""):
+        self._visual_task_id = visual_task_id
         self._entries: List[ActionHistoryEntry] = []
         self._next_step = 1
+        self._screenshot_evidence: List[Dict[str, Any]] = []
         self._dom_service: Optional["DOMService"] = None
 
     def bind_dom_service(self, dom_service: "DOMService") -> None:
@@ -766,6 +768,63 @@ class ActionHistory:
 
         return entry
 
+    def capture_screenshot_evidence(self, dom_service: "DOMService", session_id: str, screenshot: str, before: Any = None, after: Any = None) -> None:
+        """Retain only a just-recorded native screenshot, outside model-authored history.
+
+        Twenty explicit captures, four MiB and sixteen million pixels bound this
+        task-local sidecar. One MiB/four million pixels bound an individual image.
+        These are admission ceilings, not increased task or model budgets.
+        """
+        import base64
+        import hashlib
+        from io import BytesIO
+        from PIL import Image
+
+        if (not self._visual_task_id or dom_service is not self._dom_service or dom_service.secret_values_used
+                or not self._entries or not isinstance(session_id, str) or not session_id):
+            return
+        entry = self._entries[-1]
+        if entry.action != "screenshot" or entry.result.get("success") is not True:
+            return
+        if (not isinstance(before, dict) or before != after
+                or not isinstance(before.get("target_id"), str) or not before["target_id"]):
+            return
+        url = before.get("url")
+        if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+            return
+        try:
+            if not isinstance(screenshot, str) or len(screenshot) > 1_398_104:
+                return
+            raw = base64.b64decode(screenshot, validate=True)
+            if len(raw) > 1_048_576:
+                return
+            with Image.open(BytesIO(raw)) as image:
+                if image.format != "PNG" or image.width * image.height > 4_000_000:
+                    return
+                pixels = image.width * image.height
+                image.verify()
+        except (ValueError, OSError, SyntaxError, Image.DecompressionBombError):
+            return
+        receipt = {"step": entry.step, "url": url, "session_id": session_id, "task_id": self._visual_task_id, "target_id": before["target_id"],
+                   "screenshot_b64": screenshot, "sha256": hashlib.sha256(raw).hexdigest(),
+                   "bytes": len(raw), "pixels": pixels}
+        # Replace only identical pixels from the same URL. Distinct viewports
+        # on one page and identical-looking pages retain their own provenance.
+        self._screenshot_evidence = [r for r in self._screenshot_evidence
+                                    if (r["url"], r["sha256"]) != (url, receipt["sha256"])]
+        self._screenshot_evidence.append(receipt)
+        while (len(self._screenshot_evidence) > 20
+               or sum(r["bytes"] for r in self._screenshot_evidence) > 4_194_304
+               or sum(r["pixels"] for r in self._screenshot_evidence) > 16_000_000):
+            self._screenshot_evidence.pop(0)
+
+    def screenshot_evidence(self, session_id: str, task_id: str) -> List[Dict[str, Any]]:
+        """Return same-session public native receipts; never hydrate paths or URLs."""
+        if not task_id or task_id != self._visual_task_id or self._dom_service is None or self._dom_service.secret_values_used:
+            return []
+        return [{**r, "url": self._dom_service.model_visible_value(r["url"])}
+                for r in self._screenshot_evidence if r["session_id"] == session_id]
+
     def last_action_step(self) -> Optional[int]:
         """Return the latest recorded receipt ID without copying DOM history."""
         return self._entries[-1].step if self._entries else None
@@ -812,6 +871,7 @@ class ActionHistory:
         that happened before the pause instead of treating the resumed page as
         a brand-new session.
         """
+        self._screenshot_evidence = []  # Preserve existing no-image durable-resume policy.
         restored: List[ActionHistoryEntry] = []
         allowed_fields = {entry_field.name for entry_field in fields(ActionHistoryEntry)}
         for raw_entry in entries or []:
@@ -827,6 +887,7 @@ class ActionHistory:
     def clear(self) -> None:
         """Clear the action history."""
         self._entries = []
+        self._screenshot_evidence = []
         self._next_step = 1
 
     def __len__(self) -> int:
