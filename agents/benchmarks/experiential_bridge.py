@@ -38,6 +38,11 @@ def pool_sha256(pool):
     from providers.rose import pools
 
     identity = asdict(pools.get_pool(pool))
+    # Preserve existing artifact IDs when the optional override simply inherits
+    # the original auth policy. A real eligibility change still changes identity.
+    subscriptions = identity.pop("subscription_auth_enabled", None)
+    if subscriptions is not None and subscriptions != identity["direct_auth_enabled"]:
+        identity["subscription_auth_enabled"] = subscriptions
     identity.pop("foundry_model")
     identity["foundry_enabled"] = False
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
