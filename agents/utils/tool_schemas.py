@@ -1096,6 +1096,12 @@ BROWSER_GOAL_PROFILE_NOTE = (
 )
 
 
+def _require_spawn_output_schema_key(schema: Dict[str, Any]) -> None:
+    required = schema.setdefault("required", [])
+    if "output_schema" not in required:
+        required.append("output_schema")
+
+
 class SpawnAgentTool(BaseModel):
     """Spawn an autonomous agent; type selects capabilities and per-type required fields.
 
@@ -1108,6 +1114,8 @@ class SpawnAgentTool(BaseModel):
     general_purpose sub-agents; otherwise it will likely spawn another
     general_purpose to retry the same faulty tool after the first error.
     """
+
+    model_config = ConfigDict(json_schema_extra=_require_spawn_output_schema_key)
 
     tool: Literal["spawn_agent"]
     type: Literal["browser", "code", "general_purpose", "explore", "for_each"] = Field(
@@ -1307,6 +1315,8 @@ class SpawnAgentToolNoGP(BaseModel):
     narrowing beats a runtime rejection loop the same way SpawnExploreAgentTool
     does for PLAN.
     """
+
+    model_config = ConfigDict(json_schema_extra=_require_spawn_output_schema_key)
 
     tool: Literal["spawn_agent"]
     type: Literal["browser", "code", "explore"] = Field(
