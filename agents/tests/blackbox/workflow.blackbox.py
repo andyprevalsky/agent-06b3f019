@@ -10193,6 +10193,393 @@ async def test_workflow_check_parent_state_transient_failure_backstop_orphans():
         _restore_workflow(original)
 
 
+async def test_workflow_final_value_presentation():
+    """The actual publisher delivers the selected value, not summary narration."""
+    from pathlib import Path
+    original_data = json.loads(Path(__file__).with_name("final_presentation_original.json").read_text())
+    wf = _bare_workflow_instance()
+    wf.agent_id = "final-value-root"
+    wf.user_id = "u"
+    wf.goal = original_data["goal"]
+    wf.model = "rose-1-flash"
+    wf.parent_workflow_id = None
+    wf.output_schema = {**original_data["schema"], "presentation": {"version": 1, "mode": "value", "field": "wikipedia_access_day", "encoding": "text"}}
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["generate_completion_summary"] = {"summary": "This must not replace the value"}
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(context=[{"role": "USER", "text": wf.goal}], structured_response=original_data["output"])
+        assert "generate_completion_summary" not in [name for name, _ in fake.activity_calls]
+        final = [(i, args) for i, (name, args) in enumerate(fake.activity_calls)
+                 if name == "post_agent_message" and len(args or []) >= 4
+                 and args[3].get("isFinalSummary")]
+        assert len(final) == 1
+        index, args = final[0]
+        assert args[1] == "4", args
+        assert args[3]["completionSummary"]["answerText"] == "4"
+        assert args[3]["completionSummary"]["outputs"][0]["value"] == 4
+        notifications = [args for name, args in fake.activity_calls if name == "notify_sms_event_activity"]
+        assert len(notifications) == 1
+        assert notifications[0][3]["answerText"] == "4"
+        assert notifications[0][3]["presentation"] == wf.output_schema["presentation"]
+        assert index < next(i for i, (name, _) in enumerate(fake.activity_calls) if name == "mark_finished")
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_final_value_rejects_stale_or_invalid():
+    for kind in ("stale", "missing", "cancel"):
+        wf = _bare_workflow_instance()
+        wf.agent_id = "final-invalid"
+        wf.parent_workflow_id = None
+        wf.output_schema = {"fields": [{"name": "day", "type": "int", "required": True}],
+                            "presentation": {"version": 1, "mode": "value", "field": "day", "encoding": "text"}}
+        async def drain():
+            if kind == "stale":
+                wf._response_schema_revision = wf._response_schema_accepted_revision + 1
+            if kind == "cancel":
+                raise asyncio.CancelledError()
+        wf._drain_fast_mode_explores = drain
+        fake = _FakeWorkflowModule()
+        original = _patch_workflow(fake)
+        try:
+            try:
+                await wf._mark_complete([], {} if kind == "missing" else {"day": 4})
+            except (ValueError, RuntimeError, asyncio.CancelledError):
+                pass
+            else:
+                raise AssertionError(kind)
+            assert not wf._is_finished
+            assert not fake.activity_calls
+        finally:
+            _restore_workflow(original)
+
+
+async def test_workflow_final_value_late_feedback():
+    for accepted in (False, True):
+        wf = _bare_workflow_instance()
+        wf.agent_id = "late-value"
+        wf.user_id = "u"
+        wf.goal = "Only the requested result"
+        wf.model = "rose-1-flash"
+        wf.parent_workflow_id = None
+        wf.output_schema = {"fields": [{"name": "day", "type": "int", "required": True}],
+                            "presentation": {"version": 1, "mode": "value", "field": "day", "encoding": "text"}}
+        wf._start_response_schema_refresh = lambda: None
+        wf._wake_background_waiters = lambda: None
+        wf._note_wait_wake = lambda *args: None
+        async def delayed():
+            await wf.receive_user_response("Instead provide a full report")
+            if accepted:
+                # Even a new accepted schema cannot reuse the old verification.
+                wf._response_schema_accepted_revision = wf._response_schema_revision
+        wf._stop_pending_background_agents = delayed
+        fake = _FakeWorkflowModule()
+        original = _patch_workflow(fake)
+        try:
+            try:
+                await wf._mark_complete([], {"day": 4})
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("late feedback published a stale final answer")
+            assert wf._response_schema_revision == 1
+            assert "Instead provide a full report" in wf._response_schema_feedback
+            assert wf._is_finished is False
+            assert not any(name == "mark_finished" for name, args in fake.activity_calls)
+            assert not any(name == "post_agent_message" and len(args or []) >= 4
+                           and args[3].get("isFinalSummary") for name, args in fake.activity_calls)
+        finally:
+            _restore_workflow(original)
+
+
+async def test_workflow_final_value_late_schema_matrix():
+    failures = []
+    for stage in ("transcript", "final_post"):
+        for accepted in (False, True):
+            wf = _bare_workflow_instance()
+            wf.agent_id = "late-field-change"
+            wf.user_id = "u"
+            wf.goal = "Only the day"
+            wf.model = "rose-1-flash"
+            wf.parent_workflow_id = None
+            wf.output_schema = {"fields": [{"name": "day", "type": "int", "required": True}],
+                                "presentation": {"version": 1, "mode": "value", "field": "day", "encoding": "text"}}
+            wf._start_response_schema_refresh = lambda: None
+            wf._wake_background_waiters = lambda: None
+            wf._note_wait_wake = lambda *args: None
+            async def feedback():
+                await wf.receive_user_response("Instead give the month")
+                if accepted:
+                    wf._response_schema_accepted_revision = wf._response_schema_revision
+                    wf.output_schema = {"fields": [{"name": "month", "type": "str", "required": True}],
+                                        "presentation": {"version": 1, "mode": "value", "field": "month", "encoding": "text"}}
+            if stage == "transcript":
+                async def transcript(context):
+                    await feedback()
+                    return context
+                wf._completion_transcript = transcript
+            else:
+                original_post = wf._post_message
+                async def post(*args, **kwargs):
+                    result = await original_post(*args, **kwargs)
+                    if len(args) > 2 and args[2].get("isFinalSummary"):
+                        await feedback()
+                    return result
+                wf._post_message = post
+            fake = _FakeWorkflowModule()
+            original = _patch_workflow(fake)
+            error = None
+            try:
+                try:
+                    await wf._mark_complete([], {"day": 4})
+                except Exception as caught:
+                    error = caught
+                finals = [args for name, args in fake.activity_calls
+                          if name == "post_agent_message" and len(args or []) >= 4
+                          and args[3].get("isFinalSummary")]
+                if not isinstance(error, RuntimeError) or wf._is_finished:
+                    failures.append(f"{stage}/{accepted}: {type(error).__name__}, finished={wf._is_finished}")
+                if any(name == "mark_finished" for name, _ in fake.activity_calls):
+                    failures.append(f"{stage}/{accepted}: persisted stale completion")
+                assert wf._response_schema_revision == 1
+                assert "Instead give the month" in wf._response_schema_feedback
+                assert len(finals) == (1 if stage == "final_post" else 0)
+                if finals:
+                    assert finals[0][1] == "4", "already written history must not be rewritten"
+            finally:
+                _restore_workflow(original)
+    assert not failures, "; ".join(failures)
+
+
+async def test_workflow_final_value_loaded_schema():
+    for value_mode in (True, False):
+        wf = _bare_workflow_instance()
+        wf.agent_id = "late-load"
+        wf.user_id = "u"
+        wf.goal = "Only the requested result"
+        wf.model = "rose-1-flash"
+        wf.parent_workflow_id = None
+        wf.output_schema = None
+        schema = {"fields": [{"name": "day", "type": "int", "required": True}]}
+        if value_mode:
+            schema["presentation"] = {"version": 1, "mode": "value", "field": "day", "encoding": "text"}
+        fake = _FakeWorkflowModule()
+        fake.activity_returns["fetch_agent_config"] = {"response_schema": schema}
+        fake.activity_returns["generate_completion_summary"] = {"summary": "Legacy report"}
+        original = _patch_workflow(fake)
+        try:
+            await wf._mark_complete([], {"day": 4})
+            assert wf.output_schema == schema
+            final = next(args for name, args in fake.activity_calls if name == "post_agent_message"
+                         and len(args or []) >= 4 and args[3].get("isFinalSummary"))
+            calls = [name for name, _ in fake.activity_calls]
+            if value_mode:
+                assert "generate_completion_summary" not in calls
+                assert final[1] == "4"
+                assert final[3]["completionSummary"]["answerText"] == "4"
+            else:
+                assert "generate_completion_summary" in calls
+                assert final[1] == ""
+                assert "answerText" not in final[3]["completionSummary"]
+        finally:
+            _restore_workflow(original)
+
+
+async def test_workflow_final_value_feedback_during_schema_load():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "load-feedback"
+    wf.user_id = "u"
+    wf.goal = "Only the day"
+    wf.model = "rose-1-flash"
+    wf.parent_workflow_id = None
+    wf.output_schema = None
+    wf._start_response_schema_refresh = lambda: None
+    wf._wake_background_waiters = lambda: None
+    wf._note_wait_wake = lambda *args: None
+    fake = _FakeWorkflowModule()
+    execute = fake.execute_activity
+    async def with_feedback(fn, args=None, **kwargs):
+        if getattr(fn, "__name__", "") == "fetch_agent_config":
+            await wf.receive_user_response("Instead give the month")
+            return {"response_schema": {"fields": [{"name": "day", "type": "int", "required": True}],
+                    "presentation": {"version": 1, "mode": "value", "field": "day", "encoding": "text"}}}
+        return await execute(fn, args=args, **kwargs)
+    fake.execute_activity = with_feedback
+    original = _patch_workflow(fake)
+    try:
+        try:
+            await wf._mark_complete([], {"day": 4})
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("unaccepted loaded schema finalized")
+        assert not wf._is_finished
+        assert wf._response_schema_revision == 1
+        assert "Instead give the month" in wf._response_schema_feedback
+        assert not any(name == "mark_finished" for name, _ in fake.activity_calls)
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_final_verification_entry_revision_matrix():
+    # Same-shaped accepted schemas are deliberately included: schema acceptance
+    # must never be mistaken for re-verification of the old result.
+    for stage in ("initial", "deferred", "drain", "load", "stop", "transcript", "post"):
+        for accepted in (False, True):
+            for changed_shape in (False, True):
+                wf = _bare_workflow_instance()
+                wf.agent_id = "entry-revision"
+                wf.user_id = "u"
+                wf.goal = "Only the day"
+                wf.model = "rose-1-flash"
+                wf.parent_workflow_id = None
+                schema = {"fields": [{"name": "day", "type": "int", "required": True}],
+                          "presentation": {"version": 1, "mode": "value", "field": "day", "encoding": "text"}}
+                wf.output_schema = None if stage == "load" else schema
+                wf._start_response_schema_refresh = lambda: None
+                wf._wake_background_waiters = lambda: None
+                wf._note_wait_wake = lambda *args: None
+                async def feedback():
+                    await wf.receive_user_response("Instead give the next result")
+                    if accepted:
+                        wf._response_schema_accepted_revision = wf._response_schema_revision
+                        if changed_shape:
+                            wf.output_schema = {"fields": [{"name": "month", "type": "str", "required": True}],
+                                "presentation": {"version": 1, "mode": "value", "field": "month", "encoding": "text"}}
+                fake = _FakeWorkflowModule()
+                if stage == "initial":
+                    # An accepted entry revision is legitimate; its next change
+                    # must still be caught at the first suspended phase.
+                    if accepted:
+                        wf._await_deferred_startup = feedback
+                elif stage in ("deferred", "drain", "stop"):
+                    setattr(wf, {"deferred": "_await_deferred_startup", "drain": "_drain_fast_mode_explores",
+                                 "stop": "_stop_pending_background_agents"}[stage], feedback)
+                elif stage == "load":
+                    execute = fake.execute_activity
+                    async def load(fn, args=None, **kwargs):
+                        if getattr(fn, "__name__", "") == "fetch_agent_config":
+                            await feedback()
+                            return {"response_schema": schema}
+                        return await execute(fn, args=args, **kwargs)
+                    fake.execute_activity = load
+                elif stage == "transcript":
+                    async def transcript(context):
+                        await feedback()
+                        return context
+                    wf._completion_transcript = transcript
+                else:
+                    original_post = wf._post_message
+                    async def post(*args, **kwargs):
+                        result = await original_post(*args, **kwargs)
+                        if len(args) > 2 and args[2].get("isFinalSummary"):
+                            await feedback()
+                        return result
+                    wf._post_message = post
+                original = _patch_workflow(fake)
+                try:
+                    if stage == "initial":
+                        await feedback()
+                    try:
+                        await wf._mark_complete([], {"day": 4})
+                    except RuntimeError:
+                        pass
+                    else:
+                        raise AssertionError(f"stale completion: {stage}/{accepted}/{changed_shape}")
+                    assert not wf._is_finished, (stage, accepted, changed_shape)
+                    assert "Instead give the next result" in wf._response_schema_feedback
+                    assert not any(name == "mark_finished" for name, _ in fake.activity_calls)
+                    finals = [args for name, args in fake.activity_calls if name == "post_agent_message"
+                              and len(args or []) >= 4 and args[3].get("isFinalSummary")]
+                    assert len(finals) == (1 if stage == "post" else 0)
+                    if finals:
+                        assert finals[0][1] == "4"  # Retain the real prior write.
+                finally:
+                    _restore_workflow(original)
+
+
+def test_workflow_final_presentation_resume():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "final-resume"
+    wf.context_gates = {}
+    wf.max_iterations = None
+    wf.user_id = "u"
+    wf.goal = "Only the requested number"
+    wf.output_schema = {"fields": [{"name": "day", "type": "int", "required": True}],
+                        "presentation": {"version": 1, "mode": "value", "field": "day", "encoding": "text"}}
+    wf._response_schema_revision = 3
+    wf._response_schema_accepted_revision = 3
+    wf._response_schema_applied_revision = 3
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        state = wf._continuation_resume_state([])
+        restored = _bare_workflow_instance()
+        restored._restore_deployment_state(state)
+        assert restored.output_schema == wf.output_schema
+        assert restored._response_schema_accepted_revision == 3
+        restored._require_current_response_schema_acceptance()
+    finally:
+        _restore_workflow(original)
+
+
+def test_final_presentation_contract():
+    from utils.final_presentation import render_final_answer, validate_presentation
+    from utils.tool_schemas import ResponseSchemaConfig
+    from helpers.llm import _GeneratedResponseSchema, _schema_from_generated_model
+    field = {"name": "answer", "type": "int", "required": True}
+    policy = {"version": 1, "mode": "value", "field": "answer", "encoding": "text"}
+    schema = {"fields": [field], "presentation": policy}
+    assert render_final_answer(schema, {"answer": 0}) == "0"
+    assert render_final_answer({"fields": [field]}, {"answer": 4}) is None
+    assert ResponseSchemaConfig.model_validate(schema).presentation.field == "answer"
+    from utils.response_schema_wire import decode_wire
+    legacy = ResponseSchemaConfig.model_validate({"fields": [field]}).model_dump()
+    assert "presentation" not in legacy
+    report = ResponseSchemaConfig.model_validate({"fields": [field], "presentation": {"version": 1, "mode": "report"}}).model_dump()
+    assert report["presentation"] == {"version": 1, "mode": "report"}
+    native = {"nodes": [{"id": "answer", "parent_id": None, "position": 0,
+                         "name": "answer", "type": "int", "required": True,
+                         "nullable": False, "description": "Number", "constraints": []}],
+              "presentation": policy, "reasoning": "Number"}
+    decoded = decode_wire(native, internal=True, reasoning=True)
+    assert decoded["presentation"] == policy
+    assert _schema_from_generated_model(_GeneratedResponseSchema.model_validate(native))["presentation"] == policy
+
+    generated = _GeneratedResponseSchema.model_validate({**schema, "reasoning": "A number"})
+    assert _schema_from_generated_model(generated)["presentation"] == policy
+    for bad in [
+        {**schema, "presentation": {**policy, "field": "missing"}},
+        {**schema, "fields": [{**field, "nullable": True}]},
+        {**schema, "fields": [{**field, "required": False}]},
+        {**schema, "fields": [field, {"name": "notice", "type": "str", "required": True}]},
+        {**schema, "fields": [{**field, "type": "file_pointer"}]},
+        {**schema, "presentation": {**policy, "version": 2}},
+    ]:
+        try:
+            validate_presentation(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(bad)
+    for value in [True, None, "4"]:
+        try:
+            render_final_answer(schema, {"answer": value})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(value)
+    text_schema = {**schema, "fields": [{**field, "type": "str"}]}
+    assert render_final_answer(text_schema, {"answer": "<script>4</script>"}) == "<script>4</script>"
+    assert render_final_answer(text_schema, {"answer": ""}) == ""
+    bool_schema = {**schema, "fields": [{**field, "type": "bool"}]}
+    assert render_final_answer(bool_schema, {"answer": False}) == "false"
+    json_schema = {**schema, "fields": [{**field, "type": "list[str]"}],
+                   "presentation": {**policy, "encoding": "json"}}
+    assert render_final_answer(json_schema, {"answer": ["a", "b"]}) == '["a","b"]'
+
+
 async def test_workflow_mark_complete_happy_path():
     """_mark_complete posts summary, updates tree, signals parent."""
     wf = _bare_workflow_instance()
@@ -12333,6 +12720,15 @@ async def test_workflow_post_message_does_not_throttle_tree_outside_demo():
 async def run_all_tests():
     print("workflow blackbox tests:")
     r = BlackboxResult()
+    r.record("final_presentation_contract", test_final_presentation_contract)
+    r.record("workflow_final_presentation_resume", test_workflow_final_presentation_resume)
+    await r.record_async("workflow_final_value_presentation", test_workflow_final_value_presentation)
+    await r.record_async("workflow_final_value_rejects_stale_or_invalid", test_workflow_final_value_rejects_stale_or_invalid)
+    await r.record_async("workflow_final_value_late_feedback", test_workflow_final_value_late_feedback)
+    await r.record_async("workflow_final_value_late_schema_matrix", test_workflow_final_value_late_schema_matrix)
+    await r.record_async("workflow_final_value_loaded_schema", test_workflow_final_value_loaded_schema)
+    await r.record_async("workflow_final_value_feedback_during_schema_load", test_workflow_final_value_feedback_during_schema_load)
+    await r.record_async("workflow_final_verification_entry_revision_matrix", test_workflow_final_verification_entry_revision_matrix)
 
     # Pure logic tests (sync)
     r.record("task_dag_parallel", test_task_dag_parallel)

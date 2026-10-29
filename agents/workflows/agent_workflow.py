@@ -55,6 +55,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from helpers.agent_addressing import background_tree_entries, with_legacy_spawn_task_name
     from helpers.background_agents import CHILD_WORKFLOW_AGENT_TYPES, is_agent_authored_user_metadata
+    from utils.final_presentation import render_final_answer
     from helpers.completion_summary_contract import (
         is_ablated_completion_summary,
         is_raw_tool_envelope,
@@ -6388,19 +6389,68 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         6. Signal parent (if sub-agent)
         7. Save blueprint (fire-and-forget, no UI)
         """
+        # The supplied result was verified against the requirements at entry.
+        # Accepting a new schema during any await does not reverify that result,
+        # even when the new schema has exactly the same field shape.
+        verified_revision = (self._response_schema_revision, self._response_schema_accepted_revision)
+        def require_verified_revision():
+            try:
+                self._require_current_response_schema_acceptance()
+                if verified_revision != (self._response_schema_revision, self._response_schema_accepted_revision):
+                    raise RuntimeError("Completion verification was superseded by newer user requirements")
+            except Exception:
+                self._is_finished = False
+                raise
+
+        require_verified_revision()
         await self._await_deferred_startup()
-        self._require_current_response_schema_acceptance()
+        require_verified_revision()
         workflow.logger.info("✓ Marking task complete")
         # Leftover-safe drain (no-op when Fast Mode waited like live).
         await self._drain_fast_mode_explores()
+        require_verified_revision()
+        # A first load may supply presentation metadata, but must not change
+        # the requirements against which the supplied result was verified.
+        await self._load_output_schema(poll_until_present=True)
+        require_verified_revision()
+        final_answer = None
+        if not self.parent_workflow_id and isinstance(self.output_schema, dict) and self.output_schema.get("presentation"):
+            final_answer = render_final_answer(self.output_schema, structured_response)
+        presentation_snapshot = (
+            self._response_schema_revision,
+            self._response_schema_accepted_revision,
+            _json.dumps(self.output_schema, sort_keys=True, separators=(",", ":")),
+        ) if final_answer is not None else None
+        def require_current_final_presentation():
+            require_verified_revision()
+            if presentation_snapshot is None:
+                return
+            try:
+                self._require_current_response_schema_acceptance()
+                current = (
+                    self._response_schema_revision,
+                    self._response_schema_accepted_revision,
+                    _json.dumps(self.output_schema, sort_keys=True, separators=(",", ":")),
+                )
+                if current != presentation_snapshot:
+                    raise RuntimeError("Final presentation was superseded by newer user requirements")
+            except Exception:
+                # No final answer or terminal DB write has occurred. Preserve
+                # real feedback for the normal schema/verification retry owner.
+                self._is_finished = False
+                raise
+
         # Latch the terminal flag FIRST so any late child_cost_update signal
         # (which calls _update_cost_and_signal_parent → broadcast) cannot
         # overwrite the COMPLETED status with ACTIVE/Processing.
         self._is_finished = True
         # No background agent keeps running (or billing) after its parent ends.
         await self._stop_pending_background_agents()
+        require_current_final_presentation()
         await self._world_clock_event("finish")
+        require_current_final_presentation()
         await self._flush_pending_messages()
+        require_current_final_presentation()
 
         # Force a final tree-cost persist so the debounced emitter's last (≤3s
         # stale) value is corrected to the exact terminal cost. Recalc first, then
@@ -6413,9 +6463,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # wf_mark_complete_persists_summary_cost.
         self.subtree_cost_cents = self.own_cost_cents + sum(self.children_cost_cents.values())
         await self._persist_tree_cost()
-
-        # Poll for output_schema if missing (handles race condition with async schema generation)
-        await self._load_output_schema(poll_until_present=True)
+        require_current_final_presentation()
 
         tool_counts = {}
         summary = ""
@@ -6435,6 +6483,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 },
             )
 
+            require_current_final_presentation()
+
             # Generate summary - pass structured_response, output_schema, and child_tool_counts.
             # The summary is presentation, not part of the completion contract:
             # the verifier already scored this run complete. A failure here is
@@ -6442,44 +6492,49 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             # abort the durable terminal transition below, otherwise a
             # fully-verified agent is discarded — see
             # docs/rca/cases/2026-07-11-completion-gated-behind-final-summary-message-post.md
-            try:
-                summary_result = await workflow.execute_activity(
-                    generate_completion_summary,
-                    args=[
-                        context,
-                        # Persisted-row goal: the summary prompt labels this "ORIGINAL
-                        # GOAL" and it doubles as the DEMO cache namespace.
-                        self.demo_cache_goal,
-                        self.model,
-                        structured_response,
-                        self.output_schema,
-                        self.child_tool_counts,
-                        self._active_claude_token(),
-                        self._active_claude_source(),
-                        self._active_claude_pool_id(),
-                        self.user_id,
-                        self._active_gpt_token(),
-                        self._active_gpt_account_id(),
-                        self._active_gpt_source(),
-                        self._active_gpt_pool_id(),
-                        self.user_id,
-                        self.agent_id,
-                        self.compute_token_lineage_key,
-                        self.compute_token_demo_cache_affinity_key,
-                        self.fast_mode_cache_enabled,
-                        0,  # Fast Mode step — one completion summary per agent
-                    ],
-                    start_to_close_timeout=timedelta(seconds=60),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
-                )
-                summary_result = summary_result or {}
-            except Exception as summary_exc:
-                summary_error = str(summary_exc)
-                summary_result = {}
-                workflow.logger.error(f"completion_summary generation failed, completing without it: {summary_error}")
+            if final_answer is None:
+                try:
+                    summary_result = await workflow.execute_activity(
+                        generate_completion_summary,
+                        args=[
+                            context,
+                            # Persisted-row goal: the summary prompt labels this "ORIGINAL
+                            # GOAL" and it doubles as the DEMO cache namespace.
+                            self.demo_cache_goal,
+                            self.model,
+                            structured_response,
+                            self.output_schema,
+                            self.child_tool_counts,
+                            self._active_claude_token(),
+                            self._active_claude_source(),
+                            self._active_claude_pool_id(),
+                            self.user_id,
+                            self._active_gpt_token(),
+                            self._active_gpt_account_id(),
+                            self._active_gpt_source(),
+                            self._active_gpt_pool_id(),
+                            self.user_id,
+                            self.agent_id,
+                            self.compute_token_lineage_key,
+                            self.compute_token_demo_cache_affinity_key,
+                            self.fast_mode_cache_enabled,
+                            0,  # Fast Mode step — one completion summary per agent
+                        ],
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+                    summary_result = summary_result or {}
+                except Exception as summary_exc:
+                    summary_error = str(summary_exc)
+                    summary_result = {}
+                    workflow.logger.error(f"completion_summary generation failed, completing without it: {summary_error}")
+            else:
+                summary_result = {"summary": final_answer}
 
+            require_current_final_presentation()
             summary = strip_fast_mode_card_narration(summary_result.get("summary", ""))
             transcript = await self._completion_transcript(context)
+            require_current_final_presentation()
             structured_response = self._coalesce_structured_response(transcript, structured_response)
             summary_is_invalid = is_ablated_completion_summary(summary)
             needs_demo_detail = is_oai_demo_mass_agent_task(self) and len(str(summary or "").strip()) < 200
@@ -6542,6 +6597,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 cache_creation_input_tokens=summary_result.get("usage", {}).get("cache_creation_input_tokens", 0),
                 from_fast_cache=summary_result.get("usage", {}).get("from_fast_cache", False),
             )
+            require_current_final_presentation()
             self.token_count += summary_result.get("usage", {}).get("total_tokens", 0)
 
             # Build tool usage array for frontend
@@ -6563,10 +6619,17 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             # summary is already observable.
             # Suppress the automatic tree broadcast here; otherwise _post_message
             # would emit its default ACTIVE state after we latched _is_finished.
+            require_current_final_presentation()
             structured_response, summary = normalize_completion_notice(self.goal, structured_response, summary)
             formatted_outputs = self._format_outputs(structured_response)
+            if final_answer is not None:
+                # Revalidate after coalescing/materialization; no changed value may
+                # be published under the earlier accepted presentation.
+                final_answer = render_final_answer(self.output_schema, structured_response)
+                summary = final_answer
+            require_current_final_presentation()
             await self._post_message(
-                "",
+                final_answer if final_answer is not None else "",
                 "TOOL",
                 {
                     "toolCallId": tool_call_id,
@@ -6576,6 +6639,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     "title": "✅ Task Complete",
                     "completionSummary": {
                         "summary": summary,
+                        **({"answerText": final_answer, "presentation": self.output_schema["presentation"]} if final_answer is not None else {}),
                         "outputs": formatted_outputs,
                         "toolUsage": tool_usage,
                         "totalToolCalls": total_tool_calls,
@@ -6589,6 +6653,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 },
                 update_tree=False,
             )
+            # A signal may be handled while publication is awaited. Keep that
+            # already-written answer in history, but never certify its old
+            # verification against the newer requirements.
+            require_current_final_presentation()
 
             # Mark finished (includes structured_response for persistence).
             # mark_finished only reads the first USER text as the goal
@@ -6628,7 +6696,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                         self.user_id,
                         "completion",
                         self.agent_id,
-                        {"summary": summary, "outputs": formatted_outputs},
+                        {"summary": summary, "outputs": formatted_outputs,
+                         **({"answerText": final_answer, "presentation": self.output_schema["presentation"]} if final_answer is not None else {})},
                     ]
                     if self.world_model_mode != "real":
                         notification_args.append(self.world_model_mode)

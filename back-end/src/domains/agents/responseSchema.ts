@@ -1,5 +1,6 @@
 /** Canonical agent response-schema validation, shared by create and update. */
 import { z } from 'zod';
+import { FinalPresentationSchema, validateFinalPresentation } from './finalPresentation';
 
 const outputFieldConstraints = {
   minItems: z.number().int().min(0).optional(),
@@ -138,4 +139,5 @@ export const ResponseSchemaFieldSchema = z
 // Response schema type (passed by parent agent for sub-agents)
 export const ResponseSchemaSchema = z.object({
   fields: z.array(ResponseSchemaFieldSchema),
-});
+  presentation: FinalPresentationSchema.nullable().optional(),
+}).superRefine(validateFinalPresentation);

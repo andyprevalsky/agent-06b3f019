@@ -88,6 +88,7 @@ async function deliverAcrossChannels(
       channel,
       message: channelMessage,
       requiredLinks: notification.requiredLinks,
+      preserveText: notification.preserveText,
       agentId: options?.archiveRootAgentId,
       eventType: options?.archiveContext?.event_type,
       correctionBudget,
@@ -217,8 +218,10 @@ function completionOutputLines(outputs: unknown): string[] {
 export function buildCompletionSmsBody(
   agentId: string,
   summary: string,
-  outputs?: unknown
+  outputs?: unknown,
+  finalAnswer?: string
 ): string {
+  if (finalAnswer !== undefined) return finalAnswer;
   const prefix = agentId.substring(0, 6);
   const url = getAgentUrl(agentId);
   const oneLineSummary = summary.replace(/\s+/g, ' ').trim();
@@ -573,7 +576,8 @@ export async function notifyCompletion(
   agent: { id: string },
   summary: string,
   outputs?: unknown,
-  channels: SupervisorChannel[] = ['SMS']
+  channels: SupervisorChannel[] = ['SMS'],
+  finalAnswer?: string
 ): Promise<{
   success: boolean;
   messageSid?: string;
@@ -596,12 +600,12 @@ export async function notifyCompletion(
   }
 
   const prefix = agent.id.substring(0, 6);
-  const message = buildCompletionSmsBody(agent.id, summary, outputs);
+  const message = buildCompletionSmsBody(agent.id, summary, outputs, finalAnswer);
 
   const result = await sendLifecycleSms(
     userId,
     phone,
-    { message, requiredLinks: [getAgentUrl(agent.id)] },
+    { message, requiredLinks: finalAnswer === undefined ? [getAgentUrl(agent.id)] : [], preserveText: finalAnswer !== undefined },
     {
       archiveRootAgentId: agent.id,
       archiveContext: { event_type: 'completion', user_id: userId },

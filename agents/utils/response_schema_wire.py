@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from utils.response_schema_constraints import bounds_from_entries
+from utils.final_presentation import FinalPresentation
 
 PublicType = Literal[
     "str", "int", "float", "bool", "list[str]", "list[int]", "object",
@@ -71,6 +72,7 @@ def wire_model(internal=False, reasoning=False, title=False):
             ),
         )
     }
+    fields["presentation"] = (FinalPresentation | None, None)
     if reasoning:
         fields["reasoning"] = (str, Field(description="Analysis of the concrete outputs required."))
     if title:
@@ -145,7 +147,7 @@ def decode_wire(value, *, internal=False, reasoning=False, title=False):
             output[parent]["properties"] = [
                 output[node.id] for node in sorted(siblings, key=lambda node: node.position)
             ]
-    result = {key: item for key, item in model.model_dump().items() if key != "nodes"}
+    result = {key: item for key, item in model.model_dump(exclude_none=True).items() if key != "nodes"}
     result["fields"] = [output[node.id] for node in sorted(roots, key=lambda node: node.position)]
     return result
 

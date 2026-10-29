@@ -338,7 +338,14 @@ def _safe_time() -> float:
 T = TypeVar("T", bound=BaseModel)
 
 
-_RESPONSE_SCHEMA_SYSTEM_PROMPT = """You are an expert at analyzing agent goals and producing the MINIMAL output schema needed to verify the goal was completed.
+_RESPONSE_SCHEMA_SYSTEM_PROMPT = """When the user explicitly requests only a final value or an exact output format,
+select presentation version 1, mode value, bound to the single required nonnullable
+output field. Use text for scalar text/numbers/booleans, json only for explicitly
+requested JSON. Otherwise use mode report or omit presentation. Never suppress
+additional deliverables, files, required disclosures or approval/payment notices.
+Do not infer value mode merely because the schema has one field.
+
+You are an expert at analyzing agent goals and producing the MINIMAL output schema needed to verify the goal was completed.
 
 Your output is consumed by an automated verifier that scores 1.0 when every required field can be populated accurately from tool-result evidence. Therefore:
   - Required defaults to true; `required: false` lets the agent omit a field.
@@ -513,7 +520,11 @@ class _GeneratedResponseSchemaField(BaseModel):
         return self
 
 
+from utils.final_presentation import FinalPresentation, validate_presentation
+
+
 class _GeneratedResponseSchema(BaseModel):
+    presentation: FinalPresentation | None = None
     reasoning: str = Field(description="Analysis of what concrete outputs the goal requires.")
     fields: List[_GeneratedResponseSchemaField] = Field(
         min_length=1,
@@ -535,6 +546,7 @@ class _GeneratedResponseSchema(BaseModel):
 
     @model_validator(mode="after")
     def _at_least_one_required_field(self):
+        validate_presentation(self.model_dump(exclude_none=True))
         if not any(field.required for field in self.fields):
             raise ValueError("generated output schema must contain at least one required field")
         return self
@@ -770,7 +782,11 @@ def _schema_from_generated_model(generated: _GeneratedResponseSchema) -> Dict[st
         if field.properties is not None:
             item["properties"] = [project(child) for child in field.properties]
         return item
-    return {"fields": [project(field) for field in generated.fields]}
+    schema = {"fields": [project(field) for field in generated.fields]}
+    if generated.presentation is not None:
+        schema["presentation"] = generated.presentation.model_dump(exclude_none=True)
+    validate_presentation(schema)
+    return schema
 
 
 def _normalize_generated_agent_title(raw: str) -> Optional[str]:

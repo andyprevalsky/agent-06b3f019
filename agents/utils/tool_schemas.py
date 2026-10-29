@@ -301,8 +301,25 @@ class ResponseSchemaFieldConfig(BaseModel):
         return data
 
 
+from utils.final_presentation import FinalPresentation, validate_presentation
+
+
 class ResponseSchemaConfig(BaseModel):
     """Structured output schema defining what data the agent must return when complete."""
+
+    presentation: FinalPresentation | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_presentation(self, handler):
+        data = handler(self)
+        if self.presentation is None:
+            data.pop("presentation", None)
+        return data
+
+    @model_validator(mode="after")
+    def _validate_presentation(self):
+        validate_presentation(self.model_dump(exclude_none=True))
+        return self
 
     fields: List[ResponseSchemaFieldConfig] = Field(
         description=(
