@@ -376,3 +376,60 @@ no safe general runtime candidate is justified. No reasoning deletion,
 bibliography keyword rule, summary rewrite, criterion change, prompt nudge,
 model replay or task regrade was performed. The correct final animal and
 original C3 failure both remain. Live source unchanged; tokens UNMETERED.
+
+
+## R76: original It20 BU075 run1 menu claim and answer-source exposure
+
+The independently verified seven-member normal packet binds root
+06b3459d-2b96-4382-b50c-b4258431de9d, jobr001-j0005 and executed source
+4016ffaf50aeee0eff1b242d9e348f54896fdc02, patchnone. Archive SHA256 is
+829958f02182beeebfc28f1cd49ab6e1f4c693f25a254805612e96350213df2b;
+manifest SHA256 is
+b20fb7510ca3ed10b4888595a89152f002ef3979924459ab76d0ef6f027efa3a;
+run SHA256 is 51cbf93017852877fcf756bd8c2ecd2ef112a3ae1236250cb1e5ca11e9005a0f.
+Native COMPLETED in1924.0seconds is distinct from canonical FAILED/infraFALSE.
+C1/C2/C4 passed; C3 rejected an intermediate claim despite a correct final list.
+
+The task asks for the fruits shared by the2008 painting Embroidery from
+Uzbekistan and the October1949 breakfast menu of the liner later used in
+The Last Voyage, ordered clockwise and pluralized. Message73's original menu
+extraction lists Pear and Bananas under Fruit; lemons and watermelon are not
+in that list. Persisted assistant message107 at19:18:35.016Z nevertheless says:
+“It seems the fruits in the menu include bananas, lemons, pears, and watermelon.”
+This is already an actor-authored claim before the final report. The later
+final answer does not erase it under the unchanged C3 trajectory criterion.
+The corresponding actor-step28 encoded request/response was not found in the
+supplied worker log; no stronger raw-author-input parity is claimed.
+
+The first captured browser verifier request at worker12561 has SHA256
+cddf0dc2211122baee44f2fc8a95cd413549652341917674f76c966d2fc45c13.
+Its response at12578, SHA256
+3631e1757290916e3493b290f038886d050f788835caff881a52f42d378b73bb,
+returns bananas, pears with task_completed=false and score0 because the order
+is not yet established. The final request at15776 has SHA256
+a67a721a1eee23516ddda69f3219a4d83c84849d962909cd35e214c772eb7aca;
+response15785, SHA256
+ef1e7f266955a4f0d7fb4045b8bccb448d491b05889256b7b5e72c4bce7c377d,
+returns pears, bananas with task_completed=true and score1. Root extraction155
+and final summary157 preserve that string. No scalar substitution is shown.
+
+A separate evidence limitation must remain visible: message141 records the
+raw GitHub page at
+https://raw.githubusercontent.com/liuxuannan/AgentHallu/main/AgentHallu/OpenDeepSearch/006.json,
+containing
+this question's answer and another agent trajectory. The final verifier
+explicitly relies on that page's answer and clockwise ordering. This is
+observed exposure to a public answer artifact, not independent validation
+from the painting and menu. It does not reclassify the original C3 failure or
+prove a general code defect. No new website or model call was made here. This browser-navigation exposure
+is distinct from model/demo-cache mode evidence; no cache replay is inferred.
+
+Archive searches used lemons/watermelon/painting and intermediate-claim/
+retained-contradiction vocabulary. This case's R53/R73 Solution and Human
+feedback and the BU072 early-date case were read. The observable retained
+false-claim boundary is related; the deeper causal mechanism remains OPEN.
+Do not strip reasoning, suppress the earlier claim, insert expected fruits,
+rewrite the rubric, or claim clean independent task success from the exposed
+answer source. No runtime, prompt, criteria, budget, model route or grade
+changed. Original FAILED/infraFALSE and native COMPLETED remain intact.
+Tokens UNMETERED.
