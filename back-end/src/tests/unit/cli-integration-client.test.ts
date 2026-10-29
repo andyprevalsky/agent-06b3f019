@@ -1,7 +1,7 @@
 /** The shipped CLI forwards argv intact, preserves failures and never retries writes. */
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { createServer } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { resolve, join } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
@@ -9,9 +9,30 @@ import { promisify } from 'node:util';
 const exec = promisify(execFile);
 const cli = resolve(__dirname, '../../assets/rose-tools/rose.cjs');
 
+function acceptsCliRequest(req: IncomingMessage, res: ServerResponse, path: string): boolean {
+  if (req.method === 'POST' && req.url === path) return true;
+  // The host discovers new listeners with HEAD/GET probes, independently of the CLI.
+  res.writeHead(404).end();
+  return false;
+}
+
+async function assertHostProbesIgnored(port: number, path: string): Promise<void> {
+  for (const target of ['/', path]) {
+    for (const method of ['HEAD', 'GET']) {
+      const response = await fetch(`http://127.0.0.1:${port}${target}`, {
+        method,
+        signal: AbortSignal.timeout(5000),
+      });
+      assert.equal(response.status, 404);
+      await response.arrayBuffer();
+    }
+  }
+}
+
 test('template CLI run preserves argv, bearer auth and the remote exit code', async () => {
   let body: unknown;
   const server = createServer(async (req, res) => {
+    if (!acceptsCliRequest(req, res, '/cli/fixture/run')) return;
     assert.equal(req.url, '/cli/fixture/run');
     assert.equal(req.headers.authorization, 'Bearer fixture-token');
     let raw = '';
@@ -25,6 +46,7 @@ test('template CLI run preserves argv, bearer auth and the remote exit code', as
   assert.ok(address && typeof address === 'object');
   const args = ['search', 'a query with spaces', '$(must stay literal)', '--json'];
   try {
+    await assertHostProbesIgnored(address.port, '/cli/fixture/run');
     await assert.rejects(
       exec(process.execPath, [cli, 'cli', 'run', 'fixture', '--', ...args], {
         env: {
@@ -51,6 +73,7 @@ test('template CLI run preserves argv, bearer auth and the remote exit code', as
 test('an uncertain command response is surfaced without executing it twice', async () => {
   const calls: string[] = [];
   const server = createServer((req, res) => {
+    if (!acceptsCliRequest(req, res, '/cli/fixture/run')) return;
     calls.push(`${req.method} ${req.url}`);
     res.writeHead(503, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'template unavailable' }));
@@ -59,6 +82,7 @@ test('an uncertain command response is surfaced without executing it twice', asy
   const address = server.address();
   assert.ok(address && typeof address === 'object');
   try {
+    await assertHostProbesIgnored(address.port, '/cli/fixture/run');
     await assert.rejects(
       exec(process.execPath, [cli, 'cli', 'run', 'fixture', '--', 'write'], {
         env: {
@@ -87,6 +111,7 @@ test('publish requires JSON verification argv before calling the backend', async
 test('publish forwards reproducible installation and credential metadata', async () => {
   let body: unknown;
   const server = createServer(async (req, res) => {
+    if (!acceptsCliRequest(req, res, '/cli/fixture/publish')) return;
     let raw = '';
     for await (const chunk of req) raw += chunk;
     body = JSON.parse(raw);
@@ -97,6 +122,7 @@ test('publish forwards reproducible installation and credential metadata', async
   const address = server.address();
   assert.ok(address && typeof address === 'object');
   try {
+    await assertHostProbesIgnored(address.port, '/cli/fixture/publish');
     await exec(
       process.execPath,
       [
