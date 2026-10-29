@@ -89,3 +89,22 @@ Resolve the canonical audit path from the ownership record before diagnosing
 missing custody. A missing success-only mirror is expected after failed cleanup.
 An ambiguous allocation and a later unsafe lookup remain distinct unknowns;
 retained exact ownership supports guarded recovery, not retrospective absence.
+
+## Same R63: canonical operational recovery completed
+
+The owner executed exactly one canonical recovery on unchanged source355,
+using the original owner token and ordinary bounds. It exited0 at
+1793252949.64495. The returned receipt reports registry removal and
+provider-teardown-verified at1793252943. Original result archive SHA256 is
+`3e99daf38d27a8cfc7e518c78243ec2cd8c74509cad4cc9917a1720b945d9e6c`.
+Independently recomputing the supplied canonical audit and run-local mirror
+produced the same digest as the mirror's source-audit binding:
+`8f22bd8bc9018c12f6fbc7e4b8d14389321acb650a45d8fa7734ae7b9b5e309f`.
+
+All three fresh records have disposition destroyed-provider-retained. This
+is verified provider-terminal retention, not physical absence. The original
+name-only record still has no invented Machine ID. The original lifecycle
+remains FAILED with empty audit SHA, and all twenty original tasks remain
+cancelled/unscored. The first allocation timeout and exact final unsafe-query
+cause remain unresolved. Operational ownership reconciliation is complete;
+no code repair, benchmark success or retroactive lifecycle rewrite is claimed.
