@@ -649,7 +649,8 @@ export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"
 echo "Starting backend with coverage collection on port $COV_PORT..."
 launch_coverage_process_group env \
   NODE_V8_COVERAGE="$COV_TMP" PORT="$COV_PORT" DISABLE_GMAIL_SYNC=1 \
-    DISABLE_GOOGLE_DATA_PURGE=1 \
+  NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require=$SCRIPT_DIR/blackbox-kernel-proxy-custody.cjs" \
+  DISABLE_GOOGLE_DATA_PURGE=1 \
   node --import tsx src/bootstrap.ts >"$COV_LOG" 2>&1
 BACKEND_PID="$LAUNCHED_COVERAGE_PID"
 BLACKBOX_PID=""

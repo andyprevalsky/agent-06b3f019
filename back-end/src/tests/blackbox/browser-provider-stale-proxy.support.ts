@@ -1,32 +1,16 @@
 #!/usr/bin/env tsx
 
-/**
- * Live leg: a cached managed proxy is deleted between pause and resume.
- *
- * Geo proxies are shared by name across the Kernel project, so prod sessions and
- * concurrent runs hold the same cached ID and any of them can lose it. Resume
- * must re-provision the same geo instead of downgrading city → state. The proxy
- * deleted here is a uniquely named one this leg created, so no other run or
- * prod session can have resolved it.
+/** Live proxy custody: reuse the existing shared geo proxy without allocating or deleting one.
+ * Deleted-cache recovery is covered deterministically in kernel-stale-cache.support.ts.
  */
-
-import { randomUUID } from 'node:crypto';
-import { InternalServerError, type Kernel } from '@onkernel/sdk';
-import {
-  KERNEL_CREATE_REQUEST_OPTIONS,
-  kernelProxyCandidates,
-  managedKernelProxyFromSource,
-} from '../../providers/browser/kernelProxy';
-import { prisma } from '../../providers/database';
-import type { ProxyGeoLocation } from '../../providers/geoip';
-import { retryWithBackoff } from '../../providers/retry';
+import type { Kernel } from '@onkernel/sdk';
 import {
   assert,
   type BrowserApiResponse,
   type BrowserMetadataResponse,
 } from './browser-provider.helpers';
 
-export async function assertResumeReprovisionsDeletedProxy(options: {
+export async function assertResumeReusesExistingProxy(options: {
   kernel: Kernel;
   taskId: string;
   sessionId: string;
@@ -35,84 +19,32 @@ export async function assertResumeReprovisionsDeletedProxy(options: {
   post: (path: string, body?: unknown) => Promise<BrowserApiResponse>;
 }): Promise<string> {
   const { kernel, taskId, sessionId, proxySource, proxyLocation, post } = options;
-  const mode = managedKernelProxyFromSource(proxySource ?? null);
-  assert(mode !== undefined, `no managed proxy mode for source ${String(proxySource)}`);
-  // The cached row to poison is the one for the proxy the session actually
-  // uses. After a rotation that is another US state than the agent's own, so
-  // the key comes from the session's reported location, not the agent's.
+  const before = await kernel.browsers.retrieve(sessionId, { include_deleted: true });
   assert(
-    proxyLocation !== undefined && typeof proxyLocation.country === 'string',
-    `session reported no proxy location: ${JSON.stringify(proxyLocation)}`
+    typeof before.proxy_id === 'string' && before.proxy_id !== '',
+    'live browser must name its existing proxy'
   );
-  const sessionLocation: ProxyGeoLocation = {
-    country: proxyLocation.country,
-    ...(proxyLocation.state ? { state: proxyLocation.state } : {}),
-    ...(proxyLocation.city ? { city: proxyLocation.city } : {}),
-  };
-  const candidate = kernelProxyCandidates(sessionLocation, mode.type).find(
-    (c) => c.source === proxySource
-  );
-  assert(candidate !== undefined, `no managed proxy candidate for source ${String(proxySource)}`);
-
-  // Kernel intermittently answers a valid proxy create with `500 failed to
-  // apply proxy config`; only that provider-side 5xx is retried.
-  const doomed = await retryWithBackoff(
-    () =>
-      kernel.proxies.create(
-        {
-          type: candidate.type,
-          name: `rose-blackbox-stale-${randomUUID()}`,
-          config: candidate.config,
-        },
-        KERNEL_CREATE_REQUEST_OPTIONS
-      ),
-    {
-      maxRetries: 3,
-      fixedDelays: [1_000, 2_000],
-      isRetryable: (error) => error instanceof InternalServerError,
-      component: 'browser-provider:stale-proxy-create',
-    }
-  );
-  const key = { provider: 'kernel', proxyKey: candidate.proxyKey };
-  let doomedDeleted = false;
+  await post('/close', {
+    session_id: sessionId,
+    pause: true,
+    current_url: 'https://example.com/proxy-reuse-check',
+  });
+  const resumed = await post('/resume', { task_id: taskId });
+  const resumedId = String(resumed.session_id);
   try {
-    await prisma.browserProviderProxy.upsert({
-      where: { provider_proxyKey: key },
-      create: { ...key, proxyId: doomed.id, proxyType: candidate.type, config: candidate.config },
-      update: { proxyId: doomed.id },
-    });
-    await post('/close', {
-      session_id: sessionId,
-      pause: true,
-      current_url: 'https://example.com/stale-proxy-check',
-    });
-    await kernel.proxies.delete(doomed.id);
-    doomedDeleted = true;
-
-    const resumed = await post('/resume', { task_id: taskId });
-    const resumedId = String(resumed.session_id);
     const metadata = resumed.browser_session_metadata ?? {};
     assert(
       metadata.proxy_source === proxySource &&
         JSON.stringify(metadata.proxy_location) === JSON.stringify(proxyLocation),
-      `resume after a deleted cached proxy downgraded ${String(proxySource)} to ${String(
-        metadata.proxy_source
-      )}`
+      'resume changed the existing proxy tier or location'
     );
-    const remote = await kernel.browsers.retrieve(resumedId, { include_deleted: true });
-    assert(
-      remote.proxy_id !== undefined && remote.proxy_id !== null && remote.proxy_id !== doomed.id,
-      'resume reused the deleted proxy ID'
-    );
-    const cached = await prisma.browserProviderProxy.findUnique({
-      where: { provider_proxyKey: key },
-    });
-    assert(cached?.proxyId === remote.proxy_id, 'the stale cache row was not replaced');
-    return resumedId;
-  } finally {
-    if (!doomedDeleted) await kernel.proxies.delete(doomed.id).catch(() => {});
-    await prisma.browserProviderProxy.deleteMany({
-      where: { provider: 'kernel', proxyId: doomed.id },
-    });
+    const after = await kernel.browsers.retrieve(resumedId, { include_deleted: true });
+    assert(after.proxy_id === before.proxy_id, 'resume must reuse the existing shared proxy');
+  } catch (error) {
+    // The caller cannot learn this replacement ID on a failed assertion.
+    // Close only the exact browser created by this leg; shared proxies stay intact.
+    await post('/close', { session_id: resumedId, pause: false }).catch(() => {});
+    throw error;
   }
+  return resumedId;
 }

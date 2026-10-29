@@ -543,6 +543,7 @@ EOF
 
   PORT="$PORT" \
   DISABLE_GMAIL_SYNC=1 \
+  NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require=$SCRIPT_DIR/blackbox-kernel-proxy-custody.cjs" \
   npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
   BACKEND_PID=$!
   trap 'exit 130' INT
