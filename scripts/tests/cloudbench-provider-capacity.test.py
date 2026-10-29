@@ -351,7 +351,10 @@ class ProviderCapacityCampaignTests(unittest.TestCase):
         # Unlike the subprocess cases above, runpy inherits this process's
         # environment. Pin the same Kernel fixture here; otherwise the real
         # back-end/.env (Tilion, cap 16) changes the expected 70/71 boundary.
-        with patch.dict(os.environ, clean_env(), clear=True), contextlib.redirect_stderr(io.StringIO()) as stderr:
+        with (
+            patch.dict(os.environ, clean_env(), clear=True),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+        ):
             self.assertEqual(refusal(70), 0)
             self.assertEqual(refusal(71), 78)
         self.assertIn("requested 71 concurrent benches, maximum 70.", stderr.getvalue())

@@ -4,6 +4,7 @@ import type { Browser, CDPSession, Frame, Page } from 'playwright';
 import { encryptProjectSecret, decryptProjectSecret } from '../projects/secrets';
 import { getCheckpointObject, putCheckpointObject } from '../codeSessions/artifactStore';
 import { prisma } from '../database';
+import { createLogger } from '../logger';
 import { connectValidatedBrowser } from '../steel/sessionConnection';
 import type { SteelLifecycleMutation } from '../steel/lifecycleClaim';
 import { captureFrameIndexedDB, restoreFrameIndexedDB } from './checkpointIndexedDB';
@@ -29,6 +30,7 @@ export type BrowserCheckpoint = {
   limitations: ['no_external_action_replay', 'no_websocket_or_heap_state'];
 };
 const digest = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
+const log = createLogger('BrowserCheckpoint');
 export const EMPTY_BROWSER_BASELINE = 'browser-checkpoint:empty:v1';
 const userPrefix = (userId: string) => `user/${digest(userId)}/browser-checkpoints/`;
 
@@ -267,7 +269,14 @@ export async function restoreLogicalBrowserCheckpoint(
   const context = browser.contexts()[0];
   if (!context) throw new Error('Browser checkpoint restore context missing');
   await assertLogicalBinding(taskId, row);
+  log.info('Restoring logical browser storage', {
+    taskId,
+    cookies: checkpoint.storage.cookies.length,
+    origins: checkpoint.storage.origins.length,
+    tabs: checkpoint.tabs.length,
+  });
   await context.setStorageState(checkpoint.storage);
+  log.info('Logical browser storage restored', { taskId });
   const targets = checkpoint.tabs.length
     ? checkpoint.tabs
     : [row.currentUrl ?? row.startUrl]
@@ -287,6 +296,7 @@ export async function restoreLogicalBrowserCheckpoint(
     await assertLogicalBinding(taskId, row);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   }
+  log.info('Logical browser tabs restored', { taskId, tabs: prepared.length });
 }
 
 /** Seed each origin in the destination tab's storage namespace, including late-created frames. */

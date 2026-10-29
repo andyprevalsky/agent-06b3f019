@@ -36,7 +36,6 @@ import { getAuthOptions } from '../../providers/authOptions';
 import * as repo from './repo';
 import { storedBrowserProvider } from '../../providers/browser/types';
 import { buildBrowserSessionMetadata } from './service.metadata';
-export { buildBrowserSessionMetadata } from './service.metadata';
 import { validateBrowserKeySymbols } from './service.browser-input';
 import { validateSessionFilePath } from './service.file-path';
 import {
@@ -61,6 +60,7 @@ export {
 export { injectLocalStorage, SessionNotFoundError, SessionNoUserError };
 export { InvalidSessionFilePathError } from './service.file-path';
 export { CdpInjectionError, SessionNoWsUrlError } from './types';
+export { buildBrowserSessionMetadata } from './service.metadata';
 
 const log = createLogger('BrowserSession');
 
@@ -69,6 +69,10 @@ async function requireSessionOwner(sessionId: string, userId?: string): Promise<
   const session = await repo.findSessionBySessionId(sessionId);
   if (session === null || session.context.userId !== userId) throw new SessionNotFoundError();
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 /**
  * A logical browser holds private state only once it has its own checkpoint or

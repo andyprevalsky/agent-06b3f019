@@ -195,6 +195,18 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "description": "Open a new browser tab, optionally navigating to a URL",
         "params": {"url": {"type": "string", "description": "URL to open in new tab (defaults to about:blank)"}},
     },
+    "read_tool_output": {
+        "description": (
+            "Read omitted tool output using its opaque output_id. Pages use Unicode character offsets; "
+            "follow next_offset or search with query. Only outputs from this agent/session can be read."
+        ),
+        "params": {
+            "output_id": {"type": "string", "description": "Opaque ID from a tool result preview.", "required": True},
+            "offset": {"type": "integer", "description": "Character offset; use next_offset to continue."},
+            "limit": {"type": "integer", "description": "Maximum number of Unicode characters to read (default: 20000, max: 20000)."},
+            "query": {"type": "string", "description": "Optional literal substring to find at or after offset."},
+        },
+    },
     "upload_file": {
         "description": (
             "Upload a file to a file input element. The file must be available in the session's available_files "
@@ -940,7 +952,7 @@ def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
     block_note = detect_amazon_return_self_service_block(url, f"{bs.get('title') or ''}\n{dom_tree}")
     block_text = f"\nPage Signal: {block_note}\n" if block_note else ""
 
-    return (
+    text = (
         f"# Current Browser State\n\n"
         f"Timestamp: {timestamp}\n"
         f"{stats_text}Current URL: {url}{title_part}\n"
@@ -948,6 +960,7 @@ def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
         f"{scroll_text}{tabs_text}{events_text}{popups_text}{downloads_text}{block_text}"
         f"Interactive elements:\n{dom_tree}"
     )
+    return text
 
 
 def build_browser_state_message_content(
@@ -1284,6 +1297,7 @@ _VALID_ACTIONS = frozenset(
         "switch_tab",
         "close_tab",
         "open_new_tab",
+        "read_tool_output",
         "attempt_completion",
         "request_user_assistance_for_authentication",
         "request_payment_card",
@@ -1431,6 +1445,13 @@ def _normalize_action_params(
         return validate_browser_tool_args("phone", params)
     if normalized_action == "generate_write_lock_notification":
         return dict(params)
+    if normalized_action == "read_tool_output":
+        # Validate against read_tool_output's own schema and pass the coerced
+        # values; the generic mapping below drops output_id/offset/limit and
+        # renames query to instruction.
+        from browser_tools.schemas import validate_browser_tool_args
+
+        return validate_browser_tool_args("read_tool_output", params)
 
     if normalized_action == "read_logs":
         log_params: Dict[str, Any] = {}
