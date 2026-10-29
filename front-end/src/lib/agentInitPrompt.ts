@@ -6,7 +6,7 @@
  * back-end/src/tests/blackbox/repo-onboarding.blackbox.ts).
  */
 
-export const ROSE_CLI_PACKAGE = '@roselabs/cli';
+export const ROSE_CLI_PACKAGE = '@roselabs.ai/cli';
 export const ROSE_CLI_BIN = 'rose';
 
 export function agentInitPrompt(code: string): string {

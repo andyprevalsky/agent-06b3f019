@@ -1,5 +1,5 @@
 {
-  "name": "@roselabs/cli",
+  "name": "@roselabs.ai/cli",
   "version": "0.1.0",
   "description": "Rose CLI: set up a local project on Rose with your coding agent (rose agent-init) and keep it synced (rose push).",
   "type": "module",

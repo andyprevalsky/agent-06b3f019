@@ -21,7 +21,7 @@ import { renderWithProviders } from './test-wrapper';
 
 const API_BASE = 'http://localhost:3001/api';
 function exactPrompt(code: string): string {
-  return `Install the Rose CLI with \`npm i -g @roselabs/cli\`, then set up this project on Rose by running \`rose agent-init --login-code ${code}\` and following its instructions. Run these commands yourself and ask for my approval when needed.`;
+  return `Install the Rose CLI with \`npm i -g @roselabs.ai/cli\`, then set up this project on Rose by running \`rose agent-init --login-code ${code}\` and following its instructions. Run these commands yourself and ask for my approval when needed.`;
 }
 
 function codeFor(n: number): string {
