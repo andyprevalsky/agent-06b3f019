@@ -7331,8 +7331,10 @@ CLOUDBENCH_GUEST_NATIVE_STOP_CALL_TIMEOUT=2
 # Controller cleanup runs as the EXIT trap of a signalled controller, where a
 # bare `return` reports the status from before the trap (here 143).
 cleanup() {{
+  local native_started=$SECONDS
   fleet_native_stop_undelivered_guests 0
   status=$?
+  printf '%s\\n' "$((SECONDS - native_started))" > "$FAKE/native-elapsed-seconds"
   trap - EXIT
   exit "$status"
 }}
@@ -7380,9 +7382,11 @@ exit 143
     assert receipt["verified_state"] == initial, receipt
     assert 1 <= len(stops) <= 3 and receipt["stop_requests"] == len(stops), (stops, receipt)
     if case == "stop-always-fails":
-        # Retries continue until the attempt cap or the shared deadline, whichever
-        # comes first; under host load the 6 s window can end after two requests.
-        assert len(stops) == 3 or elapsed >= 6, (stops, elapsed)
+        # The controller's deadline uses integer Bash SECONDS, whose next tick
+        # may be less than one monotonic second away. Compare deadline exhaustion
+        # on that same clock; keep the independent monotonic upper bound above.
+        native_elapsed = int((fake / "native-elapsed-seconds").read_text())
+        assert len(stops) == 3 or native_elapsed >= 6, (stops, native_elapsed, elapsed)
 
 
 def test_guest_shutdown_child_confirmation_native_stop_counts_only_sent_requests(tmp_path: Path) -> None:
