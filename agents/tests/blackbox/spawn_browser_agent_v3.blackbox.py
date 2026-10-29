@@ -4622,7 +4622,11 @@ async def test_browser_humanizer_cursor_observer_runs_after_visual_cursor_update
 
 
 async def test_browser_humanizer_cdp_mouse_transport_queues_full_path_before_drain():
+    from functools import partial
+    from random import Random
+
     from browser_tools.humanizer import BrowserHumanizer
+    from browser_tools.input_synthesis import synthesize_mouse_path
 
     real_sleep = asyncio.sleep
 
@@ -4693,6 +4697,9 @@ async def test_browser_humanizer_cdp_mouse_transport_queues_full_path_before_dra
         ),
         patch("browser_tools.humanizer.asyncio.sleep", AsyncMock()),
         patch("browser_tools.humanizer.random.random", return_value=1.0),
+        # This transport fixture requires a path longer than 20 samples.
+        # Keep the real generator while making its input RNG deterministic.
+        patch("browser_tools.humanizer.synthesize_mouse_path", side_effect=partial(synthesize_mouse_path, rng=Random(0))),
     ):
         humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
         humanizer.set_cursor_observer(lambda x, y: observed.append((x, y)))
