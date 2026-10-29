@@ -803,6 +803,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-campaign-env.py" \
        "$ROOT_DIR/scripts/cloudbench-seed-get.sh" \
        "$ROOT_DIR/scripts/cloudbench-forensic-retirement.py" \
+       "$ROOT_DIR/scripts/cloudbench-retired-diagnostic-custody.py" \
        "$ROOT_DIR/scripts/cloudbench-sealed-machine-retirement.py" \
        "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-inventory.sh" \
@@ -11607,6 +11608,19 @@ fleet_recovery_confirm_runtime_evidence() {  # <exact dead-owner registry>; veri
     local FLEET_OWNER_TOKEN="${1##*/}" FLEET_TEARDOWN_OWNERSHIP_DIR
     local -a CHILD_OUT=() CHILD_MACHINE=()
     FLEET_TEARDOWN_OWNERSHIP_DIR="$(registry_meta_value "$registry/meta" audit_dir)"
+    local retired_diagnostic_status=0
+    if [ -f "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-retired-diagnostic-custody.py" ]; then
+        python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-retired-diagnostic-custody.py" \
+            --registry "$registry" --common "$GIT_COMMON_DIR" \
+            --guard-fd "${REGISTRY_RECOVERY_GUARD_FD:--1}" --recovery-pid "$$" \
+            --recovery-birth "$FLEET_OWNER_PID_START" || retired_diagnostic_status=$?
+        case "$retired_diagnostic_status" in
+            0) return 0 ;;
+            2) ;; # Not this retired-primary case; retain ordinary validation.
+            *) return 1 ;;
+        esac
+    fi
+
     if [ -e "$(registry_meta_value "$registry/meta" runs_root)/$(registry_meta_value "$registry/meta" run_id)/_forensic/manifest.json" ]; then
         manifest_schema="$(python3 - "$(registry_meta_value "$registry/meta" runs_root)/$(registry_meta_value "$registry/meta" run_id)/_forensic/manifest.json" <<'PY'
 import json, sys

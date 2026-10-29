@@ -136,3 +136,69 @@ permission to classify provider infrastructure or force a task result.
 ## Reusable lesson
 
 Separate generated artifact requirements, retained evidence coverage and actual artifact-delivery failures before attributing a late browser timeout to one repairable cause.
+
+## R43: independently observed BU055 run2 recurrence
+
+The new original is jobr002-j0020, root7ef6071a-5d30-44c6-8f9c-d1d8ddb75cb6,
+fleet20261029-002843-2095876, executed at unchanged765caac00ce085dd0359b8342161a8717be7446d
+with workspace_patch_sha256=none. It remains nativeFAILED/taskFAILED after
+3012.9seconds, infra_failure=false. The bounded intake began at approximately
+2026-10-29T01:31Z. Normal archive SHA256 is
+1283fcfd8edf13b5e5ed2c4bbfe465890e2564a83b2351c031bc9a13f7f89394;
+manifest9ab3246f9d5c2bcad1e11a74e0be64c33e583393b936c1ab4d0d64cff6eb0e82
+and all seven member sizes/hashes verify. Run and full-worker hashes are
+ea0b3eeb1c7e8b30ee5b3dfdd81ead3a9bedc74de488f9cc042df315bd0603a8 and
+bfd332dc8c73a6efd0a0f79cd660895ac79961b17e1f1576103343b6a352e6ad.
+Supplemental lifecycle data is separately labelled; no physical release state
+is inferred from the task outcome.
+
+This occurrence was grouped only after opening its original schema and input.
+The schema generator's first response reaches its length limit with no JSON.
+The next actual responsee2a5879beea6 emits required restaurants:list[file_pointer]
+with minItems=maxItems=3 inside each supercharger. Its recorded reasoning
+explicitly considers nested restaurant objects, identifies the native nested
+field enum limitation, and emits file pointers. This supports a concrete
+representation limitation, not proof that a legal flattened alternative could
+not have completed the task. The later general schema capability repair was
+not executed in this original run.
+
+At01:00:25.347906Z verifier562c9ed2b2d5 receives a compact action window25..54;
+its separate evaluate steps are54,52,50,48,46,44,42,40,38,36,34,32,30,29,26.
+Earlier executed step10 contains the Tesla Bloomington East3rdStreet card and
+2894 E3rdSt address, step12 the Fresh Thyme Market card/3600 W3rdSt address,
+and step24 the Tokyo Japan Sushi & Hibachi name/address/Maps URL. The specific
+'East 3rd Street' and 'Tokyo Japan Sushi & Hibachi' strings are absent from both
+raw context and encoded request. Fresh Thyme Market text is still present
+elsewhere, so this is not a claim that every mention of the western site vanished.
+The full earlier evaluated receipts are outside the separate receipt selection.
+Step10/12/24 message SHA256 values are respectively
+dde93ab527dd648f316fc08a065aea821c8d6baecc5c8489d4dfcdcbbe016469,
+ab303e833c21e6ddc362db923ec78a46161ccfeddb456f86a3d9f1205e11f5b4,
+and c6f45b8f6179de779044c2262710672edb6244664344a0d5e549a329044eac26.
+
+The actual converter exactly reproduces the captured request after excluding
+its separately inserted schema-system message. Budget use is33470/160000,
+with one per-tool truncation. Thus these omissions precede budget exhaustion.
+Raw context SHA256 is5c57b425f9d24bcf11996b17a58a78188601a2be20296e2dcbe1ce8df8244c6f;
+request SHA256 isf0754d6f313aa42ffc8b70e23622537eb70a01d23b3bd2ac5d90680b24fbd368.
+The response explicitly rejects missing Tesla-sourced addresses, the third
+Evansville restaurant name/URL, full coverage and required files. It returns
+score0.5/task_completed=false; session_files reports no downloaded files.
+Unlike run1, this intake has not established any failed file-upload request.
+
+The actor continues collecting addresses through step79. Temporal reports
+activity StartToClose timeout at01:24:32.632544Z, and the root fails. There is
+no later captured completion verifier or final successful answer. A prior
+15-second evaluate timeout recovered and subsequent evaluate calls succeeded;
+that event alone does not explain the final50-minute exhaustion. The later
+'Agent paused by user' and browser cleanup-failed messages are retained as
+emitted, not interpreted as new user action or as the cause of the task failure.
+
+This is an additional original observation of the same required-file and
+bounded-evidence mechanisms, not a regression of pending repairs. The scoped
+full-history evaluate-candidate repair9994210 and the separate nested-schema
+capability repair were not in executed765. No duplicate repair, test, timeout
+change, task rewrite or model replay is proposed here. Whether either repair
+changes this task's actual outcome remains OPEN. The last-call, artifact,
+semantic coverage and final-timeout limits remain distinct. No new browser,
+provider, model, DB, capture or image operation was performed. TokensUNMETERED.

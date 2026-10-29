@@ -96,3 +96,45 @@ native instruction or DTO byte change requires fresh review.
 ## Reusable lesson
 
 Separate a finite native wire representation from canonical typed data, and test legacy coercions plus every shared schema embedding before claiming compatibility.
+
+## R44 original occurrence: BU058 run 2
+
+Original It13 job r002-j0023, root13f8a5a5-f4a2-4694-bdac-cdee15dffe21,
+executed765caac00ce085dd0359b8342161a8717be7446d. Archive
+f2b002473b9811fb3b0ed1154617f52b46d380041880217fa76da543bd6b7eda and
+normal manifest e4b316cefbd384f0e40306b8f3abc8cc913f0fbbcc8f82675c5803bc5f4f15d2
+were independently checked; all seven member sizes and hashes match.
+Native FAILED after2880.3s, benchmarkFAILED and infraFALSE remain unchanged.
+This is not a regression of the unexecuted qualified next source.
+
+The actual schema request at00:34:26, SHA
+ da1169bcfb6c1583e2bd08b4dc7319dc634ea9cc7ad7732ddaab8245e76f5f7f,
+exposes the restricted nested-field enum without object/list[object] or another
+properties level. Its actual response SHA
+15e5c9247d3055de1698b137d70c0f11e5d0f5ffb02a61cc332b02d7fa7579d1 reasons
+that year/tier object pairs are appropriate, then emits required tiers as four
+to five session file pointers for each sponsor. The browser receives that shape.
+The restriction and emitted shape are observed; this does not isolate the
+model's reason for choosing files.
+
+Verifier request SHA
+5b18a0089d76771874a0325cf84d5fff9b83777e9a6055975768364c2435eb82 and response
+0353259d6438309e21828009f407b34d5d9b900d699e878bbf239b475e8b8d8c show fifteen
+sponsor names/years with empty tiers, task_completed=true and score0.5. Tier
+values are described in reasoning, but the verifier explicitly says the
+required session files do not exist. Subsequent request
+944cf3a825b8a95ab439acc7a38205dfdbac4bdb0d28818f11b5ce3ae889a89e and response
+0509bccd085342230052e12252a2492abc752cee9d88b3bd47345d23048dba55 repeat the
+missing-file boundary. These are model assertions, not independent validation
+of all researched sponsor facts. Schema validation correctly rejects empty
+required lists. The actor continues attempting downloads/file creation until
+max_iterations100 at01:21:43.949Z. A later browser-pause HTTP500 is a separate
+cleanup observation; it does not explain the earlier representation contract.
+
+Unlike R36 run1's optional omitted-tier output, this occurrence does not admit
+completion without required tier files. It is appended to the existing bounded
+schema-capability family after reading the original request/response and prior
+case, not inferred from task name. No duplicate runtime fix, model replay,
+timeout/step increase, task/rubric edit or original PASS claim is justified.
+The existing finite-wire mitigation remains source-qualified only; R44's actual
+unchanged-task outcome stays OPEN. Tokens UNMETERED.

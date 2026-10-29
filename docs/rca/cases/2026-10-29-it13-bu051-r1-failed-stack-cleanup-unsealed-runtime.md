@@ -53,3 +53,64 @@ wait for it or authorize capture, recovery, signals, retry or a runtime change.
 A stopped service manifest and worker shutdown message do not substitute for
 an exact clean supervisor and stack receipt. Preserve diagnostic bytes without
 promoting them to a normal sealed runtime export or completed resource release.
+
+## Postterminal operational custody repair (R39, 2026-10-29)
+
+Original R39 clock 00:26:25 UTC and postterminal phase 01:36 UTC are retained.
+The original task failure and missing guest/runtime evidence remain unresolved;
+this repair addresses only administrative custody after proven retirement.
+
+The parent's one authorized original765 canonical recovery returned1 at
+`fleet_recovery_confirm_runtime_evidence`: the normal sealed runtime manifest
+was never collected. Canonical recovery itself changed retain to reap and
+removed the guest-cleanup latch; it did not create a guest ACK, normal manifest,
+or completed task. The owner-wide runtime-evidence latch remained.
+
+Existing original custody: diagnostic archive
+`f507adaa43cfc46ae9e87d1be24ab926e291b6b9fa9f4dc488b4bbe600a3e6e2`,
+diagnostic run
+`efdcbebe94912c859e11d4798d199af41f59d17134fa888e8777c3cb7b077217`,
+16-original-record custody bundle
+`01e751addfad569bb3bf4d55a3852ec3bf2cbdc310dc7e8d8d74684fd6d9b258`.
+All original member hashes were checked. Root
+`49e8969d-bc7b-472b-97c3-d256c3fc1e9a` has four root-only cleanup snapshots;
+after/final/payment snapshots are sealed/deleted, no errors/warnings/purchases,
+and exact Tilion session `sess_b28038d95f524ec18f263ab4ce321ef6` has DELETE204.
+Actual backend parsing agrees with that sole session/root. Supplied native
+observations bind Machine `879640a0615ee8` destroyed and Volume
+`vol_4y8gl2w3n666gnpr` pending_destroy/unattached. Pending destroy is not absence.
+Full native bodies remain custodian-attested; local replay uses their safe
+projections and rebased paths, not fresh observations.
+
+The source repair adds a separate zero-credit diagnostic custody path for one
+already-retired fresh primary under canonical lock and dead-owner identity.
+It requires complete source/task/allocation binding, no child/pool/reuse,
+physical retained diagnostic files with original hashes, complete root/provider/
+payment closure, and fresh matching terminal native observations. It enumerates
+the entire retained run and rejects unknown admission/allocation markers and
+symlink ancestry. These conditions are rechecked after native reads and after
+durable receipt publication before removing only the runtime-evidence latch.
+The receipt preserves missing ACK and normal-runtime evidence explicitly. The
+normal/ACK/forensic paths keep their validators; no status, task grade, model
+budget, capture guard or provider cleanup rule changes.
+
+Independent V1 review rejected overlooked unlisted outputs and symlinked
+intermediate directories. Exact V2 patch
+`1f265f94a61a0bc79c059b3aad3ae9fa976bebb3f1c5615ba5fab90aa86d4378`
+closed both and received scoped GROUNDED review. The same new controls on V1
+fail20 cases. V2 passes42 owning controls; existing retention72 pass. Applied
+byte-identical V2 passes42 again (2.92s). Tests exercise the actual shell
+entrypoint with inert native adapters and no sockets, before/after-read and
+post-publication mutations, source/foreign/child/live/custody/ordinary-route
+negatives. Original765 entrypoint still demonstrates the missing normal-manifest
+RED. Compile, shell syntax and diff checks pass. No live recovery was run by
+this worker and no original task PASS or full owner-teardown result is claimed.
+
+References personally opened: Codex rollout writer lock34–118, OpenClaw git
+lock14–35/67–87, Hermes update lock294–323. They support narrow ownership and
+custody principles, not Fly authority; Hermes's legacy unknown-age fallback is
+contrary and not adopted. Exact local normal mapper and physical-file contracts
+are decisive. Full scoped review, exact inline diff and hashes are preserved in
+the review handoff. This is a source repair with operational execution pending;
+original native failure, INFRA outcome, diagnostic proof_credit0, absent ACK,
+missing normal capture, original source/mode/clock and full-task OPEN persist.
