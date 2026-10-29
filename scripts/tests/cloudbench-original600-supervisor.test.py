@@ -270,6 +270,7 @@ class Shard(unittest.TestCase):
   script.write_text("import fcntl,signal,sys,time\nfrom pathlib import Path\np=Path(sys.argv[1]);f=(p/'startup-cohorts/parent.lock').open('w');fcntl.flock(f,fcntl.LOCK_EX)\ndef done(*a):\n (p/'ending').write_text('term');sys.exit(7)\nsignal.signal(signal.SIGTERM,done);(p/'ready').write_text('ready');time.sleep(.6);(p/'ending').write_text('natural')\n")
   original_popen=subprocess.Popen;children=[];campaigns=[]
   def spawn(*unused,**kwargs):
+   self.assertEqual(float(kwargs['env']['RUN_BENCH_CAMPAIGN_STARTUP_DEADLINE_EPOCH']), epoch+shard.get('e2e_timeout',5400)-shard.get('task_timeout',1200))
    cid=kwargs['env']['RUN_BENCH_CAMPAIGN_ID'];campaign=repo/'.context/benchmarks/campaigns'/cid;(campaign/'startup-cohorts/c001').mkdir(parents=True)
    value=shard_summary(shard,infra);value.update(campaign_id=cid,e2e_started_at_epoch=epoch)
    (campaign/'summary.json').write_text(json.dumps(value));(campaign/'startup-cohorts/c001/manifest.json').write_text(json.dumps(dict(cohort_id='c001',jobs={j['job_id']:None for j in value['jobs']},e2e_deadline_monotonic=time.monotonic()+5400)))
@@ -303,6 +304,25 @@ class Shard(unittest.TestCase):
     progress=status['progress'];self.assertEqual((progress['jobs'],sum(c[3] for c in progress['combos'])),(9,9),'live scorecard counters cover every logical job')
     self.assertLess(len(raw),16384,'the runner PROBE reads at most 16 KiB')
     self.assertEqual(identity.with_suffix('.infra.json').stat().st_mode&0o777,0o600);self.assertEqual(sorted(x.name for x in identity.parent.iterdir() if x.name.startswith('.original600')),[])
+ def test_shard_supervisor_enforces_the_group_threshold_without_a_host(self):
+  # 2026-10-20: a host restart killed the operator and both shard runners after
+  # release; the guest supervisors kept running a 60-job group with their own
+  # threshold left at 30 (= every job of a 30-job shard), so no stop survived.
+  import hashlib
+  names=[self.tasks[i] for i in range(0,20,2)]
+  shard=shard_fixture(self.tasks,index=0,count=2,tasks=names,tasks_sha256=hashlib.sha256(('\n'.join(names)+'\n').encode()).hexdigest(),
+                      task_indexes=list(range(0,20,2)),group_total=60)
+  self.assertEqual(S['validate_shard'](shard,self.tasks),30)
+  for infra,expected_code,ending in ((2,0,'natural'),(3,7,'term')):
+   with self.subTest(infra=infra),tempfile.TemporaryDirectory()as name:
+    repo=Path(name);(repo/'agents').mkdir()
+    result,campaigns,children,identity=self.run_main(repo,shard,{},infra)
+    self.assertEqual((result,(campaigns[0]/'ending').read_text()),(expected_code,ending),'3/60 of the group stops this shard; 2/60 continues')
+  for total,threshold in ((60,3),(61,4),(70,4),(600,30)):
+   with self.subTest(total=total):
+    self.assertEqual(S['group_infra_threshold'](dict(group_total=total)),threshold)
+    self.assertTrue(20*threshold>=total>20*(threshold-1),'the fixed 5% predicate of the original scheduled group total')
+  self.assertEqual(S['group_infra_threshold'](dict(group_total=60,infra_threshold=2)),2,'an explicit bound threshold is kept')
  def test_progress_counters_are_bounded_and_read_each_terminal_card_once(self):
   with tempfile.TemporaryDirectory()as name:
    fleet=Path(name)/'fleet';(fleet/'_batch').mkdir(parents=True)
@@ -339,14 +359,14 @@ class BoundManifest(unittest.TestCase):
              group_run_id='original600-fixture',group_total=70,group_started_at=1792287011.18,manifest_sha256=self.sha,task_timeout=480)
   value.update(changes);return value
  def test_shard_validates_against_its_bound_manifest_and_timeouts(self):
-  self.assertEqual(S['validate_shard'](self.shard(),self.tasks),24);self.assertEqual(S['shard_timeouts'](self.shard()),(480,5400))
+  self.assertEqual(S['validate_shard'](self.shard(),self.tasks),24);self.assertEqual(S['shard_timeouts'](self.shard()),(480,5400));self.assertEqual(S['shard_timeouts'](self.shard(task_timeout=7200,e2e_timeout=10020)),(7200,10020))
   original=json.loads((Path(__file__).parent/'fixtures/original600-tasks.json').read_bytes())
   self.assertEqual(S['validate_shard'](shard_fixture(original),original),9);self.assertEqual(S['shard_timeouts'](shard_fixture(original)),(1200,5400))
   unbound={k:v for k,v in self.shard().items() if k!='manifest_sha256'}
   for manifest,value,message in [(self.tasks,unbound,'original 200 tasks required'),(list(reversed(self.tasks)),self.shard(),'bound ordered tasks changed'),
                                  (self.tasks+[self.tasks[0]],self.shard(),'distinct ordered tasks'),(original,self.shard(manifest_sha256=S['ORIGINAL_TASK_NAMES_SHA256']),'invalid bound manifest hash'),
                                  (self.tasks,self.shard(task_timeout=1200),'encoded by absence'),(self.tasks,self.shard(task_timeout=30),'task timeout'),
-                                 (self.tasks,self.shard(e2e_timeout=2000),'e2e timeout'),(self.tasks,self.shard(e2e_timeout=9000),'e2e timeout'),(self.tasks,self.shard(group_total=71),'group total')]:
+                                 (self.tasks,self.shard(e2e_timeout=1680),'e2e timeout'),(self.tasks,self.shard(e2e_timeout=10021),'e2e timeout'),(self.tasks,self.shard(task_timeout=7200,e2e_timeout=8400),'e2e timeout'),(self.tasks,self.shard(e2e_timeout=1680),'e2e timeout'),(self.tasks,self.shard(task_timeout=7201,e2e_timeout=9300),'task timeout'),(self.tasks,self.shard(group_total=71),'group total')]:
    with self.subTest(message=message),self.assertRaisesRegex(ValueError,message):S['validate_shard'](value,manifest)
  def test_main_runs_the_bound_manifest_with_its_timeouts_and_refuses_original_options(self):
   with tempfile.TemporaryDirectory()as name:

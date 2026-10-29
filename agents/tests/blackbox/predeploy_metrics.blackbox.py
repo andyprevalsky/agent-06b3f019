@@ -487,12 +487,13 @@ def test_deploy_summary_separates_parallel_overlap_from_gaps() -> None:
     spec = importlib.util.spec_from_file_location("deploy_stage_under_test", repo_root / "scripts/deploy_stage.py")
     assert spec is not None and spec.loader is not None
     deploy_stage = importlib.util.module_from_spec(spec)
-    # deploy_stage imports its sibling factory_metadata as a script would.
+    # A file-spec import does not add its sibling scripts directory to sys.path.
+    # The production CLI does, so give this fixture the same import context.
     sys.path.insert(0, str(repo_root / "scripts"))
     try:
         spec.loader.exec_module(deploy_stage)
     finally:
-        sys.path.remove(str(repo_root / "scripts"))
+        sys.path.pop(0)
 
     with tempfile.TemporaryDirectory() as raw_dir:
         run_dir = Path(raw_dir) / "interval-run"
