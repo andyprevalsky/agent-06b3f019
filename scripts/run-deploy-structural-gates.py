@@ -222,8 +222,12 @@ def record_durations(
     totals: dict[str, float] = {}
     for gate in {job.gate.name: job.gate for job in jobs}.values():
         labels = [job.label for job in jobs if job.gate is gate]
-        if not all(label in results for label in labels):
-            continue  # stopped early or killed: an incomplete observation is not a cost
+        if not all(label in results and results[label][0] == 0 for label in labels):
+            # Stopped early, killed, failed or timed out: not a cost observation.
+            # Recording a timeout would triple the next run's deadline for the
+            # same hung gate (timeout = 3x expected) and a fast failure would
+            # distort longest-first ordering; the previous value is kept.
+            continue
         totals[gate.name] = round(sum(results[label][1] for label in labels), 2)
     merged = {**previous, **totals}
     payload = {

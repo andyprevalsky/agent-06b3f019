@@ -77,6 +77,10 @@ if [[ "$FAILED_FIRST" == "1" ]]; then
   fi
 fi
 
+# Retained summaries from an earlier run were read above (failed-first); drop
+# them now so a shard that exits before its own preflight cannot hand the
+# duration recorder stale, positive observations.
+rm -f "$BACKEND_DIR"/coverage/blackbox-run-shard*/summary.json
 BASE_PORT="${CONDUCTOR_PORT:-55000}"
 DURATIONS="${BACKEND_COVERAGE_SHARD_DURATIONS:-}"
 # Timing-balanced shards: without an explicit durations file, reuse the

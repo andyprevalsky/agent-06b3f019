@@ -1307,6 +1307,28 @@ class StructuralGateSchedulingTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             self.assertEqual(shard.select(items), (items, []))
 
+    def test_failed_or_timed_out_gates_are_not_recorded_as_costs(self) -> None:
+        """A failure or a 600 s timeout is not a duration observation: recording
+        it would triple the next deadline for the same hung gate and let a fast
+        failure distort longest-first ordering. The previous value survives."""
+        module = _load_runner("deploy_runner_duration_costs")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "durations.json"
+            path.write_text(json.dumps({"schema_version": 1, "gates": {"timed": {"seconds": 12.5, "shards": 1}}}))
+            ok = module.Job(module.Gate("ok", ("true",)), 0)
+            failed = module.Job(module.Gate("failed", ("false",)), 0)
+            timed = module.Job(module.Gate("timed", ("sleep", "1")), 0)
+            sharded = module.Gate("sharded", ("true",), shards=2)
+            shard_jobs = [module.Job(sharded, 1), module.Job(sharded, 2)]
+            results = {"ok": (0, 1.5, ""), "failed": (1, 0.2, ""), "timed": (124, 600.0, ""),
+                       "sharded[1/2]": (0, 3.0, ""), "sharded[2/2]": (1, 4.0, "")}
+            module.record_durations(path, [ok, failed, timed, *shard_jobs], results)
+            recorded = module.load_durations(path)
+        self.assertEqual(recorded.get("ok"), 1.5)
+        self.assertNotIn("failed", recorded)
+        self.assertEqual(recorded.get("timed"), 12.5, "a timed-out gate must keep its previous cost")
+        self.assertNotIn("sharded", recorded, "one failed shard poisons the gate's observation")
+
     def test_registered_shards_expand_with_their_environment(self) -> None:
         module = _load_runner("deploy_runner_shards")
         sharded = [gate for gate in module.GATES if gate.shards > 1]

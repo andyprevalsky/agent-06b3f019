@@ -21,7 +21,8 @@ POOL="${CLOUDBENCH_WARM_POOL_NAME:-deploy-warm-pool}"
 MEMORY="${WARM_POOL_MEMORY_MB:-4096}"
 FALLBACK="${WARM_POOL_SUSPEND_FALLBACK_MB:-2048}"
 CYCLES="${RESUME_CYCLES:-3}"
-RESULTS="${RESULTS_JSONL:-/home/boxes/rose/.context/deploy-speed-exp/results.jsonl}"
+RESULTS="${RESULTS_JSONL:-$ROOT_DIR/.context/deploy-speed-exp/results.jsonl}"
+mkdir -p "$(dirname "$RESULTS")"
 export CLOUDBENCH_WARM_POOL_NAME="$POOL"
 
 stamp() { date -u +%Y-%m-%dT%H:%M:%SZ; }

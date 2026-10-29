@@ -34,6 +34,10 @@ try {
   fail("BACKEND_COVERAGE_DATABASE_URL is not a URL");
 }
 const isolated = process.env.ROSE_DEPLOY_WORKTREE === "1";
+// A shard database is `<workspace db>_s<i>`. No workspace database may itself
+// end in `_s<digits>`, otherwise one worktree's shard could name another
+// worktree's prepared database (`feature-s1` sanitizes to `feature_s1`).
+if (/_s[0-9]+$/.test(identity.replace(/[^a-zA-Z0-9]/g, "_"))) fail("workspace identity must not end in _s<digits> (reserved for coverage shards)");
 let expectedName = `victoria_${identity}`;
 if (isolated) {
   let root;
@@ -50,7 +54,8 @@ if (isolated) {
     fail("ROSE_DEPLOY_WORKTREE_PATH is unreadable");
   }
   if (configured !== root) fail("ROSE_DEPLOY_WORKTREE_PATH does not name this checkout");
-  const safe = identity.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 48);
+  // 43 = the prepare script's cut (victoria_deploy_ + 43 + _s99 <= 63 bytes).
+  const safe = identity.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 43);
   expectedName = `victoria_deploy_${safe}`;
   let marker;
   try {

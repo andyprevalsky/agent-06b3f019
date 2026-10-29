@@ -440,6 +440,65 @@ def check_wait_receipt_contract(tmp: Path, pipeline=None, scenario="both") -> No
         publisher.join()
 
 
+def check_interrupted_rounds_and_dead_supervisor_deferral() -> None:
+    """A signalled run (``interrupted`` receipt) is not a completed failed round
+    for FIX_LOOP_CAP, and the waiter only defers a failure to a supersede while a
+    live supervisor on a still-running attempt can deliver one."""
+    pipeline = load_module("pipeline_interrupted_rounds", DRIVER)
+    failed = {"status": "failed", "lanes": {"x": {"status": "failed", "exit": 1}}}
+    interrupted = {"status": "failed", "interrupted": "SIGTERM", "lanes": {"x": {"status": "failed", "exit": 143}}}
+    state = pipeline.fix_loop_state([failed, interrupted, failed], 2)
+    assert state["failed_rounds"] == 2 and state["capped"], state
+    state = pipeline.fix_loop_state([interrupted, interrupted, interrupted], 2)
+    assert state["failed_rounds"] == 0 and not state["capped"], "interrupted runs counted as completed rounds"
+    # Deferral predicate: terminal receipt or dead supervisor must not defer (the waiter would spin forever).
+    dead = {"status": "failed", "follow_source": True, "supervisor_pid": 2**22 - 1, "source": {"head": "a", "digest": "b"}}
+    assert not pipeline._supervisor_alive(dead), "pid sentinel unexpectedly alive"
+    assert dead.get("status") != "running"
+    # A freeze without head/digest (tests patch source_digest to {}) renders "-" instead of raising.
+    assert pipeline._source_label({}) == "head=- digest=-" and pipeline._source_label(None) == "head=- digest=-"
+    assert pipeline._source_label({"head": "abc", "digest": "0123456789abcdef"}) == "head=abc digest=0123456789ab"
+    print("interrupted rounds + dead-supervisor deferral + source label: ok")
+
+
+def check_exclusive_lane_resizes_to_free_memory(tmp: Path, env: dict[str, str]) -> None:
+    """The exclusive structural lane is planned against the budget measured at
+    plan time; when less is free at admission it runs narrower instead of being
+    refused (PR1634 coordinator, 2026-10-29), and is still refused below one
+    worker. Exact widths: the pure fitter; the driver: a real narrowed spawn."""
+    pipeline = load_module("pipeline_fit_exclusive", DRIVER)
+    floor = pipeline.STRUCTURAL_WORKER_MEMORY_MB
+    lane = pipeline.Lane("deploy-command-structural", ["python3", "x.py", "--max-workers", "3"],
+                         memory_mb=1024 + floor * 3, exclusive=True)
+    fitted = pipeline.fit_exclusive_lane(lane, 1024 + floor * 2 + 50)
+    assert fitted.command[-2:] == ["--max-workers", "2"] and fitted.memory_mb == 1024 + floor * 2, fitted
+    assert pipeline.fit_exclusive_lane(lane, 1024 + floor * 9).command[-1] == "3", "never wider than planned"
+    assert pipeline.fit_exclusive_lane(lane, 1024 + floor - 1) is None, "below one worker stays a refusal"
+    assert pipeline.fit_exclusive_lane(pipeline.Lane("other", ["true"], exclusive=False), 10**6) is None
+    assert pipeline.fit_exclusive_lane(pipeline.Lane("no-flag", ["true"], exclusive=True), 10**6) is None
+    state = tmp / "resize"
+    plan = tmp / "resize-plan.json"
+    probe = tmp / "resize-args.txt"
+    write_plan(plan, [{"name": "structural", "exclusive": True, "reuse_passed": False,
+                       "memory_mb": 1024 + floor * 3,
+                       "command": ["bash", "-c", f"printf '%s\\n' \"$@\" > {probe}", "_", "--max-workers", "3"]}])
+    run = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
+                     "--memory-budget-mb", str(1024 + floor * 2 + 50), env=env)
+    assert run.returncode == 0, run.stdout + run.stderr
+    receipt = json.loads((state / "receipt.json").read_text())["lanes"]["structural"]
+    args = probe.read_text().split()
+    workers = int(args[args.index("--max-workers") + 1])
+    assert receipt["status"] == "passed" and 1 <= workers <= 2, (receipt, args)
+    assert receipt["note"].startswith(f"resized: 3 -> {workers} workers") and "PIPELINE_LANE_RESIZED" in run.stdout, \
+        (receipt, run.stdout)
+    assert receipt["memory_mb"] == 1024 + floor * workers, receipt
+    run = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
+                     "--memory-budget-mb", "1000", env=env)
+    receipt = json.loads((state / "receipt.json").read_text())["lanes"]["structural"]
+    assert run.returncode == 1 and receipt["status"] == "failed" and receipt["note"].startswith("refused: needs"), receipt
+    print("exclusive lane resize: ok")
+
+
 def main() -> int:
     global DRIVER
     with tempfile.TemporaryDirectory(prefix="deploy-pipeline-test-") as raw:
@@ -545,6 +604,8 @@ def main() -> int:
         check_watchdog_receipts(tmp, env)
         check_follow_source(tmp, env)
         check_fix_loop_cap(tmp, env)
+        check_interrupted_rounds_and_dead_supervisor_deferral()
+        check_exclusive_lane_resizes_to_free_memory(tmp, env)
         check_standard_plan_typescript()
         check_schedule_phases(tmp, env)
         check_stage_receipt_seed(tmp, env)

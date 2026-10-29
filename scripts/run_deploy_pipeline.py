@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from collections.abc import Mapping
 import json
 import os
 import re
@@ -83,7 +84,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -328,6 +329,15 @@ def watchdog_terminations(started_epoch: float, finished_epoch: float, log: Path
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _source_label(source: Mapping[str, object] | None) -> str:
+    """``head=<sha> digest=<12 hex>`` for log lines; a freeze without those keys
+    (tests patch ``source_digest`` to ``{}``) renders ``-`` instead of raising."""
+    source = source or {}
+    head = source.get("head") or "-"
+    digest = str(source.get("digest") or "")[:12] or "-"
+    return f"head={head} digest={digest}"
 
 
 def source_digest(root: Path | None = None) -> dict[str, str]:
@@ -650,6 +660,37 @@ def exclusive_structural_workers(host: dict) -> int:
     return max(MIN_WORKERS, min(STRUCTURAL_RUNNER_MAX_WORKERS, host["cpus"], int(by_memory)))
 
 
+def _lane_workers(lane: Lane) -> int | None:
+    """The ``--max-workers N`` a lane's command declares, or None."""
+    try:
+        return int(lane.command[lane.command.index("--max-workers") + 1])
+    except (ValueError, IndexError):
+        return None
+
+
+def fit_exclusive_lane(lane: Lane, available_mb: int) -> Lane | None:
+    """The exclusive structural lane at the width ``available_mb`` backs at the
+    per-worker floor, never wider than planned.
+
+    The plan sizes that lane to the whole budget measured when ``plan`` ran;
+    MemAvailable drifts by about 1 GB before its phase starts (page cache held
+    by tsc/eslint, Postgres, other agents on the box), and a lane reserved to
+    the last MB was refused at admission without running a single gate
+    (PR1634 coordinator, 2026-10-29). Narrowing it keeps every gate running at
+    the width the box can actually back; None when not even MIN_WORKERS fit,
+    which stays a refusal.
+    """
+    planned = _lane_workers(lane)
+    if not lane.exclusive or planned is None:
+        return None
+    workers = min(planned, int((available_mb - 1024) // STRUCTURAL_WORKER_MEMORY_MB))
+    if workers < MIN_WORKERS:
+        return None
+    index = lane.command.index("--max-workers") + 1
+    command = [*lane.command[:index], str(workers), *lane.command[index + 1:]]
+    return replace(lane, command=command, memory_mb=1024 + STRUCTURAL_WORKER_MEMORY_MB * workers)
+
+
 def _list_schedule(order: list[Lane], seconds: dict[str, float], after: dict[str, list[str]],
                    max_parallel: int, budget_mb: int | None) -> float:
     """Makespan of a list schedule under the driver's admission rules."""
@@ -784,8 +825,8 @@ def fix_loop_state(receipts: list[dict], cap: int) -> dict:
             rounds = 0
             classes = {}
             continue
-        if receipt.get("status") != "failed":
-            continue
+        if receipt.get("status") != "failed" or receipt.get("interrupted"):
+            continue  # a signalled run never completed a round
         rounds += 1
         for name in sorted(_failed_lanes(receipt)):
             classes.setdefault(name, []).append(_lane_failure_class(receipt, name))
@@ -969,7 +1010,7 @@ def _run_attempt(
     write_receipt(receipt_path, receipt)
     log_dir = state_dir / "logs"
     log_dir.mkdir(exist_ok=True)
-    print(f"PIPELINE_ATTEMPT attempt={attempt} head={frozen['head']} digest={frozen['digest'][:12]}", flush=True)
+    print(f"PIPELINE_ATTEMPT attempt={attempt} {_source_label(frozen)}", flush=True)
 
     processes: dict[str, subprocess.Popen[bytes]] = {}
     stopping = 0
@@ -1035,6 +1076,23 @@ def _run_attempt(
                     break
                 if any(receipt["lanes"][d]["status"] not in TERMINAL_LANE for d in lane.after):
                     continue
+                if lane.exclusive and not running:
+                    # Alone in its phase: fit its width to what is free right now
+                    # (the plan-time budget and live headroom both drift) instead
+                    # of refusing it or waiting for memory no other lane holds.
+                    if pass_sample is None:
+                        pass_sample = runtime_host_resources()
+                        sample_host_peak(receipt["host_peak"], pass_sample)
+                    free = [value for value in (budget_mb, memory_budget_mb(pass_sample)) if value is not None]
+                    fitted = fit_exclusive_lane(lane, min(free) - reserved) if free else None
+                    if fitted is not None and fitted.memory_mb < lane.memory_mb:
+                        note = (f"resized: {_lane_workers(lane)} -> {_lane_workers(fitted)} workers "
+                                f"(planned {lane.memory_mb} MB, {min(free)} MB available)")
+                        receipt["lanes"][lane.name].update(note=note, memory_mb=fitted.memory_mb)
+                        print(f"PIPELINE_LANE_RESIZED lane={lane.name} {note}", flush=True)
+                        pending[pending.index(lane)] = fitted
+                        by_name[lane.name] = fitted
+                        lane = fitted
                 if budget_mb is not None:
                     if lane.memory_mb > budget_mb:
                         # It can never fit: fail loudly now instead of starting it
@@ -1112,6 +1170,8 @@ def _run_attempt(
                     receipt["lanes"][lane.name].update(status="superseded", note="superseded")
                 else:
                     receipt["lanes"][lane.name].update(status="failed", exit=128 + stopping, note="not started")
+            if stopping:
+                receipt["interrupted"] = signal.Signals(stopping).name
             pending = []
         if not pending and all(state["status"] in TERMINAL_LANE for state in receipt["lanes"].values()):
             break
@@ -1125,8 +1185,8 @@ def _run_attempt(
                 if probe != changed_source:
                     changed_source, changed_since = probe, now
                     print(
-                        f"PIPELINE_SOURCE_CHANGED attempt={attempt} head={probe['head']} "
-                        f"digest={probe['digest'][:12]} settling={settle_seconds:.0f}s",
+                        f"PIPELINE_SOURCE_CHANGED attempt={attempt} {_source_label(probe)} "
+                        f"settling={settle_seconds:.0f}s",
                         flush=True,
                     )
                 elif now - changed_since >= settle_seconds:
@@ -1139,8 +1199,8 @@ def _run_attempt(
                     )
                     write_receipt(receipt_path, receipt)
                     print(
-                        f"PIPELINE_SUPERSEDED attempt={attempt} old_head={frozen['head']} "
-                        f"new_head={probe['head']} terminating={','.join(receipt['superseded_lanes']) or '-'}",
+                        f"PIPELINE_SUPERSEDED attempt={attempt} old_head={frozen.get('head')} "
+                        f"new_head={probe.get('head')} terminating={','.join(receipt['superseded_lanes']) or '-'}",
                         flush=True,
                     )
                     _terminate_lanes(processes, signal.SIGTERM)
@@ -1179,8 +1239,8 @@ def _run_attempt(
             receipt["superseded_lanes"] = []
             write_receipt(receipt_path, receipt)
             print(
-                f"PIPELINE_SUPERSEDED attempt={attempt} old_head={frozen['head']} "
-                f"new_head={settled['head']} terminating=- (source changed after the lanes finished)",
+                f"PIPELINE_SUPERSEDED attempt={attempt} old_head={frozen.get('head')} "
+                f"new_head={settled.get('head')} terminating=- (source changed after the lanes finished)",
                 flush=True,
             )
             return receipt, "superseded"
@@ -1331,6 +1391,8 @@ def wait(state_dir: Path, timeout: float, stall_seconds: float = 0.0, since: flo
         if (
             code == deploy_stage_wait.EXIT_FAILED
             and current.get("follow_source")
+            and current.get("status") in ("running", "failing")  # attempt not terminal
+            and _supervisor_alive(current)
             and _pending_source_change(current)
         ):
             # The failure belongs to bytes that are no longer current: a fix is

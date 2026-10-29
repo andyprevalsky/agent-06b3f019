@@ -494,6 +494,56 @@ class WarmPoolTest(unittest.TestCase):
         self.assertIn("ceiling", proc.stderr)
         self.assertEqual(self.fake.members(), [])
 
+    def test_exec_and_wait_http_timeouts_exceed_the_server_budget(self):
+        """exec/wait carry a server-side timeout (240-300 s for prep/git); the
+        HTTP read timeout must outlast it or a slow guest command times out
+        client-side and (for exec) gets re-run on retry."""
+        pool = runpy.run_path(str(CLI))
+        fly = pool["Fly"]("app", "FlyV1 test", base="http://127.0.0.1:9")
+        seen = []
+        fly._call = lambda method, path, body=None, expect_json=True, timeout=None: seen.append((method, timeout))
+        fly.exec("m1", ["true"], seconds=240)
+        fly.wait("m1", "started", seconds=90)
+        self.assertEqual(seen, [("POST", 240 + fly.HTTP_GRACE_SECONDS), ("GET", 90 + fly.HTTP_GRACE_SECONDS)])
+
+    def test_post_read_timeout_is_not_retried_but_get_is(self):
+        """A POST that timed out may already have run the guest command or
+        started the Machine: it is reported, never replayed. GETs still retry."""
+        from unittest.mock import patch
+        pool = runpy.run_path(str(CLI))
+        fly = pool["Fly"]("app", "FlyV1 test", base="http://127.0.0.1:9")
+        with patch("urllib.request.urlopen", side_effect=TimeoutError("read timed out")) as urlopen, patch("time.sleep"):
+            with self.assertRaises(pool["PoolError"]):
+                fly._call("POST", "/machines/m1/exec", {"command": ["true"], "timeout": 5})
+            self.assertEqual(urlopen.call_count, 1, "a timed-out POST was replayed")
+            urlopen.reset_mock()
+            with self.assertRaises(pool["PoolError"]):
+                fly._call("GET", "/machines")
+            self.assertEqual(urlopen.call_count, 4, "idempotent GETs keep their bounded retries")
+
+    def test_claim_receipt_failure_destroys_the_resumed_member(self):
+        """Once checkout resumed and leased a member, a failed receipt step must
+        not leave it started+leased forever (refresh skips leased members and
+        the reaper protects them): the member is destroyed and claim fails."""
+        self.provision(1)
+        member = self.fake.members()[0]["id"]
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "bench-out"
+            out.mkdir()
+            out.chmod(0o500)  # claim_path.write_text -> PermissionError after the resume
+            try:
+                proc = subprocess.run([sys.executable, "-I", str(CLI), "claim", "--out", str(out), "--run-token", "owner-0",
+                                       "--ref", "a" * 40, *self.common, "--json"],
+                                      env=dict(os.environ, FLY_FLAPS_BASE_URL=self.fake.base, FLY_API_TOKEN="FlyV1 test"),
+                                      capture_output=True, text=True, timeout=120, check=False)
+            finally:
+                out.chmod(0o700)
+            self.assertFalse((out / "warm-pool-claim.json").exists())
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("claim receipt failed", proc.stdout + proc.stderr)
+        self.assertNotIn(member, self.fake.rows, "resumed member must be destroyed when no receipt could be written")
+        self.assertTrue(any(e[0] == "DELETE" and member in e[1] for e in self.fake.mutations()))
+
     def test_status_reports_cost_without_mutation(self):
         self.provision(1)
         before = len(self.fake.mutations())

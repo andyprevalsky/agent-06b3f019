@@ -251,12 +251,19 @@ echo "PASS: aliased legacy registries lock once and absent ones are created and 
 # Backend coverage shard 1 lost its listen port on 2026-10-28: the registry
 # handed out 56000, inside Linux's default ephemeral range (32768-60999), so an
 # outbound connection can take 56022 and make listen() hit EADDRINUSE with no
-# listener present. New claims must land wholly above the live kernel window;
-# a host-only ip_local_reserved_ports mitigation does not survive a reboot and
-# never makes a new claim safe. A recorded claim is accepted only above the
-# window or when its 101-port footprint (owned ports, the +20/+22/+24
-# coverage shards and the +100 blackbox backend) is reserved; otherwise claim,
-# prepare and --check fail closed without rewriting the live identity.
+# listener present. New claims must land with their whole listen footprint
+# outside the live kernel window and below 65535; a host-only
+# ip_local_reserved_ports mitigation does not survive a reboot and never makes
+# a new claim safe. A recorded claim is accepted only outside the window or
+# when its 6265-port footprint (owned ports, the +20/+22/+24 coverage shards,
+# the +100 blackbox backend and the +5764..+6264 cloud benchmark hub) is
+# reserved; otherwise claim, prepare and --check fail closed without rewriting
+# the live identity. Base 61000 put the hub at 66764 on 2026-10-29.
+footprint_clear() {  # <base> <low> <high>
+  local base="$1" low="$2" high="$3" last
+  last=$((base + 6264))
+  [ "$last" -le 65535 ] && { [ "$last" -lt "$low" ] || [ "$base" -gt "$high" ]; }
+}
 fake_ipv4="$TMP_ROOT/proc-sys-net-ipv4"
 mkdir -p "$fake_ipv4"
 printf '32768\t60999\n' >"$fake_ipv4/ip_local_port_range"
@@ -266,8 +273,8 @@ deploy_tmp_d="$TMP_ROOT/descend-I99-tmp-d"
 git -C "$controller" worktree add -q -b deploy-tmp-d "$deploy_tmp_d"
 ephemeral_safe_port="$(ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" claim \
   --registry "$ephemeral_registry" --owner "$deploy_tmp_d")"
-[ "$ephemeral_safe_port" -gt 60999 ] \
-  || fail "a deploy worktree base port must lie above the kernel ephemeral range 32768-60999 (got $ephemeral_safe_port)"
+footprint_clear "$ephemeral_safe_port" 32768 60999 \
+  || fail "a deploy worktree base port must keep its whole listen footprint outside the kernel ephemeral range 32768-60999 and below 65535 (got $ephemeral_safe_port)"
 ephemeral_safe_again="$(ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" claim \
   --registry "$ephemeral_registry" --owner "$deploy_tmp_d")"
 expect_eq "$ephemeral_safe_again" "$ephemeral_safe_port" "an ephemeral-safe claim stays idempotent"
@@ -276,8 +283,8 @@ deploy_tmp_e="$TMP_ROOT/descend-I99-tmp-e"
 git -C "$controller" worktree add -q -b deploy-tmp-e "$deploy_tmp_e"
 reserved_port="$(ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" claim \
   --registry "$ephemeral_registry" --owner "$deploy_tmp_e")"
-[ "$reserved_port" -gt 60999 ] \
-  || fail "new claims must stay above the ephemeral range even when host ports are reserved (got $reserved_port)"
+footprint_clear "$reserved_port" 32768 60999 \
+  || fail "new claims must stay outside the ephemeral range even when host ports are reserved (got $reserved_port)"
 printf '32768\t60999\n' >"$fake_ipv4/ip_local_port_range"
 : >"$fake_ipv4/ip_local_reserved_ports"
 deploy_tmp_f="$TMP_ROOT/descend-I99-tmp-f"
@@ -289,9 +296,9 @@ ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" bash "$PREFLIGHT" \
   --skip-dependencies \
   --skip-database
 prepared_port="$(sed -nE 's/^export CONDUCTOR_PORT=([0-9]+)$/\1/p' "$deploy_tmp_f/.context/deploy-worktree.env")"
-[ -n "$prepared_port" ] && [ "$prepared_port" -gt 60999 ] \
+[ -n "$prepared_port" ] && footprint_clear "$prepared_port" 32768 60999 \
   || fail "prepare-deploy-worktree must record an ephemeral-safe CONDUCTOR_PORT (got '$prepared_port')"
-echo "PASS: deploy worktree port claims land above the kernel ephemeral range despite host mitigation"
+echo "PASS: deploy worktree port claims land outside the kernel ephemeral range despite host mitigation"
 
 # There must be no warning-and-continue fallback when every candidate overlaps
 # the kernel window. Refuse before publishing an unusable workspace identity.
@@ -323,8 +330,9 @@ echo "PASS: safe port exhaustion fails without publishing an unsafe claim"
 # A kernel-range change must not silently migrate or accept an existing claim:
 # an unreserved one fails closed (claim, prepare) without touching the config,
 # a ten-port reservation is not enough (coverage shards listen at +22/+24,
-# the blackbox backend at +100), and a reservation covering the 101-port
-# footprint keeps the live identity.
+# the blackbox backend at +100), the old 101-port reservation leaves the
+# +5764..+6264 benchmark hub exposed, and a reservation covering the whole
+# 6265-port footprint keeps the live identity.
 config_before="$(cksum <"$deploy_tmp_f/.context/deploy-worktree.env")"
 set +e
 existing_output="$(ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" bash "$PREFLIGHT" \
@@ -344,8 +352,13 @@ printf '%s-%s\n' "$prepared_port" "$((prepared_port + 9))" >"$fake_ipv4/ip_local
 ! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" bash "$PREFLIGHT" \
   --worktree "$deploy_tmp_f" --source "$controller" \
   --port-registry "$ephemeral_registry" --skip-dependencies --skip-database >/dev/null 2>&1 \
-  || fail "a ten-port reservation must not satisfy the 101-port listen footprint"
-printf '%s-%s,%s-%s\n' "$prepared_port" "$((prepared_port + 100))" "$reserved_port" "$((reserved_port + 100))" \
+  || fail "a ten-port reservation must not satisfy the 6265-port listen footprint"
+printf '%s-%s\n' "$prepared_port" "$((prepared_port + 100))" >"$fake_ipv4/ip_local_reserved_ports"
+! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" bash "$PREFLIGHT" \
+  --worktree "$deploy_tmp_f" --source "$controller" \
+  --port-registry "$ephemeral_registry" --skip-dependencies --skip-database >/dev/null 2>&1 \
+  || fail "a 101-port reservation leaves the +5764..+6264 benchmark hub exposed and must not satisfy the footprint"
+printf '%s-%s,%s-%s\n' "$prepared_port" "$((prepared_port + 6264))" "$reserved_port" "$((reserved_port + 6264))" \
   >"$fake_ipv4/ip_local_reserved_ports"
 ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" bash "$PREFLIGHT" \
   --worktree "$deploy_tmp_f" --source "$controller" \
@@ -369,13 +382,13 @@ malformed_status=$?
 set -e
 [ "$malformed_status" -ne 0 ] || fail "a malformed ip_local_port_range must fail the claim closed (got '$malformed_output')"
 [[ "$malformed_output" == *"ip_local_port_range"* ]] || fail "the malformed-range failure must name ip_local_port_range"
-! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 61000 >/dev/null 2>&1 \
+! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 20000 >/dev/null 2>&1 \
   || fail "a malformed ip_local_port_range must fail check closed"
 printf '60999\t32768\n' >"$fake_ipv4/ip_local_port_range"
 ! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" claim \
   --registry "$ephemeral_registry" --owner "$deploy_tmp_d" >/dev/null 2>&1 \
   || fail "a reversed ip_local_port_range must fail the claim closed"
-! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 61000 >/dev/null 2>&1 \
+! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 20000 >/dev/null 2>&1 \
   || fail "a reversed ip_local_port_range must fail check closed"
 printf '32768\t60999\n' >"$fake_ipv4/ip_local_port_range"
 set +e
@@ -385,29 +398,42 @@ missing_status=$?
 set -e
 [ "$missing_status" -ne 0 ] || fail "a missing kernel sysctl tree must fail the claim closed (got '$missing_output')"
 [[ "$missing_output" == *"no-such-sysctl-tree"* ]] || fail "the missing-tree failure must name the missing path"
-! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$TMP_ROOT/no-such-sysctl-tree" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 61000 >/dev/null 2>&1 \
+! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$TMP_ROOT/no-such-sysctl-tree" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 20000 >/dev/null 2>&1 \
   || fail "a missing kernel sysctl tree must fail check closed"
 echo "PASS: malformed, reversed and missing kernel ranges fail closed"
 
-# A new claim must clear the window with its whole listen footprint: with the
-# kernel window ending at 64025, base 64000 would put the coverage shards
-# (64022/64024) back inside it, so the first eligible base is 64030.
-printf '64015\t64025\n' >"$fake_ipv4/ip_local_port_range"
+# A new claim must clear the window with its whole 6265-port listen footprint
+# and fit below 65535. Below a window starting at 26265 the first base 20000
+# fits exactly (20000+6264 < 26265); one port lower nothing fits below it, and
+# above 60999 no base keeps its +5764..+6264 hub under 65535, so the claim fails.
+# Above a narrow window the first base past it is taken and its hub still fits.
+printf '26265\t60999\n' >"$fake_ipv4/ip_local_port_range"
 : >"$fake_ipv4/ip_local_reserved_ports"
 boundary_registry="$TMP_ROOT/boundary-ports"
 boundary_port="$(ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" claim \
   --registry "$boundary_registry" --owner "$deploy_tmp_g")"
-[ "$boundary_port" -ge 64030 ] \
-  || fail "a new claim must keep its +22/+24 coverage ports above the kernel window (got $boundary_port with window 64015-64025)"
+[ "$boundary_port" -lt 26265 ] && footprint_clear "$boundary_port" 26265 60999 \
+  || fail "a new claim must keep its whole footprint below the kernel window (got $boundary_port with window 26265-60999)"
+printf '26264\t60999\n' >"$fake_ipv4/ip_local_port_range"
+! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" claim \
+  --registry "$TMP_ROOT/tight-ports" --owner "$deploy_tmp_g" >/dev/null 2>&1 \
+  || fail "a footprint overlapping the window by one port must not be claimed"
+printf '20000\t26270\n' >"$fake_ipv4/ip_local_port_range"
+above_port="$(ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" claim \
+  --registry "$TMP_ROOT/above-ports" --owner "$deploy_tmp_g")"
+[ "$above_port" -gt 26270 ] && footprint_clear "$above_port" 20000 26270 \
+  || fail "a claim above the window must start past it and keep its hub under 65535 (got $above_port with window 20000-26270)"
 printf '32768\t60999\n' >"$fake_ipv4/ip_local_port_range"
-echo "PASS: new claims keep their coverage-shard footprint above the kernel window"
+echo "PASS: new claims keep their whole listen footprint outside the kernel window and below 65535"
 
 # `check` is the deploy preflight's verdict for a recorded base port.
 : >"$fake_ipv4/ip_local_reserved_ports"
 ! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 56000 >/dev/null 2>&1 \
   || fail "check must reject an unreserved base port inside the kernel ephemeral range"
-ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 61000 >/dev/null \
-  || fail "check must accept a base port above the kernel ephemeral range"
+ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 20000 >/dev/null \
+  || fail "check must accept a base port whose whole footprint lies below the kernel ephemeral range"
+! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 61000 >/dev/null 2>&1 \
+  || fail "check must reject a base port whose +5764 benchmark hub would exceed 65535 (hub 66764 refused the smoke lane on 2026-10-29)"
 printf '56000-56009\n' >"$fake_ipv4/ip_local_reserved_ports"
 ! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 56000 >/dev/null 2>&1 \
   || fail "check must reject a reservation that leaves the +20/+22/+24 coverage ports exposed"
@@ -415,8 +441,11 @@ printf '56000-56029\n' >"$fake_ipv4/ip_local_reserved_ports"
 ! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 56000 >/dev/null 2>&1 \
   || fail "check must reject a reservation that leaves the +100 blackbox backend port exposed"
 printf '56000-56999\n' >"$fake_ipv4/ip_local_reserved_ports"
+! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 56000 >/dev/null 2>&1 \
+  || fail "check must reject a reservation that leaves the +5764..+6264 benchmark hub exposed"
+printf '56000-62264\n' >"$fake_ipv4/ip_local_reserved_ports"
 ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 56000 >/dev/null \
-  || fail "check must accept a base port whose footprint the host reserved"
+  || fail "check must accept a base port whose whole footprint the host reserved"
 : >"$fake_ipv4/ip_local_reserved_ports"
 echo "PASS: check judges recorded ports against the kernel window and the reserved footprint"
 
@@ -464,12 +493,19 @@ printf '%s-%s\n' "$deploy_one_base" "$((deploy_one_base + 9))" >"$fake_ipv4/ip_l
     bash "$PREFLIGHT" --check
 ) >/dev/null 2>&1 || fail "preflight check must still fail when only the ten owned ports are reserved"
 printf '%s-%s\n' "$deploy_one_base" "$((deploy_one_base + 100))" >"$fake_ipv4/ip_local_reserved_ports"
+! (
+  cd "$deploy_one"
+  PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" \
+    CONDUCTOR_PORT=55040 CONDUCTOR_WORKSPACE_PATH="$controller" \
+    bash "$PREFLIGHT" --check
+) >/dev/null 2>&1 || fail "preflight check must still fail when the +5764..+6264 benchmark hub ports are unreserved"
+printf '%s-%s\n' "$deploy_one_base" "$((deploy_one_base + 6264))" >"$fake_ipv4/ip_local_reserved_ports"
 (
   cd "$deploy_one"
   PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" \
     CONDUCTOR_PORT=55040 CONDUCTOR_WORKSPACE_PATH="$controller" \
     bash "$PREFLIGHT" --check
-) >/dev/null || fail "preflight check must pass once the host reserved the owned footprint"
+) >/dev/null || fail "preflight check must pass once the host reserved the whole owned footprint"
 printf '32768\t60999\n' >"$fake_ipv4/ip_local_port_range"
 : >"$fake_ipv4/ip_local_reserved_ports"
 echo "PASS: deploy preflight check refuses an unreserved base port inside the kernel ephemeral range"
@@ -652,7 +688,7 @@ system_name="$(
   . "$deploy_system/.context/deploy-worktree.env"
   printf '%s' "$CONDUCTOR_WORKSPACE_NAME"
 )"
-system_db="victoria_deploy_$(printf '%s' "$system_name" | tr -c '[:alnum:]' '_' | cut -c1-48)"
+system_db="victoria_deploy_$(printf '%s' "$system_name" | tr -c '[:alnum:]' '_' | cut -c1-43)"
 grep -Eq '^export ROSE_USE_SYSTEM_PG=true[[:space:]]*$' \
   "$deploy_system/.context/deploy-worktree.env" \
   || fail "system Postgres prepare must persist ROSE_USE_SYSTEM_PG into deploy-worktree.env"
@@ -832,5 +868,54 @@ seed_output="$(python3 "$SEED_LOCKFILE" "$seed_target" "$seed_source")" \
 [ ! -e "$seed_target/package-lock.json" ] \
   || fail "a source without a recorded installation must leave ordinary resolution untouched"
 echo "PASS: a source without a recorded installation falls back to ordinary resolution"
+
+# Dependency preparation owns Prisma client generation (2026-10-29: a reused
+# linked tree carried the source checkout's stale client and every
+# Prisma-backed lane refused to start while the structural lanes were green).
+# ensure-prisma-client.sh regenerates a stale client inside the worktree and
+# refuses one that resolves into another checkout.
+require_text "$PREFLIGHT" 'bash scripts/ensure-prisma-client.sh "$target"' "dependency hydration must regenerate a stale Prisma client"
+ENSURE_PRISMA="$ROOT_DIR/scripts/ensure-prisma-client.sh"
+prisma_bin="$TMP_ROOT/prisma-bin"
+prisma_state="$TMP_ROOT/prisma-state"
+prisma_fixture="$TMP_ROOT/prisma-fixture"
+prisma_elsewhere="$TMP_ROOT/prisma-elsewhere/node_modules/.prisma"
+mkdir -p "$prisma_bin" "$prisma_state" "$prisma_fixture/back-end/scripts" "$prisma_fixture/node_modules" "$prisma_elsewhere/client"
+: >"$prisma_fixture/back-end/scripts/assert-prisma-client-current.mjs"
+cat >"$prisma_bin/node" <<'NODE'
+#!/usr/bin/env bash
+case "$*" in
+  *assert-prisma-client-current.mjs*) [ -f "${FAKE_PRISMA_STATE:?}/fresh" ] ;;
+  -e*) cat "${FAKE_PRISMA_STATE:?}/resolved" ;;
+  *) echo "unexpected fake node invocation: $*" >&2; exit 97 ;;
+esac
+NODE
+cat >"$prisma_bin/npx" <<'NPX'
+#!/usr/bin/env bash
+[ "$1 $2" = "prisma generate" ] || { echo "unexpected fake npx invocation: $*" >&2; exit 97; }
+printf '%s\n' "$PWD" >>"${FAKE_PRISMA_STATE:?}/generate-calls"
+touch "$FAKE_PRISMA_STATE/fresh"
+NPX
+chmod +x "$prisma_bin/node" "$prisma_bin/npx"
+prisma_fixture="$(cd "$prisma_fixture" && pwd -P)"
+prisma_elsewhere="$(cd "$prisma_elsewhere" && pwd -P)"
+printf '%s' "$prisma_fixture/node_modules/.prisma/client/default.js" >"$prisma_state/resolved"
+touch "$prisma_state/fresh"
+PATH="$prisma_bin:$PATH" FAKE_PRISMA_STATE="$prisma_state" bash "$ENSURE_PRISMA" "$prisma_fixture" \
+  || fail "a fresh Prisma client must pass without regeneration"
+[ ! -e "$prisma_state/generate-calls" ] || fail "a fresh Prisma client must not be regenerated"
+rm -f "$prisma_state/fresh"
+ln -s "$prisma_elsewhere" "$prisma_fixture/node_modules/.prisma"
+PATH="$prisma_bin:$PATH" FAKE_PRISMA_STATE="$prisma_state" bash "$ENSURE_PRISMA" "$prisma_fixture" \
+  || fail "a stale Prisma client must be regenerated"
+expect_eq "$(cat "$prisma_state/generate-calls")" "$prisma_fixture/back-end" "prisma generate runs in the worktree's own back-end"
+[ -d "$prisma_fixture/node_modules/.prisma" ] && [ ! -L "$prisma_fixture/node_modules/.prisma" ] \
+  || fail "a .prisma link into another checkout must become the worktree's own directory before generation"
+[ -d "$prisma_elsewhere/client" ] || fail "the other checkout's generated client must be left untouched"
+rm -f "$prisma_state/fresh" "$prisma_state/generate-calls"
+printf '%s' "$prisma_elsewhere/client/default.js" >"$prisma_state/resolved"
+! PATH="$prisma_bin:$PATH" FAKE_PRISMA_STATE="$prisma_state" bash "$ENSURE_PRISMA" "$prisma_fixture" >/dev/null 2>&1 \
+  || fail "a regenerated client that resolves outside the worktree must fail closed"
+echo "PASS: dependency hydration regenerates a stale Prisma client inside the worktree"
 
 echo "All deploy-worktree preflight tests passed."

@@ -59,6 +59,11 @@ case "$behaviour" in
 esac
 mkdir -p "$BACKEND_COVERAGE_MERGE_DIR"
 echo "{}" >"$BACKEND_COVERAGE_MERGE_DIR/coverage-shard-$index.json"
+# Like the real shard, publish this run's blackbox summary (seeded by the test).
+if [[ -n "${FAKE_SUMMARY_DIR:-}" && -f "$FAKE_SUMMARY_DIR/shard-$index.json" ]]; then
+  mkdir -p "$(dirname "$0")/../coverage/blackbox-run-shard$index"
+  cp "$FAKE_SUMMARY_DIR/shard-$index.json" "$(dirname "$0")/../coverage/blackbox-run-shard$index/summary.json"
+fi
 FAKE
 cat >"$REPO/bin/npx" <<'FAKE'
 #!/usr/bin/env bash
@@ -189,10 +194,24 @@ node -e '
 #    unless an explicit BACKEND_COVERAGE_SHARD_DURATIONS wins.
 LEDGER="$REPO/.context/deploy-durations/backend-blackbox.json"
 rm -f "$LEDGER"
-echo '{"results":[{"domain":"code-preview","passed":true,"duration":250000},{"domain":"health","passed":true,"duration":900}]}' \
+# A summary retained from an earlier run is not an observation of this run: the
+# coordinator drops it before the shards start, so a shard that exits before
+# its own preflight leaves nothing for the recorder.
+mkdir -p "$REPO/back-end/coverage/blackbox-run-shard1" "$REPO/back-end/coverage/blackbox-run-shard2"
+echo '{"results":[{"domain":"stale-domain","passed":true,"duration":999000}]}' \
   >"$REPO/back-end/coverage/blackbox-run-shard1/summary.json"
+records
+FAKE_SHARD_1=fail bash "$RUNNER" 2 >"$TMP/out5-stale" 2>&1 && fail "failed shard run exited 0"
+[[ ! -e "$REPO/back-end/coverage/blackbox-run-shard1/summary.json" ]] || fail "retained shard summary survived into the new run"
+[[ ! -s "$LEDGER" ]] || { grep -q stale-domain "$LEDGER" && fail "stale summary was recorded as a current observation"; }
+rm -f "$LEDGER"
+# This run's shards publish their own summaries (seeded through the fake shard).
+mkdir -p "$TMP/seed5"
+echo '{"results":[{"domain":"code-preview","passed":true,"duration":250000},{"domain":"health","passed":true,"duration":900}]}' \
+  >"$TMP/seed5/shard-1.json"
 echo '{"results":[{"domain":"user-ui","passed":false,"duration":4000},{"domain":"skipped","passed":false,"aborted":true,"duration":0}]}' \
-  >"$REPO/back-end/coverage/blackbox-run-shard2/summary.json"
+  >"$TMP/seed5/shard-2.json"
+export FAKE_SUMMARY_DIR="$TMP/seed5"
 records
 bash "$RUNNER" 2 >"$TMP/out5" 2>&1 || fail "ledger run failed: $(cat "$TMP/out5")"
 grep -q '^durations=$' "$TMP/rec/shard-1.env" || fail "first run must not use a ledger that did not exist yet"
@@ -256,12 +275,26 @@ resolve 1/2 "postgresql://postgres:postgres@db.example.com:5432/$BASE_DB" >/dev/
 printf 'victoria_deploy_someone_else\n' >"$WT/.context/deploy-system-pg.db"
 resolve "" >/dev/null 2>&1 && fail "a marker naming another database must be refused"
 printf '%s\n' "$BASE_DB" >"$WT/.context/deploy-system-pg.db"
+# Shard-suffix space is reserved: a 45-character identity still yields a <= 63-byte shard database.
+LONG_IDENT="agent-0123456789abcdef-0123456789ab-extra-long"
+LONG_WT="$TMP/deploy-wt-long"; mkdir -p "$LONG_WT/.context"
+LONG_DB="victoria_deploy_$(printf '%s' "$LONG_IDENT" | tr -c '[:alnum:]' '_' | cut -c1-43)"
+printf '%s\n' "$LONG_DB" >"$LONG_WT/.context/deploy-system-pg.db"
+LONG_SHARD="$(BACKEND_COVERAGE_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/$LONG_DB" ROSE_DEPLOY_WORKTREE=1 ROSE_DEPLOY_WORKTREE_PATH="$LONG_WT" node "$HELPER" "$LONG_IDENT" "$LONG_WT" 2/2 | sed -n 2p)"
+[[ "$LONG_SHARD" == "${LONG_DB}_s2" && "${#LONG_SHARD}" -le 63 ]] || fail "a long identity keeps its shard database within 63 bytes (got '$LONG_SHARD')"
+grep -q "cut -c1-43" "$ROOT_DIR/scripts/prepare-deploy-worktree.sh" || fail "prepare-deploy-worktree.sh must cut the identity at 43 to reserve shard-suffix space"
+# An identity shaped like a shard name is refused on both paths (it could name another worktree's shard).
+BACKEND_COVERAGE_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/victoria_deploy_feature_s1 ROSE_DEPLOY_WORKTREE=1 ROSE_DEPLOY_WORKTREE_PATH="$WT" node "$HELPER" "feature-s1" "$WT" >/dev/null 2>&1 && fail "an identity ending in _s<digits> must be refused (isolated path)"
+env -u ROSE_DEPLOY_WORKTREE -u ROSE_DEPLOY_WORKTREE_PATH BACKEND_COVERAGE_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/victoria_ws_s1 node "$HELPER" "ws_s1" "$WT" 1/2 >/dev/null 2>&1 && fail "an identity ending in _s<digits> must be refused (generic path)"
+grep -q '_s\[0-9\]' "$ROOT_DIR/scripts/prepare-deploy-worktree.sh" || fail "prepare-deploy-worktree.sh must refuse identities ending in _s<digits>"
 # Generic (non-isolated) system-PG path keeps the workspace naming.
-[[ "$(BACKEND_COVERAGE_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/victoria_myws node "$HELPER" myws "$WT" 2/3 | sed -n 2p)" == "victoria_myws_s2" ]] \
+# (hermetic: a /deploy shell exports ROSE_DEPLOY_WORKTREE* for its own worktree; clear them for the generic case)
+[[ "$(env -u ROSE_DEPLOY_WORKTREE -u ROSE_DEPLOY_WORKTREE_PATH BACKEND_COVERAGE_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/victoria_myws node "$HELPER" myws "$WT" 2/3 | sed -n 2p)" == "victoria_myws_s2" ]] \
   || fail "generic workspace shards derive victoria_<ws>_s<i>"
 # run-coverage.sh binds to the helper and no longer refuses shards with a prepared URL.
 RC="$ROOT_DIR/back-end/scripts/run-coverage.sh"
 grep -q 'coverage-database-url.mjs" "\$WORKSPACE_HINT" "\$ROOT_DIR" "\$COVERAGE_SHARD"' "$RC" || fail "run-coverage.sh must resolve the prepared URL per shard through the helper"
+grep -q 'rm -f "\$BACKEND_DIR"/coverage/blackbox-run-shard\*/summary.json' "$ROOT_DIR/back-end/scripts/run-coverage-sharded.sh" || fail "run-coverage-sharded.sh must drop retained shard summaries before starting shards"
 grep -q 'Coverage shards need one prepared database each' "$RC" && fail "run-coverage.sh must not refuse shards on the prepared-URL path"
 grep -q 'ENSURE_SYSTEM_DB_NAME="\$COVERAGE_SHARD_DB_NAME"' "$RC" || fail "a derived shard database must be created through ensure_workspace_system_db"
 

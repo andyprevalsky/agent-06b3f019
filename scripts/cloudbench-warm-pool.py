@@ -110,7 +110,7 @@ def resolve_token(explicit: str | None = None) -> str:
     if not token:
         env_file = ROOT / "agents" / ".env"
         if env_file.is_file():
-            for line in env_file.read_text().splitlines():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
                 if line.startswith("FLY_API_TOKEN="):
                     token = line.split("=", 1)[1].strip().strip('"').strip("'")
                     break
@@ -128,7 +128,12 @@ class Fly:
         self.timeout = timeout
         self.calls: list[tuple[str, str]] = []
 
-    def _call(self, method: str, path: str, body=None, expect_json=True):
+    def _call(self, method: str, path: str, body=None, expect_json=True, timeout: float | None = None):
+        """One Machines API call. ``timeout`` overrides the client read timeout
+        for calls whose server-side work legitimately outlasts it (exec/wait).
+        A read timeout is retried only for GETs: a POST that timed out may
+        already have run the guest command or started the Machine."""
+        timeout = self.timeout if timeout is None else timeout
         url = f"{self.base}/v1/apps/{self.app}{path}"
         raw = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(url, data=raw, method=method, headers={
@@ -138,7 +143,7 @@ class Fly:
         last = None
         for attempt in range(4):
             try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
                     payload = response.read()
                     if not expect_json or not payload:
                         return None
@@ -151,7 +156,8 @@ class Fly:
                     continue
                 raise PoolError(f"{method} {path} -> HTTP {error.code}: {detail}") from error
             except (urllib.error.URLError, TimeoutError) as error:
-                if attempt < 3:
+                timed_out = isinstance(error, TimeoutError) or isinstance(getattr(error, "reason", None), TimeoutError)
+                if attempt < 3 and not (timed_out and method != "GET"):
                     last = error
                     time.sleep(1.5 * (attempt + 1))
                     continue
@@ -180,11 +186,19 @@ class Fly:
     def stop(self, machine_id):
         return self._call("POST", f"/machines/{machine_id}/stop", {})
 
+    # Server-side timeouts for exec/wait exceed the default client read
+    # timeout; give the HTTP call the server budget plus a grace period so a
+    # slow guest command is awaited instead of timing out client-side and
+    # (for exec) re-running the command on retry.
+    HTTP_GRACE_SECONDS = 30
+
     def wait(self, machine_id, state, seconds=60):
-        return self._call("GET", f"/machines/{machine_id}/wait?state={state}&timeout={int(seconds)}")
+        return self._call("GET", f"/machines/{machine_id}/wait?state={state}&timeout={int(seconds)}",
+                          timeout=int(seconds) + self.HTTP_GRACE_SECONDS)
 
     def exec(self, machine_id, command, seconds=120):
-        return self._call("POST", f"/machines/{machine_id}/exec", {"command": command, "timeout": int(seconds)})
+        return self._call("POST", f"/machines/{machine_id}/exec", {"command": command, "timeout": int(seconds)},
+                          timeout=int(seconds) + self.HTTP_GRACE_SECONDS)
 
     def set_metadata(self, machine_id, key, value):
         return self._call("POST", f"/machines/{machine_id}/metadata/{key}", {"value": value}, expect_json=False)
@@ -278,7 +292,7 @@ def default_deps_fingerprint(root: Path = ROOT) -> str:
             continue
         digest.update(relative.encode() + b"\0")
         if relative.endswith("package.json"):
-            data = json.loads(path.read_text() or "{}")
+            data = json.loads(path.read_text(encoding="utf-8") or "{}")
             fields = {k: data.get(k) for k in ("dependencies", "devDependencies", "optionalDependencies",
                                                "peerDependencies", "overrides", "workspaces") if k in data}
             digest.update(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode())
@@ -485,15 +499,30 @@ def checkout(fly: Fly, args, image, deps, log):
     for member in sorted(candidates, key=lambda m: m["created_at"] or ""):
         machine_id = member["id"]
         clock = time.monotonic()
-        fly.set_metadata(machine_id, f"{TAG}_state", f"{STATE_LEASED}:{lease}")
-        time.sleep(args.lease_settle)
-        current = fly.machine(machine_id)
+        try:
+            # A candidate from a stale listing may already be destroyed or
+            # claimed; any API failure here moves on to the next candidate
+            # instead of aborting the whole checkout (exit 1 would mask the
+            # clone fallback the fleet expects on exit 3).
+            fly.set_metadata(machine_id, f"{TAG}_state", f"{STATE_LEASED}:{lease}")
+            time.sleep(args.lease_settle)
+            current = fly.machine(machine_id)
+        except PoolError as error:
+            tried.append({"machine": machine_id, "outcome": f"unavailable: {error}"})
+            continue
         if metadata_of(current).get(f"{TAG}_state") != f"{STATE_LEASED}:{lease}" or current.get("state") != "suspended":
             tried.append({"machine": machine_id, "outcome": "lost-lease-race"})
             continue
         try:
             fly.start(machine_id)
             wait_state(fly, machine_id, "started", args.start_timeout)
+            # The metadata lease is check-then-act; a second claimer working
+            # from a stale listing could have overwritten it before our start
+            # landed. Re-verify after the start so two claimers never share
+            # one running guest (the loser leaves the member to the winner).
+            if metadata_of(fly.machine(machine_id)).get(f"{TAG}_state") != f"{STATE_LEASED}:{lease}":
+                tried.append({"machine": machine_id, "outcome": "lost-lease-after-start"})
+                continue
             started_at = round(time.monotonic() - clock, 3)
             ready = probe(fly, machine_id, "health", args.prep_timeout)
             ready_seconds = round(time.monotonic() - clock, 3)
@@ -733,13 +762,26 @@ def main(argv=None):
             receipt = checkout(fly, args, image, deps, log)
             receipt.update({"pool": args.pool, "app": fly.app, "run_token": args.run_token, "ref": args.ref,
                             "claimed_at": now_iso()})
-            if receipt.get("machine"):
-                if args.run_token:
-                    fly.set_metadata(receipt["machine"], f"{TAG}_run", args.run_token)
-                receipt["fallback"] = None
-            else:
-                receipt["fallback"] = "clone"
-            claim_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+            try:
+                if receipt.get("machine"):
+                    if args.run_token:
+                        fly.set_metadata(receipt["machine"], f"{TAG}_run", args.run_token)
+                    receipt["fallback"] = None
+                else:
+                    receipt["fallback"] = "clone"
+                claim_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+            except (PoolError, OSError) as error:
+                # The member is already resumed and tagged leased: without a
+                # receipt nothing would ever release it (refresh skips leased
+                # members, the reaper treats it as protected). Destroy it so
+                # the next top-up re-provisions a clean member.
+                if receipt.get("machine"):
+                    log(f"❌ claim receipt failed after resuming {receipt['machine']}; destroying it: {error}")
+                    try:
+                        destroy_member(fly, args.pool, receipt["machine"], log)
+                    except PoolError as cleanup_error:
+                        log(f"❌ could not destroy {receipt['machine']} after the failed claim: {cleanup_error}")
+                raise PoolError(f"claim receipt failed: {error}") from error
             emit(args, receipt, log)
             if not receipt.get("machine"):
                 log(f"🏊 no suspended pool member matches image {image[:19]} deps {deps[:12]} ({receipt.get('candidates', 0)} candidates of {receipt.get('members', 0)}); fleet falls back to clone")
