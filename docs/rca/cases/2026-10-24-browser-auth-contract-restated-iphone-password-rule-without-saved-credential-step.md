@@ -20,7 +20,7 @@ tags:
 sources:
   - fleet run descend-full69-20261023 cluster R12 (R4 5x gate runs 2-3; base 2/4)
 repro: agents/tests/blackbox/rose_browser_use.blackbox.py::test_native_autofill_real_model_synthetic_controls
-status: mitigated
+status: fixed
 ---
 
 ## Problem
@@ -76,7 +76,7 @@ At 10k agents: a prompt-text change only, with no runtime cost.
 
 ## Human feedback
 
-None recorded.
+On 2026-10-29 the user directed the deployment owner to fix the remaining browser failure; it was not waived.
 
 ## Reusable lesson
 
@@ -95,3 +95,61 @@ Evidence: /var/tmp/rose-final-agents-coverage-verified.log and
 .context/test-runs/agents-coverage-20261029-002931-1793374/rose-browser-use.log.
 No assertion, scenario, timeout, browser default, or approval gate was changed;
 the failed run is retained and blocks deployment without a valid gate override.
+
+
+## Conditional second-decision reproduction and repair, 2026-10-29
+
+The recurrence was reconstructed from the exact second request in
+`.llm-dumps/unbound/1793233788329-8dc6f9d14bbd-test-native-autofill-server_available.json`.
+The first decision had legitimately requested `screen.text`; the failure occurred
+when the model then chose password assistance instead of the available backend
+saved-credential operation. The earlier aggregate 5% estimate did not measure
+this conditioned request.
+
+On merged source `9a6e1b39d`, replay through `RoseClient.collect` with the same
+messages, tool schemas, actual `gpt-5.6-luna-foundry`, default low effort,
+2048-token limit, temperature 0.3, and local backend cooldown authority produced:
+
+- Baseline: 11 premature password-help choices, eight saved-credential attempts,
+  and one further screen read out of 20 calls.
+- Correcting only the tool's missing escalation prerequisites: two premature
+  help choices, 17 credential attempts, and one read out of 20.
+- Correcting only the stale capability statement: five premature help choices,
+  12 credential attempts, and three reads out of 20.
+- Both corrections: zero premature help choices, 36 credential attempts, and
+  four reads out of 40. Reads are not counted as completed credential fills.
+
+The two remaining contradictory surfaces were the native assistance tool's
+partial blocking-password rule and the owning phone guide's obsolete statement
+that verified app/account binding was unavailable. The backend already performs
+current-form/account binding inside `credentials.fill_saved`. The candidate
+clarifies that capability and completes the existing tool prerequisite; it adds
+no classifier, forced action, fallback, model change, or new runtime state.
+
+The next-deeper class considered was all duplicated tool/skill instructions.
+Removing all restatements is not coherent: invocation constraints and task
+procedures have distinct scopes, and the earlier measured removal worsened
+behavior. The repair instead aligns capability and escalation prerequisites
+across those existing scopes.
+
+The delivery-contract regression failed before the production change and passed
+afterward. The permanent live control now also includes the captured prior read;
+the original five scenarios and credential-fill assertion are retained. An
+unchanged five-run command failed before the repair on both original
+`server_available` and the captured-read scenario. Afterward it completed five
+runs without assertion failures. The full owning browser domain then passed117/117. Independent review
+`browser-contract-20261029` returned GROUNDED for candidate SHA256
+`a310aa7e04c5b8e2bc092f0f43e6520391f903e7b26e6a3d149f3ce8a15ba51a`
+with no blocking findings; whole-release gates remain separate.
+
+Evidence: `.context/pr1634-browser-rca/` contains original/variant wire captures,
+individual response metadata, `contract-before.log`, `contract-after.log`,
+`control-before-five.log`, `control-after-five.log`, `candidate.patch`, and the
+reference findings. The first attempt without a running local cooldown authority
+is retained and excluded from the valid experiment counts.
+
+Reference verification: `hermes-agent/tools/browser_vault_tool.py:589-601`
+requires saved-credential lookup first; lines621-630 bind and resolve the secret
+server-side; lines645-654 ask for protected user entry only after no saved item.
+This is a credential-specific analog for both corrected rules, with browser
+origin binding rather than Rose's native current-form/account binding.

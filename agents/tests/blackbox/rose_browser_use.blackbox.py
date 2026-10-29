@@ -2966,6 +2966,10 @@ async def test_native_autofill_preference_reaches_actual_enabled_request():
             prompt = json.dumps(captured[-1]["messages"])
             assert "try an already available native AutoFill suggestion" in prompt
             assert "credentials.fill_saved" in prompt and "phone_credential_unavailable" in prompt
+            assert "performs its own server-side current form/account binding" in prompt
+            assert "binding, which is not available yet" not in prompt
+            auth_tool = next(tool["function"] for tool in captured[-1]["tools"] if tool["function"]["name"] == "request_user_assistance_for_authentication")
+            assert "request password help only after matching native AutoFill is unavailable and credentials.fill_saved returned phone_credential_unavailable, or a saved credential was rejected" in auth_tool["description"]
             assert "Never reveal, extract, copy, or transcribe" in prompt
             assert "Supply no password, credential ref/ID, account, realm," in prompt
             assert "credentials.fill_saved requires a current successful screen.text result." in prompt
@@ -3046,6 +3050,7 @@ async def test_native_autofill_real_model_synthetic_controls():
     scenarios = {
         "available": "Apple Account synthetic@example.invalid. Password field is masked. A matching native AutoFill suggestion for synthetic@example.invalid is already visible: Use Saved Password button at center (100, 200).",
         "server_available": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
+        "server_available_after_read": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
         "missing": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
         "presence": "Apple Account synthetic@example.invalid. Saved password selected. Face ID authentication required to use this saved password. Only the account owner can approve Face ID. No alternative autonomous approval is available.",
         "rejected": "Apple Account synthetic@example.invalid. The matching saved password was already selected once using native AutoFill. Apple Account rejected it: Incorrect password. Password is still required to continue.",
@@ -3059,6 +3064,14 @@ async def test_native_autofill_real_model_synthetic_controls():
         history = ActionHistory()
         if name == "missing":
             await history.record_action(SimpleNamespace(), action="phone", params={"mode": "operation", "operation": "credentials.fill_saved", "args": {}}, result={"success": False, "error": "phone_credential_unavailable", "operation": {"operation": "credentials.fill_saved", "status": "FAILED", "errorCode": "phone_credential_unavailable", "result": None}})
+        if name == "server_available_after_read":
+            # Preserve the actual read decision immediately preceding the captured miss.
+            chosen_read = {"action": "phone", "thinking": "**Continuing with authentication**\n\nI see that I need to continue the authentication process. I should gather actual observations from the screen text, which might be provided from the last operation. But wait, can I do this on the phone? It seems like I should use the screen text for this, and then I can fill in any saved details as per the instructions. I’ll make sure to keep this organized!", "params": {"mode": "operation", "operation": "screen.text", "args": {"min_confidence": 0.3}}}
+            receipt = copy.deepcopy(state["interaction"]["lastOperation"])
+            receipt.update(id="synthetic-read-2", cursor=4)
+            await _native_autofill_record_read(history, chosen_read, receipt)
+            state["interaction"]["cursor"] = receipt["cursor"]
+            state["interaction"]["lastOperation"] = receipt
         for observation_round in range(3):
             result = await RoseClient().complete_browser_use(task="Continue my authorized Apple Account sign-in. Use my already available matching saved credential if possible; ask me for the protected step only when needed.", browser_state={**_browser_state(), "phone": state}, dynamic_system_context=PHONE_GUIDANCE, action_history=history.get_entries(), available_actions=["phone", "request_user_assistance_for_authentication"], include_screenshot=False, call_site="test-native-autofill-" + name, deadline_s=90, skip_cache_write=True)
             chosen = result.get("action", {})
@@ -3076,7 +3089,7 @@ async def test_native_autofill_real_model_synthetic_controls():
         action = result.get("action", {})
         params = action.get("params", {})
         assert not (action.get("action") == "phone" and params.get("operation") == "input.text"), (name, action)
-        if name == "server_available":
+        if name in {"server_available", "server_available_after_read"}:
             assert action.get("action") == "phone" and params.get("operation") == "credentials.fill_saved" and params.get("args") == {}, (name, action)
         elif name == "available":
             assert action.get("action") == "phone" and params.get("operation") == "input.tap", (name, action)
@@ -3200,7 +3213,7 @@ async def test_phone_setup_settings_actual_handler_observation():
         assert "Preserve the original authorized phone task" in wire
         import hashlib
         from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
-        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "9c830fa34b5b32887395809af480a9a7a25bcfcbb095848ef32bfba5481d1db8", "Ordinary enabled guide must match pre-exception HEAD bytes"
+        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "f978ff61322efeca0c82eab35c3e9ce33cf7737a3a6183aa6cd0b4dab6ce75d2", "Ordinary enabled guide must match the saved-credential binding contract"
         for marker in (None, False, "true"):
             plain_setup = {key: value for key, value in setup.items() if key != "googlePasscodeExceptionAllowed"}
             if marker is not None:
