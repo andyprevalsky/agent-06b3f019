@@ -877,12 +877,13 @@ async def test_tilion_cost_row_is_12_cents_per_hour_plus_create():
     assert _tilion_egress_class({"proxy_source": "tilion_mobile_city"}) == "premium"
     assert _tilion_egress_class({"proxy_source": "tilion_direct"}) == "direct"
     assert _tilion_egress_class({}) == "premium", "unknown errs toward the higher rate"
-    # Banked at both rebinds (rotation, recovery) and before each of the eight
-    # cost-row exits clears dom_service (drain, parked completion, verified
+    # Banked at both rebinds (rotation, recovery), at the shared pause helper
+    # before backend checkpoint, and before the eight remaining cost-row exits
+    # clear dom_service (drain, parked completion, verified
     # completion, the two terminal-pause exits, max iterations, and the two
     # error exits); behavior in spawn-browser-agent-v3's
     # activity_tilion_cost_row_bills_live_bytes_not_resume_create.
-    assert handler_source.count("_tilion_leave_session()\n") == 10
+    assert handler_source.count("_tilion_leave_session()\n") == 11
     fast = build_usage_items(1000, 100, pricing, 3_600_000, provider="tilion", fast_mode_cache_enabled=True)
     assert next(i for i in fast if i["type"] == "service")["cost_cents"] == 0.0
 

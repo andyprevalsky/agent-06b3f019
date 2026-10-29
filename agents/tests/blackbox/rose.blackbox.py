@@ -862,9 +862,32 @@ async def test_cerebras_strict_native_response_retains_parser_retry():
     async def on_chunk(*args):
         pass
 
-    with patch.dict(os.environ, {"CEREBRAS_API_KEY": "offline-test-placeholder", "ROSE_FAST_CACHE_MODE": "off"}):
-        try:
-            await call_llm_structured_streaming(
+    try:
+        with patch.dict(os.environ, {"CEREBRAS_API_KEY": "offline-test-placeholder", "ROSE_FAST_CACHE_MODE": "off"}):
+            try:
+                await call_llm_structured_streaming(
+                    messages=[{"role": "user", "content": "offline replay"}],
+                    model="rose-labs/rose-1-flash",
+                    temperature=1,
+                    max_tokens=128,
+                    response_model=model,
+                    on_chunk=on_chunk,
+                    call_site="test",
+                    skip_cache_write=True,
+                )
+            except Exception as exc:
+                assert type(exc).__name__ == "LLMStructuredOutputError"
+                assert "valid list" in str(exc)
+            else:
+                raise AssertionError("Malformed native arrays were silently coerced")
+            assert len(requests) == 3
+            assert [body["model"] for body in requests] == ["qwen-3.8-27b", "qwen-3.8-27b", "google/gemini-3.8-flash"]
+            assert all(
+                any(row.get("role") == "tool" and "valid list" in str(row.get("content")) for row in body["messages"])
+                for body in requests[1:]
+            )
+            corrected = True
+            response, _, _ = await call_llm_structured_streaming(
                 messages=[{"role": "user", "content": "offline replay"}],
                 model="rose-labs/rose-1-flash",
                 temperature=1,
@@ -874,31 +897,12 @@ async def test_cerebras_strict_native_response_retains_parser_retry():
                 call_site="test",
                 skip_cache_write=True,
             )
-        except Exception as exc:
-            assert type(exc).__name__ == "LLMStructuredOutputError"
-            assert "valid list" in str(exc)
-        else:
-            raise AssertionError("Malformed native arrays were silently coerced")
-        assert len(requests) == 3
-        assert [body["model"] for body in requests] == ["qwen-3.8-27b", "qwen-3.8-27b", "google/gemini-3.8-flash"]
-        assert all(
-            any(row.get("role") == "tool" and "valid list" in str(row.get("content")) for row in body["messages"])
-            for body in requests[1:]
-        )
-        corrected = True
-        response, _, _ = await call_llm_structured_streaming(
-            messages=[{"role": "user", "content": "offline replay"}],
-            model="rose-labs/rose-1-flash",
-            temperature=1,
-            max_tokens=128,
-            response_model=model,
-            on_chunk=on_chunk,
-            call_site="test",
-            skip_cache_write=True,
-        )
-        assert len(requests) == 4
-        assert response.tool_calls[0].labels == ["Software Engineer"]
-        assert response.tool_calls[0].count == 5
+            assert len(requests) == 4
+            assert response.tool_calls[0].labels == ["Software Engineer"]
+            assert response.tool_calls[0].count == 5
+    finally:
+        # A leaked global handler would answer every later test's capture-wrapped request.
+        teardown_mock()
 
 
 async def test_cerebras_tool_call_at_output_limit_is_escalated_not_accepted():
@@ -5613,6 +5617,8 @@ async def test_gpt_api_key_credit_failure_cools_all_agent_requests_before_foundr
     )
 
     def handler(req):
+        if req.url.path.endswith("/foundry-deployment/cooldown"):
+            return httpx.Response(200, json={"cooldowns": {}})
         if str(req.url) == OPENAI_RESPONSES_API_URL:
             seen["openai"] += 1
             return httpx.Response(200, text=exhausted_sse)
@@ -6604,7 +6610,7 @@ async def test_cerebras_cooldown_rpc_is_bounded_and_cancellation_isolated():
     with patch("providers.rose.cerebras.httpx.AsyncClient", offline_client):
         try:
             first = asyncio.create_task(cb._cerebras_on_cooldown(scope, "offline-fake"))
-            await entered.wait()
+            await asyncio.wait_for(entered.wait(),2)
             sibling = asyncio.create_task(cb._cerebras_on_cooldown(scope, "offline-fake"))
             first.cancel()
             try:
@@ -7250,6 +7256,7 @@ async def test_client_foundry_stream_exit_closes_http_owner():
             patch.dict(
                 os.environ,
                 {
+                    "BACKEND_API_KEY": "",  # Provider-only fixture; shared authority has its own regression.
                     "AZURE_FOUNDRY_ENDPOINT": "https://foundry.invalid",
                     "AZURE_FOUNDRY_API_KEY": "offline-fake",
                     "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
@@ -7456,6 +7463,7 @@ async def test_browser_use_dump_records_foundry_wire_effort_and_temperature():
     and the Responses body carries no temperature; the dump said xhigh / 0.3.
     """
     from helpers import observability
+    from providers.rose import foundry
 
     sent = []
     foundry_sse = "\n".join(
@@ -7492,6 +7500,7 @@ async def test_browser_use_dump_records_foundry_wire_effort_and_temperature():
             },
         ),
         patch.object(observability, "dump_llm_context", side_effect=lambda **kw: dumps.append(kw)),
+        patch.object(foundry, "_shared_scope", return_value=None),
     ):
         await RoseClient(openrouter_key="ork-x").complete_browser_use(
             task="Wait briefly",
@@ -7559,7 +7568,7 @@ async def test_client_foundry_region_rate_limit_fails_over_before_openrouter():
             return httpx.Response(200, text=openrouter_sse, headers={"Content-Type": "text/event-stream"})
         return httpx.Response(500, text="unexpected route")
 
-    env = {"GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}
+    env = {"BACKEND_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}
     for host, (suffix, key) in regions.items():
         env[f"AZURE_FOUNDRY_ENDPOINT{suffix}"] = f"https://{host}"
         env[f"AZURE_FOUNDRY_API_KEY{suffix}"] = key
@@ -7621,6 +7630,8 @@ async def test_client_foundry_skips_non_https_optional_region_and_keeps_serving(
     attempted: list[str] = []
 
     def handler(req):
+        if req.url.path.endswith("/foundry-deployment/cooldown"):
+            return httpx.Response(200, json={"cooldowns": {}})
         if req.url.host.endswith(".openai.azure.com"):
             attempted.append(f"{req.url.scheme}://{req.url.host}")
         if req.url.host == "a-4989-resource.openai.azure.com" and req.url.scheme == "https":
@@ -7734,7 +7745,8 @@ async def test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter():
         patch.dict(
             os.environ,
             {
-                "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+                "BACKEND_API_KEY": "",  # Provider-only fixture; shared authority has its own regression.
+                    "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
                 "AZURE_FOUNDRY_API_KEY": "test-key",
                 "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
                 "GPT_API_KEY": "",
@@ -7797,7 +7809,8 @@ async def test_gpt56_foundry_turns_cache_markers_into_breakpoints_and_reports_tr
     ]
     set_mock_handler(handler)
     env = {
-        "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+        "BACKEND_API_KEY": "",  # Provider-only fixture; shared authority has its own regression.
+                    "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
         "AZURE_FOUNDRY_API_KEY": "test-key",
         "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
         "GPT_API_KEY": "",
@@ -7998,6 +8011,8 @@ async def test_client_foundry_luna_backs_mini_and_speed_pools():
     cerebras_status = {"code": 200}
 
     def handler(req):
+        if req.url.path.endswith("/foundry-deployment/cooldown"):
+            return httpx.Response(200, json={"cooldowns": {}})
         host = req.url.host
         if host == "api.cerebras.ai":
             attempted.append("cerebras")
@@ -8090,6 +8105,8 @@ async def test_text_only_foundry_skipped_for_image_requests():
     openrouter_bodies: list[dict] = []
 
     def handler(req):
+        if req.url.path.endswith("/foundry-deployment/cooldown"):
+            return httpx.Response(200, json={"cooldowns": {}})
         if req.url.host == "a-4989-resource.openai.azure.com":
             attempted.append(f"foundry:{json.loads(req.content)['model']}")
             return httpx.Response(200, text=foundry_sse, headers={"Content-Type": "text/event-stream"})
@@ -10672,6 +10689,565 @@ async def test_funded_openai_preserves_requested_output_budget():
     assert seen_foundry == [foundry_reference]
 
 
+async def test_foundry_rate_limit_cooldown_hint_ladder_and_shared_store():
+    """RCA 2026-10-20-foundry-deployment-cooldown-per-process.
+
+    Length: provider advice (Retry-After, else an in-stream "try again in N s",
+    codex responses_error.rs:90-125), otherwise 30/60/300 s per deployment
+    (openclaw usage-failure-state.ts:18-27), reset by a served request. With a
+    backend key, every mark is published and a shared cooldown read from the
+    backend skips that deployment without sending it a request.
+    """
+    import time
+    import types
+    from datetime import datetime, timedelta, timezone
+
+    from providers.rose import foundry
+    from providers.rose.errors import RoseServerError
+    from providers.rose.pools import foundry_model, get_pool
+
+    hint = foundry._retry_hint_seconds
+    assert hint(httpx.Headers({"retry-after-ms": "1500"}), "try again in 9s") == 1.5
+    assert hint(httpx.Headers({"retry-after": "12"}), "try again in 9s") == 12.0
+    assert hint(httpx.Headers({}), "Rate limit reached. Please try again in 7s.") == 7.0
+    assert hint(httpx.Headers({}), "Please try again in 20 seconds") == 20.0
+    assert hint(httpx.Headers({}), "try again in 250ms") == 0.25
+    assert hint(httpx.Headers({}), "try again in 900 seconds") == 900.0
+    assert hint(httpx.Headers({}), "Requests have exceeded token rate limit.") is None
+
+    model = foundry_model(get_pool("rose-1-ultra"))
+    deployments = [f"{model}-a", f"{model}-b"]
+    completed = (
+        "event: response.output_text.delta\n"
+        'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+        "event: response.completed\n"
+        'data: {"type":"response.completed","response":'
+        '{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+    )
+
+    def limited(message: str) -> str:
+        return (
+            "event: response.failed\n"
+            'data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"'
+            + message
+            + '"}}}\n\n'
+        )
+
+    async def run(env: dict, handler) -> list[str]:
+        hits: list[str] = []
+        real = httpx.AsyncClient
+
+        async def routed(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "foundry.example.test":
+                hits.append(json.loads(request.content)["model"])
+            return await handler(request)
+
+        module_httpx = types.SimpleNamespace(
+            AsyncClient=lambda **kw: real(**kw, transport=httpx.MockTransport(routed), trust_env=False),
+            Timeout=httpx.Timeout,
+            Headers=httpx.Headers,
+            TransportError=httpx.TransportError,
+        )
+        with (
+            patch.object(foundry, "httpx", module_httpx),
+            patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))),
+        ):
+            await _drain(
+                foundry.foundry_complete(
+                    pool_spec=get_pool("rose-1-ultra"),
+                    messages=[{"role": "user", "content": "hi"}],
+                    response_format=None,
+                    tools=None,
+                    context_tools=None,
+                    tool_choice=None,
+                    temperature=None,
+                    effort=None,
+                    provider_fast_mode=True,
+                    request_id="foundry-cooldown",
+                    route_key="foundry-cooldown-route",
+                    agent_id=None,
+                    call_site="test",
+                    cache_namespace="foundry-cooldown",
+                    ttft_timeout_s=30,
+                    idle_timeout_s=30,
+                )
+            )
+        return hits
+
+    env = {
+        "AZURE_FOUNDRY_ENDPOINT": "https://foundry.example.test",
+        "AZURE_FOUNDRY_API_KEY": "offline",
+        "AZURE_FOUNDRY_DEPLOYMENTS": ",".join(deployments),
+    }
+    with patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))):
+        first = foundry._route_plan(foundry.foundry_regions(), (model,), "foundry-cooldown-route")[0]
+    key = (first[0].endpoint, first[1])
+
+    def provider(reject_message):
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.host == "foundry.example.test", f"no backend configured, got {request.url}"
+            body = json.loads(request.content)
+            text = limited(reject_message) if reject_message and body["model"] == first[1] else completed
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=text.encode())
+
+        return handler
+
+    def remaining() -> float:
+        return foundry._cooldown_until[key] - time.monotonic()
+
+    # Local-only (no backend key): ladder 30 -> 60 -> 300 -> 300, then serve resets it.
+    foundry._reset_foundry_cooldown_cache()
+    try:
+        observed = []
+        for _ in range(4):
+            foundry._cooldown_until.pop(key, None)
+            assert (await run(env, provider("exceeded token rate limit")))[0] == first[1]
+            observed.append(round(remaining()))
+        assert observed == [30, 60, 300, 300], observed
+        hits = await run(env, provider(None))
+        assert first[1] not in hits, "a cooling deployment must not receive a request"
+        foundry._cooldown_until.pop(key, None)
+        await run(env, provider(None))
+        assert foundry._strikes.get(key, 0) == 0, "a served request ends the escalation"
+        foundry._cooldown_until.pop(key, None)
+        await run(env, provider("exceeded token rate limit"))
+        assert round(remaining()) == 30
+        foundry._cooldown_until.pop(key, None)
+        await run(env, provider("Rate limit reached. Please try again in 7s."))
+        assert round(remaining()) == 7, "the in-stream retry hint sets the cooldown"
+        foundry._cooldown_until.pop(key, None)
+        await run(env, provider("Please try again in 900 seconds."))
+        assert round(remaining()) == 900, "provider advice must not be capped to the fallback ladder"
+
+        # Shared store: the mark is published; another process's mark is honored.
+        foundry._reset_foundry_cooldown_cache()
+        shared_env = {**env, "BACKEND_API_URL": "https://backend.example.test", "BACKEND_API_KEY": "internal"}
+        marks: list[dict] = []
+        shared: dict[str, dict] = {}
+        shared_key = f"foundry.example.test:{first[1]}"
+
+        async def backend(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "foundry.example.test":
+                return await provider("exceeded token rate limit" if not shared else None)(request)
+            assert request.headers["x-api-key"] == "internal"
+            if request.url.path.endswith("/foundry-deployment/cooldown"):
+                keys = request.url.params["keys"].split(",")
+                return httpx.Response(200, json={"cooldowns": {k: shared[k] for k in keys if k in shared}})
+            if request.url.path.endswith("/token/rate-limited"):
+                marks.append(json.loads(request.content))
+                until = (datetime.now(timezone.utc) + timedelta(seconds=900)).isoformat()
+                shared[shared_key] = {"rateLimitedUntil": until, "strikes": 2, "remainingSeconds": 900}
+                return httpx.Response(200, json={"ok": True, "rateLimitedUntil": until, "strikes": 2, "remainingSeconds": 900})
+            raise AssertionError(f"unexpected backend call {request.url}")
+
+        await run(shared_env, backend)
+        assert marks == [
+            {"type": "foundry", "source": "pool", "region": "foundry.example.test", "deployment": first[1]}
+        ], marks
+        assert round(remaining()) == 900, "the shared store preserves provider advice beyond the fallback cap"
+        # A fresh process (empty cache) reads the shared mark and never hits the deployment.
+        foundry._reset_foundry_cooldown_cache()
+        hits = await run(shared_env, backend)
+        assert first[1] not in hits, f"shared cooldown ignored: {hits}"
+        # A configured but unavailable authority fails closed, including on retry.
+        foundry._reset_foundry_cooldown_cache()
+
+        unexpected_hits = []
+
+        async def store_down(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "foundry.example.test":
+                unexpected_hits.append(request.url)
+                return await provider(None)(request)
+            return httpx.Response(503)
+
+        for _ in range(2):
+            try:
+                await run(shared_env, store_down)
+            except RoseServerError as exc:
+                assert "authority unavailable" in str(exc)
+            else:
+                raise AssertionError("an unavailable shared cooldown authority must fail closed")
+        assert unexpected_hits == [], unexpected_hits
+    finally:
+        foundry._reset_foundry_cooldown_cache()
+
+
+async def test_foundry_unrepresentable_retry_hint_uses_ladder_and_fails_over():
+    """Advice the shared authority cannot store falls back to the ladder.
+
+    The authority keeps each deadline as a JavaScript Date and rejects advice
+    past its range with HTTP 400 (back-end foundryDeploymentCooldown.ts); the
+    backend client ignores such advice (foundry.ts retryHintSeconds), like
+    codex's RetryAfter::from_delay checked_add. A worker must not publish it.
+    """
+    import time
+    import types
+    from datetime import datetime, timedelta, timezone
+
+    from providers.rose import foundry
+    from providers.rose.pools import foundry_model, get_pool
+
+    max_date_ms = 8.64e15
+    hint = foundry._retry_hint_seconds
+    assert hint(httpx.Headers({"retry-after": "1e18"}), "") is None
+    assert hint(httpx.Headers({"retry-after-ms": "1e30", "retry-after": "12"}), "") == 12.0
+    assert hint(httpx.Headers({"retry-after": "1e18"}), "try again in 9s") == 9.0
+    assert hint(httpx.Headers({}), "try again in " + "9" * 400 + " seconds") is None
+    assert hint(httpx.Headers({}), "try again in 999999999999999 seconds") is None
+    assert hint(httpx.Headers({"retry-after": "86400"}), "") == 86400.0, "storable advice stays uncapped"
+
+    model = foundry_model(get_pool("rose-1-ultra"))
+    deployments = [f"{model}-a", f"{model}-b"]
+    env = {
+        "AZURE_FOUNDRY_ENDPOINT": "https://foundry.example.test",
+        "AZURE_FOUNDRY_API_KEY": "offline",
+        "AZURE_FOUNDRY_DEPLOYMENTS": ",".join(deployments),
+        "BACKEND_API_URL": "https://backend.example.test",
+        "BACKEND_API_KEY": "internal",
+    }
+    os_stub = types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))
+    with patch.object(foundry, "os", os_stub):
+        first = foundry._route_plan(foundry.foundry_regions(), (model,), "foundry-unrepresentable-route")[0][1]
+    key = ("https://foundry.example.test", first)
+    completed = (
+        "event: response.output_text.delta\n"
+        'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+        "event: response.completed\n"
+        'data: {"type":"response.completed","response":'
+        '{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+    )
+    hits: list[str] = []
+    marks: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "foundry.example.test":
+            deployment = json.loads(request.content)["model"]
+            hits.append(deployment)
+            if deployment == first:
+                return httpx.Response(429, headers={"retry-after": "1e18"}, content=b"{}")
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=completed.encode())
+        if request.url.path.endswith("/foundry-deployment/cooldown"):
+            return httpx.Response(200, json={"cooldowns": {}})
+        if request.url.path.endswith("/token/rate-limited"):
+            body = json.loads(request.content)
+            marks.append(body)
+            seconds = body.get("retryAfterSeconds", 30)
+            # The authority's own representable-deadline check (HTTP 400).
+            if time.time() * 1000 + seconds * 1000 > max_date_ms:
+                return httpx.Response(400, json={"error": "retryAfterSeconds must produce a representable deadline"})
+            until = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+            return httpx.Response(200, json={"rateLimitedUntil": until, "strikes": 1, "remainingSeconds": seconds})
+        raise AssertionError(f"unexpected call {request.url}")
+
+    real = httpx.AsyncClient
+    module_httpx = types.SimpleNamespace(
+        AsyncClient=lambda **kw: real(**kw, transport=httpx.MockTransport(handler), trust_env=False),
+        Timeout=httpx.Timeout,
+        Headers=httpx.Headers,
+        TransportError=httpx.TransportError,
+    )
+    foundry._reset_foundry_cooldown_cache()
+    try:
+        with patch.object(foundry, "httpx", module_httpx), patch.object(foundry, "os", os_stub):
+            chunks = await _drain(
+                foundry.foundry_complete(
+                    pool_spec=get_pool("rose-1-ultra"),
+                    messages=[{"role": "user", "content": "hi"}],
+                    response_format=None,
+                    tools=None,
+                    context_tools=None,
+                    tool_choice=None,
+                    temperature=None,
+                    effort=None,
+                    provider_fast_mode=True,
+                    request_id="foundry-unrepresentable",
+                    route_key="foundry-unrepresentable-route",
+                    agent_id=None,
+                    call_site="test",
+                    cache_namespace="foundry-unrepresentable",
+                    ttft_timeout_s=30,
+                    idle_timeout_s=30,
+                )
+            )
+        assert hits[0] == first and len(hits) == 2, hits
+        assert any(chunk.kind == "content" for chunk in chunks), "the next deployment must serve"
+        assert marks == [{"type": "foundry", "source": "pool", "region": "foundry.example.test", "deployment": first}]
+        assert key not in foundry._unconfirmed_marks, "the authority must acknowledge the mark"
+        assert 25 < foundry._cooldown_until[key] - time.monotonic() <= 30, "the fallback ladder sets the hold"
+    finally:
+        foundry._reset_foundry_cooldown_cache()
+
+
+async def _check_foundry_shared_state_case(case):
+    import time
+    import types
+    from datetime import datetime, timedelta, timezone
+    from providers.rose import foundry as f
+
+    real = httpx.AsyncClient
+    key = ("https://r.example", "deployment")
+    region = types.SimpleNamespace(endpoint=key[0], host="r.example")
+    env = {"BACKEND_API_KEY": "fixture", "BACKEND_API_URL": "https://authority.example"}
+
+    def state(seconds=900):
+        return {
+            "strikes": 1,
+            "rateLimitedUntil": (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat(),
+            "remainingSeconds": seconds,
+        }
+
+    def client(handler):
+        return types.SimpleNamespace(AsyncClient=lambda **kw: real(**kw, transport=httpx.MockTransport(handler)))
+
+    with patch.object(f, "os", types.SimpleNamespace(getenv=lambda k, d=None: env.get(k, d))):
+        try:
+            if case == "overlap":
+                f._reset_foundry_cooldown_cache()
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def delayed(req):
+                    if req.method == "GET":
+                        entered.set()
+                        await release.wait()
+                        return httpx.Response(200, json={"cooldowns": {}})
+                    return httpx.Response(200, json=state())
+
+                with patch.object(f, "httpx", client(delayed)):
+                    read = asyncio.create_task(f._refresh_shared_cooldowns([key]))
+                    await asyncio.wait_for(entered.wait(), 2)
+                    await f._report_rate_limit(region, key[1], 900)
+                    release.set()
+                    await read
+                    assert f._cooldown_until.get(key, 0) - time.monotonic() > 890, "old read erased acknowledged mark"
+            if case in {"pending_mark", "pending_mark_failure"}:
+                f._reset_foundry_cooldown_cache()
+                entered, release = asyncio.Event(), asyncio.Event()
+                reads = []
+                async def during_mark(req):
+                    if req.method == "POST":
+                        entered.set()
+                        await release.wait()
+                        return httpx.Response(503) if case == "pending_mark_failure" else httpx.Response(200, json=state())
+                    reads.append(1)
+                    return httpx.Response(200, json={"cooldowns": {}})
+                with patch.object(f, "httpx", client(during_mark)):
+                    mark = asyncio.create_task(f._report_rate_limit(region, key[1], 900))
+                    await asyncio.wait_for(entered.wait(), 2)
+                    try:
+                        await f._refresh_shared_cooldowns([key])
+                        preserved = f._cooldown_until.get(key, 0) - time.monotonic() > 890
+                        fresh = key in f._shared_checked_at
+                    finally:
+                        release.set()
+                        try:
+                            await mark
+                        except RoseServerError:
+                            assert case == "pending_mark_failure"
+                    assert preserved, "GET during pending mark erased known 429"
+                    assert not fresh, "pending write admitted a healthy read cache"
+                    if case == "pending_mark_failure":
+                        assert key not in f._shared_checked_at, "failed mark admitted healthy cache"
+                        count = len(reads)
+                        await f._refresh_shared_cooldowns([key])
+                        assert len(reads) > count, "failed mark suppressed a real authority recheck"
+                        assert f._cooldown_until.get(key, 0) - time.monotonic() > 890
+                        assert key not in f._shared_checked_at, "unpublished 429 was cached healthy"
+                        # A failed publisher has a bounded local hold, not an immortal fence.
+                        f._cooldown_until[key] = time.monotonic() - 1
+                        await f._refresh_shared_cooldowns([key])
+                        assert key not in f._cooldown_until, "expired local guard cannot clear"
+                        assert key in f._shared_checked_at
+            if case == "stall_after_healthy_read":
+                # SAME60 2026-10-22: guest event-loop stalls consumed the 2 s read
+                # budget after healthy reads; failing closed sent browser steps to
+                # the slower waterfall. A recent authority snapshot stays usable.
+                f._reset_foundry_cooldown_cache()
+                stall = {"on": False}
+
+                async def stalled(req):
+                    if stall["on"]:
+                        # A starved guest freezes the loop mid-request; the reply is
+                        # ready, but the read deadline passes before it is consumed.
+                        asyncio.get_running_loop().call_soon(time.sleep, 0.3)
+                        for _ in range(3):
+                            await asyncio.sleep(0)
+                    return httpx.Response(200, json={"cooldowns": {}})
+
+                with patch.object(f, "httpx", client(stalled)), patch.object(f, "_SHARED_RPC_TIMEOUT_S", 0.2):
+                    await f._refresh_shared_cooldowns([key])
+                    assert key in f._shared_checked_at
+                    healthy_at = f._shared_checked_at[key]
+                    f._shared_checked_at[key] = healthy_at - (f._SHARED_RECHECK_S + 1)
+                    stall["on"] = True
+                    await f._refresh_shared_cooldowns([key])  # recent snapshot: no fail-closed
+                    assert key not in f._cooldown_until, "a failed refresh invented a cooldown"
+                    assert f._shared_checked_at[key] < healthy_at, "a failed read was recorded as fresh"
+                    # Past the bounded grace, an unavailable authority still fails closed.
+                    f._shared_checked_at[key] = healthy_at - (f._SHARED_STALE_GRACE_S + 1)
+                    try:
+                        await f._refresh_shared_cooldowns([key])
+                    except RoseServerError as exc:
+                        assert "authority unavailable" in str(exc)
+                    else:
+                        raise AssertionError("an expired snapshot must fail closed")
+                    # A process that never read the authority has no snapshot to reuse.
+                    f._reset_foundry_cooldown_cache()
+                    try:
+                        await f._refresh_shared_cooldowns([key])
+                    except RoseServerError:
+                        pass
+                    else:
+                        raise AssertionError("no snapshot must fail closed")
+            if case == "malformed":
+                for payload in (
+                    {},
+                    {"cooldowns": []},
+                    {
+                        "cooldowns": {
+                            "r.example:deployment": {"strikes": 1, "rateLimitedUntil": "bad", "remainingSeconds": 900}
+                        }
+                    },
+                ):
+                    f._reset_foundry_cooldown_cache()
+
+                    async def malformed(req):
+                        return httpx.Response(200, json=payload)
+
+                    with patch.object(f, "httpx", client(malformed)):
+                        try:
+                            await f._refresh_shared_cooldowns([key])
+                        except RoseServerError:
+                            pass
+                        else:
+                            raise AssertionError("malformed state accepted")
+                    assert key not in f._shared_checked_at
+                f._reset_foundry_cooldown_cache()
+                original_until = time.monotonic() + 900
+                f._cooldown_until[key] = original_until
+
+                async def partly_invalid(req):
+                    return httpx.Response(
+                        200, json={"cooldowns": {"r.example:deployment": state(0), "bad.example:deployment": {}}}
+                    )
+
+                with patch.object(f, "httpx", client(partly_invalid)):
+                    try:
+                        await f._refresh_shared_cooldowns([key])
+                    except RoseServerError:
+                        pass
+                    else:
+                        raise AssertionError("partly invalid state accepted")
+                assert f._cooldown_until[key] == original_until, "invalid response partially mutated cache"
+            if case == "reset":
+                f._reset_foundry_cooldown_cache()
+                calls = []
+
+                async def failed(req):
+                    calls.append(req.url.path)
+                    return httpx.Response(503)
+
+                f._strikes[key] = 2
+                with patch.object(f, "httpx", client(failed)):
+                    await f._report_served(region, key[1])
+                    await f._report_served(region, key[1])
+                assert len(calls) == 2 and f._strikes[key] == 2, "failed reset lost retry obligation"
+            if case == "new_mark":
+                f._strikes[key] = 2
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def reset_then_mark(req):
+                    if req.url.path.endswith("/served"):
+                        entered.set()
+                        await release.wait()
+                        return httpx.Response(200, json={"reset": True})
+                    return httpx.Response(200, json=state())
+
+                with patch.object(f, "httpx", client(reset_then_mark)):
+                    reset = asyncio.create_task(f._report_served(region, key[1]))
+                    await asyncio.wait_for(entered.wait(), 2)
+                    await f._report_rate_limit(region, key[1], 900)
+                    release.set()
+                    await reset
+                assert f._cooldown_until.get(key, 0) - time.monotonic() > 890, "old reset erased new mark"
+            if case == "mark_order":
+                f._reset_foundry_cooldown_cache()
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def out_of_order(req):
+                    seconds = json.loads(req.content)["retryAfterSeconds"]
+                    if seconds == 30:
+                        entered.set()
+                        await release.wait()
+                    return httpx.Response(200, json=state(seconds))
+
+                with patch.object(f, "httpx", client(out_of_order)):
+                    old = asyncio.create_task(f._report_rate_limit(region, key[1], 30))
+                    await asyncio.wait_for(entered.wait(), 2)
+                    await f._report_rate_limit(region, key[1], 900)
+                    release.set()
+                    await old
+                assert f._cooldown_until[key] - time.monotonic() > 890, "old mark acknowledgement shortened new mark"
+            if case == "clock":
+                f._reset_foundry_cooldown_cache()
+
+                class FastClock(datetime):
+                    @classmethod
+                    def now(cls, tz=None):
+                        return datetime.now(tz) + timedelta(seconds=3600)
+
+                async def healthy(req):
+                    return httpx.Response(200, json={"cooldowns": {"r.example:deployment": state(30)}})
+
+                with patch.object(f, "httpx", client(healthy)), patch.object(f, "datetime", FastClock):
+                    await f._refresh_shared_cooldowns([key])
+                assert f._cooldown_until[key] - time.monotonic() > 29, "worker clock shortened authority duration"
+            if case == "failed_mark_then_remote_mark":
+                # This process's publication failed and its bounded local hold
+                # expired; another worker then marked the same deployment. The
+                # read that applies that authority state is a usable snapshot.
+                f._reset_foundry_cooldown_cache()
+                reads = []
+                authority = {"up": True}
+
+                async def remote_mark(req):
+                    if req.method == "POST":
+                        return httpx.Response(503)
+                    reads.append(1)
+                    if not authority["up"]:
+                        return httpx.Response(503)
+                    return httpx.Response(200, json={"cooldowns": {"r.example:deployment": state(300)}})
+
+                with patch.object(f, "httpx", client(remote_mark)):
+                    try:
+                        await f._report_rate_limit(region, key[1], None)
+                    except RoseServerError:
+                        pass
+                    else:
+                        raise AssertionError("a failed publication must surface")
+                    f._cooldown_until[key] = time.monotonic() - 1
+                    await f._refresh_shared_cooldowns([key])
+                    assert f._cooldown_until[key] - time.monotonic() > 290, "another worker's mark was not applied"
+                    assert key in f._shared_checked_at, "an applied authority snapshot was not cached"
+                    count = len(reads)
+                    await f._refresh_shared_cooldowns([key])
+                    assert len(reads) == count, "a fresh authority snapshot was read again"
+                    authority["up"] = False
+                    f._shared_checked_at[key] -= f._SHARED_RECHECK_S + 1
+                    await f._refresh_shared_cooldowns([key])  # within stale grace: no fail-closed
+                    assert len(reads) == count + 1
+                    assert f._cooldown_until[key] - time.monotonic() > 280, "a failed read dropped the cooldown"
+        finally:
+            f._reset_foundry_cooldown_cache()
+
+
+async def test_foundry_shared_state_interleavings_and_validation():
+    for case in (
+        "overlap", "pending_mark", "pending_mark_failure", "stall_after_healthy_read",
+        "malformed", "reset", "new_mark", "mark_order", "clock", "failed_mark_then_remote_mark",
+    ):
+        await _check_foundry_shared_state_case(case)
+
+
 async def test_wmh_response_schema_binds_exact_candidate_call_ids():
     import json
     import types
@@ -11265,6 +11841,15 @@ async def run_all_tests():
         "cerebras_tools_send_omittable_optionals_as_their_type",
         test_cerebras_tools_send_omittable_optionals_as_their_type,
     )
+    await r.record_async(
+        "foundry_rate_limit_cooldown_hint_ladder_shared",
+        test_foundry_rate_limit_cooldown_hint_ladder_and_shared_store,
+    )
+    await r.record_async(
+        "foundry_unrepresentable_retry_hint_uses_ladder",
+        test_foundry_unrepresentable_retry_hint_uses_ladder_and_fails_over,
+    )
+    await r.record_async("foundry_shared_state_interleavings", test_foundry_shared_state_interleavings_and_validation)
     r.record(
         "cerebras_tools_keep_null_for_omittable_string_optionals",
         test_cerebras_tools_keep_null_for_omittable_string_optionals,

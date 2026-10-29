@@ -46,7 +46,11 @@ class CampaignTickets(unittest.TestCase):
                 "cloudbench-provider-capacity.py",
                 "cloudbench-provider-limits.json",
             ):
-                shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+                shutil.copyfile(Path(os.environ["SAME_CLI_CAMPAIGN_SOURCE"]) if name == "run-bench-campaign.py" and os.environ.get("SAME_CLI_CAMPAIGN_SOURCE") else ROOT / "scripts" / name, scripts / name)
+            if mode in ("external-member-retry", "external-member-exhausted"):
+                campaign=scripts/"run-bench-campaign.py"
+                injection = "\ndef released_attempt(workspace, job):\n    return dict(resources_released=True, lifecycle_verified=True, terminal_task=job['controller_exit_code']==0, infra_failure=job['controller_exit_code']==17)\n\n"
+                campaign.write_text(campaign.read_text().replace('if __name__ == "__main__":', injection+'if __name__ == "__main__":'))
             if mode in ("ticket-prepare-fail", "ticket-assign-fail"):
                 # Fail only the campaign parent's in-process call, as a raced
                 # child exit or a ticket refusal would, keeping child CLIs real.
@@ -62,7 +66,7 @@ class CampaignTickets(unittest.TestCase):
                 shutil.copyfile(ROOT / "scripts/cloudbench-campaign-barrier.py", scripts / "cloudbench-campaign-barrier.py")
             if mode.startswith(("mutation", "relay")):
                 for name in ("cloudbench-campaign-mutation.py", "cloudbench-script-snapshot.py", "cloudbench-port-lease.py", "cloudbench-cohort-reconcile.py", "cloudbench-machine-readiness.py", "cloudbench-campaign-machines.py"):
-                    shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+                    shutil.copyfile(Path(os.environ["SAME_CLI_CAMPAIGN_SOURCE"]) if name == "run-bench-campaign.py" and os.environ.get("SAME_CLI_CAMPAIGN_SOURCE") else ROOT / "scripts" / name, scripts / name)
                 (scripts / "lib").mkdir()
                 for name in ("cloudbench-env.sh", "cloudbench-inventory.sh"):
                     shutil.copyfile(ROOT / "scripts/lib" / name, scripts / "lib" / name)
@@ -83,7 +87,7 @@ while not(p/'stop').exists():time.sleep(.01)
 """)
                 if mode.startswith("relay"):
                     for name in ("cloudbench-shared-relay.py", "run-bench-cloud", "run-bench-fleet"):
-                        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+                        shutil.copyfile(Path(os.environ["SAME_CLI_CAMPAIGN_SOURCE"]) if name == "run-bench-campaign.py" and os.environ.get("SAME_CLI_CAMPAIGN_SOURCE") else ROOT / "scripts" / name, scripts / name)
                     if old_relay:
                         (scripts / "run-bench-campaign.py").write_bytes(subprocess.check_output(
                             ["git", "show", "ffe622243b8d704692fd3b69ab1d08eb1bb54040:scripts/run-bench-campaign.py"], cwd=ROOT))
@@ -204,7 +208,7 @@ if [ "${CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE:-0}" = 1 ]; then
  trap 'printf "CANARY_JOINED\n" >> "$FIXTURE_ROOT/events"; exit 143' TERM INT
  case "$FIXTURE_CANARY_MODE" in
   fail) exit 17 ;;
-  cancel|relay-cancel|external-abort-canary) while :; do sleep .05; done ;;
+  cancel|relay-cancel|external-abort-canary|startup-canary) while :; do sleep .05; done ;;
  esac
  printf 'CANARY_DONE\n' >> "$FIXTURE_ROOT/events"
  exit 0
@@ -213,6 +217,13 @@ printf 'TASK_START\n' >> "$FIXTURE_ROOT/events"
 [ -n "${CLOUDBENCH_COHORT_PREFLIGHT_RECEIPT:-}" ] || exit 92
 if [ "$FIXTURE_CANARY_MODE" = tamper ]; then CLOUDBENCH_COHORT_PREFLIGHT_SHA256=0000000000000000000000000000000000000000000000000000000000000000; fi
 CLOUDBENCH_INFRA_CANARY_COLD_BOOTSTRAP="$FIXTURE_COLD" CLOUDBENCH_INFRA_CANARY_REF="$FIXTURE_BENCH_REF" python3 -S "$FIXTURE_ROOT/scripts/cloudbench-infra-canary-preflight.py" --stamp "$FIXTURE_ROOT/.context/fleet-infra-canary.last-pass" --lock "$FIXTURE_ROOT/.context/fleet-infra-canary-preflight.transaction.lock" --ttl-seconds 3600 --width 2 --canary "$FIXTURE_ROOT/scripts/run-fleet-infra-canary" --nested-controller-lock cloudbench-controller-infra-canary-preflight.lock
+if [[ "$FIXTURE_CANARY_MODE" == external-member-* && "$RUN_BENCH_CAMPAIGN_JOB_ID" = r001-j0008 ]]; then
+ if [ "$FIXTURE_CANARY_MODE" = external-member-exhausted ] || [ "${RUN_BENCH_CAMPAIGN_ATTEMPT:-1}" = 1 ]; then
+  printf 'MEMBER_FAILED\n' >> "$FIXTURE_ROOT/events"
+  exit 17
+ fi
+ printf 'MEMBER_RETRY_READY\n' >> "$FIXTURE_ROOT/events"
+fi
 if [ -n "${FIXTURE_BARRIER_SECONDS:-}" ]; then
  printf 'ENV|%s|%s|%s|%s|%s\n' "$RUN_BENCH_CAMPAIGN_JOB_ID" "$RUN_BENCH_CAMPAIGN_TOTAL_JOBS" "$RUN_BENCH_CAMPAIGN_STARTED_AT" "$BENCHMARK_HUB_GROUP_RUN_ID" "${RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER:-}${RUN_BENCH_CAMPAIGN_TASK_INDEXES:-}${RUN_BENCH_CAMPAIGN_GROUP_TOTAL:-}${RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT:-}" >> "$FIXTURE_ROOT/events"
  if python3 "$FIXTURE_ROOT/scripts/cloudbench-campaign-barrier.py" --deadline "$(python3 -c 'import sys,time;print(time.time()+float(sys.argv[1]))' "$FIXTURE_BARRIER_SECONDS")" --controller-pid "$$"; then
@@ -379,6 +390,11 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 "fixture-c",
                 "--forward-arg=--strict-barrier",
             ]
+            if mode.startswith("startup-"):
+                epoch=time.time()-(901 if mode=="startup-expired" else 898)
+                env["RUN_BENCH_CAMPAIGN_STARTUP_DEADLINE_EPOCH"]=str(epoch+9300-7200-1200)
+                argv.extend(["--e2e-started-at",str(epoch),"--e2e-timeout","9300",
+                             "--forward-arg=--timeout","--forward-arg=7200"])
             if mode == "explicit":
                 argv.extend(
                     [
@@ -399,7 +415,7 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 )
                 try:
                     deadline = time.monotonic() + 15
-                    while not (root / "events").exists():
+                    while not (root / "events").exists() or "CANARY_ENTER" not in (root / "events").read_text():
                         if child.poll() is not None or time.monotonic() > deadline:
                             raise AssertionError("parent canary did not enter")
                         time.sleep(0.02)
@@ -428,6 +444,16 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 if (root / "events").exists()
                 else []
             )
+            if mode.startswith("startup-"):
+                self.assertNotEqual(result.returncode,0,result.stdout+result.stderr+details)
+                self.assertNotIn("TASK_START",events)
+                self.assertFalse(list((root/".context/benchmarks/campaigns").glob("*/startup-cohorts/*/release.json")))
+                self.assertEqual(len(summaries),1)
+                self.assertTrue(json.loads(summaries[0].read_text())["startup_timeout_exceeded"])
+                if mode=="startup-canary":
+                    self.assertIn("CANARY_ENTER",events)
+                    self.assertIn("CANARY_JOINED",events)
+                return
             if mode.startswith("relay"):
                 if old_relay or mode in ("relay-foreign", "relay-source", "relay-cancel"):
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr + details)
@@ -464,6 +490,10 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 self.assertEqual(events.count("PROVIDER_BOUNDARY:0"), 6)
                 self.assertLess(events.index("PROVIDER_BOUNDARY:1"), events.index("TASK_START"))
                 return
+            if mode in ("external-member-retry", "external-member-exhausted"):
+                campaign=scripts/"run-bench-campaign.py"
+                injection = "\ndef released_attempt(workspace, job):\n    return dict(resources_released=True, lifecycle_verified=True, terminal_task=job['controller_exit_code']==0, infra_failure=job['controller_exit_code']==17)\n\n"
+                campaign.write_text(campaign.read_text().replace('if __name__ == "__main__":', injection+'if __name__ == "__main__":'))
             if mode in ("ticket-prepare-fail", "ticket-assign-fail"):
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr + details)
                 self.assertNotIn("Traceback", result.stderr)
@@ -543,6 +573,8 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
 
     def external_barrier_run(self, root, argv, env, mode):
         """Act as the sharded coordinator against one real strict campaign."""
+        if mode in ("external-member-retry", "external-member-exhausted"):
+            argv.extend(["--retry-infra","1"])
         barrier = Path(env["RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER"])
         events_path = root / "events"
         release_id = "a1" * 16
@@ -567,7 +599,7 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                         raise AssertionError(label + " was not reached: " + str(events()) + "".join(child.communicate()))
                     time.sleep(0.02)
 
-            if mode in ("external-release", "external-abort"):
+            if mode in ("external-release", "external-abort", "external-member-retry"):
                 wait_until(lambda: status() == "ready", "external readiness")
                 cohort = next((root / ".context/benchmarks/campaigns").glob("*/startup-cohorts/c001"))
                 self.assertEqual(len(list((cohort / "ready").glob("*.json"))), 6)
@@ -576,7 +608,10 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 self.assertEqual(status(), "ready")
                 self.assertFalse((cohort / "release.json").exists())
                 self.assertNotIn("BARRIER_RELEASED", events())
-                if mode == "external-release":
+                if mode == "external-member-retry":
+                    self.assertEqual(events().count("MEMBER_FAILED"),1)
+                    self.assertIn("MEMBER_RETRY_READY",events())
+                if mode in ("external-release", "external-member-retry"):
                     write_exclusive(barrier / "release.json", {
                         "schema": "campaign-external-barrier-release-v1",
                         "release_id": release_id, "released_at": "2026-10-18T00:00:00+00:00"})
@@ -609,7 +644,16 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
         self.assertEqual(ready["status"], history[-1], output)
         self.assertEqual(len(summary["startup_cohorts"]), 1)
         self.assertEqual(list(barrier.glob(".*")), [], "atomic replace leaves no temporary file")
-        if mode == "external-release":
+        if mode == "external-member-exhausted":
+            self.assertNotEqual(child.returncode,0,output)
+            self.assertEqual(observed.count("MEMBER_FAILED"),2)
+            self.assertNotIn("BARRIER_RELEASED",observed)
+            self.assertFalse((cohort/"release.json").exists())
+            self.assertEqual(summary["startup_cohorts"][0]["status"],"aborted")
+            self.assertEqual(sum(bool(j.get("infra_failure")) for j in summary["jobs"]),1)
+            self.assertEqual(sum(j["status"]=="cancelled" for j in summary["jobs"]),5)
+            return
+        if mode in ("external-release", "external-member-retry"):
             self.assertEqual(child.returncode, 0, output)
             self.assertEqual(history, ["waiting", "ready", "released"])
             self.assertEqual((ready["ready_count"], ready["failed_count"], ready["survivor_count"]), (6, 0, 6))
@@ -643,9 +687,12 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
             self.assertIn("ready", history)
             self.assertEqual(history[-1], "failed")
             self.assertEqual(observed.count("BARRIER_FAILED"), 6)
-            self.assertEqual((ready["failed_count"], ready["survivor_count"]), (6, 0))
-            self.assertEqual(summary["startup_cohorts"][0]["status"], "failed")
-            self.assertEqual({job["status"] for job in summary["jobs"]}, {"failed"})
+            failed=sum(bool(job.get("startup_failed_before_release")) for job in summary["jobs"])
+            self.assertGreaterEqual(failed,1)
+            self.assertEqual((ready["failed_count"], ready["survivor_count"]), (failed,6-failed))
+            self.assertEqual(summary["startup_cohorts"][0]["status"], "aborted")
+            self.assertTrue({job["status"] for job in summary["jobs"]} <= {"failed","cancelled"})
+            self.assertEqual(sum(job["status"]=="failed" for job in summary["jobs"]),failed)
             self.assertIsNone(summary["external_barrier"]["abort"])
             return
         self.assertEqual(history[-1], "aborted")
@@ -667,6 +714,18 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
             else:
                 self.assertIn("SEED_JOINED", observed)
                 self.assertNotIn("CANARY_ENTER", observed)
+
+    def test_explicit_startup_deadline_admits_no_late_task(self):
+        self.campaign_fixture(mode="startup-expired")
+
+    def test_explicit_startup_deadline_joins_active_canary(self):
+        self.campaign_fixture(mode="startup-canary")
+
+    def test_strict_member_retry_rejoins_full_cohort_then_releases(self):
+        self.campaign_fixture(mode="external-member-retry")
+
+    def test_strict_member_retry_exhaustion_aborts_without_partial_release(self):
+        self.campaign_fixture(mode="external-member-exhausted")
 
     def test_external_barrier_holds_release_until_coordinator_release(self):
         self.campaign_fixture(mode="external-release")

@@ -61,6 +61,7 @@ export {
 export { injectLocalStorage, SessionNotFoundError, SessionNoUserError };
 export { InvalidSessionFilePathError } from './service.file-path';
 export { CdpInjectionError, SessionNoWsUrlError } from './types';
+export { buildBrowserSessionMetadata } from './service.metadata';
 
 const log = createLogger('BrowserSession');
 

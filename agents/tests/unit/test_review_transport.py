@@ -72,6 +72,7 @@ def test_foundry_original_body_read_failure_matches_observer_off(monkeypatch):
     monkeypatch.setenv('AZURE_FOUNDRY_ENDPOINT', 'https://offline.invalid')
     monkeypatch.setenv('AZURE_FOUNDRY_API_KEY', 'synthetic')
     monkeypatch.setenv('AZURE_FOUNDRY_DEPLOYMENTS', 'gpt-6-sol')
+    monkeypatch.setattr(foundry, '_shared_scope', lambda: None)
     async def call():
         return [item async for item in foundry.foundry_complete(
             pool_spec=get_pool('rose-1-ultra'),messages=[{'role':'user','content':'synthetic'}],

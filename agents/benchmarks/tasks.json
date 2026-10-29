@@ -606,7 +606,7 @@
   {
     "name": "spawn-sub-agents",
     "title": "Multi-Level General-Purpose Agent Spawning",
-    "prompt": "Find (1) Tokyo Metropolis's total Japanese-and-foreign resident population in the Tokyo Metropolitan Government Basic Resident Register table dated August 1, 2026, and (2) the U.S. Census Bureau QuickFacts estimate for New York City proper dated July 1, 2025. Use official sources for both values. You MUST use spawn_general_purpose_agent exactly twice - once per city. Each general-purpose agent should use explore-agent web research, MUST NOT use a browser agent, Claude Code, or code sandbox, and should return only the numeric population value. After both agents complete, multiply the two populations together and report the final product.",
+    "prompt": "Find (1) the year the Eiffel Tower in Paris was completed and (2) the year the Golden Gate Bridge in San Francisco opened to the public. Both are widely published facts; any reliable source is fine. You MUST use spawn_general_purpose_agent exactly twice - once per landmark. Each general-purpose agent should use explore-agent web research, MUST NOT use a browser agent, Claude Code, or code sandbox, and should return only the four-digit year. After both agents complete, multiply the two years together and report both years and the final product.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": [
@@ -647,18 +647,18 @@
         ]
       },
       {
-        "id": "final-answer-population-product",
+        "id": "final-answer-year-product",
         "method": "static_check",
         "criteria": [
-          "Collected both population numbers and multiplied them: the root's final answer states Tokyo's official total 14137164 (Basic Resident Register, August 1, 2026), New York City's official estimate 8584629 (QuickFacts, July 1, 2025) and their exact product 121362308052156"
+          "Collected both years and multiplied them: the root's final answer states the Eiffel Tower's completion year 1889, the Golden Gate Bridge's opening year 1937 and their exact product 3658993"
         ],
         "checks": [
           {
             "type": "final_answer_figures",
             "expected_values": [
-              "14137164",
-              "8584629",
-              "121362308052156"
+              "1889",
+              "1937",
+              "3658993"
             ],
             "tolerance": "0"
           }

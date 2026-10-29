@@ -281,7 +281,13 @@ export async function restoreLogicalBrowserCheckpoint(
   if (!context) throw new Error('Browser checkpoint restore context missing');
   await assertRestoreBinding();
   if (!recovery?.targets) {
-    log.info('Browser checkpoint restore phase', { task_id: taskId, phase: 'storage_started' });
+    log.info('Browser checkpoint restore phase', {
+      task_id: taskId,
+      phase: 'storage_started',
+      cookies: checkpoint.storage.cookies.length,
+      origins: checkpoint.storage.origins.length,
+      tabs: checkpoint.tabs.length,
+    });
     await context.setStorageState(checkpoint.storage);
     log.info('Browser checkpoint restore phase', { task_id: taskId, phase: 'storage_completed' });
   }
@@ -378,6 +384,7 @@ export async function restoreLogicalBrowserCheckpoint(
     await assertRestoreBinding();
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   }
+  log.info('Logical browser tabs restored', { taskId, tabs: prepared.length });
 }
 
 /** Seed each origin in the destination tab's storage namespace, including late-created frames. */

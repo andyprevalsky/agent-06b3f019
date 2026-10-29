@@ -229,6 +229,10 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-maintenance-env.test.py"),
     ),
     Gate(
+        "cloudbench-shard-coordinator",
+        ("python3", "scripts/tests/cloudbench-shard-coordinator.test.py"),
+    ),
+    Gate(
         "cloudbench-controller-orphan-drain",
         ("python3", "scripts/tests/cloudbench-controller-orphan-drain.test.py"),
     ),

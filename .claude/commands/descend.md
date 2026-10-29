@@ -38,6 +38,46 @@ budgets, concurrency and acceptance rules rather than importing another run's
 special profile. Invocation authorizes running the requested slice and repairing
 infra; it does not approve a runtime/product fix or a different paid workload.
 
+Explicit user scheduling holds override automatic reruns and next-slice defaults.
+For the resumed Polar campaign, retain `/benchmark`'s 20-task K=3, fastest-first
+comparable duration groups, 2-hour cap and user-go-before-next-20 scope; none of
+the repair, approval or continuation steps below grants a new batch launch.
+
+## Alignment and implementation (explicit user correction, October 21, 2026)
+
+Align proposed behavior with the user **one fix at a time**, then implement each
+agreed fix **in parallel** with independent agreed work. Sequential discussion
+is not a global implementation pause. Honor recorded agreement without asking
+again; only materially broader behavior needs further alignment. Keep one owner
+per edited boundary and reuse completed proof.
+
+For the aligned Polar repairs, preserve these contracts:
+
+- A real user pause **adds to the existing result**, preserving its text and
+  errors. A timeout stays a timeout; do not invent a pause, discard an earlier
+  result, or duplicate terminal summaries to satisfy an evaluator.
+- Actual final-answer/completion-card evidence belongs in the evaluator input
+  for **all benchmarks by default**, not only the failing Polar examples.
+  Preserve distinct existing assistant text and do not count duplicate summaries
+  as additional evidence. Restored evidence is not a proved task outcome.
+- Bound oversized **tool results across main, explore and browser agents** with
+  an inline preview and an agent-accessible way to retrieve the full remaining
+  content. Preserve existing tighter limits and use a generous fallback where
+  uncapped. Retain the full authorized result before truncation; a file path or
+  mock alone does not prove retrieval. Keep redaction and access boundaries and
+  full evaluator/archive evidence. Parallelize independent integrations using
+  **one shared helper and one paged read through existing attachments**; do not
+  add a second storage system, service or framework for this repair.
+
+The user authorized **one rerun of the same 60 copies with the same CLI**, in a
+benchmark sub-agent, **after all three agreed fixes are implemented and well
+tested**. Preserve the original 20 tasks, K=3, CLI settings and accepted baseline;
+write new run evidence separately. This authorizes that repeat even though its
+slots already have accepted baseline results. It does not authorize Batch 2,
+the next 20 or a changed workload. Resolve actual integration, backend-first,
+warm-source and admission prerequisites; do not invent additional approval gates.
+The parent retains 10-minute and start/no-queue/end CLI scorecards.
+
 ## The iteration loop
 
 1. **Run and monitor** the requested experiment on its frozen source. When
@@ -62,7 +102,7 @@ infra; it does not approve a runtime/product fix or a different paid workload.
    before the next useful experiment. Human approval blocks only its scoped action.
 5. **Sleep when the critical owners are working and no useful independent work
    remains.** Operational monitors and workers continue. Wake for actionable
-   events or every **15 minutes**; inspect evidence, send the full scorecard,
+   events or every **10 minutes**; inspect evidence, send the full scorecard,
    act on stalls and increase parallelization where useful. Put a one-line
    cause **and corrective action** directly beneath every red progress row.
    If the same blocker persists without new causal evidence at the next check,
@@ -70,6 +110,24 @@ infra; it does not approve a runtime/product fix or a different paid workload.
 6. **Rerun the original authorized experiment after verified critical repairs.**
    Leave unrelated RCA lanes moving. Repeat this loop until the requested goal
    passes, then finish the normal deployment, durable publication and owned cleanup.
+
+Between bug-fix sessions, run the affected owning tests, then rerun the same
+original authorized benchmark. A full `/deploy` is not required between fixes.
+If the benchmark actually depends on changed deployed code, satisfy only that
+necessary deployed prerequisite before the rerun; do not automatically make the
+whole release a prerequisite. An already active deployment may finish in
+parallel. Preserve the original benchmark contract, scoped approvals and normal
+production-release requirements.
+
+Use `scripts/run-bench` from the worktree containing the approved fixes; do not
+wait for production deployment to make local source available. `--local` runs
+that worktree's code. The default cloud path stages a verified workspace patch
+where supported; sharded runs such as the same-60 require a clean, pushed commit
+and check out that exact source on controllers and guests. Commit/push for cloud
+source transport is not deployment. Verify the executed source and preserve the
+original substrate, task arguments and budgets. A configured external authority
+is a separate runtime dependency: distinguish its missing API from missing
+local fixes, and do not bypass shared state or authentication to obtain a run.
 
 Parent sleep, user questions and scorecard edits do not pause active workers.
 Preparing a command, passing a diagnostic and completing an evidence packet are
@@ -102,11 +160,12 @@ and Downstream Implications sections or their code-block presentation.
    proof; outcome pending, or Open observability gap when causal proof is absent.
 3. **Every fix is cemented.** Promote the repro into the consistently-run suite
    that owns the first-bad boundary.
-4. **Actively drive asynchronous work.** Give a named owner the operational
-   monitor, immediate infra-stop/error notifications and normal cleanup. The
-   parent acts on events and uses the fixed 15-minute check-in when otherwise
-   waiting. Check real output growth and liveness; parent sleep never pauses
-   workers. Do not duplicate the monitor with parent-side busy polling.
+4. **Actively drive asynchronous work.** By default a sub-agent owns each run:
+   launch, operational monitor, immediate infra-stop/error notifications,
+   infra `/RCA` delegation, normal cleanup and the returned clustered results.
+   The parent posts only the CLI batch scorecard, every 10 minutes and on three
+   transitions (tasks started, no more queued, run end), and acts on events.
+   Check real output growth and liveness; parent sleep never pauses workers. Do not duplicate the monitor with parent-side busy polling.
    4a. **Measure progress from the work itself.** At five minutes with no
    started tasks, inspect the current build/activation/guest stage and its
    original deadline. The assigned operational monitor continues its required
@@ -681,7 +740,7 @@ while the requested goal still has authorized work:
     else:
         sleep interruptibly; workers and operational monitors keep running
     on an actionable event: act without waiting for the scheduled checkpoint
-    every 15 minutes, on a fixed deadline:
+    every 10 minutes, on a fixed deadline, and on start / no-more-queued / end:
         check evidence-backed milestones and publish the full scorecard
         put reason + specific action beneath every red progress row
         remove a wait, narrow/reassign a stall or add useful parallel work
@@ -767,6 +826,147 @@ status, timeout, website, or issue class. A symptom says where a failure
 surfaced, not what to fix, and many unrelated root causes end as the same
 timeout.
 
+After symptom-level triage, run a **choke-point pass** across the whole batch,
+passes included. For each upstream mechanism observed in any failure (a
+sub-agent activity killed at StartToClose, a retry or failover, a false pause,
+lost work being redone), count its runtime occurrences in every FAIL and every
+PASS. A mechanism that appears in most failures across several symptom groups,
+and rarely in passes, is a candidate shared first-bad boundary. Example: in
+Polar batch 1 (2026-10-20), the 30-minute browser activity kill appeared in 36
+of 47 FAILs, spread over the timeout, role-alternation, min-steps and rubric
+groups, but in only 3 of 10 PASSes. Give that mechanism its own cluster. Keep
+each downstream cluster as its own row, record its dependency on the upstream
+cluster, and preserve both memberships. Prevalence ranks hypotheses; the
+per-run observed mechanism, not the count, grants membership.
+
+- Count members from runtime evidence across every run in the batch, not
+  from the sample one RCA inspected.
+- A wall-clock timeout is a symptom: decompose the lost time (upstream kills
+  and redone work, per-step latency buckets, idle gaps) before assigning it a
+  cluster. Decompose it as per-decision cost × decision count, and compare
+  the first third of an activity's steps with the last third. A cost that
+  grows inside an activity, such as context growth or CPU burst exhaustion,
+  is invisible in fleet-wide percentiles.
+- Identify killed activities by span duration ≥ StartToClose − 10 s, and
+  check the count against the Hub. Matching kills by timestamp proximity
+  mislabels short activities.
+- Read event-loop lag (`loop.lag`) together with process CPU. Lag with low
+  CPU means starvation (quota, steal or blocking I/O); lag at 100% CPU means
+  saturation. They need different fixes.
+- For a killed or stalled span, decode its last `llm.context.dumped` payload
+  to recover the exact final decision and the action history. It contains a
+  leased token, so never paste the raw dump.
+- Prove resource starvation with the provider's own counters before
+  attributing to it, for example Fly `fly_instance_cpu_throttle`, `steal`,
+  `cpu_balance` and `cpu_baseline`, which outlive destroyed guests. Line up
+  the stall onset with the moment the burst balance runs out.
+- When a supervisor timeout "never fired", check separately: did the timer
+  fire, compared with another timer on the same loop; and what did the code
+  after it wait on (the cancelled child settling, a post-timeout classifier)?
+  Prefer deadlines that report and move on without waiting for the hung
+  child, as codex `exec.rs` and claude-code `withTimeout` do.
+- Check isolation boundaries for shared external limits. A benchmark guest
+  that copies production state (compute tokens, cooldowns, semaphores) into
+  its own database enforces that limit per guest, not across the fleet. Count
+  grants or marks per guest against the real provider capacity before
+  calling a provider error external. In Polar batch 1, 58 guests each
+  granted the same token at 1 of 16 slots, and OpenAI returned 285 429s.
+- Check that a suspected cause separates failures from passes before ranking
+  it. In Polar batch 1, the Foundry failover share did not separate them,
+  while prompt growth and activity kills did.
+- Before attributing a FAIL to the agent, check the evaluator contract. Did
+  the judge see what the product shows the user (for example a final answer
+  stored in message metadata)? Does any gate inherit a repository default
+  that the benchmark's reference does not have (for example a per-agent step
+  minimum)? Prove evaluator clusters with judge-only replays on the saved
+  trajectories, with no agent rerun, and report how many verdicts change.
+- Rank clusters by priority, then by affected-run count, as "X of N", and
+  state which clusters overlap.
+- **Name the real error, not a condition.** A cluster's cause must be a
+  concrete defect at a named code site: what it does, what it should do,
+  and the observed consequence. Examples: "a compaction trigger that never
+  fires because its threshold exceeds the model window", or "the action
+  result omits the page state its contract promises". A growing value, a
+  slow step or a high count ("context grows", "31% of turns observe",
+  "CPU at 22%") is a measurement. Keep digging until you find the defect, or
+  label it a design gap or an open observability gap. For growth, attribute
+  it by measured tokens per source rather than by raw characters (base64
+  characters overstated screenshot growth about 40×). Then find the
+  single-step jumps and the exact tool result behind each one: in Polar batch
+  1, five evaluate results that the harness returned uncapped and twice
+  produced every jump of at least 100k tokens.
+- **Be exact about limits.** Say which limit fired, who enforces it and
+  where it is set. For example: "Temporal StartToClose of 30 minutes kills
+  the activity; the loop itself has no time check".
+- **Be exact about providers.** Name every provider error and the model
+  served: provider, deployment/region, HTTP status, error text, counts and
+  timestamps, and the configured pool versus `actual_model`. Never write
+  "rate limited by X" without that receipt.
+- **Ground every proposed harness change in golden references.** Before
+  recommending any change to harness behaviour (caps, history pruning,
+  screenshot retention, timeouts, observation format, recovery), open the
+  reference harnesses: claude-code-src, openclaw, hermes-agent, codex,
+  prime-agent, and browser-use or Skyvern when present. Cite the real
+  `path:line` and the concrete value each one uses, for example "hermes caps
+  X at N (path:line); Skyvern times out Y after Z s (path:line)", and make
+  that the stated reasoning for the proposed value. Write "no analog found"
+  only after searching. A change with no reference precedent must say why
+  every reference approach does not fit. Never cite from memory.
+
+### Match proof to the claimed boundary
+
+Continuously add reusable findings to this owning section as reviews arrive;
+reuse partial work and accepted unchanged evidence instead of restarting an RCA.
+
+- **Audit causal coverage, not just green test counts.** Name each real producer,
+  consumer and mocked boundary. A dispatcher test whose `record_action` is an
+  AsyncMock proves the submitted arguments, not durable history persistence.
+  A captured judge request proves evidence delivery, not provider acceptance,
+  reasoning quality or an unchanged benchmark outcome. Verify registration in
+  the actual owning runner: a test definition is not coverage when
+  `run_all_tests` never calls it. Preserve before/after output and exact source.
+- **A reserve is not a proved admission bound.** A between-turn check at
+  timeout minus 300 seconds cannot guarantee completion if an admitted action
+  plus recovery can take 660 seconds. Trace admission, cancellation-resistant
+  awaits and finalization against the same remaining clock; test a step crossing
+  the boundary and finalization exhaustion. Distinguish cooperative timeout
+  fixtures from a hard wall deadline. Do not silently increase the task budget.
+- **Separate restored judge evidence from input capacity and error grading.**
+  Removing a 4000-character cut restores archived text; it does not establish
+  that the configured provider accepts the complete history plus screenshots.
+  Record actual input size and provider limit evidence separately. A synthetic
+  context rejection returning score 0 proves the error path, not a real provider
+  failure or a task FAIL. Keep missing completion summaries, clipped tool text,
+  duplicate root hydration and absent screenshots as distinct mechanisms;
+  preserve original step labels and accepted grades. Never hide a capacity gap
+  by silently reintroducing clipping or changing rubric thresholds.
+- **Check actual reference policy and units.** Cite source bytes/revision and
+  the real conditional, configured use and value, not a bundled library symbol
+  or plausible analogy. Correct reversed predicates and rendered-line offsets.
+  Browser-use's 20000-character evaluate cap and DOM-only cap do not imply a
+  40000-character whole-state policy; Codex byte truncation is not a Unicode
+  character bound. A reference budget does not establish local 120/180/60-second
+  reserves. Label local choices, loss/type changes and unproved memory bounds.
+- **Distinguish lifecycle contracts and external failures.** Closing a browser
+  before a retained-tab obligation ends is a custody/lifetime design gap; a
+  recorded URL list does not prove live tabs. An observed Google challenge is
+  external evidence, while failed recovery needs per-candidate receipts before
+  assigning its cause. Keep independent answer-quality failures separate from
+  both, even when their transcripts share a browser kill.
+- **Shared limits need shared authority proof.** Preserve per-bench isolation
+  while checking the approved shared token/cooldown boundary with fresh and
+  already-warm readers, expiry, unavailable-authority behavior and served reset.
+  Check overlapping read/mark/reset operations: an old successful read must not
+  erase a newly acknowledged mark, and malformed HTTP 200 state is not a valid
+  empty state. Require acknowledged resets and account for authority/worker
+  clock skew; sequential mocks do not prove these interleavings.
+  A five-second read cache is bounded propagation, not instantaneous exclusion;
+  a two-second RPC timeout is not proof of provider admission capacity. Honor
+  explicit provider retry hints (including 900 seconds) before the approved
+  OpenClaw transient fallback of 30/60/300 seconds; do not substitute its separate
+  exponential rate-limit policy. Backend-first rollout and unchanged task
+  outcome proof remain distinct from local PostgreSQL plus mocked-provider proof.
+
 Give every cluster a stable row ID, a kebab-case name for its boundary and
 mechanism, its member tasks, and one **exemplar**: the member with `observed`
 evidence and the cheapest owning-boundary repro. Membership is a hypothesis
@@ -776,6 +976,32 @@ On a later epoch, triage new occurrences or changed boundary evidence, including
 recurrences. Add each card to an existing cluster by the same rules before
 creating a new one. If a task has two independently observed causes, preserve
 both memberships. An unknown cause remains an Observability Gap singleton.
+
+### Independent golden-reference review
+
+As soon as end/error clusters are known, start one independent read-only
+Explore subagent in parallel with RCA owners to review the current clusters
+against locally available golden references. Reuse that reviewer for new
+clusters or changed membership/first-bad boundaries; do not duplicate fix
+owners or block unrelated work. Give it exact cluster members, first-bad
+boundaries, exemplar evidence, and immutable source revisions.
+
+Route repository, reference, and evidence retrieval through the designated
+Explore agent; main and fix owners consume its evidence packet and request
+missing reads there. Reviewers may inspect actual diffs for review. For each
+cluster, check exact prompt copy, exact hyperparameters (including timeout and
+truncation limits with units), and critical new tools verbatim. Return an
+exact-match, partial, no-support, or read-gap disposition for each category,
+with necessary excerpts or exact values, paths/revisions, native integration
+constraints, and any required full-tail retrieval compatibility. Distinguish
+unavailable/unread source from a negative finding; do not refetch without
+network authorization.
+
+Golden references inform a candidate; they do not establish causality or
+authorize prompt/tool changes, relaxed budgets, or blind copying. Preserve
+existing approvals, RCA red/green proof, registered tests, and exact-task
+outcome proof. Return findings to main in the existing cluster handoff, not a
+new service, framework, or approval gate.
 
 ### Delegate cluster ownership
 
@@ -848,10 +1074,15 @@ ready. Never wait for an infra-clean run or every other RCA to finish.
 
 The queue holds clusters, not tasks. Sort it by:
 
-1. member-task count, largest first, so the fix that flips the most tasks is
-   decided first;
-2. complexity class, easiest first, from the table below; then
-3. row ID.
+1. priority, highest first, honoring explicit user priorities;
+2. affected-run count, largest first, with member-task count, largest first
+   recorded separately when runs and tasks differ;
+3. complexity class, easiest first, from the table below; then row ID.
+
+Only the main chat delivers harness/eval approval requests. Show the current
+queue position as **X of N**, priority, affected-run numerator/denominator,
+unique task count and overlaps, followed by the exact inline diff and canonical
+approval evidence. Do not turn queue rank or a worker's review into approval.
 
 Infra and External Blocker never enter the runtime-fix approval queue; keep
 their repair/observability states in the same durable cluster ledger.
@@ -864,8 +1095,8 @@ their repair/observability states in the same durable cluster ledger.
 | 4    | Harness                   | Prompting Inconsistency, Agent Reasoning Failure, Resource/Performance Failure |
 
 Re-rank only when membership changes: a later epoch's clustering, a split, or a
-merge. Between those events the order is stable, and a cluster whose
-outcome-proof rerun fails keeps its position.
+merge, or when the user changes priority. Between those events the order is
+stable, and a cluster whose outcome-proof rerun fails keeps its position.
 
 A cluster is **idle** when it is not applying, outcome-rerunning, or in RCA.
 Deliver the top ready idle cluster's request in the main thread. A

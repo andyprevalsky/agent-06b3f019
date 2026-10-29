@@ -33,7 +33,8 @@ async function syncGmailEmails(
   const jobId = `gmail-oauth-${userId}-${Date.now()}`;
   log.info('Starting Gmail email sync', { jobId, userId });
 
-  const emails = await fetchGmailEmails(accessToken, userEmail);
+  // Keyed by mailbox so this first sync shares one quota budget with the cron's.
+  const emails = await fetchGmailEmails({ key: userEmail, token: accessToken }, userEmail);
   const result = await parseGmailOAuthEmails(userId, userEmail, emails, jobId, credentialId);
 
   const existingIntegration = await repo.findIntegrationById(integrationId);

@@ -163,8 +163,9 @@ async def fetch_search_results_exa(
     results = []
     for item in data.get("results", []):
         highlights = [h for h in item.get("highlights") or [] if isinstance(h, str) and h]
-        # Same per-result cap Parallel applies at its source (excerpt_settings).
-        excerpt = "\n".join(highlights)[:max_chars_per_result]
+        # Keep received text intact until the activity can retain it with
+        # trusted caller scope. The existing excerpt budget is applied there.
+        excerpt = "\n".join(highlights)
         results.append(
             {
                 "title": item.get("title") or "",
