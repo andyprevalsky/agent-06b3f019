@@ -1108,6 +1108,11 @@ async def spawn_explore_agent_activity(
     if text_attachment_pointers:
         initial_user_message["metadata"] = {"attachments": text_attachment_pointers}
 
+    async def completion_handoff() -> Optional[str]:
+        if agent_inbox is not None and await agent_inbox.settle_for_handoff():
+            return EXPLORE_COMPLETION_DEFERRED_FOR_MESSAGE
+        return None
+
     # Run the agent loop. Wrap in try/finally so backgrounded FE posts are always
     # drained — if run_agent raises, the already-scheduled _pending_fe_posts tasks
     # would otherwise dangle on the shared worker loop (asyncio "Task exception was
@@ -1130,6 +1135,7 @@ async def spawn_explore_agent_activity(
                 execute_tool=explore_execute_tool,
                 post_message=explore_post_message,
                 poll_inbox=explore_poll_inbox if agent_inbox is not None else None,
+                completion_handoff=completion_handoff if agent_inbox is not None else None,
                 max_iterations=resolved_max_iterations,
                 winddown_window=EXPLORE_WINDDOWN_WINDOW,
                 max_context_tokens=min(max_context_tokens, selected_context_window),

@@ -20,7 +20,6 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Tuple, Type
 
-import structlog
 from pydantic import BaseModel
 
 # All imports at module level - no inline imports to avoid workflow sandbox issues
@@ -28,6 +27,7 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, TimeoutError as TemporalTimeoutError
 
+from helpers.workflow_safe import context_logger
 from helpers.attachment_context import attachment_request_overhead
 from helpers.attachments import extract_file_pointer_dicts, resolve_attachments_activity
 from helpers.background_agents import is_agent_authored_user_metadata
@@ -75,7 +75,7 @@ from helpers.tool_output import RetentionError, preview_tool_text, stated_cut
 from utils.tool_schemas import create_agent_action_model, get_tool_models
 from utils.user_tool_models import build_user_tool_registry, llm_declarations
 
-logger = structlog.get_logger()
+logger = context_logger()
 
 
 class RequiredTurnToolError(LLMStructuredOutputError):
@@ -213,6 +213,7 @@ async def run_agent(
     # agent-to-agent context rows to append before each LLM call.
     poll_inbox: Optional[Callable[[], Awaitable[List[Dict]]]] = None,
     execute_tool: Optional[Callable[[str, Dict, str], Awaitable[Dict]]] = None,
+    completion_handoff: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
     # Factual status of this agent's still-running background agents, appended
     # to the completion verifier's evidence (None when nothing is pending).
     get_pending_background_status: Optional[Callable[[], Optional[str]]] = None,
@@ -2217,6 +2218,9 @@ async def run_agent(
                     completion_tool_error = str(
                         completion_tool_result.get("message") or "Completion was rejected by the tool executor"
                     )
+
+                if skip_verification and completion_handoff and not completion_tool_error:
+                    completion_tool_error = await completion_handoff()
 
                 # Completion is a normal tool boundary. If its executor rejects
                 # the call, show that error to the same model and continue the

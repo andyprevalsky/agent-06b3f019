@@ -1427,8 +1427,11 @@ async def _webauthn_site():
 
     popup = (
         "<title>popup</title><script>window.webauthn='pending';"
+        "window.webauthnStart={url:location.href,focused:document.hasFocus(),"
+        "visibility:document.visibilityState,readyState:document.readyState};"
         "navigator.credentials.get({publicKey:{challenge:new Uint8Array(32),timeout:60000}})"
-        ".then(()=>{window.webauthn='resolved'}).catch(e=>{window.webauthn=e.name});</script>"
+        ".then(()=>{window.webauthn='resolved'}).catch(e=>{"
+        "window.webauthnError={name:e.name,message:e.message};window.webauthn=e.name});</script>"
     )
     app = web.Application()
     app.router.add_get("/", lambda _r: web.Response(content_type="text/html", text="<title>main</title>"))
@@ -1465,6 +1468,12 @@ async def _popup_webauthn_outcome(arm_webauthn: bool) -> str:
                     if outcome != "pending":
                         break
                     await asyncio.sleep(0.1)
+                if outcome != ("NotAllowedError" if arm_webauthn else "pending"):
+                    details = await popup.evaluate(
+                        "({outcome:window.webauthn,start:window.webauthnStart,error:window.webauthnError,"
+                        "url:location.href,readyState:document.readyState,focused:document.hasFocus()})"
+                    )
+                    print(f"WebAuthn popup arm={arm_webauthn}: {details!r}")
                 return outcome
             finally:
                 await browser.close()

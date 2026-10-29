@@ -19,6 +19,14 @@ from pathlib import Path
 from typing import Sequence
 
 from deploy_stage import LifecycleError, admit_stage, append_stage, release_stage
+from factory_detail import (
+    HostSampler,
+    active_admissions,
+    attempt_detail,
+    reuse_detail,
+    source_detail,
+    stage_detail,
+)
 from factory_metadata import load_metadata
 
 FORWARDED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
@@ -58,10 +66,93 @@ def _git_output(*arguments: str) -> bytes:
     ).stdout
 
 
-def _worktree_fingerprint(command: Sequence[str]) -> str:
-    """Hash every deploy input; exact-tree reuse is conservative by design."""
+# Per-lane input scopes for --reuse-passed. A scoped lane hashes the content of
+# every repository path EXCEPT its excluded prefixes, so a new or unmapped path
+# is always an input (over-inclusion by construction). Only lanes whose suites
+# cannot read the excluded trees are scoped: the back-end, agents and
+# repository-wide structural lanes read across packages (agents executes
+# back-end code and schema; back-end reads front-end, agents, scripts, docs and
+# .claude), so they keep the exact whole-worktree fingerprint. Root manifests,
+# lockfiles, configs, scripts/, shared/ and .claude/ remain inputs of every
+# lane. A scoped lane hashes file content rather than HEAD, so committing an
+# unrelated fix does not invalidate it; its suites do not inspect git state.
+_DOCUMENTATION_ONLY = (
+    "research/",
+    "docs/",
+    "claude-code-src/",
+    "prompt-review/",
+    "pitch-deck/",
+    "observability/",
+)
+_MAC_EXCLUDED = ("back-end/", "agents/", *_DOCUMENTATION_ONLY)
+_LANE_SCOPES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    # Vitest blackbox/structural: front-end/ plus the benchmark catalog read by
+    # tests-e2e/helpers.ts (imported by a blackbox suite).
+    "frontend-coverage-blackbox": (
+        ("back-end/", "mac-app/", "agents/", *_DOCUMENTATION_ONLY),
+        ("agents/benchmarks/tasks.json",),
+    ),
+    # The Electron app consumes front-end/ and shared/ contracts; back-end/ and
+    # agents/ sources appear only in its comments.
+    "mac-static": (_MAC_EXCLUDED, ()),
+    "mac-coverage-blackbox": (_MAC_EXCLUDED, ()),
+}
+
+
+def _in_lane_scope(path: str, excluded: Sequence[str], reincluded: Sequence[str]) -> bool:
+    if path in reincluded:
+        return True
+    return not any(path.startswith(prefix) for prefix in excluded)
+
+
+def _split_paths(output: bytes) -> list[str]:
+    return [os.fsdecode(raw) for raw in output.split(b"\0") if raw]
+
+
+def _scoped_content_fingerprint(digest: "hashlib._Hash", stage: str) -> None:
+    excluded, reincluded = _LANE_SCOPES[stage]
+    _hash_field(digest, "scope", json.dumps([stage, excluded, reincluded]).encode())
+    # --no-renames: a staged rename out of scope must list its in-scope source
+    # as deleted, otherwise the unchanged HEAD entry keeps a stale pass reusable.
+    changed = set(
+        _split_paths(
+            _git_output("diff", "--no-ext-diff", "--no-renames", "--name-only", "-z", "HEAD")
+        )
+    )
+    for entry in sorted(_split_paths(_git_output("ls-tree", "-r", "-z", "--full-tree", "HEAD"))):
+        meta, _, relative = entry.partition("\t")
+        if relative in changed or not _in_lane_scope(relative, excluded, reincluded):
+            continue
+        _hash_field(digest, f"tree:{relative}", meta.encode())
+    untracked = set(_split_paths(_git_output("ls-files", "--others", "--exclude-standard", "-z")))
+    for relative in sorted(changed | untracked):
+        if not _in_lane_scope(relative, excluded, reincluded):
+            continue
+        path = REPO_ROOT / relative
+        try:
+            if path.is_symlink():
+                value = b"link:" + os.readlink(path).encode()
+            elif path.exists():
+                value = (b"x:" if os.access(path, os.X_OK) else b"f:") + path.read_bytes()
+            else:
+                value = b"deleted"
+        except OSError as error:
+            value = f"unreadable:{type(error).__name__}".encode()
+        _hash_field(digest, f"worktree:{relative}", value)
+
+
+def _worktree_fingerprint(command: Sequence[str], stage: str = "") -> str:
+    """Hash every deploy input; exact-tree reuse is conservative by design.
+
+    A lane in _LANE_SCOPES hashes the content of its declared inputs; every
+    other lane hashes HEAD plus the whole worktree diff and untracked files.
+    """
 
     digest = hashlib.sha256()
+    if stage in _LANE_SCOPES:
+        _scoped_content_fingerprint(digest, stage)
+        _hash_invocation(digest, command)
+        return digest.hexdigest()
     _hash_field(digest, "head", _git_output("rev-parse", "HEAD"))
     _hash_field(digest, "tracked", _git_output("diff", "--no-ext-diff", "--binary", "HEAD"))
     untracked = _git_output("ls-files", "--others", "--exclude-standard", "-z")
@@ -74,6 +165,11 @@ def _worktree_fingerprint(command: Sequence[str]) -> str:
         except OSError as error:
             value = f"unreadable:{type(error).__name__}".encode()
         _hash_field(digest, f"untracked:{relative}", value)
+    _hash_invocation(digest, command)
+    return digest.hexdigest()
+
+
+def _hash_invocation(digest: "hashlib._Hash", command: Sequence[str]) -> None:
     _hash_field(digest, "cwd", os.fsencode(os.getcwd()))
     for index, argument in enumerate(command):
         _hash_field(digest, f"argv:{index}", os.fsencode(argument))
@@ -81,7 +177,6 @@ def _worktree_fingerprint(command: Sequence[str]) -> str:
         if name in {"_", "OLDPWD", "SHLVL"}:
             continue
         _hash_field(digest, f"env:{name}", os.fsencode(value))
-    return digest.hexdigest()
 
 
 def _cache_path(run_dir: Path, stage: str, fingerprint: str) -> Path:
@@ -103,6 +198,41 @@ def _record_cache_hit(run_dir: Path, stage: str, fingerprint: str) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(json.dumps({"schema_version": 1, "fingerprint": fingerprint}) + "\n")
     temporary.replace(path)
+
+
+def _append_reused(
+    run_dir: Path,
+    run_id: str,
+    stage: str,
+    fingerprint: str,
+    telemetry: dict,
+    invoked_epoch: float,
+) -> None:
+    """Record an exact-input reuse so reviews can count skipped reruns."""
+
+    now = time.time()
+    try:
+        append_stage(
+            run_dir,
+            run_id=run_id,
+            stage=stage,
+            started_at=_utc_timestamp(),
+            finished_at=_utc_timestamp(),
+            started_epoch=now,
+            finished_epoch=now,
+            exit_code=0,
+            log="",
+            telemetry=telemetry,
+            status="reused",
+            detail={
+                "schema_version": 1,
+                "outcome": {"exit_code": 0, "failure_class": None},
+                "reuse": reuse_detail(run_dir, fingerprint, requested=True, hit=True),
+                "timing": {"setup_seconds": round(max(0.0, now - invoked_epoch), 3), "exec_seconds": 0.0},
+            },
+        )
+    except OSError as error:
+        print(f"warning: could not append reused stage record: {error}", file=sys.stderr)
 
 
 def _run_logged(log_path: Path, command: Sequence[str]) -> int:
@@ -189,7 +319,24 @@ def _run_logged(log_path: Path, command: Sequence[str]) -> int:
     return child_exit
 
 
+def _source_in_background() -> tuple[threading.Thread, dict]:
+    """Collect source detail concurrently so it never adds to stage wall time."""
+
+    source: dict = {}
+
+    def collect() -> None:
+        try:
+            source.update(source_detail(REPO_ROOT))
+        except Exception as error:  # Telemetry must never change a gate result.
+            print(f"warning: could not collect source detail: {type(error).__name__}", file=sys.stderr)
+
+    thread = threading.Thread(target=collect, daemon=True)
+    thread.start()
+    return thread, source
+
+
 def main() -> int:
+    invoked_epoch = time.time()
     args = _parser().parse_args()
     command = list(args.command)
     if command and command[0] == "--":
@@ -212,18 +359,21 @@ def main() -> int:
         return 2
 
     run_dir = args.run_root / run_id
+    concurrent_stages = max(0, active_admissions(run_dir) - 1)
     fingerprint: str | None = None
     if args.reuse_passed:
         try:
-            fingerprint = _worktree_fingerprint(command)
+            fingerprint = _worktree_fingerprint(command, args.stage)
         except (OSError, subprocess.SubprocessError) as error:
             print(f"warning: could not fingerprint deploy inputs: {error}", file=sys.stderr)
         if fingerprint is not None and _cache_hit(run_dir, args.stage, fingerprint):
+            _append_reused(run_dir, run_id, args.stage, fingerprint, telemetry, invoked_epoch)
             try:
                 release_stage(args.run_root, run_id=run_id, token=token)
             except (LifecycleError, OSError) as error:
                 print(f"warning: could not release deploy stage admission: {error}", file=sys.stderr)
-            print(f"== reused passed deploy stage: {args.stage} (exact worktree + command) ==")
+            scope = "lane inputs" if args.stage in _LANE_SCOPES else "exact worktree"
+            print(f"== reused passed deploy stage: {args.stage} ({scope} + command) ==")
             return 0
 
     log_relative = f"logs/{args.stage}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{os.getpid()}.log"
@@ -233,8 +383,33 @@ def main() -> int:
     started_epoch = time.time()
     print(f"== deploy stage: {args.stage} ==")
 
+    source_thread, source = _source_in_background()
+    sampler = HostSampler().start()
     stage_exit = _run_logged(log_path, command)
     finished_epoch = time.time()
+    host = sampler.stop()
+    source_thread.join(timeout=30)
+    try:
+        detail = stage_detail(
+            exit_code=stage_exit,
+            log_path=log_path,
+            invoked_epoch=invoked_epoch,
+            started_epoch=started_epoch,
+            finished_epoch=finished_epoch,
+            concurrent_stages=concurrent_stages,
+            host=host,
+            source=dict(source),
+            attempt=attempt_detail(run_dir, args.stage, source),
+            reuse=reuse_detail(
+                run_dir / "passed-cache" / args.stage,
+                fingerprint,
+                requested=args.reuse_passed,
+                hit=False,
+            ),
+        )
+    except Exception as error:  # Telemetry must never change a gate result.
+        print(f"warning: could not build stage detail: {type(error).__name__}", file=sys.stderr)
+        detail = None
     try:
         append_stage(
             run_dir,
@@ -247,6 +422,7 @@ def main() -> int:
             exit_code=stage_exit,
             log=log_relative,
             telemetry=telemetry,
+            detail=detail,
         )
     except OSError as error:
         print(f"warning: could not append deploy stage record: {error}", file=sys.stderr)
@@ -257,7 +433,7 @@ def main() -> int:
 
     if stage_exit == 0 and fingerprint is not None:
         try:
-            finished_fingerprint = _worktree_fingerprint(command)
+            finished_fingerprint = _worktree_fingerprint(command, args.stage)
             if finished_fingerprint == fingerprint:
                 _record_cache_hit(run_dir, args.stage, fingerprint)
             else:
