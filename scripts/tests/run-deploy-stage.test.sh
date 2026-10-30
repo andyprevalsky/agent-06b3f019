@@ -108,6 +108,22 @@ reuse_stage standalone --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$st
 [ "$(wc -l < "$standalone_counter" | tr -d ' ')" = 1 ] || fail "a pass recorded without --reuse-passed was not reusable"
 grep -q "reused passed deploy stage: standalone (exact worktree + command)" "$TEST_ROOT/standalone.out" \
     || fail "standalone reuse was not disclosed with its scope"
+# Process identity is not a deploy input: systemd stamps a fresh
+# INVOCATION_ID/JOURNAL_STREAM/SYSTEMD_EXEC_PID on every transient unit and the
+# terminal its own geometry, so a lane relaunched as a new unit must still match
+# its own pass, while a changed gate input such as DEPLOY_GATE_OVERRIDES must not.
+identity_counter="$TEST_ROOT/reuse-identity-counter"
+INVOCATION_ID=0123abcd JOURNAL_STREAM=8:1 SYSTEMD_EXEC_PID=11 COLUMNS=80 LISTEN_PID=11 \
+    reuse_stage identity --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$identity_counter" >/dev/null
+INVOCATION_ID=4567ef01 JOURNAL_STREAM=8:2 SYSTEMD_EXEC_PID=22 COLUMNS=120 LISTEN_PID=22 \
+    reuse_stage identity --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$identity_counter" >"$TEST_ROOT/identity.out"
+[ "$(wc -l < "$identity_counter" | tr -d ' ')" = 1 ] \
+    || fail "a new systemd unit identity defeated reuse of an identical pass"
+grep -q "reused passed deploy stage" "$TEST_ROOT/identity.out" \
+    || fail "identity-only relaunch was not disclosed as reuse"
+DEPLOY_GATE_OVERRIDES=fixture:changed \
+    reuse_stage identity --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$identity_counter" >/dev/null
+[ "$(wc -l < "$identity_counter" | tr -d ' ')" = 2 ] || fail "a changed gate input reused stale evidence"
 reuse_stage --finish >/dev/null
 
 # A failed finalize must remain non-zero even though summary rendering succeeds,

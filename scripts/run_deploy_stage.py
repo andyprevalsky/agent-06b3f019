@@ -197,12 +197,48 @@ def _worktree_fingerprint(command: Sequence[str], stage: str = "") -> str:
     return digest.hexdigest()
 
 
+# The environment is a deploy input (NODE_OPTIONS, DEPLOY_GATE_OVERRIDES,
+# ROSE_*, CONDUCTOR_* change what a gate runs), so every variable is hashed
+# except the ones that only identify this process, session or terminal.
+# systemd stamps a fresh INVOCATION_ID/JOURNAL_STREAM/SYSTEMD_EXEC_PID on every
+# transient unit and the shell its own PWD/OLDPWD/SHLVL/_, so a lane relaunched
+# as a new unit inside the same deploy run never matched its own pass: on
+# 2026-10-30 the 33-minute coverage lane and the 10-minute structural lane
+# re-ran on identical bytes on every retry. cwd is hashed on its own.
+_PROCESS_IDENTITY_ENV = frozenset(
+    {
+        "_",
+        "OLDPWD",
+        "PWD",
+        "SHLVL",
+        "INVOCATION_ID",
+        "JOURNAL_STREAM",
+        "SYSTEMD_EXEC_PID",
+        "NOTIFY_SOCKET",
+        "COLUMNS",
+        "LINES",
+        "TERM_SESSION_ID",
+        "ITERM_SESSION_ID",
+        "WINDOWID",
+        "XDG_SESSION_ID",
+        "SSH_CLIENT",
+        "SSH_CONNECTION",
+        "SSH_TTY",
+    }
+)
+_PROCESS_IDENTITY_ENV_PREFIXES = ("LISTEN_",)
+
+
+def _is_process_identity_env(name: str) -> bool:
+    return name in _PROCESS_IDENTITY_ENV or name.startswith(_PROCESS_IDENTITY_ENV_PREFIXES)
+
+
 def _hash_invocation(digest: "hashlib._Hash", command: Sequence[str]) -> None:
     _hash_field(digest, "cwd", os.fsencode(os.getcwd()))
     for index, argument in enumerate(command):
         _hash_field(digest, f"argv:{index}", os.fsencode(argument))
     for name, value in sorted(os.environ.items()):
-        if name in {"_", "OLDPWD", "SHLVL"}:
+        if _is_process_identity_env(name):
             continue
         _hash_field(digest, f"env:{name}", os.fsencode(value))
 

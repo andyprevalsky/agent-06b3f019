@@ -655,7 +655,12 @@ supervisor; a receipt started before `--since` belongs to an earlier iteration
 and never satisfies the wait, and a lane that failed before writing a stage row
 (refused by the memory budget, spawn error) wakes it like any other failure.
 Never arm a second, different waiter for the same lanes. An exact-input
-`--reuse-passed` hit records `reused`, which both count as a pass.
+`--reuse-passed` hit records `reused`, which both count as a pass. The exact
+input is HEAD, the worktree diff and untracked files, cwd, argv and the
+environment minus process-identity variables (systemd `INVOCATION_ID`,
+`JOURNAL_STREAM`, `SYSTEMD_EXEC_PID`, `LISTEN_*`; shell `PWD`/`SHLVL`;
+terminal geometry and session ids), so a lane relaunched as a new unit on
+identical bytes reuses its own pass instead of re-running.
 
 **Speculative gates on the next HEAD (`run --follow-source`).** Start the
 pipeline with `--follow-source` so a fix committed while CodeRabbit is still
