@@ -20,10 +20,12 @@ that actually merges. Rows already on the base ref are never touched.
 
 A deploy's local smoke lane records its rows under .context/deploy-ledger-park
 (BENCHMARK_HISTORY_PARK_DIR) so the tracked ledgers stay unchanged while the
-other gates fingerprint the worktree. `--apply-parked` appends those parked
-attempt and duration rows to the tracked ledgers byte-for-byte and replays the
-parked span rows through the normal segmented span append, marks the parked
-files applied, and then runs the latest-only filter over the result.
+other gates fingerprint the worktree. `--apply-parked` first checks that every
+parked row parses (a truncated row refuses the publish before any ledger is
+touched), then appends the parked attempt and duration rows to the tracked
+ledgers byte-for-byte, replays the parked span rows through the normal
+segmented span append, marks the parked files applied, and runs the
+latest-only filter over the result.
 """
 from __future__ import annotations
 
@@ -195,48 +197,56 @@ def _load_span_history(repo: Path):
     return module
 
 
+def _parked_rows(path: Path) -> list[bytes]:
+    """The non-blank rows of one parked file, each verified to parse as a JSON
+    object. A truncated or otherwise unparseable row (the smoke lane died
+    mid-write) fails the whole publish before any ledger is touched: skipping
+    it would mark the file applied while the tracked ledger lacks the row."""
+    rows: list[bytes] = []
+    for number, line in enumerate(path.read_bytes().splitlines(), start=1):
+        if not line.strip():
+            continue
+        if _row(line) is None:
+            raise RuntimeError(f"{path}:{number}: unparseable parked ledger row; nothing was applied")
+        rows.append(line)
+    return rows
+
+
 def apply_parked(repo: Path, park: Path) -> dict[str, int]:
     """Replay the smoke lane's parked rows into the tracked ledgers.
 
-    Attempt and duration rows are appended byte-for-byte; span rows go through
-    the segmented span append (90 MiB segments per branch and day) exactly as a
-    direct write would have. Each applied parked file is renamed
-    ``<name>.applied-<utc>`` so a second publish cannot apply it again.
-    Returns the number of rows applied per ledger."""
+    Every parked file is parsed first; one bad row refuses the publish before
+    any ledger changes. Attempt and duration rows are then appended
+    byte-for-byte; span rows go through the segmented span append (90 MiB
+    segments per branch and day) exactly as a direct write would have. Each
+    applied parked file is renamed ``<name>.applied-<utc>`` so a second
+    publish cannot apply it again. Returns the number of rows applied per
+    ledger."""
     # The publish itself must never be redirected back into the park.
     os.environ.pop(PARK_DIR_ENV, None)
     applied: dict[str, int] = {}
     if not park.is_dir():
         print(f"no parked ledger rows under {park}")
         return applied
+    parked = {name: _parked_rows(park / name) for name in (ATTEMPTS, DURATIONS, SPANS) if (park / name).is_file()}
+    if not parked:
+        print(f"no parked ledger rows under {park}")
+        return applied
     history = repo / HISTORY_DIR
     history.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    for name in (ATTEMPTS, DURATIONS):
-        source = park / name
-        if not source.is_file():
-            continue
-        lines = [line for line in source.read_bytes().splitlines() if line.strip()]
-        with (history / name).open("ab") as handle:
-            handle.write(b"".join(line + b"\n" for line in lines))
+    for name, lines in parked.items():
+        if name == SPANS:
+            rows = [_row(line) for line in lines]
+            written = _load_span_history(repo).record_span_observations(rows) if rows else 0
+            if written != len(rows):
+                raise RuntimeError(f"{park / name}: applied {written} of {len(rows)} parked span rows")
+        else:
+            with (history / name).open("ab") as handle:
+                handle.write(b"".join(line + b"\n" for line in lines))
         applied[name] = len(lines)
-        source.rename(park / f"{name}.applied-{stamp}")
-    spans = park / SPANS
-    if spans.is_file():
-        rows = []
-        for line in spans.read_bytes().splitlines():
-            row = _row(line) if line.strip() else None
-            if row is not None:
-                rows.append(row)
-        written = _load_span_history(repo).record_span_observations(rows) if rows else 0
-        if written != len(rows):
-            raise RuntimeError(f"{spans}: applied {written} of {len(rows)} parked span rows")
-        applied[SPANS] = written
-        spans.rename(park / f"{SPANS}.applied-{stamp}")
-    for name, count in applied.items():
-        print(f"{HISTORY_DIR}/{name}: applied {count} parked row(s) from {park}")
-    if not applied:
-        print(f"no parked ledger rows under {park}")
+        (park / name).rename(park / f"{name}.applied-{stamp}")
+        print(f"{HISTORY_DIR}/{name}: applied {len(lines)} parked row(s) from {park}")
     return applied
 
 

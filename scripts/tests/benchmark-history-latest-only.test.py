@@ -227,6 +227,23 @@ class LatestOnlyTests(unittest.TestCase):
         self.assertEqual([r["agent_id"] for r in self.read("task_attempts.jsonl")[2:]], ["park-b1"])
         self.assertFalse((elsewhere / "task_attempts.jsonl").exists())
 
+    def test_apply_parked_rejects_an_unparseable_parked_row_before_touching_any_ledger(self):
+        # The smoke lane died mid-write and left a truncated span row. Skipping it
+        # would mark the park applied while the tracked ledger lacks the row, so
+        # the publish must fail before any ledger is appended or any file renamed.
+        park = self.park("task_attempts.jsonl",
+                         [attempt("smoke-b", True, "2026-10-21T11:06:00+00:00", 100, "park-b1")])
+        self.park("span_durations.jsonl", [span("smoke-b", "park-b1", "2026-10-21T11:05:30+00:00")])
+        with (park / "span_durations.jsonl").open("a") as handle:
+            handle.write('{"agent_id": "park-b1", "benchmark": "smoke-b", "dur')  # cut mid-row, no newline
+        before = self.tracked_bytes()
+        with self.assertRaises(RuntimeError) as refused:
+            self.run_tool("--apply-parked", "--write")
+        self.assertIn("span_durations.jsonl:2", str(refused.exception))
+        self.assertEqual(self.tracked_bytes(), before, "a refused publish must not touch any tracked ledger")
+        self.assertEqual(sorted(path.name for path in park.iterdir()), ["span_durations.jsonl", "task_attempts.jsonl"],
+                         "nothing may be marked applied")
+
 
 if __name__ == "__main__":
     unittest.main()
