@@ -129,16 +129,26 @@ backend-coverage-blackbox (2560 MB) it fits the budget. A plan with
 The deploy.md ``semantic-stack`` lane (4096 MB; its own ``run.sh --benchmark``
 stack, Playwright semantics, latency ratchet, E2B smoke) deliberately keeps its
 ``after`` edges on backend coverage and live-probes instead of joining the
-coverage phase. Measured on #1639 (8 cores / 16007 MB, watchdog cap 14471 MB):
-the coverage phase's whole-box MemAvailable floor was 6485 MB (9522 MB used)
-and semantic-stack alone took MemAvailable from 11392 to 6741 MB (~4650 MB
+coverage phase, and trails every stack-owning lane for an ownership reason,
+not a memory one: its startup runs ``scripts/kill-services.sh``, which
+terminates every runtime process owned by this worktree, including the
+coverage shards' instrumented backends, the local smoke lane's per-run
+benchmark stack and the AgentCard lifecycle lane's ``run-bench --local``
+stack. The plan loader therefore appends implied ``after`` edges from each
+``STACK_KILLER_LANES`` lane to every ``STACK_OWNER_LANES`` lane in the plan
+(``implied_stack_dependencies``; the receipt's ``after`` map shows them and
+declared edges are kept), so semantic-stack can never be admitted while smoke
+or agentcard-lifecycle is running, whatever the memory accounting says (on
+#1640 only 4096 + 4096 MB against an 8188 MB budget kept them apart).
+Memory still rules out the overlap with the coverage lanes on this host:
+measured on #1639 (8 cores / 16007 MB, watchdog cap 14471 MB), the coverage
+phase's whole-box MemAvailable floor was 6485 MB (9522 MB used) and
+semantic-stack alone took MemAvailable from 11392 to 6741 MB (~4650 MB
 footprint; 1652.8 MB largest child RSS from the stage row), so overlapping
 them would reach ~14172 MB used, inside the 2048 MB reserve below the cap, and
-the declared reservations (7808 + 4096 MB) exceed the 8065 MB budget. Its
-startup also runs ``scripts/kill-services.sh``, which terminates every runtime
-process owned by this worktree, including the coverage shards' instrumented
-backends and the smoke lane's stack. Overlapping it needs a smaller stack or a
-larger host, not a schedule change.
+the declared reservations (7808 + 4096 MB) exceed the 8065 MB budget.
+Overlapping it with the coverage lanes needs a smaller stack or a larger host,
+not a schedule change.
 
 Plan file (JSON): {"lanes": [{"name", "command": [...], "cwd": "back-end",
 "env": {...}, "after": ["lane"], "reuse_passed": true, "group": "3",
@@ -561,9 +571,36 @@ def load_plan(path: Path) -> list[Lane]:
     return load_plan_payload(path)[0]
 
 
+# Ownership boundary, not a memory question: the deploy.md ``semantic-stack``
+# lane starts its own ``run.sh --benchmark`` stack, whose startup runs
+# ``scripts/kill-services.sh`` against every runtime process this worktree
+# owns. A lane that owns such a stack (the local smoke lane's per-run
+# benchmark stack, the AgentCard lifecycle lane's ``run-bench --local`` stack)
+# must therefore have exited before it starts. On #1640 only memory kept them
+# apart (4096 + 4096 MB against an 8188 MB budget, 4 MB from admitting both),
+# so the loader adds the edge explicitly; declared edges are never removed.
+STACK_KILLER_LANES = ("semantic-stack",)
+STACK_OWNER_LANES = ("smoke", "agentcard-lifecycle")
+
+
+def implied_stack_dependencies(lanes: list[Lane]) -> list[Lane]:
+    """``after`` edges from every stack-killing lane to each stack-owning lane
+    present in the plan, appended to the lane's declared edges."""
+    names = {lane.name for lane in lanes}
+    result: list[Lane] = []
+    for lane in lanes:
+        if lane.name in STACK_KILLER_LANES:
+            owners = [owner for owner in STACK_OWNER_LANES
+                      if owner in names and owner != lane.name and owner not in lane.after]
+            if owners:
+                lane = replace(lane, after=[*lane.after, *owners])
+        result.append(lane)
+    return result
+
+
 def load_plan_payload(path: Path) -> tuple[list[Lane], dict]:
     payload = json.loads(path.read_text())
-    lanes = [Lane(**lane) for lane in payload["lanes"]]
+    lanes = implied_stack_dependencies([Lane(**lane) for lane in payload["lanes"]])
     names = [lane.name for lane in lanes]
     if len(set(names)) != len(names):
         raise ValueError(f"duplicate lane names: {names}")

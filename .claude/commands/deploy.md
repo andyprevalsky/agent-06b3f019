@@ -1063,8 +1063,11 @@ Group 3 lanes alone). The local smoke lane (Group 4, 4096 MB) declares
 exclusive structural lane instead of being admitted first and holding that
 lane's memory (#1638 attempt 5 ran smoke alone for ~22 min; 11–24 min across attempts); the AgentCard lane
 declares the same phase. Undeclared Group 4 lanes stay unphased, and a plan's
-own `after` edges are never removed: `live-probes` and `semantic-stack` start
-as soon as their declared dependencies and memory allow.
+own `after` edges are never removed: `live-probes` starts as soon as its
+declared dependencies and memory allow, and `semantic-stack` additionally
+waits for the stack-owning lanes (`smoke`, `agentcard-lifecycle`) because its
+`run.sh --benchmark` startup runs `kill-services.sh` against every runtime
+process this worktree owns; the driver adds those edges to the plan itself.
 
 **Retry after a failure: failed-first, still a full sweep.** Rerun the same
 stage with `BACKEND_COVERAGE_FAILED_FIRST=1` in the `env` above. The previously

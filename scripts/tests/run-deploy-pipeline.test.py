@@ -487,6 +487,67 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
     print("materialized reservation credit: ok")
 
 
+def check_stack_owner_dependency(tmp: Path, env: dict[str, str]) -> None:
+    """semantic-stack's ``run.sh --benchmark`` startup runs kill-services.sh
+    against every runtime process this worktree owns, so it must never start
+    while the local smoke lane or the AgentCard lifecycle lane (their own
+    local stacks) is running. On #1640 only memory kept them apart (4096 +
+    4096 MB against an 8188 MB budget). The plan loader now appends the edge
+    (declared edges kept, receipt ``after`` shows it); with unbounded memory
+    only the dependency can hold semantic-stack back. Plans without a
+    stack-owning lane and lanes with other names are untouched, and a plan
+    that would close a cycle through the implied edge is refused."""
+    pipeline = load_module("pipeline_stack_owner", DRIVER)
+    plan = tmp / "stack-owner-plan.json"
+    state = tmp / "stack-owner"
+    marker = tmp / "semantic-started"
+    write_plan(plan, [
+        {"name": "cov", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3"},
+        {"name": "smoke", "command": ["sleep", "1.5"], "reuse_passed": False, "group": "4", "phase": "coverage"},
+        {"name": "agentcard-lifecycle", "command": ["sleep", "1.0"], "reuse_passed": False, "group": "4",
+         "phase": "coverage"},
+        {"name": "semantic-stack", "command": ["touch", str(marker)], "after": ["cov"], "reuse_passed": False,
+         "group": "4"},
+    ], schedule={"policy": "legacy"})
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, env=env, timeout=120)
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["status"])
+    lanes = receipt["lanes"]
+    assert lanes["semantic-stack"]["started_epoch"] >= max(lanes["smoke"]["finished_epoch"],
+                                                            lanes["agentcard-lifecycle"]["finished_epoch"]), \
+        "semantic-stack started while a lane owning a worktree stack was still running"
+    assert receipt["after"]["semantic-stack"] == ["cov", "smoke", "agentcard-lifecycle"], receipt["after"]
+    assert receipt["after"]["smoke"] == [] and receipt["after"]["agentcard-lifecycle"] == [], receipt["after"]
+    assert lanes["smoke"]["started_epoch"] < lanes["cov"]["finished_epoch"], "owners are not held back"
+    # No stack-owning lane in the plan: nothing is added; other names are untouched.
+    write_plan(plan, [
+        {"name": "cov", "command": ["true"], "group": "3"},
+        {"name": "semantic-stack", "command": ["true"], "after": ["cov"], "group": "4"},
+        {"name": "semantic", "command": ["true"], "group": "4"},
+        {"name": "smoke-like", "command": ["true"], "group": "4", "phase": "coverage"},
+    ])
+    loaded = {lane.name: lane for lane in pipeline.load_plan_payload(plan)[0]}
+    assert loaded["semantic-stack"].after == ["cov"] and loaded["semantic"].after == [], loaded
+    # An implied edge never duplicates a declared one, and a plan that makes an
+    # owner wait for the killer is a cycle, refused before any lane starts.
+    write_plan(plan, [
+        {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage"},
+        {"name": "semantic-stack", "command": ["true"], "after": ["smoke"], "group": "4"},
+    ])
+    assert pipeline.load_plan_payload(plan)[0][1].after == ["smoke"]
+    write_plan(plan, [
+        {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage", "after": ["semantic-stack"]},
+        {"name": "semantic-stack", "command": ["true"], "group": "4"},
+    ])
+    try:
+        pipeline.load_plan_payload(plan)
+    except ValueError as error:
+        assert "cyclic" in str(error), error
+    else:
+        raise AssertionError("an owner that waits for semantic-stack must be refused as a cycle")
+    print("stack owner dependency: ok")
+
+
 def check_wait_receipt_contract(tmp: Path, pipeline=None, scenario="both") -> None:
     """Replay terminal receipts at the supervisor/row waiter boundary."""
     pipeline = pipeline or load_module("pipeline_wait_contract", DRIVER)
@@ -709,6 +770,7 @@ def main() -> int:
         check_wait_receipt_contract(tmp)
         check_live_headroom_and_child_rusage(tmp, env)
         check_materialized_reservation_credit(tmp, env)
+        check_stack_owner_dependency(tmp, env)
         check_plan_scaling()
         check_structural_memory_floor()
         check_macos_memory(tmp, env)
