@@ -29,6 +29,8 @@ export interface ComputeCodeCredentialResult {
   source: 'user' | 'pool';
   userId: string;
   poolTokenId?: string;
+  /** The exact Integration row served; failure reports name it (S33). */
+  integrationId?: string;
   lineageKey?: string;
 }
 
@@ -157,6 +159,7 @@ async function rowToCredential(
       source,
       userId: integration.userId,
       poolTokenId: source === 'pool' ? integration.id : undefined,
+      integrationId: integration.id,
     };
   }
 
@@ -169,6 +172,7 @@ async function rowToCredential(
     source,
     userId: integration.userId,
     poolTokenId: source === 'pool' ? integration.id : undefined,
+    integrationId: integration.id,
   };
 }
 

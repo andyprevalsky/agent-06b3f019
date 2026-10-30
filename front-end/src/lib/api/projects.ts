@@ -20,6 +20,8 @@
 import { API_BASE_WITH_PATH, getAuthHeaders } from './client';
 
 export interface Project {
+  /** One folder level; older cached project responses may omit it. */
+  folders?: ProjectFolder[];
   id: string;
   name: string;
   /** Code repo the project's workspaces clone, e.g. `https://github.com/org/repo`. */
@@ -155,4 +157,36 @@ export async function deleteProjectEnvFile(projectId: string, fileId: string): P
     headers: getAuthHeaders(),
   });
   if (!response.ok) throw new Error(`Failed to delete environment file (${response.status})`);
+}
+
+/** A single organizational level inside a project; folders cannot contain folders. */
+export interface ProjectFolder {
+  id: string;
+  name: string;
+  projectId: string;
+}
+
+export async function saveProjectFolder(
+  projectId: string,
+  name: string,
+  folderId?: string,
+): Promise<ProjectFolder> {
+  const url = `${projectUrl(projectId)}/folders${folderId ? `/${encodeURIComponent(folderId)}` : ''}`;
+  const response = await fetch(url, {
+    method: folderId ? 'PUT' : 'POST',
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ name }),
+  });
+  if (response.status === 409)
+    throw new Error('A folder with this name already exists in this project.');
+  if (!response.ok) throw new Error('Could not save folder. Try again.');
+  return (await response.json()) as ProjectFolder;
+}
+
+export async function deleteProjectFolder(projectId: string, folderId: string): Promise<void> {
+  const response = await fetch(`${projectUrl(projectId)}/folders/${encodeURIComponent(folderId)}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+  });
+  if (!response.ok) throw new Error('Could not delete folder. Try again.');
 }

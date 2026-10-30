@@ -101,3 +101,17 @@ export async function grantGithubRepoAccess(userId: string, repoUrl: string): Pr
     skipDuplicates: true,
   });
 }
+
+/** Indexed one-level folder CRUD; service checks the owning project first. */
+export function listFolders(projectId: string) {
+  return prisma.projectFolder.findMany({ where: { projectId }, orderBy: { name: 'asc' } });
+}
+export function createFolder(projectId: string, name: string) {
+  return prisma.projectFolder.create({ data: { projectId, name } });
+}
+export function renameFolder(projectId: string, id: string, name: string) {
+  return prisma.projectFolder.updateMany({ where: { id, projectId }, data: { name } });
+}
+export function deleteFolder(projectId: string, id: string) {
+  return prisma.projectFolder.deleteMany({ where: { id, projectId } });
+}

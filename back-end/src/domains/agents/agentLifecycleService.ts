@@ -2,7 +2,7 @@
  * Agent lifecycle service — create and delete agents.
  */
 
-import { resolveAgentProjectId } from './agentProject';
+import { resolveCreateAgentPlacement } from './agentProject';
 import { randomUUID } from '../../providers/crypto';
 import { startAgentWorkflowExecution } from '../../providers/temporal';
 import { bindStartedRunIdentity } from '../../providers/workflowGeneration';
@@ -211,7 +211,7 @@ export async function createAgent(
   await applyCreateBodyRules(body, userId, benchmarkFlag);
   const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);
   if (existingSubAgent !== null) return existingSubAgent;
-  const projectId = await resolveAgentProjectId(body, userId);
+  const { projectId, folderId } = await resolveCreateAgentPlacement(body, userId);
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
     await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null, userId);
   const agentId = body.agent_id ?? randomUUID();
@@ -256,6 +256,7 @@ export async function createAgent(
     workflowTaskQueue: body.task_queue,
     ...(await serverCreateFields(body, userId, isSubAgent, options)),
     projectId,
+    folderId,
     taskPath,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;

@@ -5,6 +5,7 @@
  *           every "+" (Home's too): tooltip and aria-label "Create Super Agent"
  *           icon = ProjectIcon: the GitHub repo owner's avatar when repoUrl is a
  *           GitHub repo, else (or after a load error) the folder (UI item 32)
+ *   [REST] --folder-plus--> parent opens a one-level folder name editor
  *   [REST] --right-click--> [MENU] Rename project | Project settings | Delete project (red)
  *   [MENU] --Rename--> [RENAMING] inline input --Enter (non-empty)--> onRename(name) --> [REST]
  *                                              --Escape | blur--> [REST]
@@ -127,6 +128,7 @@ export interface RoseProjectRowProps {
   /** The next new agent is created in this project (its "+" was clicked). */
   isPending?: boolean;
   onCreateAgent: () => void;
+  onCreateFolder?: () => void;
   onOpenSettings: () => void;
   onStartRename: () => void;
   onRename: (name: string) => void;
@@ -242,6 +244,17 @@ export default function RoseProjectRow(props: RoseProjectRowProps) {
           {isExpanded && (
             <>
               <NewAgentHereButton onClick={props.onCreateAgent} />
+              {props.onCreateFolder && (
+                <button
+                  type="button"
+                  aria-label={`New folder in ${project.name}`}
+                  title="New folder"
+                  onClick={props.onCreateFolder}
+                  className={ICON_BUTTON}
+                >
+                  <FolderPlus className="h-[15px] w-[15px]" strokeWidth={1.7} />
+                </button>
+              )}
               <button
                 type="button"
                 aria-label={`${project.name} project settings`}

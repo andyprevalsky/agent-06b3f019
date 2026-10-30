@@ -183,6 +183,7 @@ const createAgentBaseSchema = z.object({
   memory_enabled: z.boolean().optional(),
   /** Owning Project (left-bar grouping); sub-agents inherit the parent's when omitted. */
   project_id: z.string().uuid().nullable().optional(),
+  folder_id: z.string().uuid().nullable().optional(),
   // Provider/environment execution mode. Defaults to real at the DB and
   // workflow boundaries; sub-agents inherit their parent's persisted mode.
   world_model_mode: z.enum(['real', 'simulate', 'shadow']).optional(),
@@ -269,6 +270,8 @@ export const updateStatusSchema = z.object({
 });
 
 export const updateAgentSchema = z.object({
+  project_id: z.string().uuid().nullable().optional(),
+  folder_id: z.string().uuid().nullable().optional(),
   // Sidebar rename. `null` clears the override and falls back to the goal.
   title: z.string().trim().min(1).max(80).nullable().optional(),
   // Internal schema-generator candidate. Applied only to an untitled root agent,
