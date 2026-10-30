@@ -60,11 +60,22 @@ if [ "${#PREDEPLOY_TASKS[@]}" -ge "$PREDEPLOY_BENCH_CAP" ]; then
     echo "🚨 PREDEPLOY BENCH COUNT AT HARD CAP: ${#PREDEPLOY_TASKS[@]}/$PREDEPLOY_BENCH_CAP" >&2
 fi
 
+# Every stage marker carries a UTC timestamp so a deploy's smoke lane shows
+# where its wall clock went (the four regression pre-stages ran serially for
+# 22 min before the fleet launched on 2026-10-29) without changing the stages.
+stage_mark() {
+    printf '::rca-stage::%s\n' "$1"
+    printf '⏱ %s stage %s\n' "$(date -u +%FT%TZ)" "$1"
+}
+
 run_predeploy_stage() {
-    local label="$1"
+    local label="$1" started rc=0
     shift
-    printf '::rca-stage::%s\n' "$label"
-    "$@"
+    stage_mark "$label"
+    started="$(date +%s)"
+    "$@" || rc=$?
+    printf '⏱ %s stage %s done exit=%s in %ss\n' "$(date -u +%FT%TZ)" "$label" "$rc" "$(( $(date +%s) - started ))"
+    return "$rc"
 }
 
 echo "🧪 Verifying concurrent cloud benchmark workstream isolation..."
@@ -79,10 +90,35 @@ run_predeploy_stage "focused cloud lifecycle regression" \
 run_predeploy_stage "cloud multi-workstream concurrency regression" \
     bash "$ROOT_DIR/scripts/tests/cloudbench-multi-workstream.test.sh"
 
+# Opt-in digest-bound SUSPENDED warm pool (scripts/cloudbench-warm-pool.py).
+# Reports how many pool members match the donor's current image digest and
+# this checkout's dependency fingerprint plus the pool's idle cost, and hands
+# the pool name to the fleet. Off by default. The consumption boundary is
+# `cloudbench-warm-pool.py claim --out <bench-out>` (resume + health/digest
+# checks + `<bench-out>/warm-pool-claim.json`, `transport: running-guest`,
+# exit 3 = no match → clone) and `release <id> --out <bench-out>` (re-suspend
+# healthy members, destroy the rest); both are regression-tested offline in
+# scripts/tests/cloudbench-warm-pool.test.py. The fleet's per-run boot-config
+# transport (machine update + cold boot) still restarts a resumed member, so
+# the memory-snapshot saving is realized only once provision_primary_machine
+# in scripts/run-bench-fleet consumes that claim receipt with a running-guest
+# transport in scripts/run-bench-cloud (CLOUDBENCH_BOOT_TRANSPORT=warm-resume).
+if [ -n "${DEPLOY_WARM_POOL_NAME:-}" ]; then
+    stage_mark "deploy warm pool status"
+    mkdir -p "$ROOT_DIR/.context/predeploy-runs"
+    # Advisory only: bound it so an unreachable Machines API cannot stall the smoke lane.
+    if timeout 120 "$ROOT_DIR/agents/venv/bin/python" "$ROOT_DIR/scripts/cloudbench-warm-pool.py" status \
+        --pool "$DEPLOY_WARM_POOL_NAME" --receipt "$ROOT_DIR/.context/predeploy-runs/warm-pool-status.json"; then
+        export CLOUDBENCH_WARM_POOL_NAME="$DEPLOY_WARM_POOL_NAME"
+    else
+        echo "⚠️  warm pool status unavailable; the fleet clones as usual" >&2
+    fi
+fi
+
 HUB_URL="${HUB_URL:-https://navi-j9a9.onrender.com}"
 HUB_USER_ID="${HUB_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
 HUB_POLLER_BIN="${HUB_POLLER_BIN:-$ROOT_DIR/scripts/run-bench-hub-poller}"
-printf '::rca-stage::%s\n' "Benchmark Hub credentials"
+stage_mark "Benchmark Hub credentials"
 if [ -z "${BACKEND_API_KEY:-}" ]; then
     BACKEND_API_KEY="$(grep -E '^BACKEND_API_KEY=' "$ROOT_DIR/back-end/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\"')"
 fi
@@ -98,7 +134,7 @@ print(json.dumps({"scope": sys.argv[1], "task_names": sys.argv[2:]}))
 PY
 )"
 
-printf '::rca-stage::%s\n' "Benchmark Hub request submission"
+stage_mark "Benchmark Hub request submission"
 response="$(curl -fsS -X POST "$HUB_URL/api/benchmarks/run-requests" \
     -H "X-API-Key: $BACKEND_API_KEY" \
     -H "X-User-Id: $HUB_USER_ID" \
@@ -134,7 +170,7 @@ _teardown_poller() {
 trap '_teardown_poller; exit 130' INT
 trap '_teardown_poller; exit 143' TERM
 
-printf '::rca-stage::%s\n' "Benchmark Hub cloud fleet execution"
+stage_mark "Benchmark Hub cloud fleet execution"
 HUB_URL="$HUB_URL" \
 HUB_USER_ID="$HUB_USER_ID" \
 BACKEND_API_KEY="$BACKEND_API_KEY" \
@@ -148,7 +184,7 @@ POLLER_PID=$!
 wait "$POLLER_PID"
 trap - INT TERM
 
-printf '::rca-stage::%s\n' "Benchmark Hub result verification"
+stage_mark "Benchmark Hub result verification"
 final="$(curl -fsS "$HUB_URL/api/benchmarks/runs/$run_id" \
     -H "X-API-Key: $BACKEND_API_KEY" \
     -H "X-User-Id: $HUB_USER_ID")"

@@ -438,6 +438,7 @@ class StructuralGateRunnerTests(unittest.TestCase):
                     patch.object(module.os, "cpu_count", return_value=14),
                     patch.object(module, "GATES", gates),
                     patch.object(module, "FAILURE_STATE", root / "failures.json"),
+                    patch.object(module, "DURATIONS_STATE", root / "durations.json"),
                     patch.object(sys, "argv", [str(RUNNER)]),
                     patch.object(module.subprocess, "Popen", side_effect=launch),
                     patch.object(module.time, "sleep", side_effect=observe_admission),
@@ -452,13 +453,16 @@ class StructuralGateRunnerTests(unittest.TestCase):
             self.assertEqual(result, 1, "a real gate failure must remain fatal")
             with (
                 patch.object(module, "run_gates", return_value=0) as run,
+                patch.object(module, "DURATIONS_STATE", root / "unrecorded-durations.json"),
                 patch.object(sys, "argv", [str(RUNNER), "--max-workers", "3"]),
             ):
                 self.assertEqual(module.main(), 0)
+                # Without recorded durations the plan is the registry itself.
                 run.assert_called_once_with(
-                    module.GATES,
+                    list(module.GATES),
                     max_workers=3,
                     failure_state=module.ROOT / module.FAILURE_STATE,
+                    durations_state=module.ROOT / module.DURATIONS_STATE,
                 )
 
     def test_gates_start_under_the_documented_umask_not_the_invokers(self) -> None:
@@ -1303,6 +1307,28 @@ class StructuralGateSchedulingTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             self.assertEqual(shard.select(items), (items, []))
 
+    def test_failed_or_timed_out_gates_are_not_recorded_as_costs(self) -> None:
+        """A failure or a 600 s timeout is not a duration observation: recording
+        it would triple the next deadline for the same hung gate and let a fast
+        failure distort longest-first ordering. The previous value survives."""
+        module = _load_runner("deploy_runner_duration_costs")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "durations.json"
+            path.write_text(json.dumps({"schema_version": 1, "gates": {"timed": {"seconds": 12.5, "shards": 1}}}))
+            ok = module.Job(module.Gate("ok", ("true",)), 0)
+            failed = module.Job(module.Gate("failed", ("false",)), 0)
+            timed = module.Job(module.Gate("timed", ("sleep", "1")), 0)
+            sharded = module.Gate("sharded", ("true",), shards=2)
+            shard_jobs = [module.Job(sharded, 1), module.Job(sharded, 2)]
+            results = {"ok": (0, 1.5, ""), "failed": (1, 0.2, ""), "timed": (124, 600.0, ""),
+                       "sharded[1/2]": (0, 3.0, ""), "sharded[2/2]": (1, 4.0, "")}
+            module.record_durations(path, [ok, failed, timed, *shard_jobs], results)
+            recorded = module.load_durations(path)
+        self.assertEqual(recorded.get("ok"), 1.5)
+        self.assertNotIn("failed", recorded)
+        self.assertEqual(recorded.get("timed"), 12.5, "a timed-out gate must keep its previous cost")
+        self.assertNotIn("sharded", recorded, "one failed shard poisons the gate's observation")
+
     def test_registered_shards_expand_with_their_environment(self) -> None:
         module = _load_runner("deploy_runner_shards")
         sharded = [gate for gate in module.GATES if gate.shards > 1]
@@ -1323,6 +1349,64 @@ class StructuralGateSchedulingTests(unittest.TestCase):
             self.assertNotIn(module.SHARD_ENV, unsharded.environment())
         expected = [job.expected_seconds for job in jobs]
         self.assertEqual(expected, sorted(expected, reverse=True), "longest first")
+
+    def test_plan_gates_uses_recorded_durations_and_splits_long_shardable_gates(self) -> None:
+        module = _load_runner("deploy_runner_plan")
+        gates = (
+            module.Gate("split", ("true",), expected_seconds=10, shards=2),
+            module.Gate("whole", ("true",)),
+            module.Gate("tiny", ("true",), expected_seconds=5),
+        )
+        # Cold start: no record -> the registry plan, unchanged.
+        self.assertEqual(module.plan_gates(gates, {}, 4), list(gates))
+        recorded = {"split": 2000.0, "whole": 900.0, "tiny": 1.0}
+        planned = module.plan_gates(gates, recorded, 4)
+        by_name = {gate.name: gate for gate in planned}
+        # budget = 2901 / 4 = 725.25 s; 70% threshold = 507.7 s -> 2000 s needs 4 shards.
+        self.assertEqual(by_name["split"].shards, 4)
+        self.assertEqual(by_name["split"].expected_seconds, 2000.0)
+        self.assertEqual(by_name["whole"].shards, 1, "a suite without DEPLOY_GATE_SHARD support never splits")
+        self.assertEqual(by_name["whole"].expected_seconds, 900.0)
+        self.assertEqual(by_name["tiny"].expected_seconds, 1.0)
+        self.assertEqual([g.name for g in planned], ["split", "whole", "tiny"], "gate set and order unchanged")
+        jobs = module.expand_jobs(planned)
+        self.assertEqual([job.label for job in jobs][:2], ["whole", "split[1/4]"], "longest job first")
+        self.assertEqual(sum(1 for job in jobs if job.gate.name == "split"), 4)
+        self.assertEqual(jobs[0].timeout_seconds, 2700.0, "timeouts follow recorded cost, never below the default")
+        # The registry count is the floor and MAX_AUTO_SHARDS the ceiling.
+        self.assertEqual(module.plan_gates(gates, {"split": 1.0}, 4)[0].shards, 2)
+        self.assertEqual(module.plan_gates(gates, {"split": 10**6}, 100)[0].shards, module.MAX_AUTO_SHARDS)
+        with self.assertRaises(ValueError):
+            module.plan_gates(gates, recorded, 0)
+
+    def test_run_gates_records_per_gate_durations_for_the_next_plan(self) -> None:
+        module = _load_runner("deploy_runner_durations")
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-durations-") as temporary:
+            ledger = Path(temporary) / "durations.json"
+            gates = (
+                module.Gate("sharded", ("bash", "-c", "sleep 0.2"), expected_seconds=1, shards=2),
+                module.Gate("single", ("bash", "-c", "sleep 0.1")),
+            )
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(module.run_gates(gates, max_workers=3, durations_state=ledger), 0)
+            recorded = module.load_durations(ledger)
+            self.assertEqual(set(recorded), {"sharded", "single"})
+            self.assertGreaterEqual(recorded["sharded"], 0.4, "a sharded gate records the sum of its shards")
+            self.assertGreaterEqual(recorded["single"], 0.1)
+            payload = json.loads(ledger.read_text())
+            self.assertEqual(payload["gates"]["sharded"]["shards"], 2)
+            self.assertIn("sharded[1/2]", payload["jobs"])
+            planned = module.plan_gates(gates, recorded, 3)
+            self.assertEqual(planned[0].expected_seconds, recorded["sharded"])
+            # Gates absent from a later run keep their record instead of vanishing.
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                module.run_gates(
+                    (module.Gate("single", ("bash", "-c", "sleep 0.1")),), max_workers=1, durations_state=ledger
+                )
+            self.assertEqual(set(module.load_durations(ledger)), {"sharded", "single"})
+            self.assertEqual(module.load_durations(Path(temporary) / "missing.json"), {})
+            (Path(temporary) / "broken.json").write_text("{not json")
+            self.assertEqual(module.load_durations(Path(temporary) / "broken.json"), {})
 
     def test_sharded_gate_runs_every_shard_through_the_runner(self) -> None:
         module = _load_runner("deploy_runner_shard_run")

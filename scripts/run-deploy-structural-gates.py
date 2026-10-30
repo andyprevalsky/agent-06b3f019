@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import signal
@@ -13,9 +14,9 @@ import sys
 import tempfile
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import BinaryIO, Sequence
+from typing import BinaryIO, Mapping, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -97,6 +98,16 @@ GATE_UMASK = 0o022
 # The CLI records which gates failed so a retry can run them first. Every
 # retry still runs the full registry; ordering never skips a gate.
 FAILURE_STATE = Path(".context") / "deploy-structural" / "last-failures.json"
+# Observed per-gate seconds from the previous run on this host (sum of its
+# shard jobs). They replace the registry estimates for longest-first ordering,
+# per-gate timeouts and timing-balanced splitting; the registry constants are
+# the cold-start fallback. Planning never adds or drops a gate.
+DURATIONS_STATE = Path(".context") / "deploy-structural" / "durations.json"
+# Buildkite-style balancing: a gate whose recorded cost exceeds this fraction
+# of the per-worker budget (total work / workers) is split into more shards
+# when its suite supports DEPLOY_GATE_SHARD (registry ``shards > 1``).
+SPLIT_FRACTION = 0.7
+MAX_AUTO_SHARDS = 8
 
 
 @dataclass(frozen=True)
@@ -186,6 +197,83 @@ def record_failures(path: Path, failed: Sequence[str]) -> None:
     os.replace(temporary, path)
 
 
+def load_durations(path: Path) -> dict[str, float]:
+    """Recorded whole-gate seconds (``{"gates": {name: {"seconds": s}}}``)."""
+    try:
+        recorded = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    gates = recorded.get("gates") if isinstance(recorded, dict) else None
+    if not isinstance(gates, dict):
+        return {}
+    durations: dict[str, float] = {}
+    for name, entry in gates.items():
+        seconds = entry.get("seconds") if isinstance(entry, dict) else entry
+        if isinstance(name, str) and isinstance(seconds, (int, float)) and seconds > 0:
+            durations[name] = float(seconds)
+    return durations
+
+
+def record_durations(
+    path: Path, jobs: Sequence[Job], results: Mapping[str, tuple[int, float, str]]
+) -> dict[str, float]:
+    """Persist this run's per-gate seconds; gates that did not finish keep their old value."""
+    previous = load_durations(path)
+    totals: dict[str, float] = {}
+    for gate in {job.gate.name: job.gate for job in jobs}.values():
+        labels = [job.label for job in jobs if job.gate is gate]
+        if not all(label in results and results[label][0] == 0 for label in labels):
+            # Stopped early, killed, failed or timed out: not a cost observation.
+            # Recording a timeout would triple the next run's deadline for the
+            # same hung gate (timeout = 3x expected) and a fast failure would
+            # distort longest-first ordering; the previous value is kept.
+            continue
+        totals[gate.name] = round(sum(results[label][1] for label in labels), 2)
+    merged = {**previous, **totals}
+    payload = {
+        "schema_version": 1,
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "gates": {
+            name: {
+                "seconds": seconds,
+                "shards": next((max(job.gate.shards, 1) for job in jobs if job.gate.name == name), None),
+            }
+            for name, seconds in sorted(merged.items())
+        },
+        "jobs": {label: round(result[1], 2) for label, result in sorted(results.items())},
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2) + "\n")
+    os.replace(temporary, path)
+    return merged
+
+
+def plan_gates(
+    gates: Sequence[Gate], recorded: Mapping[str, float], max_workers: int
+) -> list[Gate]:
+    """Timing-balanced plan: recorded costs replace estimates; long shardable
+    gates split so no job exceeds SPLIT_FRACTION of the per-worker budget.
+
+    Only gates the registry already shards (their suites honour
+    DEPLOY_GATE_SHARD) and that have a recorded cost can split further; the
+    registry count is the minimum and MAX_AUTO_SHARDS the ceiling. Registry
+    estimates alone never reshape the plan. The gate set itself never changes.
+    """
+    if max_workers < 1:
+        raise ValueError("max_workers must be positive")
+    costed = [replace(gate, expected_seconds=recorded.get(gate.name, gate.expected_seconds)) for gate in gates]
+    budget = sum(gate.expected_seconds for gate in costed) / max_workers
+    threshold = SPLIT_FRACTION * budget
+    planned = []
+    for gate in costed:
+        shards = gate.shards
+        if gate.shards > 1 and gate.name in recorded and threshold > 0 and gate.expected_seconds > threshold:
+            shards = min(MAX_AUTO_SHARDS, max(gate.shards, math.ceil(gate.expected_seconds / threshold)))
+        planned.append(replace(gate, shards=shards))
+    return planned
+
+
 GATES = (
     Gate("swap-harness", ("python3", "scripts/tests/swap-harness.test.py")),
     Gate(
@@ -235,6 +323,7 @@ GATES = (
     ),
     Gate("benchmark-campaign-grouping", ("bash", "scripts/tests/campaign-hub-grouping.test.sh")),
     Gate("cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")),
+    Gate("cloudbench-warm-pool", ("python3", "scripts/tests/cloudbench-warm-pool.test.py")),
     Gate(
         "benchmark-successful-llm-evidence",
         ("python3", "scripts/tests/verify-successful-llm-queries.test.py"),
@@ -447,6 +536,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="ignore the recorded failures of the previous run when ordering",
     )
+    parser.add_argument(
+        "--no-recorded-durations",
+        action="store_true",
+        help="plan from the registry estimates only (ignore .context/deploy-structural/durations.json)",
+    )
     return parser
 
 
@@ -505,6 +599,7 @@ def run_gates(
     gates: Sequence[Gate],
     max_workers: int,
     failure_state: Path | None = None,
+    durations_state: Path | None = None,
 ) -> int:
     if max_workers < 1:
         raise ValueError("max_workers must be positive")
@@ -646,6 +741,11 @@ def run_gates(
             record_failures(failure_state, sorted(failed_gates))
         except OSError as error:
             print(f"deploy structural gates: failure record not saved: {error}", file=sys.stderr)
+    if durations_state is not None and not received_signal:
+        try:
+            record_durations(durations_state, jobs, results)
+        except OSError as error:
+            print(f"deploy structural gates: duration record not saved: {error}", file=sys.stderr)
     if failures or repeated_failure:
         print("failed deploy structural gates: " + ", ".join(failures), file=sys.stderr)
         return 1
@@ -671,9 +771,23 @@ def main() -> int:
         )
         return 1
     state = None if args.no_failed_first else ROOT / FAILURE_STATE
-    if args.max_workers is None:
-        return run_gates(GATES, max_workers=default_max_workers(), failure_state=state)
-    return run_gates(GATES, max_workers=args.max_workers, failure_state=state)
+    max_workers = default_max_workers() if args.max_workers is None else args.max_workers
+    durations_state = ROOT / DURATIONS_STATE
+    recorded = {} if args.no_recorded_durations else load_durations(durations_state)
+    gates = plan_gates(GATES, recorded, max_workers)
+    resharded = [
+        f"{planned.name} {registered.shards}->{planned.shards}"
+        for registered, planned in zip(GATES, gates)
+        if planned.shards != registered.shards
+    ]
+    if recorded or resharded:
+        print(
+            f"deploy structural gates: {len(recorded)} recorded gate duration(s) from "
+            f"{durations_state}; timing split: {', '.join(resharded) or 'none'}",
+            file=sys.stderr,
+            flush=True,
+        )
+    return run_gates(gates, max_workers=max_workers, failure_state=state, durations_state=durations_state)
 
 
 if __name__ == "__main__":

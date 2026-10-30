@@ -249,12 +249,12 @@ for cpus, expected in ((None, 1), (1, 1), (8, 4), (14, 8), (128, 8)):
     with patch.object(runner.os, 'cpu_count', return_value=cpus):
         assert runner.default_max_workers() == expected
         for status in (0, 1):
-            with patch.object(sys, 'argv', [str(runner.__file__)]), patch.object(runner.shutil, 'which', return_value='/fixture/tool'), patch.object(runner, 'run_gates', return_value=status) as run:
+            with patch.object(sys, 'argv', [str(runner.__file__)]), patch.object(runner.shutil, 'which', return_value='/fixture/tool'), patch.object(runner, 'load_durations', return_value={}), patch.object(runner, 'run_gates', return_value=status) as run:
                 assert runner.main() == status
-                run.assert_called_once_with(runner.GATES, max_workers=expected, failure_state=runner.ROOT / runner.FAILURE_STATE)
-with patch.object(sys, 'argv', [str(runner.__file__), '--max-workers', '3']), patch.object(runner.shutil, 'which', return_value='/fixture/tool'), patch.object(runner, 'run_gates', return_value=1) as run:
+                run.assert_called_once_with(list(runner.GATES), max_workers=expected, failure_state=runner.ROOT / runner.FAILURE_STATE, durations_state=runner.ROOT / runner.DURATIONS_STATE)
+with patch.object(sys, 'argv', [str(runner.__file__), '--max-workers', '3']), patch.object(runner.shutil, 'which', return_value='/fixture/tool'), patch.object(runner, 'load_durations', return_value={}), patch.object(runner, 'run_gates', return_value=1) as run:
     assert runner.main() == 1
-    run.assert_called_once_with(runner.GATES, max_workers=3, failure_state=runner.ROOT / runner.FAILURE_STATE)
+    run.assert_called_once_with(list(runner.GATES), max_workers=3, failure_state=runner.ROOT / runner.FAILURE_STATE, durations_state=runner.ROOT / runner.DURATIONS_STATE)
 print('PASS: scaled bounded defaults, explicit override, full registry, failure propagation')
 PY_ADMISSION
 require_text "$DEPLOY_STRUCTURAL_RUNNER" '"kill-services"' "command-structural runner must retain the benchmark-controller cleanup regression"

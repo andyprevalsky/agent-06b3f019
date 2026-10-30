@@ -77,8 +77,39 @@ if [[ "$FAILED_FIRST" == "1" ]]; then
   fi
 fi
 
+# Retained summaries from an earlier run were read above (failed-first); drop
+# them now so a shard that exits before its own preflight cannot hand the
+# duration recorder stale, positive observations.
+rm -f "$BACKEND_DIR"/coverage/blackbox-run-shard*/summary.json
+# A shard killed mid-run (a superseded pipeline attempt sends SIGTERM) leaves
+# its raw coverage under coverage/tmp-shard<i>, and run-coverage.sh refuses to
+# start a new collection over unrecovered raw coverage. Keep that evidence,
+# out of the way, so the next attempt can run (2026-10-30: attempt 2 of the
+# PR #1637 proof run was refused by attempt 1's interrupted shards).
+for leftover in "$BACKEND_DIR"/coverage/tmp-shard*; do
+  [[ -d "$leftover" ]] && [[ -n "$(find "$leftover" -mindepth 1 -print -quit)" ]] || continue
+  archive="$ROOT_DIR/.context/test-runs/backend-coverage-unrecovered-$(date -u +%Y%m%d-%H%M%S)-$$"
+  mkdir -p "$archive"
+  mv "$leftover" "$archive/"
+  echo "Archived unrecovered raw coverage from an interrupted shard: $leftover -> $archive/$(basename "$leftover")"
+done
 BASE_PORT="${CONDUCTOR_PORT:-55000}"
 DURATIONS="${BACKEND_COVERAGE_SHARD_DURATIONS:-}"
+# Timing-balanced shards: without an explicit durations file, reuse the
+# per-worktree ledger of recorded blackbox domain durations (written by
+# record_domain_durations after every sharded run, pass or fail) so the shard
+# plan packs by observed cost instead of by name. The ledger only changes
+# which shard runs a domain; every domain still runs exactly once.
+DURATIONS_LEDGER="$ROOT_DIR/.context/deploy-durations/backend-blackbox.json"
+if [[ -z "$DURATIONS" && -s "$DURATIONS_LEDGER" ]]; then
+  DURATIONS="$DURATIONS_LEDGER"
+  echo "Shard balancing: recorded domain durations from $DURATIONS_LEDGER"
+fi
+
+record_domain_durations() {
+  node "$SCRIPT_DIR/coverage-shard-durations.mjs" "$DURATIONS_LEDGER" \
+    "$BACKEND_DIR"/coverage/blackbox-run-shard*/summary.json || true
+}
 declare -a PIDS=()
 for ((i = 1; i <= SHARDS; i++)); do
   # Each shard gets a disjoint two-port range above the unsharded one.
@@ -128,6 +159,7 @@ while ((DONE_COUNT < SHARDS)); do
   if ((DONE_COUNT < SHARDS)); then sleep 1; fi
 done
 trap - INT TERM
+record_domain_durations
 if [[ "$FAILED" -ne 0 ]]; then
   # Archive the passing shards' raw coverage so the next run is not blocked.
   ARCHIVE="$ROOT_DIR/.context/test-runs/backend-coverage-merged-failed-$(date -u +%Y%m%d-%H%M%S)-$$"

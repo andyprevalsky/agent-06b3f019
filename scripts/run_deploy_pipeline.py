@@ -19,25 +19,64 @@ This supervisor only schedules lanes and writes one atomic receipt:
   sibling fails so one iteration collects every failure. When all lanes
   finish it re-hashes the source and marks the receipt ``stale`` if anything
   changed after the freeze, so an older snapshot can never be reported green.
+
+  With ``--follow-source`` the supervisor keeps hashing the source while lanes
+  run. Once a change has settled (``--settle-seconds`` without further edits)
+  it supersedes the attempt: running lanes are terminated, their results are
+  discarded, and a new attempt starts on the new bytes with the superseded
+  attempt's failed lanes first. Every attempt is bound to HEAD plus the source
+  digest it ran on; ``verify`` refuses a receipt whose bytes are not the
+  current worktree. Speculation never touches the bounded review ledger
+  (``deploy_review_cycle.py``): it only starts gates earlier.
+
+  ``--fix-loop-cap N`` (default 2, env ``DEPLOY_FIX_LOOP_CAP``) refuses a
+  blind N+1th full round: after N completed failed rounds in this state dir
+  the driver prints ``FIX_LOOP_CAP`` with the failure classes and exits 6.
+  ``--after-rca REF`` records the RCA that justifies the next round and
+  restarts the count.
 * ``wait`` is the same event waiter as ``run-deploy-stage --wait``
   (``scripts/deploy_stage_wait.py``) over this pipeline's lanes: it watches
   the lanes' own stage receipts and adds only supervisor events (supervisor
-  died, lane never started or refused, stale source). ``--since`` (epoch
-  captured before launching ``run``) is required so a previous iteration's
-  receipt can never satisfy the wait. Exit codes match that waiter:
-  0 = all green, 1 = a lane failed, 2 = usage/receipt error, 3 = a lane
+  died, lane never started or refused, stale source, superseded attempt).
+  ``--since`` (epoch captured before launching ``run``) is required so a
+  previous iteration's receipt can never satisfy the wait. Exit codes match
+  that waiter: 0 = all green, 1 = a lane failed, 2 = usage/receipt error, 3 = a lane
   runner or the supervisor died, 4 = stalled (``--stall-seconds``),
-  124 = timeout, 5 = stale source.
+  124 = timeout, 5 = stale source, 6 = fix-loop cap.
+* ``verify`` exits 0 only when the receipt passed on exactly the current
+  HEAD and worktree bytes (never merge a HEAD whose gates ran on other bytes).
+
+* ``simulate`` projects the Group 3 union wall of the phased schedule against
+  the legacy all-at-once admission from the same recorded lane durations,
+  naming every lane whose isolated duration is unrecorded as UNMEASURED.
+
+Group 3 admission schedule (EXP-L). Lanes that ran concurrently on the
+8-core/15 GB devbox thrashed each other (deploy-command-structural 1,555 s
+beside the coverage lanes; frontend coverage 1,059 s beside them versus
+260 s alone). ``run`` therefore phases Group 3 from recorded per-lane
+durations (``.context/deploy-durations/pipeline-lanes.json``, written after
+every attempt from the lanes' own wall clocks and seeded from the stage
+receipts under ``.context/deploy-runs``): the quick lanes (recorded <= 90 s:
+eslint, typescript, backend-structural, seed checks) start together, then
+every ``exclusive`` lane (deploy-command-structural) runs alone at the full
+host width the memory budget allows, then the coverage lanes start together
+under the existing budgets, longest recorded first, so frontend and backend
+overlap inside the agents window. Phases are implied ``after`` dependencies:
+no lane is skipped, every lane remains a full sweep, failed lanes still run
+first within their phase and Group 4 lanes are untouched. A plan with
+``"schedule": {"policy": "legacy"}`` keeps the previous all-at-once admission.
 
 Plan file (JSON): {"lanes": [{"name", "command": [...], "cwd": "back-end",
 "env": {...}, "after": ["lane"], "reuse_passed": true, "group": "3",
-"memory_mb": 1024}], "max_parallel": 4, "memory_budget_mb": 9000}
+"memory_mb": 1024, "exclusive": false}], "max_parallel": 4,
+"memory_budget_mb": 9000, "schedule": {"policy": "phased"}}
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+from collections.abc import Mapping
 import json
 import os
 import re
@@ -45,7 +84,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -58,9 +97,16 @@ SOURCE_ROOT = ROOT
 # a run copies the receipts inside its window so a killed lane is attributed.
 WATCHDOG_LOG = Path(os.environ.get("DEPLOY_PIPELINE_WATCHDOG_LOG") or "/run/boxes-memory-terminations.jsonl")
 HOST_SAMPLE_SECONDS = 1.0
-RECEIPT_SCHEMA = 1
+RECEIPT_SCHEMA = 2
 EXIT_STALE = 5
-TERMINAL_LANE = {"passed", "failed"}
+EXIT_FIX_LOOP_CAP = 6
+DEFAULT_FIX_LOOP_CAP = 2
+DEFAULT_SETTLE_SECONDS = 10.0
+DEFAULT_POLL_SECONDS = 2.0
+DEFAULT_MAX_ATTEMPTS = 20
+TERMINAL_LANE = {"passed", "failed", "superseded"}
+# Internal waiter event: the supervisor superseded the attempt being waited on.
+_SUPERSEDED_EVENT = -1
 # run-deploy-stage rejects any other stage name before it writes a row.
 LANE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 # deploy.md's worker budgets were sized for this host; smaller hosts scale down.
@@ -74,6 +120,29 @@ STRUCTURAL_WORKER_MEMORY_MB = 1840
 # Kept free for the agent harness, the Docker DB and the 15 GB memory watchdog.
 MEMORY_RESERVE_MB = 2048
 DEFAULT_LANE_MEMORY_MB = 1024
+# ── Group 3 admission schedule (EXP-L) ────────────────────────────────────────
+# Recorded per-lane wall clocks, per worktree (next to the backend blackbox
+# domain ledger the sharded coverage coordinator keeps).
+LANE_DURATIONS = Path(".context") / "deploy-durations" / "pipeline-lanes.json"
+LANE_DURATION_SAMPLES = 20
+# A lane whose recorded duration is at most this many seconds is "quick": it
+# finishes before any heavy lane would benefit from the freed cores.
+QUICK_LANE_SECONDS = 90.0
+SCHEDULE_PHASED = "phased"
+SCHEDULE_LEGACY = "legacy"
+# Safe default order when no duration has been recorded yet (seconds observed
+# on the 2026-10-29 deploy-1627 runs; only their relative order matters).
+DEFAULT_LANE_SECONDS = {
+    "seed-cache-decision": 3.0,
+    "canonical-seed-whatsapp-content": 2.5,
+    "eslint": 24.0,
+    "typescript": 27.0,
+    "backend-structural": 37.0,
+    "deploy-command-structural": 1555.0,
+    "backend-coverage-blackbox": 1505.0,
+    "frontend-coverage-blackbox": 1000.0,
+    "agents-coverage-blackbox": 800.0,
+}
 
 
 def host_resources(cpus: int | None = None, mem_available_mb: int | None = None,
@@ -262,6 +331,15 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _source_label(source: Mapping[str, object] | None) -> str:
+    """``head=<sha> digest=<12 hex>`` for log lines; a freeze without those keys
+    (tests patch ``source_digest`` to ``{}``) renders ``-`` instead of raising."""
+    source = source or {}
+    head = source.get("head") or "-"
+    digest = str(source.get("digest") or "")[:12] or "-"
+    return f"head={head} digest={digest}"
+
+
 def source_digest(root: Path | None = None) -> dict[str, str]:
     """HEAD plus every tracked/untracked non-ignored byte of the worktree."""
     root = SOURCE_ROOT if root is None else root
@@ -304,6 +382,8 @@ class Lane:
     retry_env: dict[str, str] = field(default_factory=dict)
     # Declared peak footprint; the supervisor admits lanes against the budget.
     memory_mb: int = DEFAULT_LANE_MEMORY_MB
+    # Runs alone in its own phase at full host width (deploy-command-structural).
+    exclusive: bool = False
 
 
 def load_plan(path: Path) -> list[Lane]:
@@ -346,12 +426,16 @@ def load_plan_payload(path: Path) -> tuple[list[Lane], dict]:
     return lanes, payload
 
 
+def _failed_lanes(receipt: dict | None) -> set[str]:
+    if not receipt:
+        return set()
+    return {name for name, lane in receipt.get("lanes", {}).items() if lane.get("status") == "failed"}
+
+
 def failed_first(lanes: list[Lane], previous: dict | None) -> list[Lane]:
     """Stable order with the prior receipt's failed lanes admitted first."""
 
-    failed = set()
-    if previous:
-        failed = {name for name, lane in previous.get("lanes", {}).items() if lane.get("status") == "failed"}
+    failed = _failed_lanes(previous)
     return sorted(lanes, key=lambda lane: 0 if lane.name in failed else 1)
 
 
@@ -370,11 +454,428 @@ def overall(lanes: dict[str, dict]) -> str:
     return "running"
 
 
+def lane_durations_path() -> Path:
+    override = os.environ.get("DEPLOY_PIPELINE_LANE_DURATIONS")
+    return Path(override) if override else ROOT / LANE_DURATIONS
+
+
+def load_lane_durations(path: Path | None = None) -> dict[str, list[dict]]:
+    """Recorded samples per lane: [{"wall_s", "status", "concurrent", "at", ...}]."""
+    path = lane_durations_path() if path is None else path
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    lanes = payload.get("lanes") if isinstance(payload, dict) else None
+    if not isinstance(lanes, dict):
+        return {}
+    clean: dict[str, list[dict]] = {}
+    for name, samples in lanes.items():
+        rows = []
+        for sample in samples if isinstance(samples, list) else []:
+            try:
+                wall = float(sample["wall_s"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if wall > 0 and sample.get("status") in {"passed", "failed"}:
+                rows.append({**sample, "wall_s": wall})
+        if rows:
+            clean[str(name)] = rows
+    return clean
+
+
+def _lane_stage_row(receipt: dict, name: str) -> dict | None:
+    """The run-deploy-stage row this receipt's lane wrote (matched by start time)."""
+    lane = receipt.get("lanes", {}).get(name, {})
+    run_dir = receipt.get("stage_run_dir")
+    started = lane.get("started_epoch")
+    if not run_dir or started is None:
+        return None
+    best: tuple[float, dict] | None = None
+    for row in deploy_stage_wait._rows(Path(run_dir)):
+        if row.get("stage") != name:
+            continue
+        try:
+            row_started = float(row.get("started_epoch") or 0)
+        except (TypeError, ValueError):
+            continue
+        if abs(row_started - float(started)) <= 5.0 and (best is None or row_started > best[0]):
+            best = (row_started, row)
+    return best[1] if best else None
+
+
+def record_lane_durations(receipt: dict, path: Path | None = None) -> dict[str, list[dict]]:
+    """Append every executed lane's own wall clock to the ledger.
+
+    Exact-input ``--reuse-passed`` hits (stage status ``reused``) and
+    superseded, refused or never-started lanes record nothing: only a lane
+    that actually ran is evidence of its duration. ``concurrent`` counts the
+    lanes of this attempt whose run overlapped the sample's.
+    """
+    path = lane_durations_path() if path is None else path
+    ledger = load_lane_durations(path)
+    lanes = receipt.get("lanes", {})
+    for name, lane in lanes.items():
+        if lane.get("status") not in {"passed", "failed"} or not lane.get("wall_s") or lane.get("started_epoch") is None:
+            continue
+        row = _lane_stage_row(receipt, name)
+        if row is not None and row.get("status") == "reused":
+            continue
+        overlap = 1
+        for other, state in lanes.items():
+            if other == name or state.get("started_epoch") is None or state.get("finished_epoch") is None:
+                continue
+            if state["started_epoch"] < lane["finished_epoch"] and state["finished_epoch"] > lane["started_epoch"]:
+                overlap += 1
+        sample = {"wall_s": round(float(lane["wall_s"]), 1), "status": lane["status"], "concurrent": overlap,
+                  "at": receipt.get("started_at"), "head": (receipt.get("source") or {}).get("head"),
+                  "attempt": receipt.get("attempt"), "source": "receipt"}
+        ledger.setdefault(name, []).append(sample)
+        ledger[name] = ledger[name][-LANE_DURATION_SAMPLES:]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_receipt(path, {"schema_version": 1, "lanes": ledger})
+    return ledger
+
+
+def stage_receipt_samples(names: list[str], run_root: Path | None = None) -> dict[str, list[dict]]:
+    """Seed estimates from the stage receipts of every deploy run in this
+    worktree: a lane that ran before the ledger existed still has data."""
+    if run_root is None:
+        run_root = Path(os.environ.get("DEPLOY_RUN_ROOT") or ROOT / ".context" / "deploy-runs")
+    wanted = set(names)
+    found: dict[str, list[dict]] = {}
+    try:
+        stage_files = sorted(run_root.glob("*/stages.jsonl"))
+    except OSError:
+        return found
+    for stage_file in stage_files:
+        for row in deploy_stage_wait._rows(stage_file.parent):
+            name = row.get("stage")
+            if name not in wanted or row.get("status") not in {"passed", "failed"}:
+                continue
+            try:
+                wall = float(row.get("duration_seconds") or 0)
+            except (TypeError, ValueError):
+                continue
+            if wall <= 0:
+                continue
+            timing = ((row.get("detail") or {}).get("timing") or {})
+            found.setdefault(name, []).append({
+                "wall_s": wall, "status": row.get("status"), "concurrent": int(timing.get("concurrent_stages") or 1),
+                "at": row.get("started_at"), "source": "stage-receipt"})
+    return {name: rows[-LANE_DURATION_SAMPLES:] for name, rows in found.items()}
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    return ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def lane_estimates(lanes: list[Lane], ledger: dict[str, list[dict]] | None = None,
+                   stage_samples: dict[str, list[dict]] | None = None) -> dict[str, dict]:
+    """Per-lane duration estimate and where it came from.
+
+    Ledger samples win, then stage receipts, then the safe default table; a
+    lane known nowhere is ``unknown`` and scheduled as heavy (never quick).
+    ``isolated_s`` is the median of samples that ran with nothing else, when
+    any exist; ``seconds`` is the median of every sample.
+    """
+    ledger = load_lane_durations() if ledger is None else ledger
+    stage_samples = {} if stage_samples is None else stage_samples
+    estimates: dict[str, dict] = {}
+    for lane in lanes:
+        samples = ledger.get(lane.name) or stage_samples.get(lane.name) or []
+        if samples:
+            source = "ledger" if ledger.get(lane.name) else "stage-receipts"
+            walls = [float(sample["wall_s"]) for sample in samples]
+            alone = [float(s["wall_s"]) for s in samples if int(s.get("concurrent") or 1) <= 1]
+            estimates[lane.name] = {"seconds": round(_median(walls), 1), "samples": len(samples), "source": source,
+                                    "isolated_s": round(_median(alone), 1) if alone else None}
+        elif lane.name in DEFAULT_LANE_SECONDS:
+            estimates[lane.name] = {"seconds": DEFAULT_LANE_SECONDS[lane.name], "samples": 0, "source": "default",
+                                    "isolated_s": None}
+        else:
+            estimates[lane.name] = {"seconds": None, "samples": 0, "source": "unknown", "isolated_s": None}
+    return estimates
+
+
+def schedule_phases(lanes: list[Lane], estimates: dict[str, dict]) -> list[dict]:
+    """Ordered Group 3 phases: quick lanes, each exclusive lane alone, then the
+    rest (longest recorded first). Other groups are not phased."""
+    group3 = [lane for lane in lanes if lane.group == "3"]
+
+    def seconds(lane: Lane) -> float:
+        value = (estimates.get(lane.name) or {}).get("seconds")
+        return float("inf") if value is None else float(value)
+
+    quick = sorted((l for l in group3 if not l.exclusive and seconds(l) <= QUICK_LANE_SECONDS), key=seconds)
+    exclusive = sorted((l for l in group3 if l.exclusive), key=seconds, reverse=True)
+    heavy = sorted((l for l in group3 if not l.exclusive and seconds(l) > QUICK_LANE_SECONDS), key=seconds, reverse=True)
+    phases: list[dict] = []
+    if quick:
+        phases.append({"phase": "quick", "lanes": [l.name for l in quick]})
+    for lane in exclusive:
+        phases.append({"phase": "exclusive", "lanes": [lane.name]})
+    if heavy:
+        phases.append({"phase": "coverage", "lanes": [l.name for l in heavy]})
+    return phases
+
+
+def implied_dependencies(phases: list[dict]) -> dict[str, list[str]]:
+    """Every lane of phase k waits for every lane of phases < k."""
+    implied: dict[str, list[str]] = {}
+    earlier: list[str] = []
+    for phase in phases:
+        for name in phase["lanes"]:
+            implied[name] = list(earlier)
+        earlier.extend(phase["lanes"])
+    return implied
+
+
+def apply_schedule(lanes: list[Lane], payload: dict) -> dict:
+    """Add the phase-implied ``after`` edges to ``lanes``; return the receipt record."""
+    policy = str((payload.get("schedule") or {}).get("policy") or SCHEDULE_PHASED)
+    if policy == SCHEDULE_LEGACY:
+        return {"policy": SCHEDULE_LEGACY, "phases": [], "estimates": {}, "implied_after": {}}
+    if policy != SCHEDULE_PHASED:
+        raise ValueError(f"unknown schedule policy {policy!r} (expected {SCHEDULE_PHASED} or {SCHEDULE_LEGACY})")
+    ledger = load_lane_durations()
+    stage_samples = stage_receipt_samples([lane.name for lane in lanes])
+    estimates = lane_estimates(lanes, ledger, stage_samples)
+    phases = schedule_phases(lanes, estimates)
+    implied = implied_dependencies(phases)
+    for lane in lanes:
+        for dependency in implied.get(lane.name, []):
+            if dependency != lane.name and dependency not in lane.after:
+                lane.after.append(dependency)
+    return {"policy": SCHEDULE_PHASED, "phases": phases, "estimates": estimates, "implied_after": implied}
+
+
+def exclusive_structural_workers(host: dict) -> int:
+    """Width of the structural runner when it runs alone: every core the
+    whole-box memory budget can back at the measured per-worker floor."""
+    budget = memory_budget_mb(host)
+    by_memory = STRUCTURAL_RUNNER_MAX_WORKERS if budget is None else (budget - 1024) // STRUCTURAL_WORKER_MEMORY_MB
+    return max(MIN_WORKERS, min(STRUCTURAL_RUNNER_MAX_WORKERS, host["cpus"], int(by_memory)))
+
+
+def _lane_workers(lane: Lane) -> int | None:
+    """The ``--max-workers N`` a lane's command declares, or None."""
+    try:
+        return int(lane.command[lane.command.index("--max-workers") + 1])
+    except (ValueError, IndexError):
+        return None
+
+
+def fit_exclusive_lane(lane: Lane, available_mb: int) -> Lane | None:
+    """The exclusive structural lane at the width ``available_mb`` backs at the
+    per-worker floor, never wider than planned.
+
+    The plan sizes that lane to the whole budget measured when ``plan`` ran;
+    MemAvailable drifts by about 1 GB before its phase starts (page cache held
+    by tsc/eslint, Postgres, other agents on the box), and a lane reserved to
+    the last MB was refused at admission without running a single gate
+    (PR1634 coordinator, 2026-10-29). Narrowing it keeps every gate running at
+    the width the box can actually back; None when not even MIN_WORKERS fit,
+    which stays a refusal.
+    """
+    planned = _lane_workers(lane)
+    if not lane.exclusive or planned is None:
+        return None
+    workers = min(planned, int((available_mb - 1024) // STRUCTURAL_WORKER_MEMORY_MB))
+    if workers < MIN_WORKERS:
+        return None
+    index = lane.command.index("--max-workers") + 1
+    command = [*lane.command[:index], str(workers), *lane.command[index + 1:]]
+    return replace(lane, command=command, memory_mb=1024 + STRUCTURAL_WORKER_MEMORY_MB * workers)
+
+
+def _list_schedule(order: list[Lane], seconds: dict[str, float], after: dict[str, list[str]],
+                   max_parallel: int, budget_mb: int | None) -> float:
+    """Makespan of a list schedule under the driver's admission rules."""
+    finished: dict[str, float] = {}
+    running: list[tuple[float, str, int]] = []  # (end, name, memory_mb)
+    pending = list(order)
+    clock = 0.0
+    while pending or running:
+        reserved = sum(memory for _, _, memory in running)
+        for lane in list(pending):
+            if max_parallel and len(running) >= max_parallel:
+                break
+            if any(dependency not in finished for dependency in after.get(lane.name, [])):
+                continue
+            if budget_mb is not None and running and reserved + lane.memory_mb > budget_mb:
+                continue
+            pending.remove(lane)
+            running.append((clock + seconds[lane.name], lane.name, lane.memory_mb))
+            reserved += lane.memory_mb
+        if running:
+            running.sort()
+            end, name, _ = running.pop(0)
+            clock = max(clock, end)
+            finished[name] = clock
+        elif pending:  # unsatisfiable dependency: force progress rather than spin
+            lane = pending.pop(0)
+            running.append((clock + seconds[lane.name], lane.name, lane.memory_mb))
+    return round(clock, 1)
+
+
+def simulate(lanes: list[Lane], estimates: dict[str, dict], max_parallel: int, budget_mb: int | None) -> dict:
+    """Projected Group 3 union wall, phased versus legacy admission, from
+    recorded durations only (no contention model).
+
+    Legacy uses every lane's recorded median, measured with the lanes running
+    together. Phased uses ``isolated_s`` where a lane has run alone and the
+    same loaded median otherwise, naming those lanes UNMEASURED: the phased
+    wall is then an upper bound, not a measurement.
+    """
+    group3 = [lane for lane in lanes if lane.group == "3"]
+    loaded = {lane.name: float((estimates.get(lane.name) or {}).get("seconds") or 0.0) for lane in group3}
+    legacy_after = {lane.name: [d for d in lane.after if d in loaded] for lane in group3}
+    legacy_wall = _list_schedule(sorted(group3, key=lambda l: -loaded[l.name]), loaded, legacy_after,
+                                 max_parallel, budget_mb)
+    phases = schedule_phases(group3, estimates)
+    implied = implied_dependencies(phases)
+    phased: dict[str, float] = {}
+    unmeasured: list[str] = []
+    for lane in group3:
+        isolated = (estimates.get(lane.name) or {}).get("isolated_s")
+        if isolated is None:
+            unmeasured.append(lane.name)
+        phased[lane.name] = loaded[lane.name] if isolated is None else float(isolated)
+    phased_after = {lane.name: sorted(set(legacy_after[lane.name]) | set(implied.get(lane.name, []))) for lane in group3}
+    phased_wall = _list_schedule(sorted(group3, key=lambda l: -phased[l.name]), phased, phased_after,
+                                 max_parallel, budget_mb)
+    return {"legacy_union_wall_s": legacy_wall, "phased_union_wall_s": phased_wall,
+            "delta_s": round(legacy_wall - phased_wall, 1), "phases": phases,
+            "lanes": {lane.name: {"loaded_s": loaded[lane.name], "phased_s": phased[lane.name],
+                                  "source": (estimates.get(lane.name) or {}).get("source")} for lane in group3},
+            "unmeasured_isolated": unmeasured,
+            "note": "phased uses recorded isolated durations only where a lane has run alone; UNMEASURED lanes "
+                    "keep their loaded median as an upper bound, so the phased wall is a bound, not a measurement"}
+
+
+def _history(state_dir: Path) -> list[dict]:
+    """Every archived receipt of this state dir, oldest first."""
+    receipts: list[dict] = []
+    try:
+        lines = (state_dir / "history.jsonl").read_text().splitlines()
+    except OSError:
+        return receipts
+    for line in lines:
+        try:
+            receipt = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(receipt, dict):
+            receipts.append(receipt)
+    return receipts
+
+
+def _archive(state_dir: Path, receipt: dict) -> None:
+    with (state_dir / "history.jsonl").open("a") as handle:
+        handle.write(json.dumps(receipt, sort_keys=True) + "\n")
+
+
+def _lane_failure_class(receipt: dict, name: str) -> str:
+    """The run-deploy-stage failure class recorded for a failed lane."""
+    lane = receipt.get("lanes", {}).get(name, {})
+    fallback = f"exit-{lane.get('exit')}" if lane.get("exit") is not None else "unknown"
+    run_dir = receipt.get("stage_run_dir")
+    started = lane.get("started_epoch")
+    if not run_dir or started is None:
+        return fallback
+    best: dict | None = None
+    for row in deploy_stage_wait._rows(Path(run_dir)):
+        if row.get("stage") != name:
+            continue
+        try:
+            row_started = float(row.get("started_epoch") or 0)
+        except (TypeError, ValueError):
+            continue
+        if abs(row_started - float(started)) <= 5.0 and (best is None or row_started > best["_t"]):
+            best = {"_t": row_started, "row": row}
+    if best is None:
+        return fallback
+    detail = best["row"].get("detail") or {}
+    outcome = detail.get("outcome") or {}
+    return str(outcome.get("failure_class") or fallback)
+
+
+def fix_loop_state(receipts: list[dict], cap: int) -> dict:
+    """Consecutive completed failed rounds, with their failure classes.
+
+    Superseded, stale and capped receipts never count as a round: nothing
+    ran to completion on those bytes. A passed round or an ``after_rca``
+    acknowledgement restarts the count.
+    """
+    rounds = 0
+    classes: dict[str, list[str]] = {}
+    rca_ref: str | None = None
+    for receipt in receipts:
+        loop = receipt.get("fix_loop") or {}
+        if loop.get("rca_ack"):
+            # Only the run started with --after-rca restarts the count; later
+            # receipts carry the reference for telemetry without resetting.
+            rounds = 0
+            classes = {}
+            rca_ref = str(loop.get("rca_ref"))
+        if receipt.get("status") == "passed":
+            rounds = 0
+            classes = {}
+            continue
+        if receipt.get("status") != "failed" or receipt.get("interrupted"):
+            continue  # a signalled run never completed a round
+        rounds += 1
+        for name in sorted(_failed_lanes(receipt)):
+            classes.setdefault(name, []).append(_lane_failure_class(receipt, name))
+    return {"cap": cap, "failed_rounds": rounds, "classes": classes, "rca_ref": rca_ref,
+            "rca_ack": False, "capped": bool(cap) and rounds >= cap}
+
+
+def _terminate_lanes(processes: dict[str, subprocess.Popen[bytes]], signum: int) -> None:
+    for process in processes.values():
+        if process.returncode is None:
+            try:
+                os.killpg(process.pid, signum)
+            except ProcessLookupError:
+                pass
+
+
+def _probe_source() -> dict[str, str] | None:
+    """Current source digest, or None while git is busy (index.lock, commit in flight)."""
+    try:
+        return source_digest()
+    except (subprocess.CalledProcessError, OSError):
+        return None
+
+
+def _settled_source(frozen: dict, settle_seconds: float, poll_seconds: float) -> dict[str, str]:
+    """Block until the changed source has stopped changing for settle_seconds."""
+    current = _probe_source() or frozen
+    since = time.monotonic()
+    while True:
+        time.sleep(min(poll_seconds, max(0.05, settle_seconds)))
+        probe = _probe_source()
+        if probe is not None and probe != current:
+            current, since = probe, time.monotonic()
+        elif time.monotonic() - since >= settle_seconds:
+            return current
+
+
 def run(
     plan: Path,
     state_dir: Path,
     max_parallel: int | None = None,
     budget_mb: int | None = None,
+    *,
+    follow_source: bool = False,
+    settle_seconds: float = DEFAULT_SETTLE_SECONDS,
+    poll_seconds: float = DEFAULT_POLL_SECONDS,
+    fix_loop_cap: int = DEFAULT_FIX_LOOP_CAP,
+    after_rca: str | None = None,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
 ) -> int:
     lanes, payload = load_plan_payload(plan)
     host = host_resources()
@@ -398,13 +899,85 @@ def run(
         except json.JSONDecodeError:
             previous = None
         if previous:
-            history = state_dir / "history.jsonl"
-            with history.open("a") as handle:
-                handle.write(json.dumps(previous, sort_keys=True) + "\n")
+            _archive(state_dir, previous)
+    receipts = _history(state_dir)
+    loop = fix_loop_state(receipts, fix_loop_cap)
+    if after_rca:
+        loop.update(failed_rounds=0, classes={}, rca_ref=after_rca, rca_ack=True, capped=False)
+    if loop["capped"]:
+        summary = "; ".join(f"{lane}={','.join(kinds)}" for lane, kinds in sorted(loop["classes"].items())) or "-"
+        receipt = {
+            "schema_version": RECEIPT_SCHEMA,
+            "plan": str(plan),
+            "supervisor_pid": os.getpid(),
+            "started_at": _now(),
+            "started_epoch": time.time(),
+            "finished_at": _now(),
+            "attempt": 1,
+            "source": _probe_source(),
+            "lanes": {lane.name: {"status": "not-run", "group": lane.group} for lane in lanes},
+            "status": "capped",
+            "fix_loop": loop,
+            "stage_run_dir": _stage_run_dir(),
+        }
+        write_receipt(receipt_path, receipt)
+        print(
+            f"FIX_LOOP_CAP: {loop['failed_rounds']} full gate round(s) failed on this deploy "
+            f"(cap {fix_loop_cap}); failure classes: {summary}. Route every class to /RCA "
+            "(local repro + fix) instead of a blind rerun; then run again with --after-rca <ref>.",
+            flush=True,
+        )
+        return EXIT_FIX_LOOP_CAP
+    attempt = 1
+    supersedes: dict | None = None
+    while True:
+        receipt, outcome = _run_attempt(
+            lanes, plan, state_dir, receipt_path, max_parallel, previous,
+            host=host, live_budget=live_budget, budget_mb=budget_mb,
+            attempt=attempt, supersedes=supersedes, loop=loop,
+            follow_source=follow_source, settle_seconds=settle_seconds, poll_seconds=poll_seconds,
+            payload=payload,
+        )
+        if outcome != "superseded":
+            break
+        if attempt >= max_attempts:
+            receipt["status"] = "stale"
+            receipt["note"] = f"max attempts ({max_attempts}) reached while the source kept changing"
+            write_receipt(receipt_path, receipt)
+            break
+        _archive(state_dir, receipt)
+        previous = receipt
+        supersedes = {"attempt": attempt, **receipt["source"]}
+        attempt += 1
+    return {"passed": 0, "failed": 1, "stale": EXIT_STALE}.get(receipt["status"], 1)
+
+
+def _run_attempt(
+    lanes: list[Lane],
+    plan: Path,
+    state_dir: Path,
+    receipt_path: Path,
+    max_parallel: int,
+    previous: dict | None,
+    *,
+    host: dict,
+    live_budget: int,
+    budget_mb: int,
+    attempt: int,
+    supersedes: dict | None,
+    loop: dict,
+    follow_source: bool,
+    settle_seconds: float,
+    poll_seconds: float,
+    payload: dict | None = None,
+) -> tuple[dict, str]:
+    """One attempt on one frozen source; returns (receipt, "done" | "superseded")."""
+    # Phase-implied dependencies are recomputed per attempt from the ledger as
+    # it stands now; the plan's own ``after`` edges are always kept.
+    lanes = [Lane(**{**lane.__dict__, "after": list(lane.after)}) for lane in lanes]
+    schedule = apply_schedule(lanes, payload or {})
     order = failed_first(lanes, previous)
-    previously_failed = {
-        name for name, lane in (previous or {}).get("lanes", {}).items() if lane.get("status") == "failed"
-    }
+    previously_failed = _failed_lanes(previous)
     frozen = source_digest()
     receipt: dict = {
         "schema_version": RECEIPT_SCHEMA,
@@ -412,12 +985,16 @@ def run(
         "supervisor_pid": os.getpid(),
         "started_at": _now(),
         "started_epoch": time.time(),
+        "attempt": attempt,
+        "follow_source": follow_source,
+        "settle_seconds": settle_seconds if follow_source else None,
         "source": frozen,
         "order": [lane.name for lane in order],
         "lanes": {
             lane.name: {"status": "pending", "group": lane.group, "memory_mb": lane.memory_mb} for lane in order
         },
         "status": "running",
+        "fix_loop": loop,
         "stage_run_dir": _stage_run_dir(),
         "source_root": str(SOURCE_ROOT),
         "host": host,
@@ -425,10 +1002,15 @@ def run(
         "host_samples": [{"at": _now(), **host, "headroom_mb": live_budget}],
         "max_parallel": max_parallel,
         "memory_budget_mb": budget_mb,
+        "schedule": schedule,
+        "after": {lane.name: list(lane.after) for lane in order},
     }
+    if supersedes:
+        receipt["supersedes"] = supersedes
     write_receipt(receipt_path, receipt)
     log_dir = state_dir / "logs"
     log_dir.mkdir(exist_ok=True)
+    print(f"PIPELINE_ATTEMPT attempt={attempt} {_source_label(frozen)}", flush=True)
 
     processes: dict[str, subprocess.Popen[bytes]] = {}
     stopping = 0
@@ -436,18 +1018,17 @@ def run(
     def terminate(signum: int, _frame: object) -> None:
         nonlocal stopping
         stopping = signum
-        for process in processes.values():
-            if process.returncode is None:
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
+        _terminate_lanes(processes, signal.SIGTERM)
 
     for forwarded in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
         signal.signal(forwarded, terminate)
 
     by_name = {lane.name: lane for lane in lanes}
     pending = list(order)
+    superseding: dict | None = None  # the settled new source once detected
+    changed_source: dict | None = None
+    changed_since = 0.0
+    last_probe = time.monotonic()
     last_sample = time.monotonic()
     while True:
         if time.monotonic() - last_sample >= HOST_SAMPLE_SECONDS:
@@ -468,8 +1049,12 @@ def run(
             pid, status, usage = os.wait4(process.pid, os.WNOHANG)
             if pid:
                 process.returncode = os.waitstatus_to_exitcode(status)
+                if superseding is not None:
+                    status = "superseded"
+                else:
+                    status = "passed" if process.returncode == 0 else "failed"
                 lane_state.update(
-                    status="passed" if process.returncode == 0 else "failed",
+                    status=status,
                     exit=process.returncode,
                     finished_epoch=time.time(),
                     wall_s=round(time.time() - lane_state["started_epoch"], 1),
@@ -478,9 +1063,9 @@ def run(
                 )
                 changed = True
         if changed:
-            receipt["status"] = overall(receipt["lanes"])
+            receipt["status"] = "superseded" if superseding is not None else overall(receipt["lanes"])
             write_receipt(receipt_path, receipt)
-        if not stopping:
+        if not stopping and superseding is None:
             running = sum(1 for p in processes.values() if p.returncode is None)
             reserved = sum(
                 by_name[name].memory_mb for name, p in processes.items() if p.returncode is None
@@ -491,6 +1076,23 @@ def run(
                     break
                 if any(receipt["lanes"][d]["status"] not in TERMINAL_LANE for d in lane.after):
                     continue
+                if lane.exclusive and not running:
+                    # Alone in its phase: fit its width to what is free right now
+                    # (the plan-time budget and live headroom both drift) instead
+                    # of refusing it or waiting for memory no other lane holds.
+                    if pass_sample is None:
+                        pass_sample = runtime_host_resources()
+                        sample_host_peak(receipt["host_peak"], pass_sample)
+                    free = [value for value in (budget_mb, memory_budget_mb(pass_sample)) if value is not None]
+                    fitted = fit_exclusive_lane(lane, min(free) - reserved) if free else None
+                    if fitted is not None and fitted.memory_mb < lane.memory_mb:
+                        note = (f"resized: {_lane_workers(lane)} -> {_lane_workers(fitted)} workers "
+                                f"(planned {lane.memory_mb} MB, {min(free)} MB available)")
+                        receipt["lanes"][lane.name].update(note=note, memory_mb=fitted.memory_mb)
+                        print(f"PIPELINE_LANE_RESIZED lane={lane.name} {note}", flush=True)
+                        pending[pending.index(lane)] = fitted
+                        by_name[lane.name] = fitted
+                        lane = fitted
                 if budget_mb is not None:
                     if lane.memory_mb > budget_mb:
                         # It can never fit: fail loudly now instead of starting it
@@ -564,10 +1166,44 @@ def run(
             write_receipt(receipt_path, receipt)
         elif pending:
             for lane in pending:
-                receipt["lanes"][lane.name].update(status="failed", exit=128 + stopping, note="not started")
+                if superseding is not None:
+                    receipt["lanes"][lane.name].update(status="superseded", note="superseded")
+                else:
+                    receipt["lanes"][lane.name].update(status="failed", exit=128 + stopping, note="not started")
+            if stopping:
+                receipt["interrupted"] = signal.Signals(stopping).name
             pending = []
         if not pending and all(state["status"] in TERMINAL_LANE for state in receipt["lanes"].values()):
             break
+        now = time.monotonic()
+        if follow_source and not stopping and superseding is None and now - last_probe >= poll_seconds:
+            last_probe = now
+            probe = _probe_source()
+            if probe is None or probe == frozen:
+                changed_source, changed_since = None, 0.0
+            else:
+                if probe != changed_source:
+                    changed_source, changed_since = probe, now
+                    print(
+                        f"PIPELINE_SOURCE_CHANGED attempt={attempt} {_source_label(probe)} "
+                        f"settling={settle_seconds:.0f}s",
+                        flush=True,
+                    )
+                elif now - changed_since >= settle_seconds:
+                    superseding = probe
+                    receipt["status"] = "superseded"
+                    receipt["superseded_at"] = _now()
+                    receipt["superseded_by"] = probe
+                    receipt["superseded_lanes"] = sorted(
+                        name for name, state in receipt["lanes"].items() if state["status"] == "running"
+                    )
+                    write_receipt(receipt_path, receipt)
+                    print(
+                        f"PIPELINE_SUPERSEDED attempt={attempt} old_head={frozen.get('head')} "
+                        f"new_head={probe.get('head')} terminating={','.join(receipt['superseded_lanes']) or '-'}",
+                        flush=True,
+                    )
+                    _terminate_lanes(processes, signal.SIGTERM)
         time.sleep(0.2)
 
     receipt["finished_at"] = _now()
@@ -583,13 +1219,34 @@ def run(
             + ", ".join(f"{r.get('comm')} pid={r.get('pid')} at={r.get('at')}" for r in receipt["watchdog_terminations"]),
             file=sys.stderr,
         )
+    if superseding is not None:
+        receipt["status"] = "superseded"
+        write_receipt(receipt_path, receipt)
+        return receipt, "superseded"
     final_source = source_digest()
     receipt["final_source"] = final_source
     receipt["status"] = overall(receipt["lanes"])
+    try:
+        record_lane_durations(receipt)
+    except OSError as error:
+        print(f"PIPELINE_LEDGER: could not record lane durations: {error}", file=sys.stderr, flush=True)
     if final_source != frozen:
+        if follow_source and not stopping:
+            settled = _settled_source(frozen, settle_seconds, poll_seconds)
+            receipt["status"] = "superseded"
+            receipt["superseded_at"] = _now()
+            receipt["superseded_by"] = settled
+            receipt["superseded_lanes"] = []
+            write_receipt(receipt_path, receipt)
+            print(
+                f"PIPELINE_SUPERSEDED attempt={attempt} old_head={frozen.get('head')} "
+                f"new_head={settled.get('head')} terminating=- (source changed after the lanes finished)",
+                flush=True,
+            )
+            return receipt, "superseded"
         receipt["status"] = "stale"
     write_receipt(receipt_path, receipt)
-    return {"passed": 0, "failed": 1, "stale": EXIT_STALE}.get(receipt["status"], 1)
+    return receipt, "done"
 
 
 def _stage_run_dir() -> str | None:
@@ -623,10 +1280,27 @@ def _supervisor_alive(receipt: dict) -> bool:
     return True
 
 
-def _supervisor_event(receipt: dict) -> tuple[int, dict] | None:
-    """Events only the supervisor knows; lane events come from stage receipts."""
+def _pending_source_change(receipt: dict) -> bool:
+    """Whether the worktree bytes already differ from the attempt's frozen source."""
+    probe = _probe_source()
+    return probe is not None and probe != (receipt.get("source") or {})
+
+
+def _supervisor_event(receipt: dict, attempt: int | None = None) -> tuple[int, dict] | None:
+    """Events only the supervisor knows; lane events come from stage receipts.
+
+    ``attempt`` is the attempt the waiter armed on; a receipt from another
+    attempt (or one marked superseded) is the supersede event. Without it the
+    receipt's own attempt is used, so a single receipt is judged on its own.
+    """
+    if attempt is None:
+        attempt = int(receipt.get("attempt", 1))
     if receipt.get("status") == "stale":
         return EXIT_STALE, {"event": "stale"}
+    if receipt.get("status") == "capped":
+        return EXIT_FIX_LOOP_CAP, {"event": "fix-loop-cap", "fix_loop": receipt.get("fix_loop")}
+    if receipt.get("status") == "superseded" or int(receipt.get("attempt", 1)) != attempt:
+        return _SUPERSEDED_EVENT, {"event": "superseded", "attempt": attempt}
     unstarted = [
         name
         for name, lane in receipt["lanes"].items()
@@ -669,41 +1343,96 @@ def wait(state_dir: Path, timeout: float, stall_seconds: float = 0.0, since: flo
             return 2
         time.sleep(0.2)
         receipt = fresh()
+    if receipt.get("status") == "capped":
+        loop = receipt.get("fix_loop") or {}
+        print(f"PIPELINE_WAKE status=fix-loop-cap exit={EXIT_FIX_LOOP_CAP} failed_rounds={loop.get('failed_rounds')}")
+        print(json.dumps({"event": "fix-loop-cap", "exit": EXIT_FIX_LOOP_CAP, "fix_loop": loop}, sort_keys=True))
+        return EXIT_FIX_LOOP_CAP
     if not receipt.get("stage_run_dir"):
         print("PIPELINE_WAKE status=no-stage-run exit=2 (start one with run-deploy-stage --start)")
         return 2
-    lanes = list(receipt["lanes"])
-    stage_run_dir = Path(receipt["stage_run_dir"])
     latest = {"receipt": receipt}
 
     def refresh() -> dict:
         latest["receipt"] = _read_receipt(receipt_path) or latest["receipt"]
         return latest["receipt"]
 
-    code, payload = deploy_stage_wait.wait_for_stages(
-        stage_run_dir,
-        lanes,
-        since=float(receipt["started_epoch"]),
-        timeout=max(0.0, limit - (time.monotonic() - started)),
-        stall_seconds=stall_seconds,
-        extra_event=lambda: _supervisor_event(refresh()),
-    )
-    while code == 0:
-        if time.monotonic() - started >= limit:
-            code, payload = deploy_stage_wait.EXIT_TIMEOUT, {"event": "timeout"}
+    while True:
+        current = latest["receipt"]
+        attempt = int(current.get("attempt", 1))
+        lanes = list(current["lanes"])
+        stage_run_dir = Path(current["stage_run_dir"])
+        code, payload = deploy_stage_wait.wait_for_stages(
+            stage_run_dir,
+            lanes,
+            since=float(current["started_epoch"]),
+            timeout=max(0.0, limit - (time.monotonic() - started)),
+            stall_seconds=stall_seconds,
+            extra_event=lambda armed=attempt: _supervisor_event(refresh(), armed),
+        )
+        if code == deploy_stage_wait.EXIT_FAILED:
+            # A stage failure is reported before extra_event runs: the attempt
+            # may already have been superseded, in which case the failure
+            # belongs to discarded bytes and the next attempt is what to follow.
+            current = refresh()
+            if int(current.get("attempt", 1)) != attempt or current.get("status") == "superseded":
+                code, payload = _SUPERSEDED_EVENT, {"event": "superseded", "attempt": attempt}
+        while code == 0:
+            if time.monotonic() - started >= limit:
+                code, payload = deploy_stage_wait.EXIT_TIMEOUT, {"event": "timeout"}
+                break
+            # Every lane passed; the supervisor still re-hashes the frozen source.
+            current = refresh()
+            status = current.get("status")
+            if int(current.get("attempt", 1)) != attempt or status == "superseded":
+                code, payload = _SUPERSEDED_EVENT, {"event": "superseded", "attempt": attempt}
+                break
+            if status in {"passed", "failed", "stale"}:
+                code = {"passed": 0, "failed": 1, "stale": EXIT_STALE}[status]
+                payload = {"event": status}
+                break
+            if not _supervisor_alive(current):
+                code, payload = 3, {"event": "supervisor-died", "pid": current.get("supervisor_pid")}
+                break
+            time.sleep(0.2)
+        if (
+            code == deploy_stage_wait.EXIT_FAILED
+            and current.get("follow_source")
+            and current.get("status") in ("running", "failing")  # attempt not terminal
+            and _supervisor_alive(current)
+            and _pending_source_change(current)
+        ):
+            # The failure belongs to bytes that are no longer current: a fix is
+            # landing and the supervisor will supersede this attempt once it
+            # settles. Report the next attempt instead of the stale failure.
+            if time.monotonic() - started >= limit:
+                code, payload = deploy_stage_wait.EXIT_TIMEOUT, {"event": "timeout", "pending_supersede": attempt}
+                break
+            time.sleep(0.5)
+            continue
+        if code != _SUPERSEDED_EVENT:
             break
-        # Every lane passed; the supervisor still re-hashes the frozen source.
-        current = refresh()
-        status = current.get("status")
-        if status in {"passed", "failed", "stale"}:
-            code = {"passed": 0, "failed": 1, "stale": EXIT_STALE}[status]
-            payload = {"event": status}
+        # Superseded: wait for the next attempt's receipt (or a terminal state) and start over.
+        print(f"PIPELINE_SUPERSEDED attempt={attempt} (results on the old bytes discarded)", flush=True)
+        while True:
+            current = refresh()
+            if int(current.get("attempt", 1)) != attempt and current.get("status") != "superseded":
+                break
+            if current.get("status") == "stale":
+                code, payload = EXIT_STALE, {"event": "stale"}
+                break
+            if not _supervisor_alive(current):
+                code, payload = 3, {"event": "supervisor-died", "pid": current.get("supervisor_pid")}
+                break
+            if time.monotonic() - started >= limit:
+                code, payload = deploy_stage_wait.EXIT_TIMEOUT, {"event": "timeout", "superseded": attempt}
+                break
+            time.sleep(0.2)
+        if code != _SUPERSEDED_EVENT:
             break
-        if not _supervisor_alive(current):
-            code, payload = 3, {"event": "supervisor-died", "pid": current.get("supervisor_pid")}
-            break
-        time.sleep(0.2)
     final = latest["receipt"]
+    lanes = list(final["lanes"])
+    stage_run_dir = Path(final["stage_run_dir"])
     rows = {
         row.get("stage"): row
         for row in deploy_stage_wait._rows(stage_run_dir)
@@ -715,13 +1444,46 @@ def wait(state_dir: Path, timeout: float, stall_seconds: float = 0.0, since: flo
         note = f" note={lane['note']!r}" if lane.get("note") else ""
         print(f"FAILED {name} exit={rows.get(name, {}).get('exit_code', lane.get('exit'))} log={lane.get('log')}{note}")
     running = sorted(set(lanes) - set(rows) - set(failed))
+    source = final.get("source") or {}
     print(
-        f"PIPELINE_WAKE status={payload.get('event')} exit={code} head={final['source']['head']} "
+        f"PIPELINE_WAKE status={payload.get('event')} exit={code} head={source.get('head')} "
+        f"digest={str(source.get('digest'))[:12]} attempt={final.get('attempt', 1)} "
         f"still_running={','.join(running) or '-'}"
     )
     payload["exit"] = code
+    payload["attempt"] = final.get("attempt", 1)
+    payload["source"] = source
     print(json.dumps(payload, sort_keys=True, default=str))
     return code
+
+
+def verify(state_dir: Path, expect_head: str | None = None) -> int:
+    """Exit 0 only for a passed receipt bound to the current HEAD and bytes."""
+    receipt = _read_receipt(state_dir / "receipt.json")
+    if receipt is None:
+        print("PIPELINE_VERIFY status=no-receipt exit=2")
+        return 2
+    status = receipt.get("status")
+    source = receipt.get("source") or {}
+    if status != "passed":
+        print(f"PIPELINE_VERIFY status={status} exit=1 head={source.get('head')} (receipt is not green)")
+        return 1
+    current = source_digest()
+    if expect_head and source.get("head") != expect_head:
+        print(f"PIPELINE_VERIFY status=head-mismatch exit={EXIT_STALE} receipt={source.get('head')} expected={expect_head}")
+        return EXIT_STALE
+    if current != source:
+        print(
+            f"PIPELINE_VERIFY status=source-mismatch exit={EXIT_STALE} receipt_head={source.get('head')} "
+            f"receipt_digest={str(source.get('digest'))[:12]} current_head={current['head']} "
+            f"current_digest={current['digest'][:12]} (gates ran on different bytes; rerun)"
+        )
+        return EXIT_STALE
+    print(
+        f"PIPELINE_VERIFY status=bound exit=0 head={current['head']} digest={current['digest'][:12]} "
+        f"attempt={receipt.get('attempt', 1)}"
+    )
+    return 0
 
 
 AGENTCARD_TASKS = (
@@ -730,6 +1492,14 @@ AGENTCARD_TASKS = (
     "agent-payment-idempotent-abandonment",
     "agent-payment-abandonment",
 )
+# Persisted per worktree (.context is per checkout): tsc re-checks only files
+# whose content hash changed and re-reports the cached diagnostics for the
+# rest, so the error set equals a full --noEmit run.
+TSBUILDINFO = "../.context/tsbuildinfo/back-end.tsbuildinfo"
+TYPESCRIPT_COMMAND = [
+    "bash", "-c",
+    f"mkdir -p ../.context/tsbuildinfo && npx tsc --noEmit --incremental --tsBuildInfoFile {TSBUILDINFO}",
+]
 
 
 def standard_plan(args: argparse.Namespace) -> dict:
@@ -766,11 +1536,16 @@ def standard_plan(args: argparse.Namespace) -> dict:
     if args.group in {"3", "all"}:
         lane("eslint", ["bash", "-c", "xargs node scripts/lint-affected.mjs < ../.context/deploy-lint-ts.txt"],
              "back-end", memory_mb=3072)
-        lane("typescript", ["npx", "tsc", "--noEmit"], "back-end", memory_mb=2048)
+        lane("typescript", list(TYPESCRIPT_COMMAND), "back-end", memory_mb=2048)
         lane("backend-structural", ["npm", "run", "test:structural"], "back-end", memory_mb=512)
+        if args.schedule == SCHEDULE_PHASED:
+            # Alone in its phase: every core the whole-box budget can back at
+            # the measured per-worker floor, not the shared host_scale share.
+            workers["structural"] = exclusive_structural_workers(host)
         lane("deploy-command-structural", ["python3", "scripts/run-deploy-structural-gates.py",
              "--max-workers", str(workers["structural"])],
-             memory_mb=1024 + STRUCTURAL_WORKER_MEMORY_MB * workers["structural"])
+             memory_mb=1024 + STRUCTURAL_WORKER_MEMORY_MB * workers["structural"],
+             exclusive=args.schedule == SCHEDULE_PHASED)
         lane("seed-cache-decision", ["bash", "scripts/tests/seed-cache-decision.test.sh"], memory_mb=256)
         lane("canonical-seed-whatsapp-content", ["bash", "scripts/tests/canonical-seed-whatsapp-content.test.sh"],
              memory_mb=256)
@@ -807,13 +1582,48 @@ def standard_plan(args: argparse.Namespace) -> dict:
     for entry in lanes:
         if entry["group"] == "4":
             entry.setdefault("reuse_passed", False)
+    plan_lanes = [Lane(**{k: v for k, v in entry.items() if k in Lane.__dataclass_fields__}) for entry in lanes]
+    estimates = lane_estimates(plan_lanes, load_lane_durations(), stage_receipt_samples([l.name for l in plan_lanes]))
+    phases = schedule_phases(plan_lanes, estimates) if args.schedule == SCHEDULE_PHASED else []
     return {
         "lanes": lanes,
         "host": host,
         "workers": workers,
         "max_parallel": default_max_parallel(host),
         "memory_budget_mb": memory_budget_mb(host),
+        # ``run`` recomputes the phases from the ledger at attempt time; this
+        # preview shows the order the current ledger implies.
+        "schedule": {"policy": args.schedule, "phases": phases, "estimates": estimates},
     }
+
+
+def simulate_plan(path: Path, max_parallel: int | None, budget_mb: int | None,
+                  legacy_plan: Path | None = None) -> dict:
+    """``legacy_plan`` (``plan --schedule legacy``) supplies the legacy lanes'
+    own reservations/worker flags; without it the same plan is compared."""
+    lanes, payload = load_plan_payload(path)
+    estimates = lane_estimates(lanes, load_lane_durations(), stage_receipt_samples([l.name for l in lanes]))
+    if max_parallel is None:
+        max_parallel = int(payload.get("max_parallel") or 0)
+    if budget_mb is None:
+        budget_mb = payload.get("memory_budget_mb")
+    result = simulate(lanes, estimates, max_parallel, budget_mb)
+    if legacy_plan is not None:
+        legacy_lanes, _ = load_plan_payload(legacy_plan)
+        legacy = simulate(legacy_lanes, lane_estimates(legacy_lanes, load_lane_durations(),
+                                                       stage_receipt_samples([l.name for l in legacy_lanes])),
+                          max_parallel, budget_mb)
+        result["legacy_union_wall_s"] = legacy["legacy_union_wall_s"]
+        result["delta_s"] = round(result["legacy_union_wall_s"] - result["phased_union_wall_s"], 1)
+        result["legacy_plan"] = str(legacy_plan)
+    return result
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -826,12 +1636,24 @@ def main(argv: list[str] | None = None) -> int:
                             help="concurrent lanes; default: host-scaled plan value (0 = memory-bounded only)")
     run_parser.add_argument("--memory-budget-mb", type=int, default=None,
                             help="tighten declared-memory budget; whole-box watchdog headroom always applies")
+    run_parser.add_argument("--follow-source", action="store_true",
+                            help="supersede the attempt when the source changes and settles")
+    run_parser.add_argument("--settle-seconds", type=float, default=DEFAULT_SETTLE_SECONDS)
+    run_parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
+    run_parser.add_argument("--max-attempts", type=int, default=DEFAULT_MAX_ATTEMPTS)
+    run_parser.add_argument("--fix-loop-cap", type=int, default=_env_int("DEPLOY_FIX_LOOP_CAP", DEFAULT_FIX_LOOP_CAP),
+                            help="completed failed rounds before FIX_LOOP_CAP (0 disables)")
+    run_parser.add_argument("--after-rca", default=None,
+                            help="RCA reference that authorizes the next round and restarts the count")
     wait_parser = sub.add_parser("wait")
     wait_parser.add_argument("--state-dir", type=Path, required=True)
     wait_parser.add_argument("--timeout", type=float, default=0)
     wait_parser.add_argument("--stall-seconds", type=float, default=0.0)
     wait_parser.add_argument("--since", type=float, required=True,
                              help="epoch captured before launching `run`; older receipts never satisfy the wait")
+    verify_parser = sub.add_parser("verify", help="exit 0 only when the receipt passed on the current bytes")
+    verify_parser.add_argument("--state-dir", type=Path, required=True)
+    verify_parser.add_argument("--expect-head", default=None)
     plan_parser = sub.add_parser("plan", help="print the standard Group 3/4 plan JSON")
     plan_parser.add_argument("--group", choices=("3", "4", "all"), default="all")
     plan_parser.add_argument("--backend", action="store_true")
@@ -850,16 +1672,39 @@ def main(argv: list[str] | None = None) -> int:
                              help="plan for this MemTotal in MB (default: this host)")
     plan_parser.add_argument("--host-watchdog-mb", type=int, default=None,
                              help="plan for this watchdog cap in MB (default: recorded cap or 90%% of MemTotal)")
+    plan_parser.add_argument("--schedule", choices=(SCHEDULE_PHASED, SCHEDULE_LEGACY), default=SCHEDULE_PHASED,
+                             help="Group 3 admission: phased (quick -> exclusive structural -> coverage) or legacy")
+    simulate_parser = sub.add_parser("simulate", help="project the Group 3 union wall: phased vs legacy")
+    simulate_parser.add_argument("--plan", type=Path, required=True)
+    simulate_parser.add_argument("--max-parallel", type=int, default=None)
+    simulate_parser.add_argument("--memory-budget-mb", type=int, default=None)
+    simulate_parser.add_argument("--legacy-plan", type=Path, default=None,
+                                 help="plan --schedule legacy output: the legacy variant's own lane reservations")
     args = parser.parse_args(argv)
     if args.action == "plan":
         print(json.dumps(standard_plan(args), indent=2))
         return 0
-    if args.action == "run":
+    if args.action == "simulate":
         try:
-            return run(args.plan, args.state_dir, args.max_parallel, args.memory_budget_mb)
+            print(json.dumps(simulate_plan(args.plan, args.max_parallel, args.memory_budget_mb, args.legacy_plan),
+                             indent=2))
         except ValueError as error:
             print(f"invalid plan {args.plan}: {error}", file=sys.stderr)
             return 2
+        return 0
+    if args.action == "run":
+        try:
+            return run(
+                args.plan, args.state_dir, args.max_parallel, args.memory_budget_mb,
+                follow_source=args.follow_source, settle_seconds=args.settle_seconds,
+                poll_seconds=args.poll_seconds, fix_loop_cap=args.fix_loop_cap,
+                after_rca=args.after_rca, max_attempts=args.max_attempts,
+            )
+        except ValueError as error:
+            print(f"invalid plan {args.plan}: {error}", file=sys.stderr)
+            return 2
+    if args.action == "verify":
+        return verify(args.state_dir, args.expect_head)
     return wait(args.state_dir, args.timeout, args.stall_seconds, args.since)
 
 
