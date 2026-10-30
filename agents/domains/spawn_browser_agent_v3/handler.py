@@ -74,6 +74,7 @@ from helpers.wait_condition_or_handoff import (
     wait_condition_or_generation_handoff,
 )
 from helpers.workflow_generation import WorkflowGenerationSealed
+from helpers.browser_budget_stop import (announce_finalizer, register_finalizer, finish_budget_stop, forget_finalizer, finalizer_stop_requested, finalizer_result)
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from loop.activity_helper import call_temporal_activity_from_activity
 from providers.demo_cache.browser_use_cache import cached_browser_decision
@@ -6210,6 +6211,7 @@ async def spawn_browser_agent_activity_v3(
     agent_model: Optional[str] = None,
     inbox_address: Optional[str] = None,
     await_owner_cleanup: bool = False,
+    budget_finalizer: Optional[dict] = None,
 ) -> Dict[str, Any]:
     # Browser steps run on the spawning agent's Rose pool (ultra root → ultra).
     browser_pool = browser_pool_for_agent_model(agent_model)
@@ -6274,6 +6276,7 @@ async def spawn_browser_agent_activity_v3(
         browser_pool=browser_pool,
         inbox_address=inbox_address,
         await_owner_cleanup=await_owner_cleanup,
+        budget_finalizer=budget_finalizer,
     )
 
 
@@ -7920,6 +7923,7 @@ async def _spawn_browser_agent_activity_v3_real(
     browser_pool: str = BROWSER_USE_PRICING_POOL,
     inbox_address: Optional[str] = None,
     await_owner_cleanup: bool = False,
+    budget_finalizer: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
@@ -12940,6 +12944,9 @@ Based on this feedback, I need to continue working on the task and address the i
         terminal_reason = loop_abort_reason or f"Max iterations ({MAX_ITERATIONS}) reached"
         logger.warning(terminal_reason if loop_abort_reason else f"Max iterations reached: {MAX_ITERATIONS}")
 
+        if not loop_abort_reason and iteration >= MAX_ITERATIONS:
+            await announce_finalizer(budget_finalizer, steps=MAX_ITERATIONS)
+
         # Final synthesis pass — mirror run_agent's max-iterations handling
         # (loop/run_agent.py:1889). A browser sub-agent that exhausts its step
         # budget without ever calling attempt_completion would otherwise hand
@@ -13603,6 +13610,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         self, workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str
     ) -> AsyncGenerator[ToolEvent, None]:
         """Spawn browser agent with browser-use + Rose API."""
+        budget_ticket = None
         start_url = tool_call.get("start_url", "")
         goal = tool_call.get("goal", "")
         output_schema = tool_call.get("output_schema")
@@ -13815,9 +13823,22 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             goal=goal,
                             workflow_instance=workflow_instance,
                         )
+                        activity_identity = None
+                        if (getattr(workflow_instance, "_browser_execution_task_id", None) == tool_call_id
+                                and write_lock_resume_state is None
+                                and workflow.patched("browser-budget-finalizer-v1")):
+                            activity_identity = str(workflow.uuid4())
+                            budget_ticket = register_finalizer(
+                                workflow_instance, task_id=known_task_id, tool_id=tool_call_id,
+                                activity_id=activity_identity, limit=MAX_ITERATIONS,
+                                timeout_seconds=browser_timeout_minutes * 60,
+                            )
+                        if budget_ticket is not None:
+                            activity_args.append(budget_ticket)
                         activity_handle = workflow.start_activity(
                             spawn_browser_agent_activity_v3,
                             args=activity_args,
+                            **({"activity_id": activity_identity} if activity_identity else {}),
                             start_to_close_timeout=timedelta(minutes=browser_timeout_minutes),
                             heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
                             cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
@@ -13834,13 +13855,18 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             await workflow.wait_condition(
                                 lambda handle=activity_handle: (
                                     handle.done() or tool_stop_requested(workflow_instance, tool_call_id)
+                                    or finalizer_stop_requested(workflow_instance, budget_ticket)
                                 )
                             )
                         except asyncio.CancelledError:
                             await cancel_and_join_browser_activity(activity_handle)
                             raise
                         # Pause, or a kill_agent of this agent (helpers/tool_interrupts.py).
-                        if tool_stop_requested(workflow_instance, tool_call_id) and not activity_handle.done():
+                        if (tool_stop_requested(workflow_instance, tool_call_id)
+                                or finalizer_stop_requested(workflow_instance, budget_ticket)) and not activity_handle.done():
+                            if (finalizer_stop_requested(workflow_instance, budget_ticket)
+                                    and not tool_stop_requested(workflow_instance, tool_call_id)):
+                                await workflow_instance.pause()
                             logger.info("\U0001f534 Cancelling browser agent due to pause")
                             activity_handle.cancel()
                             was_cancelled = True
@@ -14764,6 +14790,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                 break
 
+            result = finalizer_result(workflow_instance, budget_ticket, result)
             tool_usage: Dict[str, list] = browser_usage_items_to_tool_usage(result.get("usage_items"))
 
             output_files = result.get("output_files", [])
@@ -14842,6 +14869,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         file_pointer=fp,
                     )
 
+            await finish_budget_stop(workflow_instance, budget_ticket, result)
+
         except _BrowserPaymentResumeAbandoned:
             yield _browser_abandoned_resume_event(
                 result.get("task_id") or known_task_id,
@@ -14890,6 +14919,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 status=MessageStatus.ERROR,
                 metadata=_browser_task_terminal_metadata(result, activity_task_id),
             )
+
+        finally:
+            forget_finalizer(workflow_instance, budget_ticket)
 
 
 # ========================================

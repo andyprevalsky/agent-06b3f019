@@ -34708,6 +34708,20 @@ async def test_kernel_replay_is_stopped_before_the_browser_session_is_closed():
     assert recordings, "the Kernel replay recording message must still be saved"
 
 
+def test_browser_budget_finalizer_guards():
+    from browser_budget_guard_cases import test_ticket_ack_exact, test_stop_requires_current_acknowledged_finalizer
+    for fault in ("none", "task", "activity", "attempt", "nonce", "generation", "steps", "bool", "deadline", "too-late", "revision", "paused", "kill", "orphan"):
+        test_ticket_ack_exact(fault)
+    for fault in ("none", "early", "wrong-budget", "bool", "first-run", "multiple", "expired", "feedback", "paused", "kill"):
+        test_stop_requires_current_acknowledged_finalizer(fault)
+
+
+async def test_browser_budget_finalizer_handoff():
+    from browser_budget_stop_cases import exercise_finalizer_handoff
+    for mode in ("budget", "user", "kill", "feedback", "noack"):
+        await exercise_finalizer_handoff(globals(), Path(__file__), mode)
+
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     from browser_operational_projection_fixtures import (
@@ -34717,6 +34731,8 @@ async def run_all_tests():
     )
 
     r = BlackboxResult()
+    await r.record_async("browser_budget_finalizer_handoff", test_browser_budget_finalizer_handoff)
+    r.record("browser_budget_finalizer_guards", test_browser_budget_finalizer_guards)
     await r.record_async("cdp_stall_probe_bounds_session_attachment", test_cdp_stall_probe_bounds_session_attachment)
     await r.record_async("cdp_stall_probe_preserves_send_and_cancellation", test_cdp_stall_probe_preserves_send_and_cancellation)
     await r.record_async("cdp_stall_probe_keeps_renderer_browser_distinction", test_cdp_stall_probe_keeps_renderer_browser_distinction)

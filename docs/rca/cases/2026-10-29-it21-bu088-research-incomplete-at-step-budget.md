@@ -276,3 +276,43 @@ and sealed tree. Original PAUSED/FAIL/infraFALSE and cleanup records remain
 unchanged. Research sufficiency, returned native verification and the original
 unchanged-task outcome remain OPEN; no model, browser, DB or provider call,
 new benchmark, outcome claim or live-source change was made.
+
+### R106 — bounded finalizer handoff repair (future source)
+
+The original It25 BU088r2 evidence above remains unchanged: source
+`3dc00896d3b8dcc0b3666c9c8493507ee96c7809`, native PAUSED, progress 0,
+benchmark FAIL, and producer infra FALSE. The final verifier started at
+04:47:48.539824Z; the budget pause arrived at 04:47:51.147554Z and activity
+cancellation followed at 04:48:00.320516Z. No verifier result was persisted.
+This differs from r1's absence of a completion invocation.
+
+The reviewed future-source repair preserves an already-active finalizer only
+when an acknowledged ticket binds the exact task, current Temporal run,
+first execution run, activity, attempt, nonce, exhausted step limit, schema
+revision, and original activity deadline. It adds no browser action, model
+call, retry allowance, or time budget. Missing or early tickets, resumed
+activities, multiple active tasks, and invalid identity/deadline fall back to
+the existing pause. Ordinary pause, kill, sealing, and schema changes retain
+cancellation authority. An accepted stop prevents new root/child dispatch;
+finalization retains credential and cleanup duties before parking the root.
+It does not fabricate verification, progress, success, or cleanup evidence.
+
+Exact reviewed patch SHA-256:
+`d95a8bde66e03099baa65429a9ead5fa35fe713f004356b1f73504a245c4e08f`.
+Independent reviewer B returned GROUNDED; parent independently verified the
+13 preimages/output hashes and the causal RED/GREEN plus five native-activity
+controls. The same owning baseline canceled the blocked verifier; the
+candidate allowed its result before pause. Mocked external services make this
+a routing/lifecycle proof, not a replay or successful completion of the
+original task. The existing R101 declared-judge routing repair is preserved.
+
+Post-application checks on the exact reviewed bytes passed: registered
+finalizer handoff (five native activity/manager scenarios), ticket guards
+(24 rejection/acceptance controls), accepted/refused poller paths, and ten
+backend ownership/generation/refusal controls. Pinned Python compilation,
+archive validation, and whitespace checks are recorded in the handoff.
+The prior targeted TypeScript baseline and candidate had the same five
+unrelated DOM-global diagnostics; full clean TypeScript and Ruff are not
+claimed. Original task success and any actual unchanged-judge outcome remain
+OPEN. This change is qualified only for future integration; the live It26
+source remains frozen separately.

@@ -25933,9 +25933,38 @@ def test_fly_log_subprocesses_close_their_transports_before_loop_shutdown():
         assert not marker.exists(), "a timed-out flyctl snapshot child outlived the runner"
 
 
+async def _exercise_budget_stop_poller(accepted):
+ import httpx
+ from benchmarks import run_benchmark as b
+ t=copy.deepcopy(b.get_task_by_name('polar-bu-088'));posts=[];reads=[]
+ async def get(*args):
+  reads.append(args)
+  return {'agent':{'id':'root','status':'ACTIVE' if len(reads)==1 else 'PAUSED','progress':0},'messages':[{'role':'TOOL','metadata':{'toolName':'spawn_browser_agent','task_id':'browser','steps_taken':step}} for step in range(1,101)]}
+ async def request(req):
+  posts.append(req.url.path)
+  if req.url.path.endswith('/browser-budget-stop'):
+   assert req.read()==b'{"budget":100}'
+   return httpx.Response(200,json={'accepted':accepted})
+  assert req.url.path.endswith('/pause')
+  return httpx.Response(200,json={'success':True})
+ real=httpx.AsyncClient
+ with patch.object(b,'get_agent',get),patch.object(b,'_api_headers',AsyncMock(return_value={})),patch.object(b.httpx,'AsyncClient',side_effect=lambda **kw:real(transport=httpx.MockTransport(request),**kw)):
+  result=await b._poll_agent('http://offline.test','root',t)
+ assert result[0]['agent']['status']=='PAUSED'
+ assert result[0]['_benchmark']['step_budget_reached'] is True
+ assert posts==(['/api/agents/root/browser-budget-stop'] if accepted else ['/api/agents/root/browser-budget-stop','/api/agents/root/pause'])
+ assert len(reads)==2
+ print('POLLER',accepted,'PASS',posts)
+
+async def test_browser_budget_stop_poller_keeps_pause_fallback():
+    await _exercise_budget_stop_poller(True)
+    await _exercise_budget_stop_poller(False)
+
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("browser_budget_stop_poller_keeps_pause_fallback", test_browser_budget_stop_poller_keeps_pause_fallback)
     from benchmarks.process_bench_test import run_process_controls
 
     r.record("process_bench_contract_and_adversarial_traces", run_process_controls)

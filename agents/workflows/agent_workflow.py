@@ -1570,6 +1570,16 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         if note_generation_handoff(self, task_queue):
             workflow.logger.info(f"Generation handoff signalled: live={task_queue}")
 
+    @workflow.update
+    def browser_finalizer_ready(self, payload: dict) -> bool:
+        from helpers.browser_budget_stop import acknowledge_finalizer
+        return acknowledge_finalizer(self, payload)
+
+    @workflow.update
+    def stop_at_browser_budget(self, request: dict) -> dict:
+        from helpers.browser_budget_stop import request_budget_stop
+        return request_budget_stop(self, request)
+
     @workflow.signal
     async def pause(self):
         """Pause workflow execution."""

@@ -4491,6 +4491,18 @@ async def post_world_model_update_events(base_url: str, agent_id: str) -> None:
             return
 
 
+async def pause_at_browser_budget(base_url: str, agent_id: str, budget: int) -> bool:
+    """Ask for an exact finalizer handoff; refusal retains ordinary pause."""
+    try:
+        headers = await _api_headers()
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(f"{base_url}/api/agents/{agent_id}/browser-budget-stop",
+                                     headers=headers, json={"budget": budget})
+        return resp.status_code == 200 and resp.json().get("accepted") is True
+    except Exception:
+        return False
+
+
 async def pause_agent(base_url: str, agent_id: str) -> bool:
     """POST /api/agents/:id/pause — pause root agent (children discover via polling)."""
     headers = await _api_headers()
@@ -4970,6 +4982,7 @@ async def _poll_agent(
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
     wall_clock_disabled = polar_wall_clock_disabled(task) or resolved_timeout in (None, 0)
     step_budget = polar_browser_step_budget(task)
+    budget_stop_pending = None
 
     while True:
         elapsed = time.monotonic() - start
@@ -5085,7 +5098,11 @@ async def _poll_agent(
                 )
                 return data, approvals_triggered, approvals_resolved, None
 
-        if step_budget and status not in TERMINAL_STATUSES:
+        if budget_stop_pending is not None:
+            data["_benchmark"].update(budget_stop_pending)
+            if status == "PAUSED":
+                return data, approvals_triggered, approvals_resolved, None
+        if step_budget and budget_stop_pending is None and status not in TERMINAL_STATUSES:
             browser_steps = _agent_class_step_counts(data).get("browser", {})
             used_steps = max(browser_steps.values()) if browser_steps else 0
             if used_steps >= step_budget:
@@ -5093,6 +5110,14 @@ async def _poll_agent(
                 data["_benchmark"]["browser_steps"] = used_steps
                 data["_benchmark"]["browser_step_budget"] = step_budget
                 print(f"    🧭 Browser step budget reached: {used_steps}/{step_budget} — pausing for polar judge")
+                if await pause_at_browser_budget(base_url, agent_id, step_budget):
+                    budget_stop_pending = {
+                        "step_budget_reached": True, "browser_steps": used_steps,
+                        "browser_step_budget": step_budget,
+                    }
+                    # Existing polling/deadlines continue; no additional actions
+                    # are admitted by the accepted finalizer-only workflow stop.
+                    continue
                 try:
                     await pause_agent(base_url, agent_id)
                     data = await get_agent(base_url, agent_id)
