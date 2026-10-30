@@ -3053,15 +3053,41 @@ async def _synchronize_playwright_page_with_agent_focus(
     if not focused_target_id or not contexts:
         return current_page
 
-    pages = getattr(contexts[0], "pages", None) or []
+    context = contexts[0]
+    pages = list(getattr(context, "pages", None) or [])
     foreground_key = (focused_target_id, len(pages))
+
+    def is_live_member(page: Any) -> bool:
+        current_contexts = getattr(playwright_browser, "contexts", None) or []
+        return (
+            bool(current_contexts) and current_contexts[0] is context
+            and any(member is page for member in (getattr(context, "pages", None) or []))
+            and not getattr(page, "is_closed", lambda: False)()
+        )
+
+    def is_cached_focus(page: Any) -> bool:
+        if focus_cache is None:
+            return False
+        with contextlib.suppress(TypeError):
+            return focus_cache.target_ids.get(page) == focused_target_id
+        return False
+
+    # A Page's target ID is stable for its lifetime. Resolve the known focused
+    # member before discovering unrelated pages, whose CDP attachment may stall.
+    pages.sort(key=lambda page: not is_cached_focus(page))
     for page in pages:
         try:
-            target_id = await _page_target_id(contexts[0], page, focus_cache)
+            if not is_live_member(page):
+                continue
+            target_id = await _page_target_id(context, page, focus_cache)
             if target_id != focused_target_id:
                 continue
+            if getattr(session, "agent_focus_target_id", None) != focused_target_id or not is_live_member(page):
+                return current_page
             if focus_cache is None or focus_cache.foreground != foreground_key or page is not current_page:
                 await page.bring_to_front()
+                if getattr(session, "agent_focus_target_id", None) != focused_target_id or not is_live_member(page):
+                    return current_page
                 if focus_cache is not None:
                     focus_cache.foreground = foreground_key
             return page

@@ -32054,6 +32054,186 @@ async def test_browser_tab_rebind_preserves_provider_keyboard_transport():
             await exercise(call, 'tilion', cancel=True)
 
 
+async def test_cached_tab_focus_ignores_unrelated_stalled_page():
+    """Known live focus must not await an unrelated tab's CDP attachment."""
+    from domains.spawn_browser_agent_v3.handler import (
+        TabFocusCache, _rebind_browser_tab_runtime,
+        _synchronize_playwright_page_with_agent_focus,
+    )
+
+    class Page:
+        def __init__(self, target):
+            self.target = target
+            self.closed = False
+            self.front_calls = 0
+            self.on_front = None
+        def is_closed(self):
+            return self.closed
+        async def bring_to_front(self):
+            self.front_calls += 1
+            if self.on_front:
+                await self.on_front()
+
+    class Context:
+        def __init__(self, pages):
+            self.pages = pages
+            self.lookups = []
+            self.detached = []
+            self.block = None
+            self.on_lookup = None
+        async def new_cdp_session(self, page):
+            self.lookups.append(page.target)
+            if page is self.block:
+                await asyncio.Future()
+            if self.on_lookup:
+                self.on_lookup(page)
+            context = self
+            class Session:
+                async def send(self, method):
+                    assert method == "Target.getTargetInfo"
+                    return {"targetInfo": {"targetId": page.target}}
+                async def detach(self):
+                    context.detached.append(page.target)
+            return Session()
+
+    foreign, focused = Page("foreign"), Page("focus")
+    context = Context([foreign, focused])
+    context.block = foreign
+    cache = TabFocusCache()
+    cache.target_ids[focused] = "focus"
+    session = SimpleNamespace(agent_focus_target_id="focus")
+    browser = SimpleNamespace(contexts=[context])
+    service = SimpleNamespace(session=session)
+    recorder = SimpleNamespace(page=foreign)
+    old = SimpleNamespace(closed=False)
+    async def close_old():
+        old.closed = True
+    old.close = close_old
+    class Humanizer:
+        def __init__(self, **kwargs):
+            self.page = kwargs["input_page"]
+        async def initialize_cursor(self, **kwargs):
+            pass
+        def set_cursor_observer(self, observer):
+            self.observer = observer
+    task = asyncio.create_task(_rebind_browser_tab_runtime(
+        dom_service=service, dom_page=object(), playwright_browser=browser,
+        current_page=foreign, humanizer=old, browser_recorder=recorder,
+        cursor_observer=None, humanizer_factory=Humanizer, focus_cache=cache,
+    ))
+    try:
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert task.done(), "known focus blocked behind unrelated CDP attachment"
+        selected, rebound = await task
+        assert selected is focused and rebound.page is focused
+        assert old.closed and recorder.page is focused
+        assert context.lookups == [] and focused.front_calls == 1
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def select(ctx, current, target, cached=None, other_context=None):
+        local_cache = cached or TabFocusCache()
+        owner = SimpleNamespace(agent_focus_target_id=target)
+        result = await _synchronize_playwright_page_with_agent_focus(
+            dom_service=SimpleNamespace(session=owner),
+            playwright_browser=SimpleNamespace(contexts=[ctx] + ([other_context] if other_context else [])),
+            current_page=current, focus_cache=local_cache,
+        )
+        return result, local_cache
+
+    # A closed or removed cached Page cannot be selected.
+    focused.closed = True
+    context.block = None
+    result, _ = await select(context, foreign, "focus", cache)
+    assert result is foreign and focused.front_calls == 1
+    focused.closed = False
+    context.pages = [foreign]
+    result, _ = await select(context, foreign, "focus", cache)
+    assert result is foreign and focused.front_calls == 1
+
+    # A matching Page in another context is not an authority to cross contexts.
+    result, _ = await select(context, foreign, "focus", cache, Context([focused]))
+    assert result is foreign and focused.front_calls == 1
+
+    # Focus changes select the new cached target, not the former focus.
+    second = Page("second")
+    context.pages = [foreign, focused, second]
+    context.block = foreign
+    cache.target_ids[second] = "second"
+    result, _ = await select(context, focused, "second", cache)
+    assert result is second and second.front_calls == 1
+
+    # Existing uncached discovery and exact acquired-session cleanup still work.
+    context.block = None
+    context.lookups.clear()
+    context.detached.clear()
+    result, _ = await select(context, foreign, "focus")
+    assert result is focused
+    assert context.lookups == ["foreign", "focus"]
+    assert context.detached == context.lookups
+
+    # Target changes or removal while discovery awaits cannot authorize old focus.
+    for mutation in ("focus", "removed", "closed", "context"):
+        current, candidate = Page("current"), Page("candidate")
+        ctx = Context([candidate, current])
+        owner = SimpleNamespace(agent_focus_target_id="candidate")
+        active_browser = SimpleNamespace(contexts=[ctx])
+        def mutate(page):
+            if mutation == "focus":
+                owner.agent_focus_target_id = "new-target"
+            elif mutation == "removed":
+                ctx.pages.remove(page)
+            elif mutation == "context":
+                active_browser.contexts = [Context([current])]
+            else:
+                page.closed = True
+        ctx.on_lookup = mutate
+        result = await _synchronize_playwright_page_with_agent_focus(
+            dom_service=SimpleNamespace(session=owner),
+            playwright_browser=active_browser,
+            current_page=current, focus_cache=TabFocusCache(),
+        )
+        assert result is current and candidate.front_calls == 0
+
+    # A change during foregrounding is not published as a current selection.
+    current, candidate = Page("current"), Page("candidate")
+    ctx = Context([current, candidate])
+    owner = SimpleNamespace(agent_focus_target_id="candidate")
+    after_cache = TabFocusCache()
+    after_cache.target_ids[candidate] = "candidate"
+    async def change_during_front():
+        owner.agent_focus_target_id = "replacement"
+    candidate.on_front = change_during_front
+    result = await _synchronize_playwright_page_with_agent_focus(
+        dom_service=SimpleNamespace(session=owner),
+        playwright_browser=SimpleNamespace(contexts=[ctx]), current_page=current,
+        focus_cache=after_cache,
+    )
+    assert result is current and after_cache.foreground is None
+    assert candidate.front_calls == 1  # Dispatched foreground cannot be retracted.
+
+    # Cancellation of actual focus foregrounding propagates without publishing it.
+    entered = asyncio.Event()
+    async def blocked_front():
+        entered.set()
+        await asyncio.Future()
+    focused.on_front = blocked_front
+    context.pages = [foreign, focused]
+    task = asyncio.create_task(select(context, foreign, "focus", cache))
+    await entered.wait()
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("focus cancellation swallowed")
+
+
 async def test_playwright_page_tracks_browser_use_tab_focus():
     """Humanized clicks, recorder, and live view must follow browser-use focus."""
     import inspect
@@ -35634,6 +35814,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_tab_rebind_preserves_provider_keyboard_transport",
         test_browser_tab_rebind_preserves_provider_keyboard_transport,
+    )
+    await r.record_async(
+        "cached_tab_focus_ignores_unrelated_stalled_page",
+        test_cached_tab_focus_ignores_unrelated_stalled_page,
     )
     await r.record_async(
         "playwright_page_tracks_browser_use_tab_focus",
