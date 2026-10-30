@@ -1050,7 +1050,8 @@ def check_declared_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
     """Follow-up x (2026-10-30): the 4096 MB local smoke lane (Group 4, no
     ``after`` edges) was admitted at attempt start and held the memory the
     exclusive structural lane (6544 MB of a 7752 MB budget) needed, so the
-    pipeline was smoke-only for 13-23 min before any Group 3 lane ran. A lane
+    pipeline ran smoke alone for ~22 min (11-24 min across attempts) before
+    any Group 3 lane ran. A lane
     outside Group 3 may now declare ``"phase": "coverage"``: it joins the
     coverage phase (after the quick and exclusive phases) and runs beside the
     coverage lanes within the budget. Undeclared Group 4 lanes stay unphased,
@@ -1106,7 +1107,8 @@ def check_declared_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
     assert lanes["semantic"]["started_epoch"] < smoke["finished_epoch"], "semantic is not gated by the smoke lane"
     assert lanes["g4-free"]["started_epoch"] < lanes["quick"]["finished_epoch"], "undeclared Group 4 stays unphased"
 
-    # The standard plan declares the phase for the local smoke lane only.
+    # The standard plan declares the phase for the local smoke lane and the
+    # AgentCard lifecycle lane; the cloud smoke lane stays unphased.
     local = {lane["name"]: lane for lane in plan_json("--group", "4", "--smoke", "local", "--agentcard")["lanes"]}
     assert local["smoke"]["phase"] == "coverage" and local["smoke"]["memory_mb"] == 4096, local["smoke"]
     assert local["agentcard-lifecycle"]["phase"] == "coverage", local["agentcard-lifecycle"]

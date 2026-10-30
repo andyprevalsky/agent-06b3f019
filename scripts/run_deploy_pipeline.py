@@ -68,7 +68,8 @@ first within their phase and Group 4 lanes are untouched unless they declare
 and exclusive phases) instead of starting at attempt start. The 4096 MB local
 smoke lane declares it, because admitted first it held the memory the
 exclusive structural lane (6544 MB of a 7752 MB budget) needed and the
-pipeline was smoke-only for 13-23 min (#1638, 2026-10-30); beside
+pipeline ran smoke alone for ~22 min on #1638 attempt 5 (11-24 min across
+attempts, 2026-10-30); beside
 backend-coverage-blackbox (2560 MB) it fits the budget. A plan with
 ``"schedule": {"policy": "legacy"}`` keeps the previous all-at-once admission.
 
