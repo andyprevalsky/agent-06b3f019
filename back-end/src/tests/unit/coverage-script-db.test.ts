@@ -29,6 +29,10 @@ try {
         encoding: 'utf8',
         env: {
           ...process.env,
+          // run-coverage.sh defines SCRIPT_DIR at its top, outside the replayed
+          // slice; the branch resolves the prepared URL through
+          // scripts/coverage-database-url.mjs relative to it.
+          SCRIPT_DIR: join(process.cwd(), 'scripts'),
           ROOT_DIR: dbRoot,
           WORKSPACE_HINT: identity,
           ROSE_DEPLOY_WORKTREE: '1',
