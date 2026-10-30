@@ -1,4 +1,4 @@
-import { resolveBatchProjectIds } from './agentProject';
+import { resolveBatchProjectIds, type BatchAgentResult } from './agentProject';
 import { resolveCreateTaskPaths } from './agentTaskPathCreate';
 import { isWorkflowStartAdmissionPending } from '../../providers/workflowQueueAdmission';
 /**
@@ -47,16 +47,6 @@ import type { BatchCreateAgentParams } from './repo';
 
 const log = createLogger('AgentsBatch');
 
-export interface BatchAgentResult {
-  agent_id: string;
-  status: 'STARTING_UP' | 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'FAILED';
-  temporal_workflow_id: string | null;
-  goal?: string;
-  model?: string;
-  error?: string;
-  already_existed?: boolean;
-}
-
 interface BatchCreateAgentsArgs {
   bodies: CreateAgentBody[];
   userId: string;
@@ -97,6 +87,7 @@ function buildBatchItem(
     ...(body.write_lock_enabled !== undefined ? { writeLockEnabled: body.write_lock_enabled } : {}),
     ...executionModeCreateFields(body),
     ...(typeof body.project_id === 'string' ? { projectId: body.project_id } : {}),
+    ...(typeof body.folder_id === 'string' ? { folderId: body.folder_id } : {}),
     verifierType,
     ...(isBenchmark ? { isBenchmark: true } : {}),
     ...(body.attachments !== undefined
@@ -198,6 +189,8 @@ async function runPhaseTwoStarts(
     if (settled.status === 'fulfilled') {
       out.set(agentId, {
         agent_id: agentId,
+        project_id: body.project_id ?? null,
+        folder_id: body.folder_id ?? null,
         status: 'STARTING_UP',
         temporal_workflow_id: settled.value,
         goal: body.goal,
@@ -222,6 +215,8 @@ async function runPhaseTwoStarts(
     }
     out.set(agentId, {
       agent_id: agentId,
+      project_id: body.project_id ?? null,
+      folder_id: body.folder_id ?? null,
       status: pendingAdmission ? 'STARTING_UP' : 'FAILED',
       temporal_workflow_id: null,
       goal: body.goal,
@@ -300,6 +295,10 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
         body.memory_enabled = stored.memoryEnabled;
       }
       assertExistingDescendantRequestMatches(body, stored);
+      if (stored.temporalWorkflowStartPending) {
+        // Retrying a durable child must not re-inherit a parent's later move.
+        [body.project_id, body.folder_id] = [stored.projectId, stored.folderId];
+      }
     }
   }
 
@@ -342,6 +341,8 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
     const row = existingById.get(agentId)!;
     return {
       agent_id: row.id,
+      project_id: row.projectId,
+      folder_id: row.folderId,
       status: row.status as BatchAgentResult['status'],
       temporal_workflow_id: row.temporalWorkflowId,
       goal: row.goal,

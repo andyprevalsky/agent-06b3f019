@@ -9,6 +9,8 @@
  *   + New project  (inline: Enter creates, Escape cancels)
  *   [icon] Project A   [+ new agent here] [⚙ settings]   (right-click: rename/settings/delete)
  *       project A agents (indented)
+ *       folder rows (one level; collapse/expand, count, +, rename/delete menu)
+ *         folder agents; folder-plus on project opens the create editor
  *   ──────
  *   [icon] Project B   [+] [⚙]
  *   (icon = GitHub repo owner's avatar when connected to a GitHub repo, else folder)
@@ -58,6 +60,7 @@ import type { Agent } from '../../hooks';
 import { useNow } from '../useNow';
 import type { GroupedAgents } from './groupAgentsByProject';
 import RoseAgentBranch from './RoseAgentBranch';
+import RoseProjectFolders from './RoseProjectFolders';
 import type { RoseAgentMenuActions } from './RoseAgentRowMenu';
 import RoseProjectRow, { HomeProjectRow, NewProjectRow } from './RoseProjectRow';
 import { oldAgentsLabel, splitOldAgents } from './oldAgents';
@@ -67,7 +70,7 @@ const OLD_AGENT_CLOCK_MS = 60_000;
 export const HOME_GROUP = 'home';
 
 export interface RoseProjectActions {
-  onCreateAgentInProject: (project: Project) => void;
+  onCreateAgentInProject: (project: Project, folderId?: string | null) => void;
   /** "+" on the Home project row (a new agent without a project). */
   onCreateHomeAgent?: () => void;
   onOpenProjectSettings: (project: Project) => void;
@@ -153,30 +156,51 @@ function ProjectGroupRow({
   project,
   agents,
   props,
+  renderAgents,
 }: {
   project: Project;
   agents: Agent[];
   props: RoseAgentGroupsProps;
+  renderAgents: (agents: Agent[], key: string) => React.ReactNode;
 }) {
+  const [creatingFolder, setCreatingFolder] = useState(false);
   const a = props.projectActions;
   const isActive =
     props.settingsProjectId === project.id ||
     agents.some((agent) => agent.agent_id === props.selectedAgentId);
   return (
-    <RoseProjectRow
-      project={project}
-      isActive={isActive}
-      isRenaming={props.renamingProjectId === project.id}
-      isExpanded={props.isExpanded}
-      isPending={props.pendingGroupKey === project.id}
-      onCreateAgent={() => a.onCreateAgentInProject(project)}
-      onOpenSettings={() => a.onOpenProjectSettings(project)}
-      onStartRename={() => a.onStartRename(project)}
-      onRename={(name) => a.onRename(project, name)}
-      onCancelRename={a.onCancelRename}
-      onRequestDelete={() => a.onRequestDelete(project)}
-      onMenuOpenChange={props.onMenuOpenChange}
-    />
+    <>
+      <RoseProjectRow
+        project={project}
+        isActive={isActive}
+        isRenaming={props.renamingProjectId === project.id}
+        isExpanded={props.isExpanded}
+        isPending={props.pendingGroupKey === project.id}
+        onCreateAgent={() => a.onCreateAgentInProject(project)}
+        onCreateFolder={() => setCreatingFolder(true)}
+        onOpenSettings={() => a.onOpenProjectSettings(project)}
+        onStartRename={() => a.onStartRename(project)}
+        onRename={(name) => a.onRename(project, name)}
+        onCancelRename={a.onCancelRename}
+        onRequestDelete={() => a.onRequestDelete(project)}
+        onMenuOpenChange={props.onMenuOpenChange}
+      />
+      <div data-testid={`rose-group-${project.id}`} className="flex flex-col">
+        <RoseProjectFolders
+          project={project}
+          agents={agents}
+          creating={creatingFolder}
+          onCancelCreate={() => setCreatingFolder(false)}
+          expanded={props.isExpanded}
+          filtering={props.isFiltering}
+          selectedAgentId={props.selectedAgentId}
+          pendingGroupKey={props.pendingGroupKey}
+          onCreateAgent={a.onCreateAgentInProject}
+          onMenuOpenChange={props.onMenuOpenChange}
+          renderAgents={renderAgents}
+        />
+      </div>
+    </>
   );
 }
 
@@ -289,16 +313,20 @@ export default function RoseAgentGroups(props: RoseAgentGroupsProps) {
       {projectViews.map(({ project, view }, index) => (
         <Fragment key={project.id}>
           {index > 0 && <GroupDivider isExpanded={isExpanded} />}
-          <ProjectGroupRow project={project} agents={view.agents} props={props} />
-          <div data-testid={`rose-group-${project.id}`} className="flex flex-col">
-            <GroupAgents
-              view={view}
-              indented
-              open={openOld.has(view.key)}
-              onToggle={() => toggleOld(view.key)}
-              props={props}
-            />
-          </div>
+          <ProjectGroupRow
+            project={project}
+            agents={view.agents}
+            props={props}
+            renderAgents={(agents, key) => (
+              <GroupAgents
+                view={viewOf(key, agents)}
+                indented
+                open={openOld.has(key)}
+                onToggle={() => toggleOld(key)}
+                props={props}
+              />
+            )}
+          />
         </Fragment>
       ))}
       {showHome && projectViews.length > 0 && <GroupDivider isExpanded={isExpanded} />}

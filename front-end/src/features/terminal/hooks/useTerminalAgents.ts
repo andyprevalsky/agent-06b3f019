@@ -204,17 +204,19 @@ function buildAuthModalHandlers(modals: ReturnType<typeof useTerminalModals>) {
 
 /** New-agent entry points; each makes the next goal create a fresh agent. */
 function buildNewAgentHandlers(a: BuildArgs) {
-  const openNewAgent = (projectId: string | null) => {
+  const openNewAgent = (projectId: string | null, folderId: string | null = null) => {
     a.cleanupAgentState();
     a.resetAnimationState();
     a.setCurrentView('agents');
     a.messaging.setNewAgentProjectId(projectId);
+    a.messaging.setNewAgentFolderId(folderId);
   };
   return {
     /** New Super Agent: the next goal creates a Home agent. */
     handleCreateNewAgent: () => openNewAgent(null),
     /** A project's "+" (Rose Desktop): the next goal creates the agent in that project. */
-    handleCreateNewAgentInProject: (project: { id: string }) => openNewAgent(project.id),
+    handleCreateNewAgentInProject: (project: { id: string }, folderId?: string | null) =>
+      openNewAgent(project.id, folderId),
   };
 }
 
@@ -287,6 +289,7 @@ function buildReturn(a: BuildArgs) {
     handleJoinWaitlist,
     ...newAgent,
     newAgentProjectId: a.messaging.newAgentProjectId,
+    newAgentFolderId: a.messaging.newAgentFolderId,
     handleSubmitFeedback: a.actions.handleSubmitFeedback,
     resetAnimationState: a.resetAnimationState,
   };

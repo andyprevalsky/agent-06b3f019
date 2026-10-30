@@ -33,6 +33,7 @@ const AGENT_LIST_SELECT = {
   worldModelMode: true,
   memoryEnabled: true,
   projectId: true,
+  folderId: true,
   createdAt: true,
   updatedAt: true,
   deletedAt: true,

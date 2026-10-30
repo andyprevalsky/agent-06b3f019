@@ -25,7 +25,9 @@ import {
 } from './useProjects';
 import type { RoseProjectActions } from './RoseAgentGroups';
 
-export function useRoseSidebarProjects(onCreateAgentInProject: (project: Project) => void) {
+export function useRoseSidebarProjects(
+  onCreateAgentInProject: (project: Project, folderId?: string | null) => void,
+) {
   const { toast } = useToast();
   const projectQuery = useProjectsQuery();
   const projects = projectQuery.data ?? [];

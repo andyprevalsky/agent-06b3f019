@@ -37,6 +37,7 @@ export class ProjectError extends Error {
 }
 
 export interface ProjectDto {
+  folders: { id: string; name: string; projectId: string }[];
   id: string;
   name: string;
   repoUrl: string | null;
@@ -76,6 +77,7 @@ export function toProjectDto(
 ): ProjectDto {
   return {
     id: project.id,
+    folders: project.folders ?? [],
     name: project.name,
     repoUrl: project.repoUrl,
     githubConnected,

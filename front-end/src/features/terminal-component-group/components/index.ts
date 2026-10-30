@@ -97,3 +97,5 @@ export * from './WaitForChip';
 export { default as WaitForChip } from './WaitForChip';
 export * from './WriteLockToggle';
 export { default as WriteLockToggle } from './WriteLockToggle';
+
+export { NewAgentLocation } from './rose-sidebar/NewAgentLocation';

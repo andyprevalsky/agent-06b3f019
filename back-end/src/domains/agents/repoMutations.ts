@@ -51,9 +51,13 @@ function optionalAgentCreateFields(params: {
   githubRepoUrl?: string;
   originDeviceId?: string;
   projectId?: string | null;
+  folderId?: string | null;
   taskPath?: string | null;
 }): Partial<Prisma.AgentUncheckedCreateInput> {
   return {
+    ...(params.folderId !== undefined && params.folderId !== null
+      ? { folderId: params.folderId }
+      : {}),
     ...(params.projectId !== undefined && params.projectId !== null
       ? { projectId: params.projectId }
       : {}),
@@ -146,6 +150,7 @@ export interface CreateAgentParams {
   /** Rose Mac app device that started this root agent (C14 local code agents). */
   originDeviceId?: string;
   projectId?: string | null;
+  folderId?: string | null;
   taskPath?: string | null;
 }
 
@@ -217,6 +222,8 @@ export async function createAgentTransaction(params: CreateAgentParams) {
 }
 
 export interface BatchCreateAgentParams {
+  projectId?: string | null;
+  folderId?: string | null;
   agentId: string;
   userId: string;
   parentAgentId: string | null;

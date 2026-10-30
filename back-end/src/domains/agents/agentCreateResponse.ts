@@ -29,6 +29,7 @@ export function createAgentResponse(
     memory_enabled: agent.memoryEnabled,
     world_model_mode: agent.worldModelMode,
     project_id: agent.projectId,
+    folder_id: agent.folderId,
     created_at: agent.createdAt,
     updated_at: agent.updatedAt,
     available_endpoints: getX402Endpoints(agent.id),
