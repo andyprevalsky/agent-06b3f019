@@ -237,6 +237,19 @@ park_smoke PREDEPLOY_PARK_LEDGERS=1 PREDEPLOY_RUN_ID=parked-flag >"$TEST_ROOT/pa
 [ "$(wc -l <"$PARK_DIR/task_attempts.jsonl")" -eq 1 ] || fail "PREDEPLOY_PARK_LEDGERS=1 must park the rows"
 cmp -s "$PARK_FIXTURE/agents/benchmarks/history/task_attempts.jsonl" "$TEST_ROOT/park-attempts.before" \
     || fail "flagged smoke appended to the tracked attempts ledger"
+# An explicit BENCHMARK_HISTORY_PARK_DIR is honoured as-is, and the printed
+# publish command names that directory: the default replay would miss it and
+# report success while this run's rows stay parked.
+CUSTOM_PARK="$TEST_ROOT/custom-park"
+park_smoke BENCHMARK_HISTORY_PARK_DIR="$CUSTOM_PARK" PREDEPLOY_RUN_ID=parked-custom >"$TEST_ROOT/park-custom.out" 2>&1 \
+    || fail "smoke with an explicit park directory failed: $(cat "$TEST_ROOT/park-custom.out")"
+[ "$(wc -l <"$CUSTOM_PARK/task_attempts.jsonl")" -eq 1 ] || fail "an explicit BENCHMARK_HISTORY_PARK_DIR must receive the rows"
+[ "$(wc -l <"$PARK_DIR/task_attempts.jsonl")" -eq 1 ] || fail "an explicit park directory must leave the default park untouched"
+grep -qF -- "python3 scripts/benchmark-history-latest-only.py --base origin/main --apply-parked \"$CUSTOM_PARK\" --write" \
+    "$TEST_ROOT/park-custom.out" \
+    || fail "the printed publish command must name the configured park directory: $(grep -F 'publish them with' "$TEST_ROOT/park-custom.out")"
+grep -qF -- "--apply-parked \"$PARK_DIR\" --write" "$TEST_ROOT/park-flag.out" \
+    || fail "the printed publish command must name the default park directory: $(grep -F 'publish them with' "$TEST_ROOT/park-flag.out")"
 # Outside a deploy the rows still reach the tracked ledgers directly.
 park_smoke PREDEPLOY_RUN_ID=unparked >"$TEST_ROOT/park-plain.out" 2>&1 \
     || fail "plain smoke failed: $(cat "$TEST_ROOT/park-plain.out")"
