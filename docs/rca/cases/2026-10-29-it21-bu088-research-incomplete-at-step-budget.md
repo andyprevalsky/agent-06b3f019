@@ -119,3 +119,52 @@ UNMETERED. The recovered cleanup500 and later204 were reported separately.
 
 Trace the actual pause initiator and last captured actor decision before
 classifying a low-progress result or treating missing aggregate usage as no work.
+
+## R101 observed budget-stop variant: original It25 BU088r1
+
+Original r001-j0008/root35cc19f5-0d07-4ec3-bed2-427e4fa451b9 executes
+3dc00896d3b8dcc0b3666c9c8493507ee96c7809/patchnone. Archive
+8d8b68b0146a03a478e8090e15ee53cbfcb4fc96e5f8c1f74b3db04a10a4a167 and all
+seven original members match manifest
+920fea13653266916e8d58b9fe15aa96b4ce07e86e288896515d7debf220f636.
+Run SHA f6d4d9791933892eccc88dcacdea65547565d8358a0799fa015852b8b5b9cd83
+records nativePAUSED2059.4s/progress0, canonicalFAILED and originalinfraFALSE.
+There is no declared semantic judge result. This is not the It22 CDP socket
+failure simply because the task ID is shared.
+
+The original supplemental driver line16297 explicitly says Browser step budget
+reached100/100, pausing for Polar judge. Normal worker25693 records completed
+budget step99/evaluate at03:27:46.619405Z. Its raw output dump3a81b7509d4b
+at25677 has decoded SHA
+d1a74f4f5fa328799f2327cf931e4e56617cad6365ae0c6e9c7e10d8f50af3ca
+and selects extraction of the current search page. The preceding goto searched
+Oxfordshire, tablet, died and1993. No completed answer or attempt_completion
+is present. A BBC article about a green AMT pill occurs earlier in the actual
+history, but the record does not bind the two deaths, dates, ages, distance
+and coroner into an accepted solution.
+
+There are103 distinct completed action receipt indices:53goto,46evaluate and
+4read_browser_state, plus4 explicit observation-budget refunds. These receipt
+counts are not a replacement for the driver's100-step counter; a following
+model request is in flight when the pause arrives. Worker25708 starts that
+request at03:27:50.498268Z, before workflowPAUSE at03:27:51.057595Z.
+Cancellation is requested immediately and the activity records paused
+cancellation at03:27:53.030747Z. No completed next response is retained.
+This ordering does not prove a new model call after local cancellation or a
+missing pause guard. Later UI text saying paused by user does not override
+the original driver budget initiator.
+
+Archive searches covered BU088 budget and100-step incomplete research. The
+prior case's Solution/Human feedback and the BU083 source-identification case
+were read after this trace. This occurrence matches the observed bounded
+research-stop pattern, while retaining its distinct inputs and cancellation
+ordering; no model-intelligence cause is established without a controlled
+comparison. No cap, prompt, answer, grade or runtime repair was made.
+
+Final normal cleanup records exact Tilion session
+sess_0351eca3b4af436eb0e171f29e0ccf46 DELETE204, root deleted and tree sealed.
+Incidental passkey/recording errors do not displace that final closure evidence.
+No positive operational transport failure or new native/model/DB call was
+introduced. Original outcomes and the earlier case bytes remain preserved;
+selected driver/worker hashes are in .context/r101/proof.json. Outcome remains
+OPEN, with no separate duplicate fix or test lane.
