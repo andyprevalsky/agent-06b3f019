@@ -639,6 +639,7 @@ def main() -> int:
         check_standard_plan_typescript()
         check_schedule_phases(tmp, env)
         check_stage_receipt_seed(tmp, env)
+        check_passed_only_estimates_and_dag_phases(tmp, env)
     print("run-deploy-pipeline: all checks passed")
     return 0
 
@@ -955,7 +956,8 @@ def check_stage_receipt_seed(tmp: Path, env: dict[str, str]) -> None:
     estimates = pipeline.lane_estimates(lanes, {}, samples)
     assert estimates["deploy-command-structural"] == {"seconds": 1000.4, "samples": 2, "source": "stage-receipts",
                                                        "isolated_s": 441.2}, estimates
-    assert estimates["eslint"]["source"] == "stage-receipts" and estimates["eslint"]["seconds"] == 24.0
+    # eslint's only receipt FAILED: not evidence of its duration (follow-up k), so the default table applies.
+    assert estimates["eslint"] == {"seconds": 24.0, "samples": 0, "source": "default", "isolated_s": None}, estimates
     assert estimates["agents-coverage-blackbox"] == {"seconds": 800.0, "samples": 0, "source": "default",
                                                       "isolated_s": None}
     phases = pipeline.schedule_phases(lanes, estimates)
@@ -966,6 +968,79 @@ def check_stage_receipt_seed(tmp: Path, env: dict[str, str]) -> None:
     assert pipeline.exclusive_structural_workers({"cpus": 14, "mem_available_mb": 32768}) == 8
     assert pipeline.exclusive_structural_workers({"cpus": 2, "mem_available_mb": 32768}) == 2
     print("stage receipt seed: ok")
+
+
+def check_passed_only_estimates_and_dag_phases(tmp: Path, env: dict[str, str]) -> None:
+    """Follow-ups k/n (2026-10-30): only passed samples estimate a lane (a
+    2.5 s FAILED backend-coverage sample and a 4.9 s FAILED live-probes sample
+    were re-phased as quick); phases are layered over the plan's ``after``
+    DAG so a lane that waits for the exclusive lane never lands in the quick
+    phase (attempt 7 deadlocked with every lane pending); an explicit cycle or
+    an unknown dependency fails the attempt loudly before any lane starts."""
+    pipeline = load_module("pipeline_passed_only", DRIVER)
+
+    def sample(wall: float, status: str, concurrent: int = 1) -> dict:
+        return {"wall_s": wall, "status": status, "concurrent": concurrent, "at": "2026-10-30T00:00:00Z"}
+
+    lanes = [pipeline.Lane(name="probe", command=["true"], group="3"),
+             pipeline.Lane(name="eslint", command=["true"], group="3")]
+    estimates = pipeline.lane_estimates(lanes, {"probe": [sample(4.9, "failed", 3)]},
+                                        {"probe": [sample(2.5, "failed")], "eslint": [sample(24.0, "failed")]})
+    assert estimates["probe"] == {"seconds": None, "samples": 0, "source": "unknown", "isolated_s": None}, estimates
+    assert estimates["eslint"]["source"] == "default", estimates
+    estimates = pipeline.lane_estimates(
+        lanes, {"probe": [sample(4.9, "failed", 3), sample(70.0, "passed", 1), sample(2.0, "failed")]}, {})
+    assert estimates["probe"] == {"seconds": 70.0, "samples": 1, "source": "ledger", "isolated_s": 70.0}, estimates
+    estimates = pipeline.lane_estimates(lanes, {"probe": [sample(4.9, "failed")]}, {"probe": [sample(30.0, "passed", 2)]})
+    assert estimates["probe"] == {"seconds": 30.0, "samples": 1, "source": "stage-receipts", "isolated_s": None}, estimates
+    assert [p["lanes"] for p in pipeline.schedule_phases(lanes, pipeline.lane_estimates(
+        lanes, {"probe": [sample(4.9, "failed", 3)]}, {}))] == [["eslint"], ["probe"]], "a failed-only lane is never quick"
+
+    ledger = tmp / "passed-only-ledger.json"
+    ledger.write_text(json.dumps({"schema_version": 1, "lanes": {
+        "probe": [sample(4.9, "failed", 3)], "big": [sample(600.0, "passed", 1)],
+        "quick": [sample(5.0, "passed", 3)], "quick-after": [sample(6.0, "passed", 3)], "cov": [sample(300.0, "passed", 3)],
+    }}))
+    assert pipeline.load_lane_durations(ledger)["probe"][0]["status"] == "failed", "failed samples stay as telemetry"
+    env = {**env, "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}
+    state = tmp / "dag"
+    plan = tmp / "dag-plan.json"
+    write_plan(plan, [
+        {"name": "quick", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3"},
+        {"name": "quick-after", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "after": ["quick"]},
+        {"name": "big", "command": ["sleep", "0.4"], "reuse_passed": False, "group": "3", "exclusive": True},
+        {"name": "probe", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "after": ["big"]},
+        {"name": "cov", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3"},
+    ], schedule={"policy": "phased"})
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, env=env, timeout=120)
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["status"])
+    phases = [(p["phase"], p["lanes"]) for p in receipt["schedule"]["phases"]]
+    assert phases == [("quick", ["quick", "quick-after"]), ("exclusive", ["big"]), ("coverage", ["probe", "cov"])], phases
+    assert receipt["schedule"]["estimates"]["probe"]["source"] == "unknown", receipt["schedule"]["estimates"]
+    assert receipt["after"]["probe"][0] == "big" and set(receipt["after"]["probe"]) == {"big", "quick", "quick-after"}
+    assert receipt["after"]["quick-after"] == ["quick"], "an edge inside the quick phase adds no implied edges"
+    ran_lanes = receipt["lanes"]
+    assert all(lane["status"] == "passed" for lane in ran_lanes.values()), ran_lanes
+    assert ran_lanes["quick-after"]["started_epoch"] >= ran_lanes["quick"]["finished_epoch"]
+    assert ran_lanes["big"]["started_epoch"] >= ran_lanes["quick-after"]["finished_epoch"]
+    assert ran_lanes["probe"]["started_epoch"] >= ran_lanes["big"]["finished_epoch"]
+    recorded = json.loads(ledger.read_text())["lanes"]
+    assert recorded["probe"][0]["status"] == "failed" and recorded["probe"][-1]["status"] == "passed", recorded["probe"]
+
+    for policy in ("phased", "legacy"):
+        write_plan(plan, [{"name": "a", "command": ["true"], "reuse_passed": False, "group": "3", "after": ["b"]},
+                          {"name": "b", "command": ["true"], "reuse_passed": False, "group": "3", "after": ["a"]}],
+                   schedule={"policy": policy})
+        cyc = run_driver("run", "--plan", str(plan), "--state-dir", str(tmp / f"cycle-{policy}"), *UNBOUNDED,
+                         env=env, timeout=60)
+        assert cyc.returncode == 2 and "cycl" in cyc.stderr, (policy, cyc.returncode, cyc.stderr)
+        assert not (tmp / f"cycle-{policy}" / "receipt.json").exists(), "a cyclic plan must fail before any lane starts"
+    write_plan(plan, [{"name": "a", "command": ["true"], "reuse_passed": False, "group": "3", "after": ["ghost"]}],
+               schedule={"policy": "phased"})
+    ghost = run_driver("run", "--plan", str(plan), "--state-dir", str(tmp / "ghost"), *UNBOUNDED, env=env, timeout=60)
+    assert ghost.returncode == 2 and "ghost" in ghost.stderr, (ghost.returncode, ghost.stderr)
+    print("passed-only estimates + DAG phases: ok")
 
 
 if __name__ == "__main__":
