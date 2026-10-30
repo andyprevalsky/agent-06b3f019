@@ -116,3 +116,62 @@ A click handler can succeed while the destination returns an HTTP error.
 Credential inventory, injected browser state, navigation acknowledgement and
 final provider cleanup are distinct facts. Trace each before proposing an
 exception-policy or authentication change.
+
+
+## R91: It23 BU085 run2 guarded reload failure
+
+Original job r002-j0015/root1ec59614-6505-442f-8606-21df06559afb ran
+sourcefc00b583e7df7b94d05fdb3442bddd23cd21be8b with patchnone.
+NativeFAILED714.2seconds and progress1 remain distinct from canonicalFAILED,
+producerinfraFALSE. No completed year or declared semantic judge is recorded.
+Progress1 is not a successful native completion. All seven original member
+sizes and hashes independently verify against manifest
+e7693b6a3373ade45289fc620effdfcbfc9e564a3658b8cc707d590e50e15432;
+archive7294d5c26d666421f14634759f20972d9c2c9a1c3df1bd27b50fa0036020792c
+and normal run0031f36c60bbbbddfbcbd44bbb18240efad9998c5fded1bf73586b3c28553fe3.
+
+The exact actor browser_use_step_11 request/output at worker15313 has payload
+SHA256792bee4900e7a5def951de23c5e213b8df0de6d229b81f66574d9ed0cf76ddfe.
+It chooses switch_tab C28A while looking for the paper's dedication.
+Persisted messages56/57 show that action starting00:41:22.008Z and succeeding
+00:41:25.210Z. The selected destination is the same Harvard bitstream as R86.
+
+This occurrence has a material ordering difference from R86. At00:41:25.058418Z,
+worker15364 records successful harvard.edu realm preparation with one password,
+passkey_count0, passkeys_newly_injected3 and cookies_injectedfalse. The preceding
+virtual-authenticator readback reports expected3/observed3/missing0; later
+passkey-used messages are retained. These counts describe different inventory
+and injection fields; they must not be flattened into no credentials.
+No secret values were inspected or added to this case.
+
+The first captured HTTP429 for the destination is worker15393 at
+00:41:28.165224Z, after realm preparation. Unlike R86, this packet does not
+establish a destination429 before preparation. Native navigation then repeatedly
+raises ERR_HTTP_RESPONSE_CODE_FAILURE. Eight supervisor recovery messages61–68
+from00:41:29.205Z through00:41:48.411Z perform bring_to_front/press_escape on a
+chrome-error page visibly showing HTTP ERROR429. Worker15493 exhausts the
+existing recovery budget at00:41:50.405900Z. Native failure reaches the manager
+and root; the final error summary says the native browser task did not complete.
+
+Exact-source pending_credential_reload_realm is cleared only after successful
+navigation/readiness acknowledgement. The exception guard runs here and
+exhausts recovery; it did not silently escape the error. No safe alternative
+transition was proven that would preserve the credential/realm obligation
+while allowing unrelated research. A forced ACK, larger budget, task-specific
+URL rule or credential bypass would not establish a general causal repair.
+
+The source-origin or upstream policy causing429, its response body and a safe
+retry interval remain unestablished. Other captured Google429 responses are
+separate events, not proof of a platform-wide outage. The native record has
+no completed answer or semantic rejection to repair by rewriting presentation.
+This is a relative/recurrence of the guarded reload failure boundary, appended
+with its different injection and response ordering rather than asserted as
+an identical initial cause.
+
+The final original cleanup separately records same-session Tilion DELETE204,
+root soft-deletion and tree sealing, with cleanup_failure null. Earlier cleanup
+failure metadata does not erase this later receipt and supplies no terminal
+infrastructure reclassification. Searches used credential_reload_error HTTP429
+and ERR_HTTP_RESPONSE_CODE_FAILURE mandatory reload; R86 and R52 Solution/Human
+feedback were read. OPEN, no runtime patch, model/provider/native/DB call,
+replay, cap/criteria change or task regrade. Tokens UNMETERED.
