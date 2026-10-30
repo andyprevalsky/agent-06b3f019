@@ -49,8 +49,8 @@ def classify_model(model: str) -> tuple[str, str]:
     if any(model and model == spec.cerebras_model for spec in POOL_REGISTRY.values()):
         return "cerebras", model
     for slot in (0, 1):
-        # Waterfalls are not all the same length -- rose-1-oss pins a single
-        # open-weights layer -- so the slot must be bounds-checked per pool.
+        # Waterfalls are not all the same length -- pools carry one to several
+        # open-weights layers -- so the slot must be bounds-checked per pool.
         # Without the guard this raised IndexError for any model that reached
         # the loop without matching an earlier pool at that slot; `any()` had
         # been hiding it by short-circuiting on a longer pool first, which made

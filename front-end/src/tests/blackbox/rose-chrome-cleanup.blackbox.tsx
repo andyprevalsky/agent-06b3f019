@@ -12,6 +12,7 @@
  *    followed by the new goals in order, then the stock goals minus four
  *  - #55 the Popular Goals row is exactly as wide as the query box
  */
+import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
@@ -131,6 +132,17 @@ describe('mobile query box safe area (#11)', () => {
     expect(mobileRule()).toMatch(
       /padding-bottom:\s*calc\(\s*0\.75rem \+ max\(0px, var\(--safe-area-inset-bottom\) - var\(--mobile-querybox-gap\)\)\s*\)/,
     );
+  });
+
+  it('sizes and places the app shell from the iOS visible-viewport vars', async () => {
+    setViewport(430, 932);
+    await renderTerminal(true);
+    const shell = screen.getByTestId('terminal-app-shell');
+    // initViewportHeight writes these: full screen in the PWA, keyboard top while typing.
+    expect(shell.style.height).toBe('var(--app-height, 100dvh)');
+    expect(shell.style.top).toBe('var(--app-top, 0px)');
+    expect(shell).toHaveClass('fixed');
+    expect(screen.getByRole('main').style.height).toBe('var(--app-height, 100dvh)');
   });
 
   it('Rose Desktop: the input area opts in and leaves one gap under the box', async () => {
@@ -603,5 +615,33 @@ describe('Rose Desktop stacking order and composer continuity (UI review 1/13/14
     releaseDetail();
     await waitFor(() => expect(screen.getByPlaceholderText('Type your message...')).toBe(input));
     expect(composer.isConnected).toBe(true);
+  });
+});
+
+// ─── Mobile trajectory text reads 2px larger ─────────────────────────────────
+
+describe('mobile trajectory text', () => {
+  const css = readFileSync(resolve(FRONT_END, 'src/index.css'), 'utf8');
+
+  it('bumps every message-list text size by 2px on phones only', () => {
+    const start = css.indexOf('@media (max-width: 767px) {\n  .rose-trajectory');
+    expect(start).toBeGreaterThan(-1);
+    const rule = css.slice(start, css.indexOf('\n}\n', start));
+    expect(rule).toMatch(/\.rose-trajectory \.text-xs \{\s*font-size: calc\(0\.75rem \+ 2px\)/);
+    expect(rule).toMatch(
+      /\.rose-trajectory \.text-sm,\s*\.rose-trajectory \.prose-sm \{\s*font-size: calc\(0\.875rem \+ 2px\)/,
+    );
+    // Every arbitrary px size used by trajectory components has a +2px override,
+    // so a newly introduced size cannot silently stay small on mobile.
+    const dir = resolve(FRONT_END, 'src/features/terminal-component-group/components');
+    const sources = execSync(`grep -rhoE "text-\\[[0-9.]+px\\]" ${dir} --include=*.tsx || true`)
+      .toString()
+      .split('\n')
+      .filter(Boolean);
+    for (const size of new Set(sources)) {
+      const px = Number(size.slice(6, -3));
+      const selector = `.rose-trajectory .${size.replace(/[[\].]/g, (c) => `\\${c}`)}`;
+      expect(rule, size).toContain(`${selector} {\n    font-size: ${px + 2}px;`);
+    }
   });
 });

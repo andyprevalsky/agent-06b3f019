@@ -650,12 +650,69 @@ the worker budgets above, and a source change after the freeze marks the run
 before launching `run`; its
 `python3 scripts/run_deploy_pipeline.py wait --state-dir <dir> --since "$SINCE" [--stall-seconds S]`
 is this same waiter over the pipeline's lanes, with the same exit codes plus
-`5` for a stale source and `3` for a dead supervisor; a receipt started before
-`--since` belongs to an earlier iteration and never satisfies the wait, and a
-lane that failed before writing a stage row (refused by the memory budget,
-spawn error) wakes it like any other failure. Never arm a second, different
-waiter for the same lanes. An exact-input `--reuse-passed` hit records
-`reused`, which both count as a pass.
+`5` for a stale source, `6` for the fix-loop cap and `3` for a dead
+supervisor; a receipt started before `--since` belongs to an earlier iteration
+and never satisfies the wait, and a lane that failed before writing a stage row
+(refused by the memory budget, spawn error) wakes it like any other failure.
+Never arm a second, different waiter for the same lanes. An exact-input
+`--reuse-passed` hit records `reused`, which both count as a pass. For most
+lanes the exact input is HEAD, the worktree diff and untracked files, cwd,
+argv and the environment minus process/session/terminal identity variables
+(e.g. systemd `INVOCATION_ID`, `JOURNAL_STREAM`, `SYSTEMD_EXEC_PID`,
+`NOTIFY_SOCKET`, `LISTEN_*`; shell `_`, `PWD`, `OLDPWD`, `SHLVL`; `COLUMNS`,
+`LINES`, terminal/SSH session ids — the full list is
+`_PROCESS_IDENTITY_ENV` plus `_PROCESS_IDENTITY_ENV_PREFIXES` in
+`scripts/run_deploy_stage.py`), so a lane
+relaunched by a fresh process on identical bytes reuses its own pass instead
+of re-running. Two lane groups narrow that input: `eslint`, `typescript` and
+`backend-structural` drop the append-only `agents/benchmarks/history/`
+ledgers (tracked diff and untracked files) when they run their real command (lint-affected over the
+deploy lint list, `tsc`, `npm run test:structural`), and the front-end and mac
+lanes (`_LANE_SCOPES`) hash only their in-scope file content instead of HEAD.
+Every reuse line names the scope it matched. The local smoke lane itself no
+longer dirties those ledgers while it runs: inside a deploy
+(`ROSE_DEPLOY_WORKTREE=1`, or `PREDEPLOY_PARK_LEDGERS=1`)
+`scripts/run-predeploy-local` parks the attempt, duration and span rows its
+run records under `.context/deploy-ledger-park/` (`BENCHMARK_HISTORY_PARK_DIR`,
+honoured by the ledger writers in `agents/benchmarks/timeout_history.py` and
+`span_history.py`; reads keep the tracked files), so its recorded pass
+fingerprint and every whole-worktree lane admitted after it stay stable across
+attempts. Publish those rows with the normal ledger step,
+`scripts/benchmark-history-latest-only.py --apply-parked <park dir> … --write`
+(the launcher prints the exact command with its park directory; the default is
+`.context/deploy-ledger-park` under the worktree, e.g.
+`python3 scripts/benchmark-history-latest-only.py --base origin/main --apply-parked "<worktree>/.context/deploy-ledger-park" --write`),
+which refuses the publish if any parked row is unparseable, appends the rows
+to the tracked ledgers (span rows through the segmented append; rows an
+interrupted publish already appended are skipped, so a replay is a no-op)
+before the latest-only filter and renames the parked files `*.applied-<utc>`.
+
+**Speculative gates on the next HEAD (`run --follow-source`).** Start the
+pipeline with `--follow-source` so a fix committed while CodeRabbit is still
+reviewing the frozen HEAD does not wait for the in-flight lanes: once the
+worktree bytes have settled (`--settle-seconds`, default 10) the supervisor
+prints `PIPELINE_SUPERSEDED`, terminates the lanes bound to the old digest,
+discards their results, and starts a new attempt on the new HEAD with the
+superseded attempt's failed lanes first (unchanged lanes still reuse their
+`--reuse-passed` receipts). `wait` follows the supersede and reports the
+attempt it woke on. This changes only when gates start: it never pushes,
+never opens or closes a review cycle, and never requests a review, so the
+bounded `deploy_review_cycle.py` ledger is untouched; push the batch once the
+open cycle is terminal exactly as before. Every receipt is bound to the HEAD
+plus source digest it ran on, and Phase 3 runs
+`python3 scripts/run_deploy_pipeline.py verify --state-dir <dir> --expect-head "$(git rev-parse HEAD)"`
+before `require-mergeable`: a green receipt from other bytes exits `5` and
+the gates rerun.
+
+**Fix-loop cap (`FIX_LOOP_CAP`, exit 6).** After two consecutive completed
+failed rounds in the same state dir (`--fix-loop-cap`, env
+`DEPLOY_FIX_LOOP_CAP`, default 2; recorded in every receipt's `fix_loop`),
+`run` refuses a third blind rerun and prints `FIX_LOOP_CAP: ... failure
+classes: <lane>=<class,...>` from the lanes' stage records. Do not rerun: open
+`/RCA` for each independent failure class (local repro + fix + registered
+regression), then resume with `run --after-rca "<rca ref>"`, which records the
+reference and restarts the count. A passed round also restarts it. The cap is
+telemetry plus routing; it never changes which lanes run.
 
 ## Step 1: Prettier format
 
@@ -719,10 +776,19 @@ If any files were modified by this step, stage and commit them (can combine with
 ## Step 3: TypeScript type check
 
 ```bash
-cd back-end && bash ../scripts/run-deploy-stage typescript --reuse-passed -- npx tsc --noEmit
+cd back-end && bash ../scripts/run-deploy-stage typescript --reuse-passed -- \
+  bash -c 'mkdir -p ../.context/tsbuildinfo && npx tsc --noEmit --incremental --tsBuildInfoFile ../.context/tsbuildinfo/back-end.tsbuildinfo'
 ```
 
 Catches type errors that ESLint misses (wrong argument types, missing properties, bad generics). Fix any errors before proceeding — pre-existing type errors in touched files are your responsibility.
+
+`--incremental` keeps a per-worktree `.tsbuildinfo` under `.context/` (never
+committed): tsc re-checks only files whose content hash changed plus their
+dependents and re-reports the cached diagnostics for the rest, so the error
+set is identical to a full `tsc --noEmit` (verified on three injected
+signature breaks with 399/12/4 errors) while a one-file fix iteration drops
+from ~25 s to ~7 s. A missing or stale buildinfo simply costs one full check.
+`run_deploy_pipeline.py plan` emits the same command for the `typescript` lane.
 
 ## Step 4: Structural tests + fix (no skip)
 
@@ -779,11 +845,13 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-provider-capacity.test.py`,
 `bash scripts/tests/campaign-hub-grouping.test.sh`,
 `bash scripts/tests/cloudbench-fetch-ref.test.sh`,
+`python3 scripts/tests/cloudbench-warm-pool.test.py`,
 `python3 scripts/tests/verify-successful-llm-queries.test.py`,
 `python3 scripts/tests/cloudbench-exact-session-multi-root.test.py`,
 `python3 scripts/tests/cloudbench-forensic-quiesced.test.py`,
 `python3 scripts/tests/cloudbench-controller-linux.test.py`,
 `python3 scripts/tests/factory-metadata.test.py`,
+`python3 scripts/tests/final-review-script-regressions.test.py`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/factory-metadata.test.py`,
 `python3 scripts/biz_review.py self-test`,
@@ -954,13 +1022,41 @@ cd back-end && bash ../scripts/run-deploy-stage backend-coverage-blackbox --reus
       npm run test:coverage:sharded
 ```
 
-This one command runs all 91 deterministic back-end blackbox domains plus unit
-tests under V8 coverage as **two shards** (`scripts/run-coverage-sharded.sh`:
-each shard has its own instrumented backend, database, port and raw V8
-directory; the worker counts apply per shard). Their raw coverage is merged
-into one `c8 report --check-coverage`, so it must both pass every test and meet
+This one command runs every deterministic back-end blackbox domain
+(`back-end/src/tests/blackbox/*.blackbox.ts`, 239 files on 2026-10-30, minus
+the provider-dependent `integration-health`: 238 domains run) under V8
+coverage as **two
+blackbox shards** (`scripts/run-coverage-sharded.sh`: each shard has its own
+instrumented backend, database, port and raw V8 directory; the blackbox and
+contract worker counts apply per shard, `BACKEND_UNIT_CONCURRENCY` to the
+single unit pass), then the **unit suite once, alone**
+(`BACKEND_COVERAGE_UNIT_PASS=1`, its own `<workspace>_s0` database, log
+`coverage/units.log`) after the last shard has finished: the unit suite's
+headless-browser fps probe (`rose-ui-cli-browser`) is host-load dependent and
+failed 4/4 sharded runs when each shard ran its own unit slice beside two
+blackbox streams (2026-10-30). All raw coverage is merged into one
+`c8 report --check-coverage`, so it must both pass every test and meet
 `back-end/.c8rc.json` on the merged report; the real provider credential probe
-runs once in Step 4c.
+runs once in Step 4c. On an isolated deploy worktree on system Postgres
+(`BACKEND_COVERAGE_DATABASE_URL` = the prepared `.context/deploy-system-pg.db`
+database) the shards still run: shard `i/N` owns the derived
+`<prepared>_s<i>` database on the same server
+(`back-end/scripts/coverage-database-url.mjs`), so never substitute the
+unsharded `npm run test:coverage` there; the 2026-10-29 deploy did and paid
+a 1,505 s single sweep. `run_deploy_pipeline.py plan` emits the sharded
+command, phases Group 3 (quick lanes → `deploy-command-structural` alone at
+full budget-backed width → the coverage lanes together, longest recorded
+first) from `.context/deploy-durations/pipeline-lanes.json`, and
+`run_deploy_pipeline.py simulate --plan <plan> --legacy-plan <plan --schedule legacy>`
+projects the union wall from the same ledger (plus a `group3` block for the
+Group 3 lanes alone). The local smoke lane (Group 4, 4096 MB) declares
+`"phase": "coverage"` in the plan: it joins the coverage phase beside
+`backend-coverage-blackbox` (4096 + 2560 MB fit the budget) after the
+exclusive structural lane instead of being admitted first and holding that
+lane's memory (#1638 attempt 5 ran smoke alone for ~22 min; 11–24 min across attempts); the AgentCard lane
+declares the same phase. Undeclared Group 4 lanes stay unphased, and a plan's
+own `after` edges are never removed: `live-probes` and `semantic-stack` start
+as soon as their declared dependencies and memory allow.
 
 **Retry after a failure: failed-first, still a full sweep.** Rerun the same
 stage with `BACKEND_COVERAGE_FAILED_FIRST=1` in the `env` above. The previously
@@ -1099,7 +1195,7 @@ After all parallel Group 3 branches finish, validate every external credential
 (E2B, Steel, Parallel.ai, Anthropic, OpenRouter, Supabase) with the focused test
 below. The deterministic Step 4a batch excludes this provider-dependent domain,
 so this runs exactly once and a provider outage can be retried without rerunning
-all 91 instrumented back-end domains.
+every instrumented back-end domain.
 
 Step 4p launches the exact `run-deploy-stage credential-health` command with
 `npx tsx src/tests/blackbox/integration-health.blackbox.ts`.
@@ -2210,6 +2306,10 @@ Only enter this phase when the Test Loop is green and the exact current HEAD has
 a clean completed review. Enforce that invariant rather than trusting prose:
 
 ```bash
+# Pipeline-driven gates: the green receipt must be bound to these exact bytes
+# (exit 5 = the gates ran on a different HEAD/digest; rerun them).
+[ ! -f .context/deploy-pipeline/receipt.json ] || \
+  python3 scripts/run_deploy_pipeline.py verify --state-dir .context/deploy-pipeline --expect-head "$(git rev-parse HEAD)"
 python3 scripts/deploy_review_cycle.py require-mergeable --head "$(git rev-parse HEAD)"
 ```
 

@@ -14,15 +14,35 @@ import sys
 import tempfile
 
 
-FIRST_BASE_PORT = 56_000
-LAST_BASE_PORT = 64_990
 PORTS_PER_WORKTREE = 10
+MAX_PORT = 65_535
 # Ports a prepared worktree actually listens on relative to its base: the ten
 # owned stack ports, run.sh's +20 collision rescan step, the coverage shards at
-# +20+2i (back-end/scripts/run-coverage-sharded.sh) and the blackbox backend at
-# +100 (back-end/scripts/run-blackbox-tests.sh). Kernel autobind must not be
-# able to reach any of them.
-FOOTPRINT_PORTS = 101
+# +20+2i (back-end/scripts/run-coverage-sharded.sh), the blackbox backend at
+# +100 (back-end/scripts/run-blackbox-tests.sh) and the cloud benchmark fleet's
+# central hub, preferred at +5764 and searched up to 500 ports further
+# (scripts/run-bench-fleet DASH_BASE, cloudbench_select_central_hub_port).
+# Kernel autobind must not be able to reach any of them, and the whole
+# footprint must exist below 65535: base 61000 put the hub at 66764 and the
+# cloud smoke lane refused to start (2026-10-29).
+HUB_PORT_OFFSET = 5_764
+HUB_PORT_SEARCH = 500
+# The exact ports a worktree listens on, relative to its base: the owned stack
+# block, run.sh's +20 rescan step with the coverage shards at +20+2i, the
+# blackbox backend at +100, an isolated local benchmark stack at +200..+209
+# (agents/benchmarks/local.py PORT_RANGE_OFFSETS) and the hub search window.
+# Reservations and the kernel window are judged against these, never against
+# the unused gap up to the hub.
+LISTENER_OFFSETS = (
+    *range(0, PORTS_PER_WORKTREE),
+    *range(20, 30),
+    100,
+    *range(200, 210),
+    *range(HUB_PORT_OFFSET, HUB_PORT_OFFSET + HUB_PORT_SEARCH + 1),
+)
+FOOTPRINT_PORTS = HUB_PORT_OFFSET + HUB_PORT_SEARCH + 1  # span, for the 65535 bound
+FIRST_BASE_PORT = 20_000
+LAST_BASE_PORT = MAX_PORT - FOOTPRINT_PORTS + 1
 # Linux publishes the range the kernel autobinds outbound connections from.
 # Tests point ROSE_DEPLOY_PROC_SYS_NET_IPV4 at a fixture directory; production
 # reads the live kernel tree.
@@ -94,12 +114,23 @@ def _kernel_autobind_ports() -> tuple[int, int, set[int]] | None:
     return low, high, _parse_port_list(reserved_text)
 
 
+def _listener_ports(base_port: int) -> list[int]:
+    return [base_port + offset for offset in LISTENER_OFFSETS]
+
+
 def _footprint_reserved(base_port: int, window: tuple[int, int, set[int]]) -> bool:
     low, high, reserved = window
-    return all(
-        port < low or port > high or port in reserved
-        for port in range(base_port, base_port + FOOTPRINT_PORTS)
-    )
+    return all(port < low or port > high or port in reserved for port in _listener_ports(base_port))
+
+
+def _footprint_fits(base_port: int) -> bool:
+    return base_port + FOOTPRINT_PORTS - 1 <= MAX_PORT
+
+
+def _footprint_outside(base_port: int, window: tuple[int, int, set[int]]) -> bool:
+    """Every listener port lies below or above the kernel window."""
+    low, high, _ = window
+    return all(port < low or port > high for port in _listener_ports(base_port))
 
 
 def _reserve_remedy(first: int, last: int) -> str:
@@ -117,18 +148,26 @@ def _ephemeral_conflict(base_port: int) -> str | None:
     rely on a reservation (see ``Registry.claim``): it is host-local state that
     does not survive a reboot.
     """
+    last = base_port + FOOTPRINT_PORTS - 1
+    if not _footprint_fits(base_port):
+        return (
+            f"deploy-worktree ports {base_port}-{last} (owned ports, the +20/+22/+24 coverage shards, "
+            f"the +100 blackbox backend and the +{HUB_PORT_OFFSET}..+{HUB_PORT_OFFSET + HUB_PORT_SEARCH} "
+            f"benchmark hub) do not fit below {MAX_PORT}: the cloud smoke lane's central hub could not "
+            "bind. Retire this worktree and prepare it again so it claims a range that fits."
+        )
     window = _kernel_autobind_ports()
-    if window is None or base_port > window[1] or _footprint_reserved(base_port, window):
+    if window is None or _footprint_outside(base_port, window) or _footprint_reserved(base_port, window):
         return None
     low, high, _ = window
-    last = base_port + FOOTPRINT_PORTS - 1
     return (
         f"deploy-worktree ports {base_port}-{last} (owned ports, the +20/+22/+24 coverage "
-        f"shards and the +100 blackbox backend) lie inside the kernel ephemeral port range {low}-{high} and "
+        f"shards, the +100 blackbox backend and the +{HUB_PORT_OFFSET}..+{HUB_PORT_OFFSET + HUB_PORT_SEARCH} "
+        f"benchmark hub) lie inside the kernel ephemeral port range {low}-{high} and "
         "are not all reserved: any outbound connection on this host can take one of them "
         "as its source port, after which listen() fails with EADDRINUSE although nothing "
         f"is listening. Reserve them with {_reserve_remedy(base_port, last)}, or retire "
-        "this worktree and prepare it again so it claims a range above that window."
+        "this worktree and prepare it again so it claims a range outside that window."
     )
 
 
@@ -229,21 +268,22 @@ class Registry:
             for base_port in range(FIRST_BASE_PORT, LAST_BASE_PORT + 1, PORTS_PER_WORKTREE)
             if base_port not in claimed
         ]
-        # Only ranges wholly above the kernel window are eligible for a new
-        # claim; a host-only ip_local_reserved_ports entry is not inherited by
-        # the next boot. When none exist the claim fails with the exact remedy:
-        # handing out a stealable range would only recreate the EADDRINUSE race.
-        safe = [base_port for base_port in candidates if window is None or base_port > window[1]]
+        # Only ranges whose whole footprint lies outside the kernel window are
+        # eligible for a new claim; a host-only ip_local_reserved_ports entry
+        # is not inherited by the next boot. When none exist the claim fails
+        # with the exact remedy: handing out a stealable range would only
+        # recreate the EADDRINUSE race.
+        safe = [base_port for base_port in candidates if window is None or _footprint_outside(base_port, window)]
         if candidates and not safe:
             low, high, _ = window
             raise RuntimeError(
-                "no free deploy-worktree range lies above the kernel ephemeral port range "
-                f"{low}-{high} (claimable bases {FIRST_BASE_PORT}-{LAST_BASE_PORT}); outbound "
-                "connections would steal its ports and listen() would fail with EADDRINUSE. "
-                "New claims never rely on ip_local_reserved_ports (host-local, lost on reboot). "
-                "Lower the kernel window so ranges above it exist, e.g. sudo sysctl -w "
-                "net.ipv4.ip_local_port_range='32768 60999' (persist it in /etc/sysctl.d), "
-                "or retire a deploy worktree whose claim sits above the window, then claim again."
+                "no free deploy-worktree range lies outside the kernel ephemeral port range "
+                f"{low}-{high} with its whole {FOOTPRINT_PORTS}-port listen footprint (claimable bases "
+                f"{FIRST_BASE_PORT}-{LAST_BASE_PORT}); outbound connections would steal its ports and "
+                "listen() would fail with EADDRINUSE. New claims never rely on ip_local_reserved_ports "
+                "(host-local, lost on reboot). Narrow the kernel window so a footprint fits beside it, "
+                "e.g. sudo sysctl -w net.ipv4.ip_local_port_range='32768 60999' (persist it in "
+                "/etc/sysctl.d), or retire a deploy worktree whose claim sits outside the window, then claim again."
             )
         for base_port in safe:
             if not _range_is_bindable(base_port):
@@ -305,7 +345,7 @@ def main() -> int:
             )
         else:
             print(
-                f"✅ deploy-worktree ports {args.base_port}-{last} are above, or reserved "
+                f"✅ deploy-worktree ports {args.base_port}-{last} are outside, or reserved "
                 f"from, the kernel ephemeral port range {window[0]}-{window[1]}"
             )
         return 0

@@ -85,6 +85,10 @@ const BrowserStatusBarCarousel = lazy(() =>
   })),
 );
 
+/** iOS keeps the shell on the visible viewport (app-wiring initViewportHeight
+ * sets --app-top/--app-height: flush on the keyboard, full-screen in the PWA). */
+const APP_SHELL_STYLE = { top: 'var(--app-top, 0px)', height: 'var(--app-height, 100dvh)' };
+
 export function TerminalContent(props: {
   loadAgentsRef: React.MutableRefObject<(() => void) | null>;
 }): React.JSX.Element;
@@ -218,8 +222,9 @@ function InteractiveTerminalChrome(props: TerminalLayoutProps) {
   return (
     <AttentionRequestsProvider value={attention}>
       <div
-        className="h-screen w-screen flex flex-col bg-background dark:bg-navi-black relative overflow-hidden"
-        style={{ height: '100dvh' }}
+        data-testid="terminal-app-shell"
+        className="h-screen w-screen flex flex-col bg-background dark:bg-navi-black fixed left-0 overflow-hidden"
+        style={APP_SHELL_STYLE}
       >
         <BackgroundPattern
           patternOffset={props.patternOffset}
@@ -235,7 +240,7 @@ function InteractiveTerminalChrome(props: TerminalLayoutProps) {
 
         {currentView === 'agents' && <InspectionAccountBadge context={agents.inspectionContext} />}
 
-        <div className="h-screen flex z-[4]" style={{ height: '100dvh' }}>
+        <div className="h-screen flex z-[4]" style={{ height: APP_SHELL_STYLE.height }}>
           <SidebarSection
             agents={agents}
             drip={drip}

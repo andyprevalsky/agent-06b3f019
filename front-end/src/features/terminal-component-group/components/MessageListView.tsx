@@ -243,7 +243,10 @@ export function MessageListView(props: MessageListViewProps) {
   );
 
   return (
-    <div ref={containerRef} className={`${containerClassName} mobile-disable-message-entry-spawn`}>
+    <div
+      ref={containerRef}
+      className={`${containerClassName} mobile-disable-message-entry-spawn rose-trajectory`}
+    >
       <TrajectoryItems
         props={props}
         metrics={streamingMetricsBySubAgentId}
