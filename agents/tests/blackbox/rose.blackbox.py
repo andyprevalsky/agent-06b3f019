@@ -7314,6 +7314,44 @@ async def test_client_foundry_stream_exit_closes_http_owner():
     assert not failures, "; ".join(failures)
 
 
+async def test_user_auth_error_report_names_the_leased_integration():
+    """S33: an auth_error report names the exact leased subscription row.
+
+    Unscoped, the backend cannot tell a user's accounts apart; one bad token
+    expired every healthy sibling subscription in prod (2026-10-29/30).
+    """
+    from helpers.llm import _build_compute_auth_context
+
+    posted = []
+
+    def handler(req):
+        if "token/rate-limited" in str(req.url):
+            posted.append(json.loads(req.content))
+            return httpx.Response(200, json={"ok": True})
+        return httpx.Response(500, text="unexpected route")
+
+    set_mock_handler(handler)
+    for token_type in ("gpt", "claude"):
+        posted.clear()
+        ctx = _build_compute_auth_context(
+            {
+                "type": token_type,
+                "accessToken": "token",
+                "source": "user",
+                "userId": "user-s33",
+                "integrationId": "integration-s33",
+                "lineageKey": "lineage-s33",
+            },
+            "user-s33",
+        )
+        assert ctx is not None and ctx.mark_rate_limited is not None
+        assert await ctx.mark_rate_limited(ctx, 60, None, "auth_error")
+        assert len(posted) == 1, posted
+        body = posted[0]
+        assert body["source"] == "user" and body["failureReason"] == "auth_error", body
+        assert body["integrationId"] == "integration-s33", f"{token_type}: {body}"
+
+
 async def test_client_foundry_server_error_falls_through_to_openrouter():
     """A Foundry failure before output must preserve the Ultra waterfall."""
     sse_ok = "\n".join(
@@ -12211,6 +12249,10 @@ async def run_all_tests():
     await r.record_async(
         "client_foundry_stream_exit_closes_http_owner",
         test_client_foundry_stream_exit_closes_http_owner,
+    )
+    await r.record_async(
+        "user_auth_error_report_names_the_leased_integration",
+        test_user_auth_error_report_names_the_leased_integration,
     )
     await r.record_async(
         "client_foundry_server_error_falls_through_to_openrouter",
