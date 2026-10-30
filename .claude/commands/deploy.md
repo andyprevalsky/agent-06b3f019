@@ -384,8 +384,9 @@ CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -v '^agents/benchmarks/histor
 # watchdog cap, rechecks whole-box headroom before every admission, and never
 # admits declared totals over the startup budget. Against live headroom, which
 # already contains what the running lanes use, a phased lane is charged only
-# their unmaterialized declarations (declared minus the lane's sampled
-# process-tree PSS); unphased lanes (semantic-stack) and unobserved usage keep
+# their unmaterialized declarations (declared minus the lane's freshly sampled
+# anonymous process-tree PSS, Pss_Anon: file-backed pages are still counted in
+# MemAvailable); unphased lanes (semantic-stack) and unobserved usage keep
 # the declared sum (#1640: smoke waited 16 min on a double-counted 3712 MB).
 # A lane that cannot fit alone fails
 # visibly without starting. Explicit resource limits can only tighten memory

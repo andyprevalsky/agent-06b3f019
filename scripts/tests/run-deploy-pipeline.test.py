@@ -462,15 +462,18 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
         holder, joiner, unphased = lanes["holder"], lanes["joiner"], lanes["unphased"]
         assert joiner["started_epoch"] < holder["finished_epoch"], \
             "joiner fits beside holder's unmaterialized reservation and must not wait for it"
-        assert holder["tree_peak_rss_mb"] >= 50, holder
+        assert holder["tree_peak_anon_mb"] >= 50, holder
         admission = joiner["admission"]
         assert admission["decision"] == "admitted" and admission["accounting"] == "unmaterialized", admission
         assert admission["headroom_mb"] == 120 and admission["budget_mb"] == 300 and admission["memory_mb"] == 60
         assert admission["reserved_declared_mb"] == 100 and admission["reserved_live_mb"] < 60, admission
-        assert admission["running"]["holder"]["memory_mb"] == 100 and admission["running"]["holder"]["tree_rss_mb"] >= 50
+        assert admission["running"]["holder"]["memory_mb"] == 100 and admission["running"]["holder"]["tree_anon_mb"] >= 50
         assert admission["running"]["holder"]["observation"] == "fresh", admission["running"]
+        assert admission["running"]["holder"]["tree_pss_mb"] >= admission["running"]["holder"]["tree_anon_mb"], \
+            "total PSS is recorded beside the anonymous credit basis"
+        assert holder["tree_peak_pss_mb"] >= holder["tree_peak_anon_mb"] >= 50, holder
         assert 0 <= admission["running"]["holder"]["observed_age_s"] <= pipeline.OBSERVATION_MAX_AGE_SECONDS
-        assert holder["tree_rss_at"] and holder["tree_rss_mono"] is not None, holder
+        assert holder["tree_sampled_at"] and holder["tree_sampled_mono"] is not None, holder
         assert admission["deferred"]["first"]["reason"] == "headroom", admission["deferred"]
         assert admission["deferred"]["first"]["running"]["holder"]["observation"] == "unknown", admission["deferred"]
         assert admission["deferred"]["checks"] >= 1 and admission["deferred"]["reason"] == "headroom", admission
@@ -483,12 +486,12 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
         print("materialized reservation credit: process-tree sampling is Linux-only; conservative path only")
     # Unobserved usage (macOS, unreadable /proc) keeps the whole declaration: joiner waits.
     write(tmp / "unobserved-joined", tmp / "unobserved-unphased")
-    lanes = run(tmp / "unobserved", sample_lane_tree_rss=lambda pids: {})["lanes"]
+    lanes = run(tmp / "unobserved", sample_lane_tree_memory=lambda pids: {})["lanes"]
     assert lanes["joiner"]["started_epoch"] >= lanes["holder"]["finished_epoch"], lanes["joiner"]
-    assert lanes["joiner"]["admission"]["running"] == {} and lanes["holder"]["tree_rss_mb"] is None, lanes
-    assert "tree_peak_rss_mb" not in lanes["holder"], lanes["holder"]
+    assert lanes["joiner"]["admission"]["running"] == {} and lanes["holder"]["tree_anon_mb"] is None, lanes
+    assert "tree_peak_anon_mb" not in lanes["holder"], lanes["holder"]
     last = lanes["joiner"]["admission"]["deferred"]["last"]["running"]["holder"]
-    assert last["tree_rss_mb"] is None and last["observation"] == "unknown", last
+    assert last["tree_anon_mb"] is None and last["observation"] == "unknown", last
     assert pipeline.unmaterialized_mb(100, None) == 100 and pipeline.unmaterialized_mb(100, 70.4) == 30
     assert pipeline.unmaterialized_mb(100, 250.0) == 0
     print("materialized reservation credit: ok")
@@ -521,15 +524,15 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     ], schedule={"policy": "legacy"})
     calls: list[set[int]] = []
 
-    def flaky_sampler(pids: set[int]) -> dict[int, float | None]:
+    def flaky_sampler(pids: set[int]) -> dict[int, dict | None]:
         calls.append(set(pids))
-        return {pid: 80.0 for pid in pids} if len(calls) == 1 else {}
+        return {pid: {"anon_mb": 80.0, "pss_mb": 96.0} for pid in pids} if len(calls) == 1 else {}
 
     def host() -> dict:
         return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if marker.exists() else 300)}
 
     with patch.object(pipeline, "host_resources", side_effect=host), \
-         patch.object(pipeline, "sample_lane_tree_rss", side_effect=flaky_sampler), \
+         patch.object(pipeline, "sample_lane_tree_memory", side_effect=flaky_sampler), \
          patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
          patch.dict(os.environ, env):
         result = pipeline.run(plan, state, max_parallel=0)
@@ -539,30 +542,79 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     assert len(calls) >= 3, f"the sampler must have failed after its first pass: {len(calls)} passes"
     assert joiner["started_epoch"] >= holder["finished_epoch"], \
         "a stale 80 MB observation stayed credited after sampling failed"
-    assert holder["tree_peak_rss_mb"] == 80.0 and holder["tree_rss_mb"] is None, holder
+    assert holder["tree_peak_anon_mb"] == 80.0 and holder["tree_peak_pss_mb"] == 96.0, holder
+    assert holder["tree_anon_mb"] is None and holder["tree_pss_mb"] is None, holder
     last = joiner["admission"]["deferred"]["last"]["running"]["holder"]
-    assert last == {"memory_mb": 100, "tree_rss_mb": None, "observed_age_s": last["observed_age_s"],
-                    "observation": "unknown"} and last["observed_age_s"] is not None, last
-    # (1) PSS unreadable for one live process: the tree is unknown, never summed RSS.
+    assert last == {"memory_mb": 100, "tree_anon_mb": None, "tree_pss_mb": None,
+                    "observed_age_s": last["observed_age_s"], "observation": "unknown"} \
+        and last["observed_age_s"] is not None, last
+    # (1) Anonymous PSS only. A rollup unreadable for one live process, or
+    # lacking Pss / Pss_Anon, makes the tree unknown (never summed RSS); a
+    # file-backed footprint with zero Pss_Anon is observed as 0 MB and leaves
+    # the growth reservation untouched: those pages are still in MemAvailable.
     proc = tmp / "fake-proc"
     for pid, ppid in ((100, 1), (101, 100), (102, 101), (200, 1)):
         (proc / str(pid)).mkdir(parents=True)
         fields = ["S", str(ppid), str(pid), str(pid)] + ["0"] * 17 + ["1000", "25000"]  # ... vsize, rss pages
         (proc / str(pid) / "stat").write_text(f"{pid} (fake) {' '.join(fields)}\n")
     (proc / "not-a-pid").mkdir()
+    rollup = "Rss: 4096 kB\nPss: 2048 kB\nPss_Dirty: 1024 kB\nPss_Anon: 1024 kB\nPss_File: 1024 kB\nPss_Shmem: 0 kB\n"
     for pid in (100, 101):
-        (proc / str(pid) / "smaps_rollup").write_text("Rss: 4096 kB\nPss: 2048 kB\nPss_Anon: 1024 kB\n")
-    assert pipeline.sample_lane_tree_rss({100, 200}, proc) == {100: None, 200: None}, "102 and 200 lack PSS"
-    (proc / "102" / "smaps_rollup").write_text("Rss: 4096 kB\nPss: 1024 kB\n")
-    assert pipeline.sample_lane_tree_rss({100}, proc) == {100: 5.0}, "PSS of 100 + 101 + 102 = 2 + 2 + 1 MB"
+        (proc / str(pid) / "smaps_rollup").write_text(rollup)
+    assert pipeline.sample_lane_tree_memory({100, 200}, proc) == {100: None, 200: None}, "102 and 200 lack a rollup"
+    (proc / "102" / "smaps_rollup").write_text("Rss: 4096 kB\nPss: 1024 kB\nPss_Anon: 512 kB\nPss_File: 512 kB\n")
+    assert pipeline.sample_lane_tree_memory({100}, proc) == {100: {"anon_mb": 2.5, "pss_mb": 5.0}}, \
+        "anon 1 + 1 + 0.5 MB, total 2 + 2 + 1 MB over 100, 101, 102"
     shutil.rmtree(proc / "102")  # exited since the listing: gone, not unknown
     listing = os.listdir(proc)
     with patch.object(pipeline.os, "listdir", return_value=listing + ["102"]):
-        assert pipeline.sample_lane_tree_rss({100}, proc) == {100: 4.0}
-    (proc / "101" / "smaps_rollup").write_text("Rss: 4096 kB\n")  # no Pss line
-    assert pipeline.sample_lane_tree_rss({100}, proc) == {100: None}
-    assert pipeline.sample_lane_tree_rss({100}, tmp / "no-such-proc") == {100: None}
-    assert pipeline.sample_lane_tree_rss(set(), proc) == {}
+        assert pipeline.sample_lane_tree_memory({100}, proc) == {100: {"anon_mb": 2.0, "pss_mb": 4.0}}
+    (proc / "101" / "smaps_rollup").write_text("Rss: 4096 kB\nPss: 2048 kB\nPss_File: 2048 kB\n")  # no Pss_Anon
+    assert pipeline.sample_lane_tree_memory({100}, proc) == {100: None}, "a rollup without Pss_Anon is unknown"
+    (proc / "101" / "smaps_rollup").write_text("Rss: 4096 kB\nPss_Anon: 1024 kB\n")  # no Pss
+    assert pipeline.sample_lane_tree_memory({100}, proc) == {100: None}, "a rollup without Pss is unknown"
+    (proc / "101" / "smaps_rollup").write_text(rollup)
+    (proc / "100" / "smaps_rollup").write_text(
+        "Rss: 92160 kB\nPss: 92160 kB\nPss_Dirty: 0 kB\nPss_Anon: 0 kB\nPss_File: 92160 kB\nPss_Shmem: 0 kB\n")
+    file_backed = pipeline.sample_lane_tree_memory({100}, proc)
+    assert file_backed == {100: {"anon_mb": 1.0, "pss_mb": 92.0}}, file_backed
+    assert pipeline.unmaterialized_mb(100, 0.0) == 100 and pipeline.unmaterialized_mb(100, 1.0) == 99, \
+        "90 MB of file-backed PSS reduces no reservation; only the anonymous MB do"
+    assert pipeline.sample_lane_tree_memory({100}, tmp / "no-such-proc") == {100: None}
+    assert pipeline.sample_lane_tree_memory(set(), proc) == {}
+    # A fresh observation with zero anonymous memory and a large file-backed
+    # footprint credits nothing: the joiner must still wait for the holder.
+    anon_marker = tmp / "anon-holder-allocated"
+    anon_plan = tmp / "anon-plan.json"
+    anon_state = tmp / "anon"
+    write_plan(anon_plan, [
+        {"name": "gate", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 1},
+        {"name": "holder", "command": [sys.executable, "-c",
+                                       f"import pathlib, time; pathlib.Path({str(anon_marker)!r}).touch(); "
+                                       "time.sleep(3.5)"],
+         "reuse_passed": False, "group": "3", "memory_mb": 100},
+        {"name": "joiner", "command": ["true"], "after": ["gate"], "reuse_passed": False, "group": "3",
+         "memory_mb": 60},
+    ], schedule={"policy": "legacy"})
+
+    def anon_host() -> dict:
+        return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if anon_marker.exists() else 300)}
+
+    with patch.object(pipeline, "host_resources", side_effect=anon_host), \
+         patch.object(pipeline, "sample_lane_tree_memory",
+                      side_effect=lambda pids: {pid: {"anon_mb": 0.0, "pss_mb": 95.0} for pid in pids}), \
+         patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
+         patch.dict(os.environ, env):
+        result = pipeline.run(anon_plan, anon_state, max_parallel=0)
+    receipt = json.loads((anon_state / "receipt.json").read_text())
+    assert result == 0 and receipt["status"] == "passed", (result, receipt["lanes"])
+    holder, joiner = receipt["lanes"]["holder"], receipt["lanes"]["joiner"]
+    assert joiner["started_epoch"] >= holder["finished_epoch"], \
+        "95 MB of file-backed PSS with zero Pss_Anon reduced the holder's growth reservation"
+    last = joiner["admission"]["deferred"]["last"]["running"]["holder"]
+    assert last["observation"] == "fresh" and last["tree_anon_mb"] == 0.0 and last["tree_pss_mb"] == 95.0, last
+    assert joiner["admission"]["deferred"]["last"]["reserved_live_mb"] == 100, joiner["admission"]["deferred"]
+    assert holder["tree_peak_anon_mb"] == 0.0 and holder["tree_peak_pss_mb"] == 95.0, holder
     # A delayed scan: the observation is as old as the scan's START. The first
     # pass takes 3.5 s (over the 3 s limit) and reports 80 MB when it returns;
     # the gate exits during that scan, so the joiner's first check runs right
@@ -582,18 +634,18 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     ], schedule={"policy": "legacy"})
     slow_calls: list[float] = []
 
-    def slow_sampler(pids: set[int]) -> dict[int, float | None]:
+    def slow_sampler(pids: set[int]) -> dict[int, dict | None]:
         slow_calls.append(time.monotonic())
         if len(slow_calls) == 1:
             time.sleep(pipeline.OBSERVATION_MAX_AGE_SECONDS + 0.5)
-            return {pid: 80.0 for pid in pids}
+            return {pid: {"anon_mb": 80.0, "pss_mb": 96.0} for pid in pids}
         return {}
 
     def slow_host() -> dict:
         return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if slow_marker.exists() else 300)}
 
     with patch.object(pipeline, "host_resources", side_effect=slow_host), \
-         patch.object(pipeline, "sample_lane_tree_rss", side_effect=slow_sampler), \
+         patch.object(pipeline, "sample_lane_tree_memory", side_effect=slow_sampler), \
          patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
          patch.dict(os.environ, env):
         result = pipeline.run(slow_plan, slow_state, max_parallel=0)
@@ -603,26 +655,44 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     assert joiner["started_epoch"] >= holder["finished_epoch"], \
         "an observation from a scan older than the limit was credited because the scan had just returned"
     first = joiner["admission"]["deferred"]["first"]["running"]["holder"]
-    assert first["observation"] == "stale" and first["tree_rss_mb"] == 80.0, first
+    assert first["observation"] == "stale" and first["tree_anon_mb"] == 80.0, first
     assert first["observed_age_s"] >= pipeline.OBSERVATION_MAX_AGE_SECONDS, first
     assert joiner["admission"]["deferred"]["last"]["running"]["holder"]["observation"] == "unknown", joiner
-    assert holder["tree_peak_rss_mb"] == 80.0 and holder["tree_rss_at"], holder
-    # Fresh, stale (too old, from the future, unstamped) and unknown observations
-    # on the monotonic clock.
+    assert holder["tree_peak_anon_mb"] == 80.0 and holder["tree_sampled_at"], holder
+    # Fresh, stale (too old, unstamped), invalid (from the future) and unknown
+    # observations on the monotonic clock. The raw elapsed value is compared;
+    # only the displayed age is rounded (3.04 s must not read as 3.0 and pass,
+    # -0.04 s must not read as -0.0 and pass).
     now = 1_000.0
-    fresh, detail = pipeline.fresh_tree_rss_mb({"tree_rss_mb": 80.0, "tree_rss_mono": now - 1.0}, now)
-    assert fresh == 80.0 and detail == {"tree_rss_mb": 80.0, "observed_age_s": 1.0, "observation": "fresh"}, detail
-    stale, detail = pipeline.fresh_tree_rss_mb(
-        {"tree_rss_mb": 80.0, "tree_rss_mono": now - pipeline.OBSERVATION_MAX_AGE_SECONDS - 0.1}, now)
-    assert stale is None and detail["observation"] == "stale" and detail["tree_rss_mb"] == 80.0, detail
-    future, detail = pipeline.fresh_tree_rss_mb({"tree_rss_mb": 80.0, "tree_rss_mono": now + 5.0}, now)
-    assert future is None and detail == {"tree_rss_mb": 80.0, "observed_age_s": -5.0, "observation": "stale"}, detail
-    assert pipeline.fresh_tree_rss_mb({"tree_rss_mb": 80.0}, now) == (None, {
-        "tree_rss_mb": 80.0, "observed_age_s": None, "observation": "stale"})
-    assert pipeline.fresh_tree_rss_mb({"tree_rss_mb": None, "tree_rss_mono": now}, now)[1]["observation"] == "unknown"
-    assert pipeline.fresh_tree_rss_mb({}, now) == (None, {"tree_rss_mb": None, "observed_age_s": None,
-                                                        "observation": "unknown"})
-    assert pipeline.fresh_tree_rss_mb({"tree_rss_mb": 80.0, "tree_rss_mono": time.monotonic()})[0] == 80.0, \
+    limit = pipeline.OBSERVATION_MAX_AGE_SECONDS
+
+    def classify(age: float) -> tuple[float | None, dict]:
+        return pipeline.fresh_tree_anon_mb({"tree_anon_mb": 80.0, "tree_pss_mb": 96.0,
+                                            "tree_sampled_mono": now - age}, now)
+
+    fresh, detail = classify(1.0)
+    assert fresh == 80.0 and detail == {"tree_anon_mb": 80.0, "tree_pss_mb": 96.0, "observed_age_s": 1.0,
+                                        "observation": "fresh"}, detail
+    assert classify(limit - 0.04) == (80.0, {"tree_anon_mb": 80.0, "tree_pss_mb": 96.0,
+                                             "observed_age_s": round(limit - 0.04, 2), "observation": "fresh"})
+    assert classify(limit)[0] == 80.0, "exactly the limit is still fresh"
+    over, detail = classify(limit + 0.04)
+    assert over is None and detail["observation"] == "stale" and detail["observed_age_s"] == round(limit + 0.04, 2), \
+        f"{limit + 0.04:.2f} s must not round down to the limit: {detail}"
+    stale, detail = classify(limit + 0.1)
+    assert stale is None and detail["observation"] == "stale" and detail["tree_anon_mb"] == 80.0, detail
+    future, detail = classify(-0.04)
+    assert future is None and detail["observation"] == "invalid" and detail["observed_age_s"] == -0.04, \
+        f"-0.04 s must not round to -0.0 and pass: {detail}"
+    future, detail = classify(-5.0)
+    assert future is None and detail == {"tree_anon_mb": 80.0, "tree_pss_mb": 96.0, "observed_age_s": -5.0,
+                                         "observation": "invalid"}, detail
+    assert pipeline.fresh_tree_anon_mb({"tree_anon_mb": 80.0}, now) == (None, {
+        "tree_anon_mb": 80.0, "tree_pss_mb": None, "observed_age_s": None, "observation": "stale"})
+    assert pipeline.fresh_tree_anon_mb({"tree_anon_mb": None, "tree_sampled_mono": now}, now)[1]["observation"] == "unknown"
+    assert pipeline.fresh_tree_anon_mb({}, now) == (None, {"tree_anon_mb": None, "tree_pss_mb": None,
+                                                        "observed_age_s": None, "observation": "unknown"})
+    assert pipeline.fresh_tree_anon_mb({"tree_anon_mb": 80.0, "tree_sampled_mono": time.monotonic()})[0] == 80.0, \
         "the default clock is monotonic, not wall time"
     print("observation validity: ok")
 

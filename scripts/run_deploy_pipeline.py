@@ -36,25 +36,30 @@ MB smoke lane waited 16 min (18:15:06 -> 18:31:08) for ``3712 + 4096 <= 4700``
 although the box held ~11.2 GB below the watchdog cap; on #1639 the same three
 lanes started together only because no co-tenant held memory at 15:06:22.
 ``run`` therefore samples every running lane's process tree at 1 Hz (PSS of
-every descendant of its stage wrapper, ``tree_rss_mb`` / ``tree_rss_at`` /
-``tree_peak_rss_mb`` on the lane; Linux /proc) and, for a phased lane (Group 3
-or a declared coverage-phase lane), reserves only
-``sum(max(0, declared - observed))`` of the running lanes: exactly the growth
-their declarations still allow. Observed means PSS only, never summed RSS
-(shared pages would count once per process and over-credit the lane): a tree
-with any live process whose ``smaps_rollup`` is unreadable is unknown. Every
+every descendant of its stage wrapper; ``tree_anon_mb`` / ``tree_pss_mb`` /
+``tree_sampled_at`` / ``tree_peak_anon_mb`` / ``tree_peak_pss_mb`` on the
+lane; Linux /proc) and, for a phased lane (Group 3 or a declared
+coverage-phase lane), reserves only ``sum(max(0, declared - observed))`` of
+the running lanes: exactly the growth their declarations still allow.
+Observed means anonymous PSS (``Pss_Anon`` from ``smaps_rollup``) only:
+MemAvailable still counts a lane's file-backed resident pages as reclaimable,
+so crediting total PSS would double-count them, and summed RSS would count
+pages shared between the lane's processes once per process; total PSS is
+recorded alongside for the receipt. A tree with any live process whose
+rollup is unreadable or lacks ``Pss``/``Pss_Anon`` is unknown. Every
 sampling pass re-marks every running lane, so a lane the pass could not fully
 observe is unknown again rather than keeping an earlier value, and the credit
 binds to a fresh observation: at most ``OBSERVATION_MAX_AGE_SECONDS`` (3 s)
 old on the monotonic clock, measured from the stamp taken *before* the /proc
 scan, so a scan that itself outlives the limit yields no credit when it
-returns, and a negative age (a stamp from the future) is stale as well.
-``tree_rss_at`` keeps the wall-clock scan start for humans. Each running
-lane's observation state (``fresh``/``stale``/``unknown``), value and age are
-part of the recorded admission inputs, and a deferred lane keeps its first
-and latest deferral inputs. A lane whose usage is unknown or stale (macOS,
-unreadable /proc, not yet sampled, a stalled or slow pass) keeps its whole
-declaration, and the declarations themselves are unchanged. An
+returns; the raw elapsed value is compared (rounding only the displayed age),
+and a negative age (a stamp from the future) is ``invalid``, also no credit.
+``tree_sampled_at`` keeps the wall-clock scan start for humans. Each running
+lane's observation state (``fresh``/``stale``/``invalid``/``unknown``), values
+and age are part of the recorded admission inputs, and a deferred lane keeps
+its first and latest deferral inputs. A lane whose usage is unknown, stale or
+invalid (macOS, unreadable /proc, not yet sampled, a stalled or slow pass)
+keeps its whole declaration, and the declarations themselves are unchanged. An
 unphased lane (``semantic-stack``: its ``run.sh --benchmark`` startup runs
 ``kill-services.sh``, which terminates a running smoke stack) keeps the
 declared-peak accounting, so this change cannot admit it beside a stack it
@@ -65,7 +70,8 @@ history) and ``waiting`` while deferred. The smoke lane stays at 4096 MB: the
 only window in which it ran with idle siblings (#1639 attempt 1, 14:28-14:41Z,
 backend/agents idle at 66/126 MB) measured a whole-box footprint of 3492 MB
 median / 4905 MB peak, so it is not shown to be over-declared; right-size from
-recorded ``tree_peak_rss_mb`` once passed runs carry it.
+recorded ``tree_peak_anon_mb`` / ``tree_peak_pss_mb`` once passed runs carry
+them.
 
   With ``--follow-source`` the supervisor keeps hashing the source while lanes
   run. Once a change has settled (``--settle-seconds`` without further edits)
@@ -407,21 +413,25 @@ def sample_host_peak(peak: dict, host: dict) -> dict:
     return peak
 
 
-def sample_lane_tree_rss(pids: set[int], proc: Path | None = None) -> dict[int, float | None]:
-    """Proportional resident memory (MB, PSS) of each lane's whole process
-    tree, or ``None`` for a lane whose tree could not be fully observed.
+def sample_lane_tree_memory(pids: set[int], proc: Path | None = None) -> dict[int, dict | None]:
+    """Anonymous and total proportional resident memory (MB) of each lane's
+    whole process tree (``{"anon_mb", "pss_mb"}``), or ``None`` for a lane
+    whose tree could not be fully observed.
 
     Descendants are followed by parent links from the lane's stage wrapper, so
     the stage runner's command (started in its own session) and everything it
     forks are attributed to the lane; a process that daemonized away from the
-    tree is missed, which only under-credits the lane. PSS
-    (``/proc/<pid>/smaps_rollup``) counts pages shared between the lane's own
-    processes once, the way MemAvailable gives them back; summed RSS would
-    count them once per process and over-credit the declaration, so there is
-    no RSS fallback: a tree with any live process whose PSS is unreadable is
-    unknown. A process that exited between the listing and the read is simply
-    gone. Linux only: elsewhere, or when /proc cannot be listed, every lane is
-    unknown and keeps its whole declaration reserved.
+    tree is missed, which only under-credits the lane. Only ``Pss_Anon`` from
+    ``/proc/<pid>/smaps_rollup`` (kernel >= 4.14) is a materialized claim on
+    MemAvailable: file-backed resident pages stay counted as reclaimable in
+    MemAvailable, so crediting them would double-count them, and PSS counts
+    pages shared between the lane's own processes once, where summed RSS
+    would count them once per process. Total ``Pss`` is recorded alongside
+    for the receipt. A rollup missing either line, or any live process whose
+    rollup is unreadable, makes the tree unknown. A process that exited
+    between the listing and the read is simply gone. Linux only: elsewhere, or
+    when /proc cannot be listed, every lane is unknown and keeps its whole
+    declaration reserved.
     """
     proc = PROC_ROOT if proc is None else proc
     if not pids:
@@ -449,53 +459,69 @@ def sample_lane_tree_rss(pids: set[int], proc: Path | None = None) -> dict[int, 
     for pid, parent in parents.items():
         children.setdefault(parent, []).append(pid)
 
-    def pss_mb(pid: int) -> float | None:
+    def resident_mb(pid: int) -> tuple[float, float] | None:
+        """(anonymous PSS, total PSS) in MB; None when the tree is unknown."""
         try:
-            for line in (proc / str(pid) / "smaps_rollup").read_text().splitlines():
-                if line.startswith("Pss:"):
-                    return int(line.split()[1]) / 1024
+            lines = (proc / str(pid) / "smaps_rollup").read_text().splitlines()
         except OSError:
-            if not (proc / str(pid)).exists():
-                return 0.0  # exited since the listing: nothing resident
-        except (IndexError, ValueError):
-            pass
-        return None  # live process without readable PSS: the tree is unknown
+            # Exited since the listing: nothing resident. Otherwise a live
+            # process without a readable rollup, which makes the tree unknown.
+            return (0.0, 0.0) if not (proc / str(pid)).exists() else None
+        values: dict[str, float] = {}
+        for line in lines:
+            key, _, rest = line.partition(":")
+            if key in ("Pss", "Pss_Anon"):
+                try:
+                    values[key] = int(rest.split()[0]) / 1024
+                except (IndexError, ValueError):
+                    return None
+        if "Pss" not in values or "Pss_Anon" not in values:
+            return None
+        return values["Pss_Anon"], values["Pss"]
 
-    totals: dict[int, float | None] = {}
+    totals: dict[int, dict | None] = {}
     for root in pids:
-        total: float | None = 0.0
+        anon_total: float | None = 0.0
+        pss_total = 0.0
         seen: set[int] = set()
         stack = [int(root)]
-        while stack and total is not None:
+        while stack and anon_total is not None:
             pid = stack.pop()
             if pid in seen or pid not in parents:
                 continue
             seen.add(pid)
-            value = pss_mb(pid)
+            value = resident_mb(pid)
             if value is None:
-                total = None
+                anon_total = None
                 break
-            total += value
+            anon_total += value[0]
+            pss_total += value[1]
             stack.extend(children.get(pid, []))
-        totals[int(root)] = None if total is None else round(total, 1)
+        totals[int(root)] = None if anon_total is None else {"anon_mb": round(anon_total, 1),
+                                                              "pss_mb": round(pss_total, 1)}
     return totals
 
 
-def fresh_tree_rss_mb(state: dict, now: float | None = None) -> tuple[float | None, dict]:
-    """The lane's process-tree PSS when the latest sampling pass observed the
-    whole tree and started within ``OBSERVATION_MAX_AGE_SECONDS``; otherwise
-    ``None``. Age is measured on the monotonic clock from the stamp the pass
-    took before its /proc scan (``tree_rss_mono``); a negative age (a stamp
-    from the future) or one beyond the limit is stale. The detail names the
-    observation state (``fresh``, ``stale``, ``unknown``) and its age for the
-    admission record."""
+def fresh_tree_anon_mb(state: dict, now: float | None = None) -> tuple[float | None, dict]:
+    """The lane's anonymous process-tree PSS when the latest sampling pass
+    observed the whole tree and started within ``OBSERVATION_MAX_AGE_SECONDS``;
+    otherwise ``None``. Age is measured on the monotonic clock from the stamp
+    the pass took before its /proc scan (``tree_sampled_mono``); a negative
+    age (a stamp from the future) or one beyond the limit is stale. The detail
+    names the observation state (``fresh``, ``stale``, ``unknown``), the
+    anonymous and total PSS and the age for the admission record."""
     now = time.monotonic() if now is None else now
-    value, at = state.get("tree_rss_mb"), state.get("tree_rss_mono")
-    age = None if at is None else round(now - float(at), 1)
-    detail = {"tree_rss_mb": value, "observed_age_s": age}
+    value, at = state.get("tree_anon_mb"), state.get("tree_sampled_mono")
+    # Compare the raw elapsed value; round only what the record displays, or a
+    # true age of 3.04 s would read 3.0 and pass, and -0.04 s would read -0.0.
+    age = None if at is None else now - float(at)
+    detail = {"tree_anon_mb": value, "tree_pss_mb": state.get("tree_pss_mb"),
+              "observed_age_s": None if age is None else round(age, 2)}
     if value is None:
         return None, {**detail, "observation": "unknown"}
-    if age is None or age < 0 or age > OBSERVATION_MAX_AGE_SECONDS:
+    if age is not None and age < 0:
+        return None, {**detail, "observation": "invalid"}  # a stamp from the future
+    if age is None or age > OBSERVATION_MAX_AGE_SECONDS:
         return None, {**detail, "observation": "stale"}
     return float(value), {**detail, "observation": "fresh"}
 
@@ -793,8 +819,10 @@ def record_lane_durations(receipt: dict, path: Path | None = None) -> dict[str, 
                   "at": receipt.get("started_at"), "head": (receipt.get("source") or {}).get("head"),
                   "attempt": receipt.get("attempt"), "source": "receipt",
                   # Footprint telemetry for right-sizing ``memory_mb``: the largest
-                  # single child (wait4) and the lane's whole process tree (PSS, 1 Hz).
-                  "peak_rss_mb": lane.get("peak_rss_mb"), "tree_peak_rss_mb": lane.get("tree_peak_rss_mb")}
+                  # single child (wait4) and the lane's whole process tree (anonymous
+                  # and total PSS peaks, sampled at 1 Hz).
+                  "peak_rss_mb": lane.get("peak_rss_mb"), "tree_peak_anon_mb": lane.get("tree_peak_anon_mb"),
+                  "tree_peak_pss_mb": lane.get("tree_peak_pss_mb")}
         ledger.setdefault(name, []).append(sample)
         ledger[name] = ledger[name][-LANE_DURATION_SAMPLES:]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1453,17 +1481,23 @@ def _run_attempt(
             # The observation is as old as the scan's start: a slow scan must not
             # relabel an early reading as fresh when it finally returns.
             scan_started, scan_wall = time.monotonic(), _now()
-            observed = sample_lane_tree_rss({p.pid for p in processes.values() if p.returncode is None})
+            observed = sample_lane_tree_memory({p.pid for p in processes.values() if p.returncode is None})
             for name, process in processes.items():
                 if process.returncode is not None:
                     continue
                 # Every pass re-marks every running lane: a lane this pass could
                 # not fully observe is unknown again, never its previous value.
+                # Anonymous PSS is the credit basis; total PSS is recorded only.
                 tree_state = receipt["lanes"][name]
                 value = observed.get(process.pid)
-                tree_state.update(tree_rss_mb=value, tree_rss_mono=scan_started, tree_rss_at=scan_wall)
+                tree_state.update(tree_anon_mb=None if value is None else value["anon_mb"],
+                                  tree_pss_mb=None if value is None else value["pss_mb"],
+                                  tree_sampled_mono=scan_started, tree_sampled_at=scan_wall)
                 if value is not None:
-                    tree_state["tree_peak_rss_mb"] = max(float(tree_state.get("tree_peak_rss_mb") or 0.0), value)
+                    tree_state["tree_peak_anon_mb"] = max(float(tree_state.get("tree_peak_anon_mb") or 0.0),
+                                                          value["anon_mb"])
+                    tree_state["tree_peak_pss_mb"] = max(float(tree_state.get("tree_peak_pss_mb") or 0.0),
+                                                         value["pss_mb"])
             last_sample = time.monotonic()
         # Reap exits before admitting successors, so a lane's finished_epoch
         # always precedes the started_epoch of a lane admitted into its share.
@@ -1500,7 +1534,7 @@ def _run_attempt(
             # Live headroom already contains what the running lanes use; only
             # the part of their declarations not yet materialized is still owed,
             # and only a fresh, fully observed sample says how much that is.
-            observations = {name: fresh_tree_rss_mb(state) for name, state in running_states.items()}
+            observations = {name: fresh_tree_anon_mb(state) for name, state in running_states.items()}
             unmaterialized = sum(unmaterialized_mb(by_name[name].memory_mb, observations[name][0])
                                  for name in running_states)
             pass_sample = None
@@ -1613,7 +1647,7 @@ def _run_attempt(
                     status="running", started_epoch=time.time(), log=str(log_path)
                 )
                 running_states[lane.name] = receipt["lanes"][lane.name]
-                observations[lane.name] = fresh_tree_rss_mb(running_states[lane.name])  # unknown until sampled
+                observations[lane.name] = fresh_tree_anon_mb(running_states[lane.name])  # unknown until sampled
                 running += 1
                 reserved += lane.memory_mb
                 unmaterialized += lane.memory_mb  # nothing of a fresh lane is visible yet
