@@ -655,12 +655,20 @@ supervisor; a receipt started before `--since` belongs to an earlier iteration
 and never satisfies the wait, and a lane that failed before writing a stage row
 (refused by the memory budget, spawn error) wakes it like any other failure.
 Never arm a second, different waiter for the same lanes. An exact-input
-`--reuse-passed` hit records `reused`, which both count as a pass. The exact
-input is HEAD, the worktree diff and untracked files, cwd, argv and the
-environment minus process-identity variables (systemd `INVOCATION_ID`,
-`JOURNAL_STREAM`, `SYSTEMD_EXEC_PID`, `LISTEN_*`; shell `PWD`/`SHLVL`;
-terminal geometry and session ids), so a lane relaunched as a new unit on
-identical bytes reuses its own pass instead of re-running.
+`--reuse-passed` hit records `reused`, which both count as a pass. For most
+lanes the exact input is HEAD, the worktree diff and untracked files, cwd,
+argv and the environment minus process/session/terminal identity variables
+(e.g. systemd `INVOCATION_ID`, `JOURNAL_STREAM`, `SYSTEMD_EXEC_PID`,
+`NOTIFY_SOCKET`, `LISTEN_*`; shell `_`, `PWD`, `OLDPWD`, `SHLVL`; `COLUMNS`,
+`LINES`, terminal/SSH session ids — the full list is
+`_PROCESS_IDENTITY_ENV` in `scripts/run_deploy_stage.py`), so a lane
+relaunched by a fresh process on identical bytes reuses its own pass instead
+of re-running. Two lane groups narrow that input: `eslint`, `typescript` and
+`backend-structural` drop the append-only `agents/benchmarks/history/`
+ledgers from the diff when they run their real command (lint-affected over the
+deploy lint list, `tsc`, `npm run test:structural`), and the front-end and mac
+lanes (`_LANE_SCOPES`) hash only their in-scope file content instead of HEAD.
+Every reuse line names the scope it matched.
 
 **Speculative gates on the next HEAD (`run --follow-source`).** Start the
 pipeline with `--follow-source` so a fix committed while CodeRabbit is still
@@ -996,10 +1004,13 @@ cd back-end && bash ../scripts/run-deploy-stage backend-coverage-blackbox --reus
       npm run test:coverage:sharded
 ```
 
-This one command runs all 91 deterministic back-end blackbox domains under V8
-coverage as **two blackbox shards** (`scripts/run-coverage-sharded.sh`: each
-shard has its own instrumented backend, database, port and raw V8 directory;
-the worker counts apply per shard), then the **unit suite once, alone**
+This one command runs every deterministic back-end blackbox domain
+(`back-end/src/tests/blackbox/*.blackbox.ts`, 238 files on 2026-10-30, minus
+the provider-dependent `integration-health`) under V8 coverage as **two
+blackbox shards** (`scripts/run-coverage-sharded.sh`: each shard has its own
+instrumented backend, database, port and raw V8 directory; the blackbox and
+contract worker counts apply per shard, `BACKEND_UNIT_CONCURRENCY` to the
+single unit pass), then the **unit suite once, alone**
 (`BACKEND_COVERAGE_UNIT_PASS=1`, its own `<workspace>_s0` database, log
 `coverage/units.log`) after the last shard has finished: the unit suite's
 headless-browser fps probe (`rose-ui-cli-browser`) is host-load dependent and
@@ -1157,7 +1168,7 @@ After all parallel Group 3 branches finish, validate every external credential
 (E2B, Steel, Parallel.ai, Anthropic, OpenRouter, Supabase) with the focused test
 below. The deterministic Step 4a batch excludes this provider-dependent domain,
 so this runs exactly once and a provider outage can be retried without rerunning
-all 91 instrumented back-end domains.
+every instrumented back-end domain.
 
 Step 4p launches the exact `run-deploy-stage credential-health` command with
 `npx tsx src/tests/blackbox/integration-health.blackbox.ts`.

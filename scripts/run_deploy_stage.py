@@ -95,7 +95,24 @@ _MAC_EXCLUDED = ("back-end/", "agents/", *_DOCUMENTATION_ONLY)
 # agents lanes and the scripts/tests gates (deploy-command-structural and the
 # seed checks) read them and keep the whole-worktree fingerprint.
 _LEDGER_PATHS = ("agents/benchmarks/history/",)
-_LEDGER_FREE_LANES = frozenset({"eslint", "typescript", "backend-structural"})
+# A lane name alone does not prove what ran under it: the ledgers stay out of
+# the fingerprint only when the stage is one of these lanes AND its argv is
+# that lane's real command (lint-affected over the deploy lint list, tsc, or
+# the back-end structural suite). Any other command under the same name keeps
+# the whole-worktree fingerprint, so a ledger write still invalidates it.
+_LEDGER_FREE_COMMANDS = {
+    "eslint": ("lint-affected.mjs",),
+    "typescript": ("tsc",),
+    "backend-structural": ("test:structural",),
+}
+
+
+def _ledger_free(stage: str, command: Sequence[str]) -> bool:
+    markers = _LEDGER_FREE_COMMANDS.get(stage)
+    if not markers:
+        return False
+    joined = " ".join(os.fsdecode(argument) for argument in command)
+    return any(marker in joined for marker in markers)
 _LANE_SCOPES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     # Vitest blackbox/structural: front-end/ plus the benchmark catalog read by
     # tests-e2e/helpers.ts (imported by a blackbox suite).
@@ -152,10 +169,10 @@ def _scoped_content_fingerprint(digest: "hashlib._Hash", stage: str) -> None:
         _hash_field(digest, f"worktree:{relative}", value)
 
 
-def _fingerprint_scope(stage: str) -> str:
+def _fingerprint_scope(stage: str, command: Sequence[str]) -> str:
     if stage in _LANE_SCOPES:
         return "lane inputs"
-    if stage in _LEDGER_FREE_LANES:
+    if _ledger_free(stage, command):
         return "exact worktree minus append-only ledgers"
     return "exact worktree"
 
@@ -164,9 +181,9 @@ def _worktree_fingerprint(command: Sequence[str], stage: str = "") -> str:
     """Hash every deploy input; exact-tree reuse is conservative by design.
 
     A lane in _LANE_SCOPES hashes the content of its declared inputs; a lane
-    in _LEDGER_FREE_LANES hashes HEAD plus the worktree diff and untracked
-    files outside the append-only benchmark ledgers; every other lane hashes
-    HEAD plus the whole worktree diff and untracked files.
+    running its _LEDGER_FREE_COMMANDS command hashes HEAD plus the worktree
+    diff and untracked files outside the append-only benchmark ledgers; every
+    other lane hashes HEAD plus the whole worktree diff and untracked files.
     """
 
     digest = hashlib.sha256()
@@ -174,9 +191,9 @@ def _worktree_fingerprint(command: Sequence[str], stage: str = "") -> str:
         _scoped_content_fingerprint(digest, stage)
         _hash_invocation(digest, command)
         return digest.hexdigest()
-    ledger_free = stage in _LEDGER_FREE_LANES
+    ledger_free = _ledger_free(stage, command)
     diff_paths = ("--", ".", *(f":(exclude){prefix}" for prefix in _LEDGER_PATHS)) if ledger_free else ()
-    _hash_field(digest, "scope", _fingerprint_scope(stage).encode())
+    _hash_field(digest, "scope", _fingerprint_scope(stage, command).encode())
     _hash_field(digest, "head", _git_output("rev-parse", "HEAD"))
     _hash_field(digest, "tracked", _git_output("diff", "--no-ext-diff", "--binary", "HEAD", *diff_paths))
     untracked = _git_output("ls-files", "--others", "--exclude-standard", "-z")
@@ -438,7 +455,7 @@ def main() -> int:
             release_stage(args.run_root, run_id=run_id, token=token)
         except (LifecycleError, OSError) as error:
             print(f"warning: could not release deploy stage admission: {error}", file=sys.stderr)
-        print(f"== reused passed deploy stage: {args.stage} ({_fingerprint_scope(args.stage)} + command) ==")
+        print(f"== reused passed deploy stage: {args.stage} ({_fingerprint_scope(args.stage, command)} + command) ==")
         return 0
 
     log_relative = f"logs/{args.stage}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{os.getpid()}.log"

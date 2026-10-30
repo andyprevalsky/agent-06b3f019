@@ -263,10 +263,29 @@ git -C "$LANE_REPO" init -q
 git -C "$LANE_REPO" add -A
 git -C "$LANE_REPO" -c user.name=t -c user.email=t@t commit -qm fixture
 lane_counter="$TEST_ROOT/lane-counter"
+# The ledger-free lanes drop the append-only ledgers from their fingerprint
+# only when their argv is the lane's real command, so the fixture lanes carry
+# that command's marker as a trailing argument (lint-affected over the deploy
+# lint list, tsc, the back-end structural suite). lane_stage_generic runs the
+# same stage name with an arbitrary command and must keep the exact-worktree
+# fingerprint.
+lane_marker() {
+    case "$1" in
+        eslint) printf 'scripts/lint-affected.mjs' ;;
+        typescript) printf 'tsc' ;;
+        backend-structural) printf 'test:structural' ;;
+        *) printf 'generic' ;;
+    esac
+}
 lane_stage() {
     (cd "$LANE_REPO" && DEPLOY_RUN_ROOT="$LANE_REPO/.context/deploy-runs" \
         bash scripts/run-deploy-stage "$1" --reuse-passed -- \
-        bash -c 'printf "%s\n" "$1" >> "$2"' _ "$1" "$lane_counter" >/dev/null)
+        bash -c 'printf "%s\n" "$1" >> "$2"' _ "$1" "$lane_counter" "$(lane_marker "$1")" >/dev/null)
+}
+lane_stage_generic() {
+    (cd "$LANE_REPO" && DEPLOY_RUN_ROOT="$LANE_REPO/.context/deploy-runs" \
+        bash scripts/run-deploy-stage "$1" --reuse-passed -- \
+        bash -c 'printf "%s-generic\n" "$1" >> "$2"' _ "$1" "$lane_counter" >/dev/null)
 }
 lane_runs() { grep -cx "$1" "$lane_counter" 2>/dev/null || true; }
 expect_lane() {
@@ -334,8 +353,13 @@ for stage in eslint typescript backend-structural backend-coverage-blackbox depl
 done
 ts=$(lane_runs typescript); bs=$(lane_runs backend-structural); cov=$(lane_runs backend-coverage-blackbox)
 dcs=$(lane_runs deploy-command-structural)
+lane_stage_generic eslint
+generic_before=$(lane_runs eslint-generic)
 printf '{"task":"x","status":"passed"}\n' >> "$LANE_REPO/agents/benchmarks/history/task_attempts.jsonl"
 expect_lane eslint 1 "a dirty tracked ledger row"
+lane_stage_generic eslint
+[ "$(lane_runs eslint-generic)" = $((generic_before + 1)) ] \
+    || fail "a generic command under the eslint lane name kept its pass across a ledger row (expected an exact-worktree re-run)"
 expect_lane typescript "$ts" "a dirty tracked ledger row"
 expect_lane backend-structural "$bs" "a dirty tracked ledger row"
 expect_lane backend-coverage-blackbox $((cov + 1)) "a dirty tracked ledger row (the backend reads task_attempts.jsonl)"

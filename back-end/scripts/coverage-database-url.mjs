@@ -88,6 +88,11 @@ if (shard === "units") {
   const match = /^([1-9][0-9]*)\/([1-9][0-9]*)$/.exec(shard);
   if (!match || Number(match[1]) > Number(match[2])) fail("shard must be <index>/<count> with 1 <= index <= count");
   derived = `${expectedName}_s${match[1]}`;
+}
+if (derived) {
+  // The resolved URL (line 1) is what run-coverage.sh connects to; the unit
+  // pass and every blackbox shard must land on their own derived database,
+  // never on the prepared base one.
   if (derived.length > 63) fail("derived shard database name exceeds Postgres's 63-byte identifier limit");
   url.pathname = `/${derived}`;
 }
