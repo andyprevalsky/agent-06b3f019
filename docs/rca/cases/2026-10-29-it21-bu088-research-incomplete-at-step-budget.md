@@ -222,3 +222,57 @@ immutable. The research result and unchanged-task success are still OPEN.
 Future eligible runs may make their normal declared judge calls instead of
 being rejected before judging; no deployment, live source update, original
 regrade or new benchmark was performed by this repair lane.
+
+
+## It25 BU088r2 — final verifier started, then budget pause cancelled it
+
+Original r002-j0018/root `a3def611-fc90-4b17-b88e-c2902e049a64`, fleet
+`20261030-035513-1929853`, executes source
+`3dc00896d3b8dcc0b3666c9c8493507ee96c7809` without a patch. All seven normal
+member sizes and hashes independently verify. Archive SHA256
+`83d3f4152c11accf9227bffb77272b4fba57a96166e2089b55da31ae29427132`;
+manifest `0862ca1d27e465b36835de1772b4dd91fb97937e2ee3cf89a87a7c50aa125c72`;
+run `25f0e54d4ff92256bcee48a00426dd37f2312d6f605fa26004d82796cddfd9e0`;
+worker `577c6d4cc099d0df8a33e233a254255369c1c942263fc79eb303b73319fb4d3c`.
+Native PAUSED/2801.6 seconds/progress0 differs from canonical FAIL,
+`Low progress score: 0.00`, producer infraFALSE and cleanup_failureNone.
+
+The generated and persisted schema correctly requires nonnullable string
+`younger_victim_pill_type`, described as the pill the younger victim took.
+Original schema output hash
+`e1c6498fec3a6d126a4c5226968e54520c596fe79f8d32e660ed29908ee470b8`.
+Unlike r1, r2 did start completion verification: worker43834 records the
+100-iteration limit at04:47:47.557372Z, and worker43854/43855 records
+`verifier_browser_max_steps` request `05ad5e7a37d2` at04:47:48.534647Z/
+04:47:48.539824Z. Its complete429555-byte decoded input SHA256 is
+`1c81ca0916bcc4492ecb071783d73f3c4999994c89a9420aaa6e4166e07bdc7a`.
+That request includes the original goal, the correct required field, final
+browser state, an actual screenshot and retained tool-result evidence.
+It is not evidence of a returned score or a completed answer.
+
+Supplemental driver21749 records `Browser step budget reached: 100/100`.
+Workflow PAUSE arrives04:47:51.147554Z (worker43858); check_progress ends with
+an error and the browser activity records cancellation04:48:00.320516Z
+(worker43864/43865). No completed verifier response or structured output is
+present. Root progress was initialized to0 at04:01:10.367382Z (worker50);
+there is no captured later root score update or declared evaluator result.
+Thus this zero is not a returned verifier judgment. The separate R101 routing
+repair applies to this budget-PAUSED result, without retroactively grading it.
+
+The cancellation ownership is explicit: benchmark `_poll_agent` sends ordinary
+pause at the budget; workflow `pause` sets is_paused; the browser manager calls
+activity_handle.cancel; the nested verifier await propagates cancellation.
+The existing pause/kill contract must not be weakened to preserve a score.
+No task/generation-bound final-verifier handoff is supplied to the benchmark
+poller. Arbitrary delay, shielding all final verification, or ignoring pause
+would not be a safe narrow repair. No second runtime fix or new test lane was
+introduced; a distinct safe handoff would require its own explicit contract.
+
+An earlier socket closure at04:27:42.298849Z recovered at04:27:48.857380Z;
+subsequent actor work and final verification were recorded. This is not an
+unrecovered terminal transport failure. Tilion session
+`sess_0351ec9c5a06407a84a73982f680125d` has recorded DELETE204, root deletion
+and sealed tree. Original PAUSED/FAIL/infraFALSE and cleanup records remain
+unchanged. Research sufficiency, returned native verification and the original
+unchanged-task outcome remain OPEN; no model, browser, DB or provider call,
+new benchmark, outcome claim or live-source change was made.
