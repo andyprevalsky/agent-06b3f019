@@ -168,3 +168,57 @@ No positive operational transport failure or new native/model/DB call was
 introduced. Original outcomes and the earlier case bytes remain preserved;
 selected driver/worker hashes are in .context/r101/proof.json. Outcome remains
 OPEN, with no separate duplicate fix or test lane.
+
+
+## R101 routing repair — reviewed future source, original outcome remains open
+
+A bounded follow-up on 2026-10-30 isolated a separate deterministic grading
+admission defect. In original It25 BU088r1, required nonnullable `pill_type`
+correctly described the requested answer. Root progress remained its startup
+zero; the captured worker contained no completion-verifier invocation or
+returned validation score before the recorded 100-step pause. This does not
+establish an answered task or a model-quality cause.
+
+The existing `evaluate_task` budget-pause exception explicitly admits a Polar
+trajectory for its declared judge, but the later `progress < 0.5` check returned
+false first. `run_single_task` consequently skipped the declared Polar judge.
+The unchanged full-runner reproduction with all 229 original messages failed
+with zero judge calls and `Low progress score: 0.00`; the candidate reached one
+mocked Polar judge with those exact messages. Its supplied score remained zero
+and the resulting task remained FAIL. No actual judge, actor or provider call
+was made, and the original recorded outcome was not recomputed.
+
+The repair bypasses only that lifecycle-progress precondition for an explicitly
+budget-paused Polar task with an enforced declared Polar evaluator. It writes
+neither status nor progress. Native FAILED/CANCELLED, ordinary pause, non-Polar,
+unenforced evaluation, and completed-low-progress cases retain their gates.
+Required-tool, context and static failures remain effective. No rubric, prompt,
+criterion, step/time budget, provider setting or evidence transformation changes.
+
+Exact reviewed two-file patch SHA256:
+`50621902f983af655494b350f80c311fc3c36a6bcb784dd8cdd947b1a725496c`.
+Base `c660f41852d46cd020aedd0be5b8214657aa5f5f`; runtime preimage equals
+executed `3dc00896d3b8dcc0b3666c9c8493507ee96c7809`.
+Independent reviewer B returned GROUNDED; the parent independently verified
+RED/GREEN and authorized only these bytes on this isolated future branch.
+The permanent regression in `cloud_batch_cleanup_test.py` runs ten controls
+through the actual task runner and declared-evaluator dispatcher. Existing
+`benchmark.blackbox.py` automatically registers this test module's cases.
+Full original-message reproduction also passes its four routing controls.
+
+Opened primary comparisons: Hermes `agent/turn_failure_copy.py:146` and
+`tui_gateway/prompt_turn.py:49` distinguish a nonfailed iteration-budget handoff
+eligible for goal judging from failure/interruption; Codex
+`codex-rs/core/src/realtime_history.rs:160` preserves distinct completion/abort
+lifecycle facts; OpenClaw
+`src/agents/embedded-agent-subscribe.handlers.lifecycle.ts:95` distinguishes
+terminal delivery from incomplete/error output. Only Hermes directly provides
+a judge-admission analogue; its required summary is not imported into Rose's
+existing full-trajectory contract. The other references do not independently
+justify grading an aborted or failed task.
+
+The original native PAUSED/benchmark FAIL/infraFALSE and cleanup records remain
+immutable. The research result and unchanged-task success are still OPEN.
+Future eligible runs may make their normal declared judge calls instead of
+being rejected before judging; no deployment, live source update, original
+regrade or new benchmark was performed by this repair lane.

@@ -2654,3 +2654,71 @@ async def test_genuine_cleanup_failure_still_fails_the_task():
     assert (row.passed, row.benchmark_status) == (False, "ERROR")
     assert row.failure_reason == "Cloud cleanup failed: provider: provider session still live"
     assert getattr(row, "cleanup_failure", None) is None
+
+
+def test_polar_budget_pause_uses_declared_judge_without_lifecycle_score():
+    """R101: budget-paused progress0 is unscored, not a verifier rejection."""
+    cases = [
+        ("PAUSED", True, True, True, False, False, False, 1),
+        ("PAUSED", False, True, True, False, False, False, 0),
+        ("FAILED", True, True, True, False, False, False, 0),
+        ("CANCELLED", True, True, True, False, False, False, 0),
+        ("PAUSED", True, False, True, False, False, False, 0),
+        ("PAUSED", True, True, False, False, False, False, 0),
+        ("COMPLETED", True, True, True, False, False, False, 0),
+        ("PAUSED", True, True, True, True, False, False, 0),
+        ("PAUSED", True, True, True, False, True, False, 0),
+        ("PAUSED", True, True, True, False, False, True, 0),
+    ]
+    async def run(monkeypatch, status, budget, polar_task, enforce, missing_tool, context_failure, static_failure, expected_judges):
+        task = copy.deepcopy(bench.get_task_by_name("polar-bu-088"))
+        task.enforce_declared_evaluators = enforce
+        if not polar_task:
+            task.tags = []
+            task.group = "fixture"
+        if missing_tool:
+            task.expected_tools = ["missing-required-tool"]
+        if static_failure:
+            task.evaluators.insert(0, {"id": "fixture-static", "method": "static_check", "checks": []})
+        data = {"agent": {"id": ROOT, "status": status, "progress": 0},
+                "messages": [{"role": "user", "text": task.prompt, "metadata": {"toolName": "spawn_browser_agent", "toolStatus": "FINISHED", "action_type": "task_complete", "toolCallId": "fixture-browser"}}],
+                "_benchmark": {"step_budget_reached": budget, "tree": {}}}
+        calls=[]
+        if context_failure:
+            from benchmarks.context_validator import ContextViolation
+            monkeypatch.setattr(bench, "validate_context", lambda messages: [ContextViolation("fixture", "error", "malformed context")])
+        if static_failure:
+            monkeypatch.setattr(bench, "_run_declared_static_check", lambda *args: (False, "fixture static rejection"))
+        async def judge(**kwargs):
+            calls.append(kwargs)
+            return {'score': 0.0, 'reasoning': 'Fixture judges trajectory as failed'}
+        import benchmarks.polar_evaluator as polar
+        monkeypatch.setattr(polar, 'run_polar_evaluator', judge)
+        monkeypatch.setattr(bench, 'count_tree_tool_calls', AsyncMock(return_value={'spawn_browser_agent': 1}))
+        async def empty(*a, **kw): return []
+        for name in ('_apply_live_fixtures','_apply_memory_fixtures','_restore_live_fixture_scenarios_async','subscribe_supabase_realtime_agent','post_world_model_update_events','archive_agent_start'):
+            monkeypatch.setattr(bench,name,empty)
+        monkeypatch.setattr(bench,'create_agent',AsyncMock(return_value=ROOT))
+        monkeypatch.setattr(bench,'_poll_agent',AsyncMock(return_value=(data,0,0,None)))
+        monkeypatch.setattr(bench,'_get_settled_tool_usage',AsyncMock(return_value={}))
+        monkeypatch.setattr(bench,'_fetch_tree_stats',AsyncMock(return_value={}))
+        monkeypatch.setattr(bench,'get_llm_usage_details',AsyncMock(return_value=({},bench.aggregate_prompt_cache_share([]))))
+        monkeypatch.setattr(bench,'ensure_payment_lifecycle_cleanup',AsyncMock(return_value=None))
+        monkeypatch.setattr(bench,'collect_logs',AsyncMock(return_value={'messages':data['messages']}))
+        monkeypatch.setattr(bench,'finalize_archive_and_score_world_model',AsyncMock(return_value=('fixture',None)))
+        monkeypatch.setattr(bench,'_should_delete_agent_after_run',lambda *a:True)
+        monkeypatch.setattr(bench,'delete_agent',AsyncMock())
+        monkeypatch.setattr(bench,'get_agent_tree',AsyncMock(return_value=[]))
+        monkeypatch.setattr(bench,'collect_tree_messages',AsyncMock(return_value=data['_benchmark']['tree']))
+        result=await bench.run_single_task('http://localhost:39999',task)
+        assert len(calls)==expected_judges
+        assert result.passed is False
+        if calls:
+            assert calls[0]['task_prompt']==task.prompt
+            assert calls[0]['data']['messages']==data["messages"]
+            assert result.logs['declared_evaluators'][0]['score']==0.0
+        if static_failure:
+            assert any(item["id"] == "fixture-static" and item["passed"] is False for item in result.logs["declared_evaluators"])
+    for case in cases:
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            asyncio.run(run(monkeypatch, *case))

@@ -6341,8 +6341,17 @@ def evaluate_task(
             f"Expected exactly {task.expected_approval_count} approval request(s), observed {approvals_triggered}",
         )
 
-    # Progress score check (verifier gave a score)
-    if progress < 0.5:
+    # Budget-paused Polar trajectories are graded by their declared evaluator;
+    # lifecycle progress may still be its startup value without a verifier call.
+    polar_budget_pause = (
+        status == "PAUSED"
+        and data.get("_benchmark", {}).get("step_budget_reached") is True
+        and is_polar_bench_task(task)
+        and task.enforce_declared_evaluators
+        and any(evaluator.get("method") == "polar" for evaluator in task.evaluators)
+    )
+    # Other runs still require a successful native progress check.
+    if progress < 0.5 and not polar_budget_pause:
         return False, f"Low progress score: {progress:.2f}"
 
     return True, None
