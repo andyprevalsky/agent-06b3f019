@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from functools import cache
 import os
 import shutil
 import subprocess
@@ -260,6 +261,27 @@ Module._resolveFilename = function(request, parent, ...rest) {
     return graph, snapshot
 
 
+@pytest.fixture(scope="module")
+def frontend_native_archives(tmp_path_factory, frontend_graph):
+    """Lazily prepare immutable inputs only for cases using valid archives."""
+    @cache
+    def prepare():
+        graph, _ = frontend_graph
+        root = tmp_path_factory.mktemp("frontend-native-archives")
+        archives = []
+        for number, artifact in enumerate(graph["natives"]):
+            native = root / f"native-{number}"
+            shutil.copytree(artifact["source"], native)
+            tarball = root / f"native-{number}.tgz"
+            with tarfile.open(tarball, "w:gz", compresslevel=1) as archive:
+                archive.add(native, arcname="package")
+            tarball.chmod(0o444)
+            archives.append(tarball)
+        return tuple(archives)
+
+    return prepare
+
+
 FRONTEND_BUILD = r"""
 const path = require('node:path');
 (async () => {
@@ -300,7 +322,7 @@ const path = require('node:path');
     ],
 )
 def test_cloudbench_image_build_loads_actual_frontend_compilers_without_version_or_manifest_changes(
-    tmp_path, state, frontend_graph
+    tmp_path, state, frontend_graph, frontend_native_archives
 ):
     node, npm = shutil.which("node"), shutil.which("npm")
     assert node and npm, "frontend coverage requires the installed Node/npm toolchain"
@@ -309,16 +331,19 @@ def test_cloudbench_image_build_loads_actual_frontend_compilers_without_version_
     # extraction offline. Neither package names nor host/libc selection are faked.
     artifacts = {**graph, "natives": []}
     for number, artifact in enumerate(graph["natives"]):
-        native = tmp_path / f"native-{number}"
-        shutil.copytree(artifact["source"], native)
         if state == "wrong-version":
+            # This case changes registry input, never the shared valid archives.
+            native = tmp_path / f"native-{number}"
+            shutil.copytree(artifact["source"], native)
             package = native / "package.json"
             metadata = json.loads(package.read_text())
             metadata["version"] = "0.0.0"
             package.write_text(json.dumps(metadata))
-        tarball = tmp_path / f"native-{number}.tgz"
-        with tarfile.open(tarball, "w:gz", compresslevel=1) as archive:
-            archive.add(native, arcname="package")
+            tarball = tmp_path / f"native-{number}.tgz"
+            with tarfile.open(tarball, "w:gz", compresslevel=1) as archive:
+                archive.add(native, arcname="package")
+        else:
+            tarball = frontend_native_archives()[number]
         artifacts["natives"].append({**artifact, "tarball": str(tarball)})
     graph_file = tmp_path / "graph.json"
     graph_file.write_text(json.dumps(artifacts))
