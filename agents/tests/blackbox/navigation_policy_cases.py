@@ -8,7 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 
-async def assert_navigation_policy_activity_cases(namespace, *, failed_navigation=False):
+async def assert_navigation_policy_activity_cases(namespace, *, failed_navigation=False,
+                                                 native_error_code="net::ERR_EMPTY_RESPONSE"):
     from domains.spawn_browser_agent_v3 import handler as h
     from domains.spawn_browser_agent_v3.navigation_policy import (
         NavigationPolicyBarrier, is_native_navigation_policy_denial, url_digest,
@@ -19,7 +20,7 @@ async def assert_navigation_policy_activity_cases(namespace, *, failed_navigatio
     barrier_type = (getattr(policy_module, "NavigationFailureBarrier", NavigationPolicyBarrier)
                     if failed_navigation else NavigationPolicyBarrier)
     checkpoint_key = "navigation_failure_barrier" if failed_navigation else "navigation_policy_barrier"
-    native_error = ("Navigation failed: net::ERR_EMPTY_RESPONSE" if failed_navigation else
+    native_error = (f"Navigation failed: {native_error_code}" if failed_navigation else
                     {'code': -32000, 'message': 'navigation to a non-public address is blocked'})
     if not failed_navigation:
         assert is_native_navigation_policy_denial(RuntimeError(native_error))
@@ -171,7 +172,7 @@ async def assert_navigation_policy_activity_cases(namespace, *, failed_navigatio
             events.append(('ready', url))
             if mode == 'readiness_error' and not changed_ack:
                 changed_ack = True
-                raise RuntimeError('Navigation failed: net::ERR_EMPTY_RESPONSE')
+                raise RuntimeError(f'Navigation failed: {native_error_code}')
             if mode == 'schema_ack' and not changed_ack:
                 changed_ack = True
                 sync_state['current']['delivered_user_instruction_count'] += 1
@@ -344,13 +345,18 @@ async def assert_failed_navigation_identity_and_restore():
         NavigationPolicyBarrier, restore_navigation_barrier, is_native_navigation_policy_denial,
     )
     literal = "Navigation failed: net::ERR_EMPTY_RESPONSE"
-    assert type(native_navigation_failure(RuntimeError(literal))) is NativeNavigationFailure
+    for code in ("net::ERR_EMPTY_RESPONSE", "net::ERR_CONNECTION_CLOSED"):
+        failure = native_navigation_failure(RuntimeError("Navigation failed: " + code))
+        assert type(failure) is NativeNavigationFailure and failure.args == (code,)
     class UntrustedRuntimeError(RuntimeError):
         pass
     for error in (ValueError(literal), UntrustedRuntimeError(literal), RuntimeError(literal, 'extra'),
                   RuntimeError({'errorText': 'net::ERR_EMPTY_RESPONSE'}),
                   RuntimeError('prefix ' + literal), RuntimeError(literal + ' suffix'),
                   RuntimeError('Navigation failed: net::ERR_HTTP_RESPONSE_CODE_FAILURE'),
+                  RuntimeError('Navigation failed: net::ERR_ABORTED'),
+                  RuntimeError('Navigation failed: net::ERR_BLOCKED_BY_CLIENT'),
+                  RuntimeError({'code': -32000, 'message': 'navigation to a non-public address is blocked'}),
                   RuntimeError('Page.navigate() timed out'), asyncio.CancelledError()):
         assert native_navigation_failure(error) is None
     assert not is_native_navigation_policy_denial(RuntimeError(literal))

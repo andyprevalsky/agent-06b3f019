@@ -159,3 +159,53 @@ regardless of the local routing result.
 Preserve an unacknowledged credential obligation while exposing a narrowly
 classified native navigation failure to guarded alternate navigation; do not
 turn an unreachable document into either successful evidence or a policy denial.
+
+## R120 — It28 BU094r1 native connection-closed failure
+
+This original executes d0663f361a1118ce6776d1ab8aaa0987dcf252a5, which already
+contains the reviewed R115 empty-response barrier. It is a proved coverage gap
+at the same mandatory navigation result boundary, not evidence that d066 ran
+unqualified future code or that all Chromium errors should be treated alike.
+
+The canonical campaign row is CANCELLED after the later operational stop.
+The separately sealed diagnostic run records nativeFAILED792.8s/progress1 and
+benchmark_statusFAILED/producerinfraFALSE. Preserve both axes; this diagnostic
+is not promoted to a scored campaign failure. Root566087d1-dd77-4c68-bed4-c7486baaf0e3
+has archive8bde70d74315497f6d6fef75cb9eeae9e62681b86d3f14b3187627810a197020,
+normal manifest669c64d762456db11ea355208d81f58ac1c98250db2f63408e05531d57500bb6;
+all seven original member sizes/hashes were verified.
+
+It requests the same publication from the census-paper clues. Author output139
+SHAed45e8d3a445e4a21f50ed33402c043a4aa1824337ed5177ce36475893ed6e9b declares a
+required nonempty publication_name string and matching value/text presentation.
+No verifier call appears among the15 captured native context dumps. Last read
+result48 explicitly shows zero elements/empty DOM for the HTTPS PDF; this is not
+proof of usable source content or a completed answer.
+
+Worker17672 at19:09:35.405732Z prepares revistadestatistica.ro with password_count1,
+passkey_count0, cookies_injectedfalse and passkeys_newly_injected0;17673 reports
+the state-read result. The callback creates the pending reload obligation.
+Worker20191 at19:10:11.374362Z records native
+`Navigation failed: net::ERR_CONNECTION_CLOSED`; repeated event_result failures
+reach54212 eight-recovery exhaustion, then54213 fatal at19:18:21.297168Z. The
+manager fails at55133. Exactd066 handler10497 awaits that native result; its
+classifier recognizes only ERR_EMPTY_RESPONSE, so this other observed native
+transport code goes through generic recovery instead of restricted alternate
+navigation. Neither code assigns vendor/local blame or proves whole-CDP loss.
+
+The R120 candidate unifies the two evidenced machine-code identities in the
+same narrow typed transport-failure classifier. It adds no error-specific state
+machine and changes no handler, checkpoint or ACK contract. Abort/cancellation,
+policy denial, HTTP failure, parser errors and the same text from readiness stay
+outside this classifier. Feedback describes transport failure without claiming
+an empty response for the connection-closed case. The exact reviewed code and
+original task outcome remain separate; no live calls, grade or timeout changes.
+
+Parent owns independent review and application. This remains OPEN until the
+exact original task outcome is proved; local continuation controls are not a
+benchmark rerun. Original normal cleanup records Tilion session
+sess_98241c121df74e3c9366ad5cf25aaeab DELETE204, root_deleted/tree_sealed and no
+cleanup error. The two archive searches and prior R115/R86/R35 comparison are
+retained in the private evidence packet.
+
+Parent integration: independent review found the exact `3560f36c` patch grounded. The composed checkout preserves all three reviewed output hashes and the unchanged handler. Actual registered 11-selector collateral run and pinned Python 3.11 compilation of three changed Python files passed. These checks establish the bounded routing repair, not the original task outcome or upstream transport cause.

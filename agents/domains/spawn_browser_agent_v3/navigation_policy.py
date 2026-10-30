@@ -51,12 +51,20 @@ class NativeNavigationFailure(RuntimeError):
     """A Page.navigate errorText admitted only at its native result await."""
 
 
+# Exact machine-code contract from browser-use's Page.navigate result adapter.
+# Only observed transport failures belong here; policy/HTTP errors, aborted
+# navigation, arbitrary parser errors and readiness exceptions do not.
+_NAVIGATION_TRANSPORT_FAILURES = {
+    "Navigation failed: net::ERR_EMPTY_RESPONSE": "net::ERR_EMPTY_RESPONSE",
+    "Navigation failed: net::ERR_CONNECTION_CLOSED": "net::ERR_CONNECTION_CLOSED",
+}
+
+
 def native_navigation_failure(error: BaseException) -> NativeNavigationFailure | None:
-    # browser-use converts Page.navigate.errorText to this exact RuntimeError.
-    # Do not admit timeouts, HTTP failures, policy errors or page/model text.
-    if type(error) is RuntimeError and error.args == ("Navigation failed: net::ERR_EMPTY_RESPONSE",):
-        return NativeNavigationFailure("net::ERR_EMPTY_RESPONSE")
-    return None
+    if type(error) is not RuntimeError or len(error.args) != 1 or type(error.args[0]) is not str:
+        return None
+    code = _NAVIGATION_TRANSPORT_FAILURES.get(error.args[0])
+    return NativeNavigationFailure(code) if code is not None else None
 
 
 class NavigationPolicyBarrier:
@@ -131,15 +139,15 @@ class NavigationFailureBarrier(NavigationPolicyBarrier):
     """Retain unacknowledged credentials after a typed failed navigation.
 
     Shares only the restrictive alternate-navigation/ACK protocol with policy
-    refusal. An empty response is not evidence of a policy or provider failure.
+    refusal. A transport failure does not establish a policy denial or provider cause.
     """
     checkpoint_key = "navigation_failure_barrier"
     feedback = (
-        "The browser returned an empty response while navigating. Credential "
+        "The browser navigation transport failed. Credential "
         "setup is not acknowledged. Only goto/open_new_tab to a different public "
         "HTTP(S) page, or switch_tab to a different page, may run until the new "
         "page's credential setup is acknowledged. Current-page interactions and "
-        "completion are blocked. The cause of the empty response is unknown."
+        "completion are blocked. The cause of the transport failure is unknown."
     )
     result_code = "native_navigation_failed"
     context_flag = "navigation_failure_restricted"

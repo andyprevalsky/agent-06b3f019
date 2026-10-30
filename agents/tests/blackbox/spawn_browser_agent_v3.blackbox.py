@@ -26204,6 +26204,8 @@ async def test_native_failed_navigation_restriction_and_escape():
                                          assert_failed_navigation_identity_and_restore,
                                          assert_navigation_admission_at_native_dispatch)
     await assert_navigation_policy_activity_cases(globals(), failed_navigation=True)
+    await assert_navigation_policy_activity_cases(
+        globals(), failed_navigation=True, native_error_code="net::ERR_CONNECTION_CLOSED")
     await assert_failed_navigation_identity_and_restore()
     await assert_navigation_admission_at_native_dispatch()
 
