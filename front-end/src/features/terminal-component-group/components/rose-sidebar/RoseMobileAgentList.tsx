@@ -47,8 +47,8 @@ function useMobileRows(props: MobileAgentListProps) {
     false,
   );
   const apps = useRoseApps();
-  const projects = useRoseSidebarProjects((project) => {
-    apps?.onCreateAgentInProject?.(project);
+  const projects = useRoseSidebarProjects((project, folderId) => {
+    apps?.onCreateAgentInProject?.(project, folderId);
     props.onClose();
   });
   const code = useRoseCodeAgents(rows, props.selectedAgentId);
