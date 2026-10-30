@@ -725,6 +725,7 @@ export async function getComputeCodeToken(
     accountId: result.accountId,
     source: result.source,
     poolTokenId: result.poolTokenId,
+    integrationId: result.integrationId,
     lineageKey: result.lineageKey,
     fastCacheAffinityKey: lineage?.fastCacheAffinityKey,
   };
@@ -739,6 +740,7 @@ export async function markTokenRateLimited(
     userId?: string;
     rateLimitedUntil?: string;
     failureReason?: string;
+    integrationId?: string;
   }
 ) {
   if (source === 'pool') {
@@ -764,6 +766,7 @@ export async function markTokenRateLimited(
     await markUserTokenRateLimited(params.userId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
+      integrationId: params.integrationId,
     });
     return {
       ok: true,
@@ -784,6 +787,7 @@ export async function markComputeTokenRateLimited(
     rateLimitedUntil?: string;
     failureReason?: string;
     credentialId?: string;
+    integrationId?: string;
     model?: string;
     region?: string;
     deployment?: string;
@@ -860,6 +864,7 @@ export async function markGptTokenRateLimited(
     userId?: string;
     rateLimitedUntil?: string;
     failureReason?: string;
+    integrationId?: string;
   }
 ) {
   if (source === 'pool') {
@@ -885,6 +890,7 @@ export async function markGptTokenRateLimited(
     await markGptUserTokenRateLimited(params.userId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
+      integrationId: params.integrationId,
     });
     return {
       ok: true,

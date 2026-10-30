@@ -551,6 +551,7 @@ def _build_claude_auth_context(
     source: Optional[str] = None,
     user_id: Optional[str] = None,
     pool_token_id: Optional[str] = None,
+    integration_id: Optional[str] = None,
     lineage_key: Optional[str] = None,
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
@@ -575,6 +576,7 @@ def _build_claude_auth_context(
             ctx.source,
             user_id=ctx.user_id,
             pool_token_id=ctx.pool_token_id,
+            integration_id=integration_id if ctx.source == "user" else None,
             cooldown_seconds=cooldown_seconds,
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
@@ -622,6 +624,7 @@ def _build_gpt_auth_context(
     source: Optional[str] = None,
     user_id: Optional[str] = None,
     pool_token_id: Optional[str] = None,
+    integration_id: Optional[str] = None,
     lineage_key: Optional[str] = None,
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
@@ -646,6 +649,7 @@ def _build_gpt_auth_context(
             ctx.source,
             user_id=ctx.user_id,
             pool_token_id=ctx.pool_token_id,
+            integration_id=integration_id if ctx.source == "user" else None,
             cooldown_seconds=cooldown_seconds,
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
@@ -707,6 +711,7 @@ def _build_compute_auth_context(
             source=result.get("source"),
             user_id=user_id,
             pool_token_id=result.get("poolTokenId"),
+            integration_id=result.get("integrationId"),
             lineage_key=result.get("lineageKey"),
             agent_id=agent_id,
             root_agent_id=root_agent_id,
@@ -719,6 +724,7 @@ def _build_compute_auth_context(
         source=result.get("source"),
         user_id=user_id,
         pool_token_id=result.get("poolTokenId"),
+        integration_id=result.get("integrationId"),
         lineage_key=result.get("lineageKey"),
         agent_id=agent_id,
         root_agent_id=root_agent_id,
@@ -7360,6 +7366,7 @@ async def fetch_compute_token_activity(
                         "accountId": data.get("accountId"),
                         "source": data.get("source", "user"),
                         "poolTokenId": data.get("poolTokenId"),
+                        "integrationId": data.get("integrationId"),
                         "lineageKey": data.get("lineageKey"),
                         "fastCacheAffinityKey": data.get("fastCacheAffinityKey") or demo_cache_affinity_key,
                     }
@@ -7483,6 +7490,7 @@ async def mark_compute_token_rate_limited_activity(
     source: str,
     user_id: str,
     pool_token_id: Optional[str] = None,
+    integration_id: Optional[str] = None,
     cooldown_seconds: int = 5 * 60,
     rate_limited_until: Optional[str] = None,
     failure_reason: Optional[str] = None,
@@ -7504,6 +7512,10 @@ async def mark_compute_token_rate_limited_activity(
         body["poolTokenId"] = pool_token_id
     if source == "user":
         body["userId"] = user_id
+        # Name the exact leased row: an auth_error must never expire the
+        # user's other subscriptions (S33).
+        if integration_id:
+            body["integrationId"] = integration_id
 
     try:
         async with httpx.AsyncClient() as client:
