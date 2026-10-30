@@ -42,6 +42,8 @@ export async function pauseAgent(agentId: string): Promise<void> {
     try {
       const client = await getTemporalClient();
       const handle = client.workflow.getHandle(paused.temporalWorkflowId);
+      // No cause argument: the cause-aware handler defaults to 'user', and a
+      // draining older generation's `pause(self)` fails its task on any argument.
       await handle.signal('pause');
     } catch (error) {
       log.warn('Pause signal failed, DB updated. Workflow will sync next iteration', {

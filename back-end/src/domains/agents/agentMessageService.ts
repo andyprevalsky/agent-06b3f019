@@ -3,7 +3,7 @@
  */
 
 import { deliverUserMessageToWorkflow, signalUserResponse } from '../../providers/agentResume';
-import { broadcastAgentUpdate, handleChatMessage } from '../../providers/chat';
+import { handleChatMessage } from '../../providers/chat';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
 import {
   broadcastCreatedMessage,
@@ -13,17 +13,11 @@ import {
   createWorkflowMessageGroup,
 } from '../../providers/messages';
 import { type FilePointer, validateTotalSize } from '../../providers/storage';
-import {
-  generateResponseSchema,
-  type ResponseSchemaDirectAuth,
-} from '../../providers/setResponseSchema';
 import type { PostMessageBody } from './types';
 import * as repo from './repo';
 import { withActiveBrowserSessionShareLock } from './repoBrowserTargetedMessages';
 import { readTaskInboxMessages } from './agentToAgentService';
-import { createLogger } from '../../providers/logger';
-
-const log = createLogger('Agents');
+import { broadcastChatReactivation } from './agentMessageReactivation';
 
 /**
  * Agent statuses whose Temporal workflow has already ended. A follow-up message
@@ -109,21 +103,7 @@ async function routeUserMessage(
       agentForChat.status = 'ACTIVE';
       // Clients still hold the finished run's status; tell them before the chat
       // turn streams (the chat Start agent button is gated on ACTIVE).
-      await broadcastAgentUpdate(
-        agentId,
-        {
-          status: 'ACTIVE',
-          temporalWorkflowId: null,
-          progress: 0,
-          updatedAt: new Date().toISOString(),
-        },
-        agentForChat.busId ?? undefined
-      ).catch((error: unknown) =>
-        log.warn('Failed to broadcast chat reactivation', {
-          agent_id: agentId,
-          error: error instanceof Error ? error.message : String(error),
-        })
-      );
+      await broadcastChatReactivation(agentId, agentForChat.busId ?? undefined);
     } else {
       const fresh = await repo.findAgentUnique(agentId);
       if (fresh !== null) {
@@ -401,43 +381,4 @@ export async function postMessage(
     text: message.text,
     role: message.role,
   });
-}
-
-// ---------------------------------------------------------------------------
-// Batch message lookup (context pointer resolution)
-// ---------------------------------------------------------------------------
-
-const MAX_BATCH_SIZE = 50;
-
-/** Fetch messages by IDs for context pointer resolution. Scoped to user's agents. */
-export async function getMessagesBatch(ids: unknown, userId: string) {
-  if (!Array.isArray(ids) || ids.length === 0) {
-    return { error: 'ids must be a non-empty array', status: 400 };
-  }
-
-  if (ids.length > MAX_BATCH_SIZE) {
-    return { error: `Maximum ${MAX_BATCH_SIZE} IDs per batch request`, status: 400 };
-  }
-
-  const messages = await repo.findMessagesByIds(ids as string[], userId);
-  return { messages };
-}
-
-// ---------------------------------------------------------------------------
-// Generate response schema
-// ---------------------------------------------------------------------------
-
-/** Generate response schema for a goal (used by browser agent). */
-export async function generateSchema(goal: string, directAuth?: ResponseSchemaDirectAuth) {
-  return generateResponseSchema(goal, { directAuth });
-}
-
-// ---------------------------------------------------------------------------
-// Batch fetch messages
-// ---------------------------------------------------------------------------
-
-/** Fetch messages by IDs, scoped to the requesting user. */
-export async function batchFetchMessages(ids: string[], userId: string) {
-  const messages = await repo.findMessagesByIds(ids, userId);
-  return { messages };
 }

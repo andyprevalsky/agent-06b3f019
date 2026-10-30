@@ -56,7 +56,6 @@ def live_funded_azure():
                 os.environ[name] = value
 
 
-
 import httpx
 from helpers.httpx_capture import (
     clear_captures,
@@ -181,6 +180,17 @@ def assert_captured_call(
     return call
 
 
+def _start_case() -> None:
+    """Each recorded case starts with no captures and no global mock handler.
+
+    A handler a previous case left set overrides every later client's own
+    MockTransport (httpx_capture routes through the global handler first), so a
+    case could silently talk to another test's fake server.
+    """
+    clear_captures()
+    clear_mock_handler()
+
+
 class BlackboxResult:
     """Accumulates pass/fail results for the test runner."""
 
@@ -196,7 +206,7 @@ class BlackboxResult:
         builds a coroutine, never runs a single assertion, and raises nothing —
         so a completely dead test reported ✅. Detect that and fail loudly.
         """
-        clear_captures()
+        _start_case()
         try:
             returned = fn()
             if inspect.iscoroutine(returned):
@@ -205,26 +215,32 @@ class BlackboxResult:
                     f"async test '{name}' was registered with record(); its assertions "
                     f"never ran. Use `await r.record_async(...)` instead."
                 )
-            self.passed += 1
-            print(f"  ✅ {name}")
+            self.record_result(name)
         except Exception as e:
-            self.failed += 1
-            self.errors.append(f"{name}: {e}")
-            print(f"  ❌ {name}: {e}")
-            traceback.print_exc()
+            self.record_result(name, e)
 
     async def record_async(self, name: str, fn: Callable) -> None:
         """Run an async test function, record the result."""
-        clear_captures()
+        _start_case()
         try:
             await fn()
+            self.record_result(name)
+        except Exception as e:
+            self.record_result(name, e)
+
+    def record_result(self, name: str, error: BaseException | None = None) -> None:
+        """Record an immediate or deferred outcome without losing its traceback."""
+        if error is None:
             self.passed += 1
             print(f"  ✅ {name}")
-        except Exception as e:
-            self.failed += 1
-            self.errors.append(f"{name}: {e}")
-            print(f"  ❌ {name}: {e}")
-            traceback.print_exc()
+            return
+        self.failed += 1
+        detail = type(error).__name__
+        if str(error):
+            detail += f": {error}"
+        self.errors.append(f"{name}: {str(error) or type(error).__name__}")
+        print(f"  ❌ {name}: {detail}")
+        traceback.print_exception(type(error), error, error.__traceback__)
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -261,3 +277,30 @@ async def native_browser_start_source(timestamp: str, *, tool_call_id: str = "to
         "metadata": args[3],
         "timestamp": timestamp,
     }
+
+
+@contextlib.contextmanager
+def retained_tool_output_fixture():
+    """Exercise the real shared retention helper without network or credentials."""
+    import uuid
+    from collections import OrderedDict
+    from unittest.mock import patch
+
+    stored = {}
+
+    async def upload(user_id, body, filename, mime_type, *, idempotency_key):
+        path = f"{user_id}/{uuid.uuid5(uuid.NAMESPACE_URL, idempotency_key)}_{filename}"
+        stored[path] = body
+        return {"storage_path": path}
+
+    async def download(path):
+        if path not in stored:
+            raise ValueError("No retained output in this scope")
+        return stored[path]
+
+    with (patch("helpers.tool_output._persisted_outputs", OrderedDict()),
+          patch("helpers.tool_output._pending_outputs", {}),
+          patch("helpers.attachments.upload_to_storage", side_effect=upload),
+          patch("helpers.attachments.download_from_storage", side_effect=download),
+          patch("httpx.AsyncClient.send", side_effect=AssertionError("Unexpected provider/network request"))):
+        yield stored

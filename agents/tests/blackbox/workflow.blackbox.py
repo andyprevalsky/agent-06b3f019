@@ -53,6 +53,179 @@ def test_task_dag_parallel():
     assert dag.is_complete(), "Should be complete with all 3 done"
 
 
+def test_workflow_policy_import_does_not_rebuild_provider_clients():
+    """A pure workflow timeout policy must not load activity-side provider clients."""
+    import builtins
+
+    from helpers.workflow_sandbox import workflow_sandbox_restrictions
+    from temporalio.worker.workflow_sandbox._importer import Importer
+    from temporalio.worker.workflow_sandbox._restrictions import RestrictionContext
+
+    import sys
+
+    host_pricing = sys.modules["helpers.model_pricing"]
+    importer = Importer(workflow_sandbox_restrictions(), RestrictionContext())
+    with importer.applied():
+        builtins.__import__("helpers.wmh_activity_policy")
+        sandbox_pricing = builtins.__import__("helpers.model_pricing", fromlist=["get_default_pricing"])
+    provider_modules = sorted(name for name in importer.new_modules if name.startswith("providers.rose"))
+    assert not provider_modules, f"workflow policy import rebuilt activity-side provider clients: {provider_modules}"
+    assert sandbox_pricing is host_pricing, "pricing module must reuse the host instance on cold workflow replay"
+    assert sandbox_pricing.get_default_pricing is host_pricing.get_default_pricing
+
+
+def test_workflow_helper_exports_reuse_host_activity_definitions():
+    """Cold imports keep workflow isolation while reusing registered activities."""
+    import builtins
+    import helpers
+    import sys
+
+    from helpers.workflow_sandbox import workflow_sandbox_restrictions
+    from temporalio.worker.workflow_sandbox._importer import Importer
+    from temporalio.worker.workflow_sandbox._restrictions import RestrictionContext
+
+    host_exports = {name: getattr(helpers, name) for name in helpers.__all__}
+    importer = Importer(workflow_sandbox_restrictions(), RestrictionContext())
+    with importer.applied():
+        policy = builtins.__import__("helpers.wmh_activity_policy", fromlist=["wmh_activity_timeout_options"])
+        sandbox_helpers = builtins.__import__("helpers", fromlist=list(host_exports))
+    assert sandbox_helpers is not helpers, "the helpers package must remain sandbox-isolated"
+    assert policy is not sys.modules["helpers.wmh_activity_policy"], (
+        "pure workflow helpers must remain sandbox-isolated"
+    )
+    rebuilt = [name for name, value in host_exports.items() if getattr(sandbox_helpers, name) is not value]
+    assert not rebuilt, f"cold replay rebuilt registered helper exports: {rebuilt}"
+
+
+def test_workflow_action_model_cache_preserves_registry_and_validation():
+    """Equivalent replay inputs reuse a schema without sharing different tools."""
+    from typing import Literal
+
+    from pydantic import BaseModel, ValidationError
+    from utils.tool_schemas import create_agent_action_model
+
+    class FirstTool(BaseModel):
+        tool: Literal["custom"]
+        first: str
+
+    class ReplacementTool(BaseModel):
+        tool: Literal["custom"]
+        replacement: int
+
+    first = create_agent_action_model(["custom"], {"custom": FirstTool})
+    same = create_agent_action_model(["custom"], dict(custom=FirstTool))
+    assert first is same, "identical replay tool types rebuilt the action schema"
+    replacement = create_agent_action_model(["custom"], {"custom": ReplacementTool})
+    assert first is not replacement, "a changed user-tool registry reused a stale schema"
+    registry = {"first": FirstTool, "replacement": ReplacementTool}
+    forward = create_agent_action_model(["first", "replacement"], registry)
+    reverse = create_agent_action_model(["replacement", "first"], registry)
+    assert forward is not reverse, "tool union ordering must remain part of the schema identity"
+    assert first.model_validate({"response": "", "tool_calls": [{"tool": "custom", "first": "ok"}]}).tool_calls
+    assert replacement.model_validate({"response": "", "tool_calls": [{"tool": "custom", "replacement": 3}]}).tool_calls
+    try:
+        replacement.model_validate({"response": "", "tool_calls": [{"tool": "custom", "first": "stale"}]})
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("the new registry accepted a payload valid only under the old schema")
+
+
+def test_workflow_sandbox_keeps_worker_logging_configuration():
+    """Workflow replay suppresses logs; activities retain configured structlog."""
+    import logging
+    import structlog
+    from unittest.mock import patch
+    from temporalio import workflow
+    from helpers.workflow_safe import context_logger
+    from helpers.workflow_sandbox import workflow_sandbox_restrictions
+
+    assert "structlog" not in workflow_sandbox_restrictions().passthrough_modules
+    previous = structlog.get_config()
+    was_configured = structlog.is_configured()
+    activity_events, records = [], []
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+    handler = Capture()
+    base = workflow.logger.base_logger
+    old_level = base.level
+    base.addHandler(handler)
+    base.setLevel(logging.DEBUG)
+    def collect(logger, method, event):
+        activity_events.append(event.copy())
+        return event
+    try:
+        structlog.configure(processors=[collect], logger_factory=structlog.ReturnLoggerFactory())
+        log = context_logger()
+        with patch.object(workflow, "in_workflow", return_value=True):
+            with patch.object(workflow.unsafe, "is_replaying_history_events", return_value=True):
+                log.info("replayed", agent_id="fixture")
+            assert not activity_events and not records
+            with patch.object(workflow.unsafe, "is_replaying_history_events", return_value=False):
+                log.info("live", agent_id="fixture")
+            assert len(records) == 1 and records[0].agent_id == "fixture"
+        with patch.object(workflow, "in_workflow", return_value=False):
+            log.info("activity", agent_id="activity")
+        assert activity_events[-1]["agent_id"] == "activity"
+    finally:
+        base.removeHandler(handler)
+        base.setLevel(old_level)
+        if was_configured:
+            structlog.configure(**previous)
+        else:
+            structlog.reset_defaults()
+
+
+async def test_blackbox_result_preserves_empty_exceptions_and_tracebacks():
+    """Empty exception messages still identify the failing boundary in run logs."""
+    from contextlib import redirect_stderr, redirect_stdout
+    from io import StringIO
+
+    def fail_sync():
+        raise AssertionError()
+
+    async def fail_async():
+        raise TimeoutError()
+
+    for name, invoke, exception_name, frame_name in (
+        ("sync", fail_sync, "AssertionError", "fail_sync"),
+        ("async", fail_async, "TimeoutError", "fail_async"),
+    ):
+        result = BlackboxResult()
+        stdout, stderr = StringIO(), StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            if name == "sync":
+                result.record(name, invoke)
+            else:
+                await result.record_async(name, invoke)
+        assert result.summary() == {"passed": 0, "failed": 1, "total": 1}
+        assert exception_name in stdout.getvalue(), stdout.getvalue()
+        assert exception_name in result.errors[0], result.errors
+        assert frame_name in stderr.getvalue(), stderr.getvalue()
+
+    # Temporal cases collect errors, then report them outside the except block.
+    try:
+        try:
+            fail_sync()
+        except AssertionError as cause:
+            raise TimeoutError() from cause
+    except TimeoutError as caught:
+        deferred_error = caught
+    result = BlackboxResult()
+    stdout, stderr = StringIO(), StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        result.record_result("deferred", deferred_error)
+        result.record_result("passed", None)
+    assert result.summary() == {"passed": 1, "failed": 1, "total": 2}
+    assert "deferred: TimeoutError" in stdout.getvalue(), stdout.getvalue()
+    assert "passed" in stdout.getvalue(), stdout.getvalue()
+    assert result.errors == ["deferred: TimeoutError"], result.errors
+    assert "AssertionError" in stderr.getvalue(), stderr.getvalue()
+    assert "TimeoutError" in stderr.getvalue(), stderr.getvalue()
+    assert "fail_sync" in stderr.getvalue(), stderr.getvalue()
+
+
 def test_usage_model_falls_back_when_cache_provenance_is_unknown():
     """Legacy Fast Mode entries use the literal ``unknown`` provenance value.
 
@@ -214,6 +387,50 @@ def test_extract_error_message_chained():
 # ===========================================================================
 # 2. context_utils pure-logic tests
 # ===========================================================================
+
+
+async def test_user_pause_refresh_keeps_original_result_order_and_error():
+    from helpers.llm import collapse_duplicate_tool_results
+    from unittest.mock import AsyncMock
+    import copy
+    original = {"message_id": "result", "role": "TOOL", "timestamp": "2026-01-01T00:00:00+00:00",
+                "text": "Original error", "metadata": {"toolCallId": "call", "toolStatus": "ERROR",
+                    "error": True, "errorCode": "ORIGINAL", "workflowGeneration": "generation"}}
+    following = {"message_id": "next", "role": "ASSISTANT", "text": "Next turn",
+                 "timestamp": "2026-01-01T00:00:03+00:00"}
+    context = [copy.deepcopy(original), following]
+    paused = copy.deepcopy(original)
+    paused["text"] += "\n\n[User paused the browser agent.]"
+    paused["metadata"]["userPause"] = {"reason": "user", "recordedAt": "2026-01-01T00:00:02+00:00"}
+    cursor = datetime.fromisoformat(following["timestamp"])
+    cursor = await poll_and_update_context(AsyncMock(return_value=[paused]), context, cursor)
+    assert cursor == datetime.fromisoformat(following["timestamp"]), "late commit cannot rewind the ordinary cursor"
+    assert [row["message_id"] for row in context] == ["result", "next"]
+    assert context[0]["text"].startswith(paused["text"])
+    assert context[0]["metadata"]["errorCode"] == "ORIGINAL"
+    assert len(collapse_duplicate_tool_results(context)) == 2
+    from helpers.llm import build_llm_messages
+    declaration = {"role": "ASSISTANT", "text": "Browse", "timestamp": "2025-12-31T23:59:59+00:00",
+                   "metadata": {"tool_calls": [{"tool": "spawn_browser_agent", "tool_call_id": "call", "goal": "Browse"}]}}
+    projected = await build_llm_messages([declaration, *context], "system")
+    tool_results = [m for m in projected if m.get("role") == "tool"]
+    assert len(tool_results) == 1, projected
+    assert "Original error" in tool_results[0]["content"]
+    assert "User paused the browser agent" in tool_results[0]["content"]
+    await poll_and_update_context(AsyncMock(return_value=[paused, original]), context, cursor)
+    assert context[0]["metadata"].get("userPause") == paused["metadata"]["userPause"]
+    assert len(context) == 2
+    # The workflow maintains its own context as well as run_agent's list.
+    from workflows.agent_workflow import AgentWorkflow
+    from unittest.mock import MagicMock, patch
+    wf = AgentWorkflow.__new__(AgentWorkflow)
+    wf.agent_id = "fixture"
+    wf.context = [copy.deepcopy(original), following]
+    wf._admit_durable_response_schema_feedback = MagicMock()
+    with patch("workflows.agent_workflow.workflow.execute_activity", AsyncMock(return_value=[paused])):
+        await wf._poll_messages(cursor)
+    assert wf.context[0]["metadata"]["userPause"] == paused["metadata"]["userPause"]
+    assert [row["message_id"] for row in wf.context] == ["result", "next"]
 
 
 async def test_poll_and_update_context():
@@ -718,7 +935,8 @@ async def mock_call_llm_activity(
         # Poll-retry scenarios deliberately exercise loop exhaustion. A valid
         # already-elapsed wait keeps polling without completing or sleeping.
         "tool_calls": [{"tool": "wait_for", "until_timestamp": "2000-01-01T00:00:00Z"}]
-        if activity_agent_id in POLL_TRANSIENT_BURST else [
+        if activity_agent_id in POLL_TRANSIENT_BURST
+        else [
             {
                 "tool": "attempt_completion",
                 "result": "All done",
@@ -2319,6 +2537,7 @@ def test_workflow_restore_deployment_state_preserves_pause_modes():
     paused = _bare_workflow_instance()
     paused._restore_deployment_state(_deployment_resume_fixture("PAUSED"))
     assert paused.is_paused is True
+    assert paused._user_pause_active is False  # Legacy status text is not user intent proof.
     assert paused._cost_limit_reached is False
     assert paused._resume_status_message == "Paused by user"
 
@@ -2326,6 +2545,7 @@ def test_workflow_restore_deployment_state_preserves_pause_modes():
     limited._restore_deployment_state(_deployment_resume_fixture("COST_LIMIT_REACHED"))
     assert limited.is_paused is True
     assert limited._cost_limit_reached is True
+    assert limited._user_pause_active is False
 
     out_of_credits = _bare_workflow_instance()
     out_of_credits._restore_deployment_state(_deployment_resume_fixture("OUT_OF_CREDITS"))
@@ -2396,6 +2616,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     wf._response_schema_applied_revision = 2
     wf._response_schema_initialized = True
     wf._has_credits = False
+    wf._user_pause_active = True
     wf._last_credit_check = 40
     wf.write_lock_enabled = False
     wf._signup_completed = True
@@ -2440,6 +2661,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     assert args[11] == "execute_continued"
     assert args[12] is None
     assert state["kind"] == "continuation"
+    assert restored._user_pause_active is True
     assert restored.iteration_offset == 41
     assert restored.max_iterations is None
     assert (restored.token_count, restored.tokens_in, restored.tokens_out) == (950, 680, 270)
@@ -2810,12 +3032,22 @@ def test_workflow_parent_state_query():
     wf.is_paused = True
     wf._cost_limit_reached = True
     wf._is_finished = True
-    assert wf.parent_state_query() == {"is_paused": True, "is_cost_limit_reached": True, "is_finished": True}
+    assert wf.parent_state_query() == {
+        "is_paused": True,
+        "is_cost_limit_reached": True,
+        "is_finished": True,
+        "user_pause_active": False,
+    }
 
 
 def test_workflow_parent_state_query_all_false():
     wf = _bare_workflow_instance()
-    assert wf.parent_state_query() == {"is_paused": False, "is_cost_limit_reached": False, "is_finished": False}
+    assert wf.parent_state_query() == {
+        "is_paused": False,
+        "is_cost_limit_reached": False,
+        "is_finished": False,
+        "user_pause_active": False,
+    }
 
 
 def test_workflow_format_outputs_no_schema_emits_response_keys():
@@ -3604,6 +3836,74 @@ def _restore_workflow(original):
     m.workflow = original
 
 
+async def test_pause_episode_preserves_user_intent_across_automatic_signals():
+    from pause_control_provenance import prove_pause_episode_ordering
+    await prove_pause_episode_ordering()
+
+
+async def test_pause_intent_ends_with_recovered_episode():
+    from unittest.mock import AsyncMock
+    wf = _bare_workflow_instance()
+    wf.agent_id = "pause-episode"
+    wf._update_tree_state = AsyncMock()
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.pause()
+        assert wf._user_pause_active
+        await wf.price_limit_increased({"new_limit_cents": 100})
+        assert not wf.is_paused and not wf._user_pause_active, "B2: price recovery retained old intent"
+        await wf.cost_limit_reached()
+        assert wf.is_paused and not wf._user_pause_active, "B2: automatic stop inherited old user intent"
+        # A stale marker in a restored ACTIVE snapshot is not a live pause episode.
+        state = _deployment_resume_fixture("ACTIVE")
+        state["runtime_state"] = {"user_pause_active": True}
+        wf._restore_deployment_state(state)
+        assert not wf.is_paused and not wf._user_pause_active
+        wf._user_pause_active = True
+        wf._apply_deployment_control_state({"status": "ACTIVE"})
+        assert not wf._user_pause_active
+        # The parent's explicit cause is inherited, never inferred from pause alone.
+        for explicit in (False, True):
+            wf.parent_workflow_id = "parent"
+            wf.is_paused = False
+            wf._paused_by_parent = False
+            wf._query_parent_state = AsyncMock(return_value={"is_paused": True, "user_pause_active": explicit})
+            await wf._check_parent_state()
+            assert wf.is_paused and wf._user_pause_active is explicit
+        # Parent recovery and orphan recovery also end inherited pause intent.
+        for parent_state in ({"is_paused": False, "is_cost_limit_reached": False}, {"parent_missing": True}):
+            wf.parent_workflow_id = "parent"
+            wf._orphaned = False
+            wf._paused_by_parent = True
+            wf.is_paused = True
+            wf._user_pause_active = True
+            wf._query_parent_state = AsyncMock(return_value=parent_state)
+            await wf._check_parent_state()
+            assert not wf.is_paused and not wf._user_pause_active
+        # The transient-parent orphan exit and one-shot budget wrap-up also unpause.
+        import workflows.agent_workflow as module
+        wf._orphaned = False
+        wf._paused_by_parent = True
+        wf.is_paused = True
+        wf._user_pause_active = True
+        wf._parent_query_failures_while_paused = module._ORPHAN_TRANSIENT_FAILURE_LIMIT - 1
+        wf._query_parent_state = AsyncMock(return_value={})
+        await wf._check_parent_state()
+        assert not wf.is_paused and not wf._user_pause_active
+        wf._cost_limit_reached = True
+        wf._paused_by_parent = False
+        wf.is_paused = True
+        wf._user_pause_active = True
+        wf.price_limit_cents = 10
+        wf.subtree_cost_cents = 11
+        wf._maybe_arm_cost_limit_wrapup_after_browser(tool_name="spawn_browser_agent", result={"success": True},
+            paused_before=False, cost_limit_before=False)
+        assert not wf.is_paused and not wf._user_pause_active
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_signal_pause_sets_paused_flag():
     wf = _bare_workflow_instance()
     wf.agent_id = "agent-1"
@@ -3614,6 +3914,7 @@ async def test_workflow_signal_pause_sets_paused_flag():
     try:
         await wf.pause()
         assert wf.is_paused is True
+        assert wf._user_pause_active is True
         # Should have tried to broadcast tree state (via update_agent_tree_state activity)
         activity_names = [c[0] for c in fake.activity_calls]
         assert "update_agent_tree_state" in activity_names
@@ -3635,6 +3936,25 @@ async def test_workflow_signal_pause_cascades_to_children():
         # Both children should have received "pause" signal
         cascaded = [s for s in fake.signal_calls if s[1] == "pause"]
         assert {s[0] for s in cascaded} == {"wfc1", "wfc2"}
+        # A user pause cascades with no argument, exactly as before the cause
+        # parameter existed: a child still on a draining older generation defines
+        # `pause(self)` and would fail its workflow task on any argument.
+        assert all(s[2] is None for s in cascaded), cascaded
+    finally:
+        _restore_workflow(original)
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.bus_id = "bus-1"
+    wf.goal = "g"
+    wf.pending_children = {"c1"}
+    wf.child_workflow_ids = {"c1": "wfc1"}
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.pause("subscription")
+        # Only the cause-aware backend produces a non-user cause; children keep it.
+        assert [s for s in fake.signal_calls if s[1] == "pause"] == [("wfc1", "pause", "subscription")]
     finally:
         _restore_workflow(original)
 
@@ -3645,6 +3965,7 @@ async def test_workflow_signal_resume_clears_paused_flag():
     wf.bus_id = "bus-1"
     wf.goal = "g"
     wf.is_paused = True
+    wf._user_pause_active = True
     wf._paused_by_parent = True
     # No parent_workflow_id -> resume shouldn't be blocked
     fake = _FakeWorkflowModule()
@@ -3652,6 +3973,7 @@ async def test_workflow_signal_resume_clears_paused_flag():
     try:
         await wf.resume()
         assert wf.is_paused is False
+        assert wf._user_pause_active is False
         assert wf._paused_by_parent is False
     finally:
         _restore_workflow(original)
@@ -11281,6 +11603,60 @@ async def test_workflow_poll_messages_exception_raises():
         _restore_workflow(original)
 
 
+async def test_workflow_retained_output_dispatch_and_error_pairing():
+    import re
+    from unittest.mock import AsyncMock, patch
+    from _test_utils import retained_tool_output_fixture
+    from helpers.tool_output import preview_tool_text
+    from tools.read_tool_output import read_tool_output_activity
+    import tools.read_tool_output as reader
+    from helpers.llm import build_llm_messages
+
+    import ast
+    from pathlib import Path
+    from tools.read_tool_output import preview_tool_output_activity
+
+    registry_tree = ast.parse((Path(__file__).resolve().parents[2] / "worker.py").read_text())
+    registry = next(node.value for node in ast.walk(registry_tree) if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == "registered_activities" for target in node.targets))
+    registered_names = {node.id for node in registry.elts if isinstance(node, ast.Name)}
+    for fn in (read_tool_output_activity, preview_tool_output_activity):
+        assert fn.__temporal_activity_definition.name in registered_names
+
+    wf = _bare_workflow_instance()
+    wf.agent_id, wf.user_id = "agent", "user"
+    wf._update_tree_state = AsyncMock()
+    receipts = []
+
+    async def handle(event, call_id, name):
+        receipts.append({"role": "TOOL", "text": event.message, "metadata": {
+            "toolCallId": call_id, "toolName": name, "toolStatus": event.status.value}})
+    wf._handle_tool_event = handle
+
+    async def execute_activity(fn, *, args, **kwargs):
+        assert fn is read_tool_output_activity
+        return await fn(*args)
+
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        with retained_tool_output_fixture(), patch.object(reader.workflow, "execute_activity", execute_activity):
+            preview = await preview_tool_text("body " * 25000 + "MAIN_TAIL", user_id="user", agent_id="agent")
+            output_id = re.search(r'output_id="([a-f0-9]{32})"', preview)[1]
+            result = await wf._execute_tool("read_tool_output", {"output_id": output_id, "query": "MAIN_TAIL", "user_id": "attacker"}, "read-main")
+            assert not result.get("error"), result
+            context = [{"role": "ASSISTANT", "text": "", "metadata": {"tool_calls": [
+                {"tool": "read_tool_output", "tool_call_id": "read-main", "output_id": output_id}]}}, receipts[-1]]
+            messages = await build_llm_messages(context, "system", user_id="user", agent_id="agent")
+            assert "MAIN_TAIL" in messages[-1]["content"]
+            for args in ({"output_id": "invalid"}, {"output_id": "f" * 32}):
+                result = await wf._execute_tool("read_tool_output", args, "bad-read")
+                assert result.get("error"), result
+                assert receipts[-1]["metadata"]["toolStatus"] == "ERROR"
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_execute_tool_unknown_tool_returns_error():
     """Unknown tool: returns error AND posts a TOOL event so the loop's next
     iteration sees a paired tool_result for the LLM's tool_use. Without the
@@ -12333,6 +12709,18 @@ async def test_workflow_post_message_does_not_throttle_tree_outside_demo():
 async def run_all_tests():
     print("workflow blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("wf_retained_output_dispatch", test_workflow_retained_output_dispatch_and_error_pairing)
+
+    await r.record_async(
+        "blackbox_result_empty_exception_diagnostics", test_blackbox_result_preserves_empty_exceptions_and_tracebacks
+    )
+
+    r.record("wf_policy_import_avoids_provider_clients", test_workflow_policy_import_does_not_rebuild_provider_clients)
+    r.record("wf_helper_exports_reuse_host_activities", test_workflow_helper_exports_reuse_host_activity_definitions)
+    r.record(
+        "wf_action_model_cache_preserves_registry", test_workflow_action_model_cache_preserves_registry_and_validation
+    )
+    r.record("wf_logging_keeps_worker_configuration", test_workflow_sandbox_keeps_worker_logging_configuration)
 
     # Pure logic tests (sync)
     r.record("task_dag_parallel", test_task_dag_parallel)
@@ -12454,6 +12842,7 @@ async def run_all_tests():
 
     # Async tests
     await r.record_async("poll_and_update_context", test_poll_and_update_context)
+    await r.record_async("user_pause_refresh", test_user_pause_refresh_keeps_original_result_order_and_error)
     await r.record_async(
         "poll_and_update_context_filters_subagent_work",
         test_poll_and_update_context_filters_subagent_work_and_advances_cursor,
@@ -12461,6 +12850,8 @@ async def run_all_tests():
 
     # Signal-handler + cost-tracking tests (fake workflow module)
     await r.record_async("wf_signal_pause", test_workflow_signal_pause_sets_paused_flag)
+    await r.record_async("pause_intent_ends_with_recovered_episode", test_pause_intent_ends_with_recovered_episode)
+    await r.record_async("pause_episode_ordering", test_pause_episode_preserves_user_intent_across_automatic_signals)
     await r.record_async("wf_signal_pause_cascade", test_workflow_signal_pause_cascades_to_children)
     await r.record_async("wf_signal_resume", test_workflow_signal_resume_clears_paused_flag)
     await r.record_async(
@@ -12786,7 +13177,9 @@ async def run_all_tests():
         test_workflow_cost_limit_flushes_tree_cost_before_pausing,
     )
     await r.record_async("wf_update_tree_state_no_bus", test_workflow_update_tree_state_skips_without_bus)
-    await r.record_async("wf_update_tree_state_no_bus_persists_status", test_workflow_update_tree_state_persists_status_without_bus)
+    await r.record_async(
+        "wf_update_tree_state_no_bus_persists_status", test_workflow_update_tree_state_persists_status_without_bus
+    )
     await r.record_async("wf_update_tree_state_with_bus", test_workflow_update_tree_state_with_bus_broadcasts)
     await r.record_async("wf_persist_tree_cost", test_workflow_persist_tree_cost_executes_activity)
     await r.record_async("wf_query_parent_state_empty", test_workflow_query_parent_state_returns_empty_without_parent)
@@ -13131,13 +13524,7 @@ async def run_all_tests():
     wf_results = await _run_all_workflow_tests()
     wf_results += await _run_parked_tool_cutover_tests()
     for test_name, err in wf_results:
-        if err is None:
-            r.passed += 1
-            print(f"  \u2705 {test_name}")
-        else:
-            r.failed += 1
-            r.errors.append(f"{test_name}: {err}")
-            print(f"  \u274c {test_name}: {err}")
+        r.record_result(test_name, err)
 
     teardown_mock()
     return r.all_passed

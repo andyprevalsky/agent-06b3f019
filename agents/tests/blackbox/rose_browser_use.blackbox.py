@@ -2904,10 +2904,13 @@ def test_phone_off_matches_prephone_bytes():
     sign up only with identities listed in Auth Options. ..." to both modes. The tools
     hashes are unchanged; no Phone text entered the phone-off prompt. Re-pin only for
     reviewed text that also reaches phone-on mode, and record the commit here.
+    Re-pinned for the approved read_tool_output browser action (Polar item 16, approved
+    by Andy 2026-10-26): only the tools hash changed in both modes, and excluding that
+    one action reproduces the previous tools hash exactly; system/messages are unchanged.
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('ad32df749a6a2d7bd52cdd71beba6847813e3f65de4b9e121f0af2d159f10ec5', 'e8d1ee04f73c9a08380b8e4573109ffc9ce1bf757b2120fc556ee975657bbf89', '4c0d0eb65703bdae2065193f937bf2035e919102dc5e4652916cf771a0f5527c'), '1': ('9bd995b7f5e4d24462806f7e2f34db7a1330fcd80b3c9b6fbef79dfe6a69ef84', '5661e2684efeaf877a48c64a6f240cd0889e30517342fb0a4de5baa9823d12fa', '1dc1c6088a8ab2bb8539271e93ce1f43af4ac7ed543ce1fb624b2b4a01d3d44a')}
+    expected = {'0': ('2c9fdf3a97705cd018c06dce4c08d4981d0524889a46cfb03b5286bbf9c84515', 'e8d1ee04f73c9a08380b8e4573109ffc9ce1bf757b2120fc556ee975657bbf89', '4c0d0eb65703bdae2065193f937bf2035e919102dc5e4652916cf771a0f5527c'), '1': ('2de1338897c8e1a3749b7f5fa9a3b0a03015d50aaf779f5cd67f3a697710afa9', '5661e2684efeaf877a48c64a6f240cd0889e30517342fb0a4de5baa9823d12fa', '1dc1c6088a8ab2bb8539271e93ce1f43af4ac7ed543ce1fb624b2b4a01d3d44a')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):

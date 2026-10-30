@@ -31,6 +31,7 @@ import {
   KERNEL_PAGE_OFFSET,
   computeLiveViewLetterbox,
   kernelLiveViewScaledStyle,
+  presentLiveViewIframeUrl,
   resolveLiveViewPageRect,
 } from '@/features/terminal-component-group/components/browser-status-bar/liveViewDisplay';
 
@@ -65,30 +66,48 @@ function trackTranslate(): { x: number; y: number } {
   return { x: Number(match[1]), y: Number(match[2]) };
 }
 
-/** Pane pixel where the overlay puts the cursor tip (overlay box = letterboxed stream box). */
-function overlayTipPixel(paneWidth: number, paneHeight: number) {
-  const box = computeLiveViewLetterbox(paneWidth, paneHeight, 1280, 800);
+/** Pane pixel where the overlay puts the cursor tip (overlay box = letterboxed display box). */
+function overlayTipPixel(paneWidth: number, paneHeight: number, display: { w: number; h: number }) {
+  const box = computeLiveViewLetterbox(paneWidth, paneHeight, display.w, display.h);
   const t = trackTranslate();
   return { x: box.offsetX + (t.x / 100) * box.width, y: box.offsetY + (t.y / 100) * box.height };
 }
 
 /**
- * Pane pixel where the remote player actually paints a page point. Measured on a
- * live Kernel session: page (x, y) is drawn at stream (x, y + 87) of a 1280x800
- * frame, and the FE scales that native frame to fill the letterbox box.
+ * Ground truth measured on live sessions (2026-10-28): marks painted at known
+ * page coordinates were located in each provider's stream. Each function
+ * returns the pane pixel where the provider paints page point (x, y) inside the
+ * FE's letterboxed box, independent of the production geometry table.
  */
-function streamPaintPixel(
-  paneWidth: number,
-  paneHeight: number,
-  page: { x: number; y: number },
-  chromeTop: number,
-) {
-  const box = computeLiveViewLetterbox(paneWidth, paneHeight, 1280, 800);
-  return {
-    x: box.offsetX + page.x * box.scale,
-    y: box.offsetY + (page.y + chromeTop) * box.scale,
-  };
-}
+const PROVIDER_TRUTH = {
+  // Whole 1280x800 headful screen shown; Chrome UI fills the top 87px.
+  kernel: {
+    url: 'https://prod-iad-hypeman-25.kernel.sh/browser/live/abc?readOnly=true',
+    display: { w: 1280, h: 800 },
+    paint: (box: ReturnType<typeof computeLiveViewLetterbox>, x: number, y: number) => ({
+      x: box.offsetX + x * box.scale,
+      y: box.offsetY + (y + 87) * box.scale,
+    }),
+  },
+  // 1288x891 window cropped to the page at (4, 87): the box shows exactly the page.
+  steel: {
+    url: 'https://api.steel.dev/v1/sessions/s/player?interactive=false',
+    display: { w: 1280, h: 800 },
+    paint: (box: ReturnType<typeof computeLiveViewLetterbox>, x: number, y: number) => ({
+      x: box.offsetX + x * box.scale,
+      y: box.offsetY + y * box.scale,
+    }),
+  },
+  // embed=1 viewer: the 1366x625 page image object-fit:contain, anchored top-left.
+  tilion: {
+    url: 'https://back.tilion.dev/v1/session/sess_x/live-view?token=t',
+    display: { w: 1366, h: 625 },
+    paint: (box: ReturnType<typeof computeLiveViewLetterbox>, x: number, y: number) => {
+      const s = Math.min(box.width / 1366, box.height / 625);
+      return { x: box.offsetX + x * s, y: box.offsetY + y * s };
+    },
+  },
+} as const;
 
 async function renderWithHandlers(
   props: Partial<React.ComponentProps<typeof BrowserCursorOverlay>> = {},
@@ -237,34 +256,62 @@ describe('BrowserCursorOverlay realtime stream', () => {
     expect(trackTranslate()).toEqual({ x: 0, y: 0 });
   });
 
-  it('lands on the painted Kernel page point at every pane size, letterbox and DPR', () => {
-    const page = { x: 1000, y: 600 };
-    render(
-      <BrowserCursorOverlay
-        agentId={null}
-        taskId="task-1"
-        messages={[makeMessageWithCoords(page.x, page.y)]}
-        browserUrl={KERNEL_URL}
-      />,
-    );
-    // Pane sizes in CSS px: exact native, shrunk, enlarged past native (Kernel's
-    // player alone would not upscale), pillarboxed (wide), letterboxed (tall).
-    // DPR does not enter: both the overlay and the scaled iframe live in CSS px.
-    const panes: Array<[number, number]> = [
-      [1280, 800],
-      [960, 600],
-      [2560, 1600],
-      [1920, 900],
-      [700, 1100],
-      [1111, 777],
-    ];
-    for (const [w, h] of panes) {
-      const tip = overlayTipPixel(w, h);
-      const painted = streamPaintPixel(w, h, page, KERNEL_PAGE_OFFSET.y);
-      expect(tip.x).toBeCloseTo(painted.x, 6);
-      expect(tip.y).toBeCloseTo(painted.y, 6);
-    }
+  it.each(['kernel', 'steel', 'tilion'] as const)(
+    'lands on the %s-painted page point at every pane size, letterbox and DPR',
+    (provider) => {
+      const truth = PROVIDER_TRUTH[provider];
+      const page = { x: 1000, y: 600 };
+      render(
+        <BrowserCursorOverlay
+          agentId={null}
+          taskId="task-1"
+          messages={[makeMessageWithCoords(page.x, page.y)]}
+          browserUrl={truth.url}
+        />,
+      );
+      // Pane sizes in CSS px: native, shrunk, enlarged past native, pillarboxed
+      // (wide) and letterboxed (tall). DPR does not enter: the overlay and the
+      // scaled iframe both live in CSS px (checked at DPR 1 and 2 in Chromium).
+      const panes: Array<[number, number]> = [
+        [1280, 800],
+        [960, 600],
+        [2560, 1600],
+        [1920, 900],
+        [700, 1100],
+        [1111, 777],
+      ];
+      for (const [w, h] of panes) {
+        const box = computeLiveViewLetterbox(w, h, truth.display.w, truth.display.h);
+        const tip = overlayTipPixel(w, h, truth.display);
+        const painted = truth.paint(box, page.x, page.y);
+        expect(tip.x).toBeCloseTo(painted.x, 6);
+        expect(tip.y).toBeCloseTo(painted.y, 6);
+      }
+    },
+  );
+
+  it('binds geometry per provider, never one offset for all', () => {
+    expect(resolveLiveViewPageRect(PROVIDER_TRUTH.kernel.url)).toEqual({
+      x: 0,
+      y: 87,
+      width: 1280,
+      height: 713,
+    });
+    expect(resolveLiveViewPageRect(PROVIDER_TRUTH.steel.url)).toEqual({
+      x: 0,
+      y: 0,
+      width: 1280,
+      height: 800,
+    });
+    expect(resolveLiveViewPageRect(PROVIDER_TRUTH.tilion.url)).toEqual({
+      x: 0,
+      y: 0,
+      width: 1366,
+      height: 625,
+    });
     expect(KERNEL_PAGE_OFFSET).toEqual({ x: 0, y: 87 });
+    expect(presentLiveViewIframeUrl(PROVIDER_TRUTH.tilion.url)).toContain('embed=1');
+    expect(presentLiveViewIframeUrl(PROVIDER_TRUTH.kernel.url)).toBe(PROVIDER_TRUTH.kernel.url);
   });
 
   it('renders the Kernel iframe at native pixels scaled to the clip so the stream fills it', () => {
@@ -275,8 +322,6 @@ describe('BrowserCursorOverlay realtime stream', () => {
       transform: 'scale(2)',
     });
     expect(kernelLiveViewScaledStyle(640).transform).toBe('scale(0.5)');
-    expect(resolveLiveViewPageRect(KERNEL_URL)).toEqual({ x: 0, y: 87, width: 1280, height: 713 });
-    expect(resolveLiveViewPageRect(STEEL_URL)).toEqual({ x: 0, y: 0, width: 1280, height: 800 });
   });
 });
 

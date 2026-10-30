@@ -237,6 +237,89 @@ describe('app-wiring/hooks', () => {
     });
   });
 
+  describe('iOS app shell follows the visible viewport (installed PWA)', () => {
+    // iPhone Pro Max PWA: 430x932 screen, but iOS reports a layout viewport
+    // short by the status-bar inset (873), which left a ~60px band under the
+    // query box. The keyboard shrinks AND pans the visual viewport; a shell
+    // sized by 100dvh then floated the query box far above the keyboard.
+    const SCREEN = { width: 430, height: 932 };
+    let vv: { height: number; offsetTop: number; scale: number };
+    let fire: () => void;
+
+    beforeEach(() => {
+      Object.defineProperty(navigator, 'userAgent', {
+        value:
+          'Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605 Mobile/15E148',
+        configurable: true,
+      });
+      Object.defineProperty(navigator, 'standalone', { value: true, configurable: true });
+      Object.defineProperty(window, 'screen', {
+        value: { ...SCREEN },
+        configurable: true,
+      });
+      Object.defineProperty(window, 'innerWidth', { value: 430, configurable: true });
+      Object.defineProperty(window, 'innerHeight', { value: 873, configurable: true });
+      vv = { height: 873, offsetTop: 0, scale: 1 };
+      const listeners: Array<() => void> = [];
+      Object.defineProperty(window, 'visualViewport', {
+        configurable: true,
+        value: {
+          get height() {
+            return vv.height;
+          },
+          get offsetTop() {
+            return vv.offsetTop;
+          },
+          get scale() {
+            return vv.scale;
+          },
+          addEventListener: (_ev: string, fn: () => void) => listeners.push(fn),
+          removeEventListener: vi.fn(),
+        },
+      });
+      fire = () => listeners.forEach((fn) => fn());
+    });
+
+    afterEach(() => {
+      delete (navigator as { standalone?: boolean }).standalone;
+      document.documentElement.style.removeProperty('--app-height');
+      document.documentElement.style.removeProperty('--app-top');
+    });
+
+    const shell = () => ({
+      height: document.documentElement.style.getPropertyValue('--app-height'),
+      top: document.documentElement.style.getPropertyValue('--app-top'),
+    });
+
+    it('fills the whole screen with the keyboard closed, leaving no bottom gap', () => {
+      initViewportHeight();
+      expect(shell()).toEqual({ height: '932px', top: '0px' });
+    });
+
+    it('ends exactly at the keyboard top while typing, then returns to full screen', () => {
+      initViewportHeight();
+      vv = { height: 560, offsetTop: 300, scale: 1 };
+      fire();
+      expect(shell()).toEqual({ height: '560px', top: '300px' });
+      vv = { height: 873, offsetTop: 0, scale: 1 };
+      fire();
+      expect(shell()).toEqual({ height: '932px', top: '0px' });
+    });
+
+    it('ignores pinch zoom, which shrinks the visual viewport without a keyboard', () => {
+      initViewportHeight();
+      vv = { height: 400, offsetTop: 120, scale: 2 };
+      fire();
+      expect(shell()).toEqual({ height: '932px', top: '0px' });
+    });
+
+    it('in a Safari tab, keeps the browser-owned toolbar space (no full-screen override)', () => {
+      delete (navigator as { standalone?: boolean }).standalone;
+      initViewportHeight();
+      expect(shell()).toEqual({ height: '873px', top: '0px' });
+    });
+  });
+
   describe('computeViewportScale', () => {
     it('does not scale mobile-width layouts', () => {
       expect(computeViewportScale(390, 844)).toBe(1);

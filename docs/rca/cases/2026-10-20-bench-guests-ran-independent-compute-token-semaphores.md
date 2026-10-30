@@ -83,10 +83,17 @@ asserts, through two guests, that capacity 16 holds across both and that a
 rate-limit mark via guest A stops guest B. Pre-fix 18/18 granted; post-fix
 16/18 granted and guest B returns 404 after the mark (5 consecutive passes).
 
-Activation for cloud guests (pointing them at the production backend, which is
-the real single authority for these real credentials) writes bench leases and
-cooldowns into production state, so it waits for approval; see
-`/home/boxes/polar-600-resume/approvals/SHARED-TOKEN-STATE-RCA.md`.
+Activation (A1, approved by Andy on 2026-10-20 as the default for every
+benchmark): cloud guests (fresh and pooled Machines, `scripts/run-bench-cloud`
+-> `scripts/cloudbench-run.sh`) and local isolated stacks
+(`agents/benchmarks/local.py`, `scripts/run-bench --local`) set
+`COMPUTE_TOKEN_AUTHORITY_URL=https://navi-j9a9.onrender.com` and reuse their
+own `BACKEND_API_KEY`. `BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off` is the
+diagnostics opt-out. A guest or local stack without the key refuses to start;
+an unreachable authority fails the delegated calls closed. Covered by
+`scripts/tests/cloudbench-env.test.sh` and the `benchmark` agents blackbox
+(`local_isolated_compute_token_authority`). Outcome proof (a cloud fleet rerun)
+is still pending, so the case stays open.
 
 Golden references: hermes-agent keeps credential exhaustion in one auth store
 under a cross-process lock (`hermes_cli/auth.py:724-736`,
@@ -142,3 +149,12 @@ guest consumers (chat rotation, SMS supervisor) still read the local DB.
 ## Reusable lesson
 
 When an isolated environment copies a shared credential, route the credential's lease and cooldown state to one shared authority instead of copying that state too.
+
+
+### 2026-10-21 environment precedence correction
+
+The completion lane changed local authority-key derivation to honor the explicit
+injected authority key first, then injected BACKEND_API_KEY, then back-end/.env.
+The existing local-start regression fails against the previous helper and passes
+with the corrected precedence. The explicit diagnostic opt-out still clears both
+authority exports. No production setting was written or deployed.

@@ -38,6 +38,16 @@ jobs:
           # Test the deployed URL without executing code from a preview branch
           # that could otherwise read the authentication secrets below.
           ref: ${{ github.event.repository.default_branch }}
+          # Fetch trees only; skip ~3.1 GB of benchmark history, media and
+          # vendored sources a full checkout downloaded (~4 min per job).
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/agents/benchmarks/
+            /agents/benchmarks/tasks.json
+            !/front-end/public/
+            !/claude-code-src/
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -83,7 +93,7 @@ jobs:
           retention-days: 14
 
   lifecycle:
-    name: Chat full-lifecycle latency ratchet
+    name: Chat full-lifecycle latency ratchet (${{ matrix.path }})
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.deployment_status.state == 'success' &&
@@ -91,12 +101,29 @@ jobs:
        github.event.deployment.production_environment == true)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # One chat path per runner: each path keeps one browser and one worker on
+    # its own host (no renderer contention), and the four paths run at once
+    # instead of back to back. Keep this list equal to CHAT_PATHS.
+    strategy:
+      fail-fast: false
+      matrix:
+        path: [direct_answer, web_search, agent_plan, agent_execute]
 
     steps:
       - name: Check out trusted lifecycle harness
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
+          # Fetch trees only; skip ~3.1 GB of benchmark history, media and
+          # vendored sources a full checkout downloaded (~4 min per job).
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/agents/benchmarks/
+            /agents/benchmarks/tasks.json
+            !/front-end/public/
+            !/claude-code-src/
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -124,6 +151,7 @@ jobs:
           BACKEND_URL: ${{ inputs.backend_url || 'https://navi-j9a9.onrender.com' }}
           FRONTEND_URL: ${{ inputs.frontend_url || github.event.deployment_status.environment_url || 'https://www.roselabs.ai' }}
           SEMANTIC_WORKERS: 1
+          CHAT_LIFECYCLE_PATH: ${{ matrix.path }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           TEST_API_KEY: ${{ secrets.BACKEND_API_KEY }}
@@ -133,7 +161,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: chat-lifecycle-${{ github.run_id }}
+          name: chat-lifecycle-${{ github.run_id }}-${{ matrix.path }}
           path: |
             front-end/playwright-report
             front-end/test-results

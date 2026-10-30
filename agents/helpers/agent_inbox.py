@@ -249,7 +249,7 @@ class AgentInbox:
         self._settle_reads()
         if self._fetched:
             return True
-        self.start_read()
+        self.start_read(fresh=True)
         return False
 
     async def next_step_messages(self) -> List[Dict[str, Any]]:
@@ -266,6 +266,16 @@ class AgentInbox:
         self.start_read(fresh=True)
         return self._deliver(list(self._fetched.values()))
 
+    async def settle_for_handoff(self, timeout: Optional[float] = None) -> bool:
+        """Settle existing terminal reads without acknowledging their messages."""
+        pending = [task for task in self._reads if not task.done()]
+        if pending:
+            _, hung = await asyncio.wait(pending, timeout=AGENT_INBOX_TIMEOUT_SECONDS if timeout is None else timeout)
+            for task in hung:
+                task.cancel()
+        self._settle_reads()
+        return bool(self._fetched)
+
     async def finish(self, timeout: Optional[float] = None) -> List[Dict[str, Any]]:
         """The agent has ended: undelivered messages for its parent, oldest first.
 
@@ -273,12 +283,7 @@ class AgentInbox:
         flight get ``timeout`` to land; any still hung are cancelled, and their
         rows were never acknowledged.
         """
-        pending = [task for task in self._reads if not task.done()]
-        if pending:
-            _, hung = await asyncio.wait(pending, timeout=AGENT_INBOX_TIMEOUT_SECONDS if timeout is None else timeout)
-            for task in hung:
-                task.cancel()
-        self._settle_reads()
+        await self.settle_for_handoff(timeout)
         return self._deliver(list(self._fetched.values()))
 
     def accept(self, messages: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

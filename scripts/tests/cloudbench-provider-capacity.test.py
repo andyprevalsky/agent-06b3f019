@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "scripts/cloudbench-provider-capacity.py"
@@ -300,6 +301,10 @@ class ProviderCapacityBrowserProviderTests(unittest.TestCase):
 
 class ProviderCapacityCampaignTests(unittest.TestCase):
     def setUp(self) -> None:
+        # In-process helper calls need the same isolated policy as subprocesses.
+        environment = patch.dict(os.environ, clean_env(), clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
         self.tmp = Path(tempfile.mkdtemp(prefix="provider-capacity-campaign-"))
         self.addCleanup(shutil.rmtree, self.tmp)
         # A disposable control root: the real helper/registry and a run-bench
@@ -347,7 +352,12 @@ class ProviderCapacityCampaignTests(unittest.TestCase):
         self.assertEqual(width(50, 600, None), 50)  # bounded sliding campaign
         self.assertEqual(width(100, 10, None), 10)  # fewer jobs than width
         self.assertEqual(width(70, 70, None), 70)
-        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+        # The direct helper call shares this interpreter's environment; pin the
+        # same Kernel fleet as clean_env() does for the subprocess assertions.
+        with (
+            patch.dict(os.environ, {"CLOUDBENCH_BROWSER_PROVIDER": "kernel"}),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+        ):
             self.assertEqual(refusal(70), 0)
             self.assertEqual(refusal(71), 78)
         self.assertIn("requested 71 concurrent benches, maximum 70.", stderr.getvalue())

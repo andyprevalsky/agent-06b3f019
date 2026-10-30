@@ -11,6 +11,7 @@ import sys
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote
@@ -25,6 +26,33 @@ ROOT = Path(__file__).resolve().parents[1]
 QUEUE_CLI = ROOT / "back-end/scripts/worker-deployment-queue.ts"
 DRAIN_TIMEOUT_SECONDS = 2700
 MACHINE_STOP_TIMEOUT_SECONDS = 120
+# Each bank Machine is prepared or retired under its own native lease and its own
+# durable ownership checks, so independent Machines never wait for each other.
+# Observed serial cost (run 40615048427): ~59s prepare and ~36s retire per Machine.
+MACHINE_OPERATION_CONCURRENCY = 8
+# Recheck serving health before admitting each bounded retirement wave.
+MACHINE_RETIRE_WAVE_SIZE = 4
+
+
+def for_each_machine(operation, records):
+    """Apply one independent per-Machine operation to every record concurrently.
+
+    Every started operation runs to completion before this returns, so no native
+    mutation outlives the controller. Results keep input order. A hard failure
+    outranks capacity-pending, and the stage stays unadvanced either way, so the
+    resumable state machine retries exactly as it would after a serial failure.
+    """
+    records = list(records)
+    if not records:
+        return []
+    with ThreadPoolExecutor(max_workers=min(MACHINE_OPERATION_CONCURRENCY, len(records))) as executor:
+        futures = [executor.submit(operation, record) for record in records]
+        wait(futures)
+    errors = [future.exception() for future in futures if future.exception() is not None]
+    hard = [error for error in errors if not isinstance(error, PoolCapacityPending)]
+    if errors:
+        raise (hard or errors)[0]
+    return [future.result() for future in futures]
 
 
 def runtime_queue_matches(health, identity, job_id, expected_queue=None, pool_queue=None):
@@ -494,8 +522,10 @@ def run(ledger=None, native_factory=NativePool):
         job = prepare_bank(job, ledger, native, minimum=8)
     if job["stage"] == "PREPARING":
         initialize_queue(job, ledger)
-        for expected in job["evidence"]["PREPARING"]["candidateRecords"]:
-            native.prepare(expected, job["priorPointer"])
+        for_each_machine(
+            lambda expected: native.prepare(expected, job["priorPointer"]),
+            job["evidence"]["PREPARING"]["candidateRecords"],
+        )
         deadline = time.monotonic() + 300
         while not (
             all(native.healthy(mid) for mid in job["candidateMachineIds"])
@@ -536,8 +566,10 @@ def run(ledger=None, native_factory=NativePool):
         managed = [record for record in prior_records if record.get("managedJobId") and record["id"] not in held_ids]
         retained = [record["id"] for record in prior_records if not record.get("managedJobId")]
         retired = []
-        for expected in job["evidence"]["PREPARING"]["candidateRecords"]:
-            native.prepare(expected, previous)
+        for_each_machine(
+            lambda expected: native.prepare(expected, previous),
+            job["evidence"]["PREPARING"]["candidateRecords"],
+        )
         if not all(native.healthy(mid) for mid in job["candidateMachineIds"]):
             raise PoolCapacityPending("Serving bank is not ready; every old worker is retained")
         if managed or mismatch_records:
@@ -563,10 +595,11 @@ def run(ledger=None, native_factory=NativePool):
                     raise PoolCapacityPending("Old bank remains served until its queue is certified retired")
                 print("Old bank is still draining; retaining every Machine", flush=True)
                 time.sleep(30)
-            for record in managed:
+            for offset in range(0, len(managed), MACHINE_RETIRE_WAVE_SIZE):
                 if not all(native.healthy(mid) for mid in job["candidateMachineIds"]):
                     raise PoolCapacityPending("Serving bank lost health; remaining old workers are retained")
-                retired.append(native.retire(record, previous))
+                wave = managed[offset:offset + MACHINE_RETIRE_WAVE_SIZE]
+                retired.extend(for_each_machine(lambda record: native.retire(record, previous), wave))
             for owner in {record["managedJobId"] for record in managed}:
                 ids = [record["id"] for record in managed if record["managedJobId"] == owner]
                 ledger.release(
