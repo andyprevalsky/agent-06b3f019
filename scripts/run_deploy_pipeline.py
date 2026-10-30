@@ -50,6 +50,19 @@ This supervisor only schedules lanes and writes one atomic receipt:
   the legacy all-at-once admission from the same recorded lane durations,
   naming every lane whose isolated duration is unrecorded as UNMEASURED.
 
+* ``production`` is the post-merge Fly lane (deploy.md Step 13/13ab): when the
+  merge (``merged_sha^1..merged_sha``) touches agent runtime files per
+  ``scripts/classify-agent-runtime-changes.sh`` or ``deploy-agents.yml``, it
+  waits for the exact ``deploy-agents.yml`` run whose headSha is the merged SHA
+  to complete successfully, recovers the durable job id from its log, runs the
+  Step 13ab queue-identity and ``monitor-cooperative-cutover.ts --verify``
+  checks, and only then runs the dispatch command after ``--`` (the Step 13b
+  production semantic dispatch). ``production.json`` in the state dir records
+  the decision, run id/attempt/job id and every GitHub wait; a failed or
+  still-running cutover exits 1 with the operator's next action and never
+  dispatches (the #1639 chain dispatched while Fly was still cutting over and
+  4/5 production semantic jobs failed, 2026-10-30).
+
 Group 3 admission schedule (EXP-L). Lanes that ran concurrently on the
 8-core/15 GB devbox thrashed each other (deploy-command-structural 1,555 s
 beside the coverage lanes; frontend coverage 1,059 s beside them versus
@@ -1791,6 +1804,321 @@ def simulate_plan(path: Path, max_parallel: int | None, budget_mb: int | None,
     return result
 
 
+# ── Post-merge production gate: the Fly lane (deploy.md Step 13 / 13ab) ───────
+# ``production`` gates the Step 13b production semantic dispatch on the exact
+# deploy-agents.yml run of the merged SHA. The #1639 chain (2026-10-30)
+# dispatched the production semantic workflow as soon as Render was live while
+# the Fly cooperative cutover was still running; 4/5 jobs failed (route
+# timeouts, temporal_workflow_id never persisted) and only the rerun after Fly
+# was live passed. Every GitHub wait is recorded in the production receipt.
+PRODUCTION_RECEIPT = "production.json"
+PRODUCTION_SCHEMA = 1
+AGENTS_WORKFLOW = "deploy-agents.yml"
+AGENTS_WORKFLOW_PATH = ".github/workflows/deploy-agents.yml"
+CLASSIFY_AGENT_RUNTIME = Path("scripts") / "classify-agent-runtime-changes.sh"
+SURFACE_HASH_SCRIPT = Path("scripts") / "agent_workflow_surface_hash.py"
+# deploy-agents.yml logs the durable job it enqueued; the cutover monitor and
+# the queue identity check (Step 13ab) are bound to that exact job.
+JOB_ID_PATTERN = re.compile(r"Queued production worker deployment ([a-f0-9]{64})")
+# deploy.md Step 13: 120 x 5 s for the exact run to appear, 540 x 10 s for it
+# to complete (the workflow's own cutover step allows 90 minutes).
+DEFAULT_FLY_START_TIMEOUT = 600.0
+DEFAULT_FLY_TIMEOUT = 5400.0
+DEFAULT_FLY_POLL_SECONDS = 10.0
+GH_TIMEOUT_SECONDS = 120.0
+
+
+class ProductionGateError(RuntimeError):
+    """A blocked production gate: the message is the operator's next action."""
+
+
+def merged_changes(merged_sha: str, root: Path | None = None) -> list[str]:
+    """Paths changed by the merge commit itself (``merged_sha^1..merged_sha``),
+    never the latest ``main``, which may already belong to a later PR."""
+    root = SOURCE_ROOT if root is None else root
+    output = subprocess.run(
+        ["git", "diff", "--name-only", f"{merged_sha}^1", merged_sha], cwd=root, check=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300,
+    ).stdout
+    return [line for line in output.splitlines() if line]
+
+
+def agent_cutover_required(changed: list[str], root: Path | None = None) -> dict:
+    """deploy.md Step 13's rule: runtime files selected by
+    ``scripts/classify-agent-runtime-changes.sh`` or the workflow file itself
+    require the exact deploy-agents.yml run; tests, benchmarks, docs and
+    coverage harnesses under agents/ never do."""
+    root = SOURCE_ROOT if root is None else root
+    classified = subprocess.run(
+        ["bash", str(root / CLASSIFY_AGENT_RUNTIME)], input="".join(f"{path}\n" for path in changed),
+        cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60,
+    ).stdout
+    runtime = [line for line in classified.splitlines() if line]
+    workflow = AGENTS_WORKFLOW_PATH in changed
+    return {"required": bool(runtime or workflow), "runtime_files": runtime, "workflow_changed": workflow}
+
+
+def _gh_json(arguments: list[str], root: Path) -> object:
+    """``gh ... --json`` parsed; a failed call raises with gh's own message."""
+    completed = subprocess.run(["gh", *arguments], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, timeout=GH_TIMEOUT_SECONDS)
+    if completed.returncode != 0:
+        raise ProductionGateError(f"gh {' '.join(arguments[:3])} failed: {completed.stderr.strip() or completed.stdout.strip()}")
+    try:
+        return json.loads(completed.stdout or "null")
+    except json.JSONDecodeError as error:
+        raise ProductionGateError(f"gh {' '.join(arguments[:3])} returned invalid JSON: {error}") from error
+
+
+def _gh_run_log(run_id: str, root: Path) -> str:
+    completed = subprocess.run(["gh", "run", "view", run_id, "--log"], cwd=root, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, timeout=GH_TIMEOUT_SECONDS * 5)
+    if completed.returncode != 0:
+        raise ProductionGateError(f"gh run view {run_id} --log failed: {completed.stderr.strip()}")
+    return completed.stdout
+
+
+def recover_job_id(log: str, run_id: str) -> str:
+    """The one durable job the run enqueued (deploy.md: ``sort -u`` of the log
+    line, exactly one 64-hex id)."""
+    found = sorted(set(JOB_ID_PATTERN.findall(log)))
+    if len(found) != 1:
+        raise ProductionGateError(
+            f"exact deployment job was not recovered from run {run_id}'s log "
+            f"({len(found)} 'Queued production worker deployment <id>' lines); do not dispatch "
+            "production semantics: inspect `gh run view " + run_id + " --log` and resume the saved job per "
+            "deploy.md Step 13"
+        )
+    return found[0]
+
+
+def fly_wait(merged_sha: str, *, root: Path, waits: list[dict], state: dict | None = None,
+             timeout: float = DEFAULT_FLY_TIMEOUT, start_timeout: float = DEFAULT_FLY_START_TIMEOUT,
+             poll_seconds: float = DEFAULT_FLY_POLL_SECONDS, sleep=time.sleep) -> dict:
+    """Block until the exact deploy-agents.yml run whose headSha is the merged
+    SHA has completed; every GitHub wait lands in ``waits`` and the run's
+    identity, conclusion and durable job id land in ``state`` as they are
+    learned (so a blocked gate's receipt still names the run). Returns
+    ``state``."""
+    result = {"required": True} if state is None else state
+    result.update(required=True, run_id=None, attempt=None, url=None, status=None, conclusion=None,
+                  deployment_token=None, job_id=None)
+    started = time.monotonic()
+    run_row: dict | None = None
+    polls = 0
+    while run_row is None:
+        polls += 1
+        rows = _gh_json(["run", "list", "--workflow", AGENTS_WORKFLOW, "--branch", "main", "--limit", "30",
+                         "--json", "databaseId,headSha,status,conclusion,attempt,url"], root)
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict) and row.get("headSha") == merged_sha:
+                run_row = row
+                break
+        if run_row is None:
+            if time.monotonic() - started >= start_timeout:
+                waits.append({"workflow": AGENTS_WORKFLOW, "kind": "run-start", "head": merged_sha, "run_id": None,
+                              "polls": polls, "waited_s": round(time.monotonic() - started, 1), "outcome": "timeout"})
+                raise ProductionGateError(
+                    f"exact {AGENTS_WORKFLOW} run for {merged_sha} did not start within {start_timeout:.0f}s; "
+                    "do not dispatch production semantics: check GitHub Actions for the merge commit or start it with "
+                    f"`gh workflow run {AGENTS_WORKFLOW} --ref main -f expected_sha={merged_sha}`"
+                )
+            sleep(min(5.0, poll_seconds))
+    run_id = str(run_row.get("databaseId"))
+    result.update(run_id=run_id, url=run_row.get("url"), status=run_row.get("status"))
+    waits.append({"workflow": AGENTS_WORKFLOW, "kind": "run-start", "head": merged_sha, "run_id": run_id,
+                  "polls": polls, "waited_s": round(time.monotonic() - started, 1), "outcome": "found"})
+    complete_started = time.monotonic()
+    polls = 0
+    view: dict = {}
+    while True:
+        polls += 1
+        payload = _gh_json(["run", "view", run_id, "--json", "status,conclusion,attempt,url,headSha"], root)
+        view = payload if isinstance(payload, dict) else {}
+        result.update(status=view.get("status"), url=view.get("url") or result["url"],
+                      attempt=str(view.get("attempt") or "") or None)
+        if view.get("status") == "completed":
+            break
+        if time.monotonic() - complete_started >= timeout:
+            waits.append({"workflow": AGENTS_WORKFLOW, "kind": "run-complete", "run_id": run_id, "polls": polls,
+                          "waited_s": round(time.monotonic() - complete_started, 1), "status": view.get("status"),
+                          "outcome": "timeout"})
+            raise ProductionGateError(
+                f"{AGENTS_WORKFLOW} run {run_id} ({view.get('url') or 'no url'}) is still {view.get('status')} after "
+                f"{timeout:.0f}s; CI is still active: retain its job, clocks and Machines and keep observing "
+                "(deploy.md Step 13) instead of dispatching production semantics"
+            )
+        sleep(poll_seconds)
+    conclusion = str(view.get("conclusion") or "none")
+    attempt = str(view.get("attempt") or "")
+    waits.append({"workflow": AGENTS_WORKFLOW, "kind": "run-complete", "run_id": run_id, "attempt": attempt,
+                  "polls": polls, "waited_s": round(time.monotonic() - complete_started, 1),
+                  "status": "completed", "conclusion": conclusion, "outcome": "completed"})
+    result.update(attempt=attempt, url=view.get("url"), status="completed", conclusion=conclusion,
+                  deployment_token=f"{run_id}-{attempt}" if attempt else None)
+    log = _gh_run_log(run_id, root)
+    try:
+        result["job_id"] = recover_job_id(log, run_id)
+    except ProductionGateError:
+        if conclusion == "success":
+            raise
+    if conclusion != "success":
+        resume = (f"node --import tsx scripts/worker-deployment-queue.ts run --job-id {result['job_id']} -- "
+                  "python3 ../scripts/worker_pool_cutover.py" if result["job_id"] else
+                  f"recover the job id from `gh run view {run_id} --log` and resume it per deploy.md Step 13")
+        raise ProductionGateError(
+            f"{AGENTS_WORKFLOW} run {run_id} attempt {attempt or '?'} concluded {conclusion} "
+            f"({view.get('url') or 'no url'}); the Fly worker cutover is NOT live for {merged_sha}. Do not dispatch "
+            f"production semantics: resume the saved deployment from back-end/ with `{resume}` "
+            "and rerun this gate once it succeeds"
+        )
+    return result
+
+
+def _dotenv_values(path: Path) -> dict[str, str]:
+    """``KEY=VALUE`` lines of an env file (what ``source .env`` exports); values
+    are returned, never printed."""
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return values
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def surface_hash(root: Path) -> str:
+    completed = subprocess.run([sys.executable, str(root / SURFACE_HASH_SCRIPT)], cwd=root, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, timeout=300)
+    if completed.returncode != 0 or not completed.stdout.strip():
+        raise ProductionGateError(f"could not compute the agent workflow surface hash: {completed.stderr.strip()}")
+    return completed.stdout.strip()
+
+
+def cutover_verify(fly: dict, merged_sha: str, expected_hash: str, *, root: Path) -> dict:
+    """deploy.md Step 13ab for the cooperative route: the saved job must carry
+    this merged SHA and workflow attempt, then the managed monitor ``--verify``
+    is authoritative for the job, its pointer and retained bank evidence."""
+    backend = root / "back-end"
+    env = {**os.environ, **_dotenv_values(backend / ".env")}
+    job_id = fly["job_id"]
+    read = subprocess.run(["node", "--import", "tsx", "scripts/worker-deployment-queue.ts", "read", "--job-id", job_id],
+                          cwd=backend, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)
+    if read.returncode != 0:
+        raise ProductionGateError(f"worker-deployment-queue.ts read --job-id {job_id} failed: {read.stderr.strip()}")
+    try:
+        job = json.loads(read.stdout)
+        identity = job["identity"]
+        source_commit, attempt = identity["sourceCommit"], identity["attempt"]
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        raise ProductionGateError(f"worker-deployment-queue.ts read --job-id {job_id} returned no job identity: {error}") from error
+    if source_commit != merged_sha or attempt != fly["deployment_token"]:
+        raise ProductionGateError(
+            f"job {job_id} source/attempt mismatch: job sourceCommit={source_commit} attempt={attempt}, expected "
+            f"{merged_sha} / {fly['deployment_token']}; a prior rollout of the same SHA cannot authorize this deploy"
+        )
+    monitor = subprocess.run(["node", "--import", "tsx", "scripts/monitor-cooperative-cutover.ts", "--job-id", job_id,
+                              "--expected-hash", expected_hash, "--verify"], cwd=backend, env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=3600)
+    tail = monitor.stdout[-2000:]
+    if monitor.returncode != 0:
+        raise ProductionGateError(
+            f"monitor-cooperative-cutover.ts --verify failed (exit {monitor.returncode}) for job {job_id}: {tail.strip()}"
+        )
+    return {"job_id": job_id, "source_commit": source_commit, "attempt": attempt, "expected_hash": expected_hash,
+            "queue_read": "ok", "monitor_verify_exit": 0, "monitor_tail": tail}
+
+
+def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = None, *, root: Path | None = None,
+               expected_hash: str | None = None, timeout: float = DEFAULT_FLY_TIMEOUT,
+               start_timeout: float = DEFAULT_FLY_START_TIMEOUT, poll_seconds: float = DEFAULT_FLY_POLL_SECONDS) -> int:
+    """Gate the production semantic dispatch on every exercised surface being
+    live. Render/Vercel waits stay in deploy.md Step 13/13a; this command owns
+    the Fly lane: when the merge touches agent runtime files (or
+    deploy-agents.yml) it waits for the exact deploy-agents.yml run on the
+    merged SHA to complete successfully, recovers its durable job id, runs the
+    Step 13ab identity + monitor verification, and only then runs ``dispatch``
+    (when given). A failed or still-running cutover exits 1 with the operator's
+    next action and never dispatches. The receipt ``production.json`` in
+    ``state_dir`` records the decision, the run id/attempt/job id and every
+    GitHub wait."""
+    root = SOURCE_ROOT if root is None else root
+    state_dir.mkdir(parents=True, exist_ok=True)
+    receipt_path = state_dir / PRODUCTION_RECEIPT
+    waits: list[dict] = []
+    receipt: dict = {"schema_version": PRODUCTION_SCHEMA, "merged_sha": merged_sha, "started_at": _now(),
+                     "started_epoch": time.time(), "github_waits": waits, "status": "running",
+                     "fly": {"required": None}, "cutover_verify": None, "semantic_dispatch": None}
+    write_receipt(receipt_path, receipt)
+
+    def finish(status: str, code: int, error: str | None = None) -> int:
+        receipt.update(status=status, finished_at=_now(), wall_s=round(time.time() - receipt["started_epoch"], 1))
+        if error:
+            receipt["error"] = error
+        write_receipt(receipt_path, receipt)
+        return code
+
+    try:
+        changed = merged_changes(merged_sha, root)
+        cutover = agent_cutover_required(changed, root)
+        receipt["changed_files"] = len(changed)
+        receipt["agent_cutover"] = cutover
+        if cutover["required"]:
+            print(f"PIPELINE_PRODUCTION fly=required head={merged_sha} runtime_files={len(cutover['runtime_files'])} "
+                  f"workflow_changed={cutover['workflow_changed']}: waiting for the exact {AGENTS_WORKFLOW} run",
+                  flush=True)
+            try:
+                fly_wait(merged_sha, root=root, waits=waits, state=receipt["fly"], timeout=timeout,
+                         start_timeout=start_timeout, poll_seconds=poll_seconds)
+            except ProductionGateError:
+                write_receipt(receipt_path, receipt)
+                raise
+            fly = receipt["fly"]
+            print(f"PIPELINE_PRODUCTION fly=completed run={fly['run_id']} attempt={fly['attempt']} "
+                  f"conclusion={fly['conclusion']} job={fly['job_id']}", flush=True)
+            write_receipt(receipt_path, receipt)
+            expected = expected_hash or surface_hash(root)
+            receipt["cutover_verify"] = cutover_verify(fly, merged_sha, expected, root=root)
+            print(f"PIPELINE_PRODUCTION cutover=verified job={fly['job_id']} hash={expected}", flush=True)
+        else:
+            receipt["fly"] = {"required": False, "reason": "no agent runtime or deploy-agents.yml change in the merge"}
+            print(f"PIPELINE_PRODUCTION fly=not-required head={merged_sha} ({len(changed)} changed files, "
+                  "no agent runtime change): no deploy-agents.yml wait", flush=True)
+    except ProductionGateError as error:
+        print(f"PIPELINE_PRODUCTION status=blocked exit=1 {error}", flush=True)
+        return finish("failed", 1, str(error))
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
+        detail = getattr(error, "stderr", "") or ""
+        message = f"{type(error).__name__}: {error} {detail.strip() if isinstance(detail, str) else ''}".strip()
+        print(f"PIPELINE_PRODUCTION status=error exit=2 {message}", flush=True)
+        return finish("failed", 2, message)
+    if dispatch:
+        receipt["semantic_dispatch"] = {"command": list(dispatch), "at": _now(), "exit": None}
+        write_receipt(receipt_path, receipt)
+        completed = subprocess.run(dispatch, cwd=root)
+        receipt["semantic_dispatch"]["exit"] = completed.returncode
+        print(f"PIPELINE_PRODUCTION dispatch exit={completed.returncode}", flush=True)
+        if completed.returncode != 0:
+            return finish("failed", completed.returncode, f"dispatch command exited {completed.returncode}")
+    else:
+        receipt["semantic_dispatch"] = {"command": None, "gate": "open"}
+    print(f"PIPELINE_PRODUCTION status=open exit=0 head={merged_sha} receipt={receipt_path}", flush=True)
+    return finish("passed", 0)
+
+
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, "") or default)
@@ -1846,6 +2174,21 @@ def main(argv: list[str] | None = None) -> int:
                              help="plan for this watchdog cap in MB (default: recorded cap or 90%% of MemTotal)")
     plan_parser.add_argument("--schedule", choices=(SCHEDULE_PHASED, SCHEDULE_LEGACY), default=SCHEDULE_PHASED,
                              help="Group 3 admission: phased (quick -> exclusive structural -> coverage) or legacy")
+    production_parser = sub.add_parser(
+        "production",
+        help="post-merge Fly lane: wait for the exact deploy-agents.yml run of the merged SHA (agent runtime "
+             "changes only), verify its cutover, then run the dispatch command after `--`")
+    production_parser.add_argument("--merged-sha", required=True)
+    production_parser.add_argument("--state-dir", type=Path, required=True)
+    production_parser.add_argument("--timeout", type=float, default=DEFAULT_FLY_TIMEOUT,
+                                   help="seconds to wait for the run to complete once it exists")
+    production_parser.add_argument("--start-timeout", type=float, default=DEFAULT_FLY_START_TIMEOUT,
+                                   help="seconds to wait for the exact run to appear")
+    production_parser.add_argument("--poll-seconds", type=float, default=DEFAULT_FLY_POLL_SECONDS)
+    production_parser.add_argument("--expected-hash", default=None,
+                                   help="precomputed agent workflow surface hash (default: scripts/agent_workflow_surface_hash.py)")
+    production_parser.add_argument("dispatch", nargs=argparse.REMAINDER,
+                                   help="-- <command> run only once the gate is open (e.g. gh workflow run ...)")
     simulate_parser = sub.add_parser("simulate", help="project the Group 3 union wall: phased vs legacy")
     simulate_parser.add_argument("--plan", type=Path, required=True)
     simulate_parser.add_argument("--max-parallel", type=int, default=None)
@@ -1877,6 +2220,12 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     if args.action == "verify":
         return verify(args.state_dir, args.expect_head)
+    if args.action == "production":
+        dispatch = list(args.dispatch)
+        if dispatch and dispatch[0] == "--":
+            dispatch.pop(0)
+        return production(args.merged_sha, args.state_dir, dispatch or None, expected_hash=args.expected_hash,
+                          timeout=args.timeout, start_timeout=args.start_timeout, poll_seconds=args.poll_seconds)
     return wait(args.state_dir, args.timeout, args.stall_seconds, args.since)
 
 

@@ -643,8 +643,178 @@ def main() -> int:
         check_declared_phase_lanes(tmp, env)
         check_dependencies_through_unphased_lanes(tmp, env)
         check_simulate_legacy_plan_group3(tmp, env)
+        check_production_fly_wait(tmp, env)
     print("run-deploy-pipeline: all checks passed")
     return 0
+
+
+def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
+    """``production`` gates the Step 13b dispatch on the exact deploy-agents.yml
+    run of the merged SHA: an agent runtime change waits for completed/success
+    (recording run id, attempt, job id and every GitHub wait), a merge without
+    agent runtime changes never calls gh, and a failed run blocks the dispatch
+    with the resume action. gh and node are fake executables on PATH."""
+    repo = tmp / "production-source"
+    repo.mkdir()
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    for name in ("run_deploy_pipeline.py", "deploy_stage_wait.py", "classify-agent-runtime-changes.sh"):
+        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+    (repo / ".gitignore").write_text(".context/\n__pycache__/\n")
+    git = ["git", "-C", str(repo), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+
+    def commit(message: str, files: dict[str, str]) -> str:
+        for relative, content in files.items():
+            path = repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", message], check=True)
+        return subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+
+    commit("base", {"README": "base\n"})
+    tests_only = commit("agents tests + backend", {"agents/tests/new_case.py": "x\n", "back-end/src/x.ts": "y\n"})
+    runtime = commit("agents runtime", {"agents/worker_patch.py": "z\n"})
+    fake = tmp / "production-fake"
+    fake.mkdir()
+    bin_dir = fake / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "$*" >> "$FAKE_GH_DIR/calls.log"\n'
+        'case "$1 $2" in\n'
+        '  "run list") cat "$FAKE_GH_DIR/list.json" ;;\n'
+        '  "run view")\n'
+        '    case " $* " in\n'
+        '      *" --log "*) cat "$FAKE_GH_DIR/log.txt" ;;\n'
+        '      *) n=$(cat "$FAKE_GH_DIR/view-count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE_GH_DIR/view-count"\n'
+        '         f="$FAKE_GH_DIR/view-$n.json"; [ -f "$f" ] || f="$FAKE_GH_DIR/view-last.json"; cat "$f" ;;\n'
+        '    esac ;;\n'
+        '  *) echo "unexpected gh $*" >&2; exit 1 ;;\n'
+        "esac\n")
+    (bin_dir / "node").write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "$*" >> "$FAKE_GH_DIR/node-calls.log"\n'
+        'case " $* " in\n'
+        '  *worker-deployment-queue.ts*) cat "$FAKE_GH_DIR/job.json" ;;\n'
+        '  *monitor-cooperative-cutover.ts*) exit "${FAKE_MONITOR_EXIT:-0}" ;;\n'
+        '  *) echo "unexpected node $*" >&2; exit 1 ;;\n'
+        "esac\n")
+    for name in ("gh", "node"):
+        (bin_dir / name).chmod(0o755)
+    job_id = "a" * 64
+    driver = scripts / "run_deploy_pipeline.py"
+    prod_env = {**env, "PATH": f"{bin_dir}:{env.get('PATH', os.environ.get('PATH', ''))}", "FAKE_GH_DIR": str(fake)}
+    calls = fake / "calls.log"
+
+    def reset(list_rows: list[dict], views: list[dict], log: str = "") -> None:
+        for stale in fake.glob("view-*"):
+            stale.unlink()
+        for stale in (calls, fake / "node-calls.log"):
+            stale.unlink(missing_ok=True)
+        (fake / "list.json").write_text(json.dumps(list_rows))
+        for index, view in enumerate(views, start=1):
+            (fake / f"view-{index}.json").write_text(json.dumps(view))
+        (fake / "view-last.json").write_text(json.dumps(views[-1]))
+        (fake / "log.txt").write_text(log)
+        (fake / "job.json").write_text(json.dumps({"identity": {"sourceCommit": runtime, "attempt": "123-1"}}))
+
+    def run_production(merged: str, state: Path, *extra: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(driver), "production", "--merged-sha", merged, "--state-dir", str(state),
+             "--poll-seconds", "0.05", "--expected-hash", "feedface", *extra,
+             "--", "bash", "-c", f'echo dispatch >> "{calls}"'],
+            env=prod_env, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+
+    def call_lines() -> list[str]:
+        return calls.read_text().splitlines() if calls.exists() else []
+
+    # 1. Agent runtime change: the newest run belongs to another SHA and must be
+    #    ignored; the exact run is in progress twice, then completed/success.
+    running = {"databaseId": 123, "headSha": runtime, "status": "in_progress", "conclusion": None, "attempt": 1,
+               "url": "https://github.com/acme/rose/actions/runs/123"}
+    other = {**running, "databaseId": 999, "headSha": "f" * 40}
+    log = f"2026-10-30T20:00:00Z cutover Queued production worker deployment {job_id} for {runtime}\n"
+    reset([other, running], [{"status": "in_progress", "conclusion": None, "attempt": 1, "url": running["url"]},
+                             {"status": "in_progress", "conclusion": None, "attempt": 1, "url": running["url"]},
+                             {"status": "completed", "conclusion": "success", "attempt": 1, "url": running["url"]}], log)
+    state = tmp / "production-state"
+    ran = run_production(runtime, state)
+    assert ran.returncode == 0, ran.stdout
+    lines = call_lines()
+    assert lines and lines[-1] == "dispatch", lines
+    assert sum(1 for line in lines if line.startswith("run list")) == 1, lines
+    views = [line for line in lines if line.startswith("run view 123") and "--json" in line]
+    assert len(views) == 3, lines
+    log_index = next(i for i, line in enumerate(lines) if line == "run view 123 --log")
+    assert log_index > lines.index(views[-1]) and lines.index("dispatch") > log_index, lines
+    assert not any("999" in line for line in lines), "a run on another SHA must never be polled"
+    node_calls = (fake / "node-calls.log").read_text().splitlines()
+    assert node_calls[0].endswith(f"worker-deployment-queue.ts read --job-id {job_id}"), node_calls
+    assert node_calls[1].endswith(f"monitor-cooperative-cutover.ts --job-id {job_id} --expected-hash feedface --verify"), node_calls
+    receipt = json.loads((state / "production.json").read_text())
+    assert receipt["status"] == "passed" and receipt["merged_sha"] == runtime, receipt
+    assert receipt["agent_cutover"] == {"required": True, "runtime_files": ["agents/worker_patch.py"],
+                                        "workflow_changed": False}, receipt["agent_cutover"]
+    fly = receipt["fly"]
+    assert fly["run_id"] == "123" and fly["attempt"] == "1" and fly["job_id"] == job_id, fly
+    assert fly["conclusion"] == "success" and fly["deployment_token"] == "123-1", fly
+    assert receipt["cutover_verify"]["monitor_verify_exit"] == 0 and receipt["cutover_verify"]["queue_read"] == "ok"
+    waits = receipt["github_waits"]
+    assert [w["kind"] for w in waits] == ["run-start", "run-complete"], waits
+    assert waits[0]["run_id"] == "123" and waits[0]["outcome"] == "found", waits
+    assert waits[1]["polls"] == 3 and waits[1]["conclusion"] == "success" and waits[1]["outcome"] == "completed", waits
+    assert receipt["semantic_dispatch"]["exit"] == 0, receipt["semantic_dispatch"]
+    assert "PIPELINE_PRODUCTION fly=completed run=123 attempt=1" in ran.stdout, ran.stdout
+
+    # 2. No agent runtime change (tests + back-end only): no gh call, dispatch at once.
+    reset([other], [{"status": "queued", "conclusion": None, "attempt": 1}])
+    ran = run_production(tests_only, tmp / "production-state-2")
+    assert ran.returncode == 0, ran.stdout
+    assert call_lines() == ["dispatch"], call_lines()
+    receipt = json.loads((tmp / "production-state-2" / "production.json").read_text())
+    assert receipt["fly"] == {"required": False, "reason": "no agent runtime or deploy-agents.yml change in the merge"}
+    assert receipt["agent_cutover"]["required"] is False and receipt["github_waits"] == [], receipt
+    assert not (fake / "node-calls.log").exists(), "no cutover verification without a Fly lane"
+
+    # 3. The exact run concluded failure: blocked, actionable, never dispatched.
+    reset([{**running, "databaseId": 124}],
+          [{"status": "completed", "conclusion": "failure", "attempt": 2, "url": "https://github.com/acme/rose/actions/runs/124"}],
+          log)
+    ran = run_production(runtime, tmp / "production-state-3")
+    assert ran.returncode == 1, ran.stdout
+    assert "dispatch" not in call_lines(), call_lines()
+    assert "run 124 attempt 2 concluded failure" in ran.stdout and "Do not dispatch" in ran.stdout, ran.stdout
+    assert f"worker-deployment-queue.ts run --job-id {job_id}" in ran.stdout, ran.stdout
+    assert not (fake / "node-calls.log").exists(), "a failed run must not reach the cutover monitor"
+    receipt = json.loads((tmp / "production-state-3" / "production.json").read_text())
+    assert receipt["status"] == "failed" and receipt["fly"]["conclusion"] == "failure" and receipt["fly"]["job_id"] == job_id
+    assert receipt["github_waits"][-1]["conclusion"] == "failure" and "concluded failure" in receipt["error"], receipt
+
+    # 4. The exact run never appears: blocked with the manual start command.
+    reset([other], [{"status": "queued", "conclusion": None, "attempt": 1}])
+    ran = run_production(runtime, tmp / "production-state-4", "--start-timeout", "0.2")
+    assert ran.returncode == 1 and "did not start" in ran.stdout and f"expected_sha={runtime}" in ran.stdout, ran.stdout
+    assert "dispatch" not in call_lines(), call_lines()
+    receipt = json.loads((tmp / "production-state-4" / "production.json").read_text())
+    assert receipt["github_waits"] == [{**receipt["github_waits"][0], "kind": "run-start", "outcome": "timeout",
+                                        "run_id": None}], receipt["github_waits"]
+
+    # 5. A job bound to another SHA/attempt or a failed monitor blocks the dispatch.
+    reset([running], [{"status": "completed", "conclusion": "success", "attempt": 1, "url": running["url"]}], log)
+    (fake / "job.json").write_text(json.dumps({"identity": {"sourceCommit": tests_only, "attempt": "123-1"}}))
+    ran = run_production(runtime, tmp / "production-state-5")
+    assert ran.returncode == 1 and "source/attempt mismatch" in ran.stdout and "dispatch" not in call_lines(), ran.stdout
+    reset([running], [{"status": "completed", "conclusion": "success", "attempt": 1, "url": running["url"]}], log)
+    ran = subprocess.run(
+        [sys.executable, str(driver), "production", "--merged-sha", runtime, "--state-dir", str(tmp / "production-state-6"),
+         "--poll-seconds", "0.05", "--expected-hash", "feedface", "--", "bash", "-c", f'echo dispatch >> "{calls}"'],
+        env={**prod_env, "FAKE_MONITOR_EXIT": "3"}, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, timeout=120)
+    assert ran.returncode == 1 and "monitor-cooperative-cutover.ts --verify failed (exit 3)" in ran.stdout, ran.stdout
+    assert "dispatch" not in call_lines(), call_lines()
+    print("production fly wait: ok")
 
 
 def check_follow_source(tmp: Path, env: dict[str, str]) -> None:

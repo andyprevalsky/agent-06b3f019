@@ -2922,6 +2922,14 @@ if [ -x /opt/devbox-tools/gh/current/bin/gh ]; then
   export GH_TOKEN
   gh() { /opt/devbox-tools/gh/current/bin/gh "$@"; }
 fi
+# Fly lane gate (agents runtime changes only): the exact deploy-agents.yml run
+# on the merged SHA must be completed/success and its cutover verified (Step
+# 13ab) before this dispatch; #1639 dispatched during the cutover and 4/5 jobs
+# failed. Records run id, attempt, job id and every GitHub wait in
+# .context/deploy-pipeline/production.json; no agents change → no wait.
+python3 scripts/run_deploy_pipeline.py production --merged-sha "$DEPLOY_MERGED_SHA" \
+  --state-dir .context/deploy-pipeline ||
+  { echo "❌ Fly lane is not live/verified for $DEPLOY_MERGED_SHA; not dispatching production semantics"; exit 1; }
 python3 scripts/record_factory_event.py deploy production-start semantic
 SEMANTIC_DISPATCH_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh workflow run chat-lifecycle-ratchet.yml --ref main \
