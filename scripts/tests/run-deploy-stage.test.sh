@@ -148,6 +148,108 @@ grep -q "warning: could not append deploy stage record" "$TEST_ROOT/append.out" 
 [ -z "$(find "$RUN_ROOT/append-warning/admissions" -name '*.json' -print)" ] \
     || fail "append failure leaked a stage admission"
 
+# Follow-up z (2026-10-30): inside a deploy (ROSE_DEPLOY_WORKTREE=1, or the
+# explicit PREDEPLOY_PARK_LEDGERS=1) the smoke launcher parks the benchmark
+# ledger rows its run records under .context instead of appending them to the
+# tracked agents/benchmarks/history/ files, so neither its own --reuse-passed
+# fingerprint nor the whole-worktree lanes that start after it change while it
+# runs. Outside a deploy the tracked ledgers still receive the rows directly.
+# The fixture is a minimal repository root: the real launcher plus the real
+# ledger writers (copied bytes) and a fake run-bench that records one task
+# through those writers, exactly as run_benchmark.py does after a task.
+PARK_FIXTURE="$TEST_ROOT/park-root"
+mkdir -p "$PARK_FIXTURE/scripts" "$PARK_FIXTURE/agents/benchmarks/history" "$PARK_FIXTURE/.context"
+cp "$ROOT_DIR/scripts/run-predeploy-local" "$PARK_FIXTURE/scripts/run-predeploy-local"
+cp "$ROOT_DIR/scripts/run_logged_command.py" "$PARK_FIXTURE/scripts/run_logged_command.py"
+for module in __init__ select_predeploy_benches predeploy_metrics timeout_history span_history; do
+    cp "$ROOT_DIR/agents/benchmarks/$module.py" "$PARK_FIXTURE/agents/benchmarks/$module.py"
+done
+cat >"$PARK_FIXTURE/agents/benchmarks/tasks.json" <<'JSON'
+[{"name": "park-fixture-smoke", "tags": ["smoke"], "status": "ready", "runner": "agent",
+  "bench": "pipeline-e2e", "group": "pre-deploy", "timeout_seconds": 60}]
+JSON
+printf '{"task": "park-fixture-smoke", "passed": true, "status": "COMPLETED", "duration_seconds": 10.0, "timestamp": "2026-10-29T00:00:00+00:00", "agent_id": "seed"}\n' \
+    >"$PARK_FIXTURE/agents/benchmarks/history/task_attempts.jsonl"
+printf '{"task": "park-fixture-smoke", "duration_seconds": 10.0, "cost_cents": 0.0, "timestamp": "2026-10-29T00:00:00+00:00", "agent_id": "seed"}\n' \
+    >"$PARK_FIXTURE/agents/benchmarks/history/task_durations.jsonl"
+printf '{"agent_id": "seed", "benchmark": "park-fixture-smoke", "duration_ms": 1.0, "span_key": "k", "timestamp": "2026-10-29T00:00:00+00:00"}\n' \
+    >"$PARK_FIXTURE/agents/benchmarks/history/span_durations.jsonl"
+cat >"$PARK_FIXTURE/scripts/run-bench" <<'FAKE'
+#!/usr/bin/env bash
+# Fake run-bench --local <task> --max-concurrency N: record the task through the
+# real ledger writers, exactly as run_benchmark.py does after a task.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+printf '%s\n' "${BENCHMARK_HISTORY_PARK_DIR:-<unset>}" >"$ROOT/.context/run-bench-park-env"
+cd "$ROOT/agents"
+python3 - "$2" <<'PY'
+import sys
+from benchmarks.span_history import record_span_observations
+from benchmarks.timeout_history import record_attempt, record_pass
+task = sys.argv[1]
+stamp = "2026-10-30T00:00:00+00:00"
+record_attempt(task_name=task, passed=True, status="COMPLETED", duration_seconds=12.0, cost_cents=1.5,
+               agent_id="fake-agent", timestamp=stamp, run_id="fake-run")
+record_pass(task_name=task, duration_seconds=12.0, cost_cents=1.5, agent_id="fake-agent", timestamp=stamp)
+written = record_span_observations([{"agent_id": "fake-agent", "benchmark": task, "duration_ms": 5.0,
+                                     "span_key": "k", "span_name": "n", "status": "ok", "timestamp": stamp}])
+assert written == 1, written
+PY
+FAKE
+chmod +x "$PARK_FIXTURE/scripts/run-bench" "$PARK_FIXTURE/scripts/run-predeploy-local"
+git -C "$PARK_FIXTURE" init -q
+git -C "$PARK_FIXTURE" -c user.email=t@example.com -c user.name=t add -A
+git -C "$PARK_FIXTURE" -c user.email=t@example.com -c user.name=t commit -qm fixture
+cp "$PARK_FIXTURE/agents/benchmarks/history/task_attempts.jsonl" "$TEST_ROOT/park-attempts.before"
+cp "$PARK_FIXTURE/agents/benchmarks/history/task_durations.jsonl" "$TEST_ROOT/park-durations.before"
+cp "$PARK_FIXTURE/agents/benchmarks/history/span_durations.jsonl" "$TEST_ROOT/park-spans.before"
+park_smoke() {
+    (
+        cd "$PARK_FIXTURE"
+        env -u BENCHMARK_HISTORY_PARK_DIR -u ROSE_DEPLOY_WORKTREE -u PREDEPLOY_PARK_LEDGERS "$@" \
+            PREDEPLOY_ATTEMPTS_FILE="$PARK_FIXTURE/agents/benchmarks/history/task_attempts.jsonl" \
+            bash scripts/run-predeploy-local
+    )
+}
+park_smoke ROSE_DEPLOY_WORKTREE=1 PREDEPLOY_RUN_ID=parked >"$TEST_ROOT/park-deploy.out" 2>&1 \
+    || fail "deploy smoke with parked ledgers failed: $(cat "$TEST_ROOT/park-deploy.out")"
+PARK_DIR="$PARK_FIXTURE/.context/deploy-ledger-park"
+[ "$(cat "$PARK_FIXTURE/.context/run-bench-park-env")" = "$PARK_DIR" ] \
+    || fail "run-bench did not receive the park directory: $(cat "$PARK_FIXTURE/.context/run-bench-park-env")"
+grep -q "deploy-ledger-park" "$TEST_ROOT/park-deploy.out" || fail "the launcher must announce where the rows are parked"
+cmp -s "$PARK_FIXTURE/agents/benchmarks/history/task_attempts.jsonl" "$TEST_ROOT/park-attempts.before" \
+    || fail "deploy smoke appended to the tracked attempts ledger"
+cmp -s "$PARK_FIXTURE/agents/benchmarks/history/task_durations.jsonl" "$TEST_ROOT/park-durations.before" \
+    || fail "deploy smoke appended to the tracked durations ledger"
+cmp -s "$PARK_FIXTURE/agents/benchmarks/history/span_durations.jsonl" "$TEST_ROOT/park-spans.before" \
+    || fail "deploy smoke appended to the tracked span ledger"
+[ -z "$(git -C "$PARK_FIXTURE" status --porcelain -- agents/benchmarks/history)" ] \
+    || fail "deploy smoke left the tracked ledgers dirty: $(git -C "$PARK_FIXTURE" status --porcelain)"
+grep -q '"task": "park-fixture-smoke".*"run_id": "fake-run"' "$PARK_DIR/task_attempts.jsonl" \
+    || fail "parked attempts row missing"
+grep -q '"task": "park-fixture-smoke"' "$PARK_DIR/task_durations.jsonl" || fail "parked durations row missing"
+grep -q '"benchmark": "park-fixture-smoke"' "$PARK_DIR/span_durations.jsonl" || fail "parked span row missing"
+[ "$(wc -l <"$PARK_DIR/task_attempts.jsonl")" -eq 1 ] || fail "exactly one parked attempt row expected"
+# The explicit flag parks outside an isolated deploy worktree too.
+rm -rf "$PARK_DIR"
+park_smoke PREDEPLOY_PARK_LEDGERS=1 PREDEPLOY_RUN_ID=parked-flag >"$TEST_ROOT/park-flag.out" 2>&1 \
+    || fail "flagged smoke with parked ledgers failed: $(cat "$TEST_ROOT/park-flag.out")"
+[ "$(wc -l <"$PARK_DIR/task_attempts.jsonl")" -eq 1 ] || fail "PREDEPLOY_PARK_LEDGERS=1 must park the rows"
+cmp -s "$PARK_FIXTURE/agents/benchmarks/history/task_attempts.jsonl" "$TEST_ROOT/park-attempts.before" \
+    || fail "flagged smoke appended to the tracked attempts ledger"
+# Outside a deploy the rows still reach the tracked ledgers directly.
+park_smoke PREDEPLOY_RUN_ID=unparked >"$TEST_ROOT/park-plain.out" 2>&1 \
+    || fail "plain smoke failed: $(cat "$TEST_ROOT/park-plain.out")"
+[ "$(cat "$PARK_FIXTURE/.context/run-bench-park-env")" = "<unset>" ] || fail "a plain smoke run must not park its rows"
+[ "$(wc -l <"$PARK_FIXTURE/agents/benchmarks/history/task_attempts.jsonl")" -eq 2 ] \
+    || fail "a plain smoke run must append its attempt row to the tracked ledger"
+[ "$(wc -l <"$PARK_FIXTURE/agents/benchmarks/history/task_durations.jsonl")" -eq 2 ] \
+    || fail "a plain smoke run must append its duration row to the tracked ledger"
+[ "$(wc -l <"$PARK_FIXTURE/agents/benchmarks/history/span_durations.jsonl")" -eq 2 ] \
+    || fail "a plain smoke run must append its span row to the tracked ledger"
+[ "$(wc -l <"$PARK_DIR/task_attempts.jsonl")" -eq 1 ] || fail "a plain smoke run must leave the park untouched"
+echo "pre-deploy smoke parks its ledger rows inside a deploy: ok"
+
 # Environment-controlled IDs may not escape their artifact roots.
 RUN_ROOT="$TEST_ROOT/invalid"
 for invalid_id in . .. ../escape bad/id; do

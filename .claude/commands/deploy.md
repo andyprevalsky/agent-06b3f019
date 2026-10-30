@@ -669,7 +669,18 @@ of re-running. Two lane groups narrow that input: `eslint`, `typescript` and
 ledgers (tracked diff and untracked files) when they run their real command (lint-affected over the
 deploy lint list, `tsc`, `npm run test:structural`), and the front-end and mac
 lanes (`_LANE_SCOPES`) hash only their in-scope file content instead of HEAD.
-Every reuse line names the scope it matched.
+Every reuse line names the scope it matched. The local smoke lane itself no
+longer dirties those ledgers while it runs: inside a deploy
+(`ROSE_DEPLOY_WORKTREE=1`, or `PREDEPLOY_PARK_LEDGERS=1`)
+`scripts/run-predeploy-local` parks the attempt, duration and span rows its
+run records under `.context/deploy-ledger-park/` (`BENCHMARK_HISTORY_PARK_DIR`,
+honoured by the ledger writers in `agents/benchmarks/timeout_history.py` and
+`span_history.py`; reads keep the tracked files), so its own `--reuse-passed`
+fingerprint and every whole-worktree lane admitted after it stay stable across
+attempts. Publish those rows with the normal ledger step,
+`python3 scripts/benchmark-history-latest-only.py --base origin/main --apply-parked --write`,
+which appends them to the tracked ledgers (span rows through the segmented
+append) before the latest-only filter and renames the parked files `*.applied-<utc>`.
 
 **Speculative gates on the next HEAD (`run --follow-source`).** Start the
 pipeline with `--follow-source` so a fix committed while CodeRabbit is still

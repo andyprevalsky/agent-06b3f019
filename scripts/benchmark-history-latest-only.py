@@ -13,12 +13,25 @@ that actually merges. Rows already on the base ref are never touched.
   python3 scripts/benchmark-history-latest-only.py            # report only
   python3 scripts/benchmark-history-latest-only.py --write    # rewrite ledgers
   python3 scripts/benchmark-history-latest-only.py --check    # exit 1 if stale rows remain
+  python3 scripts/benchmark-history-latest-only.py --apply-parked --write
+      # first replay the deploy smoke lane's parked rows
+      # (.context/deploy-ledger-park, see run-predeploy-local) into the
+      # tracked ledgers, then keep only each task's most recent run
+
+A deploy's local smoke lane records its rows under .context/deploy-ledger-park
+(BENCHMARK_HISTORY_PARK_DIR) so the tracked ledgers stay unchanged while the
+other gates fingerprint the worktree. `--apply-parked` appends those parked
+attempt and duration rows to the tracked ledgers byte-for-byte and replays the
+parked span rows through the normal segmented span append, marks the parked
+files applied, and then runs the latest-only filter over the result.
 """
 from __future__ import annotations
 
 import argparse
 import collections
+import importlib.util
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -29,6 +42,10 @@ HISTORY_DIR = "agents/benchmarks/history"
 ATTEMPTS = "task_attempts.jsonl"
 DURATIONS = "task_durations.jsonl"
 SPAN_PREFIX = "span_durations"
+SPANS = f"{SPAN_PREFIX}.jsonl"
+PARK_DIR = ".context/deploy-ledger-park"
+PARK_DIR_ENV = "BENCHMARK_HISTORY_PARK_DIR"
+SPAN_HISTORY_MODULE = Path("agents/benchmarks/span_history.py")
 # Span rows of the kept run can be stamped slightly before its attempt start.
 SPAN_SLACK = timedelta(seconds=60)
 
@@ -159,6 +176,70 @@ def select_dependents(
             ledger.keep[index] = False
 
 
+def _load_span_history(repo: Path):
+    """The span ledger writer, bound to ``repo``'s tracked history directory.
+
+    The repository being published normally ships the module; a repository
+    without it (tests) uses this script's own copy. Either way every path the
+    module derives comes from the rebound HISTORY_DIR, never from this script's
+    checkout."""
+    source = repo / SPAN_HISTORY_MODULE
+    if not source.is_file():
+        source = Path(__file__).resolve().parents[1] / SPAN_HISTORY_MODULE
+    spec = importlib.util.spec_from_file_location("benchmark_history_span_writer", source)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    module.HISTORY_DIR = str(repo / HISTORY_DIR)
+    module.HISTORY_FILE = os.path.join(module.HISTORY_DIR, SPANS)
+    return module
+
+
+def apply_parked(repo: Path, park: Path) -> dict[str, int]:
+    """Replay the smoke lane's parked rows into the tracked ledgers.
+
+    Attempt and duration rows are appended byte-for-byte; span rows go through
+    the segmented span append (90 MiB segments per branch and day) exactly as a
+    direct write would have. Each applied parked file is renamed
+    ``<name>.applied-<utc>`` so a second publish cannot apply it again.
+    Returns the number of rows applied per ledger."""
+    # The publish itself must never be redirected back into the park.
+    os.environ.pop(PARK_DIR_ENV, None)
+    applied: dict[str, int] = {}
+    if not park.is_dir():
+        print(f"no parked ledger rows under {park}")
+        return applied
+    history = repo / HISTORY_DIR
+    history.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    for name in (ATTEMPTS, DURATIONS):
+        source = park / name
+        if not source.is_file():
+            continue
+        lines = [line for line in source.read_bytes().splitlines() if line.strip()]
+        with (history / name).open("ab") as handle:
+            handle.write(b"".join(line + b"\n" for line in lines))
+        applied[name] = len(lines)
+        source.rename(park / f"{name}.applied-{stamp}")
+    spans = park / SPANS
+    if spans.is_file():
+        rows = []
+        for line in spans.read_bytes().splitlines():
+            row = _row(line) if line.strip() else None
+            if row is not None:
+                rows.append(row)
+        written = _load_span_history(repo).record_span_observations(rows) if rows else 0
+        if written != len(rows):
+            raise RuntimeError(f"{spans}: applied {written} of {len(rows)} parked span rows")
+        applied[SPANS] = written
+        spans.rename(park / f"{SPANS}.applied-{stamp}")
+    for name, count in applied.items():
+        print(f"{HISTORY_DIR}/{name}: applied {count} parked row(s) from {park}")
+    if not applied:
+        print(f"no parked ledger rows under {park}")
+    return applied
+
+
 def run(repo: Path, base: str, write: bool) -> int:
     rels = _changed_ledgers(repo, base)
     ledgers = {rel: _load(repo, base, rel) for rel in rels}
@@ -202,11 +283,21 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--write", action="store_true", help="rewrite the ledgers in place")
     mode.add_argument("--check", action="store_true", help="exit 1 when superseded rows remain")
+    parser.add_argument(
+        "--apply-parked", nargs="?", const=PARK_DIR, default=None, metavar="DIR",
+        help=f"first replay the deploy smoke lane's parked rows (default {PARK_DIR} under the repo) "
+             "into the tracked ledgers; requires --write",
+    )
     args = parser.parse_args(argv)
+    if args.apply_parked is not None and not args.write:
+        parser.error("--apply-parked changes the tracked ledgers and requires --write")
     repo = Path(_git(Path(args.repo), "rev-parse", "--show-toplevel").stdout.decode().strip())
     if _git(repo, "rev-parse", "--verify", "--quiet", f"{args.base}^{{commit}}", check=False).returncode:
         print(f"base ref {args.base!r} not found; fetch it first", file=sys.stderr)
         return 2
+    if args.apply_parked is not None:
+        park = Path(args.apply_parked)
+        apply_parked(repo, park if park.is_absolute() else repo / park)
     dropped = run(repo, args.base, args.write)
     return 1 if args.check and dropped else 0
 
