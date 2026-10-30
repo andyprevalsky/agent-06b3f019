@@ -215,7 +215,13 @@ def test_oss_pool_is_open_weights_only():
     """
     oss = POOL_REGISTRY["rose-1-oss"]
     assert oss.direct_auth_enabled is False
-    assert oss.waterfall == ("moonshotai/kimi-k3",)
+    assert oss.waterfall == ("moonshotai/kimi-k3", "qwen/qwen3.8-27b")
+    # The structured-output retry excludes a model after two unparseable tool
+    # calls and the funded Foundry leg can be unavailable (Azure answered
+    # deployment_disabled for DeepSeek-V3.2 on 2026-10-30), so the waterfall
+    # itself must hold a vision-capable open-weights rescuer, or the pinned
+    # biometrics task fails with RoseAllFailed after kimi's second invalid call.
+    assert len(oss.waterfall) >= 2, "rose-1-oss needs an open-weights rescuer behind kimi-k3"
     assert not any("anthropic/" in m or "openai/" in m for m in oss.waterfall)
     # Its funded Azure fallback is open-weights too, never the inert gpt_auth_model.
     from providers.rose.pools import foundry_model
