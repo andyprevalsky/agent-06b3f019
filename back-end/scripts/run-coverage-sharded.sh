@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Sharded backend coverage: N independent run-coverage.sh shards (own
+# Sharded backend coverage: N independent blackbox run-coverage.sh shards (own
 # instrumented backend, own local database, own port and raw V8 directory),
-# then one merged c8 report that enforces back-end/.c8rc.json thresholds.
+# then the unit suite once, alone (BACKEND_COVERAGE_UNIT_PASS=1, after every
+# shard has finished), then one merged c8 report that enforces
+# back-end/.c8rc.json thresholds. The unit phase never overlaps a blackbox
+# stream: its headless-browser perf probe (rose-ui-cli-browser, fps-p50) is
+# host-load dependent and failed 4/4 sharded runs while passing unsharded
+# when every shard also ran its own unit slice beside its blackbox phase.
 #
 # Usage: bash scripts/run-coverage-sharded.sh [--failed-first] [shard-count]   (default 2)
 #        BACKEND_COVERAGE_SHARD_DURATIONS=<summary.json> balances by duration.
@@ -35,6 +40,8 @@ if ! [[ "$SHARDS" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 cd "$BACKEND_DIR"
+# Validated up front, before any shard runs: the merged c8 report's heap ceiling.
+source "$SCRIPT_DIR/coverage-report-heap.sh"
 
 MERGED_TMP="$BACKEND_DIR/coverage/tmp-merged"
 if [[ -d "$MERGED_TMP" ]] && [[ -n "$(find "$MERGED_TMP" -mindepth 1 -print -quit)" ]]; then
@@ -86,7 +93,7 @@ rm -f "$BACKEND_DIR"/coverage/blackbox-run-shard*/summary.json
 # start a new collection over unrecovered raw coverage. Keep that evidence,
 # out of the way, so the next attempt can run (2026-10-30: attempt 2 of the
 # PR #1637 proof run was refused by attempt 1's interrupted shards).
-for leftover in "$BACKEND_DIR"/coverage/tmp-shard*; do
+for leftover in "$BACKEND_DIR"/coverage/tmp-shard* "$BACKEND_DIR"/coverage/tmp-units; do
   [[ -d "$leftover" ]] && [[ -n "$(find "$leftover" -mindepth 1 -print -quit)" ]] || continue
   archive="$ROOT_DIR/.context/test-runs/backend-coverage-unrecovered-$(date -u +%Y%m%d-%H%M%S)-$$"
   mkdir -p "$archive"
@@ -115,6 +122,7 @@ for ((i = 1; i <= SHARDS; i++)); do
   # Each shard gets a disjoint two-port range above the unsharded one.
   start=$((BASE_PORT + 20 + 2 * i))
   env -u BACKEND_UNIT_TEST_FILES BACKEND_COVERAGE_SHARD="$i/$SHARDS" \
+    BACKEND_COVERAGE_SKIP_UNITS=1 \
     BACKEND_COVERAGE_SHARD_DURATIONS="$DURATIONS" \
     BACKEND_COVERAGE_MERGE_DIR="$MERGED_TMP" \
     BACKEND_COVERAGE_START_PORT="$start" BACKEND_COVERAGE_END_PORT="$((start + 1))" \
@@ -132,6 +140,7 @@ trap 'terminate_shards; archive_merged_coverage interrupted; exit 130' INT TERM
 # Reap shards in completion order so a failure is reported (and, in
 # failed-first mode, stops the sibling shards) as soon as it happens.
 FAILED=0
+ABORTED=0
 DONE_COUNT=0
 declare -a DONE=()
 while ((DONE_COUNT < SHARDS)); do
@@ -150,6 +159,7 @@ while ((DONE_COUNT < SHARDS)); do
       if [[ "$FAILED_FIRST" == "1" ]]; then
         echo "Failed-first: stopping the remaining shards."
         terminate_shards
+        ABORTED=1
         DONE_COUNT=$SHARDS
       fi
     else
@@ -160,20 +170,54 @@ while ((DONE_COUNT < SHARDS)); do
 done
 trap - INT TERM
 record_domain_durations
+
+# The unit suite runs once, alone, after the blackbox shards (see the header).
+# Like run-coverage.sh's own test phase it still runs after a failed shard so
+# one sweep reports every failure; only a failed-first abort skips it.
+UNIT_PASS_PID=""
+terminate_unit_pass() {
+  [[ -n "$UNIT_PASS_PID" ]] || return 0
+  kill -TERM "$UNIT_PASS_PID" 2>/dev/null || true
+  wait "$UNIT_PASS_PID" 2>/dev/null || true
+}
+if [[ "$ABORTED" -eq 0 ]]; then
+  echo "Blackbox shards finished; running the unit suite once, alone (log coverage/units.log)"
+  trap 'terminate_unit_pass; archive_merged_coverage interrupted; exit 130' INT TERM
+  env -u BACKEND_UNIT_TEST_FILES BACKEND_COVERAGE_UNIT_PASS=1 \
+    BACKEND_COVERAGE_MERGE_DIR="$MERGED_TMP" \
+    BACKEND_COVERAGE_START_PORT="$((BASE_PORT + 20))" BACKEND_COVERAGE_END_PORT="$((BASE_PORT + 21))" \
+    bash "$SCRIPT_DIR/run-coverage.sh" >"$BACKEND_DIR/coverage/units.log" 2>&1 &
+  UNIT_PASS_PID="$!"
+  UNIT_RC=0
+  wait "$UNIT_PASS_PID" || UNIT_RC=$?
+  UNIT_PASS_PID=""
+  trap - INT TERM
+  if [[ "$UNIT_RC" -ne 0 ]]; then
+    echo "❌ Unit pass failed (exit $UNIT_RC); see coverage/units.log"
+    grep -E '^\s+FAIL\s' "$BACKEND_DIR/coverage/units.log" || true
+    FAILED=1
+  else
+    echo "✅ Unit pass passed"
+  fi
+else
+  echo "Failed-first abort: the unit pass is skipped until the blackbox failure is fixed."
+fi
 if [[ "$FAILED" -ne 0 ]]; then
   # Archive the passing shards' raw coverage so the next run is not blocked.
   ARCHIVE="$ROOT_DIR/.context/test-runs/backend-coverage-merged-failed-$(date -u +%Y%m%d-%H%M%S)-$$"
   mkdir -p "$ARCHIVE"
   mv "$MERGED_TMP" "$ARCHIVE/raw-v8"
-  echo "Passing shards' raw coverage archived at $ARCHIVE/raw-v8."
+  echo "Passing phases' raw coverage archived at $ARCHIVE/raw-v8."
   echo "Retry: bash scripts/run-coverage-sharded.sh --failed-first $SHARDS"
   exit 1
 fi
 
 echo ""
-echo "=== Merged Coverage Report ($SHARDS shards) ==="
+echo "=== Merged Coverage Report ($SHARDS blackbox shards + unit pass) ==="
 COV_EXIT=0
-npx c8 report --temp-directory="$MERGED_TMP" --reporter=text --reporter=text-summary --reporter=json-summary \
+# The merged report holds every shard's and the unit pass's raw V8 files: the
+# same in-memory merge that exhausted node's default heap unsharded.
+coverage_report_node npx c8 report --temp-directory="$MERGED_TMP" --reporter=text --reporter=text-summary --reporter=json-summary \
   --check-coverage || COV_EXIT=$?
 if [[ "$COV_EXIT" -eq 0 ]]; then
   rm -rf "$MERGED_TMP"

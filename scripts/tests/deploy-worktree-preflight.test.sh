@@ -403,17 +403,62 @@ set -e
 echo "PASS: malformed, reversed and missing kernel ranges fail closed"
 
 # A new claim must clear the window with its whole 6265-port listen footprint
-# and fit below 65535. Below a window starting at 26265 the first base 20000
-# fits exactly (20000+6264 < 26265); one port lower nothing fits below it, and
-# above 60999 no base keeps its +5764..+6264 hub under 65535, so the claim fails.
-# Above a narrow window the first base past it is taken and its hub still fits.
-printf '26265\t60999\n' >"$fake_ipv4/ip_local_port_range"
+# and fit below 65535. The allocator proves a claim by binding its ten ports
+# on the REAL host, so the boundary is exercised at the first base B whose
+# twenty ports (B and B+10) are bindable right now, never at a literal 20000:
+# a window starting at B+10+6265 fits every base <= B+10 exactly (one more
+# port and B+20 would fit too), a sibling worktree listening on 20000-20009
+# no longer fails the scenario ("no free ten-port deploy-worktree range is
+# available" under the structural lane, 2026-10-30), and a listener held on B
+# proves a busy candidate is skipped rather than failing the claim. Below
+# 26264 nothing fits (20000+6264 reaches the window), and above 60999 no base
+# keeps its +5764..+6264 hub under 65535, so those claims fail. Above a narrow
+# window the first base past it is taken and its hub still fits.
+boundary_base="$(python3 - <<'PY'
+import socket
+for base in range(20000, 54000, 10):
+    sockets = []
+    try:
+        for port in range(base, base + 20):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sockets.append(sock)
+            sock.bind(("127.0.0.1", port))
+        print(base)
+        break
+    except OSError:
+        pass
+    finally:
+        for sock in sockets:
+            sock.close()
+PY
+)"
+[ -n "$boundary_base" ] || fail "no twenty bindable ports from a ten-aligned base below 54000 on this host"
+boundary_top=$((boundary_base + 10))
+boundary_low=$((boundary_top + 6265))
+busy_ready="$TMP_ROOT/boundary-busy-ready"
+python3 -c 'import socket,sys,time
+sock=socket.socket(socket.AF_INET,socket.SOCK_STREAM); sock.bind(("127.0.0.1",int(sys.argv[1]))); sock.listen(1)
+open(sys.argv[2],"w").close(); time.sleep(120)' "$boundary_base" "$busy_ready" &
+busy_listener=$!
+for _ in $(seq 1 200); do [ -e "$busy_ready" ] && break; sleep 0.05; done
+[ -e "$busy_ready" ] || fail "the busy-candidate listener on $boundary_base did not start"
+printf '%s\t60999\n' "$boundary_low" >"$fake_ipv4/ip_local_port_range"
 : >"$fake_ipv4/ip_local_reserved_ports"
 boundary_registry="$TMP_ROOT/boundary-ports"
 boundary_port="$(ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" claim \
   --registry "$boundary_registry" --owner "$deploy_tmp_g")"
-[ "$boundary_port" -lt 26265 ] && footprint_clear "$boundary_port" 26265 60999 \
-  || fail "a new claim must keep its whole footprint below the kernel window (got $boundary_port with window 26265-60999)"
+kill "$busy_listener" 2>/dev/null || true
+wait "$busy_listener" 2>/dev/null || true
+[ "$boundary_port" -le "$boundary_top" ] && footprint_clear "$boundary_port" "$boundary_low" 60999 \
+  || fail "a new claim must keep its whole footprint below the kernel window (got $boundary_port with window $boundary_low-60999)"
+[ "$boundary_port" -ne "$boundary_base" ] \
+  || fail "a candidate base with a live listener must be skipped, not claimed (got $boundary_port while $boundary_base is busy)"
+# The exact arithmetic, judged without binding: the last fitting base is
+# accepted and the next ten-port base is refused.
+ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port "$boundary_top" >/dev/null \
+  || fail "check must accept base $boundary_top, whose footprint ends one port below the window at $boundary_low"
+! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port $((boundary_top + 10)) >/dev/null 2>&1 \
+  || fail "check must reject base $((boundary_top + 10)), whose footprint reaches into the window at $boundary_low"
 printf '26264\t60999\n' >"$fake_ipv4/ip_local_port_range"
 ! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" claim \
   --registry "$TMP_ROOT/tight-ports" --owner "$deploy_tmp_g" >/dev/null 2>&1 \

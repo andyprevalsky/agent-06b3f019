@@ -14,7 +14,13 @@
 #      fake domain files) keeps failed-first retries inside their phase: a
 #      previously failed late-exclusive domain still runs only after the parallel
 #      fixture writers, and an aborted sweep reports unrun domains as NOT RUN
-#      failures (non-zero exit, aborted:true in summary.json).
+#      failures (non-zero exit, aborted:true in summary.json);
+#   8. the unit suite runs once, alone: every blackbox shard skips units, the
+#      unit pass (BACKEND_COVERAGE_UNIT_PASS=1, all unit files, its own port
+#      pair) starts only after the last shard ended, hands its raw coverage to
+#      the merge directory, fails the gate on its own, and is skipped after a
+#      failed-first abort (the fps probe starved beside two blackbox streams,
+#      2026-10-30).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -30,27 +36,33 @@ REPO="$TMP/repo"
 mkdir -p "$REPO/back-end/scripts" "$REPO/back-end/coverage" "$REPO/bin"
 cp "$ROOT_DIR/back-end/scripts/run-coverage-sharded.sh" "$REPO/back-end/scripts/"
 cp "$ROOT_DIR/back-end/scripts/coverage-shard-durations.mjs" "$REPO/back-end/scripts/"
+cp "$ROOT_DIR/back-end/scripts/coverage-report-heap.sh" "$REPO/back-end/scripts/"
 
 # Fake shard: records its env, hands raw coverage to the merge dir on success,
 # fails when told to, and sleeps (until TERM) when told to.
 cat >"$REPO/back-end/scripts/run-coverage.sh" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
-index="${BACKEND_COVERAGE_SHARD%%/*}"
+if [[ "${BACKEND_COVERAGE_UNIT_PASS:-0}" == "1" ]]; then index=units; else index="${BACKEND_COVERAGE_SHARD%%/*}"; fi
 log="$FAKE_RECORD_DIR/shard-$index.env"
 {
-  echo "shard=$BACKEND_COVERAGE_SHARD"
+  echo "shard=${BACKEND_COVERAGE_SHARD:-}"
   echo "ports=$BACKEND_COVERAGE_START_PORT-$BACKEND_COVERAGE_END_PORT"
   echo "priority=${BLACKBOX_TEST_PRIORITY_DOMAINS:-}"
   echo "abort=${BLACKBOX_TEST_ABORT_ON_PRIORITY_FAILURE:-}"
   echo "durations=${BACKEND_COVERAGE_SHARD_DURATIONS:-}"
   echo "unit_selector=${BACKEND_UNIT_TEST_FILES-unset}"
+  echo "skip_units=${BACKEND_COVERAGE_SKIP_UNITS:-}"
+  echo "unit_pass=${BACKEND_COVERAGE_UNIT_PASS:-}"
+  echo "started=$(date +%s%N)"
 } >"$log"
 child=""
 trap 'echo terminated >>"$log"; [[ -z "$child" ]] || kill "$child" 2>/dev/null; exit 143' TERM
 behaviour="$(eval echo "\${FAKE_SHARD_$index:-pass}")"
+# A shard takes a moment so a unit pass started too early would overlap it.
+sleep 0.2
 case "$behaviour" in
-  fail) exit 1 ;;
+  fail) echo "ended=$(date +%s%N)" >>"$log"; exit 1 ;;
   sleep)
     sleep 60 &
     child=$!
@@ -59,6 +71,7 @@ case "$behaviour" in
 esac
 mkdir -p "$BACKEND_COVERAGE_MERGE_DIR"
 echo "{}" >"$BACKEND_COVERAGE_MERGE_DIR/coverage-shard-$index.json"
+echo "ended=$(date +%s%N)" >>"$log"
 # Like the real shard, publish this run's blackbox summary (seeded by the test).
 if [[ -n "${FAKE_SUMMARY_DIR:-}" && -f "$FAKE_SUMMARY_DIR/shard-$index.json" ]]; then
   mkdir -p "$(dirname "$0")/../coverage/blackbox-run-shard$index"
@@ -68,6 +81,7 @@ FAKE
 cat >"$REPO/bin/npx" <<'FAKE'
 #!/usr/bin/env bash
 echo "npx $*" >>"$FAKE_RECORD_DIR/npx.log"
+echo "NODE_OPTIONS=${NODE_OPTIONS:-}" >>"$FAKE_RECORD_DIR/npx.log"
 exit "${FAKE_C8_EXIT:-0}"
 FAKE
 chmod +x "$REPO/back-end/scripts/run-coverage.sh" "$REPO/bin/npx"
@@ -91,10 +105,50 @@ grep -q 'shard=1/2' "$TMP/rec/shard-1.env" && grep -q 'shard=2/2' "$TMP/rec/shar
   fail "shards share a port range"
 grep -q -- '--check-coverage' "$TMP/rec/npx.log" || fail "merged threshold check did not run"
 [[ ! -e "$REPO/back-end/coverage/tmp-merged" ]] || fail "merge dir left behind after success"
+# 8. The unit suite runs once, alone, after the blackbox shards.
+grep -q '^skip_units=1$' "$TMP/rec/shard-1.env" && grep -q '^skip_units=1$' "$TMP/rec/shard-2.env" ||
+  fail "blackbox shards must skip the unit suite: $(cat "$TMP/rec/shard-1.env")"
+[[ -f "$TMP/rec/shard-units.env" ]] || fail "the unit pass did not run"
+grep -q '^unit_pass=1$' "$TMP/rec/shard-units.env" && grep -q '^shard=$' "$TMP/rec/shard-units.env" &&
+  grep -q '^skip_units=$' "$TMP/rec/shard-units.env" && grep -q '^unit_selector=unset$' "$TMP/rec/shard-units.env" ||
+  fail "the unit pass must run every unit file as a non-shard: $(cat "$TMP/rec/shard-units.env")"
+grep -q '^ports=40020-40021$' "$TMP/rec/shard-units.env" || fail "the unit pass must use the +20/+21 pair inside the declared footprint: $(cat "$TMP/rec/shard-units.env")"
+units_started="$(sed -n 's/^started=//p' "$TMP/rec/shard-units.env")"
+for i in 1 2; do
+  shard_ended="$(sed -n 's/^ended=//p' "$TMP/rec/shard-$i.env")"
+  [[ -n "$shard_ended" && "$units_started" -gt "$shard_ended" ]] ||
+    fail "the unit pass overlapped blackbox shard $i (shard ended $shard_ended, units started $units_started)"
+done
+grep -q 'running the unit suite once, alone' "$TMP/out1" || fail "the unit pass must be announced: $(cat "$TMP/out1")"
+# 9. The report step raises node's heap ceiling itself (the in-memory c8 merge
+#    of the full sweep died at the default heap, 2026-10-30), keeping any
+#    NODE_OPTIONS the caller set; the unsharded script uses the same helper.
+grep -q '^NODE_OPTIONS=--max-old-space-size=6144$' "$TMP/rec/npx.log" || fail "merged c8 report must run with the raised heap: $(cat "$TMP/rec/npx.log")"
+records
+NODE_OPTIONS="--trace-warnings" BACKEND_COVERAGE_REPORT_HEAP_MB=4096 bash "$RUNNER" 2 >"$TMP/out9" 2>&1 || fail "heap override run failed: $(cat "$TMP/out9")"
+grep -q '^NODE_OPTIONS=--trace-warnings --max-old-space-size=4096$' "$TMP/rec/npx.log" || fail "the heap option must append to the caller's NODE_OPTIONS and honour the override: $(cat "$TMP/rec/npx.log")"
+records
+BACKEND_COVERAGE_REPORT_HEAP_MB=lots bash "$RUNNER" 2 >"$TMP/out9b" 2>&1 && fail "a malformed heap override must be refused"
+[[ ! -e "$TMP/rec/shard-1.env" ]] || fail "a malformed heap override must be refused before any shard runs"
+[[ ! -e "$REPO/back-end/coverage/tmp-merged" ]] || fail "a refused heap override must not leave the merge dir behind"
+RC_UNSHARDED="$ROOT_DIR/back-end/scripts/run-coverage.sh"
+[ "$(grep -c 'coverage_report_node npx c8 report' "$RC_UNSHARDED")" = 2 ] || fail "run-coverage.sh must run both c8 report invocations through coverage_report_node"
+grep -q 'source "$SCRIPT_DIR/coverage-report-heap.sh"' "$RC_UNSHARDED" || fail "run-coverage.sh must source the shared heap helper"
 records
 FAKE_C8_EXIT=1 bash "$RUNNER" 2 >"$TMP/out1b" 2>&1 && fail "merged threshold failure did not fail the gate"
 ls "$REPO"/.context/test-runs/backend-coverage-merged-report-failed-*/raw-v8/coverage-shard-1.json >/dev/null 2>&1 ||
   fail "merged report failure deleted raw coverage"
+ls "$REPO"/.context/test-runs/backend-coverage-merged-report-failed-*/raw-v8/coverage-shard-units.json >/dev/null 2>&1 ||
+  fail "the unit pass's raw coverage was not handed to the merge directory"
+# A failing unit pass fails the gate on its own: no merged check, raw archived, retry named.
+records
+FAKE_SHARD_units=fail bash "$RUNNER" 2 >"$TMP/out8" 2>&1 && fail "a failed unit pass did not fail the gate"
+grep -q 'Unit pass failed' "$TMP/out8" || fail "unit pass failure not reported: $(cat "$TMP/out8")"
+grep -q 'Retry: bash scripts/run-coverage-sharded.sh --failed-first 2' "$TMP/out8" || fail "retry hint missing after a unit failure"
+[[ ! -e "$TMP/rec/npx.log" ]] || fail "merged check ran despite a failed unit pass"
+[[ ! -e "$REPO/back-end/coverage/tmp-merged" ]] || fail "failed unit pass leaves the merge dir blocking retry"
+ls "$REPO"/.context/test-runs/backend-coverage-merged-failed-*/raw-v8/coverage-shard-2.json >/dev/null 2>&1 ||
+  fail "passing shards' raw coverage was not archived after a unit failure"
 [[ ! -e "$REPO/back-end/coverage/tmp-merged" ]] || fail "failed report leaves merge directory blocking retry"
 
 # Interrupt a live coordinator after one shard has handed over raw coverage.
@@ -119,6 +173,7 @@ records
 cd "$REPO"
 FAKE_SHARD_1=fail bash "$RUNNER" 2 >"$TMP/out2" 2>&1 && fail "failed shard did not fail the gate"
 [[ ! -e "$TMP/rec/npx.log" ]] || fail "merged check ran despite a failed shard"
+[[ -f "$TMP/rec/shard-units.env" ]] || fail "a plain sweep must still run the unit pass after a failed shard so one run reports every failure"
 [[ ! -e "$REPO/back-end/coverage/tmp-merged" ]] || fail "merge dir blocks the next run"
 ls "$REPO"/.context/test-runs/backend-coverage-merged-failed-*/raw-v8/coverage-shard-2.json >/dev/null 2>&1 ||
   fail "passing shard's raw coverage was not archived"
@@ -139,6 +194,8 @@ elapsed=$((SECONDS - started))
 grep -q 'priority=code-preview,user-ui' "$TMP/rec/shard-1.env" || fail "priority domains not exported: $(cat "$TMP/rec/shard-1.env")"
 grep -q 'abort=1' "$TMP/rec/shard-2.env" || fail "abort-on-repeat not exported"
 grep -q terminated "$TMP/rec/shard-2.env" || fail "sibling shard was not stopped"
+[[ ! -e "$TMP/rec/shard-units.env" ]] || fail "a failed-first abort must skip the unit pass"
+grep -q 'the unit pass is skipped' "$TMP/out3" || fail "the skipped unit pass must be announced: $(cat "$TMP/out3")"
 
 # 4. Real runner, fake domains. `writer` is an ordinary pool domain and
 #    `admin-health` is a real late-exclusive (whole-DB aggregate) name; both get
@@ -280,6 +337,7 @@ resolve() {  # <shard> [url]
 [[ "$(resolve 1/2 | sed -n 1p)" == "postgresql://postgres:postgres@localhost:5432/${BASE_DB}_s1" ]] || fail "shard 1/2 must own ${BASE_DB}_s1"
 [[ "$(resolve 2/2 | sed -n 2p)" == "${BASE_DB}_s2" ]] || fail "shard 2/2 must own ${BASE_DB}_s2"
 [[ "$(resolve 1/2)" != "$(resolve 2/2)" ]] || fail "shards must never share a database"
+[[ "$(resolve units | sed -n 2p)" == "${BASE_DB}_s0" ]] || fail "the unit pass must own ${BASE_DB}_s0 (shards are numbered from 1)"
 resolve 3/2 >/dev/null 2>&1 && fail "shard index above count must be refused"
 resolve 1/2 "postgresql://postgres:postgres@localhost:5432/${BASE_DB}_s1" >/dev/null 2>&1 && fail "an already derived shard URL is not the prepared base"
 resolve 1/2 "postgresql://postgres:postgres@localhost:5432/victoria_deploy_other" >/dev/null 2>&1 && fail "another worktree's database must be refused"
@@ -315,9 +373,14 @@ grep -q '_s\[0-9\]' "$ROOT_DIR/scripts/prepare-deploy-worktree.sh" || fail "prep
 # (hermetic: a /deploy shell exports ROSE_DEPLOY_WORKTREE* for its own worktree; clear them for the generic case)
 [[ "$(env -u ROSE_DEPLOY_WORKTREE -u ROSE_DEPLOY_WORKTREE_PATH BACKEND_COVERAGE_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/victoria_myws node "$HELPER" myws "$WT" 2/3 | sed -n 2p)" == "victoria_myws_s2" ]] \
   || fail "generic workspace shards derive victoria_<ws>_s<i>"
+[[ "$(env -u ROSE_DEPLOY_WORKTREE -u ROSE_DEPLOY_WORKTREE_PATH BACKEND_COVERAGE_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/victoria_myws node "$HELPER" myws "$WT" units | sed -n 2p)" == "victoria_myws_s0" ]] \
+  || fail "the generic unit pass derives victoria_<ws>_s0"
 # run-coverage.sh binds to the helper and no longer refuses shards with a prepared URL.
 RC="$ROOT_DIR/back-end/scripts/run-coverage.sh"
-grep -q 'coverage-database-url.mjs" "\$WORKSPACE_HINT" "\$ROOT_DIR" "\$COVERAGE_SHARD"' "$RC" || fail "run-coverage.sh must resolve the prepared URL per shard through the helper"
+grep -q 'coverage-database-url.mjs" "\$WORKSPACE_HINT" "\$ROOT_DIR" "\$COVERAGE_DB_TOKEN"' "$RC" || fail "run-coverage.sh must resolve the prepared URL per shard (or unit pass) through the helper"
+grep -q 'COVERAGE_DB_TOKEN="units"' "$RC" && grep -q 'SHARD_DB_SUFFIX="_s0"' "$RC" || fail "run-coverage.sh must give the unit pass the _s0 database on both database paths"
+grep -q 'BACKEND_COVERAGE_SKIP_UNITS=1 \\' "$ROOT_DIR/back-end/scripts/run-coverage-sharded.sh" || fail "run-coverage-sharded.sh must launch blackbox-only shards"
+grep -q 'BACKEND_COVERAGE_UNIT_PASS=1' "$ROOT_DIR/back-end/scripts/run-coverage-sharded.sh" || fail "run-coverage-sharded.sh must run the dedicated unit pass"
 grep -q 'rm -f "\$BACKEND_DIR"/coverage/blackbox-run-shard\*/summary.json' "$ROOT_DIR/back-end/scripts/run-coverage-sharded.sh" || fail "run-coverage-sharded.sh must drop retained shard summaries before starting shards"
 grep -q 'Coverage shards need one prepared database each' "$RC" && fail "run-coverage.sh must not refuse shards on the prepared-URL path"
 grep -q 'ENSURE_SYSTEM_DB_NAME="\$COVERAGE_SHARD_DB_NAME"' "$RC" || fail "a derived shard database must be created through ensure_workspace_system_db"

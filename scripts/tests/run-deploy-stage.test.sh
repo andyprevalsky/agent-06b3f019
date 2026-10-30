@@ -98,6 +98,32 @@ for _ in 1 2; do
     fi
 done
 [ "$(wc -l < "$failed_counter" | tr -d ' ')" = 2 ] || fail "failed gate was reused"
+# Every pass is cached, so a standalone run (no --reuse-passed: a first manual
+# gate, or an inner stage a lane launches) is reusable by a later
+# --reuse-passed run of the identical command; only the lookup is opt-in.
+standalone_counter="$TEST_ROOT/reuse-standalone-counter"
+reuse_stage standalone -- bash -c 'printf "run\n" >> "$1"' _ "$standalone_counter" >"$TEST_ROOT/standalone-first.out"
+grep -q "reused passed deploy stage" "$TEST_ROOT/standalone-first.out" && fail "a run without --reuse-passed must never reuse"
+reuse_stage standalone --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$standalone_counter" >"$TEST_ROOT/standalone.out"
+[ "$(wc -l < "$standalone_counter" | tr -d ' ')" = 1 ] || fail "a pass recorded without --reuse-passed was not reusable"
+grep -q "reused passed deploy stage: standalone (exact worktree + command)" "$TEST_ROOT/standalone.out" \
+    || fail "standalone reuse was not disclosed with its scope"
+# Process identity is not a deploy input: systemd stamps a fresh
+# INVOCATION_ID/JOURNAL_STREAM/SYSTEMD_EXEC_PID on every transient unit and the
+# terminal its own geometry, so a lane relaunched as a new unit must still match
+# its own pass, while a changed gate input such as DEPLOY_GATE_OVERRIDES must not.
+identity_counter="$TEST_ROOT/reuse-identity-counter"
+INVOCATION_ID=0123abcd JOURNAL_STREAM=8:1 SYSTEMD_EXEC_PID=11 COLUMNS=80 LISTEN_PID=11 \
+    reuse_stage identity --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$identity_counter" >/dev/null
+INVOCATION_ID=4567ef01 JOURNAL_STREAM=8:2 SYSTEMD_EXEC_PID=22 COLUMNS=120 LISTEN_PID=22 \
+    reuse_stage identity --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$identity_counter" >"$TEST_ROOT/identity.out"
+[ "$(wc -l < "$identity_counter" | tr -d ' ')" = 1 ] \
+    || fail "a new systemd unit identity defeated reuse of an identical pass"
+grep -q "reused passed deploy stage" "$TEST_ROOT/identity.out" \
+    || fail "identity-only relaunch was not disclosed as reuse"
+DEPLOY_GATE_OVERRIDES=fixture:changed \
+    reuse_stage identity --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$identity_counter" >/dev/null
+[ "$(wc -l < "$identity_counter" | tr -d ' ')" = 2 ] || fail "a changed gate input reused stale evidence"
 reuse_stage --finish >/dev/null
 
 # A failed finalize must remain non-zero even though summary rendering succeeds,
@@ -222,12 +248,13 @@ PY
 # is never edited.
 LANE_REPO="$TEST_ROOT/lane-repo"
 mkdir -p "$LANE_REPO/scripts" "$LANE_REPO/back-end/src" "$LANE_REPO/front-end/src" \
-    "$LANE_REPO/agents/benchmarks" "$LANE_REPO/agents/tools" "$LANE_REPO/shared/contract" \
+    "$LANE_REPO/agents/benchmarks/history" "$LANE_REPO/agents/tools" "$LANE_REPO/shared/contract" \
     "$LANE_REPO/mac-app/main" "$LANE_REPO/docs"
 cp "$ROOT_DIR/scripts/run-deploy-stage" "$ROOT_DIR/scripts/run_deploy_stage.py" \
     "$ROOT_DIR/scripts/deploy_stage.py" "$ROOT_DIR/scripts/factory_metadata.py" \
     "$ROOT_DIR/scripts/factory_detail.py" "$LANE_REPO/scripts/"
 for file in package.json back-end/src/server.ts front-end/src/app.ts agents/benchmarks/tasks.json \
+    agents/benchmarks/history/task_attempts.jsonl \
     agents/tools/base.py shared/contract/fixtures.json mac-app/main/index.ts docs/guide.txt scripts/helper.sh; do
     printf 'original %s\n' "$file" > "$LANE_REPO/$file"
 done
@@ -236,10 +263,29 @@ git -C "$LANE_REPO" init -q
 git -C "$LANE_REPO" add -A
 git -C "$LANE_REPO" -c user.name=t -c user.email=t@t commit -qm fixture
 lane_counter="$TEST_ROOT/lane-counter"
+# The ledger-free lanes drop the append-only ledgers from their fingerprint
+# only when their argv is the lane's real command, so the fixture lanes carry
+# that command's marker as a trailing argument (lint-affected over the deploy
+# lint list, tsc, the back-end structural suite). lane_stage_generic runs the
+# same stage name with an arbitrary command and must keep the exact-worktree
+# fingerprint.
+lane_marker() {
+    case "$1" in
+        eslint) printf 'scripts/lint-affected.mjs' ;;
+        typescript) printf 'tsc' ;;
+        backend-structural) printf 'test:structural' ;;
+        *) printf 'generic' ;;
+    esac
+}
 lane_stage() {
     (cd "$LANE_REPO" && DEPLOY_RUN_ROOT="$LANE_REPO/.context/deploy-runs" \
         bash scripts/run-deploy-stage "$1" --reuse-passed -- \
-        bash -c 'printf "%s\n" "$1" >> "$2"' _ "$1" "$lane_counter" >/dev/null)
+        bash -c 'printf "%s\n" "$1" >> "$2"' _ "$1" "$lane_counter" "$(lane_marker "$1")" >/dev/null)
+}
+lane_stage_generic() {
+    (cd "$LANE_REPO" && DEPLOY_RUN_ROOT="$LANE_REPO/.context/deploy-runs" \
+        bash scripts/run-deploy-stage "$1" --reuse-passed -- \
+        bash -c 'printf "%s-generic\n" "$1" >> "$2"' _ "$1" "$lane_counter" >/dev/null)
 }
 lane_runs() { grep -cx "$1" "$lane_counter" 2>/dev/null || true; }
 expect_lane() {
@@ -294,5 +340,43 @@ expect_lane frontend-coverage-blackbox $((fe + 5)) "adding a front-end file"
 expect_lane frontend-coverage-blackbox $((fe + 5)) "no change after the add"
 git -C "$LANE_REPO" mv front-end/src/moved.ts docs/moved.ts
 expect_lane frontend-coverage-blackbox $((fe + 6)) "a staged rename of a front-end file out of scope"
+
+# Append-only benchmark ledgers (agents/benchmarks/history/*, written by the
+# smoke lane and local benchmark runs while the other gates run) invalidate
+# only the lanes that read them: backend-coverage-blackbox
+# (domains/benchmarks/config.ts reads task_attempts.jsonl) and the scripts/
+# tests gates rerun, while eslint, typescript and backend-structural keep
+# their pass. A tracked ledger row, an untracked ledger file and an ignored
+# .context write are all exercised; a real source edit still invalidates.
+for stage in eslint typescript backend-structural backend-coverage-blackbox deploy-command-structural; do
+    lane_stage "$stage"
+done
+ts=$(lane_runs typescript); bs=$(lane_runs backend-structural); cov=$(lane_runs backend-coverage-blackbox)
+dcs=$(lane_runs deploy-command-structural)
+lane_stage_generic eslint
+generic_before=$(lane_runs eslint-generic)
+printf '{"task":"x","status":"passed"}\n' >> "$LANE_REPO/agents/benchmarks/history/task_attempts.jsonl"
+expect_lane eslint 1 "a dirty tracked ledger row"
+lane_stage_generic eslint
+[ "$(lane_runs eslint-generic)" = $((generic_before + 1)) ] \
+    || fail "a generic command under the eslint lane name kept its pass across a ledger row (expected an exact-worktree re-run)"
+expect_lane typescript "$ts" "a dirty tracked ledger row"
+expect_lane backend-structural "$bs" "a dirty tracked ledger row"
+expect_lane backend-coverage-blackbox $((cov + 1)) "a dirty tracked ledger row (the backend reads task_attempts.jsonl)"
+expect_lane deploy-command-structural $((dcs + 1)) "a dirty tracked ledger row (scripts/tests read the ledgers)"
+printf '{"task":"y"}\n' > "$LANE_REPO/agents/benchmarks/history/span_durations.jsonl"
+expect_lane eslint 1 "an untracked ledger file"
+expect_lane typescript "$ts" "an untracked ledger file"
+expect_lane backend-coverage-blackbox $((cov + 2)) "an untracked ledger file"
+mkdir -p "$LANE_REPO/.context/deploy-durations"
+printf '{}\n' > "$LANE_REPO/.context/deploy-durations/pipeline-lanes.json"
+expect_lane eslint 1 "an ignored .context write"
+expect_lane backend-coverage-blackbox $((cov + 2)) "an ignored .context write"
+printf 'fix\n' >> "$LANE_REPO/back-end/src/server.ts"
+expect_lane eslint 2 "a back-end edit"
+expect_lane typescript $((ts + 1)) "a back-end edit"
+expect_lane backend-structural $((bs + 1)) "a back-end edit"
+git -C "$LANE_REPO" -c user.name=t -c user.email=t@t commit -qam "back-end edit"
+expect_lane eslint 3 "committing the back-end edit (ledger-free lanes still hash HEAD)"
 
 echo "run-deploy-stage regression tests passed"

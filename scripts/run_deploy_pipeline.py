@@ -572,22 +572,31 @@ def _median(values: list[float]) -> float:
     return ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2.0
 
 
+def _passed(samples: list[dict] | None) -> list[dict]:
+    return [sample for sample in samples or [] if sample.get("status") == "passed"]
+
+
 def lane_estimates(lanes: list[Lane], ledger: dict[str, list[dict]] | None = None,
                    stage_samples: dict[str, list[dict]] | None = None) -> dict[str, dict]:
     """Per-lane duration estimate and where it came from.
 
-    Ledger samples win, then stage receipts, then the safe default table; a
-    lane known nowhere is ``unknown`` and scheduled as heavy (never quick).
-    ``isolated_s`` is the median of samples that ran with nothing else, when
-    any exist; ``seconds`` is the median of every sample.
+    Passed ledger samples win, then passed stage receipts, then the safe
+    default table; a lane known nowhere is ``unknown`` and scheduled as heavy
+    (never quick). Only a pass measures a lane: a lane that FAILED in 2.5 s (a
+    stale-Prisma refusal) was re-phased as quick ahead of the exclusive lane,
+    and a 4.9 s failed live-probes sample deadlocked attempt 7 (2026-10-30).
+    Failed samples stay in the ledger as telemetry only. ``isolated_s`` is the
+    median of passed samples that ran with nothing else, when any exist;
+    ``seconds`` is the median of every passed sample.
     """
     ledger = load_lane_durations() if ledger is None else ledger
     stage_samples = {} if stage_samples is None else stage_samples
     estimates: dict[str, dict] = {}
     for lane in lanes:
-        samples = ledger.get(lane.name) or stage_samples.get(lane.name) or []
+        passed_ledger = _passed(ledger.get(lane.name))
+        samples = passed_ledger or _passed(stage_samples.get(lane.name))
         if samples:
-            source = "ledger" if ledger.get(lane.name) else "stage-receipts"
+            source = "ledger" if passed_ledger else "stage-receipts"
             walls = [float(sample["wall_s"]) for sample in samples]
             alone = [float(s["wall_s"]) for s in samples if int(s.get("concurrent") or 1) <= 1]
             estimates[lane.name] = {"seconds": round(_median(walls), 1), "samples": len(samples), "source": source,
@@ -600,25 +609,91 @@ def lane_estimates(lanes: list[Lane], ledger: dict[str, list[dict]] | None = Non
     return estimates
 
 
+def assert_acyclic(after: dict[str, list[str]]) -> None:
+    """Fail loudly on a dependency that never starts: an unknown lane name or a
+    cycle. The admission loop would otherwise idle forever with every lane
+    pending (attempt 7, 2026-10-30)."""
+    for name, dependencies in after.items():
+        unknown = sorted(set(dependencies) - set(after))
+        if unknown:
+            raise ValueError(f"lane {name!r} waits for unknown lane(s) {', '.join(unknown)}")
+    state: dict[str, int] = {}  # 1 visiting, 2 done
+    stack: list[str] = []
+
+    def visit(name: str) -> None:
+        if state.get(name) == 2:
+            return
+        if state.get(name) == 1:
+            cycle = stack[stack.index(name):] + [name]
+            raise ValueError(f"dependency cycle: {' -> '.join(cycle)}")
+        state[name] = 1
+        stack.append(name)
+        for dependency in after[name]:
+            visit(dependency)
+        stack.pop()
+        state[name] = 2
+
+    for name in after:
+        visit(name)
+
+
+def _closed_subset(candidates: list[Lane], explicit: dict[str, list[str]], placed: set[str]) -> list[Lane]:
+    """The candidates whose explicit dependencies all lie in earlier phases or
+    in the same phase (an edge inside a phase is honoured by admission; an
+    edge to a later phase would be a cycle with the implied phase edges)."""
+    chosen = {lane.name for lane in candidates}
+    while True:
+        dropped = {name for name in chosen
+                   if any(d not in placed and d not in chosen for d in explicit[name])}
+        if not dropped:
+            return [lane for lane in candidates if lane.name in chosen]
+        chosen -= dropped
+
+
 def schedule_phases(lanes: list[Lane], estimates: dict[str, dict]) -> list[dict]:
     """Ordered Group 3 phases: quick lanes, each exclusive lane alone, then the
-    rest (longest recorded first). Other groups are not phased."""
+    rest (longest recorded first). Other groups are not phased.
+
+    Phases are layered over the plan's own ``after`` DAG: a lane joins a phase
+    only once every explicit dependency is in an earlier phase or in that same
+    phase, so the implied edges (phase k waits for phases < k) can never form
+    a cycle with an explicit edge. A quick lane that waits for the exclusive
+    lane therefore runs with the coverage lanes instead of deadlocking it.
+    """
     group3 = [lane for lane in lanes if lane.group == "3"]
+    names = {lane.name for lane in group3}
+    explicit = {lane.name: [d for d in lane.after if d in names] for lane in group3}
+    assert_acyclic(explicit)
 
     def seconds(lane: Lane) -> float:
         value = (estimates.get(lane.name) or {}).get("seconds")
         return float("inf") if value is None else float(value)
 
-    quick = sorted((l for l in group3 if not l.exclusive and seconds(l) <= QUICK_LANE_SECONDS), key=seconds)
-    exclusive = sorted((l for l in group3 if l.exclusive), key=seconds, reverse=True)
-    heavy = sorted((l for l in group3 if not l.exclusive and seconds(l) > QUICK_LANE_SECONDS), key=seconds, reverse=True)
     phases: list[dict] = []
-    if quick:
-        phases.append({"phase": "quick", "lanes": [l.name for l in quick]})
-    for lane in exclusive:
-        phases.append({"phase": "exclusive", "lanes": [lane.name]})
-    if heavy:
-        phases.append({"phase": "coverage", "lanes": [l.name for l in heavy]})
+    placed: set[str] = set()
+    remaining = list(group3)
+    while remaining:
+        emitted: list[Lane] = []
+        if not phases:
+            quick = [l for l in remaining if not l.exclusive and seconds(l) <= QUICK_LANE_SECONDS]
+            emitted = sorted(_closed_subset(quick, explicit, placed), key=seconds)
+            if emitted:
+                phases.append({"phase": "quick", "lanes": [l.name for l in emitted]})
+        if not emitted:
+            ready_exclusive = sorted((l for l in remaining if l.exclusive and all(d in placed for d in explicit[l.name])),
+                                     key=seconds, reverse=True)
+            if ready_exclusive:
+                emitted = [ready_exclusive[0]]
+                phases.append({"phase": "exclusive", "lanes": [emitted[0].name]})
+        if not emitted:
+            heavy = [l for l in remaining if not l.exclusive]
+            emitted = sorted(_closed_subset(heavy, explicit, placed), key=seconds, reverse=True)
+            if emitted:
+                phases.append({"phase": "coverage", "lanes": [l.name for l in emitted]})
+        if not emitted:  # unreachable after assert_acyclic; never idle silently
+            raise ValueError(f"no schedulable Group 3 lane among {', '.join(sorted(l.name for l in remaining))}")
+        placed.update(lane.name for lane in emitted)
+        remaining = [lane for lane in remaining if lane.name not in placed]
     return phases
 
 
@@ -636,6 +711,8 @@ def implied_dependencies(phases: list[dict]) -> dict[str, list[str]]:
 def apply_schedule(lanes: list[Lane], payload: dict) -> dict:
     """Add the phase-implied ``after`` edges to ``lanes``; return the receipt record."""
     policy = str((payload.get("schedule") or {}).get("policy") or SCHEDULE_PHASED)
+    # The plan's own edges must be satisfiable before any lane starts.
+    assert_acyclic({lane.name: list(lane.after) for lane in lanes})
     if policy == SCHEDULE_LEGACY:
         return {"policy": SCHEDULE_LEGACY, "phases": [], "estimates": {}, "implied_after": {}}
     if policy != SCHEDULE_PHASED:
@@ -649,6 +726,8 @@ def apply_schedule(lanes: list[Lane], payload: dict) -> dict:
         for dependency in implied.get(lane.name, []):
             if dependency != lane.name and dependency not in lane.after:
                 lane.after.append(dependency)
+    # Explicit plus implied edges together: a cycle here would idle the attempt.
+    assert_acyclic({lane.name: list(lane.after) for lane in lanes})
     return {"policy": SCHEDULE_PHASED, "phases": phases, "estimates": estimates, "implied_after": implied}
 
 

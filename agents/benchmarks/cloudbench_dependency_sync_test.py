@@ -9699,7 +9699,12 @@ def test_status_recovery_read_closes_descriptor_on_response_failure(
         return descriptor
 
     def fail_fstat(descriptor):
-        raise OSError("descriptor metadata read failed")
+        # Only the served descriptor fails; ``module.os`` is the global os
+        # module, and pytest >= 9.2 calls os.fstat on its own capture
+        # descriptors while this patch is active.
+        if descriptor == captured.get("descriptor"):
+            raise OSError("descriptor metadata read failed")
+        return real_fstat(descriptor)
 
     monkeypatch.setattr(module.os, "open", track_open)
     if failure == "fstat":

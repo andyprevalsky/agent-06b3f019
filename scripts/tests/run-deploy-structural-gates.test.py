@@ -1147,6 +1147,105 @@ class LinuxGateExportIdleBoundTests(unittest.TestCase):
             self.assertNotIn("while :; do sleep 60; done", self._guest_tail(timeout_s))
 
 
+# Fixture harness for scripts/cloudbench-controller-export.py: bound /proc
+# enumeration to the fake host's native process namespace (the harness, the
+# unittest process and its other children). Birth ticks, cwd and fd
+# observations remain the real kernel values; the production guest collector
+# is root and observes every host UID. Definitions only; the activation below
+# patches Path.iterdir and runs the helper's main().
+CONTROLLER_EXPORT_HARNESS_NAMESPACE = """from pathlib import Path
+import os,sys,traceback
+original=Path.iterdir
+def namespace(path, original=original, getpid=os.getpid, getppid=os.getppid, getuid=os.getuid):
+    if str(path)!='/proc':
+        return original(path)
+    selected=[]
+    for process in original(path):
+        if not process.name.isdecimal(): continue
+        try:
+            if process.stat().st_uid!=getuid(): continue
+            status=(process/'stat').read_text()
+        except OSError:
+            # A foreign process that exited or changed credentials between the
+            # listing and the read (ENOENT/ESRCH/EACCES, routine on a loaded
+            # box) is not part of the fake host; only FileNotFoundError was
+            # tolerated before and anything else became a bare exit 75.
+            continue
+        fields=status[status.rfind(')')+2:].split()
+        if int(process.name) in (getpid(),getppid()) or int(fields[1])==getppid(): selected.append(process)
+    return iter(selected)
+"""
+CONTROLLER_EXPORT_HARNESS_RUN = """Path.iterdir=namespace
+helper=Path(sys.argv[1]);sys.argv=sys.argv[1:]
+subject={'__name__':'fake_native_host','__file__':str(helper)}
+exec(compile(helper.read_bytes(),str(helper),'exec'),subject)
+subject['record_temp_roots']=lambda repo,common:[str(repo.parent/'owned-temp-state')]
+subject['EXPORT_WRITER_DRAIN_SECONDS']=2  # these writers persist; keep the bounded drain short
+try: raise SystemExit(subject['main']())
+except (OSError,ValueError,KeyError):
+    # Same exit as the helper's __main__, but with the whole traceback: a
+    # structural-runner flake was a bare exit 75 with empty stderr (2026-10-30).
+    traceback.print_exc()
+    raise SystemExit(75)
+"""
+CONTROLLER_EXPORT_HARNESS = CONTROLLER_EXPORT_HARNESS_NAMESPACE + CONTROLLER_EXPORT_HARNESS_RUN
+
+
+class LinuxControllerExportHarnessTests(unittest.TestCase):
+    """The fixture harness itself: a flake inside it must be diagnosable and a
+    foreign process racing the /proc scan must not become a failure."""
+
+    def _namespace(self):
+        scope: dict = {}
+        exec(CONTROLLER_EXPORT_HARNESS_NAMESPACE, scope)  # definitions only; Path.iterdir untouched
+        self.assertIs(Path.iterdir, scope["original"])
+        return scope["namespace"]
+
+    @staticmethod
+    def _entry(name, uid=1000, ppid=50, stat_error=None, read_error=None):
+        class Entry:
+            def stat(self):
+                if stat_error: raise stat_error
+                return type("Stat", (), {"st_uid": uid})()
+            def __truediv__(self, child):
+                def read_text():
+                    if read_error: raise read_error
+                    return f"{name} (fixture) S {ppid} 1 1 0 -1\n"
+                return type("Leaf", (), {"read_text": staticmethod(read_text)})()
+        entry = Entry(); entry.name = name
+        return entry
+
+    def test_namespace_keeps_own_processes_and_skips_vanished_or_unreadable_foreign_ones(self):
+        namespace = self._namespace()
+        entries = [
+            self._entry("100"),                                   # the harness itself
+            self._entry("50", ppid=1),                            # the unittest process (parent)
+            self._entry("200"),                                   # a sibling child of the parent
+            self._entry("300", ppid=1),                           # foreign same-uid process
+            self._entry("400", stat_error=ProcessLookupError(3, "No such process")),
+            self._entry("401", stat_error=FileNotFoundError(2, "No such file")),
+            self._entry("500", read_error=PermissionError(13, "Permission denied")),
+            self._entry("600", uid=0),                            # another uid
+            self._entry("self"),                                  # /proc/self
+        ]
+        selected = list(namespace(Path("/proc"), original=lambda path: iter(entries),
+                                  getpid=lambda: 100, getppid=lambda: 50, getuid=lambda: 1000))
+        self.assertEqual([entry.name for entry in selected], ["100", "50", "200"])
+        other = Path(tempfile.gettempdir())
+        self.assertEqual(sorted(str(p) for p in namespace(other, original=lambda path: iter([other / "x"]))),
+                         [str(other / "x")], "non-/proc listings pass through")
+
+    def test_harness_reports_the_helper_exception_before_exit_75(self):
+        with tempfile.TemporaryDirectory(prefix="controller-export-harness-") as temporary:
+            helper = Path(temporary) / "fake-helper.py"
+            helper.write_text("def main():\n    raise ValueError('fixture boom')\n")
+            result = subprocess.run([sys.executable, "-c", CONTROLLER_EXPORT_HARNESS, str(helper), "export"],
+                                    text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 75)
+        self.assertIn("ValueError: fixture boom", result.stderr)
+        self.assertIn("fake-helper.py", result.stderr, "the traceback names the failing file")
+
+
 class LinuxControllerExportTests(unittest.TestCase):
     def _fixture(self):
         temporary = tempfile.TemporaryDirectory(prefix="controller-original-export-")
@@ -1173,33 +1272,7 @@ class LinuxControllerExportTests(unittest.TestCase):
         return root,repo,helper,record,reserve
 
     def _call(self, helper, *args, expected=0):
-        # Bound /proc enumeration to the fake host's native process namespace.
-        # Birth ticks, cwd and fd observations remain the real kernel values;
-        # the production guest collector is root and observes every host UID.
-        harness = """from pathlib import Path
-import os,sys
-original=Path.iterdir
-def namespace(path):
-    if str(path)=='/proc':
-        selected=[]
-        for process in original(path):
-            try:
-                if process.name.isdecimal() and process.stat().st_uid==os.getuid():
-                    status=Path(str(process)+'/stat').read_text();fields=status[status.rfind(')')+2:].split()
-                    if int(process.name) in (os.getpid(),os.getppid()) or int(fields[1])==os.getppid(): selected.append(process)
-            except FileNotFoundError: continue
-        return iter(selected)
-    return original(path)
-Path.iterdir=namespace
-helper=Path(sys.argv[1]);sys.argv=sys.argv[1:]
-subject={'__name__':'fake_native_host','__file__':str(helper)}
-exec(compile(helper.read_bytes(),str(helper),'exec'),subject)
-subject['record_temp_roots']=lambda repo,common:[str(repo.parent/'owned-temp-state')]
-subject['EXPORT_WRITER_DRAIN_SECONDS']=2  # these writers persist; keep the bounded drain short
-try: raise SystemExit(subject['main']())
-except (OSError,ValueError,KeyError): raise SystemExit(75)
-"""
-        result=subprocess.run([sys.executable,"-c",harness,str(helper),*[str(a) for a in args]],text=True,capture_output=True,timeout=30)
+        result=subprocess.run([sys.executable,"-c",CONTROLLER_EXPORT_HARNESS,str(helper),*[str(a) for a in args]],text=True,capture_output=True,timeout=30)
         self.assertEqual(result.returncode,expected,result.stderr)
         return result
 
