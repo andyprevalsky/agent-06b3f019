@@ -2,11 +2,11 @@ CREATE TABLE "ProjectFolder" (
   "id" TEXT NOT NULL,
   "name" TEXT NOT NULL,
   "projectId" TEXT NOT NULL,
-  CONSTRAINT "ProjectFolder_pkey" PRIMARY KEY ("id")
+  CONSTRAINT "ProjectFolder_pkey" PRIMARY KEY ("id"),
+  CONSTRAINT "ProjectFolder_projectId_fkey" FOREIGN KEY ("projectId")
+    REFERENCES "Project"("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 CREATE UNIQUE INDEX "ProjectFolder_projectId_name_key" ON "ProjectFolder"("projectId", "name");
-ALTER TABLE "ProjectFolder" ADD CONSTRAINT "ProjectFolder_projectId_fkey"
-  FOREIGN KEY ("projectId") REFERENCES "Project"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "Agent" ADD COLUMN "folderId" TEXT;
 CREATE INDEX "Agent_folderId_idx" ON "Agent"("folderId");
 -- The existing project->agent SET NULL and the new project->folder CASCADE can
