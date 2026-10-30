@@ -23,6 +23,10 @@
 #      2026-10-30).
 set -euo pipefail
 
+# This fixture owns its heap inputs: the default scenario starts without caller
+# overrides; the custom-options/heap case below supplies both explicitly.
+unset NODE_OPTIONS BACKEND_COVERAGE_REPORT_HEAP_MB
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/backend-coverage-sharded.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
@@ -301,20 +305,57 @@ grep -q '^durations=/explicit/summary.json$' "$TMP/rec/shard-1.env" || fail "exp
 # 6. The real shard planner packs by simulated shard wall: with one recorded
 #    250 s domain every blackbox domain is still planned exactly once and the
 #    heavy domain's shard takes fewer siblings than the other shard.
-PLAN="$ROOT_DIR/back-end/scripts/coverage-shard-plan.mjs"
-(cd "$ROOT_DIR/back-end" && node "$PLAN" 1/2 "$LEDGER" >"$TMP/p1" && node "$PLAN" 2/2 "$LEDGER" >"$TMP/p2" &&
-  node "$PLAN" 1/2 >"$TMP/q1" && node "$PLAN" 2/2 >"$TMP/q2") || fail "shard planner failed"
+# Keep this simulation's inventory fixed: production domains and their serial
+# phases can grow without changing the planner's wall-time contract. Retain the
+# real runner's phase metadata and exercise the real planner against that input.
+PLAN_REPO="$TMP/planner"
+mkdir -p "$PLAN_REPO/scripts" "$PLAN_REPO/src/tests/blackbox"
+cp "$ROOT_DIR/back-end/scripts/coverage-shard-plan.mjs" "$PLAN_REPO/scripts/"
+cp "$ROOT_DIR/back-end/src/tests/blackbox/run.ts" "$PLAN_REPO/src/tests/blackbox/"
+for domain in code-preview health user-ui fixture-pool-{01..12}; do
+  : >"$PLAN_REPO/src/tests/blackbox/$domain.blackbox.ts"
+done
+PLAN="$PLAN_REPO/scripts/coverage-shard-plan.mjs"
+plan() { BLACKBOX_TEST_CONCURRENCY=4 node "$PLAN" "$@"; }
+(plan 1/2 "$LEDGER" >"$TMP/p1" && plan 2/2 "$LEDGER" >"$TMP/p2" &&
+  plan 1/2 >"$TMP/q1" && plan 2/2 >"$TMP/q2") || fail "shard planner failed"
 node -e '
   const fs = require("fs");
   const read = (p) => fs.readFileSync(p, "utf8").trim().split(",").filter(Boolean);
   const [p1, p2, q1, q2] = process.argv.slice(1).map(read);
   const all = [...q1, ...q2].sort();
+  const expected = ["code-preview", "health", "user-ui",
+    ...Array.from({ length: 12 }, (_, i) => `fixture-pool-${String(i + 1).padStart(2, "0")}`)].sort();
+  if (JSON.stringify(all) !== JSON.stringify(expected)) { console.error("synthetic inventory differs"); process.exit(5); }
   const planned = [...p1, ...p2].sort();
   if (JSON.stringify(all) !== JSON.stringify(planned)) { console.error("planned set differs"); process.exit(1); }
   if (new Set(planned).size !== planned.length) { console.error("a domain was planned twice"); process.exit(2); }
   const [heavy, light] = p1.includes("code-preview") ? [p1, p2] : [p2, p1];
   if (heavy.length >= light.length) { console.error("heavy shard not relieved", heavy.length, light.length); process.exit(3); }
+  // code-preview is serial (250 s). The other 14 domains need at most
+  // 4 * 30 s on four workers, so adding any pool item to its shard makes
+  // the projected wall worse. Ignoring the recorded weight must fail here.
+  if (heavy.length !== 1) { console.error("heavy serial shard received parallel work", heavy); process.exit(4); }
 ' "$TMP/p1" "$TMP/p2" "$TMP/q1" "$TMP/q2" || fail "wall-aware shard plan is wrong"
+
+# Keep real-inventory coverage too: every eligible production domain must be
+# planned exactly once with and without duration history. Its changing mixture
+# of parallel and exclusive domains implies no fixed shard-cardinality ratio.
+REAL_PLAN="$ROOT_DIR/back-end/scripts/coverage-shard-plan.mjs"
+(node "$REAL_PLAN" 1/2 "$LEDGER" >"$TMP/real-p1" && node "$REAL_PLAN" 2/2 "$LEDGER" >"$TMP/real-p2" &&
+  node "$REAL_PLAN" 1/2 >"$TMP/real-q1" && node "$REAL_PLAN" 2/2 >"$TMP/real-q2") || fail "real-inventory shard planner failed"
+node -e '
+  const fs = require("fs");
+  const skip = new Set((process.env.BLACKBOX_TEST_SKIP_DOMAINS ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+  const expected = fs.readdirSync(process.argv[1]).filter((f) => f.endsWith(".blackbox.ts"))
+    .map((f) => f.replace(/\.blackbox\.ts$/, "")).filter((d) => !skip.has(d)).sort();
+  const read = (p) => fs.readFileSync(p, "utf8").trim().split(",").filter(Boolean);
+  const [p1, p2, q1, q2] = process.argv.slice(2).map(read);
+  for (const [label, planned] of [["weighted", [...p1, ...p2]], ["unweighted", [...q1, ...q2]]]) {
+    if (new Set(planned).size !== planned.length) { console.error(`${label}: production domain planned twice`); process.exit(1); }
+    if (JSON.stringify(planned.sort()) !== JSON.stringify(expected)) { console.error(`${label}: production inventory differs`); process.exit(2); }
+  }
+' "$ROOT_DIR/back-end/src/tests/blackbox" "$TMP/real-p1" "$TMP/real-p2" "$TMP/real-q1" "$TMP/real-q2" || fail "real-inventory shard coverage is wrong"
 
 # 7. Sharding on the isolated deploy (system-PG) path: the prepared
 #    BACKEND_COVERAGE_DATABASE_URL is the base; shard i/N owns `<base>_s<i>`
