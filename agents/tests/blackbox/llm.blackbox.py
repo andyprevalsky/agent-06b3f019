@@ -10072,11 +10072,16 @@ async def test_structured_validation_retries_exclude_only_repeated_known_candida
 
 
 async def test_structured_validation_exhausted_candidate_preserves_typed_error():
-    """A lone eligible native model may fail schema twice, without losing the typed contract."""
+    """A lone eligible native model may fail schema twice, without losing the typed contract.
+
+    rose-1-oss now carries a rescuer (qwen/qwen3.8-27b); it is excluded here so
+    kimi-k3 stays the lone eligible candidate this case is about.
+    """
     import httpx
     from typing import Literal
     from pydantic import BaseModel, Field
     from helpers.llm import call_llm_structured_streaming, LLMStructuredOutputError
+    from providers.rose.truncation import model_key
     from utils.tool_schemas import create_agent_action_model
 
     class TypedTool(BaseModel):
@@ -10137,6 +10142,7 @@ async def test_structured_validation_exhausted_candidate_preserves_typed_error()
                 call_site="test_exhausted_structured_candidate",
                 skip_cache_write=True,
                 _exclude_anthropic_family=True,
+                _skip_models=frozenset({model_key("qwen/qwen3.8-27b")}),
             )
         except Exception as error:
             failure = error
@@ -10145,6 +10151,93 @@ async def test_structured_validation_exhausted_candidate_preserves_typed_error()
     assert isinstance(failure, LLMStructuredOutputError), (
         f"Exhausted structured validation lost its typed error: {type(failure).__name__}: {failure}"
     )
+
+
+async def test_structured_validation_second_oss_candidate_rescues_after_two_invalid_replies():
+    """Two unparseable kimi-k3 replies send the third attempt to the pool's qwen rescuer, which serves.
+
+    Before rose-1-oss had a second waterfall model, the exclusion after two
+    invalid replies left no candidate and the pinned biometrics benchmark died
+    with RoseAllFailed while Azure Foundry answered deployment_disabled.
+    """
+    import httpx
+    from typing import Literal
+    from pydantic import BaseModel, Field
+    from helpers.llm import call_llm_structured_streaming, LLMStructuredOutputError
+    from utils.tool_schemas import create_agent_action_model
+
+    class TypedTool(BaseModel):
+        tool: Literal["typed_lookup"]
+        labels: list[str] = Field(min_length=1)
+
+    response_model = create_agent_action_model(["typed_lookup"], tool_registry={"typed_lookup": TypedTool})
+    requests = []
+
+    def handler(request):
+        if request.url.host != "openrouter.ai":
+            raise AssertionError(f"Unexpected route outside the existing OSS pool: {request.url.host}")
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) <= 2:
+            assert body["model"] == "moonshotai/kimi-k3"
+            valid = False
+        else:
+            assert body["model"] == "qwen/qwen3.8-27b"
+            valid = True
+        events = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": f"invalid-{len(requests)}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "typed_lookup",
+                                        "arguments": json.dumps({"labels": ["typed"]} if valid else {"labels": '["invalid-string-array"]'}),
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+        ]
+        return httpx.Response(
+            200,
+            text="\n".join("data: " + json.dumps(event) for event in events) + "\ndata: [DONE]\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    setup_mock_fn(handler)
+    failure = None
+    result = None
+    with patch.dict(
+        os.environ, {"CEREBRAS_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "AZURE_FOUNDRY_API_KEY": ""}
+    ):
+        try:
+            result, _, _ = await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "Return typed labels from the existing OSS pool."}],
+                model="rose-labs/rose-1-oss",
+                temperature=1,
+                max_tokens=128,
+                response_model=response_model,
+                on_chunk=AsyncMock(),
+                call_site="test_second_oss_candidate_rescues",
+                skip_cache_write=True,
+                _exclude_anthropic_family=True,
+            )
+        except Exception as error:
+            failure = error
+    assert failure is None, f"the qwen rescuer should have served: {type(failure).__name__}: {failure}"
+    assert [body["model"] for body in requests] == ["moonshotai/kimi-k3", "moonshotai/kimi-k3", "qwen/qwen3.8-27b"], (
+        f"expected two kimi attempts then the rescuer: {[body['model'] for body in requests]}"
+    )
+    assert result is not None and result.tool_calls[0].labels == ["typed"]
 
 
 # ---------------------------------------------------------------------------
@@ -10386,6 +10479,10 @@ async def run_all_tests():
     await r.record_async(
         "structured_validation_exhausted_candidate_typed_error",
         test_structured_validation_exhausted_candidate_preserves_typed_error,
+    )
+    await r.record_async(
+        "structured_validation_second_oss_candidate_rescues",
+        test_structured_validation_second_oss_candidate_rescues_after_two_invalid_replies,
     )
     await r.record_async(
         "structured_validation_candidate_eligibility",

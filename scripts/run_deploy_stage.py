@@ -85,8 +85,11 @@ _DOCUMENTATION_ONLY = (
     "observability/",
 )
 _MAC_EXCLUDED = ("back-end/", "agents/", *_DOCUMENTATION_ONLY)
-# Append-only benchmark ledgers the smoke lane and local benchmark runs write
-# while the other gates run (agents/benchmarks/history/*.jsonl). The pipeline's
+# Append-only benchmark ledgers local benchmark runs write while the other
+# gates run (agents/benchmarks/history/*.jsonl). Inside a deploy the smoke lane
+# parks its rows under .context instead (run-predeploy-local,
+# BENCHMARK_HISTORY_PARK_DIR), so only other local benchmark runs still dirty
+# them. The pipeline's
 # source digest already ignores them. Only lanes whose suites cannot read them
 # drop them from the exact fingerprint: eslint lints the listed TypeScript,
 # tsc type-checks back-end/, and the back-end structural suite reads sources,

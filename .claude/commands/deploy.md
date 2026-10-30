@@ -669,7 +669,23 @@ of re-running. Two lane groups narrow that input: `eslint`, `typescript` and
 ledgers (tracked diff and untracked files) when they run their real command (lint-affected over the
 deploy lint list, `tsc`, `npm run test:structural`), and the front-end and mac
 lanes (`_LANE_SCOPES`) hash only their in-scope file content instead of HEAD.
-Every reuse line names the scope it matched.
+Every reuse line names the scope it matched. The local smoke lane itself no
+longer dirties those ledgers while it runs: inside a deploy
+(`ROSE_DEPLOY_WORKTREE=1`, or `PREDEPLOY_PARK_LEDGERS=1`)
+`scripts/run-predeploy-local` parks the attempt, duration and span rows its
+run records under `.context/deploy-ledger-park/` (`BENCHMARK_HISTORY_PARK_DIR`,
+honoured by the ledger writers in `agents/benchmarks/timeout_history.py` and
+`span_history.py`; reads keep the tracked files), so its recorded pass
+fingerprint and every whole-worktree lane admitted after it stay stable across
+attempts. Publish those rows with the normal ledger step,
+`scripts/benchmark-history-latest-only.py --apply-parked <park dir> … --write`
+(the launcher prints the exact command with its park directory; the default is
+`.context/deploy-ledger-park` under the worktree, e.g.
+`python3 scripts/benchmark-history-latest-only.py --base origin/main --apply-parked "<worktree>/.context/deploy-ledger-park" --write`),
+which refuses the publish if any parked row is unparseable, appends the rows
+to the tracked ledgers (span rows through the segmented append; rows an
+interrupted publish already appended are skipped, so a replay is a no-op)
+before the latest-only filter and renames the parked files `*.applied-<utc>`.
 
 **Speculative gates on the next HEAD (`run --follow-source`).** Start the
 pipeline with `--follow-source` so a fix committed while CodeRabbit is still
@@ -1031,7 +1047,15 @@ command, phases Group 3 (quick lanes → `deploy-command-structural` alone at
 full budget-backed width → the coverage lanes together, longest recorded
 first) from `.context/deploy-durations/pipeline-lanes.json`, and
 `run_deploy_pipeline.py simulate --plan <plan> --legacy-plan <plan --schedule legacy>`
-projects the union wall from the same ledger.
+projects the union wall from the same ledger (plus a `group3` block for the
+Group 3 lanes alone). The local smoke lane (Group 4, 4096 MB) declares
+`"phase": "coverage"` in the plan: it joins the coverage phase beside
+`backend-coverage-blackbox` (4096 + 2560 MB fit the budget) after the
+exclusive structural lane instead of being admitted first and holding that
+lane's memory (#1638 attempt 5 ran smoke alone for ~22 min; 11–24 min across attempts); the AgentCard lane
+declares the same phase. Undeclared Group 4 lanes stay unphased, and a plan's
+own `after` edges are never removed: `live-probes` and `semantic-stack` start
+as soon as their declared dependencies and memory allow.
 
 **Retry after a failure: failed-first, still a full sweep.** Rerun the same
 stage with `BACKEND_COVERAGE_FAILED_FIRST=1` in the `env` above. The previously

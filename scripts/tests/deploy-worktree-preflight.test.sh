@@ -983,4 +983,121 @@ expect_eq "$(cat "$prisma_state/generate-calls")" "$prisma_fixture/back-end" "ow
 grep -q "resolves outside this checkout" "$TMP_ROOT/prisma-owned.out" || fail "the foreign client must be reported before regeneration"
 echo "PASS: dependency hydration regenerates a stale Prisma client inside the worktree"
 
+
+# Follow-up w (2026-10-30): a fresh deploy-worktree venv resolves every unpinned
+# range anew and drifted from the verified toolchain (pytest 9.2.0 beside the
+# source workspace's 9.1.1). Preparation now links the source workspace's
+# healthy agents/venv when agents/requirements.txt is byte-identical, never
+# installs into that linked venv, builds the worktree's own venv when the
+# manifests differ, and --check refuses a linked venv whose manifest drifted
+# or whose source venv no longer imports the agent stack (re-verified every check).
+deploy_venv="$TMP_ROOT/descend-I99-venv"
+git -C "$controller" worktree add -q -b deploy-venv "$deploy_venv"
+deploy_venv="$(cd "$deploy_venv" && pwd -P)"
+venv_state="$TMP_ROOT/fake-venv-state"
+mkdir -p "$venv_state"
+# Interpreter stub: records every invocation; `-m venv DIR` creates a stub venv
+# rooted at DIR (so the fresh-build path is observable); everything else exits 0.
+write_reusable_fake_venv() {
+  local venv="$1"
+  mkdir -p "$venv/bin"
+  cat >"$venv/bin/python" <<'PYSTUB'
+#!/usr/bin/env bash
+printf '%s\n' "$0 $*" >>"${FAKE_VENV_STATE:?}/calls"
+# `missing-package` marker: the venv lost a required package after preparation
+# (imports and the installed-manifest check fail, everything else still works).
+if [ -e "$FAKE_VENV_STATE/missing-package" ] && { [ "${1:-}" = "-c" ] || [[ "${1:-}" == *agents_venv_satisfied.py ]]; }; then
+  exit 1
+fi
+if [ "${1:-}" = "-m" ] && [ "${2:-}" = "venv" ]; then
+  target="$3"
+  mkdir -p "$target/bin"
+  cp "$0" "$target/bin/python"
+  chmod +x "$target/bin/python"
+  abs="$(cd "$target" && pwd -P)"
+  printf 'VIRTUAL_ENV="%s"\nexport VIRTUAL_ENV\n' "$abs" >"$target/bin/activate"
+fi
+exit 0
+PYSTUB
+  chmod +x "$venv/bin/python"
+  printf 'VIRTUAL_ENV="%s"\nexport VIRTUAL_ENV\n' "$(cd "$venv" && pwd -P)" >"$venv/bin/activate"
+}
+rm -rf "$controller/agents/venv"
+write_reusable_fake_venv "$controller/agents/venv"
+printf 'pytest>=7.0\nbrowser-use==0.1.0\n' >"$controller/agents/requirements.txt"
+mkdir -p "$deploy_venv/agents" "$deploy_venv/node_modules" "$deploy_venv/scripts/lib"
+cp "$controller/agents/requirements.txt" "$deploy_venv/agents/requirements.txt"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$deploy_venv/scripts/ensure-workspace-dependencies.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$deploy_venv/scripts/ensure-prisma-client.sh"
+FAKE_VENV_STATE="$venv_state" bash "$PREFLIGHT" \
+  --worktree "$deploy_venv" --source "$controller" --port-registry "$registry" --skip-database \
+  >"$TMP_ROOT/venv-reuse.out" 2>&1 || fail "preparation with identical requirements failed: $(cat "$TMP_ROOT/venv-reuse.out")"
+[ -L "$deploy_venv/agents/venv" ] || fail "identical agents/requirements.txt must link the source workspace venv: $(cat "$TMP_ROOT/venv-reuse.out")"
+expect_eq "$(cd "$deploy_venv/agents/venv" && pwd -P)" "$controller/agents/venv" "the linked venv is the source workspace's"
+! grep -q -- '-m pip' "$venv_state/calls" || fail "a linked source venv must never be installed into: $(cat "$venv_state/calls")"
+grep -q "Linked the source workspace agents/venv" "$TMP_ROOT/venv-reuse.out" || fail "preparation must report the reused venv"
+# Re-preparing keeps the link without installing anything.
+: >"$venv_state/calls"
+FAKE_VENV_STATE="$venv_state" bash "$PREFLIGHT" \
+  --worktree "$deploy_venv" --source "$controller" --port-registry "$registry" --skip-database \
+  >"$TMP_ROOT/venv-reuse-again.out" 2>&1 || fail "re-preparation failed: $(cat "$TMP_ROOT/venv-reuse-again.out")"
+[ -L "$deploy_venv/agents/venv" ] || fail "re-preparation must keep the linked venv"
+! grep -q -- '-m pip' "$venv_state/calls" || fail "re-preparation must not install into the linked venv"
+# --check accepts the linked venv (it may still stop at the database, which --skip-database never provisioned).
+: >"$venv_state/calls"
+(
+  cd "$deploy_venv"
+  ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
+    FAKE_VENV_STATE="$venv_state" bash "$PREFLIGHT" --check
+) >"$TMP_ROOT/venv-check.out" 2>&1 || true
+! grep -q "agents/venv" "$TMP_ROOT/venv-check.out" \
+  || fail "a linked venv with identical requirements must pass the venv checks: $(cat "$TMP_ROOT/venv-check.out")"
+grep -q -- "-c import browser_use" "$venv_state/calls" \
+  || fail "--check must re-run the linked venv's imports, not only inspect the link: $(cat "$venv_state/calls")"
+# The source workspace owns the linked venv and can change it after preparation:
+# a lost package must fail --check (link, interpreter, activation and manifests all still match).
+touch "$venv_state/missing-package"
+if (
+  cd "$deploy_venv"
+  ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
+    FAKE_VENV_STATE="$venv_state" bash "$PREFLIGHT" --check
+) >"$TMP_ROOT/venv-lost-package.out" 2>&1; then
+  fail "check must refuse a linked venv that no longer imports the agent stack: $(cat "$TMP_ROOT/venv-lost-package.out")"
+fi
+grep -q "no longer imports the agent stack or satisfies agents/requirements.txt" "$TMP_ROOT/venv-lost-package.out" \
+  || fail "lost-package refusal must name the failed verification: $(cat "$TMP_ROOT/venv-lost-package.out")"
+rm "$venv_state/missing-package"
+# Drifted manifest: --check refuses the link; re-preparation builds the worktree's own venv.
+printf 'pytest>=7.0\nbrowser-use==0.2.0\n' >"$deploy_venv/agents/requirements.txt"
+if (
+  cd "$deploy_venv"
+  ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
+    FAKE_VENV_STATE="$venv_state" bash "$PREFLIGHT" --check
+) >"$TMP_ROOT/venv-drift.out" 2>&1; then
+  fail "check must refuse a linked venv whose agents/requirements.txt drifted from the source"
+fi
+grep -q "linked to the source workspace but agents/requirements.txt differs" "$TMP_ROOT/venv-drift.out" \
+  || fail "drift refusal must name the requirements mismatch: $(cat "$TMP_ROOT/venv-drift.out")"
+: >"$venv_state/calls"
+FAKE_VENV_STATE="$venv_state" bash "$PREFLIGHT" \
+  --worktree "$deploy_venv" --source "$controller" --port-registry "$registry" --skip-database \
+  >"$TMP_ROOT/venv-fresh.out" 2>&1 || fail "preparation with differing requirements failed: $(cat "$TMP_ROOT/venv-fresh.out")"
+[ -d "$deploy_venv/agents/venv" ] && [ ! -L "$deploy_venv/agents/venv" ] \
+  || fail "differing agents/requirements.txt must build the worktree's own venv"
+grep -q -- "-m venv " "$venv_state/calls" || fail "the fresh venv must be created from the source interpreter"
+grep -q -- "-m pip install -r agents/requirements.txt" "$venv_state/calls" || fail "the fresh venv must install the worktree's requirements"
+# ensure_dependencies runs inside the worktree, so the stub records the relative path.
+! grep -- '-m pip' "$venv_state/calls" | grep -v -E "^($deploy_venv/)?agents/venv/bin/python " | grep -q . \
+  || fail "pip must run only through the worktree's own venv: $(cat "$venv_state/calls")"
+[ -x "$controller/agents/venv/bin/python" ] && [ -f "$controller/agents/venv/bin/activate" ] \
+  || fail "the source workspace venv must be left intact"
+(
+  cd "$deploy_venv"
+  ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
+    FAKE_VENV_STATE="$venv_state" bash "$PREFLIGHT" --check
+) >"$TMP_ROOT/venv-fresh-check.out" 2>&1 || true
+! grep -q "agents/venv" "$TMP_ROOT/venv-fresh-check.out" \
+  || fail "the worktree's own venv must pass the venv checks: $(cat "$TMP_ROOT/venv-fresh-check.out")"
+echo "PASS: deploy preparation links the source workspace venv for identical requirements and builds its own otherwise"
+
 echo "All deploy-worktree preflight tests passed."
