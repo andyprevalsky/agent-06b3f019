@@ -475,11 +475,24 @@ def test_vendored_python_wheels_install_offline_from_every_image_context(tmp_pat
     assert pins == ["world-model-harness==0.1.0+rose.8e6d55dd"], pins
 
     # An open openai range made pip walk every newer release before reaching
-    # browser-use's exact pin; keep ours equal to the installed browser-use requirement.
+    # browser-use's requirement; keep our exact openai pin inside the installed
+    # browser-use requirement (0.13.10/0.13.11 pin openai exactly, 0.13.12+ declare
+    # a range, so a fresh venv resolving the manifest's browser-use range must pass).
     from importlib.metadata import requires
 
-    browser_use_openai = [r for r in requires("browser-use") or [] if r.replace(" ", "").startswith("openai==")]
-    assert browser_use_openai and browser_use_openai[0].replace(" ", "") in lines, (browser_use_openai, "openai pin")
+    from packaging.requirements import Requirement
+
+    openai_pin = next((line for line in lines if re.fullmatch(r"openai==[^\s;]+", line)), None)
+    assert openai_pin, "agents/requirements.txt must pin openai exactly"
+    browser_use_openai = [
+        req
+        for req in (Requirement(r) for r in requires("browser-use") or [])
+        if req.name == "openai" and (req.marker is None or req.marker.evaluate({"extra": ""}))
+    ]
+    assert browser_use_openai, "browser-use must declare an openai requirement"
+    assert all(
+        req.specifier.contains(openai_pin.split("==", 1)[1], prereleases=True) for req in browser_use_openai
+    ), (openai_pin, [str(req) for req in browser_use_openai])
 
     vendor = ROOT / "agents/vendor"
     sources = (vendor / "SOURCES.txt").read_text()
