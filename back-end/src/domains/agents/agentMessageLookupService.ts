@@ -1,8 +1,7 @@
 /**
- * Message lookups and response-schema generation for the agents message routes:
- * context-pointer batch reads and the browser agent's goal schema. Split from
- * agentMessageService to keep that module within the strict domain size limit.
+ * Agent message lookups by ID and response-schema generation.
  */
+
 import {
   generateResponseSchema,
   type ResponseSchemaDirectAuth,

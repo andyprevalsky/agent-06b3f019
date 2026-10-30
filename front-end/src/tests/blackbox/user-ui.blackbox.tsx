@@ -257,7 +257,7 @@ describe('removed whole-app settings (theme, background + fade, slots)', () => {
     expect(surface).not.toHaveClass('bg-white');
     // The grid renders directly in the terminal root: no fading backdrop wrapper.
     const grid = screen.getByTestId('terminal-grid-background-layer');
-    expect(grid.parentElement).toHaveClass('h-screen', 'w-screen', 'relative');
+    expect(grid.parentElement).toBe(screen.getByTestId('terminal-app-shell'));
     expect(grid.parentElement?.style.opacity).toBe('');
     // Rose Desktop chrome is unchanged: solid left bar, bare top-right app icons.
     expect(screen.getByTestId('rose-sidebar')).toHaveAttribute('data-surface', 'opaque');

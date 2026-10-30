@@ -61,6 +61,39 @@ export function initAmplitude(): void {
   });
 }
 
+/** Visual-viewport shrink beyond this is the on-screen keyboard, not iOS's
+ * short standalone layout viewport (~status-bar inset) or a toolbar. */
+const KEYBOARD_MIN_HEIGHT_PX = 150;
+
+/**
+ * iOS: pins the app shell (`--app-height` / `--app-top`, read by
+ * TerminalContent) to what is actually visible.
+ *   keyboard open  -> the visual viewport (iOS shrinks AND pans it), so the
+ *                     bottom-anchored query box sits flush on the keyboard
+ *   keyboard closed, installed PWA -> the full screen; iOS reports a layout
+ *                     viewport short by the status-bar inset, which left a
+ *                     gap under the query box with no browser toolbar there
+ *   keyboard closed, Safari tab    -> the visual viewport (toolbar excluded)
+ * Pinch zoom also shrinks the visual viewport; it is ignored.
+ */
+function setAppShellGeometry(vv: VisualViewport): void {
+  const standalone =
+    (navigator as { standalone?: boolean }).standalone === true ||
+    window.matchMedia?.('(display-mode: standalone)').matches === true;
+  const landscape = window.innerWidth > window.innerHeight;
+  const screenHeight = landscape
+    ? Math.min(window.screen.width, window.screen.height)
+    : Math.max(window.screen.width, window.screen.height);
+  const fullHeight = standalone ? Math.max(screenHeight, window.innerHeight) : window.innerHeight;
+  const zoomed = Math.abs((vv.scale ?? 1) - 1) > 0.01;
+  const keyboardOpen = !zoomed && fullHeight - vv.height > KEYBOARD_MIN_HEIGHT_PX;
+  const height = keyboardOpen ? vv.height : zoomed || standalone ? fullHeight : vv.height;
+  const top = keyboardOpen ? (vv.offsetTop ?? 0) : 0;
+  const root = document.documentElement.style;
+  root.setProperty('--app-height', `${height}px`);
+  root.setProperty('--app-top', `${top}px`);
+}
+
 /** Sets the `--vh` CSS custom property and installs resize/orientation listeners. */
 export function initViewportHeight(): void {
   const setVH = () => {
@@ -81,7 +114,9 @@ export function initViewportHeight(): void {
     const updateVH = () => {
       const vh = window.visualViewport!.height * 0.01;
       document.documentElement.style.setProperty('--vh', `${vh}px`);
+      setAppShellGeometry(window.visualViewport!);
     };
+    setAppShellGeometry(window.visualViewport);
     window.visualViewport.addEventListener('resize', updateVH);
     window.visualViewport.addEventListener('scroll', updateVH);
   }

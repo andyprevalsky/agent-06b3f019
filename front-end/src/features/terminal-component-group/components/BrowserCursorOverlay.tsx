@@ -14,9 +14,9 @@
  *    v
  * [UNMOUNTED] -> unsubscribe from realtime channel
  *
- * GEOMETRY: the overlay fills the letterboxed 1280x800 stream box. Page
- * coordinates map through resolveLiveViewPageRect (Kernel: Chrome UI above the
- * page) to fractions of that box, applied as a % translate on a full-size
+ * GEOMETRY: the overlay fills the letterboxed provider display box. Page
+ * coordinates map through the per-provider LIVE_VIEW_GEOMETRY (Kernel: Chrome UI
+ * above the page; Steel: cropped to the page; Tilion: page-only) to fractions of that box, applied as a % translate on a full-size
  * track, so alignment holds at any pane size, aspect ratio, zoom or DPR without
  * measuring. MOTION: the track glides; an inner element runs one constant,
  * slow bob loop that new samples never restart. Reduced motion disables both.
@@ -30,10 +30,7 @@ import { extractRecord, subscribeToChannel, unsubscribe } from '@/lib/realtime';
 import { recordAgentScopeDiscard } from '@/lib/agentScopeDiagnostics';
 import type { Message } from '../hooks';
 import { useCursorTarget, type BrowserCursorPayload, type CursorPosition } from './useCursorTarget';
-import {
-  liveViewPointFraction,
-  resolveLiveViewPageRect,
-} from './browser-status-bar/liveViewDisplay';
+import { liveViewPointFraction } from './browser-status-bar/liveViewDisplay';
 
 // Custom cursor SVG - navigation arrow pointing right (from navigate-v2.png, flipped)
 // Auto-traced using potrace from the actual PNG. Black fill, 4px white stroke.
@@ -188,7 +185,7 @@ export default function BrowserCursorOverlay({
   visible = true,
 }: BrowserCursorOverlayProps) {
   const cursorPos = useCursorPosition(agentId, taskId, messages);
-  const fraction = liveViewPointFraction(resolveLiveViewPageRect(browserUrl), cursorPos);
+  const fraction = liveViewPointFraction(browserUrl, cursorPos);
 
   return (
     <div

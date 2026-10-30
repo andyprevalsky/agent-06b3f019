@@ -80,6 +80,9 @@ async function main() {
     baseUrl.searchParams.set('schema', 'public');
     process.env.DATABASE_URL = baseUrl.toString();
     process.env.DIRECT_URL = baseUrl.toString();
+    // schema.prisma's directUrl reads PRISMA_CLI_DATABASE_URL (the prod db-push
+    // guard); the fixture's own push must name this isolated database.
+    process.env.PRISMA_CLI_DATABASE_URL = baseUrl.toString();
     process.env.BACKEND_API_KEY = `e2e-${randomUUID()}`;
     process.env.CODE_SESSION_STORAGE_BACKEND = 'local';
     process.env.CODE_SESSION_STORAGE_LOCAL_DIR = join(directory, 'checkpoints');

@@ -14,6 +14,7 @@ import type { ResponseSchemaDirectAuth } from '../../providers/setResponseSchema
 import { postMessageSchema, generateSchemaRequestSchema } from './types';
 import * as controlService from './agentControlService';
 import * as messageService from './agentMessageService';
+import * as messageLookupService from './agentMessageLookupService';
 import * as attachmentService from './agentAttachmentService';
 import * as queryService from './agentQueryService';
 import { resolveAgentReadAccess } from './routes.guards';
@@ -223,7 +224,7 @@ router.post(
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
       const body = generateSchemaRequestSchema.parse(req.body);
-      const { schema, tokensIn, tokensOut } = await messageService.generateSchema(
+      const { schema, tokensIn, tokensOut } = await messageLookupService.generateSchema(
         body.goal,
         readResponseSchemaDirectAuth(req)
       );
@@ -287,7 +288,7 @@ router.post(
         res.status(401).json({ error: 'User not authenticated' });
         return;
       }
-      const result = await messageService.batchFetchMessages(ids, userId);
+      const result = await messageLookupService.batchFetchMessages(ids, userId);
       res.json(result);
     } catch (error) {
       handleRouteError(res, error, 'Failed to fetch messages');

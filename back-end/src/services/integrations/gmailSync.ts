@@ -7,6 +7,7 @@ import {
   fetchMessagesByIds,
   getGmailProfile,
   ParsedEmail,
+  type RefreshableGmailAccess,
 } from './gmailParser';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
 import {
@@ -25,6 +26,57 @@ const log = createLogger('GmailSync');
 
 // Sync interval: 1 hour
 const SYNC_INTERVAL_MS = 60 * 60 * 1000;
+/** Refreshes a running sync's claim well inside SYNC_INTERVAL_MS. */
+const CLAIM_HEARTBEAT_MS = 5 * 60 * 1000;
+/**
+ * A failed run waits this long before the next attempt: a full sync that keeps
+ * failing would otherwise re-list and re-read the whole mailbox every 5 minutes,
+ * spending the user's Gmail quota on a loop. Reconnecting resets to CONNECTED.
+ */
+const FAILED_SYNC_COOLDOWN_MS = 30 * 60 * 1000;
+
+/**
+ * Integrations a run may claim: CONNECTED, SYNC_FAILED once its cooldown has
+ * passed, or a SYNCING row whose claim went stale (crash recovery).
+ */
+function dueForSync(now = Date.now()) {
+  return [
+    { status: IntegrationStatus.CONNECTED },
+    {
+      status: IntegrationStatus.SYNC_FAILED,
+      OR: [
+        { lastFailedSyncAt: null },
+        { lastFailedSyncAt: { lt: new Date(now - FAILED_SYNC_COOLDOWN_MS) } },
+      ],
+    },
+    { status: IntegrationStatus.SYNCING, lastSyncAt: { lt: new Date(now - SYNC_INTERVAL_MS) } },
+  ];
+}
+
+/**
+ * The mailbox access a Gmail run uses: requests refresh the token on 401, and
+ * the mailbox key keeps one quota budget across refreshes and across callers.
+ */
+export function gmailMailboxAccess(
+  credential: {
+    id: string;
+    email: string | null;
+    accessToken: string | null;
+    refreshToken: string | null;
+    expiresAt: Date | null;
+  },
+  token: string
+): RefreshableGmailAccess {
+  return {
+    key: credential.email || credential.id,
+    token,
+    refresh: async () => {
+      const fresh = await getValidAccessToken(credential, { forceRefresh: true });
+      if (fresh === null) throw new Error('Gmail access token refresh failed');
+      return fresh;
+    },
+  };
+}
 
 // Google OAuth token endpoint
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -105,15 +157,19 @@ async function refreshGoogleAccessToken(
 }
 
 /**
- * Get a valid access token, refreshing if necessary
+ * Get a valid access token, refreshing if necessary. `forceRefresh` mints a new
+ * one even when the stored token looks unexpired (Google rejected it mid-run).
  */
-export async function getValidAccessToken(credential: {
-  id: string;
-  accessToken: string | null;
-  refreshToken: string | null;
-  expiresAt: Date | null;
-  scopes?: string[];
-}): Promise<string | null> {
+export async function getValidAccessToken(
+  credential: {
+    id: string;
+    accessToken: string | null;
+    refreshToken: string | null;
+    expiresAt: Date | null;
+    scopes?: string[];
+  },
+  options: { forceRefresh?: boolean } = {}
+): Promise<string | null> {
   if (credential.scopes !== undefined && missingGoogleScopes(credential.scopes).length > 0) {
     await markCredentialFailure(credential.id, {
       state: 'needs_reconnect',
@@ -123,6 +179,7 @@ export async function getValidAccessToken(credential: {
   }
   // Check if current token is still valid (with 5 min buffer)
   if (
+    options.forceRefresh !== true &&
     credential.accessToken &&
     credential.expiresAt &&
     credential.expiresAt > new Date(Date.now() + 5 * 60 * 1000)
@@ -388,11 +445,13 @@ async function syncGmailForUser(
   log.info('Starting sync for user', { userId, credentialId: credential.id });
 
   // Get valid access token
-  const accessToken = await getValidAccessToken(credential);
-  if (!accessToken) {
+  const token = await getValidAccessToken(credential);
+  if (!token) {
     log.error('Failed to get valid access token', { credentialId: credential.id });
     return { success: false, contacts: 0, messages: 0 };
   }
+  // A paced full sync can outlive the one-hour token.
+  const accessToken = gmailMailboxAccess(credential, token);
 
   // Re-fetch integration from DB to get the latest config.
   // Without this, sequential credential syncs clobber each other's historyIds
@@ -441,8 +500,10 @@ async function syncGmailForUser(
     if (historyResult.newHistoryId === '') {
       // History expired, need full sync
       log.info('History expired, falling back to full sync', { credentialId: credential.id });
-      emails = await fetchGmailEmails(accessToken, userEmail);
+      // Read the historyId BEFORE listing: mail that lands during the (quota-paced,
+      // minutes-long) full sync is then picked up by the next incremental sync.
       const profile = await getGmailProfile(accessToken);
+      emails = await fetchGmailEmails(accessToken, userEmail);
       newHistoryId = profile.historyId;
       messagesTotal = profile.messagesTotal;
     } else if (historyResult.addedMessageIds.length === 0) {
@@ -461,8 +522,8 @@ async function syncGmailForUser(
   } else {
     // Full sync (first time for this credential)
     log.info('Performing full sync (no historyId)', { credentialId: credential.id });
-    emails = await fetchGmailEmails(accessToken, userEmail);
     const profile = await getGmailProfile(accessToken);
+    emails = await fetchGmailEmails(accessToken, userEmail);
     newHistoryId = profile.historyId;
     messagesTotal = profile.messagesTotal;
   }
@@ -549,15 +610,8 @@ function reportGmailProgress(
  * ticks and backend instances; lastSyncAt then fences crash recovery.
  */
 export async function claimGmailIntegrationForSync(integrationId: string): Promise<boolean> {
-  const syncIntervalCutoff = new Date(Date.now() - SYNC_INTERVAL_MS);
   const claimed = await prisma.integration.updateMany({
-    where: {
-      id: integrationId,
-      OR: [
-        { status: { in: [IntegrationStatus.CONNECTED, IntegrationStatus.SYNC_FAILED] } },
-        { status: IntegrationStatus.SYNCING, lastSyncAt: { lt: syncIntervalCutoff } },
-      ],
-    },
+    where: { id: integrationId, OR: dueForSync() },
     data: { status: IntegrationStatus.SYNCING, lastSyncAt: new Date() },
   });
   if (claimed.count === 0) {
@@ -566,22 +620,20 @@ export async function claimGmailIntegrationForSync(integrationId: string): Promi
   return claimed.count === 1;
 }
 
-export async function runGmailSyncJob(): Promise<void> {
+/**
+ * `userIds` narrows the run to those users' integrations (an on-demand sync of
+ * specific accounts); the cron passes nothing and syncs every due integration.
+ */
+export async function runGmailSyncJob(options: { userIds?: string[] } = {}): Promise<void> {
   log.info('Starting sync job...');
 
-  const syncIntervalCutoff = new Date(Date.now() - SYNC_INTERVAL_MS);
-
-  // Find Gmail integrations that are due for sync.
-  // CONNECTED/SYNC_FAILED: always eligible (sync immediately)
-  // SYNCING: only re-pick if lastSyncAt > 1 hour ago (crash recovery)
+  // Find Gmail integrations that are due for sync (see dueForSync).
   const dueIntegrations = await prisma.integration.findMany({
     where: {
       name: 'gmail',
       isActive: true,
-      OR: [
-        { status: { in: [IntegrationStatus.CONNECTED, IntegrationStatus.SYNC_FAILED] } },
-        { status: IntegrationStatus.SYNCING, lastSyncAt: { lt: syncIntervalCutoff } },
-      ],
+      ...(options.userIds && { userId: { in: options.userIds } }),
+      OR: dueForSync(),
     },
     include: {
       emailCredentials: {
@@ -635,6 +687,21 @@ export async function runGmailSyncJob(): Promise<void> {
     let allSucceeded = true;
     let lastError: string | null = null;
 
+    // A quota-paced full sync of a large mailbox can run past the claim's
+    // crash-recovery window; keep lastSyncAt fresh so no tick or instance
+    // re-claims this integration and starts a second, competing sync.
+    const heartbeat = setInterval(() => {
+      prisma.integration
+        .update({ where: { id: integration.id }, data: { lastSyncAt: new Date() } })
+        .catch((error: unknown) =>
+          log.warn('Sync claim heartbeat failed', {
+            integrationId: integration.id,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        );
+    }, CLAIM_HEARTBEAT_MS);
+    heartbeat.unref();
+
     for (const credential of validCredentials) {
       try {
         log.info('Syncing credential', {
@@ -662,6 +729,8 @@ export async function runGmailSyncJob(): Promise<void> {
         lastError = 'Gmail sync failed';
       }
     }
+
+    clearInterval(heartbeat);
 
     await reportGmailProgress(integration, {
       runId,

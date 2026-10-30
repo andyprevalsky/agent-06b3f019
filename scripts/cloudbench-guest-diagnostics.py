@@ -95,7 +95,11 @@ def top_processes(previous: dict, current: dict, elapsed_s: float) -> list[dict]
     rows = []
     for pid, (comm, used) in current.items():
         before = previous.get(pid)
-        delta = used - (before[1] if before and before[0] == comm else 0)
+        # A process absent from the prior scan has no interval baseline. Its
+        # lifetime ticks would otherwise appear as an impossible CPU spike.
+        if before is None or before[0] != comm:
+            continue
+        delta = used - before[1]
         if delta > 0 and elapsed_s > 0:
             rows.append({"pid": pid, "comm": comm, "cpu_pct": round(100.0 * delta / CLOCK_TICKS / elapsed_s, 1)})
     rows.sort(key=lambda row: row["cpu_pct"], reverse=True)

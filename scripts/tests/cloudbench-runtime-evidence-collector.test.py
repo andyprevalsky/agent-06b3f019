@@ -350,6 +350,12 @@ def guest_diagnostics_sampler_and_inventory():
             "user": 30.0, "system": 25.0, "iowait": 5.0, "steal": 20.0,
         }, sampler["cpu_mode_pct"](before, after)
         assert sampler["cpu_mode_pct"](before, before) is None
+        ticks = sampler["CLOCK_TICKS"]
+        assert sampler["top_processes"](
+            {10: ("python", 100), 12: ("old", 100)},
+            {10: ("python", 100 + ticks), 11: ("kworker", 100000), 12: ("new", 100000)},
+            1.0,
+        ) == [{"pid": 10, "comm": "python", "cpu_pct": 100.0}]
         for sample in samples:
             assert set(sample["cpu_mode_pct"]) == {"user", "system", "iowait", "steal"}, sample
             assert sum(sample["cpu_mode_pct"].values()) <= 100.5, sample

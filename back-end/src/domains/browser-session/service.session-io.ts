@@ -1,16 +1,16 @@
 /**
- * Browser-session file transfer, screenshots and key presses: thin wrappers over
- * the provider that check the caller owns the session first.
+ * Browser-session file, screenshot and key I/O against a live provider session.
  */
-import {
-  captureScreenshot,
-  getSession,
-  listFiles as listProviderFiles,
-  pressSessionKeys,
-  readSessionFile,
-  uploadSessionFile,
-} from '../../providers/browser';
+
 import { createLogger } from '../../providers/logger';
+import {
+  getSession,
+  uploadSessionFile,
+  listFiles as listProviderFiles,
+  readSessionFile,
+  captureScreenshot,
+  pressSessionKeys,
+} from '../../providers/browser';
 import * as repo from './repo';
 import { validateBrowserKeySymbols } from './service.browser-input';
 import { validateSessionFilePath } from './service.file-path';

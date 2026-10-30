@@ -25,6 +25,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 
 def _trusted_github_host() -> str:
@@ -518,6 +519,23 @@ def wait_for_review(
         sleeper(max(0.0, min(poll_seconds, deadline - time.monotonic())))
 
 
+def record_review_event(event: str, epoch: float, pr: str, state: str | None = None) -> None:
+    """Best-effort factory event so reviews can separate review wait from work."""
+    try:
+        from factory_detail import parse_event_detail
+        from record_factory_event import append_event, default_event_log, factory_event_payload
+
+        pairs = [f"pr_number={_pr_number(pr)}"]
+        if state:
+            pairs.append(f"reason={state}")
+        payload = factory_event_payload(
+            "deploy", event, "coderabbit", recorded_epoch=epoch, detail=parse_event_detail(pairs)
+        )
+        append_event(Path(os.environ.get("FACTORY_EVENT_LOG", str(default_event_log()))), payload)
+    except (ImportError, OSError, ValueError, ReviewWaitError) as error:
+        print(f"warning: could not record review {event}: {error}", file=sys.stderr)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pr", required=True, help="pull-request number or URL")
@@ -528,8 +546,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _record_review_window(triggered_at: datetime | None, waiter_started: float, pr: str, state: str) -> None:
+    # A trigger's GitHub time remains stable across re-waits; automatic reviews
+    # are measured from waiter startup. Record the same pair on every exit.
+    requested = triggered_at.timestamp() if triggered_at is not None else waiter_started
+    reason = "manual-trigger" if triggered_at is not None else "waiter-start"
+    record_review_event("review-request", requested, pr, reason)
+    record_review_event("review-arrival", time.time(), pr, state)
+
+
 def main() -> int:
     args = parse_args()
+    waiter_started = time.time()
+    triggered_at = None
     try:
         triggered_at = latest_review_trigger_at(
             args.pr, args.repo, timeout=min(60.0, args.timeout)
@@ -545,7 +574,10 @@ def main() -> int:
         )
     except (ReviewWaitError, TimeoutError) as error:
         print(str(error), file=sys.stderr)
+        _record_review_window(triggered_at, waiter_started, args.pr,
+                              "timeout" if isinstance(error, TimeoutError) else "error")
         return 2
+    _record_review_window(triggered_at, waiter_started, args.pr, status.state)
 
     print(
         json.dumps(

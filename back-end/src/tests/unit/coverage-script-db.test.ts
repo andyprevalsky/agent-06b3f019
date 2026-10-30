@@ -29,6 +29,10 @@ try {
         encoding: 'utf8',
         env: {
           ...process.env,
+          // run-coverage.sh defines SCRIPT_DIR at its top, outside the replayed
+          // slice; the branch resolves the prepared URL through
+          // scripts/coverage-database-url.mjs relative to it.
+          SCRIPT_DIR: join(process.cwd(), 'scripts'),
           ROOT_DIR: dbRoot,
           WORKSPACE_HINT: identity,
           ROSE_DEPLOY_WORKTREE: '1',
@@ -72,6 +76,40 @@ try {
     0,
     'deploy mode must not adopt the primary workspace database'
   );
+  // The dedicated unit pass (shard token "units") and every blackbox shard own
+  // a derived database: the resolved URL on line 1 must point at it, not at
+  // the prepared base database (CodeRabbit on PR #1638: the units branch set
+  // the derived name without updating the URL).
+  const resolver = join(process.cwd(), 'scripts', 'coverage-database-url.mjs');
+  const resolve = (token: string) =>
+    spawnSync('node', [resolver, identity, dbRoot, token], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        BACKEND_COVERAGE_DATABASE_URL: url,
+        ROSE_DEPLOY_WORKTREE: '1',
+        ROSE_DEPLOY_WORKTREE_PATH: dbRoot,
+      },
+    });
+  for (const [token, suffix] of [
+    ['units', '_s0'],
+    ['1/2', '_s1'],
+    ['2/2', '_s2'],
+  ] as const) {
+    const resolved = resolve(token);
+    assert.equal(resolved.status, 0, `resolver rejected ${token}: ${resolved.stderr}`);
+    const [resolvedUrl, derived] = resolved.stdout.split('\n');
+    assert.equal(derived, `${prepared}${suffix}`, `derived name for ${token}`);
+    assert.equal(
+      new URL(resolvedUrl).pathname,
+      `/${prepared}${suffix}`,
+      `${token} must connect to its derived database, not the prepared base`
+    );
+  }
+  assert.equal(new URL(resolve('').stdout.split('\n')[0]).pathname, `/${prepared}`);
+  const unitPass = run(url, { COVERAGE_DB_TOKEN: 'units' });
+  assert.equal(unitPass.status, 0, `unit pass rejected: ${unitPass.stdout}${unitPass.stderr}`);
+  assert.match(unitPass.stdout, new RegExp(`SELECTED=.*/${prepared}_s0$`, 'm'));
   writeFileSync(marker, 'victoria_deploy_foreign\n');
   assert.notEqual(run(url).status, 0, 'foreign marker accepted');
   rmSync(marker);

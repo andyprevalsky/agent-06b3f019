@@ -36,6 +36,15 @@ fall back to time gaps. List same-category trajectories as combination
 candidates with the product of member pass rates, the expected pass rate of one
 merged trajectory.
 
+The "Failures, reruns and gaps" section (`scripts/factory_diagnostics.py`) reads
+each stage/event `detail`: per-gate failure classes and first failing names,
+rerun causes (new commit, worktree edit, unchanged rerun), exact-reuse hits and
+miss reasons, setup/queue/exec medians with host load and memory, idle gaps
+attributed to fixes, approval/review/external-deploy waits, RCA repro attempts
+and per-run benchmark/`/descend` counts. Rows recorded before detail existed
+count toward attempts and gaps only; its coverage line states how many rows
+carry detail.
+
 The report must keep each gate family separate and show exactly these columns:
 
 Add a `/descend` section sourced from
