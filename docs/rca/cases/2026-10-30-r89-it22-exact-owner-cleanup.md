@@ -18,7 +18,7 @@ tags:
 sources:
   - commit 573847c1ea6ffbc28405d3ec29e39d8f86a5c2e8
 repro: none-recorded; actual authorized canonical recovery receipts
-status: mitigated
+status: open
 ---
 
 ## Problem
