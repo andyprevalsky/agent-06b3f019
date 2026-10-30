@@ -136,6 +136,38 @@ if [[ -n "$COVERAGE_SHARD" ]]; then
   SHARD_DB_SUFFIX="_s${BASH_REMATCH[1]}"
   export BACKEND_UNIT_SHARD="$COVERAGE_SHARD"
 fi
+# The dedicated unit pass of a sharded run (BACKEND_COVERAGE_UNIT_PASS=1,
+# launched by run-coverage-sharded.sh only after every blackbox shard has
+# finished): the whole unit suite once, alone, with its own lock, artifacts
+# and database (`<workspace>_s0`; blackbox shards are numbered from 1), handing
+# its raw coverage to the coordinator's merge directory like a shard. The unit
+# suite's headless-browser perf probe (rose-ui-cli-browser `check --examples`,
+# fps-p50 >= 55) is host-load dependent: beside two blackbox streams it failed
+# 4/4 sharded runs and passed unsharded on the same box (2026-10-30), so the
+# unit phase must never overlap a blackbox shard.
+UNIT_PASS="${BACKEND_COVERAGE_UNIT_PASS:-0}"
+if [[ "$UNIT_PASS" == "1" ]]; then
+  if [[ -n "$COVERAGE_SHARD" ]]; then
+    echo "❌ BACKEND_COVERAGE_UNIT_PASS runs the whole unit suite; it cannot also be blackbox shard $COVERAGE_SHARD." >&2
+    exit 2
+  fi
+  if [[ "${BACKEND_COVERAGE_SKIP_UNITS:-0}" == "1" ]]; then
+    echo "❌ BACKEND_COVERAGE_UNIT_PASS and BACKEND_COVERAGE_SKIP_UNITS contradict each other." >&2
+    exit 2
+  fi
+  export BACKEND_COVERAGE_SKIP_BLACKBOX=1
+  SHARD_SUFFIX="-units"
+  SHARD_DB_SUFFIX="_s0"
+fi
+# The unit pass runs every unit file, so it owns the unsuffixed
+# coverage/unit-run/results.json that coverage-rerun-failed.sh reads.
+UNIT_RESULTS_SUFFIX="$SHARD_SUFFIX"
+# The shard token the prepared-URL resolver derives a per-run database from.
+COVERAGE_DB_TOKEN="$COVERAGE_SHARD"
+if [[ "$UNIT_PASS" == "1" ]]; then
+  UNIT_RESULTS_SUFFIX=""
+  COVERAGE_DB_TOKEN="units"
+fi
 COVERAGE_PARTIAL=0
 # Exit status of a partial (subset) run whose selected tests all passed. Non-zero
 # on purpose: thresholds were not enforced, so it can never be a passing gate.
@@ -508,7 +540,7 @@ if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
   # ensure_workspace_system_db like every other per-shard database, so the
   # sharded coordinator (test:coverage:sharded) also runs on the system-PG
   # deploy path instead of falling back to one unsharded sweep.
-  if ! COVERAGE_DB_RESOLUTION="$(node "$SCRIPT_DIR/coverage-database-url.mjs" "$WORKSPACE_HINT" "$ROOT_DIR" "$COVERAGE_SHARD")"; then
+  if ! COVERAGE_DB_RESOLUTION="$(node "$SCRIPT_DIR/coverage-database-url.mjs" "$WORKSPACE_HINT" "$ROOT_DIR" "$COVERAGE_DB_TOKEN")"; then
     echo "❌ BACKEND_COVERAGE_DATABASE_URL must name this workspace's local database (the exact prepared marker for an isolated deploy worktree)." >&2
     exit 1
   fi
@@ -523,7 +555,7 @@ if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
   if [[ -n "$COVERAGE_SHARD_DB_NAME" ]]; then
     LOCAL_DB_PORT="$(node -e 'process.stdout.write(new URL(process.argv[1]).port || "5432")' "$BACKEND_COVERAGE_DATABASE_URL")"
     ENSURE_SYSTEM_DB_NAME="$COVERAGE_SHARD_DB_NAME"
-    echo "Coverage shard $COVERAGE_SHARD database: $COVERAGE_SHARD_DB_NAME (derived from the prepared workspace database)"
+    echo "Coverage ${COVERAGE_SHARD:+shard $COVERAGE_SHARD}${COVERAGE_SHARD:-unit pass} database: $COVERAGE_SHARD_DB_NAME (derived from the prepared workspace database)"
   fi
   DB_FOUND=true
   echo "Using explicitly validated workspace system Postgres database"
@@ -855,7 +887,7 @@ if [[ "${BACKEND_COVERAGE_SKIP_UNITS:-0}" != "1" ]]; then
   launch_coverage_process_group env \
     BACKEND_UNIT_COVERAGE_DIR="$COV_TMP" \
     BACKEND_UNIT_CONCURRENCY="${BACKEND_UNIT_CONCURRENCY:-6}" \
-    BACKEND_UNIT_RESULTS_FILE="$BACKEND_DIR/coverage/unit-run/results$SHARD_SUFFIX.json" \
+    BACKEND_UNIT_RESULTS_FILE="$BACKEND_DIR/coverage/unit-run/results$UNIT_RESULTS_SUFFIX.json" \
     node --import tsx scripts/run-unit-tests.ts
   UNIT_PID="$LAUNCHED_COVERAGE_PID"
 else
@@ -902,11 +934,12 @@ kill "$BACKEND_PID" 2>/dev/null || true
 wait "$BACKEND_PID" 2>/dev/null || true
 BACKEND_PID=""
 
-if [[ -n "$COVERAGE_SHARD" && -n "${BACKEND_COVERAGE_MERGE_DIR:-}" ]]; then
-  # The coordinator enforces thresholds on the merged report of every shard.
+if [[ ( -n "$COVERAGE_SHARD" || "$UNIT_PASS" == "1" ) && -n "${BACKEND_COVERAGE_MERGE_DIR:-}" ]]; then
+  # The coordinator enforces thresholds on the merged report of every shard
+  # and the unit pass.
   mkdir -p "$BACKEND_COVERAGE_MERGE_DIR"
   cp -R "$COV_TMP/." "$BACKEND_COVERAGE_MERGE_DIR/"
-  echo "Shard $COVERAGE_SHARD passed; raw coverage handed to $BACKEND_COVERAGE_MERGE_DIR for the merged threshold check."
+  echo "${COVERAGE_SHARD:+Shard $COVERAGE_SHARD}${COVERAGE_SHARD:-Unit pass} passed; raw coverage handed to $BACKEND_COVERAGE_MERGE_DIR for the merged threshold check."
   exit 0
 fi
 if [[ "$COVERAGE_PARTIAL" -eq 1 ]]; then

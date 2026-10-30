@@ -991,11 +991,16 @@ cd back-end && bash ../scripts/run-deploy-stage backend-coverage-blackbox --reus
       npm run test:coverage:sharded
 ```
 
-This one command runs all 91 deterministic back-end blackbox domains plus unit
-tests under V8 coverage as **two shards** (`scripts/run-coverage-sharded.sh`:
-each shard has its own instrumented backend, database, port and raw V8
-directory; the worker counts apply per shard). Their raw coverage is merged
-into one `c8 report --check-coverage`, so it must both pass every test and meet
+This one command runs all 91 deterministic back-end blackbox domains under V8
+coverage as **two blackbox shards** (`scripts/run-coverage-sharded.sh`: each
+shard has its own instrumented backend, database, port and raw V8 directory;
+the worker counts apply per shard), then the **unit suite once, alone**
+(`BACKEND_COVERAGE_UNIT_PASS=1`, its own `<workspace>_s0` database, log
+`coverage/units.log`) after the last shard has finished: the unit suite's
+headless-browser fps probe (`rose-ui-cli-browser`) is host-load dependent and
+failed 4/4 sharded runs when each shard ran its own unit slice beside two
+blackbox streams (2026-10-30). All raw coverage is merged into one
+`c8 report --check-coverage`, so it must both pass every test and meet
 `back-end/.c8rc.json` on the merged report; the real provider credential probe
 runs once in Step 4c. On an isolated deploy worktree on system Postgres
 (`BACKEND_COVERAGE_DATABASE_URL` = the prepared `.context/deploy-system-pg.db`
