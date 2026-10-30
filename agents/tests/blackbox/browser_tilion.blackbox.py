@@ -137,13 +137,16 @@ async def _chromium(full: bool = False):
             browser = await playwright.chromium.launch(headless=True, args=[f"--remote-debugging-port={port}"])
         try:
             payload: Dict[str, Any] = {}
+            # Chromium can take well over 10s to open its debug port on a loaded
+            # deploy host; wait on a deadline until it reports its browser target.
+            deadline = time.monotonic() + 30
             async with httpx.AsyncClient(trust_env=False) as client:
-                for _ in range(100):
-                    with contextlib.suppress(httpx.HTTPError):
+                while "webSocketDebuggerUrl" not in payload and time.monotonic() < deadline:
+                    with contextlib.suppress(httpx.HTTPError, ValueError):
                         version = await client.get(f"http://127.0.0.1:{port}/json/version")
                         payload = version.json()
-                        break
-                    await asyncio.sleep(0.1)
+                    if "webSocketDebuggerUrl" not in payload:
+                        await asyncio.sleep(0.1)
             assert "webSocketDebuggerUrl" in payload, f"/json/version on 127.0.0.1:{port} -> {str(payload)[:300]}"
             yield playwright, browser, payload["webSocketDebuggerUrl"]
         finally:
