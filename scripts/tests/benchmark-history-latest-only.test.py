@@ -244,6 +244,43 @@ class LatestOnlyTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in park.iterdir()), ["span_durations.jsonl", "task_attempts.jsonl"],
                          "nothing may be marked applied")
 
+    def test_apply_parked_replay_after_an_interrupted_publish_is_a_noop(self):
+        # The publish appended every parked row but died (SIGKILL, power loss)
+        # before renaming the parked files applied. The next publish must not
+        # append the same rows again: identical overlapping attempts survive the
+        # latest-only filter, so the duplicates would land on main.
+        park = self.park("task_attempts.jsonl",
+                         [attempt("smoke-b", True, "2026-10-21T11:06:00+00:00", 100, "park-b1")])
+        self.park("task_durations.jsonl", [{"task": "smoke-b", "duration_seconds": 100,
+                                            "timestamp": "2026-10-21T11:06:00+00:00", "agent_id": "park-b1"}])
+        self.park("span_durations.jsonl", [span("smoke-b", "park-b1", "2026-10-21T11:05:30+00:00")])
+        parked = {name: (park / name).read_bytes() for name in self.LEDGERS}
+        code, out = self.run_tool("--apply-parked", "--write")
+        self.assertEqual(code, 0, out)
+        once = self.tracked_bytes()
+        # Undo only the rename: the parked files are back exactly as the interrupted publish left them.
+        for path in list(park.iterdir()):
+            path.rename(park / path.name.split(".applied-")[0])
+        self.assertEqual({name: (park / name).read_bytes() for name in self.LEDGERS}, parked)
+        code, out = self.run_tool("--apply-parked", "--write")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.tracked_bytes(), once, "a replay must not duplicate rows an interrupted publish applied")
+        for name in self.LEDGERS:
+            self.assertIn(f"{HISTORY}/{name}: applied 0 parked row(s)", out)
+            self.assertFalse((park / name).exists(), f"{name} must be marked applied again")
+        self.assertIn("1 already applied", out)
+        self.assertEqual(self.run_tool("--check")[0], 0)
+        # Interrupted after only some files were appended: the untouched ledger still receives its rows.
+        self.park("task_attempts.jsonl", [attempt("smoke-c", True, "2026-10-21T13:06:00+00:00", 100, "park-c1")])
+        self.park("task_durations.jsonl", [{"task": "smoke-c", "duration_seconds": 100,
+                                            "timestamp": "2026-10-21T13:06:00+00:00", "agent_id": "park-c1"}])
+        with (self.repo / HISTORY / "task_attempts.jsonl").open("ab") as handle:
+            handle.write((park / "task_attempts.jsonl").read_bytes())  # attempts landed, durations did not
+        code, out = self.run_tool("--apply-parked", "--write")
+        self.assertEqual(code, 0, out)
+        self.assertEqual([r["agent_id"] for r in self.read("task_attempts.jsonl")[2:]], ["park-b1", "park-c1"])
+        self.assertEqual([r["agent_id"] for r in self.read("task_durations.jsonl")], ["main-2", "park-b1", "park-c1"])
+
 
 if __name__ == "__main__":
     unittest.main()

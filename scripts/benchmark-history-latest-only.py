@@ -25,7 +25,8 @@ parked row parses (a truncated row refuses the publish before any ledger is
 touched), then appends the parked attempt and duration rows to the tracked
 ledgers byte-for-byte, replays the parked span rows through the normal
 segmented span append, marks the parked files applied, and runs the
-latest-only filter over the result.
+latest-only filter over the result. Rows an interrupted publish already
+appended are skipped, so replaying the same park twice is a no-op.
 """
 from __future__ import annotations
 
@@ -212,7 +213,21 @@ def _parked_rows(path: Path) -> list[bytes]:
     return rows
 
 
-def apply_parked(repo: Path, park: Path) -> dict[str, int]:
+def _published_rows(repo: Path, base: str) -> set[bytes]:
+    """Every row of a tracked attempt, duration or span ledger that this branch
+    changed relative to ``base``. A publish interrupted between the append and
+    the rename (SIGKILL, power loss) leaves its rows in exactly these files, so
+    the next replay can skip them instead of appending them again. Ledgers
+    unchanged since ``base`` received nothing from the park and are not read."""
+    published: set[bytes] = set()
+    for rel in _changed_ledgers(repo, base):
+        name = Path(rel).name
+        if name in (ATTEMPTS, DURATIONS) or name.startswith(SPAN_PREFIX):
+            published.update(line for line in (repo / rel).read_bytes().splitlines() if line.strip())
+    return published
+
+
+def apply_parked(repo: Path, park: Path, base: str) -> dict[str, int]:
     """Replay the smoke lane's parked rows into the tracked ledgers.
 
     Every parked file is parsed first; one bad row refuses the publish before
@@ -220,8 +235,10 @@ def apply_parked(repo: Path, park: Path) -> dict[str, int]:
     byte-for-byte; span rows go through the segmented span append (90 MiB
     segments per branch and day) exactly as a direct write would have. Each
     applied parked file is renamed ``<name>.applied-<utc>`` so a second
-    publish cannot apply it again. Returns the number of rows applied per
-    ledger."""
+    publish cannot apply it again, and a row that an interrupted publish
+    already appended (present verbatim in a ledger this branch changed) is
+    skipped, so replaying the same park twice yields the same ledgers.
+    Returns the number of rows applied per ledger."""
     # The publish itself must never be redirected back into the park.
     os.environ.pop(PARK_DIR_ENV, None)
     applied: dict[str, int] = {}
@@ -232,21 +249,25 @@ def apply_parked(repo: Path, park: Path) -> dict[str, int]:
     if not parked:
         print(f"no parked ledger rows under {park}")
         return applied
+    published = _published_rows(repo, base)
     history = repo / HISTORY_DIR
     history.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     for name, lines in parked.items():
+        fresh = [line for line in lines if line not in published]
         if name == SPANS:
-            rows = [_row(line) for line in lines]
+            rows = [_row(line) for line in fresh]
             written = _load_span_history(repo).record_span_observations(rows) if rows else 0
             if written != len(rows):
                 raise RuntimeError(f"{park / name}: applied {written} of {len(rows)} parked span rows")
-        else:
+        elif fresh:
             with (history / name).open("ab") as handle:
-                handle.write(b"".join(line + b"\n" for line in lines))
-        applied[name] = len(lines)
+                handle.write(b"".join(line + b"\n" for line in fresh))
+        applied[name] = len(fresh)
         (park / name).rename(park / f"{name}.applied-{stamp}")
-        print(f"{HISTORY_DIR}/{name}: applied {len(lines)} parked row(s) from {park}")
+        skipped = len(lines) - len(fresh)
+        note = f" ({skipped} already applied by an interrupted publish)" if skipped else ""
+        print(f"{HISTORY_DIR}/{name}: applied {len(fresh)} parked row(s) from {park}{note}")
     return applied
 
 
@@ -307,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.apply_parked is not None:
         park = Path(args.apply_parked)
-        apply_parked(repo, park if park.is_absolute() else repo / park)
+        apply_parked(repo, park if park.is_absolute() else repo / park, args.base)
     dropped = run(repo, args.base, args.write)
     return 1 if args.check and dropped else 0
 
