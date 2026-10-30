@@ -125,3 +125,64 @@ None recorded.
 Treat an unacknowledged configuration update as an unknown remote outcome and
 inspect the retained member's original evidence before assigning a no-start
 classification or discharging its recovery obligation.
+
+## Continuation: actual diagnostic capture and mounted-root evidence gap
+
+The earlier Solution records the first diagnostic stage. The subsequent
+single authorized capture of old `e826322ad17048` returned exit 0. Its original
+archive SHA256 is
+`4e52573f10b9f4b9ca108a0494cc256d5cee67a47274a8ef04d2c7a92a954475`:
+45 bytes, zero regular members and sixteen explicitly missing expected paths,
+including driver state/PID, bench log, current-token ACK/request/seals,
+services, run and backend/worker logs. Saved original config matched the prior
+native capture. The reviewed helper's journal/provenance reports inert capture,
+STOPPED and exact config restoration; raw final API responses were not exported.
+That report is distinct from independently reading the final provider state.
+Original controller custody, pending obligations and grades were retained.
+
+This does not yet prove the original volume lacked those files. Both root and
+independent reviewer reproduced a counterexample using the real collector:
+a nonexistent data directory returned success with zero files and sixteen
+missing paths, and the host verifier accepted that inventory. The original
+capture had no contemporaneous data-root or mount identity attestation. It
+remains valid as an unclassified diagnostic result and must not be relabelled
+as mounted-volume absence evidence.
+
+Integrated patch SHA256
+`61ecbd22f9e95bb931ff55384cb3a56037d1ff7bd050353de1e3b9493507ed0d`
+adds mounted-root attestation only to configured-old diagnostic capture. It
+reuses `current_cold_mount`: canonical existing `/data`, an exact mountinfo
+entry and a device distinct from `/`. It checks stat device against mountinfo
+major/minor, binds the native guest Machine, rechecks device/inode/mount before
+and after collection, and validates/preserves the attestation in provenance.
+Ordinary capture and all prior non-release restrictions remain unchanged.
+Independent reviewer `ph7f5w33myqa0z3227h3e4yz1h8h397f` returned GROUNDED
+for this diagnostic-only patch; receipt SHA256 is
+`ffa3be16689f61c5813aa0f92ff52673300787a4be4ca95e631b258010c3f68d`.
+Root applied the exact reviewed output; a new actual capture is not claimed here.
+
+The same missing-root test is baseline RED (incorrect success) and candidate
+GREEN (refusal before archive publication). The registered suite passes nineteen
+controls, including mount/Machine mismatch and changed identity; ordinary
+capture retains twenty-eight passes and two existing skips. These are offline
+controls, not a new live capture or proof of any particular volume's contents.
+The previously captured archive is immutable; only a new qualified capture can
+supply contemporaneous root/mount evidence.
+
+Even mounted-volume absence alone does not establish execution history. The
+bound boot script checks its initial `publish_driver_state booting` result
+before spawning the status server, unpacking helpers or launching the driver;
+its RUNSTAMP write is unchecked. However, state publication is not fsynced, so
+crash/lost-write histories remain a distinct uncertainty. The limited event
+subset on a normal Machine GET is not a complete lifecycle history. Neither
+this mount fix nor an empty archive proves no workload or provider allocation.
+Any later no-start or cleanup classification requires additional adequate
+original evidence or a conservative supported recovery path. R124 remains
+OPEN; current replacement ACK/normal-seven and all exact owner obligations
+remain required.
+
+A separately authorized, read-only `/events` request returned HTTP 200 in
+0.305 seconds and three events from the diagnostic restoration instance only;
+it did not supply the earlier execution history. Its raw response SHA256 is
+`414c9c8e6e19da95f358661102b2f3cdebcf404e4dfe8a454a9fd6c3e9759f99`.
+No release or no-start inference follows from that response.

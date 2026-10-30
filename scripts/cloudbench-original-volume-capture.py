@@ -153,6 +153,32 @@ def _scan_processes(proc: Path) -> tuple[int, list[dict[str, object]]]:
     return sleepers, forbidden
 
 
+def configured_data_mount(data: Path, machine: str) -> dict:
+    """Reuse the canonical mounted-/data proof, bound to this exact guest."""
+    if not re.fullmatch(r"[0-9a-f]{14}", machine or "") or os.environ.get("FLY_MACHINE_ID") != machine:
+        raise GuestRefusal("configured capture guest Machine identity differs")
+    try:
+        proof = original_file_contract()["current_cold_mount"](data)
+        root_device = Path("/").stat().st_dev
+        result = dict(schema="cloudbench-configured-data-mount-v1", machine_id=machine,
+                      path=str(data), root_device=root_device, **proof)
+        validate_configured_data_mount(result, machine)
+        return result
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        raise GuestRefusal("configured capture requires the distinct mounted original /data") from error
+
+
+def validate_configured_data_mount(value: object, machine: str) -> None:
+    if (not isinstance(value, dict) or set(value) != {
+            "schema", "machine_id", "path", "device", "inode", "root_device", "mount_device"}
+            or value.get("schema") != "cloudbench-configured-data-mount-v1"
+            or value.get("machine_id") != machine or value.get("path") != DATA_PATH
+            or any(type(value.get(key)) is not int or value[key] < 0 for key in ("device", "inode", "root_device"))
+            or value["inode"] == 0 or value["device"] == value["root_device"]
+            or value.get("mount_device") != f'{os.major(value["device"])}:{os.minor(value["device"])}'):
+        raise ValueError("configured original data mount attestation differs")
+
+
 def guest_collect(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="cloudbench-original-volume-capture guest-collect")
     parser.add_argument("--data", required=True)
@@ -160,6 +186,7 @@ def guest_collect(argv: list[str]) -> int:
     parser.add_argument("--output", required=True)
     parser.add_argument("--proc", default="/proc")
     parser.add_argument("--configured-old-member", action="store_true")
+    parser.add_argument("--machine-id")
     args = parser.parse_args(argv)
     os.umask(0o077)
     try:
@@ -168,6 +195,7 @@ def guest_collect(argv: list[str]) -> int:
         sleepers, forbidden = _scan_processes(Path(args.proc))
         if forbidden or sleepers < 1:
             raise GuestRefusal(f"guest is not inert: sleepers={sleepers} forbidden={forbidden}")
+        mount = configured_data_mount(Path(args.data), args.machine_id or os.environ.get("FLY_MACHINE_ID")) if args.configured_old_member else None
         contract = original_file_contract()
         extra = list(expected_names(args.run_token, args.configured_old_member)
                      - contract["original_names"](args.run_token))
@@ -184,6 +212,8 @@ def guest_collect(argv: list[str]) -> int:
             os.fsync(raw.fileno())
         if contract["original_files"](args.data, args.run_token, extra) != (files, missing):
             raise GuestRefusal("original files changed during capture")
+        if mount is not None and configured_data_mount(Path(args.data), args.machine_id or os.environ.get("FLY_MACHINE_ID")) != mount:
+            raise GuestRefusal("configured original data mount changed during capture")
         with open(args.output, "rb") as built:
             data = built.read()
         inventory = {
@@ -195,6 +225,7 @@ def guest_collect(argv: list[str]) -> int:
             "archive_bytes": len(data),
             "archive_sha256": hashlib.sha256(data).hexdigest(),
             "inert_sleepers": sleepers,
+            **({"data_mount": mount} if mount is not None else {}),
         }
         print(INVENTORY_MARKER + json.dumps(inventory, sort_keys=True, separators=(",", ":")), flush=True)
         return 0
@@ -981,7 +1012,7 @@ def guest_capture(fly: Fly, ident: dict, capture_dir: Path, journal: Journal,
             continue
         command = (f"python3 -I -B {remote}/{here.name} guest-collect --data {DATA_PATH} "
                    f"--run-token {token} --output {remote}/originals.tar.gz"
-                   + (" --configured-old-member" if ident.get("configured_old_member") else ""))
+                   + (" --configured-old-member --machine-id " + machine_id if ident.get("configured_old_member") else ""))
         rc, out, err = fly.flyctl(ssh_seconds, "ssh", "console", *base, "-C", command)
         lines = [line.strip() for line in out.splitlines() if line.startswith((INVENTORY_MARKER, ERROR_MARKER))]
         if len(lines) == 1 and lines[0].startswith(ERROR_MARKER):
@@ -1013,6 +1044,8 @@ def verify_capture(local: Path, inventory: dict, ident: dict) -> dict[str, bytes
         or len(data) != inventory.get("archive_bytes") or sha(data) != inventory.get("archive_sha256")
     ):
         raise CaptureFailure("downloaded capture differs from the guest inventory")
+    if ident.get("configured_old_member"):
+        validate_configured_data_mount(inventory.get("data_mount"), ident["machine_id"])
     fixed = expected_names(token, bool(ident.get("configured_old_member")))
     if set(missing) - fixed or set(missing) & set(files) or len(set(missing)) != len(missing):
         raise CaptureFailure("guest missing-file inventory is invalid")
@@ -1225,7 +1258,8 @@ def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts
         "captured_at": int(time.time()),
         **({"admission": "configured-old-member-diagnostic", "custody_sha256": ident["custody_sha256"],
             "source_ref": source_recipe[0], "source_recipe_sha256": source_recipe[1],
-            "source_fingerprint": source_recipe[2], "runtime_evidence_complete": False,
+            "source_fingerprint": source_recipe[2], "data_mount": inventory["data_mount"],
+            "runtime_evidence_complete": False,
             "phase_consumption_authorized": False} if source_recipe is not None else {}),
     }
     publish_bytes(artifacts["provenance.json"], canonical(provenance) + b"\n")
