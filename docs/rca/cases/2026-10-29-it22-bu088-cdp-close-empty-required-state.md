@@ -108,3 +108,58 @@ not identify the responsible provider or justify stopping healthy tasks.
 A missing browser-state result may follow a broken session lifecycle rather
 than an extraction or answer defect. Establish the earlier connection/target
 transition and replacement ownership before changing required-state semantics.
+
+## R93: It23 BU086r2 loses CDP before required state
+
+This is another observed close/reconnect/state-loss sequence, not proof of the
+same upstream cause. Executed sourcefc00b583e7df7b94d05fdb3442bddd23cd21be8b,
+patch none; root a5b50a02-f356-4929-aeae-7c23002c6076, r002-j0016,
+fleet20261030-002407-349164. The original asks for an actor identified through
+biographical and film clues. Archive
+ a9a0e8bed49f5aa5e994a912b91fa6d47ff5c4aba17abfa5903829da871e16bd,
+manifest012e1139cb28ceda5cc45805661f8055f77b0ed93ad761cdc0e61d99e43a5dd5,
+and run5ca86ad455dcfaa6b4e6afde36bdc59e90fcd891f547e9433626841121e828f3
+bind the original. All seven normal members were independently size/SHA checked.
+
+NativeFAILED1119.6s/progress1 precedes canonicalFAILED/producerinfraFALSE;
+no declared semantic evaluator result is recorded. Original worker15943 onward
+first records socket.send exceptions at00:46:47.834Z, then15956 records the
+upstream close at00:46:48.553211Z, code1006 and empty reason. The mux's
+`Provider closed` label describes its upstream reader ending; its source does
+not establish who initiated closure or whether provider, relay or local failure
+caused it. The worker remains alive and serves metrics during the sequence.
+
+At00:46:58.635320Z the CDP message handler exits; reconnect1 starts immediately.
+Some new upstream sockets attach, but this is not successful restoration of
+page/session state. Background target handlers subsequently report `Root CDP
+client required`; this symptom alone does not isolate the failing lifecycle
+operation. All three reconnect attempts end TimeoutError at00:47:34.157334Z,
+00:48:00.405871Z and00:48:17.443657Z. Worker17360 records exhaustion and17361
+records required BrowserStateRequest failure because CDP remains disconnected.
+Read-browser-state had already failed at00:47:30.531283Z; later no-result state
+events and actions[] recovery attempts cannot supply the missing page state.
+The final ValueError propagates through the browser activity and root manager.
+The later antibot classifier label is not independent evidence that antibot
+policy caused the socket loss.
+
+The bounded backend lookup found no BrowserChallengeRecovery/recover-challenge
+entry or earlier replacement/delete sequence proving R49's late-promotion
+cause. The same session's recorded DELETE204 occurs later at00:48:56.372Z,
+followed by another terminal DELETE204 at00:49:31.843Z. Final cleanup records
+root_deleted and tree_sealed with cleanup_failure null. Earlier cleanup metadata
+with unknown HTTP status does not supersede that terminal receipt.
+
+The full Solution/Human feedback of the R49 and R88 cases were read after the
+original trace. R88 supplies the matching downstream signature; R49 supplies a
+contrary known intentional-handoff cause that these originals do not establish.
+The exact upstream close cause and the particular reconnect phase timing out
+remain OPEN. No fabricated empty state, silent session replacement, additional
+retries, timeout increase or runtime candidate is justified by this packet.
+There was no model replay, provider query, capture or new regression test.
+
+The coordinator independently classified this original as one operational
+transport failure out of20 and directed the owner to issue one exact-process
+stop. That operational decision is separate from unchanged producerinfraFALSE,
+original native/canonical failure and any subsequent induced cancellations.
+This investigator performed no stop or recovery. Historical task improvement
+and vendor attribution remain unproven; tokens are UNMETERED.
