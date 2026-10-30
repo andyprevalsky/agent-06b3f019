@@ -213,7 +213,13 @@ export async function runLiveTilionConcurrency(): Promise<void> {
 /** The deploy gate override that holds the live cases needing Tilion residential egress. */
 export const TILION_RESIDENTIAL_LIVE_OVERRIDE = 'browser-provider:tilion-residential-live';
 
-function gateOverridden(gate: string): boolean {
+/**
+ * The deploy gate override that holds the live cases needing Kernel residential
+ * proxies (Kernel answers 403 on proxy validation while its pool is unavailable).
+ */
+export const KERNEL_RESIDENTIAL_LIVE_OVERRIDE = 'browser-provider:kernel-residential-live';
+
+export function gateOverridden(gate: string): boolean {
   return (process.env.DEPLOY_GATE_OVERRIDES ?? '')
     .split(',')
     .map((value) => value.trim())
