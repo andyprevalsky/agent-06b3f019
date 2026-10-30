@@ -45,11 +45,16 @@ their declarations still allow. Observed means PSS only, never summed RSS
 with any live process whose ``smaps_rollup`` is unreadable is unknown. Every
 sampling pass re-marks every running lane, so a lane the pass could not fully
 observe is unknown again rather than keeping an earlier value, and the credit
-binds to a fresh observation (``OBSERVATION_MAX_AGE_SECONDS``, 3 s); each
-running lane's observation state (``fresh``/``stale``/``unknown``), value and
-age are part of the recorded admission inputs. A lane whose usage is unknown
-or stale (macOS, unreadable /proc, not yet sampled, a stalled pass) keeps its
-whole declaration, and the declarations themselves are unchanged. An
+binds to a fresh observation: at most ``OBSERVATION_MAX_AGE_SECONDS`` (3 s)
+old on the monotonic clock, measured from the stamp taken *before* the /proc
+scan, so a scan that itself outlives the limit yields no credit when it
+returns, and a negative age (a stamp from the future) is stale as well.
+``tree_rss_at`` keeps the wall-clock scan start for humans. Each running
+lane's observation state (``fresh``/``stale``/``unknown``), value and age are
+part of the recorded admission inputs, and a deferred lane keeps its first
+and latest deferral inputs. A lane whose usage is unknown or stale (macOS,
+unreadable /proc, not yet sampled, a stalled or slow pass) keeps its whole
+declaration, and the declarations themselves are unchanged. An
 unphased lane (``semantic-stack``: its ``run.sh --benchmark`` startup runs
 ``kill-services.sh``, which terminates a running smoke stack) keeps the
 declared-peak accounting, so this change cannot admit it beside a stack it
@@ -478,15 +483,19 @@ def sample_lane_tree_rss(pids: set[int], proc: Path | None = None) -> dict[int, 
 
 def fresh_tree_rss_mb(state: dict, now: float | None = None) -> tuple[float | None, dict]:
     """The lane's process-tree PSS when the latest sampling pass observed the
-    whole tree and did so within ``OBSERVATION_MAX_AGE_SECONDS``; otherwise
-    ``None``. The detail names the observation state (``fresh``, ``stale``,
-    ``unknown``) and its age for the admission record."""
-    now = time.time() if now is None else now
-    value, at = state.get("tree_rss_mb"), state.get("tree_rss_epoch")
-    detail = {"tree_rss_mb": value, "observed_age_s": None if at is None else round(now - float(at), 1)}
+    whole tree and started within ``OBSERVATION_MAX_AGE_SECONDS``; otherwise
+    ``None``. Age is measured on the monotonic clock from the stamp the pass
+    took before its /proc scan (``tree_rss_mono``); a negative age (a stamp
+    from the future) or one beyond the limit is stale. The detail names the
+    observation state (``fresh``, ``stale``, ``unknown``) and its age for the
+    admission record."""
+    now = time.monotonic() if now is None else now
+    value, at = state.get("tree_rss_mb"), state.get("tree_rss_mono")
+    age = None if at is None else round(now - float(at), 1)
+    detail = {"tree_rss_mb": value, "observed_age_s": age}
     if value is None:
         return None, {**detail, "observation": "unknown"}
-    if at is None or now - float(at) > OBSERVATION_MAX_AGE_SECONDS:
+    if age is None or age < 0 or age > OBSERVATION_MAX_AGE_SECONDS:
         return None, {**detail, "observation": "stale"}
     return float(value), {**detail, "observation": "fresh"}
 
@@ -511,7 +520,9 @@ def _admission_inputs(lane: Lane, headroom: int | None, budget_mb: int | None, r
 
 
 def _record_waiting(state: dict, inputs: dict, reason: str) -> None:
-    waiting = state.setdefault("waiting", {"since": _now(), "checks": 0})
+    """Deferral history on the lane: the first and the latest decision inputs
+    and how many checks it has waited through."""
+    waiting = state.setdefault("waiting", {"since": _now(), "checks": 0, "first": {**inputs, "reason": reason}})
     waiting["checks"] += 1
     waiting["reason"] = reason
     waiting["last"] = inputs
@@ -1439,8 +1450,10 @@ def _run_attempt(
             sample_host_peak(receipt["host_peak"], sample)
             receipt["host_samples"].append({"at": _now(), **sample,
                                             "headroom_mb": memory_budget_mb(sample)})
+            # The observation is as old as the scan's start: a slow scan must not
+            # relabel an early reading as fresh when it finally returns.
+            scan_started, scan_wall = time.monotonic(), _now()
             observed = sample_lane_tree_rss({p.pid for p in processes.values() if p.returncode is None})
-            sampled_at = time.time()
             for name, process in processes.items():
                 if process.returncode is not None:
                     continue
@@ -1448,7 +1461,7 @@ def _run_attempt(
                 # not fully observe is unknown again, never its previous value.
                 tree_state = receipt["lanes"][name]
                 value = observed.get(process.pid)
-                tree_state.update(tree_rss_mb=value, tree_rss_epoch=sampled_at, tree_rss_at=_now())
+                tree_state.update(tree_rss_mb=value, tree_rss_mono=scan_started, tree_rss_at=scan_wall)
                 if value is not None:
                     tree_state["tree_peak_rss_mb"] = max(float(tree_state.get("tree_peak_rss_mb") or 0.0), value)
             last_sample = time.monotonic()

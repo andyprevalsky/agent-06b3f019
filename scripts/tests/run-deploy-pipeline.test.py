@@ -470,7 +470,9 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
         assert admission["running"]["holder"]["memory_mb"] == 100 and admission["running"]["holder"]["tree_rss_mb"] >= 50
         assert admission["running"]["holder"]["observation"] == "fresh", admission["running"]
         assert 0 <= admission["running"]["holder"]["observed_age_s"] <= pipeline.OBSERVATION_MAX_AGE_SECONDS
-        assert holder["tree_rss_at"] and holder["tree_rss_epoch"] <= holder["finished_epoch"], holder
+        assert holder["tree_rss_at"] and holder["tree_rss_mono"] is not None, holder
+        assert admission["deferred"]["first"]["reason"] == "headroom", admission["deferred"]
+        assert admission["deferred"]["first"]["running"]["holder"]["observation"] == "unknown", admission["deferred"]
         assert admission["deferred"]["checks"] >= 1 and admission["deferred"]["reason"] == "headroom", admission
         assert admission["deferred"]["last"]["reserved_live_mb"] + 60 > 120, admission["deferred"]
         assert unphased["started_epoch"] >= holder["finished_epoch"], \
@@ -561,18 +563,67 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     assert pipeline.sample_lane_tree_rss({100}, proc) == {100: None}
     assert pipeline.sample_lane_tree_rss({100}, tmp / "no-such-proc") == {100: None}
     assert pipeline.sample_lane_tree_rss(set(), proc) == {}
-    # Fresh, stale and unknown observations.
+    # A delayed scan: the observation is as old as the scan's START. The first
+    # pass takes 3.5 s (over the 3 s limit) and reports 80 MB when it returns;
+    # the gate exits during that scan, so the joiner's first check runs right
+    # after it and must see the holder stale (not fresh because the scan "just
+    # finished"), then unknown as later passes fail; it waits for the holder.
+    slow_marker = tmp / "slow-holder-allocated"
+    slow_plan = tmp / "slow-scan-plan.json"
+    slow_state = tmp / "slow-scan"
+    write_plan(slow_plan, [
+        {"name": "gate", "command": ["sleep", "4.0"], "reuse_passed": False, "group": "3", "memory_mb": 1},
+        {"name": "holder", "command": [sys.executable, "-c",
+                                       f"import pathlib, time; pathlib.Path({str(slow_marker)!r}).touch(); "
+                                       "time.sleep(6.5)"],
+         "reuse_passed": False, "group": "3", "memory_mb": 100},
+        {"name": "joiner", "command": ["true"], "after": ["gate"], "reuse_passed": False, "group": "3",
+         "memory_mb": 60},
+    ], schedule={"policy": "legacy"})
+    slow_calls: list[float] = []
+
+    def slow_sampler(pids: set[int]) -> dict[int, float | None]:
+        slow_calls.append(time.monotonic())
+        if len(slow_calls) == 1:
+            time.sleep(pipeline.OBSERVATION_MAX_AGE_SECONDS + 0.5)
+            return {pid: 80.0 for pid in pids}
+        return {}
+
+    def slow_host() -> dict:
+        return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if slow_marker.exists() else 300)}
+
+    with patch.object(pipeline, "host_resources", side_effect=slow_host), \
+         patch.object(pipeline, "sample_lane_tree_rss", side_effect=slow_sampler), \
+         patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
+         patch.dict(os.environ, env):
+        result = pipeline.run(slow_plan, slow_state, max_parallel=0)
+    receipt = json.loads((slow_state / "receipt.json").read_text())
+    assert result == 0 and receipt["status"] == "passed", (result, receipt["lanes"])
+    holder, joiner = receipt["lanes"]["holder"], receipt["lanes"]["joiner"]
+    assert joiner["started_epoch"] >= holder["finished_epoch"], \
+        "an observation from a scan older than the limit was credited because the scan had just returned"
+    first = joiner["admission"]["deferred"]["first"]["running"]["holder"]
+    assert first["observation"] == "stale" and first["tree_rss_mb"] == 80.0, first
+    assert first["observed_age_s"] >= pipeline.OBSERVATION_MAX_AGE_SECONDS, first
+    assert joiner["admission"]["deferred"]["last"]["running"]["holder"]["observation"] == "unknown", joiner
+    assert holder["tree_peak_rss_mb"] == 80.0 and holder["tree_rss_at"], holder
+    # Fresh, stale (too old, from the future, unstamped) and unknown observations
+    # on the monotonic clock.
     now = 1_000.0
-    fresh, detail = pipeline.fresh_tree_rss_mb({"tree_rss_mb": 80.0, "tree_rss_epoch": now - 1.0}, now)
+    fresh, detail = pipeline.fresh_tree_rss_mb({"tree_rss_mb": 80.0, "tree_rss_mono": now - 1.0}, now)
     assert fresh == 80.0 and detail == {"tree_rss_mb": 80.0, "observed_age_s": 1.0, "observation": "fresh"}, detail
     stale, detail = pipeline.fresh_tree_rss_mb(
-        {"tree_rss_mb": 80.0, "tree_rss_epoch": now - pipeline.OBSERVATION_MAX_AGE_SECONDS - 0.1}, now)
+        {"tree_rss_mb": 80.0, "tree_rss_mono": now - pipeline.OBSERVATION_MAX_AGE_SECONDS - 0.1}, now)
     assert stale is None and detail["observation"] == "stale" and detail["tree_rss_mb"] == 80.0, detail
+    future, detail = pipeline.fresh_tree_rss_mb({"tree_rss_mb": 80.0, "tree_rss_mono": now + 5.0}, now)
+    assert future is None and detail == {"tree_rss_mb": 80.0, "observed_age_s": -5.0, "observation": "stale"}, detail
     assert pipeline.fresh_tree_rss_mb({"tree_rss_mb": 80.0}, now) == (None, {
         "tree_rss_mb": 80.0, "observed_age_s": None, "observation": "stale"})
-    assert pipeline.fresh_tree_rss_mb({"tree_rss_mb": None, "tree_rss_epoch": now}, now)[1]["observation"] == "unknown"
+    assert pipeline.fresh_tree_rss_mb({"tree_rss_mb": None, "tree_rss_mono": now}, now)[1]["observation"] == "unknown"
     assert pipeline.fresh_tree_rss_mb({}, now) == (None, {"tree_rss_mb": None, "observed_age_s": None,
                                                         "observation": "unknown"})
+    assert pipeline.fresh_tree_rss_mb({"tree_rss_mb": 80.0, "tree_rss_mono": time.monotonic()})[0] == 80.0, \
+        "the default clock is monotonic, not wall time"
     print("observation validity: ok")
 
 
