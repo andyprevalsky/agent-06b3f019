@@ -215,3 +215,92 @@ replacement, timeout/cap change, model replay or speculative regression test
 was introduced. Positive operational transport evidence was sent to the
 coordinator separately from immutable producerinfraFALSE; this investigator
 performed no stop or recovery. No original task grade or outcome changed.
+
+### R109: It26 BU097r1 upstream closure followed by failed reconnect (2026-10-30)
+
+This is another observation of the **unrecovered CDP transport → unavailable
+required browser state** boundary, not proof that the initiating cause matches
+any earlier incident in this case. The original root is
+`263284f4-9b1e-4f31-8734-1d6e51e66f5b`, job `r001-j0007`, task
+`polar-bu-097`, executed source
+`7e557a39083db505203e9e9bdf697e6c1a3f5a98` with no workspace patch.
+The original producer records **FAILED, 564.1 seconds, progress 1, no judge
+result, and infrastructure failure FALSE**. These original fields remain
+unchanged. The parent separately treated the positively observed transport loss
+as an operational infrastructure incident under the one-of-twenty stop rule;
+that decision is not a rewritten benchmark result.
+
+The sealed original archive has SHA256
+`2f1c3708dc9abd8df2dce8bb92ea218ba006c7f93a29c42b5c14d40f80953ab7`.
+All 16 supplied custody members were independently hash-checked, including the
+seven normal-runtime files. Worker log SHA256 is
+`caf6d96f11d399fe4a24b2ed21c65c4813691fea68fad24c0f9fabb5672fe2eb`;
+normal `run.json` SHA256 is
+`7842dc851a4fd7d563084ba653b3e21e7ae68f21b0d52b046143daaaba96387e`.
+References below are original worker-log line numbers; timestamps are UTC:
+
+| Line | Time | Recorded boundary |
+| --- | --- | --- |
+| 11640 | 05:36:51.547634 | CdpMux reports the upstream CDP socket closed, code `1000`, empty reason. |
+| 11723 / 11728 | 05:36:52.825888 / 52.984104 | `SwitchTabEvent` handler exceeds its own 10-second timeout; Rose surfaces `BrowserActionRaisedTimeout`. |
+| 11729 | 05:36:53.060304 | BrowserUse's downstream CDP message handler exits. |
+| 11735 / 11742 / 11752 | 05:36:53.873286 / 58.427305 / 05:37:01.306924 | All three native reconnect attempts fail with `ConnectionError: WebSocket connection closed`. |
+| 11753 | 05:37:01.307340 | Native reconnect exhaustion is recorded. |
+| 11825, 11839–11882 | 05:37:12.984059–22.429991 | Eight generic supervisor recovery records contain empty action lists; none proves restored transport. |
+| 11886 / 11887 | 05:37:22.988875 / 23.061529 | Recovery budget exhausts; required `BrowserStateRequestEvent` has no non-None handler result and the activity fails. |
+
+There is no successful reconnect recorded between upstream closure and the
+fatal state request. This is **not** the 330-second outer action-cap boundary:
+the action raised its own event-handler timeout. The backend's browser-session close/pause request
+at 05:37:23.384 and exact-session DELETE at 05:38:17.181 are later than the
+worker's upstream-close and fatal-state events; they do not explain the first
+closure. Code `1000` and an empty reason identify neither the initiator's motive
+nor a vendor defect. No wire-stage or provider-internal explanation is proved.
+
+Earlier telemetry is relevant but remains **measurement, not causal proof**:
+asyncio task count rose from 351 at 05:36:11.544931 (line 11122), to 1,831 at
+05:36:28.343504 (11152), 2,445 at 05:36:36.101334 (11252), and 3,800 at
+05:36:51.304622 (11608). Emulation-command no-reply errors accompanied the
+buildup. The log contains 3,721 HTTP-cache-store events. After the failed
+reconnect sequence, task count was 30 at 05:37:13.781828 (11830). These facts do
+not prove an event-task leak, renderer overload, an OOM, or that cache work caused
+the upstream closure. Worker logging and polling continued.
+
+The original user asked for the artist's birth year, constrained by scholarship
+and college history, a dated band/guitarist article, a 1990s movie, and marriage
+age/date facts. The actual persisted schema correctly represented that answer:
+`birth_year`, required, nonnullable, type `int`, with presentation version 1,
+mode `value`, field `birth_year`, encoding `text`. There is no schema rejection
+in the failing path and `latest_structured_response_keys` was null at failure.
+Bing searches mentioning Rahman and Roots are not proof that all factual
+criteria were satisfied; the answer and whole-task correctness remain OPEN.
+
+An independent offline check used the installed compatible BrowserUse 0.13.11,
+Bubus 1.5.6 and cdp-use 1.4.5. It registered the real BrowserStateRequest handler
+wrapper, set the session to disconnected and no longer reconnecting, and
+requested a required event result. The wrapper skipped the handler body and
+Bubus raised the same non-None-result ValueError. Network was blocked. This
+establishes that the final message can be a consequence of exhausted transport
+recovery **without missing handler registration**; it does not reproduce the
+upstream close or prove a repair. Those local dependency bytes were not claimed
+to be independently hash-identical to the original guest's dependencies.
+
+Source inspection used a clean supplied agents archive plus all differing
+original-7e paths, checked against their SHA256 and Git blob IDs. The untouched
+path equality was supplied by the parent's Git comparison. Exact 7e
+`service_actions.py` requires a successful target ACK before recording a tab
+switch, `handler.py` distinguishes action-raised timeout from the outer cap,
+and `cdp_multiplexer.py` clears owned mappings and closes downstream clients when
+its upstream reader ends. No runtime patch, timeout increase, state fallback,
+new capture, or live/model replay was performed or justified.
+
+Reviewer correction: an initial filtered read missed worker line 11640 and
+briefly reported no upstream-close marker. The full structured scan found it;
+the reviewer immediately corrected the parent. The sequence above supersedes
+that interim absence claim. Do not preserve the mistaken claim as evidence.
+
+Private independent receipt, hashed event projection, and portable offline
+replay are retained with R109's supplied original custody. Historical FE/last
+LLM publication was not independently revalidated in this read-only intake.
+The case remains **OPEN**: identify the initiating transport failure from
+original evidence or a causal owning control before proposing a runtime fix.
