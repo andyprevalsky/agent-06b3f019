@@ -151,3 +151,60 @@ prompt, or task. No new replay or model call was performed. Cleanup reports
 Tilion DELETE204 with no errors/warnings. R113 is an append-only offline
 investigation; it neither deploys the qualified future changes nor counts as
 a repaired benchmark result.
+
+## R116: It27 BU098r2 retained film-runtime assertions
+
+This recurrence is limited to the observed **raw actor assertion → unchanged
+persisted statement → later contrary evidence** boundary; it does not establish
+a shared generation cause. Original root
+`18e0b195-e328-4110-bba3-440abd4d0e3e`, task `polar-bu-098`, source
+`98c8668b47b5e9b2fd2b807c2f083f2e46a04733`, patch none. Native
+COMPLETED795.3s/progress1 and canonicalFAIL/C3FAIL remain distinct. C1/C2/C4
+pass; original producerinfraFALSE is unchanged.
+
+All seven normal files independently match their manifest sizes/hashes.
+Normal run SHA256 is
+`36d8d32503b9353341186377b1b159ed17300b9aac242b54f2c9fa48aa753845`;
+worker SHA256 is
+`35f4abeb2eb63b982446216beef98ab2b4ae0546215a470b303feb5c243c711a`.
+The user asks for a1980s film lasting95–110minutes with director and writer
+biographical clues. Raw schema output worker85,
+`a2d6d299ff441c2e52f49403bbd7dbd1ca1c9abacdfba747367df4094b6fb9ef`,
+requires a generic movie_name string and inserts no specific title/runtime.
+Its persisted value/text presentation matches the requested movie-name output.
+
+At zero-based message66 (judge step67), the actor states that Nineteen
+Eighty-Four runs113minutes and Another Time Another Place runs98minutes. Raw
+browser_use_step_14 output at worker12859, SHA256
+`9361b3865a48f1a0fef6a959109cad5fa0d05c50ebe49a188642554a459a332d`,
+has action.thinking exactly equal to that persisted message. Its captured input
+contains no standalone113 runtime or factual98-minute runtime; occurrences of
+98 are DOM element indices. The actor also says it needs to search for
+“pollution from similar queries across agents.” That generated phrase is not
+evidence that cross-agent contamination occurred. No observed parsing or
+persistence transformation introduced the disputed claims.
+
+Later original observations contradict them: message70 shows118minutes for
+Another Time Another Place; message78 shows110minutes for Nineteen Eighty-Four.
+Message74 gives107minutes for White Mischief. The original C3 rejection follows
+these contradictions. It is not a rejection of the final movie name.
+
+Final browser-verifier input worker18413, SHA256
+`b2257860170dde6a7664c7ebd46af626b6b4ed14ad78842ad757a351b4b9b679`,
+contains the118/110-minute evidence but not the113/98-minute assertions. The
+verifier prompt explicitly omits actor reasoning. Output worker18425,
+`39ffa821b5bb0c1b9adf0f94f428c29facc2f808d40771bbcc78f8c793b8aaea`,
+returns White Mischief, task_completedtrue, score1, while distinguishing the
+book author James Fox from the evangelical actor and noting the mistaken
+writer clue. Final output-field verification does not erase earlier claims
+from the independent full-trajectory C3 assessment.
+
+Two archive searches used film-runtime/intermediate-claim and
+contrary-evidence terms. The available local search index was older than98c;
+its results were leads only. The full supplied retained-city and R113
+comparators and the streamed-commentary parsing case were read. Unlike that
+parser defect, raw actor and persisted text agree. Why the actor generated
+those runtimes remains OPEN: no model replay, raw provider-wire comparison,
+or causal intervention was performed. No forced title, reasoning suppression,
+prompt edit, criterion change, timeout change or runtime fix is justified by
+this record. All original grades and facts are preserved.
