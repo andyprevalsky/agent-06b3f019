@@ -1260,6 +1260,7 @@ async def run_all_tests():
     print("tool-schemas blackbox tests:")
     # Recursive public schemas use a finite native node-table contract.
     r = BlackboxResult()
+    r.record("final_presentation_native_shape", test_final_presentation_native_shape)
     r.record("response_schema_nodes_legacy_forms", test_response_schema_nodes_name_preserves_legacy_input_forms)
     r.record("recursive_response_schema_public_native", test_recursive_response_schema_public_and_native_wire)
     r.record("recursive_response_schema_invalid_graphs", test_recursive_response_schema_wire_rejects_invalid_graphs)
@@ -1567,3 +1568,65 @@ def test_response_schema_nodes_name_preserves_legacy_input_forms():
             pass
         else:
             raise AssertionError("malformed node envelope was accepted as a legacy map")
+
+
+def test_final_presentation_native_shape():
+    import copy
+    import json
+    from pathlib import Path
+    import jsonschema
+    from helpers.llm import _GeneratedResponseSchemaWithTitle
+    from providers.rose.schema import build_openai_response_format
+    from providers.rose.cerebras import build_cerebras_body
+    from utils.final_presentation import FinalPresentation
+
+    original = json.loads(Path(__file__).with_name("final_presentation_wire_original.json").read_text())
+    response_format = build_openai_response_format(_GeneratedResponseSchemaWithTitle)
+    body = build_cerebras_body(model="qwen-3.8-27b", messages=[], tools=None,
+        tool_choice=None, response_format=response_format, temperature=.3,
+        max_tokens=16000, effort="high")
+    schema = body["response_format"]["json_schema"]["schema"]
+
+    def rejected(value):
+        try:
+            jsonschema.validate(value, schema)
+        except jsonschema.ValidationError:
+            return True
+        return False
+
+    # Actual provider-produced value/null-field object failed canonical parsing.
+    try:
+        _GeneratedResponseSchemaWithTitle.model_validate(original)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Captured canonical rejection changed")
+    assert rejected(original), "Native format admitted invalid value presentation"
+    report = copy.deepcopy(original)
+    report["presentation"] = {"version": 1, "mode": "report", "field": None, "encoding": None}
+    jsonschema.validate(report, schema)
+    _GeneratedResponseSchemaWithTitle.model_validate(report)
+    report["presentation"] = None
+    jsonschema.validate(report, schema)
+    _GeneratedResponseSchemaWithTitle.model_validate(report)
+
+    for encoding in ("text", "json"):
+        valid = {"nodes": [{"id": "name", "parent_id": None, "position": 0,
+            "name": "name", "type": "str", "required": True, "nullable": False,
+            "description": "Requested name", "constraints": []}],
+            "presentation": {"version": 1, "mode": "value", "field": "name", "encoding": encoding},
+            "reasoning": "One requested name", "title": "Requested Name"}
+        jsonschema.validate(valid, schema)
+        _GeneratedResponseSchemaWithTitle.model_validate(valid)
+        for key in ("field", "encoding"):
+            invalid = copy.deepcopy(valid)
+            invalid["presentation"][key] = None
+            assert rejected(invalid)
+        invalid = copy.deepcopy(valid)
+        invalid["presentation"]["mode"] = "report"
+        assert rejected(invalid)
+
+    assert FinalPresentation.model_validate({"version": 1, "mode": "report"}).model_dump() == {
+        "version": 1, "mode": "report"}
+    assert FinalPresentation.model_validate({"version": 1, "mode": "value", "field": "x", "encoding": "text"}).model_dump() == {
+        "version": 1, "mode": "value", "field": "x", "encoding": "text"}

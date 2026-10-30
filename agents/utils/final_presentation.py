@@ -15,6 +15,37 @@ class FinalPresentation(BaseModel):
     field: str | None = None
     encoding: Literal["text", "json"] | None = None
 
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema, handler):
+        schema = handler(core_schema)
+        if handler.mode != "validation":
+            return schema
+        # Match the existing mode-dependent validator in provider input schemas.
+        # Serialization and canonical accepted values remain unchanged.
+        report = {
+            "type": "object",
+            "properties": {
+                "version": {"const": 1, "type": "integer"},
+                "mode": {"const": "report", "type": "string"},
+                "field": {"type": "null"},
+                "encoding": {"type": "null"},
+            },
+            "required": ["version", "mode"],
+            "additionalProperties": False,
+        }
+        value = {
+            "type": "object",
+            "properties": {
+                "version": {"const": 1, "type": "integer"},
+                "mode": {"const": "value", "type": "string"},
+                "field": {"type": "string", "minLength": 1},
+                "encoding": {"enum": ["text", "json"], "type": "string"},
+            },
+            "required": ["version", "mode", "field", "encoding"],
+            "additionalProperties": False,
+        }
+        return {"title": schema.get("title", cls.__name__), "anyOf": [report, value]}
+
     @model_serializer(mode="wrap")
     def canonical_shape(self, handler):
         data = handler(self)
