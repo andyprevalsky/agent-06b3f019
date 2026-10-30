@@ -101,6 +101,37 @@ point, `capture_error: pause timed out` is reported together with high main-
 thread CPU and rising `anon_mb`. That points at a native builtin such as zlib,
 `JSON`/`Buffer` concat or sharp, on the main thread.
 
+2026-10-30: two more kills, both about 5 minutes after a deploy. One was at
+16:05:54Z on instance `-nlnpk`. The other was at 19:24:30Z on `-slh6v`, during
+the post-deploy production semantic run (samples 5/5 of `agent_plan`,
+`web_search` and `agent_execute` timed out).
+
+On `-slh6v` the last main-thread line was at 19:23:43.569. It was
+`[ChatHandler] Escalating to superintelligence` followed by a `span.start
+http.request`, the same router-escalation point as the 10-27 04:48 kill. The
+loop then stayed silent for 47 s until the kill. The S24 watchdog wrote
+nothing in those 47 s, although the restarted instance's startup stall at
+19:24:45 shows it was running.
+
+Reproduced locally: when the main thread blocks inside native code
+(`crypto.pbkdf2Sync`), the stall line waited on the stack capture. The
+capture cannot finish until the native call returns. When its 5 s timeout
+fired, the late `Debugger.enable` callback posted to the closed session and
+threw `ERR_INSPECTOR_NOT_CONNECTED`, which killed the worker. A native-code
+stall, the case the 16 GiB kills most likely are, was therefore invisible.
+
+Fixed in S31:
+
+- The memory line (RSS, `anon_mb`, CPU per thread) is written at once and every
+  `reportEveryMs`, independent of any capture.
+- The stack and isolate memory come in a separate `event loop stall stack`
+  line.
+- Inspector callbacks after a timeout are no-ops.
+- A worker error is logged instead of crashing.
+
+The next kill therefore records the memory curve and per-thread CPU even when
+the main thread never reaches JavaScript.
+
 The process stops writing logs the moment the loop blocks, so no existing log
 can name the code that ran. This is the owned gap: the backend had no
 observation path that survives a blocked event loop.
@@ -117,10 +148,18 @@ that is running and shows the memory curve. `EVENT_LOOP_WATCHDOG_DISABLED=1`
 turns it off.
 
 Regression: `back-end/src/tests/unit/event-loop-stall-watchdog.test.ts` (backend
-unit suite in `/deploy` coverage). A child process blocks its loop in a named
-function while allocating Buffers. The test requires the stall record to name
-that frame and report RSS, the RSS curve to continue, and the end of the stall
-to be recorded. It passed five consecutive runs.
+unit suite in `/deploy` coverage). It runs two cases, and both passed five
+consecutive runs.
+
+1. A child process blocks its loop in a named JavaScript function while
+   allocating Buffers. A stack line must name that frame and split the heap
+   from Buffers, memory lines must continue, and the end of the stall must be
+   recorded.
+2. A child blocks inside native code for 7 s. The first memory line must
+   appear within 2 s, at least three more must follow during the block, the
+   worker must survive the capture timeout, and the child must exit cleanly.
+   The pre-fix watchdog fails this case: it writes no line until the block ends
+   and crashes on the late inspector callback.
 
 The case stays open until a watchdog record from prod identifies the code and
 that cause is reproduced and fixed. Scaling to two instances (Andy's decision)
