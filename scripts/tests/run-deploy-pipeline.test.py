@@ -14,6 +14,9 @@ budgets to the host, ``run`` caps concurrent lanes and admits them against a
 declared-memory budget, refusing a lane that can never fit. ``wait`` requires
 ``--since`` so a previous iteration's receipt can never be reported, and it
 reports lanes that failed before any stage row existed instead of hanging.
+Live admission (2026-10-30, #1640): a phased lane is charged only the running
+lanes' unmaterialized declarations against live headroom (their usage is
+already in MemAvailable); unphased and unobserved lanes keep the declared sum.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -403,6 +407,86 @@ def check_live_headroom_and_child_rusage(tmp: Path, env: dict[str, str]) -> None
     print("live headroom refusal + per-lane child rusage: ok")
 
 
+def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> None:
+    """Follow-up ah (#1640, 2026-10-30): live headroom already contains what
+    the running lanes use, so charging their whole declarations against it
+    again made the 4096 MB smoke lane wait 16 min beside the two coverage
+    lanes (3712 + 4096 > ~4700 headroom). A phased lane now reserves only the
+    running lanes' unmaterialized declarations (declared - observed
+    process-tree PSS, sampled at 1 Hz) against live headroom; the startup
+    budget still caps declared totals; an unphased lane (semantic-stack, whose
+    startup kills a running stack) keeps the declared accounting; an unobserved
+    lane keeps its whole declaration; every decision's inputs land in the
+    receipt. Budget 300 at start, headroom 120 once the holder has allocated:
+    holder (100) + joiner (60) exceed 120 declared, but 100 - ~70 observed + 60
+    fit, so joiner must start while holder is still running."""
+    pipeline = load_module("pipeline_materialized_credit", DRIVER)
+    marker = tmp / "holder-allocated"
+    plan = tmp / "credit-plan.json"
+    holder_command = [sys.executable, "-c",
+                      "import pathlib, time; block = b'x' * (60 * 1024 * 1024); "
+                      f"pathlib.Path({str(marker)!r}).touch(); time.sleep(4); del block"]
+
+    def write(joined: Path, unphased: Path) -> None:
+        write_plan(plan, [
+            {"name": "gate", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 1},
+            {"name": "holder", "command": holder_command, "reuse_passed": False, "group": "3", "memory_mb": 100},
+            {"name": "joiner", "command": ["touch", str(joined)], "after": ["gate"], "reuse_passed": False,
+             "group": "3", "memory_mb": 60},
+            {"name": "unphased", "command": ["touch", str(unphased)], "after": ["gate"], "reuse_passed": False,
+             "group": "4", "memory_mb": 60},
+        ], schedule={"policy": "legacy"})
+
+    def host() -> dict:
+        # No MemTotal/watchdog: headroom is MemAvailable less the 2 GiB reserve.
+        return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if marker.exists() else 300)}
+
+    def run(state: Path, **patches) -> dict:
+        if marker.exists():
+            marker.unlink()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(pipeline, "host_resources", side_effect=host))
+            stack.enter_context(patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])))
+            stack.enter_context(patch.dict(os.environ, env))
+            for name, value in patches.items():
+                stack.enter_context(patch.object(pipeline, name, value))
+            result = pipeline.run(plan, state, max_parallel=0)
+        receipt = json.loads((state / "receipt.json").read_text())
+        assert result == 0 and receipt["status"] == "passed", (result, receipt["status"], receipt["lanes"])
+        assert receipt["memory_budget_mb"] == 300, receipt["memory_budget_mb"]
+        return receipt
+
+    if sys.platform == "linux":
+        write(tmp / "credit-joined", tmp / "credit-unphased")
+        lanes = run(tmp / "credit")["lanes"]
+        holder, joiner, unphased = lanes["holder"], lanes["joiner"], lanes["unphased"]
+        assert joiner["started_epoch"] < holder["finished_epoch"], \
+            "joiner fits beside holder's unmaterialized reservation and must not wait for it"
+        assert holder["tree_peak_rss_mb"] >= 50, holder
+        admission = joiner["admission"]
+        assert admission["decision"] == "admitted" and admission["accounting"] == "unmaterialized", admission
+        assert admission["headroom_mb"] == 120 and admission["budget_mb"] == 300 and admission["memory_mb"] == 60
+        assert admission["reserved_declared_mb"] == 100 and admission["reserved_live_mb"] < 60, admission
+        assert admission["running"]["holder"]["memory_mb"] == 100 and admission["running"]["holder"]["tree_rss_mb"] >= 50
+        assert admission["deferred"]["checks"] >= 1 and admission["deferred"]["reason"] == "headroom", admission
+        assert admission["deferred"]["last"]["reserved_live_mb"] + 60 > 120, admission["deferred"]
+        assert unphased["started_epoch"] >= holder["finished_epoch"], \
+            "an unphased lane keeps the declared accounting beside a running stack"
+        assert unphased["admission"]["accounting"] == "declared", unphased["admission"]
+        assert "waiting" not in joiner and "waiting" not in unphased, "deferral history moves under admission"
+    else:
+        print("materialized reservation credit: process-tree sampling is Linux-only; conservative path only")
+    # Unobserved usage (macOS, unreadable /proc) keeps the whole declaration: joiner waits.
+    write(tmp / "unobserved-joined", tmp / "unobserved-unphased")
+    lanes = run(tmp / "unobserved", sample_lane_tree_rss=lambda pids: {})["lanes"]
+    assert lanes["joiner"]["started_epoch"] >= lanes["holder"]["finished_epoch"], lanes["joiner"]
+    assert lanes["joiner"]["admission"]["running"] == {} and "tree_rss_mb" not in lanes["holder"], lanes
+    assert lanes["joiner"]["admission"]["deferred"]["last"]["running"]["holder"]["tree_rss_mb"] is None, lanes["joiner"]
+    assert pipeline.unmaterialized_mb(100, None) == 100 and pipeline.unmaterialized_mb(100, 70.4) == 30
+    assert pipeline.unmaterialized_mb(100, 250.0) == 0
+    print("materialized reservation credit: ok")
+
+
 def check_wait_receipt_contract(tmp: Path, pipeline=None, scenario="both") -> None:
     """Replay terminal receipts at the supervisor/row waiter boundary."""
     pipeline = pipeline or load_module("pipeline_wait_contract", DRIVER)
@@ -624,6 +708,7 @@ def main() -> int:
 
         check_wait_receipt_contract(tmp)
         check_live_headroom_and_child_rusage(tmp, env)
+        check_materialized_reservation_credit(tmp, env)
         check_plan_scaling()
         check_structural_memory_floor()
         check_macos_memory(tmp, env)

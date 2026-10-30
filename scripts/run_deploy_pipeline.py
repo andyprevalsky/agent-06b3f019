@@ -11,14 +11,48 @@ This supervisor only schedules lanes and writes one atomic receipt:
 * ``run``  starts every lane whose ``after`` dependencies have exited, with
   previously failed lanes (from the prior receipt in the same state dir)
   admitted first. At most ``--max-parallel`` lanes run at once (default from
-  the host's cores and memory) and the declared ``memory_mb`` of the running
-  lanes never exceeds the startup budget or current whole-box headroom below
-  the watchdog cap, with a 2 GiB reserve. A lane that cannot fit alone is
+  the host's cores and memory); the declared ``memory_mb`` of the running
+  lanes plus the candidate never exceeds the startup budget, and against the
+  current whole-box headroom below the watchdog cap (2 GiB reserve) a phased
+  lane is charged only the running lanes' still-unmaterialized declarations
+  (see *Admission accounting* below). A lane that cannot fit alone is
   refused (``failed``, note ``refused: ...``) instead of being started into
   cgroup throttling or the memory watchdog. Lanes keep running after a
   sibling fails so one iteration collects every failure. When all lanes
   finish it re-hashes the source and marks the receipt ``stale`` if anything
   changed after the freeze, so an older snapshot can never be reported green.
+
+Admission accounting (follow-up ah, measured on #1640, 2026-10-30). Two
+checks admit a pending lane. The startup budget (``memory_budget_mb``, the
+smaller of the plan's and the headroom at attempt start) caps the declared
+total of the running lanes plus the candidate; it is a static ceiling and
+never double-counts. The live check samples the host again and requires the
+candidate to fit ``memory_budget_mb`` of that sample (MemAvailable and the
+watchdog cap, less the 2 GiB reserve). That headroom already contains what
+the running lanes use, so charging their whole declarations against it again
+double-counted them: on #1640 attempt 1 the two coverage lanes (2560 + 1152 MB
+declared) had taken MemAvailable to ~8300 MB (headroom ~4700 MB) and the 4096
+MB smoke lane waited 16 min (18:15:06 -> 18:31:08) for ``3712 + 4096 <= 4700``
+although the box held ~11.2 GB below the watchdog cap; on #1639 the same three
+lanes started together only because no co-tenant held memory at 15:06:22.
+``run`` therefore samples every running lane's process tree at 1 Hz (PSS of
+every descendant of its stage wrapper, ``tree_rss_mb`` / ``tree_peak_rss_mb``
+on the lane; Linux /proc) and, for a phased lane (Group 3 or a declared
+coverage-phase lane), reserves only ``sum(max(0, declared - observed))`` of
+the running lanes: exactly the growth their declarations still allow. A lane
+whose usage is unobserved (macOS, unreadable /proc, not yet sampled) keeps
+its whole declaration, and the declarations themselves are unchanged. An
+unphased lane (``semantic-stack``: its ``run.sh --benchmark`` startup runs
+``kill-services.sh``, which terminates a running smoke stack) keeps the
+declared-peak accounting, so this change cannot admit it beside a stack it
+would kill. Every decision is kept on the lane for audit: ``admission``
+(``admitted``/``refused`` with headroom, budget, declared and live
+reservations, the running lanes with their observed usage, and the deferral
+history) and ``waiting`` while deferred. The smoke lane stays at 4096 MB: the
+only window in which it ran with idle siblings (#1639 attempt 1, 14:28-14:41Z,
+backend/agents idle at 66/126 MB) measured a whole-box footprint of 3492 MB
+median / 4905 MB peak, so it is not shown to be over-declared; right-size from
+recorded ``tree_peak_rss_mb`` once passed runs carry it.
 
   With ``--follow-source`` the supervisor keeps hashing the source while lanes
   run. Once a change has settled (``--settle-seconds`` without further edits)
@@ -346,6 +380,92 @@ def sample_host_peak(peak: dict, host: dict) -> dict:
     return peak
 
 
+def sample_lane_tree_rss(pids: set[int]) -> dict[int, float]:
+    """Resident memory (MB) of each lane's whole process tree.
+
+    Descendants are followed by parent links from the lane's stage wrapper, so
+    the stage runner's command (started in its own session) and everything it
+    forks are attributed to the lane; a process that daemonized away from the
+    tree is missed, which only under-credits the lane. PSS
+    (``/proc/<pid>/smaps_rollup``) shares pages between the lane's own
+    processes the way MemAvailable gives them back; RSS is the fallback where
+    the rollup is unreadable. Linux only: elsewhere, or when /proc cannot be
+    read, the result is empty and the lane's usage stays unobserved, which
+    keeps its whole declaration reserved.
+    """
+    if not pids or sys.platform != "linux":
+        return {}
+    page_mb = os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return {}
+    parents: dict[int, int] = {}
+    rss_pages: dict[int, int] = {}
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            stat = Path(f"/proc/{entry}/stat").read_text()
+        except OSError:
+            continue  # exited between listdir and read
+        fields = stat[stat.rindex(")") + 2:].split()
+        try:
+            parents[int(entry)], rss_pages[int(entry)] = int(fields[1]), int(fields[21])
+        except (IndexError, ValueError):
+            continue
+    children: dict[int, list[int]] = {}
+    for pid, parent in parents.items():
+        children.setdefault(parent, []).append(pid)
+
+    def resident_mb(pid: int) -> float:
+        try:
+            for line in Path(f"/proc/{pid}/smaps_rollup").read_text().splitlines():
+                if line.startswith("Pss:"):
+                    return int(line.split()[1]) / 1024
+        except (OSError, IndexError, ValueError):
+            pass
+        return rss_pages[pid] * page_mb
+
+    totals: dict[int, float] = {}
+    for root in pids:
+        total, seen, stack = 0.0, set(), [int(root)]
+        while stack:
+            pid = stack.pop()
+            if pid in seen or pid not in parents:
+                continue
+            seen.add(pid)
+            total += resident_mb(pid)
+            stack.extend(children.get(pid, []))
+        totals[int(root)] = round(total, 1)
+    return totals
+
+
+def unmaterialized_mb(memory_mb: int, observed_mb: float | None) -> int:
+    """The part of a running lane's declared reservation not yet visible in
+    MemAvailable: its headroom for growth still to come. Unobserved usage
+    keeps the whole declaration."""
+    if observed_mb is None:
+        return int(memory_mb)
+    return max(0, int(memory_mb) - int(observed_mb))
+
+
+def _admission_inputs(lane: Lane, headroom: int | None, budget_mb: int | None, reserved: int, live_reserved: int,
+                      accounting: str, running_states: dict[str, dict], by_name: dict[str, Lane]) -> dict:
+    """Every input of one admission decision, kept on the lane for audit."""
+    return {"at": _now(), "headroom_mb": headroom, "budget_mb": budget_mb, "memory_mb": lane.memory_mb,
+            "reserved_declared_mb": reserved, "reserved_live_mb": live_reserved, "accounting": accounting,
+            "running": {name: {"memory_mb": by_name[name].memory_mb, "tree_rss_mb": state.get("tree_rss_mb")}
+                        for name, state in running_states.items()}}
+
+
+def _record_waiting(state: dict, inputs: dict, reason: str) -> None:
+    waiting = state.setdefault("waiting", {"since": _now(), "checks": 0})
+    waiting["checks"] += 1
+    waiting["reason"] = reason
+    waiting["last"] = inputs
+
+
 def _iso_epoch(value: object) -> float | None:
     try:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
@@ -582,7 +702,10 @@ def record_lane_durations(receipt: dict, path: Path | None = None) -> dict[str, 
                 overlap += 1
         sample = {"wall_s": round(float(lane["wall_s"]), 1), "status": lane["status"], "concurrent": overlap,
                   "at": receipt.get("started_at"), "head": (receipt.get("source") or {}).get("head"),
-                  "attempt": receipt.get("attempt"), "source": "receipt"}
+                  "attempt": receipt.get("attempt"), "source": "receipt",
+                  # Footprint telemetry for right-sizing ``memory_mb``: the largest
+                  # single child (wait4) and the lane's whole process tree (PSS, 1 Hz).
+                  "peak_rss_mb": lane.get("peak_rss_mb"), "tree_peak_rss_mb": lane.get("tree_peak_rss_mb")}
         ledger.setdefault(name, []).append(sample)
         ledger[name] = ledger[name][-LANE_DURATION_SAMPLES:]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1221,6 +1344,11 @@ def _run_attempt(
         signal.signal(forwarded, terminate)
 
     by_name = {lane.name: lane for lane in lanes}
+    # Phased lanes are designed to run together: admitting one charges only the
+    # running lanes' unmaterialized declarations against live headroom. Unphased
+    # lanes keep the declared-peak accounting (semantic-stack's startup kills a
+    # running smoke stack; memory is what keeps them apart).
+    credit_lanes = {lane.name for lane in phased_lanes(lanes)}
     pending = list(order)
     superseding: dict | None = None  # the settled new source once detected
     changed_source: dict | None = None
@@ -1233,6 +1361,13 @@ def _run_attempt(
             sample_host_peak(receipt["host_peak"], sample)
             receipt["host_samples"].append({"at": _now(), **sample,
                                             "headroom_mb": memory_budget_mb(sample)})
+            observed = sample_lane_tree_rss({p.pid for p in processes.values() if p.returncode is None})
+            for name, process in processes.items():
+                if process.returncode is None and process.pid in observed:
+                    tree_state = receipt["lanes"][name]
+                    tree_state["tree_rss_mb"] = observed[process.pid]
+                    tree_state["tree_peak_rss_mb"] = max(float(tree_state.get("tree_peak_rss_mb") or 0.0),
+                                                         observed[process.pid])
             last_sample = time.monotonic()
         # Reap exits before admitting successors, so a lane's finished_epoch
         # always precedes the started_epoch of a lane admitted into its share.
@@ -1263,10 +1398,13 @@ def _run_attempt(
             receipt["status"] = "superseded" if superseding is not None else overall(receipt["lanes"])
             write_receipt(receipt_path, receipt)
         if not stopping and superseding is None:
-            running = sum(1 for p in processes.values() if p.returncode is None)
-            reserved = sum(
-                by_name[name].memory_mb for name, p in processes.items() if p.returncode is None
-            )
+            running_states = {name: receipt["lanes"][name] for name, p in processes.items() if p.returncode is None}
+            running = len(running_states)
+            reserved = sum(by_name[name].memory_mb for name in running_states)
+            # Live headroom already contains what the running lanes use; only
+            # the part of their declarations not yet materialized is still owed.
+            unmaterialized = sum(unmaterialized_mb(by_name[name].memory_mb, state.get("tree_rss_mb"))
+                                 for name, state in running_states.items())
             pass_sample = None
             for lane in list(pending):
                 if max_parallel and running >= max_parallel:
@@ -1303,26 +1441,43 @@ def _run_attempt(
                         )
                         continue
                     if reserved + lane.memory_mb > budget_mb:
-                        continue  # admitted when running lanes release their share
+                        # Admitted when running lanes release their declared share.
+                        _record_waiting(receipt["lanes"][lane.name], {
+                            "at": _now(), "budget_mb": budget_mb, "memory_mb": lane.memory_mb,
+                            "reserved_declared_mb": reserved}, "budget")
+                        continue
                 if pass_sample is None:
                     pass_sample = runtime_host_resources()
                     sample_host_peak(receipt["host_peak"], pass_sample)
                 sample = pass_sample
                 headroom = memory_budget_mb(sample)
-                if headroom is None or reserved + lane.memory_mb > headroom:
+                accounting = "unmaterialized" if lane.name in credit_lanes else "declared"
+                live_reserved = unmaterialized if accounting == "unmaterialized" else reserved
+                inputs = _admission_inputs(lane, headroom, budget_mb, reserved, live_reserved, accounting,
+                                           running_states, by_name)
+                if headroom is None or live_reserved + lane.memory_mb > headroom:
                     if headroom is None and receipt["host_samples"][-1].get("error") != sample.get("error"):
                         receipt["host_samples"].append({"at": _now(), **sample, "headroom_mb": headroom})
                     if running:
+                        _record_waiting(receipt["lanes"][lane.name], inputs, "headroom")
                         continue  # this run can still release reservations
                     receipt["host_samples"].append({"at": _now(), **sample, "headroom_mb": headroom})
                     pending.remove(lane)
                     receipt["lanes"][lane.name].update(
                         status="failed", exit=None, finished_epoch=time.time(),
                         note=f"refused: needs {lane.memory_mb} MB, live headroom {headroom} MB",
+                        admission={**inputs, "decision": "refused"},
                     )
                     continue
                 receipt["host_samples"].append({"at": _now(), **sample, "headroom_mb": headroom})
                 pending.remove(lane)
+                deferred = receipt["lanes"][lane.name].pop("waiting", None)
+                receipt["lanes"][lane.name]["admission"] = {**inputs, "decision": "admitted", "deferred": deferred}
+                if deferred:
+                    print(f"PIPELINE_LANE_ADMITTED lane={lane.name} after {deferred['checks']} deferred check(s) "
+                          f"since {deferred['since']}: headroom={headroom} reserved_live={live_reserved} "
+                          f"reserved_declared={reserved} memory={lane.memory_mb} accounting={accounting}",
+                          flush=True)
                 argv = ["bash", str(STAGE_WRAPPER), lane.name]
                 if lane.reuse_passed:
                     argv.append("--reuse-passed")
@@ -1352,14 +1507,17 @@ def _run_attempt(
                         finished_epoch=time.time(),
                         log=str(log_path),
                         note=f"spawn failed: {error}",
+                        admission={**inputs, "decision": "spawn-failed", "deferred": deferred},
                     )
                     continue
                 pass_sample = None  # a successful spawn changes live headroom
                 receipt["lanes"][lane.name].update(
                     status="running", started_epoch=time.time(), log=str(log_path)
                 )
+                running_states[lane.name] = receipt["lanes"][lane.name]
                 running += 1
                 reserved += lane.memory_mb
+                unmaterialized += lane.memory_mb  # nothing of a fresh lane is visible yet
             write_receipt(receipt_path, receipt)
         elif pending:
             for lane in pending:

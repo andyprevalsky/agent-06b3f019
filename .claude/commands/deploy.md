@@ -382,10 +382,16 @@ CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -v '^agents/benchmarks/histor
 # 1471.98 MiB largest-child peak rounded up with a 25% margin for each worker.
 # run reserves 2 GiB for other processes below both available memory and the
 # watchdog cap, rechecks whole-box headroom before every admission, and never
-# admits reservations over that headroom. A lane that cannot fit alone fails
+# admits declared totals over the startup budget. Against live headroom, which
+# already contains what the running lanes use, a phased lane is charged only
+# their unmaterialized declarations (declared minus the lane's sampled
+# process-tree PSS); unphased lanes (semantic-stack) and unobserved usage keep
+# the declared sum (#1640: smoke waited 16 min on a double-counted 3712 MB).
+# A lane that cannot fit alone fails
 # visibly without starting. Explicit resource limits can only tighten memory
 # admission. Receipts include timestamped MemAvailable samples, per-lane child
-# peak RSS (wait4/getrusage), load peaks and memory-watchdog TERM records.
+# peak RSS (wait4/getrusage), per-lane process-tree PSS, every admission's
+# inputs, load peaks and memory-watchdog TERM records.
 # Account for Postgres, Docker and other agents outside the deploy cgroup:
 # MemoryHigh on one unit does not protect the rest of this 16 GiB box.
 BACKEND_BLACKBOX_WORKERS=4
