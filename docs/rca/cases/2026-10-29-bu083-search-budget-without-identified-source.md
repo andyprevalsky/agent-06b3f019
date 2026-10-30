@@ -97,3 +97,59 @@ A budget-driven pause, a local activity cancellation, and a source-identificatio
 failure are separate observations. Count budgeted decisions rather than all
 action receipts, preserve positive cleanup evidence, and require a concrete
 mechanical defect before turning an unresolved search into a runtime patch.
+
+## R102: It25 BU083r1 original budget pause
+
+Original r001-j0003/root06968b69-9878-4b21-b845-2d21a78f5418 ran
+source3dc00896d3b8dcc0b3666c9c8493507ee96c7809 with no patch. Archive
+93424fdd71e2298ef1c94a25a5126869f7b45147eb248661ee187930baf92d52
+and normal manifesta777a89c467bad315700e3490ae7a4494646807b25acc5487d8a86427dbc00c6
+bind seven members independently verified by size and SHA256.
+NativePAUSED2101.0s/progress0 is separate from canonicalFAILED/infraFALSE.
+The low-progress gate fails; no declared semantic judge result is recorded.
+
+The task again asks for an athlete's hometown by identifying November2019
+and January2020 articles and their publishers. The retained trajectory keeps
+searching across candidate sports/articles without establishing the requested
+source and hometown. The required athlete_hometown string schema preserves
+that request; no completed structured answer is present.
+
+Original driver line16692 explicitly says Browser step budget reached100/100,
+pausing for polar judge. Backend logs show POST to this root's pause endpoint
+at03:28:31.571Z, returning200 at03:28:31.805Z. Worker24503 receives PAUSE at
+03:28:31.806357Z and records activity cancellation at03:28:35.986499Z. The
+label “paused by user” does not establish a separate human intervention: the
+captured driver and API call identify the budget-triggered path.
+
+The last completed actor call is browser_use_step_99: exact decoded original
+request/output SHA256
+98778d562bc84386fa558bf192236e471211f663c4b168120aecaf5cb13e3bfb.
+It chooses evaluate(document.body.innerText), reading Bing results for a Golf
+Digest January2020 interview/hometown query. The result is delivered at
+03:28:29.617Z. Step100 starts at03:28:30.668089Z, request699519701b3a, before
+the pause arrives; no completed response for it is claimed. There is no
+recorded completion-verifier result or accepted hometown to recover.
+
+Source _agent_class_step_counts counts distinct explicit steps_taken values.
+The original final messages contain100 distinct values0..99, explaining the
+driver's100/100 observation even though the final completed call is99.
+Separately104 recorded action phases comprise53goto,46evaluate and5
+read_browser_state, with five observation-budget refund events. Raw action
+receipt counts, distinct counter values and model-call labels are different
+measurements; their differing values alone do not prove a counter defect or
+a causal completion failure. No cap or counting change is proposed.
+
+The pause's browser cleanup reports HTTP500, but the later normal terminal
+receipt records the same Tilion session sess_98241c69135549f6b6ac64f933730e57
+DELETE204 with root_deleted/tree_sealed and cleanup_failure null. The earlier
+failure is retained separately and does not establish terminal infrastructure
+failure. Zero summary usage counters do not mean zero browser execution.
+
+Two archive searches used “Browser step budget reached100 pausing” and
+“BU083 scoring methods hometown research.” This case's Solution and Human
+feedback were read. The evidence matches its observed unfinished-research /
+budget-pause boundary, so this occurrence is appended rather than creating a
+duplicate repair lane. Underlying research failure remains OPEN without a
+controlled causal reproduction. No model-intelligence claim, forced athlete,
+search prompt change, replay, new native/DB/provider call or live-source edit.
+Original grade and clocks remain unchanged. Tokens UNMETERED.
