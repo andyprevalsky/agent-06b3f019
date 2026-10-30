@@ -217,6 +217,34 @@ agents_venv_is_self_rooted() {
     [ "$(canonical_dir "$activated")" = "$(canonical_dir "$venv")" ]
 }
 
+# The source workspace's healthy agents/venv is the verified toolchain
+# (CLAUDE.md "Fresh clone setup": link existing healthy trees, including
+# agents/venv, when the manifests match). A fresh venv resolves every
+# unpinned range anew and drifted on 2026-10-30 (pytest 9.2.0 beside the
+# verified 9.1.1), so a deploy worktree links the source venv whenever its
+# agents/requirements.txt is byte-identical and that venv activates to itself,
+# imports the agent stack and satisfies the manifest. A linked venv is never
+# installed into: the source workspace owns it.
+agents_venv_reusable_from_source() {
+  local target="$1"
+  local source_workspace="$2"
+  local source_venv="$source_workspace/agents/venv"
+  cmp -s "$target/agents/requirements.txt" "$source_workspace/agents/requirements.txt" || return 1
+  [ -x "$source_venv/bin/python" ] || return 1
+  agents_venv_is_self_rooted "$source_venv" || return 1
+  "$source_venv/bin/python" -c 'import browser_use, pytest, temporalio' >/dev/null 2>&1 || return 1
+  "$source_venv/bin/python" "$target/scripts/lib/agents_venv_satisfied.py" "$target/agents/requirements.txt" \
+    >/dev/null 2>&1
+}
+
+agents_venv_linked_to_source() {
+  local target="$1"
+  local source_workspace="$2"
+  [ -L "$target/agents/venv" ] || return 1
+  [ -d "$target/agents/venv" ] || return 1
+  [ "$(canonical_dir "$target/agents/venv")" = "$(canonical_dir "$source_workspace/agents/venv")" ]
+}
+
 ensure_dependencies() {
   local target="$1"
   local source_workspace="$2"
@@ -244,18 +272,35 @@ ensure_dependencies() {
     # checkout's schema at the time; regenerate it here (test launchers only
     # assert freshness and never rewrite it).
     bash scripts/ensure-prisma-client.sh "$target"
-    if [ ! -x agents/venv/bin/python ] ||
+    if [ -L agents/venv ]; then
+      # A venv linked to the source workspace is reused only while that venv
+      # still matches this worktree's manifest; otherwise drop the link (never
+      # the source venv behind it) and decide afresh below.
+      if agents_venv_linked_to_source "$target" "$source_workspace" &&
+        agents_venv_reusable_from_source "$target" "$source_workspace"; then
+        echo "♻️  Reusing the source workspace agents/venv (requirements identical): $(canonical_dir agents/venv)"
+      else
+        echo "📦 Linked agents/venv no longer matches agents/requirements.txt; replacing the link."
+        rm agents/venv
+      fi
+    fi
+    if [ ! -e agents/venv ] && agents_venv_reusable_from_source "$target" "$source_workspace"; then
+      ln -s "$source_workspace/agents/venv" agents/venv
+      echo "♻️  Linked the source workspace agents/venv (requirements identical): $(canonical_dir agents/venv)"
+    elif [ ! -x agents/venv/bin/python ] ||
       ! agents_venv_is_self_rooted agents/venv ||
       ! agents/venv/bin/python -c 'import browser_use, pytest, temporalio' >/dev/null 2>&1; then
       source_python="$source_workspace/agents/venv/bin/python"
       [ -x "$source_python" ] || source_python="$(command -v python3)"
-      if [ -e agents/venv ]; then
+      if [ -e agents/venv ] || [ -L agents/venv ]; then
         mv agents/venv "agents/venv.incomplete.$(date -u +%Y%m%d%H%M%S).$$"
       fi
+      echo "📦 Building a fresh agents/venv (requirements differ from the source workspace or its venv is unusable)..."
       "$source_python" -m venv agents/venv
       agents/venv/bin/python -m pip install --upgrade pip
       agents/venv/bin/python -m pip install -r agents/requirements.txt
-    elif ! agents/venv/bin/python scripts/lib/agents_venv_satisfied.py agents/requirements.txt; then
+    elif [ ! -L agents/venv ] &&
+      ! agents/venv/bin/python scripts/lib/agents_venv_satisfied.py agents/requirements.txt; then
       agents/venv/bin/python -m pip install -r agents/requirements.txt
     fi
     agents/venv/bin/python -c 'import browser_use, pytest, temporalio' >/dev/null
@@ -470,6 +515,19 @@ if $CHECK_ONLY; then
     echo "   Re-run deploy-worktree preparation to rebuild it in place." >&2
     exit 1
   }
+  if [ -L "$WORKTREE/agents/venv" ]; then
+    # A linked venv is the source workspace's; it is only this worktree's
+    # toolchain while both manifests are byte-identical.
+    agents_venv_linked_to_source "$WORKTREE" "$ROSE_DEPLOY_SOURCE_WORKSPACE" || {
+      echo "❌ Deploy worktree agents/venv links outside its selected source workspace." >&2
+      exit 1
+    }
+    cmp -s "$WORKTREE/agents/requirements.txt" "$ROSE_DEPLOY_SOURCE_WORKSPACE/agents/requirements.txt" || {
+      echo "❌ Deploy worktree agents/venv is linked to the source workspace but agents/requirements.txt differs." >&2
+      echo "   Re-run deploy-worktree preparation to build this worktree's own venv." >&2
+      exit 1
+    }
+  fi
   [ -d "$WORKTREE/node_modules" ] || {
     echo "❌ Deploy worktree is missing node_modules." >&2
     exit 1
