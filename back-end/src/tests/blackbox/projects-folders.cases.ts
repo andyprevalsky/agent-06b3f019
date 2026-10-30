@@ -431,7 +431,11 @@ test('folders: migration preserves both deletion paths with the existing project
     'utf8'
   );
   const schema = `folder_migration_${randomBytes(8).toString('hex')}`;
-  const result = spawnSync('psql', [process.env.DATABASE_URL!, '-v', 'ON_ERROR_STOP=1', '-q'], {
+  const psqlUrl = new URL(process.env.DATABASE_URL!);
+  // Coverage adds Prisma pool options that the native psql client rejects.
+  for (const key of ['connection_limit', 'pool_timeout', 'pgbouncer', 'schema', 'socket_timeout'])
+    psqlUrl.searchParams.delete(key);
+  const result = spawnSync('psql', [psqlUrl.toString(), '-v', 'ON_ERROR_STOP=1', '-q'], {
     encoding: 'utf8',
     timeout: 30_000,
     input: `BEGIN;
