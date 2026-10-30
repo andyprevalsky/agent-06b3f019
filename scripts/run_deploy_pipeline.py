@@ -54,12 +54,18 @@ This supervisor only schedules lanes and writes one atomic receipt:
   merge (``merged_sha^1..merged_sha``) touches agent runtime files per
   ``scripts/classify-agent-runtime-changes.sh`` or ``deploy-agents.yml``, it
   waits for the exact ``deploy-agents.yml`` run whose headSha is the merged SHA
-  to complete successfully, recovers the durable job id from its log, runs the
-  Step 13ab queue-identity and ``monitor-cooperative-cutover.ts --verify``
-  checks, and only then runs the dispatch command after ``--`` (the Step 13b
-  production semantic dispatch). ``production.json`` in the state dir records
-  the decision, run id/attempt/job id and every GitHub wait; a failed or
-  still-running cutover exits 1 with the operator's next action and never
+  to complete (any conclusion), recovers the durable job id from its log, and
+  requires the Step 13ab proof that the Fly lane is live: the durable job
+  (``worker-deployment-queue.ts read``) is ``SUCCEEDED`` and bound to the
+  merged SHA and ``<run_id>-<attempt>``, and
+  ``monitor-cooperative-cutover.ts --verify`` passes. Only then does it run the
+  dispatch command after ``--`` (the Step 13b production semantic dispatch).
+  The run's GitHub conclusion is recorded but is not the authority: a run that
+  concluded failure and was resumed through the queue CLI keeps that
+  conclusion. ``production.json`` in the state dir records the decision, run
+  id/attempt/job id, job stage and every GitHub wait; a still-running run, a
+  job that is not SUCCEEDED, an identity mismatch or a failed monitor exits 1
+  with the operator's next action (the exact resume command) and never
   dispatches (the #1639 chain dispatched while Fly was still cutting over and
   4/5 production semantic jobs failed, 2026-10-30).
 
@@ -1916,7 +1922,7 @@ def fly_wait(merged_sha: str, *, root: Path, waits: list[dict], state: dict | No
     ``state``."""
     result = {"required": True} if state is None else state
     result.update(required=True, run_id=None, attempt=None, url=None, status=None, conclusion=None,
-                  deployment_token=None, job_id=None)
+                  deployment_token=None, job_id=None, job_stage=None)
     started = time.monotonic()
     run_row: dict | None = None
     polls = 0
@@ -1970,22 +1976,12 @@ def fly_wait(merged_sha: str, *, root: Path, waits: list[dict], state: dict | No
                   "status": "completed", "conclusion": conclusion, "outcome": "completed"})
     result.update(attempt=attempt, url=view.get("url"), status="completed", conclusion=conclusion,
                   deployment_token=f"{run_id}-{attempt}" if attempt else None)
-    log = _gh_run_log(run_id, root)
-    try:
-        result["job_id"] = recover_job_id(log, run_id)
-    except ProductionGateError:
-        if conclusion == "success":
-            raise
-    if conclusion != "success":
-        resume = (f"node --import tsx scripts/worker-deployment-queue.ts run --job-id {result['job_id']} -- "
-                  "python3 ../scripts/worker_pool_cutover.py" if result["job_id"] else
-                  f"recover the job id from `gh run view {run_id} --log` and resume it per deploy.md Step 13")
-        raise ProductionGateError(
-            f"{AGENTS_WORKFLOW} run {run_id} attempt {attempt or '?'} concluded {conclusion} "
-            f"({view.get('url') or 'no url'}); the Fly worker cutover is NOT live for {merged_sha}. Do not dispatch "
-            f"production semantics: resume the saved deployment from back-end/ with `{resume}` "
-            "and rerun this gate once it succeeds"
-        )
+    # The GitHub conclusion is telemetry: a run that concluded failure and was
+    # resumed through the queue CLI keeps that conclusion forever (deploy.md
+    # Step 13), and `gh run rerun` would mint an attempt whose token the job
+    # identity rejects. The durable job recovered from this run's log is the
+    # authority for "live" (Step 13ab: stage SUCCEEDED + monitor --verify).
+    result["job_id"] = recover_job_id(log=_gh_run_log(run_id, root), run_id=run_id)
     return result
 
 
@@ -2022,10 +2018,20 @@ def surface_hash(root: Path) -> str:
     return completed.stdout.strip()
 
 
+def resume_command(job_id: str) -> str:
+    """deploy.md Step 13: an interrupted or failed CI cutover resumes the SAME
+    durable job from back-end/; never enqueue a replacement or rerun CI."""
+    return (f"node --import tsx scripts/worker-deployment-queue.ts run --job-id {job_id} -- "
+            "python3 ../scripts/worker_pool_cutover.py")
+
+
 def cutover_verify(fly: dict, merged_sha: str, expected_hash: str, *, root: Path) -> dict:
-    """deploy.md Step 13ab for the cooperative route: the saved job must carry
-    this merged SHA and workflow attempt, then the managed monitor ``--verify``
-    is authoritative for the job, its pointer and retained bank evidence."""
+    """deploy.md Step 13ab for the cooperative route: the saved job must be
+    ``SUCCEEDED`` (CI cut over only when its durable job is; a green build or
+    the run's conclusion is insufficient) and carry this merged SHA and
+    workflow attempt, then the managed monitor ``--verify`` is authoritative
+    for the job, its pointer and retained bank evidence. ``fly['job_stage']``
+    records the stage read, separately from the run's conclusion."""
     backend = root / "back-end"
     env = {**os.environ, **_dotenv_values(backend / ".env")}
     job_id = fly["job_id"]
@@ -2035,10 +2041,20 @@ def cutover_verify(fly: dict, merged_sha: str, expected_hash: str, *, root: Path
         raise ProductionGateError(f"worker-deployment-queue.ts read --job-id {job_id} failed: {read.stderr.strip()}")
     try:
         job = json.loads(read.stdout)
+        stage = str(job["stage"])
         identity = job["identity"]
         source_commit, attempt = identity["sourceCommit"], identity["attempt"]
     except (json.JSONDecodeError, KeyError, TypeError) as error:
-        raise ProductionGateError(f"worker-deployment-queue.ts read --job-id {job_id} returned no job identity: {error}") from error
+        raise ProductionGateError(
+            f"worker-deployment-queue.ts read --job-id {job_id} returned no job stage/identity: {error}") from error
+    fly["job_stage"] = stage
+    if stage != "SUCCEEDED":
+        raise ProductionGateError(
+            f"durable job {job_id} is {stage}, not SUCCEEDED (run {fly.get('run_id')} concluded "
+            f"{fly.get('conclusion')}); the Fly worker cutover is NOT live for {merged_sha}. Do not dispatch "
+            f"production semantics: resume the saved deployment from back-end/ with `{resume_command(job_id)}` "
+            "and rerun this gate once the durable job is SUCCEEDED"
+        )
     if source_commit != merged_sha or attempt != fly["deployment_token"]:
         raise ProductionGateError(
             f"job {job_id} source/attempt mismatch: job sourceCommit={source_commit} attempt={attempt}, expected "
@@ -2052,8 +2068,8 @@ def cutover_verify(fly: dict, merged_sha: str, expected_hash: str, *, root: Path
         raise ProductionGateError(
             f"monitor-cooperative-cutover.ts --verify failed (exit {monitor.returncode}) for job {job_id}: {tail.strip()}"
         )
-    return {"job_id": job_id, "source_commit": source_commit, "attempt": attempt, "expected_hash": expected_hash,
-            "queue_read": "ok", "monitor_verify_exit": 0, "monitor_tail": tail}
+    return {"job_id": job_id, "job_stage": stage, "source_commit": source_commit, "attempt": attempt,
+            "expected_hash": expected_hash, "queue_read": "ok", "monitor_verify_exit": 0, "monitor_tail": tail}
 
 
 def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = None, *, root: Path | None = None,
@@ -2063,11 +2079,13 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
     live. Render/Vercel waits stay in deploy.md Step 13/13a; this command owns
     the Fly lane: when the merge touches agent runtime files (or
     deploy-agents.yml) it waits for the exact deploy-agents.yml run on the
-    merged SHA to complete successfully, recovers its durable job id, runs the
-    Step 13ab identity + monitor verification, and only then runs ``dispatch``
-    (when given). A failed or still-running cutover exits 1 with the operator's
-    next action and never dispatches. The receipt ``production.json`` in
-    ``state_dir`` records the decision, the run id/attempt/job id and every
+    merged SHA to complete, recovers its durable job id, runs the Step 13ab
+    proof (job SUCCEEDED + identity + monitor --verify), and only then runs
+    ``dispatch`` (when given). A still-running run, a job that is not
+    SUCCEEDED, an identity mismatch or a failed monitor exits 1 with the
+    operator's next action and never dispatches. The receipt
+    ``production.json`` in ``state_dir`` records the decision, the run
+    id/attempt/job id, the run conclusion and job stage separately, and every
     GitHub wait."""
     root = SOURCE_ROOT if root is None else root
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -2105,8 +2123,13 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
                   f"conclusion={fly['conclusion']} job={fly['job_id']}", flush=True)
             write_receipt(receipt_path, receipt)
             expected = expected_hash or surface_hash(root)
-            receipt["cutover_verify"] = cutover_verify(fly, merged_sha, expected, root=root)
-            print(f"PIPELINE_PRODUCTION cutover=verified job={fly['job_id']} hash={expected}", flush=True)
+            try:
+                receipt["cutover_verify"] = cutover_verify(fly, merged_sha, expected, root=root)
+            except ProductionGateError:
+                write_receipt(receipt_path, receipt)  # keeps fly.job_stage for the operator
+                raise
+            print(f"PIPELINE_PRODUCTION cutover=verified job={fly['job_id']} job_stage={fly['job_stage']} "
+                  f"hash={expected}", flush=True)
         else:
             receipt["fly"] = {"required": False, "reason": "no agent runtime or deploy-agents.yml change in the merge"}
             print(f"PIPELINE_PRODUCTION fly=not-required head={merged_sha} ({len(changed)} changed files, "

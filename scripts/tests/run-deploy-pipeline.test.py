@@ -650,10 +650,14 @@ def main() -> int:
 
 def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     """``production`` gates the Step 13b dispatch on the exact deploy-agents.yml
-    run of the merged SHA: an agent runtime change waits for completed/success
-    (recording run id, attempt, job id and every GitHub wait), a merge without
-    agent runtime changes never calls gh, and a failed run blocks the dispatch
-    with the resume action. gh and node are fake executables on PATH."""
+    run of the merged SHA: an agent runtime change waits for the run to
+    complete and for the Step 13ab proof (durable job SUCCEEDED, identity bound
+    to the merged SHA and run attempt, monitor --verify), recording run id,
+    attempt, job id, conclusion and job stage; a merge without agent runtime
+    changes never calls gh; a run that concluded failure still opens the gate
+    when its resumed durable job is SUCCEEDED, and a job that is not SUCCEEDED
+    blocks with the exact resume command. gh and node are fake executables on
+    PATH."""
     repo = tmp / "production-source"
     repo.mkdir()
     scripts = repo / "scripts"
@@ -718,7 +722,11 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
             (fake / f"view-{index}.json").write_text(json.dumps(view))
         (fake / "view-last.json").write_text(json.dumps(views[-1]))
         (fake / "log.txt").write_text(log)
-        (fake / "job.json").write_text(json.dumps({"identity": {"sourceCommit": runtime, "attempt": "123-1"}}))
+        write_job("SUCCEEDED", runtime, "123-1")
+
+    def write_job(stage: str, source: str, attempt: str) -> None:
+        (fake / "job.json").write_text(json.dumps({"stage": stage, "identity": {"sourceCommit": source,
+                                                                               "attempt": attempt}}))
 
     def run_production(merged: str, state: Path, *extra: str) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -759,8 +767,9 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
                                         "workflow_changed": False}, receipt["agent_cutover"]
     fly = receipt["fly"]
     assert fly["run_id"] == "123" and fly["attempt"] == "1" and fly["job_id"] == job_id, fly
-    assert fly["conclusion"] == "success" and fly["deployment_token"] == "123-1", fly
+    assert fly["conclusion"] == "success" and fly["job_stage"] == "SUCCEEDED" and fly["deployment_token"] == "123-1", fly
     assert receipt["cutover_verify"]["monitor_verify_exit"] == 0 and receipt["cutover_verify"]["queue_read"] == "ok"
+    assert receipt["cutover_verify"]["job_stage"] == "SUCCEEDED", receipt["cutover_verify"]
     waits = receipt["github_waits"]
     assert [w["kind"] for w in waits] == ["run-start", "run-complete"], waits
     assert waits[0]["run_id"] == "123" and waits[0]["outcome"] == "found", waits
@@ -778,19 +787,48 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     assert receipt["agent_cutover"]["required"] is False and receipt["github_waits"] == [], receipt
     assert not (fake / "node-calls.log").exists(), "no cutover verification without a Fly lane"
 
-    # 3. The exact run concluded failure: blocked, actionable, never dispatched.
-    reset([{**running, "databaseId": 124}],
-          [{"status": "completed", "conclusion": "failure", "attempt": 2, "url": "https://github.com/acme/rose/actions/runs/124"}],
-          log)
-    ran = run_production(runtime, tmp / "production-state-3")
+    # 3a. The exact run concluded failure but its durable job was resumed through
+    #     the queue CLI and is SUCCEEDED (deploy.md Step 13): the job, not the
+    #     GitHub conclusion, is the authority, so the gate opens; both are recorded.
+    failed_run = {"status": "completed", "conclusion": "failure", "attempt": 2,
+                  "url": "https://github.com/acme/rose/actions/runs/124"}
+    reset([{**running, "databaseId": 124}], [failed_run], log)
+    write_job("SUCCEEDED", runtime, "124-2")
+    ran = run_production(runtime, tmp / "production-state-3a")
+    assert ran.returncode == 0, ran.stdout
+    assert call_lines()[-1] == "dispatch", call_lines()
+    node_calls = (fake / "node-calls.log").read_text().splitlines()
+    assert len(node_calls) == 2 and "--verify" in node_calls[1], node_calls
+    receipt = json.loads((tmp / "production-state-3a" / "production.json").read_text())
+    assert receipt["status"] == "passed", receipt
+    fly = receipt["fly"]
+    assert fly["conclusion"] == "failure" and fly["job_stage"] == "SUCCEEDED", fly
+    assert fly["run_id"] == "124" and fly["attempt"] == "2" and fly["deployment_token"] == "124-2", fly
+    assert fly["job_id"] == job_id and receipt["cutover_verify"]["job_stage"] == "SUCCEEDED", receipt
+    assert receipt["github_waits"][-1]["conclusion"] == "failure", receipt["github_waits"]
+
+    # 3b. The exact run concluded failure and the durable job is not SUCCEEDED:
+    #     blocked with the exact resume command, never dispatched, nothing verified.
+    reset([{**running, "databaseId": 124}], [failed_run], log)
+    write_job("PREPARING", runtime, "124-2")
+    ran = run_production(runtime, tmp / "production-state-3b")
     assert ran.returncode == 1, ran.stdout
     assert "dispatch" not in call_lines(), call_lines()
-    assert "run 124 attempt 2 concluded failure" in ran.stdout and "Do not dispatch" in ran.stdout, ran.stdout
-    assert f"worker-deployment-queue.ts run --job-id {job_id}" in ran.stdout, ran.stdout
-    assert not (fake / "node-calls.log").exists(), "a failed run must not reach the cutover monitor"
-    receipt = json.loads((tmp / "production-state-3" / "production.json").read_text())
-    assert receipt["status"] == "failed" and receipt["fly"]["conclusion"] == "failure" and receipt["fly"]["job_id"] == job_id
-    assert receipt["github_waits"][-1]["conclusion"] == "failure" and "concluded failure" in receipt["error"], receipt
+    assert f"durable job {job_id} is PREPARING, not SUCCEEDED" in ran.stdout and "Do not dispatch" in ran.stdout, ran.stdout
+    assert (f"node --import tsx scripts/worker-deployment-queue.ts run --job-id {job_id} -- "
+            "python3 ../scripts/worker_pool_cutover.py") in ran.stdout, ran.stdout
+    assert "rerun this gate once the durable job is SUCCEEDED" in ran.stdout, ran.stdout
+    node_calls = (fake / "node-calls.log").read_text().splitlines()
+    assert len(node_calls) == 1 and "read --job-id" in node_calls[0], "a job that is not SUCCEEDED must not reach the monitor"
+    receipt = json.loads((tmp / "production-state-3b" / "production.json").read_text())
+    assert receipt["status"] == "failed" and receipt["fly"]["conclusion"] == "failure", receipt
+    assert receipt["fly"]["job_stage"] == "PREPARING" and receipt["fly"]["job_id"] == job_id, receipt["fly"]
+    assert receipt["cutover_verify"] is None and "not SUCCEEDED" in receipt["error"], receipt
+    # A completed run whose log never named a durable job cannot be verified.
+    reset([{**running, "databaseId": 124}], [failed_run], "no queue line here\n")
+    ran = run_production(runtime, tmp / "production-state-3c")
+    assert ran.returncode == 1 and "exact deployment job was not recovered from run 124" in ran.stdout, ran.stdout
+    assert "dispatch" not in call_lines() and not (fake / "node-calls.log").exists(), call_lines()
 
     # 4. The exact run never appears: blocked with the manual start command.
     reset([other], [{"status": "queued", "conclusion": None, "attempt": 1}])
@@ -803,7 +841,7 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
 
     # 5. A job bound to another SHA/attempt or a failed monitor blocks the dispatch.
     reset([running], [{"status": "completed", "conclusion": "success", "attempt": 1, "url": running["url"]}], log)
-    (fake / "job.json").write_text(json.dumps({"identity": {"sourceCommit": tests_only, "attempt": "123-1"}}))
+    write_job("SUCCEEDED", tests_only, "123-1")
     ran = run_production(runtime, tmp / "production-state-5")
     assert ran.returncode == 1 and "source/attempt mismatch" in ran.stdout and "dispatch" not in call_lines(), ran.stdout
     reset([running], [{"status": "completed", "conclusion": "success", "attempt": 1, "url": running["url"]}], log)

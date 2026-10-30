@@ -1035,8 +1035,8 @@ fps probe `rose-ui-cli-browser.test.ts`), then that **fps probe alone**
 (`BACKEND_COVERAGE_UNIT_PASS_LABEL=probe`, log `coverage/units-probe.log`)
 after every shard and the unit pass have finished: the probe is host-load
 dependent and failed 4/4 sharded runs beside two blackbox streams
-(2026-10-30), while the rest of the unit suite waited 12.7 min after the
-shards on #1639. All raw coverage is merged into one
+(2026-10-30), while the full unit suite (probe included) waited 12.7 min
+after the shards on #1639. All raw coverage is merged into one
 `c8 report --check-coverage`, so it must both pass every test and meet
 `back-end/.c8rc.json` on the merged report; the real provider credential probe
 runs once in Step 4c. On an isolated deploy worktree on system Postgres
@@ -2926,10 +2926,12 @@ if [ -x /opt/devbox-tools/gh/current/bin/gh ]; then
   gh() { /opt/devbox-tools/gh/current/bin/gh "$@"; }
 fi
 # Fly lane gate (agents runtime changes only): the exact deploy-agents.yml run
-# on the merged SHA must be completed/success and its cutover verified (Step
-# 13ab) before this dispatch; #1639 dispatched during the cutover and 4/5 jobs
-# failed. Records run id, attempt, job id and every GitHub wait in
-# .context/deploy-pipeline/production.json; no agents change → no wait.
+# on the merged SHA must be completed and its durable job SUCCEEDED with the
+# Step 13ab verify passing before this dispatch (a resumed job keeps the run's
+# failure conclusion; the job is the authority); #1639 dispatched during the
+# cutover and 4/5 jobs failed. Records run id, attempt, job id, conclusion,
+# job stage and every GitHub wait in .context/deploy-pipeline/production.json;
+# no agents change → no wait.
 python3 scripts/run_deploy_pipeline.py production --merged-sha "$DEPLOY_MERGED_SHA" \
   --state-dir .context/deploy-pipeline ||
   { echo "❌ Fly lane is not live/verified for $DEPLOY_MERGED_SHA; not dispatching production semantics"; exit 1; }
