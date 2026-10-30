@@ -730,6 +730,7 @@ class _ActionContext:
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]]
     prefetched_browser_state: Optional[Dict[str, Any]] = None
     model_params: Optional[Dict[str, Any]] = None
+    navigation_admission: Optional[Callable[..., Awaitable[Optional[str]]]] = None
 
 
 async def _refuse_navigation(
@@ -1331,6 +1332,7 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
             current_auth_realm=context.current_auth_realm,
             prepare_credentials_for_url=context.prepare_credentials_for_url,
             browser_network_recorder=context.browser_network_recorder,
+            navigation_admission=context.navigation_admission,
         )
     if context.action_name == "navback":
         guard = _navigation_guard_error(context, action="navback")
@@ -1409,6 +1411,7 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
             action_history=context.action_history,
             params=context.params,
             thinking=context.thinking,
+            navigation_admission=context.navigation_admission,
         )
     if context.action_name == "close_tab":
         guard = _navigation_guard_error(context, action="close_tab")
@@ -1440,6 +1443,10 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
     await _prepare_navigation_credentials(
         url, context.current_auth_realm, context.prepare_credentials_for_url,
     )
+    if context.navigation_admission is not None:
+        error = await context.navigation_admission(url, None)
+        if error:
+            return await _refuse_navigation(context, action="open_new_tab", error=error, params={"url": url})
     event = context.session.event_bus.dispatch(NavigateToUrlEvent(url=url, new_tab=True))
     await event
     await event.event_result(raise_if_any=True, raise_if_none=False)
@@ -1736,6 +1743,7 @@ async def execute_action(
     prefetched_browser_state: Optional[Dict[str, Any]] = None,
     auth_context_for_url: Optional[Callable[[str], Awaitable[Dict[str, Any]]]] = None,
     successful_secret_refs: Optional[set[str]] = None,
+    navigation_admission: Optional[Callable[..., Awaitable[Optional[str]]]] = None,
 ) -> Dict[str, Any]:
     """Resolve private values and report successful use privately to the caller."""
     if successful_secret_refs is not None:
@@ -1893,6 +1901,7 @@ async def _execute_resolved_action(
     prefetched_browser_state: Optional[Dict[str, Any]] = None,
     model_params: Optional[Dict[str, Any]] = None,
     auth_context_for_url: Optional[Callable[[str], Awaitable[Dict[str, Any]]]] = None,
+    navigation_admission: Optional[Callable[..., Awaitable[Optional[str]]]] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -1960,6 +1969,7 @@ async def _execute_resolved_action(
             prepare_credentials_for_url=prepare_credentials_for_url,
             prefetched_browser_state=prefetched_browser_state,
             model_params=model_params,
+            navigation_admission=navigation_admission,
         )
         if action_name in _INTERACTION_ACTIONS:
             result = await _execute_interaction_action(context)
@@ -4118,6 +4128,7 @@ async def _execute_goto(
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
     wait_for_navigation: Optional[Callable[..., Awaitable[None]]] = None,
     browser_network_recorder: Optional[Any] = None,
+    navigation_admission: Optional[Callable[..., Awaitable[Optional[str]]]] = None,
 ) -> Dict[str, Any]:
     """Prepare a target realm's credentials, then execute navigation."""
     from browser_use.browser.events import NavigateToUrlEvent
@@ -4130,6 +4141,13 @@ async def _execute_goto(
         url, current_auth_realm, prepare_credentials_for_url,
     )
 
+    if navigation_admission is not None:
+        error = await navigation_admission(url, None)
+        if error:
+            result = {"success": False, "error": error}
+            await action_history.record_action(dom_service=dom_service, action="goto", thinking=thinking,
+                                              params={"url": url}, result=result)
+            return result
     network_clock = getattr(browser_network_recorder, "network_clock_ms", None)
     navigation_started_ms = network_clock() if callable(network_clock) else None
     try:
@@ -4311,6 +4329,7 @@ async def _execute_switch_tab(
     action_history: ActionHistory,
     params: Dict,
     thinking: Any,
+    navigation_admission: Optional[Callable[..., Awaitable[Optional[str]]]] = None,
 ) -> Dict[str, Any]:
     """Execute a tab switch action."""
     from browser_use.browser.events import SwitchTabEvent
@@ -4325,6 +4344,13 @@ async def _execute_switch_tab(
         available_tabs = [f"{t.target_id[-4:]} ({t.title or t.url})" for t in tabs]
         return {"success": False, "error": f"Tab '{tab_id}' not found. Available: {available_tabs}"}
 
+    if navigation_admission is not None:
+        error = await navigation_admission(target.url, target.target_id)
+        if error:
+            result = {"success": False, "error": error}
+            await action_history.record_action(dom_service=dom_service, action="switch_tab", thinking=thinking,
+                                              params={"tab_id": tab_id}, result=result)
+            return result
     event = session.event_bus.dispatch(SwitchTabEvent(target_id=target.target_id))
     await event
     switched_target = await event.event_result(raise_if_any=True, raise_if_none=True)

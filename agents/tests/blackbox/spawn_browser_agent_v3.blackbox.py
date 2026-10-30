@@ -24443,6 +24443,9 @@ class _FakeDomService:
     async def get_browser_state(self, include_screenshot=False):
         return {"url": "https://example.com/login", "screenshot": None}
 
+    def get_parked_page_identity(self):
+        return {"url": "https://example.com/login", "target_id": "fixture-target"}
+
     async def get_page_identity(self):
         return {"url": "https://example.com/login", "title": ""}
 
@@ -26196,6 +26199,12 @@ async def test_return_to_quarantined_realm_invalidates_other_auth_context():
     )
 
 
+async def test_native_navigation_policy_restriction_and_escape():
+    from navigation_policy_cases import assert_navigation_policy_activity_cases, assert_navigation_admission_at_native_dispatch
+    await assert_navigation_policy_activity_cases(globals())
+    await assert_navigation_admission_at_native_dispatch()
+
+
 async def test_credential_reload_failure_preserves_pending_ack_and_shared_recovery():
     """Execute the original activity's realm/reload block with only I/O faked."""
     import ast
@@ -26203,6 +26212,7 @@ async def test_credential_reload_failure_preserves_pending_ack_and_shared_recove
     import textwrap
     from pathlib import Path
     from types import SimpleNamespace
+    from domains.spawn_browser_agent_v3.navigation_policy import NavigationPolicyBarrier, is_native_navigation_policy_denial
     source = Path(__file__).resolve().parents[2] / 'domains/spawn_browser_agent_v3/handler.py'
     source = globals().get('RELOAD_SOURCE', source)
     text = Path(source).read_text()
@@ -26232,6 +26242,9 @@ async def run(mode, pending='new.example', current_url='https://new.example/logi
         auth_realm = auth_realm_from_url(url)
         return {'credential_preparation_error': 'fixture'} if preparation_error else {'auth_realm': auth_realm}
     pending_credential_reload_realm = pending
+    navigation_policy = NavigationPolicyBarrier('fixture-task')
+    def _policy_authority():
+        return ('session', 'fixture-task', 'target', current_url, active_credential_binding, 0, 0)
     async def _recover_browser_step(reason, *, reload_page):
         events.append(('recover', pending_credential_reload_realm, reason, reload_page))
         return mode != 'exhausted'
@@ -26250,7 +26263,7 @@ async def run(mode, pending='new.example', current_url='https://new.example/logi
     def dispatch(event):
         events.append(('dispatch', event.url, pending_credential_reload_realm))
         return Event()
-    dom_service = SimpleNamespace(session=SimpleNamespace(event_bus=SimpleNamespace(dispatch=dispatch)))
+    dom_service = SimpleNamespace(session=SimpleNamespace(event_bus=SimpleNamespace(dispatch=dispatch)), get_parked_page_identity=lambda: {'url': current_url, 'target_id': 'target'})
     async def wait_for_navigation_ready(*args, **kwargs):
         nonlocal failures
         events.append(('ready_ack', pending_credential_reload_realm))
@@ -26264,7 +26277,7 @@ async def run(mode, pending='new.example', current_url='https://new.example/logi
         break
     return events
 '''
-    env = {'asyncio': asyncio, 'SimpleNamespace': SimpleNamespace,
+    env = {'NavigationPolicyBarrier': NavigationPolicyBarrier, 'is_native_navigation_policy_denial': is_native_navigation_policy_denial, 'asyncio': asyncio, 'SimpleNamespace': SimpleNamespace,
            'auth_realm_from_url': lambda u: u.split('/')[2] if '://' in u else '',
            'auth_realm_matches_url': lambda realm,u: bool(realm) and realm == (u.split('/')[2] if '://' in u else ''),
            'NavigateToUrlEvent': lambda **kw: SimpleNamespace(**kw),
@@ -37231,6 +37244,7 @@ async def run_all_tests():
         "activity_fatal_error_keeps_credentials_out_of_classifier_and_temporal_failure",
         test_activity_fatal_error_keeps_credentials_out_of_classifier_and_temporal_failure,
     )
+    await r.record_async("native_navigation_policy_restriction_and_escape", test_native_navigation_policy_restriction_and_escape)
     await r.record_async("credential_reload_failure_preserves_pending_ack_and_shared_recovery", test_credential_reload_failure_preserves_pending_ack_and_shared_recovery)
     await r.record_async(
         "activity_redirected_goto_reloads_prepared_realm_once",
