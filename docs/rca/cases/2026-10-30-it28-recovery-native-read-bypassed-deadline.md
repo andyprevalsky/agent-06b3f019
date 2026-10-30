@@ -17,7 +17,7 @@ tags:
   - recovery
 sources:
   - commit d0663f361a1118ce6776d1ab8aaa0987dcf252a5
-  - owner 57100c65e07744c59a71176d7fa4810d
+  - memory:owner-57100c65e07744c59a71176d7fa4810d
 repro: scripts/tests/cloudbench-recovery-fd.test.py
 status: open
 ---
