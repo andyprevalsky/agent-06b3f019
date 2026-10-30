@@ -7320,11 +7320,23 @@ async def test_user_auth_error_report_names_the_leased_integration():
     Unscoped, the backend cannot tell a user's accounts apart; one bad token
     expired every healthy sibling subscription in prod (2026-10-29/30).
     """
-    from helpers.llm import _build_compute_auth_context
+    from helpers.llm import _build_compute_auth_context, fetch_compute_token_activity
 
     posted = []
+    lease_type = {"value": "gpt"}
 
     def handler(req):
+        if "credentials/token" in str(req.url):
+            return httpx.Response(
+                200,
+                json={
+                    "type": lease_type["value"],
+                    "accessToken": "token",
+                    "source": "user",
+                    "integrationId": "integration-s33",
+                    "lineageKey": "lineage-s33",
+                },
+            )
         if "token/rate-limited" in str(req.url):
             posted.append(json.loads(req.content))
             return httpx.Response(200, json={"ok": True})
@@ -7333,17 +7345,11 @@ async def test_user_auth_error_report_names_the_leased_integration():
     set_mock_handler(handler)
     for token_type in ("gpt", "claude"):
         posted.clear()
-        ctx = _build_compute_auth_context(
-            {
-                "type": token_type,
-                "accessToken": "token",
-                "source": "user",
-                "userId": "user-s33",
-                "integrationId": "integration-s33",
-                "lineageKey": "lineage-s33",
-            },
-            "user-s33",
-        )
+        lease_type["value"] = token_type
+        # The real lease path: the backend response through the fetch activity.
+        lease = await fetch_compute_token_activity("user-s33")
+        assert lease is not None and lease.get("integrationId") == "integration-s33", lease
+        ctx = _build_compute_auth_context(lease, "user-s33")
         assert ctx is not None and ctx.mark_rate_limited is not None
         assert await ctx.mark_rate_limited(ctx, 60, None, "auth_error")
         assert len(posted) == 1, posted

@@ -7366,6 +7366,7 @@ async def fetch_compute_token_activity(
                         "accountId": data.get("accountId"),
                         "source": data.get("source", "user"),
                         "poolTokenId": data.get("poolTokenId"),
+                        "integrationId": data.get("integrationId"),
                         "lineageKey": data.get("lineageKey"),
                         "fastCacheAffinityKey": data.get("fastCacheAffinityKey") or demo_cache_affinity_key,
                     }
