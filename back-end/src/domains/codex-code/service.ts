@@ -98,10 +98,9 @@ export async function createSession(params: CreateSessionParams) {
     normalizedRepoUrl = accessCheck.normalizedUrl!;
   }
 
-  // Codex never uses the DEMO / Fast Mode cache: the Fast Mode button only
-  // selects Codex's native speed (service tier).
-  const speedSource = await repo.findAgentCodexSpeedSource(agent_id);
-  const codexSpeed = codexSpeedFor(speedSource.fastModeEnabled, speedSource.speed);
+  // Codex never uses the DEMO / Fast Mode cache: the agent's speed only
+  // selects Codex's native service tier.
+  const codexSpeed = codexSpeedFor(await repo.findAgentSpeed(agent_id));
   const { session, fields } = await createWithCodeSession(
     {
       agentId: agent_id,

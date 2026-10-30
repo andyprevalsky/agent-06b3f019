@@ -1,17 +1,29 @@
 #!/usr/bin/env tsx
 /**
- * S30 (Andy, 2026-10-28): the query box's speed is Codex's native speed.
- * Fast Mode off → standard, Fast → priority ("Fast"), Ultrafast → ultrafast.
+ * S30 (Andy, 2026-10-28): an agent's speed is Codex's native speed.
+ * standard → no tier, fast → priority ("Fast"), ultrafast → ultrafast.
+ * Rows that predate Agent.speed keep their legacy Fast Mode flag (true → fast).
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { codexSpeedFor } from '../../providers/codexSpeed';
+import { agentSpeedFromRow } from '../../providers/rose/speed';
 
-test('query-box speed maps to the Codex service tier', () => {
-  assert.equal(codexSpeedFor(false, null), 'standard');
-  assert.equal(codexSpeedFor(false, 'ultra'), 'standard', 'Fast Mode off wins over a stale speed');
-  assert.equal(codexSpeedFor(true, 'fast'), 'priority');
-  assert.equal(codexSpeedFor(true, 'ultra'), 'ultrafast');
-  assert.equal(codexSpeedFor(true, null), 'priority', 'callers without a speed get Fast');
-  assert.equal(codexSpeedFor(true, 'bogus'), 'priority');
+test('agent speed maps to the Codex service tier', () => {
+  assert.equal(codexSpeedFor('standard'), 'standard');
+  assert.equal(codexSpeedFor('fast'), 'priority');
+  assert.equal(codexSpeedFor('ultrafast'), 'ultrafast');
+});
+
+test('stored rows resolve their speed before the Codex mapping', () => {
+  const tier = (row: { speed: string | null; fastModeCacheEnabled: boolean }) =>
+    codexSpeedFor(agentSpeedFromRow(row));
+  assert.equal(tier({ speed: 'ultrafast', fastModeCacheEnabled: false }), 'ultrafast');
+  assert.equal(tier({ speed: 'standard', fastModeCacheEnabled: true }), 'standard');
+  assert.equal(
+    tier({ speed: null, fastModeCacheEnabled: true }),
+    'priority',
+    'legacy Fast Mode row'
+  );
+  assert.equal(tier({ speed: null, fastModeCacheEnabled: false }), 'standard');
 });

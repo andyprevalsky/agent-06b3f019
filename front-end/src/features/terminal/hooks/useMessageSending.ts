@@ -264,11 +264,14 @@ export function useMessageSending({
               attachments: attachments && attachments.length > 0 ? attachments : undefined,
               price_limit_cents: pendingPriceLimitCents,
               ...(userCanUseFastMode ? { fast_mode_cache_enabled: fastMode } : {}),
-              // Fast vs Ultrafast (speedLevel.ts; defaults to Ultrafast).
-              ...(userCanUseFastMode && fastMode
+              // Off → standard; Fast vs Ultrafast (speedLevel.ts; defaults to Ultrafast).
+              ...(userCanUseFastMode
                 ? {
-                    fast_mode_speed:
-                      readQueryPreferences(userId).ultraPreferred === false ? 'fast' : 'ultra',
+                    speed: !fastMode
+                      ? 'standard'
+                      : readQueryPreferences(userId).ultraPreferred === false
+                        ? 'fast'
+                        : 'ultrafast',
                   }
                 : {}),
               ...(userCanUseSimulator

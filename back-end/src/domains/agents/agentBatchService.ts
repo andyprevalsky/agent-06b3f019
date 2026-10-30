@@ -29,6 +29,8 @@ import {
 import { assertExistingDescendantRequestMatches } from './agentDescendantStartService';
 import {
   applyFastModeDefault,
+  applySpeedDefault,
+  executionModeCreateFields,
   applyMemoryDefault,
   assertWorldModelModeAccess,
   disableFastModeForWorldModel,
@@ -93,12 +95,7 @@ function buildBatchItem(
     ...(meta.proxyGeo.city !== undefined ? { proxyCity: meta.proxyGeo.city } : {}),
     ...(body.price_limit_cents !== undefined ? { priceLimitCents: body.price_limit_cents } : {}),
     ...(body.write_lock_enabled !== undefined ? { writeLockEnabled: body.write_lock_enabled } : {}),
-    ...(body.fast_mode_cache_enabled !== undefined
-      ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
-      : {}),
-    ...(body.fast_mode_speed !== undefined ? { fastModeSpeed: body.fast_mode_speed } : {}),
-    ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
-    ...(body.memory_enabled !== undefined ? { memoryEnabled: body.memory_enabled } : {}),
+    ...executionModeCreateFields(body),
     ...(typeof body.project_id === 'string' ? { projectId: body.project_id } : {}),
     verifierType,
     ...(isBenchmark ? { isBenchmark: true } : {}),
@@ -272,7 +269,11 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
   if (isInternal) {
     for (const body of bodies) body.goal = resolvePromptSecrets(body.goal);
   }
-  for (const body of bodies) applyFastModeDefault(body, userId);
+  for (const body of bodies) {
+    // Speed reads the raw legacy flag, so it resolves before the Fast Mode default.
+    applySpeedDefault(body);
+    applyFastModeDefault(body, userId);
+  }
   const parentById = await loadBatchParentExecutionFlags(bodies, userId);
   applyExecutionModeInheritanceForBatch(bodies, parentById);
   await resolveBatchProjectIds(bodies, userId, parentById);

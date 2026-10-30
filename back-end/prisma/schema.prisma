@@ -87,8 +87,10 @@ model Agent {
   ownCostCents                     Float                       @default(0)
   writeLockEnabled                 Boolean                     @default(true)
   fastModeCacheEnabled             Boolean                     @default(true)
-  /// Query-box speed when Fast Mode is on: "fast" or "ultra" (Codex service tier priority / ultrafast).
-  fastModeSpeed                    String?
+  /// LLM provider speed requested at create: standard | fast | ultrafast.
+  /// Null = the row predates this column; readers derive it from
+  /// fastModeCacheEnabled (true → fast). Never gates any cache.
+  speed                            String?
   worldModelMode                   String                      @default("real")
   memoryEnabled                    Boolean                     @default(true)
   isBenchmark                      Boolean                     @default(false)

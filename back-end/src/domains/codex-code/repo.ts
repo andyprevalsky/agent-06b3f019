@@ -1,4 +1,5 @@
 import { prisma } from '../../providers/database';
+import { agentSpeedFromRow, type AgentSpeed } from '../../providers/rose/speed';
 
 export async function findAgentGithubInfo(agentId: string) {
   return prisma.agent.findUnique({
@@ -44,24 +45,24 @@ export async function findSessionById(taskId: string) {
   });
 }
 
-/** Fast Mode button + query-box speed for an agent (speed falls back to its tree root's). */
-export async function findAgentCodexSpeedSource(
-  agentId: string
-): Promise<{ fastModeEnabled: boolean; speed: string | null }> {
+/**
+ * A Codex session agent's speed (Agent.speed). A row created before that
+ * column existed carries null and takes its tree root's speed instead.
+ */
+export async function findAgentSpeed(agentId: string): Promise<AgentSpeed> {
   const agent = await prisma.agent.findUnique({
     where: { id: agentId },
-    select: { fastModeCacheEnabled: true, fastModeSpeed: true, busId: true },
+    select: { speed: true, fastModeCacheEnabled: true, busId: true },
   });
-  if (agent === null) return { fastModeEnabled: true, speed: null };
-  let speed = agent.fastModeSpeed;
-  if (speed === null && agent.busId !== null && agent.busId !== agentId) {
-    const root = await prisma.agent.findUnique({
-      where: { id: agent.busId },
-      select: { fastModeSpeed: true },
-    });
-    speed = root?.fastModeSpeed ?? null;
+  if (agent === null) return 'fast';
+  if (agent.speed !== null || agent.busId === null || agent.busId === agentId) {
+    return agentSpeedFromRow(agent);
   }
-  return { fastModeEnabled: agent.fastModeCacheEnabled, speed };
+  const root = await prisma.agent.findUnique({
+    where: { id: agent.busId },
+    select: { speed: true, fastModeCacheEnabled: true },
+  });
+  return agentSpeedFromRow(root ?? agent);
 }
 
 /** Recover the selected credential's owner, including pooled credentials. */

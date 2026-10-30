@@ -190,7 +190,7 @@ describe('useTerminalAgents Fast Mode bridge', () => {
     expect(createOff?.body).toMatchObject({ fast_mode_cache_enabled: false });
   });
 
-  it('sends the Fast vs Ultrafast choice so code agents start at that native speed', async () => {
+  it('sends the query-box speed (standard, fast or ultrafast) so agents start at that native speed', async () => {
     const { result } = renderHook(() => useMessageSending(messageSendingArgs()));
     await waitFor(() => expect(result.current.fastMode).toBe(true));
     const sent = async (goal: string) => {
@@ -203,13 +203,12 @@ describe('useTerminalAgents Fast Mode bridge', () => {
         ?.body as Record<string, unknown> | undefined;
     };
 
-    expect(await sent('ultra by default')).toMatchObject({ fast_mode_speed: 'ultra' });
+    expect(await sent('ultra by default')).toMatchObject({ speed: 'ultrafast' });
     writeQueryPreferences(ADMIN_ACCOUNTS[0]!.userId, { ultraPreferred: false });
-    expect(await sent('fast when chosen')).toMatchObject({ fast_mode_speed: 'fast' });
+    expect(await sent('fast when chosen')).toMatchObject({ speed: 'fast' });
     act(() => result.current.setFastMode(false));
     const off = await sent('normal speed');
-    expect(off).toMatchObject({ fast_mode_cache_enabled: false });
-    expect(off).not.toHaveProperty('fast_mode_speed');
+    expect(off).toMatchObject({ fast_mode_cache_enabled: false, speed: 'standard' });
   });
 
   it('hydrates Fast Mode from the loaded agent detail instead of the account default', async () => {

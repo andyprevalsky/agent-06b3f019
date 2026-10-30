@@ -1,20 +1,17 @@
+import type { AgentSpeed } from './rose/speed';
+
 /**
- * Query-box speed → Codex's native service tier.
+ * Agent speed → Codex's native service tier.
  *
- *   Fast Mode off           → standard   (no service tier)
- *   Fast Mode on, "fast"    → priority   (Codex "Fast")
- *   Fast Mode on, "ultra"   → ultrafast  (Codex "Ultrafast")
+ *   standard   → standard   (no service tier)
+ *   fast       → priority   (Codex "Fast")
+ *   ultrafast  → ultrafast  (Codex "Ultrafast")
  *
- * Fast Mode on without a recorded speed (API and benchmark callers) is "fast".
- * Codex never uses the DEMO / Fast Mode cache; speed is the only thing the
- * Fast Mode button changes for a Codex session.
+ * Codex never uses the DEMO / Fast Mode cache; speed only picks its tier.
  */
 export type CodexServiceSpeed = 'standard' | 'priority' | 'ultrafast';
 
-export function codexSpeedFor(
-  fastModeEnabled: boolean,
-  speed: string | null | undefined
-): CodexServiceSpeed {
-  if (!fastModeEnabled) return 'standard';
-  return speed === 'ultra' ? 'ultrafast' : 'priority';
+export function codexSpeedFor(speed: AgentSpeed): CodexServiceSpeed {
+  if (speed === 'ultrafast') return 'ultrafast';
+  return speed === 'fast' ? 'priority' : 'standard';
 }

@@ -213,6 +213,7 @@ export async function findExecutionModeFlagsByIds(agentIds: string[], userId?: s
     select: {
       id: true,
       fastModeCacheEnabled: true,
+      speed: true,
       worldModelMode: true,
       memoryEnabled: true,
       isBenchmark: true,
