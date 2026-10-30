@@ -96,3 +96,27 @@ from schema correctness, progress1 and the unchanged producer classification.
 ## Reusable lesson
 
 Separate a successful candidate probe and intentional old-session teardown from the later worker attachment failure; preserve both sides before assigning the handoff cause.
+
+
+## Later bounded staged-input fingerprint comparison
+
+A separately authorized read-only check of the original readiness-bound
+serialized backend/agent inputs and sealed worker log now excludes a staged-key
+mismatch. The receipt observed_at is1793388540.0656533; its file SHA is
+6873767bf70c37909c80ebe7398279f359f9683fe0bc46317d24db506d81587c.
+The original readiness receipt SHA is
+1e1a1c4cc39f3225089292049c59cdde233912b13022a69c91c3d98589b3f141.
+The serialized backend file f93cd450921b222db7f7e8d4266641fd3bd818015f48d618fb566a24846aebe5
+and agent file892f4393e0e2c7d1bcc80d938d451bd3eff9a50885f7d66f51a42e718ee47d51
+match their original readiness bindings. The sealed worker file remains
+d31f85f17f159d000fc5c857b5a87e6853156e2cd7353389b6e5c720525b3391.
+
+All three extracted key fingerprints—the backend serialized input, agent
+serialized input, and promoted worker URI—equal
+978a4f92ca5ccdb8d34c9f2f3db182e472b5e40beebcb2fbc3f7c2ebec6de723.
+No plaintext key or authenticated URI was exposed in this receipt. This is new
+bounded evidence relative to the earlier missing-input observation; it does
+not establish the key actually used by the running backend's probe, a successful
+worker handshake, or the initiating cause of the connection failure. Runtime
+backend credential equality and the causal RCA remain OPEN. Original grades,
+producerinfraFALSE, the operational transport finding and cleanup are unchanged.
