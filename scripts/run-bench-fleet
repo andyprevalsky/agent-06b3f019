@@ -2063,21 +2063,20 @@ print(volume_ids[0])
 }
 
 machine_status_exact_read() {  # <machine-id> [timeout-seconds]; 0=exact status, 1=exactly absent, 2=unsafe read
-    local id="$1" timeout="${2:-}" output status
+    local id="$1" timeout="${2:-30}" output status
     case "$id" in ''|*[!0-9a-f]*) return 2 ;; esac
     case "$timeout" in *[!0-9]*) return 2 ;; esac
-    # A caller with a wall-clock budget bounds this exact read; a timed-out
-    # read is an unsafe read, never an absence.
-    if [ -n "$timeout" ]; then
-        if output="$(fly_with_timeout "$timeout" machine status "$id" -a "$APP")"; then
-            status=0
-        else
-            status=$?
-        fi
-    elif output="$(FLY machine status "$id" -a "$APP" 2>&1)"; then
+    # Exact native reads are bounded even without an outer caller budget.
+    # Callers with a shorter wall-clock allowance keep their explicit limit.
+    if output="$(fly_with_timeout "$timeout" machine status "$id" -a "$APP")"; then
         status=0
     else
         status=$?
+    fi
+    # Partial output from an expired or signalled call cannot prove absence.
+    if [ "$status" -ge 128 ]; then
+        printf '%s\n' "${output:0:200}" >&2
+        return 2
     fi
     if [ "$status" -eq 0 ]; then
         printf '%s\n' "$output"
@@ -2093,16 +2092,13 @@ machine_status_exact_read() {  # <machine-id> [timeout-seconds]; 0=exact status,
 }
 
 machine_config_exact_read() {  # <machine-id> [timeout-seconds]; exact config JSON or non-zero
-    local id="$1" timeout="${2:-}"
+    local id="$1" timeout="${2:-30}"
     case "$id" in ''|*[!0-9a-f]*) return 1 ;; esac
     case "$timeout" in *[!0-9]*) return 1 ;; esac
-    if [ -n "$timeout" ]; then
-        # Explicit status: cleanup calls this from an EXIT trap, where a bare
-        # `return` reports the status from before the trap.
-        fly_with_timeout "$timeout" machine status "$id" -a "$APP" -d
-        return "$?"
-    fi
-    FLY machine status "$id" -a "$APP" -d 2>/dev/null
+    # Explicit status: cleanup calls this from an EXIT trap, where a bare
+    # `return` reports the status from before the trap.
+    fly_with_timeout "$timeout" machine status "$id" -a "$APP" -d
+    return "$?"
 }
 
 machine_volume_id() {  # machine_volume_id <machine_id> [timeout-seconds] → its mounted volume id (or empty)

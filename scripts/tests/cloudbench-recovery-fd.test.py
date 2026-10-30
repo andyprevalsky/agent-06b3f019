@@ -185,5 +185,143 @@ release_registry_recovery_lock "$FIXTURE/owners/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
                             wait_file(base / 'daemon.done')
 
 
+
+class NativeReadDeadlineTest(unittest.TestCase):
+    """The real read helpers use the real deadline wrapper and fail closed."""
+
+    def invoke(self, entry, mode, timeout=None):
+        fleet = (ROOT / 'scripts/run-bench-fleet').read_text()
+        inventory = (ROOT / 'scripts/lib/cloudbench-inventory.sh').read_text()
+        definitions = '\n'.join(function(fleet, name) for name in (
+            'machine_status_exact_read', 'machine_config_exact_read',
+            'registry_machine_details'))
+        definitions += function(inventory, 'fly_with_timeout').replace(
+            'fly_with_timeout() {', 'bounded_native_call() {', 1)
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            native = base / 'native.py'
+            native.write_text("""import json, os, pathlib, sys, time
+base = pathlib.Path(os.environ['FIXTURE'])
+with (base / 'calls').open('a') as stream:
+    stream.write(json.dumps(sys.argv[1:]) + '\\n')
+mode = os.environ['MODE']
+if mode == 'partial-absence':
+    print('machine abcd1234 was not found in app', flush=True)
+    time.sleep(30)
+elif mode == 'partial-config':
+    print('{"id":"abcd1234"}', flush=True)
+    time.sleep(30)
+elif mode == 'signalled':
+    print('machine abcd1234 was not found in app')
+    sys.exit(143)
+elif mode == 'absence':
+    print('machine abcd1234 was not found in app')
+    sys.exit(1)
+elif mode == 'config':
+    print('{"id":"abcd1234"}')
+elif mode == 'foreign':
+    print('Machine ID: abcd1234\\nState: stopped\\n\\nVM\\n ID = ffffffff\\n Name = cloudbench-test\\n State = stopped')
+else:
+    print('Machine ID: abcd1234\\nState: stopped\\n\\nVM\\n ID = abcd1234\\n Name = cloudbench-test\\n State = stopped')
+""")
+            script = definitions + '''
+APP=offline
+FLY() { python3 "$FIXTURE/native.py" "$@"; }
+fly_with_timeout() {
+    printf '%s\\n' "$1" >> "$FIXTURE/budgets"
+    bounded_native_call "$@"
+}
+''' + entry + ' abcd1234' + ('' if timeout is None else ' "' + timeout + '"')
+            start = time.monotonic()
+            result = subprocess.run(['bash', '-c', script], capture_output=True,
+                                    text=True, timeout=12,
+                                    env=dict(os.environ, FIXTURE=str(base), MODE=mode))
+            elapsed = time.monotonic() - start
+            calls = ((base / 'calls').read_text().splitlines()
+                     if (base / 'calls').exists() else [])
+            budgets = ((base / 'budgets').read_text().splitlines()
+                       if (base / 'budgets').exists() else [])
+            return result, calls, budgets, elapsed
+
+    def test_default_read_deadline_and_explicit_shorter_budget(self):
+        for entry, mode in (('registry_machine_details', 'status'),
+                            ('machine_config_exact_read', 'config')):
+            for timeout, expected in ((None, '30'), ('', '30'), ('2', '2')):
+                with self.subTest(entry=entry, timeout=timeout):
+                    result, calls, budgets, _ = self.invoke(entry, mode, timeout)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(budgets, [expected],
+                                     'native read bypassed its bounded transport')
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(json.loads(calls[0])[:3],
+                                     ['machine', 'status', 'abcd1234'])
+
+    def test_expired_partial_reads_are_unsafe_not_absence_or_config(self):
+        for entry, mode, expected in (
+                ('registry_machine_details', 'partial-absence', 2),
+                ('machine_config_exact_read', 'partial-config', 142)):
+            with self.subTest(entry=entry):
+                result, calls, budgets, elapsed = self.invoke(entry, mode, '1')
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertEqual(budgets, ['1'])
+                self.assertEqual(len(calls), 1)
+                self.assertLess(elapsed, 8)
+                self.assertIn('FLY_COMPLETION_TIMEOUT', result.stderr)
+
+    def test_recovery_timeout_refuses_before_guest_or_latch_changes(self):
+        fleet = (ROOT / 'scripts/run-bench-fleet').read_text()
+        definitions = '\n'.join(function(fleet, name) for name in (
+            'machine_status_exact_read', 'registry_machine_details',
+            'fleet_recovery_reconnect_guest_shutdowns'))
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            registry = base / 'owners' / ('a' * 32)
+            registry.mkdir(parents=True)
+            (base / 'audits' / registry.name).mkdir(parents=True)
+            latch = registry / 'guest-cleanup-unconfirmed'
+            latch.write_text('original retained obligation\n')
+            script = definitions + '''
+FLEET_AUDIT_ROOT="$FIXTURE/audits"
+CLOUDBENCH_SCRIPT_SNAPSHOT="$FIXTURE/scripts"
+APP=offline
+fleet_registry_build_guest_recovery_plan() {
+    printf 'guest\\tbench\\tcloudbench-test\\tabcd1234\\tvol_owned\\t%s/out\\t12345\\n' "$FIXTURE" > "$2"
+}
+cleanup_stale_owner_recovery_proxies() { printf cleanup > "$FIXTURE/cleanup"; }
+FLY() { printf UNBOUNDED >> "$FIXTURE/forbidden";return 99; }
+fly_with_timeout() {
+    if [ "$2 $3" = 'machines list' ]; then return 1; fi
+    printf '%s\\n' "$1" > "$FIXTURE/deadline"
+    printf 'machine abcd1234 was not found in app\\n'
+    return 142
+}
+fleet_registry_confirm_guest_teardown() { printf ack >> "$FIXTURE/forbidden"; }
+fleet_recovery_reconnect_guest_shutdowns "$FIXTURE/owners/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+'''
+            result = subprocess.run(['bash', '-c', script], capture_output=True,
+                                    text=True, timeout=5,
+                                    env=dict(os.environ, FIXTURE=str(base)))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((base / 'forbidden').exists())
+            self.assertEqual((base / 'deadline').read_text().strip(), '30')
+            self.assertTrue((base / 'cleanup').exists())
+            self.assertEqual(latch.read_text(), 'original retained obligation\n')
+            self.assertIn('absent or unreadable', result.stderr)
+
+    def test_absence_identity_and_invalid_budget_keep_refusing(self):
+        result, _, budgets, _ = self.invoke('registry_machine_details', 'absence')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(budgets, ['30'])
+        result, _, _, _ = self.invoke('registry_machine_details', 'foreign')
+        self.assertEqual(result.returncode, 2)
+        result, _, _, _ = self.invoke('registry_machine_details', 'signalled')
+        self.assertEqual(result.returncode, 2)
+        for entry in ('registry_machine_details', 'machine_config_exact_read'):
+            for timeout in ('invalid', '0'):
+                result, calls, _, _ = self.invoke(entry, 'status', timeout)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, [])
+
+
 if __name__ == '__main__':
     unittest.main()
