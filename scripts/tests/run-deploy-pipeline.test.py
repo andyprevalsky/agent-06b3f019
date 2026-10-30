@@ -440,6 +440,35 @@ def check_wait_receipt_contract(tmp: Path, pipeline=None, scenario="both") -> No
         publisher.join()
 
 
+def check_wait_follows_supersede_behind_stage_failure(tmp: Path) -> None:
+    """A stage failure is reported before the supervisor hook runs; if the
+    attempt was superseded meanwhile the waiter follows the new attempt
+    instead of reporting the discarded failure."""
+    pipeline = load_module("pipeline_wait_supersede", DRIVER)
+    state = tmp / "supersede-wait"
+    state.mkdir()
+    stages = tmp / "supersede-stages"
+    stages.mkdir()
+    first = {"status": "failing", "attempt": 1, "started_epoch": 1, "stage_run_dir": str(stages),
+             "source": {"head": "a", "digest": "b"}, "supervisor_pid": os.getpid(), "follow_source": True,
+             "lanes": {"x": {"status": "failed", "exit": 1}}}
+    pipeline.write_receipt(state / "receipt.json", first)
+    calls: list[int] = []
+
+    def fake_wait(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:  # attempt 1's failure surfaces after attempt 2 already replaced it
+            pipeline.write_receipt(state / "receipt.json", {**first, "attempt": 2, "started_epoch": 3,
+                                                            "status": "passed", "lanes": {"x": {"status": "passed"}}})
+            return (1, {"event": "failed", "failed": ["x"]})
+        return (0, {"event": "passed"})
+
+    with patch.object(pipeline.deploy_stage_wait, "wait_for_stages", side_effect=fake_wait):
+        result = pipeline.wait(state, timeout=5, since=0)
+    assert result == 0 and len(calls) == 2, (result, calls)
+    print("waiter follows a supersede behind a stage failure: ok")
+
+
 def check_interrupted_rounds_and_dead_supervisor_deferral() -> None:
     """A signalled run (``interrupted`` receipt) is not a completed failed round
     for FIX_LOOP_CAP, and the waiter only defers a failure to a supersede while a
@@ -605,6 +634,7 @@ def main() -> int:
         check_follow_source(tmp, env)
         check_fix_loop_cap(tmp, env)
         check_interrupted_rounds_and_dead_supervisor_deferral()
+        check_wait_follows_supersede_behind_stage_failure(tmp)
         check_exclusive_lane_resizes_to_free_memory(tmp, env)
         check_standard_plan_typescript()
         check_schedule_phases(tmp, env)

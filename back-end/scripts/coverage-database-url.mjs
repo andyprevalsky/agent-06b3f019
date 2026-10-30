@@ -16,6 +16,7 @@
 // Stdout (on success): <resolved-url>\n<derived-db-name-or-empty>\n
 // Exit 1 with a reason on stderr when the prepared URL is not this
 // workspace's database or the shard spec is malformed.
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -54,8 +55,13 @@ if (isolated) {
     fail("ROSE_DEPLOY_WORKTREE_PATH is unreadable");
   }
   if (configured !== root) fail("ROSE_DEPLOY_WORKTREE_PATH does not name this checkout");
-  // 43 = the prepare script's cut (victoria_deploy_ + 43 + _s99 <= 63 bytes).
-  const safe = identity.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 43);
+  // Same rule as prepare-deploy-worktree.sh system_deploy_db_name: a sanitized
+  // identity longer than 43 keeps its first 30 characters plus a 12-hex sha256
+  // of the whole name (victoria_deploy_ + 43 + _s99 <= 63 bytes, no shared
+  // prefix collisions).
+  let safe = identity.replace(/[^a-zA-Z0-9]/g, "_");
+  if (safe.length > 43) safe = `${safe.slice(0, 30)}_${crypto.createHash("sha256").update(safe).digest("hex").slice(0, 12)}`;
+  if (/_s[0-9]+$/.test(safe)) fail("the deploy database name would end in _s<digits> (reserved for coverage shards)");
   expectedName = `victoria_deploy_${safe}`;
   let marker;
   try {

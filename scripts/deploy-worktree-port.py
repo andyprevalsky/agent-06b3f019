@@ -27,7 +27,20 @@ MAX_PORT = 65_535
 # cloud smoke lane refused to start (2026-10-29).
 HUB_PORT_OFFSET = 5_764
 HUB_PORT_SEARCH = 500
-FOOTPRINT_PORTS = HUB_PORT_OFFSET + HUB_PORT_SEARCH + 1
+# The exact ports a worktree listens on, relative to its base: the owned stack
+# block, run.sh's +20 rescan step with the coverage shards at +20+2i, the
+# blackbox backend at +100, an isolated local benchmark stack at +200..+209
+# (agents/benchmarks/local.py PORT_RANGE_OFFSETS) and the hub search window.
+# Reservations and the kernel window are judged against these, never against
+# the unused gap up to the hub.
+LISTENER_OFFSETS = (
+    *range(0, PORTS_PER_WORKTREE),
+    *range(20, 30),
+    100,
+    *range(200, 210),
+    *range(HUB_PORT_OFFSET, HUB_PORT_OFFSET + HUB_PORT_SEARCH + 1),
+)
+FOOTPRINT_PORTS = HUB_PORT_OFFSET + HUB_PORT_SEARCH + 1  # span, for the 65535 bound
 FIRST_BASE_PORT = 20_000
 LAST_BASE_PORT = MAX_PORT - FOOTPRINT_PORTS + 1
 # Linux publishes the range the kernel autobinds outbound connections from.
@@ -101,12 +114,13 @@ def _kernel_autobind_ports() -> tuple[int, int, set[int]] | None:
     return low, high, _parse_port_list(reserved_text)
 
 
+def _listener_ports(base_port: int) -> list[int]:
+    return [base_port + offset for offset in LISTENER_OFFSETS]
+
+
 def _footprint_reserved(base_port: int, window: tuple[int, int, set[int]]) -> bool:
     low, high, reserved = window
-    return all(
-        port < low or port > high or port in reserved
-        for port in range(base_port, base_port + FOOTPRINT_PORTS)
-    )
+    return all(port < low or port > high or port in reserved for port in _listener_ports(base_port))
 
 
 def _footprint_fits(base_port: int) -> bool:
@@ -114,9 +128,9 @@ def _footprint_fits(base_port: int) -> bool:
 
 
 def _footprint_outside(base_port: int, window: tuple[int, int, set[int]]) -> bool:
-    """The whole listen footprint lies below or above the kernel window."""
+    """Every listener port lies below or above the kernel window."""
     low, high, _ = window
-    return base_port + FOOTPRINT_PORTS - 1 < low or base_port > high
+    return all(port < low or port > high for port in _listener_ports(base_port))
 
 
 def _reserve_remedy(first: int, last: int) -> str:

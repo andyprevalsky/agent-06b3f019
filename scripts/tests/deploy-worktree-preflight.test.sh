@@ -440,12 +440,20 @@ printf '56000-56009\n' >"$fake_ipv4/ip_local_reserved_ports"
 printf '56000-56029\n' >"$fake_ipv4/ip_local_reserved_ports"
 ! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 56000 >/dev/null 2>&1 \
   || fail "check must reject a reservation that leaves the +100 blackbox backend port exposed"
+# Reservations are judged against the listener ports, never the unused gap up
+# to the hub: with the hub (61764-62264) above the default window, reserving the
+# in-window listeners 56000-56999 is enough; under a window reaching 62500 the
+# hub ports must be reserved too.
 printf '56000-56999\n' >"$fake_ipv4/ip_local_reserved_ports"
-! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 56000 >/dev/null 2>&1 \
-  || fail "check must reject a reservation that leaves the +5764..+6264 benchmark hub exposed"
-printf '56000-62264\n' >"$fake_ipv4/ip_local_reserved_ports"
 ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 56000 >/dev/null \
-  || fail "check must accept a base port whose whole footprint the host reserved"
+  || fail "check must accept a reservation covering every in-window listener when the hub lies above the window"
+printf '32768\t62500\n' >"$fake_ipv4/ip_local_port_range"
+! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 56000 >/dev/null 2>&1 \
+  || fail "check must reject a reservation that leaves the +5764..+6264 benchmark hub exposed inside the window"
+printf '56000-56999,61764-62264\n' >"$fake_ipv4/ip_local_reserved_ports"
+ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port 56000 >/dev/null \
+  || fail "check must accept a base port whose listener ports the host reserved"
+printf '32768\t60999\n' >"$fake_ipv4/ip_local_port_range"
 : >"$fake_ipv4/ip_local_reserved_ports"
 echo "PASS: check judges recorded ports against the kernel window and the reserved footprint"
 
@@ -895,6 +903,8 @@ cat >"$prisma_bin/npx" <<'NPX'
 [ "$1 $2" = "prisma generate" ] || { echo "unexpected fake npx invocation: $*" >&2; exit 97; }
 printf '%s\n' "$PWD" >>"${FAKE_PRISMA_STATE:?}/generate-calls"
 touch "$FAKE_PRISMA_STATE/fresh"
+# A local generation makes the client resolve inside the worktree from now on.
+[ ! -f "$FAKE_PRISMA_STATE/resolved-after" ] || cp "$FAKE_PRISMA_STATE/resolved-after" "$FAKE_PRISMA_STATE/resolved"
 NPX
 chmod +x "$prisma_bin/node" "$prisma_bin/npx"
 prisma_fixture="$(cd "$prisma_fixture" && pwd -P)"
@@ -916,6 +926,16 @@ rm -f "$prisma_state/fresh" "$prisma_state/generate-calls"
 printf '%s' "$prisma_elsewhere/client/default.js" >"$prisma_state/resolved"
 ! PATH="$prisma_bin:$PATH" FAKE_PRISMA_STATE="$prisma_state" bash "$ENSURE_PRISMA" "$prisma_fixture" >/dev/null 2>&1 \
   || fail "a regenerated client that resolves outside the worktree must fail closed"
+# A fresh client that resolves into another checkout is still not this
+# worktree's: a later regeneration there would change these lanes silently.
+rm -f "$prisma_state/generate-calls"
+touch "$prisma_state/fresh"
+printf '%s' "$prisma_elsewhere/client/default.js" >"$prisma_state/resolved"
+printf '%s' "$prisma_fixture/node_modules/.prisma/client/default.js" >"$prisma_state/resolved-after"
+PATH="$prisma_bin:$PATH" FAKE_PRISMA_STATE="$prisma_state" bash "$ENSURE_PRISMA" "$prisma_fixture" >"$TMP_ROOT/prisma-owned.out" 2>&1 \
+  || fail "a fresh client owned by another checkout must be regenerated locally: $(cat "$TMP_ROOT/prisma-owned.out")"
+expect_eq "$(cat "$prisma_state/generate-calls")" "$prisma_fixture/back-end" "ownership before freshness: the foreign client is regenerated locally"
+grep -q "resolves outside this checkout" "$TMP_ROOT/prisma-owned.out" || fail "the foreign client must be reported before regeneration"
 echo "PASS: dependency hydration regenerates a stale Prisma client inside the worktree"
 
 echo "All deploy-worktree preflight tests passed."

@@ -64,6 +64,7 @@ class FakeFly:
         self.prep_fail = prep_fail
         self.health_fail_ids = set(health_fail_ids)
         self.cold_boot_ids = set()  # Fly lost the memory snapshot: start boots from scratch
+        self.stale_list_ids = set()  # the list endpoint still reports these as suspended (stale listing)
         self.counter = 0
         self.uptime = {}
         fake = self
@@ -91,7 +92,8 @@ class FakeFly:
                 with fake.lock:
                     fake.events.append(("GET", self.path))
                     if p[-1] == "machines":
-                        return self.reply(200, list(fake.rows.values()))
+                        return self.reply(200, [dict(r, state="suspended") if r["id"] in fake.stale_list_ids else r
+                                                for r in fake.rows.values()])
                     if p[-2] == "machines":
                         row = fake.rows.get(p[-1])
                         return self.reply(200, row) if row else self.reply(404, {"error": "not found"})
@@ -520,6 +522,50 @@ class WarmPoolTest(unittest.TestCase):
             with self.assertRaises(pool["PoolError"]):
                 fly._call("GET", "/machines")
             self.assertEqual(urlopen.call_count, 4, "idempotent GETs keep their bounded retries")
+
+    def test_transport_failures_are_not_replayed_for_posts(self):
+        """Resets, disconnects, incomplete reads and gateway 5xx after a POST are
+        ambiguous (the volume/Machine/exec may exist); they surface as PoolError
+        on the first attempt. GETs keep bounded retries; a refused connection
+        (nothing sent) and a 429 (rejected unexecuted) may retry any method."""
+        import http.client
+        import io
+        import urllib.error
+        from unittest.mock import patch
+        pool = runpy.run_path(str(CLI))
+        fly = pool["Fly"]("app", "FlyV1 test", base="http://127.0.0.1:9")
+        gateway = lambda code: urllib.error.HTTPError("http://x", code, "gateway", {}, io.BytesIO(b""))
+        cases = [  # (method, side effect, expected urlopen calls)
+            ("POST", ConnectionResetError("reset"), 1),
+            ("POST", http.client.RemoteDisconnected("closed"), 1),
+            ("POST", http.client.IncompleteRead(b""), 1),
+            ("POST", gateway(503), 1),
+            ("POST", gateway(429), 4),
+            ("POST", urllib.error.URLError(ConnectionRefusedError("refused")), 4),
+            ("GET", ConnectionResetError("reset"), 4),
+            ("GET", gateway(503), 4),
+        ]
+        for method, effect, calls in cases:
+            with patch("urllib.request.urlopen", side_effect=effect) as urlopen, patch("time.sleep"):
+                with self.assertRaises(pool["PoolError"], msg=f"{method} {effect!r}"):
+                    fly._call(method, "/volumes", {"name": "v"} if method == "POST" else None)
+                self.assertEqual(urlopen.call_count, calls, f"{method} {effect!r}")
+
+    def test_checkout_skips_a_member_another_claimer_already_started(self):
+        """A stale candidate listing must not make checkout write its lease over
+        a member someone else started: it is skipped without any metadata
+        write, so no member is ever left started under a lease nobody owns."""
+        self.provision(1)
+        member = self.fake.members()[0]["id"]
+        self.fake.rows[member]["state"] = "started"   # another claimer started it ...
+        self.fake.stale_list_ids.add(member)           # ... after our listing was taken
+        before = len(self.fake.mutations())
+        receipt = run(self.fake, "checkout", *self.common, expect=3)
+        self.assertIsNone(receipt.get("machine"))
+        self.assertTrue(any(t["machine"] == member and t["outcome"].startswith("not-claimable") for t in receipt["tried"]), receipt)
+        self.assertFalse(any(e[0] == "POST" and f"/machines/{member}/metadata/" in e[1] for e in self.fake.mutations()[before:]),
+                         "no lease write on a member another claimer started")
+        self.assertEqual((self.fake.rows[member]["config"]["metadata"] or {}).get("deploy_warm_pool_state"), "ready")
 
     def test_claim_receipt_failure_destroys_the_resumed_member(self):
         """Once checkout resumed and leased a member, a failed receipt step must

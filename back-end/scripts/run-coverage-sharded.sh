@@ -81,6 +81,18 @@ fi
 # them now so a shard that exits before its own preflight cannot hand the
 # duration recorder stale, positive observations.
 rm -f "$BACKEND_DIR"/coverage/blackbox-run-shard*/summary.json
+# A shard killed mid-run (a superseded pipeline attempt sends SIGTERM) leaves
+# its raw coverage under coverage/tmp-shard<i>, and run-coverage.sh refuses to
+# start a new collection over unrecovered raw coverage. Keep that evidence,
+# out of the way, so the next attempt can run (2026-10-30: attempt 2 of the
+# PR #1637 proof run was refused by attempt 1's interrupted shards).
+for leftover in "$BACKEND_DIR"/coverage/tmp-shard*; do
+  [[ -d "$leftover" ]] && [[ -n "$(find "$leftover" -mindepth 1 -print -quit)" ]] || continue
+  archive="$ROOT_DIR/.context/test-runs/backend-coverage-unrecovered-$(date -u +%Y%m%d-%H%M%S)-$$"
+  mkdir -p "$archive"
+  mv "$leftover" "$archive/"
+  echo "Archived unrecovered raw coverage from an interrupted shard: $leftover -> $archive/$(basename "$leftover")"
+done
 BASE_PORT="${CONDUCTOR_PORT:-55000}"
 DURATIONS="${BACKEND_COVERAGE_SHARD_DURATIONS:-}"
 # Timing-balanced shards: without an explicit durations file, reuse the

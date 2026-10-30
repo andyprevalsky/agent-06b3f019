@@ -1370,6 +1370,13 @@ def wait(state_dir: Path, timeout: float, stall_seconds: float = 0.0, since: flo
             stall_seconds=stall_seconds,
             extra_event=lambda armed=attempt: _supervisor_event(refresh(), armed),
         )
+        if code == deploy_stage_wait.EXIT_FAILED:
+            # A stage failure is reported before extra_event runs: the attempt
+            # may already have been superseded, in which case the failure
+            # belongs to discarded bytes and the next attempt is what to follow.
+            current = refresh()
+            if int(current.get("attempt", 1)) != attempt or current.get("status") == "superseded":
+                code, payload = _SUPERSEDED_EVENT, {"event": "superseded", "attempt": attempt}
         while code == 0:
             if time.monotonic() - started >= limit:
                 code, payload = deploy_stage_wait.EXIT_TIMEOUT, {"event": "timeout"}

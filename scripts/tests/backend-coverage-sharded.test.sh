@@ -202,6 +202,18 @@ echo '{"results":[{"domain":"stale-domain","passed":true,"duration":999000}]}' \
   >"$REPO/back-end/coverage/blackbox-run-shard1/summary.json"
 records
 FAKE_SHARD_1=fail bash "$RUNNER" 2 >"$TMP/out5-stale" 2>&1 && fail "failed shard run exited 0"
+# Raw coverage a killed shard left behind (a superseded pipeline attempt) is
+# archived under .context/test-runs before the shards start; run-coverage.sh
+# would otherwise refuse the new collection.
+mkdir -p "$REPO/back-end/coverage/tmp-shard1" "$REPO/back-end/coverage/tmp-shard2"
+echo '{"interrupted":true}' >"$REPO/back-end/coverage/tmp-shard1/raw.json"
+records
+bash "$RUNNER" 2 >"$TMP/out5-leftover" 2>&1 || fail "a run after an interrupted shard must proceed: $(cat "$TMP/out5-leftover")"
+grep -q "Archived unrecovered raw coverage from an interrupted shard" "$TMP/out5-leftover" || fail "the archived leftover must be reported"
+[ ! -e "$REPO/back-end/coverage/tmp-shard1/raw.json" ] || fail "interrupted raw coverage must be moved out of the shard's tmp dir"
+[ -n "$(find "$REPO/.context/test-runs" -path '*backend-coverage-unrecovered-*/tmp-shard1/raw.json' -print -quit)" ] \
+  || fail "interrupted raw coverage must be archived under .context/test-runs"
+[ -d "$REPO/back-end/coverage/tmp-shard2" ] || fail "an empty leftover dir is not evidence and is left alone"
 [[ ! -e "$REPO/back-end/coverage/blackbox-run-shard1/summary.json" ]] || fail "retained shard summary survived into the new run"
 [[ ! -s "$LEDGER" ]] || { grep -q stale-domain "$LEDGER" && fail "stale summary was recorded as a current observation"; }
 rm -f "$LEDGER"
@@ -278,11 +290,23 @@ printf '%s\n' "$BASE_DB" >"$WT/.context/deploy-system-pg.db"
 # Shard-suffix space is reserved: a 45-character identity still yields a <= 63-byte shard database.
 LONG_IDENT="agent-0123456789abcdef-0123456789ab-extra-long"
 LONG_WT="$TMP/deploy-wt-long"; mkdir -p "$LONG_WT/.context"
-LONG_DB="victoria_deploy_$(printf '%s' "$LONG_IDENT" | tr -c '[:alnum:]' '_' | cut -c1-43)"
+LONG_SAFE="$(printf '%s' "$LONG_IDENT" | tr -c '[:alnum:]' '_')"
+LONG_DB="victoria_deploy_${LONG_SAFE:0:30}_$(printf '%s' "$LONG_SAFE" | sha256sum | cut -c1-12)"
 printf '%s\n' "$LONG_DB" >"$LONG_WT/.context/deploy-system-pg.db"
 LONG_SHARD="$(BACKEND_COVERAGE_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/$LONG_DB" ROSE_DEPLOY_WORKTREE=1 ROSE_DEPLOY_WORKTREE_PATH="$LONG_WT" node "$HELPER" "$LONG_IDENT" "$LONG_WT" 2/2 | sed -n 2p)"
 [[ "$LONG_SHARD" == "${LONG_DB}_s2" && "${#LONG_SHARD}" -le 63 ]] || fail "a long identity keeps its shard database within 63 bytes (got '$LONG_SHARD')"
-grep -q "cut -c1-43" "$ROOT_DIR/scripts/prepare-deploy-worktree.sh" || fail "prepare-deploy-worktree.sh must cut the identity at 43 to reserve shard-suffix space"
+grep -q '"${#safe}" -gt 43' "$ROOT_DIR/scripts/prepare-deploy-worktree.sh" || fail "prepare-deploy-worktree.sh must shorten long identities with a digest to reserve shard-suffix space"
+# Two identities that share their first 43 characters get distinct databases (digest of the whole name).
+TWIN_IDENT="${LONG_IDENT}-twin"
+TWIN_SAFE="$(printf '%s' "$TWIN_IDENT" | tr -c '[:alnum:]' '_')"
+TWIN_DB="victoria_deploy_${TWIN_SAFE:0:30}_$(printf '%s' "$TWIN_SAFE" | sha256sum | cut -c1-12)"
+[ "$TWIN_DB" != "$LONG_DB" ] || fail "identities sharing a 43-character prefix must not share a deploy database"
+TWIN_WT="$TMP/deploy-wt-twin"; mkdir -p "$TWIN_WT/.context"
+printf '%s\n' "$TWIN_DB" >"$TWIN_WT/.context/deploy-system-pg.db"
+[[ "$(BACKEND_COVERAGE_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/$TWIN_DB" ROSE_DEPLOY_WORKTREE=1 ROSE_DEPLOY_WORKTREE_PATH="$TWIN_WT" node "$HELPER" "$TWIN_IDENT" "$TWIN_WT" 1/2 | sed -n 2p)" == "${TWIN_DB}_s1" ]] \
+  || fail "the resolver must derive the digest-shortened name for a twin identity"
+BACKEND_COVERAGE_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/$LONG_DB" ROSE_DEPLOY_WORKTREE=1 ROSE_DEPLOY_WORKTREE_PATH="$TWIN_WT" node "$HELPER" "$TWIN_IDENT" "$TWIN_WT" 1/2 >/dev/null 2>&1 \
+  && fail "a twin identity must not resolve to its sibling's database"
 # An identity shaped like a shard name is refused on both paths (it could name another worktree's shard).
 BACKEND_COVERAGE_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/victoria_deploy_feature_s1 ROSE_DEPLOY_WORKTREE=1 ROSE_DEPLOY_WORKTREE_PATH="$WT" node "$HELPER" "feature-s1" "$WT" >/dev/null 2>&1 && fail "an identity ending in _s<digits> must be refused (isolated path)"
 env -u ROSE_DEPLOY_WORKTREE -u ROSE_DEPLOY_WORKTREE_PATH BACKEND_COVERAGE_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/victoria_ws_s1 node "$HELPER" "ws_s1" "$WT" 1/2 >/dev/null 2>&1 && fail "an identity ending in _s<digits> must be refused (generic path)"

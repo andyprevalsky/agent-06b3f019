@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -150,14 +151,22 @@ class Fly:
                     return json.loads(payload)
             except urllib.error.HTTPError as error:
                 detail = error.read().decode(errors="replace")[:400]
-                if error.code in (429, 502, 503, 504) and attempt < 3:
+                # 429 rejected the request unexecuted: any method may retry. A
+                # gateway 502/503/504 is ambiguous for a POST (the volume, the
+                # Machine or the exec may already have happened): only GETs retry.
+                if attempt < 3 and (error.code == 429 or (error.code in (502, 503, 504) and method == "GET")):
                     last = error
                     time.sleep(1.5 * (attempt + 1))
                     continue
                 raise PoolError(f"{method} {path} -> HTTP {error.code}: {detail}") from error
-            except (urllib.error.URLError, TimeoutError) as error:
-                timed_out = isinstance(error, TimeoutError) or isinstance(getattr(error, "reason", None), TimeoutError)
-                if attempt < 3 and not (timed_out and method != "GET"):
+            except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as error:
+                # Resets, disconnects and incomplete reads escape urlopen's URLError
+                # wrapping; once the request was sent they are as ambiguous as a
+                # read timeout. Only a refused connection (nothing sent) lets a
+                # non-GET retry; GETs keep their bounded retries for every failure.
+                reason = getattr(error, "reason", error)
+                unsent = isinstance(reason, (ConnectionRefusedError, socket.gaierror))
+                if attempt < 3 and (method == "GET" or unsent):
                     last = error
                     time.sleep(1.5 * (attempt + 1))
                     continue
@@ -503,7 +512,15 @@ def checkout(fly: Fly, args, image, deps, log):
             # A candidate from a stale listing may already be destroyed or
             # claimed; any API failure here moves on to the next candidate
             # instead of aborting the whole checkout (exit 1 would mask the
-            # clone fallback the fleet expects on exit 3).
+            # clone fallback the fleet expects on exit 3). Re-read it first: a
+            # member another claimer already leased or started is skipped
+            # without touching its tag, so our write can never strand a
+            # started member under a lease nobody owns.
+            fresh = fly.machine(machine_id)
+            previous_tag = metadata_of(fresh).get(f"{TAG}_state")
+            if fresh.get("state") != "suspended" or previous_tag != STATE_READY:
+                tried.append({"machine": machine_id, "outcome": f"not-claimable: {fresh.get('state')}/{previous_tag}"})
+                continue
             fly.set_metadata(machine_id, f"{TAG}_state", f"{STATE_LEASED}:{lease}")
             time.sleep(args.lease_settle)
             current = fly.machine(machine_id)
@@ -511,6 +528,14 @@ def checkout(fly: Fly, args, image, deps, log):
             tried.append({"machine": machine_id, "outcome": f"unavailable: {error}"})
             continue
         if metadata_of(current).get(f"{TAG}_state") != f"{STATE_LEASED}:{lease}" or current.get("state") != "suspended":
+            if metadata_of(current).get(f"{TAG}_state") == f"{STATE_LEASED}:{lease}":
+                # Our tag landed over a member someone else started between the
+                # read and the write: hand the tag back so the owner's post-start
+                # re-verification keeps the member instead of both sides leaving.
+                try:
+                    fly.set_metadata(machine_id, f"{TAG}_state", previous_tag)
+                except PoolError:
+                    pass
             tried.append({"machine": machine_id, "outcome": "lost-lease-race"})
             continue
         try:

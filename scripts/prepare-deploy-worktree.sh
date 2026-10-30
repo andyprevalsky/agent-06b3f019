@@ -270,9 +270,21 @@ database_port() {
 system_deploy_db_name() {
   # Isolated DB name on shared system Postgres (Cloud: ROSE_USE_SYSTEM_PG).
   # Keep it SQL-safe and unique per worktree identity.
-  local safe
-  # 43 keeps victoria_deploy_<safe>_s<i> (coverage shards) within Postgres's 63-byte identifier limit.
-  safe="$(printf '%s' "$CONDUCTOR_WORKSPACE_NAME" | tr -c '[:alnum:]' '_' | cut -c1-43)"
+  local safe digest
+  safe="$(printf '%s' "$CONDUCTOR_WORKSPACE_NAME" | tr -c '[:alnum:]' '_')"
+  # victoria_deploy_<safe>_s<i> (coverage shards) must stay within Postgres's
+  # 63-byte identifier limit. A long identity keeps its first 30 characters
+  # plus a 12-hex sha256 of the whole sanitized name, so two worktrees that
+  # share a prefix never share a database (back-end/scripts/coverage-database-url.mjs
+  # derives the same name).
+  if [ "${#safe}" -gt 43 ]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+      digest="$(printf '%s' "$safe" | sha256sum | cut -c1-12)"
+    else
+      digest="$(printf '%s' "$safe" | shasum -a 256 | cut -c1-12)"
+    fi
+    safe="${safe:0:30}_${digest}"
+  fi
   case "$safe" in
     *_s[0-9]|*_s[0-9][0-9]|*_s[0-9][0-9][0-9])
       echo "❌ Deploy worktree identity $CONDUCTOR_WORKSPACE_NAME ends in _s<digits>, which is reserved for coverage shard databases." >&2
