@@ -34,7 +34,12 @@ import {
 } from './browser-provider-rotation.support';
 import { assertAuthPersistFailedInitCustody } from './browser-provider.auth-persist.cleanup.support';
 import { runLiveProviderParity } from './browser-provider.live.support';
-import { runLiveCrossProviderCases } from './browser-provider.tilion-live-cases.support';
+import {
+  gateOverridden,
+  KERNEL_RESIDENTIAL_LIVE_OVERRIDE,
+  logOverriddenLiveCase,
+  runLiveCrossProviderCases,
+} from './browser-provider.tilion-live-cases.support';
 import { runLiveTilionHarvest } from './browser-provider.tilion-harvest.live';
 import { assertKernelUnhealthyProxyRelaxesLocation } from './browser-provider-proxy-health.support';
 import { assertStaleProxyCreateFailureIsLabeled } from './browser-provider-stale-proxy.support';
@@ -578,14 +583,22 @@ async function main(): Promise<void> {
   if (browserUseFlagBeforeContractTests === undefined)
     delete process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
   else process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = browserUseFlagBeforeContractTests;
-  try {
-    await runLiveProviderParity();
-    if (process.env.TEST_BASE_URL) console.log('PASS live Kernel provider parity');
-  } catch (error) {
-    failed++;
-    console.error(
-      `FAIL live Kernel provider parity: ${error instanceof Error ? error.message : String(error)}`
+  if (process.env.TEST_BASE_URL && gateOverridden(KERNEL_RESIDENTIAL_LIVE_OVERRIDE)) {
+    logOverriddenLiveCase(
+      'live Kernel provider parity',
+      KERNEL_RESIDENTIAL_LIVE_OVERRIDE,
+      'Kernel residential proxy unavailable'
     );
+  } else {
+    try {
+      await runLiveProviderParity();
+      if (process.env.TEST_BASE_URL) console.log('PASS live Kernel provider parity');
+    } catch (error) {
+      failed++;
+      console.error(
+        `FAIL live Kernel provider parity: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 
   failed += await runLiveCrossProviderCases();
