@@ -19,7 +19,7 @@ tags:
   - claude-code
 sources:
   - task User Scale Bug Bash lane S33 (parent thread thr_1981ff79aa724ae59870f1829121c7e1)
-  - Render req 277d3376ff0e 2026-10-29T03:15:17Z (gpt_code, updated 3), req 36c6bfbac24f 2026-10-30T18:09:38Z (claude_code, updated 3)
+  - PR #1644
 repro: back-end/src/tests/blackbox/integrations.scoped-auth-expiry.cases.ts
 status: fixed
 ---
@@ -30,11 +30,13 @@ Prod had no usable code-agent subscription for Andy: all three `claude_code`
 rows and two of three `gpt_code` rows were EXPIRED (`auth_error`), so every
 code session ran on the paid Azure fallback.
 
-## Evidence
+## Diagnosis
+
+Evidence (Render prod logs, read-only DB):
 
 - Each batch shares one `updatedAt` to the millisecond (gpt: 2026-10-29
   03:15:17.292; claude: 2026-10-30 18:09:38.393), i.e. one `updateMany`.
-- Render (prod) made both writes through
+- Render (prod; req 277d3376ff0e gpt, 36c6bfbac24f claude) made both writes through
   `POST /api/integrations/compute-code/token/rate-limited`, logging
   `disabled after auth_error`, `updated: 3`, `accountId: null`,
   `integrationId: null`.
@@ -43,7 +45,7 @@ code session ran on the paid Azure fallback.
   instances, and upstream revocation. The expiry was our own write, and it was
   issued without naming a credential.
 
-## Root cause
+Root cause:
 
 The compute-token lease served one `Integration` row but never told the worker
 which one. On a 401/403 the worker reported `{type, source:"user", userId,
@@ -51,7 +53,7 @@ failureReason:"auth_error"}`. The service forwarded only `userId`, and the
 user branch expired every matching row. One bad account therefore expired
 every healthy sibling subscription.
 
-## Fix
+## Solution
 
 - The lease returns `integrationId`. The worker captures it in the auth
   context's mark callback and sends it back. The route and service pass it to
@@ -70,7 +72,20 @@ every healthy sibling subscription.
 - `rose.blackbox.py` `user_auth_error_report_names_the_leased_integration`:
   the worker's report body carries the leased `integrationId`.
 
-## 10k-agent behaviour
+## Human feedback
+
+Andy (via parent, 2026-10-30): find why the subscriptions expired; never let a
+test or second instance rotate a prod token; do not modify prod credentials;
+he reconnects after the fix. Restoring the 5 collateral rows waits for his OK.
+
+## Reusable lesson
+
+A failure report must name the exact credential that failed. Any write keyed
+only by user (or other coarse owner) can turn one bad credential into an
+outage of every sibling. When the identity is missing, refuse the destructive
+write and let a scoped retry handle it.
+
+10k-agent behaviour:
 
 The guard adds one indexed `count` per unscoped auth report. Scoped reports
 update a single row by primary key. No new channels or fan-out.
