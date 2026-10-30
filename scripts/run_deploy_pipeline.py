@@ -86,6 +86,20 @@ attempts, 2026-10-30); beside
 backend-coverage-blackbox (2560 MB) it fits the budget. A plan with
 ``"schedule": {"policy": "legacy"}`` keeps the previous all-at-once admission.
 
+The deploy.md ``semantic-stack`` lane (4096 MB; its own ``run.sh --benchmark``
+stack, Playwright semantics, latency ratchet, E2B smoke) deliberately keeps its
+``after`` edges on backend coverage and live-probes instead of joining the
+coverage phase. Measured on #1639 (8 cores / 16007 MB, watchdog cap 14471 MB):
+the coverage phase's whole-box MemAvailable floor was 6485 MB (9522 MB used)
+and semantic-stack alone took MemAvailable from 11392 to 6741 MB (~4650 MB
+footprint; 1652.8 MB largest child RSS from the stage row), so overlapping
+them would reach ~14172 MB used, inside the 2048 MB reserve below the cap, and
+the declared reservations (7808 + 4096 MB) exceed the 8065 MB budget. Its
+startup also runs ``scripts/kill-services.sh``, which terminates every runtime
+process owned by this worktree, including the coverage shards' instrumented
+backends and the smoke lane's stack. Overlapping it needs a smaller stack or a
+larger host, not a schedule change.
+
 Plan file (JSON): {"lanes": [{"name", "command": [...], "cwd": "back-end",
 "env": {...}, "after": ["lane"], "reuse_passed": true, "group": "3",
 "memory_mb": 1024, "exclusive": false, "phase": ""}], "max_parallel": 4,
