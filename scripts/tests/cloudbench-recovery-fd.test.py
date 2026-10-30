@@ -272,11 +272,19 @@ fly_with_timeout() {
         fleet = (ROOT / 'scripts/run-bench-fleet').read_text()
         definitions = '\n'.join(function(fleet, name) for name in (
             'machine_status_exact_read', 'registry_machine_details',
+            'fleet_has_replaced_preconfig',
+            'fleet_recovery_verify_replaced_preconfig',
+            'fleet_recovery_confirm_replaced_preconfig',
             'fleet_recovery_reconnect_guest_shutdowns'))
+        definitions += function(
+            (ROOT / 'scripts/lib/cloudbench-inventory.sh').read_text(),
+            'registry_meta_value')
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             registry = base / 'owners' / ('a' * 32)
             registry.mkdir(parents=True)
+            (registry / 'meta').write_text(
+                f'runs_root={base}/runs\nrun_id=ordinary\n')
             (base / 'audits' / registry.name).mkdir(parents=True)
             latch = registry / 'guest-cleanup-unconfirmed'
             latch.write_text('original retained obligation\n')

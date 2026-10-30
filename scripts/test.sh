@@ -410,6 +410,7 @@ if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench|run-ben
   run_suite "Cloud Benchmark Disposable Volume CLI" python3 scripts/tests/cloudbench-disposable-volume-cli.test.py
   run_suite "Cloud Benchmark Original 600 Supervisor" python3 scripts/tests/cloudbench-original600-supervisor.test.py
   run_suite "Cloud Benchmark Disposable Recovery" python3 scripts/tests/cloudbench-disposable-recovery.test.py
+  run_suite "Cloud Benchmark Replaced Preconfiguration" python3 scripts/tests/cloudbench-replaced-preconfig.test.py
   run_suite "Cloud Benchmark Disposable Decisions" python3 scripts/tests/cloudbench-disposable-lifecycle.test.py
   run_suite "Cloud Benchmark Retained Successor Completion" python3 scripts/tests/cloudbench-retained-successor.test.py
   run_suite "Cloud Benchmark Disposable Outer Lifecycle" env CLOUDBENCH_TEST_DISPOSABLE_ONLY=1 bash scripts/tests/cloudbench-multi-workstream.test.sh

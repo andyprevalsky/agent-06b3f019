@@ -37,7 +37,7 @@ class Disposable(unittest.TestCase):
    write(index/'machines/abcd1234','cloudbench-fixture\n');write(index/'volumes/vol_owned','cloudbench-fixture\n')
    for n in ('guest-cleanup-unconfirmed','runtime-evidence-unconfirmed'):
     if missing:(reg/n).touch()
-   script='set -u\n'+''.join(function(n)for n in ('fleet_current_disposable_registry','fleet_disposable_registry_policy','fleet_disposable_delete_intent','fleet_retire_sealed_primary','fleet_disposable_resources_terminal','fleet_release_cleanup_capacity','capacity_release_owner_reservations','capacity_reserve_slots','reap_volume','reap_machine','fleet_validate_reap_cohort','fleet_reap_registry_record_native','fleet_reap_registry_record','reap_registry_clones','machine_creation_admission','provision_primary_machine'))+r'''
+   script='set -u\n'+''.join(function(n)for n in ('fleet_current_disposable_registry','fleet_disposable_registry_policy','fleet_disposable_delete_intent','fleet_retire_sealed_primary','fleet_disposable_resources_terminal','fleet_release_cleanup_capacity','capacity_release_owner_reservations','capacity_reserve_slots','reap_volume','reap_machine','fleet_validate_reap_cohort','fleet_has_replaced_preconfig','fleet_has_replaced_preconfig_phase','fleet_recovery_verify_replaced_preconfig','fleet_replaced_preconfig_verify_before_reap','fleet_reap_registry_record_native','fleet_reap_registry_record','reap_registry_clones','machine_creation_admission','provision_primary_machine'))+r'''
 APP=fixture; FLEET_OWNER_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 FLEET_OWNERSHIP_ROOT="$CASE/owners";FLEET_REGISTRY_DIR="$FLEET_OWNERSHIP_ROOT/$FLEET_OWNER_TOKEN"
 GIT_COMMON_DIR="$CASE/common";mkdir -p "$GIT_COMMON_DIR"

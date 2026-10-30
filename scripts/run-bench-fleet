@@ -2820,6 +2820,9 @@ cloudbench_collect_remaining_runtime_evidence() {
         return 1
     fi
     if [ "${FLEET_REGISTRY_PUBLISHED:-0}" = "1" ]; then
+        if fleet_has_replaced_preconfig_phase "$FLEET_REGISTRY_DIR"; then
+            fleet_recovery_verify_replaced_preconfig "$FLEET_REGISTRY_DIR" || return 1
+        fi
         rm -f "$FLEET_REGISTRY_DIR/runtime-evidence-unconfirmed" \
             && cloudbench_fsync_directory "$FLEET_REGISTRY_DIR"
     fi
@@ -6230,6 +6233,7 @@ fleet_reap_registry_record_native() {  # <registry> <mode> <version> <legacy-sta
                 unresolved=1
                 continue
             fi
+            fleet_replaced_preconfig_verify_before_reap "$registry" "$id" "$volume_id" absent || return 1
             if [ -e "$registry/preconfig-evidence-consumed" ] || [ -L "$registry/preconfig-evidence-consumed" ]; then
                 fleet_preconfig_verify_before_reap "$registry" "$id" "$volume_id" absent || return 1
             fi
@@ -6279,6 +6283,7 @@ fleet_reap_registry_record_native() {  # <registry> <mode> <version> <legacy-sta
             volume_id="$(fleet_registry_reconcile_mounted_volume \
                 "$registry" "$clone_name" "$id")" || return 1
         fi
+        fleet_replaced_preconfig_verify_before_reap "$registry" "$id" "$volume_id" "$state" || return 1
         if [ -e "$registry/preconfig-evidence-consumed" ] || [ -L "$registry/preconfig-evidence-consumed" ]; then
             fleet_preconfig_verify_before_reap "$registry" "$id" "$volume_id" "$state" || return 1
         fi
@@ -8217,7 +8222,7 @@ recover_exact_pool_claims() {  # <dead-owner-meta> [exact]
 
 fleet_registry_build_guest_recovery_plan() {  # <registry-dir> <output-plan>
     local registry="${1%/}" plan="$2"
-    python3 - "$registry" "$plan" "$APP" "${FLEET_AUDIT_ROOT:-}" "${SOURCE_HELPER:-}" "${POOL_CLAIMS_DIR:-}" <<'PY'
+    python3 - "$registry" "$plan" "$APP" "${FLEET_AUDIT_ROOT:-}" "${SOURCE_HELPER:-}" "${POOL_CLAIMS_DIR:-}" "${STARTUP_FAILURE_ARCHIVE_HELPER:-}" <<'PY'
 import hashlib
 import json
 import os
@@ -8468,6 +8473,25 @@ if pool_dir is not None and pool_dir.exists():
         pool_ids.add(machine_id)
         volume_ids.add(volume_id)
 
+replaced_outputs = {}
+replaced_helper = sys.argv[7] if len(sys.argv) > 7 else ""
+for task in run_dir.iterdir():
+    if plain_directory(task) and ((task / "boot-config-host-replaced").exists()
+                                  or (task / "boot-config-host-replaced").is_symlink()
+                                  or any(task.glob("host-replaced-*"))):
+        if not replaced_helper:
+            raise ValueError("replaced pre-config recovery helper missing")
+        for bench, machine, token, output in runpy.run_path(replaced_helper)["replaced_preconfig_members"](registry):
+            if machine in replaced_outputs:
+                raise ValueError("duplicate replaced pre-config output")
+            replaced_outputs[machine] = (bench, Path(output), 0)
+        break
+if any(machine not in machine_records for machine in replaced_outputs):
+    # Retired replacements are checked by their durable per-member receipt;
+    # they are no longer a live guest obligation.
+    replaced_outputs = {machine: row for machine, row in replaced_outputs.items()
+                        if machine in machine_records}
+
 retired_sources: dict[str, str] = {}
 
 
@@ -8602,6 +8626,11 @@ for candidate in run_dir.iterdir():
         if not port_value.isdigit() or not 1024 <= int(port_value) <= 65_535:
             raise ValueError("invalid stale-owner status proxy port")
     output_by_machine[machine_id] = (candidate.name, candidate, int(port_value))
+
+for machine_id, row in replaced_outputs.items():
+    if machine_id in output_by_machine or machine_id in retired_outputs:
+        raise ValueError("replaced pre-config machine duplicates live output")
+    output_by_machine[machine_id] = row
 
 if retired_outputs:
     root_sources = {retired_sources[machine_id] for machine_id in retired_outputs}
@@ -8754,7 +8783,7 @@ for machine_id, (clone_name, volume_id) in machine_records.items():
         continue
     bench, output, preferred_port = output_by_machine[machine_id]
     values = (
-        "pool-guest" if machine_id in pool_ids else "guest",
+        "replaced-preconfig" if machine_id in replaced_outputs else "pool-guest" if machine_id in pool_ids else "guest",
         bench,
         clone_name,
         machine_id,
@@ -10187,6 +10216,127 @@ PY
     [ "$failed" -eq 0 ] && [ "$recovered" -eq "${#recovery_benches[@]}" ]
 }
 
+fleet_has_replaced_preconfig() {
+    local run output
+    [ -e "$1/replaced-preconfig-phase.json" ] || [ -L "$1/replaced-preconfig-phase.json" ] || {
+        run="$(registry_meta_value "$1/meta" runs_root)/$(registry_meta_value "$1/meta" run_id)"
+        for output in "$run"/*/boot-config-host-replaced "$run"/*/host-replaced-*; do
+            [ ! -e "$output" ] && [ ! -L "$output" ] || return 0
+        done
+        return 1
+    }
+}
+
+fleet_has_replaced_preconfig_phase() {  # ordinary live replacements have no recovery phase
+    local run receipt
+    [ -e "$1/replaced-preconfig-phase.json" ] || [ -L "$1/replaced-preconfig-phase.json" ] || {
+        run="$(registry_meta_value "$1/meta" runs_root)/$(registry_meta_value "$1/meta" run_id)"
+        for receipt in "$run"/*/host-replaced-*/failed-preconfig-runtime-archive/consumed.json; do
+            [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || return 0
+        done
+        return 1
+    }
+}
+
+fleet_recovery_verify_replaced_preconfig() {  # whole mapping + per-member phase revalidation
+    fleet_has_replaced_preconfig "$1" || return 0
+    local plan status=0
+    plan="$(mktemp "${TMPDIR:-/tmp}/cloudbench-replaced-plan.XXXXXX")" || return 1
+    fleet_registry_build_guest_recovery_plan "$1" "$plan" || status=1
+    rm -f "$plan"
+    [ "$status" -eq 0 ] || return 1
+    python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$1" <<'PYREPLACED'
+import runpy, sys
+runpy.run_path(sys.argv[1])["replaced_preconfig_members"](sys.argv[2], verified=True)
+PYREPLACED
+}
+
+fleet_recovery_confirm_replaced_preconfig() {  # <registry> <complete canonical plan>
+    local registry="$1" plan="$2" kind bench clone machine volume output port token base attempt
+    while IFS=$'\t' read -r kind bench clone machine volume output port; do
+        [ "$kind" = replaced-preconfig ] || continue
+        token="$(python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$registry" "$machine" "$output" <<'PYTOKEN'
+import runpy, sys
+rows = runpy.run_path(sys.argv[1])["replaced_preconfig_members"](sys.argv[2])
+found = [row[2] for row in rows if row[1] == sys.argv[3] and row[3] == sys.argv[4]]
+assert len(found) == 1
+print(found[0])
+PYTOKEN
+)" || return 1
+        base="$output/failed-preconfig-runtime-archive"
+        [ ! -L "$base" ] && mkdir -p "$base" && chmod 700 "$base" || return 1
+        attempt="$(mktemp -d "$base/attempt.XXXXXX")" || return 1
+        # Local rejection markers alone never establish a no-guest phase.
+        # Both exact native reads must still prove the original inert config.
+        fleet_preconfig_native_read "$machine" "$attempt/native-before.json" || return 1
+        if [ ! -e "$base/originals.tar.gz" ] && [ ! -L "$base/originals.tar.gz" ]; then
+            python3 "$STARTUP_FAILURE_ARCHIVE_HELPER" capture-preconfig --registry "$registry" \
+                --output "$output" --machine "$machine" --run-token "$token" \
+                --archive "$base/originals.tar.gz" || return 1
+        fi
+        fleet_preconfig_native_read "$machine" "$attempt/native-after.json" || return 1
+        python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$registry" "$output" "$machine" "$token" \
+            "$base/originals.tar.gz" "$attempt/native-before.json" "$attempt/native-after.json" "$base/consumed.json" <<'PYCONSUME'
+import runpy, sys
+module = runpy.run_path(sys.argv[1])
+module["commit_preconfig"](*sys.argv[2:])
+module["consume_replaced_preconfig"](*sys.argv[2:6], sys.argv[9])
+PYCONSUME
+        [ "$?" -eq 0 ] || return 1
+    done < "$plan"
+    fleet_recovery_verify_replaced_preconfig "$registry"
+}
+
+fleet_recovery_prepare_replaced_preconfig() {  # explicit stale recovery, including already-ACKed current guest
+    local registry="$1" plan status=0
+    fleet_has_replaced_preconfig "$registry" || return 0
+    if fleet_recovery_verify_replaced_preconfig "$registry" >/dev/null 2>&1; then
+        return 0
+    fi
+    plan="$(mktemp "${TMPDIR:-/tmp}/cloudbench-replaced-prepare.XXXXXX")" || return 1
+    if ! fleet_registry_build_guest_recovery_plan "$registry" "$plan" \
+        || ! fleet_recovery_confirm_replaced_preconfig "$registry" "$plan"; then
+        status=1
+    fi
+    rm -f "$plan"
+    return "$status"
+}
+
+fleet_replaced_preconfig_verify_before_reap() {  # exact per-member fresh native proof
+    local registry="$1" machine="$2" volume="$3" state="$4" binding output token base attempt
+    fleet_has_replaced_preconfig_phase "$registry" || return 0
+    fleet_recovery_verify_replaced_preconfig "$registry" || return 1
+    binding="$(python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$registry" "$machine" <<'PYBIND'
+import runpy, sys
+rows = runpy.run_path(sys.argv[1])["replaced_preconfig_members"](sys.argv[2], verified=True)
+found = [row for row in rows if row[1] == sys.argv[3]]
+assert len(found) <= 1
+if found:
+    print(found[0][3], found[0][2], sep="\t")
+PYBIND
+)" || return 1
+    [ -n "$binding" ] || return 0
+    IFS=$'\t' read -r output token <<< "$binding"
+    base="$output/failed-preconfig-runtime-archive"
+    if [ "$state" = absent ] || [ "$state" = destroyed ]; then
+        python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$registry" "$output" "$machine" "$token" "$base/consumed.json" "$volume" <<'PYABSENT'
+import runpy, sys
+proof = runpy.run_path(sys.argv[1])["verify_preconfig_receipt"](*sys.argv[2:7])
+assert proof["volume_id"] == sys.argv[7]
+PYABSENT
+        return $?
+    fi
+    attempt="$(mktemp -d "$base/reap.XXXXXX")" || return 1
+    fleet_preconfig_native_read "$machine" "$attempt/native-before.json" || return 1
+    fleet_preconfig_native_read "$machine" "$attempt/native-after.json" || return 1
+    python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$registry" "$output" "$machine" "$token" \
+        "$base/consumed.json" "$attempt/native-before.json" "$attempt/native-after.json" "$volume" <<'PYREAP'
+import runpy, sys
+proof = runpy.run_path(sys.argv[1])["verify_preconfig_receipt"](*sys.argv[2:9])
+assert proof["volume_id"] == sys.argv[9]
+PYREAP
+}
+
 fleet_preconfig_recovery_plan() {  # exact whole-owner fresh/no-admission cohort, local only
     python3 - "$1" "$APP" "$FLEET_AUDIT_ROOT" "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_execution_provenance.py" "${POOL_COLD_BOOTSTRAP:-0}" "${POOL_CLAIMS_DIR:-}" <<'PYPLAN'
 import json, os, re, runpy, stat, sys
@@ -10567,9 +10717,14 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
         cleanup_stale_owner_recovery_proxies || true
         return 1
     fi
+    if ! fleet_recovery_confirm_replaced_preconfig "$registry" "$STALE_OWNER_RECOVERY_PLAN_FILE"; then
+        cleanup_stale_owner_recovery_proxies || true
+        return 1
+    fi
     while IFS=$'\t' read -r kind bench clone_name machine_id volume_id output \
         preferred_port; do
         case "$kind" in
+            replaced-preconfig) continue ;;
             guest|pool-guest)
                 if [ "$kind" = guest ] \
                     && { [ -e "$registry/sealed-machine-retirements/$machine_id.json" ] \
@@ -10828,6 +10983,9 @@ PY
     # discharge the cleanup latch before attempting runtime recapture. A guest
     # stopped by exact recovery cannot serve that capture; preserving its
     # runtime latch lets the interrupted-volume forensic archive handle it.
+    if [ "$shutdown_status" -eq 0 ] && ! fleet_recovery_verify_replaced_preconfig "$registry"; then
+        shutdown_status=1
+    fi
     if [ "$shutdown_status" -eq 0 ] \
         && [ -e "$registry/guest-cleanup-unconfirmed" ]; then
         FLEET_REGISTRY_DIR="$registry"
@@ -11599,6 +11757,8 @@ PY
 }
 
 fleet_recovery_confirm_runtime_evidence() {  # <exact dead-owner registry>; verified copies only
+    fleet_recovery_prepare_replaced_preconfig "$1" || return 1
+    fleet_recovery_verify_replaced_preconfig "$1" || return 1
     local registry="$1" mapping index out machine bench mode manifest_schema status=0
     local FLEET_REGISTRY_DIR="$1" FLEET_REGISTRY_PUBLISHED=1
     local FLEET_OWNER_TOKEN="${1##*/}" FLEET_TEARDOWN_OWNERSHIP_DIR
