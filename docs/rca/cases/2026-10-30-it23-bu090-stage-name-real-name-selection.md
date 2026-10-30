@@ -108,3 +108,44 @@ independent criterion failure, immutable grades, and the live source freeze.
 A model-authored output description can select one supported designation while
 an exact criterion expects another. Trace the original schema and raw verifier
 value before attributing that difference to data loss or rewriting evaluation.
+
+## R99 observed recurrence: original It25 BU090r1
+
+It25 r001-j0010/rootba972f23-d07f-45bb-a43b-cee6568d1149 independently exhibits
+the same observed designation-selection boundary on source
+3dc00896d3b8dcc0b3666c9c8493507ee96c7809, patch none. Archive
+4a930ea2357a82ac7edce079001c33e7e310fc2a83488d4df35a17e0e418055e and all
+seven normal member sizes/hashes match manifest
+d7351fb03873202e86705a998430fde0c933932a1ada89dbb1bb618aedc0d2d6.
+Run SHA3ea74812bfc34a037bac48078b88e1cba6783fd9789d05ecbbe4a6e6d9e624a7
+ends nativeCOMPLETED885.1s/progress1, but declared3/4FAIL C4-only and
+producerinfraFALSE. Original C1/C2/C3 all pass.
+
+This time the captured source is the Korea Herald, not the prior K-VIBE page.
+Original DOM message65 identifies J. Yoon and explicitly says his legal name
+is Yoon Jae-woong. Both names remain in the final native verifier input.
+Raw schema-author response worker81/dumpf290b7482477, decoded SHA
+a8ec7876102706503dcaf4fb6be7b36ca29fe64d9a003f3a0b1923469a0b386e,
+requests a required string deceased_band_member_name described as the full
+name, with value/text presentation. The stored schema preserves that wording.
+
+Raw verifier response worker14900/dumpb8fec2cf065c, decoded SHA
+88ae7a7c1baed020a8364308595d5302d72da5c9aee731e0a5d027276f3bbafe,
+selects deceased_band_member_name=Yoon Jae-woong, task_completed=true and
+score1.0. Its reasoning explicitly recognizes J. Yoon and the legal name and
+calls the latter the requested full name. The child output and final response
+retain that value unchanged. Thus this is not evidence that an alias was lost
+in transport or the output renderer; the semantic choice precedes those stages.
+
+The independent C4 requires exact J.Yoon and rejects that choice while C1–C3
+accept its grounding and identity. Preserve that original verdict without
+asserting a task-definition defect, rewriting the rubric, or claiming a
+model-intelligence cause without a controlled reproduction. No task-specific
+alias rule, generic prompt change or runtime candidate is justified by this
+recurrence alone. Earlier R90 provenance and limitations remain intact.
+
+The sealed cleanup contains exact Tilion session
+sess_b28038171a134973a7badcbef42f29e5 DELETE204 and root deleted/tree sealed.
+No operational infrastructure failure, replay, native/DB/model call or live
+source change occurred in the bounded investigation. All original grades and
+clocks remain unchanged; no new repair lane or duplicated case was created.
