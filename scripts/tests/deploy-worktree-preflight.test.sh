@@ -989,7 +989,8 @@ echo "PASS: dependency hydration regenerates a stale Prisma client inside the wo
 # source workspace's 9.1.1). Preparation now links the source workspace's
 # healthy agents/venv when agents/requirements.txt is byte-identical, never
 # installs into that linked venv, builds the worktree's own venv when the
-# manifests differ, and --check refuses a linked venv whose manifest drifted.
+# manifests differ, and --check refuses a linked venv whose manifest drifted
+# or whose source venv no longer imports the agent stack (re-verified every check).
 deploy_venv="$TMP_ROOT/descend-I99-venv"
 git -C "$controller" worktree add -q -b deploy-venv "$deploy_venv"
 deploy_venv="$(cd "$deploy_venv" && pwd -P)"
@@ -1003,6 +1004,11 @@ write_reusable_fake_venv() {
   cat >"$venv/bin/python" <<'PYSTUB'
 #!/usr/bin/env bash
 printf '%s\n' "$0 $*" >>"${FAKE_VENV_STATE:?}/calls"
+# `missing-package` marker: the venv lost a required package after preparation
+# (imports and the installed-manifest check fail, everything else still works).
+if [ -e "$FAKE_VENV_STATE/missing-package" ] && { [ "${1:-}" = "-c" ] || [[ "${1:-}" == *agents_venv_satisfied.py ]]; }; then
+  exit 1
+fi
 if [ "${1:-}" = "-m" ] && [ "${2:-}" = "venv" ]; then
   target="$3"
   mkdir -p "$target/bin"
@@ -1038,19 +1044,35 @@ FAKE_VENV_STATE="$venv_state" bash "$PREFLIGHT" \
 [ -L "$deploy_venv/agents/venv" ] || fail "re-preparation must keep the linked venv"
 ! grep -q -- '-m pip' "$venv_state/calls" || fail "re-preparation must not install into the linked venv"
 # --check accepts the linked venv (it may still stop at the database, which --skip-database never provisioned).
+: >"$venv_state/calls"
 (
   cd "$deploy_venv"
   ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
-    bash "$PREFLIGHT" --check
+    FAKE_VENV_STATE="$venv_state" bash "$PREFLIGHT" --check
 ) >"$TMP_ROOT/venv-check.out" 2>&1 || true
 ! grep -q "agents/venv" "$TMP_ROOT/venv-check.out" \
   || fail "a linked venv with identical requirements must pass the venv checks: $(cat "$TMP_ROOT/venv-check.out")"
+grep -q -- "-c import browser_use" "$venv_state/calls" \
+  || fail "--check must re-run the linked venv's imports, not only inspect the link: $(cat "$venv_state/calls")"
+# The source workspace owns the linked venv and can change it after preparation:
+# a lost package must fail --check (link, interpreter, activation and manifests all still match).
+touch "$venv_state/missing-package"
+if (
+  cd "$deploy_venv"
+  ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
+    FAKE_VENV_STATE="$venv_state" bash "$PREFLIGHT" --check
+) >"$TMP_ROOT/venv-lost-package.out" 2>&1; then
+  fail "check must refuse a linked venv that no longer imports the agent stack: $(cat "$TMP_ROOT/venv-lost-package.out")"
+fi
+grep -q "no longer imports the agent stack or satisfies agents/requirements.txt" "$TMP_ROOT/venv-lost-package.out" \
+  || fail "lost-package refusal must name the failed verification: $(cat "$TMP_ROOT/venv-lost-package.out")"
+rm "$venv_state/missing-package"
 # Drifted manifest: --check refuses the link; re-preparation builds the worktree's own venv.
 printf 'pytest>=7.0\nbrowser-use==0.2.0\n' >"$deploy_venv/agents/requirements.txt"
 if (
   cd "$deploy_venv"
   ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
-    bash "$PREFLIGHT" --check
+    FAKE_VENV_STATE="$venv_state" bash "$PREFLIGHT" --check
 ) >"$TMP_ROOT/venv-drift.out" 2>&1; then
   fail "check must refuse a linked venv whose agents/requirements.txt drifted from the source"
 fi
@@ -1072,7 +1094,7 @@ grep -q -- "-m pip install -r agents/requirements.txt" "$venv_state/calls" || fa
 (
   cd "$deploy_venv"
   ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
-    bash "$PREFLIGHT" --check
+    FAKE_VENV_STATE="$venv_state" bash "$PREFLIGHT" --check
 ) >"$TMP_ROOT/venv-fresh-check.out" 2>&1 || true
 ! grep -q "agents/venv" "$TMP_ROOT/venv-fresh-check.out" \
   || fail "the worktree's own venv must pass the venv checks: $(cat "$TMP_ROOT/venv-fresh-check.out")"

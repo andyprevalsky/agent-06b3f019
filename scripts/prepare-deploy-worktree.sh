@@ -527,6 +527,15 @@ if $CHECK_ONLY; then
       echo "   Re-run deploy-worktree preparation to build this worktree's own venv." >&2
       exit 1
     }
+    # The source workspace owns that venv and can change it after preparation
+    # (a removed package, a partial reinstall): re-verify, as preparation did,
+    # that it still imports the agent stack and satisfies this manifest. The
+    # link, interpreter, activation and manifests alone do not prove that.
+    agents_venv_reusable_from_source "$WORKTREE" "$ROSE_DEPLOY_SOURCE_WORKSPACE" || {
+      echo "❌ Deploy worktree agents/venv is linked to the source workspace but that venv no longer imports the agent stack or satisfies agents/requirements.txt." >&2
+      echo "   Re-run deploy-worktree preparation to build this worktree's own venv." >&2
+      exit 1
+    }
   fi
   [ -d "$WORKTREE/node_modules" ] || {
     echo "❌ Deploy worktree is missing node_modules." >&2
