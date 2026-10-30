@@ -176,7 +176,7 @@ def check_macos_memory(tmp: Path, env: dict[str, str]) -> None:
          patch.object(pipeline.os, "getloadavg", return_value=(1.5, 1.0, 0.5)), \
          patch.object(pipeline, "_watchdog_cap_mb", return_value=None), \
          patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
-         patch.dict(os.environ, env):
+         patch.dict(os.environ, env, clear=True):
         host = pipeline.host_resources()
         assert host["mem_total_mb"] == 32768 and host["mem_available_mb"] == 13312, host
         page_size = 4096
@@ -395,7 +395,7 @@ def check_live_headroom_and_child_rusage(tmp: Path, env: dict[str, str]) -> None
                 "mem_available_mb": 2300 if marker.exists() else 8192}
     with patch.object(pipeline, "host_resources", side_effect=host), \
          patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
-         patch.dict(os.environ, env):
+         patch.dict(os.environ, env, clear=True):
         result = pipeline.run(plan, state, max_parallel=2)
     receipt = json.loads((state / "receipt.json").read_text())
     assert result == 1 and not victim.exists(), "live MemAvailable fell but the next lane was still launched"
@@ -441,13 +441,18 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
         # No MemTotal/watchdog: headroom is MemAvailable less the 2 GiB reserve.
         return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if marker.exists() else 300)}
 
+    seen_flag: list[str] = []  # what the driver's process actually saw in each arm
+
     def run(state: Path, extra_env: dict[str, str] | None = None, **patches) -> dict:
         if marker.exists():
             marker.unlink()
         with ExitStack() as stack:
             stack.enter_context(patch.object(pipeline, "host_resources", side_effect=host))
             stack.enter_context(patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])))
-            stack.enter_context(patch.dict(os.environ, {**env, **(extra_env or {})}))
+            # clear=True: a flag exported by the parent (the control run's
+            # DEPLOY_ADMISSION_CREDIT=0) must not leak into an arm that did not set it.
+            stack.enter_context(patch.dict(os.environ, {**env, **(extra_env or {})}, clear=True))
+            seen_flag.append(os.environ.get("DEPLOY_ADMISSION_CREDIT", "<unset>"))
             for name, value in patches.items():
                 stack.enter_context(patch.object(pipeline, name, value))
             result = pipeline.run(plan, state, max_parallel=0)
@@ -460,7 +465,8 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
         write(tmp / "credit-joined", tmp / "credit-unphased")
         receipt = run(tmp / "credit")
         lanes = receipt["lanes"]
-        assert "DEPLOY_ADMISSION_CREDIT" not in env, "the default (credit on) is under test here"
+        assert "DEPLOY_ADMISSION_CREDIT" not in env and seen_flag[-1] == "<unset>", \
+            f"the true-unset default is under test here; the driver saw {seen_flag[-1]!r}"
         enabled_receipt = receipt
         holder, joiner, unphased = lanes["holder"], lanes["joiner"], lanes["unphased"]
         assert joiner["started_epoch"] < holder["finished_epoch"], \
@@ -505,6 +511,16 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
         assert last["running"]["holder"]["tree_anon_mb"] >= 50 and last["running"]["holder"]["tree_pss_mb"] >= 50, \
             "observations are still sampled and recorded for evidence"
         assert holder["tree_peak_anon_mb"] >= 50 and holder["tree_sampled_at"], holder
+        assert seen_flag[-1] == "0", seen_flag
+        # Explicit "enabled" arm (DEPLOY_ADMISSION_CREDIT=1), separate from the
+        # true-unset default: the credit applies and the records say enabled.
+        write(tmp / "enabled-joined", tmp / "enabled-unphased")
+        receipt = run(tmp / "enabled", extra_env={"DEPLOY_ADMISSION_CREDIT": "1"})
+        lanes = receipt["lanes"]
+        assert seen_flag[-1] == "1", seen_flag
+        assert lanes["joiner"]["started_epoch"] < lanes["holder"]["finished_epoch"], "an explicit 1 credits"
+        assert receipt["admission_credit"] == "enabled" and lanes["joiner"]["admission"]["credit"] == "enabled", receipt
+        assert lanes["joiner"]["admission"]["reserved_live_mb"] < 60, lanes["joiner"]["admission"]
     else:
         print("materialized reservation credit: process-tree sampling is Linux-only; conservative path only")
     # Unobserved usage (macOS, unreadable /proc) keeps the whole declaration: joiner waits.
@@ -557,7 +573,7 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     with patch.object(pipeline, "host_resources", side_effect=host), \
          patch.object(pipeline, "sample_lane_tree_memory", side_effect=flaky_sampler), \
          patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
-         patch.dict(os.environ, env):
+         patch.dict(os.environ, env, clear=True):
         result = pipeline.run(plan, state, max_parallel=0)
     receipt = json.loads((state / "receipt.json").read_text())
     assert result == 0 and receipt["status"] == "passed", (result, receipt["lanes"])
@@ -627,7 +643,7 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
          patch.object(pipeline, "sample_lane_tree_memory",
                       side_effect=lambda pids: {pid: {"anon_mb": 0.0, "pss_mb": 95.0} for pid in pids}), \
          patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
-         patch.dict(os.environ, env):
+         patch.dict(os.environ, env, clear=True):
         result = pipeline.run(anon_plan, anon_state, max_parallel=0)
     receipt = json.loads((anon_state / "receipt.json").read_text())
     assert result == 0 and receipt["status"] == "passed", (result, receipt["lanes"])
@@ -670,7 +686,7 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     with patch.object(pipeline, "host_resources", side_effect=slow_host), \
          patch.object(pipeline, "sample_lane_tree_memory", side_effect=slow_sampler), \
          patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
-         patch.dict(os.environ, env):
+         patch.dict(os.environ, env, clear=True):
         result = pipeline.run(slow_plan, slow_state, max_parallel=0)
     receipt = json.loads((slow_state / "receipt.json").read_text())
     assert result == 0 and receipt["status"] == "passed", (result, receipt["lanes"])
@@ -753,7 +769,7 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     with patch.object(pipeline, "host_resources", side_effect=delayed_host), \
          patch.object(pipeline, "sample_lane_tree_memory", side_effect=once_sampler), \
          patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
-         patch.dict(os.environ, env):
+         patch.dict(os.environ, env, clear=True):
         result = pipeline.run(probe_plan, probe_state, max_parallel=0)
     receipt = json.loads((probe_state / "receipt.json").read_text())
     assert result == 0 and receipt["status"] == "passed", (result, receipt["lanes"])
@@ -959,8 +975,13 @@ def main() -> int:
         tmp = Path(raw)
         source_root = make_source_root(tmp / "source")
         DRIVER = source_root / "scripts" / "run_deploy_pipeline.py"
-        env = {**os.environ, "DEPLOY_RUN_ROOT": str(tmp / "runs"),
-               "DEPLOY_PIPELINE_SOURCE_ROOT": str(source_root)}
+        # The matched control run exports DEPLOY_ADMISSION_CREDIT=0 for the whole
+        # pipeline, and the structural lane that executes this suite inherits
+        # it: every scenario sets the admission knobs it needs explicitly, so
+        # the base environment carries none of them (in-process runs patch
+        # os.environ with clear=True for the same reason).
+        env = {**{key: value for key, value in os.environ.items() if not key.startswith("DEPLOY_ADMISSION_")},
+               "DEPLOY_RUN_ROOT": str(tmp / "runs"), "DEPLOY_PIPELINE_SOURCE_ROOT": str(source_root)}
         start_timing(tmp / "runs", env)
         marker = tmp / "slow-finished"
         plan = tmp / "plan.json"
@@ -1050,6 +1071,11 @@ def main() -> int:
         check_wait_receipt_contract(tmp)
         check_live_headroom_and_child_rusage(tmp, env)
         check_materialized_reservation_credit(tmp, env)
+        # Control: the suite itself inherits the control run's flag and every
+        # credit scenario (default on, explicitly off, unobserved) still holds.
+        (tmp / "inherited-flag").mkdir()
+        with patch.dict(os.environ, {"DEPLOY_ADMISSION_CREDIT": "0"}):
+            check_materialized_reservation_credit(tmp / "inherited-flag", env)
         check_observation_validity(tmp, env)
         check_stack_owner_dependency(tmp, env)
         check_plan_scaling()
