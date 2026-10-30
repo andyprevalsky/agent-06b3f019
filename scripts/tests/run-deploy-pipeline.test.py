@@ -642,6 +642,7 @@ def main() -> int:
         check_passed_only_estimates_and_dag_phases(tmp, env)
         check_declared_phase_lanes(tmp, env)
         check_dependencies_through_unphased_lanes(tmp, env)
+        check_simulate_legacy_plan_group3(tmp, env)
     print("run-deploy-pipeline: all checks passed")
     return 0
 
@@ -1209,6 +1210,45 @@ def check_dependencies_through_unphased_lanes(tmp: Path, env: dict[str, str]) ->
     assert simulated["legacy_union_wall_s"] == 305.0 and simulated["phased_union_wall_s"] == 309.0, simulated
     print("dependencies through unphased lanes: ok")
 
+
+def check_simulate_legacy_plan_group3(tmp: Path, env: dict[str, str]) -> None:
+    """CodeRabbit on #1639 (2026-10-30): ``simulate --legacy-plan`` replaced only
+    the top-level legacy wall and delta; the ``group3`` block still compared
+    the phased plan against itself. Both blocks now describe the supplied
+    legacy plan."""
+    def sample(wall: float, concurrent: int = 1) -> dict:
+        return {"wall_s": wall, "status": "passed", "concurrent": concurrent, "at": "2026-10-30T00:00:00Z"}
+
+    ledger = tmp / "legacy-plan-ledger.json"
+    ledger.write_text(json.dumps({"schema_version": 1, "lanes": {
+        "quick": [sample(5.0, 3)], "big": [sample(600.0)], "cov": [sample(300.0, 3)], "smoke": [sample(1400.0, 2)],
+        "legacy-extra": [sample(1000.0, 3)],
+    }}))
+    empty_runs = tmp / "legacy-plan-no-runs"
+    empty_runs.mkdir(exist_ok=True)
+    env = {**env, "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger), "DEPLOY_RUN_ROOT": str(empty_runs)}
+    phased = [
+        {"name": "quick", "command": ["true"], "group": "3"},
+        {"name": "big", "command": ["true"], "group": "3", "exclusive": True},
+        {"name": "cov", "command": ["true"], "group": "3"},
+        {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage"},
+    ]
+    plan = tmp / "legacy-plan-phased.json"
+    legacy_plan = tmp / "legacy-plan-legacy.json"
+    write_plan(plan, phased, schedule={"policy": "phased"})
+    # The legacy plan carries a Group 3 lane the phased plan does not (its own structural shape).
+    write_plan(legacy_plan, [*phased, {"name": "legacy-extra", "command": ["true"], "group": "3"}],
+               schedule={"policy": "legacy"})
+    simulated = json.loads(run_driver("simulate", "--plan", str(plan), "--legacy-plan", str(legacy_plan),
+                                      "--max-parallel", "0", env=env, check=True).stdout)
+    assert simulated["legacy_plan"] == str(legacy_plan), simulated
+    # Top level: legacy plan all at once (smoke 1400 dominates); phased quick 5 -> big 600 -> smoke 1400.
+    assert simulated["legacy_union_wall_s"] == 1400.0 and simulated["phased_union_wall_s"] == 2005.0, simulated
+    assert simulated["delta_s"] == -605.0, simulated
+    # Group 3: the legacy plan's own lanes (legacy-extra 1000 dominates), not the phased plan's 600.
+    assert simulated["group3"] == {"legacy_union_wall_s": 1000.0, "phased_union_wall_s": 905.0, "delta_s": 95.0}, \
+        simulated["group3"]
+    print("simulate --legacy-plan group3: ok")
 
 
 if __name__ == "__main__":

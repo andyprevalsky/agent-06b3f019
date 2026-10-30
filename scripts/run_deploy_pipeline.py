@@ -1768,7 +1768,9 @@ def standard_plan(args: argparse.Namespace) -> dict:
 def simulate_plan(path: Path, max_parallel: int | None, budget_mb: int | None,
                   legacy_plan: Path | None = None) -> dict:
     """``legacy_plan`` (``plan --schedule legacy``) supplies the legacy lanes'
-    own reservations/worker flags; without it the same plan is compared."""
+    own reservations/worker flags; without it the same plan is compared. With
+    it, both the top-level and the ``group3`` legacy walls (and deltas)
+    describe that plan, never the phased plan compared against itself."""
     lanes, payload = load_plan_payload(path)
     estimates = lane_estimates(lanes, load_lane_durations(), stage_receipt_samples([l.name for l in lanes]))
     if max_parallel is None:
@@ -1781,8 +1783,9 @@ def simulate_plan(path: Path, max_parallel: int | None, budget_mb: int | None,
         legacy = simulate(legacy_lanes, lane_estimates(legacy_lanes, load_lane_durations(),
                                                        stage_receipt_samples([l.name for l in legacy_lanes])),
                           max_parallel, budget_mb)
-        result["legacy_union_wall_s"] = legacy["legacy_union_wall_s"]
-        result["delta_s"] = round(result["legacy_union_wall_s"] - result["phased_union_wall_s"], 1)
+        for block, legacy_block in ((result, legacy), (result["group3"], legacy["group3"])):
+            block["legacy_union_wall_s"] = legacy_block["legacy_union_wall_s"]
+            block["delta_s"] = round(block["legacy_union_wall_s"] - block["phased_union_wall_s"], 1)
         result["legacy_plan"] = str(legacy_plan)
     return result
 
