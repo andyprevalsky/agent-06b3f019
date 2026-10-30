@@ -3,12 +3,17 @@ set -euo pipefail
 
 # Sharded backend coverage: N independent blackbox run-coverage.sh shards (own
 # instrumented backend, own local database, own port and raw V8 directory),
-# then the unit suite once, alone (BACKEND_COVERAGE_UNIT_PASS=1, after every
-# shard has finished), then one merged c8 report that enforces
-# back-end/.c8rc.json thresholds. The unit phase never overlaps a blackbox
-# stream: its headless-browser perf probe (rose-ui-cli-browser, fps-p50) is
-# host-load dependent and failed 4/4 sharded runs while passing unsharded
-# when every shard also ran its own unit slice beside its blackbox phase.
+# the unit pass beside them (BACKEND_COVERAGE_UNIT_PASS=1: its own `_s0`
+# database, port pair and raw directory, every unit file except the fps probe),
+# then the fps probe alone (a second, labelled unit pass:
+# BACKEND_COVERAGE_UNIT_PASS_LABEL=probe, BACKEND_UNIT_TEST_FILES=<probe>) once
+# every shard and the unit pass have finished, then one merged c8 report that
+# enforces back-end/.c8rc.json thresholds. Only the probe is host-load
+# dependent: rose-ui-cli-browser's headless-browser perf check (fps-p50 >= 55)
+# failed 4/4 sharded runs beside two blackbox streams while passing unsharded
+# (2026-10-30). The rest of the unit suite ran alone for 12.7 min after the
+# shards on #1639 (2026-10-30); overlapping it saves that serial wait minus the
+# probe's ~2 min.
 #
 # Usage: bash scripts/run-coverage-sharded.sh [--failed-first] [shard-count]   (default 2)
 #        BACKEND_COVERAGE_SHARD_DURATIONS=<summary.json> balances by duration.
@@ -117,6 +122,8 @@ record_domain_durations() {
   node "$SCRIPT_DIR/coverage-shard-durations.mjs" "$DURATIONS_LEDGER" \
     "$BACKEND_DIR"/coverage/blackbox-run-shard*/summary.json || true
 }
+# The one host-load-dependent unit file; it never runs beside a blackbox shard.
+FPS_PROBE_FILE="rose-ui-cli-browser.test.ts"
 declare -a PIDS=()
 for ((i = 1; i <= SHARDS; i++)); do
   # Each shard gets a disjoint two-port range above the unsharded one.
@@ -130,12 +137,27 @@ for ((i = 1; i <= SHARDS; i++)); do
   PIDS+=("$!")
   echo "Started coverage shard $i/$SHARDS (pid ${PIDS[$((i - 1))]}, log coverage/shard-$i.log)"
 done
+# The unit pass runs beside the shards on its own `_s0` database and +20/+21
+# port pair, minus the fps probe (run alone below).
+env -u BACKEND_UNIT_TEST_FILES -u BACKEND_COVERAGE_UNIT_PASS_LABEL BACKEND_COVERAGE_UNIT_PASS=1 \
+  BACKEND_UNIT_EXCLUDE_FILES="$FPS_PROBE_FILE" \
+  BACKEND_COVERAGE_MERGE_DIR="$MERGED_TMP" \
+  BACKEND_COVERAGE_START_PORT="$((BASE_PORT + 20))" BACKEND_COVERAGE_END_PORT="$((BASE_PORT + 21))" \
+  bash "$SCRIPT_DIR/run-coverage.sh" >"$BACKEND_DIR/coverage/units.log" 2>&1 &
+UNIT_PASS_PID="$!"
+echo "Started the unit pass beside the shards (pid $UNIT_PASS_PID, fps probe $FPS_PROBE_FILE excluded, log coverage/units.log)"
 
+terminate_unit_pass() {
+  [[ -n "$UNIT_PASS_PID" ]] || return 0
+  kill -TERM "$UNIT_PASS_PID" 2>/dev/null || true
+  wait "$UNIT_PASS_PID" 2>/dev/null || true
+  UNIT_PASS_PID=""
+}
 terminate_shards() {
   for pid in "${PIDS[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
   for pid in "${PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
 }
-trap 'terminate_shards; archive_merged_coverage interrupted; exit 130' INT TERM
+trap 'terminate_shards; terminate_unit_pass; archive_merged_coverage interrupted; exit 130' INT TERM
 
 # Reap shards in completion order so a failure is reported (and, in
 # failed-first mode, stops the sibling shards) as soon as it happens.
@@ -157,8 +179,9 @@ while ((DONE_COUNT < SHARDS)); do
       grep -E '^\s+FAIL\s' "$BACKEND_DIR/coverage/shard-$i.log" || true
       FAILED=1
       if [[ "$FAILED_FIRST" == "1" ]]; then
-        echo "Failed-first: stopping the remaining shards."
+        echo "Failed-first: stopping the remaining shards and the unit pass."
         terminate_shards
+        terminate_unit_pass
         ABORTED=1
         DONE_COUNT=$SHARDS
       fi
@@ -168,30 +191,15 @@ while ((DONE_COUNT < SHARDS)); do
   done
   if ((DONE_COUNT < SHARDS)); then sleep 1; fi
 done
-trap - INT TERM
 record_domain_durations
 
-# The unit suite runs once, alone, after the blackbox shards (see the header).
-# Like run-coverage.sh's own test phase it still runs after a failed shard so
-# one sweep reports every failure; only a failed-first abort skips it.
-UNIT_PASS_PID=""
-terminate_unit_pass() {
-  [[ -n "$UNIT_PASS_PID" ]] || return 0
-  kill -TERM "$UNIT_PASS_PID" 2>/dev/null || true
-  wait "$UNIT_PASS_PID" 2>/dev/null || true
-}
-if [[ "$ABORTED" -eq 0 ]]; then
-  echo "Blackbox shards finished; running the unit suite once, alone (log coverage/units.log)"
-  trap 'terminate_unit_pass; archive_merged_coverage interrupted; exit 130' INT TERM
-  env -u BACKEND_UNIT_TEST_FILES BACKEND_COVERAGE_UNIT_PASS=1 \
-    BACKEND_COVERAGE_MERGE_DIR="$MERGED_TMP" \
-    BACKEND_COVERAGE_START_PORT="$((BASE_PORT + 20))" BACKEND_COVERAGE_END_PORT="$((BASE_PORT + 21))" \
-    bash "$SCRIPT_DIR/run-coverage.sh" >"$BACKEND_DIR/coverage/units.log" 2>&1 &
-  UNIT_PASS_PID="$!"
+# The concurrent unit pass, like run-coverage.sh's own test phase, still
+# completes after a failed shard so one sweep reports every failure; only a
+# failed-first abort stops it (above).
+if [[ -n "$UNIT_PASS_PID" ]]; then
   UNIT_RC=0
   wait "$UNIT_PASS_PID" || UNIT_RC=$?
   UNIT_PASS_PID=""
-  trap - INT TERM
   if [[ "$UNIT_RC" -ne 0 ]]; then
     echo "❌ Unit pass failed (exit $UNIT_RC); see coverage/units.log"
     grep -E '^\s+FAIL\s' "$BACKEND_DIR/coverage/units.log" || true
@@ -199,8 +207,40 @@ if [[ "$ABORTED" -eq 0 ]]; then
   else
     echo "✅ Unit pass passed"
   fi
+fi
+trap - INT TERM
+
+# The fps probe runs alone, after every blackbox shard and the unit pass (see
+# the header): a labelled unit pass selecting only that file. Skipped only
+# after a failed-first abort.
+PROBE_PASS_PID=""
+terminate_probe_pass() {
+  [[ -n "$PROBE_PASS_PID" ]] || return 0
+  kill -TERM "$PROBE_PASS_PID" 2>/dev/null || true
+  wait "$PROBE_PASS_PID" 2>/dev/null || true
+}
+if [[ "$ABORTED" -eq 0 ]]; then
+  echo "Blackbox shards and the unit pass finished; running the fps probe alone (log coverage/units-probe.log)"
+  trap 'terminate_probe_pass; archive_merged_coverage interrupted; exit 130' INT TERM
+  env -u BACKEND_UNIT_EXCLUDE_FILES BACKEND_COVERAGE_UNIT_PASS=1 BACKEND_COVERAGE_UNIT_PASS_LABEL=probe \
+    BACKEND_UNIT_TEST_FILES="$FPS_PROBE_FILE" \
+    BACKEND_COVERAGE_MERGE_DIR="$MERGED_TMP" \
+    BACKEND_COVERAGE_START_PORT="$((BASE_PORT + 20))" BACKEND_COVERAGE_END_PORT="$((BASE_PORT + 21))" \
+    bash "$SCRIPT_DIR/run-coverage.sh" >"$BACKEND_DIR/coverage/units-probe.log" 2>&1 &
+  PROBE_PASS_PID="$!"
+  PROBE_RC=0
+  wait "$PROBE_PASS_PID" || PROBE_RC=$?
+  PROBE_PASS_PID=""
+  trap - INT TERM
+  if [[ "$PROBE_RC" -ne 0 ]]; then
+    echo "❌ fps probe pass failed (exit $PROBE_RC); see coverage/units-probe.log"
+    grep -E '^\s+FAIL\s' "$BACKEND_DIR/coverage/units-probe.log" || true
+    FAILED=1
+  else
+    echo "✅ fps probe pass passed"
+  fi
 else
-  echo "Failed-first abort: the unit pass is skipped until the blackbox failure is fixed."
+  echo "Failed-first abort: the unit pass was stopped and the fps probe is skipped until the blackbox failure is fixed."
 fi
 if [[ "$FAILED" -ne 0 ]]; then
   # Archive the passing shards' raw coverage so the next run is not blocked.
@@ -213,7 +253,7 @@ if [[ "$FAILED" -ne 0 ]]; then
 fi
 
 echo ""
-echo "=== Merged Coverage Report ($SHARDS blackbox shards + unit pass) ==="
+echo "=== Merged Coverage Report ($SHARDS blackbox shards + unit pass + fps probe) ==="
 COV_EXIT=0
 # The merged report holds every shard's and the unit pass's raw V8 files: the
 # same in-memory merge that exhausted node's default heap unsharded.

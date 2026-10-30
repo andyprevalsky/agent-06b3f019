@@ -110,6 +110,62 @@ try {
   const unitPass = run(url, { COVERAGE_DB_TOKEN: 'units' });
   assert.equal(unitPass.status, 0, `unit pass rejected: ${unitPass.stdout}${unitPass.stderr}`);
   assert.match(unitPass.stdout, new RegExp(`SELECTED=.*/${prepared}_s0$`, 'm'));
+  // The sharded coordinator runs the unit pass beside the shards and the fps
+  // probe alone afterwards as a labelled unit pass (run-coverage-sharded.sh).
+  // Replay run-coverage.sh's unit-pass prelude: both passes resolve the
+  // `units` token (`_s0`, serial reuse, never a shard's `_s<i>`), while the
+  // labelled pass owns its own `-units-<label>` lock/raw suffix and
+  // `results-<label>.json`, so it cannot clobber the concurrent pass's record.
+  const unitPrelude = coverageScript.slice(
+    coverageScript.indexOf('UNIT_PASS="${BACKEND_COVERAGE_UNIT_PASS:-0}"'),
+    coverageScript.indexOf('COVERAGE_PARTIAL=0')
+  );
+  assert.ok(unitPrelude.length > 100, 'unit pass prelude must exist in run-coverage.sh');
+  // The deploy's own unit pass runs this file with BACKEND_COVERAGE_UNIT_PASS=1 (and may set the
+  // label), so the negative cases below must not inherit those from the parent environment.
+  const unitPassFreeEnv = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([key]) => key !== 'BACKEND_COVERAGE_UNIT_PASS' && key !== 'BACKEND_COVERAGE_UNIT_PASS_LABEL'
+    )
+  );
+  const replayUnitPrelude = (overrides: Record<string, string>) =>
+    spawnSync(
+      'bash',
+      [
+        '-c',
+        `COVERAGE_SHARD=""\nSHARD_SUFFIX=""\nSHARD_DB_SUFFIX=""\n${unitPrelude}\n` +
+          `printf 'SUFFIX=%s TOKEN=%s DB=%s RESULTS=%s\\n' "$SHARD_SUFFIX" "$COVERAGE_DB_TOKEN" "$SHARD_DB_SUFFIX" "$UNIT_RESULTS_SUFFIX"`,
+      ],
+      { encoding: 'utf8', env: { ...unitPassFreeEnv, ...overrides } }
+    );
+  const concurrent = replayUnitPrelude({ BACKEND_COVERAGE_UNIT_PASS: '1' });
+  assert.equal(concurrent.status, 0, concurrent.stderr);
+  assert.match(concurrent.stdout, /^SUFFIX=-units TOKEN=units DB=_s0 RESULTS=$/m);
+  const probe = replayUnitPrelude({
+    BACKEND_COVERAGE_UNIT_PASS: '1',
+    BACKEND_COVERAGE_UNIT_PASS_LABEL: 'probe',
+  });
+  assert.equal(probe.status, 0, probe.stderr);
+  assert.match(probe.stdout, /^SUFFIX=-units-probe TOKEN=units DB=_s0 RESULTS=-probe$/m);
+  for (const [token] of [['1/2'], ['2/2']] as const)
+    assert.notEqual(
+      new URL(resolve(token).stdout.split('\n')[0]).pathname,
+      new URL(resolve('units').stdout.split('\n')[0]).pathname,
+      `shard ${token} must never share the unit passes' database`
+    );
+  assert.notEqual(
+    replayUnitPrelude({
+      BACKEND_COVERAGE_UNIT_PASS: '1',
+      BACKEND_COVERAGE_UNIT_PASS_LABEL: 'Probe 1',
+    }).status,
+    0,
+    'a label outside [a-z0-9-]+ must be refused'
+  );
+  assert.notEqual(
+    replayUnitPrelude({ BACKEND_COVERAGE_UNIT_PASS_LABEL: 'probe' }).status,
+    0,
+    'a label without BACKEND_COVERAGE_UNIT_PASS=1 must be refused'
+  );
   writeFileSync(marker, 'victoria_deploy_foreign\n');
   assert.notEqual(run(url).status, 0, 'foreign marker accepted');
   rmSync(marker);

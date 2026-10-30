@@ -10,6 +10,8 @@ import assert from 'node:assert/strict';
 import { DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS } from '../../providers/chat/routerCompletionDeadline';
 import { DEFAULT_CEREBRAS_CHAT_HEDGE_MS } from '../../providers/rose/exclusiveCerebrasChatRoute';
 import {
+  assertServedOnFirstAttempt,
+  type DecisionRound,
   type GoalAnchor,
   goalAnchorFailure,
   type LiveObservation,
@@ -74,11 +76,19 @@ const served: LiveObservation = {
 };
 const noHeaders: LiveObservation = {};
 
+/** A decision round whose every attempt reached GLM; `searchRequests` Parallel POSTs closed it. */
+function round(glm: LiveObservation[], searchRequests = 0): DecisionRound {
+  return { attempts: glm.length, glm, otherRoutes: glm.length, searchRequests };
+}
+
 function sample(overrides: Partial<LiveSample>): LiveSample {
+  const attempts = overrides.attempts ?? 1;
+  const glm = overrides.glm ?? [served];
   return {
     outcome: { kind: 'escalated', atMs: 3_408 },
-    attempts: 1,
-    glm: [served],
+    attempts,
+    glm,
+    rounds: [{ ...round(glm), attempts }],
     alerts: [],
     goal: GOAL,
     ...overrides,
@@ -141,6 +151,37 @@ async function run(): Promise<void> {
   assert.equal(late.error, null, 'first content past the budget is OpenRouter-side');
   assert.equal(late.runs, 2);
 
+  // #1640 attempt 2 (2026-10-30 19:04Z): the router searched first (four Parallel
+  // POSTs), then the after_search decision escalated; both decisions served first-try.
+  const searchedThenEscalated = sample({
+    outcome: { kind: 'escalated', atMs: 11_296 },
+    rounds: [round([served], 4), round([served])],
+  });
+  const twoRounds = await verdict([searchedThenEscalated]);
+  assert.equal(twoRounds.error, null, 'a search round before the escalation is not a retry');
+  assert.equal(twoRounds.runs, 1);
+
+  // A regenerate inside either round is a missed first attempt; OpenRouter's miss is re-probed.
+  const missInSearchRound = sample({ rounds: [round([noHeaders, served], 4), round([served])] });
+  const missInLastRound = sample({
+    attempts: 2,
+    glm: [noHeaders, served],
+    rounds: [round([served], 4), round([noHeaders, served])],
+  });
+  for (const [label, missed] of [
+    ['search round', missInSearchRound],
+    ['escalating round', missInLastRound],
+  ] as const) {
+    const reprobed = await verdict([missed, searchedThenEscalated]);
+    assert.equal(reprobed.error, null, `${label}: an OpenRouter-side miss is re-probed`);
+    assert.equal(reprobed.runs, 2, `${label}: a served later decision hides no earlier miss`);
+    assert.throws(
+      () => assertServedOnFirstAttempt(missed, GOAL_ANCHOR),
+      /first router attempt/,
+      `${label}: a second router attempt inside one decision round fails`
+    );
+  }
+
   const failsAtOnce: Array<[string, LiveSample]> = [
     [
       'a 402 is our account',
@@ -164,6 +205,23 @@ async function run(): Promise<void> {
       }),
     ],
     ['a turn that never settles is ours', sample({ outcome: { kind: 'timeout', atMs: 45_000 } })],
+    [
+      'a searched turn that never settles is ours',
+      sample({
+        outcome: { kind: 'timeout', atMs: 45_000 },
+        rounds: [round([served], 4), round([served])],
+      }),
+    ],
+    [
+      'a 402 inside the search round is ours',
+      sample({ rounds: [round([{ status: 402, headersMs: 300 }, served], 4), round([served])] }),
+    ],
+    [
+      'a search without a router decision is ours',
+      sample({
+        rounds: [{ attempts: 0, glm: [], otherRoutes: 0, searchRequests: 4 }, round([served])],
+      }),
+    ],
   ];
   for (const [label, failing] of failsAtOnce) {
     const result = await verdict([failing, sample({})]);
@@ -172,7 +230,7 @@ async function run(): Promise<void> {
   }
 
   process.stdout.write(
-    `PASS chat-router-failover live verdict (${failsAtOnce.length + 4} samples, ` +
+    `PASS chat-router-failover live verdict (${failsAtOnce.length + 7} samples, ` +
       `${CORRECT_GOALS.length + WRONG_GOALS.length + 1} goals)\n`
   );
 }
