@@ -3,7 +3,9 @@
  *
  *   main thread: heartbeat (SharedArrayBuffer, every HEARTBEAT_MS)
  *   watchdog worker: heartbeat stale > stallMs
- *     -> one memory line at once (RSS, anonymous RSS, CPU per thread from /proc)
+ *     -> one memory line at once: RSS, anonymous RSS, CPU per thread, the
+ *        container cgroup's memory (anon/file/sock) and the largest processes
+ *        (the 16 GiB limit counts every process in the container)
  *     -> then, without blocking further memory lines, a stack capture:
  *     -> inspector.Session.connectToMainThread()
  *     -> Debugger.pause (interrupts the busy isolate at its next JS boundary)
@@ -83,6 +85,40 @@ function busyThreads() {
   }
 }
 
+// The cgroup limit counts every process in the container, so name the biggest.
+function containerProcesses() {
+  try {
+    const page = 4096;
+    const rows = [];
+    for (const pid of fs.readdirSync('/proc')) {
+      if (!/^\\d+$/.test(pid)) continue;
+      try {
+        const rss = Number(fs.readFileSync('/proc/' + pid + '/statm', 'utf8').split(' ')[1]) * page;
+        const comm = fs.readFileSync('/proc/' + pid + '/comm', 'utf8').trim();
+        rows.push({ pid: Number(pid), comm, rss_mb: Math.round(rss / 1048576) });
+      } catch {}
+    }
+    return rows.sort((a, b) => b.rss_mb - a.rss_mb).slice(0, 5);
+  } catch {
+    return undefined;
+  }
+}
+
+function cgroupMemory() {
+  try {
+    const stat = fs.readFileSync('/sys/fs/cgroup/memory.stat', 'utf8');
+    const field = (name) => {
+      const match = new RegExp('^' + name + ' ([0-9]+)$', 'm').exec(stat);
+      return match ? Math.round(Number(match[1]) / 1048576) : undefined;
+    };
+    let current;
+    try { current = Math.round(Number(fs.readFileSync('/sys/fs/cgroup/memory.current', 'utf8')) / 1048576); } catch {}
+    return { current_mb: current, anon_mb: field('anon'), file_mb: field('file'), sock_mb: field('sock') };
+  } catch {
+    return undefined;
+  }
+}
+
 function emit(record) {
   try {
     fs.writeSync(2, JSON.stringify({ timestamp: new Date().toISOString(), level: 'error', component: 'EventLoopStall', ...record }) + '\\n');
@@ -151,7 +187,17 @@ let lastReport = 0;
 let capturing = false;
 
 function memorySample(message) {
-  emit({ message, stall_ms: Date.now() - stalledSince, rss_mb: rssMb(), anon_mb: anonMb(), threads: busyThreads() });
+  const usage = process.memoryUsage();
+  emit({
+    message,
+    stall_ms: Date.now() - stalledSince,
+    rss_mb: rssMb(),
+    anon_mb: anonMb(),
+    process_memory: { rss_mb: Math.round(usage.rss / 1048576) },
+    cgroup: cgroupMemory(),
+    processes: containerProcesses(),
+    threads: busyThreads(),
+  });
 }
 
 function captureStack() {

@@ -19,6 +19,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 const PROVIDER = path.resolve(__dirname, '../../providers/eventLoopStallWatchdog.ts');
@@ -64,6 +65,18 @@ setTimeout(() => {
   assert(typeof stall.anon_mb === 'number', 'stall record reports anonymous RSS');
   const threads = stall.threads as Array<{ tid: number; cpu_pct: number }> | undefined;
   assert(Array.isArray(threads) && threads.length > 0, 'stall record shows per-thread CPU');
+  const processes = stall.processes as Array<{ pid: number; rss_mb: number }> | undefined;
+  assert(
+    Array.isArray(processes) && processes.length > 0,
+    `stall record lists the container's largest processes: ${JSON.stringify(processes)}`
+  );
+  if (existsSync('/sys/fs/cgroup/memory.stat')) {
+    const cgroup = stall.cgroup as Record<string, number> | undefined;
+    assert(
+      cgroup && typeof cgroup.anon_mb === 'number' && typeof cgroup.file_mb === 'number',
+      `stall record splits the container cgroup's anon and file memory: ${JSON.stringify(cgroup)}`
+    );
+  }
 
   const stacks = records.filter((record) => record.message === 'event loop stall stack');
   assert(stacks.length > 0, `no stack record:\n${stderr}`);
