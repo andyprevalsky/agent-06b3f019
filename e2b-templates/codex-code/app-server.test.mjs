@@ -913,6 +913,10 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
       if (settled(events())) break;
       await new Promise((r) => setTimeout(r, 10));
     }
+    assert.ok(
+      settled(events()),
+      `Codex fixture did not reach its expected outcome. Server output:\n${logs}`,
+    );
     const calls = readFileSync(journal, "utf8")
       .trim()
       .split("\n")
