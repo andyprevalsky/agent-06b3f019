@@ -2306,6 +2306,7 @@ async def test_fetch_compute_token_activity_passes_lineage_params():
         "accountId": "acct-1",
         "source": "pool",
         "poolTokenId": "pool-1",
+        "integrationId": "pool-1",
         "lineageKey": "agent:a-1",
         "fastCacheAffinityKey": "affinity-1",
     }

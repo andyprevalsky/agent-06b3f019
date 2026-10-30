@@ -14853,8 +14853,8 @@ def test_webdecoy_biometrics_uses_fresh_isolated_browser_state():
     assert getattr(task, "browser_profile_mode", None) == "fresh"
     assert getattr(task, "browser_auth_realm", None) == "webdecoy.com"
     assert task.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES
+    assert task.expected_browser_provider is None
     assert task.expected_browser_session_metadata_values == {
-        "profile_source": "new_user_persistent",
         "auth_source": "none",
         "cookies_injected": False,
         "cookies_count": 0,
@@ -14912,6 +14912,83 @@ def test_webdecoy_biometrics_uses_fresh_isolated_browser_state():
     finally:
         bench._restore_isolated_browser_state_scenario = original_restore
     assert restored == [(manifest, "fresh browser state")]
+
+
+def test_webdecoy_catalog_requires_provider_neutral_isolation():
+    """Check isolation state without coupling acceptance to provider labels."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = get_task_by_name("browser-biometrics-webdecoy")
+    # Captured on agent 520014be, browser_use_step_1 (2026-10-29).
+    metadata = {
+        "provider": "tilion",
+        "requested_provider": "tilion",
+        "provider_fallback_reason": None,
+        "profile_id": None,
+        "profile_source": "tilion_ephemeral",
+        "auth_source": "none",
+        "cookies_injected": False,
+        "cookies_count": 0,
+        "local_storage_origin_count": 0,
+        "indexed_db_origin_count": 0,
+        "permission_grant_count": 0,
+        "cache_storage_origin_count": 0,
+    }
+
+    def data_for(items, score="0.02"):
+        return {
+            "agent": {"status": "COMPLETED", "progress": 1.0},
+            "messages": [{"role": "TOOL", "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"}}] + [
+                {
+                    "role": "TOOL",
+                    "message": (
+                        "Visited https://webdecoy.com/product/fcaptcha-demo/. "
+                        "Clicked checkbox. Submitted invisible mode form with "
+                        "benchmark-human@example.com. Risk Score: " + score
+                    ),
+                    "metadata": {
+                        "toolName": "spawn_browser_agent",
+                        "toolStatus": "FINISHED",
+                        "action_type": "task_complete",
+                        "task_id": "browser-task-" + str(index),
+                        "browser_session_id": "session-" + str(index),
+                        "browser_session_metadata": item,
+                        "structured_response": {"fcaptcha_risk_score": score},
+                    },
+                }
+                for index, item in enumerate(items)
+            ],
+        }
+
+    actual = evaluate_task(task, data_for([metadata]), 0)
+    assert actual == (True, None), actual
+    for field in (
+        "auth_source", "cookies_injected", "cookies_count", "local_storage_origin_count",
+        "indexed_db_origin_count", "permission_grant_count", "cache_storage_origin_count",
+    ):
+        altered = dict(metadata)
+        altered[field] = "cookie_bundle" if field == "auth_source" else (
+            True if field == "cookies_injected" else 1
+        )
+        assert evaluate_task(task, data_for([altered]), 0)[0] is False, field
+        del altered[field]
+        assert evaluate_task(task, data_for([altered]), 0)[0] is False, "missing:" + field
+    # Provider and profile-source labels are not evidence of auth/storage state.
+    for provider, source in (("tilion", "tilion_ephemeral"), ("kernel", "new_user_persistent"),
+                             ("future-provider", "new-label"), (None, None)):
+        item = {**metadata, "provider": provider, "profile_source": source}
+        if provider is None:
+            item.pop("provider")
+            item.pop("profile_source")
+        assert evaluate_task(task, data_for([item]), 0) == (True, None)
+    assert evaluate_task(task, data_for([{}]), 0)[0] is False
+    # Separate sessions cannot combine partial isolation evidence.
+    split = [{**metadata, "cookies_count": 1}, {**metadata, "local_storage_origin_count": 1}]
+    assert evaluate_task(task, data_for(split), 0)[0] is False
+    # Correct isolation alone must not bypass the existing outcome ratchet.
+    passed, reason = evaluate_task(task, data_for([metadata], score="0.164"), 0)
+    assert passed is False and "ratchet" in reason.lower(), reason
 
 
 async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
@@ -26597,6 +26674,10 @@ async def run_all_tests():
     r.record(
         "webdecoy_fresh_browser_state",
         test_webdecoy_biometrics_uses_fresh_isolated_browser_state,
+    )
+    r.record(
+        "webdecoy_catalog_provider_neutral_isolation",
+        test_webdecoy_catalog_requires_provider_neutral_isolation,
     )
     await r.record_async(
         "live_fixture_setup_restore_yields",

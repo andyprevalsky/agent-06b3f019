@@ -276,6 +276,7 @@ router.post(
           rateLimitedUntil: body.rateLimitedUntil as string | undefined,
           failureReason: body.failureReason as string | undefined,
           credentialId: body.credentialId as string | undefined,
+          integrationId: typeof body.integrationId === 'string' ? body.integrationId : undefined,
           model: body.model as string | undefined,
           region: typeof body.region === 'string' ? body.region : undefined,
           deployment: typeof body.deployment === 'string' ? body.deployment : undefined,
