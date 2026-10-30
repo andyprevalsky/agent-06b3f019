@@ -153,3 +153,61 @@ duplicate repair lane. Underlying research failure remains OPEN without a
 controlled causal reproduction. No model-intelligence claim, forced athlete,
 search prompt change, replay, new native/DB/provider call or live-source edit.
 Original grade and clocks remain unchanged. Tokens UNMETERED.
+
+## R104: It25 BU083r2 reaches the activity deadline
+
+This is a distinct terminal boundary in the same unfinished-research task,
+not another100-step pause or a proven recurrence of an unrecovered CDP close.
+Original r002-j0013/rootdb81f7b2-d19e-4a10-8fff-18f17d0dbe49 ran
+source3dc00896d3b8dcc0b3666c9c8493507ee96c7809, patch none. Archive
+2878751a1e1f86ef9b406e083a0c6a40fe17dc6f8d0c3d866f8b2b7c77d990fc
+and normal manifest7fe1dcfc2c8b50a7dfdce228c6713816a2c73028998a2dc9f7d02cf51d4919b9
+bind all seven members, independently checked by size/SHA. NativeFAILED3017s,
+progress1 and canonicalFAILED/infraFALSE remain distinct; no semantic judge
+result or completed hometown answer is recorded. The required athlete_hometown
+schema still describes the January2020 article's hometown and has no output.
+
+Two abnormal CDP closes are captured at03:00:23.029884Z and03:40:30.070504Z.
+Both successfully reconnect on attempt1, at03:00:37.269744Z and
+03:40:37.035253Z respectively. In particular, successful state observations
+continue after the latter through03:43:19.348762Z. Those successful continuations
+are contrary evidence to attributing this fatal result to an unrecovered
+socket or missing-focus failure. The close initiators remain unknown.
+
+Worker22935 starts request358366aab67e/browser_use_step_64 at03:43:33.990131Z.
+The activity wait then ends at03:43:36.479491Z with error after3000389ms;
+worker22945 reports activity StartToClose timeout at03:43:36.630913Z.
+The source manager schedules the existing step-scaled50-minute activity
+window for100steps. Activity cancellation/paused cleanup follows at
+03:43:41.670606Z; it is not evidence of an independent human pause.
+No completed response for that final in-flight request is claimed.
+
+The retained123 action-phase records contain63goto and60read_browser_state
+operations. Their measured total is2972.37s: execute_action1628.4s,
+llm_decision795.8s and observe_state302.0s are the largest summed categories.
+These are instrumentation categories, not proof of which upstream operation
+caused the total delay. Read-only observations are refunded in the budget;
+raw action count does not establish budget overrun. The last completed model
+call selects another state observation, and the task still lacks a verified
+source/article-to-athlete-to-hometown chain.
+
+Later full model payloads are unavailable: worker22893 explicitly skips the
+completed step64 dump because payload_too_large. The last retained complete
+dump is step50, SHA256
+7d72b2c60b0dcbdfe4373dd31dc74b57a008b82dca26cead6a57222c4375c1a9.
+No raw final-input parity, model-only cause or replay is inferred from the
+remaining metadata. The next fresh-provider call would not reconstruct the
+missing original state.
+
+Pause cleanup reports failure, but the normal final receipt records the same
+Tilion session sess_993d70946af14154b5e02da115ec5053 DELETE204,
+root_deleted/tree_sealed and cleanup_failure null. These separate facts do not
+supply a new terminal infrastructure classification or task success.
+
+Archive searches used “StartToClose timeout BU083” and “reconnected successful
+observation outer deadline.” This case and the prior BU055 deadline record's
+Solution/Human feedback were read. No causal mechanical repair is established;
+the deadline is an observed termination boundary, not a root-cause diagnosis.
+No timeout extension, forced answer, model/provider substitution or speculative
+retry was added. The original failure remains OPEN. No live calls or runtime
+edits were performed; tokens UNMETERED.
