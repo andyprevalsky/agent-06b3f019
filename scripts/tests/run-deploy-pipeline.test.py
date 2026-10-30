@@ -640,6 +640,7 @@ def main() -> int:
         check_schedule_phases(tmp, env)
         check_stage_receipt_seed(tmp, env)
         check_passed_only_estimates_and_dag_phases(tmp, env)
+        check_declared_phase_lanes(tmp, env)
     print("run-deploy-pipeline: all checks passed")
     return 0
 
@@ -1041,6 +1042,113 @@ def check_passed_only_estimates_and_dag_phases(tmp: Path, env: dict[str, str]) -
     ghost = run_driver("run", "--plan", str(plan), "--state-dir", str(tmp / "ghost"), *UNBOUNDED, env=env, timeout=60)
     assert ghost.returncode == 2 and "ghost" in ghost.stderr, (ghost.returncode, ghost.stderr)
     print("passed-only estimates + DAG phases: ok")
+
+
+def check_declared_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
+    """Follow-up x (2026-10-30): the 4096 MB local smoke lane (Group 4, no
+    ``after`` edges) was admitted at attempt start and held the memory the
+    exclusive structural lane (6544 MB of a 7752 MB budget) needed, so the
+    pipeline was smoke-only for 13-23 min before any Group 3 lane ran. A lane
+    outside Group 3 may now declare ``"phase": "coverage"``: it joins the
+    coverage phase (after the quick and exclusive phases) and runs beside the
+    coverage lanes within the budget. Undeclared Group 4 lanes stay unphased,
+    the plan's own ``after`` edges are kept exactly, and a lane whose edges are
+    met starts as soon as memory allows: nothing waits for the declared smoke
+    lane unless its plan says so. ``plan`` declares it for the local smoke
+    lane and ``simulate`` projects the declared lanes beside Group 3."""
+    def sample(wall: float, concurrent: int) -> dict:
+        return {"wall_s": wall, "status": "passed", "concurrent": concurrent, "at": "2026-10-30T00:00:00Z"}
+
+    ledger = tmp / "declared-phase-ledger.json"
+    ledger.write_text(json.dumps({"schema_version": 1, "lanes": {
+        "quick": [sample(5.0, 3)], "big": [sample(600.0, 1)], "cov": [sample(300.0, 3)], "smoke": [sample(1400.0, 2)],
+    }}))
+    env = {**env, "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}
+    plan = tmp / "declared-phase-plan.json"
+    state = tmp / "declared-phase"
+    # Budget 100: smoke (50) beside big (80) cannot fit; cov (30) beside smoke can.
+    write_plan(plan, [
+        {"name": "quick", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10},
+        {"name": "big", "command": ["sleep", "0.4"], "reuse_passed": False, "group": "3", "exclusive": True,
+         "memory_mb": 80},
+        {"name": "cov", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 30},
+        {"name": "smoke", "command": ["sleep", "1.2"], "reuse_passed": False, "group": "4", "memory_mb": 50,
+         "phase": "coverage"},
+        {"name": "probe", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10,
+         "after": ["big", "cov"]},
+        {"name": "semantic", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "4", "memory_mb": 10,
+         "after": ["big", "cov", "probe"]},
+        {"name": "g4-free", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "4", "memory_mb": 10},
+    ], schedule={"policy": "phased"})
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
+                     "--memory-budget-mb", "100", env=env, timeout=120)
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["status"])
+    lanes = receipt["lanes"]
+    assert all(lane["status"] == "passed" for lane in lanes.values()), lanes
+    phases = [(p["phase"], p["lanes"]) for p in receipt["schedule"]["phases"]]
+    assert phases[:2] == [("quick", ["quick"]), ("exclusive", ["big"])], phases
+    assert phases[2][0] == "coverage" and set(phases[2][1]) == {"cov", "probe", "smoke"}, phases
+    assert receipt["after"]["smoke"] == ["quick", "big"], receipt["after"]
+    assert receipt["after"]["semantic"] == ["big", "cov", "probe"], "declared edges kept, no implied edges added"
+    assert receipt["after"]["g4-free"] == [], receipt["after"]
+    big, smoke, cov, probe = lanes["big"], lanes["smoke"], lanes["cov"], lanes["probe"]
+    assert big["started_epoch"] >= lanes["quick"]["finished_epoch"], "exclusive lane waits for the quick phase"
+    assert big["started_epoch"] < smoke["started_epoch"], "the exclusive lane is admitted before the smoke lane"
+    assert smoke["started_epoch"] >= big["finished_epoch"] and cov["started_epoch"] >= big["finished_epoch"]
+    assert max(smoke["started_epoch"], cov["started_epoch"]) < min(smoke["finished_epoch"], cov["finished_epoch"]), \
+        "smoke overlaps the coverage lane"
+    assert probe["started_epoch"] >= cov["finished_epoch"] and probe["started_epoch"] < smoke["finished_epoch"], \
+        "a lane whose own edges are met starts while smoke still runs"
+    assert lanes["semantic"]["started_epoch"] >= probe["finished_epoch"], receipt["after"]
+    assert lanes["semantic"]["started_epoch"] < smoke["finished_epoch"], "semantic is not gated by the smoke lane"
+    assert lanes["g4-free"]["started_epoch"] < lanes["quick"]["finished_epoch"], "undeclared Group 4 stays unphased"
+
+    # The standard plan declares the phase for the local smoke lane only.
+    local = {lane["name"]: lane for lane in plan_json("--group", "4", "--smoke", "local", "--agentcard")["lanes"]}
+    assert local["smoke"]["phase"] == "coverage" and local["smoke"]["memory_mb"] == 4096, local["smoke"]
+    assert local["agentcard-lifecycle"]["phase"] == "coverage", local["agentcard-lifecycle"]
+    cloud = {lane["name"]: lane for lane in plan_json("--group", "4", "--smoke", "cloud")["lanes"]}
+    assert not cloud["smoke"].get("phase"), cloud["smoke"]
+    phased_plan = plan_json("--group", "all", "--backend", "--smoke", "local", "--schedule", "phased")
+    coverage = [p for p in phased_plan["schedule"]["phases"] if p["phase"] == "coverage"]
+    assert coverage and "smoke" in coverage[-1]["lanes"] and "backend-coverage-blackbox" in coverage[-1]["lanes"], \
+        phased_plan["schedule"]["phases"]
+    assert phased_plan["schedule"]["phases"][0]["phase"] == "quick" and "smoke" not in phased_plan["schedule"]["phases"][0]["lanes"]
+    assert "smoke" in phased_plan["schedule"]["estimates"], "the smoke lane has a default estimate"
+
+    # simulate projects the declared lane beside Group 3 and reports the Group 3-only wall separately.
+    write_plan(plan, [
+        {"name": "quick", "command": ["true"], "group": "3"},
+        {"name": "big", "command": ["true"], "group": "3", "exclusive": True},
+        {"name": "cov", "command": ["true"], "group": "3"},
+        {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage"},
+        {"name": "g4-free", "command": ["true"], "group": "4"},
+    ], schedule={"policy": "phased"})
+    # A fresh seeded ledger: the run above appended its own real samples to the first one.
+    seeded = tmp / "declared-phase-seeded.json"
+    seeded.write_text(json.dumps({"schema_version": 1, "lanes": {
+        "quick": [sample(5.0, 3)], "big": [sample(600.0, 1)], "cov": [sample(300.0, 3)], "smoke": [sample(1400.0, 2)],
+    }}))
+    empty_runs = tmp / "declared-no-runs"
+    empty_runs.mkdir(exist_ok=True)
+    simulated = json.loads(run_driver("simulate", "--plan", str(plan), "--max-parallel", "0",
+                                      env={**env, "DEPLOY_PIPELINE_LANE_DURATIONS": str(seeded),
+                                           "DEPLOY_RUN_ROOT": str(empty_runs)}, check=True).stdout)
+    # phased: quick 5 -> big alone 600 -> cov 300 beside smoke 1400; legacy: everything at once.
+    assert simulated["phased_union_wall_s"] == 5.0 + 600.0 + 1400.0, simulated
+    assert simulated["legacy_union_wall_s"] == 1400.0, simulated
+    assert simulated["group3"] == {"legacy_union_wall_s": 600.0, "phased_union_wall_s": 905.0, "delta_s": -305.0}, simulated
+    assert simulated["lanes"]["smoke"]["phase"] == "coverage" and "g4-free" not in simulated["lanes"], simulated["lanes"]
+    assert [p["lanes"] for p in simulated["phases"]] == [["quick"], ["big"], ["smoke", "cov"]], simulated["phases"]
+
+    # An unknown declared phase is refused before any lane starts.
+    write_plan(plan, [{"name": "x", "command": ["true"], "reuse_passed": False, "group": "4", "phase": "quick"}],
+               schedule={"policy": "phased"})
+    bogus = run_driver("run", "--plan", str(plan), "--state-dir", str(tmp / "declared-bogus"), *UNBOUNDED, env=env)
+    assert bogus.returncode == 2 and "phase" in bogus.stderr, (bogus.returncode, bogus.stderr)
+    assert not (tmp / "declared-bogus" / "receipt.json").exists()
+    print("declared phase lanes: ok")
 
 
 if __name__ == "__main__":

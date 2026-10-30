@@ -1042,7 +1042,15 @@ command, phases Group 3 (quick lanes → `deploy-command-structural` alone at
 full budget-backed width → the coverage lanes together, longest recorded
 first) from `.context/deploy-durations/pipeline-lanes.json`, and
 `run_deploy_pipeline.py simulate --plan <plan> --legacy-plan <plan --schedule legacy>`
-projects the union wall from the same ledger.
+projects the union wall from the same ledger (plus a `group3` block for the
+Group 3 lanes alone). The local smoke lane (Group 4, 4096 MB) declares
+`"phase": "coverage"` in the plan: it joins the coverage phase beside
+`backend-coverage-blackbox` (4096 + 2560 MB fit the budget) after the
+exclusive structural lane instead of being admitted first and holding that
+lane's memory (#1638 attempt 5 was smoke-only for 13 min); the AgentCard lane
+declares the same phase. Undeclared Group 4 lanes stay unphased, and a plan's
+own `after` edges are never removed: `live-probes` and `semantic-stack` start
+as soon as their declared dependencies and memory allow.
 
 **Retry after a failure: failed-first, still a full sweep.** Rerun the same
 stage with `BACKEND_COVERAGE_FAILED_FIRST=1` in the `env` above. The previously

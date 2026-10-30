@@ -63,12 +63,18 @@ host width the memory budget allows, then the coverage lanes start together
 under the existing budgets, longest recorded first, so frontend and backend
 overlap inside the agents window. Phases are implied ``after`` dependencies:
 no lane is skipped, every lane remains a full sweep, failed lanes still run
-first within their phase and Group 4 lanes are untouched. A plan with
+first within their phase and Group 4 lanes are untouched unless they declare
+``"phase": "coverage"``: such a lane joins the coverage phase (after the quick
+and exclusive phases) instead of starting at attempt start. The 4096 MB local
+smoke lane declares it, because admitted first it held the memory the
+exclusive structural lane (6544 MB of a 7752 MB budget) needed and the
+pipeline was smoke-only for 13-23 min (#1638, 2026-10-30); beside
+backend-coverage-blackbox (2560 MB) it fits the budget. A plan with
 ``"schedule": {"policy": "legacy"}`` keeps the previous all-at-once admission.
 
 Plan file (JSON): {"lanes": [{"name", "command": [...], "cwd": "back-end",
 "env": {...}, "after": ["lane"], "reuse_passed": true, "group": "3",
-"memory_mb": 1024, "exclusive": false}], "max_parallel": 4,
+"memory_mb": 1024, "exclusive": false, "phase": ""}], "max_parallel": 4,
 "memory_budget_mb": 9000, "schedule": {"policy": "phased"}}
 """
 
@@ -130,6 +136,9 @@ LANE_DURATION_SAMPLES = 20
 QUICK_LANE_SECONDS = 90.0
 SCHEDULE_PHASED = "phased"
 SCHEDULE_LEGACY = "legacy"
+# The only phase a lane outside Group 3 may declare (``Lane.phase``).
+PHASE_COVERAGE = "coverage"
+LANE_PHASES = ("", PHASE_COVERAGE)
 # Safe default order when no duration has been recorded yet (seconds observed
 # on the 2026-10-29 deploy-1627 runs; only their relative order matters).
 DEFAULT_LANE_SECONDS = {
@@ -142,6 +151,9 @@ DEFAULT_LANE_SECONDS = {
     "backend-coverage-blackbox": 1505.0,
     "frontend-coverage-blackbox": 1000.0,
     "agents-coverage-blackbox": 800.0,
+    # Local smoke lane, 2026-10-30 #1638 (22.6 min alone); orders it within the
+    # coverage phase and lets ``simulate`` project it on a fresh host.
+    "smoke": 1358.0,
 }
 
 
@@ -384,6 +396,11 @@ class Lane:
     memory_mb: int = DEFAULT_LANE_MEMORY_MB
     # Runs alone in its own phase at full host width (deploy-command-structural).
     exclusive: bool = False
+    # Declared phase for a lane outside Group 3: "coverage" admits it with the
+    # coverage lanes, after the quick and exclusive phases (the local smoke
+    # lane). Empty keeps a Group 4 lane unphased; Group 3 lanes are phased from
+    # their recorded durations regardless.
+    phase: str = ""
 
 
 def load_plan(path: Path) -> list[Lane]:
@@ -403,6 +420,8 @@ def load_plan_payload(path: Path) -> tuple[list[Lane], dict]:
             raise ValueError(f"{lane.name}: empty command")
         if int(lane.memory_mb) < 0:
             raise ValueError(f"{lane.name}: memory_mb must be >= 0")
+        if lane.phase not in LANE_PHASES:
+            raise ValueError(f"{lane.name}: unknown phase {lane.phase!r} (expected one of {LANE_PHASES})")
         for dependency in lane.after:
             if dependency not in names or dependency == lane.name:
                 raise ValueError(f"{lane.name}: invalid dependency {dependency}")
@@ -650,9 +669,15 @@ def _closed_subset(candidates: list[Lane], explicit: dict[str, list[str]], place
         chosen -= dropped
 
 
+def phased_lanes(lanes: list[Lane]) -> list[Lane]:
+    """Group 3 plus every lane that declares a phase (the local smoke lane)."""
+    return [lane for lane in lanes if lane.group == "3" or lane.phase == PHASE_COVERAGE]
+
+
 def schedule_phases(lanes: list[Lane], estimates: dict[str, dict]) -> list[dict]:
     """Ordered Group 3 phases: quick lanes, each exclusive lane alone, then the
-    rest (longest recorded first). Other groups are not phased.
+    rest (longest recorded first). Other groups are not phased unless a lane
+    declares ``phase: "coverage"``, which places it in the coverage phase.
 
     Phases are layered over the plan's own ``after`` DAG: a lane joins a phase
     only once every explicit dependency is in an earlier phase or in that same
@@ -660,9 +685,9 @@ def schedule_phases(lanes: list[Lane], estimates: dict[str, dict]) -> list[dict]
     a cycle with an explicit edge. A quick lane that waits for the exclusive
     lane therefore runs with the coverage lanes instead of deadlocking it.
     """
-    group3 = [lane for lane in lanes if lane.group == "3"]
-    names = {lane.name for lane in group3}
-    explicit = {lane.name: [d for d in lane.after if d in names] for lane in group3}
+    phased = phased_lanes(lanes)
+    names = {lane.name for lane in phased}
+    explicit = {lane.name: [d for d in lane.after if d in names] for lane in phased}
     assert_acyclic(explicit)
 
     def seconds(lane: Lane) -> float:
@@ -671,11 +696,11 @@ def schedule_phases(lanes: list[Lane], estimates: dict[str, dict]) -> list[dict]
 
     phases: list[dict] = []
     placed: set[str] = set()
-    remaining = list(group3)
+    remaining = list(phased)
     while remaining:
         emitted: list[Lane] = []
         if not phases:
-            quick = [l for l in remaining if not l.exclusive and seconds(l) <= QUICK_LANE_SECONDS]
+            quick = [l for l in remaining if not l.exclusive and not l.phase and seconds(l) <= QUICK_LANE_SECONDS]
             emitted = sorted(_closed_subset(quick, explicit, placed), key=seconds)
             if emitted:
                 phases.append({"phase": "quick", "lanes": [l.name for l in emitted]})
@@ -691,7 +716,7 @@ def schedule_phases(lanes: list[Lane], estimates: dict[str, dict]) -> list[dict]
             if emitted:
                 phases.append({"phase": "coverage", "lanes": [l.name for l in emitted]})
         if not emitted:  # unreachable after assert_acyclic; never idle silently
-            raise ValueError(f"no schedulable Group 3 lane among {', '.join(sorted(l.name for l in remaining))}")
+            raise ValueError(f"no schedulable phased lane among {', '.join(sorted(l.name for l in remaining))}")
         placed.update(lane.name for lane in emitted)
         remaining = [lane for lane in remaining if lane.name not in placed]
     return phases
@@ -773,6 +798,17 @@ def fit_exclusive_lane(lane: Lane, available_mb: int) -> Lane | None:
 def _list_schedule(order: list[Lane], seconds: dict[str, float], after: dict[str, list[str]],
                    max_parallel: int, budget_mb: int | None) -> float:
     """Makespan of a list schedule under the driver's admission rules."""
+    return _wall(_list_schedule_finish(order, seconds, after, max_parallel, budget_mb))
+
+
+def _wall(finished: dict[str, float], names: set[str] | None = None) -> float:
+    values = [end for name, end in finished.items() if names is None or name in names]
+    return round(max(values), 1) if values else 0.0
+
+
+def _list_schedule_finish(order: list[Lane], seconds: dict[str, float], after: dict[str, list[str]],
+                          max_parallel: int, budget_mb: int | None) -> dict[str, float]:
+    """Finish time of every lane in a list schedule under the driver's admission rules."""
     finished: dict[str, float] = {}
     running: list[tuple[float, str, int]] = []  # (end, name, memory_mb)
     pending = list(order)
@@ -797,39 +833,54 @@ def _list_schedule(order: list[Lane], seconds: dict[str, float], after: dict[str
         elif pending:  # unsatisfiable dependency: force progress rather than spin
             lane = pending.pop(0)
             running.append((clock + seconds[lane.name], lane.name, lane.memory_mb))
-    return round(clock, 1)
+    return finished
 
 
 def simulate(lanes: list[Lane], estimates: dict[str, dict], max_parallel: int, budget_mb: int | None) -> dict:
-    """Projected Group 3 union wall, phased versus legacy admission, from
-    recorded durations only (no contention model).
+    """Projected union wall of the phased lanes (Group 3 plus declared-phase
+    lanes such as the local smoke lane), phased versus legacy admission, from
+    recorded durations only (no contention model). ``group3`` reports the same
+    two walls over the Group 3 lanes alone, so the smoke lane's own length
+    never hides how long the Group 3 gates took.
 
     Legacy uses every lane's recorded median, measured with the lanes running
     together. Phased uses ``isolated_s`` where a lane has run alone and the
     same loaded median otherwise, naming those lanes UNMEASURED: the phased
     wall is then an upper bound, not a measurement.
     """
-    group3 = [lane for lane in lanes if lane.group == "3"]
-    loaded = {lane.name: float((estimates.get(lane.name) or {}).get("seconds") or 0.0) for lane in group3}
-    legacy_after = {lane.name: [d for d in lane.after if d in loaded] for lane in group3}
-    legacy_wall = _list_schedule(sorted(group3, key=lambda l: -loaded[l.name]), loaded, legacy_after,
-                                 max_parallel, budget_mb)
-    phases = schedule_phases(group3, estimates)
+    simulated = phased_lanes(lanes)
+    group3 = {lane.name for lane in simulated if lane.group == "3"}
+    loaded = {lane.name: float((estimates.get(lane.name) or {}).get("seconds") or 0.0) for lane in simulated}
+    legacy_after = {lane.name: [d for d in lane.after if d in loaded] for lane in simulated}
+    legacy_finish = _list_schedule_finish(sorted(simulated, key=lambda l: -loaded[l.name]), loaded, legacy_after,
+                                          max_parallel, budget_mb)
+    phases = schedule_phases(simulated, estimates)
     implied = implied_dependencies(phases)
     phased: dict[str, float] = {}
     unmeasured: list[str] = []
-    for lane in group3:
+    for lane in simulated:
         isolated = (estimates.get(lane.name) or {}).get("isolated_s")
         if isolated is None:
             unmeasured.append(lane.name)
         phased[lane.name] = loaded[lane.name] if isolated is None else float(isolated)
-    phased_after = {lane.name: sorted(set(legacy_after[lane.name]) | set(implied.get(lane.name, []))) for lane in group3}
-    phased_wall = _list_schedule(sorted(group3, key=lambda l: -phased[l.name]), phased, phased_after,
-                                 max_parallel, budget_mb)
+    phased_after = {lane.name: sorted(set(legacy_after[lane.name]) | set(implied.get(lane.name, [])))
+                    for lane in simulated}
+    phased_finish = _list_schedule_finish(sorted(simulated, key=lambda l: -phased[l.name]), phased, phased_after,
+                                          max_parallel, budget_mb)
+    legacy_wall, phased_wall = _wall(legacy_finish), _wall(phased_finish)
+    legacy_group3, phased_group3 = _wall(legacy_finish, group3), _wall(phased_finish, group3)
+    lanes_out: dict[str, dict] = {}
+    for lane in simulated:
+        entry = {"loaded_s": loaded[lane.name], "phased_s": phased[lane.name],
+                 "source": (estimates.get(lane.name) or {}).get("source")}
+        if lane.phase:
+            entry["phase"] = lane.phase
+        lanes_out[lane.name] = entry
     return {"legacy_union_wall_s": legacy_wall, "phased_union_wall_s": phased_wall,
             "delta_s": round(legacy_wall - phased_wall, 1), "phases": phases,
-            "lanes": {lane.name: {"loaded_s": loaded[lane.name], "phased_s": phased[lane.name],
-                                  "source": (estimates.get(lane.name) or {}).get("source")} for lane in group3},
+            "group3": {"legacy_union_wall_s": legacy_group3, "phased_union_wall_s": phased_group3,
+                       "delta_s": round(legacy_group3 - phased_group3, 1)},
+            "lanes": lanes_out,
             "unmeasured_isolated": unmeasured,
             "note": "phased uses recorded isolated durations only where a lane has run alone; UNMEASURED lanes "
                     "keep their loaded median as an upper bound, so the phased wall is a bound, not a measurement"}
@@ -1647,9 +1698,14 @@ def standard_plan(args: argparse.Namespace) -> dict:
         if args.smoke == "cloud":
             lane("smoke", ["bash", "scripts/run-predeploy-cloud"], group="4", memory_mb=1024)
         elif args.smoke == "local":
-            lane("smoke", ["bash", "scripts/run-predeploy-local"], group="4", memory_mb=4096)
+            # Coverage phase: admitted first, this 4096 MB stack held the memory
+            # the exclusive structural lane needed (#1638: smoke-only for 13-23
+            # min). Beside backend-coverage-blackbox (2560 MB) it fits the budget.
+            lane("smoke", ["bash", "scripts/run-predeploy-local"], group="4", memory_mb=4096,
+                 phase=PHASE_COVERAGE)
         if args.agentcard:
-            # Alongside smoke, never after it: its own isolated local stack.
+            # Alongside smoke, never after it: its own isolated local stack in
+            # the same declared phase (no edge between the two).
             lane("agentcard-lifecycle",
                  ["bash", "scripts/run-bench", "--local", *AGENTCARD_TASKS, "--bootstrap",
                   "--max-concurrency", "1", "--no-dashboard"], group="4", env={
@@ -1657,7 +1713,7 @@ def standard_plan(args: argparse.Namespace) -> dict:
                      "BENCHMARK_ATTEMPT_SUITE": "predeploy",
                      "BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY": "0",
                      "BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1",
-                 }, reuse_passed=False, memory_mb=4096)
+                 }, reuse_passed=False, memory_mb=4096, phase=PHASE_COVERAGE)
     for entry in lanes:
         if entry["group"] == "4":
             entry.setdefault("reuse_passed", False)
