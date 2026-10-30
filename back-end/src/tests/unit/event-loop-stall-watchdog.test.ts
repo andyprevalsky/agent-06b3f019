@@ -6,7 +6,8 @@
  * while RSS climbed to 16 GiB, and no main-thread log line survived. This child
  * process blocks its loop in `oomStallReproLoop` while allocating Buffers, the
  * same signature. The watchdog must write, from its own thread, one stderr line
- * that names the blocking frame and reports RSS, then a recovery line.
+ * that names the blocking frame and reports RSS, the main isolate's heap vs
+ * Buffer split and per-thread CPU, keeps sampling, then writes a recovery line.
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -49,9 +50,29 @@ assert(
   `the stall record must name the blocking frame: ${JSON.stringify(frames)}`
 );
 assert(typeof stall.rss_mb === 'number' && stall.rss_mb > 0, 'stall record reports RSS');
+const memory = stall.memory as Record<string, number> | undefined;
 assert(
-  records.some((record) => record.message === 'event loop stall continues'),
-  'RSS is reported again while the stall lasts'
+  memory && typeof memory.heapUsed_mb === 'number' && typeof memory.arrayBuffers_mb === 'number',
+  `the stall record splits the main isolate's heap from Buffers: ${JSON.stringify(memory)}`
+);
+assert(typeof stall.anon_mb === 'number', 'the stall record reports anonymous RSS');
+const threads = stall.threads as Array<{ tid: number; cpu_pct: number }> | undefined;
+assert(
+  Array.isArray(threads) && threads.some((thread) => thread.tid === result.pid),
+  `the stall record shows the main thread's CPU: ${JSON.stringify(threads)}`
+);
+const continues = records.filter((record) => record.message === 'event loop stall continues');
+assert(continues.length > 0, 'RSS is reported again while the stall lasts');
+assert(
+  continues.some((record) =>
+    (record.frames as Array<{ fn: string }>).some((frame) => frame.fn === 'oomStallReproLoop')
+  ),
+  'later samples name the blocking frame again'
+);
+const late = continues[continues.length - 1].memory as Record<string, number>;
+assert(
+  late.arrayBuffers_mb > (memory?.arrayBuffers_mb ?? 0),
+  `the off-heap Buffer growth is visible across samples: ${memory?.arrayBuffers_mb} -> ${late.arrayBuffers_mb}`
 );
 assert(
   records.some((record) => record.message === 'event loop stall ended'),

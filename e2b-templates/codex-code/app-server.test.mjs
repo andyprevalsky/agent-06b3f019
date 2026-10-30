@@ -40,6 +40,7 @@ const {
   handoffFromFinalMessage,
   handoffSchemaFromGoal,
   setUsingApiKey,
+  azureSpeed,
 } = vm.runInNewContext(
   // The real credential-failure classifier and usage-limit reporter the class calls.
   "let oauthFallbackReason = null;\nlet usingApiKey = false;\nconst FUNDED_PROVIDER = false;\n" +
@@ -52,7 +53,7 @@ const {
       source.indexOf("function codexUsageLimit() {"),
     ) +
     block +
-    "\n({ Native: CodexAppServer, strictOutputSchema, handoffFromFinalMessage, handoffSchemaFromGoal, setUsingApiKey: (value) => { usingApiKey = value; } })",
+    "\n({ Native: CodexAppServer, strictOutputSchema, handoffFromFinalMessage, handoffSchemaFromGoal, azureSpeed, setUsingApiKey: (value) => { usingApiKey = value; } })",
   sandbox,
 );
 function fixture(options = {}) {
@@ -532,7 +533,6 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         PORT: String(port),
         GITHUB_REPO_URL: "",
         ROSE_PROJECT_WORKDIR: "",
-        CODEX_FAST_MODE_PROXY_URL: "",
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -1199,6 +1199,7 @@ test("the Azure switch continues GPT-6.1 Sol at priority, never the login's ultr
 
 for (const [speed, expectedTier] of [
   ["fast", "priority"],
+  ["priority", "priority"],
   ["ultrafast", "priority"],
   ["standard", null],
 ]) {
@@ -1243,3 +1244,119 @@ for (const [speed, expectedTier] of [
     );
   });
 }
+
+// S30 (2026-10-28): the query box's speed reaches Codex as its native service
+// tier. Fast → priority ("Fast"), Ultrafast → ultrafast, Normal → standard. The
+// explicitly selected model is preserved when its nearest supported tier is used.
+const SPEED_CATALOG = [
+  {
+    id: "gpt-5.6-terra",
+    model: "gpt-5.6-terra",
+    supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
+    serviceTiers: [{ id: "priority" }],
+  },
+  {
+    id: "gpt-6.1-sol",
+    model: "gpt-6.1-sol",
+    isDefault: true,
+    supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
+    serviceTiers: [{ id: "priority" }, { id: "ultrafast" }],
+  },
+];
+test("the requested query-box speed starts Codex on its native service tier", async () => {
+  const cases = [
+    { speed: "standard", model: "gpt-5.6-terra", tier: null },
+    { speed: "priority", model: "gpt-5.6-terra", tier: "priority" },
+    { speed: "ultrafast", model: "gpt-5.6-terra", tier: "priority" },
+  ];
+  for (const expected of cases) {
+    const { native, calls } = fixture({
+      settings: { model: "gpt-5.6-terra", effort: null, speed: expected.speed },
+      models: SPEED_CATALOG,
+    });
+    await native.initialize(null, "hello");
+    const startup = calls.find((c) => c.method === "thread/start");
+    assert.equal(
+      startup.params.model,
+      expected.model,
+      `${expected.speed}: model`,
+    );
+    assert.equal(
+      startup.params.serviceTier,
+      expected.tier,
+      `${expected.speed}: tier`,
+    );
+    const turn = calls.find((c) => c.method === "turn/start");
+    assert.equal(
+      turn.params.serviceTier,
+      expected.tier,
+      `${expected.speed}: first turn tier`,
+    );
+  }
+});
+test("an unavailable requested tier degrades to the next slower tier, never faster", async () => {
+  const onlyPriority = SPEED_CATALOG.slice(0, 1).map((m) => ({
+    ...m,
+    isDefault: true,
+  }));
+  const ultra = fixture({
+    settings: { model: "gpt-5.6-terra", effort: null, speed: "ultrafast" },
+    models: onlyPriority,
+  });
+  await ultra.native.initialize(null, "hello");
+  assert.equal(
+    ultra.calls.find((c) => c.method === "thread/start").params.serviceTier,
+    "priority",
+  );
+  const noTiers = fixture({
+    settings: { model: "model", effort: null, speed: "priority" },
+    models: [{ id: "model", model: "model", serviceTiers: [] }],
+  });
+  await noTiers.native.initialize(null, "hello");
+  assert.equal(
+    noTiers.calls.find((c) => c.method === "thread/start").params.serviceTier,
+    null,
+  );
+});
+test("a funded Azure session keeps its deployment: ultrafast runs as priority, never a model switch", async () => {
+  assert.equal(azureSpeed("standard"), "standard");
+  assert.equal(azureSpeed("priority"), "priority");
+  assert.equal(azureSpeed("ultrafast"), "priority");
+  assert.equal(azureSpeed(null), "standard");
+  const azureCatalog = [
+    {
+      id: "azure-terra",
+      model: "azure-terra",
+      supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
+      serviceTiers: [{ id: "priority" }],
+    },
+    ...SPEED_CATALOG.slice(1),
+  ];
+  const { native, calls } = fixture({
+    settings: {
+      model: "azure-terra",
+      effort: null,
+      speed: azureSpeed("ultrafast"),
+    },
+    models: azureCatalog,
+  });
+  await native.initialize(null, "hello");
+  const startup = calls.find((c) => c.method === "thread/start");
+  assert.equal(startup.params.model, "azure-terra");
+  assert.equal(startup.params.serviceTier, "priority");
+});
+test("Codex never routes through a Rose proxy or the demo cache", () => {
+  for (const forbidden of [
+    "chatgpt_base_url",
+    "CODEX_FAST_MODE_PROXY_URL",
+    "model_providers.fastmode",
+    "codex-proxy",
+    "fast_cache_proxy",
+  ]) {
+    assert.equal(
+      source.includes(forbidden),
+      false,
+      `ws-server must not contain ${forbidden}: Codex talks to its provider directly`,
+    );
+  }
+});

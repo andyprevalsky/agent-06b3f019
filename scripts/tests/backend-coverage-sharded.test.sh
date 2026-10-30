@@ -15,12 +15,20 @@
 #      previously failed late-exclusive domain still runs only after the parallel
 #      fixture writers, and an aborted sweep reports unrun domains as NOT RUN
 #      failures (non-zero exit, aborted:true in summary.json);
-#   8. the unit suite runs once, alone: every blackbox shard skips units, the
-#      unit pass (BACKEND_COVERAGE_UNIT_PASS=1, all unit files, its own port
-#      pair) starts only after the last shard ended, hands its raw coverage to
-#      the merge directory, fails the gate on its own, and is skipped after a
-#      failed-first abort (the fps probe starved beside two blackbox streams,
-#      2026-10-30).
+#   8. the unit pass runs beside the shards and the fps probe alone: every
+#      blackbox shard skips units; the unit pass (BACKEND_COVERAGE_UNIT_PASS=1,
+#      its own port pair, every unit file except rose-ui-cli-browser.test.ts via
+#      BACKEND_UNIT_EXCLUDE_FILES) starts with the shards; the probe pass
+#      (label `probe`, BACKEND_UNIT_TEST_FILES=rose-ui-cli-browser.test.ts)
+#      starts only after every shard AND the unit pass ended; both hand raw
+#      coverage to the merge directory and fail the gate on their own; a
+#      failed-first abort stops the unit pass and skips the probe (the fps
+#      probe starved beside two blackbox streams, 2026-10-30; the full unit
+#      suite then waited 12.7 min after the shards on #1639).
+#  10. the REAL unit runner's selection (run-unit-tests.ts --list) honours
+#      BACKEND_UNIT_EXCLUDE_FILES / BACKEND_UNIT_TEST_FILES and refuses unknown
+#      entries, so the probe is excluded from the concurrent pass and is the
+#      only file of the serial pass.
 set -euo pipefail
 
 # This fixture owns its heap inputs: the default scenario starts without caller
@@ -47,7 +55,7 @@ cp "$ROOT_DIR/back-end/scripts/coverage-report-heap.sh" "$REPO/back-end/scripts/
 cat >"$REPO/back-end/scripts/run-coverage.sh" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "${BACKEND_COVERAGE_UNIT_PASS:-0}" == "1" ]]; then index=units; else index="${BACKEND_COVERAGE_SHARD%%/*}"; fi
+if [[ "${BACKEND_COVERAGE_UNIT_PASS:-0}" == "1" ]]; then index="units${BACKEND_COVERAGE_UNIT_PASS_LABEL:+-$BACKEND_COVERAGE_UNIT_PASS_LABEL}"; else index="${BACKEND_COVERAGE_SHARD%%/*}"; fi
 log="$FAKE_RECORD_DIR/shard-$index.env"
 {
   echo "shard=${BACKEND_COVERAGE_SHARD:-}"
@@ -56,13 +64,15 @@ log="$FAKE_RECORD_DIR/shard-$index.env"
   echo "abort=${BLACKBOX_TEST_ABORT_ON_PRIORITY_FAILURE:-}"
   echo "durations=${BACKEND_COVERAGE_SHARD_DURATIONS:-}"
   echo "unit_selector=${BACKEND_UNIT_TEST_FILES-unset}"
+  echo "unit_exclude=${BACKEND_UNIT_EXCLUDE_FILES-unset}"
+  echo "unit_label=${BACKEND_COVERAGE_UNIT_PASS_LABEL-unset}"
   echo "skip_units=${BACKEND_COVERAGE_SKIP_UNITS:-}"
   echo "unit_pass=${BACKEND_COVERAGE_UNIT_PASS:-}"
   echo "started=$(date +%s%N)"
 } >"$log"
 child=""
 trap 'echo terminated >>"$log"; [[ -z "$child" ]] || kill "$child" 2>/dev/null; exit 143' TERM
-behaviour="$(eval echo "\${FAKE_SHARD_$index:-pass}")"
+behaviour="$(eval echo "\${FAKE_SHARD_${index//-/_}:-pass}")"
 # A shard takes a moment so a unit pass started too early would overlap it.
 sleep 0.2
 case "$behaviour" in
@@ -109,21 +119,40 @@ grep -q 'shard=1/2' "$TMP/rec/shard-1.env" && grep -q 'shard=2/2' "$TMP/rec/shar
   fail "shards share a port range"
 grep -q -- '--check-coverage' "$TMP/rec/npx.log" || fail "merged threshold check did not run"
 [[ ! -e "$REPO/back-end/coverage/tmp-merged" ]] || fail "merge dir left behind after success"
-# 8. The unit suite runs once, alone, after the blackbox shards.
+# 8. The unit pass runs beside the blackbox shards (fps probe excluded); the
+#    probe runs alone after every shard and the unit pass.
+PROBE="rose-ui-cli-browser.test.ts"
 grep -q '^skip_units=1$' "$TMP/rec/shard-1.env" && grep -q '^skip_units=1$' "$TMP/rec/shard-2.env" ||
   fail "blackbox shards must skip the unit suite: $(cat "$TMP/rec/shard-1.env")"
 [[ -f "$TMP/rec/shard-units.env" ]] || fail "the unit pass did not run"
 grep -q '^unit_pass=1$' "$TMP/rec/shard-units.env" && grep -q '^shard=$' "$TMP/rec/shard-units.env" &&
-  grep -q '^skip_units=$' "$TMP/rec/shard-units.env" && grep -q '^unit_selector=unset$' "$TMP/rec/shard-units.env" ||
-  fail "the unit pass must run every unit file as a non-shard: $(cat "$TMP/rec/shard-units.env")"
+  grep -q '^skip_units=$' "$TMP/rec/shard-units.env" && grep -q '^unit_selector=unset$' "$TMP/rec/shard-units.env" &&
+  grep -q "^unit_exclude=$PROBE$" "$TMP/rec/shard-units.env" && grep -q '^unit_label=unset$' "$TMP/rec/shard-units.env" ||
+  fail "the unit pass must run every unit file except the fps probe as an unlabelled non-shard: $(cat "$TMP/rec/shard-units.env")"
 grep -q '^ports=40020-40021$' "$TMP/rec/shard-units.env" || fail "the unit pass must use the +20/+21 pair inside the declared footprint: $(cat "$TMP/rec/shard-units.env")"
 units_started="$(sed -n 's/^started=//p' "$TMP/rec/shard-units.env")"
+units_ended="$(sed -n 's/^ended=//p' "$TMP/rec/shard-units.env")"
 for i in 1 2; do
   shard_ended="$(sed -n 's/^ended=//p' "$TMP/rec/shard-$i.env")"
-  [[ -n "$shard_ended" && "$units_started" -gt "$shard_ended" ]] ||
-    fail "the unit pass overlapped blackbox shard $i (shard ended $shard_ended, units started $units_started)"
+  [[ -n "$shard_ended" && "$units_started" -lt "$shard_ended" ]] ||
+    fail "the unit pass must run beside blackbox shard $i (shard ended $shard_ended, units started $units_started)"
 done
-grep -q 'running the unit suite once, alone' "$TMP/out1" || fail "the unit pass must be announced: $(cat "$TMP/out1")"
+[[ -f "$TMP/rec/shard-units-probe.env" ]] || fail "the fps probe pass did not run"
+grep -q '^unit_pass=1$' "$TMP/rec/shard-units-probe.env" && grep -q '^shard=$' "$TMP/rec/shard-units-probe.env" &&
+  grep -q "^unit_selector=$PROBE$" "$TMP/rec/shard-units-probe.env" && grep -q '^unit_label=probe$' "$TMP/rec/shard-units-probe.env" &&
+  grep -q '^unit_exclude=unset$' "$TMP/rec/shard-units-probe.env" ||
+  fail "the probe pass must select only the fps probe under the probe label: $(cat "$TMP/rec/shard-units-probe.env")"
+grep -q '^ports=40020-40021$' "$TMP/rec/shard-units-probe.env" || fail "the probe pass reuses the unit pass's port pair once it is free: $(cat "$TMP/rec/shard-units-probe.env")"
+probe_started="$(sed -n 's/^started=//p' "$TMP/rec/shard-units-probe.env")"
+[[ -n "$units_ended" && "$probe_started" -gt "$units_ended" ]] ||
+  fail "the fps probe overlapped the unit pass (units ended $units_ended, probe started $probe_started)"
+for i in 1 2; do
+  shard_ended="$(sed -n 's/^ended=//p' "$TMP/rec/shard-$i.env")"
+  [[ -n "$shard_ended" && "$probe_started" -gt "$shard_ended" ]] ||
+    fail "the fps probe overlapped blackbox shard $i (shard ended $shard_ended, probe started $probe_started)"
+done
+grep -q 'Started the unit pass beside the shards' "$TMP/out1" || fail "the concurrent unit pass must be announced: $(cat "$TMP/out1")"
+grep -q 'running the fps probe alone' "$TMP/out1" || fail "the serial probe pass must be announced: $(cat "$TMP/out1")"
 # 9. The report step raises node's heap ceiling itself (the in-memory c8 merge
 #    of the full sweep died at the default heap, 2026-10-30), keeping any
 #    NODE_OPTIONS the caller set; the unsharded script uses the same helper.
@@ -144,6 +173,8 @@ ls "$REPO"/.context/test-runs/backend-coverage-merged-report-failed-*/raw-v8/cov
   fail "merged report failure deleted raw coverage"
 ls "$REPO"/.context/test-runs/backend-coverage-merged-report-failed-*/raw-v8/coverage-shard-units.json >/dev/null 2>&1 ||
   fail "the unit pass's raw coverage was not handed to the merge directory"
+ls "$REPO"/.context/test-runs/backend-coverage-merged-report-failed-*/raw-v8/coverage-shard-units-probe.json >/dev/null 2>&1 ||
+  fail "the fps probe pass's raw coverage was not handed to the merge directory"
 # A failing unit pass fails the gate on its own: no merged check, raw archived, retry named.
 records
 FAKE_SHARD_units=fail bash "$RUNNER" 2 >"$TMP/out8" 2>&1 && fail "a failed unit pass did not fail the gate"
@@ -153,6 +184,13 @@ grep -q 'Retry: bash scripts/run-coverage-sharded.sh --failed-first 2' "$TMP/out
 [[ ! -e "$REPO/back-end/coverage/tmp-merged" ]] || fail "failed unit pass leaves the merge dir blocking retry"
 ls "$REPO"/.context/test-runs/backend-coverage-merged-failed-*/raw-v8/coverage-shard-2.json >/dev/null 2>&1 ||
   fail "passing shards' raw coverage was not archived after a unit failure"
+[[ -f "$TMP/rec/shard-units-probe.env" ]] || fail "a plain sweep must still run the fps probe after a failed unit pass so one run reports every failure"
+# A failing fps probe fails the gate on its own too.
+records
+FAKE_SHARD_units_probe=fail bash "$RUNNER" 2 >"$TMP/out8b" 2>&1 && fail "a failed fps probe did not fail the gate"
+grep -q 'fps probe pass failed' "$TMP/out8b" || fail "probe failure not reported: $(cat "$TMP/out8b")"
+[[ ! -e "$TMP/rec/npx.log" ]] || fail "merged check ran despite a failed fps probe"
+[[ ! -e "$REPO/back-end/coverage/tmp-merged" ]] || fail "failed probe leaves the merge dir blocking retry"
 [[ ! -e "$REPO/back-end/coverage/tmp-merged" ]] || fail "failed report leaves merge directory blocking retry"
 
 # Interrupt a live coordinator after one shard has handed over raw coverage.
@@ -191,15 +229,16 @@ echo '{"results":[{"domain":"user-ui","passed":false},{"domain":"skipped","passe
   >"$REPO/back-end/coverage/blackbox-run-shard2/summary.json"
 records
 started=$SECONDS
-FAKE_SHARD_1=fail FAKE_SHARD_2=sleep bash "$RUNNER" --failed-first 2 >"$TMP/out3" 2>&1 &&
+FAKE_SHARD_1=fail FAKE_SHARD_2=sleep FAKE_SHARD_units=sleep bash "$RUNNER" --failed-first 2 >"$TMP/out3" 2>&1 &&
   fail "failed-first repeated failure did not fail the gate"
 elapsed=$((SECONDS - started))
 ((elapsed < 30)) || fail "failed-first waited for the sibling shard (${elapsed}s)"
 grep -q 'priority=code-preview,user-ui' "$TMP/rec/shard-1.env" || fail "priority domains not exported: $(cat "$TMP/rec/shard-1.env")"
 grep -q 'abort=1' "$TMP/rec/shard-2.env" || fail "abort-on-repeat not exported"
 grep -q terminated "$TMP/rec/shard-2.env" || fail "sibling shard was not stopped"
-[[ ! -e "$TMP/rec/shard-units.env" ]] || fail "a failed-first abort must skip the unit pass"
-grep -q 'the unit pass is skipped' "$TMP/out3" || fail "the skipped unit pass must be announced: $(cat "$TMP/out3")"
+grep -q terminated "$TMP/rec/shard-units.env" || fail "a failed-first abort must stop the concurrent unit pass"
+[[ ! -e "$TMP/rec/shard-units-probe.env" ]] || fail "a failed-first abort must skip the fps probe"
+grep -q 'the fps probe is skipped' "$TMP/out3" || fail "the skipped probe must be announced: $(cat "$TMP/out3")"
 
 # 4. Real runner, fake domains. `writer` is an ordinary pool domain and
 #    `admin-health` is a real late-exclusive (whole-DB aggregate) name; both get
@@ -356,6 +395,21 @@ node -e '
     if (JSON.stringify(planned.sort()) !== JSON.stringify(expected)) { console.error(`${label}: production inventory differs`); process.exit(2); }
   }
 ' "$ROOT_DIR/back-end/src/tests/blackbox" "$TMP/real-p1" "$TMP/real-p2" "$TMP/real-q1" "$TMP/real-q2" || fail "real-inventory shard coverage is wrong"
+
+# 10. The real unit runner's selection: the coordinator excludes exactly the
+#     fps probe from the concurrent pass and selects only it for the serial
+#     pass; unknown entries on either list are refused before anything runs.
+UNIT_RUNNER_LIST() { (cd "$ROOT_DIR/back-end" && BACKEND_UNIT_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/unused "$@" node --import tsx scripts/run-unit-tests.ts --list); }
+UNIT_RUNNER_LIST env >"$TMP/units-all" || fail "run-unit-tests.ts --list failed"
+grep -qx "rose-ui-cli-browser.test.ts" "$TMP/units-all" || fail "the fps probe file must exist in the unit suite"
+UNIT_RUNNER_LIST env BACKEND_UNIT_EXCLUDE_FILES=rose-ui-cli-browser.test.ts >"$TMP/units-excluded" || fail "--list with the exclusion failed"
+grep -qx "rose-ui-cli-browser.test.ts" "$TMP/units-excluded" && fail "BACKEND_UNIT_EXCLUDE_FILES must drop the fps probe from the concurrent pass"
+[[ "$(wc -l <"$TMP/units-excluded")" -eq $(( $(wc -l <"$TMP/units-all") - 1 )) ]] || fail "the exclusion must drop exactly one file"
+[[ "$(UNIT_RUNNER_LIST env BACKEND_UNIT_TEST_FILES=rose-ui-cli-browser.test.ts)" == "rose-ui-cli-browser.test.ts" ]] || fail "the serial pass must select only the fps probe"
+UNIT_RUNNER_LIST env BACKEND_UNIT_EXCLUDE_FILES=no-such-file.test.ts >/dev/null 2>&1 && fail "an unknown BACKEND_UNIT_EXCLUDE_FILES entry must be refused"
+grep -q 'FPS_PROBE_FILE="rose-ui-cli-browser.test.ts"' "$ROOT_DIR/back-end/scripts/run-coverage-sharded.sh" || fail "run-coverage-sharded.sh must name the fps probe file"
+grep -q 'BACKEND_UNIT_EXCLUDE_FILES="\$FPS_PROBE_FILE"' "$ROOT_DIR/back-end/scripts/run-coverage-sharded.sh" || fail "the concurrent unit pass must exclude the fps probe"
+grep -q 'BACKEND_COVERAGE_UNIT_PASS_LABEL=probe' "$ROOT_DIR/back-end/scripts/run-coverage-sharded.sh" || fail "the serial probe pass must carry the probe label"
 
 # 7. Sharding on the isolated deploy (system-PG) path: the prepared
 #    BACKEND_COVERAGE_DATABASE_URL is the base; shard i/N owns `<base>_s<i>`

@@ -13,7 +13,6 @@ import {
 } from "fs";
 import { spawn, execFileSync } from "child_process";
 import { timingSafeEqual } from "crypto";
-import { createServer } from "http";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -65,10 +64,6 @@ const CODE_AGENT_SYSTEM_PROMPT = process.env.CODE_AGENT_SYSTEM_PROMPT || "";
 const MOBBIN_MCP_TOKEN = process.env.MOBBIN_MCP_TOKEN || "";
 const GITHUB_REPO_URL = process.env.GITHUB_REPO_URL;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const CODEX_FAST_MODE_PROXY_URL = process.env.CODEX_FAST_MODE_PROXY_URL;
-const CODEX_FAST_MODE_PROXY_PORT = Number(
-  process.env.CODEX_FAST_MODE_PROXY_PORT || "37441",
-);
 
 if (!GOAL) {
   log("error", "CODEX_GOAL not set");
@@ -464,9 +459,6 @@ function appendCodexStdout(data) {
 async function shutdown(code = 0) {
   log("info", "Starting graceful shutdown", { code });
   nativeCodex?.child.kill("SIGTERM");
-  if (codexFastModeProxy) {
-    await new Promise((resolve) => codexFastModeProxy.server.close(resolve));
-  }
   for (const client of clients) {
     if (client.readyState === 1)
       client.send(JSON.stringify({ type: "exit", code }));
@@ -660,122 +652,6 @@ process.on("SIGTERM", () => shutdown(exitCode ?? 0));
 
 log("info", "Server listening", { port: PORT });
 
-function collectBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-    req.on("error", reject);
-  });
-}
-
-function proxyHeaders(headers) {
-  const out = {};
-  const skip = new Set([
-    "connection",
-    "content-length",
-    "host",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-  ]);
-  for (const [key, value] of Object.entries(headers)) {
-    if (skip.has(key.toLowerCase()) || value === undefined) continue;
-    out[key] = Array.isArray(value) ? value.join(", ") : String(value);
-  }
-  return out;
-}
-
-async function startCodexFastModeProxy() {
-  if (!CODEX_FAST_MODE_PROXY_URL) return null;
-
-  const targetBase = new URL(CODEX_FAST_MODE_PROXY_URL.replace(/\/$/, ""));
-  const server = createServer(async (req, res) => {
-    try {
-      const body = await collectBody(req);
-      const target = new URL(
-        `${targetBase.pathname}${req.url || "/"}`,
-        targetBase.origin,
-      );
-      const headers = proxyHeaders(req.headers);
-      const method = req.method || "GET";
-      const upstream = await fetch(target, {
-        method,
-        headers,
-        body: method === "GET" || method === "HEAD" ? undefined : body,
-      });
-      res.statusCode = upstream.status;
-      upstream.headers.forEach((value, key) => {
-        if (
-          ![
-            "content-encoding",
-            "content-length",
-            "connection",
-            "transfer-encoding",
-          ].includes(key.toLowerCase())
-        ) {
-          res.setHeader(key, value);
-        }
-      });
-      const responseBody = Buffer.from(await upstream.arrayBuffer());
-      res.end(responseBody);
-      const cacheHeader = upstream.headers.get("x-fast-mode-cache") || null;
-      log("info", "Codex Fast Mode proxy request", {
-        method,
-        path: req.url,
-        status: upstream.status,
-        cache: cacheHeader,
-      });
-      appendEvent({
-        type: "fast_cache_proxy_request",
-        raw_type: "codex_fast_mode_proxy_request",
-        method,
-        path: req.url,
-        status: upstream.status,
-        cache: cacheHeader,
-      });
-    } catch (err) {
-      log("error", "Codex Fast Mode proxy failed", { error: err.message });
-      appendEvent({
-        type: "fast_cache_proxy_error",
-        raw_type: "codex_fast_mode_proxy_error",
-        method: req.method || "GET",
-        path: req.url,
-        error: err.message,
-      });
-      res.statusCode = 502;
-      res.end(JSON.stringify({ error: "Codex Fast Mode proxy failed" }));
-    }
-  });
-
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(CODEX_FAST_MODE_PROXY_PORT, "127.0.0.1", resolve);
-  });
-  const baseUrl = `http://127.0.0.1:${CODEX_FAST_MODE_PROXY_PORT}`;
-  const sanitizedTarget = CODEX_FAST_MODE_PROXY_URL.replace(
-    /\/[^/]*$/,
-    "/<goalHash>",
-  );
-  log("info", "Codex Fast Mode proxy listening", {
-    baseUrl,
-    target: sanitizedTarget,
-  });
-  appendEvent({
-    type: "fast_cache_proxy_started",
-    raw_type: "codex_fast_mode_proxy_started",
-    base_url: baseUrl,
-    target: sanitizedTarget,
-  });
-  return { server, baseUrl };
-}
-
-let codexFastModeProxy = await startCodexFastModeProxy();
-
 const home = homedir();
 const codexHome = join(home, ".codex");
 // Same contract as the Claude Code ws-server: ROSE_PROJECT_WORKDIR names an
@@ -808,7 +684,7 @@ function useFundedProvider() {
 
 /** Exec-transport default tier on Azure; app-server turns name theirs explicitly. */
 function azureServiceTier() {
-  return CODEX_SPEED === "fast" || CODEX_SPEED === "ultrafast"
+  return CODEX_SPEED === "fast" || CODEX_SPEED === "priority" || CODEX_SPEED === "ultrafast"
     ? CODEX_AZURE_SERVICE_TIER
     : null;
 }
@@ -1075,7 +951,7 @@ const sanitizedGoal = [
 // The ChatGPT fast-mode proxy only makes sense for the OAuth token — it forwards
 // to the ChatGPT codex backend, which won't authenticate an OpenAI API key. So
 // the API-key path (initial or fallback) runs against the default OpenAI endpoint.
-function buildCodexArgs({ useFastModeProxy, resume = null }) {
+function buildCodexArgs({ resume = null } = {}) {
   const args = [
     "exec",
     "--ignore-user-config",
@@ -1136,18 +1012,6 @@ function buildCodexArgs({ useFastModeProxy, resume = null }) {
       'mcp_servers.mobbin.bearer_token_env_var="MOBBIN_MCP_TOKEN"',
       "-c",
       'mcp_servers.mobbin.enabled_tools=["search_screens","search_flows","search_sections"]',
-    );
-  }
-  if (useFastModeProxy && codexFastModeProxy) {
-    args.splice(
-      1,
-      0,
-      "-c",
-      `chatgpt_base_url="${codexFastModeProxy.baseUrl}"`,
-      "-c",
-      'model_provider="fastmode"',
-      "-c",
-      `model_providers.fastmode={name="fastmode",base_url="${codexFastModeProxy.baseUrl}/backend-api/codex",wire_api="responses"}`,
     );
   }
   return args;
@@ -1788,6 +1652,11 @@ function handoffFromFinalMessage(text, schema) {
   return `${JSON.stringify(prune(value, schema), null, 2)}\n`;
 }
 
+/** A funded Azure session keeps its deployment; only non-standard requests use priority. */
+function azureSpeed(requested) {
+  return requested && requested !== "standard" ? "priority" : "standard";
+}
+
 // A requested speed -> the catalog tiers that satisfy it, nearest first. Codex
 // names priority processing "Fast"; ultrafast falls back to it when a model
 // (gpt-6.1-terra, the Azure catalog) does not offer ultrafast.
@@ -1850,7 +1719,7 @@ function stageDirectAttachments(id, attachments = []) {
 }
 
 function spawnCodexAppServer() {
-  const legacyArgs = buildCodexArgs({ useFastModeProxy: !usingApiKey });
+  const legacyArgs = buildCodexArgs();
   // Keep the existing MCP/proxy overrides, replacing exec-only flags.
   const args = ["app-server", "--listen", "stdio://"];
   for (let i = 1; i < legacyArgs.length; i++) {
@@ -1894,7 +1763,9 @@ async function runCodexAppServer() {
   const settings = {
     model: usingApiKey ? CODEX_AZURE_MODEL : CODEX_MODEL,
     effort: process.env.CODEX_REASONING_EFFORT || null,
-    speed: process.env.CODEX_SPEED || null,
+    speed: usingApiKey
+      ? azureSpeed(process.env.CODEX_SPEED || null)
+      : process.env.CODEX_SPEED || null,
   };
   nativeCodex = new CodexAppServer(child, appendEvent, settings, handoff);
   // Runtime fallback, as in the exec transport: a turn that failed because the
@@ -1937,7 +1808,11 @@ async function runCodexAppServer() {
       const resumed = new CodexAppServer(
         next.child,
         appendEvent,
-        { ...failed.settings, model: CODEX_AZURE_MODEL },
+        {
+          ...failed.settings,
+          model: CODEX_AZURE_MODEL,
+          speed: azureSpeed(failed.settings.speed),
+        },
         handoff,
       );
       nativeCodex = resumed;
@@ -1990,9 +1865,7 @@ if (CODEX_TRANSPORT === "app-server") {
 } else {
   // An API-key-only session (no OAuth credential) must skip the ChatGPT fast-mode
   // proxy — it targets the ChatGPT backend, which won't authenticate an API key.
-  let { code, signal } = await runCodex(
-    buildCodexArgs({ useFastModeProxy: !usingApiKey }),
-  );
+  let { code, signal } = await runCodex(buildCodexArgs());
 
   // Runtime fallback: the ChatGPT OAuth token became unusable mid-run. Retry
   // ONCE on the funded Azure OpenAI provider (no ChatGPT proxy). Mirrors the
@@ -2022,9 +1895,7 @@ if (CODEX_TRANSPORT === "app-server") {
     useFundedProvider();
     usingApiKey = true;
     oauthFallbackReason = null;
-    ({ code, signal } = await runCodex(
-      buildCodexArgs({ useFastModeProxy: false }),
-    ));
+    ({ code, signal } = await runCodex(buildCodexArgs()));
   }
 
   // Delivered user turns run, in order, as resumed turns of the same thread.
@@ -2036,7 +1907,6 @@ if (CODEX_TRANSPORT === "app-server") {
     });
     ({ code, signal } = await runCodex(
       buildCodexArgs({
-        useFastModeProxy: !usingApiKey,
         resume: { threadId: codexThreadId, text: turn.text },
       }),
     ));

@@ -233,6 +233,29 @@ describe('useTerminalAgents Fast Mode bridge', () => {
     },
   );
 
+  it('sends the query-box speed (standard, fast or ultrafast) so agents start at that native speed', async () => {
+    setUltraPreferred(true, mocks.authState.user.id);
+    const { result } = renderHook(() => useMessageSending(messageSendingArgs()));
+    await waitFor(() => expect(result.current.fastMode).toBe(true));
+    const sent = async (goal: string) => {
+      clearCaptures();
+      act(() => result.current.setMessageInput(goal));
+      await act(async () => {
+        await result.current.handleSendMessage();
+      });
+      return capturedRequests.find((r) => r.method === 'POST' && r.url.endsWith('/agents'))
+        ?.body as Record<string, unknown> | undefined;
+    };
+
+    expect(await sent('ultra when chosen')).toMatchObject({ speed: 'ultrafast' });
+    act(() => setUltraPreferred(false, mocks.authState.user.id));
+    expect(await sent('fast when chosen')).toMatchObject({ speed: 'fast' });
+    act(() => result.current.setFastMode(false));
+    const off = await sent('normal speed');
+    expect(off).toMatchObject({ speed: 'standard' });
+    expect(off).not.toHaveProperty('fast_mode_cache_enabled');
+  });
+
   it('hydrates Fast Mode from the loaded agent detail instead of the account default', async () => {
     const agentDetail = {
       agent_id: 'agent-loaded',

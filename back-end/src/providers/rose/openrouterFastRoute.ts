@@ -51,7 +51,12 @@ export const OPENROUTER_CHAT_LATENCY_PROVIDER = {
   preferred_min_throughput: { p50: 80 },
   // Friendli repeatedly started streaming but missed the 15s router completion
   // bound on the exact production follow-up, despite the throughput preference.
-  ignore: ['friendli'],
+  // InferenceNet accepts strict json_schema but emits keys out of declared order
+  // (reasoning, queries, mode, goal, action): the router decides last, after it
+  // has written an agent goal, so a direct answer escalated to an agent (2/30
+  // replays vs 0/29 on order-keeping hosts), and early action detection never
+  // fires (S32, docs/rca/cases/2026-10-28-router-fallback-host-ignores-schema-key-order.md).
+  ignore: ['friendli', 'inference-net'],
   allow_fallbacks: true,
   require_parameters: true,
 } as const;

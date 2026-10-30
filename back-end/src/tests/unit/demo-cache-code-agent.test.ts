@@ -132,69 +132,35 @@ test('Claude Code sandbox enables Fast Mode through a live Claude Code model ali
   );
 });
 
-test('Codex Code sandbox uses Fast Mode localhost proxy plumbing', () => {
+test('Codex Code sandbox never routes through a Rose proxy or the DEMO cache', () => {
   const e2bProvider = readFileSync(join(process.cwd(), 'src', 'providers', 'e2b.ts'), 'utf8');
   const wsServer = readFileSync(
     join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'ws-server.mjs'),
     'utf8'
   );
   const viteConfig = readFileSync(join(process.cwd(), '..', 'front-end', 'vite.config.ts'), 'utf8');
+  const server = readFileSync(join(process.cwd(), 'src', 'server.ts'), 'utf8');
+  // S30 (Andy, 2026-10-28): Codex talks to its provider directly. No ngrok, no
+  // /codex-proxy, no cache reads/writes/ordinals/capability URLs.
+  for (const [label, text, forbidden] of [
+    ['backend', e2bProvider, 'buildFastModeCodexEnv'],
+    ['backend', e2bProvider, 'CODEX_FAST_MODE_PROXY_URL'],
+    ['server', server, "'/codex-proxy'"],
+    ['wrapper', wsServer, 'CODEX_FAST_MODE_PROXY_URL'],
+    ['wrapper', wsServer, 'chatgpt_base_url'],
+    ['wrapper', wsServer, 'model_provider="fastmode"'],
+    ['wrapper', wsServer, 'x-fast-mode-cache'],
+    ['vite', viteConfig, "'/codex-proxy'"],
+  ] as const) {
+    assert.ok(!text.includes(forbidden), `${label} must not contain ${forbidden}`);
+  }
   assert.ok(
-    e2bProvider.includes('buildFastModeCodexEnv'),
-    'backend must build Codex Fast Mode env'
-  );
-  assert.ok(
-    e2bProvider.includes('CODEX_FAST_MODE_PROXY_URL'),
-    'backend must inject Codex proxy URL'
-  );
-  assert.ok(
-    e2bProvider.includes('Fast Mode: Codex code-agent cache config'),
-    'backend must log Codex Fast Mode cache configuration before sandbox launch'
-  );
-  assert.ok(
-    e2bProvider.includes('fastModeCacheEnabled === true') &&
-      e2bProvider.includes(
-        'Fast Mode cache is enabled for Codex code agent but no Codex proxy URL is configured'
-      ),
-    'read-enabled Codex Fast Mode must fail loudly instead of silently running live'
+    e2bProvider.includes('envs.CODEX_SPEED = codexSpeed'),
+    'the Fast Mode button selects Codex native speed instead'
   );
   assert.ok(
     e2bProvider.includes('overlayCodexCodeWsServer'),
     'backend must overlay checked-in Codex server'
-  );
-  assert.ok(wsServer.includes('CODEX_FAST_MODE_PROXY_URL'), 'wrapper must read Codex proxy URL');
-  assert.ok(
-    wsServer.includes('chatgpt_base_url'),
-    'wrapper must point Codex CLI at localhost proxy'
-  );
-  assert.ok(
-    wsServer.includes('model_provider="fastmode"'),
-    'wrapper must force Codex model calls through Fast Mode provider'
-  );
-  assert.ok(
-    wsServer.includes('/backend-api/codex'),
-    'wrapper model provider must use the ChatGPT Codex backend path'
-  );
-  assert.ok(
-    wsServer.includes('fast_cache_proxy_request'),
-    'wrapper must emit structured proxy cache events over the WebSocket'
-  );
-  assert.ok(
-    wsServer.includes('upstream.headers.get("x-fast-mode-cache")'),
-    'wrapper must record the backend demo-cache header for each proxied request'
-  );
-  assert.ok(
-    wsServer.includes('wire_api="responses"'),
-    'wrapper model provider must use Responses API wire format'
-  );
-  assert.ok(
-    viteConfig.includes("'/codex-proxy'") &&
-      viteConfig.includes("target: `http://localhost:${process.env.BACKEND_PORT || '3000'}`"),
-    'public dev tunnel must proxy Codex cache traffic to backend'
-  );
-  assert.ok(
-    wsServer.includes('/backend-api/codex/responses') === false,
-    'wrapper must not cache provider paths itself'
   );
   assert.ok(
     // E2B HOME is /home/user; a local (Mac) session keeps the same HOME-relative path.

@@ -2746,16 +2746,15 @@ export_sandbox_backend_base_url
 # of a dead loopback tee (cache capture requires a publicly reachable URL).
 if [ "${DISABLE_FAST_MODE_PROXY:-}" = "1" ]; then
     export FAST_MODE_ANTHROPIC_PROXY_URL=""
-    export FAST_MODE_CODEX_PROXY_URL=""
     echo "⚡ DISABLE_FAST_MODE_PROXY=1 — fast-mode proxy off; sandbox code agents use the direct claudeAuth path"
 elif [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ] || [[ "${PUBLIC_BASE_URL:-}" == http://localhost:* ]] || [[ "${PUBLIC_BASE_URL:-}" == http://127.* ]]; then
     export FAST_MODE_ANTHROPIC_PROXY_URL=""
-    export FAST_MODE_CODEX_PROXY_URL=""
     echo "⚡ Fast-mode proxy off — PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-unset} is not E2B-reachable; sandbox code agents use direct Anthropic OAuth"
 else
     export FAST_MODE_ANTHROPIC_PROXY_URL="$PUBLIC_BASE_URL/anthropic-proxy"
-    export FAST_MODE_CODEX_PROXY_URL="$PUBLIC_BASE_URL/codex-proxy"
 fi
+# Codex never routes through a Rose proxy (S30): no FAST_MODE_CODEX_PROXY_URL.
+unset FAST_MODE_CODEX_PROXY_URL
 export BACKEND_LOG_FILE="${BACKEND_LOG_FILE:-$PWD/back-end/backend-logs.log}"
 export FRONTEND_LOG_FILE="${FRONTEND_LOG_FILE:-$PWD/front-end/frontend-logs.log}"
 export NAVI_WORKER_LOG_FILE="${NAVI_WORKER_LOG_FILE:-$PWD/agents/navi-worker-log.txt}"

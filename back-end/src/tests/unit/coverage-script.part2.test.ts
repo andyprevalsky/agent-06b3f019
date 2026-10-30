@@ -67,10 +67,9 @@ assert.match(
   /FAST_MODE_ANTHROPIC_PROXY_URL="\$\{BLACKBOX_FAST_MODE_ANTHROPIC_PROXY_URL:-\}"/,
   'isolated blackbox backend must not inherit a developer Fast Mode Anthropic tunnel'
 );
-assert.match(
-  blackboxScript,
-  /FAST_MODE_CODEX_PROXY_URL="\$\{BLACKBOX_FAST_MODE_CODEX_PROXY_URL:-\}"/,
-  'isolated blackbox backend must not inherit a developer Fast Mode Codex tunnel'
+assert.ok(
+  !blackboxScript.includes('FAST_MODE_CODEX_PROXY_URL='),
+  'Codex never routes through a Rose proxy (S30): no Codex tunnel to export'
 );
 
 const codexSmokeIndex = codexBlackbox.indexOf('fn: testSmoke_codexCompletesE2bTask');
