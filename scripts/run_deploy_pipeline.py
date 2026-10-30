@@ -54,10 +54,15 @@ old on the monotonic clock, measured from the stamp taken *before* the /proc
 scan, so a scan that itself outlives the limit yields no credit when it
 returns; the raw elapsed value is compared (rounding only the displayed age),
 and a negative age (a stamp from the future) is ``invalid``, also no credit.
-``tree_sampled_at`` keeps the wall-clock scan start for humans. Each running
-lane's observation state (``fresh``/``stale``/``invalid``/``unknown``), values
-and age are part of the recorded admission inputs, and a deferred lane keeps
-its first and latest deferral inputs. A lane whose usage is unknown, stale or
+``tree_sampled_at`` keeps the wall-clock scan start for humans. The
+classification and the resulting credit are computed per candidate at its
+decision point, immediately after the live host probe, never ahead of the
+candidate loop: a slow probe or a deschedule between the sampling pass and
+the decision ages the sample, and the decision and its record use the same,
+current classification. Each running lane's observation state
+(``fresh``/``stale``/``invalid``/``unknown``), values and age are part of the
+recorded admission inputs, and a deferred lane keeps its first and latest
+deferral inputs. A lane whose usage is unknown, stale or
 invalid (macOS, unreadable /proc, not yet sampled, a stalled or slow pass)
 keeps its whole declaration, and the declarations themselves are unchanged. An
 unphased lane (``semantic-stack``: its ``run.sh --benchmark`` startup runs
@@ -1533,10 +1538,9 @@ def _run_attempt(
             reserved = sum(by_name[name].memory_mb for name in running_states)
             # Live headroom already contains what the running lanes use; only
             # the part of their declarations not yet materialized is still owed,
-            # and only a fresh, fully observed sample says how much that is.
-            observations = {name: fresh_tree_anon_mb(state) for name, state in running_states.items()}
-            unmaterialized = sum(unmaterialized_mb(by_name[name].memory_mb, observations[name][0])
-                                 for name in running_states)
+            # and only a fresh, fully observed sample says how much that is. The
+            # classification is computed per candidate at its decision point
+            # (after the host probe), never ahead of the loop.
             pass_sample = None
             for lane in list(pending):
                 if max_parallel and running >= max_parallel:
@@ -1583,6 +1587,13 @@ def _run_attempt(
                     sample_host_peak(receipt["host_peak"], pass_sample)
                 sample = pass_sample
                 headroom = memory_budget_mb(sample)
+                # Classify the running lanes' observations now, after the host
+                # probe: a slow probe or a deschedule may have aged a sample that
+                # was fresh when this pass began past the limit. The decision
+                # and its record use the same, current classification.
+                observations = {name: fresh_tree_anon_mb(state) for name, state in running_states.items()}
+                unmaterialized = sum(unmaterialized_mb(by_name[name].memory_mb, observations[name][0])
+                                     for name in running_states)
                 accounting = "unmaterialized" if lane.name in credit_lanes else "declared"
                 live_reserved = unmaterialized if accounting == "unmaterialized" else reserved
                 inputs = _admission_inputs(lane, headroom, budget_mb, reserved, live_reserved, accounting,
@@ -1646,11 +1657,11 @@ def _run_attempt(
                 receipt["lanes"][lane.name].update(
                     status="running", started_epoch=time.time(), log=str(log_path)
                 )
+                # The next candidate reclassifies the running lanes, including
+                # this one (unknown until a sampling pass observes it).
                 running_states[lane.name] = receipt["lanes"][lane.name]
-                observations[lane.name] = fresh_tree_anon_mb(running_states[lane.name])  # unknown until sampled
                 running += 1
                 reserved += lane.memory_mb
-                unmaterialized += lane.memory_mb  # nothing of a fresh lane is visible yet
             write_receipt(receipt_path, receipt)
         elif pending:
             for lane in pending:

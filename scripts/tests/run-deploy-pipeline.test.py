@@ -694,6 +694,53 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
                                                         "observed_age_s": None, "observation": "unknown"})
     assert pipeline.fresh_tree_anon_mb({"tree_anon_mb": 80.0, "tree_sampled_mono": time.monotonic()})[0] == 80.0, \
         "the default clock is monotonic, not wall time"
+    # A delayed host probe: the holder is observed fresh (80 MB) at ~1 s, the
+    # gate exits at ~1.5 s and the joiner's admission probe then takes 3.2 s.
+    # The classification must be made after that probe, at the decision point,
+    # where the sample is ~3.8 s old: stale, no credit, the joiner waits (later
+    # passes fail, so it keeps waiting for the holder). A prompt probe crediting
+    # a fresh sample is the first scenario of check_materialized_reservation_credit.
+    probe_marker = tmp / "probe-holder-allocated"
+    gate_marker = tmp / "probe-gate-done"
+    probe_plan = tmp / "probe-plan.json"
+    probe_state = tmp / "probe"
+    write_plan(probe_plan, [
+        {"name": "gate", "command": ["bash", "-c", f"sleep 1.5; touch {gate_marker}"], "reuse_passed": False,
+         "group": "3", "memory_mb": 1},
+        {"name": "holder", "command": [sys.executable, "-c",
+                                       f"import pathlib, time; pathlib.Path({str(probe_marker)!r}).touch(); "
+                                       "time.sleep(6.5)"],
+         "reuse_passed": False, "group": "3", "memory_mb": 100},
+        {"name": "joiner", "command": ["true"], "after": ["gate"], "reuse_passed": False, "group": "3",
+         "memory_mb": 60},
+    ], schedule={"policy": "legacy"})
+    probe_calls: list[int] = []
+    slow_probes: list[float] = []
+
+    def once_sampler(pids: set[int]) -> dict[int, dict | None]:
+        probe_calls.append(len(pids))
+        return {pid: {"anon_mb": 80.0, "pss_mb": 96.0} for pid in pids} if len(probe_calls) == 1 else {}
+
+    def delayed_host() -> dict:
+        if gate_marker.exists() and not slow_probes:
+            slow_probes.append(time.monotonic())
+            time.sleep(pipeline.OBSERVATION_MAX_AGE_SECONDS + 0.2)
+        return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if probe_marker.exists() else 300)}
+
+    with patch.object(pipeline, "host_resources", side_effect=delayed_host), \
+         patch.object(pipeline, "sample_lane_tree_memory", side_effect=once_sampler), \
+         patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
+         patch.dict(os.environ, env):
+        result = pipeline.run(probe_plan, probe_state, max_parallel=0)
+    receipt = json.loads((probe_state / "receipt.json").read_text())
+    assert result == 0 and receipt["status"] == "passed", (result, receipt["lanes"])
+    holder, joiner = receipt["lanes"]["holder"], receipt["lanes"]["joiner"]
+    assert slow_probes and holder["tree_peak_anon_mb"] == 80.0, (slow_probes, holder)
+    assert joiner["started_epoch"] >= holder["finished_epoch"], \
+        "a sample that expired during the host probe was still credited at the decision"
+    first = joiner["admission"]["deferred"]["first"]["running"]["holder"]
+    assert first["observation"] == "stale" and first["observed_age_s"] > pipeline.OBSERVATION_MAX_AGE_SECONDS, first
+    assert joiner["admission"]["deferred"]["first"]["reserved_live_mb"] == 100, joiner["admission"]["deferred"]
     print("observation validity: ok")
 
 
