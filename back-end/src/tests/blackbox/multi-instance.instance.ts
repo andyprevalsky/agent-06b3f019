@@ -508,27 +508,6 @@ async function main(): Promise<unknown> {
           false,
           { sessionId }
         );
-      } else {
-        const { resolveCodex } = await import('../../providers/codexProxyCore');
-        await resolveCodex(
-          traceHash,
-          'POST',
-          '/backend-api/codex/responses',
-          { input: [{ role: 'user', content: 'hi' }] },
-          {},
-          {
-            cacheGet,
-            cacheSet,
-            fetchUpstream: async () => ({
-              status: 200,
-              contentType: 'text/event-stream',
-              body: 'ok',
-            }),
-            reserveOrdinal: routes.PROXY_ORDINAL_RESERVER,
-          },
-          false,
-          { sessionId }
-        );
       }
       return { keys };
     }

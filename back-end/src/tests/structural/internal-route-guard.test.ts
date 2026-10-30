@@ -130,7 +130,7 @@ assert.deepStrictEqual(
 // The Fast Mode proxies carry no Authorization; every trace route must verify
 // the server-minted capability (RCA 2026-10-26-internal-routes-trusted-any-user-jwt).
 const proxySource = fs.readFileSync(path.join(domainsDir, 'demo-cache/routes.proxy.ts'), 'utf8');
-for (const routerName of ['anthropicProxyRouter', 'codexProxyRouter']) {
+for (const routerName of ['anthropicProxyRouter']) {
   assert.ok(
     new RegExp(`${routerName}\\.use\\(\\s*'/:traceParam',\\s*requireProxyCapability`).test(
       proxySource
@@ -138,6 +138,8 @@ for (const routerName of ['anthropicProxyRouter', 'codexProxyRouter']) {
     `${routerName} must verify the proxy capability before any trace route`
   );
 }
+// Codex never routes through a Rose proxy (S30): no Codex trace router exists.
+assert.ok(!proxySource.includes('codexProxyRouter'), 'no Codex proxy router (S30)');
 assert.ok(
   !/parse(Anthropic|Codex)TraceParam\(req\.params/.test(proxySource),
   'proxy handlers must parse the verified trace segment, never the raw param'

@@ -15,7 +15,6 @@
 import assert from 'node:assert';
 import {
   buildFastModeAnthropicEnv,
-  buildFastModeCodexEnv,
   codeAgentTraceHash,
   isE2bReachableProxyBaseUrl,
 } from '../../domains/demo-cache/codeAgentEnv';
@@ -58,32 +57,9 @@ test('#20 injects ANTHROPIC_BASE_URL with goalHash path when on', () => {
   );
 });
 
-test('#20 injects CODEX_FAST_MODE_PROXY_URL with goalHash path when on', () => {
-  const env = buildFastModeCodexEnv('do a thing', true, 'https://api.example.com/codex-proxy');
-  assert.ok(env.CODEX_FAST_MODE_PROXY_URL);
-  assert.match(
-    env.CODEX_FAST_MODE_PROXY_URL!,
-    /^https:\/\/api\.example\.com\/codex-proxy\/[0-9a-f]{16},[0-9a-f]{32}$/
-  );
-});
-
-test('#20 derives Codex proxy URL from Anthropic proxy URL when explicit URL is absent', () => {
-  const oldAnthropic = process.env.FAST_MODE_ANTHROPIC_PROXY_URL;
-  const oldCodex = process.env.FAST_MODE_CODEX_PROXY_URL;
-  delete process.env.FAST_MODE_CODEX_PROXY_URL;
-  process.env.FAST_MODE_ANTHROPIC_PROXY_URL = 'https://api.example.com/anthropic-proxy';
-  try {
-    const env = buildFastModeCodexEnv('do a thing', true);
-    assert.match(
-      env.CODEX_FAST_MODE_PROXY_URL!,
-      /^https:\/\/api\.example\.com\/codex-proxy\/[0-9a-f]{16},[0-9a-f]{32}$/
-    );
-  } finally {
-    if (oldAnthropic === undefined) delete process.env.FAST_MODE_ANTHROPIC_PROXY_URL;
-    else process.env.FAST_MODE_ANTHROPIC_PROXY_URL = oldAnthropic;
-    if (oldCodex === undefined) delete process.env.FAST_MODE_CODEX_PROXY_URL;
-    else process.env.FAST_MODE_CODEX_PROXY_URL = oldCodex;
-  }
+test('Codex has no Fast Mode / DEMO cache env builder (S30)', async () => {
+  const env = (await import('../../providers/codeAgentFastModeEnv')) as Record<string, unknown>;
+  assert.strictEqual(env.buildFastModeCodexEnv, undefined, 'Codex must never get a proxy URL');
 });
 
 // #25 — flag off → nothing injected (inert).
@@ -128,24 +104,6 @@ test('refuses loopback Fast Mode Anthropic proxy base (E2B-unreachable)', () => 
       true
     ),
     {}
-  );
-  assert.deepStrictEqual(
-    buildFastModeCodexEnv('tint rs.jpeg', true, 'http://localhost:56201/codex-proxy'),
-    {}
-  );
-});
-
-test('write-only injects CODEX_FAST_MODE_PROXY_URL with record-only path when flag off', () => {
-  const env = buildFastModeCodexEnv(
-    'do a thing',
-    false,
-    'https://api.example.com/codex-proxy',
-    true
-  );
-  assert.ok(env.CODEX_FAST_MODE_PROXY_URL);
-  assert.match(
-    env.CODEX_FAST_MODE_PROXY_URL!,
-    /^https:\/\/api\.example\.com\/codex-proxy\/[0-9a-f]{16},[0-9a-f]{32}\/record-only(\.[0-9a-f]{32})?$/
   );
 });
 
@@ -314,11 +272,6 @@ test('no BACKEND_API_KEY skips proxy routing instead of failing session creation
       buildFastModeAnthropicEnv('g', true, 'https://api.example.com/anthropic-proxy'),
       {}
     );
-    assert.deepStrictEqual(
-      buildFastModeCodexEnv('g', true, 'https://api.example.com/codex-proxy'),
-      {}
-    );
-    // e2b's "cache on but no Codex proxy" error must not fire for this case.
     assert.strictEqual(fastModeProxySigningAvailable(), false);
   } finally {
     process.env.BACKEND_API_KEY = saved;

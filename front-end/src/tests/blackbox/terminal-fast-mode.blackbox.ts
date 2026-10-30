@@ -7,7 +7,7 @@ import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { clearCaptures, capturedRequests } from './msw/capture';
 import { ADMIN_ACCOUNTS } from '@/lib/adminAccounts';
-import { resetQueryPreferencesMemory } from '@/lib/queryPreferences';
+import { resetQueryPreferencesMemory, writeQueryPreferences } from '@/lib/queryPreferences';
 import { resetFastModeSessionOverride } from '@/lib/fastModeSession';
 
 const mocks = vi.hoisted(() => {
@@ -188,6 +188,27 @@ describe('useTerminalAgents Fast Mode bridge', () => {
       (r) => r.method === 'POST' && r.url.endsWith('/agents'),
     );
     expect(createOff?.body).toMatchObject({ fast_mode_cache_enabled: false });
+  });
+
+  it('sends the query-box speed (standard, fast or ultrafast) so agents start at that native speed', async () => {
+    const { result } = renderHook(() => useMessageSending(messageSendingArgs()));
+    await waitFor(() => expect(result.current.fastMode).toBe(true));
+    const sent = async (goal: string) => {
+      clearCaptures();
+      act(() => result.current.setMessageInput(goal));
+      await act(async () => {
+        await result.current.handleSendMessage();
+      });
+      return capturedRequests.find((r) => r.method === 'POST' && r.url.endsWith('/agents'))
+        ?.body as Record<string, unknown> | undefined;
+    };
+
+    expect(await sent('ultra by default')).toMatchObject({ speed: 'ultrafast' });
+    writeQueryPreferences(ADMIN_ACCOUNTS[0]!.userId, { ultraPreferred: false });
+    expect(await sent('fast when chosen')).toMatchObject({ speed: 'fast' });
+    act(() => result.current.setFastMode(false));
+    const off = await sent('normal speed');
+    expect(off).toMatchObject({ fast_mode_cache_enabled: false, speed: 'standard' });
   });
 
   it('hydrates Fast Mode from the loaded agent detail instead of the account default', async () => {

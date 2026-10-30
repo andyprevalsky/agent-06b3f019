@@ -25,9 +25,12 @@ import {
   applyFastModeInheritance,
   applyMemoryDefault,
   applyMemoryInheritance,
+  applySpeedDefault,
+  applySpeedInheritance,
   applyWorldModelModeInheritance,
   assertWorldModelModeAccess,
   disableFastModeForWorldModel,
+  resolvedSpeed,
 } from './agentExecutionMode';
 import {
   resumeExistingSubAgent,
@@ -141,10 +144,12 @@ async function resolveSubAgentBenchmarkFlag(
   const parent = await repo.findAgent(body.parent_agent_id, userId);
   if (
     body.fast_mode_cache_enabled === undefined ||
+    body.speed === undefined ||
     body.world_model_mode === undefined ||
     body.memory_enabled === undefined
   ) {
     applyFastModeInheritance(body, parent?.fastModeCacheEnabled);
+    applySpeedInheritance(body, parent);
     applyWorldModelModeInheritance(body, parent?.worldModelMode);
     applyMemoryInheritance(body, parent?.memoryEnabled);
   }
@@ -198,6 +203,8 @@ export async function createAgent(
   if (isInternal) body.goal = resolvePromptSecrets(body.goal);
   const verifier = { type: 'FLOAT_LLM_JUDGE' as const };
   const isSubAgent = body.parent_agent_id !== undefined;
+  // Speed reads the raw legacy flag, so it resolves before the Fast Mode default.
+  applySpeedDefault(body);
   applyFastModeDefault(body, userId);
 
   const benchmarkFlag = await resolveSubAgentBenchmarkFlag(body, userId, isBenchmark);
@@ -236,6 +243,7 @@ export async function createAgent(
     priceLimitCents: resolvePriceLimitCents(body.price_limit_cents),
     writeLockEnabled: body.write_lock_enabled,
     fastModeCacheEnabled: body.fast_mode_cache_enabled,
+    speed: resolvedSpeed(body),
     memoryEnabled: body.memory_enabled,
     worldModelMode: body.world_model_mode,
     verifierType: verifier.type,
