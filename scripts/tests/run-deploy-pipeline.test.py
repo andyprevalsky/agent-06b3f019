@@ -468,6 +468,9 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
         assert admission["headroom_mb"] == 120 and admission["budget_mb"] == 300 and admission["memory_mb"] == 60
         assert admission["reserved_declared_mb"] == 100 and admission["reserved_live_mb"] < 60, admission
         assert admission["running"]["holder"]["memory_mb"] == 100 and admission["running"]["holder"]["tree_rss_mb"] >= 50
+        assert admission["running"]["holder"]["observation"] == "fresh", admission["running"]
+        assert 0 <= admission["running"]["holder"]["observed_age_s"] <= pipeline.OBSERVATION_MAX_AGE_SECONDS
+        assert holder["tree_rss_at"] and holder["tree_rss_epoch"] <= holder["finished_epoch"], holder
         assert admission["deferred"]["checks"] >= 1 and admission["deferred"]["reason"] == "headroom", admission
         assert admission["deferred"]["last"]["reserved_live_mb"] + 60 > 120, admission["deferred"]
         assert unphased["started_epoch"] >= holder["finished_epoch"], \
@@ -480,11 +483,97 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
     write(tmp / "unobserved-joined", tmp / "unobserved-unphased")
     lanes = run(tmp / "unobserved", sample_lane_tree_rss=lambda pids: {})["lanes"]
     assert lanes["joiner"]["started_epoch"] >= lanes["holder"]["finished_epoch"], lanes["joiner"]
-    assert lanes["joiner"]["admission"]["running"] == {} and "tree_rss_mb" not in lanes["holder"], lanes
-    assert lanes["joiner"]["admission"]["deferred"]["last"]["running"]["holder"]["tree_rss_mb"] is None, lanes["joiner"]
+    assert lanes["joiner"]["admission"]["running"] == {} and lanes["holder"]["tree_rss_mb"] is None, lanes
+    assert "tree_peak_rss_mb" not in lanes["holder"], lanes["holder"]
+    last = lanes["joiner"]["admission"]["deferred"]["last"]["running"]["holder"]
+    assert last["tree_rss_mb"] is None and last["observation"] == "unknown", last
     assert pipeline.unmaterialized_mb(100, None) == 100 and pipeline.unmaterialized_mb(100, 70.4) == 30
     assert pipeline.unmaterialized_mb(100, 250.0) == 0
     print("materialized reservation credit: ok")
+
+
+def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
+    """Review of f3127ca41: the credit must bind to a fresh, fully observed
+    PSS sample. (1) Summed RSS is never a PSS substitute: shared pages count
+    once per process and would over-credit the lane, so a tree with any live
+    process whose smaps_rollup is unreadable is unknown. (2) Every sampling
+    pass re-marks every running lane: a lane sampled at 80 MB whose later
+    passes fail (process gone, /proc unreadable, PID reuse) is unknown again,
+    not still credited 80 MB; and an observation older than
+    OBSERVATION_MAX_AGE_SECONDS is stale. Unknown and stale keep the whole
+    declaration; only fresh credits."""
+    pipeline = load_module("pipeline_observation_validity", DRIVER)
+    # (2) Stale after a sampling failure. The holder is observed once at 80 MB
+    # (first pass, ~1 s) and never again; the joiner becomes eligible only at
+    # ~2.5 s, by which time the failed passes must have made the holder unknown.
+    marker = tmp / "validity-holder-allocated"
+    plan = tmp / "validity-plan.json"
+    state = tmp / "validity"
+    write_plan(plan, [
+        {"name": "gate", "command": ["sleep", "2.5"], "reuse_passed": False, "group": "3", "memory_mb": 1},
+        {"name": "holder", "command": [sys.executable, "-c",
+                                       f"import pathlib, time; pathlib.Path({str(marker)!r}).touch(); time.sleep(5)"],
+         "reuse_passed": False, "group": "3", "memory_mb": 100},
+        {"name": "joiner", "command": ["true"], "after": ["gate"], "reuse_passed": False, "group": "3",
+         "memory_mb": 60},
+    ], schedule={"policy": "legacy"})
+    calls: list[set[int]] = []
+
+    def flaky_sampler(pids: set[int]) -> dict[int, float | None]:
+        calls.append(set(pids))
+        return {pid: 80.0 for pid in pids} if len(calls) == 1 else {}
+
+    def host() -> dict:
+        return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if marker.exists() else 300)}
+
+    with patch.object(pipeline, "host_resources", side_effect=host), \
+         patch.object(pipeline, "sample_lane_tree_rss", side_effect=flaky_sampler), \
+         patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
+         patch.dict(os.environ, env):
+        result = pipeline.run(plan, state, max_parallel=0)
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert result == 0 and receipt["status"] == "passed", (result, receipt["lanes"])
+    holder, joiner = receipt["lanes"]["holder"], receipt["lanes"]["joiner"]
+    assert len(calls) >= 3, f"the sampler must have failed after its first pass: {len(calls)} passes"
+    assert joiner["started_epoch"] >= holder["finished_epoch"], \
+        "a stale 80 MB observation stayed credited after sampling failed"
+    assert holder["tree_peak_rss_mb"] == 80.0 and holder["tree_rss_mb"] is None, holder
+    last = joiner["admission"]["deferred"]["last"]["running"]["holder"]
+    assert last == {"memory_mb": 100, "tree_rss_mb": None, "observed_age_s": last["observed_age_s"],
+                    "observation": "unknown"} and last["observed_age_s"] is not None, last
+    # (1) PSS unreadable for one live process: the tree is unknown, never summed RSS.
+    proc = tmp / "fake-proc"
+    for pid, ppid in ((100, 1), (101, 100), (102, 101), (200, 1)):
+        (proc / str(pid)).mkdir(parents=True)
+        fields = ["S", str(ppid), str(pid), str(pid)] + ["0"] * 17 + ["1000", "25000"]  # ... vsize, rss pages
+        (proc / str(pid) / "stat").write_text(f"{pid} (fake) {' '.join(fields)}\n")
+    (proc / "not-a-pid").mkdir()
+    for pid in (100, 101):
+        (proc / str(pid) / "smaps_rollup").write_text("Rss: 4096 kB\nPss: 2048 kB\nPss_Anon: 1024 kB\n")
+    assert pipeline.sample_lane_tree_rss({100, 200}, proc) == {100: None, 200: None}, "102 and 200 lack PSS"
+    (proc / "102" / "smaps_rollup").write_text("Rss: 4096 kB\nPss: 1024 kB\n")
+    assert pipeline.sample_lane_tree_rss({100}, proc) == {100: 5.0}, "PSS of 100 + 101 + 102 = 2 + 2 + 1 MB"
+    shutil.rmtree(proc / "102")  # exited since the listing: gone, not unknown
+    listing = os.listdir(proc)
+    with patch.object(pipeline.os, "listdir", return_value=listing + ["102"]):
+        assert pipeline.sample_lane_tree_rss({100}, proc) == {100: 4.0}
+    (proc / "101" / "smaps_rollup").write_text("Rss: 4096 kB\n")  # no Pss line
+    assert pipeline.sample_lane_tree_rss({100}, proc) == {100: None}
+    assert pipeline.sample_lane_tree_rss({100}, tmp / "no-such-proc") == {100: None}
+    assert pipeline.sample_lane_tree_rss(set(), proc) == {}
+    # Fresh, stale and unknown observations.
+    now = 1_000.0
+    fresh, detail = pipeline.fresh_tree_rss_mb({"tree_rss_mb": 80.0, "tree_rss_epoch": now - 1.0}, now)
+    assert fresh == 80.0 and detail == {"tree_rss_mb": 80.0, "observed_age_s": 1.0, "observation": "fresh"}, detail
+    stale, detail = pipeline.fresh_tree_rss_mb(
+        {"tree_rss_mb": 80.0, "tree_rss_epoch": now - pipeline.OBSERVATION_MAX_AGE_SECONDS - 0.1}, now)
+    assert stale is None and detail["observation"] == "stale" and detail["tree_rss_mb"] == 80.0, detail
+    assert pipeline.fresh_tree_rss_mb({"tree_rss_mb": 80.0}, now) == (None, {
+        "tree_rss_mb": 80.0, "observed_age_s": None, "observation": "stale"})
+    assert pipeline.fresh_tree_rss_mb({"tree_rss_mb": None, "tree_rss_epoch": now}, now)[1]["observation"] == "unknown"
+    assert pipeline.fresh_tree_rss_mb({}, now) == (None, {"tree_rss_mb": None, "observed_age_s": None,
+                                                        "observation": "unknown"})
+    print("observation validity: ok")
 
 
 def check_stack_owner_dependency(tmp: Path, env: dict[str, str]) -> None:
@@ -770,6 +859,7 @@ def main() -> int:
         check_wait_receipt_contract(tmp)
         check_live_headroom_and_child_rusage(tmp, env)
         check_materialized_reservation_credit(tmp, env)
+        check_observation_validity(tmp, env)
         check_stack_owner_dependency(tmp, env)
         check_plan_scaling()
         check_structural_memory_floor()
