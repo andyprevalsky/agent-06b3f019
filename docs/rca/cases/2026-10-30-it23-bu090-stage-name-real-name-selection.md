@@ -149,3 +149,42 @@ sess_b28038171a134973a7badcbef42f29e5 DELETE204 and root deleted/tree sealed.
 No operational infrastructure failure, replay, native/DB/model call or live
 source change occurred in the bounded investigation. All original grades and
 clocks remain unchanged; no new repair lane or duplicated case was created.
+
+## R105 observed recurrence: original It25 BU090r2
+
+Original r002-j0020/root069bfa9d-5041-487d-a120-bcc0fedf2f5c on
+3dc00896d3b8dcc0b3666c9c8493507ee96c7809/patchnone independently preserves
+the same observed name-selection boundary. Archive
+fcefd81405f6e7ffce9921248469470883dd1081eefc19d586d3dc9122f27cf3 and all
+seven normal member sizes/hashes match manifest
+7fac8ea8548f9cff53dc58f0cbab84495ae85ed457dc86e47f320ab74dcf8e4e.
+Run SHA d970e4465a8ba1bb999c354d37474c25980e4bca0ccca2d2db142df847ddf76e
+ends nativeCOMPLETED402.9s/progress1. C1/C2/C3 pass; C4 exact J.Yoon fails.
+ProducerinfraFALSE and all original grades remain unchanged.
+
+Raw schema-author output at worker96/dump9b5768d77fa9, decoded SHA
+753286ed9d36b9507823c2f79c67f35dc21aedafe47b40cb55a7013e28c6f8cf,
+explicitly requests the full name in required field deceased_member_name.
+Persisted canonical schema retains that description and value/text presentation.
+The original K-VIBE DOM identifies J.Yoon and gives real name Yoon Jae-woong;
+both designations remain in the verifier input. Raw verifier output at
+worker9665/dump1dcb787baff5, decoded SHA
+f095e3a8bc48aa2ad19d029d841bee3b50038536ef3f57031f7c18441d8918b8,
+returns Yoon Jae-woong with task_completed=true and score1.0, explicitly
+reasoning about the stage name and requested full name. Final output is the
+same legal-name string. No observed converter or delivery step removes a
+previously selected stage-name answer.
+
+Two archive searches covered stage-name/real-name and schema descriptions.
+The prior R90/R99 Solution and Human feedback were read. This is a recurrence
+of their observed boundary, not a controlled demonstration of model cause or
+a reason to rewrite the exact criterion. No new runtime fix, answer override,
+alias heuristic, model replay or duplicated case was introduced. The original
+R90/R99 bytes remain intact.
+
+Cleanup evidence differs from the earlier runs and is preserved as recorded:
+Kernel sessionugrhn50wa2jcas9sfynk5hmm returns404, root is deleted and tree
+sealed, cleanup errors are empty, and warning archive:TimeoutError remains.
+This is not described as a Tilion204 or as perfect archive publication. No
+new provider/native/DB/guest query, deployment or grade change occurred.
+Selected original output hashes are retained in .context/r105/proof.json.
