@@ -217,6 +217,34 @@ agents_venv_is_self_rooted() {
     [ "$(canonical_dir "$activated")" = "$(canonical_dir "$venv")" ]
 }
 
+# The source workspace's healthy agents/venv is the verified toolchain
+# (CLAUDE.md "Fresh clone setup": link existing healthy trees, including
+# agents/venv, when the manifests match). A fresh venv resolves every
+# unpinned range anew and drifted on 2026-10-30 (pytest 9.2.0 beside the
+# verified 9.1.1), so a deploy worktree links the source venv whenever its
+# agents/requirements.txt is byte-identical and that venv activates to itself,
+# imports the agent stack and satisfies the manifest. A linked venv is never
+# installed into: the source workspace owns it.
+agents_venv_reusable_from_source() {
+  local target="$1"
+  local source_workspace="$2"
+  local source_venv="$source_workspace/agents/venv"
+  cmp -s "$target/agents/requirements.txt" "$source_workspace/agents/requirements.txt" || return 1
+  [ -x "$source_venv/bin/python" ] || return 1
+  agents_venv_is_self_rooted "$source_venv" || return 1
+  "$source_venv/bin/python" -c 'import browser_use, pytest, temporalio' >/dev/null 2>&1 || return 1
+  "$source_venv/bin/python" "$target/scripts/lib/agents_venv_satisfied.py" "$target/agents/requirements.txt" \
+    >/dev/null 2>&1
+}
+
+agents_venv_linked_to_source() {
+  local target="$1"
+  local source_workspace="$2"
+  [ -L "$target/agents/venv" ] || return 1
+  [ -d "$target/agents/venv" ] || return 1
+  [ "$(canonical_dir "$target/agents/venv")" = "$(canonical_dir "$source_workspace/agents/venv")" ]
+}
+
 ensure_dependencies() {
   local target="$1"
   local source_workspace="$2"
@@ -240,18 +268,39 @@ ensure_dependencies() {
       workspaces+=(mac-app)
     fi
     bash scripts/ensure-workspace-dependencies.sh "${workspaces[@]}"
-    if [ ! -x agents/venv/bin/python ] ||
+    # A reused dependency tree carries the client generated for its source
+    # checkout's schema at the time; regenerate it here (test launchers only
+    # assert freshness and never rewrite it).
+    bash scripts/ensure-prisma-client.sh "$target"
+    if [ -L agents/venv ]; then
+      # A venv linked to the source workspace is reused only while that venv
+      # still matches this worktree's manifest; otherwise drop the link (never
+      # the source venv behind it) and decide afresh below.
+      if agents_venv_linked_to_source "$target" "$source_workspace" &&
+        agents_venv_reusable_from_source "$target" "$source_workspace"; then
+        echo "♻️  Reusing the source workspace agents/venv (requirements identical): $(canonical_dir agents/venv)"
+      else
+        echo "📦 Linked agents/venv no longer matches agents/requirements.txt; replacing the link."
+        rm agents/venv
+      fi
+    fi
+    if [ ! -e agents/venv ] && agents_venv_reusable_from_source "$target" "$source_workspace"; then
+      ln -s "$source_workspace/agents/venv" agents/venv
+      echo "♻️  Linked the source workspace agents/venv (requirements identical): $(canonical_dir agents/venv)"
+    elif [ ! -x agents/venv/bin/python ] ||
       ! agents_venv_is_self_rooted agents/venv ||
       ! agents/venv/bin/python -c 'import browser_use, pytest, temporalio' >/dev/null 2>&1; then
       source_python="$source_workspace/agents/venv/bin/python"
       [ -x "$source_python" ] || source_python="$(command -v python3)"
-      if [ -e agents/venv ]; then
+      if [ -e agents/venv ] || [ -L agents/venv ]; then
         mv agents/venv "agents/venv.incomplete.$(date -u +%Y%m%d%H%M%S).$$"
       fi
+      echo "📦 Building a fresh agents/venv (requirements differ from the source workspace or its venv is unusable)..."
       "$source_python" -m venv agents/venv
       agents/venv/bin/python -m pip install --upgrade pip
       agents/venv/bin/python -m pip install -r agents/requirements.txt
-    elif ! agents/venv/bin/python scripts/lib/agents_venv_satisfied.py agents/requirements.txt; then
+    elif [ ! -L agents/venv ] &&
+      ! agents/venv/bin/python scripts/lib/agents_venv_satisfied.py agents/requirements.txt; then
       agents/venv/bin/python -m pip install -r agents/requirements.txt
     fi
     agents/venv/bin/python -c 'import browser_use, pytest, temporalio' >/dev/null
@@ -266,8 +315,27 @@ database_port() {
 system_deploy_db_name() {
   # Isolated DB name on shared system Postgres (Cloud: ROSE_USE_SYSTEM_PG).
   # Keep it SQL-safe and unique per worktree identity.
-  local safe
-  safe="$(printf '%s' "$CONDUCTOR_WORKSPACE_NAME" | tr -c '[:alnum:]' '_' | cut -c1-48)"
+  local safe digest
+  safe="$(printf '%s' "$CONDUCTOR_WORKSPACE_NAME" | tr -c '[:alnum:]' '_')"
+  # victoria_deploy_<safe>_s<i> (coverage shards) must stay within Postgres's
+  # 63-byte identifier limit. A long identity keeps its first 30 characters
+  # plus a 12-hex sha256 of the whole sanitized name, so two worktrees that
+  # share a prefix never share a database (back-end/scripts/coverage-database-url.mjs
+  # derives the same name).
+  if [ "${#safe}" -gt 43 ]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+      digest="$(printf '%s' "$safe" | sha256sum | cut -c1-12)"
+    else
+      digest="$(printf '%s' "$safe" | shasum -a 256 | cut -c1-12)"
+    fi
+    safe="${safe:0:30}_${digest}"
+  fi
+  case "$safe" in
+    *_s[0-9]|*_s[0-9][0-9]|*_s[0-9][0-9][0-9])
+      echo "❌ Deploy worktree identity $CONDUCTOR_WORKSPACE_NAME ends in _s<digits>, which is reserved for coverage shard databases." >&2
+      return 1
+      ;;
+  esac
   printf 'victoria_deploy_%s\n' "$safe"
 }
 
@@ -411,7 +479,7 @@ if $CHECK_ONLY; then
     # Cloud dev boxes have no Conductor-provided CONDUCTOR_WORKSPACE_PATH; their
     # primary checkout is identified by the cloud-build.sh .cloud-env rooted at
     # itself. A linked worktree is never primary, even with a copied .cloud-env.
-    cloud_root="$(sed -n 's/^export CONDUCTOR_ROOT_PATH=//p' "$WORKTREE/.cloud-env" 2>/dev/null | tail -n 1)"
+    cloud_root="$( (sed -n 's/^export CONDUCTOR_ROOT_PATH=//p' "$WORKTREE/.cloud-env" 2>/dev/null || true) | tail -n 1)"
     if grep -qx '# rose-cloud-env' "$WORKTREE/.cloud-env" 2>/dev/null &&
       [ -n "$cloud_root" ] && [ -d "$cloud_root" ] &&
       [ "$(canonical_dir "$cloud_root")" = "$WORKTREE" ] &&
@@ -429,6 +497,14 @@ if $CHECK_ONLY; then
     echo "❌ Deploy worktree config belongs to ${ROSE_DEPLOY_WORKTREE_PATH:-unknown}, not $WORKTREE." >&2
     exit 1
   }
+  # The owned ten-port range must not be exposed to kernel ephemeral autobind:
+  # an outbound connection that takes one of its ports makes a later listen()
+  # fail with EADDRINUSE (backend coverage shard 1 lost 56022 on 2026-10-28).
+  # New claims avoid the live window; an older claim must be reserved by the host.
+  python3 "$SCRIPT_DIR/deploy-worktree-port.py" check --base-port "$CONDUCTOR_PORT" || {
+    echo "❌ Deploy worktree base port $CONDUCTOR_PORT is exposed to kernel ephemeral autobind; see the remedy above." >&2
+    exit 1
+  }
   check_env_files "$WORKTREE" "$ROSE_DEPLOY_SOURCE_WORKSPACE"
   [ -x "$WORKTREE/agents/venv/bin/python" ] || {
     echo "❌ Deploy worktree is missing agents/venv." >&2
@@ -439,6 +515,28 @@ if $CHECK_ONLY; then
     echo "   Re-run deploy-worktree preparation to rebuild it in place." >&2
     exit 1
   }
+  if [ -L "$WORKTREE/agents/venv" ]; then
+    # A linked venv is the source workspace's; it is only this worktree's
+    # toolchain while both manifests are byte-identical.
+    agents_venv_linked_to_source "$WORKTREE" "$ROSE_DEPLOY_SOURCE_WORKSPACE" || {
+      echo "❌ Deploy worktree agents/venv links outside its selected source workspace." >&2
+      exit 1
+    }
+    cmp -s "$WORKTREE/agents/requirements.txt" "$ROSE_DEPLOY_SOURCE_WORKSPACE/agents/requirements.txt" || {
+      echo "❌ Deploy worktree agents/venv is linked to the source workspace but agents/requirements.txt differs." >&2
+      echo "   Re-run deploy-worktree preparation to build this worktree's own venv." >&2
+      exit 1
+    }
+    # The source workspace owns that venv and can change it after preparation
+    # (a removed package, a partial reinstall): re-verify, as preparation did,
+    # that it still imports the agent stack and satisfies this manifest. The
+    # link, interpreter, activation and manifests alone do not prove that.
+    agents_venv_reusable_from_source "$WORKTREE" "$ROSE_DEPLOY_SOURCE_WORKSPACE" || {
+      echo "❌ Deploy worktree agents/venv is linked to the source workspace but that venv no longer imports the agent stack or satisfies agents/requirements.txt." >&2
+      echo "   Re-run deploy-worktree preparation to build this worktree's own venv." >&2
+      exit 1
+    }
+  fi
   [ -d "$WORKTREE/node_modules" ] || {
     echo "❌ Deploy worktree is missing node_modules." >&2
     exit 1

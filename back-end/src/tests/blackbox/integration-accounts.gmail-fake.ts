@@ -1,8 +1,8 @@
 /**
  * Gmail faked at the global fetch boundary for the Gmail sync-progress case:
  * one mailbox per access token, with knobs for the failures a real sync meets
- * (profile outage, list error, a batch that fails mid-sync) and a log of what
- * was asked. `install()` routes only Google API hosts here; every other request
+ * (profile outage, list error, a batch that fails mid-sync, the per-user quota
+ * wall) and a log of what was asked. `install()` routes only Google API hosts here; every other request
  * (the backend under test) goes to the real fetch.
  */
 
@@ -43,6 +43,26 @@ export class FakeMailbox {
   batchCalls = 0;
   /** Ids Google returned full content for, in request order. */
   fullFetched: string[] = [];
+  /**
+   * Google's per-user quota wall: after `skip` metered requests (profile,
+   * messages.get, each batch sub-request), answer every request for the next
+   * `forMs` with the exact 403 rateLimitExceeded body Gmail sends ("Units per
+   * minute per user"). The budget refills when the window ends.
+   */
+  quotaWall: { skip: number; forMs: number } | null = null;
+  private quotaWallUntil: number | null = null;
+  /** How many requests the quota wall rejected. */
+  quotaRejected = 0;
+  /**
+   * Google's one-hour token lifetime: once `tokenUses` requests have used the
+   * original token it answers 401, and only a refresh-token grant for
+   * `refreshToken` mints a working one (which outlives the rest of the run).
+   */
+  tokenLifetimeRequests: number | null = null;
+  tokenUses = 0;
+  readonly refreshToken = `refresh-${randomUUID()}`;
+  /** Tokens minted by refresh-token grants. */
+  refreshes = 0;
   /** history.list answers keyed by startHistoryId. */
   history = new Map<string, { added: string[]; newHistoryId: string }>();
 
@@ -63,7 +83,38 @@ export class FakeMailbox {
   byId(id: string): FakeMessage | undefined {
     return this.messages.find((m) => m.id === id);
   }
+
+  /** Meter one request; true when the quota wall rejects it. */
+  overQuota(): boolean {
+    if (this.quotaWall === null) return false;
+    if (this.quotaWall.skip > 0) {
+      this.quotaWall.skip -= 1;
+      return false;
+    }
+    this.quotaWallUntil ??= Date.now() + this.quotaWall.forMs;
+    if (Date.now() >= this.quotaWallUntil) return false;
+    this.quotaRejected += 1;
+    return true;
+  }
 }
+
+/** Gmail's real quota-exhausted body (captured from production, 2026-10-28). */
+const QUOTA_EXCEEDED = {
+  error: {
+    code: 403,
+    message:
+      "Quota exceeded for quota metric 'Queries' and limit 'Previous quota: Units per minute per user' of service 'gmail.googleapis.com'.",
+    errors: [
+      {
+        message:
+          "Quota exceeded for quota metric 'Queries' and limit 'Previous quota: Units per minute per user' of service 'gmail.googleapis.com'.",
+        domain: 'usageLimits',
+        reason: 'rateLimitExceeded',
+      },
+    ],
+    status: 'PERMISSION_DENIED',
+  },
+};
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -95,9 +146,18 @@ function batchResponse(box: FakeMailbox, body: string): Response {
     ...body.matchAll(/GET \/gmail\/v1\/users\/me\/messages\/([^?\s]+)\?format=full/g),
   ].map((match) => match[1]);
   const parts = ids.map((id) => {
-    const message = box.byId(id);
-    const status = message ? 'HTTP/1.1 200 OK' : 'HTTP/1.1 404 Not Found';
-    const payload = message ? fullMessage(message) : { error: { code: 404 } };
+    const limited = box.overQuota();
+    const message = limited ? undefined : box.byId(id);
+    const status = limited
+      ? 'HTTP/1.1 403 Forbidden'
+      : message
+        ? 'HTTP/1.1 200 OK'
+        : 'HTTP/1.1 404 Not Found';
+    const payload = limited
+      ? QUOTA_EXCEEDED
+      : message
+        ? fullMessage(message)
+        : { error: { code: 404 } };
     if (message) box.fullFetched.push(id);
     return (
       `--${BATCH_BOUNDARY}\r\nContent-Type: application/http\r\nContent-ID: <response-${id}>\r\n\r\n` +
@@ -140,10 +200,13 @@ function messageResponse(box: FakeMailbox, id: string, format: string | null): R
 
 export class FakeGmail {
   private readonly boxes = new Map<string, FakeMailbox>();
+  /** Every mailbox, including ones whose current token has expired. */
+  private readonly mailboxes: FakeMailbox[] = [];
 
   mailbox(address: string, messagesTotal: number, historyId: string): FakeMailbox {
     const box = new FakeMailbox(address, `tok-${randomUUID()}`, messagesTotal, historyId);
     this.boxes.set(box.token, box);
+    this.mailboxes.push(box);
     return box;
   }
 
@@ -159,20 +222,37 @@ export class FakeGmail {
     };
   }
 
+  /** Refresh-token grant: a mailbox's own refresh token mints a new access token. */
+  private refreshGrant(init?: RequestInit): Response {
+    const refreshToken = new URLSearchParams(String(init?.body ?? '')).get('refresh_token');
+    const box = this.mailboxes.find((b) => b.refreshToken === refreshToken);
+    if (box === undefined) return json({ error: 'invalid_grant' }, 400);
+    const token = `tok-${randomUUID()}`;
+    box.refreshes += 1;
+    box.tokenLifetimeRequests = null;
+    this.boxes.set(token, box);
+    return json({ access_token: token, expires_in: 3600, token_type: 'Bearer' });
+  }
+
   fetcher: GmailFetcher = async (input, init) => {
     const url = new URL(String(input));
-    if (url.hostname === 'oauth2.googleapis.com') {
-      return json({ error: 'invalid_grant' }, 400);
-    }
+    if (url.hostname === 'oauth2.googleapis.com') return this.refreshGrant(init);
     const token = new Headers(init?.headers).get('authorization')?.replace(/^Bearer /, '') ?? '';
     const box = this.boxes.get(token);
     if (box === undefined) return json({ error: { code: 401 } }, 401);
+    if (box.tokenLifetimeRequests !== null && ++box.tokenUses > box.tokenLifetimeRequests) {
+      this.boxes.delete(token);
+      return json({ error: { code: 401, status: 'UNAUTHENTICATED' } }, 401);
+    }
     if (url.hostname === 'www.googleapis.com' && url.pathname === '/batch/gmail/v1') {
       box.batchCalls += 1;
       if (box.failBatchCall === box.batchCalls) return json({ error: { code: 400 } }, 400);
       return batchResponse(box, String(init?.body ?? ''));
     }
     const path = url.pathname.replace('/gmail/v1/users/me', '');
+    if ((path === '/profile' || path.startsWith('/messages/')) && box.overQuota()) {
+      return json(QUOTA_EXCEEDED, 403);
+    }
     if (path === '/profile') {
       if (box.profileFailures > 0) {
         box.profileFailures -= 1;

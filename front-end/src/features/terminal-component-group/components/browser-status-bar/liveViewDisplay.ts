@@ -7,26 +7,32 @@
  * keep the Electron release build's imports unambiguous.
  *
  * User FE pane (arbitrary leftover size)
- *   -> letterbox the CONTENT viewport (1280x800)
+ *   -> letterbox the provider DISPLAY rect (LIVE_VIEW_GEOMETRY[provider])
  *     -> clip box (overflow hidden)
- *       -> iframe (Steel: native 1288x891 canvas, CSS-scaled so the
- *          1280x800 page including the right-edge cart fits, then
- *          translated by (-4, -91) * scale)
- *         -> Steel/Kernel player
+ *       -> iframe (Steel/Kernel: native window pixels, CSS-scaled to the
+ *          clip and, for Steel, translated by -display.origin * scale;
+ *          Tilion: ?embed=1 viewer filling the clip)
+ *         -> provider player
  *           -> remote browser (UNCHANGED session size — antibot)
  *
- * Steel headful debug streams the full computer window (1288x891):
- * 1280x800 content + 4px side borders + 91px toolbar. Showing that window
- * in the FE makes page content look off-center / hanging outside the window.
- * Kernel sessions are created at 1280x800 (no FE chrome crop). That is the
- * whole headful screen: Chrome's tab strip + toolbar fill its top 87px, so the
- * page viewport (where agent/cursor coordinates live) is 1280x713 at y=87.
- * Kernel's player also never upscales past native 1280x800 (it centers the
- * native frame in a larger iframe), so the FE renders its iframe at native
- * pixels and CSS-scales it to the clip, exactly like Steel.
- * Tilion's viewer page (`/v1/session/{id}/live-view?token=…`) streams the
- * page at the session viewport with no window chrome, so it is uncropped too.
- * Its view token expires after 1800 s (see the Tilion helpers below).
+ * PER-PROVIDER GEOMETRY (window px; measured on live sessions 2026-10-28 by
+ * painting marks at known page coordinates and locating them in the stream):
+ *   Kernel  window 1280x800 = the whole headful screen. Chrome's tab strip +
+ *           toolbar fill the top 87px: page viewport 1280x713 at (0,87).
+ *           The player centers the native frame and never upscales, so the
+ *           FE renders the iframe at native pixels and CSS-scales it. Display
+ *           keeps the Chrome UI (whole window).
+ *   Steel   window 1288x891 = 4px side/bottom borders + 87px chrome. Page
+ *           viewport 1280x800 at (4,87); the player contain-fits the window.
+ *           Display crops to the page (no window chrome in the FE).
+ *   Tilion  ?embed=1 viewer streams only the page viewport (no chrome) as an
+ *           object-fit:contain image anchored TOP-LEFT. The page viewport is
+ *           1366x625 CSS px on every persona sampled (5 sessions; spoofed
+ *           screens 1366x768..1920x1080, DPR 1..1.75), so the aspect is fixed.
+ *           Without embed=1 it adds its own bar/padding, so always embed.
+ *           Its view token expires after 1800 s (see the Tilion helpers below).
+ * Agent action / BROWSER_CURSOR coordinates are page CSS px. The cursor maps
+ * them through resolveLiveViewPageRect into the display box.
  *
  * Neither surface may resize the remote viewport to the FE pane: that
  * desyncs the fingerprint (spoofed outer/screen vs real inner).
@@ -35,8 +41,11 @@
 export const STEEL_LIVE_VIEW_WINDOW = { width: 1288, height: 891 } as const;
 export const KERNEL_LIVE_VIEW_WINDOW = { width: 1280, height: 800 } as const;
 export const LIVE_VIEW_CONTENT_VIEWPORT = { width: 1280, height: 800 } as const;
-/** Matches Steel session create: 1280+8 by 800+91, and BrowserCursorOverlay. */
-export const STEEL_CHROME_CROP = { x: 4, y: 91 } as const;
+/**
+ * Steel page origin inside its 1288x891 window: 4px left border, 87px chrome
+ * (the remaining 4px is the bottom border, not toolbar). Measured 2026-10-28.
+ */
+export const STEEL_CHROME_CROP = { x: 4, y: 87 } as const;
 
 /**
  * Kernel headful Chrome UI above the page, in stream pixels. Measured on a live
@@ -44,6 +53,53 @@ export const STEEL_CHROME_CROP = { x: 4, y: 91 } as const;
  * page-space mark at (x, y) painted at stream (x, y + 87).
  */
 export const KERNEL_PAGE_OFFSET = { x: 0, y: 87 } as const;
+
+/**
+ * Tilion page viewport = its stream (CSS px). Fixed across device personas: the
+ * spoofed device.screen/DPR vary per session but innerWidth/innerHeight did not.
+ */
+export const TILION_LIVE_VIEW_PAGE = { width: 1366, height: 625 } as const;
+
+export type LiveViewProvider = 'kernel' | 'steel' | 'tilion' | 'other';
+
+export interface LiveViewRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** window: frame the player paints; display: part the FE shows; page: page viewport. */
+export interface LiveViewGeometry {
+  window: LiveViewRect;
+  display: LiveViewRect;
+  page: LiveViewRect;
+}
+
+const full = (width: number, height: number): LiveViewRect => ({ x: 0, y: 0, width, height });
+
+export const LIVE_VIEW_GEOMETRY: Record<LiveViewProvider, LiveViewGeometry> = {
+  kernel: {
+    window: full(1280, 800),
+    display: full(1280, 800),
+    page: { x: KERNEL_PAGE_OFFSET.x, y: KERNEL_PAGE_OFFSET.y, width: 1280, height: 713 },
+  },
+  steel: {
+    window: full(1288, 891),
+    display: { x: STEEL_CHROME_CROP.x, y: STEEL_CHROME_CROP.y, width: 1280, height: 800 },
+    page: { x: STEEL_CHROME_CROP.x, y: STEEL_CHROME_CROP.y, width: 1280, height: 800 },
+  },
+  tilion: {
+    window: full(TILION_LIVE_VIEW_PAGE.width, TILION_LIVE_VIEW_PAGE.height),
+    display: full(TILION_LIVE_VIEW_PAGE.width, TILION_LIVE_VIEW_PAGE.height),
+    page: full(TILION_LIVE_VIEW_PAGE.width, TILION_LIVE_VIEW_PAGE.height),
+  },
+  other: {
+    window: full(1280, 800),
+    display: full(1280, 800),
+    page: full(1280, 800),
+  },
+};
 
 /**
  * Agent statuses whose browser can never resume. OUT_OF_CREDITS and
@@ -125,39 +181,54 @@ export function isKernelLiveViewUrl(url: string): boolean {
   }
 }
 
-/**
- * Where the remote PAGE viewport sits inside the displayed 1280x800 stream.
- * Browser action and BROWSER_CURSOR coordinates are page CSS pixels; the cursor
- * overlay maps them through this rect so it lands on the action at any pane size.
- */
-export function resolveLiveViewPageRect(url: string | null | undefined): LiveViewVisibleStreamRect {
-  const content = LIVE_VIEW_CONTENT_VIEWPORT;
-  if (url && isKernelLiveViewUrl(url)) {
-    return {
-      x: KERNEL_PAGE_OFFSET.x,
-      y: KERNEL_PAGE_OFFSET.y,
-      width: content.width - KERNEL_PAGE_OFFSET.x,
-      height: content.height - KERNEL_PAGE_OFFSET.y,
-    };
-  }
-  // Steel's chrome is cropped away and Tilion streams the page only.
-  return { x: 0, y: 0, width: content.width, height: content.height };
+export function resolveLiveViewProvider(url: string | null | undefined): LiveViewProvider {
+  if (!url) return 'other';
+  if (isSteelLiveViewUrl(url)) return 'steel';
+  if (isKernelLiveViewUrl(url)) return 'kernel';
+  if (isTilionLiveViewUrl(url)) return 'tilion';
+  return 'other';
+}
+
+export function resolveLiveViewGeometry(url: string | null | undefined): LiveViewGeometry {
+  return LIVE_VIEW_GEOMETRY[resolveLiveViewProvider(url)];
 }
 
 /**
- * Page-space point -> fraction (0..1) of the displayed stream box. Fractions
- * are size-independent, so the overlay stays aligned through any resize, DPR
- * or letterbox without measuring the pane.
+ * Where the remote PAGE viewport sits inside the displayed box (display px).
+ * Browser action and BROWSER_CURSOR coordinates are page CSS pixels; the cursor
+ * overlay maps them through this rect so it lands on the action at any pane size.
+ */
+export function resolveLiveViewPageRect(url: string | null | undefined): LiveViewRect {
+  const { display, page } = resolveLiveViewGeometry(url);
+  return { x: page.x - display.x, y: page.y - display.y, width: page.width, height: page.height };
+}
+
+/**
+ * Page-space point -> fraction (0..1) of the displayed box. Fractions are
+ * size-independent, so the overlay stays aligned through any resize, DPR or
+ * letterbox without measuring the pane.
  */
 export function liveViewPointFraction(
-  rect: LiveViewVisibleStreamRect,
+  url: string | null | undefined,
   point: { x: number; y: number },
 ): { x: number; y: number } {
-  const content = LIVE_VIEW_CONTENT_VIEWPORT;
+  const { display } = resolveLiveViewGeometry(url);
+  const rect = resolveLiveViewPageRect(url);
   return {
-    x: (rect.x + point.x) / content.width,
-    y: (rect.y + point.y) / content.height,
+    x: (rect.x + point.x) / display.width,
+    y: (rect.y + point.y) / display.height,
   };
+}
+
+/**
+ * The URL the FE iframe loads. Tilion's viewer adds its own bar and padding
+ * unless embedded; embed=1 streams only the page, so the geometry above holds.
+ */
+export function presentLiveViewIframeUrl(url: string): string {
+  if (!isTilionLiveViewUrl(url)) return url;
+  const parsed = new URL(url);
+  parsed.searchParams.set('embed', '1');
+  return parsed.toString();
 }
 
 export function isTilionLiveViewUrl(url: string): boolean {
@@ -204,17 +275,14 @@ export function presentHeldLiveViewUrl(
 
 /** Remote player canvas size — Steel includes window chrome. */
 export function resolveLiveViewWindowSize(url: string): LiveViewSize {
-  return isSteelLiveViewUrl(url)
-    ? { width: STEEL_LIVE_VIEW_WINDOW.width, height: STEEL_LIVE_VIEW_WINDOW.height }
-    : { width: KERNEL_LIVE_VIEW_WINDOW.width, height: KERNEL_LIVE_VIEW_WINDOW.height };
+  const frame = resolveLiveViewGeometry(url).window;
+  return { width: frame.width, height: frame.height };
 }
 
-/** What the user should see: the page content viewport, never window chrome. */
-export function resolveLiveViewDisplaySize(_url: string): LiveViewSize {
-  return {
-    width: LIVE_VIEW_CONTENT_VIEWPORT.width,
-    height: LIVE_VIEW_CONTENT_VIEWPORT.height,
-  };
+/** What the FE box shows (its aspect ratio): the provider display rect. */
+export function resolveLiveViewDisplaySize(url: string): LiveViewSize {
+  const { display } = resolveLiveViewGeometry(url);
+  return { width: display.width, height: display.height };
 }
 
 /** @deprecated use resolveLiveViewDisplaySize — kept as the FE frame size. */

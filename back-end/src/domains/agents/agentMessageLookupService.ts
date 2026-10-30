@@ -1,7 +1,7 @@
 /**
- * Agents domain — message batch lookups and response-schema generation
- * (split from agentMessageService.ts to keep it within the strict line limit).
+ * Agent message lookups by ID and response-schema generation.
  */
+
 import {
   generateResponseSchema,
   type ResponseSchemaDirectAuth,

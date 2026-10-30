@@ -69,7 +69,7 @@ export function MainContent(props: MainContentProps) {
         fullWidthView && 'md:pl-[var(--browse-sidebar-offset)]',
       )}
       style={{
-        height: '100dvh',
+        height: 'var(--app-height, 100dvh)',
         ...browseOffsetStyle,
       }}
     >

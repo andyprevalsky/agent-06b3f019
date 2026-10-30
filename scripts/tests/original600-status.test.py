@@ -201,6 +201,9 @@ class Status(unittest.TestCase):
         names=['task-a','task-b','task-c']
         shard=dict(index=0,count=20,tasks=names,tasks_sha256=M['digest'](('\n'.join(names)+'\n').encode()),task_indexes=[0,7,9],runs=3,
                    group_run_id='campaign-group-fixture',group_total=600,group_started_at=self.epoch)
+        (self.root/'scripts').mkdir();current=(ROOT/'scripts/cloudbench-original600-supervisor.py').read_bytes()
+        (self.root/'scripts/cloudbench-original600-supervisor.py').write_bytes(current)
+        cfg=dict(cfg,source_files={'cloudbench-original600-supervisor.py':M['digest'](current)})
         write(self.cfg,dict(cfg,shard=shard))
         payload=M['binding'](self.run)['payload']
         added=('total_jobs','campaign_total_jobs','infra_stop_threshold','task_indexes','runs')
@@ -208,6 +211,19 @@ class Status(unittest.TestCase):
         self.assertEqual({k:v for k,v in payload.items() if k not in added},legacy)
         write(self.cfg,dict(cfg,shard=dict(shard,infra_threshold=2)))
         self.assertEqual(M['binding'](self.run)['payload']['infra_stop_threshold'],2)
+        # The reported stop is what the run's own pinned guest supervisor enforces: 0a2470cc6 guests
+        # stop a 60-job group's shard at 30, the group-threshold supervisor at 3 (5% of 60).
+        names60=['task-a','task-b']
+        shard60=dict(shard,tasks=names60,tasks_sha256=M['digest'](('\n'.join(names60)+'\n').encode()),task_indexes=[0,7],group_total=60)
+        pinned=self.root/'scripts/cloudbench-original600-supervisor.py'
+        old=subprocess.check_output(['git','-C',str(ROOT),'show','0a2470cc6cc906f1c94f5e0644273815ed9ae7c8:scripts/cloudbench-original600-supervisor.py'])
+        for raw,expected in ((old,30),((ROOT/'scripts/cloudbench-original600-supervisor.py').read_bytes(),3)):
+            pinned.write_bytes(raw)
+            write(self.cfg,dict(cfg,shard=shard60,source_files={'cloudbench-original600-supervisor.py':M['digest'](raw)}))
+            with self.subTest(expected=expected):
+                self.assertEqual(M['binding'](self.run)['payload']['infra_stop_threshold'],expected)
+        write(self.cfg,dict(cfg,shard=shard60,source_files={'cloudbench-original600-supervisor.py':'0'*64}))
+        with self.assertRaisesRegex(ValueError,'pinned supervisor source changed'):M['binding'](self.run)
         write(self.cfg,dict(cfg,shard=dict(shard,runs=0)))
         with self.assertRaises(ValueError):M['binding'](self.run)
         scope={'__name__':'offline_status_payload'};exec(M['REMOTE'],scope)

@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import vm from "node:vm";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
@@ -438,6 +439,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  const childClosed = new Promise((resolve) => child.once("close", resolve));
   let logs = "";
   child.stdout.on("data", (d) => (logs += d));
   child.stderr.on("data", (d) => (logs += d));
@@ -583,7 +585,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   } finally {
     for (const socket of sockets) socket.terminate();
     child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("close", resolve));
+    await childClosed;
     rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -748,6 +750,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  const childClosed = new Promise((resolve) => child.once("close", resolve));
   let logs = "";
   child.stdout.on("data", (d) => (logs += d));
   child.stderr.on("data", (d) => (logs += d));
@@ -842,7 +845,64 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   } finally {
     ws?.terminate();
     child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("close", resolve));
+    await childClosed;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// A server may exit before teardown begins. Preserve its assertion and logs
+// instead of waiting forever for a close event that has already been emitted.
+test("early server exit preserves the owning fallback failure and completes cleanup", async () => {
+  const directory = mkdtempSync(
+    join(tmpdir(), "rose-native-close-regression-"),
+  );
+  const preload = join(directory, "early-exit.cjs");
+  writeFileSync(
+    preload,
+    `
+const cp = require('node:child_process');
+const original = cp.spawn;
+cp.spawn = function(command, args, options) {
+  if (args?.some(arg => String(arg).endsWith('/ws-server.mjs'))) {
+    return original(command, ['-e', 'console.error("fixture early exit 23");process.exit(23)'], options);
+  }
+  return original(command, args, options);
+};
+require('node:module').syncBuiltinESMExports();
+`,
+  );
+  try {
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    const child = spawn(
+      process.execPath,
+      [
+        "--require",
+        preload,
+        "--test",
+        "--test-name-pattern=^app-server falls back to the funded Azure",
+        fileURLToPath(import.meta.url),
+      ],
+      { env, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const closed = new Promise((resolve) => child.once("close", resolve));
+    let output = "";
+    child.stdout.on("data", (data) => {
+      output += data;
+    });
+    child.stderr.on("data", (data) => {
+      output += data;
+    });
+    const code = await closed;
+    assert.equal(code, 1, output);
+    assert.match(output, /failureType: 'testCodeFailure'/);
+    assert.match(output, /fixture early exit 23/);
+    assert.match(output, /# cancelled 0/);
+    assert.doesNotMatch(
+      output,
+      /cancelledByParent|event loop has already resolved/,
+    );
+  } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });

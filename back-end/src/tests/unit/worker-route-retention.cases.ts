@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import path from 'node:path';
 import type { PrismaClient } from '@prisma/client';
 import type * as API from '../../providers/workerDeploymentQueue';
+import { execTypeScript } from '../../providers/processSafety';
 
 type Identity = API.WorkerDeploymentIdentity;
 export async function retainedRouteMismatchCases(ctx: {
@@ -461,14 +460,7 @@ export async function retainedRouteMismatchCases(ctx: {
   assert.deepEqual(report.actualQueues, [`navi-agent-tasks@${original.identity.surfaceHash}`]);
   assert.equal(JSON.stringify(await api.readWorkerDeployment(original.jobId)), originalBytes);
   const monitor = path.resolve(__dirname, '../../../scripts/monitor-cooperative-cutover.ts');
-  const tsx = path.resolve(__dirname, '../../../../node_modules/.bin/tsx');
-  const result = await promisify(execFile)(tsx, [
-    monitor,
-    '--job-id',
-    next.jobId,
-    '--json',
-    '--verify',
-  ]);
+  const result = await execTypeScript([monitor, '--job-id', next.jobId, '--json', '--verify']);
   const reportStart = result.stdout.indexOf('{\n  "phase"');
   assert.ok(reportStart >= 0);
   const monitored = JSON.parse(result.stdout.slice(reportStart));
@@ -484,9 +476,7 @@ export async function retainedRouteMismatchCases(ctx: {
     api.readWorkerDeploymentRetainedRouteMismatch(next.jobId),
     /retention|mismatch/i
   );
-  await assert.rejects(
-    promisify(execFile)(tsx, [monitor, '--job-id', next.jobId, '--json', '--verify'])
-  );
+  await assert.rejects(execTypeScript([monitor, '--job-id', next.jobId, '--json', '--verify']));
   await prisma.toolSideEffect.update({ where: { id: hold.id }, data: { status: 'HELD' } });
   const future = await api.enqueueWorkerDeployment(identity(app, 'future'));
   const currentPointer = await prisma.agentQueuePointer.findUniqueOrThrow({

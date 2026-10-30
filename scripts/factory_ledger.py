@@ -126,6 +126,8 @@ def stage_rows(root: Path) -> Iterable[dict[str, Any]]:
             record.update({field: metadata.get(field) for field in RUN_FIELDS})
             if record.get("telemetry") is None and metadata.get("telemetry") is not None:
                 record["telemetry"] = metadata["telemetry"]
+            if isinstance(row.get("detail"), dict):
+                record["detail"] = row["detail"]
             yield record
 
 
@@ -137,6 +139,8 @@ def event_rows(root: Path) -> Iterable[dict[str, Any]]:
             continue
         record: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "kind": "factory-event"}
         record.update({field: row.get(field) for field in EVENT_FIELDS})
+        if isinstance(row.get("detail"), dict):
+            record["detail"] = row["detail"]
         yield record
 
 

@@ -2256,12 +2256,14 @@ def test_worktree_patch_includes_unpushed_commits_from_fetchable_base(
     subprocess.run(["git", "-C", str(repo), "config", "user.email", "bench@example.com"], check=True)
     subprocess.run(["git", "-C", str(repo), "config", "user.name", "Bench"], check=True)
     (repo / "tracked.txt").write_text("base\n")
-    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    (repo / "source_marker.py").write_text('print("base-source")\n')
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt", "source_marker.py"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-m", "base"], check=True, capture_output=True)
     base = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
     (repo / "tracked.txt").write_text("unpushed commit\n")
     subprocess.run(["git", "-C", str(repo), "commit", "-am", "local"], check=True, capture_output=True)
     (repo / "tracked.txt").write_text("working tree\n")
+    (repo / "source_marker.py").write_text('print("executed-local-worktree-change")\n')
     (repo / "untracked.txt").write_text("also shipped\n")
 
     patch = subprocess.run(
@@ -2274,6 +2276,16 @@ def test_worktree_patch_includes_unpushed_commits_from_fetchable_base(
     subprocess.run(["git", "-C", str(checkout), "apply", "--binary", "-"], input=patch, check=True)
     assert (checkout / "tracked.txt").read_text() == "working tree\n"
     assert (checkout / "untracked.txt").read_text() == "also shipped\n"
+
+    executed = subprocess.run(
+        [sys.executable, "-I", "-B", str(checkout / "source_marker.py")],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=5,
+    )
+    assert executed.stdout == "executed-local-worktree-change\n"
 
 
 def test_fleet_patch_packages_clean_unpushed_head_from_fetchable_base(
@@ -7380,9 +7392,10 @@ exit 143
     assert receipt["verified_state"] == initial, receipt
     assert 1 <= len(stops) <= 3 and receipt["stop_requests"] == len(stops), (stops, receipt)
     if case == "stop-always-fails":
-        # Retries continue until the attempt cap or the shared deadline, whichever
-        # comes first; under host load the 6 s window can end after two requests.
-        assert len(stops) == 3 or elapsed >= 6, (stops, elapsed)
+        # Retries continue until the attempt cap or the shared deadline. Bash
+        # SECONDS has one-second granularity, so a six-tick window can consume
+        # as little as five wall-clock seconds when it begins mid-tick.
+        assert len(stops) == 3 or elapsed >= 5, (stops, elapsed)
 
 
 def test_guest_shutdown_child_confirmation_native_stop_counts_only_sent_requests(tmp_path: Path) -> None:
@@ -9686,7 +9699,12 @@ def test_status_recovery_read_closes_descriptor_on_response_failure(
         return descriptor
 
     def fail_fstat(descriptor):
-        raise OSError("descriptor metadata read failed")
+        # Only the served descriptor fails; ``module.os`` is the global os
+        # module, and pytest >= 9.2 calls os.fstat on its own capture
+        # descriptors while this patch is active.
+        if descriptor == captured.get("descriptor"):
+            raise OSError("descriptor metadata read failed")
+        return real_fstat(descriptor)
 
     monkeypatch.setattr(module.os, "open", track_open)
     if failure == "fstat":
@@ -32905,6 +32923,30 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_for_cohort_budget(tmp_pat
     assert drained["created"] == 50 and drained["all_reaped"]
 
 
+def test_fleet_cleanup_releases_emergency_disk_reserve_for_cohort_budget_rerun_at_same_path(tmp_path: Path) -> None:
+    """A rerun at a recreated work path must not inherit the earlier run's admission ledger.
+
+    The reserve ledger lives under /tmp, outside the test directory. A recreated parent lock at
+    the same path changes the recorded identity, which used to fail every owner of the next run.
+    """
+    driver = ROOT / "agents/benchmarks/fixtures/cloudbench_cleanup_reserve_cohort.py"
+    env = {**os.environ, "RESERVE_FIXTURE_OWNER_COUNT": "3", "RESERVE_FIXTURE_CAPACITY_MB": "3000"}
+    work = tmp_path / "cohort"
+    for attempt in range(3):
+        shutil.rmtree(work, ignore_errors=True)
+        result = subprocess.run(
+            [sys.executable, str(driver), str(FLEET_SCRIPT), str(work)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=FIXTURE_HOST_GUARD_SECONDS + 2 * FIXTURE_DRAIN_SECONDS,
+        )
+        assert result.returncode == 0, (attempt, result.stdout + result.stderr)
+        receipt = json.loads((work / "receipt.safe.json").read_text())
+        assert receipt["admitted"] == 3 and receipt["failed"] == 0, (attempt, receipt)
+
+
 @pytest.mark.parametrize("interleaving", ["timezone", "reused-pid"])
 def test_fleet_cleanup_releases_emergency_disk_reserve_with_stable_owner_identity(
     tmp_path: Path,
@@ -36431,3 +36473,12 @@ fleet_reap_registry_record_native {shlex.quote(str(registry))} stale 2 0 {shlex.
         assert not any(call.startswith("audit ") for call in call_log)
         assert record.read_text() == "name=cloudbench-late\nvolume_id=vol_late\n"
         assert "does not mount owned volume vol_late; retaining record" in result.stderr
+
+
+def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost_readiness_regressions() -> None:
+    """Run the native/shared readiness regression in the deployed cloudbench gate."""
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/tests/cloudbench-status-readiness-observability.test.py")],
+        text=True, capture_output=True, check=False, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

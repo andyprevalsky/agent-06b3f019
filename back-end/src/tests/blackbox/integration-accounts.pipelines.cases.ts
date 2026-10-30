@@ -17,6 +17,11 @@
  *   <source>_passwords  passwords     passwords stored / uploaded, per source row
  *   (plaid: integration-accounts.plaid.cases.ts; Mac pipelines: mac-app blackboxes)
  *
+ *   gmail at Google's per-user quota wall (403 rateLimitExceeded) waits and
+ *   retries: every wanted message is still saved and the historyId recorded;
+ *   an access token that expires mid-sync is refreshed once and the run finishes;
+ *   a failed run cools down before the next full sync.
+ *
  * Registered by integration-accounts.blackbox.ts.
  */
 import fs from 'node:fs';
@@ -26,7 +31,6 @@ import { randomUUID } from 'node:crypto';
 import AdmZip from 'adm-zip';
 import { prisma } from '../../providers/database';
 import { authRealmFromCookieDomain } from '../../providers/authRealm';
-import { GOOGLE_OAUTH_SCOPES } from '../../domains/integrations/googleScopes';
 import { processCookiesUpload } from '../../domains/integrations/uploadService.browser';
 import {
   processContactsUpload,
@@ -36,29 +40,16 @@ import {
   processApplePasswordsUpload,
   processPasswordsUpload,
 } from '../../domains/integrations/uploadService.passwords';
-import { runGmailSyncJob } from '../../services/integrations/gmailSync';
-import { FakeGmail, fillMailbox } from './integration-accounts.gmail-fake';
+import { gmailCases } from './integration-accounts.gmail.cases';
 import {
   anonymousSession,
   assert,
-  defaultAccountOf,
-  type Account,
+  bar,
+  progressRow,
   type Session,
 } from './integration-accounts.support';
 
 type User = () => Session;
-
-function progressRow(userId: string, provider: string) {
-  return prisma.integrationSyncProgress.findUniqueOrThrow({
-    where: { userId_provider_accountId: { userId, provider, accountId: '' } },
-  });
-}
-
-async function bar(session: Session, provider: string): Promise<Account> {
-  const account = await defaultAccountOf(session.token, provider);
-  assert(account !== undefined, `${provider}: its row is listed as one account`);
-  return account;
-}
 
 /** The finished run: synced at 100% in `unit` with done = total (when known). */
 async function expectSynced(session: Session, provider: string, unit: string, total: number) {
@@ -79,89 +70,6 @@ function tempFile(name: string, contents: string | Buffer): string {
   const file = path.join(os.tmpdir(), `integration-progress-${randomUUID()}-${name}`);
   fs.writeFileSync(file, contents);
   return file;
-}
-
-async function gmailCredential(userId: string, address: string, token: string) {
-  const row = await prisma.integration.create({
-    data: {
-      userId,
-      name: 'gmail',
-      type: 'TOOL_SETUP',
-      status: 'CONNECTED',
-      isActive: true,
-      config: { userEmail: address },
-    },
-  });
-  await prisma.emailIntegrationCredential.create({
-    data: {
-      userId,
-      integrationId: row.id,
-      provider: 'GMAIL',
-      email: address,
-      accessToken: token,
-      refreshToken: 'refresh-token',
-      expiresAt: new Date(Date.now() + 60 * 60_000),
-      scopes: [...GOOGLE_OAUTH_SCOPES],
-    },
-  });
-}
-
-async function gmailSyncReportsMessagesSaved(user: User): Promise<void> {
-  const session = user();
-  const address = `owner.${randomUUID().slice(0, 8)}@example.com`;
-  const gmail = new FakeGmail();
-  const box = gmail.mailbox(address, 500, '9001');
-  const { selected } = fillMailbox(box, { contacts: 3, perContact: 2, newsletters: 4, tag: 'p' });
-  await gmailCredential(session.userId, address, box.token);
-  const restore = gmail.install();
-  try {
-    await runGmailSyncJob();
-  } finally {
-    restore();
-  }
-  const row = await progressRow(session.userId, 'gmail');
-  assert(row.state === 'synced', `gmail: run synced, got ${row.state} (${row.lastError})`);
-  assert(row.unit === 'messages', `gmail: unit messages, got ${row.unit}`);
-  assert(row.total === 500n, `gmail: total is the mailbox messagesTotal, got ${row.total}`);
-  const saved = await prisma.messageRecord.count({ where: { person: { userId: session.userId } } });
-  assert(
-    saved === selected.length,
-    `gmail: saved the ${selected.length} wanted messages, got ${saved}`
-  );
-  assert(row.done === BigInt(saved), `gmail: done = ${saved} messages saved, got ${row.done}`);
-  const account = await bar(session, 'gmail');
-  assert(account.state === 'synced' && account.progress?.pct === 100, 'gmail: synced bar');
-  assert(account.label === address, 'gmail: labelled by its address');
-}
-
-async function gmailFailureEndsFailed(): Promise<void> {
-  const session = await anonymousSession();
-  try {
-    const address = `broken.${randomUUID().slice(0, 8)}@example.com`;
-    const gmail = new FakeGmail();
-    const box = gmail.mailbox(address, 10, '1');
-    box.listStatus = 403;
-    await gmailCredential(session.userId, address, box.token);
-    const restore = gmail.install();
-    try {
-      await runGmailSyncJob();
-    } finally {
-      restore();
-    }
-    const account = await bar(session, 'gmail');
-    assert(account.state === 'sync_failed', `gmail: failed run, got ${account.state}`);
-    assert(
-      account.lastError === 'Gmail sync failed',
-      `gmail: error shown, got ${account.lastError}`
-    );
-    const row = await progressRow(session.userId, 'gmail');
-    assert(row.state === 'failed' && row.finishedAt !== null, 'gmail: the run is terminal');
-  } finally {
-    const where = { userId: session.userId };
-    await prisma.integrationSyncProgress.deleteMany({ where });
-    await prisma.emailIntegrationCredential.deleteMany({ where });
-    await prisma.integration.deleteMany({ where });
-  }
 }
 
 function csv(rows: string[][]): string {
@@ -495,11 +403,7 @@ async function passwordUploadsReportPerSourceRow(user: User): Promise<void> {
 
 export function cases(user: User): Array<{ name: string; fn: () => Promise<void> }> {
   return [
-    {
-      name: 'Gmail sync: messages saved of messagesTotal, ends synced',
-      fn: () => gmailSyncReportsMessagesSaved(user),
-    },
-    { name: 'Gmail sync: a failed address ends the run sync_failed', fn: gmailFailureEndsFailed },
+    ...gmailCases(user),
     {
       name: 'LinkedIn upload: bytes received, then parsed records, ends synced',
       fn: () => linkedinUploadReportsRecords(user),

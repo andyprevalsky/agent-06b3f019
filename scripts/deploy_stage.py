@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import importlib
 import json
 import math
 import os
@@ -17,7 +18,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
 
-from factory_metadata import load_metadata
+# Resolve the sibling module however this file is loaded (script, import, or by path).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+load_metadata = importlib.import_module("factory_metadata").load_metadata
 
 ACTIVE_STATUSES = {"active", "finishing"}
 
@@ -282,24 +285,26 @@ def append_stage(
     exit_code: int,
     log: str,
     telemetry: dict | None = None,
+    detail: dict | None = None,
+    status: str | None = None,
 ) -> None:
-    _append_json_line(
-        run_dir / "stages.jsonl",
-        {
-            "schema_version": 1,
-            "telemetry": load_metadata() if telemetry is None else telemetry,
-            "run_id": run_id,
-            "stage": stage,
-            "started_at": started_at,
-            "finished_at": finished_at,
-            "started_epoch": started_epoch,
-            "finished_epoch": finished_epoch,
-            "duration_seconds": round(max(0.0, finished_epoch - started_epoch), 1),
-            "status": "passed" if exit_code == 0 else "failed",
-            "exit_code": exit_code,
-            "log": log,
-        },
-    )
+    row = {
+        "schema_version": 1,
+        "telemetry": load_metadata() if telemetry is None else telemetry,
+        "run_id": run_id,
+        "stage": stage,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "started_epoch": started_epoch,
+        "finished_epoch": finished_epoch,
+        "duration_seconds": round(max(0.0, finished_epoch - started_epoch), 1),
+        "status": status or ("passed" if exit_code == 0 else "failed"),
+        "exit_code": exit_code,
+        "log": log,
+    }
+    if detail is not None:
+        row["detail"] = detail
+    _append_json_line(run_dir / "stages.jsonl", row)
 
 
 def _load_rows(path: Path) -> list[dict]:
@@ -410,8 +415,12 @@ def render_history(run_root: Path) -> str:
     durations: dict[str, list[float]] = defaultdict(list)
     passed_durations: dict[str, list[float]] = defaultdict(list)
     passes: dict[str, int] = defaultdict(int)
+    reused: dict[str, int] = defaultdict(int)
     for _, rows in runs:
         for row in rows:
+            if row.get("status") == "reused":
+                reused[str(row.get("stage", ""))] += 1
+                continue
             stage = str(row.get("stage", ""))
             duration = row.get("duration_seconds")
             if stage and isinstance(duration, (int, float)):
@@ -435,6 +444,11 @@ def render_history(run_root: Path) -> str:
         else:
             timing = f"{'n/a':>9}  {'n/a':>9}"
         lines.append(f"{stage:<28}  {len(values):>4}  {pass_rate:>5.1f}%  {timing}")
+    if reused:
+        lines.append(
+            "Reused exact-input passes: "
+            + ", ".join(f"{stage}={count}" for stage, count in sorted(reused.items()))
+        )
 
     run_spans: list[float] = []
     completed_names: list[str] = []

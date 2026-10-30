@@ -33,6 +33,7 @@ import {
   isKernelLiveViewUrl,
   kernelLiveViewIframeStyle,
   kernelLiveViewScaledStyle,
+  presentLiveViewIframeUrl,
   resolveLiveViewChromeCrop,
   resolveLiveViewDisplaySize,
   steelLiveViewIframeCropStyle,
@@ -125,7 +126,7 @@ export function LiveViewFrame({
           <iframe
             ref={iframeRef}
             key={iframeKey ?? `${title}:${url}`}
-            src={url}
+            src={presentLiveViewIframeUrl(url)}
             title={title}
             className={cn(
               iframeStyle ? 'z-0 border-0' : 'absolute inset-0 z-0 h-full w-full border-0',
