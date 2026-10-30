@@ -85,6 +85,17 @@ _DOCUMENTATION_ONLY = (
     "observability/",
 )
 _MAC_EXCLUDED = ("back-end/", "agents/", *_DOCUMENTATION_ONLY)
+# Append-only benchmark ledgers the smoke lane and local benchmark runs write
+# while the other gates run (agents/benchmarks/history/*.jsonl). The pipeline's
+# source digest already ignores them. Only lanes whose suites cannot read them
+# drop them from the exact fingerprint: eslint lints the listed TypeScript,
+# tsc type-checks back-end/, and the back-end structural suite reads sources,
+# migrations and the benchmark catalog, never the ledgers. backend-coverage-
+# blackbox (domains/benchmarks/config.ts reads task_attempts.jsonl), the
+# agents lanes and the scripts/tests gates (deploy-command-structural and the
+# seed checks) read them and keep the whole-worktree fingerprint.
+_LEDGER_PATHS = ("agents/benchmarks/history/",)
+_LEDGER_FREE_LANES = frozenset({"eslint", "typescript", "backend-structural"})
 _LANE_SCOPES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     # Vitest blackbox/structural: front-end/ plus the benchmark catalog read by
     # tests-e2e/helpers.ts (imported by a blackbox suite).
@@ -141,11 +152,21 @@ def _scoped_content_fingerprint(digest: "hashlib._Hash", stage: str) -> None:
         _hash_field(digest, f"worktree:{relative}", value)
 
 
+def _fingerprint_scope(stage: str) -> str:
+    if stage in _LANE_SCOPES:
+        return "lane inputs"
+    if stage in _LEDGER_FREE_LANES:
+        return "exact worktree minus append-only ledgers"
+    return "exact worktree"
+
+
 def _worktree_fingerprint(command: Sequence[str], stage: str = "") -> str:
     """Hash every deploy input; exact-tree reuse is conservative by design.
 
-    A lane in _LANE_SCOPES hashes the content of its declared inputs; every
-    other lane hashes HEAD plus the whole worktree diff and untracked files.
+    A lane in _LANE_SCOPES hashes the content of its declared inputs; a lane
+    in _LEDGER_FREE_LANES hashes HEAD plus the worktree diff and untracked
+    files outside the append-only benchmark ledgers; every other lane hashes
+    HEAD plus the whole worktree diff and untracked files.
     """
 
     digest = hashlib.sha256()
@@ -153,11 +174,18 @@ def _worktree_fingerprint(command: Sequence[str], stage: str = "") -> str:
         _scoped_content_fingerprint(digest, stage)
         _hash_invocation(digest, command)
         return digest.hexdigest()
+    ledger_free = stage in _LEDGER_FREE_LANES
+    diff_paths = ("--", ".", *(f":(exclude){prefix}" for prefix in _LEDGER_PATHS)) if ledger_free else ()
+    _hash_field(digest, "scope", _fingerprint_scope(stage).encode())
     _hash_field(digest, "head", _git_output("rev-parse", "HEAD"))
-    _hash_field(digest, "tracked", _git_output("diff", "--no-ext-diff", "--binary", "HEAD"))
+    _hash_field(digest, "tracked", _git_output("diff", "--no-ext-diff", "--binary", "HEAD", *diff_paths))
     untracked = _git_output("ls-files", "--others", "--exclude-standard", "-z")
-    _hash_field(digest, "untracked-list", untracked)
-    for raw_path in sorted(path for path in untracked.split(b"\0") if path):
+    untracked_paths = sorted(
+        path for path in untracked.split(b"\0")
+        if path and not (ledger_free and any(os.fsdecode(path).startswith(p) for p in _LEDGER_PATHS))
+    )
+    _hash_field(digest, "untracked-list", b"\0".join(untracked_paths))
+    for raw_path in untracked_paths:
         relative = os.fsdecode(raw_path)
         path = REPO_ROOT / relative
         try:
@@ -360,21 +388,22 @@ def main() -> int:
 
     run_dir = args.run_root / run_id
     concurrent_stages = max(0, active_admissions(run_dir) - 1)
+    # Every pass is cached against its inputs, so a standalone run (or an inner
+    # stage a lane launches without --reuse-passed) is reusable by a later
+    # --reuse-passed run of the identical command; only the lookup is opt-in.
     fingerprint: str | None = None
-    if args.reuse_passed:
+    try:
+        fingerprint = _worktree_fingerprint(command, args.stage)
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"warning: could not fingerprint deploy inputs: {error}", file=sys.stderr)
+    if args.reuse_passed and fingerprint is not None and _cache_hit(run_dir, args.stage, fingerprint):
+        _append_reused(run_dir, run_id, args.stage, fingerprint, telemetry, invoked_epoch)
         try:
-            fingerprint = _worktree_fingerprint(command, args.stage)
-        except (OSError, subprocess.SubprocessError) as error:
-            print(f"warning: could not fingerprint deploy inputs: {error}", file=sys.stderr)
-        if fingerprint is not None and _cache_hit(run_dir, args.stage, fingerprint):
-            _append_reused(run_dir, run_id, args.stage, fingerprint, telemetry, invoked_epoch)
-            try:
-                release_stage(args.run_root, run_id=run_id, token=token)
-            except (LifecycleError, OSError) as error:
-                print(f"warning: could not release deploy stage admission: {error}", file=sys.stderr)
-            scope = "lane inputs" if args.stage in _LANE_SCOPES else "exact worktree"
-            print(f"== reused passed deploy stage: {args.stage} ({scope} + command) ==")
-            return 0
+            release_stage(args.run_root, run_id=run_id, token=token)
+        except (LifecycleError, OSError) as error:
+            print(f"warning: could not release deploy stage admission: {error}", file=sys.stderr)
+        print(f"== reused passed deploy stage: {args.stage} ({_fingerprint_scope(args.stage)} + command) ==")
+        return 0
 
     log_relative = f"logs/{args.stage}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{os.getpid()}.log"
     log_path = run_dir / log_relative
