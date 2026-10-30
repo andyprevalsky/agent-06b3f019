@@ -42,6 +42,7 @@ Usage (from the controller's workspace):
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import ctypes
 import errno
@@ -111,8 +112,11 @@ def original_file_contract() -> dict:
     return sibling(STARTUP_ARCHIVE)
 
 
-def expected_names(token: str) -> set[str]:
-    return original_file_contract()["original_names"](token) | set(extra_names(token))
+def expected_names(token: str, configured_old: bool = False) -> set[str]:
+    names = original_file_contract()["original_names"](token) | set(extra_names(token))
+    if configured_old:
+        names |= {f"cloudbench-prelaunch-{token}.sealed", f"cloudbench-prestack-{token}.sealed"}
+    return names
 
 
 def allowed_name(name: str, fixed: set[str]) -> bool:
@@ -155,6 +159,7 @@ def guest_collect(argv: list[str]) -> int:
     parser.add_argument("--run-token", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--proc", default="/proc")
+    parser.add_argument("--configured-old-member", action="store_true")
     args = parser.parse_args(argv)
     os.umask(0o077)
     try:
@@ -164,7 +169,8 @@ def guest_collect(argv: list[str]) -> int:
         if forbidden or sleepers < 1:
             raise GuestRefusal(f"guest is not inert: sleepers={sleepers} forbidden={forbidden}")
         contract = original_file_contract()
-        extra = extra_names(args.run_token)
+        extra = list(expected_names(args.run_token, args.configured_old_member)
+                     - contract["original_names"](args.run_token))
         # Read-only originals; absent files are reported, never created.
         files, missing = contract["original_files"](args.data, args.run_token, extra)
         descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -494,8 +500,83 @@ def validate_original_config(config: object, ident: dict) -> None:
         raise Refusal("unsupported Machine config: auto_destroy is set")
 
 
+def configured_old_member_identity(args: argparse.Namespace) -> dict:
+    """Diagnostic capture only; never consume the replaced member's obligation."""
+    registry = exact_directory(args.registry, "registry")
+    meta = fields(registry / "meta")
+    if (meta.get("host") != socket.gethostname()
+            or not re.fullmatch(r"[0-9]+", meta.get("pid", ""))
+            or not meta.get("pid_start")
+            or pid_birth_state(meta["pid"], meta["pid_start"]) != "absent"):
+        raise Refusal("configured old-member owner is not proven dead on this host")
+    if not SAFE_TOKEN.fullmatch(args.bench) or not re.fullmatch(r"[0-9a-f]{14}", args.machine_id):
+        raise Refusal("unsafe configured old-member identity")
+    run = exact_directory(Path(meta["runs_root"]) / meta["run_id"], "run")
+    output = exact_directory(run / args.bench / ("host-replaced-" + args.machine_id), "old output")
+    workspace = exact_directory(Path(meta["workspace_root"]), "workspace")
+    helper = sibling(STARTUP_ARCHIVE)
+    try:
+        members = helper["replaced_preconfig_members"](registry)
+        matches = [row for row in members if row[0] == args.bench and row[1] == args.machine_id
+                   and row[3] == str(output)]
+        if len(matches) != 1:
+            raise ValueError("old member is not uniquely enumerated")
+        token = matches[0][2]
+        original_meta, original, files = helper["preconfig_files"](registry, output, args.machine_id, token)
+    except (ValueError, KeyError, OSError, AssertionError, StopIteration) as error:
+        raise Refusal("configured old-member custody is invalid") from error
+    if (original_meta != meta or original["volume_id"] != args.volume_id
+            or not re.fullmatch(r"vol_[A-Za-z0-9]+", args.volume_id)):
+        raise Refusal("configured old-member volume differs")
+    for name in ("guest-cleanup-unconfirmed", "runtime-evidence-unconfirmed"):
+        regular_bytes(registry / name, 65536)
+    if lexists(output / "failed-preconfig-runtime-archive/consumed.json"):
+        raise Refusal("old member already has a consumed phase")
+    return dict(registry=registry, owner=registry.name, meta=meta, run=run, run_id=meta["run_id"],
+                out=output, audit=Path(meta["audit_dir"]), workspace=workspace, app=meta["app"],
+                bench=args.bench, ordinal=int(token.rsplit("-", 1)[1]), token=token, kind="clone",
+                machine_id=args.machine_id, volume_id=args.volume_id, clone_name=original["clone_name"],
+                isolate_services=args.isolate_services, undelivered_native_stop=None,
+                configured_old_member=True,
+                custody_sha256=sha(canonical({name: sha(data) for name, data in files.items()})),
+                capture_helper_sha256=sha(Path(__file__).resolve().read_bytes()))
+
+
+def revalidate_configured_old_member(ident: dict) -> None:
+    if not ident.get("configured_old_member"):
+        return
+    args = argparse.Namespace(registry=ident["registry"], bench=ident["bench"],
+                              machine_id=ident["machine_id"], volume_id=ident["volume_id"],
+                              isolate_services=ident["isolate_services"])
+    if configured_old_member_identity(args) != ident:
+        raise Refusal("configured old-member custody changed during capture")
+
+
+def configured_old_source(config: dict, ident: dict) -> tuple[str, str, str]:
+    env = config.get("env", {})
+    expected = {"CLOUDBENCH_BOOT": "1", "CLOUDBENCH_FRESH_VOLUME": "1",
+                "CLOUDBENCH_RUN_TOKEN": ident["token"],
+                "BENCH_TASKS_B64": base64.b64encode(ident["bench"].encode()).decode()}
+    if (any(env.get(key) != value for key, value in expected.items())
+            or any(env.get(key, value) != value for key, value in {
+                "CLOUDBENCH_DATA_DIR": "/data", "CLOUDBENCH_REPO_DIR": "/data/repo"}.items())):
+        raise Refusal("configured old-member native task or data path differs")
+    try:
+        source = sibling("cloudbench-prestack-recovery.py")["native_recipe"](ident["meta"], config)
+    except (ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
+        raise Refusal("configured old-member native source recipe differs") from error
+    original = json_file(ident["run"] / "execution-provenance.json")
+    if source[0] != original.get("base_sha"):
+        raise Refusal("configured old-member native source differs from original run")
+    return source
+
+
 def local_identity(args: argparse.Namespace) -> dict:
     """Exact durable owner/run/task/resource binding; read-only."""
+    if getattr(args, "configured_old_member", False):
+        if getattr(args, "undelivered_native_stop", False):
+            raise Refusal("configured old-member and undelivered modes conflict")
+        return configured_old_member_identity(args)
     registry = exact_directory(args.registry, "registry")
     owner = registry.name
     if not re.fullmatch(r"[0-9a-f]{32}", owner):
@@ -656,17 +737,24 @@ def native_preflight(fly: Fly, ident: dict) -> tuple[dict, dict]:
         raise Refusal("Machine is already destroyed") from None
     except CaptureFailure as error:
         raise Refusal(str(error)) from None
+    if ident.get("configured_old_member") and (machine.get("id") != ident["machine_id"]
+            or not isinstance(machine.get("instance_id"), str) or not machine["instance_id"]):
+        raise Refusal("configured old-member native Machine identity differs")
     if machine.get("state") != "stopped":
         raise Refusal(f"Machine state is {machine.get('state')!r}, not stopped")
     if ident["clone_name"] is not None and machine.get("name") != ident["clone_name"]:
         raise Refusal("native Machine name is not the owned clone name")
     validate_original_config(machine.get("config"), ident)
+    if ident.get("configured_old_member"):
+        configured_old_source(machine["config"], ident)
     try:
         volume = fly.volume(ident["volume_id"])
     except NotFound:
         raise Refusal("volume is already destroyed") from None
     except CaptureFailure as error:
         raise Refusal(str(error)) from None
+    if ident.get("configured_old_member") and volume.get("id") != ident["volume_id"]:
+        raise Refusal("configured old-member native volume identity differs")
     if volume.get("state") not in sibling("cloudbench-machine-readiness.py")["MOUNTABLE_VOLUME_STATES"]:
         raise Refusal(f"volume state is {volume.get('state')!r}")
     if volume.get("attached_machine_id") != ident["machine_id"]:
@@ -892,7 +980,8 @@ def guest_capture(fly: Fly, ident: dict, capture_dir: Path, journal: Journal,
             journal("guest-retry", attempt=attempt, reason=last_error)
             continue
         command = (f"python3 -I -B {remote}/{here.name} guest-collect --data {DATA_PATH} "
-                   f"--run-token {token} --output {remote}/originals.tar.gz")
+                   f"--run-token {token} --output {remote}/originals.tar.gz"
+                   + (" --configured-old-member" if ident.get("configured_old_member") else ""))
         rc, out, err = fly.flyctl(ssh_seconds, "ssh", "console", *base, "-C", command)
         lines = [line.strip() for line in out.splitlines() if line.startswith((INVENTORY_MARKER, ERROR_MARKER))]
         if len(lines) == 1 and lines[0].startswith(ERROR_MARKER):
@@ -924,7 +1013,7 @@ def verify_capture(local: Path, inventory: dict, ident: dict) -> dict[str, bytes
         or len(data) != inventory.get("archive_bytes") or sha(data) != inventory.get("archive_sha256")
     ):
         raise CaptureFailure("downloaded capture differs from the guest inventory")
-    fixed = expected_names(token)
+    fixed = expected_names(token, bool(ident.get("configured_old_member")))
     if set(missing) - fixed or set(missing) & set(files) or len(set(missing)) != len(missing):
         raise CaptureFailure("guest missing-file inventory is invalid")
     originals: dict[str, bytes] = {}
@@ -942,9 +1031,10 @@ def verify_capture(local: Path, inventory: dict, ident: dict) -> dict[str, bytes
             if len(content) != member.size or row.get("bytes") != member.size or row.get("sha256") != sha(content):
                 raise CaptureFailure(f"capture member differs from the guest inventory: {name}")
             originals[name] = content
-    if set(originals) != set(files) or sum(map(len, originals.values())) > MAX_TOTAL_BYTES:
+    if (set(originals) != set(files) or sum(map(len, originals.values())) > MAX_TOTAL_BYTES
+            or (ident.get("configured_old_member") and not fixed <= set(files) | set(missing))):
         raise CaptureFailure("capture members differ from the guest inventory")
-    if not originals.get("bench.log", b"").startswith(f"RUNSTAMP-{token}\n".encode()):
+    if not ident.get("configured_old_member") and not originals.get("bench.log", b"").startswith(f"RUNSTAMP-{token}\n".encode()):
         raise CaptureFailure("original bench.log is absent or not stamped with this guest run token")
     return originals
 
@@ -981,6 +1071,9 @@ def cross_check_receipts(out: Path, ident: dict, originals: dict[str, bytes]) ->
 def final_native_proof(fly: Fly, ident: dict, original: dict) -> tuple[dict, dict]:
     machine = fly.machine(ident["machine_id"])
     volume = fly.volume(ident["volume_id"])
+    if ident.get("configured_old_member") and (machine.get("id") != ident["machine_id"]
+            or machine.get("name") != ident["clone_name"] or volume.get("id") != ident["volume_id"]):
+        raise CaptureFailure("final configured old-member native identity differs")
     if machine.get("state") not in ("stopped", "created") or machine.get("config") != original:
         raise CaptureFailure("final native Machine is not idle with the exact original config")
     if volume.get("attached_machine_id") != ident["machine_id"] or volume.get("state") != "created":
@@ -997,6 +1090,10 @@ def resolve_token(ident: dict) -> str:
 
 def capture(args: argparse.Namespace) -> int:
     ident = local_identity(args)
+    if ident.get("configured_old_member") and any(
+            args.capture_dir.resolve().is_relative_to(path)
+            for path in (ident["run"], ident["registry"], ident["audit"])):
+        raise Refusal("diagnostic capture directory overlaps original custody")
     capture_dir = private_capture_dir(args.capture_dir, create=not args.preflight_only)
     machine_id = ident["machine_id"]
     artifacts = {name: capture_dir / f"{machine_id}.{name}" for name in (
@@ -1036,8 +1133,11 @@ def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts
     inert = inert_variant(original)
     stage, mutated, local = "inert-config", False, None
     restore_hint = ("--restore-original-config" + (" --isolate-services" if ident.get("isolate_services") else "")
-                    + (" --undelivered-native-stop" if ident.get("undelivered_native_stop") else ""))
+                    + (" --undelivered-native-stop" if ident.get("undelivered_native_stop") else "")
+                    + (" --configured-old-member" if ident.get("configured_old_member") else ""))
     mutations: list[str] = []
+    revalidate_configured_old_member(ident)
+    source_recipe = configured_old_source(original, ident) if ident.get("configured_old_member") else None
 
     def interrupted(signum, _frame):
         raise CaptureFailure(f"interrupted by signal {signum}")
@@ -1062,11 +1162,13 @@ def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts
         originals = verify_capture(local, inventory, ident)
         checks = cross_check_receipts(ident["out"], ident, originals)
         journal("capture-verified", files=len(originals), missing=len(inventory["missing"]))
+        revalidate_configured_old_member(ident)
         stage = "stop-and-restore"
         mutations += ["stop", "config-restore"]
         stop_and_restore(fly, ident, original, journal, args.wait_seconds)
         stage = "final-native-proof"
         final_machine, final_volume = final_native_proof(fly, ident, original)
+        revalidate_configured_old_member(ident)
     except BaseException as error:
         for sig in previous:
             signal.signal(sig, signal.SIG_IGN)
@@ -1121,6 +1223,10 @@ def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts
            if ident.get("undelivered_native_stop") else {}),
         "capture_helper_sha256": sha(Path(__file__).resolve().read_bytes()),
         "captured_at": int(time.time()),
+        **({"admission": "configured-old-member-diagnostic", "custody_sha256": ident["custody_sha256"],
+            "source_ref": source_recipe[0], "source_recipe_sha256": source_recipe[1],
+            "source_fingerprint": source_recipe[2], "runtime_evidence_complete": False,
+            "phase_consumption_authorized": False} if source_recipe is not None else {}),
     }
     publish_bytes(artifacts["provenance.json"], canonical(provenance) + b"\n")
     rename_noreplace(local, artifacts["tar.gz"])
@@ -1241,6 +1347,8 @@ def restore_only(args: argparse.Namespace) -> int:
     snapshot = capture_dir / f"{machine_id}.original-config.private.json"
     original = json_file(snapshot, 16 * 1024 * 1024)
     validate_original_config(original, ident)
+    if ident.get("configured_old_member"):
+        configured_old_source(original, ident)
     lock = RecoveryLock(ident["registry"])
     lock.acquire()
     try:
@@ -1919,11 +2027,15 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--undelivered-native-stop", action="store_true",
                         help="admit only a quarantined guest with an exact verified guest-native-stop.json "
                              "(delivery_receipt=absent); publish its backend log and provider manifest for recovery")
+    parser.add_argument("--configured-old-member", action="store_true",
+                        help="diagnostic-only capture of an exact retained host-replaced member; never consumes its pending obligation")
     parser.add_argument("--wait-seconds", type=int, default=300)
     parser.add_argument("--ssh-seconds", type=int, default=300)
     parser.add_argument("--attempts", type=int, default=5)
     args = parser.parse_args(argv)
     try:
+        if args.configured_old_member and (args.undelivered_native_stop or args.publish_recovery_inputs or args.next_step):
+            raise Refusal("configured old-member mode cannot publish recovery inputs or use another admission")
         if args.next_step:
             return next_step(args)
         if args.capture_dir is None:
