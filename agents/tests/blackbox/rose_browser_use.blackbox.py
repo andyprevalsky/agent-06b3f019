@@ -3051,7 +3051,10 @@ async def _native_autofill_control_record(history, turn_messages, *, chosen, res
 async def _native_autofill_control_request(client, *, name, state, history, turn_messages, **overrides):
     """The one browser-use request every Native AutoFill control sends (live or mocked)."""
     from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
-    request = dict(task=_NATIVE_AUTOFILL_CONTROL_TASK, browser_state={**_browser_state(), "phone": state}, dynamic_system_context=PHONE_GUIDANCE, action_history=history.get_entries(), available_actions=["phone", "request_user_assistance_for_authentication"], include_screenshot=False, call_site="test-native-autofill-" + name, deadline_s=90, skip_cache_write=True)
+    # Production (`_call_browser_use_with_rotation`) passes both stores; the
+    # message builder renders `turn_messages`, so the model sees the executed
+    # `phone` operation and its receipt instead of the lossy legacy summary.
+    request = dict(task=_NATIVE_AUTOFILL_CONTROL_TASK, browser_state={**_browser_state(), "phone": state}, dynamic_system_context=PHONE_GUIDANCE, action_history=history.get_entries(), turn_messages=turn_messages, available_actions=["phone", "request_user_assistance_for_authentication"], include_screenshot=False, call_site="test-native-autofill-" + name, deadline_s=90, skip_cache_write=True)
     request.update(overrides)
     return await client.complete_browser_use(**request)
 
