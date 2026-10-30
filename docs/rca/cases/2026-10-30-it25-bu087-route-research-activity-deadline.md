@@ -104,3 +104,50 @@ family inference or stop decision from a generic failure label.
 A recovered socket closure and a long-silent background target can coexist with
 successful active-page work. Attribute the terminal deadline using the actual
 critical path and identity, not the loudest preceding transport warning.
+
+## R114 — It27 BU091 two original deadline failures (2026-10-30)
+
+These are separately observed deadline episodes, not proof that the earlier
+BU087 route-research incident shares an underlying cause. Both executed
+98c8668b47b5e9b2fd2b807c2f083f2e46a04733/patchnone and asked for the first and
+last names of the gunner who first spotted enemy aircraft during a WWII raid
+by two aircraft named for the same US state. Both generated the requested
+required `gunner_first_name` and `gunner_last_name` fields. No captured verifier
+invocation or declared semantic judge was found in either full original worker
+log; this does not establish that no uncaptured work occurred.
+
+For r1/r001-j0001, root2367e1c0-983a-4d33-9f3f-c9057943dacf, archive
+557f408d45d51b3b663e1397da6c8c811880fc838339432f7745a923bf88bacb and all seven
+original members match manifest
+16db3a8430bc5a99faa3402a9cc5fa949a5d1c9aaff2754fc92e22af32ca8c54.
+Run4d930f869610f7756f7704d10b10a3e529ea13274c4683a0d9ab6bf2bd7ffea0 and
+worker945da0f1fe53962b31d4d2e6eb83cfa9da2f90cb96a9c03f0dd0e5d00b208069
+record nativeFAILED3007.6s/progress1/producerinfraFALSE. Worker83286 records the
+manager's ActivityError/StartToClose timeout at07:38:54.297277Z. A socket close
+around07:35:30 is followed by explicit successful reconnect at07:35:32.356011Z
+(after2.3s), so it is not evidence of an unrecovered whole-browser connection.
+The last persisted action is read_browser_state at iteration64/actionstep117;
+original raw browser dumps extend only through step41. Action count is not a
+model-turn count, and the dump boundary is a capture limit.
+
+For r2/r002-j0011, rootd071a167-178c-460d-9511-7d426928598f, archive
+6a69d5a06e0161a2f127f2ae3a9f78a5bdefd5603b2ab7de3d472746eddc3758 and all seven
+original members match manifest
+da36d96a1d783864db3dc9bcbd37cd850c0f0614f7846205ff4bf791624eb128.
+Run2a901b4e75747aed82c173c224e53c399f76d972510b16b32f996456fe0a5252 and
+worker7ced6f82c07563386a646268fc0f5c463bb397153742ff024973df16ac6ff07a
+record nativeFAILED3029.7s/progress1/producerinfraFALSE. Worker61201 records
+StartToClose at07:38:58.769929Z. The last captured actor request is step68,
+evaluating document.body.innerText during continued searches for the aircraft,
+Texas and its gunner. No captured accepted completion or smaller fatal native
+operation establishes why the original deadline was reached.
+
+The two archive searches covered StartToClose/BU091 and deadline/completion;
+this case's Solution and Human feedback were read. Keep the original deadline,
+all failed grades and the independent cleanup receipts. R1's exact session
+sess_993d7048ba4e4f1698e9eabdebf41307 and r2's
+sess_c3d0eb1deb5e400fba44d726c9796db8 each have normal DELETE204/root sealing
+with no cleanup error. No operational infrastructure promotion, timeout change,
+model replay or speculative runtime repair was made. The missing proof is the
+critical-path contribution of waits/research and uncaptured terminal context,
+not merely the existence of a deadline or a recovered socket warning.
