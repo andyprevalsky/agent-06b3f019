@@ -3668,9 +3668,7 @@ class BillingStopRetainTests(unittest.TestCase):
         self.assertEqual(result['status'],'PENDING')
         self.assertEqual(self.fly.posts,[])
         self.assertTrue(guest_limits,'actual guest dispatch must be reached')
-        # A regression waits the 1.5s alarm plus the 0.25s publish (>=1.75s); the
-        # margin below that absorbs scheduler noise on a loaded deploy host.
-        self.assertLess(elapsed,1.74,'metadata publication was added back to whole-call deadline')
+        self.assertLess(elapsed,1.62,'metadata publication was added back to whole-call deadline')
         self.assertEqual(guest_limits,[1],'integer guest timeout must fit remaining original clock')
 
 
