@@ -163,3 +163,55 @@ stop. That operational decision is separate from unchanged producerinfraFALSE,
 original native/canonical failure and any subsequent induced cancellations.
 This investigator performed no stop or recovery. Historical task improvement
 and vendor attribution remain unproven; tokens are UNMETERED.
+
+## R96: It24 BU088r1 original transport failure
+
+Executed8136eb6bb1d32d98553a70ca5f98278b590bee81/patch none;
+root b470e68c-a8d9-4c5d-9322-24589b705a31, r001-j0008,
+fleet20261030-013929-2182921. Archive SHA256
+939b10dd947355cfb45a381402eed0fc194f770e34fa94381c86a818661bc522
+(11905624 bytes), normal manifest
+c67dfb7807ef0a97b7e9eabc12bf21c9f4c6a3809e2aab2a9fabf955e148038d:
+all seven original members independently match size and hash. The unchanged
+question asks which pill the younger victim took, using two deaths, ages,
+dates, coroner and distance as identifying constraints.
+
+NativeFAILED919.8s/progress1 and canonicalFAILED/producerinfraFALSE are distinct
+from an answer rejection: no semantic evaluator result is recorded. The final
+root message reports native browser failure, not an accepted pill answer.
+The actual fatal stack is required observation: handler10304 ->
+_observe_step_page3241 -> DOMService2552 -> BrowserUse get_browser_state_summary
+-> event_result with raise_if_none and raise_if_any. Its missing handler result
+is downstream of an earlier connection failure.
+
+Original worker30989 onward records page-target95D6244B0C25 silence with pending
+Network.getResponseBody calls on a Yorkshire Evening Post article. At
+01:58:03.133345Z worker31050 records snapshot, dom_tree and device_pixel_ratio
+CDP request timeout. Other CDP sessions still reply during that earlier phase;
+this does not establish whole-transport loss then or identify the cause of
+the later close. No classifier invocation in that interval establishes an
+R84 attachment-timeout regression.
+
+Worker38910 records upstream code1006/empty reason at02:00:55.858581Z.
+Reconnects1/2/3 fail TimeoutError at02:01:21.850079Z,
+02:01:39.288543Z and02:01:56.297223Z. Worker39495 records all three failed;
+39498 records required-state CDP still disconnected. Eight subsequent recovery
+attempts have actions[]/about:blank. Fatal no-result state acquisition follows
+at02:02:02.415105Z. A mux log label saying provider closed is not proof of a
+vendor-initiated close or the particular failed reconnect phase.
+
+Unlike R49's captured late promotion, this original backend's earlier
+recover-challenge request ends503 at01:52:37.274Z after eight unsuccessful
+candidate probes. No promotion is recorded. The same original Tilion session
+sess_b28038a9c17449cf8011b21ba55727af is deleted204 only at02:02:04.263Z,
+after the fatal observation, and again during terminal cleanup. Final cleanup
+records DELETE204/root_deleted/tree_sealed and cleanup_failure null.
+
+Two archive searches used the exact non-None-handler/CDP error and the
+socket-close/reconnect/required-state behavior. The full R88/R93 and R49 cases
+were read: the downstream signature is related, but the original close cause
+and failed reconnect subphase remain OPEN. No fabricated empty state, session
+replacement, timeout/cap change, model replay or speculative regression test
+was introduced. Positive operational transport evidence was sent to the
+coordinator separately from immutable producerinfraFALSE; this investigator
+performed no stop or recovery. No original task grade or outcome changed.
