@@ -674,20 +674,51 @@ def phased_lanes(lanes: list[Lane]) -> list[Lane]:
     return [lane for lane in lanes if lane.group == "3" or lane.phase == PHASE_COVERAGE]
 
 
+def phased_dependencies(lanes: list[Lane]) -> dict[str, list[str]]:
+    """For every phased lane, the phased lanes it waits for: its direct
+    ``after`` edges plus every edge reached through a chain of unphased lanes.
+    A quick lane ``q`` that waits for the unphased ``u``, which waits for the
+    coverage lane ``p``, must wait for ``p``'s phase as well; dropping ``u``
+    placed ``q`` in the quick phase and the implied edge p -> q closed the
+    cycle p -> u -> q -> p (CodeRabbit on #1639, 2026-10-30). Order follows
+    the lane's own ``after`` list, depth first; unknown names are left to
+    ``assert_acyclic`` on the full plan."""
+    by_name = {lane.name: lane for lane in lanes}
+    names = {lane.name for lane in phased_lanes(lanes)}
+    dependencies: dict[str, list[str]] = {}
+    for lane in phased_lanes(lanes):
+        found: list[str] = []
+        seen: set[str] = set()
+        stack = list(reversed(lane.after))
+        while stack:
+            dependency = stack.pop()
+            if dependency in seen:
+                continue
+            seen.add(dependency)
+            if dependency in names:
+                found.append(dependency)
+            elif dependency in by_name:
+                stack.extend(reversed(by_name[dependency].after))
+        dependencies[lane.name] = found
+    return dependencies
+
+
 def schedule_phases(lanes: list[Lane], estimates: dict[str, dict]) -> list[dict]:
     """Ordered Group 3 phases: quick lanes, each exclusive lane alone, then the
     rest (longest recorded first). Other groups are not phased unless a lane
     declares ``phase: "coverage"``, which places it in the coverage phase.
 
     Phases are layered over the plan's own ``after`` DAG: a lane joins a phase
-    only once every explicit dependency is in an earlier phase or in that same
+    only once every explicit dependency (direct, or reached through unphased
+    lanes; ``phased_dependencies``) is in an earlier phase or in that same
     phase, so the implied edges (phase k waits for phases < k) can never form
     a cycle with an explicit edge. A quick lane that waits for the exclusive
     lane therefore runs with the coverage lanes instead of deadlocking it.
+    Pass every plan lane, not only the phased ones: the unphased lanes carry
+    the chains.
     """
     phased = phased_lanes(lanes)
-    names = {lane.name for lane in phased}
-    explicit = {lane.name: [d for d in lane.after if d in names] for lane in phased}
+    explicit = phased_dependencies(lanes)
     assert_acyclic(explicit)
 
     def seconds(lane: Lane) -> float:
@@ -851,10 +882,12 @@ def simulate(lanes: list[Lane], estimates: dict[str, dict], max_parallel: int, b
     simulated = phased_lanes(lanes)
     group3 = {lane.name for lane in simulated if lane.group == "3"}
     loaded = {lane.name: float((estimates.get(lane.name) or {}).get("seconds") or 0.0) for lane in simulated}
-    legacy_after = {lane.name: [d for d in lane.after if d in loaded] for lane in simulated}
+    # Edges to other phased lanes, including those reached through unphased
+    # lanes (whose own durations the projection does not model).
+    legacy_after = phased_dependencies(lanes)
     legacy_finish = _list_schedule_finish(sorted(simulated, key=lambda l: -loaded[l.name]), loaded, legacy_after,
                                           max_parallel, budget_mb)
-    phases = schedule_phases(simulated, estimates)
+    phases = schedule_phases(lanes, estimates)
     implied = implied_dependencies(phases)
     phased: dict[str, float] = {}
     unmeasured: list[str] = []

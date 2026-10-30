@@ -641,6 +641,7 @@ def main() -> int:
         check_stage_receipt_seed(tmp, env)
         check_passed_only_estimates_and_dag_phases(tmp, env)
         check_declared_phase_lanes(tmp, env)
+        check_dependencies_through_unphased_lanes(tmp, env)
     print("run-deploy-pipeline: all checks passed")
     return 0
 
@@ -1149,6 +1150,65 @@ def check_declared_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
     assert bogus.returncode == 2 and "phase" in bogus.stderr, (bogus.returncode, bogus.stderr)
     assert not (tmp / "declared-bogus" / "receipt.json").exists()
     print("declared phase lanes: ok")
+
+
+def check_dependencies_through_unphased_lanes(tmp: Path, env: dict[str, str]) -> None:
+    """CodeRabbit on #1639 (2026-10-30): a quick Group 3 lane ``q`` that waits
+    for an unphased lane ``u`` which in turn waits for a coverage lane ``p``
+    landed in the quick phase (its only direct edge, ``u``, is unphased and
+    was dropped), so the implied coverage edge p -> q closed the cycle
+    p -> u -> q -> p and ``assert_acyclic`` refused the plan before any lane
+    started. Dependencies are now followed through unphased lanes: ``q``
+    joins ``p``'s coverage phase, the plan's own edges stay exact, admission
+    honours p -> u -> q and ``simulate`` projects the same chain."""
+    pipeline = load_module("pipeline_unphased_chain", DRIVER)
+
+    def sample(wall: float, concurrent: int = 1) -> dict:
+        return {"wall_s": wall, "status": "passed", "concurrent": concurrent, "at": "2026-10-30T00:00:00Z"}
+
+    walls = {"q": [sample(5.0)], "p": [sample(300.0)], "quick": [sample(4.0)]}
+    lanes = [pipeline.Lane(name="q", command=["true"], group="3", after=["u"]),
+             pipeline.Lane(name="u", command=["true"], group="4", after=["p"]),
+             pipeline.Lane(name="p", command=["true"], group="3"),
+             pipeline.Lane(name="quick", command=["true"], group="3")]
+    phases = pipeline.schedule_phases(lanes, pipeline.lane_estimates(lanes, walls, {}))
+    assert [(p["phase"], p["lanes"]) for p in phases] == [("quick", ["quick"]), ("coverage", ["p", "q"])], phases
+    assert pipeline.phased_dependencies(lanes) == {"q": ["p"], "p": [], "quick": []}, pipeline.phased_dependencies(lanes)
+
+    ledger = tmp / "unphased-chain-ledger.json"
+    ledger.write_text(json.dumps({"schema_version": 1, "lanes": walls}))
+    env = {**env, "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}
+    plan = tmp / "unphased-chain-plan.json"
+    write_plan(plan, [
+        {"name": "q", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "after": ["u"]},
+        {"name": "u", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "4", "after": ["p"]},
+        {"name": "p", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3"},
+        {"name": "quick", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3"},
+    ], schedule={"policy": "phased"})
+    state = tmp / "unphased-chain"
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, env=env, timeout=120)
+    assert ran.returncode == 0, (ran.returncode, ran.stderr)
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert receipt["status"] == "passed", receipt["status"]
+    assert [(p["phase"], p["lanes"]) for p in receipt["schedule"]["phases"]] == \
+        [("quick", ["quick"]), ("coverage", ["p", "q"])], receipt["schedule"]["phases"]
+    assert receipt["after"] == {"q": ["u", "quick"], "u": ["p"], "p": ["quick"], "quick": []}, receipt["after"]
+    ran_lanes = receipt["lanes"]
+    assert ran_lanes["u"]["started_epoch"] >= ran_lanes["p"]["finished_epoch"], "u waits for p (plan edge)"
+    assert ran_lanes["q"]["started_epoch"] >= ran_lanes["u"]["finished_epoch"], "q waits for u (plan edge)"
+    # A fresh seeded ledger: the run above appended its own real samples to the first one.
+    seeded = tmp / "unphased-chain-seeded.json"
+    seeded.write_text(json.dumps({"schema_version": 1, "lanes": walls}))
+    empty_runs = tmp / "unphased-no-runs"
+    empty_runs.mkdir(exist_ok=True)
+    simulated = json.loads(run_driver("simulate", "--plan", str(plan), "--max-parallel", "0",
+                                      env={**env, "DEPLOY_PIPELINE_LANE_DURATIONS": str(seeded),
+                                           "DEPLOY_RUN_ROOT": str(empty_runs)}, check=True).stdout)
+    assert [p["lanes"] for p in simulated["phases"]] == [["quick"], ["p", "q"]], simulated["phases"]
+    # legacy: p (300) then q (5) through u, quick beside them; phased: quick 4 -> p 300 -> q 5.
+    assert simulated["legacy_union_wall_s"] == 305.0 and simulated["phased_union_wall_s"] == 309.0, simulated
+    print("dependencies through unphased lanes: ok")
+
 
 
 if __name__ == "__main__":
