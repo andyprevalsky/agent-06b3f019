@@ -38,9 +38,10 @@ const {
   strictOutputSchema,
   handoffFromFinalMessage,
   handoffSchemaFromGoal,
+  azureSpeed,
 } = vm.runInNewContext(
   block +
-    "\n({ Native: CodexAppServer, strictOutputSchema, handoffFromFinalMessage, handoffSchemaFromGoal })",
+    "\n({ Native: CodexAppServer, strictOutputSchema, handoffFromFinalMessage, handoffSchemaFromGoal, azureSpeed })",
   sandbox,
 );
 function fixture(options = {}) {
@@ -979,6 +980,33 @@ test("an unavailable requested tier degrades to the next slower tier, never fast
     noTiers.calls.find((c) => c.method === "thread/start").params.serviceTier,
     null,
   );
+});
+test("a funded Azure session keeps its deployment: ultrafast runs as priority, never a model switch", async () => {
+  assert.equal(azureSpeed("standard"), "standard");
+  assert.equal(azureSpeed("priority"), "priority");
+  assert.equal(azureSpeed("ultrafast"), "priority");
+  assert.equal(azureSpeed(null), "priority");
+  const azureCatalog = [
+    {
+      id: "azure-terra",
+      model: "azure-terra",
+      supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
+      serviceTiers: [{ id: "priority" }],
+    },
+    ...SPEED_CATALOG.slice(1),
+  ];
+  const { native, calls } = fixture({
+    settings: {
+      model: "azure-terra",
+      effort: null,
+      speed: azureSpeed("ultrafast"),
+    },
+    models: azureCatalog,
+  });
+  await native.initialize(null, "hello");
+  const startup = calls.find((c) => c.method === "thread/start");
+  assert.equal(startup.params.model, "azure-terra");
+  assert.equal(startup.params.serviceTier, "priority");
 });
 test("Codex never routes through a Rose proxy or the demo cache", () => {
   for (const forbidden of [

@@ -1516,6 +1516,15 @@ function handoffFromFinalMessage(text, schema) {
 }
 
 /**
+ * Azure honors only the priority tier (ultrafast there is silently standard)
+ * and serves one deployment, so a funded-provider session never takes the
+ * ultrafast model switch: any non-standard speed is priority.
+ */
+function azureSpeed(requested) {
+  return requested === "standard" ? "standard" : "priority";
+}
+
+/**
  * The service tier a session starts on. A requested tier the model does not
  * offer degrades to the next slower one it does (ultrafast → priority →
  * standard); with no request a new session keeps the fastest advertised tier.
@@ -1619,7 +1628,9 @@ async function runCodexAppServer() {
   const settings = {
     model: usingApiKey ? CODEX_AZURE_MODEL : CODEX_MODEL,
     effort: process.env.CODEX_REASONING_EFFORT || null,
-    speed: process.env.CODEX_SPEED || null,
+    speed: usingApiKey
+      ? azureSpeed(process.env.CODEX_SPEED || null)
+      : process.env.CODEX_SPEED || null,
   };
   nativeCodex = new CodexAppServer(child, appendEvent, settings, handoff);
   // Runtime fallback, as in the exec transport: a turn that failed because the
@@ -1658,11 +1669,10 @@ async function runCodexAppServer() {
       const resumed = new CodexAppServer(
         next.child,
         appendEvent,
-        // Azure honors only the priority tier; ultrafast there is silently standard.
         {
           ...failed.settings,
           model: CODEX_AZURE_MODEL,
-          speed: failed.settings.speed === "standard" ? "standard" : "priority",
+          speed: azureSpeed(failed.settings.speed),
         },
         handoff,
       );
