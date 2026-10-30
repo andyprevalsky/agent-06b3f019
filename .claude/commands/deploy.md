@@ -661,11 +661,12 @@ argv and the environment minus process/session/terminal identity variables
 (e.g. systemd `INVOCATION_ID`, `JOURNAL_STREAM`, `SYSTEMD_EXEC_PID`,
 `NOTIFY_SOCKET`, `LISTEN_*`; shell `_`, `PWD`, `OLDPWD`, `SHLVL`; `COLUMNS`,
 `LINES`, terminal/SSH session ids — the full list is
-`_PROCESS_IDENTITY_ENV` in `scripts/run_deploy_stage.py`), so a lane
+`_PROCESS_IDENTITY_ENV` plus `_PROCESS_IDENTITY_ENV_PREFIXES` in
+`scripts/run_deploy_stage.py`), so a lane
 relaunched by a fresh process on identical bytes reuses its own pass instead
 of re-running. Two lane groups narrow that input: `eslint`, `typescript` and
 `backend-structural` drop the append-only `agents/benchmarks/history/`
-ledgers from the diff when they run their real command (lint-affected over the
+ledgers (tracked diff and untracked files) when they run their real command (lint-affected over the
 deploy lint list, `tsc`, `npm run test:structural`), and the front-end and mac
 lanes (`_LANE_SCOPES`) hash only their in-scope file content instead of HEAD.
 Every reuse line names the scope it matched.
@@ -1005,8 +1006,9 @@ cd back-end && bash ../scripts/run-deploy-stage backend-coverage-blackbox --reus
 ```
 
 This one command runs every deterministic back-end blackbox domain
-(`back-end/src/tests/blackbox/*.blackbox.ts`, 238 files on 2026-10-30, minus
-the provider-dependent `integration-health`) under V8 coverage as **two
+(`back-end/src/tests/blackbox/*.blackbox.ts`, 239 files on 2026-10-30, minus
+the provider-dependent `integration-health`: 238 domains run) under V8
+coverage as **two
 blackbox shards** (`scripts/run-coverage-sharded.sh`: each shard has its own
 instrumented backend, database, port and raw V8 directory; the blackbox and
 contract worker counts apply per shard, `BACKEND_UNIT_CONCURRENCY` to the

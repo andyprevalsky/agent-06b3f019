@@ -443,11 +443,11 @@ source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"
 export BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES="${BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES:-weekly}"
 # Coverage remains deterministic and still exercises the unavailable path.
 # The deploy workflow runs one focused live weekly probe afterward, so a
-# provider quota failure can be retried without rerunning all 91 deterministic domains.
+# provider quota failure can be retried without rerunning every deterministic domain.
 export AMPLITUDE_API_KEY=""
 export AMPLITUDE_SECRET_KEY=""
 # Credential health is a mandatory focused deploy stage, not deterministic code
-# coverage. Keep its real provider calls out of this 91-domain batch so a TLS or
+# coverage. Keep its real provider calls out of this deterministic batch so a TLS or
 # provider outage can be retried without rerunning every instrumented test.
 export BLACKBOX_TEST_SKIP_DOMAINS="${BLACKBOX_TEST_SKIP_DOMAINS:+$BLACKBOX_TEST_SKIP_DOMAINS,}integration-health"
 export CONTRACT_TEST_SKIP_DOMAINS="$BLACKBOX_TEST_SKIP_DOMAINS"
