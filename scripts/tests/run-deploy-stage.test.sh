@@ -108,6 +108,20 @@ reuse_stage standalone --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$st
 [ "$(wc -l < "$standalone_counter" | tr -d ' ')" = 1 ] || fail "a pass recorded without --reuse-passed was not reusable"
 grep -q "reused passed deploy stage: standalone (exact worktree + command)" "$TEST_ROOT/standalone.out" \
     || fail "standalone reuse was not disclosed with its scope"
+# Every executed stage row carries the host evidence the pipeline schedule is
+# decided from: the largest child RSS (RUSAGE_CHILDREN after the wait) and the
+# whole-box MemAvailable floor during the stage. #1639's rows showed
+# semantic-stack at 1652.8 MB child RSS / ~4.65 GB whole-box footprint beside a
+# 6.5 GB coverage-phase floor, which is why it stays after the coverage phase.
+python3 - "$RUN_ROOT/reuse/stages.jsonl" <<'PY' || fail "executed stage rows must record child peak RSS and the MemAvailable floor"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+ran = [row for row in rows if row.get("stage") == "standalone" and row.get("status") == "passed"]
+assert ran, "no executed passed row for stage standalone"
+host = (ran[0].get("detail") or {}).get("host") or {}
+assert float(host.get("child_peak_rss_mb") or 0) > 0, host
+assert float(host.get("mem_available_min_mb") or 0) > 0 and float(host.get("mem_total_mb") or 0) > 0, host
+PY
 # Process identity is not a deploy input: systemd stamps a fresh
 # INVOCATION_ID/JOURNAL_STREAM/SYSTEMD_EXEC_PID on every transient unit and the
 # terminal its own geometry, so a lane relaunched as a new unit must still match

@@ -37,9 +37,12 @@ if [[ -z "$EVIDENCE_DIR" ]]; then
 fi
 BLACKBOX_SUMMARY="${EVIDENCE_DIR:+$EVIDENCE_DIR/summary.json}"
 UNIT_RESULTS="$BACKEND_DIR/coverage/unit-run/results.json"
+# The sharded coordinator runs the fps probe as a separate labelled unit pass
+# (run-coverage-sharded.sh); its failures live beside the main pass's record.
+UNIT_PROBE_RESULTS="$BACKEND_DIR/coverage/unit-run/results-probe.json"
 
 selection="$(
-  BLACKBOX_SUMMARY="$BLACKBOX_SUMMARY" UNIT_RESULTS="$UNIT_RESULTS" node -e '
+  BLACKBOX_SUMMARY="$BLACKBOX_SUMMARY" UNIT_RESULTS="$UNIT_RESULTS" UNIT_PROBE_RESULTS="$UNIT_PROBE_RESULTS" node -e '
     const fs = require("node:fs");
     const read = (path) => {
       try { return path ? JSON.parse(fs.readFileSync(path, "utf8")) : undefined; }
@@ -51,9 +54,11 @@ selection="$(
       console.log("FULL");
       process.exit(0);
     }
+    const probe = read(process.env.UNIT_PROBE_RESULTS);
+    const units = [...new Set([...unit.failed, ...(Array.isArray(probe?.failed) ? probe.failed : [])])].sort();
     const domains = blackbox.results.filter((r) => !r.passed && !r.aborted).map((r) => r.domain);
     console.log(`DOMAINS=${domains.join(",")}`);
-    console.log(`UNITS=${unit.failed.join(",")}`);
+    console.log(`UNITS=${units.join(",")}`);
   '
 )"
 
