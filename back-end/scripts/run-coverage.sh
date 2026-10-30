@@ -139,35 +139,48 @@ if [[ -n "$COVERAGE_SHARD" ]]; then
   export BACKEND_UNIT_SHARD="$COVERAGE_SHARD"
 fi
 # The dedicated unit pass of a sharded run (BACKEND_COVERAGE_UNIT_PASS=1,
-# launched by run-coverage-sharded.sh only after every blackbox shard has
-# finished): the whole unit suite once, alone, with its own lock, artifacts
-# and database (`<workspace>_s0`; blackbox shards are numbered from 1), handing
-# its raw coverage to the coordinator's merge directory like a shard. The unit
-# suite's headless-browser perf probe (rose-ui-cli-browser `check --examples`,
-# fps-p50 >= 55) is host-load dependent: beside two blackbox streams it failed
-# 4/4 sharded runs and passed unsharded on the same box (2026-10-30), so the
-# unit phase must never overlap a blackbox shard.
+# launched by run-coverage-sharded.sh beside the blackbox shards): the unit
+# suite with its own lock, artifacts and database (`<workspace>_s0`; blackbox
+# shards are numbered from 1), handing its raw coverage to the coordinator's
+# merge directory like a shard. The unit suite's headless-browser perf probe
+# (rose-ui-cli-browser `check --examples`, fps-p50 >= 55) is host-load
+# dependent: beside two blackbox streams it failed 4/4 sharded runs and passed
+# unsharded on the same box (2026-10-30). The coordinator therefore excludes
+# that file from the concurrent pass (BACKEND_UNIT_EXCLUDE_FILES) and runs it
+# alone afterwards as a second, labelled unit pass
+# (BACKEND_COVERAGE_UNIT_PASS_LABEL=probe, BACKEND_UNIT_TEST_FILES=<probe>):
+# same `_s0` database (serial reuse), its own `-units-<label>` lock, raw
+# directory, logs and `results-<label>.json`.
 UNIT_PASS="${BACKEND_COVERAGE_UNIT_PASS:-0}"
+UNIT_PASS_LABEL="${BACKEND_COVERAGE_UNIT_PASS_LABEL:-}"
 if [[ "$UNIT_PASS" == "1" ]]; then
   if [[ -n "$COVERAGE_SHARD" ]]; then
-    echo "❌ BACKEND_COVERAGE_UNIT_PASS runs the whole unit suite; it cannot also be blackbox shard $COVERAGE_SHARD." >&2
+    echo "❌ BACKEND_COVERAGE_UNIT_PASS runs the unit suite; it cannot also be blackbox shard $COVERAGE_SHARD." >&2
     exit 2
   fi
   if [[ "${BACKEND_COVERAGE_SKIP_UNITS:-0}" == "1" ]]; then
     echo "❌ BACKEND_COVERAGE_UNIT_PASS and BACKEND_COVERAGE_SKIP_UNITS contradict each other." >&2
     exit 2
   fi
+  if [[ -n "$UNIT_PASS_LABEL" ]] && ! [[ "$UNIT_PASS_LABEL" =~ ^[a-z0-9-]+$ ]]; then
+    echo "❌ BACKEND_COVERAGE_UNIT_PASS_LABEL must match [a-z0-9-]+ (got '$UNIT_PASS_LABEL')." >&2
+    exit 2
+  fi
   export BACKEND_COVERAGE_SKIP_BLACKBOX=1
-  SHARD_SUFFIX="-units"
+  SHARD_SUFFIX="-units${UNIT_PASS_LABEL:+-$UNIT_PASS_LABEL}"
   SHARD_DB_SUFFIX="_s0"
+elif [[ -n "$UNIT_PASS_LABEL" ]]; then
+  echo "❌ BACKEND_COVERAGE_UNIT_PASS_LABEL requires BACKEND_COVERAGE_UNIT_PASS=1." >&2
+  exit 2
 fi
-# The unit pass runs every unit file, so it owns the unsuffixed
-# coverage/unit-run/results.json that coverage-rerun-failed.sh reads.
+# The unlabelled unit pass runs every unit file except the coordinator's
+# exclusions, so it owns the unsuffixed coverage/unit-run/results.json that
+# coverage-rerun-failed.sh reads; a labelled pass owns results-<label>.json.
 UNIT_RESULTS_SUFFIX="$SHARD_SUFFIX"
 # The shard token the prepared-URL resolver derives a per-run database from.
 COVERAGE_DB_TOKEN="$COVERAGE_SHARD"
 if [[ "$UNIT_PASS" == "1" ]]; then
-  UNIT_RESULTS_SUFFIX=""
+  UNIT_RESULTS_SUFFIX="${UNIT_PASS_LABEL:+-$UNIT_PASS_LABEL}"
   COVERAGE_DB_TOKEN="units"
 fi
 COVERAGE_PARTIAL=0

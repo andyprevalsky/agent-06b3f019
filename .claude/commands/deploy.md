@@ -1028,12 +1028,15 @@ coverage as **two
 blackbox shards** (`scripts/run-coverage-sharded.sh`: each shard has its own
 instrumented backend, database, port and raw V8 directory; the blackbox and
 contract worker counts apply per shard, `BACKEND_UNIT_CONCURRENCY` to the
-single unit pass), then the **unit suite once, alone**
-(`BACKEND_COVERAGE_UNIT_PASS=1`, its own `<workspace>_s0` database, log
-`coverage/units.log`) after the last shard has finished: the unit suite's
-headless-browser fps probe (`rose-ui-cli-browser`) is host-load dependent and
-failed 4/4 sharded runs when each shard ran its own unit slice beside two
-blackbox streams (2026-10-30). All raw coverage is merged into one
+unit pass), with the **unit pass beside the shards**
+(`BACKEND_COVERAGE_UNIT_PASS=1`, its own `<workspace>_s0` database and port
+pair, log `coverage/units.log`, every unit file except the headless-browser
+fps probe `rose-ui-cli-browser.test.ts`), then that **fps probe alone**
+(`BACKEND_COVERAGE_UNIT_PASS_LABEL=probe`, log `coverage/units-probe.log`)
+after every shard and the unit pass have finished: the probe is host-load
+dependent and failed 4/4 sharded runs beside two blackbox streams
+(2026-10-30), while the rest of the unit suite waited 12.7 min after the
+shards on #1639. All raw coverage is merged into one
 `c8 report --check-coverage`, so it must both pass every test and meet
 `back-end/.c8rc.json` on the merged report; the real provider credential probe
 runs once in Step 4c. On an isolated deploy worktree on system Postgres
