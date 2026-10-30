@@ -542,7 +542,6 @@ source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"
 # a test of unrelated local Fast Mode infrastructure. Explicit BLACKBOX_*
 # overrides remain available for proxy-specific blackbox runs.
 export FAST_MODE_ANTHROPIC_PROXY_URL="${BLACKBOX_FAST_MODE_ANTHROPIC_PROXY_URL:-}"
-export FAST_MODE_CODEX_PROXY_URL="${BLACKBOX_FAST_MODE_CODEX_PROXY_URL:-}"
 
 launch_backend() {
   cat >"$MANIFEST_PATH" <<EOF

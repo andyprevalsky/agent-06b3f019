@@ -264,6 +264,16 @@ export function useMessageSending({
               attachments: attachments && attachments.length > 0 ? attachments : undefined,
               price_limit_cents: pendingPriceLimitCents,
               ...(userCanUseFastMode ? { fast_mode_cache_enabled: fastMode } : {}),
+              // Off → standard; Fast vs Ultrafast (speedLevel.ts; defaults to Ultrafast).
+              ...(userCanUseFastMode
+                ? {
+                    speed: !fastMode
+                      ? 'standard'
+                      : readQueryPreferences(userId).ultraPreferred === false
+                        ? 'fast'
+                        : 'ultrafast',
+                  }
+                : {}),
               ...(userCanUseSimulator
                 ? { world_model_mode: simulatorMode ? 'simulate' : 'real' }
                 : {}),
@@ -331,6 +341,7 @@ export function useMessageSending({
       messageInput,
       selectedAgentId,
       selectedModel,
+      userId,
       fastMode,
       simulatorMode,
       canSubmitGoals,

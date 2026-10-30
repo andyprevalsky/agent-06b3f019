@@ -5,6 +5,7 @@ import { createLogicalBrowserInTransaction } from '../../providers/browser/logic
 
 import type { Prisma, AgentSource, VerifierType } from '@prisma/client';
 import { runTransactionWithRetry } from '../../providers/database';
+import type { AgentSpeed } from '../../providers/rose/speed';
 import { assertCurrentParentWorkflowGenerations } from './repoParentWorkflowFence';
 import { assertTaskPathsFree } from './repoTaskPath';
 
@@ -43,6 +44,7 @@ function optionalAgentCreateFields(params: {
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
+  speed?: AgentSpeed;
   memoryEnabled?: boolean;
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   isBenchmark?: boolean;
@@ -77,6 +79,7 @@ function optionalAgentCreateFields(params: {
     ...(params.fastModeCacheEnabled !== undefined
       ? { fastModeCacheEnabled: params.fastModeCacheEnabled }
       : {}),
+    ...(params.speed !== undefined ? { speed: params.speed } : {}),
     ...(params.memoryEnabled !== undefined ? { memoryEnabled: params.memoryEnabled } : {}),
     ...(params.worldModelMode !== undefined ? { worldModelMode: params.worldModelMode } : {}),
     ...(params.isBenchmark === true ? { isBenchmark: true } : {}),
@@ -127,6 +130,7 @@ export interface CreateAgentParams {
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
+  speed?: AgentSpeed;
   memoryEnabled?: boolean;
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   verifierType: string;
@@ -233,6 +237,7 @@ export interface BatchCreateAgentParams {
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
+  speed?: AgentSpeed;
   memoryEnabled?: boolean;
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   verifierType: string;

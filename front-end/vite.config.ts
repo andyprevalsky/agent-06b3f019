@@ -9,10 +9,6 @@ export default defineConfig(() => {
       target: `http://localhost:${process.env.BACKEND_PORT || '3000'}`,
       changeOrigin: true,
     },
-    '/codex-proxy': {
-      target: `http://localhost:${process.env.BACKEND_PORT || '3000'}`,
-      changeOrigin: true,
-    },
     '/api': {
       target: process.env.VITE_BACKEND_API_URL || 'http://localhost:3001',
       changeOrigin: true,
