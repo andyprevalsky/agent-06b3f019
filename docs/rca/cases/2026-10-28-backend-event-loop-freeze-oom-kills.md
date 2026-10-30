@@ -8,7 +8,7 @@ classification: undetermined
 problem_class: observability-trace-capture-gap
 first_bad_boundary: Unproven. In each kill the main event loop stopped (every main-thread log line ends) during an in-progress chat turn, and RSS rose from about 1 GB to 16 GiB within about 30 s with no V8 heap-limit error, which points to off-heap growth.
 symptoms:
-  - "oomKilled": {"memoryLimit": "16Gi"}
+  - "oomKilled": { "memoryLimit": "16Gi" }
   - Instance srv-d3jga77diees73cgrvk0 restarted
   - 502 responseBytes=223158 for every in-flight request
   - Initial broadcast delivery rejected reason capacity
@@ -56,7 +56,7 @@ Shared signature across the kills with retained logs (10-14, 10-22, both 10-27):
 - Main-thread logging stopped 40-70 s before each kill. Even `OPTIONS`
   preflights hung, so the loop itself was blocked.
 - A chat turn was mid-flight each time: after `[ChatHandler] Executing web
-  searches` (10-22), at the router's after-search decision (10-27 04:48), after
+searches` (10-22), at the router's after-search decision (10-27 04:48), after
   the generator finished (10-27 21:08), and mid generator stream (10-14). Same-
   millisecond bursts of stream deltas and `delivery rejected, reason: capacity`
   lines are a consequence of the stopped drain, not its cause (committed
@@ -73,6 +73,33 @@ Ruled out with local measurements:
 - Realtime broadcast backlog: replaying 40-200 stream deltas plus committed
   INSERTs showed no lag and no heap growth.
 - Trace-archive run fixtures for the affected user read under 1 KB per table.
+
+- Benchmark Hub upload floods: the 10-18 11:15-11:21Z ramp (3.4 to 6.4 GB,
+  no kill) coincided with 200-450 live plus up to 450 final Hub uploads and up
+  to 660 run reads per minute. The kill windows saw 0-7 uploads per minute, so
+  Hub traffic explains that near miss, not the kills.
+- V8 heap exhaustion: prod sets no `NODE_OPTIONS`, so the heap limit is about
+  4 GB. Reaching 16 GiB without a heap-limit error requires off-heap memory.
+- Logging backlog: queued stdout writes of distinct strings stay on the V8
+  heap, so they would hit the heap limit first.
+
+S31 (2026-10-28): the watchdog has seen no stall since it went live at 05:38Z,
+and there was no kill. Peak instance memory was 1.81 GB. The cause is still
+unreproduced. The watchdog now records what the next capture needs to
+classify the growth:
+
+- the main isolate's `process.memoryUsage()`, read from the paused frame
+  (`heapUsed` against `external`/`arrayBuffers`);
+- anonymous RSS (`RssAnon`);
+- CPU per thread since the stall began, which tells the main thread apart from
+  libuv, zlib or GC threads;
+- a fresh stack and memory sample every 5 s for the whole stall, not just the
+  first frame.
+
+If the main thread is stuck inside native code and never reaches a pause
+point, `capture_error: pause timed out` is reported together with high main-
+thread CPU and rising `anon_mb`. That points at a native builtin such as zlib,
+`JSON`/`Buffer` concat or sharp, on the main thread.
 
 The process stops writing logs the moment the loop blocks, so no existing log
 can name the code that ran. This is the owned gap: the backend had no
