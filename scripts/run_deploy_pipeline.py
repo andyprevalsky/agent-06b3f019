@@ -64,7 +64,13 @@ current classification. Each running lane's observation state
 recorded admission inputs, and a deferred lane keeps its first and latest
 deferral inputs. A lane whose usage is unknown, stale or
 invalid (macOS, unreadable /proc, not yet sampled, a stalled or slow pass)
-keeps its whole declaration, and the declarations themselves are unchanged. An
+keeps its whole declaration, and the declarations themselves are unchanged.
+``DEPLOY_ADMISSION_CREDIT=0`` (default on) disables the credit for a matched
+control run on the identical plan and head: observations are still sampled
+and recorded, every running lane classifies as ``disabled``, the whole
+declarations are reserved (the pre-credit accounting) and the receipt and
+every admission record carry ``credit: disabled``; the semantic-stack
+ownership edge below is not affected by the flag. An
 unphased lane (``semantic-stack``: its ``run.sh --benchmark`` startup runs
 ``kill-services.sh``, which terminates a running smoke stack) keeps the
 declared-peak accounting, so this change cannot admit it beside a stack it
@@ -208,6 +214,11 @@ HOST_SAMPLE_SECONDS = 1.0
 # A running lane's process-tree observation credits its declaration only while
 # it is this fresh; an older or failed sample keeps the whole declaration.
 OBSERVATION_MAX_AGE_SECONDS = 3 * HOST_SAMPLE_SECONDS
+# ``DEPLOY_ADMISSION_CREDIT=0`` disables the materialized-memory credit for a
+# matched control run on the identical plan and head: observations are still
+# sampled and recorded, every running lane classifies as ``disabled`` and the
+# whole declarations are reserved (the pre-credit accounting).
+ADMISSION_CREDIT_ENV = "DEPLOY_ADMISSION_CREDIT"
 PROC_ROOT = Path("/proc")
 RECEIPT_SCHEMA = 2
 EXIT_STALE = 5
@@ -531,6 +542,22 @@ def fresh_tree_anon_mb(state: dict, now: float | None = None) -> tuple[float | N
     return float(value), {**detail, "observation": "fresh"}
 
 
+def admission_credit_enabled() -> bool:
+    """Default on; ``DEPLOY_ADMISSION_CREDIT=0`` (or false/no/off) disables it."""
+    return os.environ.get(ADMISSION_CREDIT_ENV, "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def classify_observations(running_states: dict[str, dict],
+                          credit_enabled: bool = True) -> dict[str, tuple[float | None, dict]]:
+    """Each running lane's creditable anonymous MB and observation detail at
+    this decision. With the credit disabled every lane is ``disabled``: the
+    sampled values stay in the record and nothing is credited."""
+    observations = {name: fresh_tree_anon_mb(state) for name, state in running_states.items()}
+    if credit_enabled:
+        return observations
+    return {name: (None, {**detail, "observation": "disabled"}) for name, (_, detail) in observations.items()}
+
+
 def unmaterialized_mb(memory_mb: int, observed_mb: float | None) -> int:
     """The part of a running lane's declared reservation not yet visible in
     MemAvailable: its headroom for growth still to come. Unobserved usage
@@ -542,10 +569,11 @@ def unmaterialized_mb(memory_mb: int, observed_mb: float | None) -> int:
 
 def _admission_inputs(lane: Lane, headroom: int | None, budget_mb: int | None, reserved: int, live_reserved: int,
                       accounting: str, observations: dict[str, tuple[float | None, dict]],
-                      by_name: dict[str, Lane]) -> dict:
+                      by_name: dict[str, Lane], credit_enabled: bool = True) -> dict:
     """Every input of one admission decision, kept on the lane for audit."""
     return {"at": _now(), "headroom_mb": headroom, "budget_mb": budget_mb, "memory_mb": lane.memory_mb,
             "reserved_declared_mb": reserved, "reserved_live_mb": live_reserved, "accounting": accounting,
+            "credit": "enabled" if credit_enabled else "disabled",
             "running": {name: {"memory_mb": by_name[name].memory_mb, **detail}
                         for name, (_, detail) in observations.items()}}
 
@@ -1414,6 +1442,9 @@ def _run_attempt(
     payload: dict | None = None,
 ) -> tuple[dict, str]:
     """One attempt on one frozen source; returns (receipt, "done" | "superseded")."""
+    # The kill switch for a matched control run (DEPLOY_ADMISSION_CREDIT=0) is
+    # read per attempt and recorded on the receipt and every admission.
+    credit_enabled = admission_credit_enabled()
     # Phase-implied dependencies are recomputed per attempt from the ledger as
     # it stands now; the plan's own ``after`` edges are always kept.
     lanes = [Lane(**{**lane.__dict__, "after": list(lane.after)}) for lane in lanes]
@@ -1444,6 +1475,7 @@ def _run_attempt(
         "host_samples": [{"at": _now(), **host, "headroom_mb": live_budget}],
         "max_parallel": max_parallel,
         "memory_budget_mb": budget_mb,
+        "admission_credit": "enabled" if credit_enabled else "disabled",
         "schedule": schedule,
         "after": {lane.name: list(lane.after) for lane in order},
     }
@@ -1591,13 +1623,13 @@ def _run_attempt(
                 # probe: a slow probe or a deschedule may have aged a sample that
                 # was fresh when this pass began past the limit. The decision
                 # and its record use the same, current classification.
-                observations = {name: fresh_tree_anon_mb(state) for name, state in running_states.items()}
+                observations = classify_observations(running_states, credit_enabled)
                 unmaterialized = sum(unmaterialized_mb(by_name[name].memory_mb, observations[name][0])
                                      for name in running_states)
                 accounting = "unmaterialized" if lane.name in credit_lanes else "declared"
                 live_reserved = unmaterialized if accounting == "unmaterialized" else reserved
                 inputs = _admission_inputs(lane, headroom, budget_mb, reserved, live_reserved, accounting,
-                                           observations, by_name)
+                                           observations, by_name, credit_enabled)
                 if headroom is None or live_reserved + lane.memory_mb > headroom:
                     if headroom is None and receipt["host_samples"][-1].get("error") != sample.get("error"):
                         receipt["host_samples"].append({"at": _now(), **sample, "headroom_mb": headroom})
@@ -1619,7 +1651,8 @@ def _run_attempt(
                 if deferred:
                     print(f"PIPELINE_LANE_ADMITTED lane={lane.name} after {deferred['checks']} deferred check(s) "
                           f"since {deferred['since']}: headroom={headroom} reserved_live={live_reserved} "
-                          f"reserved_declared={reserved} memory={lane.memory_mb} accounting={accounting}",
+                          f"reserved_declared={reserved} memory={lane.memory_mb} accounting={accounting} "
+                          f"credit={'enabled' if credit_enabled else 'disabled'}",
                           flush=True)
                 argv = ["bash", str(STAGE_WRAPPER), lane.name]
                 if lane.reuse_passed:

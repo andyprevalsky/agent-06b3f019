@@ -441,13 +441,13 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
         # No MemTotal/watchdog: headroom is MemAvailable less the 2 GiB reserve.
         return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if marker.exists() else 300)}
 
-    def run(state: Path, **patches) -> dict:
+    def run(state: Path, extra_env: dict[str, str] | None = None, **patches) -> dict:
         if marker.exists():
             marker.unlink()
         with ExitStack() as stack:
             stack.enter_context(patch.object(pipeline, "host_resources", side_effect=host))
             stack.enter_context(patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])))
-            stack.enter_context(patch.dict(os.environ, env))
+            stack.enter_context(patch.dict(os.environ, {**env, **(extra_env or {})}))
             for name, value in patches.items():
                 stack.enter_context(patch.object(pipeline, name, value))
             result = pipeline.run(plan, state, max_parallel=0)
@@ -458,7 +458,10 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
 
     if sys.platform == "linux":
         write(tmp / "credit-joined", tmp / "credit-unphased")
-        lanes = run(tmp / "credit")["lanes"]
+        receipt = run(tmp / "credit")
+        lanes = receipt["lanes"]
+        assert "DEPLOY_ADMISSION_CREDIT" not in env, "the default (credit on) is under test here"
+        enabled_receipt = receipt
         holder, joiner, unphased = lanes["holder"], lanes["joiner"], lanes["unphased"]
         assert joiner["started_epoch"] < holder["finished_epoch"], \
             "joiner fits beside holder's unmaterialized reservation and must not wait for it"
@@ -482,6 +485,26 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
             "an unphased lane keeps the declared accounting beside a running stack"
         assert unphased["admission"]["accounting"] == "declared", unphased["admission"]
         assert "waiting" not in joiner and "waiting" not in unphased, "deferral history moves under admission"
+        # Kill switch for a matched control run: identical plan and head with
+        # DEPLOY_ADMISSION_CREDIT=0. Sampling and recording continue, every
+        # running lane classifies as disabled, the whole declaration is reserved
+        # (pre-credit accounting) and the records say so.
+        write(tmp / "disabled-joined", tmp / "disabled-unphased")
+        receipt = run(tmp / "disabled", extra_env={"DEPLOY_ADMISSION_CREDIT": "0"})
+        lanes = receipt["lanes"]
+        holder, joiner = lanes["holder"], lanes["joiner"]
+        assert joiner["started_epoch"] >= holder["finished_epoch"], \
+            "DEPLOY_ADMISSION_CREDIT=0 must reserve the holder's whole declaration (no credit)"
+        assert enabled_receipt["admission_credit"] == "enabled" and admission["credit"] == "enabled", admission
+        assert enabled_receipt["lanes"]["unphased"]["admission"]["credit"] == "enabled"
+        assert receipt["admission_credit"] == "disabled", receipt["admission_credit"]
+        assert joiner["admission"]["credit"] == "disabled" and lanes["unphased"]["admission"]["credit"] == "disabled"
+        last = joiner["admission"]["deferred"]["last"]
+        assert last["reserved_live_mb"] == last["reserved_declared_mb"] == 100 and last["accounting"] == "unmaterialized", last
+        assert last["running"]["holder"]["observation"] == "disabled", last["running"]
+        assert last["running"]["holder"]["tree_anon_mb"] >= 50 and last["running"]["holder"]["tree_pss_mb"] >= 50, \
+            "observations are still sampled and recorded for evidence"
+        assert holder["tree_peak_anon_mb"] >= 50 and holder["tree_sampled_at"], holder
     else:
         print("materialized reservation credit: process-tree sampling is Linux-only; conservative path only")
     # Unobserved usage (macOS, unreadable /proc) keeps the whole declaration: joiner waits.
