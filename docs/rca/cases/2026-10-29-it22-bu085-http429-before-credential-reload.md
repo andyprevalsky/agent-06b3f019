@@ -175,3 +175,49 @@ infrastructure reclassification. Searches used credential_reload_error HTTP429
 and ERR_HTTP_RESPONSE_CODE_FAILURE mandatory reload; R86 and R52 Solution/Human
 feedback were read. OPEN, no runtime patch, model/provider/native/DB call,
 replay, cap/criteria change or task regrade. Tokens UNMETERED.
+
+## R95 observed recurrence: original It24 BU085r2
+
+It24 r002-j0015/root8396719f-8475-4443-9315-334f84c2dfce independently reaches
+the same observed reload boundary on source8136eb6bb1d32d98553a70ca5f98278b590bee81,
+patch none. All seven original normal members match manifest
+255fddff8a56ab6c50fc9df0f8ca9dc2559813860aea08f4d09e17d10458304b;
+archive7e928a275341fd78319913ef9daacbd83a068478cb6ed5753bb9460a88d75cd2
+and run4da185881bbf4184f6e2db5eca2efb44dbea1d67a46525a94c399771912d40e9
+were verified. NativeFAILED664.9s/progress1 precedes canonicalFAILED/infraFALSE;
+no declared semantic judge result or answer is present.
+
+The destination differs from R86: the actual click reaches Harvard publication
+1cdc6cf7-09cc-4b5a-a34d-cd4cf6a4b420, not the earlier bitstream URL. Worker
+13469 records successful click at01:56:53.965939Z. Worker13476 records actual
+HTTP429 at01:56:54.360636Z, before the preparation/reload. The recorder reports
+an183914-byte untruncated body path; the body itself is not in the normal seven
+files, so its explanation is not invented from the status code.
+
+Worker13518 applies zero cookies and zero local-storage entries. Worker13523
+at01:56:56.096971Z records authoritative harvard.edu realm preparation with
+password_count1, passkey_count0, passkeys_newly_injected0, cookie_source none,
+and cookies_injected false. Saved credential inventory is still distinct from
+injected browser state. The source's reload block is byte-identical to the
+previously inspected implementation; no claim is made about every other source
+path or provider state being identical.
+
+Eight credential_reload_error:RuntimeError recoveries occur from
+01:57:00.092630Z through01:57:43.383036Z, with bring_to_front/press_escape on
+chrome-error and visible HTTP429. The unchanged recovery budget exhausts at
+01:57:47.295448Z. Worker14318 records the original fatal stack at handler10375
+reload_event.event_result, through browser-use navigation to
+ERR_HTTP_RESPONSE_CODE_FAILURE. Thus the R35 guard runs and eventually
+propagates a still-failed navigation; this is not its old unguarded escape.
+Selected line hashes and workerSHA
+7326cca93b4303f66dfafd45b81a09315efa8430e69810227a69d36c93e22aac are retained
+in .context/r95/proof.json.
+
+The recurrence establishes this shared observed sequence, not a common hidden
+rate-limit cause or a safe authentication bypass. No new runtime candidate,
+retry, timeout, task/grade change, model/native/DB call or duplicate repair lane
+was introduced. A general safe transition out of the unacknowledged reload
+remains unproven. The normal final cleanup records session
+sess_993d70326c2349d8bd207b5d683fc8d3 DELETE204, root deleted and tree sealed.
+No operational provider failure is inferred solely from the destination429.
+The original R86 record and its limitations remain intact.
