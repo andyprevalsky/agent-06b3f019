@@ -522,4 +522,36 @@ run_signal_case "TERM-INT-HUP-burst" TERM INT HUP TERM
 )
 echo "PASS: run_process_cwd_in_tree never claims a nested worktree"
 
+# An isolated benchmark stack runs in its own session; a SIGKILL of its
+# controller (a wrapper's grace timer) skips the controller's teardown. run.sh
+# must notice the exact owner is gone (pid + /proc start time) and shut down.
+(
+    export CONDUCTOR_PORT=61900 CONDUCTOR_WORKSPACE_NAME=owner-watch-test RUN_SH_SOURCE_ONLY=true
+    # shellcheck source=/dev/null
+    source "$ROOT_DIR/scripts/run.sh"
+    set +e
+    unset RUN_SH_OWNER_PID RUN_SH_OWNER_START
+    stack_owner_process_gone && { echo "FAIL: a stack without an owner shut down" >&2; exit 1; }
+    sleep 1000 >/dev/null 2>&1 &
+    owner=$!
+    trap 'kill -KILL "$owner" 2>/dev/null || true' EXIT
+    export RUN_SH_OWNER_PID="$owner"
+    if [ -r "/proc/$owner/stat" ]; then
+        stat=$(cat "/proc/$owner/stat")
+        export RUN_SH_OWNER_START=$(printf '%s\n' "${stat##*) }" | awk '{print $20}')
+        stack_owner_process_gone && { echo "FAIL: live owner treated as gone" >&2; exit 1; }
+        RUN_SH_OWNER_START=$((RUN_SH_OWNER_START + 1)) stack_owner_process_gone \
+            || { echo "FAIL: a reused owner PID was treated as the owner" >&2; exit 1; }
+    else
+        stack_owner_process_gone && { echo "FAIL: live owner treated as gone" >&2; exit 1; }
+    fi
+    kill -KILL "$owner"; wait "$owner" 2>/dev/null
+    stack_owner_process_gone || { echo "FAIL: SIGKILLed owner not detected" >&2; exit 1; }
+    awk '/^# Poll for failed children every second/{loop=1} loop && /stack_owner_process_gone/{found=1; exit} END{exit !found}' \
+        "$ROOT_DIR/scripts/run.sh" || { echo "FAIL: run.sh poll loop does not watch its owner" >&2; exit 1; }
+    grep -q 'env\["RUN_SH_OWNER_PID"\] = str(os.getpid())' "$ROOT_DIR/agents/benchmarks/local.py" \
+        || { echo "FAIL: local.py does not publish itself as the isolated stack owner" >&2; exit 1; }
+)
+echo "PASS: an isolated stack shuts down when its exact owner process is gone"
+
 echo "All run process cleanup tests passed."

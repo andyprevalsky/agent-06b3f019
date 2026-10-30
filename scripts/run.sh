@@ -335,6 +335,24 @@ resolve_frontend_dist_dir() {
     printf '%s/.context/frontend-builds/%s\n' "${workspace_root%/}" "$dist_key"
 }
 
+# A benchmark controller (agents/benchmarks/local.py) starts an isolated stack in
+# its own session and stops it on exit. A SIGKILL of the controller (a wrapper's
+# grace timer) skips that, so the stack watches its owner: RUN_SH_OWNER_PID plus
+# RUN_SH_OWNER_START (/proc start time) guard against PID reuse.
+stack_owner_process_gone() {
+    local pid="${RUN_SH_OWNER_PID:-}" expected="${RUN_SH_OWNER_START:-}" stat start
+    [ -n "$pid" ] || return 1
+    if [ -r "/proc/$pid/stat" ]; then
+        [ -n "$expected" ] || return 1
+        stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 0
+        start=$(printf '%s\n' "${stat##*) }" | awk '{print $20}')
+        [ "$start" = "$expected" ] && return 1
+        return 0
+    fi
+    kill -0 "$pid" 2>/dev/null && return 1
+    return 0
+}
+
 if [ "${RUN_SH_SOURCE_ONLY:-false}" = "true" ]; then
     return 0 2>/dev/null || exit 0
 fi
@@ -3060,6 +3078,14 @@ fi
 # Poll for failed children every second
 while true; do
     if $SHUTTING_DOWN; then break; fi
+
+    if stack_owner_process_gone; then
+        echo ""
+        echo "⚠️  Stack owner PID $RUN_SH_OWNER_PID exited without stopping this stack — shutting down all services."
+        cleanup
+        rm -rf "$FAIL_DIR"
+        exit 143
+    fi
 
     # Check if any process has died
     for i in "${!PIDS[@]}"; do
