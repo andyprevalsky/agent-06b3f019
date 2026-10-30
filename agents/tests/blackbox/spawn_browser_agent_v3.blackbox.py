@@ -26199,6 +26199,15 @@ async def test_return_to_quarantined_realm_invalidates_other_auth_context():
     )
 
 
+async def test_native_failed_navigation_restriction_and_escape():
+    from navigation_policy_cases import (assert_navigation_policy_activity_cases,
+                                         assert_failed_navigation_identity_and_restore,
+                                         assert_navigation_admission_at_native_dispatch)
+    await assert_navigation_policy_activity_cases(globals(), failed_navigation=True)
+    await assert_failed_navigation_identity_and_restore()
+    await assert_navigation_admission_at_native_dispatch()
+
+
 async def test_native_navigation_policy_restriction_and_escape():
     from navigation_policy_cases import assert_navigation_policy_activity_cases, assert_navigation_admission_at_native_dispatch
     await assert_navigation_policy_activity_cases(globals())
@@ -26212,7 +26221,10 @@ async def test_credential_reload_failure_preserves_pending_ack_and_shared_recove
     import textwrap
     from pathlib import Path
     from types import SimpleNamespace
-    from domains.spawn_browser_agent_v3.navigation_policy import NavigationPolicyBarrier, is_native_navigation_policy_denial
+    from domains.spawn_browser_agent_v3.navigation_policy import (
+        NavigationPolicyBarrier, NavigationFailureBarrier, NativeNavigationFailure,
+        is_native_navigation_policy_denial, native_navigation_failure,
+    )
     source = Path(__file__).resolve().parents[2] / 'domains/spawn_browser_agent_v3/handler.py'
     source = globals().get('RELOAD_SOURCE', source)
     text = Path(source).read_text()
@@ -26277,7 +26289,9 @@ async def run(mode, pending='new.example', current_url='https://new.example/logi
         break
     return events
 '''
-    env = {'NavigationPolicyBarrier': NavigationPolicyBarrier, 'is_native_navigation_policy_denial': is_native_navigation_policy_denial, 'asyncio': asyncio, 'SimpleNamespace': SimpleNamespace,
+    env = {'NavigationPolicyBarrier': NavigationPolicyBarrier, 'NavigationFailureBarrier': NavigationFailureBarrier,
+           'NativeNavigationFailure': NativeNavigationFailure, 'native_navigation_failure': native_navigation_failure,
+           'is_native_navigation_policy_denial': is_native_navigation_policy_denial, 'asyncio': asyncio, 'SimpleNamespace': SimpleNamespace,
            'auth_realm_from_url': lambda u: u.split('/')[2] if '://' in u else '',
            'auth_realm_matches_url': lambda realm,u: bool(realm) and realm == (u.split('/')[2] if '://' in u else ''),
            'NavigateToUrlEvent': lambda **kw: SimpleNamespace(**kw),
@@ -37429,6 +37443,7 @@ async def run_all_tests():
         test_activity_fatal_error_keeps_credentials_out_of_classifier_and_temporal_failure,
     )
     await r.record_async("native_navigation_policy_restriction_and_escape", test_native_navigation_policy_restriction_and_escape)
+    await r.record_async("native_failed_navigation_restriction_and_escape", test_native_failed_navigation_restriction_and_escape)
     await r.record_async("credential_reload_failure_preserves_pending_ack_and_shared_recovery", test_credential_reload_failure_preserves_pending_ack_and_shared_recovery)
     await r.record_async(
         "activity_redirected_goto_reloads_prepared_realm_once",

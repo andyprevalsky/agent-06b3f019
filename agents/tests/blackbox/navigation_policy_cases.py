@@ -8,30 +8,38 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 
-async def assert_navigation_policy_activity_cases(namespace):
+async def assert_navigation_policy_activity_cases(namespace, *, failed_navigation=False):
     from domains.spawn_browser_agent_v3 import handler as h
     from domains.spawn_browser_agent_v3.navigation_policy import (
         NavigationPolicyBarrier, is_native_navigation_policy_denial, url_digest,
     )
     from _test_utils import setup_mock
 
-    native_error = {'code': -32000, 'message': 'navigation to a non-public address is blocked'}
-    assert is_native_navigation_policy_denial(RuntimeError(native_error))
-    for error in (RuntimeError(str(native_error)), RuntimeError({'code': True, 'message': native_error['message']}),
-                  RuntimeError({'code': -32000, 'message': 'ordinary failure'}), ValueError(native_error)):
-        assert not is_native_navigation_policy_denial(error)
+    from domains.spawn_browser_agent_v3 import navigation_policy as policy_module
+    barrier_type = (getattr(policy_module, "NavigationFailureBarrier", NavigationPolicyBarrier)
+                    if failed_navigation else NavigationPolicyBarrier)
+    checkpoint_key = "navigation_failure_barrier" if failed_navigation else "navigation_policy_barrier"
+    native_error = ("Navigation failed: net::ERR_EMPTY_RESPONSE" if failed_navigation else
+                    {'code': -32000, 'message': 'navigation to a non-public address is blocked'})
+    if not failed_navigation:
+        assert is_native_navigation_policy_denial(RuntimeError(native_error))
+        for error in (RuntimeError(str(native_error)), RuntimeError({'code': True, 'message': native_error['message']}),
+                      RuntimeError({'code': -32000, 'message': 'ordinary failure'}), ValueError(native_error)):
+            assert not is_native_navigation_policy_denial(error)
+    else:
+        assert not is_native_navigation_policy_denial(RuntimeError(native_error))
     saved = {'version': 1, 'task_id': 'task-1', 'session_id': 'session-1',
              'target_id': 'target-original', 'url_sha256': url_digest('https://example.com/login'),
              'denied_url_sha256s': [url_digest('https://example.com/login')]}
-    assert NavigationPolicyBarrier('task-1', json.loads(json.dumps(saved))).checkpoint() == saved
-    debt = NavigationPolicyBarrier('task-1', saved)
+    assert barrier_type('task-1', json.loads(json.dumps(saved))).checkpoint() == saved
+    debt = barrier_type('task-1', saved)
     debt.deny('session-1', {'target_id': 'second-target', 'url': 'https://second.example/denied'})
     assert not debt.permits_destination('https://example.com/login')
     assert not debt.permits_destination('https://second.example/denied')
-    assert NavigationPolicyBarrier('task-1', debt.checkpoint()).checkpoint() == debt.checkpoint()
+    assert barrier_type('task-1', debt.checkpoint()).checkpoint() == debt.checkpoint()
     for bad in ({**saved, 'task_id': 'foreign'}, {**saved, 'version': True}, {**saved, 'url_sha256': 'invalid'}):
         try:
-            NavigationPolicyBarrier('task-1', bad)
+            barrier_type('task-1', bad)
         except ValueError:
             pass
         else:
@@ -41,7 +49,10 @@ async def assert_navigation_policy_activity_cases(namespace):
     fixture = next(n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
                    and n.name == 'test_spawn_browser_activity_verified_completion_message_leads_with_goal')
     completed = []
-    for mode in ('escape', 'drain', 'restored', 'restored_replacement', 'preparation_failure', 'second_denial', 'stale_ack', 'schema_ack', 'transient', 'cancel', 'budget', 'takeover'):
+    modes = ('escape', 'drain', 'restored', 'restored_replacement', 'preparation_failure', 'second_denial', 'stale_ack', 'schema_ack', 'transient', 'cancel', 'budget', 'takeover')
+    if failed_navigation:
+        modes += ('readiness_error', 'result_cancel', 'result_seal')
+    for mode in modes:
         url = 'https://example.com/login'
         target = 'target-original'
         events = []
@@ -57,6 +68,11 @@ async def assert_navigation_policy_activity_cases(namespace):
             {'action': 'click', 'index': 1}, {'action': 'attempt_completion'},
             {'action': 'input_text', 'params': {'text': 'private'}},
             {'action': 'goto', 'params': {'url': url}},
+            {'action': 'goto', 'params': {'url': 'http://127.0.0.1/private'}},
+            {'action': 'goto', 'params': {'url': 'https://escape.example/page'},
+             'coalesced_calls': [{'action': 'press_key', 'params': {'key': 'a'}},
+                                 {'action': 'press_key', 'params': {'key': 'b'}}],
+             'coalesced_tool_call_ids': ['call-a', 'call-b']},
             {'action': 'goto', 'params': {'url': 'https://escape.example/{{secret:password}}'}},
             {'action': 'switch_tab', 'params': {'tab_id': 'original'}},
             {'action': 'goto', 'params': {'url': 'https://escape.example/page'}},
@@ -72,7 +88,7 @@ async def assert_navigation_policy_activity_cases(namespace):
                              {'action': 'attempt_completion'},
                              {'action': 'goto', 'params': {'url': 'https://other.example/page'}},
                              {'action': 'attempt_completion'}]
-        if mode == 'transient':
+        if mode in ('transient', 'readiness_error'):
             actor_actions = [{'action': 'attempt_completion'}]
         if mode == 'budget':
             actor_actions = [{'action': 'attempt_completion'}] * 3
@@ -85,8 +101,14 @@ async def assert_navigation_policy_activity_cases(namespace):
                 return done().__await__()
             async def event_result(self, **kwargs):
                 nonlocal reload_count
+                if mode == 'result_cancel':
+                    raise asyncio.CancelledError()
+                if mode == 'result_seal':
+                    raise h.WorkflowGenerationSealed()
                 reload_count += 1
                 events.append(('reload', url))
+                if mode == 'readiness_error':
+                    return None
                 if (url == 'https://example.com/login' or (mode == 'second_denial' and 'escape.example' in url)):
                     if mode == 'transient':
                         if reload_count == 1:
@@ -147,6 +169,9 @@ async def assert_navigation_policy_activity_cases(namespace):
         async def ready(*args, **kwargs):
             nonlocal changed_ack, url, target
             events.append(('ready', url))
+            if mode == 'readiness_error' and not changed_ack:
+                changed_ack = True
+                raise RuntimeError('Navigation failed: net::ERR_EMPTY_RESPONSE')
             if mode == 'schema_ack' and not changed_ack:
                 changed_ack = True
                 sync_state['current']['delivered_user_instruction_count'] += 1
@@ -206,7 +231,7 @@ async def assert_navigation_policy_activity_cases(namespace):
                     state = {'approval_type': 'manual_pause', 'task_id': 'task-1',
                              'durable_browser_runtime': {'credential_reload_pending': True}}
                     if mode in ('restored', 'restored_replacement'):
-                        state['durable_browser_runtime']['navigation_policy_barrier'] = saved
+                        state['durable_browser_runtime'][checkpoint_key] = saved
                     for keyword in node.keywords:
                         if keyword.arg == 'write_lock_resume_state':
                             keyword.value = ast.parse(repr(state), mode='eval').body
@@ -225,30 +250,34 @@ async def assert_navigation_policy_activity_cases(namespace):
              patch.object(h, 'MAX_ITERATIONS', 4 if mode == 'budget' else 100):
             try:
                 result = await env[node.name]()
+            except h.WorkflowGenerationSealed:
+                assert mode == 'result_seal' and not contexts and verifier.await_count == 0
+                completed.append((mode, 'sealed'))
+                continue
             except asyncio.CancelledError:
-                assert mode == 'cancel' and not contexts and verifier.await_count == 0
+                assert mode in ('cancel', 'result_cancel') and not contexts and verifier.await_count == 0
                 completed.append((mode, 'cancelled'))
                 continue
-        if mode == 'cancel':
+        if mode in ('cancel', 'result_cancel'):
             assert result['status'] != 'completed' and verifier.await_count == 0
         elif mode == 'drain':
             assert verifier.await_count == 0 and not contexts
             durable = captured_resume['durable_browser_runtime']
             assert durable['credential_reload_pending'] is True
-            restored = NavigationPolicyBarrier('task-1', durable['navigation_policy_barrier'])
+            restored = barrier_type('task-1', durable[checkpoint_key])
             assert restored.active and not restored.permits_destination('https://example.com/login')
-            assert 'https://' not in json.dumps(durable['navigation_policy_barrier'])
-            saved = durable['navigation_policy_barrier']
+            assert 'https://' not in json.dumps(durable[checkpoint_key])
+            saved = durable[checkpoint_key]
         elif mode == 'budget':
             assert result['status'] != 'completed' and verifier.await_count == 0
         else:
             assert result['status'] == 'completed', (mode, result, events)
             assert verifier.await_count == 1, (mode, events)
             assert len(contexts) == len(actor_actions), (mode, events)
-        if mode not in ('cancel', 'transient', 'restored', 'restored_replacement'):
+        if mode not in ('cancel', 'result_cancel', 'transient', 'readiness_error', 'restored', 'restored_replacement'):
             assert sum(e == ('reload', 'https://example.com/login') for e in events) == 1
             assert recovery.await_count == 0
-        if mode == 'transient':
+        if mode in ('transient', 'readiness_error'):
             assert recovery.await_count == 1
         if mode == 'schema_ack':
             assert sum(e == ('ready', 'https://escape.example/page') for e in events) == 2
@@ -263,9 +292,13 @@ async def assert_navigation_policy_activity_cases(namespace):
         if mode == 'takeover':
             assert ('prepare', 'https://escape.example/page') not in events
         if mode == 'escape':
+            first_reload = events.index(('reload', 'https://example.com/login'))
+            assert ('observe', 'https://example.com/login') not in events[first_reload + 1:]
+            assert events.index(('ready', 'https://escape.example/page')) < events.index(('actor', len(actor_actions)))
             assert [e for e in events if e[0] == 'execute'] == [('execute', 'goto')]
             errors = str(contexts[-1])
-            assert 'native_navigation_policy_denied' in errors and 'navigation_policy_restricted' in errors
+            assert ('native_navigation_failed' if failed_navigation else 'native_navigation_policy_denied') in errors
+            assert ('navigation_failure_restricted' if failed_navigation else 'navigation_policy_restricted') in errors
         completed.append((mode, result['status']))
     print('Native navigation policy full-activity cases:', completed)
     return completed
@@ -303,3 +336,42 @@ async def assert_navigation_admission_at_native_dispatch():
     result = await _execute_switch_tab(session=session, dom_service=SimpleNamespace(), action_history=history,
         params={'tab_id':'known'}, thinking='', navigation_admission=tab_admission)
     assert result['success'] is False and not dispatched
+
+
+async def assert_failed_navigation_identity_and_restore():
+    from domains.spawn_browser_agent_v3.navigation_policy import (
+        NativeNavigationFailure, native_navigation_failure, NavigationFailureBarrier,
+        NavigationPolicyBarrier, restore_navigation_barrier, is_native_navigation_policy_denial,
+    )
+    literal = "Navigation failed: net::ERR_EMPTY_RESPONSE"
+    assert type(native_navigation_failure(RuntimeError(literal))) is NativeNavigationFailure
+    class UntrustedRuntimeError(RuntimeError):
+        pass
+    for error in (ValueError(literal), UntrustedRuntimeError(literal), RuntimeError(literal, 'extra'),
+                  RuntimeError({'errorText': 'net::ERR_EMPTY_RESPONSE'}),
+                  RuntimeError('prefix ' + literal), RuntimeError(literal + ' suffix'),
+                  RuntimeError('Navigation failed: net::ERR_HTTP_RESPONSE_CODE_FAILURE'),
+                  RuntimeError('Page.navigate() timed out'), asyncio.CancelledError()):
+        assert native_navigation_failure(error) is None
+    assert not is_native_navigation_policy_denial(RuntimeError(literal))
+    barrier = NavigationFailureBarrier('task')
+    barrier.deny('session', {'target_id': 'target', 'url': 'https://example.com/failure'})
+    runtime = {barrier.checkpoint_key: json.loads(json.dumps(barrier.checkpoint()))}
+    restored = restore_navigation_barrier('task', runtime)
+    assert type(restored) is NavigationFailureBarrier and restored.active
+    assert restored.result_code == 'native_navigation_failed'
+    assert not restored.permits_destination('https://example.com/failure')
+    for invalid in ({barrier.checkpoint_key: None},
+                    {**runtime, NavigationPolicyBarrier.checkpoint_key: barrier.checkpoint()},
+                    {barrier.checkpoint_key: {**barrier.checkpoint(), 'task_id': 'foreign'}}):
+        try:
+            restore_navigation_barrier('task', invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Conflicting/foreign debt was accepted')
+    policy = NavigationPolicyBarrier('task', barrier.checkpoint())
+    policy.deny('session', {'target_id': 'next', 'url': 'https://second.example/denied'})
+    mixed = NavigationFailureBarrier('task', policy.checkpoint())
+    assert not mixed.permits_destination('https://example.com/failure')
+    assert not mixed.permits_destination('https://second.example/denied')

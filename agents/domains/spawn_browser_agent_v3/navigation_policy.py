@@ -47,8 +47,28 @@ def web_destination(url: Any) -> bool:
         return False
 
 
+class NativeNavigationFailure(RuntimeError):
+    """A Page.navigate errorText admitted only at its native result await."""
+
+
+def native_navigation_failure(error: BaseException) -> NativeNavigationFailure | None:
+    # browser-use converts Page.navigate.errorText to this exact RuntimeError.
+    # Do not admit timeouts, HTTP failures, policy errors or page/model text.
+    if type(error) is RuntimeError and error.args == ("Navigation failed: net::ERR_EMPTY_RESPONSE",):
+        return NativeNavigationFailure("net::ERR_EMPTY_RESPONSE")
+    return None
+
+
 class NavigationPolicyBarrier:
     """Keep a denied document's obligation until another bound reload succeeds."""
+
+    checkpoint_key = "navigation_policy_barrier"
+    feedback = POLICY_FEEDBACK
+    result_code = "native_navigation_policy_denied"
+    context_flag = "navigation_policy_restricted"
+    title = "Navigation refused by browser policy"
+    observation_title = "Navigation policy restriction"
+    discard_message = "Native navigation policy refused credential reload."
 
     def __init__(self, task_id: str, restored: Any = None) -> None:
         self.task_id = task_id
@@ -105,3 +125,36 @@ class NavigationPolicyBarrier:
         if self.active and not self.permits_destination(identity.get("url")):
             raise ValueError("Denied document cannot acknowledge its own policy barrier")
         self._record = None
+
+
+class NavigationFailureBarrier(NavigationPolicyBarrier):
+    """Retain unacknowledged credentials after a typed failed navigation.
+
+    Shares only the restrictive alternate-navigation/ACK protocol with policy
+    refusal. An empty response is not evidence of a policy or provider failure.
+    """
+    checkpoint_key = "navigation_failure_barrier"
+    feedback = (
+        "The browser returned an empty response while navigating. Credential "
+        "setup is not acknowledged. Only goto/open_new_tab to a different public "
+        "HTTP(S) page, or switch_tab to a different page, may run until the new "
+        "page's credential setup is acknowledged. Current-page interactions and "
+        "completion are blocked. The cause of the empty response is unknown."
+    )
+    result_code = "native_navigation_failed"
+    context_flag = "navigation_failure_restricted"
+    title = "Native navigation failed"
+    observation_title = "Native navigation failed"
+    discard_message = "Native navigation failed; credential reload remains unacknowledged."
+
+
+def restore_navigation_barrier(task_id: str, runtime: dict[str, Any]) -> NavigationPolicyBarrier:
+    policy = runtime.get(NavigationPolicyBarrier.checkpoint_key)
+    failure = runtime.get(NavigationFailureBarrier.checkpoint_key)
+    if policy is not None and failure is not None:
+        raise ValueError("Conflicting navigation barrier checkpoints")
+    if NavigationFailureBarrier.checkpoint_key in runtime and failure is None:
+        raise ValueError("Invalid failed-navigation barrier checkpoint")
+    if failure is not None:
+        return NavigationFailureBarrier(task_id, failure)
+    return NavigationPolicyBarrier(task_id, policy)

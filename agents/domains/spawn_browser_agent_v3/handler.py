@@ -141,7 +141,10 @@ from .config import (
     skip_browser_network_recording,
 )
 from .credential_runtime import build_realm_credential_state, unknown_realm_credential_state
-from .navigation_policy import NavigationPolicyBarrier, POLICY_FEEDBACK, is_native_navigation_policy_denial, url_digest
+from .navigation_policy import (
+    NavigationPolicyBarrier, NavigationFailureBarrier, NativeNavigationFailure,
+    is_native_navigation_policy_denial, native_navigation_failure, restore_navigation_barrier, url_digest,
+)
 from .download_persist import BrowserDownloadPersister
 from .recording import (
     BrowserAgentRecorder,
@@ -8223,7 +8226,7 @@ async def _spawn_browser_agent_activity_v3_real(
             },
             durable_runtime_state={
                 "credential_reload_pending": bool(pending_credential_reload_realm),
-                **({"navigation_policy_barrier": navigation_policy.checkpoint()} if navigation_policy.active else {}),
+                **({navigation_policy.checkpoint_key: navigation_policy.checkpoint()} if navigation_policy.active else {}),
                 # Tilion downloads are durable in attachment storage; the
                 # resumed activity (maybe on another worker) extracts them.
                 "tilion_downloads": durable_tilion_downloads(session_id),
@@ -9855,7 +9858,7 @@ async def _spawn_browser_agent_activity_v3_real(
             auth_realm if durable_browser_runtime.get("credential_reload_pending") is True else None
         )
         action_redaction_refs: Optional[List[Dict[str, str]]] = None
-        navigation_policy = NavigationPolicyBarrier(task_id or "", durable_browser_runtime.get("navigation_policy_barrier"))
+        navigation_policy = restore_navigation_barrier(task_id or "", durable_browser_runtime)
         policy_decision_authority = None
         policy_decision_tab = None
 
@@ -10050,7 +10053,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 "inventory_status": "available" if auth_options_section else "unknown",
             }
             if navigation_policy.active:
-                return {"auth_realm": realm, "inventory_status": "unknown", "navigation_policy_restricted": True}
+                return {"auth_realm": realm, "inventory_status": "unknown", navigation_policy.context_flag: True}
             if auth_options_section:
                 context["auth_options"] = auth_options_section
             error = credential_preparation_error or failed_credential_prep_realms.get(realm)
@@ -10073,28 +10076,28 @@ async def _spawn_browser_agent_activity_v3_real(
             name = action.get("action")
             params = action.get("params") or {}
             if action.get("coalesced_calls") or "{{secret:" in json_dumps_compact(params):
-                return POLICY_FEEDBACK
+                return navigation_policy.feedback
             destination = params.get("url")
             if name == "switch_tab":
                 tab_id = params.get("tab_id")
                 if not isinstance(tab_id, str) or not tab_id:
-                    return POLICY_FEEDBACK
+                    return navigation_policy.feedback
                 tabs = await dom_service.session.get_tabs()
                 if policy_decision_authority != _policy_authority():
                     return "Browser identity or instructions changed during tab selection."
                 matches = [tab for tab in tabs if tab.target_id.endswith(tab_id)]
                 if len(matches) != 1 or matches[0].target_id == policy_decision_authority[2]:
-                    return POLICY_FEEDBACK
+                    return navigation_policy.feedback
                 if policy_decision_tab is not None and policy_decision_tab != matches[0].target_id:
                     return "Selected tab changed before restricted navigation."
                 policy_decision_tab = matches[0].target_id
                 destination = matches[0].url
             elif name not in {"goto", "open_new_tab"}:
-                return POLICY_FEEDBACK
+                return navigation_policy.feedback
             from .service_actions import _non_public_navigation_reason
             if (not navigation_policy.permits_destination(destination)
                     or _non_public_navigation_reason(destination) is not None):
-                return POLICY_FEEDBACK
+                return navigation_policy.feedback
             return None
 
         async def _execute_action(*args: Any, **kwargs: Any) -> Dict[str, Any]:
@@ -10112,7 +10115,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     if (admitted_authority[:4] != current[:4] or admitted_authority[5:] != current[5:]):
                         return "Browser identity or instructions changed before native navigation."
                     if not navigation_policy.permits_destination(destination):
-                        return POLICY_FEEDBACK
+                        return navigation_policy.feedback
                     if action.get("action") == "switch_tab":
                         if target_id != admitted_tab:
                             return "Selected tab changed before native navigation."
@@ -10378,7 +10381,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 if navigation_policy.active:
                     observe_needs_dom = False
                     identity = dom_service.get_parked_page_identity()
-                    observe_page_state = {"url": identity["url"], "title": "Navigation policy restriction",
+                    observe_page_state = {"url": identity["url"], "title": navigation_policy.observation_title,
                                           "dom_tree": "", "screenshot": None}
                 else:
                     # Kernel drops the WebAuthn VA environment ~5s after seed (agent
@@ -10490,28 +10493,37 @@ async def _spawn_browser_agent_activity_v3_real(
                         NavigateToUrlEvent(url=current_url, wait_until="commit")
                     )
                     await reload_event
-                    await reload_event.event_result(raise_if_any=True, raise_if_none=False)
+                    try:
+                        await reload_event.event_result(raise_if_any=True, raise_if_none=False)
+                    except RuntimeError as native_error:
+                        failure = native_navigation_failure(native_error)
+                        if failure is not None:
+                            raise failure from native_error
+                        raise
                     await wait_for_navigation_ready(dom_service, url=current_url)
                 except (asyncio.CancelledError, WorkflowGenerationSealed):
                     raise
                 except Exception as reload_error:
-                    if is_native_navigation_policy_denial(reload_error):
+                    if is_native_navigation_policy_denial(reload_error) or isinstance(reload_error, NativeNavigationFailure):
                         current_authority = _policy_authority()
                         if reload_authority[:3] != current_authority[:3] or reload_authority[4:] != current_authority[4:]:
                             continue
+                        barrier_type = (NavigationFailureBarrier if isinstance(reload_error, NativeNavigationFailure)
+                                        else NavigationPolicyBarrier)
+                        navigation_policy = barrier_type(task_id or "", navigation_policy.checkpoint())
                         navigation_policy.deny(session_id, reload_identity)
                         _activate_realm_credentials(unknown_realm_credential_state(observed_auth_realm), {})
-                        await action_batch.discard("Native navigation policy refused credential reload.")
+                        await action_batch.discard(navigation_policy.discard_message)
                         state_prefetch.discard()
-                        policy_result = {"success": False, "error": POLICY_FEEDBACK,
-                                         "code": "native_navigation_policy_denied"}
+                        policy_result = {"success": False, "error": navigation_policy.feedback,
+                                         "code": navigation_policy.result_code}
                         await action_history.record_action(dom_service=dom_service, action="credential_reload",
                                                           thinking="", result=policy_result)
                         _append_browser_turn_messages(browser_turn_messages,
                             unified_action={"action": "credential_reload", "params": {}},
                             result=policy_result, tool_call_id=str(uuid_module.uuid4()))
                         await _save_browser_action_message(agent_id=agent_id, task_id=task_id,
-                            title="Navigation refused by browser policy", message=POLICY_FEEDBACK,
+                            title=navigation_policy.title, message=navigation_policy.feedback,
                             status=MessageStatus.FINISHED, browser_url=browser_url,
                             action_type="credential_reload", tool_call_id=str(uuid_module.uuid4()))
                         continue
