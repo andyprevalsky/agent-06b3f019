@@ -304,3 +304,61 @@ replay are retained with R109's supplied original custody. Historical FE/last
 LLM publication was not independently revalidated in this read-only intake.
 The case remains **OPEN**: identify the initiating transport failure from
 original evidence or a causal owning control before proposing a runtime fix.
+
+
+## R121: It28 BU093r2 loses required state after failed reconnects
+
+Original rootef59df44-86ed-42f0-99c4-9b514494d6d4, r002-j0013, executed
+source d0663f361a1118ce6776d1ab8aaa0987dcf252a5/patchnone. Archive
+b71abd0cad23a97564e3a4c222b559f838f0ba557595150c7bbe40d82501d362 and
+normal manifest5cc8eb89c8a0559dbfd1b3802cfd7165b4f65d9ac1a9157ba7cb6b7f08e58c16
+bind all seven independently verified original member lengths/hashes. The
+local diagnostic records nativeFAILED706.9s/progress1 and benchmarkFAILED;
+the parent-reported containing campaign row was later CANCELLED after the
+operational stop. Do not replace that unscored cancellation with task credit.
+Original producerinfraFALSE and cleanup_failureNone remain unchanged.
+
+The user asks for the textbook containing the earliest citation of a quote,
+using newspaper/date clues. Actual required nonnullable
+`earliest_citation_textbook_name:str` plus value/text presentation matches that
+request without inserting an answer. Schema payloads53195ef9/a286b127 and all
+available compressed application payloads were size/SHA checked. No recorded
+completion-verifier call or rejected answer precedes failure. Progress1 is
+terminal lifecycle progress, not a verifier score.
+
+The first observed connection loss is worker22112 at19:16:03.051681Z:
+upstream code1011, reason `keepalive ping timeout`. The message handler exits
+at22115. Exact mux code reads the upstream close code/reason and clears its
+mappings; its `Provider closed` label does not identify the initiator or vendor
+cause. Reconnect1/2 fail TimeoutError at19:16:18.373129Z and19:16:34.380474Z;
+reconnect3 fails ConnectionError at19:16:46.106137Z. Worker22375 reports all
+three failed. This is actual transport evidence upstream of the later
+required-handler error, not a deduction from that error's wording.
+
+Successful model responses continue during recovery, while native calls
+return no focused target. An open_new_tab result is marked FINISHED but the
+next read still lacks focus; screenshot also lacks a tab, and switch_tab says
+available tabs are empty. That status does not prove usable browser recovery.
+The final model call browser_use_step_23 requests wait(time_ms1500), payload
+7b17996477b93f2985a9fc50c63c7060d3e76736320fd456e57b312f6ca37125.
+It is recorded FINISHED. The following step requires browser state; the wait
+is not itself the failed operation.
+
+Exact fatal stack: handler10409 -> _observe_step_page3272 -> DOMService2552 ->
+BrowserUse get_browser_state_summary -> event_result(raise_if_none=True,
+raise_if_any=True). Eight generic browser_url_error recoveries from22417 to
+22460 do not restore state. At22464 the existing budget is exhausted;
+22465/19:16:55.084163Z raises the non-None required-handler ValueError.
+Manager22506/19:17:13.265498Z propagates ActivityError. No recover-challenge or
+promotion event was found in this original backend log, unlike R119's
+intentional provider replacement.
+
+Two searches used the literal non-None BrowserStateRequest error and the
+keepalive/no-focus/failed-reconnect behavior. R88/R93/R96/R109 and the
+passkey-missing-focus case are related downstream evidence, not proof of the
+same upstream cause. The optional passkey re-arm mitigation does not authorize
+fabricating required DOM state. Exact initiating transport failure and failed
+reconnect subphase remain OPEN; no handshake/protocol response in this packet
+settles provider, relay, host or local lifecycle responsibility. No source
+patch, timeout/retry increase, silent replacement, empty-state fallback,
+model/native call or original-outcome rewrite was made.
