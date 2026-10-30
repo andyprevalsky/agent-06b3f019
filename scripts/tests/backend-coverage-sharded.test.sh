@@ -36,6 +36,7 @@ REPO="$TMP/repo"
 mkdir -p "$REPO/back-end/scripts" "$REPO/back-end/coverage" "$REPO/bin"
 cp "$ROOT_DIR/back-end/scripts/run-coverage-sharded.sh" "$REPO/back-end/scripts/"
 cp "$ROOT_DIR/back-end/scripts/coverage-shard-durations.mjs" "$REPO/back-end/scripts/"
+cp "$ROOT_DIR/back-end/scripts/coverage-report-heap.sh" "$REPO/back-end/scripts/"
 
 # Fake shard: records its env, hands raw coverage to the merge dir on success,
 # fails when told to, and sleeps (until TERM) when told to.
@@ -80,6 +81,7 @@ FAKE
 cat >"$REPO/bin/npx" <<'FAKE'
 #!/usr/bin/env bash
 echo "npx $*" >>"$FAKE_RECORD_DIR/npx.log"
+echo "NODE_OPTIONS=${NODE_OPTIONS:-}" >>"$FAKE_RECORD_DIR/npx.log"
 exit "${FAKE_C8_EXIT:-0}"
 FAKE
 chmod +x "$REPO/back-end/scripts/run-coverage.sh" "$REPO/bin/npx"
@@ -118,6 +120,20 @@ for i in 1 2; do
     fail "the unit pass overlapped blackbox shard $i (shard ended $shard_ended, units started $units_started)"
 done
 grep -q 'running the unit suite once, alone' "$TMP/out1" || fail "the unit pass must be announced: $(cat "$TMP/out1")"
+# 9. The report step raises node's heap ceiling itself (the in-memory c8 merge
+#    of the full sweep died at the default heap, 2026-10-30), keeping any
+#    NODE_OPTIONS the caller set; the unsharded script uses the same helper.
+grep -q '^NODE_OPTIONS=--max-old-space-size=6144$' "$TMP/rec/npx.log" || fail "merged c8 report must run with the raised heap: $(cat "$TMP/rec/npx.log")"
+records
+NODE_OPTIONS="--trace-warnings" BACKEND_COVERAGE_REPORT_HEAP_MB=4096 bash "$RUNNER" 2 >"$TMP/out9" 2>&1 || fail "heap override run failed: $(cat "$TMP/out9")"
+grep -q '^NODE_OPTIONS=--trace-warnings --max-old-space-size=4096$' "$TMP/rec/npx.log" || fail "the heap option must append to the caller's NODE_OPTIONS and honour the override: $(cat "$TMP/rec/npx.log")"
+records
+BACKEND_COVERAGE_REPORT_HEAP_MB=lots bash "$RUNNER" 2 >"$TMP/out9b" 2>&1 && fail "a malformed heap override must be refused"
+[[ ! -e "$TMP/rec/shard-1.env" ]] || fail "a malformed heap override must be refused before any shard runs"
+[[ ! -e "$REPO/back-end/coverage/tmp-merged" ]] || fail "a refused heap override must not leave the merge dir behind"
+RC_UNSHARDED="$ROOT_DIR/back-end/scripts/run-coverage.sh"
+[ "$(grep -c 'coverage_report_node npx c8 report' "$RC_UNSHARDED")" = 2 ] || fail "run-coverage.sh must run both c8 report invocations through coverage_report_node"
+grep -q 'source "$SCRIPT_DIR/coverage-report-heap.sh"' "$RC_UNSHARDED" || fail "run-coverage.sh must source the shared heap helper"
 records
 FAKE_C8_EXIT=1 bash "$RUNNER" 2 >"$TMP/out1b" 2>&1 && fail "merged threshold failure did not fail the gate"
 ls "$REPO"/.context/test-runs/backend-coverage-merged-report-failed-*/raw-v8/coverage-shard-1.json >/dev/null 2>&1 ||

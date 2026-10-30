@@ -40,6 +40,8 @@ if ! [[ "$SHARDS" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 cd "$BACKEND_DIR"
+# Validated up front, before any shard runs: the merged c8 report's heap ceiling.
+source "$SCRIPT_DIR/coverage-report-heap.sh"
 
 MERGED_TMP="$BACKEND_DIR/coverage/tmp-merged"
 if [[ -d "$MERGED_TMP" ]] && [[ -n "$(find "$MERGED_TMP" -mindepth 1 -print -quit)" ]]; then
@@ -213,7 +215,9 @@ fi
 echo ""
 echo "=== Merged Coverage Report ($SHARDS blackbox shards + unit pass) ==="
 COV_EXIT=0
-npx c8 report --temp-directory="$MERGED_TMP" --reporter=text --reporter=text-summary --reporter=json-summary \
+# The merged report holds every shard's and the unit pass's raw V8 files: the
+# same in-memory merge that exhausted node's default heap unsharded.
+coverage_report_node npx c8 report --temp-directory="$MERGED_TMP" --reporter=text --reporter=text-summary --reporter=json-summary \
   --check-coverage || COV_EXIT=$?
 if [[ "$COV_EXIT" -eq 0 ]]; then
   rm -rf "$MERGED_TMP"

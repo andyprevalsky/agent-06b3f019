@@ -18,6 +18,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/blackbox-phone-env.sh"
+# Validated up front: the c8 report step's heap ceiling (coverage_report_node).
+source "$SCRIPT_DIR/coverage-report-heap.sh"
 ROOT_DIR="$(cd "$BACKEND_DIR/.." && pwd)"
 
 # Match run.sh and run-blackbox-tests.sh resource naming when Conductor still
@@ -949,14 +951,19 @@ if [[ "$COVERAGE_PARTIAL" -eq 1 ]]; then
   exit "$COVERAGE_PARTIAL_EXIT"
 fi
 
-# Generate the coverage report and also the json-summary for the gap analysis
+# Generate the coverage report and also the json-summary for the gap analysis.
+# c8 merges every raw V8 file in memory: with all 347 unit files and 238
+# blackbox domains the merge died with "JavaScript heap out of memory" at
+# node's default (~2 GB) heap after every test had passed (2026-10-30). The
+# report step therefore raises the heap ceiling itself; it is a cap, not a
+# reservation, and lives here rather than in the caller's lane env.
 echo ""
 echo "=== Coverage Report ==="
 COV_EXIT=0
 if [[ "$REPORT_ONLY" -eq 1 ]]; then
-  npx c8 report --temp-directory="$COV_TMP" --reporter=text --reporter=text-summary --reporter=json-summary || COV_EXIT=$?
+  coverage_report_node npx c8 report --temp-directory="$COV_TMP" --reporter=text --reporter=text-summary --reporter=json-summary || COV_EXIT=$?
 else
-  npx c8 report --temp-directory="$COV_TMP" --reporter=text --reporter=text-summary --reporter=json-summary --check-coverage || COV_EXIT=$?
+  coverage_report_node npx c8 report --temp-directory="$COV_TMP" --reporter=text --reporter=text-summary --reporter=json-summary --check-coverage || COV_EXIT=$?
 fi
 
 # If coverage thresholds failed, show actionable guidance
