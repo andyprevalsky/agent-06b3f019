@@ -210,4 +210,86 @@ trap 'kill $nested_pid $own_pid $run_pid $done_pid $owner_pid $pid_run_dead $pid
   fi
 )
 echo "PASS: an unpublished isolated run is protected only while it is still starting"
+# ── The semantic lane's startup sweep beside a LIVE isolated smoke stack ──────
+#
+# Follow-up "an" (2026-10-31): kill_stale_same_worktree_benchmark_stack is the
+# first sweep a non-isolated `run.sh --benchmark` (the deploy's semantic stack)
+# runs, and /deploy serialized `semantic-stack` after the smoke lane on the
+# belief that it would kill the smoke lane's isolated stack in the same
+# worktree. The real sweep, extracted from run.sh and executed against fixtures
+# (not only its predicates): a worker carrying a live isolated run's
+# BENCHMARK_RUN_ID survives past the young-process grace, while this
+# workspace's stale run.sh stack, a stale worker with no run identity and the
+# leftover of a stopped run are reaped, and another worktree's worker is never
+# a candidate. The sweep runs as a separate process so the fixtures are not its
+# own process family.
+TMP4="$(mktemp -d)"
+WT4="$TMP4/wt"
+OTHER4="$TMP4/other"
+mkdir -p "$WT4/.context/benchmarks/smoke-live" "$WT4/.context/benchmarks/smoke-done" \
+  "$WT4/agents" "$WT4/scripts" "$OTHER4/agents"
+printf '{"status": "running", "run_sh_pid": 999999, "services": []}\n' > "$WT4/.context/benchmarks/smoke-live/services.json"
+printf '{"status": "stopped", "run_sh_pid": 999998, "services": []}\n' > "$WT4/.context/benchmarks/smoke-done/services.json"
+printf '#!/usr/bin/env bash\nsleep 1000\n' > "$WT4/scripts/run.sh"
+(cd "$WT4" && BENCHMARK_RUN_ID=smoke-live exec -a "$WT4/agents/worker.py" sleep 1000) &
+live4=$!
+(cd "$WT4" && BENCHMARK_RUN_ID=smoke-done exec -a "$WT4/agents/worker.py" sleep 1000) &
+done4=$!
+(cd "$WT4" && exec -a "$WT4/agents/worker.py" sleep 1000) &
+stale4=$!
+(cd "$WT4" && exec bash scripts/run.sh --benchmark) &
+ownstack4=$!
+(cd "$OTHER4" && exec -a "$OTHER4/agents/worker.py" sleep 1000) &
+other4=$!
+cleanup4() {
+  local child
+  for child in $(pgrep -P "$ownstack4" 2>/dev/null); do kill "$child" 2>/dev/null || true; done
+  kill "$live4" "$done4" "$stale4" "$ownstack4" "$other4" 2>/dev/null || true
+  rm -rf "$TMP4"
+}
+trap 'cleanup4; kill $nested_pid $own_pid $run_pid $done_pid $owner_pid $pid_run_dead $pid_run_owned $pid_run_fresh 2>/dev/null || true; rm -rf "$TMP" "$TMP3"' EXIT
+{
+  printf '. %q\n' "$ROOT_DIR/scripts/lib/run-process-cleanup.sh"
+  sed -n '/^process_cwd_in_this_worktree()/,/^}/p' "$RUN_SH"
+  sed -n '/^is_current_process_family()/,/^}/p' "$RUN_SH"
+  sed -n '/^kill_stale_tree()/,/^}/p' "$RUN_SH"
+  sed -n '/^process_age_seconds()/,/^}/p' "$RUN_SH"
+  sed -n '/^benchmark_startup_grace_seconds()/,/^}/p' "$RUN_SH"
+  sed -n '/^isolated_run_still_starting()/,/^}/p' "$RUN_SH"
+  sed -n '/^pid_belongs_to_active_isolated_benchmark()/,/^}/p' "$RUN_SH"
+  sed -n '/^kill_stale_same_worktree_benchmark_stack()/,/^}/p' "$RUN_SH"
+  printf 'BENCHMARK_MODE=true\nexport BENCHMARK_STARTUP_GRACE_SECONDS=0\ncd %q || exit 1\nkill_stale_same_worktree_benchmark_stack\n' "$WT4"
+} > "$TMP4/sweep.sh"
+grep -q 'kill_stale_same_worktree_benchmark_stack() {' "$TMP4/sweep.sh" || {
+  echo "FAIL: could not extract kill_stale_same_worktree_benchmark_stack from run.sh" >&2
+  exit 1
+}
+sleep 0.3
+for fixture in "$live4" "$done4" "$stale4" "$ownstack4" "$other4"; do
+  kill -0 "$fixture" 2>/dev/null || { echo "FAIL: fixture $fixture did not start" >&2; exit 1; }
+done
+bash "$TMP4/sweep.sh" > "$TMP4/sweep.log" 2>&1 || true
+assert_fate4() {  # <pid> <alive|dead> <label>
+  local attempt
+  for attempt in $(seq 1 30); do
+    if [ "$2" = dead ] && ! kill -0 "$1" 2>/dev/null; then return 0; fi
+    [ "$2" = dead ] || break
+    sleep 0.1
+  done
+  if [ "$2" = alive ]; then
+    kill -0 "$1" 2>/dev/null && return 0
+    echo "FAIL: $3 was killed by the startup sweep (PID $1)" >&2
+  else
+    echo "FAIL: $3 survived the startup sweep (PID $1)" >&2
+  fi
+  cat "$TMP4/sweep.log" >&2
+  exit 1
+}
+assert_fate4 "$live4" alive "worker carrying a live isolated run's BENCHMARK_RUN_ID"
+assert_fate4 "$other4" alive "another worktree's worker"
+assert_fate4 "$stale4" dead "stale same-worktree worker with no run identity"
+assert_fate4 "$done4" dead "leftover worker of a stopped isolated run"
+assert_fate4 "$ownstack4" dead "this worktree's own stale run.sh stack"
+echo "PASS: the startup sweep spares a live isolated run and reaps only this worktree's stale stack"
+
 echo "All isolated-cloud-kill tests passed."
