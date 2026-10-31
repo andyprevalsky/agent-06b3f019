@@ -82,7 +82,12 @@ probe_semantic_host_capacity() {
 import os
 import subprocess
 
-cpus = os.cpu_count() or ""
+# CPUs this process may actually run on: a cpuset, taskset or container quota
+# mask hides cores that os.cpu_count() still reports.
+try:
+    cpus = len(os.sched_getaffinity(0)) or ""
+except (AttributeError, OSError):
+    cpus = os.cpu_count() or ""
 try:
     load = f"{os.getloadavg()[0]:.2f}"
 except OSError:
@@ -106,15 +111,17 @@ PY
 }
 
 # Prints the Playwright worker count for the measured capacity: never above the
-# request, one worker per whole idle core, one worker when free memory is below
-# SEMANTIC_MIN_MEM_FREE_PCT, and never below one. Unknown inputs never cap.
+# request, one worker per whole idle core (the CPU count minus the 1-minute
+# load when a load is given, the CPU count alone when it is not), one worker
+# when free memory is below SEMANTIC_MIN_MEM_FREE_PCT, and never below one.
+# Unknown inputs never cap.
 # Args: requested cpus load1 mem_free_pct
 semantic_workers_for_capacity() {
   awk -v req="$1" -v cpus="$2" -v load="$3" -v mem="$4" \
     -v min_mem="${SEMANTIC_MIN_MEM_FREE_PCT:-20}" 'BEGIN {
     n = req + 0
-    if (cpus != "" && load != "") {
-      slots = int(cpus - load)
+    if (cpus != "") {
+      slots = int(cpus - (load != "" ? load : 0))
       if (slots < n) n = slots
     }
     if (mem != "" && mem + 0 < min_mem + 0) n = 1
@@ -288,14 +295,29 @@ if ! [[ "$SEMANTIC_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
-# Shared-host sizing is local-only: the production gate runs on a dedicated CI
-# runner whose worker counts chat-lifecycle-ratchet.yml pins explicitly.
-if [[ "$PROD_MODE" -eq 0 ]]; then
-  IFS='|' read -r HOST_CPUS HOST_LOAD1 HOST_MEM_FREE_PCT <<< "$(probe_semantic_host_capacity || true)"
-  REQUESTED_SEMANTIC_WORKERS="$SEMANTIC_WORKERS"
-  SEMANTIC_WORKERS=$(semantic_workers_for_capacity "$REQUESTED_SEMANTIC_WORKERS" "${HOST_CPUS:-}" "${HOST_LOAD1:-}" "${HOST_MEM_FREE_PCT:-}")
-  echo "  Semantic workers: requested=$REQUESTED_SEMANTIC_WORKERS effective=$SEMANTIC_WORKERS (cpus=${HOST_CPUS:-unknown} load1=${HOST_LOAD1:-unknown} mem_free_pct=${HOST_MEM_FREE_PCT:-unknown} min_mem_free_pct=${SEMANTIC_MIN_MEM_FREE_PCT:-20})"
+# Every Playwright worker drives one Chromium plus its trace/video encoders,
+# which are CPU-bound while a page renders, so workers beyond the host's CPUs
+# add latency, not throughput: every test's wall time grows with the
+# oversubscription ratio and the longest test is the first to exhaust its fixed
+# deadline. Size workers in both modes. Local runs share the host with other
+# workspaces, so they also subtract the measured 1-minute load. The production
+# gate's GitHub-hosted runner is dedicated to this job but small (two vCPUs for
+# a private repository), so it caps on CPU count and free memory only; the load
+# left by dependency and browser installation is transient and must not
+# serialize the gate. chat-lifecycle-ratchet.yml's SEMANTIC_WORKERS is the
+# ceiling, not a promise. RCA 2026-10-31-production-semantic-gate-oversubscribed-
+# two-vcpu-runner: four workers on two vCPUs scaled every UI case 1.5-1.9x
+# between runs of identical source and pushed the 59-78s folder-controls
+# desktop case past its 90s deadline.
+IFS='|' read -r HOST_CPUS HOST_LOAD1 HOST_MEM_FREE_PCT <<< "$(probe_semantic_host_capacity || true)"
+REQUESTED_SEMANTIC_WORKERS="$SEMANTIC_WORKERS"
+if [[ "$PROD_MODE" -eq 1 ]]; then
+  SIZING_LOAD1=""
+else
+  SIZING_LOAD1="${HOST_LOAD1:-}"
 fi
+SEMANTIC_WORKERS=$(semantic_workers_for_capacity "$REQUESTED_SEMANTIC_WORKERS" "${HOST_CPUS:-}" "$SIZING_LOAD1" "${HOST_MEM_FREE_PCT:-}")
+echo "  Semantic workers: requested=$REQUESTED_SEMANTIC_WORKERS effective=$SEMANTIC_WORKERS (mode=$([[ "$PROD_MODE" -eq 1 ]] && echo prod || echo local) cpus=${HOST_CPUS:-unknown} load1=${HOST_LOAD1:-unknown} sizing_load1=${SIZING_LOAD1:-ignored} mem_free_pct=${HOST_MEM_FREE_PCT:-unknown} min_mem_free_pct=${SEMANTIC_MIN_MEM_FREE_PCT:-20})"
 
 # Resolve the test runner from this package explicitly. In the root npm
 # workspace, `npx playwright` can select the backend's Playwright CLI while the
