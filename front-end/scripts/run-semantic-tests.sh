@@ -77,21 +77,88 @@ apply_local_semantic_db_urls() {
 # RCA 2026-10-02-semantic-renderer-stall-consumed-chip-poll-budget: at load ~56
 # on 14 cores, four Chromium workers left one renderer frozen for 34s.
 # Prints "cpus|load1|mem_free_pct"; a field is empty when it cannot be read.
+# cpus is the smaller of the affinity mask (cpusets and taskset hide cores that
+# os.cpu_count() still reports) and the CFS bandwidth quota (cgroup v2 cpu.max
+# or v1 cpu.cfs_quota_us/cpu.cfs_period_us on this cgroup or an ancestor; a quota
+# does not hide cores, it caps CPU time, so it is rounded up to whole CPUs).
+# load1 is empty when that count is narrower than the host's CPU count: the
+# host-wide load then mostly measures work outside this mask, and subtracting it
+# would starve the allowed CPUs' worker count. SEMANTIC_CGROUP_ROOT and
+# SEMANTIC_PROC_CGROUP exist for the deploy gate's fake-cgroup regression.
 probe_semantic_host_capacity() {
   python3 - <<'PY'
+import math
 import os
 import subprocess
 
-# CPUs this process may actually run on: a cpuset, taskset or container quota
-# mask hides cores that os.cpu_count() still reports.
+CGROUP_ROOT = os.environ.get("SEMANTIC_CGROUP_ROOT", "/sys/fs/cgroup")
+PROC_CGROUP = os.environ.get("SEMANTIC_PROC_CGROUP", "/proc/self/cgroup")
+
+
+def read_text(path):
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
+def own_cgroup_paths():
+    """(v2 path, v1 cpu-controller path) of this process; None when absent."""
+    v2 = v1 = None
+    for line in (read_text(PROC_CGROUP) or "").splitlines():
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        hierarchy, controllers, path = parts
+        if hierarchy == "0" and controllers == "":
+            v2 = path
+        elif "cpu" in controllers.split(","):
+            v1 = path
+    return v2, v1
+
+
+def ancestors(path):
+    parts = [part for part in (path or "").split("/") if part]
+    for depth in range(len(parts), -1, -1):
+        yield os.path.join(*parts[:depth]) if depth else ""
+
+
+def quota_limits():
+    """CFS bandwidth limits (quota / period, in CPUs) on this cgroup and its ancestors."""
+    v2, v1 = own_cgroup_paths()
+    for rel in ancestors(v2):  # the root cpu.max is checked even without a v2 line
+        text = read_text(os.path.join(CGROUP_ROOT, rel, "cpu.max"))
+        if text:
+            quota, _, period = text.partition(" ")
+            if quota != "max" and quota.isdigit() and period.isdigit() and int(period) > 0:
+                yield int(quota) / int(period)
+    if v1 is not None:
+        for mount in ("cpu", "cpu,cpuacct"):
+            for rel in ancestors(v1):
+                base = os.path.join(CGROUP_ROOT, mount, rel)
+                quota = read_text(os.path.join(base, "cpu.cfs_quota_us"))
+                period = read_text(os.path.join(base, "cpu.cfs_period_us"))
+                if quota and period and quota.lstrip("-").isdigit() and period.isdigit():
+                    if int(quota) > 0 and int(period) > 0:
+                        yield int(quota) / int(period)
+
+
 try:
-    cpus = len(os.sched_getaffinity(0)) or ""
+    affinity = len(os.sched_getaffinity(0)) or 0
 except (AttributeError, OSError):
-    cpus = os.cpu_count() or ""
-try:
-    load = f"{os.getloadavg()[0]:.2f}"
-except OSError:
-    load = ""
+    affinity = os.cpu_count() or 0
+cpus = affinity
+for limit in quota_limits():
+    cpus = min(cpus, max(1, math.ceil(limit)))
+host_cpus = os.cpu_count() or 0
+restricted = bool(cpus) and host_cpus > cpus
+load = ""
+if not restricted:
+    try:
+        load = f"{os.getloadavg()[0]:.2f}"
+    except OSError:
+        load = ""
 mem = ""
 try:
     out = subprocess.run(["sysctl", "-n", "kern.memorystatus_level"],
@@ -106,7 +173,7 @@ if not mem:
         mem = str(info["MemAvailable"] * 100 // info["MemTotal"])
     except (OSError, KeyError, ValueError, ZeroDivisionError):
         pass
-print(f"{cpus}|{load}|{mem}")
+print(f"{cpus or ''}|{load}|{mem}")
 PY
 }
 

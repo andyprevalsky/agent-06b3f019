@@ -566,25 +566,27 @@ def structural_lane_memory_mb(workers: int) -> int:
 
 def smoke_lane_memory_mb() -> int:
     """Declared reservation of the local smoke stack: LANE_PEAK_MARGIN over its
-    largest recorded process-tree peak (4150 MB)."""
+    largest recorded process-tree peak (3319.4 MB recorded -> 4150 MB declared)."""
     return int(math.ceil(LANE_PEAK_MARGIN * SMOKE_RECORDED_TREE_PEAK_MB))
 
 
 def live_probes_lane_memory_mb() -> int:
     """Declared reservation of the Step 4p live probes lane: LANE_PEAK_MARGIN
-    over its largest recorded process-tree peak (963 MB)."""
+    over its largest recorded process-tree peak (769.7 MB recorded -> 963 MB declared)."""
     return int(math.ceil(LANE_PEAK_MARGIN * LIVE_PROBES_RECORDED_TREE_PEAK_MB))
 
 
 def semantic_stack_lane_memory_mb() -> int:
     """Declared reservation of the Group 4 semantic stack lane: LANE_PEAK_MARGIN
-    over its largest recorded process-tree peak (6108 MB)."""
+    over its largest recorded process-tree peak (4886.2 MB recorded -> 6108 MB
+    declared)."""
     return int(math.ceil(LANE_PEAK_MARGIN * SEMANTIC_STACK_RECORDED_TREE_PEAK_MB))
 
 
 def e2b_smoke_lane_memory_mb() -> int:
     """Declared reservation of the Group 4 Step 6c E2B smoke lane:
-    LANE_PEAK_MARGIN over its largest recorded process-tree peak (812 MB)."""
+    LANE_PEAK_MARGIN over its largest recorded process-tree peak (649.1 MB recorded
+    -> 812 MB declared)."""
     return int(math.ceil(LANE_PEAK_MARGIN * E2B_SMOKE_RECORDED_TREE_PEAK_MB))
 
 
