@@ -751,6 +751,28 @@ Outcomes `killed` and `failed` (survivors after SIGKILL) require
 `scripts/run-bench --local --run-id <run> --reconcile-cleanup` before the next
 smoke lane — an operator instruction in the receipt note, not enforced.
 
+**Owner-run classification.** Before each attempt, and again in the lane
+teardown for that lane's own runs, the supervisor classifies every run under
+`.context/benchmarks/` (`PIPELINE_OWNER_RUNS … live/finished/aborted/stranded/
+bootstrapping/unknown` counts; every row appended to
+`<state-dir>/owner-runs.jsonl`). The preflight acts only on this deploy's own
+runs (those its earlier lane teardown receipts named); another session's run
+is classified and reported, never renamed or waited on (an `unknown` one still
+refuses). A pid-less run that no live process carries (`BENCHMARK_RUN_ID` in
+its environment, `--run-id` on its command line, or a command line naming the
+run when its environment cannot be read) past the startup grace
+(`BENCHMARK_STARTUP_GRACE_SECONDS`, 90 s by default) or whose manifest/cleanup
+receipt shows the bootstrap ended is `aborted` when it left no manifest or a
+`clean` cleanup receipt, and is set aside under `_aborted/` (renamed, never
+deleted, classification written beside the evidence); one that left a manifest
+without a clean receipt is `stranded`: reported and left in place for
+`--reconcile-cleanup`. An own `bootstrapping` run is waited out (the grace, at
+most) and refuses the launch if still bootstrapping after it. An unreadable
+record, a symlinked `.context/benchmarks` or an unavailable `/proc` is
+`unknown` and refuses the launch (`PIPELINE_OWNER_RUNS_REFUSED`, every lane
+`failed`, not a fix-loop round) — never move a run dir by hand while a process
+still carries its run id.
+
 **Fix-loop cap (`FIX_LOOP_CAP`, exit 6).** After two consecutive completed
 failed rounds in the same state dir (`--fix-loop-cap`, env
 `DEPLOY_FIX_LOOP_CAP`, default 2; recorded in every receipt's `fix_loop`),
