@@ -171,6 +171,20 @@ export function mockProjectsApi(
       project.folders = [...folders, folder];
       return HttpResponse.json(folder, { status: 201 });
     }),
+    http.put(`${API_BASE}/projects/:id/folders/order`, async ({ request, params }) => {
+      const project = projects.find((p) => p.id === params.id);
+      if (!project) return new HttpResponse(null, { status: 404 });
+      const body = (await request.json()) as { folderIds: string[] };
+      const folders = project.folders ?? [];
+      if (
+        body.folderIds.length !== folders.length ||
+        new Set(body.folderIds).size !== folders.length ||
+        body.folderIds.some((id) => !folders.some((f) => f.id === id))
+      )
+        return new HttpResponse(null, { status: 409 });
+      project.folders = body.folderIds.map((id) => folders.find((f) => f.id === id)!);
+      return HttpResponse.json({ folders: project.folders });
+    }),
     http.put(`${API_BASE}/projects/:id/folders/:folderId`, async ({ request, params }) => {
       const project = projects.find((p) => p.id === params.id)!;
       const { name } = (await request.json()) as { name: string };

@@ -1,6 +1,6 @@
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from '../../providers/database';
-import { newSyncSalt } from '../../providers/projects/store';
+import { folderOrderBy, newSyncSalt } from '../../providers/projects/store';
 
 export {
   claimSyncRevision,
@@ -104,14 +104,57 @@ export async function grantGithubRepoAccess(userId: string, repoUrl: string): Pr
 
 /** Indexed one-level folder CRUD; service checks the owning project first. */
 export function listFolders(projectId: string) {
-  return prisma.projectFolder.findMany({ where: { projectId }, orderBy: { name: 'asc' } });
+  return prisma.projectFolder.findMany({ where: { projectId }, orderBy: folderOrderBy });
 }
+
+export class FolderProjectMissingError extends Error {}
+
+/** Serialize membership and order changes on just this project, before reading folders. */
+function writeFolders<T>(projectId: string, write: (tx: Prisma.TransactionClient) => Promise<T>) {
+  return runTransactionWithRetry(async (tx) => {
+    const rows = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "Project" WHERE "id" = ${projectId} FOR UPDATE
+    `;
+    if (rows.length === 0) throw new FolderProjectMissingError();
+    return write(tx);
+  });
+}
+
 export function createFolder(projectId: string, name: string) {
-  return prisma.projectFolder.create({ data: { projectId, name } });
+  return writeFolders(projectId, async (tx) => {
+    const last = await tx.projectFolder.aggregate({
+      where: { projectId },
+      _max: { sortOrder: true },
+    });
+    return tx.projectFolder.create({
+      data: { projectId, name, sortOrder: (last._max.sortOrder ?? -1) + 1 },
+    });
+  });
 }
 export function renameFolder(projectId: string, id: string, name: string) {
-  return prisma.projectFolder.updateMany({ where: { id, projectId }, data: { name } });
+  return writeFolders(projectId, async (tx) => {
+    const result = await tx.projectFolder.updateMany({ where: { id, projectId }, data: { name } });
+    return result.count === 0 ? null : tx.projectFolder.findUniqueOrThrow({ where: { id } });
+  });
 }
 export function deleteFolder(projectId: string, id: string) {
-  return prisma.projectFolder.deleteMany({ where: { id, projectId } });
+  return writeFolders(projectId, (tx) => tx.projectFolder.deleteMany({ where: { id, projectId } }));
+}
+
+/** Exact membership is checked after the lock; stale clients cannot partially reorder. */
+export function reorderFolders(projectId: string, folderIds: string[]) {
+  return writeFolders(projectId, async (tx) => {
+    const current = await tx.projectFolder.findMany({ where: { projectId }, select: { id: true } });
+    const desired = new Set(folderIds);
+    if (current.length !== folderIds.length || current.some((folder) => !desired.has(folder.id))) {
+      return null;
+    }
+    await tx.$executeRaw`
+      UPDATE "ProjectFolder" AS folder SET "sortOrder" = ranks.position
+      FROM (VALUES ${Prisma.join(folderIds.map((id, position) => Prisma.sql`(${id}, ${position}::integer)`))})
+        AS ranks(id, position)
+      WHERE folder.id = ranks.id AND folder."projectId" = ${projectId}
+    `;
+    return tx.projectFolder.findMany({ where: { projectId }, orderBy: folderOrderBy });
+  });
 }

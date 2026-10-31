@@ -72,6 +72,16 @@ export const projectFolderSchema = z.object({ name: projectNameSchema }).strict(
 
 export const projectIdSchema = z.string().uuid();
 
+export const projectFolderOrderSchema = z
+  .object({
+    folderIds: z
+      .array(projectIdSchema.transform((id) => id.toLowerCase()))
+      .min(1)
+      .max(1000)
+      .refine((ids) => new Set(ids).size === ids.length, { message: 'folderIds must be unique' }),
+  })
+  .strict();
+
 const variableNameSchema = z
   .string()
   .regex(/^[A-Za-z_][A-Za-z0-9_.-]{0,199}$/, 'invalid variable name');

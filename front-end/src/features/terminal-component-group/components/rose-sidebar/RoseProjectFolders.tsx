@@ -7,8 +7,17 @@
  * Deletion removes only the container: its agents return to the project root.
  * Folder "+" selects (project, folder); project "+" selects (project, null).
  */
-import { ChevronDown, ChevronRight, Folder, MoreHorizontal, Plus, X } from 'lucide-react';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronDown,
+  ChevronRight,
+  Folder,
+  MoreHorizontal,
+  Plus,
+  X,
+} from 'lucide-react';
+import { useEffect, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import {
@@ -22,6 +31,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
   deleteProjectFolder,
+  reorderProjectFolders,
   saveProjectFolder,
   type Project,
   type ProjectFolder,
@@ -32,6 +42,31 @@ import { PROJECTS_QUERY_KEY } from './useProjects';
 import { ROSE_ACTIVE_COLOR } from './roseSidebarLayout';
 
 const folderGroupKey = (id: string) => `folder:${id}`;
+const FOLDER_DRAG_TYPE = 'application/x-rose-project-folder';
+
+export function FolderAgentCount({ count, active }: { count: number; active: boolean }) {
+  return (
+    <span
+      role="img"
+      aria-label={`${count} ${count === 1 ? 'agent' : 'agents'}`}
+      title={`${count} ${count === 1 ? 'agent' : 'agents'}`}
+      className="relative inline-flex h-6 w-6 shrink-0 items-center justify-center"
+      style={active ? { color: ROSE_ACTIVE_COLOR } : undefined}
+    >
+      <Folder aria-hidden="true" className="h-6 w-6" strokeWidth={1.4} />
+      <span
+        aria-hidden="true"
+        data-testid="folder-agent-count"
+        className={cn(
+          'absolute bottom-[4px] left-1/2 -translate-x-1/2 px-[1px] font-semibold tabular-nums leading-[9px] text-foreground',
+          count >= 100 ? 'text-[8px] tracking-[-0.3px]' : 'text-[9px]',
+        )}
+      >
+        {count > 999 ? '999+' : count}
+      </span>
+    </span>
+  );
+}
 
 function FolderNameEditor({
   initial = '',
@@ -128,6 +163,16 @@ function FolderGroup({
   onCreateAgent,
   onMenuOpenChange,
   renderAgents,
+  index,
+  folderCount,
+  reordering,
+  dragging,
+  dropEdge,
+  onMove,
+  onDragStart,
+  onDragEnd,
+  onDragOver,
+  onDrop,
 }: {
   folder: ProjectFolder;
   agents: Agent[];
@@ -139,6 +184,16 @@ function FolderGroup({
   onCreateAgent: (project: Project, folderId?: string | null) => void;
   onMenuOpenChange: (open: boolean) => void;
   renderAgents: (agents: Agent[], key: string) => ReactNode;
+  index: number;
+  folderCount: number;
+  reordering: boolean;
+  dragging: boolean;
+  dropEdge?: 'before' | 'after';
+  onMove: (direction: -1 | 1) => void;
+  onDragStart: (event: DragEvent<HTMLDivElement>) => void;
+  onDragEnd: () => void;
+  onDragOver: (event: DragEvent<HTMLDivElement>) => void;
+  onDrop: (event: DragEvent<HTMLDivElement>) => void;
 }) {
   const [open, setOpen] = useState(true);
   const [menu, setMenu] = useState(false);
@@ -175,10 +230,18 @@ function FolderGroup({
     <div data-testid={`rose-folder-${folder.id}`}>
       <div
         data-pending={pending}
+        draggable={!filtering && !reordering && !busy && !menu}
+        onDragStart={onDragStart}
+        onDragEnd={onDragEnd}
+        onDragOver={onDragOver}
+        onDrop={onDrop}
         className={cn(
           'group flex h-[34px] items-center gap-1 pr-4 text-[13px]',
           expanded ? 'pl-[30px]' : 'pl-[22px]',
           pending && 'bg-primary/5',
+          dragging && 'opacity-40',
+          dropEdge === 'before' && 'shadow-[inset_0_2px_0_hsl(var(--primary))]',
+          dropEdge === 'after' && 'shadow-[inset_0_-2px_0_hsl(var(--primary))]',
         )}
         style={selected || pending ? { color: ROSE_ACTIVE_COLOR } : undefined}
       >
@@ -191,11 +254,7 @@ function FolderGroup({
           className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-muted-foreground hover:text-foreground"
         >
           {expanded && (shown ? <ChevronDown size={12} /> : <ChevronRight size={12} />)}
-          <Folder
-            className="h-4 w-4 shrink-0"
-            strokeWidth={1.6}
-            style={selected || pending ? { color: ROSE_ACTIVE_COLOR } : undefined}
-          />
+          <FolderAgentCount count={agents.length} active={selected || pending} />
           {expanded && (
             <>
               <span
@@ -205,9 +264,6 @@ function FolderGroup({
                 )}
               >
                 {folder.name}
-              </span>
-              <span className="text-[11px] tabular-nums text-muted-foreground">
-                {agents.length}
               </span>
             </>
           )}
@@ -239,6 +295,36 @@ function FolderGroup({
                 role="menu"
                 onCloseAutoFocus={(e) => e.preventDefault()}
               >
+                {[
+                  {
+                    label: 'Move up',
+                    direction: -1 as const,
+                    disabled: index === 0,
+                    Icon: ArrowUp,
+                  },
+                  {
+                    label: 'Move down',
+                    direction: 1 as const,
+                    disabled: index === folderCount - 1,
+                    Icon: ArrowDown,
+                  },
+                ].map(({ label, direction, disabled, Icon }) => (
+                  <button
+                    key={label}
+                    type="button"
+                    role="menuitem"
+                    disabled={disabled || reordering || filtering}
+                    className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm hover:bg-muted disabled:pointer-events-none disabled:opacity-40"
+                    onClick={() => {
+                      setMenu(false);
+                      onMove(direction);
+                    }}
+                  >
+                    <Icon size={14} />
+                    {label}
+                  </button>
+                ))}
+                <div className="my-1 border-t border-border" />
                 <button
                   type="button"
                   role="menuitem"
@@ -350,13 +436,52 @@ export default function RoseProjectFolders({
   renderAgents: (agents: Agent[], key: string) => ReactNode;
 }) {
   const cache = useQueryClient();
+  const [optimisticOrder, setOptimisticOrder] = useState<string[] | null>(null);
+  const [reordering, setReordering] = useState(false);
+  const reorderInFlight = useRef(false);
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ id: string; edge: 'before' | 'after' } | null>(
+    null,
+  );
+  const [orderError, setOrderError] = useState('');
   useEffect(() => {
     if (creating) onMenuOpenChange(true);
     return () => {
       if (creating) onMenuOpenChange(false);
     };
   }, [creating, onMenuOpenChange]);
-  const folders = project.folders ?? [];
+  const savedFolders = project.folders ?? [];
+  const rank = new Map(optimisticOrder?.map((id, index) => [id, index]));
+  const folders = optimisticOrder
+    ? [...savedFolders].sort((a, b) => (rank.get(a.id) ?? Infinity) - (rank.get(b.id) ?? Infinity))
+    : savedFolders;
+  const reorder = async (ids: string[]) => {
+    if (reorderInFlight.current || filtering) return;
+    if (ids.every((id, index) => folders[index]?.id === id)) return;
+    reorderInFlight.current = true;
+    setReordering(true);
+    setOrderError('');
+    setOptimisticOrder(ids);
+    try {
+      await cache.cancelQueries({ queryKey: PROJECTS_QUERY_KEY, exact: true });
+      const nextFolders = await reorderProjectFolders(project.id, ids);
+      cache.setQueryData<Project[]>(PROJECTS_QUERY_KEY, (current) =>
+        current?.map((row) => (row.id === project.id ? { ...row, folders: nextFolders } : row)),
+      );
+      void cache.invalidateQueries({ queryKey: PROJECTS_QUERY_KEY, exact: true });
+    } catch (err) {
+      setOrderError(err instanceof Error ? err.message : 'Could not reorder folders.');
+      void cache.invalidateQueries({ queryKey: PROJECTS_QUERY_KEY, exact: true });
+    } finally {
+      setOptimisticOrder(null);
+      setReordering(false);
+      reorderInFlight.current = false;
+    }
+  };
+  const endDrag = () => {
+    setDraggedId(null);
+    setDropTarget(null);
+  };
   const byFolder = new Map(folders.map((folder) => [folder.id, [] as Agent[]]));
   const root: Agent[] = [];
   for (const agent of agents)
@@ -374,7 +499,12 @@ export default function RoseProjectFolders({
         />
       )}
       {renderAgents(root, project.id)}
-      {folders.map((folder) => {
+      {orderError && (
+        <p role="alert" className="px-5 py-1 text-xs text-destructive">
+          {orderError}
+        </p>
+      )}
+      {folders.map((folder, index) => {
         const rows = byFolder.get(folder.id)!;
         if (filtering && !rows.length) return null;
         return (
@@ -390,6 +520,48 @@ export default function RoseProjectFolders({
             onCreateAgent={onCreateAgent}
             onMenuOpenChange={onMenuOpenChange}
             renderAgents={renderAgents}
+            index={index}
+            folderCount={folders.length}
+            reordering={reordering}
+            dragging={draggedId === folder.id}
+            dropEdge={dropTarget?.id === folder.id ? dropTarget.edge : undefined}
+            onMove={(direction) => {
+              const ids = folders.map((row) => row.id);
+              const target = index + direction;
+              if (target < 0 || target >= ids.length) return;
+              [ids[index], ids[target]] = [ids[target], ids[index]];
+              void reorder(ids);
+            }}
+            onDragStart={(event) => {
+              if (filtering || reorderInFlight.current) {
+                event.preventDefault();
+                return;
+              }
+              event.dataTransfer.effectAllowed = 'move';
+              event.dataTransfer.setData(FOLDER_DRAG_TYPE, folder.id);
+              setDraggedId(folder.id);
+            }}
+            onDragEnd={endDrag}
+            onDragOver={(event) => {
+              if (!draggedId || draggedId === folder.id || filtering || reordering) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = 'move';
+              const rect = event.currentTarget.getBoundingClientRect();
+              setDropTarget({
+                id: folder.id,
+                edge: event.clientY >= rect.top + rect.height / 2 ? 'after' : 'before',
+              });
+            }}
+            onDrop={(event) => {
+              if (!draggedId || draggedId === folder.id || filtering || reordering) return;
+              event.preventDefault();
+              const ids = folders.map((row) => row.id).filter((id) => id !== draggedId);
+              const rect = event.currentTarget.getBoundingClientRect();
+              const offset = event.clientY >= rect.top + rect.height / 2 ? 1 : 0;
+              ids.splice(ids.indexOf(folder.id) + offset, 0, draggedId);
+              endDrag();
+              void reorder(ids);
+            }}
           />
         );
       })}
