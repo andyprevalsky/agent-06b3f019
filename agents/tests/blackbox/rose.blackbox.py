@@ -11784,12 +11784,96 @@ async def test_truncation_retains_incoming_candidate_exclusions():
     assert all("candidatea" in excluded for excluded in seen)
 
 
+
+async def test_truncation_labels_cut_off_models_without_relabeling_structured_exclusions():
+    """Cut-off recovery names its own skip reason and keeps an incoming structured-exclusion label."""
+    from providers.rose.truncation import recover_truncated
+
+    seen = []
+
+    async def attempt(**kwargs):
+        seen.append((kwargs.get("_skip_models"), kwargs.get("_skip_reasons")))
+        yield StreamChunk(kind="metadata", data={"actual_model": "candidate-b-gpt"})
+        yield StreamChunk(
+            kind="usage", data={"finish_reason": "length" if len(seen) == 1 else "stop", "completion_tokens": 1}
+        )
+        yield StreamChunk(kind="done", data={})
+
+    await _drain(
+        recover_truncated(
+            attempt,
+            {
+                "messages": [],
+                "response_model": object,
+                "max_tokens": 100,
+                "_skip_models": frozenset({"candidatea"}),
+                "_skip_reasons": {"candidatea": "structured_output_excluded"},
+            },
+        )
+    )
+    assert len(seen) == 2
+    assert seen[1][0] == frozenset({"candidatea", "candidateb"})
+    assert seen[1][1] == {"candidatea": "structured_output_excluded", "candidateb": "reply_cut_off_at_output_limit"}
+
+
+async def test_waterfall_logs_structured_exclusion_reason_separately_from_cut_off():
+    """`rose.waterfall.step_skipped` must say why a model was skipped: exclusion vs cut-off.
+
+    Deploy 12 (agent 8099ad68): kimi-k3 was skipped after two schema-invalid
+    replies, but the log said `reply_cut_off_at_output_limit`, which pointed
+    the RCA at output budgets first. The two need different repairs.
+    """
+    from providers.rose.errors import RoseAllFailed
+    from providers.rose.waterfall import (
+        SKIP_REASON_CUT_OFF,
+        SKIP_REASON_STRUCTURED_OUTPUT_EXCLUDED,
+        waterfall_complete,
+    )
+
+    pool = PoolSpec(
+        name="rose-1-oss",
+        claude_auth_model="claude-sonnet-5",
+        gpt_auth_model="gpt-5.6-luna",
+        waterfall=("moonshotai/kimi-k3", "qwen/qwen3.8-27b"),
+        direct_auth_enabled=False,
+    )
+    logged = []
+    with patch("providers.rose.waterfall.logger") as fake_logger:
+        fake_logger.warning.side_effect = lambda event, **fields: logged.append((event, fields))
+        try:
+            async for _chunk in waterfall_complete(
+                pool_spec=pool,
+                messages=[{"role": "user", "content": "both candidates already excluded"}],
+                openrouter_key="test-key",
+                request_id="test-skip-reasons",
+                skip_models=frozenset({"kimik3", "qwen3827b"}),
+                skip_reasons={"kimik3": SKIP_REASON_STRUCTURED_OUTPUT_EXCLUDED},
+            ):
+                raise AssertionError("no candidate may be served when every step is skipped")
+        except RoseAllFailed:
+            pass
+
+    reasons = {fields["model"]: fields["reason"] for event, fields in logged if event == "rose.waterfall.step_skipped"}
+    assert reasons == {
+        "moonshotai/kimi-k3": SKIP_REASON_STRUCTURED_OUTPUT_EXCLUDED,
+        "qwen/qwen3.8-27b": SKIP_REASON_CUT_OFF,
+    }, reasons
+
+
 async def run_all_tests():
     print("rose blackbox tests:")
     r = BlackboxResult()
     await r.record_async("rose_local_loopback_no_fallback", test_rose_local_loopback_and_no_fallback)
     await r.record_async(
         "truncation_preserves_candidate_exclusions", test_truncation_retains_incoming_candidate_exclusions
+    )
+    await r.record_async(
+        "truncation_labels_cut_off_without_relabeling_exclusions",
+        test_truncation_labels_cut_off_models_without_relabeling_structured_exclusions,
+    )
+    await r.record_async(
+        "waterfall_skip_reason_exclusion_vs_cut_off",
+        test_waterfall_logs_structured_exclusion_reason_separately_from_cut_off,
     )
     await r.record_async("direct_auth_candidate_exclusions", test_direct_auth_honors_candidate_exclusions)
 
