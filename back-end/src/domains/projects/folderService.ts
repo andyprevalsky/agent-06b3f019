@@ -17,6 +17,16 @@ async function writeFolder<T>(write: () => Promise<T>): Promise<T> {
   try {
     return await write();
   } catch (error) {
+    if (error instanceof repo.FolderMoveError) {
+      if (error.reason === 'source_missing') throw new ProjectError(404, 'Folder not found');
+      if (error.reason === 'same_folder')
+        throw new ProjectError(400, 'A folder cannot precede itself');
+      throw new ProjectError(
+        409,
+        'Destination folder changed; reload folders and retry',
+        'folder_order_stale'
+      );
+    }
     if (error instanceof repo.FolderProjectMissingError) {
       throw new ProjectError(404, 'Project not found');
     }
@@ -47,15 +57,13 @@ export async function deleteFolder(userId: string, projectId: string, id: string
   if (result.count === 0) throw new ProjectError(404, 'Folder not found');
 }
 
-export async function reorderFolders(userId: string, projectId: string, folderIds: string[]) {
+export async function moveFolder(
+  userId: string,
+  projectId: string,
+  folderId: string,
+  beforeId: string | null
+) {
   await requireProject(userId, projectId);
-  const folders = await writeFolder(() => repo.reorderFolders(projectId, folderIds));
-  if (folders === null) {
-    throw new ProjectError(
-      409,
-      'Folder membership changed; reload folders and retry',
-      'folder_order_stale'
-    );
-  }
+  const folders = await writeFolder(() => repo.moveFolder(projectId, folderId, beforeId));
   return { folders };
 }

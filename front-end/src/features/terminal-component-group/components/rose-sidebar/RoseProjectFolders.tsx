@@ -31,7 +31,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
   deleteProjectFolder,
-  reorderProjectFolders,
+  moveProjectFolder,
   saveProjectFolder,
   type Project,
   type ProjectFolder,
@@ -455,7 +455,7 @@ export default function RoseProjectFolders({
   const folders = optimisticOrder
     ? [...savedFolders].sort((a, b) => (rank.get(a.id) ?? Infinity) - (rank.get(b.id) ?? Infinity))
     : savedFolders;
-  const reorder = async (ids: string[]) => {
+  const reorder = async (ids: string[], movedId: string) => {
     if (reorderInFlight.current || filtering) return;
     if (ids.every((id, index) => folders[index]?.id === id)) return;
     reorderInFlight.current = true;
@@ -464,7 +464,11 @@ export default function RoseProjectFolders({
     setOptimisticOrder(ids);
     try {
       await cache.cancelQueries({ queryKey: PROJECTS_QUERY_KEY, exact: true });
-      const nextFolders = await reorderProjectFolders(project.id, ids);
+      const nextFolders = await moveProjectFolder(
+        project.id,
+        movedId,
+        ids[ids.indexOf(movedId) + 1] ?? null,
+      );
       cache.setQueryData<Project[]>(PROJECTS_QUERY_KEY, (current) =>
         current?.map((row) => (row.id === project.id ? { ...row, folders: nextFolders } : row)),
       );
@@ -530,7 +534,7 @@ export default function RoseProjectFolders({
               const target = index + direction;
               if (target < 0 || target >= ids.length) return;
               [ids[index], ids[target]] = [ids[target], ids[index]];
-              void reorder(ids);
+              void reorder(ids, folder.id);
             }}
             onDragStart={(event) => {
               if (filtering || reorderInFlight.current) {
@@ -560,7 +564,7 @@ export default function RoseProjectFolders({
               const offset = event.clientY >= rect.top + rect.height / 2 ? 1 : 0;
               ids.splice(ids.indexOf(folder.id) + offset, 0, draggedId);
               endDrag();
-              void reorder(ids);
+              void reorder(ids, draggedId);
             }}
           />
         );

@@ -75,10 +75,20 @@ for (const width of [1280, 390]) {
       if (!path.startsWith('/api/')) return route.continue();
       let body: unknown = {};
       if (path === '/api/projects') body = { projects: [{ ...project, folders }] };
-      else if (path === '/api/projects/project/folders/order' && request.method() === 'PUT') {
-        const { folderIds } = request.postDataJSON() as { folderIds: string[] };
-        expect(new Set(folderIds)).toEqual(new Set(folders.map((folder) => folder.id)));
-        folders = folderIds.map((id) => folders.find((folder) => folder.id === id)!);
+      else if (
+        path.match(/^\/api\/projects\/project\/folders\/[^/]+\/position$/) &&
+        request.method() === 'PUT'
+      ) {
+        const { beforeId } = request.postDataJSON() as { beforeId: string | null };
+        const folderId = path.split('/').at(-2)!;
+        const moved = folders.find((folder) => folder.id === folderId)!;
+        const next = folders.filter((folder) => folder.id !== folderId);
+        next.splice(
+          beforeId === null ? next.length : next.findIndex((folder) => folder.id === beforeId),
+          0,
+          moved,
+        );
+        folders = next;
         body = { folders };
       } else if (path === '/api/agents') body = { agents };
       else if (path === '/api/agents/code-agents') body = { code_agents: [] };

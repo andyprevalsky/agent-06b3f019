@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import type { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { folderOrderBy, newSyncSalt } from '../../providers/projects/store';
 
@@ -141,19 +141,32 @@ export function deleteFolder(projectId: string, id: string) {
   return writeFolders(projectId, (tx) => tx.projectFolder.deleteMany({ where: { id, projectId } }));
 }
 
-/** Exact membership is checked after the lock; stale clients cannot partially reorder. */
-export function reorderFolders(projectId: string, folderIds: string[]) {
+export class FolderMoveError extends Error {
+  constructor(readonly reason: 'source_missing' | 'target_missing' | 'same_folder') {
+    super(reason);
+  }
+}
+
+/** Splice the displayed order, then persist dense ranks with two bound parameters. */
+export function moveFolder(projectId: string, folderId: string, beforeId: string | null) {
   return writeFolders(projectId, async (tx) => {
-    const current = await tx.projectFolder.findMany({ where: { projectId }, select: { id: true } });
-    const desired = new Set(folderIds);
-    if (current.length !== folderIds.length || current.some((folder) => !desired.has(folder.id))) {
-      return null;
-    }
+    const ordered = await tx.projectFolder.findMany({
+      where: { projectId },
+      orderBy: folderOrderBy,
+    });
+    const sourceIndex = ordered.findIndex((folder) => folder.id === folderId);
+    if (sourceIndex < 0) throw new FolderMoveError('source_missing');
+    if (beforeId === folderId) throw new FolderMoveError('same_folder');
+    const [source] = ordered.splice(sourceIndex, 1);
+    const targetIndex =
+      beforeId === null ? ordered.length : ordered.findIndex((folder) => folder.id === beforeId);
+    if (targetIndex < 0) throw new FolderMoveError('target_missing');
+    ordered.splice(targetIndex, 0, source);
     await tx.$executeRaw`
-      UPDATE "ProjectFolder" AS folder SET "sortOrder" = ranks.position
-      FROM (VALUES ${Prisma.join(folderIds.map((id, position) => Prisma.sql`(${id}, ${position}::integer)`))})
-        AS ranks(id, position)
-      WHERE folder.id = ranks.id AND folder."projectId" = ${projectId}
+      UPDATE "ProjectFolder" AS folder SET "sortOrder" = (ranked.position - 1)::integer
+      FROM jsonb_array_elements_text(${JSON.stringify(ordered.map((item) => item.id))}::jsonb)
+        WITH ORDINALITY AS ranked(id, position)
+      WHERE folder.id = ranked.id AND folder."projectId" = ${projectId}
     `;
     return tx.projectFolder.findMany({ where: { projectId }, orderBy: folderOrderBy });
   });

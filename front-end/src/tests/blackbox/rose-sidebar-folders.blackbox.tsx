@@ -140,7 +140,7 @@ describe('one-level folders inside projects', () => {
   const folderOrder = () =>
     screen.getAllByTestId(/^rose-folder-/).map((row) => row.getAttribute('data-testid'));
 
-  it('moves folders from the menu, disables boundaries, and saves the complete order', async () => {
+  it('moves folders from the menu, disables boundaries, and saves the moved folder position', async () => {
     const api = mockProjectsApi([makeProject({ folders: orderedFolders })]);
     renderBar({ agents });
     const user = userEvent.setup();
@@ -151,8 +151,8 @@ describe('one-level folders inside projects', () => {
       expect(folderOrder()).toEqual(['rose-folder-f-doc', 'rose-folder-f-ui', 'rose-folder-f-api']),
     );
     expect(api.projects[0].folders?.map((f) => f.id)).toEqual(['f-doc', 'f-ui', 'f-api']);
-    expect(requests('PUT', '/projects/p-rose/folders/order')[0].body).toEqual({
-      folderIds: ['f-doc', 'f-ui', 'f-api'],
+    expect(requests('PUT', '/projects/p-rose/folders/f-ui/position')[0].body).toEqual({
+      beforeId: 'f-api',
     });
     await user.click(screen.getByRole('button', { name: 'Services folder options' }));
     expect(screen.getByRole('menuitem', { name: 'Move down' })).toBeDisabled();
@@ -173,13 +173,15 @@ describe('one-level folders inside projects', () => {
     fireEvent.dragStart(row('f-api'), { dataTransfer });
     fireEvent.dragOver(row('f-ui'), { dataTransfer });
     fireEvent.drop(row('f-ui'), { dataTransfer });
-    await waitFor(() => expect(requests('PUT', '/projects/p-rose/folders/order')).toHaveLength(1));
+    await waitFor(() =>
+      expect(requests('PUT', '/projects/p-rose/folders/f-api/position')).toHaveLength(1),
+    );
     await waitFor(() =>
       expect(folderOrder()).toEqual(['rose-folder-f-api', 'rose-folder-f-ui', 'rose-folder-f-doc']),
     );
     server.use(
       http.put(
-        `${API_BASE}/projects/p-rose/folders/order`,
+        `${API_BASE}/projects/p-rose/folders/:folderId/position`,
         () => new HttpResponse(null, { status: 503 }),
       ),
     );

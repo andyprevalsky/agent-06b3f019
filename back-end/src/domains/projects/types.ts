@@ -72,14 +72,8 @@ export const projectFolderSchema = z.object({ name: projectNameSchema }).strict(
 
 export const projectIdSchema = z.string().uuid();
 
-export const projectFolderOrderSchema = z
-  .object({
-    folderIds: z
-      .array(projectIdSchema.transform((id) => id.toLowerCase()))
-      .min(1)
-      .max(1000)
-      .refine((ids) => new Set(ids).size === ids.length, { message: 'folderIds must be unique' }),
-  })
+export const projectFolderPositionSchema = z
+  .object({ beforeId: projectIdSchema.nullable() })
   .strict();
 
 const variableNameSchema = z
