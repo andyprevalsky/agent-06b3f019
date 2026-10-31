@@ -1682,7 +1682,7 @@ def check_exclusive_lane_defers_behind_stack_lane(tmp: Path, env: dict[str, str]
 def check_static_ceiling_credits_observed_lanes(tmp: Path, env: dict[str, str]) -> None:
     """Follow-up PR-11 (#1658 round 1, 2026-10-31): smoke 4150 + backend 3072
     + agents 1536 = 8758 MB declared against an 8755 MB budget deferred
-    agents-coverage on reason ``budget`` for ~18 min although the live check
+    agents-coverage on reason ``budget`` for ~14 min although the live check
     had 157 MB to spare. The static ceiling now charges a phased candidate
     only the freshly observed running lanes' unmaterialized declarations;
     unobserved lanes, a disabled credit and an unphased candidate keep the

@@ -32,7 +32,7 @@ only the unmaterialized declaration of each freshly observed running lane
 (``reserved_static_mb`` beside ``reserved_declared_mb`` in the waiting and
 admission records): the plan had sized the coverage lanes' workers one by one
 and their declarations with the smoke lane summed to 8758 MB against an 8755
-MB budget, so agents-coverage (1536 MB) waited ~18 min on reason ``budget``
+MB budget, so agents-coverage (1536 MB) waited ~14 min on reason ``budget``
 for backend-coverage to finish while live headroom had 157 MB to spare. An
 unobserved, stale or unknown lane, a disabled credit and an unphased
 candidate keep the whole declarations; the never-fits refusal is unchanged

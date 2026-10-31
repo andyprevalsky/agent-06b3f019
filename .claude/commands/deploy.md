@@ -390,7 +390,7 @@ CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -v '^agents/benchmarks/histor
 # anonymous process-tree PSS, Pss_Anon: file-backed pages are still counted in
 # MemAvailable); unphased lanes (semantic-stack) and unobserved usage keep
 # the declared sum (#1640: smoke waited 16 min on a double-counted 3712 MB;
-# #1658 round 1: agents-coverage waited ~18 min on 8758 declared vs 8755).
+# #1658 round 1: agents-coverage waited ~14 min on 8758 declared vs 8755).
 # A lane that cannot fit alone fails
 # visibly without starting. Explicit resource limits can only tighten memory
 # admission. Receipts include timestamped MemAvailable samples, per-lane child
