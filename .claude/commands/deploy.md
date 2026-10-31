@@ -2679,25 +2679,22 @@ Render has no GitHub Actions run to watch, so the only proof a backend deploy is
 
 ```bash
 python3 scripts/record_factory_event.py deploy production-start render
-cd "$(git rev-parse --show-toplevel)/back-end" && source .env
-MERGED_SHA="$DEPLOY_MERGED_SHA"   # immutable merge commit captured in Step 12
-echo "Waiting for Render to deploy ${MERGED_SHA:0:7}..."
-DEPLOY_OK=""
-for i in $(seq 1 90); do  # up to ~15 min at 10s (Render builds can be slow)
-  read -r STATUS COMMIT < <(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
-    "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys?limit=1" \
-    | python3 -c "import sys,json; d=json.load(sys.stdin)[0]['deploy']; print(d.get('status',''), (d.get('commit') or {}).get('id','')[:7])")
-  echo "  Render: status=$STATUS commit=$COMMIT (want ${MERGED_SHA:0:7})"
-  case "$STATUS" in
-    live)
-      if [ "$COMMIT" = "${MERGED_SHA:0:7}" ]; then DEPLOY_OK=1; break; fi ;;
-    build_failed|update_failed|canceled|pre_deploy_failed)
-      echo "❌ Render deploy $STATUS for $COMMIT"; DEPLOY_OK="failed"; break ;;
-  esac
-  sleep 10
-done
-[ "$DEPLOY_OK" = "1" ] || { echo "❌ Render did not bring ${MERGED_SHA:0:7} live (last status: $STATUS)"; exit 1; }
-echo "✅ Render live on ${MERGED_SHA:0:7}"
+cd "$(git rev-parse --show-toplevel)"
+# Polls the Render deploys API (RENDER_API_KEY/RENDER_SERVICE_ID from
+# back-end/.env) up to 90 x 10 s. A deploy for the merged SHA is the authority
+# (live opens, build_failed/update_failed/canceled/pre_deploy_failed block).
+# Render auto-deploy skips a commit with no change under back-end/, so no
+# deploy ever appears (#1652, #1655 spun to the bound): the live deploy's
+# commit then opens the gate as source-equivalent only when it is an ancestor
+# of the merged SHA and `git diff <live> <merged> -- back-end/ render.yaml` is
+# empty; any back-end change or non-ancestor keeps waiting. Records `render`
+# (status, live_commit, merged_sha, backend_diff, evidence) in
+# .context/deploy-pipeline/production.json; prints RENDER_LIVE or
+# RENDER_SOURCE_EQUIVALENT live=<sha> merged=<sha>. Exit 2 = Render API, git or
+# credential failure (fail closed; repair and rerun), never a pass.
+python3 scripts/run_deploy_pipeline.py production-render --merged-sha "$DEPLOY_MERGED_SHA" \
+  --state-dir .context/deploy-pipeline ||
+  { echo "❌ Render does not serve the merged backend ${DEPLOY_MERGED_SHA:0:7}"; exit 1; }
 python3 scripts/record_factory_event.py deploy production-finish render
 ```
 

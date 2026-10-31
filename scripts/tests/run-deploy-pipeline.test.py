@@ -36,6 +36,7 @@ import threading
 import time
 from contextlib import ExitStack, redirect_stdout
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1581,6 +1582,7 @@ def main() -> int:
         check_simulate_legacy_plan_group3(tmp, env)
         check_receipt_readers(tmp)
         check_production_fly_wait(tmp, env)
+        check_production_render(tmp, env)
         check_production_semantic(tmp, env)
         check_semantic_workflow_source_sha()
     print("run-deploy-pipeline: all checks passed")
@@ -1829,6 +1831,232 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     assert ran.returncode == 1 and "monitor-cooperative-cutover.ts --verify failed (exit 3)" in ran.stdout, ran.stdout
     assert "dispatch" not in call_lines(), call_lines()
     print("production fly wait: ok")
+
+
+def check_production_render(tmp: Path, env: dict[str, str]) -> None:
+    """``production-render`` (deploy.md Step 13a step 1) serves the merged
+    backend's proof from the Render deploys API, stubbed on loopback, over a
+    fixture repo: (a) no deploy for the merged SHA, live commit an ancestor
+    with no change under back-end/ -> source-equivalent, receipt recorded,
+    probes run; (b) a back-end change since the live commit keeps waiting to
+    the bound; (c) a live commit that is not an ancestor keeps waiting;
+    (d) a deploy for the merged SHA takes the exact-SHA path (live opens,
+    build_failed blocks); (e) a Render API error or missing credentials fails
+    closed (exit 2) without probes. The lane never overwrites, and is never
+    overwritten by, the Fly lane's receipt of the same merged SHA."""
+    repo = tmp / "render-source"
+    repo.mkdir()
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    for name in ("run_deploy_pipeline.py", "deploy_stage_wait.py", "factory_metadata.py",
+                 "classify-agent-runtime-changes.sh"):
+        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+    (repo / ".gitignore").write_text(".context/\n__pycache__/\n")
+    git = ["git", "-C", str(repo), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+
+    def commit(message: str, files: dict[str, str]) -> str:
+        for relative, content in files.items():
+            path = repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", message], check=True)
+        return subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+
+    base = commit("base", {"README": "base\n"})
+    live = commit("backend v1", {"back-end/src/server.ts": "v1\n"})
+    docs_only = commit("docs only", {"docs/notes.md": "notes\n", "scripts/tool.py": "x = 1\n"})
+    backend_change = commit("backend v2", {"back-end/src/server.ts": "v2\n"})
+    branch = subprocess.run([*git, "rev-parse", "--abbrev-ref", "HEAD"], check=True, stdout=subprocess.PIPE,
+                            text=True).stdout.strip()
+    subprocess.run([*git, "checkout", "-q", "-b", "side", base], check=True)
+    sibling = commit("sibling docs", {"docs/other.md": "other\n"})
+    subprocess.run([*git, "checkout", "-q", branch], check=True)
+
+    fake = tmp / "render-fake"
+    fake.mkdir()
+    requests_log = fake / "requests.log"
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args: object) -> None:  # keep the suite's output clean
+            pass
+
+        def do_GET(self) -> None:  # http.server dispatches on this exact name
+            with requests_log.open("a") as handle:
+                handle.write(f"{self.path} auth={self.headers.get('Authorization')}\n")
+            if self.path.split("?")[0] != "/services/srv-fixture/deploys":
+                self.send_error(404)
+                return
+            if self.headers.get("Authorization") != "Bearer fixture-key":
+                self.send_error(401)
+                return
+            if (fake / "fail").exists():
+                self.send_error(500, "fixture outage")
+                return
+            count = int((fake / "count").read_text()) + 1 if (fake / "count").exists() else 1
+            (fake / "count").write_text(str(count))
+            path = fake / f"deploys-{count}.json"
+            if not path.exists():
+                path = fake / "deploys-last.json"
+            body = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    driver = scripts / "run_deploy_pipeline.py"
+    render_env = {**{key: value for key, value in env.items() if not key.startswith("RENDER_")},
+                  "DEPLOY_RENDER_API_BASE": f"http://127.0.0.1:{server.server_address[1]}",
+                  "RENDER_API_KEY": "fixture-key", "RENDER_SERVICE_ID": "srv-fixture"}
+    probes = fake / "probes.log"
+
+    def deploy(commit_id: str, status: str, deploy_id: str) -> dict:
+        return {"deploy": {"id": deploy_id, "status": status, "commit": {"id": commit_id, "message": "m"}},
+                "cursor": deploy_id}
+
+    def reset(*pages: list[dict]) -> None:
+        for stale in fake.glob("deploys-*.json"):
+            stale.unlink()
+        for stale in (fake / "count", fake / "fail", requests_log, probes):
+            stale.unlink(missing_ok=True)
+        for index, page in enumerate(pages, start=1):
+            (fake / f"deploys-{index}.json").write_text(json.dumps(page))
+        (fake / "deploys-last.json").write_text(json.dumps(pages[-1]))
+
+    def run_render(merged: str, state: Path, *extra: str, env_override: dict[str, str] | None = None
+                   ) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(driver), "production-render", "--merged-sha", merged, "--state-dir", str(state),
+             "--poll-seconds", "0.05", *extra, "--", "bash", "-c", f'echo probes >> "{probes}"'],
+            env=render_env if env_override is None else env_override, cwd=repo, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, timeout=120)
+
+    def requests() -> list[str]:
+        return requests_log.read_text().splitlines() if requests_log.exists() else []
+
+    def receipt_of(state: Path) -> dict:
+        return json.loads((state / "production.json").read_text())
+
+    try:
+        # (a) Render skipped the merge (no deploy for it); the live deploy's commit
+        #     is an ancestor and nothing under back-end/ changed since: equivalent.
+        reset([deploy(live, "live", "dep-live")])
+        state_a = tmp / "render-state-a"
+        ran = run_render(docs_only, state_a)
+        assert ran.returncode == 0, ran.stdout
+        assert f"RENDER_SOURCE_EQUIVALENT live={live} merged={docs_only}" in ran.stdout, ran.stdout
+        assert "RENDER_LIVE " not in ran.stdout and "PIPELINE_RENDER then exit=0" in ran.stdout, ran.stdout
+        assert probes.read_text() == "probes\n", "the probes must run once the live backend is proven"
+        assert requests() == ["/services/srv-fixture/deploys?limit=20 auth=Bearer fixture-key"], requests()
+        render = receipt_of(state_a)["render"]
+        assert render["provider"] == "render" and render["status"] == "source-equivalent", render
+        assert render["merged_sha"] == docs_only and render["live_commit"] == live, render
+        assert render["backend_diff"] == [] and render["deploy_id"] == "dep-live" and render["polls"] == 1, render
+        equivalence = render["equivalence"]
+        assert equivalence["equivalent"] is True and equivalence["live_is_ancestor"] is True, equivalence
+        assert equivalence["backend_diff"] == [] and equivalence["service_paths"] == ["back-end/", "render.yaml"]
+        assert sorted(equivalence["changed_files"]) == ["docs/notes.md", "scripts/tool.py"], equivalence
+        assert render["then"] == {**render["then"], "exit": 0} and render["then"]["command"][0] == "bash", render
+        assert receipt_of(state_a)["merged_sha"] == docs_only and "wall_s" in render, receipt_of(state_a)
+        # The Fly lane of the same merged SHA carries the Render lane forward.
+        ran = subprocess.run(
+            [sys.executable, str(driver), "production", "--merged-sha", docs_only, "--state-dir", str(state_a),
+             "--poll-seconds", "0.05", "--", "true"],
+            env={**render_env, "PATH": "/usr/bin:/bin"}, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=120)
+        assert ran.returncode == 0, ran.stdout
+        after = receipt_of(state_a)
+        assert after["status"] == "passed" and after["fly"]["required"] is False, after
+        assert after["render"] == render, "production must not drop the Render lane of the same merged SHA"
+
+        # (b) A back-end change since the live commit is never equivalent: the
+        #     exact-SHA wait runs to its bound and blocks; no probes.
+        reset([deploy(live, "live", "dep-live")])
+        state_b = tmp / "render-state-b"
+        ran = run_render(backend_change, state_b, "--timeout", "0.3")
+        assert ran.returncode == 1, ran.stdout
+        assert "RENDER_SOURCE_EQUIVALENT" not in ran.stdout and not probes.exists(), ran.stdout
+        assert f"Render did not bring {backend_change[:7]} live within 0s" in ran.stdout, ran.stdout
+        assert f"live commit {live[:9]} is not source-equivalent" in ran.stdout, ran.stdout
+        assert len(requests()) >= 2, "the bounded wait must keep polling the deploys API"
+        render = receipt_of(state_b)["render"]
+        assert render["status"] == "timeout" and render["live_commit"] is None and render["polls"] >= 2, render
+        assert render["backend_diff"] == ["back-end/src/server.ts"], render
+        assert render["equivalence"]["equivalent"] is False and render["equivalence"]["live_is_ancestor"] is True
+        assert "back-end/" in render["equivalence"]["reason"] and "not source-equivalent" in render["error"], render
+
+        # (c) The live commit is not an ancestor of the merged SHA (another
+        #     branch's deploy): never equivalent, keeps waiting to the bound.
+        reset([deploy(live, "live", "dep-live")])
+        state_c = tmp / "render-state-c"
+        ran = run_render(sibling, state_c, "--timeout", "0.3")
+        assert ran.returncode == 1 and "RENDER_SOURCE_EQUIVALENT" not in ran.stdout and not probes.exists(), ran.stdout
+        render = receipt_of(state_c)["render"]
+        assert render["status"] == "timeout" and render["equivalence"]["live_is_ancestor"] is False, render
+        assert render["equivalence"]["equivalent"] is False and "not an ancestor" in render["equivalence"]["reason"]
+
+        # (d) Render created a deploy for the merged SHA: the exact-SHA path is
+        #     unchanged (building twice, then live); no equivalence is consulted.
+        building = [deploy(backend_change, "build_in_progress", "dep-new"), deploy(live, "live", "dep-live")]
+        reset(building, building, [deploy(backend_change, "live", "dep-new"), deploy(live, "deactivated", "dep-live")])
+        state_d = tmp / "render-state-d"
+        ran = run_render(backend_change, state_d)
+        assert ran.returncode == 0, ran.stdout
+        assert f"RENDER_LIVE commit={backend_change} deploy=dep-new" in ran.stdout, ran.stdout
+        assert "RENDER_SOURCE_EQUIVALENT" not in ran.stdout and probes.read_text() == "probes\n", ran.stdout
+        assert ran.stdout.count("Render: status=build_in_progress") == 2 and len(requests()) == 3, ran.stdout
+        render = receipt_of(state_d)["render"]
+        assert render["status"] == "live" and render["live_commit"] == backend_change, render
+        assert render["deploy_id"] == "dep-new" and render["deploy_status"] == "live" and render["polls"] == 3, render
+        assert render["equivalence"] is None and render["backend_diff"] == [], render
+        # A failed deploy for the merged SHA blocks at once, as before.
+        reset([deploy(backend_change, "build_failed", "dep-bad"), deploy(live, "live", "dep-live")])
+        state_d2 = tmp / "render-state-d2"
+        ran = run_render(backend_change, state_d2)
+        assert ran.returncode == 1 and "Render deploy build_failed for" in ran.stdout and "dep-bad" in ran.stdout, ran.stdout
+        assert not probes.exists() and len(requests()) == 1, ran.stdout
+        render = receipt_of(state_d2)["render"]
+        assert render["status"] == "deploy-failed" and render["deploy_status"] == "build_failed", render
+        # The Render lane joins an existing Fly-lane receipt of the same SHA
+        # instead of replacing it.
+        state_e = tmp / "render-state-e"
+        ran = subprocess.run(
+            [sys.executable, str(driver), "production", "--merged-sha", backend_change, "--state-dir", str(state_e),
+             "--poll-seconds", "0.05", "--", "true"],
+            env={**render_env, "PATH": "/usr/bin:/bin"}, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=120)
+        assert ran.returncode == 0, ran.stdout
+        reset([deploy(backend_change, "live", "dep-new")])
+        ran = run_render(backend_change, state_e)
+        assert ran.returncode == 0, ran.stdout
+        joined = receipt_of(state_e)
+        assert joined["status"] == "passed" and joined["fly"]["required"] is False, joined
+        assert joined["render"]["status"] == "live" and joined["semantic_dispatch"]["exit"] == 0, joined
+
+        # (e) A Render API error fails closed: exit 2, no probes, error recorded;
+        #     missing credentials never reach the API.
+        reset([deploy(live, "live", "dep-live")])
+        (fake / "fail").touch()
+        state_f = tmp / "render-state-f"
+        ran = run_render(docs_only, state_f)
+        assert ran.returncode == 2 and "HTTP 500" in ran.stdout and "PIPELINE_RENDER status=error exit=2" in ran.stdout, ran.stdout
+        assert "RENDER_SOURCE_EQUIVALENT" not in ran.stdout and not probes.exists(), ran.stdout
+        render = receipt_of(state_f)["render"]
+        assert render["status"] == "error" and "HTTP 500" in render["error"] and render["then"] is None, render
+        reset([deploy(live, "live", "dep-live")])
+        ran = run_render(docs_only, tmp / "render-state-g",
+                         env_override={k: v for k, v in render_env.items() if k != "RENDER_API_KEY"})
+        assert ran.returncode == 2 and "RENDER_API_KEY not set" in ran.stdout and requests() == [], ran.stdout
+        assert not probes.exists(), ran.stdout
+        assert receipt_of(tmp / "render-state-g")["render"]["status"] == "error", receipt_of(tmp / "render-state-g")
+    finally:
+        server.shutdown()
+        server.server_close()
+    print("production render wait: ok")
 
 
 def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
