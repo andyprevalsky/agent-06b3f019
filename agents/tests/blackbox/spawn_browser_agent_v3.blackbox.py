@@ -27598,7 +27598,7 @@ async def test_spawn_browser_activity_setup_failure_hands_unread_input_to_owner(
     assert "- go to instacart instead" in failed[0]["message"], failed[0]["message"]
 
 
-async def _exercise_first_step_shutdown(*, neutral=False, resume=False, resume_url="about:blank"):
+async def _exercise_first_step_shutdown(*, neutral=False, resume=False, resume_url="about:blank", require_trace=False):
     """A deploy SIGTERM mid-step must end the activity at the next step boundary.
 
     Agent 3efa7cae: a deploy stopped the worker machine while a browser task
@@ -27715,6 +27715,16 @@ async def _exercise_first_step_shutdown(*, neutral=False, resume=False, resume_u
             start_url="about:blank" if neutral else "https://example.com",
             is_resume=resume,
         )
+
+    if require_trace:
+        events = [e for e in captured if e.get("event") == "browser.foreground.await"]
+        starts = [e["operation"] for e in events if e.get("state") == "start" and e["operation"] not in {"control_read", "control_ack", "control_yield"}]
+        assert starts[:3] == ["user_control", "tab_rebind", "instruction_sync"], starts
+        assert "overlay_suppress" in starts and "observe_page" in starts, starts
+        assert all(e["step"] == 1 for e in events), events
+        assert len({e["trace_id"] for e in events}) == 1, events
+        for start in (e for e in events if e.get("state") == "start"):
+            assert any(e.get("request_ordinal") == start["request_ordinal"] and e.get("state") in {"done", "error", "cancelled"} for e in events), events
 
     assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
     assert result["yield_reason"] == WORKER_SHUTDOWN, result
@@ -35708,6 +35718,169 @@ async def test_browser_budget_finalizer_handoff():
         await exercise_finalizer_handoff(globals(), Path(__file__), mode)
 
 
+
+async def test_foreground_trace_actual_step_entry():
+    await _exercise_first_step_shutdown(neutral=True, require_trace=True)
+    await _exercise_first_step_shutdown(neutral=True, resume=True, require_trace=True)
+
+
+async def test_foreground_trace_pending_native_attach():
+    """Execute the real focus helper and identify its pending await before cancellation."""
+    from structlog.testing import capture_logs
+    from domains.spawn_browser_agent_v3 import handler as h
+    from domains.spawn_browser_agent_v3.foreground_trace import ForegroundAwaitTrace, _identity
+
+    entered = asyncio.Event()
+    async def attach(page):
+        entered.set()
+        await asyncio.Future()
+    page = SimpleNamespace(is_closed=lambda: False)
+    context = SimpleNamespace(pages=[page], new_cdp_session=attach)
+    service = SimpleNamespace(session=SimpleNamespace(agent_focus_target_id="target-private"))
+    trace = ForegroundAwaitTrace(agent_id="agent-private", task_id="task-private", session_id="session-private", step=6)
+    with capture_logs() as events:
+        task = asyncio.create_task(trace.run("tab_rebind", h._rebind_browser_tab_runtime(
+            dom_service=service, dom_page=None, playwright_browser=SimpleNamespace(contexts=[context]),
+            current_page=None, humanizer=None, browser_recorder=None, cursor_observer=None,
+        )))
+        try:
+            await entered.wait()
+            assert not task.done()
+            pending = [e for e in events if e.get("operation") == "cdp_attach" and e.get("state") == "start"]
+            assert len(pending) == 1, "real native attach suspended without an owned diagnostic"
+            assert pending[0]["task_key"] == _identity("task-private") and pending[0]["step"] == 6
+            outer = next(e for e in events if e.get("operation") == "tab_rebind" and e.get("state") == "start")
+            assert pending[0]["trace_id"] == outer["trace_id"]
+            assert pending[0]["request_ordinal"] != outer["request_ordinal"]
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    terminals = [e for e in events if e.get("state") == "cancelled"]
+    assert {e["operation"] for e in terminals} == {"tab_rebind", "cdp_attach"}, events
+    assert trace._active_tasks == {}
+    assert "private" not in json.dumps(events), events
+
+
+async def test_foreground_trace_outcome_privacy_and_budget():
+    from structlog.testing import capture_logs
+    from domains.spawn_browser_agent_v3 import foreground_trace as ft
+    async def result(value):
+        return value
+    sentinel = object()
+    trace = ft.ForegroundAwaitTrace(agent_id="https://secret/?token=value", task_id="task", session_id="s" * 10000, step=7)
+    error = RuntimeError("PRIVATE-ERROR-CONTENT")
+    async def fail():
+        raise error
+    with capture_logs() as events:
+        assert await trace.run("observe_page", result(sentinel)) is sentinel
+        with pytest.raises(RuntimeError) as caught:
+            await trace.run("target_info", fail())
+        assert caught.value is error
+        for _ in range(40):
+            assert await trace.run("user_control", result(sentinel)) is sentinel
+        assert await trace.run("PRIVATE-OPERATION", result(sentinel)) is sentinel
+    assert len(events) == ft.MAX_OPERATIONS * 2 + 1, len(events)
+    assert events[-1]["state"] == "budget_exhausted"
+    encoded = json.dumps(events)
+    assert all(secret not in encoded for secret in ("PRIVATE", "https://", "token=value", "s" * 100))
+    assert all(len(json.dumps(e)) < 650 for e in events), events
+    assert any(e.get("state") == "error" for e in events)
+    # Logging failures do not affect original results or exceptions.
+    with patch.object(ft.logger, "info", side_effect=RuntimeError("logger unavailable")):
+        other = ft.ForegroundAwaitTrace(agent_id="a", task_id="b", session_id="c", step=1)
+        assert await other.run("user_control", result(sentinel)) is sentinel
+    # Independent concurrent owners must not share their nested request ordinals.
+    gate = asyncio.Event()
+    async def nested():
+        await gate.wait()
+        return await ft.trace_foreground_await("target_info", result(sentinel))
+    with capture_logs() as concurrent:
+        one = ft.ForegroundAwaitTrace(agent_id="a", task_id="one", session_id="s", step=1)
+        two = ft.ForegroundAwaitTrace(agent_id="a", task_id="two", session_id="s", step=1)
+        tasks = [asyncio.create_task(t.run("tab_rebind", nested())) for t in (one, two)]
+        await asyncio.sleep(0)
+        gate.set()
+        assert all(value is sentinel for value in await asyncio.gather(*tasks))
+    assert len({e["trace_id"] for e in concurrent}) == 2
+    for owner in ("one", "two"):
+        rows = [e for e in concurrent if e["task_key"] == ft._identity(owner)]
+        assert [e["operation"] for e in rows if e["state"] == "start"] == ["tab_rebind", "target_info"]
+    # No owner context leaks after the wrapped coroutine completes.
+    with capture_logs() as outside:
+        assert await ft.trace_foreground_await("target_info", result(sentinel)) is sentinel
+    assert outside == []
+
+
+async def test_foreground_trace_control_ownership_wait():
+    from structlog.testing import capture_logs
+    from domains.spawn_browser_agent_v3 import handler as h
+    from domains.spawn_browser_agent_v3.foreground_trace import ForegroundAwaitTrace
+    trace = ForegroundAwaitTrace(agent_id="a", task_id="t", session_id="s", step=1)
+    with capture_logs() as events, \
+         patch.object(h, "fetch_browser_control_state", AsyncMock(side_effect=["requested", "agent"])), \
+         patch.object(h, "acknowledge_browser_user_control", AsyncMock(return_value="user")), \
+         patch.object(h, "browser_activity_checkpoint"), \
+         patch.object(h.asyncio, "sleep", AsyncMock()):
+        assert await trace.run("user_control", h._wait_for_browser_user_control(None, "t")) is True
+    rows = [(e["operation"], e["state"]) for e in events if e.get("event") == "browser.foreground.await"]
+    assert rows == [("user_control", "start"), ("control_read", "start"), ("control_read", "done"),
+                    ("control_ack", "start"), ("control_ack", "done"), ("control_yield", "start"),
+                    ("control_yield", "done"), ("control_read", "start"), ("control_read", "done"),
+                    ("user_control", "done")], rows
+
+
+async def test_foreground_trace_detached_context_is_not_foreground():
+    from structlog.testing import capture_logs
+    from domains.spawn_browser_agent_v3.foreground_trace import ForegroundAwaitTrace, trace_foreground_await
+    trace = ForegroundAwaitTrace(agent_id="a", task_id="t", session_id="s", step=1)
+    after_return = asyncio.Event()
+    after_done = asyncio.Event()
+    later_operation = asyncio.Event()
+    ran_during = asyncio.Event()
+    calls = []
+    async def result(label):
+        calls.append(label)
+        return label
+    async def detached():
+        assert await trace_foreground_await("cdp_attach", result("during")) == "during"
+        ran_during.set()
+        await after_return.wait()
+        assert await trace_foreground_await("cdp_attach", result("after")) == "after"
+        after_done.set()
+        await later_operation.wait()
+        assert await trace_foreground_await("cdp_attach", result("later")) == "later"
+    child = None
+    async def parent():
+        nonlocal child
+        child = asyncio.create_task(detached())
+        await ran_during.wait()
+        return "parent"
+    with capture_logs() as events:
+        assert await trace.run("tab_rebind", parent()) == "parent"
+        after_return.set()
+        await after_done.wait()
+        async def next_operation():
+            later_operation.set()
+            await child
+        await trace.run("instruction_sync", next_operation())
+    assert calls == ["during", "after", "later"]
+    assert [(e["operation"], e["state"]) for e in events] == [
+        ("tab_rebind", "start"), ("tab_rebind", "done"),
+        ("instruction_sync", "start"), ("instruction_sync", "done"),
+    ], events
+    assert trace._active_tasks == {}
+    # An explicit awaited operation in wait_for's Task is still a foreground owner.
+    async def nested():
+        return await trace_foreground_await("target_info", result("explicit"))
+    with capture_logs() as events:
+        assert await asyncio.wait_for(trace.run("observe_page", nested()), timeout=1) == "explicit"
+    assert [(e["operation"], e["state"]) for e in events] == [
+        ("observe_page", "start"), ("target_info", "start"),
+        ("target_info", "done"), ("observe_page", "done"),
+    ], events
+    assert trace._active_tasks == {}
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     from browser_operational_projection_fixtures import (
@@ -36608,6 +36781,11 @@ async def run_all_tests():
         "browser_tab_rebind_preserves_provider_keyboard_transport",
         test_browser_tab_rebind_preserves_provider_keyboard_transport,
     )
+    await r.record_async("foreground_trace_detached_context_is_not_foreground", test_foreground_trace_detached_context_is_not_foreground)
+    await r.record_async("foreground_trace_control_ownership_wait", test_foreground_trace_control_ownership_wait)
+    await r.record_async("foreground_trace_actual_step_entry", test_foreground_trace_actual_step_entry)
+    await r.record_async("foreground_trace_pending_native_attach", test_foreground_trace_pending_native_attach)
+    await r.record_async("foreground_trace_outcome_privacy_and_budget", test_foreground_trace_outcome_privacy_and_budget)
     await r.record_async(
         "cached_tab_focus_ignores_unrelated_stalled_page",
         test_cached_tab_focus_ignores_unrelated_stalled_page,

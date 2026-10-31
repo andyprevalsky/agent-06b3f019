@@ -236,6 +236,7 @@ from .service_crypto import (
 )
 from .state_prefetch import BrowserStatePrefetch
 from .step_timing import StepPhaseTimer
+from .foreground_trace import ForegroundAwaitTrace, trace_foreground_await
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
 from .tilion_worker import (
     apply_worker_state as apply_tilion_worker_state,
@@ -3024,13 +3025,13 @@ async def _page_target_id(context: Any, page: Any, cache: Optional[TabFocusCache
                 return cached
     cdp_session = None
     try:
-        cdp_session = await context.new_cdp_session(page)
-        target_info = await cdp_session.send("Target.getTargetInfo")
+        cdp_session = await trace_foreground_await("cdp_attach", context.new_cdp_session(page))
+        target_info = await trace_foreground_await("target_info", cdp_session.send("Target.getTargetInfo"))
         target_id = target_info.get("targetInfo", {}).get("targetId")
     finally:
         if cdp_session is not None:
             with contextlib.suppress(Exception):
-                await cdp_session.detach()
+                await trace_foreground_await("cdp_detach", cdp_session.detach())
     if target_id and cache is not None:
         with contextlib.suppress(TypeError):
             cache.target_ids[page] = target_id
@@ -3090,7 +3091,7 @@ async def _synchronize_playwright_page_with_agent_focus(
             if getattr(session, "agent_focus_target_id", None) != focused_target_id or not is_live_member(page):
                 return current_page
             if focus_cache is None or focus_cache.foreground != foreground_key or page is not current_page:
-                await page.bring_to_front()
+                await trace_foreground_await("foreground", page.bring_to_front(), target_id=target_id)
                 if getattr(session, "agent_focus_target_id", None) != focused_target_id or not is_live_member(page):
                     return current_page
                 if focus_cache is not None:
@@ -3130,7 +3131,7 @@ async def _rebind_browser_tab_runtime(
     if browser_recorder is not None:
         browser_recorder.page = focused_page
     if humanizer is not None:
-        await humanizer.close()
+        await trace_foreground_await("humanizer_close", humanizer.close())
     factory = humanizer_factory
     if factory is None:
         from browser_tools.humanizer import BrowserHumanizer
@@ -3140,7 +3141,7 @@ async def _rebind_browser_tab_runtime(
         dom_page=dom_page, input_page=focused_page, fast=False,
         **({"serial_cdp_keyboard": True} if serial_cdp_keyboard else {}),
     )
-    await rebound_humanizer.initialize_cursor(start_pos=(640, 400))
+    await trace_foreground_await("cursor_initialize", rebound_humanizer.initialize_cursor(start_pos=(640, 400)))
     rebound_humanizer.set_cursor_observer(cursor_observer)
     return focused_page, rebound_humanizer
 
@@ -3282,7 +3283,7 @@ async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
     snapshot or LLM action computed before the user interaction.
     """
     try:
-        state = await fetch_browser_control_state(config, task_id)
+        state = await trace_foreground_await("control_read", fetch_browser_control_state(config, task_id))
     except Exception as exc:
         logger.warning("Unable to read browser control state; keeping agent ownership", error=str(exc))
         return False
@@ -3290,15 +3291,15 @@ async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
     while state in {"requested", "user"}:
         if state == "requested":
             try:
-                state = await acknowledge_browser_user_control(config, task_id)
+                state = await trace_foreground_await("control_ack", acknowledge_browser_user_control(config, task_id))
             except Exception as exc:
                 logger.warning("Unable to acknowledge browser user control", error=str(exc))
         if state == "user":
             yielded = True
         browser_activity_checkpoint("Waiting for user to hand browser control back")
-        await asyncio.sleep(0.5)
+        await trace_foreground_await("control_yield", asyncio.sleep(0.5))
         try:
-            state = await fetch_browser_control_state(config, task_id)
+            state = await trace_foreground_await("control_read", fetch_browser_control_state(config, task_id))
         except Exception as exc:
             logger.warning("Unable to refresh browser control state; continuing to yield", error=str(exc))
     return yielded
@@ -10346,7 +10347,10 @@ async def _spawn_browser_agent_activity_v3_real(
             iteration += 1
             step_timer.start_step(iteration)
             browser_activity_checkpoint(f"Step {iteration}")
-            if await _wait_for_browser_user_control(config, task_id):
+            foreground_trace = ForegroundAwaitTrace(
+                agent_id=agent_id, task_id=task_id, session_id=session_id, step=iteration,
+            )
+            if await foreground_trace.run("user_control", _wait_for_browser_user_control(config, task_id)):
                 await action_batch.discard("Batch remainder skipped after user control.")
                 tab_focus_cache.foreground = None
                 state_prefetch.discard()
@@ -10357,7 +10361,7 @@ async def _spawn_browser_agent_activity_v3_real(
             # -> foreground provider tab -> rebind humanizer + recorder.
             # This runs before observation so the LLM, synthesized input, and
             # customer live view all refer to the same authoritative tab.
-            input_page, humanizer = await _rebind_browser_tab_runtime(
+            input_page, humanizer = await foreground_trace.run("tab_rebind", _rebind_browser_tab_runtime(
                 dom_service=dom_service,
                 dom_page=dom_page,
                 playwright_browser=playwright_browser,
@@ -10367,11 +10371,11 @@ async def _spawn_browser_agent_activity_v3_real(
                 cursor_observer=observe_cursor,
                 focus_cache=tab_focus_cache,
                 serial_cdp_keyboard=is_single_cdp_client_provider(browser_session_metadata.get("provider")),
-            )
+            ))
             step_timer.mark("tab_rebind")
 
-            if not await sync_user_instructions():
-                await sync_user_instructions(require_confirmed_read=True)
+            if not await foreground_trace.run("instruction_sync", sync_user_instructions()):
+                await foreground_trace.run("instruction_sync", sync_user_instructions(require_confirmed_read=True))
             agent_message_rows = instruction_state.pop("_agent_message_rows", None) or []
             if agent_inbox is not None:
                 # Same read as the user instructions: rows addressed to this task only, once each.
@@ -10432,7 +10436,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     # state fetch / supervisor recovery path indefinitely.
                     with contextlib.suppress(asyncio.TimeoutError):
                         await asyncio.wait_for(
-                            dom_service.ensure_browser_overlays_suppressed(),
+                            foreground_trace.run("overlay_suppress", dom_service.ensure_browser_overlays_suppressed()),
                             timeout=BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
                         )
                     step_timer.mark("overlay_suppress")
@@ -10445,7 +10449,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         ),
                     )
                     observe_page_state = await asyncio.wait_for(
-                        _observe_step_page(dom_service, needs_dom=observe_needs_dom),
+                        foreground_trace.run("observe_page", _observe_step_page(dom_service, needs_dom=observe_needs_dom)),
                         timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                     )
                 if (

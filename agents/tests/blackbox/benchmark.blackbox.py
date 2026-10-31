@@ -20900,6 +20900,47 @@ def test_logical_tool_counts_ignore_progress_messages():
     }
 
 
+def test_logical_tool_counts_include_typed_background_browser_start():
+    """R142: an actual background-start receipt is one logical browser spawn."""
+    from copy import deepcopy
+    from benchmarks.run_benchmark import _count_logical_tool_calls_from_messages
+
+    capsule = json.loads((Path(__file__).resolve().parents[2] / "benchmarks" / "fixtures"
+                          / "r142-background-browser-message.json").read_text())
+    original = capsule["messages"][0]["message"]
+    preserved = deepcopy(original)
+    count = _count_logical_tool_calls_from_messages
+    assert count([original]) == {"spawn_browser_agent": 1}
+    call_id = original["metadata"]["toolCallId"]
+    requested = {"role": "ASSISTANT", "metadata": {"tool_calls": [
+        {"tool": "spawn_agent", "type": "browser", "tool_call_id": call_id}]}}
+    progress = {"role": "TOOL", "metadata": {
+        "toolName": "spawn_browser_agent", "toolStatus": "IN_PROGRESS", "toolCallId": call_id}}
+    finished = {"role": "TOOL", "metadata": {
+        "toolName": "spawn_browser_agent", "toolStatus": "FINISHED", "toolCallId": call_id,
+        "action_type": "task_complete"}}
+    assert count([original, deepcopy(original), requested, progress, finished]) == {"spawn_browser_agent": 1}
+    assert count([requested, original, finished, progress]) == {"spawn_browser_agent": 1}
+    assert original == preserved
+    # Hidden is a presentation property: a visible copy cannot add a new invocation.
+    visible = deepcopy(original)
+    visible["metadata"]["hidden"] = False
+    assert count([visible, original]) == {"spawn_browser_agent": 1}
+    # Conflicting type or task identity must never create a browser invocation.
+    for changes in ({"agentType": "explore"}, {"backgroundTaskId": "foreign-task"},
+                    {"backgroundTaskId": None}, {"toolCallId": 1, "backgroundTaskId": 1},
+                    {"toolStatus": "IN_PROGRESS"}, {"toolStatus": "ERROR"}):
+        invalid = deepcopy(original)
+        invalid["metadata"].update(changes)
+        assert count([invalid]).get("spawn_browser_agent", 0) == 0, changes
+    # A background hint without its producer marker, or another typed spawn, is not a browser.
+    for changes in ({"runInBackground": False}, {"runInBackground": "true"},
+                    {"backgroundAgentType": "explore"}, {"backgroundAgentType": None}):
+        other = deepcopy(original)
+        other["metadata"].update(changes)
+        assert count([other]) == {"spawn_agent": 1}, changes
+
+
 def test_logical_tool_counts_canonicalize_model_facing_routed_calls():
     """A typed model-facing call and its routed runtime events are one logical tool."""
     from benchmarks.run_benchmark import _count_logical_tool_calls_from_messages
@@ -26327,9 +26368,81 @@ async def test_browser_budget_stop_poller_keeps_pause_fallback():
     await _exercise_budget_stop_poller(False)
 
 
+
+def test_browser_iteration_budget_preserves_trajectory_counting():
+    from benchmarks import run_benchmark as b
+
+    def row(step, *, task="browser", tool="spawn_browser_agent"):
+        return {"role": "TOOL", "metadata": {
+            "toolName": tool, "task_id": task, "subAgentId": task,
+            "steps_taken": step, "toolStatus": "FINISHED",
+        }}
+
+    # Real producer initial navigation is zero; evidence scoring intentionally
+    # counts that work. Only the native loop budget reads the counter value.
+    messages = [row(step) for step in range(100)]
+    messages += [row(99), row(True), row(-1), row("100")]
+    data = {"messages": messages}
+    assert b._agent_class_step_counts(data) == {"browser": {"browser": 100}}
+    assert b._browser_iteration_budget_counts(data) == {"browser": 99}
+    assert b._browser_iteration_budget_counts({"messages": [row(0)]}) == {"browser": 0}
+    assert b._agent_class_step_counts({"messages": [row(0)]}) == {"browser": {"browser": 1}}
+    # Sparse/out-of-order counters and separate browser instances must not
+    # turn the native threshold back into a distinct-message count.
+    data = {"messages": [row(100), row(0), row(100), row(3, task="other")]}
+    assert b._browser_iteration_budget_counts(data) == {"browser": 100, "other": 3}
+    assert b._agent_class_step_counts(data) == {"browser": {"browser": 2, "other": 1}}
+
+
+async def test_browser_budget_poller_waits_for_native_iteration_limit():
+    import httpx
+    from benchmarks import run_benchmark as b
+
+    task = copy.deepcopy(b.get_task_by_name("polar-bu-088"))
+    posts, reads = [], []
+    rows = [{"role": "TOOL", "metadata": {
+        "toolName": "spawn_browser_agent", "task_id": "browser",
+        "steps_taken": step,
+    }} for step in range(100)]
+
+    async def get(*args):
+        reads.append(args)
+        # Original R141 prefix: initial navigation0 plus counters1..99.
+        # It must continue to read, without asking for stop or user pause.
+        if len(reads) == 1:
+            return {"agent": {"id": "root", "status": "ACTIVE", "progress": 0}, "messages": rows}
+        if len(reads) == 2:
+            assert posts == []
+            rows.append({"role": "TOOL", "metadata": {
+                "toolName": "spawn_browser_agent", "task_id": "browser", "steps_taken": 100,
+            }})
+            return {"agent": {"id": "root", "status": "ACTIVE", "progress": 0}, "messages": rows}
+        return {"agent": {"id": "root", "status": "PAUSED", "progress": 0}, "messages": rows}
+
+    async def request(req):
+        posts.append(req.url.path)
+        assert len(reads) == 2
+        assert req.url.path.endswith("/browser-budget-stop")
+        assert req.read() == b'{"budget":100}'
+        return httpx.Response(200, json={"accepted": True})
+
+    real_client = httpx.AsyncClient
+    with patch.object(b, "get_agent", get), patch.object(b, "get_attention_requests", AsyncMock(return_value=[])), patch.object(
+        b, "_fetch_tree_stats", AsyncMock(return_value={"total_messages": 100, "agent_count": 1, "total_cost_cents": 0, "all_agents": [], "failed_count": 0, "active_count": 1, "error_agents": []})
+    ), patch.object(b, "_api_headers", AsyncMock(return_value={})), patch.object(
+        b.httpx, "AsyncClient", side_effect=lambda **kw: real_client(transport=httpx.MockTransport(request), **kw)
+    ):
+        result = await b._poll_agent("http://offline.test", "root", task)
+    assert len(reads) == 3
+    assert posts == ["/api/agents/root/browser-budget-stop"]
+    assert result[0]["_benchmark"]["browser_steps"] == 100
+    assert result[0]["agent"]["status"] == "PAUSED"
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    r.record("browser_iteration_budget_preserves_trajectory_counting", test_browser_iteration_budget_preserves_trajectory_counting)
+    await r.record_async("browser_budget_poller_waits_for_native_iteration_limit", test_browser_budget_poller_waits_for_native_iteration_limit)
     await r.record_async("browser_budget_stop_poller_keeps_pause_fallback", test_browser_budget_stop_poller_keeps_pause_fallback)
     from benchmarks.process_bench_test import run_process_controls
 
@@ -27262,6 +27375,7 @@ async def run_all_tests():
     r.record("local_worker_health_url_derived", test_local_worker_health_url_derives_from_backend_port)
     r.record("benchmark_memory_baseline_guarded", test_benchmark_memory_baseline_endpoint_is_guarded)
     r.record("logical_tool_counts_ignore_progress", test_logical_tool_counts_ignore_progress_messages)
+    r.record("logical_tool_counts_typed_background_browser", test_logical_tool_counts_include_typed_background_browser_start)
     r.record(
         "logical_tool_counts_model_facing_routed_calls",
         test_logical_tool_counts_canonicalize_model_facing_routed_calls,

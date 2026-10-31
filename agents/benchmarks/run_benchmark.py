@@ -4088,7 +4088,20 @@ def _logical_tool_count_key(meta: dict) -> Optional[Tuple[str, str]]:
         return "request_payment_card", str(tool_call_id)
 
     if tool_name == "spawn_agent":
-        if meta.get("agentType") == "browser" and tool_call_id:
+        agent_type = meta.get("agentType")
+        if meta.get("runInBackground") is True:
+            background_type = meta.get("backgroundAgentType")
+            if agent_type is not None and background_type is not None and agent_type != background_type:
+                return None
+            if background_type == "browser":
+                # The workflow's hidden start receipt owns the same logical call
+                # as the later browser progress/completion and model request.
+                if (not isinstance(tool_call_id, str) or not tool_call_id
+                        or meta.get("backgroundTaskId") != tool_call_id
+                        or meta.get("subAgentId")):
+                    return None
+                agent_type = background_type
+        if agent_type == "browser" and tool_call_id:
             return "spawn_browser_agent", str(tool_call_id)
         if meta.get("subAgentId"):
             return None
@@ -5129,7 +5142,7 @@ async def _poll_agent(
             if status == "PAUSED":
                 return data, approvals_triggered, approvals_resolved, None
         if step_budget and budget_stop_pending is None and status not in TERMINAL_STATUSES:
-            browser_steps = _agent_class_step_counts(data).get("browser", {})
+            browser_steps = _browser_iteration_budget_counts(data)
             used_steps = max(browser_steps.values()) if browser_steps else 0
             if used_steps >= step_budget:
                 data["_benchmark"]["step_budget_reached"] = True
@@ -12846,7 +12859,9 @@ _AGENT_ORCHESTRATION_TOOLS = {
 }
 
 
-def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
+def _agent_class_step_counts(
+    data: dict, *, _browser_iteration_budget: bool = False
+) -> dict[str, dict[str, int]]:
     """Count grounded trajectory steps for each spawned agent instance.
 
     Browser steps are deliberately strict: only explicit, non-negative
@@ -12965,7 +12980,15 @@ def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
         if root != node:
             continue
         agent_class, instance_id = root
-        explicit_count = len(grouped_explicit.get(root, set()))
+        counters = grouped_explicit.get(root, set())
+        # Trajectory evidence includes the initial navigation numbered zero.
+        # Native MAX_ITERATIONS is a counter, so that navigation must not make
+        # the driver stop iteration 99 as though iteration 100 had been reached.
+        explicit_count = (
+            max(counters, default=0)
+            if agent_class == "browser" and _browser_iteration_budget
+            else len(counters)
+        )
         leaf_count = len(grouped_leaf.get(root, set()))
         counts.setdefault(agent_class, {})[instance_id] = explicit_count if explicit_count else leaf_count
 
@@ -13029,6 +13052,11 @@ def _browser_session_reached_ids(messages: list) -> set[str]:
                 if value:
                     reached.add(str(value))
     return reached
+
+
+def _browser_iteration_budget_counts(data: dict) -> dict[str, int]:
+    """Read native browser iteration counters without changing trajectory scoring."""
+    return _agent_class_step_counts(data, _browser_iteration_budget=True).get("browser", {})
 
 
 def _validate_agent_class_min_steps(
