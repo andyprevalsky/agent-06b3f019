@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +16,13 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from deploy_stage import append_stage, init_run
 from factory_ledger import encode_rows, event_rows, pending_rows, stage_rows
-from factory_metadata import load_metadata, normalize_metadata, refresh_snapshot
+from factory_metadata import (
+    SNAPSHOT_MAX_BYTES,
+    load_metadata,
+    normalize_metadata,
+    refresh_selected_snapshot,
+    refresh_snapshot,
+)
 
 
 def sample():
@@ -181,6 +188,138 @@ class FactoryMetadataTest(unittest.TestCase):
             self.assertEqual(normalized["validation"]["source_sha"], "a" * 40)
             self.assertEqual(normalized["execution"]["model"], "test-model")
             self.assertEqual(json.loads(path.read_text())["evidence"]["execution.model"], "fixture receipt")
+
+    def test_snapshot_read_is_bounded_before_the_size_check(self):
+        """The loader reads at most SNAPSHOT_MAX_BYTES + 1 bytes: a file one
+        byte over the limit is rejected, one exactly at the limit loads, and a
+        path that never reaches EOF (a FIFO with a writer behind it, a device)
+        is read no further than the bound instead of being slurped whole
+        before the size check, so the limit caps memory and time as well."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            body = json.dumps(sample()).encode()
+            exact = root / "exact.json"
+            exact.write_bytes(body + b" " * (SNAPSHOT_MAX_BYTES - len(body)))
+            self.assertEqual(exact.stat().st_size, SNAPSHOT_MAX_BYTES)
+            self.assertEqual(load_metadata(exact)["execution"]["model"], "test-model")
+            oversized = root / "oversized.json"
+            oversized.write_bytes(body + b" " * (SNAPSHOT_MAX_BYTES + 1 - len(body)))
+            with self.assertRaisesRegex(ValueError, "exceeds 64 KiB"):
+                load_metadata(oversized)
+            fifo = root / "snapshot.fifo"
+            os.mkfifo(fifo)
+            written: list[int] = []
+
+            def feed() -> None:
+                # Up to 4 MiB of digits; a bounded reader closes the FIFO long
+                # before that and the writer stops on the broken pipe.
+                try:
+                    with open(fifo, "wb", buffering=0) as writer:
+                        for _ in range(512):
+                            written.append(writer.write(b"0" * 8192))
+                except BrokenPipeError:
+                    pass
+
+            feeder = threading.Thread(target=feed, daemon=True)
+            feeder.start()
+            with self.assertRaisesRegex(ValueError, "exceeds 64 KiB"):
+                load_metadata(fifo)
+            feeder.join(timeout=30)
+            self.assertFalse(feeder.is_alive(), "the FIFO writer never finished")
+            self.assertLess(sum(written), 1024 * 1024, "the snapshot was read past the bound")
+
+    def test_refresh_io_errors_are_reported_not_fatal(self):
+        """A selected snapshot that cannot be read or rewritten (unreadable
+        file, read-only directory, failed replace, a directory at the path) is
+        reported with status "error" and left exactly as found with no
+        temporary file behind; it never raises, so the deploy continues on the
+        snapshot as found. An invalid snapshot still raises ValueError."""
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory) / "checkout"
+            context = checkout / ".context"
+            context.mkdir(parents=True)
+            snapshot = context / "factory-metadata.json"
+            snapshot.write_text(json.dumps(launch_snapshot()))
+            before = snapshot.read_bytes()
+
+            def refresh() -> dict:
+                with patch.dict(os.environ, {"FACTORY_METADATA_FILE": str(snapshot)}):
+                    return refresh_selected_snapshot("a" * 40, producer="test", checkout=checkout)
+
+            def leftovers() -> list[str]:
+                return sorted(entry.name for entry in context.iterdir() if entry.name != snapshot.name)
+
+            def expect_error(fragment: str, why: str) -> None:
+                result = refresh()
+                self.assertEqual(result["status"], "error", result)
+                self.assertEqual(result["path"], str(snapshot))
+                self.assertIn("factory metadata: not refreshed", result["message"])
+                self.assertIn(fragment, result["message"])
+                self.assertEqual(snapshot.read_bytes(), before, why)
+                self.assertEqual(leftovers(), [], f"{why}: a temporary file was left behind")
+
+            try:
+                if os.geteuid() != 0:  # root reads and writes regardless of mode bits
+                    snapshot.chmod(0)
+                    result = refresh()
+                    self.assertEqual(result["status"], "error", result)
+                    self.assertIn("could not be read or rewritten", result["message"])
+                    snapshot.chmod(0o600)
+                    self.assertEqual(snapshot.read_bytes(), before)
+                    self.assertEqual(leftovers(), [])
+                    context.chmod(0o500)
+                    expect_error("could not be read or rewritten", "a failed write changed the snapshot")
+                    context.chmod(0o700)
+                with patch.object(Path, "replace", side_effect=OSError("replace refused")):
+                    expect_error("replace refused", "a failed replace changed the snapshot")
+            finally:
+                context.chmod(0o700)
+                snapshot.chmod(0o600)
+            directory_path = context / "directory.json"
+            directory_path.mkdir()
+            with patch.dict(os.environ, {"FACTORY_METADATA_FILE": str(directory_path)}):
+                result = refresh_selected_snapshot("a" * 40, producer="test", checkout=checkout)
+            self.assertEqual(result["status"], "error", result)
+            self.assertEqual(sorted(entry.name for entry in context.iterdir()), ["directory.json", snapshot.name])
+            snapshot.write_text(json.dumps({**launch_snapshot(), "api_key": "must-not-leak"}))
+            with self.assertRaises(ValueError):
+                refresh()
+            snapshot.write_text(json.dumps(launch_snapshot()))
+            self.assertEqual(refresh()["status"], "refreshed")
+            self.assertEqual(json.loads(snapshot.read_text())["validation"]["source_sha"], "a" * 40)
+
+    def test_start_continues_when_snapshot_cannot_be_rewritten(self):
+        """`run-deploy-stage --start` with a snapshot its checkout cannot
+        rewrite (read-only .context/) still starts the run: the error is a
+        warning, the snapshot and its directory are left as found, and the
+        run's defaults carry the snapshot as found."""
+        if os.geteuid() == 0:
+            self.skipTest("root writes regardless of directory mode bits")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = git_checkout(root)
+            snapshot = checkout / ".context" / "factory-metadata.json"
+            snapshot.parent.mkdir()
+            original = launch_snapshot()
+            snapshot.write_text(json.dumps(original))
+            before = snapshot.read_bytes()
+            env = {**os.environ, "FACTORY_METADATA_FILE": str(snapshot), "DEPLOY_RUN_ROOT": str(root / "deploy-runs")}
+            snapshot.parent.chmod(0o500)
+            try:
+                started = subprocess.run(["bash", str(checkout / "scripts/run-deploy-stage"), "--start", "--run-id", "readonly"],
+                                         env=env, cwd=checkout, capture_output=True, text=True)
+            finally:
+                snapshot.parent.chmod(0o700)
+            self.assertEqual(started.returncode, 0, started.stderr)
+            self.assertIn("Deploy timing run: readonly", started.stdout)
+            self.assertIn("warning: factory metadata: not refreshed", started.stderr)
+            self.assertIn("could not be read or rewritten", started.stderr)
+            self.assertEqual(snapshot.read_bytes(), before)
+            self.assertEqual(sorted(entry.name for entry in snapshot.parent.iterdir()), [snapshot.name])
+            run_metadata = json.loads((root / "deploy-runs/readonly/metadata.json").read_text())
+            self.assertEqual(run_metadata["telemetry"]["validation"]["source_sha"], original["validation"]["source_sha"])
+            subprocess.run(["bash", str(checkout / "scripts/run-deploy-stage"), "--finish"], env=env, cwd=checkout,
+                           check=True, capture_output=True)
 
     def test_unknown_is_not_zero_or_guessed_configuration(self):
         with patch.dict(os.environ, {}, clear=True):

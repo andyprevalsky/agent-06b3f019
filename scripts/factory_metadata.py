@@ -143,7 +143,10 @@ def normalize_metadata(raw: dict) -> dict:
 
 
 def _read_snapshot(path: Path) -> dict:
-    data = path.read_bytes()
+    # Read at most one byte past the limit, so the bound caps memory and time
+    # for every path (a FIFO or device never reaches EOF), not only the check.
+    with path.open("rb") as handle:
+        data = handle.read(SNAPSHOT_MAX_BYTES + 1)
     if len(data) > SNAPSHOT_MAX_BYTES:
         raise ValueError("factory metadata exceeds 64 KiB")
     raw = json.loads(data)
@@ -190,8 +193,15 @@ def refresh_snapshot(path: str | Path, *, head: str, producer: str, now: datetim
     }
     normalized = normalize_metadata(updated)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(updated, indent=2) + "\n")
-    temporary.replace(path)
+    try:
+        temporary.write_text(json.dumps(updated, indent=2) + "\n")
+        temporary.replace(path)
+    except OSError:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
     return normalized
 
 
@@ -204,10 +214,14 @@ def refresh_selected_snapshot(head: str, *, producer: str, checkout: str | Path)
     checkout, a sibling deploy's file inherited through the environment, a
     test fixture) is left alone and reported, so no other checkout or test can
     re-stamp a live deploy's telemetry. A retrospective record keeps its
-    original observation and is reported, not rewritten. Returns
-    ``{"status", "path", "message"}`` with status ``unset`` | ``missing`` |
-    ``outside`` | ``retrospective`` | ``refreshed`` (plus ``telemetry`` when
-    refreshed); an invalid snapshot raises ``ValueError``.
+    original observation and is reported, not rewritten. A snapshot that
+    cannot be read or rewritten (permissions, a directory, a file that
+    disappeared, a failed write or replace) is reported with status ``error``
+    and left as found, with no temporary file behind: telemetry must never
+    stop a deploy. Returns ``{"status", "path", "message"}`` with status
+    ``unset`` | ``missing`` | ``outside`` | ``retrospective`` | ``error`` |
+    ``refreshed`` (plus ``telemetry`` when refreshed); an invalid snapshot
+    raises ``ValueError``.
     """
     selected = os.environ.get(SELECTED_SNAPSHOT_ENV)
     if not selected:
@@ -223,11 +237,15 @@ def refresh_selected_snapshot(head: str, *, producer: str, checkout: str | Path)
         return {"status": "outside", "path": str(path),
                 "message": f"factory metadata: not refreshed, {path} is not this checkout's "
                            f"{Path(checkout) / '.context'} snapshot"}
-    if _read_snapshot(resolved).get("record_type", "snapshot") != "snapshot":
-        return {"status": "retrospective", "path": str(path),
-                "message": f"factory metadata: not refreshed, {path} is a retrospective record and keeps "
-                           "its original observation"}
-    telemetry = refresh_snapshot(resolved, head=head, producer=producer)
+    try:
+        if _read_snapshot(resolved).get("record_type", "snapshot") != "snapshot":
+            return {"status": "retrospective", "path": str(path),
+                    "message": f"factory metadata: not refreshed, {path} is a retrospective record and keeps "
+                               "its original observation"}
+        telemetry = refresh_snapshot(resolved, head=head, producer=producer)
+    except OSError as error:
+        return {"status": "error", "path": str(path),
+                "message": f"factory metadata: not refreshed, {path} could not be read or rewritten: {error}"}
     return {"status": "refreshed", "path": str(path), "telemetry": telemetry,
             "message": (f"factory metadata: refreshed {path} observed_at={telemetry['observed_at']} "
                         f"source_sha={head}")}

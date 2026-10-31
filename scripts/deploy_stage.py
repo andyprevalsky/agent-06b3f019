@@ -164,6 +164,8 @@ def start_lifecycle(
             raise LifecycleError(f"deploy timing run already exists: {run_id}")
         # Only a start that will actually publish this run re-stamps the
         # snapshot: a refused start (run already active) leaves it untouched.
+        # A snapshot that cannot be read or rewritten is reported (status
+        # "error") and the run still starts; only an invalid one refuses it.
         try:
             refresh = factory_metadata.refresh_selected_snapshot(
                 git_sha, producer="run-deploy-stage --start", checkout=ROOT)
@@ -567,7 +569,11 @@ def main() -> int:
     values.pop("command")
     try:
         if args.command == "lifecycle-start":
-            print(start_lifecycle(**values)["message"])
+            started = start_lifecycle(**values)
+            if started["status"] == "error":
+                print(f"warning: {started['message']}", file=sys.stderr)
+            else:
+                print(started["message"])
         elif args.command == "lifecycle-admit":
             print(admit_stage(**values))
         elif args.command == "lifecycle-release":

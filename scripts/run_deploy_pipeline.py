@@ -1982,14 +1982,18 @@ def _run_attempt(
     # the new head, and freeze again when it was rewritten so a snapshot inside
     # the digested bytes never differs from the frozen source. The stage runner
     # rejects an invalid file itself before any lane command runs; the line
-    # here only names the cause earlier.
+    # here only names the cause earlier. A snapshot that cannot be read or
+    # rewritten (status "error") is reported and the attempt continues on the
+    # snapshot as found.
     try:
         refresh = factory_metadata.refresh_selected_snapshot(
             str(frozen.get("head") or ""), producer=f"run_deploy_pipeline attempt {attempt}", checkout=SOURCE_ROOT)
     except ValueError as error:
         print(f"PIPELINE_TELEMETRY factory metadata: rejected, {error}", file=sys.stderr, flush=True)
     else:
-        if refresh["status"] != "unset":
+        if refresh["status"] == "error":
+            print(f"PIPELINE_TELEMETRY {refresh['message']}", file=sys.stderr, flush=True)
+        elif refresh["status"] != "unset":
             print(f"PIPELINE_TELEMETRY {refresh['message']}", flush=True)
         if refresh["status"] == "refreshed":
             frozen = source_digest()
