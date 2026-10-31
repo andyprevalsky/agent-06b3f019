@@ -168,7 +168,13 @@ class Capture {
 export const test = base.extend<{ folderProfile: void }>({
   folderProfile: [
     async ({ browser }, use, info) => {
-      const enabled = process.env.SEMANTIC_FOLDER_PROFILE ?? (process.env.CI ? '1' : '0');
+      // Opt-in only. Browser-wide CDP tracing with the V8 CPU profiler measurably
+      // slows the case it observes: isolated on one core the 1280px body took
+      // 35.5s with it and 25.3s without, so a CI default would spend a third of
+      // the unchanged 90s deadline on diagnostics (RCA 2026-10-31-production-
+      // semantic-gate-oversubscribed-two-vcpu-runner). Set
+      // SEMANTIC_FOLDER_PROFILE=1 explicitly when a profile is wanted.
+      const enabled = process.env.SEMANTIC_FOLDER_PROFILE ?? '0';
       if (enabled !== '1' || !info.title.endsWith('1280px')) {
         await use();
         return;
