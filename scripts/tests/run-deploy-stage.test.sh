@@ -137,11 +137,25 @@ SCOPED_LANES="backend-coverage-blackbox live-probes agents-coverage-blackbox smo
 scoped_stage() {
     (cd "$SCOPED_REPO" && DEPLOY_RUN_ROOT="$RUN_ROOT" bash scripts/run-deploy-stage "$@")
 }
-# scoped_run LANE [FLAG...]: the lane's counting command; prints the lane's stdout.
+# The lane's real command marker (argv), without which the lane name alone
+# must never select its inert set. Carried as $0 of the fixture command.
+scoped_marker() {
+    case "$1" in
+        backend-coverage-blackbox) echo "npm run test:coverage:sharded" ;;
+        live-probes) echo "python3 scripts/run_deploy_live_probes.py" ;;
+        agents-coverage-blackbox) echo "bash scripts/run-coverage.sh" ;;
+        smoke) echo "bash scripts/run-predeploy-local" ;;
+        semantic-stack) echo "bash front-end/scripts/run-semantic-tests.sh" ;;
+        *) echo "_" ;;
+    esac
+}
+# scoped_run LANE [FLAG...]: the lane's counting command (identical argv on
+# every call; it fails only while the lane's fail marker file exists).
 scoped_run() {
     local lane="$1"
     shift
-    scoped_stage "$lane" "$@" -- bash -c 'printf "run\n" >> "$1"' _ "$TEST_ROOT/scoped-count-$lane"
+    scoped_stage "$lane" "$@" -- bash -c 'printf "run\n" >> "$1"; [ ! -e "$2" ]' \
+        "$(scoped_marker "$lane")" "$TEST_ROOT/scoped-count-$lane" "$TEST_ROOT/scoped-fail-$lane"
 }
 scoped_runs() {
     wc -l < "$TEST_ROOT/scoped-count-$1" | tr -d ' '
@@ -201,18 +215,36 @@ if grep -q "lane-scoped" "$TEST_ROOT/scoped-off.out"; then
     fail "flag-off run mentioned lane-scoped reuse"
 fi
 # DEPLOY_LANE_SCOPED_REUSE is a scheduling knob: setting it must not break the exact-input match.
-scoped_stage backend-coverage-blackbox --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$TEST_ROOT/scoped-count-backend-coverage-blackbox" >/dev/null
+scoped_run backend-coverage-blackbox --reuse-passed >/dev/null || fail "exact rerun failed"
 [ "$(scoped_runs backend-coverage-blackbox)" = 2 ] || fail "exact reuse of the flag-off pass missed"
-DEPLOY_LANE_SCOPED_REUSE=1 scoped_run backend-coverage-blackbox --reuse-passed >"$TEST_ROOT/scoped-exact.out" || fail "env exact run failed"
+DEPLOY_LANE_SCOPED_REUSE=0 scoped_run backend-coverage-blackbox --reuse-passed >"$TEST_ROOT/scoped-exact.out" || fail "env exact run failed"
 [ "$(scoped_runs backend-coverage-blackbox)" = 2 ] || fail "the scheduling env var changed the exact fingerprint"
 grep -q "== reused passed deploy stage: backend-coverage-blackbox" "$TEST_ROOT/scoped-exact.out" || fail "exact reuse must precede the scoped lookup"
+# The environment never enables: without the flag a docs-only tree still reruns.
+DEPLOY_LANE_SCOPED_REUSE=1 scoped_run live-probes >"$TEST_ROOT/scoped-env-only.out" || fail "env-only run failed"
+[ "$(scoped_runs live-probes)" = 2 ] || fail "DEPLOY_LANE_SCOPED_REUSE=1 enabled lane-scoped reuse without the plan flag"
+[ "$(scoped_row live-probes status)" = "passed" ] || fail "env-only run row"
+# The kill switch disables even with the flag.
+DEPLOY_LANE_SCOPED_REUSE=0 scoped_run semantic-stack --lane-scoped-reuse >"$TEST_ROOT/scoped-kill.out" || fail "kill-switch run failed"
+[ "$(scoped_runs semantic-stack)" = 2 ] || fail "DEPLOY_LANE_SCOPED_REUSE=0 did not disable lane-scoped reuse"
+if grep -q "lane-scoped" "$TEST_ROOT/scoped-kill.out"; then
+    fail "kill-switch run consulted lane-scoped reuse"
+fi
+# A stage named like a scoped lane running another command is never judged by
+# that lane's inert set: no reuse and no scoped record for the lane.
+scoped_stage smoke --lane-scoped-reuse -- bash -c 'printf "other\n" >> "$1"' _ "$TEST_ROOT/scoped-count-smoke-other" \
+    >"$TEST_ROOT/scoped-other.out" || fail "marker-less smoke run failed"
+if grep -q "lane-scoped" "$TEST_ROOT/scoped-other.out"; then
+    fail "marker-less smoke command was judged by the smoke inert set"
+fi
+[ "$(ls "$RUN_ROOT/scoped/passed-cache/smoke/scoped/"*.json | wc -l | tr -d ' ')" = 1 ] || fail "marker-less smoke pass recorded a scoped head"
 
-# (2) Agents test-only commit (enabled through the environment): agents
-# coverage reruns; backend, live probes, smoke and semantic are reused-scoped.
+# (2) Agents test-only commit: agents coverage reruns; backend, live probes,
+# smoke and semantic are reused-scoped (each from its latest pass).
 printf 'x = 2\n' > "$SCOPED_REPO/agents/tests/blackbox/sample.blackbox.py"
 SCOPED_H3="$(scoped_commit agents-test)"
 for lane in $SCOPED_LANES; do
-    DEPLOY_LANE_SCOPED_REUSE=1 scoped_run "$lane" >"$TEST_ROOT/scoped-agents-$lane.out" || fail "agents-test $lane failed"
+    scoped_run "$lane" --lane-scoped-reuse >"$TEST_ROOT/scoped-agents-$lane.out" || fail "agents-test $lane failed"
 done
 [ "$(scoped_runs agents-coverage-blackbox)" = 2 ] || fail "agents test change did not rerun agents coverage"
 grep -q "rerun: agents/tests/blackbox/sample.blackbox.py (not in the lane's declared inert set" \
@@ -224,8 +256,11 @@ grep -q "rerun: agents/tests/blackbox/sample.blackbox.py (not in the lane's decl
     || fail "agents rerun row lacks the blocking path"
 [ "$(scoped_runs backend-coverage-blackbox)" = 2 ] || fail "agents test change reran backend coverage"
 [ "$(scoped_row backend-coverage-blackbox detail reuse passed_head)" = "$SCOPED_H2" ] || fail "backend did not reuse its latest pass"
+[ "$(scoped_runs smoke)" = 1 ] || fail "agents test change reran smoke"
+for lane in live-probes semantic-stack; do
+    [ "$(scoped_runs "$lane")" = 2 ] || fail "agents test change reran $lane"
+done
 for lane in live-probes smoke semantic-stack; do
-    [ "$(scoped_runs "$lane")" = 1 ] || fail "agents test change reran $lane"
     [ "$(scoped_row "$lane" status)" = "reused-scoped" ] || fail "$lane not reused-scoped after agents test change"
     [ "$(scoped_row "$lane" detail reuse current_head)" = "$SCOPED_H3" ] || fail "$lane provenance head"
 done
@@ -238,12 +273,12 @@ for lane in $SCOPED_LANES; do
     scoped_run "$lane" --lane-scoped-reuse >"$TEST_ROOT/scoped-contract-$lane.out" || fail "contract $lane failed"
 done
 [ "$(scoped_runs backend-coverage-blackbox)" = 3 ] || fail "graph-selected docs page did not rerun backend coverage"
-[ "$(scoped_runs live-probes)" = 2 ] || fail "graph-selected docs page did not rerun live probes"
+[ "$(scoped_runs live-probes)" = 3 ] || fail "graph-selected docs page did not rerun live probes"
 [ "$(scoped_row backend-coverage-blackbox detail reuse scoped blocked 0 rule)" = "inert:docs/*" ] || fail "contract declared rule"
 [ "$(scoped_row backend-coverage-blackbox detail reuse scoped blocked 0 graph)" = "graph:selects backend-blackbox: health" ] \
     || fail "contract graph veto not recorded"
 [ "$(scoped_runs agents-coverage-blackbox)" = 2 ] || fail "contract page reran agents coverage"
-[ "$(scoped_runs smoke)" = 1 ] && [ "$(scoped_runs semantic-stack)" = 1 ] || fail "contract page reran a runtime lane"
+[ "$(scoped_runs smoke)" = 1 ] && [ "$(scoped_runs semantic-stack)" = 2 ] || fail "contract page reran a runtime lane"
 
 # (3) Schema/migration or lockfile change: nothing is reused.
 printf 'model A { id Int @id\n  b Int }\n' > "$SCOPED_REPO/back-end/prisma/schema.prisma"
@@ -269,6 +304,37 @@ for lane in agents-coverage-blackbox smoke semantic-stack; do
         || fail "unmapped graph veto not recorded for $lane"
 done
 [ "$(scoped_runs smoke)" = 3 ] || fail "unmapped file did not rerun smoke"
+
+# (6) Failed-head veto: a pass, then a docs-only commit whose flag-off run
+# FAILED, then another docs-only commit with the flag: the failure is newer
+# evidence about an inert-equivalent tree, so the lane reruns; once that rerun
+# passes, the next docs-only commit reuses again.
+# The unmapped-file scenario above left a real smoke pass on the current head.
+SCOPED_HV1="$(git -C "$SCOPED_REPO" rev-parse HEAD)"
+[ "$(scoped_row smoke status)" = "passed" ] || fail "veto baseline status"
+printf 'guide v4\n' > "$SCOPED_REPO/docs/guide.md"
+SCOPED_HV2="$(scoped_commit docs-v4)"
+touch "$TEST_ROOT/scoped-fail-smoke"
+if scoped_run smoke >"$TEST_ROOT/scoped-veto-fail.out"; then
+    fail "fail-marked smoke run reported success"
+fi
+rm -f "$TEST_ROOT/scoped-fail-smoke"
+[ "$(ls "$RUN_ROOT/scoped/passed-cache/smoke/scoped-failed/"*.json | wc -l | tr -d ' ')" = 1 ] || fail "failed head was not recorded"
+printf 'guide v5\n' > "$SCOPED_REPO/docs/guide.md"
+SCOPED_HV3="$(scoped_commit docs-v5)"
+runs_before="$(scoped_runs smoke)"
+scoped_run smoke --lane-scoped-reuse >"$TEST_ROOT/scoped-veto.out" || fail "vetoed smoke run failed"
+[ "$(scoped_runs smoke)" = "$((runs_before + 1))" ] || fail "a failed inert-equivalent head did not veto the scoped reuse"
+grep -q "lane-scoped reuse unavailable for smoke: a failed run on ${SCOPED_HV2:0:12} differs from the current tree only by inert paths" \
+    "$TEST_ROOT/scoped-veto.out" || fail "veto reason not disclosed"
+[ "$(scoped_row smoke status)" = "passed" ] || fail "vetoed run row status"
+[ "$(scoped_row smoke detail reuse scoped vetoed_by_failed_head failed_head)" = "$SCOPED_HV2" ] || fail "veto provenance head"
+[ "$(scoped_row smoke detail reuse scoped passed_head)" = "$SCOPED_HV1" ] || fail "veto provenance candidate"
+printf 'guide v6\n' > "$SCOPED_REPO/docs/guide.md"
+scoped_commit docs-v6 >/dev/null
+scoped_run smoke --lane-scoped-reuse >"$TEST_ROOT/scoped-after-veto.out" || fail "post-veto run failed"
+[ "$(scoped_runs smoke)" = "$((runs_before + 1))" ] || fail "the pass after the failure did not supersede it"
+[ "$(scoped_row smoke detail reuse passed_head)" = "$SCOPED_HV3" ] || fail "post-veto reuse candidate"
 
 # The dry-run preview reports the same decisions for a commit range.
 (cd "$SCOPED_REPO" && python3 scripts/run_deploy_stage.py --preview-lane-scoped-reuse "$SCOPED_H1..$SCOPED_H2") >"$TEST_ROOT/scoped-preview.out" \

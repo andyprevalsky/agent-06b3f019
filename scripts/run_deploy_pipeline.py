@@ -186,15 +186,19 @@ Plan file (JSON): {"lanes": [{"name", "command": [...], "cwd": "back-end",
 "memory_budget_mb": 9000, "schedule": {"policy": "phased"},
 "lane_scoped_reuse": false}
 
-``lane_scoped_reuse`` (default false; ``DEPLOY_LANE_SCOPED_REUSE=1`` also
-enables it) passes ``--lane-scoped-reuse`` to every lane: a lane listed in
-``run_deploy_stage._SCOPED_REUSE_LANES`` whose exact-input lookup missed may
-reuse its most recent PASSED result when every path changed since that pass
-is provably inert for it (declared inert set AND no selected test in the
-change->test graph). Its stage row and receipt lane carry the distinct
-``reused-scoped`` status with the passed head, fingerprint, run id and the
-rule that judged every changed path; it is a pass for the waiter and
-``overall`` but never a fresh pass of the current bytes.
+``lane_scoped_reuse`` (default false; the plan is the only enabling surface,
+``DEPLOY_LANE_SCOPED_REUSE=0`` is a kill switch) passes ``--lane-scoped-reuse``
+to every lane: a lane listed in ``run_deploy_stage._SCOPED_REUSE_LANES`` that
+runs its real command and whose exact-input lookup missed may reuse its most
+recent PASSED result when every path changed since that pass is provably
+inert for it (declared inert set AND no selected test in the change->test
+graph, and no failed run on an inert-equivalent head). Its stage row and
+receipt lane carry the distinct ``reused-scoped`` status with the passed
+head, fingerprint, run id and the rule that judged every changed path; it is
+a pass for the waiter and ``overall`` but never a fresh pass of the current
+bytes. The receipt lane is relabelled from its own stage row (matched by the
+per-launch ``DEPLOY_PIPELINE_LANE_TOKEN`` the row echoes) whether or not this
+plan enabled the feature, so a receipt can never call a reused lane passed.
 """
 
 from __future__ import annotations
@@ -209,6 +213,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -245,9 +250,20 @@ PASSING_LANE = {"passed", "reused-scoped"}
 LANE_SCOPED_REUSE_ENV = "DEPLOY_LANE_SCOPED_REUSE"
 
 
+LANE_TOKEN_ENV = "DEPLOY_PIPELINE_LANE_TOKEN"
+# A stage row must start within this many seconds before the receipt lane's
+# own start to be its row when no token can be compared (older rows).
+LANE_ROW_START_SLACK_SECONDS = 5.0
+
+
 def lane_scoped_reuse_enabled(payload: dict | None) -> bool:
-    """Plan field ``lane_scoped_reuse`` or ``DEPLOY_LANE_SCOPED_REUSE=1``; default off."""
-    return bool((payload or {}).get("lane_scoped_reuse")) or os.environ.get(LANE_SCOPED_REUSE_ENV) == "1"
+    """Plan field ``lane_scoped_reuse`` only (default off); the environment
+    can disable (``DEPLOY_LANE_SCOPED_REUSE=0``) but never enable."""
+    return bool((payload or {}).get("lane_scoped_reuse")) and os.environ.get(LANE_SCOPED_REUSE_ENV) != "0"
+
+
+def lane_token(name: str, attempt: int) -> str:
+    return f"{name}-{attempt}-{uuid.uuid4().hex}"
 # Internal waiter event: the supervisor superseded the attempt being waited on.
 _SUPERSEDED_EVENT = -1
 # run-deploy-stage rejects any other stage name before it writes a row.
@@ -826,12 +842,24 @@ def load_lane_durations(path: Path | None = None) -> dict[str, list[dict]]:
 
 
 def _lane_stage_row(receipt: dict, name: str) -> dict | None:
-    """The run-deploy-stage row this receipt's lane wrote (matched by start time)."""
+    """The run-deploy-stage row this receipt's lane wrote.
+
+    Matched by the per-launch token the lane's row echoes in its detail when
+    the receipt lane carries one. Without a token (older receipts) the row
+    must start no earlier than ``LANE_ROW_START_SLACK_SECONDS`` before the
+    lane's own start and no later than the lane's finish (plus the same
+    slack, or any time while the lane is still running): a reuse decision
+    under load can start well over 5 s after the lane was spawned, and an
+    unmatched row would leave the receipt calling a reused lane passed.
+    """
     lane = receipt.get("lanes", {}).get(name, {})
     run_dir = receipt.get("stage_run_dir")
     started = lane.get("started_epoch")
     if not run_dir or started is None:
         return None
+    token = lane.get("token")
+    finished = lane.get("finished_epoch")
+    upper = float(finished) + LANE_ROW_START_SLACK_SECONDS if finished is not None else float("inf")
     best: tuple[float, dict] | None = None
     for row in deploy_stage_wait._rows(Path(run_dir)):
         if row.get("stage") != name:
@@ -840,9 +868,30 @@ def _lane_stage_row(receipt: dict, name: str) -> dict | None:
             row_started = float(row.get("started_epoch") or 0)
         except (TypeError, ValueError):
             continue
-        if abs(row_started - float(started)) <= 5.0 and (best is None or row_started > best[0]):
+        if token:
+            if (row.get("detail") or {}).get("lane_token") != token:
+                continue
+        elif not (float(started) - LANE_ROW_START_SLACK_SECONDS <= row_started <= upper):
+            continue
+        if best is None or row_started > best[0]:
             best = (row_started, row)
     return best[1] if best else None
+
+
+def reconcile_reused_lane(receipt: dict, name: str, lane_state: dict, *, finished_epoch: float) -> str:
+    """The receipt status of a lane that exited 0: ``reused-scoped`` with the
+    row's provenance when its own stage row says so, else ``passed``.
+
+    Independent of the plan's ``lane_scoped_reuse``: the stage decides, the
+    receipt reports what the stage recorded.
+    """
+    probe = {**receipt, "lanes": {name: {**lane_state, "finished_epoch": finished_epoch}}}
+    row = _lane_stage_row(probe, name)
+    if row is None or row.get("status") != "reused-scoped":
+        return "passed"
+    lane_state["reuse"] = (row.get("detail") or {}).get("reuse")
+    receipt["reused_scoped_lanes"] = sorted({*receipt.get("reused_scoped_lanes", []), name})
+    return "reused-scoped"
 
 
 def record_lane_durations(receipt: dict, path: Path | None = None) -> dict[str, list[dict]]:
@@ -860,7 +909,7 @@ def record_lane_durations(receipt: dict, path: Path | None = None) -> dict[str, 
         if lane.get("status") not in {"passed", "failed"} or not lane.get("wall_s") or lane.get("started_epoch") is None:
             continue
         row = _lane_stage_row(receipt, name)
-        if row is not None and row.get("status") == "reused":
+        if row is not None and row.get("status") in {"reused", "reused-scoped"}:
             continue
         overlap = 1
         for other, state in lanes.items():
@@ -1575,15 +1624,12 @@ def _run_attempt(
                     status = "superseded"
                 else:
                     status = "passed" if process.returncode == 0 else "failed"
-                if status == "passed" and lane_scoped_reuse:
+                if status == "passed":
                     # A lane-scoped reuse exits 0 like a pass; its stage row
                     # carries the distinct status and provenance, which the
-                    # receipt lane must keep (never shown as a fresh pass).
-                    row = _lane_stage_row({**receipt, "lanes": {name: lane_state}}, name)
-                    if row is not None and row.get("status") == "reused-scoped":
-                        status = "reused-scoped"
-                        lane_state["reuse"] = (row.get("detail") or {}).get("reuse")
-                        receipt["reused_scoped_lanes"] = sorted({*receipt.get("reused_scoped_lanes", []), name})
+                    # receipt lane must keep whatever this plan enabled
+                    # (never shown as a fresh pass).
+                    status = reconcile_reused_lane(receipt, name, lane_state, finished_epoch=time.time())
                 lane_state.update(
                     status=status,
                     exit=process.returncode,
@@ -1693,6 +1739,7 @@ def _run_attempt(
                     argv.append("--lane-scoped-reuse")
                 argv += ["--", *lane.command]
                 log_path = log_dir / f"{lane.name}.log"
+                token = lane_token(lane.name, attempt)
                 try:
                     with log_path.open("ab") as log_handle:
                         processes[lane.name] = subprocess.Popen(
@@ -1702,6 +1749,7 @@ def _run_attempt(
                                 **os.environ,
                                 **lane.env,
                                 **(lane.retry_env if lane.name in previously_failed else {}),
+                                LANE_TOKEN_ENV: token,
                             },
                             stdout=log_handle,
                             stderr=subprocess.STDOUT,
@@ -1722,7 +1770,7 @@ def _run_attempt(
                     continue
                 pass_sample = None  # a successful spawn changes live headroom
                 receipt["lanes"][lane.name].update(
-                    status="running", started_epoch=time.time(), log=str(log_path)
+                    status="running", started_epoch=time.time(), log=str(log_path), token=token
                 )
                 # The next candidate reclassifies the running lanes, including
                 # this one (unknown until a sampling pass observes it).
@@ -2045,9 +2093,10 @@ def verify(state_dir: Path, expect_head: str | None = None) -> int:
             f"current_digest={current['digest'][:12]} (gates ran on different bytes; rerun)"
         )
         return EXIT_STALE
+    reused_scoped = receipt.get("reused_scoped_lanes") or []
     print(
         f"PIPELINE_VERIFY status=bound exit=0 head={current['head']} digest={current['digest'][:12]} "
-        f"attempt={receipt.get('attempt', 1)}"
+        f"attempt={receipt.get('attempt', 1)} reused_scoped={','.join(reused_scoped) or '-'}"
     )
     return 0
 

@@ -369,12 +369,13 @@ def render_summary(run_dir: Path) -> str:
     run_id = run_dir.name
     if not rows:
         return f"Deploy run {run_id}: no timed stages recorded"
-    lines = [f"Deploy run {run_id}", "", "Stage                         Status    Duration  Log"]
-    lines.append("----------------------------  --------  --------  ------------------------------")
+    # 13 columns fit every status, including "reused-scoped".
+    lines = [f"Deploy run {run_id}", "", "Stage                         Status         Duration  Log"]
+    lines.append("----------------------------  -------------  --------  ------------------------------")
     for row in rows:
         lines.append(
             f"{str(row.get('stage', '')):<28}  "
-            f"{str(row.get('status', '')):<8}  "
+            f"{str(row.get('status', '')):<13}  "
             f"{float(row.get('duration_seconds', 0.0)):>7.1f}s  "
             f"{row.get('log', '')}"
         )
