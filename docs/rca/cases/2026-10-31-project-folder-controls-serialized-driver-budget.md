@@ -139,6 +139,20 @@ coordinator owns the next native production semantic dispatch after integrating
 this observability-only PR; a failure is diagnosed rather than retried blindly.
 The RCA remains open pending mechanism and outcome evidence.
 
+2026-10-31 follow-up (deploy 11, run 41232225640, both attempts red): the
+mechanism is confirmed as runner oversubscription, not driver serialization.
+With identical source, every UI case in the cohort scaled 1.5-1.8x between the
+green and red runs; the desktop folder case (59s at the fastest runner) was
+simply the longest one against a 90s deadline. The production gate ran four
+Chromium workers on the private-repository runner's two vCPUs because
+`run-semantic-tests.sh` sized workers only in local mode, and the profiling
+fixture this case added (CI default) cost ~10s of the body in isolation.
+Diagnosis, measurements and the fix (capacity sizing in production mode,
+profiler opt-in) are in
+`2026-10-31-production-semantic-gate-oversubscribed-two-vcpu-runner`. The
+"partial profile" classification of the red receipts (`trace-write-failed`)
+is separate from the retry attempts and unchanged by that case.
+
 ## Human feedback
 
 The user permits skips for specified third-party credit/AgentCard or unrelated

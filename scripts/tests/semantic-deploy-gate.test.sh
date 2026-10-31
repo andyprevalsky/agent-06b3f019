@@ -172,7 +172,23 @@ if grep -Fq -- "--no-package-lock" "$WORKFLOW"; then
   fail "production semantic installs must not bypass the workspace lockfile"
 fi
 require_text "$RUNNER" 'node scripts/generate-prod-test-session.mjs' "production semantics must not install backend dependencies only to generate auth"
-require_text "$WORKFLOW" "SEMANTIC_WORKERS: 4" "production semantic gate must use four concurrent workers"
+require_text "$WORKFLOW" "SEMANTIC_WORKERS: 4" "production semantic gate must request four concurrent workers as its ceiling"
+# RCA 2026-10-31-production-semantic-gate-oversubscribed-two-vcpu-runner: the
+# runner must cap that ceiling at the runner's CPUs in production mode too.
+# Four Chromium workers on the private-repository runner's two vCPUs scaled every
+# UI case 1.5-1.9x between runs of identical source and pushed the longest case
+# past its unchanged 90s deadline.
+require_text "$RUNNER" 'if [[ "$PROD_MODE" -eq 1 ]]; then
+  SIZING_LOAD1=""' "production semantic sizing must ignore the transient post-install load and cap on CPU count"
+# The folder-controls profiling fixture is opt-in: its browser-wide CDP CPU
+# profiler added ~10s to the 1280px body on one core (35.5s vs 25.3s), a third
+# of the unchanged 90s deadline. Neither the fixture nor the workflow may turn
+# it on by default.
+FOLDER_PROFILE_FIXTURE="$ROOT_DIR/front-end/tests-e2e/folder-profile.ts"
+require_text "$FOLDER_PROFILE_FIXTURE" "const enabled = process.env.SEMANTIC_FOLDER_PROFILE ?? '0';" "folder-controls profiling must be opt-in, never a CI default"
+if grep -q "SEMANTIC_FOLDER_PROFILE" "$WORKFLOW"; then
+  fail "the production semantic workflow must not enable the folder-controls profiler"
+fi
 require_text "$WORKFLOW" "bash front-end/scripts/run-semantic-tests.sh --prod" "production gate must run every semantic spec"
 require_text "$RUNNER" 'FRONTEND_URL="${FRONTEND_URL:-https://www.roselabs.ai}"' "prod semantic default frontend must be www (apex 307s and flakes on some runners)"
 require_text "$RUNNER" 'is_loopback_url()' "prod semantic must detect loopback URLs via host parse"
@@ -515,18 +531,72 @@ eval "$(sed -n '/^semantic_workers_for_capacity() {/,/^}/p' "$RUNNER")"
 [ "$(semantic_workers_for_capacity 4 14 1.50 10)" = 1 ] || fail "low free memory must drop semantic workers to one"
 [ "$(semantic_workers_for_capacity 1 14 0.10 90)" = 1 ] || fail "host capacity must never raise semantic workers above the request"
 [ "$(semantic_workers_for_capacity 4 '' '' '')" = 4 ] || fail "unknown host capacity must not cap semantic workers"
+# Production mode passes no load: the dedicated two-vCPU GitHub runner caps on
+# CPU count alone (RCA 2026-10-31-production-semantic-gate-oversubscribed-two-vcpu-runner).
+[ "$(semantic_workers_for_capacity 4 2 '' 60)" = 2 ] || fail "a two-vCPU dedicated runner must cap semantic workers at two"
+[ "$(semantic_workers_for_capacity 4 4 '' 60)" = 4 ] || fail "a four-vCPU dedicated runner must keep the requested four workers"
+[ "$(semantic_workers_for_capacity 4 1 '' 60)" = 1 ] || fail "a one-vCPU dedicated runner must serialize semantic workers"
+[ "$(semantic_workers_for_capacity 4 2 '' 10)" = 1 ] || fail "low free memory must still drop a dedicated runner to one worker"
 eval "$(sed -n '/^probe_semantic_host_capacity() {/,/^}/p' "$RUNNER")"
 IFS='|' read -r probe_cpus probe_load probe_mem <<< "$(probe_semantic_host_capacity)"
 [[ "$probe_cpus" =~ ^[1-9][0-9]*$ ]] || fail "host capacity probe must report the CPU count"
-[[ "$probe_load" =~ ^[0-9]+\.[0-9]{2}$ ]] || fail "host capacity probe must report the 1-minute load average"
+[[ -z "$probe_load" || "$probe_load" =~ ^[0-9]+\.[0-9]{2}$ ]] || fail "host capacity probe must report the 1-minute load average as a two-decimal number or leave it empty"
 [[ -z "$probe_mem" || "$probe_mem" =~ ^[0-9]+$ ]] || fail "host capacity probe must report free memory as a whole percentage"
-require_text "$RUNNER" 'SEMANTIC_WORKERS=$(semantic_workers_for_capacity "$REQUESTED_SEMANTIC_WORKERS"' "local semantic runs must size Playwright workers to measured host capacity"
+# The probe caps the affinity count at the CFS bandwidth quota (a quota limits
+# CPU time without hiding cores) and withholds the host-wide load whenever the
+# allowed CPU count is narrower than the host, because that load mostly
+# measures work outside the mask. Exercised against a fake cgroup tree.
+PROBE_HOST_CPUS=$(python3 -c 'import os; print(os.cpu_count() or 0)')
+PROBE_AFFINITY=$(python3 -c 'import os; print(len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 0))')
+FAKE_CGROUP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/semantic-cgroup.XXXXXX")
+trap 'rm -rf "$LOCK_TEST_DIR" "$FAKE_CGROUP_ROOT"' EXIT
+printf '0::/\n' > "$FAKE_CGROUP_ROOT/proc-cgroup-v2"
+printf '200000 100000\n' > "$FAKE_CGROUP_ROOT/cpu.max"
+IFS='|' read -r quota_cpus quota_load _ <<< "$(SEMANTIC_CGROUP_ROOT="$FAKE_CGROUP_ROOT" SEMANTIC_PROC_CGROUP="$FAKE_CGROUP_ROOT/proc-cgroup-v2" probe_semantic_host_capacity)"
+expected_quota_cpus=$(( PROBE_AFFINITY < 2 ? PROBE_AFFINITY : 2 ))
+[ "$quota_cpus" = "$expected_quota_cpus" ] || fail "a cgroup v2 cpu.max of 200000/100000 must cap the probe at two CPUs (got '$quota_cpus', affinity $PROBE_AFFINITY)"
+if [ "$PROBE_HOST_CPUS" -gt 2 ]; then
+  [ -z "$quota_load" ] || fail "a quota narrower than the host must withhold the host-wide load (got '$quota_load')"
+fi
+printf '250000 100000\n' > "$FAKE_CGROUP_ROOT/cpu.max"
+IFS='|' read -r quota_cpus _ _ <<< "$(SEMANTIC_CGROUP_ROOT="$FAKE_CGROUP_ROOT" SEMANTIC_PROC_CGROUP="$FAKE_CGROUP_ROOT/proc-cgroup-v2" probe_semantic_host_capacity)"
+[ "$quota_cpus" = "$(( PROBE_AFFINITY < 3 ? PROBE_AFFINITY : 3 ))" ] || fail "a fractional CFS quota must round up to whole CPUs (got '$quota_cpus')"
+printf 'max 100000\n' > "$FAKE_CGROUP_ROOT/cpu.max"
+IFS='|' read -r quota_cpus quota_load _ <<< "$(SEMANTIC_CGROUP_ROOT="$FAKE_CGROUP_ROOT" SEMANTIC_PROC_CGROUP="$FAKE_CGROUP_ROOT/proc-cgroup-v2" probe_semantic_host_capacity)"
+[ "$quota_cpus" = "$PROBE_AFFINITY" ] || fail "an unlimited cpu.max must leave the affinity count (got '$quota_cpus', affinity $PROBE_AFFINITY)"
+if [ "$PROBE_AFFINITY" = "$PROBE_HOST_CPUS" ]; then
+  [[ "$quota_load" =~ ^[0-9]+\.[0-9]{2}$ ]] || fail "an unrestricted host must keep subtracting the 1-minute load (got '$quota_load')"
+fi
+mkdir -p "$FAKE_CGROUP_ROOT/cpu/lane"
+printf '4:cpu,cpuacct:/lane\n' > "$FAKE_CGROUP_ROOT/proc-cgroup-v1"
+printf '%s\n' 100000 > "$FAKE_CGROUP_ROOT/cpu/lane/cpu.cfs_quota_us"
+printf '%s\n' 100000 > "$FAKE_CGROUP_ROOT/cpu/lane/cpu.cfs_period_us"
+IFS='|' read -r quota_cpus quota_load _ <<< "$(SEMANTIC_CGROUP_ROOT="$FAKE_CGROUP_ROOT" SEMANTIC_PROC_CGROUP="$FAKE_CGROUP_ROOT/proc-cgroup-v1" probe_semantic_host_capacity)"
+[ "$quota_cpus" = 1 ] || fail "a cgroup v1 cfs quota of one period must cap the probe at one CPU (got '$quota_cpus')"
+if [ "$PROBE_HOST_CPUS" -gt 1 ]; then
+  [ -z "$quota_load" ] || fail "a v1 quota narrower than the host must withhold the host-wide load (got '$quota_load')"
+fi
+printf '%s\n' -1 > "$FAKE_CGROUP_ROOT/cpu/lane/cpu.cfs_quota_us"
+IFS='|' read -r quota_cpus _ _ <<< "$(SEMANTIC_CGROUP_ROOT="$FAKE_CGROUP_ROOT" SEMANTIC_PROC_CGROUP="$FAKE_CGROUP_ROOT/proc-cgroup-v1" probe_semantic_host_capacity)"
+[ "$quota_cpus" = "$PROBE_AFFINITY" ] || fail "a cgroup v1 quota of -1 must leave the affinity count (got '$quota_cpus')"
+if command -v taskset >/dev/null 2>&1 && [ "$PROBE_HOST_CPUS" -gt 1 ]; then
+  first_cpu=$(python3 -c 'import os; print(sorted(os.sched_getaffinity(0))[0])')
+  IFS='|' read -r mask_cpus mask_load _ <<< "$(SEMANTIC_CGROUP_ROOT="$FAKE_CGROUP_ROOT" SEMANTIC_PROC_CGROUP="$FAKE_CGROUP_ROOT/proc-cgroup-v2" taskset -c "$first_cpu" bash -c "$(declare -f probe_semantic_host_capacity); probe_semantic_host_capacity")"
+  [ "$mask_cpus" = 1 ] || fail "a one-CPU affinity mask must report one CPU (got '$mask_cpus')"
+  [ -z "$mask_load" ] || fail "an affinity mask narrower than the host must withhold the host-wide load (got '$mask_load')"
+fi
+require_text "$RUNNER" 'SEMANTIC_WORKERS=$(semantic_workers_for_capacity "$REQUESTED_SEMANTIC_WORKERS"' "semantic runs must size Playwright workers to measured host capacity"
 require_text "$RUNNER" 'echo "  Semantic workers: requested=$REQUESTED_SEMANTIC_WORKERS effective=$SEMANTIC_WORKERS' "semantic runner must log the capacity inputs behind its worker count"
 validate_line=$(grep -n 'SEMANTIC_WORKERS must be a positive integer' "$RUNNER" | head -1 | cut -d: -f1)
 capacity_line=$(grep -n 'SEMANTIC_WORKERS=$(semantic_workers_for_capacity' "$RUNNER" | head -1 | cut -d: -f1)
 first_launch_line=$(grep -n 'run_playwright test' "$RUNNER" | head -1 | cut -d: -f1)
 [ -n "$capacity_line" ] && [ "$validate_line" -lt "$capacity_line" ] && [ "$capacity_line" -lt "$first_launch_line" ] \
   || fail "semantic worker sizing must run after request validation and before Playwright launches"
+# The sizing block must not be fenced to local mode again: the production gate
+# is where four workers met two vCPUs.
+if sed -n "${validate_line},${capacity_line}p" "$RUNNER" | grep -q 'PROD_MODE" -eq 0'; then
+  fail "semantic worker sizing must apply in production mode as well as local mode"
+fi
 
 # LOCAL_DB_PORT + unset DATABASE + set DIRECT must not clobber the caller URL.
 REPO_DIR="$LOCK_TEST_DIR"

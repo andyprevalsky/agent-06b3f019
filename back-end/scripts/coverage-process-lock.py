@@ -161,6 +161,21 @@ def main() -> int:
     # kill of that group must not also kill the only process capable of reaping
     # the separately-sessioned backend and test descendants.
     os.setsid()
+
+    # Install the stop handlers before anything an owner can observe. The owner
+    # sends SIGTERM as soon as it reads "acquired"; with the handlers installed
+    # only after that publication, a guardian descheduled between the status
+    # write and signal.signal() (ordinary CPU contention) dies under the default
+    # disposition and never terminates its registered process groups.
+    stopping = False
+
+    def stop(_signum: int, _frame: object) -> None:
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     with lock_path.open("a+", encoding="utf-8") as lock_file:
@@ -178,15 +193,6 @@ def main() -> int:
         lock_file.flush()
         os.fsync(lock_file.fileno())
         write_status(status_path, "acquired")
-
-        stopping = False
-
-        def stop(_signum: int, _frame: object) -> None:
-            nonlocal stopping
-            stopping = True
-
-        signal.signal(signal.SIGTERM, stop)
-        signal.signal(signal.SIGINT, stop)
 
         while not stopping and os.getppid() == expected_parent_pid:
             time.sleep(0.02)

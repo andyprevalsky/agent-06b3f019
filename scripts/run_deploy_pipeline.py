@@ -211,8 +211,8 @@ default off) versions the tails that only the private launcher plan carried.
 = 1.25x its 769.7 MB recorded peak) waits for every other Group 3 lane as
 deploy.md Step 4p orders. ``semantic-stack`` (Group 4, unphased,
 ``bash scripts/run-deploy-semantic-stack.sh``: its own ``run.sh --benchmark``
-stack, Playwright UI semantics and the latency ratchet; 6507 MB = 1.25x the
-5205.2 MB peak recorded while the lane still ended with the E2B smoke) waits
+stack, Playwright UI semantics and the latency ratchet; 6108 MB = 1.25x the
+4886.2 MB peak of its first split-lane receipt, follow-up 13) waits
 for ``deploy-command-structural`` and for the agents/frontend coverage lanes
 only: its non-isolated stack's startup and EXIT ``kill-services.sh`` sweeps
 reap same-worktree worker.py/Playwright-driver/npm/vite children, which those
@@ -225,18 +225,18 @@ the run's owner record, manifest and ``BENCHMARK_RUN_ID``
 (``scripts/tests/kill-services.test.sh``,
 ``scripts/tests/run-isolated-cloud-kill.test.sh``; ``STACK_KILLER_LANES`` is
 empty since follow-up "an"). Memory still decides on this devbox: on the
-recorded 7979 MB budget 6507 + 2560 (backend coverage) and 6507 + 4150
+recorded 7979 MB budget 6108 + 2560 (backend coverage) and 6108 + 4150
 (smoke) exceed the budget, so admission defers semantic-stack until both
-release their reservations, declarations unchanged; 6507 + 1152 (agents
+release their reservations, declarations unchanged; 6108 + 1152 (agents
 coverage) would fit, which is why the sweep edge, not memory, holds it there.
-On the launcher host's 8755 MB budget the same holds (6507 + 3072 > 8755;
-6507 + 1536 fits). ``e2b-smoke`` (Group 4, unphased,
-``run-deploy-semantic-stack.sh --e2b-smoke-only``, 1536 MB documented
-estimate: no receipt measures it alone yet) runs the Step 6c Claude Code E2B
+On the launcher host's 8755 MB budget the same holds (6108 + 3072 > 8755;
+6108 + 812 fits). ``e2b-smoke`` (Group 4, unphased,
+``run-deploy-semantic-stack.sh --e2b-smoke-only``, 812 MB = 1.25x the 649.1
+MB peak of its first receipt, follow-up 13) runs the Step 6c Claude Code E2B
 blackbox smoke through the standalone runner after ``live-probes`` and
 backend coverage, which drive the same runner against ``victoria_<workspace>``
-(``E2B_SMOKE_DATABASE_EDGES``). 6507 + 1536 > 7979, so the two Group 4 tails
-run one after the other on this devbox and side by side on 8755.
+(``E2B_SMOKE_DATABASE_EDGES``). 6108 + 812 = 6920 fits 7979, so the two
+Group 4 tails may run side by side on this devbox as well as on 8755.
 
 Plan file (JSON): {"lanes": [{"name", "command": [...], "cwd": "back-end",
 "env": {...}, "after": ["lane"], "reuse_passed": true, "group": "3",
@@ -377,20 +377,20 @@ SMOKE_RECORDED_TREE_PEAK_MB = 3319.4
 # receipt exceeds it.
 LIVE_PROBES_RECORDED_TREE_PEAK_MB = 769.7
 # Group 4 semantic lane (``plan --semantic-stack``: its own run.sh --benchmark
-# stack, the Playwright UI semantics and the latency ratchet): largest
-# recorded process-tree peak over 10 passed receipts of the launcher lane
-# (4489.2-5205.2 MB). Those receipts also ran the Step 6c E2B smoke inside the
-# lane, which is now its own lane, so this pin is an upper bound for the split
-# lane until its own receipts exist; re-pin when a receipt exceeds it.
-SEMANTIC_STACK_RECORDED_TREE_PEAK_MB = 5205.2
-# Step 6c Claude Code E2B smoke as its own lane (``plan --e2b-smoke``): no
-# receipt measures it alone yet (the launcher ran it inside semantic-stack and
-# stage rows carry no memory telemetry). The standalone blackbox runner boots
-# one isolated bootstrap.ts backend (1021 MB largest recorded shard child
-# peak, x1.25 = 1277 MB) beside the runner process; declare the 1536 MB the
-# launcher reserved for the live-probes lane that drives the same runner.
-# Re-pin from tree_peak_pss_mb once the lane's first receipt exists.
-E2B_SMOKE_ESTIMATED_MEMORY_MB = 1536
+# stack, the Playwright UI semantics and the latency ratchet): process-tree
+# peak of the first receipt of the split lane (run 20261031-164809-1083486,
+# head a334edca1, 2026-10-31; lanes["semantic-stack"].tree_peak_pss_mb). The
+# 10 earlier launcher-lane receipts peaked at 4489.2-5205.2 MB while the lane
+# still ended with the Step 6c E2B smoke, which is now its own lane; re-pin
+# when a receipt exceeds it.
+SEMANTIC_STACK_RECORDED_TREE_PEAK_MB = 4886.2
+# Step 6c Claude Code E2B smoke as its own lane (``plan --e2b-smoke``, the
+# standalone blackbox runner beside one isolated bootstrap.ts backend):
+# process-tree peak of its first receipt (run 20261031-164809-1083486, head
+# a334edca1, 2026-10-31; lanes["e2b-smoke"].tree_peak_pss_mb), replacing the
+# 1536 MB estimate the lane carried before any receipt measured it alone;
+# re-pin when a receipt exceeds it.
+E2B_SMOKE_RECORDED_TREE_PEAK_MB = 649.1
 # Kept free for the agent harness, the Docker DB and the 15 GB memory watchdog.
 MEMORY_RESERVE_MB = 2048
 DEFAULT_LANE_MEMORY_MB = 1024
@@ -566,20 +566,28 @@ def structural_lane_memory_mb(workers: int) -> int:
 
 def smoke_lane_memory_mb() -> int:
     """Declared reservation of the local smoke stack: LANE_PEAK_MARGIN over its
-    largest recorded process-tree peak (4150 MB)."""
+    largest recorded process-tree peak (3319.4 MB recorded -> 4150 MB declared)."""
     return int(math.ceil(LANE_PEAK_MARGIN * SMOKE_RECORDED_TREE_PEAK_MB))
 
 
 def live_probes_lane_memory_mb() -> int:
     """Declared reservation of the Step 4p live probes lane: LANE_PEAK_MARGIN
-    over its largest recorded process-tree peak (963 MB)."""
+    over its largest recorded process-tree peak (769.7 MB recorded -> 963 MB declared)."""
     return int(math.ceil(LANE_PEAK_MARGIN * LIVE_PROBES_RECORDED_TREE_PEAK_MB))
 
 
 def semantic_stack_lane_memory_mb() -> int:
     """Declared reservation of the Group 4 semantic stack lane: LANE_PEAK_MARGIN
-    over its largest recorded process-tree peak (6507 MB)."""
+    over its largest recorded process-tree peak (4886.2 MB recorded -> 6108 MB
+    declared)."""
     return int(math.ceil(LANE_PEAK_MARGIN * SEMANTIC_STACK_RECORDED_TREE_PEAK_MB))
+
+
+def e2b_smoke_lane_memory_mb() -> int:
+    """Declared reservation of the Group 4 Step 6c E2B smoke lane:
+    LANE_PEAK_MARGIN over its largest recorded process-tree peak (649.1 MB recorded
+    -> 812 MB declared)."""
+    return int(math.ceil(LANE_PEAK_MARGIN * E2B_SMOKE_RECORDED_TREE_PEAK_MB))
 
 
 def structural_workers_within(available_mb: int, planned: int) -> int:
@@ -3502,10 +3510,10 @@ def standard_plan(args: argparse.Namespace) -> dict:
         present = {entry["name"] for entry in lanes}
         if args.semantic_stack:
             # Steps 5 + 6b as one unphased Group 4 lane: its own run.sh
-            # --benchmark stack, UI semantics, latency ratchet. 6507 MB is the
-            # pinned 1.25x margin over the recorded 5205.2 MB peak; on the
+            # --benchmark stack, UI semantics, latency ratchet. 6108 MB is the
+            # pinned 1.25x margin over the recorded 4886.2 MB peak; on the
             # recorded 7979 MB budget that defers it behind backend coverage
-            # (6507 + 2560 > 7979) and smoke (+ 4150) by memory alone, and the
+            # (6108 + 2560 > 7979) and smoke (+ 4150) by memory alone, and the
             # sweep edges hold it behind agents/frontend coverage. It never
             # waits for backend coverage or the live probes by edge.
             lane("semantic-stack", list(SEMANTIC_STACK_COMMAND), group="4",
@@ -3515,7 +3523,7 @@ def standard_plan(args: argparse.Namespace) -> dict:
         if args.e2b_smoke:
             # Step 6c alone: the standalone blackbox runner, no stack. Serial on
             # victoria_<workspace> behind the lanes that drive the same runner.
-            lane("e2b-smoke", list(E2B_SMOKE_COMMAND), group="4", memory_mb=E2B_SMOKE_ESTIMATED_MEMORY_MB,
+            lane("e2b-smoke", list(E2B_SMOKE_COMMAND), group="4", memory_mb=e2b_smoke_lane_memory_mb(),
                  after=[name for name in E2B_SMOKE_DATABASE_EDGES if name in present], reuse_passed=True)
     for entry in lanes:
         if entry["group"] == "4":

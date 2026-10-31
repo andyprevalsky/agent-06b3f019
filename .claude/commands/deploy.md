@@ -1149,12 +1149,12 @@ three tails that until 2026-10-31 lived only in a private launcher plan:
 `live-probes` (Group 3, `python3 scripts/run_deploy_live_probes.py`, 963 MB =
 1.25x its 769.7 MB recorded tree peak, `LIVE_PROBES_RECORDED_TREE_PEAK_MB`)
 after every other Group 3 lane (Step 4p); `semantic-stack` (Group 4,
-`bash scripts/run-deploy-semantic-stack.sh`: Steps 5 + 6b, 6507 MB = 1.25x the
-5205.2 MB peak recorded while the lane still ended with the E2B smoke,
+`bash scripts/run-deploy-semantic-stack.sh`: Steps 5 + 6b, 6108 MB = 1.25x the
+4886.2 MB peak of its first split-lane receipt,
 `SEMANTIC_STACK_RECORDED_TREE_PEAK_MB`) after `deploy-command-structural` and
 the agents/frontend coverage lanes only; and `e2b-smoke` (Group 4,
-`bash scripts/run-deploy-semantic-stack.sh --e2b-smoke-only`: Step 6c, 1536 MB
-documented estimate until its first receipt) after `live-probes` and backend
+`bash scripts/run-deploy-semantic-stack.sh --e2b-smoke-only`: Step 6c, 812 MB =
+1.25x its 649.1 MB recorded tree peak) after `live-probes` and backend
 coverage, which drive the same `run-blackbox-tests.sh` database. The
 semantic-stack edges are ownership, not memory: its non-isolated
 `run.sh --benchmark` startup/EXIT `kill-services.sh` sweeps reap same-worktree
@@ -1166,11 +1166,11 @@ owner record, live manifest or the `BENCHMARK_RUN_ID` its processes carry
 (`scripts/tests/kill-services.test.sh`,
 `scripts/tests/run-isolated-cloud-kill.test.sh`), so semantic-stack may run
 beside them whenever both whole declarations fit live headroom. On the recorded
-7979 MB budget they do not: 6507 + 4150 (smoke) and 6507 + 2560 (backend
+7979 MB budget they do not: 6108 + 4150 (smoke) and 6108 + 2560 (backend
 coverage) exceed it, so admission defers semantic-stack until both release
-their reservations, declarations unchanged (6507 + 1152 beside agents coverage
-would fit; the sweep edge holds it there), and 6507 + 1536 keeps `e2b-smoke`
-serial with it; on the launcher host's 8755 MB budget the two tails overlap.
+their reservations, declarations unchanged (6108 + 1152 beside agents coverage
+would fit; the sweep edge holds it there), and 6108 + 812 lets `e2b-smoke`
+overlap it on this budget as on the launcher host's 8755 MB.
 
 **Retry after a failure: failed-first, still a full sweep.** Rerun the same
 stage with `BACKEND_COVERAGE_FAILED_FIRST=1` in the `env` above. The previously

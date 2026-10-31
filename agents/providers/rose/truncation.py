@@ -216,7 +216,20 @@ async def _recover_structured_truncation(
         stage = remaining.pop(0)
         if stage == "next_model":
             # The direct-token routes serve one model; leaving it means the pool's waterfall.
-            current = {**current, "claude_auth": None, "gpt_auth": None, "_skip_models": skipped}
+            # Name the cut-off reason per model so the waterfall does not report a
+            # structured-output exclusion (helpers/llm.py) as a cut-off, or vice versa.
+            incoming_exclusions = frozenset(kwargs.get("_skip_models", ()))
+            cut_off_reasons = {
+                **dict(kwargs.get("_skip_reasons") or {}),
+                **{model: "reply_cut_off_at_output_limit" for model in skipped - incoming_exclusions},
+            }
+            current = {
+                **current,
+                "claude_auth": None,
+                "gpt_auth": None,
+                "_skip_models": skipped,
+                "_skip_reasons": cut_off_reasons,
+            }
         if larger:
             current = {**current, "max_tokens": larger}
         if deadline_s is not None:
