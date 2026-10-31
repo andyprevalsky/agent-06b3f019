@@ -384,7 +384,21 @@ async function callOrgMcpTool(
       // Headers arrived, so the request reached the provider: replay the body-read failure only
       // for the idempotent reads (a mutation may already have changed provider state).
       const transportCode = fetchTransportFailureCode(error);
-      if (transportCode === undefined || !IDEMPOTENT_READ_TOOLS.has(toolName)) throw error;
+      if (!IDEMPOTENT_READ_TOOLS.has(toolName)) {
+        // A mutation must never be replayed after its request reached the provider, even when
+        // the body read aborted on the tools/call timeout (the outer classifier would otherwise
+        // treat that AbortError as the retryable timeout class).
+        // The message must not echo the underlying text: the outer classifier matches
+        // "aborted due to timeout" by wording and would retry this error.
+        throw new AgentCardOrgRuntimeError(
+          `AgentCard Organization MCP ${toolName} response body read failed after the request ` +
+            `reached the provider (${transportCode ?? 'body-read-aborted'}); not replayed`,
+          502,
+          'agentcard_org_mcp_unavailable',
+          { tool: toolName, error: errorMessage(error), transport_code: transportCode ?? null }
+        );
+      }
+      if (transportCode === undefined) throw error;
       throw new AgentCardOrgRuntimeError(
         `AgentCard Organization MCP ${toolName} is temporarily unavailable: ` +
           `tools/call response body read failed (${transportCode})`,

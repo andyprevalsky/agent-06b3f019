@@ -419,8 +419,15 @@ class OverrideDispositionTest(unittest.TestCase):
                                      deferred_to=target, evidence=normalized, prior_rounds=prior_rounds,
                                      receipts_path=self.receipts)
 
+    def test_unavailable_cycle_is_not_a_review_round(self) -> None:
+        # findings + unavailable + open-with-review = two delivered reviews: the unavailable cycle
+        # consumed no review budget and must not count toward the three-round pre-authorization.
+        with self.assertRaises(MODULE.ReviewCycleError) as raised:
+            self.override(self.data)
+        self.assertIn("this ledger records 2", str(raised.exception))
+
     def test_override_records_findings_target_and_rounds(self) -> None:
-        cycle = self.override(self.data)
+        cycle = self.override(self.data, prior_rounds=1)
         self.assertEqual((cycle["result"], cycle["disposition"], cycle["rounds"]),
                          ("clean", "overridden", 3))
         self.assertEqual(cycle["finding_ids"], [4431365241])
@@ -454,29 +461,29 @@ class OverrideDispositionTest(unittest.TestCase):
         unanswered = dict(self.data, review_comments=[FINDING_COMMENT])
         with self.assertRaisesRegex(MODULE.ReviewCycleError,
                                     r"finding 4431365241 has no \[DEFERRED\]/\[FIXED\] reply"):
-            self.override(unanswered)
+            self.override(unanswered, prior_rounds=1)
         wrong_reply = dict(self.data,
                            review_comments=[FINDING_COMMENT, dict(DEFERRED_REPLY, body="will look later")])
         with self.assertRaisesRegex(MODULE.ReviewCycleError, "has no"):
-            self.override(wrong_reply)
+            self.override(wrong_reply, prior_rounds=1)
         self.assertEqual(MODULE.read_state(self.state_path)["cycles"][-1]["status"], "open")
 
     def test_override_refuses_an_unlisted_unanswered_finding(self) -> None:
         second = review_comment(4431365300, HEAD_C, "**Minor** · another finding")
         with self.assertRaisesRegex(MODULE.ReviewCycleError,
                                     "comment 4431365300 on da2dbd8b14e2 is neither listed nor answered"):
-            self.override(dict(self.data, review_comments=[FINDING_COMMENT, DEFERRED_REPLY, second]))
+            self.override(dict(self.data, review_comments=[FINDING_COMMENT, DEFERRED_REPLY, second]), prior_rounds=1)
         fixed = review_comment(4431365301, HEAD_C, "[FIXED] in abc", user=USER, reply_to=4431365300)
-        self.override(dict(self.data, review_comments=[FINDING_COMMENT, DEFERRED_REPLY, second, fixed]))
+        self.override(dict(self.data, review_comments=[FINDING_COMMENT, DEFERRED_REPLY, second, fixed]), prior_rounds=1)
 
     def test_override_needs_a_substantive_review_and_a_target(self) -> None:
         with self.assertRaisesRegex(MODULE.ReviewCycleError, "no substantive CodeRabbit review"):
-            self.override(dict(self.data, reviews=REPLY_WRAPPERS))
+            self.override(dict(self.data, reviews=REPLY_WRAPPERS), prior_rounds=1)
         with self.assertRaisesRegex(MODULE.ReviewCycleError, "--deferred-to"):
-            self.override(self.data, target="  ")
+            self.override(self.data, target="  ", prior_rounds=1)
         with self.assertRaisesRegex(MODULE.ReviewCycleError,
                                     "finding 1 is not a CodeRabbit review comment on da2dbd8b14e2"):
-            self.override(self.data, ids=(4431365241, 1))
+            self.override(self.data, ids=(4431365241, 1), prior_rounds=1)
 
 
 class DispositionCliTest(unittest.TestCase):

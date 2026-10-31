@@ -2205,7 +2205,8 @@ When CodeRabbit is unavailable, make at most one zero-touch retry (`@coderabbita
    `require-mergeable`, consumes no review budget, and the superseding HEAD re-`start`s
    the same `--kind` (`deploy_review_cycle.py next` prints it; the Step 10 count-based
    derivation is wrong here) without `--reset`, keeping the entry in the ledger.
-   After three review rounds on the PR (ledger cycles plus `--prior-rounds` from restarted
+   After three review rounds on the PR (ledger cycles that delivered a review — an
+   `unavailable` cycle does not count — plus `--prior-rounds` from restarted
    deploys of it), remaining findings may be deferred under the user's standing
    pre-authorization (never a security- or prod-impacting one): reply `[DEFERRED] <target>`
    on each, then `python3 scripts/deploy_review_cycle.py override --head "$REVIEW_HEAD"
