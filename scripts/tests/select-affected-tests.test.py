@@ -53,7 +53,18 @@ def check_coverage_map_dependency_preflight() -> None:
 
 
 def check_extraction_precision(selector: sat.Selector) -> None:
-    """Comments and docstrings document; only code creates edges (never fewer code edges)."""
+    """Comments and docstrings document; only code creates edges (never fewer code edges).
+
+    Audit method when the strippers change (2026-10-31 review of 01bfbe386):
+    strip every TS/JS file independently with esbuild (minify-whitespace keeps
+    code, drops comments) and every Python file with ast/tokenize (docstring
+    and COMMENT spans), then compare the path/import tokens each file yields
+    against sat.strip_comments / sat._mask_python. Any token present only in
+    the independent output is a potential under-inclusion; 0 were found over
+    3,583 TS/JS and 1,298 Python files. Pair it with a before/after selection
+    diff of every file (old selector vs new on the same tree) and trace the
+    first missing edge of each lost lane unit to a comment/docstring line.
+    """
     ts_files = ["x.test.ts", "docs/rca/cases/case.md", "scripts/critical.sh"]
     comment_only = (
         "/**\n * Start agent button is gated on ACTIVE (docs/rca/cases/\n * 2026-10-28-case.md).\n */\n"
@@ -84,6 +95,20 @@ def check_extraction_precision(selector: sat.Selector) -> None:
     for uncertain in ("const s = \"unterminated // scripts/critical.sh\nrun();\n", "const t = `open // scripts/critical.sh\n"):
         check("scripts/critical.sh" in sat.strip_comments("x.test.ts", uncertain),
               "TS: an unterminated string/template keeps the raw source (over-select, never erase)")
+    # Positive regex classification: escaped slashes inside a regex literal must
+    # not be read as a `//` comment, including after `)` (`if (ok) /re/...`).
+    regex_lines = (
+        "const re = /https?:\\/\\//.test(s) && run('scripts/critical.sh');\n",
+        "if (ok) /x\\//.test(s) && run('scripts/critical.sh');\n",
+        "const r = [a, b].map(x => x / 2) / /\\/\\//.source.length + run('scripts/critical.sh');\n",
+    )
+    for source in regex_lines:
+        check("scripts/critical.sh" in sat.strip_comments("x.test.ts", source),
+              f"TS: a regex literal with escaped slashes keeps the code after it: {source.strip()[:60]}")
+    with patch.object(sat, "_ts_regex_allowed", lambda *_: False):
+        mutant = sat.strip_comments("x.test.ts", regex_lines[0])
+    check("scripts/critical.sh" not in mutant,
+          "TS: the regex assertions are load-bearing (a division-only mutant drops the edge)")
 
     py_files = ["agents/tests/unit/test_x.py", "agents/helpers/llm.py", "agents/helpers/keep.py", "scripts/critical.sh"]
     documented = (

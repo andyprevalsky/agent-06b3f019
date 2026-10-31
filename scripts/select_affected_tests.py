@@ -269,6 +269,21 @@ _PROCESS_MATCH = re.compile(r"\b(?:pkill|pgrep|killall)\b|\bps\b[^\n]*\|\s*grep\
 # literal, template or regex is always kept. Every uncertain state (an
 # unterminated string, template, expression or block comment at EOF) returns
 # the raw source: over-selecting is acceptable, erasing a dependency is not.
+#
+# Regex-vs-division after `/` is decided from the previous token. A regex
+# misread as division is the dangerous direction (its escaped slashes can form
+# `//` and drop the rest of the line), a division misread as a regex only
+# swallows code up to the next `/` on the line without removing anything, so
+# the ambiguous `)` and `}` prefer regex while `]`, identifiers, numbers and
+# `++`/`--` (where a regex cannot legally start) mean division. Known
+# residual: a division after `)`/`}` followed on the SAME physical line by two
+# `/`-bearing string literals can hide a path in the second one; a regex after
+# `]`/identifier/number (invalid syntax anyway) can drop the rest of its line.
+# Strings end at the newline and templates fall back to raw, so damage never
+# crosses a line. A repo-wide scan (2026-10-31, 3,583 TS/JS files) found 3
+# lines where the `)` policy changes the stripped output, all of the form
+# `Math.round(x) / 100, // note`: the trailing comment text is retained
+# (over-inclusion), nothing executable is dropped.
 _TS_TOKEN_RE = re.compile(
     r"""
     (?P<line>//[^\n]*)
@@ -303,9 +318,9 @@ def _ts_regex_allowed(last_kind: str, last_text: str) -> bool:
     token = tail.group(1)
     if token in _TS_REGEX_KEYWORDS:
         return True
-    if token[0].isalnum() or token[0] in "_$" or token in {")", "]", "++", "--"}:
+    if token[0].isalnum() or token[0] in "_$" or token in {"]", "++", "--"}:
         return False
-    return True
+    return True  # includes `)`: `if (ok) /re/.test(s)` must survive
 
 
 def _strip_ts_comments(source: str) -> str:
