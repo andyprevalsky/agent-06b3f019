@@ -1770,8 +1770,11 @@ def teardown_lane(name: str, *, attempt: int, token: str, started_epoch: float, 
     foreign_seen: dict[int, dict] = {}
 
     def observe() -> tuple[list[dict], list[int], dict[int, dict]]:
-        records, older = lane_owner_records(context_root, started_epoch)
+        # Liveness first, records second: a controller that publishes its
+        # clean receipt and exits between the two reads is then reported with
+        # that receipt, never with the stale pending one read before it exited.
         owned, processes = lane_owned_processes(token, proc, cache)
+        records, older = lane_owner_records(context_root, started_epoch)
         _classify_records(records, owned, processes)
         receipt["records"], receipt["older_run_dirs"] = records, older
         for record in records:
