@@ -312,8 +312,9 @@ is_protected_isolated_stack_tree() {
 # Mirrors run.sh's pid_belongs_to_active_isolated_benchmark run-identity check.
 LIVE_ISOLATED_RUNS=""
 load_live_isolated_runs() {
+    local status=0
     LIVE_ISOLATED_RUNS=$(python3 - "$WORKTREE_DIR/.context/benchmarks" "$PROCESS_IDENTITY_HELPER" \
-        "${BENCHMARK_STARTUP_GRACE_SECONDS:-90}" <<'PYRUNS' 2>/dev/null || true
+        "${BENCHMARK_STARTUP_GRACE_SECONDS:-90}" <<'PYRUNS'
 import json
 import re
 import subprocess
@@ -372,9 +373,24 @@ for run_dir in sorted(path for path in root.glob("*") if path.is_dir() and not p
     if age < grace_seconds:
         print(run_id)
 PYRUNS
-)
+) || status=$?
+    [ "$status" -eq 0 ] && return 0
+    # Fail closed, never open: an empty list would silently restore the kill of
+    # every reparented child of a live isolated run. With an owner record on
+    # disk a live stack may exist, so the sweep is refused (run.sh startup
+    # propagates the failure); without one there is nothing to protect.
+    LIVE_ISOLATED_RUNS=""
+    if compgen -G "$WORKTREE_DIR/.context/benchmarks/*/local-stack-owner.json" > /dev/null; then
+        echo "⚠️  Could not determine the live isolated benchmark runs (loader exit $status) while isolated stack owner records exist under $WORKTREE_DIR/.context/benchmarks; refusing to sweep" >&2
+        return 1
+    fi
+    echo "⚠️  Could not determine the live isolated benchmark runs (loader exit $status); no isolated stack owner record exists, sweeping without run-identity protection" >&2
+    return 0
 }
 
+# run_process_env_value reads /proc/<pid>/environ and falls back to `ps eww`,
+# which can surface a stale or duplicate token: that fallback can only
+# over-protect (keep a process alive), never reap one that the run owns.
 is_live_isolated_run_process() {
     local pid=$1 run_id live
     [ -n "$LIVE_ISOLATED_RUNS" ] || return 1
@@ -576,7 +592,7 @@ WRAPPERS_FILE=$(mktemp)
 SKIPPED_FILE=$(mktemp)
 trap 'rm -f "$ROOTS_FILE" "$ALL_FILE" "$TARGETS_FILE" "$KEPT_FILE" "$SCRATCH_FILE" "$SURVIVORS_FILE" "$WRAPPERS_FILE" "$SKIPPED_FILE"' EXIT
 load_isolated_stack_owners
-load_live_isolated_runs
+load_live_isolated_runs || exit 1
 
 # Manifest PIDs are authoritative when present. They catch wrappers whose argv
 # is generic after cd'ing into a service directory. Capture identity at the

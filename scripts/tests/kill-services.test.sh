@@ -810,12 +810,19 @@ echo "PASS: the sweep never crosses into a nested Git worktree or out through ..
 # survive the sweep, while this workspace's own stale stack and the leftovers of
 # finished or unknown runs are still reaped.
 rm -rf "$WORKTREE/.context/benchmarks" "$WORKTREE/.claude"
+# STALE_CHILD_RUN_ID: a second child carrying another run's BENCHMARK_RUN_ID,
+# so a stale stack's downward walk contains an env-protected descendant.
 cat > "$WORKTREE/scripts/run.sh" <<'ISOLATED'
 #!/usr/bin/env bash
 ( cd "$(dirname "$0")/../agents" && exec python3 worker.py ) &
+if [ -n "${STALE_CHILD_RUN_ID:-}" ]; then
+    ( cd "$(dirname "$0")/../agents" && BENCHMARK_RUN_ID="$STALE_CHILD_RUN_ID" exec python3 worker.py "$STALE_CHILD_MARKER" ) &
+fi
 wait
 ISOLATED
 chmod +x "$WORKTREE/scripts/run.sh"
+dead_pid=999999
+while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid - 1)); done
 
 start_isolated_run() {  # <run-id> <backend-port>: a live isolated stack with owner record + manifest
     local run_id="$1" port="$2" stack_pid identity run_dir
@@ -886,13 +893,38 @@ done_detached_pid="$(detached_run_worker smoke-done "$marker-done")"
 PIDS+=("$done_detached_pid")
 ghost_detached_pid="$(detached_run_worker smoke-ghost "$marker-ghost")"
 PIDS+=("$ghost_detached_pid")
+# A manifest still `running` whose run.sh is gone and that has no owner record:
+# nothing owns it any more, so its leftovers are reapable (same predicate as
+# run.sh's startup sweep).
+mkdir -p "$WORKTREE/.context/benchmarks/smoke-orphan"
+printf '{"status": "running", "run_sh_pid": %s, "services": [], "ports": {"backend": 20130}}\n' "$dead_pid" \
+    > "$WORKTREE/.context/benchmarks/smoke-orphan/services.json"
+orphan_detached_pid="$(detached_run_worker smoke-orphan "$marker-orphan")"
+PIDS+=("$orphan_detached_pid")
 # This workspace's own stale stack (the semantic lane's previous run.sh): no run
-# id, listed in the worktree manifest on its own ports.
-(cd "$WORKTREE" && exec bash scripts/run.sh --benchmark) > /dev/null 2>&1 &
+# id, listed in the worktree manifest on its own ports. One of its children
+# carries the live run's id, so it enters the kill set through the downward
+# walk and only the final backstop can spare it.
+(cd "$WORKTREE" && STALE_CHILD_RUN_ID=smoke-live STALE_CHILD_MARKER="$marker-stale-child" \
+    exec bash scripts/run.sh --benchmark) > /dev/null 2>&1 &
 own_stale_stack_pid=$!
 PIDS+=("$own_stale_stack_pid")
-own_stale_worker_pid="$(wait_for_child "$own_stale_stack_pid")"
+own_stale_worker_pid=""
+for attempt in $(seq 1 30); do
+    own_stale_worker_pid="$(pgrep -P "$own_stale_stack_pid" -f 'worker\.py$' 2>/dev/null | head -1 || true)"
+    [ -n "$own_stale_worker_pid" ] && break
+    sleep 0.1
+done
+[ -n "$own_stale_worker_pid" ] || { echo "FAIL: stale stack did not start its worker" >&2; exit 1; }
 PIDS+=("$own_stale_worker_pid")
+stale_env_child_pid=""
+for attempt in $(seq 1 30); do
+    stale_env_child_pid="$(pgrep -P "$own_stale_stack_pid" -f "worker\.py $marker-stale-child\$" 2>/dev/null | head -1 || true)"
+    [ -n "$stale_env_child_pid" ] && break
+    sleep 0.1
+done
+[ -n "$stale_env_child_pid" ] || { echo "FAIL: stale stack did not start its env-protected child" >&2; exit 1; }
+PIDS+=("$stale_env_child_pid")
 cat > "$WORKTREE/.context/services.json" <<JSON
 {"status": "running", "run_sh_pid": $own_stale_stack_pid, "services": [], "ports": {"backend": 20010, "frontend": 20011}}
 JSON
@@ -908,9 +940,68 @@ assert_dead "$own_stale_stack_pid" "this workspace's own stale run.sh"
 assert_dead "$own_stale_worker_pid" "this workspace's own stale worker"
 assert_dead "$done_detached_pid" "leftover worker of a finished isolated run"
 assert_dead "$ghost_detached_pid" "worker naming an isolated run that does not exist"
+assert_dead "$orphan_detached_pid" "leftover worker of a running-manifest run whose run.sh is gone"
+assert_alive "$stale_env_child_pid" "live run's child under a stale stack (final backstop)"
 echo "PASS: the sweep leaves every process of a live isolated run alone and reaps its own stale stack"
 
+# The live-run loader must fail closed. A python3 shim fails only that loader
+# (its script arrives on stdin and names grace_seconds); every other call
+# reaches the real interpreter. With an owner record on disk the sweep is
+# refused before any signal; without one it warns and proceeds.
+mkdir -p "$TMP_ROOT/broken-python"
+cat > "$TMP_ROOT/broken-python/python3" <<'SHIM'
+#!/usr/bin/env bash
+real="$(command -v -p python3)"
+if [ "${1:-}" = "-" ]; then
+    script="$(cat)"
+    case "$script" in *grace_seconds*) echo "simulated loader failure" >&2; exit 7 ;; esac
+    printf '%s\n' "$script" | exec "$real" "$@"
+fi
+exec "$real" "$@"
+SHIM
+chmod +x "$TMP_ROOT/broken-python/python3"
+(cd "$WORKTREE" && exec bash scripts/run.sh --benchmark) > /dev/null 2>&1 &
+refused_stack_pid=$!
+PIDS+=("$refused_stack_pid")
+refused_worker_pid="$(wait_for_child "$refused_stack_pid")"
+PIDS+=("$refused_worker_pid")
+sleep 0.3
+loader_rc=0
+(cd "$WORKTREE" && PATH="$TMP_ROOT/broken-python:$PATH" bash scripts/kill-services.sh \
+    > "$TMP_ROOT/loader-refused.log" 2>&1) || loader_rc=$?
+if [ "$loader_rc" -eq 0 ]; then
+    echo "FAIL: a failed live-run loader with owner records on disk must refuse the sweep" >&2
+    exit 1
+fi
+if ! grep -q "refusing to sweep" "$TMP_ROOT/loader-refused.log"; then
+    echo "FAIL: the refused sweep must say why" >&2
+    cat "$TMP_ROOT/loader-refused.log" >&2
+    exit 1
+fi
+assert_alive "$refused_stack_pid" "stale run.sh while the sweep is refused"
+assert_alive "$refused_worker_pid" "stale worker while the sweep is refused"
+assert_alive "$live_stack_pid" "live isolated run.sh while the sweep is refused"
+assert_alive "$live_detached_pid" "detached live-run worker while the sweep is refused"
+echo "PASS: a failed live-run loader refuses the sweep while owner records exist"
+
 kill_pid_tree "$live_stack_pid"
-kill "$live_detached_pid" "$boot_detached_pid" 2>/dev/null || true
+kill "$live_detached_pid" "$boot_detached_pid" "$stale_env_child_pid" 2>/dev/null || true
+rm -rf "$WORKTREE/.context/benchmarks"
+loader_rc=0
+(cd "$WORKTREE" && PATH="$TMP_ROOT/broken-python:$PATH" bash scripts/kill-services.sh \
+    > "$TMP_ROOT/loader-warned.log" 2>&1) || loader_rc=$?
+if [ "$loader_rc" -ne 0 ]; then
+    echo "FAIL: a failed live-run loader with no owner record must warn and sweep (exit $loader_rc)" >&2
+    cat "$TMP_ROOT/loader-warned.log" >&2
+    exit 1
+fi
+if ! grep -q "sweeping without run-identity protection" "$TMP_ROOT/loader-warned.log"; then
+    echo "FAIL: the degraded sweep must warn" >&2
+    cat "$TMP_ROOT/loader-warned.log" >&2
+    exit 1
+fi
+assert_dead "$refused_stack_pid" "stale run.sh under a degraded sweep"
+assert_dead "$refused_worker_pid" "stale worker under a degraded sweep"
+echo "PASS: a failed live-run loader warns and sweeps when no owner record exists"
 
 echo "All kill-services tests passed."
