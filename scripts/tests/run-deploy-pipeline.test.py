@@ -36,6 +36,7 @@ import threading
 import time
 from contextlib import ExitStack, redirect_stdout
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1581,6 +1582,7 @@ def main() -> int:
         check_simulate_legacy_plan_group3(tmp, env)
         check_receipt_readers(tmp)
         check_production_fly_wait(tmp, env)
+        check_production_render(tmp, env)
         check_production_semantic(tmp, env)
         check_semantic_workflow_source_sha()
     print("run-deploy-pipeline: all checks passed")
@@ -1829,6 +1831,281 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     assert ran.returncode == 1 and "monitor-cooperative-cutover.ts --verify failed (exit 3)" in ran.stdout, ran.stdout
     assert "dispatch" not in call_lines(), call_lines()
     print("production fly wait: ok")
+
+
+def check_production_render(tmp: Path, env: dict[str, str]) -> None:
+    """``production-render`` (deploy.md Step 13a step 1) serves the merged
+    backend's proof from the Render deploys API, stubbed on loopback, over a
+    fixture repo: (a) no deploy for the merged SHA, live commit an ancestor
+    with no change under the Render service paths -> source-equivalent,
+    receipt recorded, the follow-up command runs; a root package.json change
+    or (b) a back-end change since the live commit keeps waiting to the bound;
+    (c) a live commit with the identical back-end tree that is neither an
+    ancestor nor a descendant keeps waiting (only ancestry blocks); (d) a
+    deploy for the merged SHA takes the exact-SHA path (live opens,
+    build_failed blocks); (f) a live descendant with the identical backend is
+    equivalent, (g) a live descendant that changed the backend is refused;
+    (e) a Render API error or missing credentials fails closed (exit 2)
+    without the follow-up. Every blocked receipt names the observed live
+    commit. The lane never overwrites, and is never overwritten by, the Fly
+    lane's receipt of the same merged SHA."""
+    repo = tmp / "render-source"
+    repo.mkdir()
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    for name in ("run_deploy_pipeline.py", "deploy_stage_wait.py", "factory_metadata.py",
+                 "classify-agent-runtime-changes.sh"):
+        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+    (repo / ".gitignore").write_text(".context/\n__pycache__/\n")
+    git = ["git", "-C", str(repo), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+
+    def commit(message: str, files: dict[str, str]) -> str:
+        for relative, content in files.items():
+            path = repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", message], check=True)
+        return subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+
+    commit("base", {"README": "base\n"})
+    live = commit("backend v1", {"back-end/src/server.ts": "v1\n"})
+    docs_only = commit("docs only", {"docs/notes.md": "notes\n", "scripts/tool.py": "x = 1\n"})
+    backend_change = commit("backend v2", {"back-end/src/server.ts": "v2\n"})
+    docs_after = commit("docs after", {"docs/after.md": "after\n"})
+    root_manifest = commit("root manifest", {"package.json": '{"workspaces": ["back-end"]}\n'})
+    branch = subprocess.run([*git, "rev-parse", "--abbrev-ref", "HEAD"], check=True, stdout=subprocess.PIPE,
+                            text=True).stdout.strip()
+    # `side` forks from the live commit with a docs-only change: its back-end
+    # tree is identical to every main-line commit built on `live`, so only
+    # ancestry can decide.
+    subprocess.run([*git, "checkout", "-q", "-b", "side", live], check=True)
+    sibling = commit("sibling docs", {"docs/other.md": "other\n"})
+    subprocess.run([*git, "checkout", "-q", branch], check=True)
+
+    fake = tmp / "render-fake"
+    fake.mkdir()
+    requests_log = fake / "requests.log"
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args: object) -> None:  # keep the suite's output clean
+            pass
+
+        def do_GET(self) -> None:  # http.server dispatches on this exact name
+            with requests_log.open("a") as handle:
+                handle.write(f"{self.path} auth={self.headers.get('Authorization')}\n")
+            if self.path.split("?")[0] != "/services/srv-fixture/deploys":
+                self.send_error(404)
+                return
+            if self.headers.get("Authorization") != "Bearer fixture-key":
+                self.send_error(401)
+                return
+            if (fake / "fail").exists():
+                self.send_error(500, "fixture outage")
+                return
+            count = int((fake / "count").read_text()) + 1 if (fake / "count").exists() else 1
+            (fake / "count").write_text(str(count))
+            path = fake / f"deploys-{count}.json"
+            if not path.exists():
+                path = fake / "deploys-last.json"
+            body = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    driver = scripts / "run_deploy_pipeline.py"
+    render_env = {**{key: value for key, value in env.items() if not key.startswith("RENDER_")},
+                  "DEPLOY_RENDER_API_BASE": f"http://127.0.0.1:{server.server_address[1]}",
+                  "RENDER_API_KEY": "fixture-key", "RENDER_SERVICE_ID": "srv-fixture"}
+    probes = fake / "probes.log"
+    service_paths = ["back-end/", "render.yaml", "package.json", "package-lock.json"]
+
+    def deploy(commit_id: str, status: str, deploy_id: str) -> dict:
+        return {"deploy": {"id": deploy_id, "status": status, "commit": {"id": commit_id, "message": "m"}},
+                "cursor": deploy_id}
+
+    def reset(*pages: list[dict]) -> None:
+        for stale in fake.glob("deploys-*.json"):
+            stale.unlink()
+        for stale in (fake / "count", fake / "fail", requests_log, probes):
+            stale.unlink(missing_ok=True)
+        for index, page in enumerate(pages, start=1):
+            (fake / f"deploys-{index}.json").write_text(json.dumps(page))
+        (fake / "deploys-last.json").write_text(json.dumps(pages[-1]))
+
+    def run_render(merged: str, state: Path, *extra: str, env_override: dict[str, str] | None = None
+                   ) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(driver), "production-render", "--merged-sha", merged, "--state-dir", str(state),
+             "--poll-seconds", "0.05", *extra, "--", "bash", "-c", f'echo probes >> "{probes}"'],
+            env=render_env if env_override is None else env_override, cwd=repo, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, timeout=120)
+
+    def run_fly(merged: str, state: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(driver), "production", "--merged-sha", merged, "--state-dir", str(state),
+             "--poll-seconds", "0.05", "--", "true"],
+            env={**render_env, "PATH": "/usr/bin:/bin"}, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=120)
+
+    def requests() -> list[str]:
+        return requests_log.read_text().splitlines() if requests_log.exists() else []
+
+    def receipt_of(state: Path) -> dict:
+        return json.loads((state / "production.json").read_text())
+
+    def blocked(merged: str, live_commit: str, state: Path, reason: str) -> dict:
+        """Run to a short bound against a live deploy of ``live_commit``: the
+        gate must block (exit 1), never print equivalence, never run the
+        follow-up, and record the observed live commit and ``reason``."""
+        reset([deploy(live_commit, "live", "dep-live")])
+        ran = run_render(merged, state, "--timeout", "0.3")
+        assert ran.returncode == 1, ran.stdout
+        assert "RENDER_SOURCE_EQUIVALENT" not in ran.stdout and not probes.exists(), ran.stdout
+        assert f"Render did not bring {merged[:7]} live within 0s" in ran.stdout, ran.stdout
+        assert f"live commit {live_commit[:9]} is not source-equivalent ({reason})" in ran.stdout, ran.stdout
+        assert len(requests()) >= 2, "the bounded wait must keep polling the deploys API"
+        render = receipt_of(state)["render"]
+        assert render["status"] == "timeout" and render["live_commit"] is None and render["polls"] >= 2, render
+        assert render["observed_live_commit"] == live_commit and render["observed_live_deploy_id"] == "dep-live", render
+        assert render["equivalence"]["equivalent"] is False and render["equivalence"]["reason"] == reason, render
+        assert reason in render["error"], render
+        return render
+
+    try:
+        # (a) Render skipped the merge (no deploy for it); the live deploy's commit
+        #     is an ancestor and nothing under the service paths changed: equivalent.
+        reset([deploy(live, "live", "dep-live")])
+        state_a = tmp / "render-state-a"
+        ran = run_render(docs_only, state_a)
+        assert ran.returncode == 0, ran.stdout
+        assert f"RENDER_SOURCE_EQUIVALENT live={live} merged={docs_only} reason=live-ancestor-same-backend" in ran.stdout
+        assert "RENDER_LIVE " not in ran.stdout and "PIPELINE_RENDER then exit=0" in ran.stdout, ran.stdout
+        assert probes.read_text() == "probes\n", "the follow-up command must run once the live backend is proven"
+        assert requests() == ["/services/srv-fixture/deploys?limit=20 auth=Bearer fixture-key"], requests()
+        render = receipt_of(state_a)["render"]
+        assert render["provider"] == "render" and render["status"] == "source-equivalent", render
+        assert render["merged_sha"] == docs_only and render["live_commit"] == live, render
+        assert render["observed_live_commit"] == live and render["service_paths"] == service_paths, render
+        assert render["backend_diff"] == [] and render["deploy_id"] == "dep-live" and render["polls"] == 1, render
+        equivalence = render["equivalence"]
+        assert equivalence["equivalent"] is True and equivalence["relationship"] == "ancestor", equivalence
+        assert equivalence["live_is_ancestor"] is True and equivalence["live_is_descendant"] is False, equivalence
+        assert equivalence["backend_diff"] == [] and equivalence["service_paths"] == service_paths, equivalence
+        assert equivalence["reason"] == "live-ancestor-same-backend" and "Root Directory" in equivalence["detail"]
+        assert sorted(equivalence["changed_files"]) == ["docs/notes.md", "scripts/tool.py"], equivalence
+        assert render["then"] == {**render["then"], "exit": 0} and render["then"]["command"][0] == "bash", render
+        assert receipt_of(state_a)["merged_sha"] == docs_only and "wall_s" in render, receipt_of(state_a)
+        # The Fly lane of the same merged SHA carries the Render lane forward.
+        ran = run_fly(docs_only, state_a)
+        assert ran.returncode == 0, ran.stdout
+        after = receipt_of(state_a)
+        assert after["status"] == "passed" and after["fly"]["required"] is False, after
+        assert after["render"] == render, "production must not drop the Render lane of the same merged SHA"
+
+        # A merge that changes only the root workspace manifest is a backend
+        # build input (Render resolves the root workspace graph): never equivalent.
+        render = blocked(root_manifest, docs_after, tmp / "render-state-a2", "live-ancestor-backend-changed")
+        assert render["backend_diff"] == ["package.json"] and render["equivalence"]["live_is_ancestor"] is True, render
+
+        # (b) A back-end change since the live commit is never equivalent: the
+        #     exact-SHA wait runs to its bound and blocks; no follow-up.
+        render = blocked(backend_change, live, tmp / "render-state-b", "live-ancestor-backend-changed")
+        assert render["backend_diff"] == ["back-end/src/server.ts"], render
+        assert render["equivalence"]["live_is_ancestor"] is True and "back-end/" in render["equivalence"]["detail"]
+
+        # (c) The live commit is neither an ancestor nor a descendant of the
+        #     merged SHA (a sibling branch) although their back-end trees are
+        #     identical: only ancestry blocks, and it does.
+        render = blocked(docs_only, sibling, tmp / "render-state-c", "live-unrelated")
+        assert render["backend_diff"] == [] and render["equivalence"]["relationship"] == "unrelated", render
+        assert render["equivalence"]["live_is_ancestor"] is False and render["equivalence"]["live_is_descendant"] is False
+
+        # (d) Render created a deploy for the merged SHA: the exact-SHA path is
+        #     unchanged (building twice, then live); no equivalence is consulted.
+        building = [deploy(backend_change, "build_in_progress", "dep-new"), deploy(live, "live", "dep-live")]
+        reset(building, building, [deploy(backend_change, "live", "dep-new"), deploy(live, "deactivated", "dep-live")])
+        state_d = tmp / "render-state-d"
+        ran = run_render(backend_change, state_d)
+        assert ran.returncode == 0, ran.stdout
+        assert f"RENDER_LIVE commit={backend_change} deploy=dep-new" in ran.stdout, ran.stdout
+        assert "RENDER_SOURCE_EQUIVALENT" not in ran.stdout and probes.read_text() == "probes\n", ran.stdout
+        assert ran.stdout.count("Render: status=build_in_progress") == 2 and len(requests()) == 3, ran.stdout
+        render = receipt_of(state_d)["render"]
+        assert render["status"] == "live" and render["live_commit"] == backend_change, render
+        assert render["observed_live_commit"] == backend_change and render["observed_live_deploy_id"] == "dep-new"
+        assert render["deploy_id"] == "dep-new" and render["deploy_status"] == "live" and render["polls"] == 3, render
+        assert render["equivalence"] is None and render["backend_diff"] == [], render
+        # A failed deploy for the merged SHA blocks at once, as before.
+        reset([deploy(backend_change, "build_failed", "dep-bad"), deploy(live, "live", "dep-live")])
+        state_d2 = tmp / "render-state-d2"
+        ran = run_render(backend_change, state_d2)
+        assert ran.returncode == 1 and "Render deploy build_failed for" in ran.stdout and "dep-bad" in ran.stdout, ran.stdout
+        assert not probes.exists() and len(requests()) == 1, ran.stdout
+        render = receipt_of(state_d2)["render"]
+        assert render["status"] == "deploy-failed" and render["deploy_status"] == "build_failed", render
+        assert render["observed_live_commit"] == live, render
+        # The Render lane joins an existing Fly-lane receipt of the same SHA
+        # instead of replacing it.
+        state_e = tmp / "render-state-e"
+        ran = run_fly(backend_change, state_e)
+        assert ran.returncode == 0, ran.stdout
+        reset([deploy(backend_change, "live", "dep-new")])
+        ran = run_render(backend_change, state_e)
+        assert ran.returncode == 0, ran.stdout
+        joined = receipt_of(state_e)
+        assert joined["status"] == "passed" and joined["fly"]["required"] is False, joined
+        assert joined["render"]["status"] == "live" and joined["semantic_dispatch"]["exit"] == 0, joined
+
+        # (f) Another PR deployed after the merge without touching the service
+        #     paths: the live commit is a descendant with the identical backend.
+        reset([deploy(docs_after, "live", "dep-later")])
+        state_f = tmp / "render-state-f"
+        ran = run_render(backend_change, state_f)
+        assert ran.returncode == 0, ran.stdout
+        assert (f"RENDER_SOURCE_EQUIVALENT live={docs_after} merged={backend_change} "
+                "reason=live-descendant-same-backend") in ran.stdout, ran.stdout
+        assert probes.read_text() == "probes\n", ran.stdout
+        render = receipt_of(state_f)["render"]
+        assert render["status"] == "source-equivalent" and render["live_commit"] == docs_after, render
+        assert render["merged_sha"] == backend_change and render["observed_live_commit"] == docs_after, render
+        equivalence = render["equivalence"]
+        assert equivalence["relationship"] == "descendant" and equivalence["equivalent"] is True, equivalence
+        assert equivalence["live_is_ancestor"] is False and equivalence["live_is_descendant"] is True, equivalence
+        assert equivalence["live_commit"] == docs_after and equivalence["merged_sha"] == backend_change, equivalence
+        assert equivalence["backend_diff"] == [] and equivalence["changed_files"] == ["docs/after.md"], equivalence
+
+        # (g) A descendant that changed the backend: the merged backend never ran
+        #     as-is, so the gate refuses (a manual decision), never equivalence.
+        render = blocked(docs_only, backend_change, tmp / "render-state-g", "live-descendant-backend-changed")
+        assert render["backend_diff"] == ["back-end/src/server.ts"], render
+        assert render["equivalence"]["live_is_descendant"] is True and "manual decision" in render["equivalence"]["detail"]
+
+        # (e) A Render API error fails closed: exit 2, no follow-up, error
+        #     recorded; missing credentials never reach the API.
+        reset([deploy(live, "live", "dep-live")])
+        (fake / "fail").touch()
+        state_h = tmp / "render-state-h"
+        ran = run_render(docs_only, state_h)
+        assert ran.returncode == 2 and "HTTP 500" in ran.stdout and "PIPELINE_RENDER status=error exit=2" in ran.stdout, ran.stdout
+        assert "RENDER_SOURCE_EQUIVALENT" not in ran.stdout and not probes.exists(), ran.stdout
+        render = receipt_of(state_h)["render"]
+        assert render["status"] == "error" and "HTTP 500" in render["error"] and render["then"] is None, render
+        reset([deploy(live, "live", "dep-live")])
+        ran = run_render(docs_only, tmp / "render-state-i",
+                         env_override={k: v for k, v in render_env.items() if k != "RENDER_API_KEY"})
+        assert ran.returncode == 2 and "RENDER_API_KEY not set" in ran.stdout and requests() == [], ran.stdout
+        assert not probes.exists(), ran.stdout
+        assert receipt_of(tmp / "render-state-i")["render"]["status"] == "error", receipt_of(tmp / "render-state-i")
+    finally:
+        server.shutdown()
+        server.server_close()
+    print("production render wait: ok")
 
 
 def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:

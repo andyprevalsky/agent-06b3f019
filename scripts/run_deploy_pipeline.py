@@ -130,6 +130,25 @@ them.
   with the operator's next action (the exact resume command) and never
   dispatches (the #1639 chain dispatched while Fly was still cutting over and
   4/5 production semantic jobs failed, 2026-10-30).
+* ``production-render`` is the Step 13a Render wait: it polls the Render
+  deploys API for the merged SHA. A deploy for that SHA is the authority
+  (``live`` opens the gate, a failed status blocks it, otherwise keep
+  polling). When Render created none (auto-deploy skips a commit with no
+  change under its Root Directory; #1652 and #1655 spun to the bound,
+  2026-10-31), the live deploy's commit opens the gate as
+  ``source-equivalent`` only when ``git diff <live> <merged> -- back-end/
+  render.yaml package.json package-lock.json`` is empty and the live commit
+  is an ancestor of the merged SHA (Render skipped the merge) or a
+  descendant of it (a later PR deployed the identical backend); this assumes
+  the Render service's Root Directory is back-end with no build filters. A
+  descendant that changed those paths is refused (the merged backend never
+  ran as-is: a manual decision) and an unrelated live commit keeps the
+  bounded wait. It records ``render`` (status, live_commit,
+  observed_live_commit on every poll, merged_sha, backend_diff, equivalence
+  evidence with a reason code) in ``production.json`` and prints
+  ``RENDER_LIVE`` or ``RENDER_SOURCE_EQUIVALENT live=<sha> merged=<sha>
+  reason=<code>``. Credential, Render API and git failures exit 2 and
+  never pass.
 * ``production-semantic`` is the Step 13b dispatch itself. It requires the
   passed ``production`` receipt for the same merged SHA, dispatches
   ``chat-lifecycle-ratchet.yml`` on ``main`` with ``source_sha=<merged SHA>``
@@ -238,6 +257,8 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -3041,8 +3062,8 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
                expected_hash: str | None = None, timeout: float = DEFAULT_FLY_TIMEOUT,
                start_timeout: float = DEFAULT_FLY_START_TIMEOUT, poll_seconds: float = DEFAULT_FLY_POLL_SECONDS) -> int:
     """Gate the production semantic dispatch on every exercised surface being
-    live. Render/Vercel waits stay in deploy.md Step 13/13a; this command owns
-    the Fly lane: when the merge touches agent runtime files (or
+    live. The Vercel wait stays in deploy.md Step 13 and the Render wait is
+    ``production-render`` (Step 13a); this command owns the Fly lane: when the merge touches agent runtime files (or
     deploy-agents.yml) it waits for the exact deploy-agents.yml run on the
     merged SHA to complete, recovers its durable job id, runs the Step 13ab
     proof (job SUCCEEDED + identity + monitor --verify), and only then runs
@@ -3051,7 +3072,8 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
     operator's next action and never dispatches. The receipt
     ``production.json`` in ``state_dir`` records the decision, the run
     id/attempt/job id, the run conclusion and job stage separately, and every
-    GitHub wait."""
+    GitHub wait. The ``render`` lane (``production-render``, Step 13a) of the
+    same merged SHA is carried forward and never overwritten."""
     root = SOURCE_ROOT if root is None else root
     state_dir.mkdir(parents=True, exist_ok=True)
     receipt_path = state_dir / PRODUCTION_RECEIPT
@@ -3065,18 +3087,18 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
     # or `--retry-failed-once` binds to that run and a second retry stays refused.
     previous = _read_production_receipt(receipt_path)
     if isinstance(previous, dict) and previous.get("merged_sha") == merged_sha:
-        for key in ("semantic", "semantic_history"):
+        for key in ("semantic", "semantic_history", "render"):
             if key in previous:
                 receipt[key] = previous[key]
         waits.extend(wait for wait in previous.get("github_waits") or []
                      if isinstance(wait, dict) and wait.get("workflow") == SEMANTIC_WORKFLOW)
-    write_receipt(receipt_path, receipt)
+    _write_production_receipt(receipt_path, receipt)
 
     def finish(status: str, code: int, error: str | None = None) -> int:
         receipt.update(status=status, finished_at=_now(), wall_s=round(time.time() - receipt["started_epoch"], 1))
         if error:
             receipt["error"] = error
-        write_receipt(receipt_path, receipt)
+        _write_production_receipt(receipt_path, receipt)
         return code
 
     try:
@@ -3092,17 +3114,17 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
                 fly_wait(merged_sha, root=root, waits=waits, state=receipt["fly"], timeout=timeout,
                          start_timeout=start_timeout, poll_seconds=poll_seconds)
             except ProductionGateError:
-                write_receipt(receipt_path, receipt)
+                _write_production_receipt(receipt_path, receipt)
                 raise
             fly = receipt["fly"]
             print(f"PIPELINE_PRODUCTION fly=completed run={fly['run_id']} attempt={fly['attempt']} "
                   f"conclusion={fly['conclusion']} job={fly['job_id']}", flush=True)
-            write_receipt(receipt_path, receipt)
+            _write_production_receipt(receipt_path, receipt)
             expected = expected_hash or surface_hash(root)
             try:
                 receipt["cutover_verify"] = cutover_verify(fly, merged_sha, expected, root=root)
             except ProductionGateError:
-                write_receipt(receipt_path, receipt)  # keeps fly.job_stage for the operator
+                _write_production_receipt(receipt_path, receipt)  # keeps fly.job_stage for the operator
                 raise
             print(f"PIPELINE_PRODUCTION cutover=verified job={fly['job_id']} job_stage={fly['job_stage']} "
                   f"hash={expected}", flush=True)
@@ -3120,7 +3142,7 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
         return finish("failed", 2, message)
     if dispatch:
         receipt["semantic_dispatch"] = {"command": list(dispatch), "at": _now(), "exit": None}
-        write_receipt(receipt_path, receipt)
+        _write_production_receipt(receipt_path, receipt)
         completed = subprocess.run(dispatch, cwd=root)
         receipt["semantic_dispatch"]["exit"] = completed.returncode
         print(f"PIPELINE_PRODUCTION dispatch exit={completed.returncode}", flush=True)
@@ -3130,6 +3152,320 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
         receipt["semantic_dispatch"] = {"command": None, "gate": "open"}
     print(f"PIPELINE_PRODUCTION status=open exit=0 head={merged_sha} receipt={receipt_path}", flush=True)
     return finish("passed", 0)
+
+
+# ── Post-merge Render lane (deploy.md Step 13a step 1) ────────────────────────
+# ``production-render`` waits for Render to serve the merged backend. Render
+# auto-deploy skips a commit that changes nothing under the service's Root
+# Directory (back-end/), so no deploy for the merged SHA ever appears; the raw
+# exact-SHA poll then spun to its bound twice on 2026-10-31 (#1652, #1655)
+# until a human proved by hand that the live deploy's commit is an ancestor of
+# the merged SHA with no backend change between them. That proof is now the
+# CLI's: the live backend IS the merged backend (``source-equivalent``),
+# recorded in ``production.json`` beside the Fly and semantic lanes of the
+# same merged SHA.
+RENDER_API_BASE = "https://api.render.com/v1"
+# Paths whose change can change the backend Render builds: the service root,
+# the Blueprint file should one land, and the root npm workspace manifests
+# (Render's build with Root Directory back-end resolves the root workspace
+# graph; deploy.md treats root package.json / package-lock.json as backend
+# inputs, see docs/rca/cases/2026-07-25-floating-dep-spec-without-frontend-
+# lockfile-breaks-render-build.md). Equivalence assumes the Render service's
+# Root Directory is back-end with no build filters. Any change under these
+# paths keeps the exact-SHA wait.
+RENDER_SERVICE_PATHS = ("back-end/", "render.yaml", "package.json", "package-lock.json")
+RENDER_FAILED_STATUSES = frozenset({"build_failed", "update_failed", "canceled", "pre_deploy_failed"})
+# deploy.md Step 13a: 90 x 10 s (Render builds can be slow).
+DEFAULT_RENDER_TIMEOUT = 900.0
+DEFAULT_RENDER_POLL_SECONDS = 10.0
+RENDER_HTTP_TIMEOUT_SECONDS = 30.0
+RENDER_DEPLOYS_LIMIT = 20
+
+
+class ProductionToolingError(RuntimeError):
+    """The gate could not decide (credentials, provider API, git): exit 2,
+    never a pass; the message names what to repair before rerunning."""
+
+
+def _write_production_receipt(path: Path, receipt: dict) -> None:
+    """Write a lane's view of ``production.json`` without dropping the Render
+    lane another process records in the same file for the same merged SHA:
+    deploy.md Step 13a runs ``production-render`` beside the Fly/semantic
+    commands, and only ``production-render`` writes ``render``, so the copy on
+    disk is authoritative for that key."""
+    current = _read_production_receipt(path)
+    if isinstance(current, dict) and current.get("merged_sha") == receipt.get("merged_sha") and "render" in current:
+        receipt["render"] = current["render"]
+    write_receipt(path, receipt)
+
+
+def render_credentials(root: Path) -> tuple[str, str]:
+    """``RENDER_API_KEY`` / ``RENDER_SERVICE_ID`` from the environment or
+    ``back-end/.env`` (deploy.md sources it); values are never printed."""
+    values = _dotenv_values(root / "back-end" / ".env")
+    key = os.environ.get("RENDER_API_KEY") or values.get("RENDER_API_KEY", "")
+    service = os.environ.get("RENDER_SERVICE_ID") or values.get("RENDER_SERVICE_ID", "")
+    missing = [name for name, value in (("RENDER_API_KEY", key), ("RENDER_SERVICE_ID", service)) if not value]
+    if missing:
+        raise ProductionToolingError(
+            f"{' and '.join(missing)} not set (environment or back-end/.env); the Render lane cannot be verified "
+            "without the Render API: restore back-end/.env from the authoritative env files and rerun")
+    return key, service
+
+
+def render_deploys(service_id: str, api_key: str, *, base: str | None = None) -> list[dict]:
+    """The service's newest deploys (``GET /services/<id>/deploys``), newest
+    first, unwrapped from Render's ``{"deploy": ..., "cursor": ...}`` rows. Any
+    HTTP, network or JSON failure raises ``ProductionToolingError``: the
+    gate fails closed instead of guessing."""
+    base = (base or os.environ.get("DEPLOY_RENDER_API_BASE") or RENDER_API_BASE).rstrip("/")
+    url = f"{base}/services/{service_id}/deploys?limit={RENDER_DEPLOYS_LIMIT}"
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=RENDER_HTTP_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8") or "null")
+    except urllib.error.HTTPError as error:
+        raise ProductionToolingError(
+            f"Render API GET {url} returned HTTP {error.code}; the live backend cannot be verified: check the Render "
+            "API key/service id and Render status, then rerun this gate") from error
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        raise ProductionToolingError(
+            f"Render API GET {url} failed ({type(error).__name__}: {error}); the live backend cannot be verified: "
+            "rerun this gate once the Render API is reachable") from error
+    if not isinstance(payload, list):
+        raise ProductionToolingError(f"Render API GET {url} returned {type(payload).__name__}, not a deploy list")
+    deploys: list[dict] = []
+    for row in payload:
+        if isinstance(row, dict):
+            deploy = row.get("deploy", row)
+            if isinstance(deploy, dict):
+                deploys.append(deploy)
+    return deploys
+
+
+def _render_commit(deploy: dict) -> str:
+    commit = deploy.get("commit")
+    return str(commit.get("id") or "") if isinstance(commit, dict) else ""
+
+
+def render_deploy_for(deploys: list[dict], merged_sha: str) -> dict | None:
+    """The newest deploy Render created for the merged commit, if any."""
+    for deploy in deploys:
+        if _render_commit(deploy) == merged_sha:
+            return deploy
+    return None
+
+
+def render_live_deploy(deploys: list[dict]) -> dict | None:
+    """The deploy currently serving traffic (newest ``live`` row)."""
+    for deploy in deploys:
+        if deploy.get("status") == "live":
+            return deploy
+    return None
+
+
+def _git_lines(arguments: list[str], root: Path) -> list[str]:
+    completed = subprocess.run(["git", *arguments], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, timeout=300)
+    if completed.returncode != 0:
+        raise ProductionToolingError(f"git {' '.join(arguments[:3])} failed: {completed.stderr.strip()}")
+    return [line for line in completed.stdout.splitlines() if line]
+
+
+def _is_ancestor(older: str, newer: str, root: Path) -> bool:
+    """``git merge-base --is-ancestor older newer``; a commit unknown to this
+    checkout (or any other git failure) is a tooling error, never an answer."""
+    completed = subprocess.run(["git", "merge-base", "--is-ancestor", older, newer], cwd=root,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300)
+    if completed.returncode not in (0, 1):
+        raise ProductionToolingError(
+            f"git merge-base --is-ancestor {older} {newer} failed ({completed.stderr.strip()}); fetch origin main so "
+            "both commits are known locally, then rerun this gate")
+    return completed.returncode == 0
+
+
+def render_source_equivalence(live_commit: str, merged_sha: str, root: Path | None = None) -> dict:
+    """Is the live deploy's backend the merged backend? Yes only when nothing
+    under ``RENDER_SERVICE_PATHS`` differs between the two commits AND they lie
+    on one line of history: the live commit is an ancestor of the merged SHA
+    (the merge built on what is live and Render skipped it: nothing under its
+    Root Directory changed) or a descendant of it (another PR deployed after
+    the merge without touching those paths, so the live backend is
+    byte-identical to the merged one). A descendant that changed those paths
+    is refused: the merged backend never ran as-is, which is a manual
+    decision. An unrelated live commit is never equivalent. ``reason`` is one
+    of ``live-ancestor-same-backend``, ``live-descendant-same-backend``,
+    ``live-ancestor-backend-changed``, ``live-descendant-backend-changed``,
+    ``live-unrelated``; ``detail`` explains it. A live commit unknown to this
+    checkout is a tooling error (fetch origin), never a pass."""
+    root = SOURCE_ROOT if root is None else root
+    live_is_ancestor = _is_ancestor(live_commit, merged_sha, root)
+    live_is_descendant = not live_is_ancestor and _is_ancestor(merged_sha, live_commit, root)
+    relationship = "ancestor" if live_is_ancestor else "descendant" if live_is_descendant else "unrelated"
+    backend_diff = _git_lines(["diff", "--name-only", live_commit, merged_sha, "--", *RENDER_SERVICE_PATHS], root)
+    changed = _git_lines(["diff", "--name-only", live_commit, merged_sha], root)
+    paths = ", ".join(RENDER_SERVICE_PATHS)
+    live_short, merged_short = live_commit[:9], merged_sha[:9]
+    if relationship == "unrelated":
+        reason = "live-unrelated"
+        detail = (f"live commit {live_short} is neither an ancestor nor a descendant of merged {merged_short}; "
+                  "its backend history is unrelated to the merge")
+    elif backend_diff:
+        reason = f"live-{relationship}-backend-changed"
+        detail = f"{len(backend_diff)} path(s) under {paths} differ between live {live_short} and merged {merged_short}"
+        detail += ("; the merged backend never ran as-is: a manual decision, never automatic equivalence"
+                   if live_is_descendant else "; Render builds the merged backend")
+    else:
+        reason = f"live-{relationship}-same-backend"
+        detail = (f"live commit {live_short} is an {relationship} of merged {merged_short} with no change under "
+                  f"{paths} between them")
+        detail += (" (Render auto-deploy skipped the merge: nothing under its Root Directory changed)"
+                   if live_is_ancestor else " (a later deploy of the identical backend)")
+    return {"live_commit": live_commit, "merged_sha": merged_sha, "live_is_ancestor": live_is_ancestor,
+            "live_is_descendant": live_is_descendant, "relationship": relationship,
+            "service_paths": list(RENDER_SERVICE_PATHS), "backend_diff": backend_diff,
+            "changed_files": changed[:40], "changed_count": len(changed),
+            "equivalent": relationship != "unrelated" and not backend_diff, "reason": reason, "detail": detail}
+
+
+def render_wait(merged_sha: str, *, root: Path, state: dict, fetch, timeout: float = DEFAULT_RENDER_TIMEOUT,
+                poll_seconds: float = DEFAULT_RENDER_POLL_SECONDS, sleep=time.sleep, log=print) -> dict:
+    """Poll ``fetch()`` (the service's deploys) until the merged backend is
+    served. A deploy for the merged SHA is the authority when Render created
+    one: ``live`` opens the gate, a failed status blocks it, anything else
+    keeps polling. With no deploy for the merged SHA, the live deploy's commit
+    is tested once per distinct commit with ``render_source_equivalence``;
+    equivalence opens the gate as ``source-equivalent``. The bound elapses
+    into ``timeout`` (blocked, as before). ``state`` records every fact as it
+    is learned, including ``observed_live_commit`` on every poll, so a
+    blocked gate's receipt still names what was live."""
+    state.update(status="waiting", live_commit=None, observed_live_commit=None, observed_live_deploy_id=None,
+                 deploy_id=None, deploy_status=None, backend_diff=None, equivalence=None, polls=0)
+    started = time.monotonic()
+    evaluated: dict[str, dict] = {}
+    last_seen = "none"
+    while True:
+        state["polls"] += 1
+        deploys = fetch()
+        mine = render_deploy_for(deploys, merged_sha)
+        live = render_live_deploy(deploys)
+        live_commit = _render_commit(live) if live else ""
+        state.update(observed_live_commit=live_commit or None, observed_live_deploy_id=live.get("id") if live else None)
+        if mine is not None:
+            status = str(mine.get("status") or "")
+            last_seen = status or "unknown"
+            state.update(deploy_id=mine.get("id"), deploy_status=status)
+            log(f"  Render: status={status} commit={merged_sha[:7]} (want {merged_sha[:7]}); "
+                f"live commit={live_commit[:7] or 'none'}", flush=True)
+            if status == "live":
+                state.update(status="live", live_commit=merged_sha, backend_diff=[],
+                             waited_s=round(time.monotonic() - started, 1))
+                return state
+            if status in RENDER_FAILED_STATUSES:
+                state.update(status="deploy-failed", waited_s=round(time.monotonic() - started, 1))
+                raise ProductionGateError(
+                    f"Render deploy {status} for {merged_sha[:7]} (deploy {mine.get('id')}); fetch its logs "
+                    f"(GET /v1/services/<service>/deploys/{mine.get('id')} or the Render dashboard), fix, new PR, "
+                    "continue from deploy.md Step 9")
+        else:
+            last_seen = f"no deploy for {merged_sha[:7]}"
+            log(f"  Render: no deploy for {merged_sha[:7]}; live commit={live_commit[:7] or 'none'}", flush=True)
+            if live_commit and live_commit != merged_sha:
+                if live_commit not in evaluated:
+                    evaluated[live_commit] = render_source_equivalence(live_commit, merged_sha, root)
+                    state["equivalence"] = evaluated[live_commit]
+                    state["backend_diff"] = evaluated[live_commit]["backend_diff"]
+                    log(f"  Render: live={live_commit[:9]} equivalent={evaluated[live_commit]['equivalent']} "
+                        f"reason={evaluated[live_commit]['reason']}: {evaluated[live_commit]['detail']}", flush=True)
+                if evaluated[live_commit]["equivalent"]:
+                    state.update(status="source-equivalent", live_commit=live_commit, deploy_id=live.get("id"),
+                                 deploy_status="live", backend_diff=[], waited_s=round(time.monotonic() - started, 1))
+                    return state
+        if time.monotonic() - started >= timeout:
+            state.update(status="timeout", waited_s=round(time.monotonic() - started, 1))
+            verdict = ""
+            if live_commit and live_commit != merged_sha:
+                reason = evaluated.get(live_commit, {}).get("reason", "unevaluated")
+                verdict = f"; live commit {live_commit[:9]} is not source-equivalent ({reason})"
+            raise ProductionGateError(
+                f"Render did not bring {merged_sha[:7]} live within {timeout:.0f}s (last status: {last_seen}{verdict}); "
+                "check the Render dashboard for a deploy of the merged commit and rerun this gate")
+        sleep(poll_seconds)
+
+
+def production_render(merged_sha: str, state_dir: Path, then: list[str] | None = None, *, root: Path | None = None,
+                      timeout: float = DEFAULT_RENDER_TIMEOUT, poll_seconds: float = DEFAULT_RENDER_POLL_SECONDS,
+                      sleep=time.sleep, fetch=None) -> int:
+    """deploy.md Step 13a step 1 as a CLI. Resolves the Render credentials,
+    runs ``render_wait`` and records the lane under ``render`` in
+    ``production.json`` (merged into the receipt of the same merged SHA, never
+    replacing the Fly/semantic lanes). Prints ``RENDER_LIVE commit=<sha>`` or
+    ``RENDER_SOURCE_EQUIVALENT live=<sha> merged=<sha> reason=<code>`` and
+    then runs the optional command after ``--`` only when the gate opened,
+    recording its exit (the regression uses it to prove the gate opened;
+    deploy.md's Step 13a probes follow in their own blocks). Exit 0 = the live
+    backend is the merged backend, 1 = blocked (Render deploy failed or the
+    bound elapsed), 2 = could not decide (credentials, Render API, git); a
+    non-zero ``then`` exit is returned as is."""
+    root = SOURCE_ROOT if root is None else root
+    state_dir.mkdir(parents=True, exist_ok=True)
+    receipt_path = state_dir / PRODUCTION_RECEIPT
+    entry: dict = {"provider": "render", "merged_sha": merged_sha, "started_at": _now(), "status": "starting",
+                   "service_paths": list(RENDER_SERVICE_PATHS), "then": None}
+    started_epoch = time.time()
+
+    def save() -> None:
+        current = _read_production_receipt(receipt_path)
+        if not isinstance(current, dict) or current.get("merged_sha") != merged_sha:
+            current = {"schema_version": PRODUCTION_SCHEMA, "merged_sha": merged_sha}
+        current["render"] = entry
+        write_receipt(receipt_path, current)
+
+    def finish(code: int, error: str | None = None) -> int:
+        entry.update(finished_at=_now(), wall_s=round(time.time() - started_epoch, 1))
+        if error:
+            entry["error"] = error
+        save()
+        print(f"RENDER_LANE_END {entry['finished_at']} exit={code} status={entry['status']}", flush=True)
+        return code
+
+    print(f"RENDER_LANE_START {entry['started_at']} merged={merged_sha}", flush=True)
+    save()
+    try:
+        if fetch is None:
+            api_key, service_id = render_credentials(root)
+
+            def fetch() -> list[dict]:
+                return render_deploys(service_id, api_key)
+        render_wait(merged_sha, root=root, state=entry, fetch=fetch, timeout=timeout, poll_seconds=poll_seconds,
+                    sleep=sleep)
+    except ProductionGateError as error:
+        print(f"PIPELINE_RENDER status=blocked exit=1 {error}", flush=True)
+        return finish(1, str(error))
+    except (ProductionToolingError, subprocess.TimeoutExpired, OSError) as error:
+        if entry.get("status") in (None, "starting", "waiting"):
+            entry["status"] = "error"
+        print(f"PIPELINE_RENDER status=error exit=2 {error}", flush=True)
+        return finish(2, str(error))
+    if entry["status"] == "source-equivalent":
+        equivalence = entry["equivalence"]
+        print(f"RENDER_SOURCE_EQUIVALENT live={entry['live_commit']} merged={merged_sha} "
+              f"reason={equivalence['reason']}: {equivalence['detail']}; the live backend is the merged backend",
+              flush=True)
+    else:
+        print(f"RENDER_LIVE commit={merged_sha} deploy={entry.get('deploy_id')}", flush=True)
+    save()
+    if then:
+        entry["then"] = {"command": list(then), "at": _now(), "exit": None}
+        save()
+        completed = subprocess.run(then, cwd=root)
+        entry["then"]["exit"] = completed.returncode
+        print(f"PIPELINE_RENDER then exit={completed.returncode}", flush=True)
+        if completed.returncode != 0:
+            return finish(completed.returncode, f"follow-up command exited {completed.returncode}")
+    print(f"PIPELINE_RENDER status=open exit=0 head={merged_sha} live={entry['live_commit']} "
+          f"receipt={receipt_path}", flush=True)
+    return finish(0)
 
 
 # ── Post-merge production semantic gate (deploy.md Step 13b) ──────────────────
@@ -3334,7 +3670,7 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
         entry.update(outcome=outcome, finished_at=_now(), wall_s=round(time.time() - started_epoch, 1))
         if error:
             entry["error"] = error
-        write_receipt(receipt_path, receipt)
+        _write_production_receipt(receipt_path, receipt)
         print(f"SEMANTIC_LANE_END {entry['finished_at']} exit={code}", flush=True)
         return code
 
@@ -3348,7 +3684,7 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
         _gh_text(["run", "rerun", run_id, "--failed"], root)
         entry["retry"] = {"justification": justification, "at": _now(), "previous_attempt": entry.get("attempt"),
                           "previous_conclusion": entry.get("conclusion"), "failed_jobs": failed_jobs, "attempt": None}
-        write_receipt(receipt_path, receipt)
+        _write_production_receipt(receipt_path, receipt)
         _semantic_wait_complete(run_id, root=root, waits=waits, entry=entry, min_attempt=int(entry.get("attempt") or 1) + 1,
                                 timeout=timeout, poll_seconds=poll_seconds, sleep=sleep)
         entry["retry"]["attempt"] = entry.get("attempt")
@@ -3359,12 +3695,12 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
         ``gh run list`` or a discovery timeout never dispatches the gate twice."""
         dispatched_at = datetime.now(timezone.utc).replace(microsecond=0)
         entry["dispatch"]["at"] = dispatched_at.strftime("%Y-%m-%dT%H:%M:%SZ")
-        write_receipt(receipt_path, receipt)
+        _write_production_receipt(receipt_path, receipt)
         _gh_text(["workflow", "run", SEMANTIC_WORKFLOW, "--ref", SEMANTIC_DISPATCH_REF,
                   "-f", f"source_sha={merged_sha}", "-f", f"frontend_url={frontend_url}",
                   "-f", f"backend_url={backend_url}"], root)
         entry["status"] = "dispatched"
-        write_receipt(receipt_path, receipt)
+        _write_production_receipt(receipt_path, receipt)
         print(f"PIPELINE_SEMANTIC dispatched workflow={SEMANTIC_WORKFLOW} ref={SEMANTIC_DISPATCH_REF} "
               f"source_sha={merged_sha} at={entry['dispatch']['at']}", flush=True)
         return dispatched_at
@@ -3396,7 +3732,7 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
             if retry and retry.get("attempt") is None:
                 retry["attempt"] = entry.get("attempt")
             if entry["conclusion"] != "success" and retry_justification is not None and not retry:
-                write_receipt(receipt_path, receipt)
+                _write_production_receipt(receipt_path, receipt)
                 rerun_failed(retry_justification)
         elif retrying_previous:
             print(f"PIPELINE_SEMANTIC resume run={entry['run_id']} conclusion={entry.get('conclusion')} "
@@ -3446,14 +3782,14 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
                          status=row.get("status"))
             waits.append({"workflow": SEMANTIC_WORKFLOW, "kind": "run-start", "head": merged_sha, "run_id": run_id,
                           "polls": polls, "waited_s": waited_s, "outcome": "found"})
-            write_receipt(receipt_path, receipt)
+            _write_production_receipt(receipt_path, receipt)
             print(f"SEMANTIC_RUN_ID={run_id}", flush=True)
             print(f"PIPELINE_SEMANTIC run={run_id} url={entry['url']} head_sha={entry['head_sha']} "
                   f"source_sha={merged_sha} created={entry['created_at']}", flush=True)
             _semantic_wait_complete(run_id, root=root, waits=waits, entry=entry, min_attempt=1, timeout=timeout,
                                     poll_seconds=poll_seconds, sleep=sleep)
             if entry["conclusion"] != "success" and retry_justification is not None:
-                write_receipt(receipt_path, receipt)
+                _write_production_receipt(receipt_path, receipt)
                 rerun_failed(retry_justification)
     except ProductionGateError as error:
         print(f"PIPELINE_SEMANTIC status=blocked exit=1 {error}", flush=True)
@@ -3568,6 +3904,18 @@ def main(argv: list[str] | None = None) -> int:
     semantic_parser.add_argument("--start-timeout", type=float, default=DEFAULT_SEMANTIC_START_TIMEOUT,
                                  help="seconds to wait for the dispatched run to appear")
     semantic_parser.add_argument("--poll-seconds", type=float, default=DEFAULT_SEMANTIC_POLL_SECONDS)
+    render_parser = sub.add_parser(
+        "production-render",
+        help="deploy.md Step 13a step 1: wait for Render to serve the merged backend (exact-SHA deploy live, or the "
+             "live commit is source-equivalent: an ancestor or descendant with no change under the Render service "
+             "paths), record it under `render` in production.json, then run the optional command after `--`")
+    render_parser.add_argument("--merged-sha", required=True, type=_full_sha)
+    render_parser.add_argument("--state-dir", type=Path, required=True)
+    render_parser.add_argument("--timeout", type=float, default=DEFAULT_RENDER_TIMEOUT,
+                               help="seconds to wait for the merged backend (deploy.md: 90 x 10 s)")
+    render_parser.add_argument("--poll-seconds", type=float, default=DEFAULT_RENDER_POLL_SECONDS)
+    render_parser.add_argument("then", nargs=argparse.REMAINDER,
+                               help="optional command to run only once the merged backend is live (after `--`)")
     simulate_parser = sub.add_parser("simulate", help="project the Group 3 union wall: phased vs legacy")
     simulate_parser.add_argument("--plan", type=Path, required=True)
     simulate_parser.add_argument("--max-parallel", type=int, default=None)
@@ -3605,6 +3953,12 @@ def main(argv: list[str] | None = None) -> int:
             dispatch.pop(0)
         return production(args.merged_sha, args.state_dir, dispatch or None, expected_hash=args.expected_hash,
                           timeout=args.timeout, start_timeout=args.start_timeout, poll_seconds=args.poll_seconds)
+    if args.action == "production-render":
+        then = list(args.then)
+        if then and then[0] == "--":
+            then.pop(0)
+        return production_render(args.merged_sha, args.state_dir, then or None, timeout=args.timeout,
+                                 poll_seconds=args.poll_seconds)
     if args.action == "production-semantic":
         return production_semantic(args.merged_sha, args.state_dir, frontend_url=args.frontend_url,
                                    backend_url=args.backend_url, retry_justification=args.retry_failed_once,
