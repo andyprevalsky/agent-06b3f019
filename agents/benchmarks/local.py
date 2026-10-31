@@ -3088,6 +3088,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     result_paths: list[Path] = []
     benchmark_owner = LocalBenchmarkOwner(stack)
     if stack.isolated:
+        # Every child started from here on (run.sh, run_benchmark.py, tunnels,
+        # the dashboard) inherits the run id, so the deploy pipeline's
+        # owner-run classification sees a carrier for a custom run id too (a
+        # generated id already embeds this controller's pid). A runtime
+        # environment write never reaches this process's own /proc environ;
+        # the controller itself is recognised by its ``--run-id`` argument.
+        os.environ["BENCHMARK_RUN_ID"] = stack.run_id
         benchmark_owner.record("not_started")
     previous_isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES")
     # Isolated stacks and --use-existing local stacks both key browser-provider

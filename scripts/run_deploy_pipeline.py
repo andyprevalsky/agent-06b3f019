@@ -253,6 +253,7 @@ from collections.abc import Mapping
 import json
 import os
 import re
+import runpy
 import signal
 import subprocess
 import sys
@@ -1427,8 +1428,8 @@ def fix_loop_state(receipts: list[dict], cap: int) -> dict:
             rounds = 0
             classes = {}
             continue
-        if receipt.get("status") != "failed" or receipt.get("interrupted"):
-            continue  # a signalled run never completed a round
+        if receipt.get("status") != "failed" or receipt.get("interrupted") or receipt.get("refused"):
+            continue  # a signalled run, or a launch refused by the owner-run preflight, never completed a round
         rounds += 1
         for name in sorted(_failed_lanes(receipt)):
             classes.setdefault(name, []).append(_lane_failure_class(receipt, name))
@@ -1790,8 +1791,11 @@ def teardown_lane(name: str, *, attempt: int, token: str, started_epoch: float, 
     foreign_seen: dict[int, dict] = {}
 
     def observe() -> tuple[list[dict], list[int], dict[int, dict]]:
-        records, older = lane_owner_records(context_root, started_epoch)
+        # Liveness first, records second: a controller that publishes its
+        # clean receipt and exits between the two reads is then reported with
+        # that receipt, never with the stale pending one read before it exited.
         owned, processes = lane_owned_processes(token, proc, cache)
+        records, older = lane_owner_records(context_root, started_epoch)
         _classify_records(records, owned, processes)
         receipt["records"], receipt["older_run_dirs"] = records, older
         for record in records:
@@ -1851,6 +1855,13 @@ def teardown_lane(name: str, *, attempt: int, token: str, started_epoch: float, 
             phase("kill", alive, since, signalled=killed, note=TEARDOWN_LAST_RESORT_NOTE)
             outcome = "killed" if not alive else "failed"
     receipt["lingering"] = [{"pid": pid, "comm": info["comm"]} for pid, info in sorted(owned.items())]
+    # The lane's own run directories (records written since it started): an
+    # aborted one (stopped before its controller bound a pid) is set aside now
+    # so no later launch preflight trips over its pid-less record; a run still
+    # inside the bootstrap grace is left for the next attempt's preflight.
+    receipt["owner_runs"] = reconcile_owner_runs(
+        context_root, state_dir, stage=f"attempt-{attempt}-teardown-{name}", proc=proc,
+        run_ids={record["run_id"] for record in records})
     receipt.update(outcome=outcome, survivors=alive, finished_at=_now(),
                    wall_s=round(time.monotonic() - started, 2))
     path = state_dir / "teardown" / f"attempt-{attempt}-{name}.json"
@@ -1870,6 +1881,9 @@ def _teardown_summary(receipt: dict) -> dict:
         "escalated": [s["pid"] for p in receipt["phases"] if p["phase"] == "term" for s in p["signalled"]],
         "killed": [s["pid"] for p in receipt["phases"] if p["phase"] == "kill" for s in p["signalled"]],
         "eperm": sorted({s["pid"] for s in signalled if s.get("error") == "eperm"}),
+        "set_aside": [run["run_id"] for run in receipt.get("owner_runs", {}).get("set_aside", [])],
+        "owner_runs": {run["run_id"]: run["classification"]
+                       for run in receipt.get("owner_runs", {}).get("runs", [])},
     }
 
 
@@ -1881,7 +1895,465 @@ def _teardown_log_line(attempt: int, name: str, summary: dict) -> str:
             f"owned={pids(summary['owned_pids'])} foreign={pids(summary['foreign_pids'])} "
             f"escalated={pids(summary['escalated'])} killed={pids(summary['killed'])} "
             f"eperm={pids(summary['eperm'])} survivors={pids(summary['survivors'])} "
+            f"set_aside={','.join(summary.get('set_aside', [])) or '-'} "
             f"wall_s={summary['wall_s']} receipt={summary['receipt']}")
+
+# ── Owner-run classification ──────────────────────────────────────────────────
+# An isolated benchmark run that was stopped before its controller started
+# leaves a pid-less owner record behind: ``local-benchmark-owner.json`` with
+# ``"state": "not_started", "pid": null`` (benchmarks/local.py writes it before
+# the benchmark child binds) and/or a ``local-stack-owner.json`` without a
+# positive pid. Twice on 2026-10-31 (deploy-5 round 1, PR #1655 round 2) a
+# launch preflight refused the whole deploy on such a record ("no positive
+# integer pid in …") until a human moved the directory to
+# ``.context/benchmarks/_aborted/``. Every reader of these records now shares
+# one classification, per run directory:
+#
+#   live           an owner pid alive with its recorded native identity (or an
+#                  identity that cannot be read), the run id's controller
+#                  (``benchmarks/local.py``) or a starting/running manifest's
+#                  ``run.sh``, or any process carrying the run id: a
+#                  ``BENCHMARK_RUN_ID`` environment entry, a ``--run-id`` on
+#                  its command line (a custom id cannot embed the controller
+#                  pid), or, when its environment cannot be read, a command
+#                  line naming the run
+#   finished       owners were recorded with pids and none lives (reused pids
+#                  with another identity count as exited)
+#   bootstrapping  no owner pid yet, the newest file under the run is younger
+#                  than the bootstrap grace (``BENCHMARK_STARTUP_GRACE_SECONDS``,
+#                  the same window run.sh and kill-services.sh protect, 90 s by
+#                  default) and nothing shows the bootstrap ended: protected
+#   aborted        no owner pid, no process carries the run id, the run is
+#                  older than the grace (or its manifest shows the bootstrap is
+#                  over) and it left no manifest at all or a ``clean`` cleanup
+#                  receipt: nothing remains to reconcile
+#   stranded       like aborted, but a manifest exists without a clean cleanup
+#                  receipt (run.sh killed mid-bootstrap or mid-EXIT trap, the
+#                  teardown's own SIGKILL): reported and left in place so
+#                  ``scripts/run-bench --local --run-id <id> --reconcile-cleanup``
+#                  still finds its owner record where the teardown note says
+#   unknown        a record cannot be read, the context root is a symlink, or
+#                  the process table is unavailable (non-Linux, /proc cannot be
+#                  listed): fail closed, never signal, never set aside
+#
+# The launch preflight (every attempt, before any lane starts) and the lane
+# teardown set ``aborted`` runs aside under ``_aborted/`` (renamed after a
+# fresh re-classification, never deleted, with the classification written
+# beside the evidence) and append a line to ``<state-dir>/owner-runs.jsonl``.
+# The preflight acts only on this deploy's own runs (those its earlier lane
+# teardowns named); another session's run-bench --local under this checkout
+# is classified and reported, never renamed and never waited on. A
+# ``bootstrapping`` own run makes the preflight wait for the grace to pass;
+# any ``unknown`` run refuses the launch. Only this checkout's
+# ``.context/benchmarks`` is ever read or renamed. The shell readers
+# (kill-services.sh ``load_live_isolated_runs``, run.sh
+# ``pid_belongs_to_active_isolated_benchmark``, isolated-benchmarks.sh
+# ``live_isolated_benchmark_runs``) already treat pid-less records as not live
+# and protect the same grace window; they keep their own narrower sweeps.
+OWNER_RUN_LIVE = "live"
+OWNER_RUN_FINISHED = "finished"
+OWNER_RUN_ABORTED = "aborted"
+OWNER_RUN_STRANDED = "stranded"
+OWNER_RUN_BOOTSTRAPPING = "bootstrapping"
+OWNER_RUN_UNKNOWN = "unknown"
+OWNER_RUN_CLASSES = (OWNER_RUN_LIVE, OWNER_RUN_FINISHED, OWNER_RUN_ABORTED, OWNER_RUN_STRANDED,
+                     OWNER_RUN_BOOTSTRAPPING, OWNER_RUN_UNKNOWN)
+STACK_OWNER_NAME = "local-stack-owner.json"
+BENCHMARK_OWNER_NAME = "local-benchmark-owner.json"
+ABORTED_RUNS_DIR = "_aborted"
+ABORTED_RUN_MARK_NAME = "aborted-by-deploy-pipeline.json"
+OWNER_RUNS_RECEIPT_NAME = "owner-runs.jsonl"
+BENCHMARK_RUN_ID_ENV = "BENCHMARK_RUN_ID"
+BOOTSTRAP_GRACE_ENV = "BENCHMARK_STARTUP_GRACE_SECONDS"
+DEFAULT_BOOTSTRAP_GRACE_SECONDS = 90.0
+OWNER_RUNS_POLL_SECONDS = 1.0
+OWNER_RUN_SCAN_LIMIT = 20000
+PROCESS_IDENTITY_SCRIPT = ROOT / "scripts" / "process-identity.py"
+LIVE_MANIFEST_STATUSES = {"starting", "running"}
+
+
+def bootstrap_grace_seconds() -> float:
+    """The isolated-stack startup grace (same variable and validation as
+    kill-services.sh / run.sh): a run without a manifest is protected this long."""
+    raw = os.environ.get(BOOTSTRAP_GRACE_ENV, "")
+    if re.fullmatch(r"0|[1-9][0-9]{0,4}", raw):
+        return float(raw)
+    return DEFAULT_BOOTSTRAP_GRACE_SECONDS
+
+
+def _read_json_record(path: Path) -> tuple[dict | None, str | None]:
+    """(payload, error): (None, None) when absent; an error names why it is unreadable."""
+    if path.is_symlink():
+        return None, "symlink"
+    if not path.is_file():
+        return None, None
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError) as error:
+        return None, f"unreadable ({type(error).__name__})"
+    if not isinstance(payload, dict):
+        return None, "not a JSON object"
+    return payload, None
+
+
+def _newest_mtime(run_dir: Path) -> float:
+    """The newest modification time of the run directory or anything under it
+    (bounded walk, symlinks not followed): a bootstrap still writing logs is
+    young even when its owner records are not."""
+    newest = run_dir.stat().st_mtime
+    pending = [run_dir]
+    seen = 0
+    while pending and seen < OWNER_RUN_SCAN_LIMIT:
+        current = pending.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            seen += 1
+            try:
+                newest = max(newest, entry.stat(follow_symlinks=False).st_mtime)
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(Path(entry.path))
+            except OSError:
+                continue
+    return newest
+
+
+def _proc_cmdline(proc: Path, pid: int) -> str:
+    try:
+        raw = (proc / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return ""
+    return raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
+
+
+def _owner_run_process_table(proc: Path) -> dict[int, dict] | None:
+    """Every live process, or ``None`` when the table cannot be read (another
+    platform's real /proc, or a /proc that cannot be listed): like the memory
+    sampler, an unreadable table makes every run unknown, never finished."""
+    if sys.platform != "linux" and proc == PROC_ROOT:
+        return None
+    try:
+        os.listdir(proc)
+    except OSError:
+        return None
+    return _proc_processes(proc)
+
+
+def benchmark_run_id_carriers(proc: Path, processes: dict[int, dict], run_ids) -> dict[str, list[int]]:
+    """``{run_id: [pids]}`` for every live process that carries one of
+    ``run_ids``: a ``BENCHMARK_RUN_ID`` environment entry (local.py exports it
+    to run.sh and to every child it starts after writing the owner record), a
+    ``--run-id <run_id>`` on the command line (a benchmarks/local.py controller
+    with a custom id cannot embed its pid in the id, and a runtime
+    ``os.environ`` write never reaches /proc/<pid>/environ), or, when the
+    environment cannot be read (EACCES), a world-readable command line naming
+    the run id (its context directory, a log path)."""
+    needle = f"{BENCHMARK_RUN_ID_ENV}=".encode()
+    wanted = set(run_ids)
+    carriers: dict[str, list[int]] = {}
+    for pid in sorted(processes):
+        found: set[str] = set()
+        try:
+            environ: bytes | None = (proc / str(pid) / "environ").read_bytes()
+        except OSError:
+            environ = None
+        if environ is not None:
+            for entry in environ.split(b"\0"):
+                if entry.startswith(needle):
+                    found.add(entry[len(needle):].decode("utf-8", "replace"))
+        cmdline = _proc_cmdline(proc, pid)
+        if cmdline:
+            for run_id in wanted:
+                if f"--run-id {run_id}" in cmdline or f"--run-id={run_id}" in cmdline:
+                    found.add(run_id)
+                elif environ is None and run_id in cmdline:
+                    found.add(run_id)
+        for run_id in found & wanted:
+            carriers.setdefault(run_id, []).append(pid)
+    return carriers
+
+
+def native_process_identity(pid: int) -> str:
+    """scripts/process-identity.py's birth identity of a live pid; "" when it
+    cannot be read (exited, unreadable, or no helper beside this driver)."""
+    try:
+        tools = runpy.run_path(str(PROCESS_IDENTITY_SCRIPT))
+        identity = tools["current_identity"](pid)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, SyntaxError):
+        return ""
+    return identity if isinstance(identity, str) else ""
+
+
+def classify_owner_run(run_dir: Path, *, proc: Path, processes: dict[int, dict] | None,
+                       carriers: dict[str, list[int]], identity_of, now: float, grace_seconds: float) -> dict | None:
+    """One isolated run directory -> ``{"run_id", "path", "classification",
+    "reason", "pids", "age_s", "records"}``; ``None`` for a directory that is
+    not a run (no owner record, no manifest, no generated run id).
+    ``processes is None`` (unavailable table) makes every run unknown."""
+    run_id = run_dir.name
+    result: dict = {"run_id": run_id, "path": str(run_dir), "classification": OWNER_RUN_UNKNOWN,
+                    "reason": "", "pids": [], "age_s": None, "records": []}
+    if run_dir.is_symlink() or not run_dir.is_dir():
+        return None
+    generated = GENERATED_RUN_ID.fullmatch(run_id)
+    try:
+        newest = _newest_mtime(run_dir)
+    except OSError as error:
+        result["reason"] = f"run dir unreadable ({type(error).__name__})"
+        return result
+    payloads: dict[str, dict | None] = {}
+    errors: list[str] = []
+    for name in (STACK_OWNER_NAME, BENCHMARK_OWNER_NAME, STACK_MANIFEST_NAME):
+        payload, error = _read_json_record(run_dir / name)
+        payloads[name] = payload
+        if error:
+            errors.append(f"{name}: {error}")
+        elif payload is not None:
+            result["records"].append(name)
+    cleanup_state: str | None = None
+    cleanup_path = run_dir / STACK_CLEANUP_STATUS_NAME
+    if cleanup_path.is_symlink():
+        errors.append(f"{STACK_CLEANUP_STATUS_NAME}: symlink")
+    elif cleanup_path.is_file():
+        try:
+            cleanup_state = _cleanup_status_state(cleanup_path)
+            result["records"].append(STACK_CLEANUP_STATUS_NAME)
+        except OSError as error:
+            errors.append(f"{STACK_CLEANUP_STATUS_NAME}: unreadable ({type(error).__name__})")
+    if not result["records"] and not errors and not generated:
+        return None
+    result["age_s"] = round(max(0.0, now - newest), 1)
+    if errors:
+        result["reason"] = "; ".join(errors)
+        return result
+    if processes is None:
+        result["reason"] = "process table unavailable (not Linux, or /proc cannot be listed): fail closed"
+        return result
+    stack, bench, manifest = payloads[STACK_OWNER_NAME], payloads[BENCHMARK_OWNER_NAME], payloads[STACK_MANIFEST_NAME]
+    manifest_status = str(manifest.get("status", "")).strip().lower() if manifest else ""
+    manifest_pid = _record_pid(manifest, "run_sh_pid") if manifest else None
+
+    def live(reason: str, pids: list[int]) -> dict:
+        result.update(classification=OWNER_RUN_LIVE, reason=reason, pids=sorted(pids))
+        return result
+
+    carried = carriers.get(run_id) or []
+    if carried:
+        return live(f"run id {run_id} carried by live process(es)", carried)
+    for name, payload in ((STACK_OWNER_NAME, stack), (BENCHMARK_OWNER_NAME, bench)):
+        pid = _record_pid(payload, "pid") if payload else None
+        if pid is None or pid not in processes:
+            continue
+        recorded = payload.get("native_identity") if payload else None
+        current = identity_of(pid) if isinstance(recorded, str) and recorded else ""
+        if current and current != recorded:
+            continue  # the pid was reused by another process instance
+        return live(f"{name} pid alive" + (" with matching identity" if current else " (identity unverified)"), [pid])
+    if generated:
+        controller = int(generated.group(1))
+        if controller in processes and "benchmarks/local.py" in _proc_cmdline(proc, controller):
+            return live("run-id controller (benchmarks/local.py) alive", [controller])
+    if manifest_status in LIVE_MANIFEST_STATUSES and manifest_pid in processes \
+            and "run.sh" in _proc_cmdline(proc, manifest_pid):
+        return live(f"manifest {manifest_status} with run.sh alive", [manifest_pid])
+    bench_state = bench.get("state") if bench else None
+    never_started = (
+        (bench is not None and (bench_state == "not_started" or _record_pid(bench, "pid") is None))
+        or (stack is not None and _record_pid(stack, "pid") is None)
+        or (bench is None and stack is None and generated is not None)
+    )
+    evidence = []
+    if bench_state:
+        evidence.append(f"benchmark owner state={bench_state}")
+    if manifest_status:
+        evidence.append(f"manifest status={manifest_status}")
+    if cleanup_state:
+        evidence.append(f"cleanup state={cleanup_state}")
+    if not never_started:
+        result.update(classification=OWNER_RUN_FINISHED,
+                      reason="recorded owner pids exited" + (f" ({', '.join(evidence)})" if evidence else ""))
+        return result
+    bootstrap_over = (manifest is not None and (manifest_pid is None or manifest_status == "stopped")) \
+        or cleanup_state == "clean"
+    detail = f"no owner pid, no process carries the run id, newest file {result['age_s']}s old"
+    if result["age_s"] < grace_seconds and not bootstrap_over:
+        result.update(classification=OWNER_RUN_BOOTSTRAPPING,
+                      reason=f"{detail}, within the {grace_seconds:.0f}s bootstrap grace")
+        return result
+    why = "bootstrap ended: " + ", ".join(evidence) if bootstrap_over else f"older than the {grace_seconds:.0f}s bootstrap grace"
+    if manifest is None or cleanup_state == "clean":
+        result.update(classification=OWNER_RUN_ABORTED, reason=f"{detail}, {why}")
+        return result
+    receipt = "missing" if cleanup_state is None else f"state={cleanup_state}"
+    result.update(classification=OWNER_RUN_STRANDED,
+                  reason=f"{detail}, {why}; manifest status={manifest_status or '?'} with cleanup receipt {receipt}: "
+                         f"left for `scripts/run-bench --local --run-id {run_id} --reconcile-cleanup`")
+    return result
+
+
+def _unknown_root(context_root: Path, reason: str) -> dict:
+    return {"run_id": context_root.name, "path": str(context_root), "classification": OWNER_RUN_UNKNOWN,
+            "reason": reason, "pids": [], "age_s": None, "records": []}
+
+
+def classify_owner_runs(context_root: Path, *, proc: Path | None = None, identity_of=None,
+                        now: float | None = None, grace_seconds: float | None = None,
+                        run_ids: set[str] | None = None) -> list[dict]:
+    """Classify every isolated run directory under ``context_root`` (only the
+    given ``run_ids`` when set); ``_aborted/`` itself is never a run. A
+    symlinked root is one unknown entry (fail closed)."""
+    proc = PROC_ROOT if proc is None else proc
+    identity_of = native_process_identity if identity_of is None else identity_of
+    now = time.time() if now is None else now
+    grace_seconds = bootstrap_grace_seconds() if grace_seconds is None else grace_seconds
+    if context_root.is_symlink():
+        return [_unknown_root(context_root, "context root is a symlink: fail closed")]
+    results: list[dict] = []
+    if not context_root.is_dir():
+        return results
+    processes = _owner_run_process_table(proc)
+    candidates = [run_dir for run_dir in sorted(context_root.iterdir())
+                  if run_dir.name != ABORTED_RUNS_DIR and (run_ids is None or run_dir.name in run_ids)]
+    carriers = {} if processes is None else benchmark_run_id_carriers(proc, processes, [d.name for d in candidates])
+    for run_dir in candidates:
+        result = classify_owner_run(run_dir, proc=proc, processes=processes, carriers=carriers,
+                                    identity_of=identity_of, now=now, grace_seconds=grace_seconds)
+        if result is not None:
+            results.append(result)
+    return results
+
+
+def set_aside_aborted_run(run_dir: Path, context_root: Path, classification: dict) -> Path:
+    """Rename an aborted run directory under ``<context_root>/_aborted/`` (same
+    filesystem, evidence intact) and write the classification beside it."""
+    aside = context_root / ABORTED_RUNS_DIR
+    # Keep ``_aborted/`` as old as anything it holds: run.sh and
+    # kill-services.sh read any young manifest-less directory under
+    # .context/benchmarks as an in-flight bootstrap, and a rename would stamp
+    # it with the current time.
+    aside_mtime = run_dir.stat().st_mtime
+    if aside.is_dir():
+        aside_mtime = min(aside_mtime, aside.stat().st_mtime)
+    aside.mkdir(exist_ok=True)
+    destination = aside / run_dir.name
+    if destination.exists() or destination.is_symlink():
+        destination = aside / f"{run_dir.name}.{int(time.time())}-{os.getpid()}"
+    os.rename(run_dir, destination)
+    mark = {**classification, "set_aside_at": _now(), "set_aside_by": f"run_deploy_pipeline pid {os.getpid()}",
+            "original_path": str(run_dir)}
+    (destination / ABORTED_RUN_MARK_NAME).write_text(json.dumps(mark, indent=1, sort_keys=True) + "\n")
+    os.utime(aside, (aside_mtime, aside_mtime))
+    return destination
+
+
+def own_run_ids_from_state(state_dir: Path) -> set[str]:
+    """The run ids this state dir's earlier lane teardowns named (their
+    receipts' records and classifications, and the teardown rows of
+    ``owner-runs.jsonl``): the runs this deploy's own lanes started. Anything
+    else under the context root belongs to another session."""
+    own: set[str] = set()
+    teardown_dir = state_dir / "teardown"
+    receipts = sorted(teardown_dir.glob("attempt-*.json")) if teardown_dir.is_dir() else []
+    for path in receipts:
+        try:
+            receipt = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(receipt, dict):
+            continue
+        rows = list(receipt.get("records") or []) + list((receipt.get("owner_runs") or {}).get("runs") or [])
+        own.update(row["run_id"] for row in rows if isinstance(row, dict) and isinstance(row.get("run_id"), str))
+    ledger = state_dir / OWNER_RUNS_RECEIPT_NAME
+    if ledger.is_file():
+        for line in ledger.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and "-teardown-" in str(row.get("stage")) and isinstance(row.get("run_id"), str):
+                own.add(row["run_id"])
+    return own
+
+
+def reconcile_owner_runs(context_root: Path, state_dir: Path, *, stage: str, wait_seconds: float = 0.0,
+                         poll_seconds: float = OWNER_RUNS_POLL_SECONDS, run_ids: set[str] | None = None,
+                         own_run_ids: set[str] | None = None, proc: Path | None = None, identity_of=None,
+                         grace_seconds: float | None = None) -> dict:
+    """Classify the runs under ``context_root``, wait (bounded by
+    ``wait_seconds``) for this deploy's own ``bootstrapping`` runs to resolve,
+    set its own ``aborted`` runs aside (each re-classified immediately before
+    the rename) and append every classification to ``<state_dir>/owner-runs.jsonl``.
+
+    ``own_run_ids`` names the runs this deploy may act on; ``None`` means every
+    classified run (the lane teardown already restricts ``run_ids`` to the
+    lane's own). Returns ``{"stage", "counts", "runs", "set_aside", "foreign",
+    "waited_s", "refused"}``: ``refused`` names every ``unknown`` run (fail
+    closed) and the own runs still ``bootstrapping`` after the wait; ``live``,
+    ``finished``, ``stranded`` and another session's runs are reported and left."""
+    grace_seconds = bootstrap_grace_seconds() if grace_seconds is None else grace_seconds
+
+    def own(run: dict) -> bool:
+        return own_run_ids is None or run["run_id"] in own_run_ids
+
+    def classify(only: set[str] | None) -> list[dict]:
+        return classify_owner_runs(context_root, proc=proc, identity_of=identity_of, grace_seconds=grace_seconds,
+                                   run_ids=only)
+
+    started = time.monotonic()
+    while True:
+        runs = classify(run_ids)
+        bootstrapping = [run for run in runs if run["classification"] == OWNER_RUN_BOOTSTRAPPING and own(run)]
+        if not bootstrapping or time.monotonic() - started >= wait_seconds:
+            break
+        time.sleep(poll_seconds)
+    set_aside: list[dict] = []
+    foreign: list[str] = []
+    for run in runs:
+        run["own"] = own(run)
+        run["action"] = "left"
+        if not run["own"]:
+            foreign.append(run["run_id"])
+            run["action"] = "left (not this deploy's run)"
+            continue
+        if run["classification"] != OWNER_RUN_ABORTED:
+            continue
+        fresh = classify({run["run_id"]})
+        if not fresh or fresh[0]["classification"] != OWNER_RUN_ABORTED:
+            run.update(fresh[0] if fresh else {}, action="left (reclassified before rename)")
+            continue
+        try:
+            destination = set_aside_aborted_run(Path(run["path"]), context_root, run)
+        except OSError as error:
+            run.update(action="set-aside-failed", error=f"{type(error).__name__}: {error}")
+            continue
+        run.update(action="set-aside", set_aside=str(destination))
+        set_aside.append({"run_id": run["run_id"], "set_aside": str(destination)})
+    refused = [{"run_id": run["run_id"], "classification": run["classification"], "reason": run["reason"]}
+               for run in runs
+               if run["classification"] == OWNER_RUN_UNKNOWN
+               or (run["own"] and (run["classification"] == OWNER_RUN_BOOTSTRAPPING or run["action"] == "set-aside-failed"))]
+    counts = {name: sum(1 for run in runs if run["classification"] == name) for name in OWNER_RUN_CLASSES}
+    summary = {"stage": stage, "context_root": str(context_root), "grace_seconds": grace_seconds,
+               "waited_s": round(time.monotonic() - started, 2), "counts": counts, "runs": runs,
+               "set_aside": set_aside, "foreign": foreign, "refused": refused}
+    state_dir.mkdir(parents=True, exist_ok=True)
+    with (state_dir / OWNER_RUNS_RECEIPT_NAME).open("a") as handle:
+        for run in runs:
+            handle.write(json.dumps({"at": _now(), "stage": stage, **run}, sort_keys=True) + "\n")
+    return summary
+
+
+def _owner_runs_log_line(attempt: int, summary: dict) -> str:
+    def names(values: list[dict], key: str = "run_id") -> str:
+        return ",".join(str(value[key]) for value in values) or "-"
+
+    counts = " ".join(f"{name}={summary['counts'][name]}" for name in OWNER_RUN_CLASSES)
+    return (f"PIPELINE_OWNER_RUNS attempt={attempt} stage={summary['stage']} {counts} "
+            f"foreign={len(summary['foreign'])} set_aside={names(summary['set_aside'])} "
+            f"refused={names(summary['refused'])} waited_s={summary['waited_s']}")
+
 
 def _probe_source() -> dict[str, str] | None:
     """Current source digest, or None while git is busy (index.lock, commit in flight)."""
@@ -2088,6 +2560,33 @@ def _run_attempt(
     log_dir = state_dir / "logs"
     log_dir.mkdir(exist_ok=True)
     print(f"PIPELINE_ATTEMPT attempt={attempt} {_source_label(frozen)}", flush=True)
+
+    # Launch preflight: every isolated run directory of this checkout is
+    # classified before a lane starts. This deploy's own aborted runs (named by
+    # its earlier lane teardowns) are set aside and its own bootstrapping run
+    # is waited out (the grace, at most); another session's runs are reported
+    # and left; an unreadable record refuses the launch (fail closed; nothing
+    # is ever signalled here).
+    grace = bootstrap_grace_seconds()
+    owner_runs = reconcile_owner_runs(benchmark_context_root(), state_dir, stage=f"attempt-{attempt}-preflight",
+                                      wait_seconds=grace + OWNER_RUNS_POLL_SECONDS, grace_seconds=grace,
+                                      own_run_ids=own_run_ids_from_state(state_dir))
+    receipt["owner_runs"] = {key: owner_runs[key]
+                             for key in ("stage", "counts", "set_aside", "foreign", "refused", "waited_s")}
+    print(_owner_runs_log_line(attempt, owner_runs), flush=True)
+    if owner_runs["refused"]:
+        reasons = "; ".join(f"{run['run_id']}: {run['classification']} ({run['reason']})"
+                            for run in owner_runs["refused"])
+        note = f"refused: owner-run preflight {reasons}"
+        for lane_state in receipt["lanes"].values():
+            lane_state.update(status="failed", exit=None, finished_epoch=time.time(), note=note)
+        receipt.update(status="failed", refused=owner_runs["refused"], note=note, finished_at=_now(),
+                       finished_epoch=time.time(), wall_s=round(time.time() - receipt["started_epoch"], 1))
+        write_receipt(receipt_path, receipt)
+        print(f"PIPELINE_OWNER_RUNS_REFUSED attempt={attempt} {reasons} "
+              f"(move the run to {ABORTED_RUNS_DIR}/ only after confirming nothing carries its run id; "
+              f"receipt {state_dir / OWNER_RUNS_RECEIPT_NAME})", file=sys.stderr, flush=True)
+        return receipt, "done"
 
     processes: dict[str, subprocess.Popen[bytes]] = {}
     signalled_lanes: set[str] = set()  # lanes terminated by a signal or a supersede
