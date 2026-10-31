@@ -350,12 +350,29 @@ def _record_cache_hit(run_dir: Path, stage: str, fingerprint: str) -> None:
 # A failed run of the lane records its head too, and a candidate pass is
 # vetoed when the current tree differs from a failed head only by inert paths.
 #
+# Stack lanes (graph_lanes == (): smoke, semantic-stack) execute runtime code
+# rather than selector-mapped suites, so a code file under a tooling tree
+# (_STACK_REACH_TREES) that is outside their declared inert set gets a second,
+# reach-based judgement instead of an immediate rerun: it is inert when the
+# selector neither falls back to ALL nor triggers a whole lane AND nothing the
+# stack executes reaches it, i.e. no STACK_ENTRYPOINTS member and no backend
+# route (``http:`` resource) lies in its reverse-dependency closure
+# (select_affected_tests.Selector.upstream: imports, exec'd paths, data reads).
+# The judgement is confined to tooling trees because the graph is incomplete
+# elsewhere: product->test edges are dropped (run_benchmark.py imports
+# agents/tests/e2e), router mounts become ``http:`` resources, Playwright specs
+# and fixtures are selected through computed paths. Test files, package-root
+# configuration and non-code files never get the second chance, _NEVER_INERT
+# and run_all triggers stay absolute, and a missing entrypoint fails closed.
+# Lanes with graph lanes keep the declared-only rule.
+#
 # Cross-run discovery. A deploy whose green timing run was closed with
 # --finish and then needed a test-only sync starts a new run whose own
 # passed-cache is empty, so the follow-up reran every lane. The decision
 # therefore also reads PASSED records in place from EARLIER run dirs of the
-# same run root when ALL of these hold: the earlier run's metadata names the
-# same non-empty branch as the current run's, the record carries the identical
+# same run root (worktree-local; the branch is recorded in the row but never
+# compared: a follow-up branch or the next deploy of the same tree is a valid
+# source) when ALL of these hold: the record carries the identical
 # invocation digest, its passed head is an ancestor of (or equal to) the
 # current head (git merge-base --is-ancestor: a rebased or amended branch never
 # matches), the record finished within _CROSS_RUN_MAX_AGE_SECONDS
@@ -473,6 +490,66 @@ _SCOPED_REUSE_LANES: dict[str, _ScopedLane] = {
         markers=("run-semantic-tests.sh",),
     ),
 }
+
+# What the stack lanes execute, read from scripts/run-predeploy-local (run-bench
+# --local -> run.sh --benchmark -> run_benchmark.py), scripts/run.sh (the seed
+# cache/restore/validate/save scripts, seed-local, the schema/index helpers,
+# the backend, worker and frontend services) and
+# front-end/scripts/run-semantic-tests.sh (the session generator and the
+# Playwright run on the same stack). A changed path whose reverse-dependency
+# closure contains one of these is executed by the stack and never inert.
+STACK_ENTRYPOINTS = (
+    "scripts/run-predeploy-local",
+    "scripts/run-bench",
+    "scripts/run.sh",
+    "scripts/lib/seed-cache.sh",
+    "scripts/restore-seed-dump.sh",
+    "scripts/save-seed-dump.sh",
+    "scripts/validate-canonical-seed-dump.sh",
+    "back-end/src/bootstrap.ts",
+    "back-end/scripts/seed-local.ts",
+    "back-end/scripts/seed-dump-cache.ts",
+    "back-end/scripts/ensure-fast-mode-cache-schema.ts",
+    "back-end/scripts/ensure-agent-network-grep-indexes.ts",
+    "back-end/scripts/generate-test-session.ts",
+    "agents/worker.py",
+    "agents/benchmarks/run_benchmark.py",
+    "front-end/src/main.tsx",
+    "front-end/scripts/run-semantic-tests.sh",
+)
+# Tooling trees whose code files a stack lane may judge by reach; every other
+# undeclared path (runtime source, fixtures, catalogs, prompts, configuration)
+# reruns the lane as before.
+_STACK_REACH_TREES = ("scripts/*", "back-end/scripts/*", "front-end/scripts/*", "agents/scripts/*", "mac-app/scripts/*")
+_REACH_CODE_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".sh", ".bash")
+
+
+def _selector_module():
+    """scripts/select_affected_tests.py (sibling module): the graph build is
+    the slow part and happens only in Selector()."""
+
+    try:
+        import select_affected_tests
+    except ImportError:
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import select_affected_tests
+    return select_affected_tests
+
+
+def _reach_eligible(path: str, rules: _ScopedLane) -> tuple[bool, str]:
+    """Whether a path outside ``rules.inert`` may still be judged by reach:
+    only for stack lanes, only a non-test code file under a tooling tree
+    (repo- and package-root configuration lies outside every tooling tree)."""
+
+    if rules.graph_lanes:
+        return False, "lane has graph lanes"
+    if not any(fnmatch(path, pattern) for pattern in _STACK_REACH_TREES):
+        return False, "not under a tooling tree"
+    if not path.endswith(_REACH_CODE_SUFFIXES):
+        return False, "not a code file"
+    if _selector_module().is_test_file(path):
+        return False, "test file"
+    return True, "stack lane: judged by reach"
 
 
 def _scoped_lane(stage: str, command: Sequence[str]) -> _ScopedLane | None:
@@ -643,22 +720,28 @@ class _ConsideredRun:
     run_id: str
     run_dir: Path
     cross_run: bool
+    branch: str | None = None
+
+
+def _branch_of(metadata: dict) -> str | None:
+    branch = metadata.get("branch")
+    return branch if isinstance(branch, str) and branch else None
 
 
 def _considered_runs(run_root: Path, run_dir: Path) -> list[_ConsideredRun]:
     """The current run first, then every earlier run dir of the same root
-    whose metadata names the same non-empty branch, newest first. A retired
-    run dir is simply absent; unreadable metadata, another branch, a missing
-    branch or a later start excludes a run."""
+    (worktree-local), newest first, each with the branch its metadata
+    recorded. The branch is provenance, not a filter: a follow-up branch or
+    the next deploy of the same tree is a valid source, and the record guards
+    (identical invocation, age bound, ancestor head, intact bytes, own run id)
+    decide. A retired run dir is simply absent; unreadable metadata or a
+    missing or later start excludes a run."""
 
-    runs = [_ConsideredRun(run_dir.name, run_dir, False)]
     current = _run_metadata(run_dir) or {}
-    branch = current.get("branch")
+    runs = [_ConsideredRun(run_dir.name, run_dir, False, _branch_of(current))]
     try:
         started = float(current.get("started_epoch"))
     except (TypeError, ValueError):
-        return runs
-    if not isinstance(branch, str) or not branch:
         return runs
     try:
         entries = [entry for entry in run_root.iterdir() if entry.is_dir()]
@@ -669,7 +752,7 @@ def _considered_runs(run_root: Path, run_dir: Path) -> list[_ConsideredRun]:
         if entry.name == run_dir.name or re.fullmatch(r"[A-Za-z0-9._-]+", entry.name) is None:
             continue
         metadata = _run_metadata(entry)
-        if metadata is None or metadata.get("branch") != branch:
+        if metadata is None:
             continue
         try:
             entry_started = float(metadata.get("started_epoch"))
@@ -677,7 +760,7 @@ def _considered_runs(run_root: Path, run_dir: Path) -> list[_ConsideredRun]:
             continue
         if entry_started >= started:
             continue
-        earlier.append((entry_started, _ConsideredRun(entry.name, entry, True)))
+        earlier.append((entry_started, _ConsideredRun(entry.name, entry, True, _branch_of(metadata))))
     earlier.sort(key=lambda item: item[0], reverse=True)
     runs.extend(run for _, run in earlier)
     return runs
@@ -710,8 +793,9 @@ def _scoped_records_across_runs(
     for run in runs:
         directory = (_scoped_failed_dir if failed else _scoped_records_dir)(run.run_dir, stage)
         for record in _load_scoped_records(directory, stage, invocation):
+            source = {"run_id": run.run_id, "run_dir": str(run.run_dir), "cross_run": run.cross_run, "branch": run.branch}
             if failed:
-                record["_source"] = {"run_id": run.run_id, "run_dir": str(run.run_dir), "cross_run": run.cross_run}
+                record["_source"] = source
                 records.append(record)
                 continue
             if run.cross_run and record.get("run_id") != run.run_id:
@@ -728,7 +812,7 @@ def _scoped_records_across_runs(
                 if not ancestry[head]:
                     rejected["not_ancestor"] += 1
                     continue
-            record["_source"] = {"run_id": run.run_id, "run_dir": str(run.run_dir), "cross_run": run.cross_run}
+            record["_source"] = source
             records.append(record)
     records.sort(key=lambda record: float(record.get("finished_epoch") or 0.0), reverse=True)
     return records, rejected
@@ -747,14 +831,28 @@ def _judge_declared(path: str, rules: _ScopedLane) -> tuple[bool, str]:
 
 
 class _GraphJudge:
-    """(b): one selector over the current tree, queried per changed path."""
+    """(b): one selector over the current tree, queried per changed path. For
+    stack lanes every path is additionally judged by reach from
+    STACK_ENTRYPOINTS; ``declared`` is False for a path that reached the graph
+    through _reach_eligible rather than the lane's inert set, which also makes
+    a run_lanes trigger (shared test infrastructure) a rerun."""
 
     def __init__(self) -> None:
-        import select_affected_tests  # sibling module; the graph build is the slow part
+        self._module = _selector_module()
+        self._selector = self._module.Selector()
 
-        self._selector = select_affected_tests.Selector()
+    def _lane_triggers(self, path: str) -> list[str]:
+        """Lanes the selector's run_lanes rules rerun whole for this path:
+        declared shared test infrastructure (runners, helpers, manifests)."""
 
-    def judge(self, path: str, rules: _ScopedLane) -> tuple[bool, str]:
+        return sorted({
+            lane
+            for rule in self._selector.config.get("run_lanes", [])
+            if self._module._match(path, rule["from"])
+            for lane in rule["lanes"]
+        })
+
+    def judge(self, path: str, rules: _ScopedLane, *, declared: bool = True) -> tuple[bool, str]:
         selection = self._selector.select([path])
         if selection.all_lanes:
             return False, "graph:ALL (" + "; ".join(selection.reasons) + ")"
@@ -768,7 +866,18 @@ class _GraphJudge:
             return False, f"graph:selects {listed}"
         if rules.graph_lanes:
             return True, "graph:no " + "/".join(rules.graph_lanes) + " test selected"
-        return True, "graph:no ALL fallback"
+        triggers = [] if declared else self._lane_triggers(path)
+        if triggers:
+            return False, "graph:run_lanes trigger for " + ", ".join(triggers[:5])
+        missing = [entry for entry in STACK_ENTRYPOINTS if entry not in self._selector.graph.fileset]
+        if missing:
+            return False, f"graph:stack entrypoint missing: {missing[0]}"
+        upstream = self._selector.upstream({path})
+        reached = [entry for entry in STACK_ENTRYPOINTS if entry in upstream]
+        served = sorted(node for node in upstream if node.startswith("http:"))
+        if reached or served:
+            return False, "graph:reached by the stack via " + ", ".join((reached + served)[:5])
+        return True, "graph:no ALL fallback; unreached from the stack entrypoints"
 
 
 @dataclass
@@ -807,6 +916,7 @@ class _ScopedDecision:
                 passed_run_dir=source.get("run_dir"),
                 passed_record=self.record.get("_record_path"),
                 passed_at=self.record.get("finished_at"),
+                passed_run_branch=source.get("branch"),
                 cross_run=bool(source.get("cross_run")),
             )
         if self.hit:
@@ -829,17 +939,26 @@ def _judge_changes(
 
     judged: list[dict] = []
     blocked: list[dict] = []
+    undeclared: set[str] = set()
     for path in changed:
         inert, rule = _judge_declared(path, rules)
-        judged.append({"path": path, "rule": rule})
-        if not inert:
-            blocked.append(judged[-1])
+        entry = {"path": path, "rule": rule}
+        judged.append(entry)
+        if inert:
+            continue
+        if not rule.startswith("never-inert:"):
+            eligible, why = _reach_eligible(path, rules)
+            if eligible:
+                entry["rule"] = f"{rule}; {why}"
+                undeclared.add(path)
+                continue
+        blocked.append(entry)
     if blocked:
         return judged, blocked, judge
     if judge is None:
         judge = _GraphJudge()
     for entry in judged:
-        inert, rule = judge.judge(entry["path"], rules)
+        inert, rule = judge.judge(entry["path"], rules, declared=entry["path"] not in undeclared)
         entry["graph"] = rule
         if not inert:
             blocked.append(entry)
@@ -877,6 +996,7 @@ def _failed_head_veto(
                 "failed_at": record.get("finished_at"),
                 "failed_run_id": record.get("run_id"),
                 "failed_run_dir": source.get("run_dir"),
+                "failed_run_branch": source.get("branch"),
                 "cross_run": bool(source.get("cross_run")),
                 "exit_code": record.get("exit_code"),
                 "inert_changes_since_failure": judged,
@@ -955,16 +1075,20 @@ def _print_scoped_hit(decision: _ScopedDecision) -> None:
         f"== reused passed deploy stage (lane-scoped): {decision.stage} "
         f"passed_head={record.get('head', '')[:12]} current_head={decision.current_head[:12]} "
         f"inert_paths={len(decision.changed)} passed_run={record.get('run_id', '')} "
-        f"cross_run={'true' if source.get('cross_run') else 'false'} =="
+        f"cross_run={'true' if source.get('cross_run') else 'false'} ==",
+        flush=True,
     )
     for entry in decision.changed:
-        print(f"   inert: {entry['path']} ({entry['rule']}; {entry.get('graph', '')})")
+        print(f"   inert: {entry['path']} ({entry['rule']}; {entry.get('graph', '')})", flush=True)
 
 
 def _print_scoped_miss(decision: _ScopedDecision) -> None:
-    print(f"== lane-scoped reuse unavailable for {decision.stage}: {decision.miss_reason} ==")
+    # Flushed: the pipeline appends this runner's stdout to the lane log while
+    # the child's bytes are written through sys.stdout.buffer, so an unflushed
+    # decision would land after the command's output (at exit).
+    print(f"== lane-scoped reuse unavailable for {decision.stage}: {decision.miss_reason} ==", flush=True)
     for entry in decision.blocked[:20]:
-        print(f"   rerun: {entry['path']} ({entry['rule']}; {entry.get('graph', 'graph not consulted')})")
+        print(f"   rerun: {entry['path']} ({entry['rule']}; {entry.get('graph', 'graph not consulted')})", flush=True)
 
 
 def _preview_lane_scoped_reuse(spec: str) -> int:
@@ -1206,7 +1330,8 @@ def main() -> int:
             release_stage(args.run_root, run_id=run_id, token=token)
         except (LifecycleError, OSError) as error:
             print(f"warning: could not release deploy stage admission: {error}", file=sys.stderr)
-        print(f"== reused passed deploy stage: {args.stage} ({_fingerprint_scope(args.stage, command)} + command) ==")
+        print(f"== reused passed deploy stage: {args.stage} ({_fingerprint_scope(args.stage, command)} + command) ==",
+              flush=True)
         return 0
     # Lane-scoped reuse: only after the exact lookup missed, only for the
     # listed lanes, only when enabled. Any error in the decision reruns.
@@ -1239,7 +1364,7 @@ def main() -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started_at = _utc_timestamp()
     started_epoch = time.time()
-    print(f"== deploy stage: {args.stage} ==")
+    print(f"== deploy stage: {args.stage} ==", flush=True)
 
     source_thread, source = _source_in_background()
     sampler = HostSampler().start()
