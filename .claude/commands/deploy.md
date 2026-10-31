@@ -945,6 +945,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-shard-coordinator.test.py`,
 `python3 scripts/tests/cloudbench-controller-orphan-drain.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
+`bash scripts/tests/claude-review-fallback.test.sh`,
 `python3 scripts/tests/claude-review-fallback-diagnose.test.py`,
 `python3 scripts/tests/read-graphide-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
