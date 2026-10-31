@@ -225,6 +225,16 @@ if ! $STACK_DB_EXPECTED && [[ "$USE_EXISTING_BACKEND" == "1" && -f "$STACK_MANIF
   fi
 fi
 # Try Docker container first
+# An isolated deploy worktree prepared for system Postgres owns no container
+# by design (deploy-worktree-preflight marker .context/deploy-system-pg.db):
+# its tests take this workspace's own victoria_<hint> on the marker's server
+# whatever other workspaces' containers are doing. Follow-up y (2026-10-30):
+# the live probes and the coverage lane's trailing teardown test found no
+# database on such a worktree because the fallback below was refused.
+DEPLOY_WORKTREE_SYSTEM_PG=false
+if ! $STACK_DB_EXPECTED && deploy_worktree_system_pg_prepared "$ROOT_DIR"; then
+  DEPLOY_WORKTREE_SYSTEM_PG=true
+fi
 if ! $STACK_DB_EXPECTED && docker_info_quick; then
   # Prefer the workspace-named container; fall back to the only running
   # victoria-db-* container if there's exactly one (covers cases where the
@@ -232,6 +242,8 @@ if ! $STACK_DB_EXPECTED && docker_info_quick; then
   if RESOLVED_CONTAINER="$(resolve_local_db_container "$WORKSPACE_HINT" "$WORKTREE_HINT")"; then
     DB_CONTAINER="$RESOLVED_CONTAINER"
     ISOLATED_DB_RESOLVED=true
+  elif $DEPLOY_WORKTREE_SYSTEM_PG; then
+    echo "Isolated deploy worktree on system Postgres: using its own victoria_$WORKSPACE_HINT database on localhost:5432"
   else
     if ! system_db_fallback_is_safe; then
       echo "❌ No ready Postgres container owned by this worktree." >&2
@@ -267,10 +279,15 @@ fi
 # port layout are found before the generic 5432 default.
 if ! $STACK_DB_EXPECTED && ! $DB_FOUND; then
   SYSTEM_PG_CANDIDATES=()
-  if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
-    SYSTEM_PG_CANDIDATES+=("$((CONDUCTOR_PORT + 5))")
+  if $DEPLOY_WORKTREE_SYSTEM_PG; then
+    # The prepared marker names a database on localhost:5432: same server only.
+    SYSTEM_PG_CANDIDATES+=(5432)
+  else
+    if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
+      SYSTEM_PG_CANDIDATES+=("$((CONDUCTOR_PORT + 5))")
+    fi
+    SYSTEM_PG_CANDIDATES+=(5432)
   fi
-  SYSTEM_PG_CANDIDATES+=(5432)
   for SYSTEM_PG_PORT in "${SYSTEM_PG_CANDIDATES[@]}"; do
     if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
       # Never the shared `victoria`: this workspace's own database only.
@@ -525,7 +542,6 @@ source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"
 # a test of unrelated local Fast Mode infrastructure. Explicit BLACKBOX_*
 # overrides remain available for proxy-specific blackbox runs.
 export FAST_MODE_ANTHROPIC_PROXY_URL="${BLACKBOX_FAST_MODE_ANTHROPIC_PROXY_URL:-}"
-export FAST_MODE_CODEX_PROXY_URL="${BLACKBOX_FAST_MODE_CODEX_PROXY_URL:-}"
 
 launch_backend() {
   cat >"$MANIFEST_PATH" <<EOF

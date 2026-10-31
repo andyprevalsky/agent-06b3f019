@@ -230,7 +230,15 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         name="rose-1-oss",
         claude_auth_model="claude-sonnet-5",
         gpt_auth_model="gpt-5.6-luna",
-        waterfall=("moonshotai/kimi-k3",),
+        # Two open-weights, vision-capable legs (VISION_MODELS): kimi-k3 first,
+        # Qwen 3.8 27B via OpenRouter as the rescuer. The structured-output
+        # retry excludes a model after two unparseable tool calls
+        # (helpers/llm.py), and the funded Foundry leg below has answered
+        # `deployment_disabled` ("DeepSeek-V3.2 does not support deploymentless
+        # inference") since 2026-10-30, so a single-model waterfall left the
+        # pinned biometrics task with no model at all (RoseAllFailed after
+        # kimi's second invalid spawn_agent call).
+        waterfall=("moonshotai/kimi-k3", "qwen/qwen3.8-27b"),
         direct_auth_enabled=False,
         # Funded Azure fallback stays open-weights: DeepSeek-V3.2 (MIT). On the
         # pinned biometrics task's spawn_agent schema it produced valid calls

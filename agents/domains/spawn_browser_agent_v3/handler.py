@@ -1210,6 +1210,8 @@ def _model_visible_browser_message(
                         payload[key] = value
         elif action_name and callable(action_result_redact):
             payload = action_result_redact(action_name, original)
+        from browser_tools.result_projection import preserve_output_protocol
+        payload = preserve_output_protocol(original, payload, action_name, redact, arguments=tool_arguments)
         return json_dumps_compact(payload)
 
     safe = redact(message)
@@ -3943,27 +3945,17 @@ def _browser_tool_arguments(unified_action: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _browser_tool_result_for_history(action_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
-    # formatted_state already embeds url/title/viewport/tabs/dom — keep only that
-    # for read_browser_state so the model is not billed twice for the same DOM.
-    if action_name == "read_browser_state" and result.get("formatted_state"):
-        return {
-            "success": result.get("success", True),
-            "message": result.get("message", ""),
-            "formatted_state": result["formatted_state"],
-            **({"observation_id": result["observation_id"], "target_refs": result["target_refs"]}
-               if "observation_id" in result else {}),
-            **({"auth_context": result["auth_context"]} if "auth_context" in result else {}),
-        }
-    clean: Dict[str, Any] = {}
-    for key, value in (result or {}).items():
-        if key in {"screenshot", "screenshot_b64", "base64"}:
-            continue
-        if key in {"dom_tree"}:
-            continue
-        clean[key] = value
-    if action_name == "screenshot" and (result.get("screenshot") or result.get("screenshot_b64")):
-        clean["screenshot_attached"] = True
-    return clean
+    from browser_tools.result_projection import browser_result_text_view
+    preview = getattr(result, "model_preview", None)
+    visible = dict(preview) if preview is not None else browser_result_text_view(action_name, result)
+    # Retained-output previews and native observation handles are independent.
+    # The latter were issued by the current harness, not by page text.
+    if action_name == "read_browser_state" and "observation_id" in result:
+        visible.update(observation_id=result["observation_id"], target_refs=result["target_refs"])
+    for key in ("action_step", "observation_source_call_id"):
+        if key in result:
+            visible[key] = result[key]
+    return visible
 
 
 def _append_browser_turn_messages(
@@ -8653,7 +8645,7 @@ async def _spawn_browser_agent_activity_v3_real(
         *,
         require_complete_passkeys: bool = False,
     ) -> None:
-        nonlocal cleanup_failure
+        nonlocal cleanup_failure, dom_service
         try:
             if pause and exact_session_id == session_id and dom_service is not None:
                 captured = await _capture_browser_passkey_usage(
@@ -8667,6 +8659,14 @@ async def _spawn_browser_agent_activity_v3_real(
                         task_id=task_id,
                         session_id=exact_session_id,
                     )
+            if pause and exact_session_id == session_id and dom_service is not None:
+                # Tilion admits one CDP client. The backend must connect to take
+                # its logical checkpoint before releasing the native session.
+                # Keep the passkey readback above this detach.
+                if not await _disconnect_browser(dom_service):
+                    raise BrowserSessionCloseError(exact_session_id, pause)
+                _tilion_leave_session()
+                dom_service = None
             await _stop_kernel_replay_before_session_close(browser_recorder)
             options: Dict[str, Any] = {"pause": pause}
             if current_url:
@@ -8695,6 +8695,23 @@ async def _spawn_browser_agent_activity_v3_real(
     _secret_log_scope.__enter__()
 
     try:
+        if (write_lock_resume_state or {}).get("approval_type") == AUTH_ASSISTANCE_DECLINED:
+            # A declined sign-in handoff ends this browser task. Continuing the
+            # model on the signed-out page can trigger another login or code
+            # request even when the original approval was correctly rejected.
+            await _close_browser_with_cleanup_receipt(session_id, pause=False)
+            await collect_unread_user_instructions()
+            return _visible_activity_result({
+                "status": "auth_assistance_declined",
+                "success": False,
+                "user_declined_auth": True,
+                "message": "The user declined sign-in assistance. The browser task stopped without retrying authentication.",
+                "task_id": task_id,
+                "session_id": session_id,
+                "browser_url": redact_url_secrets(browser_url),
+                "usage_items": [],
+                **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
+            })
         response_schema, schema_usage = await _refresh_browser_output_schema(
             goal=goal,
             agent_id=agent_id,
@@ -10141,6 +10158,7 @@ async def _spawn_browser_agent_activity_v3_real(
             try:
                 before_actions = len(action_history)
                 result = await execute_action(*args, **kwargs)
+                model_preview = getattr(result, "model_preview", None)
                 # Only this wrapper may bind a result to a native receipt.
                 result.pop("action_step", None)
                 signed_in_realm = signed_in_realm_for_secret_refs(successful_secret_refs, credential_url or "")
@@ -10186,6 +10204,26 @@ async def _spawn_browser_agent_activity_v3_real(
                 if len(action_history) > before_actions:
                     # Receipt identity belongs to the harness, after page masking.
                     result["action_step"] = action_history.last_action_step()
+                if model_preview is not None:
+                    from browser_tools.result_projection import BrowserModelResult, preserve_output_protocol
+                    # Do not restore the pre-redaction preview over the DOM's
+                    # private-entry/secret projection. Keep only issued protocol IDs.
+                    model_preview = getattr(result, "model_preview", model_preview)
+                    if hasattr(dom_service, "model_visible_value"):
+                        model_preview = preserve_output_protocol(
+                            model_preview, dom_service.model_visible_value(model_preview),
+                            action.get("action", ""), dom_service.model_visible_value,
+                        )
+                    for refs in redaction_refs:
+                        redact_preview = lambda value: mask_secret_values(value, refs)
+                        model_preview = preserve_output_protocol(
+                            model_preview, redact_preview(model_preview), action.get("action", ""), redact_preview,
+                        )
+                    if not hasattr(result, "__dict__"):
+                        result = BrowserModelResult(result)
+                    result.model_preview = {key: value for key, value in model_preview.items() if key != "action_step"}
+                    if "action_step" in result:
+                        result.model_preview = {**result.model_preview, "action_step": result["action_step"]}
                 return result
             finally:
                 action_redaction_refs = None
@@ -12134,9 +12172,10 @@ async def _spawn_browser_agent_activity_v3_real(
                             redact=_redact_activity_value,
                         )
                         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
-                        await _disconnect_browser(dom_service)
-                        _tilion_leave_session()
-                        dom_service = None
+                        if dom_service is not None:
+                            await _disconnect_browser(dom_service)
+                            _tilion_leave_session()
+                            dom_service = None
                         await collect_unread_user_instructions()
 
                         context_message = build_context_summary(
@@ -12625,12 +12664,19 @@ Based on this feedback, I need to continue working on the task and address the i
                     "origin": str(current_url or ""),
                 }
 
+            observation_result_source = result
             if unified_action.get("observation_source_call_id"):
                 result = {**result, "observation_source_call_id": unified_action["observation_source_call_id"]}
             result = action_batch.bind_observation(
                 unified_action, result, dom_service,
                 batch_context(dom_service, current_url, browser_turn_messages, (_credential_binding(), auth_realm, instruction_state.get("delivered_user_instruction_count"), schema_user_instruction_count)),
             )
+            # Native binding copies must not turn a bounded model preview back
+            # into the full raw action receipt.
+            if getattr(observation_result_source, "model_preview", None) is not None:
+                from browser_tools.result_projection import BrowserModelResult
+                result = BrowserModelResult(result)
+                result.model_preview = observation_result_source.model_preview
             _append_browser_turn_messages(
                 browser_turn_messages,
                 unified_action=unified_action,
@@ -13234,9 +13280,10 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
 
         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
-        await _disconnect_browser(dom_service)
-        _tilion_leave_session()
-        dom_service = None
+        if dom_service is not None:
+            await _disconnect_browser(dom_service)
+            _tilion_leave_session()
+            dom_service = None
         await collect_unread_user_instructions()
 
         context_message = build_context_summary(
@@ -13312,7 +13359,19 @@ Based on this feedback, I need to continue working on the task and address the i
 
     except asyncio.CancelledError as cancellation:
         await action_batch.discard("Batch remainder skipped on cancellation.")
-        logger.info("\U0001f534 Browser agent activity cancelled (paused)")
+        cancellation_details = activity.cancellation_details()
+        # Cancellation details identify transport cause, not user intent. The
+        # workflow alone observes actual user pause and owns its result annotation.
+        # Missing SDK details may still return cleanup ownership to the manager;
+        # they do not authorize a user-pause annotation.
+        return_cancelled_result = cancellation_details is None or cancellation_details.cancel_requested
+        logger.info(
+            "\U0001f534 Browser agent activity cancelled",
+            agent_id=agent_id,
+            task_id=task_id,
+            returns_cancellation=return_cancelled_result,
+            cancellation=repr(cancellation_details),
+        )
 
         if isinstance(cancellation, _BrowserSessionPreparationCancelled):
             prepared = cancellation.session_data
@@ -13371,34 +13430,15 @@ Based on this feedback, I need to continue working on the task and address the i
                     error=extract_error_message(snapshot_error),
                 )
 
-        if task_id:
-            with _suppress_browser_cleanup_errors():
-                await _save_browser_action_message(
-                    agent_id=agent_id,
-                    title="Browser Session Paused" if paused_session_id else "Browser Session Cancelled",
-                    task_id=task_id,
-                    message="Agent paused by user",
-                    status=MessageStatus.FINISHED,
-                    browser_url=browser_url or "",
-                    action_type="task_complete",
-                    tool_call_id=tool_call_id,
-                    is_completion_message=True,
-                    output_schema=response_schema,
-                    extra_metadata=(
-                        {"browser_cleanup": cleanup_failure}
-                        if cleanup_failure
-                        else {"session_id": paused_session_id}
-                        if paused_session_id
-                        else None
-                    ),
-                )
+        if not return_cancelled_result:
+            raise
 
         return {
             "status": "cancelled",
             "task_id": task_id,
             "session_id": session_id,
             "browser_url": redact_url_secrets(browser_url),
-            "message": "Browser agent cancelled by user",
+            "message": "Browser activity cancelled",
             **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
             **({"unread_user_messages": list(unread_user_instructions)} if unread_user_instructions else {}),
         }
@@ -13709,6 +13749,28 @@ def _browser_abandoned_resume_event(task_id: str, reason: str) -> ToolEvent:
     )
 
 
+def _browser_abandoned_resume_events(workflow_instance: Any, task_id: str, reason: str) -> tuple[ToolEvent, ...]:
+    """Close the panel and durably annotate an actual user-requested pause."""
+    events = [_browser_abandoned_resume_event(task_id, reason)]
+    if workflow_instance.is_paused and getattr(workflow_instance, "_user_pause_active", False):
+        # The excluded panel-close event cannot qualify for the backend's
+        # userPause.recordedAt write. This visible parent terminal does.
+        events.append(ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Browser Session Paused",
+            message="User paused the browser agent.",
+            status=MessageStatus.FINISHED,
+            metadata={
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "action_type": "user_pause_recorded",
+                "task_id": task_id,
+                "userPauseRequested": True,
+            },
+        ))
+    return tuple(events)
+
+
 def _browser_resume_was_paused(workflow_instance: Any, pause_sequence: Optional[int] = None) -> bool:
     return workflow_instance.is_paused or (
         pause_sequence is not None and getattr(workflow_instance, "_pause_signal_sequence", 0) != pause_sequence
@@ -13935,6 +13997,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 return park
 
             while True:
+                user_pause_requested = False
                 reentered_pause = parked_result is not None
                 if reentered_pause:
                     # Re-enter the pause branch the previous generation parked in
@@ -14034,6 +14097,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                     and not tool_stop_requested(workflow_instance, tool_call_id)):
                                 await workflow_instance.pause()
                             logger.info("\U0001f534 Cancelling browser agent due to pause")
+                            user_pause_requested = bool(getattr(workflow_instance, "_user_pause_active", False))
                             activity_handle.cancel()
                             was_cancelled = True
 
@@ -14047,7 +14111,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             was_cancelled = True
                             result = {
                                 "status": "cancelled",
-                                "message": "Browser agent cancelled by user",
+                                "message": "Browser activity cancelled",
                             }
                             if known_task_id:
                                 result["task_id"] = known_task_id
@@ -14063,15 +14127,22 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
 
                 if was_cancelled or (result and result.get("status") == "cancelled"):
+                    user_pause_requested = user_pause_requested or (
+                        workflow_instance.is_paused and bool(getattr(workflow_instance, "_user_pause_active", False))
+                    )
                     logger.info("\U0001f534 Browser agent cancelled")
                     yield ToolEvent(
                         type=EventType.POST_MESSAGE,
-                        title="Browser Session Paused",
+                        title="Browser Session Paused" if user_pause_requested else "Browser Session Cancelled",
                         message=_with_unread_user_messages(
-                            "User paused the browser agent", (result or {}).get("unread_user_messages")
+                            "User paused the browser agent" if user_pause_requested else "Browser activity cancelled",
+                            (result or {}).get("unread_user_messages"),
                         ),
                         status=MessageStatus.ERROR,
-                        metadata=_browser_task_terminal_metadata(result, activity_task_id),
+                        metadata={
+                            **_browser_task_terminal_metadata(result, activity_task_id),
+                            **({"userPauseRequested": True} if user_pause_requested else {}),
+                        },
                     )
                     return
 
@@ -14141,10 +14212,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             resume_request=approval_resume,
                         )
                         if approval_response is None:
-                            yield _browser_abandoned_resume_event(
+                            for terminal_event in _browser_abandoned_resume_events(
+                                workflow_instance,
                                 result.get("task_id") or known_task_id,
                                 "Browser paused while awaiting write approval.",
-                            )
+                            ):
+                                yield terminal_event
                             return
 
                         if approval_response.get("rejected"):
@@ -14227,10 +14300,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             workflow_instance.is_paused
                             or getattr(workflow_instance, "_pause_signal_sequence", 0) != write_pause_sequence
                         ):
-                            yield _browser_abandoned_resume_event(
+                            for terminal_event in _browser_abandoned_resume_events(
+                                workflow_instance,
                                 result.get("task_id") or known_task_id,
                                 "Browser paused before resuming the approved action.",
-                            )
+                            ):
+                                yield terminal_event
                             return
 
                         continue
@@ -14318,10 +14393,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         resume_request=approval_resume,
                     )
                     if approval_response is None:
-                        yield _browser_abandoned_resume_event(
+                        for terminal_event in _browser_abandoned_resume_events(
+                            workflow_instance,
                             result.get("task_id") or known_task_id,
                             "Browser paused while awaiting payment approval.",
-                        )
+                        ):
+                            yield terminal_event
                         return
                     if approval_response.get("rejected"):
                         write_lock_resume_state = _rejected_browser_resume_state(result, write_lock_resume_state)
@@ -14780,10 +14857,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         },
                     )
                     if _browser_resume_was_paused(workflow_instance, payment_pause_sequence):
-                        yield _browser_abandoned_resume_event(
+                        for terminal_event in _browser_abandoned_resume_events(
+                            workflow_instance,
                             result.get("task_id") or known_task_id,
                             "Browser paused before resuming the approved payment.",
-                        )
+                        ):
+                            yield terminal_event
                         return
 
                     continue
@@ -14846,10 +14925,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         return
 
                     if getattr(workflow_instance, "_pause_signal_sequence", 0) != auth_pause_sequence:
-                        yield _browser_abandoned_resume_event(
+                        for terminal_event in _browser_abandoned_resume_events(
+                            workflow_instance,
                             result.get("task_id") or known_task_id,
                             "Browser paused while awaiting authentication assistance.",
-                        )
+                        ):
+                            yield terminal_event
                         return
                     workflow_instance.is_paused = True
                     if hasattr(workflow_instance, "_update_tree_state"):
@@ -14878,10 +14959,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             raise GenerationHandoffRequested(exc.task_queue, parked=True) from None
                         raise
                     if getattr(workflow_instance, "_pause_signal_sequence", 0) != auth_pause_sequence:
-                        yield _browser_abandoned_resume_event(
+                        for terminal_event in _browser_abandoned_resume_events(
+                            workflow_instance,
                             result.get("task_id") or known_task_id,
                             "Browser paused while awaiting authentication assistance.",
-                        )
+                        ):
+                            yield terminal_event
                         return
                     user_declined = False
                     if request_id in getattr(workflow_instance, "_signal_responses", {}):
@@ -14892,6 +14975,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             isinstance(signal_response, str) and signal_response.strip() == REJECTION_SENTINEL
                         )
                         workflow_instance.is_paused = False
+                        workflow_instance._user_pause_active = False
                         if hasattr(workflow_instance, "_update_tree_state"):
                             await workflow_instance._update_tree_state(status="ACTIVE")
 
@@ -14946,10 +15030,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         },
                     )
                     if getattr(workflow_instance, "_pause_signal_sequence", 0) != auth_pause_sequence:
-                        yield _browser_abandoned_resume_event(
+                        for terminal_event in _browser_abandoned_resume_events(
+                            workflow_instance,
                             result.get("task_id") or known_task_id,
                             "Browser paused before resuming authentication assistance.",
-                        )
+                        ):
+                            yield terminal_event
                         return
 
                     continue
@@ -15038,10 +15124,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             await finish_budget_stop(workflow_instance, budget_ticket, result)
 
         except _BrowserPaymentResumeAbandoned:
-            yield _browser_abandoned_resume_event(
+            for terminal_event in _browser_abandoned_resume_events(
+                workflow_instance,
                 result.get("task_id") or known_task_id,
                 "Browser paused before resuming the approved payment.",
-            )
+            ):
+                yield terminal_event
         except GenerationHandoffRequested as exc:
             if not exc.parked:
                 yield ToolEvent(

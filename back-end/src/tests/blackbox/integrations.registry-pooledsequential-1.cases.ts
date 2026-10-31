@@ -12,6 +12,7 @@ import {
   testComputeTokenFastCacheAffinity_pinsProviderFamily,
   testComputeTokenProviderConstraint_overridesClaudeAffinity,
 } from './integrations.compute-rotation-2.cases';
+import { testRotation_userAuthErrorNeverExpiresSiblingAccounts } from './integrations.scoped-auth-expiry.cases';
 import {
   testRotation_rateLimitWindowIsMonotonic,
   testRotation_gptUserAuthErrorDisablesToken,
@@ -61,6 +62,10 @@ export function pooledSequentialTestsPart1() {
     {
       name: 'rotation -- user auth_error disables token',
       fn: testRotation_userAuthErrorDisablesToken,
+    },
+    {
+      name: 'rotation -- user auth_error never expires sibling accounts (S33)',
+      fn: testRotation_userAuthErrorNeverExpiresSiblingAccounts,
     },
     {
       name: 'rotation -- direct auth_error falls back to pool for Claude Code',

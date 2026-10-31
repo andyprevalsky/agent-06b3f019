@@ -87,6 +87,10 @@ model Agent {
   ownCostCents                     Float                       @default(0)
   writeLockEnabled                 Boolean                     @default(true)
   fastModeCacheEnabled             Boolean                     @default(true)
+  /// LLM provider speed requested at create: standard | fast | ultrafast.
+  /// Null = the row predates this column; readers derive it from
+  /// fastModeCacheEnabled (true → fast). Never gates any cache.
+  speed                            String?
   worldModelMode                   String                      @default("real")
   memoryEnabled                    Boolean                     @default(true)
   isBenchmark                      Boolean                     @default(false)
@@ -94,8 +98,11 @@ model Agent {
   /// LocalDevice.id of the Rose Mac app that started this root agent (C14).
   /// Null for web/PWA/SMS roots and for sub-agents (they resolve it via busId).
   originDeviceId                   String?
-  /// Owning Project (left-bar grouping, code-session workspace). Null = Home.
-  /// Set on create (owner-validated) or inherited from the parent agent.
+  /// Optional one-level folder; deleting it keeps this agent in its project.
+  /// Migration defers the FK check until both project-deletion cascades settle.
+  folderId                         String?
+  folder                           ProjectFolder?              @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  /// Owning project; null = Home. Validated on create/update, inherited by children.
   projectId                        String?
   project                          Project?                    @relation(fields: [projectId], references: [id], onDelete: SetNull)
   parent                           Agent?                      @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
@@ -120,6 +127,7 @@ model Agent {
   @@index([parentAgentId, worldModelMode, createdAt])
   @@index([busId])
   @@index([projectId])
+  @@index([folderId])
   @@index([busId, taskPath])
   // Trigram search indexes stay declared here: an index Prisma can model but
   // the schema omits is dropped by `db push` and emitted by `migrate diff`.
@@ -2175,9 +2183,22 @@ model Project {
   envFiles        ProjectEnvFile[]
   syncSnapshot    ProjectSyncSnapshot?
   agents          Agent[]
+  folders         ProjectFolder[]
 
   @@unique([userId, name])
   @@index([userId, updatedAt])
+}
+
+/// One-level grouping within a project; deletion leaves agents at project root.
+model ProjectFolder {
+  id        String  @id @default(uuid())
+  name      String
+  sortOrder Int     @default(0)
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  agents    Agent[]
+
+  @@unique([projectId, name])
 }
 
 /// One secret-bearing file materialized into a project checkout with 0600

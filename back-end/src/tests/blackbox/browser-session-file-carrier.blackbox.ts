@@ -116,7 +116,7 @@ async function main(): Promise<void> {
         '../../providers/browser/checkpoint': { EMPTY_BROWSER_BASELINE: 'empty-fixture' },
       })
     : {};
-  const service = load<Record<string, unknown>>('domains/browser-session/service.ts', {
+  const serviceDependencies = {
     './service.metadata': metadata,
     './repo': {
       findSessionBySessionId: async () => {
@@ -130,7 +130,21 @@ async function main(): Promise<void> {
       createLogger: () => ({ info() {}, warn() {}, error() {} }),
     },
     '../../providers/browser': { readSessionFile: io.readSessionFile },
+  };
+  // Main extracted I/O; exercise that actual module through both public paths.
+  const sessionIo = load<Record<string, unknown>>(
+    'domains/browser-session/service.session-io.ts', serviceDependencies
+  );
+  const service = load<Record<string, unknown>>('domains/browser-session/service.ts', {
+    ...serviceDependencies,
+    './service.session-io': sessionIo,
   });
+  assert.equal(service.downloadFile, sessionIo.downloadFile);
+  await assert.rejects(
+    (sessionIo.downloadFile as (session: string, file: string, user: string) => Promise<unknown>)(
+      'session', '/files/screenshot.png', 'foreign-user'
+    ), SessionNotFoundError
+  );
   const buildMetadata = service.buildBrowserSessionMetadata as (
     session: Record<string, unknown>,
     injection: Record<string, unknown>

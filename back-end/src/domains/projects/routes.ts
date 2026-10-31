@@ -27,10 +27,13 @@ import { runProjectStartupForOwner } from '../../providers/projects/workspace';
 import { asyncHandler } from '../../utils/asyncHandler';
 import * as envFiles from './envFileService';
 import * as service from './service';
+import * as folders from './folderService';
 import * as sync from './syncService';
 import {
   createEnvFileSchema,
   createProjectSchema,
+  projectFolderSchema,
+  projectFolderPositionSchema,
   projectIdSchema,
   syncPushSchema,
   updateEnvFileSchema,
@@ -223,6 +226,58 @@ router.post(
       return;
     }
     res.json(report);
+  })
+);
+
+router.get(
+  '/:id/folders',
+  handle(async (req, res, userId) => {
+    const id = idParam(req, res);
+    if (id !== null) res.json(await folders.listFolders(userId, id));
+  })
+);
+
+router.post(
+  '/:id/folders',
+  handle(async (req, res, userId) => {
+    const id = idParam(req, res);
+    const body = id !== null ? parse(projectFolderSchema, req.body, res) : null;
+    if (id !== null && body !== null)
+      res.status(201).json(await folders.createFolder(userId, id, body.name));
+  })
+);
+
+router.put(
+  '/:id/folders/:folderId/position',
+  handle(async (req, res, userId) => {
+    const id = idParam(req, res);
+    const folderId = id !== null ? idParam(req, res, 'folderId') : null;
+    const body = folderId !== null ? parse(projectFolderPositionSchema, req.body, res) : null;
+    if (id !== null && folderId !== null && body !== null) {
+      res.json(await folders.moveFolder(userId, id, folderId, body.beforeId));
+    }
+  })
+);
+
+router.put(
+  '/:id/folders/:folderId',
+  handle(async (req, res, userId) => {
+    const id = idParam(req, res);
+    const folderId = id !== null ? idParam(req, res, 'folderId') : null;
+    const body = folderId !== null ? parse(projectFolderSchema, req.body, res) : null;
+    if (id !== null && folderId !== null && body !== null)
+      res.json(await folders.renameFolder(userId, id, folderId, body.name));
+  })
+);
+
+router.delete(
+  '/:id/folders/:folderId',
+  handle(async (req, res, userId) => {
+    const id = idParam(req, res);
+    const folderId = id !== null ? idParam(req, res, 'folderId') : null;
+    if (id === null || folderId === null) return;
+    await folders.deleteFolder(userId, id, folderId);
+    res.status(204).end();
   })
 );
 

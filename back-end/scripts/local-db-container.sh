@@ -62,6 +62,21 @@ system_db_fallback_is_safe() {
   [[ -z "$running" ]]
 }
 
+# An isolated deploy worktree prepared for system Postgres
+# (scripts/prepare-deploy-worktree.sh wrote .context/deploy-system-pg.db) owns
+# no victoria-db-* container by design, so other workspaces' running containers
+# say nothing about its database: its tests take victoria_<workspace hint> on
+# the marker's server (localhost:5432), never the shared `victoria` and never
+# another worktree's database. The marker must be this checkout's own:
+# ROSE_DEPLOY_WORKTREE_PATH has to resolve to the checkout root passed in.
+deploy_worktree_system_pg_prepared() {
+  local root="${1:-}"
+  [[ "${ROSE_DEPLOY_WORKTREE:-0}" == "1" && -n "$root" && -n "${ROSE_DEPLOY_WORKTREE_PATH:-}" ]] || return 1
+  [[ -d "$root" && -d "$ROSE_DEPLOY_WORKTREE_PATH" ]] || return 1
+  [[ "$(cd "$ROSE_DEPLOY_WORKTREE_PATH" && pwd -P)" == "$(cd "$root" && pwd -P)" ]] || return 1
+  [[ -s "$root/.context/deploy-system-pg.db" ]]
+}
+
 # Shared system Postgres hosts every workspace's test database and the dev
 # stack's `victoria`. A test runner must never select `victoria` itself: its
 # schema sync is `prisma db push --accept-data-loss`, so a worktree on an older

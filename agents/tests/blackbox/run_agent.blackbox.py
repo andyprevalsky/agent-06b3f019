@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from _test_utils import (
     BlackboxResult,
     teardown_mock,
+    retained_tool_output_fixture,
 )
 
 
@@ -82,6 +83,7 @@ async def _run_single_iteration(
     poll_inbox_override=None,
     build_messages_override=None,
     get_pending_background_status_override=None,
+    completion_handoff_override=None,
 ):
     from loop.run_agent import run_agent
 
@@ -203,6 +205,7 @@ async def _run_single_iteration(
             post_message=mock_post_message,
             poll_messages=poll_messages_override,
             execute_tool=default_execute_tool,
+            **({"completion_handoff": completion_handoff_override} if "completion_handoff" in inspect.signature(run_agent).parameters else {}),
             build_messages=build_messages_override or (lambda context, prompt: [{"role": "system", "content": prompt}]),
             **({"poll_inbox": poll_inbox_override} if poll_inbox_override is not None else {}),
             **(
@@ -461,10 +464,13 @@ async def test_rejected_completion_posts_error_in_workflow_polling_mode():
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         "detected_tools_ordered": [("attempt_completion_with_result", "tc-rejected", 1.0)],
     }
-    with patch(
-        "loop.run_agent.workflow.execute_activity",
-        new=AsyncMock(return_value=workflow_llm_result),
-    ):
+    async def mock_activity(fn, args=None, **_kwargs):
+        from tools.read_tool_output import preview_tool_output_activity
+        if fn is preview_tool_output_activity:
+            return await fn(*(args or []))
+        return workflow_llm_result
+
+    with patch("loop.run_agent.workflow.execute_activity", new=AsyncMock(side_effect=mock_activity)):
         _, posted, _ = await _run_single_iteration(
             workflow_llm_result["tool_calls"],
             workflow_llm_result["detected_tools_ordered"],
@@ -2547,7 +2553,7 @@ async def test_activity_tool_results_are_hard_capped_before_context_append():
     """
     from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS
 
-    huge = "AMAZON_ORDER_CONFIRMATION " * 20_000  # well above the hard cap
+    huge = "AMAZON_ORDER_CONFIRMATION " * 20_000 + "EXACT_TAIL_SENTINEL"  # well above the hard cap
     assert len(huge) > TOOL_RESULT_HARD_CAP_CHARS
 
     tool_calls = [{"tool": "grep", "pattern": "amazon"}]
@@ -2556,15 +2562,36 @@ async def test_activity_tool_results_are_hard_capped_before_context_append():
     async def mock_execute_tool(tool_name, tool_args, tool_call_id):
         return {"success": True, "message": huge}
 
-    result, _, _ = await _run_single_iteration(
-        tool_calls,
-        detected_tools,
-        skip_verification=True,
-        execute_tool_override=mock_execute_tool,
-        max_iterations=1,
-        is_inside_temporal_activity=True,
-        poll_messages_override=None,
-    )
+    with retained_tool_output_fixture():
+        result, _, _ = await _run_single_iteration(
+            tool_calls,
+            detected_tools,
+            skip_verification=True,
+            execute_tool_override=mock_execute_tool,
+            max_iterations=1,
+            is_inside_temporal_activity=True,
+            poll_messages_override=None,
+        )
+        import re
+        from tools.read_tool_output import read_tool_output_activity
+        text = [m for m in result["context"] if m["role"] == "TOOL"][-1]["text"]
+        output_id = re.search(r'output_id="([a-f0-9]{32})"', text)[1]
+        page = await read_tool_output_activity("user-test", "agent-test", "", {"output_id": output_id, "query": "EXACT_TAIL_SENTINEL"})
+        assert page["content"] == "EXACT_TAIL_SENTINEL"
+        assert [m for m in result["context"] if m["role"] == "TOOL"][-1]["metadata"]["toolStatus"] == "FINISHED"
+
+        async def failed_tool(*args):
+            return {"success": False, "error": True, "message": huge}
+
+        failed, _, _ = await _run_single_iteration(
+            tool_calls, detected_tools, execute_tool_override=failed_tool,
+            max_iterations=1, is_inside_temporal_activity=True, poll_messages_override=None,
+        )
+        error_row = [m for m in failed["context"] if m["role"] == "TOOL"][-1]
+        assert error_row["metadata"]["toolStatus"] == "ERROR"
+        assert error_row["metadata"]["error"] is True
+        error_id = re.search(r'output_id="([a-f0-9]{32})"', error_row["text"])[1]
+        assert (await read_tool_output_activity("user-test", "agent-test", "", {"output_id": error_id, "query": "EXACT_TAIL_SENTINEL"}))["content"] == "EXACT_TAIL_SENTINEL"
 
     tool_msgs = [m for m in result.get("context") or [] if m.get("role") == "TOOL"]
     assert tool_msgs, "expected the grep tool result in context"
@@ -2572,7 +2599,131 @@ async def test_activity_tool_results_are_hard_capped_before_context_append():
     assert len(text) <= TOOL_RESULT_HARD_CAP_CHARS + 80, (
         f"uncapped tool result entered context ({len(text)} chars); hard cap is {TOOL_RESULT_HARD_CAP_CHARS}"
     )
-    assert "truncated, original_len=" in text
+    assert "Retained tool output:" in text
+
+
+async def test_workflow_output_retention_uses_activity():
+    """Large workflow receipts perform storage I/O inside a registered activity."""
+    import re
+    import loop.run_agent as loop
+    from tools.read_tool_output import preview_tool_output_activity, read_tool_output_activity
+
+    calls = []
+    async def execute_activity(fn, *, args, **kwargs):
+        calls.append(fn.__name__)
+        if fn is loop.call_llm_activity:
+            return {"response": "", "tool_calls": [{"tool": "web_search", "query": "x"}],
+                    "detected_tools_ordered": [("web_search", "tc", 1.0)], "usage": {}}
+        assert fn is preview_tool_output_activity, fn
+        return await fn(*args)
+
+    async def failed_tool(*args):
+        raise RuntimeError("failure " * 10000 + "WORKFLOW_TAIL")
+
+    with retained_tool_output_fixture(), patch.object(loop.workflow, "execute_activity", execute_activity), patch.object(loop, "preview_tool_text", side_effect=AssertionError("I/O entered workflow")):
+        result, _, _ = await _run_single_iteration(
+            [{"tool": "web_search", "query": "x"}], [("web_search", "tc", 1.0)],
+            execute_tool_override=failed_tool, is_inside_temporal_activity=False,
+        )
+        text = [m["text"] for m in result["context"] if m["role"] == "TOOL"][-1]
+        output_id = re.search(r'output_id="([a-f0-9]{32})"', text)[1]
+        page = await read_tool_output_activity("user-test", "agent-test", "", {"output_id": output_id, "query": "WORKFLOW_TAIL"})
+        assert page["content"] == "WORKFLOW_TAIL"
+        assert "preview_tool_output_activity" in calls
+
+        calls.clear()
+        async def short_failed_tool(*args):
+            raise RuntimeError("short result")
+        await _run_single_iteration(
+            [{"tool": "web_search", "query": "x"}], [("web_search", "tc-short", 1.0)],
+            execute_tool_override=short_failed_tool, is_inside_temporal_activity=False,
+        )
+        assert "preview_tool_output_activity" in calls
+
+
+async def test_activity_preview_retention_failure_keeps_stated_cut():
+    """A retained-output storage failure must leave a bounded tool result in
+    context instead of failing the loop iteration."""
+    from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS
+
+    huge = "STORAGE_DOWN_RESULT " * 20_000 + "EXACT_TAIL_SENTINEL"
+
+    async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        return {"success": True, "message": huge}
+
+    async def disk_full(*args, **kwargs):
+        raise OSError("fixture disk full")
+
+    with retained_tool_output_fixture(), patch("helpers.attachments.upload_to_storage", side_effect=disk_full):
+        result, _, _ = await _run_single_iteration(
+            [{"tool": "grep", "pattern": "x"}], [("grep", "tc-storage-down", 1.0)],
+            skip_verification=True, execute_tool_override=mock_execute_tool, max_iterations=1,
+            is_inside_temporal_activity=True, poll_messages_override=None,
+        )
+    assert result.get("status") != "error", result.get("status")
+    text = [m for m in result["context"] if m["role"] == "TOOL"][-1]["text"]
+    assert len(text) <= TOOL_RESULT_HARD_CAP_CHARS + 80
+    assert "storage failure" in text and "EXACT_TAIL_SENTINEL" not in text
+
+
+async def test_workflow_marker_verification_uses_activity():
+    """A short receipt carrying a retained marker is verified against storage;
+    that download must run in an activity, never in workflow code."""
+    import loop.run_agent as loop
+    from tools.read_tool_output import preview_tool_output_activity
+
+    marker = ('\n[Retained tool output: read_tool_output output_id="' + "a" * 32 + '" offset=600 '
+              "limit=20000; total_chars=900; Unicode characters; originating agent/session only; expires after 24h.]")
+    calls = []
+    async def execute_activity(fn, *, args, **kwargs):
+        calls.append(fn.__name__)
+        if fn is loop.call_llm_activity:
+            return {"response": "", "tool_calls": [{"tool": "web_search", "query": "x"}],
+                    "detected_tools_ordered": [("web_search", "tc", 1.0)], "usage": {}}
+        assert fn is preview_tool_output_activity, fn
+        return await fn(*args)
+
+    async def failed_tool(*args):
+        raise RuntimeError("short failure " + "p" * 600 + marker)
+
+    with retained_tool_output_fixture(), patch.object(loop.workflow, "execute_activity", execute_activity), patch.object(loop, "preview_tool_text", side_effect=AssertionError("I/O entered workflow")):
+        await _run_single_iteration(
+            [{"tool": "web_search", "query": "x"}], [("web_search", "tc", 1.0)],
+            execute_tool_override=failed_tool, is_inside_temporal_activity=False,
+        )
+    assert "preview_tool_output_activity" in calls, calls
+
+
+async def test_workflow_preview_timeout_keeps_stated_cut():
+    import loop.run_agent as loop
+    from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS
+    from temporalio.exceptions import ActivityError, RetryState, TimeoutError as TemporalTimeoutError, TimeoutType
+    from tools.read_tool_output import preview_tool_output_activity
+
+    async def execute_activity(fn, *, args, **kwargs):
+        if fn is loop.call_llm_activity:
+            return {"response": "", "tool_calls": [{"tool": "grep", "pattern": "x"}],
+                    "detected_tools_ordered": [("grep", "tc-timeout", 1.0)], "usage": {}}
+        assert fn is preview_tool_output_activity
+        error = ActivityError("preview timed out", scheduled_event_id=1, started_event_id=2,
+                              identity="test", activity_type="preview", activity_id="preview",
+                              retry_state=RetryState.TIMEOUT)
+        error.__cause__ = TemporalTimeoutError("start-to-close", type=TimeoutType.START_TO_CLOSE,
+                                               last_heartbeat_details=[])
+        raise error
+
+    async def long_tool(*args):
+        return {"success": True, "message": "TIMED_OUT_OUTPUT " * 10_000 + "EXACT_TAIL_SENTINEL"}
+
+    with retained_tool_output_fixture(), patch.object(loop.workflow, "execute_activity", execute_activity):
+        result, _, _ = await _run_single_iteration(
+            [{"tool": "grep", "pattern": "x"}], [("grep", "tc-timeout", 1.0)],
+            execute_tool_override=long_tool, is_inside_temporal_activity=False,
+            skip_verification=True, max_iterations=1,
+        )
+    text = [m["text"] for m in result["context"] if m["role"] == "TOOL"][-1]
+    assert len(text) <= TOOL_RESULT_HARD_CAP_CHARS + 80
+    assert "preview timeout" in text and "EXACT_TAIL_SENTINEL" not in text
 
 
 async def test_activity_tool_result_cap_prevents_protected_tail_overflow():
@@ -2598,7 +2749,7 @@ async def test_activity_tool_result_cap_prevents_protected_tail_overflow():
         context = kwargs["context"]
         return [context[0], *context[-4:]], True
 
-    with patch.object(run_mod, "_compress_context", side_effect=protected_head_tail) as compressor:
+    with retained_tool_output_fixture(), patch.object(run_mod, "_compress_context", side_effect=protected_head_tail) as compressor:
         result, _, _ = await _run_single_iteration(
             tool_calls,
             detected_tools,
@@ -3936,12 +4087,164 @@ async def test_attempt_completion_result_reaches_the_verifier_as_authored_work()
             assert authored == [], seen[-1]
 
 
+async def _exercise_explore_terminal_handoff(kind):
+    import helpers.agent_inbox as inbox_module
+
+    inbox = inbox_module.AgentInbox("owner", "same-task")
+    stored, seen, calls = [], [], []
+    waits = []
+    original_wait = asyncio.wait
+    release_stale = asyncio.Event()
+    fetch_count = 0
+    row = {
+        "id": "marker",
+        "text": "Forwarded marker: HTTP core document",
+        "created_at": "2026-10-29T17:47:49.682Z",
+    }
+
+    async def count_wait(*args, **kwargs):
+        waits.append(kwargs.get("timeout"))
+        return await original_wait(*args, **kwargs)
+
+    async def fetch(*args):
+        nonlocal fetch_count
+        fetch_count += 1
+        snapshot = list(stored)
+        if kind == "stale-read" and fetch_count == 1:
+            await release_stale.wait()
+        if kind == "failed-read":
+            raise RuntimeError("controlled read failure")
+        return snapshot
+
+    async def poll():
+        rows = await inbox.next_step_messages()
+        seen.extend(item["id"] for item in rows)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)  # Let the model turn's nonblocking read finish empty.
+        return [{"role": "USER", "text": item["text"], "metadata": {"agentMessage": True}} for item in rows]
+
+    async def execute(*args):
+        calls.append(args[0])
+        if len(calls) == 1 and kind not in ("no-message", "failed-read", "cancel"):
+            stored.extend([row, row] if kind == "duplicate" else [row])
+        deferred = await inbox.unread_before_finish()
+        release_stale.set()
+        if deferred:
+            return {"error": True, "message": "existing deferred message"}
+        return {"success": True}
+
+    async def handoff():
+        if kind == "cancel":
+            raise asyncio.CancelledError()
+        if await inbox.settle_for_handoff():
+            return "existing deferred message"
+        return None
+
+    kwargs = dict(
+        tool_calls=[{"tool": "attempt_completion", "result": "done"}],
+        detected_tools_ordered=[("attempt_completion", "tc", 1.0)],
+        max_iterations=1 if kind == "last-budget" else 2,
+        execute_tool_override=execute,
+        poll_inbox_override=poll,
+        completion_handoff_override=handoff,
+    )
+    with (
+        patch.object(inbox_module, "fetch_agent_inbox", fetch),
+        patch.object(asyncio, "wait", count_wait),
+        patch("providers.demo_cache.client.resolve_agent_fast_mode", new=AsyncMock(return_value=(False, None, False, None, None, True))),
+        patch("providers.demo_cache.client.ensure_position_context", new=AsyncMock()),
+    ):
+        if kind == "cancel":
+            try:
+                await _run_single_iteration(**kwargs)
+            except asyncio.CancelledError:
+                return
+            raise AssertionError("cancellation swallowed")
+        result, _, _ = await _run_single_iteration(**kwargs)
+        waits_before_finish = len(waits)
+        late = await inbox.finish()
+        assert len(waits) == waits_before_finish, "finish spent the terminal read wait twice"
+        assert not inbox._reads, "finish left an unsettled read"
+        assert not inbox._fetched, "finish left a message without custody"
+
+    if kind in ("no-message", "failed-read"):
+        assert result["status"] == "completed" and len(calls) == 1 and seen == []
+    elif kind == "last-budget":
+        assert result["status"] == "max_iterations" and len(calls) == 1
+        assert [item["id"] for item in late] == ["marker"], "iteration cap must retain parent handoff"
+    else:
+        assert seen == ["marker"], (kind, "same task must consume once", seen, [item["id"] for item in late])
+        assert result["status"] == "completed" and len(calls) == 2
+        assert not late, late
+    assert len(waits) == len(calls), "each completion attempt settles its existing read once"
+
+
+async def test_explore_consumes_final_call_message_before_terminal_handoff():
+    await _exercise_explore_terminal_handoff("final-call")
+
+
+async def test_explore_terminal_handoff_deduplicates_message_id():
+    await _exercise_explore_terminal_handoff("duplicate")
+
+
+async def test_explore_terminal_handoff_no_message_finishes():
+    await _exercise_explore_terminal_handoff("no-message")
+
+
+async def test_explore_terminal_handoff_failed_read_preserves_completion():
+    await _exercise_explore_terminal_handoff("failed-read")
+
+
+async def test_explore_terminal_handoff_does_not_refund_last_iteration():
+    await _exercise_explore_terminal_handoff("last-budget")
+
+
+async def test_explore_terminal_handoff_propagates_cancellation():
+    await _exercise_explore_terminal_handoff("cancel")
+
+
+async def test_explore_terminal_handoff_refreshes_stale_pending_snapshot():
+    await _exercise_explore_terminal_handoff("stale-read")
+
+
 async def run_all_tests():
     from helpers.messages import flush_realtime_broadcasts_for_tests
 
     print("run-agent blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "explore_terminal_handoff_refreshes_stale_pending_snapshot",
+        test_explore_terminal_handoff_refreshes_stale_pending_snapshot,
+    )
+    await r.record_async(
+        "explore_consumes_final_call_message_before_terminal_handoff",
+        test_explore_consumes_final_call_message_before_terminal_handoff,
+    )
+    await r.record_async(
+        "explore_terminal_handoff_deduplicates_message_id",
+        test_explore_terminal_handoff_deduplicates_message_id,
+    )
+    await r.record_async(
+        "explore_terminal_handoff_no_message_finishes",
+        test_explore_terminal_handoff_no_message_finishes,
+    )
+    await r.record_async(
+        "explore_terminal_handoff_failed_read_preserves_completion",
+        test_explore_terminal_handoff_failed_read_preserves_completion,
+    )
+    await r.record_async(
+        "explore_terminal_handoff_does_not_refund_last_iteration",
+        test_explore_terminal_handoff_does_not_refund_last_iteration,
+    )
+    await r.record_async(
+        "explore_terminal_handoff_propagates_cancellation",
+        test_explore_terminal_handoff_propagates_cancellation,
+    )
     await r.record_async("jev_schedules_every_turn", test_jev_schedules_every_turn_without_changing_decisions)
+    await r.record_async("workflow_output_retention_activity", test_workflow_output_retention_uses_activity)
+    await r.record_async("workflow_marker_verification_activity", test_workflow_marker_verification_uses_activity)
+    await r.record_async("workflow_preview_timeout_stated_cut", test_workflow_preview_timeout_keeps_stated_cut)
+    await r.record_async("activity_preview_retention_failure_stated_cut", test_activity_preview_retention_failure_keeps_stated_cut)
     await r.record_async("iteration_fixture_retires_realtime", test_iteration_fixture_retires_its_realtime_sender)
     await r.record_async(
         "poll_inbox_rows_reach_next_llm_call_once",

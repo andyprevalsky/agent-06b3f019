@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import vm from "node:vm";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
@@ -37,9 +38,10 @@ const {
   strictOutputSchema,
   handoffFromFinalMessage,
   handoffSchemaFromGoal,
+  azureSpeed,
 } = vm.runInNewContext(
   block +
-    "\n({ Native: CodexAppServer, strictOutputSchema, handoffFromFinalMessage, handoffSchemaFromGoal })",
+    "\n({ Native: CodexAppServer, strictOutputSchema, handoffFromFinalMessage, handoffSchemaFromGoal, azureSpeed })",
   sandbox,
 );
 function fixture(options = {}) {
@@ -434,11 +436,11 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         PORT: String(port),
         GITHUB_REPO_URL: "",
         ROSE_PROJECT_WORKDIR: "",
-        CODEX_FAST_MODE_PROXY_URL: "",
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  const childClosed = new Promise((resolve) => child.once("close", resolve));
   let logs = "";
   child.stdout.on("data", (d) => (logs += d));
   child.stderr.on("data", (d) => (logs += d));
@@ -584,7 +586,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   } finally {
     for (const socket of sockets) socket.terminate();
     child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("close", resolve));
+    await childClosed;
     rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -745,11 +747,11 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         PORT: String(port),
         GITHUB_REPO_URL: "",
         ROSE_PROJECT_WORKDIR: "",
-        CODEX_FAST_MODE_PROXY_URL: "",
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  const childClosed = new Promise((resolve) => child.once("close", resolve));
   let logs = "";
   child.stdout.on("data", (d) => (logs += d));
   child.stderr.on("data", (d) => (logs += d));
@@ -804,7 +806,11 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     const fallback = seen.find((e) => e.type === "auth_fallback");
     assert.equal(fallback?.to, "openai_api_key");
     assert.equal(fallback?.funded_provider, "azure");
-    assert.equal(fallback?.provider, "codex", "the envelope provider stays codex for the worker");
+    assert.equal(
+      fallback?.provider,
+      "codex",
+      "the envelope provider stays codex for the worker",
+    );
     assert.equal(fallback?.reason, "usage_limit_reached");
     const calls = readFileSync(journal, "utf8")
       .trim()
@@ -840,7 +846,180 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   } finally {
     ws?.terminate();
     child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("close", resolve));
+    await childClosed;
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// A server may exit before teardown begins. Preserve its assertion and logs
+// instead of waiting forever for a close event that has already been emitted.
+test("early server exit preserves the owning fallback failure and completes cleanup", async () => {
+  const directory = mkdtempSync(
+    join(tmpdir(), "rose-native-close-regression-"),
+  );
+  const preload = join(directory, "early-exit.cjs");
+  writeFileSync(
+    preload,
+    `
+const cp = require('node:child_process');
+const original = cp.spawn;
+cp.spawn = function(command, args, options) {
+  if (args?.some(arg => String(arg).endsWith('/ws-server.mjs'))) {
+    return original(command, ['-e', 'console.error("fixture early exit 23");process.exit(23)'], options);
+  }
+  return original(command, args, options);
+};
+require('node:module').syncBuiltinESMExports();
+`,
+  );
+  try {
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    const child = spawn(
+      process.execPath,
+      [
+        "--require",
+        preload,
+        "--test",
+        "--test-name-pattern=^app-server falls back to the funded Azure",
+        fileURLToPath(import.meta.url),
+      ],
+      { env, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const closed = new Promise((resolve) => child.once("close", resolve));
+    let output = "";
+    child.stdout.on("data", (data) => {
+      output += data;
+    });
+    child.stderr.on("data", (data) => {
+      output += data;
+    });
+    const code = await closed;
+    assert.equal(code, 1, output);
+    assert.match(output, /failureType: 'testCodeFailure'/);
+    assert.match(output, /fixture early exit 23/);
+    assert.match(output, /# cancelled 0/);
+    assert.doesNotMatch(
+      output,
+      /cancelledByParent|event loop has already resolved/,
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// S30 (2026-10-28): the query box's speed reaches Codex as its native service
+// tier. Fast → priority ("Fast"), Ultrafast → ultrafast, Normal → standard. A
+// model without ultrafast runs Ultrafast on the catalog model that offers it.
+const SPEED_CATALOG = [
+  {
+    id: "gpt-5.6-terra",
+    model: "gpt-5.6-terra",
+    supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
+    serviceTiers: [{ id: "priority" }],
+  },
+  {
+    id: "gpt-6.1-sol",
+    model: "gpt-6.1-sol",
+    isDefault: true,
+    supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
+    serviceTiers: [{ id: "priority" }, { id: "ultrafast" }],
+  },
+];
+test("the requested query-box speed starts Codex on its native service tier", async () => {
+  const cases = [
+    { speed: "standard", model: "gpt-5.6-terra", tier: null },
+    { speed: "priority", model: "gpt-5.6-terra", tier: "priority" },
+    { speed: "ultrafast", model: "gpt-6.1-sol", tier: "ultrafast" },
+  ];
+  for (const expected of cases) {
+    const { native, calls } = fixture({
+      settings: { model: "gpt-5.6-terra", effort: null, speed: expected.speed },
+      models: SPEED_CATALOG,
+    });
+    await native.initialize(null, "hello");
+    const startup = calls.find((c) => c.method === "thread/start");
+    assert.equal(
+      startup.params.model,
+      expected.model,
+      `${expected.speed}: model`,
+    );
+    assert.equal(
+      startup.params.serviceTier,
+      expected.tier,
+      `${expected.speed}: tier`,
+    );
+    const turn = calls.find((c) => c.method === "turn/start");
+    assert.equal(
+      turn.params.serviceTier,
+      expected.tier,
+      `${expected.speed}: first turn tier`,
+    );
+  }
+});
+test("an unavailable requested tier degrades to the next slower tier, never faster", async () => {
+  const onlyPriority = SPEED_CATALOG.slice(0, 1).map((m) => ({
+    ...m,
+    isDefault: true,
+  }));
+  const ultra = fixture({
+    settings: { model: "gpt-5.6-terra", effort: null, speed: "ultrafast" },
+    models: onlyPriority,
+  });
+  await ultra.native.initialize(null, "hello");
+  assert.equal(
+    ultra.calls.find((c) => c.method === "thread/start").params.serviceTier,
+    "priority",
+  );
+  const noTiers = fixture({
+    settings: { model: "model", effort: null, speed: "priority" },
+    models: [{ id: "model", model: "model", serviceTiers: [] }],
+  });
+  await noTiers.native.initialize(null, "hello");
+  assert.equal(
+    noTiers.calls.find((c) => c.method === "thread/start").params.serviceTier,
+    null,
+  );
+});
+test("a funded Azure session keeps its deployment: ultrafast runs as priority, never a model switch", async () => {
+  assert.equal(azureSpeed("standard"), "standard");
+  assert.equal(azureSpeed("priority"), "priority");
+  assert.equal(azureSpeed("ultrafast"), "priority");
+  assert.equal(azureSpeed(null), "priority");
+  const azureCatalog = [
+    {
+      id: "azure-terra",
+      model: "azure-terra",
+      supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
+      serviceTiers: [{ id: "priority" }],
+    },
+    ...SPEED_CATALOG.slice(1),
+  ];
+  const { native, calls } = fixture({
+    settings: {
+      model: "azure-terra",
+      effort: null,
+      speed: azureSpeed("ultrafast"),
+    },
+    models: azureCatalog,
+  });
+  await native.initialize(null, "hello");
+  const startup = calls.find((c) => c.method === "thread/start");
+  assert.equal(startup.params.model, "azure-terra");
+  assert.equal(startup.params.serviceTier, "priority");
+});
+test("Codex never routes through a Rose proxy or the demo cache", () => {
+  for (const forbidden of [
+    "chatgpt_base_url",
+    "CODEX_FAST_MODE_PROXY_URL",
+    "model_providers.fastmode",
+    "codex-proxy",
+    "fast_cache_proxy",
+  ]) {
+    assert.equal(
+      source.includes(forbidden),
+      false,
+      `ws-server must not contain ${forbidden}: Codex talks to its provider directly`,
+    );
   }
 });

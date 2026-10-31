@@ -935,8 +935,8 @@ class ExportResume(unittest.TestCase):
     def test_dead_owner_accepts_the_shards_bound_e2e_deadline_only(self):
         # 2026-10-20 Polar batch 1 (0a2470cc6): --timeout 7200 binds e2e_timeout 9300, so the
         # runner recorded caller deadline = epoch + 9300; recovery required epoch + 5400 and
-        # refused the dead-owner cleanup route for every shard of the run. The current
-        # runner binds the widened 10020 default (task + startup, copy tail and release).
+        # refused the dead-owner cleanup route for every shard of the run. That run's own
+        # pinned runner validates its 9300; this source binds the widened 10020 default.
         bound = dict(task_timeout=7200, e2e_timeout=10020)
         for seconds, accepted in ((10020, True), (5400, False), (10021, False)):
             with self.subTest(caller_deadline=seconds):
@@ -1691,6 +1691,18 @@ class ExportResume(unittest.TestCase):
 
 class WriterScanPermission(unittest.TestCase):
     """A transiently unreadable /proc entry is re-observed; a persistently unreadable live one fails closed."""
+
+    def test_exited_thread_during_maps_scan_is_not_a_writer(self):
+        collector = runpy.run_path(str(ROOT / "scripts/cloudbench-controller-export.py"))
+        process_paths = collector["process_paths"]
+        with tempfile.TemporaryDirectory() as name:
+            process = Path(name) / "8888"
+            task = process / "task" / "8888"
+            (task / "fd").mkdir(parents=True)
+            (task / "cwd").symlink_to(Path(name) / "repo")
+            (task / "maps").write_text("")
+            with mock.patch.object(Path, "read_text", side_effect=ProcessLookupError(3, "No such process")):
+                self.assertEqual(process_paths(process), [])
 
     def scan(self, denials, *, alive=True):
         collector = runpy.run_path(str(ROOT / "scripts/cloudbench-controller-export.py"))

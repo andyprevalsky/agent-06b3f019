@@ -34,7 +34,7 @@ Communication contract (mandatory)
   window), the outcome bar with PASS, HARNESS FAILURE and INFRA FAILURE always
   shown, failure causes, timing/cost/cache/LLM coverage, the lifecycle
   checklist, LAST 3 EXPERIMENTS (10 for descent), active sub-agents and ISSUES / NEXT ACTION.
-- Publish the card on agent start/completion, every fixed 15-minute checkpoint,
+- Publish the generic card on agent start/completion, every fixed 10-minute checkpoint,
   and benchmark-state changes. Events never reset the checkpoint or run clock.
 - User-requested approval messages use .claude/shared/approval-format.md instead:
   the same styled text frame, all seven required sections with How: immediately
@@ -51,6 +51,8 @@ Communication contract (mandatory)
 
 
 Descent presentation override (explicit user default)
+- Descent cards retain every fixed 15-minute checkpoint and original +900-second anchors;
+  generic ten-minute cadence never changes an existing descent schedule.
 - `--iterations N` (including zero) selects the `/descend` display: up to LAST 10
   actual selected experiments, newest first; generic cards retain LAST 3.
 - Put Iterations/Hour prominently at the top: 3600 / seconds between the latest

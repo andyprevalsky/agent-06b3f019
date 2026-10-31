@@ -42,7 +42,7 @@ import {
   markGptPoolTokenRateLimited,
   markGptUserTokenRateLimited,
 } from '../../providers/gptCredentials';
-import { getValidAccessToken } from '../../services/integrations/gmailSync';
+import { getValidAccessToken, gmailMailboxAccess } from '../../services/integrations/gmailSync';
 import { fetchGmailMessagesSince } from '../../services/integrations/gmailParser';
 import { fetchPrimitiveMessagesSince } from '../../providers/primitive';
 import { findReadableInboxes } from '../../providers/authOptionsStore';
@@ -276,7 +276,12 @@ export async function fetchEmailsSince(userId: string, since: Date, limit: numbe
           });
           return [];
         }
-        const emails = await fetchGmailMessagesSince(accessToken, since, perAccountLimit);
+        // Share the mailbox's quota budget with any sync running on it.
+        const emails = await fetchGmailMessagesSince(
+          gmailMailboxAccess(credential, accessToken),
+          since,
+          perAccountLimit
+        );
         return emails.map((email) => ({
           ...email,
           credentialId: credential.id,
@@ -720,6 +725,7 @@ export async function getComputeCodeToken(
     accountId: result.accountId,
     source: result.source,
     poolTokenId: result.poolTokenId,
+    integrationId: result.integrationId,
     lineageKey: result.lineageKey,
     fastCacheAffinityKey: lineage?.fastCacheAffinityKey,
   };
@@ -734,6 +740,7 @@ export async function markTokenRateLimited(
     userId?: string;
     rateLimitedUntil?: string;
     failureReason?: string;
+    integrationId?: string;
   }
 ) {
   if (source === 'pool') {
@@ -759,6 +766,7 @@ export async function markTokenRateLimited(
     await markUserTokenRateLimited(params.userId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
+      integrationId: params.integrationId,
     });
     return {
       ok: true,
@@ -779,6 +787,7 @@ export async function markComputeTokenRateLimited(
     rateLimitedUntil?: string;
     failureReason?: string;
     credentialId?: string;
+    integrationId?: string;
     model?: string;
     region?: string;
     deployment?: string;
@@ -855,6 +864,7 @@ export async function markGptTokenRateLimited(
     userId?: string;
     rateLimitedUntil?: string;
     failureReason?: string;
+    integrationId?: string;
   }
 ) {
   if (source === 'pool') {
@@ -880,6 +890,7 @@ export async function markGptTokenRateLimited(
     await markGptUserTokenRateLimited(params.userId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
+      integrationId: params.integrationId,
     });
     return {
       ok: true,

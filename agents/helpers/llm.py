@@ -7,6 +7,7 @@ import hashlib
 import json
 import random
 import re
+import sys
 import time  # Import at module level for Temporal workflow sandbox compatibility
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -566,6 +567,7 @@ def _build_claude_auth_context(
     source: Optional[str] = None,
     user_id: Optional[str] = None,
     pool_token_id: Optional[str] = None,
+    integration_id: Optional[str] = None,
     lineage_key: Optional[str] = None,
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
@@ -590,6 +592,7 @@ def _build_claude_auth_context(
             ctx.source,
             user_id=ctx.user_id,
             pool_token_id=ctx.pool_token_id,
+            integration_id=integration_id if ctx.source == "user" else None,
             cooldown_seconds=cooldown_seconds,
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
@@ -637,6 +640,7 @@ def _build_gpt_auth_context(
     source: Optional[str] = None,
     user_id: Optional[str] = None,
     pool_token_id: Optional[str] = None,
+    integration_id: Optional[str] = None,
     lineage_key: Optional[str] = None,
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
@@ -661,6 +665,7 @@ def _build_gpt_auth_context(
             ctx.source,
             user_id=ctx.user_id,
             pool_token_id=ctx.pool_token_id,
+            integration_id=integration_id if ctx.source == "user" else None,
             cooldown_seconds=cooldown_seconds,
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
@@ -722,6 +727,7 @@ def _build_compute_auth_context(
             source=result.get("source"),
             user_id=user_id,
             pool_token_id=result.get("poolTokenId"),
+            integration_id=result.get("integrationId"),
             lineage_key=result.get("lineageKey"),
             agent_id=agent_id,
             root_agent_id=root_agent_id,
@@ -734,6 +740,7 @@ def _build_compute_auth_context(
         source=result.get("source"),
         user_id=user_id,
         pool_token_id=result.get("poolTokenId"),
+        integration_id=result.get("integrationId"),
         lineage_key=result.get("lineageKey"),
         agent_id=agent_id,
         root_agent_id=root_agent_id,
@@ -1163,11 +1170,16 @@ def build_verifier_context_messages(
             # bodies still embed full ranking JSON (cuda-kernel agent2: 134k
             # user batch → GPT RoseDeadline). Truncate before dump.
             dumped = "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str)
-            if str(call_site or "") == "benchmark_declared_evaluator":
+            if str(call_site or "") == "benchmark_declared_evaluator" or (
+                metadata.get("benchmark_final_evidence") is True
+                and call_site == "semantic_output_field_recovery_judge"
+            ):
                 # Declared-evaluator evidence carries the runtime per-tool-result
                 # cap, and the caller sends any prompt that would overflow the
                 # model to the agentic judge. A second, grader-only cut here
                 # would drift from the runtime (grep-agent-trajectories-cross-surface).
+                # Final benchmark evidence for output-field recovery is likewise
+                # normalized/budgeted by its owner; do not re-truncate the card.
                 tool_text, truncated = dumped, False
             else:
                 tool_text, truncated = _budget_verifier_tool_result_text(
@@ -2194,6 +2206,8 @@ async def build_llm_messages(
     pre_resolved_ids: Optional[set] = None,
     llm_only_user_preamble: str = "",
     user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    session_id: str = "",
     *,
     max_context_tokens: int = _DEFAULT_CONTEXT_WINDOW,
     request_overhead: Any = None,
@@ -2203,6 +2217,7 @@ async def build_llm_messages(
         return await _render_llm_messages(
             context, system_prompt, pre_resolved_ids,
             llm_only_user_preamble, user_id, render_text, require_inline_attachments,
+            agent_id=agent_id, session_id=session_id,
         )
 
     return await admit_text_attachments(
@@ -2219,6 +2234,8 @@ async def _render_llm_messages(
     user_id: Optional[str] = None,
     render_text: Callable[[PreparedTextAttachment], str] = lambda item: item.inline,
     require_inline_attachments: bool = False,
+    agent_id: Optional[str] = None,
+    session_id: str = "",
 ) -> List[Dict]:
     """Build messages list for LLM from context, with attachment support.
 
@@ -2244,6 +2261,27 @@ async def _render_llm_messages(
     Returns:
         List of OpenAI-compatible messages ready for LLM
     """
+    from helpers.tool_output import DEFAULT_INLINE_CHARS, RetentionError, preview_tool_text, stated_cut
+
+    async def bounded_tool_text(value: str, attachment_labels: List[str]) -> str:
+        suffix = "\n\n" + "\n\n".join(attachment_labels) if attachment_labels else ""
+        # Retained previews need the originating agent's identity for scoped
+        # readback. Callers without it (DAG reasoning) have no read_tool_output
+        # tool, so they keep the complete redacted result.
+        retain = bool(user_id and agent_id)
+        limit = DEFAULT_INLINE_CHARS - len(suffix) if retain else sys.maxsize
+        try:
+            preview = await preview_tool_text(
+                value, user_id=user_id or "", agent_id=agent_id or "", session_id=session_id, limit=limit,
+            )
+        except RetentionError as error:
+            # A storage failure must not fail the model request; state the cut.
+            logger.warning("[LLM] Tool output retention failed; sending a stated cut", agent_id=agent_id, error=str(error))
+            preview = stated_cut(value, limit=limit, reason="retained readback unavailable after a storage failure")
+        if suffix and any(label not in preview for label in attachment_labels):
+            preview += suffix
+        return preview
+
     # Pointer annotations are an LLM-boundary representation, not canonical DB
     # state. Initial workflow context already carries them, but a cross-worker
     # activity rebuilds from unannotated DB rows. Normalize a copy here so worker
@@ -2309,11 +2347,18 @@ async def _render_llm_messages(
         # Skip before downloads and admission so they consume no file budget.
         if role == "ASSISTANT" and not text.strip() and not metadata.get("tool_calls") and attachments_data:
             continue
-
         # Resolve file attachments (all roles — USER, ASSISTANT, TOOL, SYSTEM)
         content, metadata_texts = await resolve_message_attachments(
             msg, pre_resolved_ids, render_text=render_text, require_inline=require_inline_attachments
         )
+        attachment_labels = []
+        for att_data in attachments_data:
+            fp = FilePointer.from_dict(att_data) if isinstance(att_data, dict) else None
+            if fp and not fp.is_text():
+                inline_label = build_attachment_metadata_text(fp, inlined=True)
+                attachment_labels.append(
+                    inline_label if inline_label in metadata_texts else build_attachment_metadata_text(fp)
+                )
 
         # Determine LLM role and base text
         ts_prefix = _ts_header(msg)
@@ -2463,7 +2508,8 @@ async def _render_llm_messages(
                                 sections.append(build_file_pointer_label(fname))
                     tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
                     label = tool_name or "tool"
-                    messages.append({"role": "user", "content": f"{ts_prefix}[{label} result]: {tool_content}"})
+                    tool_content = await bounded_tool_text(f"{ts_prefix}[{label} result]: {tool_content}", attachment_labels)
+                    messages.append({"role": "user", "content": tool_content})
                     continue
 
                 tool_content = ts_prefix + text
@@ -2483,6 +2529,7 @@ async def _render_llm_messages(
                             sections.append(build_file_pointer_label(fname))
                 tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
 
+                tool_content = await bounded_tool_text(tool_content, attachment_labels)
                 tool_msg: Dict[str, Any] = {
                     "role": "tool",
                     "content": tool_content,
@@ -2496,6 +2543,7 @@ async def _render_llm_messages(
             full_text = f"{ts_prefix}[TOOL]: {text}"
             if metadata_texts:
                 full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
+            full_text = await bounded_tool_text(full_text, attachment_labels)
             if content:
                 content.insert(0, {"type": "text", "text": full_text})
                 messages.append({"role": "user", "content": content})
@@ -6679,6 +6727,7 @@ async def call_llm_activity(
                     pre_resolved_ids=pre_resolved_ids,
                     llm_only_user_preamble=llm_only_user_preamble,
                     user_id=pending_user_id or user_id,
+                    agent_id=_context_key,
                     max_context_tokens=max_context_tokens,
                     request_overhead=attachment_overhead,
                     require_inline_attachments=require_inline_attachments,
@@ -6701,6 +6750,7 @@ async def call_llm_activity(
                     pre_resolved_ids=None,
                     llm_only_user_preamble=llm_only_user_preamble,
                     user_id=user_id,
+                    agent_id=_context_key,
                     max_context_tokens=max_context_tokens,
                     request_overhead=attachment_overhead,
                     require_inline_attachments=require_inline_attachments,
@@ -7403,6 +7453,7 @@ async def fetch_compute_token_activity(
                         "accountId": data.get("accountId"),
                         "source": data.get("source", "user"),
                         "poolTokenId": data.get("poolTokenId"),
+                        "integrationId": data.get("integrationId"),
                         "lineageKey": data.get("lineageKey"),
                         "fastCacheAffinityKey": data.get("fastCacheAffinityKey") or demo_cache_affinity_key,
                     }
@@ -7526,6 +7577,7 @@ async def mark_compute_token_rate_limited_activity(
     source: str,
     user_id: str,
     pool_token_id: Optional[str] = None,
+    integration_id: Optional[str] = None,
     cooldown_seconds: int = 5 * 60,
     rate_limited_until: Optional[str] = None,
     failure_reason: Optional[str] = None,
@@ -7547,6 +7599,10 @@ async def mark_compute_token_rate_limited_activity(
         body["poolTokenId"] = pool_token_id
     if source == "user":
         body["userId"] = user_id
+        # Name the exact leased row: an auth_error must never expire the
+        # user's other subscriptions (S33).
+        if integration_id:
+            body["integrationId"] = integration_id
 
     try:
         async with httpx.AsyncClient() as client:

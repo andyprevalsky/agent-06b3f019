@@ -1,5 +1,5 @@
 /**
- * Blackbox regression test for Fast Mode state wiring through useTerminalAgents.
+ * Blackbox regression tests for creation target and Fast Mode wiring through useTerminalAgents.
  */
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,7 +7,7 @@ import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { clearCaptures, capturedRequests } from './msw/capture';
 import { ADMIN_ACCOUNTS } from '@/lib/adminAccounts';
-import { resetQueryPreferencesMemory } from '@/lib/queryPreferences';
+import { resetQueryPreferencesMemory, writeQueryPreferences } from '@/lib/queryPreferences';
 import { resetFastModeSessionOverride } from '@/lib/fastModeSession';
 
 const mocks = vi.hoisted(() => {
@@ -115,7 +115,7 @@ afterEach(() => {
   }
 });
 
-describe('useTerminalAgents Fast Mode bridge', () => {
+describe('useTerminalAgents creation state bridge', () => {
   beforeEach(() => {
     mocks.authState.user.id = ADMIN_ACCOUNTS[0]!.userId;
     mockSession();
@@ -131,6 +131,43 @@ describe('useTerminalAgents Fast Mode bridge', () => {
   afterEach(() => {
     localStorage.clear();
     resetFastModeSessionOverride();
+  });
+
+  it('routes folder creation through the terminal handler and clears folder at project root and Home', async () => {
+    const bodies: Record<string, unknown>[] = [];
+    server.use(
+      http.post(`${API_BASE}/agents`, async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        bodies.push(body);
+        return HttpResponse.json({ agent_id: body.agent_id });
+      }),
+    );
+    const { result } = renderHook(() => useTerminalAgents('agents', vi.fn(), vi.fn()));
+
+    act(() => result.current.handleCreateNewAgentInProject({ id: 'p-rose' }, 'folder-rose'));
+    expect(result.current.newAgentFolderId).toBe('folder-rose');
+    act(() => result.current.setMessageInput('folder goal'));
+    await act(async () => result.current.handleSendMessage());
+    expect(bodies[0]).toMatchObject({ project_id: 'p-rose', folder_id: 'folder-rose' });
+    expect(result.current.newAgentFolderId).toBeNull();
+
+    // Selecting the same project's root must clear an earlier folder target.
+    act(() => result.current.handleCreateNewAgentInProject({ id: 'p-rose' }, 'folder-rose'));
+    act(() => result.current.handleCreateNewAgentInProject({ id: 'p-rose' }));
+    expect(result.current.newAgentFolderId).toBeNull();
+    act(() => result.current.setMessageInput('project root goal'));
+    await act(async () => result.current.handleSendMessage());
+    expect(bodies[1]).toMatchObject({ project_id: 'p-rose' });
+    expect(bodies[1]).not.toHaveProperty('folder_id');
+
+    act(() => result.current.handleCreateNewAgentInProject({ id: 'p-rose' }, 'folder-rose'));
+    act(() => result.current.handleCreateNewAgent());
+    expect(result.current.newAgentProjectId).toBeNull();
+    expect(result.current.newAgentFolderId).toBeNull();
+    act(() => result.current.setMessageInput('home goal'));
+    await act(async () => result.current.handleSendMessage());
+    expect(bodies[2]).not.toHaveProperty('project_id');
+    expect(bodies[2]).not.toHaveProperty('folder_id');
   });
 
   it('defaults allow-listed accounts to Fast Mode on and still allows switching off', async () => {
@@ -188,6 +225,27 @@ describe('useTerminalAgents Fast Mode bridge', () => {
       (r) => r.method === 'POST' && r.url.endsWith('/agents'),
     );
     expect(createOff?.body).toMatchObject({ fast_mode_cache_enabled: false });
+  });
+
+  it('sends the query-box speed (standard, fast or ultrafast) so agents start at that native speed', async () => {
+    const { result } = renderHook(() => useMessageSending(messageSendingArgs()));
+    await waitFor(() => expect(result.current.fastMode).toBe(true));
+    const sent = async (goal: string) => {
+      clearCaptures();
+      act(() => result.current.setMessageInput(goal));
+      await act(async () => {
+        await result.current.handleSendMessage();
+      });
+      return capturedRequests.find((r) => r.method === 'POST' && r.url.endsWith('/agents'))
+        ?.body as Record<string, unknown> | undefined;
+    };
+
+    expect(await sent('ultra by default')).toMatchObject({ speed: 'ultrafast' });
+    writeQueryPreferences(ADMIN_ACCOUNTS[0]!.userId, { ultraPreferred: false });
+    expect(await sent('fast when chosen')).toMatchObject({ speed: 'fast' });
+    act(() => result.current.setFastMode(false));
+    const off = await sent('normal speed');
+    expect(off).toMatchObject({ fast_mode_cache_enabled: false, speed: 'standard' });
   });
 
   it('hydrates Fast Mode from the loaded agent detail instead of the account default', async () => {

@@ -1067,6 +1067,9 @@ class DOMService:
         safe = self.model_visible_value(result)
         if not isinstance(result, dict) or not isinstance(safe, dict):
             return safe
+        from browser_tools.result_projection import preserve_output_protocol, retain_model_preview
+        safe = preserve_output_protocol(result, safe, action_name, self.model_visible_value)
+        safe = retain_model_preview(result, safe, action_name, self.model_visible_value)
         if "credential_ref" in result:
             safe["credential_ref"] = result["credential_ref"]
         if action_name == "request_payment_card":

@@ -12,8 +12,8 @@ const expected = {
     hash: '8b1f3584d289c31a81def8b5ab119b80392865750697e8ee5d35a3b78d479384',
   },
   pooledSequentialTests: {
-    count: 34,
-    hash: '969d66efa40349cb9fbf62df916a0f5cd59322c00efe22c0f94c6333dcae6881',
+    count: 35,
+    hash: '0f62ef2f07e93f703e1e6a47e807c77f3298e2c137a06b08489003c57418ddd0',
   },
   boundarySequentialTests: {
     count: 7,

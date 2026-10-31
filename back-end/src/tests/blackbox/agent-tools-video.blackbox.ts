@@ -99,10 +99,18 @@ before(async () => {
     saved[name] = process.env[name];
   }
   server = createServer((req, res) => {
-    // The devbox port forwarder probes every new listener with `HEAD /`; it is not a provider call.
-    if (req.method === 'HEAD' && req.url === '/') {
-      res.statusCode = 200;
+    // Gemini calls are GET/POST only. A host port probe (the boxes.dev daemon
+    // sends `HEAD /` to every new listener) is not provider traffic: never
+    // record it or hand it to a test handler that may not be installed yet.
+    if (req.method !== 'GET' && req.method !== 'POST') {
+      res.statusCode = 405;
       res.end();
+      return;
+    }
+    // Other blackbox domains may also probe ephemeral ports while this server is bound.
+    // Keep those requests out of the provider-call count and the per-test handler.
+    if (req.headers['x-goog-api-key'] !== 'blackbox-gemini-key') {
+      res.writeHead(404).end();
       return;
     }
     void readJson(req).then((body) => {
@@ -113,6 +121,10 @@ before(async () => {
         body,
       };
       calls.push(recorded);
+      if (typeof handler !== 'function') {
+        res.writeHead(503).end();
+        return;
+      }
       handler(recorded, (status, payload, raw) => {
         res.statusCode = status;
         if (raw) {

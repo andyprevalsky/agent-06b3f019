@@ -1731,18 +1731,80 @@ cloudbench_shared_proxy_start() {  # same signature as data-plane proxy
   return 1
 }
 
-cloudbench_start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log> <pid-var> <label> [timeout]
-  if cloudbench_shared_relay_enabled; then
-    cloudbench_shared_proxy_start "$@"; return $?
+# Charge one bounded controller step to a readiness budget. Every step of the
+# proxy launcher has a fixed ceiling (curl --max-time, settle, terminate grace,
+# fixed sleeps), so wall-clock time past that ceiling is a host stall (VM pause,
+# laptop sleep, cgroup freeze), not evidence about the tunnel. Production replay
+# 20261028-181310-2300577: the devbox VM paused 537 s (kernel audit seq
+# 73645→73646, 18:33:12→18:42:09Z) while six status proxies were retrying
+# through Fly GraphQL 503s; the wall-clock budget expired during the pause and
+# six healthy guests were failed closed without one post-thaw attempt, while
+# the three already-established tunnels recovered in 20 s. The stall is logged
+# and excluded; the budget keeps counting only bounded controller work.
+#   cloudbench_charge_bounded_step <charged-var> <stalled-var> <step-started-epoch> <ceiling-s> <log> <label> [minimum-s]
+cloudbench_charge_bounded_step() {
+  local charged_var="$1" stalled_var="$2" step_started="$3" ceiling="$4" log_file="$5" label="$6"
+  # Subsecond failed probes still consume a bounded budget unit when requested.
+  local elapsed excess minimum="${7:-0}"
+  elapsed=$(( $(date +%s) - step_started ))
+  [ "$elapsed" -ge "$minimum" ] || elapsed="$minimum"
+  if [ "$elapsed" -gt "$ceiling" ]; then
+    excess=$(( elapsed - ceiling ))
+    printf '[%s] %s: host stall %ss during a %ss-bounded step (excluded from the readiness budget)\n' \
+      "$(date -u +%H:%M:%S)" "$label" "$excess" "$ceiling" >> "$log_file"
+    printf -v "$stalled_var" '%s' "$(( ${!stalled_var} + excess ))"
+    elapsed="$ceiling"
   fi
+  printf -v "$charged_var" '%s' "$(( ${!charged_var} + elapsed ))"
+}
+
+cloudbench_start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log> <pid-var> <label> [timeout]
   local local_port="$1" remote_port="$2" host="$3" log_file="$4"
   local pid_var="$5" label="$6" timeout="${7:-${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}}"
-  local started_at pid attempt=0 probe_path="/" health_code
-  started_at="$(date +%s)"
-  : > "$log_file"
+  local settle="${CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS:-3}" settle_whole
+  # Bound decimal parsing before shell comparisons/arithmetic or any launch.
+  if [[ ! "$timeout" =~ ^[0-9]+$ ]]; then
+    printf 'Invalid proxy readiness timeout: expected a positive decimal integer\n' >&2
+    return 2
+  fi
+  timeout="${timeout#"${timeout%%[!0]*}"}"
+  if [ -z "$timeout" ] || [ "${#timeout}" -gt 18 ]; then
+    printf 'Invalid proxy readiness timeout: outside supported positive integer range\n' >&2
+    return 2
+  fi
+  if [[ ! "$settle" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || [ "${#settle}" -gt 32 ]; then
+    settle=3
+  fi
+  if cloudbench_shared_relay_enabled; then
+    cloudbench_shared_proxy_start "$local_port" "$remote_port" "$host" "$log_file" "$pid_var" "$label" "$timeout"
+    return $?
+  fi
+  local pid attempt=0 probe_path="/" health_code attempt_first_line
+  # Budget accounting: only bounded controller work is charged (see
+  # cloudbench_charge_bounded_step). Ceilings are the sum of each segment's
+  # fixed limits plus slack for a loaded host.
+  local charged=0 stalled=0 step_started attempt_ceiling wait_ceiling=15 retire_ceiling=15
+  local wait_budget probe_budget sleep_budget fresh_budget probe_elapsed thaw_probe_used=0 did_thaw_probe
+  settle_whole="${settle%%.*}"
+  case "$settle_whole" in ''|*[!0-9]*) settle_whole=3 ;; esac
+  settle_whole="${settle_whole#"${settle_whole%%[!0]*}"}"
+  [ -n "$settle_whole" ] || settle_whole=0
+  if [ "${#settle_whole}" -gt 18 ]; then settle=3; settle_whole=3; fi
+  attempt_ceiling=$(( 30 + settle_whole ))
+  # Retain earlier attempts: ensure_status_proxy re-enters this launcher after a
+  # transport loss, and truncating here erased the original readiness evidence
+  # of every guest that later passed (replay above).
+  if [ -s "$log_file" ]; then
+    printf '[%s] %s proxy (re)start: earlier attempts retained above\n' \
+      "$(date -u +%H:%M:%S)" "$label" >> "$log_file"
+  else
+    : > "$log_file"
+  fi
   [ "$label" = "status" ] && probe_path="/driver-health"
-  while [ $(( $(date +%s) - started_at )) -lt "$timeout" ]; do
+  while [ "$charged" -lt "$timeout" ]; do
     attempt=$((attempt + 1))
+    step_started="$(date +%s)"
+    attempt_first_line=$(( $(wc -l < "$log_file" 2>/dev/null || echo 0) + 1 ))
     printf '[%s] %s proxy attempt %s: localhost:%s -> %s:%s\n' \
       "$(date -u +%H:%M:%S)" "$label" "$attempt" "$local_port" "$host" "$remote_port" \
       >> "$log_file"
@@ -1759,35 +1821,91 @@ cloudbench_start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log>
     sleep 0.5
     curl --noproxy '*' -sS --max-time 2 -o /dev/null \
       "http://127.0.0.1:$local_port$probe_path" 2>/dev/null || true
-    if grep -Eiq 'listen tcp .*bind: address already in use|address already in use' "$log_file"; then
+    # Only this attempt's output may classify a collision: the retained log can
+    # still hold an earlier port's collision that the caller already rotated away.
+    if tail -n +"$attempt_first_line" "$log_file" 2>/dev/null \
+      | grep -Eiq 'listen tcp .*bind: address already in use|address already in use'; then
       wait "$pid" 2>/dev/null || true
       printf -v "$pid_var" '%s' ""
       return 98
     fi
     # Require a short post-probe survival window for asynchronous lazy-DNS failures.
-    sleep "${CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS:-3}"
+    sleep "$settle"
+    cloudbench_charge_bounded_step charged stalled "$step_started" "$attempt_ceiling" \
+      "$log_file" "$label proxy attempt $attempt"
     if kill -0 "$pid" 2>/dev/null; then
       if [ "$label" != "status" ]; then
         printf -v "$pid_var" '%s' "$pid"
         return 0
       fi
-      health_code="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
-        "http://127.0.0.1:$local_port/driver-health" 2>/dev/null || true)"
-      if cloudbench_status_proxy_lifecycle_response_accepted "$health_code" \
-        && kill -0 "$pid" 2>/dev/null; then
-        printf -v "$pid_var" '%s' "$pid"
-        return 0
-      fi
-      printf '[%s] status proxy lifecycle HTTP %s not accepted; restarting pid %s\n' \
-        "$(date -u +%H:%M:%S)" "${health_code:-000}" "$pid" >> "$log_file"
+      # HTTP unavailability is not process failure: a live flyctl can still be
+      # initializing WireGuard or waiting for the guest status service. Keep its
+      # progress within the original readiness deadline; restart only on exit.
+      while kill -0 "$pid" 2>/dev/null && [ "$charged" -lt "$timeout" ]; do
+        step_started="$(date +%s)"
+        wait_budget=$((timeout - charged))
+        [ "$wait_budget" -le "$wait_ceiling" ] || wait_budget="$wait_ceiling"
+        # Reserve a sleep second when available; the last second still gets
+        # one bounded observation of this same live proxy.
+        sleep_budget=0
+        [ "$wait_budget" -le 1 ] || sleep_budget=1
+        probe_budget=$((wait_budget - sleep_budget))
+        [ "$probe_budget" -le 3 ] || probe_budget=3
+        fresh_budget=0
+        did_thaw_probe=0
+        health_code="$(curl --noproxy '*' -sS --max-time "$probe_budget" -o /dev/null -w '%{http_code}' \
+          "http://127.0.0.1:$local_port/driver-health" 2>/dev/null || true)"
+        if ! cloudbench_status_proxy_lifecycle_response_accepted "$health_code" && [ "$sleep_budget" -gt 0 ]; then
+          sleep "$sleep_budget"
+        fi
+        probe_elapsed=$(( $(date +%s) - step_started ))
+        if ! cloudbench_status_proxy_lifecycle_response_accepted "$health_code" \
+          && [ "$probe_elapsed" -gt "$wait_budget" ] && [ "$thaw_probe_used" -eq 0 ]; then
+          # Reserve the first probe's fixed bound and optional sleep before one fresh
+          # observation. Both probes stay inside this one existing wait step.
+          fresh_budget=$((wait_budget - probe_budget - sleep_budget))
+          [ "$fresh_budget" -le 3 ] || fresh_budget=3
+          if [ "$fresh_budget" -gt 0 ]; then
+            thaw_probe_used=1
+            did_thaw_probe=1
+            health_code="$(curl --noproxy '*' -sS --max-time "$fresh_budget" -o /dev/null -w '%{http_code}' \
+              "http://127.0.0.1:$local_port/driver-health" 2>/dev/null || true)"
+          else
+            fresh_budget=0
+          fi
+        fi
+        if ! cloudbench_status_proxy_lifecycle_response_accepted "$health_code"; then
+          printf '[%s] status proxy lifecycle HTTP %s not accepted; waiting on pid %s\n' \
+            "$(date -u +%H:%M:%S)" "${health_code:-000}" "$pid" >> "$log_file"
+        fi
+        cloudbench_charge_bounded_step charged stalled "$step_started" "$wait_budget" \
+          "$log_file" "$label proxy attempt $attempt wait" 1
+        if [ "$did_thaw_probe" -eq 1 ]; then
+          printf 'status proxy: post-thaw probe charged=%s timeout=%s\n' "$charged" "$timeout" >> "$log_file"
+        fi
+        if cloudbench_status_proxy_lifecycle_response_accepted "$health_code" \
+          && kill -0 "$pid" 2>/dev/null; then
+          printf -v "$pid_var" '%s' "$pid"
+          return 0
+        fi
+      done
+      step_started="$(date +%s)"
       cloudbench_terminate_and_wait 5 "$pid"
     else
+      step_started="$(date +%s)"
       wait "$pid" 2>/dev/null || true
     fi
+    # Reaping makes a late lazy-start bind failure visible for port rotation.
+    if tail -n +"$attempt_first_line" "$log_file" 2>/dev/null | grep -Eiq 'listen tcp .*bind: address already in use|address already in use'; then
+      printf -v "$pid_var" '%s' ""
+      return 98
+    fi
     sleep 2
+    cloudbench_charge_bounded_step charged stalled "$step_started" "$retire_ceiling" \
+      "$log_file" "$label proxy attempt $attempt retire"
   done
   printf -v "$pid_var" '%s' ""
-  echo "❌ $label data-plane proxy did not become ready within ${timeout}s" >&2
+  echo "❌ $label data-plane proxy did not become ready within ${timeout}s (charged ${charged}s of bounded work; ${stalled}s of host stall excluded)" >&2
   tail -20 "$log_file" 2>/dev/null | sed 's/^/   /' >&2 || true
   # Ordinary remote readiness failures retain the bounded same-host retry
   # behavior above; only local ownership collisions ask the caller to rotate.
@@ -2672,6 +2790,21 @@ cloudbench_people_credential_broker_default() {  # <agents-env-file>
     [ -n "${value//[[:space:]]/}" ] && return 0
   done
   printf '%s\n' "$CLOUDBENCH_PEOPLE_CREDENTIAL_BROKER_ORIGIN"
+}
+
+# Compute-token authority for benchmark guests (A1, approved 2026-10-20).
+# Each guest restores its own database with copies of the same real compute
+# tokens, so lease capacity, rate-limit marks and the shared Foundry cooldown
+# are only correct when every guest delegates them to one backend
+# (RCA 2026-10-20-bench-guests-ran-independent-compute-token-semaphores).
+# Prints the authority URL, or nothing for BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off
+# (diagnostics only: the guest then keeps its own copied token state).
+CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_ORIGIN="https://navi-j9a9.onrender.com"
+cloudbench_compute_token_authority_url() {
+  case "${BENCHMARK_COMPUTE_TOKEN_AUTHORITY:-on}" in
+    off|OFF|Off|0|false|no) return 0 ;;
+  esac
+  printf '%s\n' "${CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL-$CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_ORIGIN}"
 }
 
 # Production Temporal namespace (mirror of agents/temporal_connection.py and

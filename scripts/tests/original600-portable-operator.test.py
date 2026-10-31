@@ -226,7 +226,7 @@ class Portable(unittest.TestCase):
                 # The host gate watchdog outlives the shard's TERM fence plus its cleanup.
                 self.assertGreater(RUNNER['gate_watchdog_seconds'](bound), bound)
                 with self.assertRaisesRegex(ValueError, 'e2e-timeout must cover'):
-                    RUNNER['campaign_timeouts'](window, int(bound) - 1 if bound > RUNNER['RUN_DEADLINE'] else window + 1)
+                    RUNNER['campaign_timeouts'](window, window + RUNNER['POST_TASK_ALLOWANCE'])
 
     def test_fragment_request_retains_transport_margin(self):
         # The old receiver's unused CLI trailer made this request 6,202 bytes.
@@ -1688,6 +1688,34 @@ class Portable(unittest.TestCase):
             self.assertEqual((terminal['status'],terminal['supervisor_state'],terminal['benchmark_success_inferred']),('FAILED_BEFORE_SUPERVISOR_RELEASED','NOT_PUBLISHED',False))
             self.assertEqual(terminal['release']['machine_id'],mid)
 
+    def test_new_attempt_refused_after_its_own_term_fence_before_any_output(self):
+        # PR #1599 review: the new-attempt clock accepted any attempt before epoch+MAX_RUN_DEADLINE
+        # (10020 s) although its TERM fence is epoch+RUN_DEADLINE (unsharded) or epoch plus the
+        # shard's bound e2e. Such an attempt allocated a controller only to TERM it at its first PROBE.
+        with tempfile.TemporaryDirectory() as name:
+            base=Path(name);base.chmod(0o700)
+            tasks=json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text());tasks_path=private(base/'tasks.json',tasks)
+            template=private(base/'authority-template.json',dict(allowed=True,source_ref='a'*40,protected_machines=['keep'+str(i) for i in range(4)],protected_volumes=['vol_keep']))
+            names=[tasks[3],tasks[10],tasks[199]]
+            shard=dict(index=0,count=20,tasks=names,tasks_sha256=hashlib.sha256(('\n'.join(names)+'\n').encode()).hexdigest(),task_indexes=[3,10,199],runs=3,
+                       group_run_id='campaign-group-fixture',group_total=600,task_timeout=3300,e2e_timeout=6120)
+            limits=dict(CLOUDBENCH_APP_MACHINE_CEILING='100',CLOUDBENCH_SHARED_CPU_GOVERNOR='10')
+            for label,bound,fence in (('unsharded',None,RUNNER['RUN_DEADLINE']),('sharded',shard,6120)):
+                self.assertLess(fence,RUNNER['MAX_RUN_DEADLINE'])
+                for late in (False,True):
+                    with self.subTest(label=label,late=late):
+                        epoch=time.time()-fence+(-60 if late else 600)
+                        value=dict(schema='original600-controller-runner-v1',allowed=True,source_root=str(base),source_ref='a'*40,source_files={},
+                                   tasks_path=str(tasks_path),started_at_epoch=epoch,authority_template=str(template),remote_env=dict(limits),remote_files=[])
+                        if bound is not None:value['shard']=dict(bound,group_started_at=epoch)
+                        config=private(base/('config-%s-%s.json'%(label,late)),value);out=base/('run-%s-%s'%(label,late))
+                        with patch.dict(RUNNER['run'].__globals__,validate_source_members=lambda *unused:None,shard_placement_env=lambda *unused:(_ for _ in ()).throw(RuntimeError('admitted'))),\
+                             patch.object(RUNNER['subprocess'],'check_output',return_value='a'*40+'\n'):
+                            with self.assertRaisesRegex(ValueError if late else RuntimeError,'new attempt clock expired' if late else 'admitted'):
+                                RUNNER['run'](config,hashlib.sha256(config.read_bytes()).hexdigest(),out)
+                        # A late attempt refuses before any output, authority or gate exists.
+                        self.assertEqual(out.exists(),not late)
+
     def _stopped_controller_run(self,native,recover=True):
         # descend-full69 shard-00: the gate joined with GATE_EXPORT_PENDING after a devbox
         # suspension lost the export download, then the controller stopped (restart 'no').
@@ -2142,7 +2170,7 @@ class Portable(unittest.TestCase):
                                                ('rootless-ordinary', names[:3] + rootless, ['--catalog-eligibility', 'ordinary'], 'cloud-root'),
                                                ('timeout', names, ['--task-timeout', '30'], 'task-timeout must be 60'),
                                                ('timeout-over-2h', names, ['--task-timeout', '7201'], 'ask the user to choose a lower execution timeout'),
-                                               ('e2e', names, ['--task-timeout', '480', '--e2e-timeout', '2000'], 'e2e-timeout must cover'),
+                                               ('e2e', names, ['--task-timeout', '480', '--e2e-timeout', '1680'], 'e2e-timeout must cover'),
                                                ('continuation', names, ['--resume-admission', str(fx.state)], 'original 200-task manifest')]:
                 with self.subTest(label=label):
                     path = fx.inputs/('bad-'+label)
@@ -2586,6 +2614,32 @@ class Sharded(unittest.TestCase):
                     available_slots_conservative=free, new_controller_slots=1, requested_original_primary_slots=600,
                     proof_path=str(private(directory/'capacity-proof.private.json', {})))
 
+    def test_adopted_wave_preserves_prior_infra_threshold_and_rejects_invalid_counts(self):
+        """Main's adoption path must retain the prior-wave numerator from the original journal."""
+        coordinator = runpy.run_path(str(ROOT / 'scripts/cloudbench-shard-coordinator.py'))
+        for prior, stopped in ((0, False), (2, True)):
+            with self.subTest(prior=prior), tempfile.TemporaryDirectory() as name:
+                out = Path(name) / 'shard'; out.mkdir()
+                journal = Path(name) / 'coordination.json'
+                record = dict(schema='original600-shard-coordination-v1', release_id='a'*24,
+                              scheduled_total=60, infra_early_stop='enabled', started_at=1,
+                              released_at=2, aborted_at=None, abort_reason=None, terminated_at=None,
+                              terminate_reason=None, prior_infra=prior,
+                              shards={'0': dict(out=str(out), pid=99999999)})
+                journal.write_text(json.dumps(record))
+                (out / 'shard-status.json').write_text(json.dumps(dict(state='JOINED', infra=dict(infra_true=1))))
+                process = types.SimpleNamespace(pid=99999999, poll=lambda:0, wait=lambda:0)
+                result = coordinator['adopt_coordinate']([dict(index=0, out=out)], lambda _:process, journal)
+                self.assertEqual((out / coordinator['OWNER_STOP']).exists(), stopped)
+                self.assertEqual(result['prior_infra'], prior)
+                self.assertEqual(result.get('terminate_cause'), 'threshold' if stopped else None)
+                if stopped:
+                    self.assertIn('3/60', result['terminate_reason'])
+                for invalid in (-1, True, '2'):
+                    bad = dict(record, prior_infra=invalid)
+                    with self.assertRaisesRegex(ValueError, 'invalid prior infra'):
+                        coordinator['adoptable'](bad, [dict(index=0, out=out)])
+
     def test_final_group_status_uses_the_hub_vocabulary(self):
         """Every coordination outcome maps onto the Hub's passed|failed|cancelled group statuses."""
         ok = dict(exit_codes={'0': 0, '1': 0}, abort_reason=None, terminate_reason=None)
@@ -2640,6 +2694,43 @@ class Sharded(unittest.TestCase):
             self.assertEqual(json.loads((shard_dir/'attempt-start.safe.json').read_bytes())['scheduled_total'], 30)
             for key in set(legacy) - {'started_at_epoch', 'authority_template', 'remote_env', 'shard'}:
                 self.assertEqual(value[key], legacy[key], key)
+
+    def test_sharded_admission_and_retry_prepare_honour_the_bound_startup_window(self):
+        # PR #1599 review: an explicit --e2e-timeout 7000 at --task-timeout 1200 binds a 5800 s
+        # startup window, but the sharded capacity/spawn/retry guards and prepare() still refused
+        # every deadline beyond the fixed 5400 s original600 bound, so admission aborted at once.
+        self.assertEqual(RUNNER['startup_deadline_epoch'](0, 1200, 7000), 5800)
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory/'state').mkdir(mode=0o700)
+            args = self.args(directory, task_count=12, repetitions=3, tasks_per_controller=4, task_timeout=1200, e2e_timeout=7000)
+            plan = CLI.shard_selection(args, RUNNER)
+            guest_env = CLI.guest_temporal_env(ROOT, args.agents_env, args.backend_env)
+            def snapshot(*unused, **kwargs):
+                raise RuntimeError('capacity read admitted')
+            with patch.object(CLI, 'capacity_snapshot', snapshot), \
+                 patch.object(CLI, 'hub_interpreter', lambda args: sys.executable), \
+                 patch.object(CLI, 'missing_prompt_secrets', lambda *a: []), \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+                 self.assertRaisesRegex(RuntimeError, 'capacity read admitted'):
+                CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan, guest_env=guest_env)
+            # A retry is bounded by the shard's own e2e, as the runner's new-attempt clock is; the
+            # unsharded original600 admission keeps its fixed 5400 s bound.
+            tasks = json.loads(args.tasks.read_text())[0::20]
+            shard = dict(index=0, count=20, tasks=tasks, task_indexes=list(range(0, 200, 20)), runs=3, group_run_id='g', group_total=600,
+                         group_started_at=1.0, tasks_sha256=CLI.digest(('\n'.join(tasks)+'\n').encode()), e2e_timeout=7000)
+            env = dict(CLOUDBENCH_APP_MACHINE_CEILING='962', CLOUDBENCH_SHARED_CPU_GOVERNOR='2428')
+            for label, age, bound, refused in (('shard', 5500, shard, False), ('shard', 7001, shard, True), ('legacy', 5401, None, True)):
+                with self.subTest(label=label, age=age):
+                    target = directory/('%s-%d' % (label, age)); target.mkdir(mode=0o700)
+                    prepare = lambda: CLI.prepare(args if bound else self.args(directory), ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, target,
+                                                  self.capacity(directory), started_at=time.time() - age, shard=bound,
+                                                  runtime_env=env if bound else None, scheduled_total=600)
+                    if refused:
+                        with self.assertRaisesRegex(ValueError, 'original campaign clock expired during admission'):
+                            prepare()
+                    else:
+                        self.assertEqual(json.loads(prepare().read_bytes())['shard'], shard)
 
     def test_arbitrary_manifest_binds_its_hash_and_timeouts_into_every_shard_config(self):
         with tempfile.TemporaryDirectory() as name:
@@ -2814,7 +2905,7 @@ class Sharded(unittest.TestCase):
                     launched.append(self)
 
                 def status(self, barrier):
-                    (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status=barrier), infra=dict(infra_true=0))))
+                    (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status=barrier, ready_count=len(self.config['shard']['tasks'])*self.config['shard']['runs'], failed_count=0, expected_count=len(self.config['shard']['tasks'])*self.config['shard']['runs'], survivor_count=len(self.config['shard']['tasks'])*self.config['shard']['runs']), infra=dict(infra_true=0))))
 
                 def poll(self):
                     self.polls += 1
@@ -3002,7 +3093,7 @@ class Sharded(unittest.TestCase):
                             info.size = len(raw); tar.addfile(info, io.BytesIO(raw))
                         self.code = 0
                     elif self.polls == 1:
-                        (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status='ready'), infra=dict(infra_true=0))))
+                        (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status='ready', ready_count=len(self.config['shard']['tasks'])*self.config['shard']['runs'], failed_count=0, expected_count=len(self.config['shard']['tasks'])*self.config['shard']['runs'], survivor_count=len(self.config['shard']['tasks'])*self.config['shard']['runs']), infra=dict(infra_true=0))))
                     return self.code
 
                 def wait(self):
@@ -3218,6 +3309,20 @@ class InputDiscovery(unittest.TestCase):
             # The bound preflight accepts the discovered pair as explicit inputs.
             CLI.warm_snapshot_preflight(DiscoveryFly(fresh, []), 'FlyV1 fixture', RUNNER, paths['warm_deps'].read_bytes(),
                                         paths['snapshot_inventory'].read_bytes(), facts['protected_machines'], now + 5400)
+
+    def test_discovery_proves_snapshot_retention_through_the_bound_e2e_deadline(self):
+        # PR #1599 review: a bound e2e (default 10020 s at --task-timeout 7200) moves the TERM
+        # fence past 5400 s; a snapshot expiring inside that window must be refreshed, not reused.
+        now = time.time()
+        fixture = warm_fixture(now, created_age=5*86400 - 8000)  # expires 8000 s from now
+        for task_timeout, action in ((1200, 'reuse'), (7200, 'refresh')):
+            with self.subTest(task_timeout=task_timeout), self.common(fixture['warm_deps'], RUN_REF + ' ' + FIXTURE_SNAPSHOT + '\n') as fx:
+                fx.args.task_timeout = task_timeout
+                report, paths = CLI.discover_inputs(fx.args, ROOT, RUNNER, 'FlyV1 fixture', False,
+                                                    fly=DiscoveryFly(fixture, bench_inventory(fixture)))
+                self.assertEqual((report['action'], paths), (action, None))
+                if action == 'refresh':
+                    self.assertTrue(any('before the run deadline' in r for r in report['reasons']), report['reasons'])
 
     def test_discovery_run_refuses_when_the_producer_does_not_prove_this_ref(self):
         now = time.time()

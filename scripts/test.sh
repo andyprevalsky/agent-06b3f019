@@ -367,6 +367,7 @@ run_suite "Cloud Benchmark Archived Owner Stop" python3 scripts/tests/cloudbench
 run_suite "Cloud Benchmark Forensic Resource Closure" python3 scripts/tests/cloudbench-forensic-resource-closure.test.py
 run_suite "Cloud Benchmark Local Forensic Closure" python3 scripts/tests/cloudbench-local-forensic-closure.test.py
 run_suite "Cloud Benchmark Status Readiness Observability" python3 scripts/tests/cloudbench-status-readiness-observability.test.py
+run_suite "Cloud Benchmark Pre-Terminal Infra Release" python3 scripts/tests/cloudbench-preterminal-infra-release.test.py
 run_suite "Controller Operator Preflight" python3 scripts/tests/cloudbench-operator-preflight.test.py
 run_suite "Playwright Browser Bootstrap" python3 scripts/tests/playwright-browser-bootstrap.test.py
 run_suite "Cloud Benchmark Recovery Descriptor Custody" python3 scripts/tests/cloudbench-recovery-fd.test.py

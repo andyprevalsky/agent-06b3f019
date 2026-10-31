@@ -8,6 +8,8 @@ _pidfd_runpy.run_path(str(_PidfdPath(__file__).resolve().with_name("pidfd_interp
 
 import base64
 import contextlib
+import errno
+import signal
 import io
 import gzip
 import hashlib
@@ -26,6 +28,20 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 M = runpy.run_path(str(ROOT / "scripts/cloudbench-controller-orphan-drain.py"))
+# Every fixture here runs under the conventional umask 022 (the deploy lane's
+# transient-service and macOS default). Interactive devbox shells use 077,
+# which hides fixtures that only pass because the umask made them private.
+FIXTURE_UMASK = 0o022
+_inherited_umask: list[int] = []
+
+
+def setUpModule():
+    _inherited_umask.append(os.umask(FIXTURE_UMASK))
+
+
+def tearDownModule():
+    if _inherited_umask:
+        os.umask(_inherited_umask.pop())
 
 
 class Drain(unittest.TestCase):
@@ -157,6 +173,22 @@ class Drain(unittest.TestCase):
         else:
             os.environ["FLY_MACHINE_ID"] = self.old_mid
         self.tmp.cleanup()
+
+    def test_libc_pidfd_keeps_handle_and_errno_without_python_bindings(self):
+        with (
+            mock.patch.object(os, "pidfd_open", None, create=True),
+            mock.patch.object(signal, "pidfd_send_signal", None, create=True),
+        ):
+            fd = self.ns["pidfd_open"](self.child.pid)
+            try:
+                self.assertFalse(os.get_inheritable(fd))
+                self.ns["pidfd_send_signal"](fd, 0)
+                self.assertIsNone(self.child.poll())
+            finally:
+                os.close(fd)
+            with self.assertRaises(OSError) as caught:
+                self.ns["pidfd_send_signal"](fd, 0)
+            self.assertEqual(caught.exception.errno, errno.EBADF)
 
     def test_registered_owner_pidfd_term_once_and_observe(self):
         planned = self.ns["execute"](dict(self.payload, action="plan"))
@@ -586,13 +618,12 @@ class NormalAgent(unittest.TestCase):
                 process_socket_fds=lambda _p: ([(77, "10")], 1),
                 process=lambda *_a: {"birth": "agent-birth", "cwd": "/tmp/gate/repo"},
             ),
-            mock.patch.object(self.g["os"], "pidfd_open", return_value=123),
+            mock.patch.dict(self.g["agent_execute"].__globals__, pidfd_open=lambda _pid: 123),
             mock.patch.object(self.g["os"], "close", lambda _fd: None),
             mock.patch.object(self.g["select"], "select", side_effect=[([], [], []), ([123], [], [])]),
-            mock.patch.object(
-                self.g["signal"],
-                "pidfd_send_signal",
-                side_effect=lambda *_a: sent.append(True),
+            mock.patch.dict(
+                self.g["agent_execute"].__globals__,
+                pidfd_send_signal=lambda *_a: sent.append(True),
             ),
         ):
             checked = M["local_state"](args)
@@ -734,7 +765,12 @@ class NormalAgent(unittest.TestCase):
             ]
         )
         old_path = producer / "cloudbench-controller-orphan-drain.py"
-        old_path.write_bytes(old_source)
+        # saved_positive_plan reads this through the private-file reader
+        # (owner-only mode); create it 0600 explicitly rather than through
+        # the inherited umask, which is 022 under the deploy lane's service.
+        with os.fdopen(os.open(old_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(old_source)
         for path in (ROOT / "scripts").iterdir():
             if path.is_file() and path.name != old_path.name:
                 (producer / path.name).symlink_to(path)

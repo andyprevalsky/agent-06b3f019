@@ -3,6 +3,7 @@
 import json
 import re
 from enum import Enum
+from functools import lru_cache
 from typing import Annotated, Any, Dict, List, Literal, Optional, Type, Union
 from urllib.parse import urlsplit
 
@@ -33,6 +34,7 @@ from utils.response_schema_constraints import (
     bounds_from_entries,
     coerce_direct_bounds_to_entries,
 )
+from utils.tool_output_schema import ReadToolOutputTool
 from utils.user_facing_writing_prompt import user_facing_text_description
 from utils.wait_for_bounds import (
     WAIT_FOR_AGENTS_DEFAULT_TIMEOUT_SECONDS,
@@ -74,6 +76,7 @@ PLANNER_RUN_IN_BACKGROUND_DESCRIPTION = (
 
 # Tools available during PLAN phase (research + create execution plan)
 PLAN_PHASE_TOOLS = [
+    "read_tool_output",
     "spawn_agent",  # Only type="explore" allowed in PLAN (enforced at runtime)
     "send_message_to_user",
     "set_plan",
@@ -82,6 +85,7 @@ PLAN_PHASE_TOOLS = [
 
 # Tools available during EXECUTE phase (run the plan)
 EXECUTE_PHASE_TOOLS = [
+    "read_tool_output",
     "spawn_agent",  # Unified: type=browser|code|general_purpose|explore
     "wait_for",
     "send_message_to_user_execute_phase",
@@ -1626,6 +1630,7 @@ ToolRegistry = Dict[str, Type[BaseModel]]
 
 # Map tool names to their Pydantic models
 TOOL_MODELS: ToolRegistry = {
+    "read_tool_output": ReadToolOutputTool,
     "wait_for": WaitForTool,
     "web_search": WebSearchTool,
     "people_search": PeopleSearchTool,
@@ -1692,6 +1697,7 @@ def _with_rose_desktop_models(registry: ToolRegistry) -> ToolRegistry:
 # Full registry list -  callers that inject tools into an explore agent MUST use
 # `get_explore_agent_tools()` so ROSE_DISABLE_API_REQUEST can strip api_request.
 EXPLORE_AGENT_TOOLS = [
+    "read_tool_output",
     "web_search",
     "people_search",
     "web_fetch",
@@ -1884,6 +1890,14 @@ def create_agent_action_model(
         else:
             logger.warning(f"Tool '{name}' not found in registry, skipping")
 
+    # Compiled classes are shared definitions: instantiate them or derive a
+    # JSON schema, but do not mutate their fields or force model rebuilding.
+    return _agent_action_model_for_types(tuple(tool_types))
+
+
+@lru_cache(maxsize=128)
+def _agent_action_model_for_types(tool_types: tuple[Type[BaseModel], ...]) -> Type[BaseModel]:
+    """Compile each ordered tool-model set once, including across workflow replays."""
     # Create union type for tool calls
     if not tool_types:
         # No tools available - agent can only communicate

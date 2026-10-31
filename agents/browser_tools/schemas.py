@@ -19,6 +19,7 @@ from utils.purchase_approval import (
     validate_product_url_for_page,
     validate_product_url_for_pages,
 )
+from utils.tool_output_schema import ReadToolOutputTool
 
 MAX_BROWSER_WAIT_MS = 60_000
 
@@ -986,6 +987,7 @@ BROWSER_TOOL_MODELS = {
     "phone": PhoneBrowserTool,
     # Observation
     "read_browser_state": ReadBrowserStateTool,
+    "read_tool_output": ReadToolOutputTool,
     "screenshot": ScreenshotTool,
     "read_logs": ReadLogsBrowserTool,
     "read_network_requests": ReadNetworkRequestsBrowserTool,

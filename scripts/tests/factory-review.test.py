@@ -2014,6 +2014,189 @@ class LedgerSourceTest(unittest.TestCase):
         self.assertEqual(payload["sources"]["mode"], "ledger")
         self.assertEqual(payload["deploy"]["completed"], 1)
         self.assertIn("Data source:", (output / "factory-review.html").read_text())
+        self.assertEqual(payload["diagnostics"]["coverage"]["stage_rows"], 1)
+        self.assertIn("Failures, reruns and gaps", (output / "factory-review.html").read_text())
+
+
+DIAGNOSTICS = FACTORY_REVIEW._factory_ledger_module("factory_diagnostics")
+
+
+def detailed(row: dict, **detail: object) -> dict:
+    return {**row, "detail": {"schema_version": 1, **detail}}
+
+
+class DiagnosticsTest(unittest.TestCase):
+
+    def test_invalid_nested_measurements_remain_unmeasured(self):
+        row=detailed(stage("run", "gate", 0, 10, "failed"), timing=[1], host="unknown")
+        result=DIAGNOSTICS.analyze_ledger([row])["gates"][0]
+        for field in ("median_setup_seconds", "median_queue_seconds", "median_exec_seconds", "max_load1", "min_mem_available_mb"):
+            self.assertIsNone(result[field])
+
+    def test_nested_detail_shapes_are_unknown_without_losing_valid_metrics(self):
+        base = detailed(stage("run-1", "gate", 0, 10, "failed"),
+                        outcome={"failure_class": "assertion", "failing": ["kept"]},
+                        timing={"exec_seconds": 10}, source={"sha": "a" * 40})
+        for field in ("outcome", "attempt", "timing", "host", "source", "reuse"):
+            for value in (["wrong"], "wrong", 1):
+                with self.subTest(field=field, value=value):
+                    broken = {**base, "detail": {**base["detail"], field: value}}
+                    result = DIAGNOSTICS.analyze_ledger([base, broken])
+                    self.assertEqual(result["coverage"]["stage_rows"], 2)
+                    self.assertEqual(result["gates"][0]["failed"], 2)
+                    self.assertEqual(result["gates"][0]["median_exec_seconds"], 10)
+                    self.assertIn({"name": "kept", "count": 1 if field == "outcome" else 2}, result["gates"][0]["failing_names"])
+
+    def test_nested_counter_keys_and_names_are_type_checked(self):
+        for failing in (123, "word", [["nested"]], {"name": "bad"}):
+            with self.subTest(failing=failing):
+                row = detailed(stage("run", "gate", 0, 10, "failed"),
+                               outcome={"failure_class": ["bad"], "failing": failing},
+                               attempt={"retry_cause": {"bad": True}})
+                result = DIAGNOSTICS.analyze_ledger([row])
+                self.assertEqual(result["gates"][0]["failure_classes"], [{"name": "unclassified", "count": 1}])
+                self.assertEqual(result["gates"][0]["failing_names"], [])
+                self.assertEqual(result["retry_causes"], [])
+        row = detailed(stage("run", "gate", 0, 10, "failed"), outcome={"failure_class": "assertion", "failing": ["good", ["bad"], 42]})
+        self.assertEqual(DIAGNOSTICS.analyze_ledger([row])["gates"][0]["failing_names"], [{"name":"good", "count":1}])
+
+
+    """Failure reasons, rerun causes, reuse, queue/exec and gap attribution."""
+
+    def rows(self) -> list[dict]:
+        source = {"sha": "a" * 40, "files_changed": 3, "insertions": 10, "deletions": 2, "lanes": ["scripts"]}
+        return [
+            detailed(
+                stage("run-1", "typescript", 0, 60, "failed"),
+                outcome={"exit_code": 2, "failure_class": "typecheck", "failing": ["src/a.ts"]},
+                attempt={"attempt": 1},
+                timing={"setup_seconds": 1.0, "exec_seconds": 60.0, "queue_seconds": 30.0},
+                host={"load1_peak": 7.5, "mem_available_min_mb": 900.0},
+                source=source,
+                reuse={"requested": True, "hit": False, "miss_reason": "no-prior-pass"},
+            ),
+            # 10 minutes fixing before the retry on a new commit.
+            detailed(
+                stage("run-1", "typescript", 660, 700),
+                outcome={"exit_code": 0, "failure_class": None},
+                attempt={"attempt": 2, "retry_cause": "new-commit", "fix_sha": "b" * 40},
+                timing={"setup_seconds": 0.5, "exec_seconds": 40.0},
+                reuse={"requested": True, "hit": False, "miss_reason": "inputs-changed"},
+            ),
+            detailed(stage("run-1", "typescript", 701, 701, "reused"), reuse={"requested": True, "hit": True}),
+            # An older row without detail still counts as an attempt.
+            stage("run-1", "prettier", 702, 710),
+            event("deploy", "review-request", "coderabbit", 720),
+            event("deploy", "review-arrival", "coderabbit", 1320),
+            stage("run-1", "semantic", 1330, 1400),
+            event("deploy", "production-start", "render", 1400),
+            event("deploy", "production-finish", "render", 1700),
+            event("deploy", "outcome", "completed", 1701),
+            event("rca", "repro-attempt", "reproduced", 2000),
+            event("rca", "repro-attempt", "fix-verified", 2100),
+        ]
+
+    def test_ledger_diagnostics_explain_failures_reruns_and_gaps(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            attempts = Path(directory) / "task_attempts.jsonl"
+            attempts.write_text(
+                "\n".join(
+                    json.dumps(row)
+                    for row in (
+                        {"task": "a", "passed": True, "status": "COMPLETED", "duration_seconds": 10,
+                         "timestamp": "2026-10-28T00:00:00+00:00", "run_id": "bench-1", "outcome_class": "passed"},
+                        {"task": "b", "passed": False, "status": "ERROR", "duration_seconds": 30,
+                         "timestamp": "2026-10-28T00:00:01+00:00", "run_id": "bench-1", "outcome_class": "failed"},
+                        {"task": "c", "passed": True, "status": "COMPLETED", "duration_seconds": 5,
+                         "timestamp": "2026-10-27T00:00:00+00:00"},
+                    )
+                )
+                + "\n"
+            )
+            result = DIAGNOSTICS.analyze_ledger(
+                self.rows(),
+                attempts_path=attempts,
+                descend_records=[{"run_id": "d1", "detail": {"infra_failed": 2, "scheduled_total": 600}}],
+            )
+        self.assertEqual(result["coverage"], {"stage_rows": 5, "stage_rows_with_detail": 3, "deploy_runs": 1, "rejected_rows": 0})
+        gate = next(row for row in result["gates"] if row["gate"] == "typescript")
+        self.assertEqual((gate["executed"], gate["failed"], gate["reruns"], gate["reused"]), (2, 1, 1, 1))
+        self.assertEqual(gate["failure_classes"], [{"name": "typecheck", "count": 1}])
+        self.assertEqual(gate["failing_names"], [{"name": "src/a.ts", "count": 1}])
+        self.assertEqual(gate["median_queue_seconds"], 30.0)
+        self.assertEqual(gate["median_exec_seconds"], 50.0)
+        self.assertEqual((gate["max_load1"], gate["min_mem_available_mb"]), (7.5, 900.0))
+        self.assertEqual(result["retry_causes"], [{"name": "new-commit", "count": 1}])
+        self.assertEqual(result["reuse"], {"hit": 1, "miss:inputs-changed": 1, "miss:no-prior-pass": 1})
+        causes = {row["cause"]: row for row in result["gap_causes"]}
+        self.assertEqual(causes["fix-before-retry"]["seconds"], 600.0)
+        self.assertEqual(causes["wait:review:coderabbit"]["seconds"], 600.0)
+        self.assertNotIn("unattributed", causes)
+        self.assertEqual(result["largest_gaps"][0]["before"], "typescript(passed)")
+        self.assertEqual(result["waits"]["review:coderabbit"]["median_seconds"], 600.0)
+        self.assertEqual(result["waits"]["external-deploy:render"]["total_seconds"], 300.0)
+        self.assertEqual(result["sources"][0]["files_changed"], 3)
+        self.assertEqual(result["rca"]["repro_attempts"], {"reproduced": 1, "fix-verified": 1})
+        bench = result["benchmarks"]
+        self.assertEqual(bench["attempts_without_run_id"], 1)
+        self.assertEqual(bench["runs"][0]["passed"], 1)
+        self.assertEqual(bench["runs"][0]["outcome_classes"], {"passed": 1, "failed": 1})
+        self.assertEqual(result["descend"], [{"run_id": "d1", "infra_failed": 2, "scheduled_total": 600}])
+        text = "\n".join(DIAGNOSTICS.render_text(result))
+        self.assertIn("Rerun causes: new-commit=1", text)
+        self.assertIn("typecheck (src/a.ts)", text)
+        self.assertIn("fix-before-retry", text)
+
+    def test_events_belong_to_latest_run_on_the_same_branch(self) -> None:
+        rows = [
+            stage("old", "build", 0, 10),
+            stage("new", "build", 200, 210),
+            # The event at the next start belongs to new, including the boundary.
+            event("deploy", "review-request", "coderabbit", 200),
+            event("deploy", "review-arrival", "coderabbit", 400),
+            event("deploy", "outcome", "completed", 401),
+        ]
+        result = DIAGNOSTICS.analyze_ledger(rows)
+        self.assertEqual(result["largest_gaps"], [{
+            "run_id": "new", "seconds": 190.0, "after": "build(passed)",
+            "before": "review-arrival:coderabbit", "cause": "wait:review:coderabbit",
+        }])
+        self.assertEqual(result["gap_causes"], [{
+            "cause": "wait:review:coderabbit", "count": 1, "seconds": 190.0,
+        }])
+
+    def test_event_window_is_not_cut_off_by_other_branch(self) -> None:
+        rows = [stage("original", "build", 0, 10),
+                {**stage("other", "build", 100, 110), "branch": "feat/other"},
+                event("deploy", "outcome", "completed", 200),
+                event("deploy", "outcome", "outside-window", 10 + 6 * 3600 + 1)]
+        result = DIAGNOSTICS.analyze_ledger(rows)
+        self.assertEqual([(g["run_id"], g["seconds"]) for g in result["largest_gaps"]],
+                         [("original", 190.0)])
+
+    def test_reused_rows_do_not_count_as_failed_or_executed_deploy_calls(self) -> None:
+        rows = [
+            stage("run-1", "eslint", 0, 10),
+            stage("run-1", "eslint", 20, 20, "reused"),
+            event("deploy", "outcome", "completed", 30),
+        ]
+        (turn,) = FACTORY_REVIEW.ledger_deploy_turns(rows)
+        stage_calls = [item for item in turn.invocations if "run-deploy-stage" in item.detail]
+        self.assertEqual(len(stage_calls), 1)
+        self.assertFalse(any(item.is_error for item in stage_calls))
+
+    def test_conductor_parser_accepts_event_detail_arguments(self) -> None:
+        self.assertEqual(
+            FACTORY_REVIEW.parse_factory_event_command(
+                "python3 scripts/record_factory_event.py rca repro-attempt reproduced --detail repro_attempt=2"
+            ),
+            ("rca", "repro-attempt", "reproduced"),
+        )
+        self.assertIsNone(
+            FACTORY_REVIEW.parse_factory_event_command(
+                "python3 scripts/record_factory_event.py deploy outcome completed --detail x=1; rm -rf /"
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -269,11 +269,11 @@ def test_polar_browser_completion_value_mode_never_projects_hidden_report():
         "completionSummary": {"summary": "HIDDEN REPORT", "outputs": [{"label": "HIDDEN LABEL", "value": 4}],
                               "presentation": {"version": 1, "mode": "value"}, "answerText": "4"}}}
     history, _ = build_polar_trajectory({"messages": [message]})
-    assert history == "1. Action: completion_summary | status=FINISHED | 4"
+    assert history == "1. Response: 4\nAction: completion_summary | status=FINISHED"
     assert "HIDDEN" not in history
     message["message"] = ""
     history, _ = build_polar_trajectory({"messages": [message]})
-    assert history.endswith("Displayed final answer: 4")
+    assert history == "1. Response: 4\nAction: completion_summary | status=FINISHED"
     assert "HIDDEN" not in history
 
 

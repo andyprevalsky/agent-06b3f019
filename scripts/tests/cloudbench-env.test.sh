@@ -4079,3 +4079,190 @@ PYWIRE
 
 # The same role-specific contract must survive staging and every guest boot path.
 python3 "$ROOT_DIR/scripts/tests/cloudbench-provider-contract.test.py"
+
+
+# Production replay (PR #1627 Group 4 cloud smoke, fleet 20261028-181310-2300577):
+# the devbox VM paused for 537 s (kernel audit seq 73645→73646, 18:33:12→18:42:09Z)
+# while six status proxies were still retrying through Fly GraphQL 503s. The
+# readiness loop measured its 180 s budget with wall-clock time, so the pause
+# consumed it; after the thaw every one of those guests was failed closed as
+# INFRA without one further probe or attempt, although the identical tunnels
+# came up within 20 s for the three guests whose proxies already existed. A
+# host stall is not controller runtime: only the bounded work of each step may
+# be charged, and the loop must keep probing/attempting after the thaw. Two
+# observed variants: (A) the attempt's flyctl had already died on the 503 and
+# the pause landed before the next attempt (test-mass-agent-run-0); (B) the
+# attempt's flyctl was alive with HTTP 000 when the pause hit and the same
+# tunnel served after the thaw (chat-mode). Fakes advance a file-backed clock
+# instead of sleeping, so the replay is offline and deterministic.
+(
+  stall_replay() {  # <variant A|B> ; fakes share state through STALL_* files
+    local variant="$1" stall_dir="$TMP_ROOT/proxy-host-stall-$1"
+    mkdir -p "$stall_dir"
+    export STALL_VARIANT="$variant" STALL_CLOCK="$stall_dir/clock" \
+      STALL_COUNT="$stall_dir/attempts" STALL_MARKER="$stall_dir/stall-pending" \
+      STALL_DONE="$stall_dir/stall-applied"
+    printf '1793212307\n' > "$STALL_CLOCK"
+    rm -f "$STALL_COUNT" "$STALL_MARKER" "$STALL_DONE"
+    date() {
+      case "$*" in
+        *+%s*) cat "$STALL_CLOCK" ;;
+        *) printf '18:31:47\n' ;;
+      esac
+    }
+    sleep() {  # advance the fake clock; a pending host pause lands in this sleep
+      local now secs="${1:-0}"
+      secs="${secs%%.*}"
+      case "$secs" in ''|*[!0-9]*) secs=1 ;; esac
+      [ "$secs" -ge 1 ] || secs=1
+      now="$(cat "$STALL_CLOCK")"
+      if [ -e "$STALL_MARKER" ]; then
+        rm -f "$STALL_MARKER"
+        : > "$STALL_DONE"
+        now=$((now + 537))
+      fi
+      printf '%s\n' "$((now + secs))" > "$STALL_CLOCK"
+      command sleep 0.02
+    }
+    flyctl() {  # A: attempts 1-4 die on the Fly GraphQL 503 (pause after #4); B: always alive
+      local n
+      n=$(( $(cat "$STALL_COUNT" 2>/dev/null || echo 0) + 1 ))
+      if [ "$STALL_VARIANT" = A ] && [ "$n" -eq 4 ]; then : > "$STALL_MARKER"; fi
+      printf '%s\n' "$n" > "$STALL_COUNT"
+      if [ "$STALL_VARIANT" = A ] && [ "$n" -le 4 ]; then
+        echo 'Error: failed to run mutation($input: ValidateWireGuardPeersInput!) { validateWireGuardPeers(input: $input) { invalidPeerIps } }: server returned a non-200 status code: 503'
+        return 1
+      fi
+      exec sleep 60
+    }
+    curl() {
+      case " $* " in
+        *" -w %{http_code} "*)
+          if [ -e "$STALL_DONE" ]; then
+            printf 204
+          else
+            # B: the first health probe fails with HTTP 000 and the pause lands
+            # in the wait that follows; the same live tunnel serves after it.
+            [ -e "$STALL_MARKER" ] || : > "$STALL_MARKER"
+            printf 000
+          fi
+          return 0 ;;
+      esac
+      # Lazy-DNS probe: let the background fake register its attempt first, and
+      # let a dying attempt finish exiting, so the replay never races the parent.
+      while [ "$(cat "$STALL_COUNT" 2>/dev/null || echo 0)" -lt "${attempt:-1}" ]; do command sleep 0.01; done
+      if [ "$STALL_VARIANT" = A ] && [ "$(cat "$STALL_COUNT")" -le 4 ]; then
+        for _ in $(seq 1 500); do kill -0 "${pid:-0}" 2>/dev/null || break; command sleep 0.01; done
+      fi
+      return 0
+    }
+    APP="cloudbench-proxy-host-stall"
+    local proxy_log="$stall_dir/cloudbench-status-proxy.log" proxy_status=0 attempts_run
+    proxy_pid=""
+    cloudbench_start_data_plane_proxy 61807 8011 "fdaa::stall-$variant" "$proxy_log" proxy_pid status 180 \
+      2> "$stall_dir/stderr" || proxy_status=$?
+    cat "$stall_dir/stderr" >&2
+    attempts_run="$(cat "$STALL_COUNT" 2>/dev/null || echo 0)"
+    [ "$proxy_status" -eq 0 ] ||
+      fail "variant $variant: a 537s host stall must not fail the status proxy closed (exit=$proxy_status, attempts=$attempts_run)"
+    [ -n "$proxy_pid" ] && kill -0 "$proxy_pid" 2>/dev/null ||
+      fail "variant $variant: a ready status proxy must publish its live pid (pid=${proxy_pid:-<empty>})"
+    grep -Eq 'host stall 5[0-9][0-9]s during a [0-9]+s-bounded step' "$proxy_log" ||
+      fail "variant $variant: the excluded host stall must be recorded in the proxy log"
+    [ -e "$STALL_DONE" ] || fail "variant $variant: the replay never applied its host pause"
+    case "$variant" in
+      A) [ "$attempts_run" -ge 5 ] ||
+           fail "variant A: the loop must make a further attempt after the thaw (attempts=$attempts_run)" ;;
+      B) [ "$attempts_run" -eq 1 ] ||
+           fail "variant B: a live tunnel that serves after the thaw must not be restarted (attempts=$attempts_run)" ;;
+    esac
+    cloudbench_terminate_and_wait 1 "$proxy_pid"
+  }
+  stall_replay A
+  stall_replay B
+) || fail "status proxy readiness must exclude host stalls from its budget and keep probing after the thaw"
+
+# The same replay lost the first-phase readiness evidence of the three guests
+# that passed: ensure_status_proxy re-enters the launcher after the thaw and the
+# launcher truncated the log, so only the restart survived. Restarts must retain
+# earlier attempts, and the bind-collision classifier must then read only the
+# current attempt's output instead of an older port's collision.
+(
+  retain_dir="$TMP_ROOT/proxy-log-retention"
+  mkdir -p "$retain_dir"
+  CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0
+  flyctl() { exec sleep 60; }
+  curl() {
+    case " $* " in *" -w %{http_code} "*) printf 204 ;; esac
+    return 0
+  }
+  APP="cloudbench-proxy-log-retention"
+  proxy_log="$retain_dir/cloudbench-status-proxy.log"
+  printf '[18:31:47] status proxy attempt 1: localhost:61807 -> fdaa::retain:8011\n' > "$proxy_log"
+  printf 'Error: listen tcp 127.0.0.1:61807: bind: address already in use\n' >> "$proxy_log"
+  proxy_pid=""
+  proxy_status=0
+  cloudbench_start_data_plane_proxy 61808 8011 fdaa::retain "$proxy_log" proxy_pid status 30 \
+    2> "$retain_dir/stderr" || proxy_status=$?
+  cat "$retain_dir/stderr" >&2
+  [ "$proxy_status" -eq 0 ] ||
+    fail "an older port's collision line must not classify the new attempt (exit=$proxy_status)"
+  grep -q 'attempt 1: localhost:61807' "$proxy_log" ||
+    fail "a proxy restart must retain the earlier attempts' evidence in the log"
+  grep -q 'localhost:61808' "$proxy_log" ||
+    fail "the restart's own attempt must be appended to the retained log"
+  cloudbench_terminate_and_wait 1 "$proxy_pid"
+) || fail "status proxy restarts must retain earlier readiness evidence"
+
+python3 "$ROOT_DIR/scripts/tests/cloudbench-proxy-review.test.py"
+# A1 (approved 2026-10-20): every cloud guest delegates compute-token lease,
+# cooldown and Foundry rate-limit state to one authority (the production
+# backend by default), so N guests cannot run N copies of one token's
+# semaphore (RCA 2026-10-20-bench-guests-ran-independent-compute-token-semaphores).
+# Fresh and pooled Machines both receive the value explicitly (also when opted
+# out, so a pooled Machine never keeps an older run's authority), and the guest
+# hands it to the stack with its own BACKEND_API_KEY or refuses to start.
+(
+  dir="$TMP_ROOT/compute-token-authority"
+  mkdir -p "$dir"
+  [ "$(env -u CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL -u BENCHMARK_COMPUTE_TOKEN_AUTHORITY bash -c 'source "$1"; cloudbench_compute_token_authority_url' _ "$HELPER_SRC")" = "https://navi-j9a9.onrender.com" ] \
+    || { echo "guests must default to the production compute-token authority" >&2; exit 1; }
+  [ "$(CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=https://authority.example bash -c 'source "$1"; cloudbench_compute_token_authority_url' _ "$HELPER_SRC")" = "https://authority.example" ] \
+    || { echo "an explicit authority URL must win" >&2; exit 1; }
+  [ -z "$(BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=https://authority.example bash -c 'source "$1"; cloudbench_compute_token_authority_url' _ "$HELPER_SRC")" ] \
+    || { echo "BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off must opt the guests out" >&2; exit 1; }
+  fragment="$(sed -n '/^# Compute-token authority (A1)/,/^fi$/p' "$ROOT_DIR/scripts/cloudbench-run.sh")"
+  [ -n "$fragment" ] || { echo "cloudbench-run.sh has no compute-token authority fragment" >&2; exit 1; }
+  mkdir -p "$dir/repo/back-end"
+  run_fragment() {  # <authority-url> -> STACK_ENV entries, one per line
+    env -i PATH="$PATH" CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL="$1" BENCHMARK_COMPUTE_TOKEN_AUTHORITY="${2:-on}" bash -c '
+      set -eo pipefail
+      source "$1"; REPO_DIR="$2"; STACK_ENV=()
+      log() { echo "$*" >&2; }; finish() { exit "$1"; }
+      eval "$3"
+      printf "%s\n" "${STACK_ENV[@]}"
+    ' _ "$HELPER_SRC" "$dir/repo" "$fragment"
+  }
+  printf 'DATABASE_URL=x\nBACKEND_API_KEY="guest-internal-key"\n' > "$dir/repo/back-end/.env"
+  [ "$(run_fragment https://navi-j9a9.onrender.com)" = "$(printf 'BENCHMARK_COMPUTE_TOKEN_AUTHORITY=on\nCOMPUTE_TOKEN_AUTHORITY_URL=https://navi-j9a9.onrender.com\nCOMPUTE_TOKEN_AUTHORITY_API_KEY=guest-internal-key')" ] \
+    || { echo "the stack must receive the authority URL and the guest's BACKEND_API_KEY" >&2; exit 1; }
+  [ "$(run_fragment '')" = "$(printf 'BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off\nCOMPUTE_TOKEN_AUTHORITY_URL=\nCOMPUTE_TOKEN_AUTHORITY_API_KEY=')" ] || { echo "an opted-out guest must disable local-stack defaults too" >&2; exit 1; }
+  [ "$(run_fragment https://authority.example off)" = "$(run_fragment '')" ] \
+    || { echo "explicit diagnostic opt-out must override a saved authority URL" >&2; exit 1; }
+  printf 'DATABASE_URL=x\n' > "$dir/repo/back-end/.env"
+  ! run_fragment https://navi-j9a9.onrender.com > /dev/null 2> "$dir/missing.err" \
+    || { echo "a guest without BACKEND_API_KEY must refuse to start" >&2; exit 1; }
+  grep -q 'needs BACKEND_API_KEY' "$dir/missing.err"
+  python3 - "$ROOT_DIR/scripts/run-bench-cloud" "$ROOT_DIR/scripts/cloudbench-run.sh" <<'PYWIRE'
+import sys
+from pathlib import Path
+cloud, run = (Path(path).read_text() for path in sys.argv[1:])
+fresh = '--env "CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=$(cloudbench_compute_token_authority_url)"'
+pooled = 'echo "export CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=$(printf \'%q\' "$(cloudbench_compute_token_authority_url)")"'
+assert cloud.count(fresh) == 1, 'fresh Machines must receive the authority explicitly'
+assert cloud.count(pooled) == 1, 'pooled Machines must receive the authority explicitly'
+start = run.index('# Compute-token authority (A1)')
+assert run.index('STACK_ENV=(') < start < run.index('env "${STACK_ENV[@]}" bash "$REPO_DIR/scripts/run.sh" --benchmark'), \
+    'the authority must be in the stack env before run.sh starts'
+PYWIRE
+) || fail "cloud guests must delegate compute-token state to the shared authority"
