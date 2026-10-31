@@ -16,6 +16,7 @@ tags:
   - ordering
   - rolling-deployment
 sources:
+  - PR #1651
   - commit 7b83bc8fd159802cb9b8d2e1ddc8ebac329abc02
 repro: back-end/src/tests/blackbox/projects-folder-order.cases.ts
 status: fixed

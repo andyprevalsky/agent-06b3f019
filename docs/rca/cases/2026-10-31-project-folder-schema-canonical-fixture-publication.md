@@ -18,6 +18,7 @@ tags:
   - smoke
 sources:
   - PR #1648
+  - PR #1651
   - commit ea781111ef13ae3ca677e993c1a3aead61edeefa
 repro: scripts/benchmark-seed-cache pull-canonical and scripts/run-predeploy-local
 status: open
@@ -82,10 +83,31 @@ container cleanup is part of the script's EXIT trap.
 Regression protection already exists in the consumer and seed-cache decision /
 canonical content suites; preserve those assertions. The operational failure
 requires publishing the fixture, not adding a redundant fallback or changing task
-definitions. The original unchanged nine-task predeploy cohort is being rerun;
-this case remains open until its actual terminal outcomes and adversarial review
-are recorded. Cache readiness alone is not proof that the smoke tasks pass.
-Golden reference: not applicable (no approval-gated repair hunk).
+definitions. The exact unchanged nine-task predeploy cohort was rerun from
+2026-10-31T00:31:41Z through 00:50:03Z: seven passed and two were explicitly
+skipped, with no task failure and no fixture startup failure. The wrapper exited
+0 and labels itself passed; that is NOT a claim of nine passing tasks.
+
+The first batch passed payment, child spawning, browser biometrics, browser
+smoke, parallel calls, background messaging and chat. Claude Code was skipped
+before agent creation because its fresh production-token lookup found no usable
+credential. The final cached mass-agent root ran, but its declared evaluator
+could not acquire a Codex compute token (pool exhausted or cooling down), so its
+outcome remains unverified. Neither skip is reported as credit exhaustion or a
+pass. These credential/evaluator paths are unchanged from the pre-folder base,
+run outside project/folder writes, and use fresh token overlays rather than
+credentials altered by this additive fixture migration. Both benchmark-owned
+cleanup receipts are state=clean with started/completed cleanup confirmation;
+cloud root provider cleanup was verified by the runner.
+
+The cache publication defect is repaired at its owning boundary. This case
+remains open only for the two unverified benchmark outcomes under the user's
+unrelated-failure skip instruction. The full failing and terminal receipts remain
+under .context/project-folders/followup and their native benchmark directories;
+no evaluator, prompt, task definition or timeout was changed. An independent
+reviewer also audited original PR1648 and the follow-up, with no remaining
+code finding; PF-ORDER-ZOD-2 grounds only the new relative-move input schema.
+Golden reference: not applicable (no approval-gated cache repair hunk).
 
 ## Human feedback
 
