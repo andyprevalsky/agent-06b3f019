@@ -1041,7 +1041,7 @@ def check_lane_scoped_reuse(tmp: Path, env: dict[str, str], source_root: Path) -
         "backend-coverage-blackbox": "passed", "smoke": "passed", "quick-gate": "passed", "live-probes": "passed"}, \
         receipt["lanes"]
     assert runs("backend-coverage-blackbox") == 1 and runs("smoke") == 1 and runs("quick-gate") == 1
-    assert all(lane["token"].startswith(f"{name}-1-") for name, lane in receipt["lanes"].items()), receipt["lanes"]
+    assert all(lane["lane_token"].startswith(f"{name}.1.") for name, lane in receipt["lanes"].items()), receipt["lanes"]
 
     second_head = commit_docs("guide v2\n")
     receipt = run_and_wait(plan)
@@ -1121,19 +1121,19 @@ def check_reconcile_reused_lane(tmp: Path) -> None:
                 "exit_code": 0, "duration_seconds": 1.0, "detail": detail}
 
     rows = [
-        row("smoke", "reused-scoped", base + 20.0, "smoke-1-tok"),          # token match, 20 s after spawn
+        row("smoke", "reused-scoped", base + 20.0, "smoke.1.tok"),          # token match, 20 s after spawn
         row("backend-coverage-blackbox", "reused-scoped", base + 40.0, None),  # token-less, inside the window
         row("live-probes", "reused-scoped", base + 200.0, None),           # token-less, after the lane finished
-        row("semantic-stack", "reused-scoped", base + 1.0, "semantic-stack-1-other"),  # another launch's token
-        row("agents-coverage-blackbox", "passed", base + 1.0, "agents-1-tok"),
+        row("semantic-stack", "reused-scoped", base + 1.0, "semantic-stack.1.other"),  # another launch's token
+        row("agents-coverage-blackbox", "passed", base + 1.0, "agents.1.tok"),
     ]
     (run_dir / "stages.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     receipt = {"stage_run_dir": str(run_dir), "lane_scoped_reuse": False, "reused_scoped_lanes": [], "lanes": {
-        "smoke": {"status": "running", "started_epoch": base, "token": "smoke-1-tok"},
+        "smoke": {"status": "running", "started_epoch": base, "lane_token": "smoke.1.tok"},
         "backend-coverage-blackbox": {"status": "running", "started_epoch": base},
         "live-probes": {"status": "running", "started_epoch": base},
-        "semantic-stack": {"status": "running", "started_epoch": base, "token": "semantic-stack-1-tok"},
-        "agents-coverage-blackbox": {"status": "running", "started_epoch": base, "token": "agents-1-tok"},
+        "semantic-stack": {"status": "running", "started_epoch": base, "lane_token": "semantic-stack.1.tok"},
+        "agents-coverage-blackbox": {"status": "running", "started_epoch": base, "lane_token": "agents.1.tok"},
     }}
     finished = base + 100.0
     outcomes = {name: pipeline.reconcile_reused_lane(receipt, name, state, finished_epoch=finished)
@@ -1148,9 +1148,9 @@ def check_reconcile_reused_lane(tmp: Path) -> None:
     ledger = tmp / "reconcile-ledger.json"
     stale = {"stage_run_dir": str(run_dir), "lanes": {
         "smoke": {"status": "passed", "started_epoch": base, "finished_epoch": finished, "wall_s": 100.0,
-                  "token": "smoke-1-tok"},
+                  "lane_token": "smoke.1.tok"},
         "agents-coverage-blackbox": {"status": "passed", "started_epoch": base, "finished_epoch": base + 2.0,
-                                     "wall_s": 2.0, "token": "agents-1-tok"},
+                                     "wall_s": 2.0, "lane_token": "agents.1.tok"},
     }}
     recorded = pipeline.record_lane_durations(stale, ledger)
     assert "smoke" not in recorded and len(recorded["agents-coverage-blackbox"]) == 1, recorded

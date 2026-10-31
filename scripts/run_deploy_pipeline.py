@@ -251,6 +251,11 @@ PASSING_LANE = {"passed", "reused-scoped"}
 LANE_SCOPED_REUSE_ENV = "DEPLOY_LANE_SCOPED_REUSE"
 
 
+# One token per lane launch, stamped into the lane's environment and recorded
+# on the receipt lane as ``lane_token``. run_deploy_stage.py excludes it from
+# every fingerprint and echoes it as the stage row's ``detail.lane_token``
+# (receipt lane <-> row matching); the lane teardown reads it from
+# /proc/<pid>/environ to decide which processes the lane owns.
 LANE_TOKEN_ENV = "DEPLOY_PIPELINE_LANE_TOKEN"
 # A stage row must start within this many seconds before the receipt lane's
 # own start to be its row when no token can be compared (older rows).
@@ -860,7 +865,7 @@ def _lane_stage_row(receipt: dict, name: str) -> dict | None:
     started = lane.get("started_epoch")
     if not run_dir or started is None:
         return None
-    token = lane.get("token")
+    token = lane.get("lane_token")
     finished = lane.get("finished_epoch")
     upper = float(finished) + LANE_ROW_START_SLACK_SECONDS if finished is not None else float("inf")
     best: tuple[float, dict] | None = None
@@ -1400,7 +1405,8 @@ def _terminate_lanes(processes: dict[str, subprocess.Popen[bytes]], signum: int)
 # ``local-benchmark-owner.json``) behind; the semantic-latency gate then blocked
 # in wait_for_isolated_benchmarks (3600 s) until a human TERMed them.
 #
-# Every lane therefore carries a unique token in its environment. A process is
+# Every lane therefore carries a unique token in its environment (the same
+# ``LANE_TOKEN_ENV`` the stage row echoes as ``detail.lane_token``). A process is
 # lane-owned when its environment carries the token or a live parent chain
 # leads to one that does; nothing else (no name pattern, no port, no cwd) makes
 # a process a target. After a terminated lane's wrapper exits, the supervisor:

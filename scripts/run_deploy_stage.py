@@ -239,9 +239,10 @@ def _worktree_fingerprint(command: Sequence[str], stage: str = "") -> str:
 # as a new unit inside the same deploy run never matched its own pass: on
 # 2026-10-30 the 33-minute coverage lane and the 10-minute structural lane
 # re-ran on identical bytes on every retry. cwd is hashed on its own.
-# run_deploy_pipeline.py stamps every lane with a fresh DEPLOY_PIPELINE_LANE_TOKEN
-# (teardown ownership of the processes the lane starts); it identifies the lane
-# process, not a gate input.
+# run_deploy_pipeline.py stamps every lane launch with a fresh
+# DEPLOY_PIPELINE_LANE_TOKEN (teardown ownership of the processes the lane
+# starts; echoed as each row's detail.lane_token so the receipt lane matches
+# its own row); it identifies the lane process, not a gate input.
 _PROCESS_IDENTITY_ENV = frozenset(
     {
         "_",
