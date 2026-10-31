@@ -48,7 +48,8 @@ def _parser() -> argparse.ArgumentParser:
         "--lane-scoped-reuse",
         action="store_true",
         help="reuse a prior PASSED result of this lane when every change since it is provably inert "
-        "(also enabled by DEPLOY_LANE_SCOPED_REUSE=1); only lanes in _SCOPED_REUSE_LANES qualify",
+        "(the pipeline passes it from the plan's lane_scoped_reuse; DEPLOY_LANE_SCOPED_REUSE=0 disables it, "
+        "the environment never enables it); only lanes in _SCOPED_REUSE_LANES qualify",
     )
     parser.add_argument(
         "--preview-lane-scoped-reuse",

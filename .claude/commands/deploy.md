@@ -664,14 +664,17 @@ and never satisfies the wait, and a lane that failed before writing a stage row
 Never arm a second, different waiter for the same lanes. An exact-input
 `--reuse-passed` hit records `reused`, which both count as a pass; a
 lane-scoped reuse records the distinct `reused-scoped` (a pass for the waiter
-and `overall`, never shown as a fresh pass of the current bytes). Enabled only
-by the plan field `lane_scoped_reuse` (default off; `DEPLOY_LANE_SCOPED_REUSE=0`
-is a kill switch; dry-run with `python3 scripts/run_deploy_stage.py
+and `overall`, never shown as a fresh pass of the current bytes). Enabled by
+the plan field `lane_scoped_reuse` (default off), which the pipeline forwards as
+`--lane-scoped-reuse`, or by that flag on a direct `scripts/run_deploy_stage.py`
+invocation for one stage (`DEPLOY_LANE_SCOPED_REUSE=0` is a kill switch, never
+an enabler; dry-run with `python3 scripts/run_deploy_stage.py
 --preview-lane-scoped-reuse PASSED_HEAD[..CURRENT_HEAD]`), a lane in
-`_SCOPED_REUSE_LANES` running its real command marker reuses its latest PASSED
-result only when every changed path is in the lane's declared inert set AND the
-change→test graph selects nothing in the lane (run_all, unmapped and never-inert
-paths force a rerun); a newer failed head on an inert-equivalent tree vetoes it.
+`_SCOPED_REUSE_LANES` running its real command marker reuses the newest
+inert-equivalent PASSED record: every path changed since it is in the lane's
+declared inert set AND the change→test graph selects nothing in the lane
+(run_all, unmapped and never-inert paths force a rerun), and no newer failed
+head on an inert-equivalent tree vetoes it.
 The row's `detail.reuse` and the receipt's `lane_scoped_reuse` /
 `reused_scoped_lanes` (`reconcile_reused_lane`; `PIPELINE_VERIFY …
 reused_scoped=`) carry the provenance. For most
@@ -725,16 +728,21 @@ the gates rerun.
 
 **Lane teardown after a supersede or termination.** Each lane launch carries a
 unique `DEPLOY_PIPELINE_LANE_TOKEN`; after a signalled lane's wrapper exits the
-supervisor reaps only token-owned owner records under `.context/benchmarks/`,
-writes `<state-dir>/teardown/attempt-<n>-<lane>.json` and prints
-`PIPELINE_LANE_TEARDOWN … outcome=`: it waits `DEPLOY_PIPELINE_TEARDOWN_WAIT_SECONDS`
-(default 120) for them to exit, TERMs each surviving run's `benchmarks/local.py`
-controller (never its bash wrappers), then SIGKILLs lane-owned survivors as the
-last resort only after the controller's published shutdown budget
-(`DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS` overrides it) passed with no
-progress. Foreign owner records are reported, never signalled. Outcome `killed`
-requires `scripts/run-bench --local --run-id <run> --reconcile-cleanup` before
-the next smoke lane.
+supervisor reads the owner records under `.context/benchmarks/` written since
+the lane started (reported, never deleted) and signals only the token-owned
+processes they name; foreign records are reported, never signalled. It writes
+`<state-dir>/teardown/attempt-<n>-<lane>.json`, prints
+`PIPELINE_LANE_TEARDOWN … outcome=`, waits `DEPLOY_PIPELINE_TEARDOWN_WAIT_SECONDS`
+(default 120) for them to exit, TERMs each surviving run's live
+`benchmarks/local.py` controller, else the record's exact owner pid (`run.sh`),
+never a bash wrapper, and SIGKILLs lane-owned survivors as the last resort after
+the kill-after budget (`local_worker_supervisor.py --shutdown-timeout`, 2175 s by
+default, plus a 120 s margin; `DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS`
+overrides it) passed with no progress for a whole wait bound, or at the hard
+ceiling of twice that budget even while the stack still publishes progress.
+Outcomes `killed` and `failed` (survivors after SIGKILL) require
+`scripts/run-bench --local --run-id <run> --reconcile-cleanup` before the next
+smoke lane — an operator instruction in the receipt note, not enforced.
 
 **Fix-loop cap (`FIX_LOOP_CAP`, exit 6).** After two consecutive completed
 failed rounds in the same state dir (`--fix-loop-cap`, env
@@ -3236,6 +3244,7 @@ publish raw transcripts, secrets or signed URLs. Set `FACTORY_METADATA_FILE`
 before collection, append snapshots for changes and publish the ledger.
 `run-deploy-stage --start` and every pipeline attempt re-stamp it
 (`factory_metadata.refresh_snapshot`: `observed_at` and `validation.source_sha`
-only) when it is this checkout's own `.context/factory-metadata.json`; a
-retrospective record or a file elsewhere is skipped and reported. Final
+only) when it is a file directly under this checkout's `.context/` (normally
+`.context/factory-metadata.json`); a retrospective record, a file elsewhere, an
+`unset` or `missing` file is skipped and reported. Final
 scorecards report model/effort/tier and collection gaps alongside timings.
