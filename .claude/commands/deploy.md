@@ -2965,7 +2965,7 @@ jobs use a sparse, blob-filtered checkout.
 # dispatch workflows; call its binary with the repo's workflow-scoped token.
 if [ -x /opt/devbox-tools/gh/current/bin/gh ]; then
   GH_TOKEN=$(set -a && . back-end/.env >/dev/null && printf %s "$GITHUB_TOKEN")
-  export GH_TOKEN
+  export GH_TOKEN DEPLOY_GH_BIN=/opt/devbox-tools/gh/current/bin/gh
   gh() { /opt/devbox-tools/gh/current/bin/gh "$@"; }
 fi
 # Fly lane gate (agents runtime changes only): the exact deploy-agents.yml run
@@ -2979,30 +2979,21 @@ python3 scripts/run_deploy_pipeline.py production --merged-sha "$DEPLOY_MERGED_S
   --state-dir .context/deploy-pipeline ||
   { echo "❌ Fly lane is not live/verified for $DEPLOY_MERGED_SHA; not dispatching production semantics"; exit 1; }
 python3 scripts/record_factory_event.py deploy production-start semantic
-SEMANTIC_DISPATCH_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-gh workflow run chat-lifecycle-ratchet.yml --ref main \
-  -f frontend_url=https://www.roselabs.ai \
-  -f backend_url=https://navi-j9a9.onrender.com
-
-SEMANTIC_RUN_ID=""
-for i in $(seq 1 40); do
-  SEMANTIC_RUN_ID=$(gh run list \
-    --workflow chat-lifecycle-ratchet.yml \
-    --event workflow_dispatch \
-    --branch main \
-    --limit 20 \
-    --json databaseId,createdAt \
-    --jq ".[] | select(.createdAt >= \"$SEMANTIC_DISPATCH_TS\") | .databaseId" \
-    | head -1)
-  [ -n "$SEMANTIC_RUN_ID" ] && break
-  sleep 5
-done
-[ -n "$SEMANTIC_RUN_ID" ] || { echo "❌ Production semantic workflow did not start"; exit 1; }
-gh run watch "$SEMANTIC_RUN_ID" --exit-status
+# Dispatches chat-lifecycle-ratchet.yml on main with source_sha=$DEPLOY_MERGED_SHA
+# (the harness checks out that exact commit; #1646's raw dispatch ran main's
+# later data-only head and needed a separate equivalence proof), binds to the
+# run this dispatch created (never an older run), polls every 30 s, records
+# run id, url, headSha, source_sha and per-job conclusions under `semantic` in
+# .context/deploy-pipeline/production.json and exits non-zero unless every job
+# succeeded. Prints SEMANTIC_RUN_ID=<id> and SEMANTIC_LANE_END <ts>.
+python3 scripts/run_deploy_pipeline.py production-semantic --merged-sha "$DEPLOY_MERGED_SHA" \
+  --state-dir .context/deploy-pipeline \
+  --frontend-url https://www.roselabs.ai --backend-url https://navi-j9a9.onrender.com ||
+  { echo "❌ production semantic gate is not green for $DEPLOY_MERGED_SHA"; exit 1; }
 python3 scripts/record_factory_event.py deploy production-finish semantic
 ```
 
-This is a hard deployment gate. If the workflow fails, the deployment is not complete: inspect its Playwright artifacts and service logs. For a provider outage, follow "Provider outages: report and retry every 10 minutes" above; use `gh run rerun "$SEMANTIC_RUN_ID" --failed` once the prior attempt is terminal so only failed jobs are retried. Retain successful jobs under their original execution provenance and audit the retry's actual checkout SHA and results. For a code defect, fix the root cause in a new PR and repeat the deploy loop. Do not report success or proceed to Step 14 while this check is red.
+This is a hard deployment gate. If the workflow fails, the deployment is not complete: inspect its Playwright artifacts and service logs. For a provider outage, follow "Provider outages: report and retry every 10 minutes" above; once the prior attempt is terminal, rerun the same command with `--retry-failed-once "<justification>"` so only failed jobs are retried (`gh run rerun <id> --failed`, recorded in production.json; exactly one retry, a second is refused). Retain successful jobs under their original execution provenance and audit the retry's actual checkout SHA and results. For a code defect, fix the root cause in a new PR and repeat the deploy loop. Do not report success or proceed to Step 14 while this check is red.
 
 If no workflow-scoped token is available, `gh workflow run` returns HTTP 403
 `Resource not accessible by integration`. In that case, run the workflow's two
