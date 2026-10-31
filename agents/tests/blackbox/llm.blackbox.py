@@ -10620,6 +10620,91 @@ async def test_structured_exclusion_carries_into_next_activity_attempt():
     assert excluded_after == sorted({model_key("moonshotai/kimi-k3"), model_key("qwen/qwen3.8-27b")})
 
 
+
+async def test_structured_exclusion_counts_no_json_and_non_object_replies():
+    """Reasoning-only and non-object JSON replies count toward excluding the candidate.
+
+    CodeRabbit on PR #1660: the failed-model bookkeeping only recognised
+    ``json.JSONDecodeError`` / ``ValidationError``. A model answering with
+    reasoning but no JSON (``No JSON content received``) or with a JSON array
+    raised a plain ``ValueError`` / ``AttributeError`` instead, so two such
+    replies never excluded it and the third regeneration went back to the same
+    model instead of the pool's next candidate.
+    """
+    import httpx
+    from typing import Literal
+    from pydantic import BaseModel, Field
+    from helpers.llm import call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+
+    class TypedTool(BaseModel):
+        tool: Literal["typed_lookup"]
+        labels: list[str] = Field(min_length=1)
+
+    response_model = create_agent_action_model(["typed_lookup"], tool_registry={"typed_lookup": TypedTool})
+    shapes = {
+        "reasoning_without_json": {"reasoning": "I will look the labels up now."},
+        "json_array": {"content": json.dumps(["typed"])},
+    }
+
+    for shape_name, invalid_delta in shapes.items():
+        requests = []
+
+        def handler(request, invalid_delta=invalid_delta, requests=requests):
+            if request.url.host != "openrouter.ai":
+                raise AssertionError(f"Unexpected route outside the existing OSS pool: {request.url.host}")
+            body = json.loads(request.content)
+            requests.append(body["model"])
+            if body["model"] == "moonshotai/kimi-k3":
+                delta = invalid_delta
+            else:
+                delta = {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": f"valid-{len(requests)}",
+                            "type": "function",
+                            "function": {"name": "typed_lookup", "arguments": json.dumps({"labels": ["typed"]})},
+                        }
+                    ]
+                }
+            events = [
+                {"choices": [{"delta": delta, "finish_reason": "tool_calls" if "tool_calls" in delta else "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+            return httpx.Response(
+                200,
+                text="\n".join("data: " + json.dumps(event) for event in events) + "\ndata: [DONE]\n",
+                headers={"content-type": "text/event-stream"},
+            )
+
+        setup_mock_fn(handler)
+        failure = None
+        result = None
+        with patch.dict(
+            os.environ, {"CEREBRAS_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "AZURE_FOUNDRY_API_KEY": ""}
+        ):
+            try:
+                result, _, _ = await call_llm_structured_streaming(
+                    messages=[{"role": "user", "content": f"Return typed labels ({shape_name})."}],
+                    model="rose-labs/rose-1-oss",
+                    temperature=1,
+                    max_tokens=128,
+                    response_model=response_model,
+                    on_chunk=AsyncMock(),
+                    call_site=f"test_exclusion_{shape_name}",
+                    skip_cache_write=True,
+                    _exclude_anthropic_family=True,
+                )
+            except Exception as error:
+                failure = error
+        assert requests == ["moonshotai/kimi-k3", "moonshotai/kimi-k3", "qwen/qwen3.8-27b"], (
+            f"{shape_name}: two invalid replies must exclude the model and route the third attempt onward: {requests}"
+        )
+        assert failure is None, f"{shape_name}: the rescuer should have served: {type(failure).__name__}: {failure}"
+        assert result is not None and result.tool_calls[0].labels == ["typed"]
+
+
 async def run_all_tests():
     print("llm blackbox tests:")
     r = BlackboxResult()
@@ -10643,6 +10728,10 @@ async def run_all_tests():
     await r.record_async(
         "structured_exclusion_carries_into_next_activity_attempt",
         test_structured_exclusion_carries_into_next_activity_attempt,
+    )
+    await r.record_async(
+        "structured_exclusion_counts_no_json_and_non_object_replies",
+        test_structured_exclusion_counts_no_json_and_non_object_replies,
     )
     r.record("legacy_cached_spawn_names_are_stable_and_scoped", test_legacy_cached_spawn_names_are_stable_and_scoped)
     await r.record_async("tool_output_preview_readback", test_tool_output_preview_and_readback_at_model_boundary)
