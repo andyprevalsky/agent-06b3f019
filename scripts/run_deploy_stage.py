@@ -859,7 +859,14 @@ def _append_reused(
         print(f"warning: could not append reused stage record: {error}", file=sys.stderr)
 
 
-def _run_logged(log_path: Path, command: Sequence[str]) -> int:
+def _run_logged(log_path: Path, command: Sequence[str]) -> tuple[int, int]:
+    """Run ``command`` and return ``(exit code, forwarded signal or 0)``.
+
+    The signal is the first one this runner received and forwarded to the
+    command (a lane the pipeline superseded, an operator's Ctrl-C). It is
+    reported separately from the exit code because a command can legitimately
+    exit 143 on its own; only the runner knows whether it was interrupted."""
+
     received_signal = 0
     child: subprocess.Popen[bytes] | None = None
     kill_timer_started = False
@@ -892,7 +899,7 @@ def _run_logged(log_path: Path, command: Sequence[str]) -> int:
     try:
         with log_path.open("wb") as log_handle:
             if received_signal:
-                return 128 + received_signal
+                return 128 + received_signal, received_signal
             try:
                 child = subprocess.Popen(
                     command,
@@ -902,7 +909,7 @@ def _run_logged(log_path: Path, command: Sequence[str]) -> int:
                 )
             except OSError as error:
                 print(f"could not start command: {error}", file=sys.stderr)
-                return 127
+                return 127, received_signal
             if received_signal:
                 forward(received_signal, None)
 
@@ -937,10 +944,10 @@ def _run_logged(log_path: Path, command: Sequence[str]) -> int:
                 child.wait()
 
     if received_signal:
-        return 128 + received_signal
+        return 128 + received_signal, received_signal
     if child_exit < 0:
-        return 128 - child_exit
-    return child_exit
+        return 128 - child_exit, 0
+    return child_exit, 0
 
 
 def _source_in_background() -> tuple[threading.Thread, dict]:
@@ -1046,7 +1053,7 @@ def main() -> int:
 
     source_thread, source = _source_in_background()
     sampler = HostSampler().start()
-    stage_exit = _run_logged(log_path, command)
+    stage_exit, interrupted_by = _run_logged(log_path, command)
     finished_epoch = time.time()
     host = sampler.stop()
     source_thread.join(timeout=30)
@@ -1097,7 +1104,18 @@ def main() -> int:
     except (LifecycleError, OSError) as error:
         print(f"warning: could not release deploy stage admission: {error}", file=sys.stderr)
 
-    if stage_exit != 0 and fingerprint is not None and worktree_state is not None:
+    # An interrupted lane (the pipeline superseding its run, an operator's
+    # Ctrl-C) says nothing about the head: it is not recorded as a failure, so
+    # it never vetoes a later lane-scoped reuse of a real pass. The runner's
+    # own forwarded signal decides this, never the exit code: a gate can exit
+    # 143 by itself, and that is a real failure.
+    if interrupted_by:
+        print(
+            f"deploy stage {args.stage} was interrupted by signal {interrupted_by}; "
+            "its exit is not recorded as a failed head",
+            file=sys.stderr,
+        )
+    elif stage_exit != 0 and fingerprint is not None and worktree_state is not None:
         try:
             head, dirty, untracked = worktree_state
             _record_scoped_failure(run_dir, args.stage, fingerprint, command, run_id, head, dirty, untracked, stage_exit)

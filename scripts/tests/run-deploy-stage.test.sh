@@ -150,12 +150,18 @@ scoped_marker() {
     esac
 }
 # scoped_run LANE [FLAG...]: the lane's counting command (identical argv on
-# every call; it fails only while the lane's fail marker file exists).
+# every call; it waits while the lane's hang marker file exists and fails
+# only while its fail marker file exists, with that file's exit code or 1).
+SCOPED_COMMAND='printf "run\n" >> "$1"; while [ -e "$3" ]; do sleep 0.05; done; [ ! -e "$2" ] || { code="$(cat "$2")"; exit "${code:-1}"; }'
+scoped_args() {
+    printf '%s\n' "$(scoped_marker "$1")" "$TEST_ROOT/scoped-count-$1" "$TEST_ROOT/scoped-fail-$1" "$TEST_ROOT/scoped-hang-$1"
+}
 scoped_run() {
     local lane="$1"
     shift
-    scoped_stage "$lane" "$@" -- bash -c 'printf "run\n" >> "$1"; [ ! -e "$2" ]' \
-        "$(scoped_marker "$lane")" "$TEST_ROOT/scoped-count-$lane" "$TEST_ROOT/scoped-fail-$lane"
+    local -a args
+    mapfile -t args < <(scoped_args "$lane")
+    scoped_stage "$lane" "$@" -- bash -c "$SCOPED_COMMAND" "${args[@]}"
 }
 scoped_runs() {
     wc -l < "$TEST_ROOT/scoped-count-$1" | tr -d ' '
@@ -335,6 +341,65 @@ scoped_commit docs-v6 >/dev/null
 scoped_run smoke --lane-scoped-reuse >"$TEST_ROOT/scoped-after-veto.out" || fail "post-veto run failed"
 [ "$(scoped_runs smoke)" = "$((runs_before + 1))" ] || fail "the pass after the failure did not supersede it"
 [ "$(scoped_row smoke detail reuse passed_head)" = "$SCOPED_HV3" ] || fail "post-veto reuse candidate"
+
+# (7) Interrupted lane: a forwarded SIGTERM (the pipeline superseding its run,
+# an operator's Ctrl-C) says nothing about the head, so the runner records no
+# failed head and the next docs-only commit still reuses the real pass. The
+# job is the identical invocation, exec'd so the signal reaches the runner.
+printf 'guide v7\n' > "$SCOPED_REPO/docs/guide.md"
+scoped_commit docs-v7 >/dev/null
+scoped_failed_count() { ls "$RUN_ROOT/scoped/passed-cache/smoke/scoped-failed/"*.json | wc -l | tr -d ' '; }
+failed_before="$(scoped_failed_count)"
+runs_before="$(scoped_runs smoke)"
+touch "$TEST_ROOT/scoped-hang-smoke"
+mapfile -t smoke_args < <(scoped_args smoke)
+(cd "$SCOPED_REPO" && exec env DEPLOY_RUN_ROOT="$RUN_ROOT" bash scripts/run-deploy-stage smoke -- \
+    bash -c "$SCOPED_COMMAND" "${smoke_args[@]}") >"$TEST_ROOT/scoped-interrupt.out" 2>&1 &
+interrupt_pid=$!
+for _ in $(seq 1 1200); do
+    [ "$(scoped_runs smoke)" = "$((runs_before + 1))" ] && break
+    sleep 0.05
+done
+[ "$(scoped_runs smoke)" = "$((runs_before + 1))" ] || fail "interrupted smoke run did not start"
+kill -TERM "$interrupt_pid"
+set +e
+wait "$interrupt_pid"
+interrupt_exit=$?
+set -e
+rm -f "$TEST_ROOT/scoped-hang-smoke"
+[ "$interrupt_exit" -eq 143 ] || fail "interrupted smoke exit was $interrupt_exit, expected 143"
+grep -q "deploy stage smoke was interrupted by signal 15; its exit is not recorded as a failed head" \
+    "$TEST_ROOT/scoped-interrupt.out" || fail "interruption was not disclosed"
+[ "$(scoped_failed_count)" = "$failed_before" ] || fail "an interrupted lane recorded a failed head"
+printf 'guide v8\n' > "$SCOPED_REPO/docs/guide.md"
+scoped_commit docs-v8 >/dev/null
+scoped_run smoke --lane-scoped-reuse >"$TEST_ROOT/scoped-after-interrupt.out" || fail "post-interrupt run failed"
+[ "$(scoped_runs smoke)" = "$((runs_before + 1))" ] || fail "an interrupted lane vetoed the scoped reuse"
+[ "$(scoped_row smoke status)" = "reused-scoped" ] || fail "post-interrupt row status"
+[ "$(scoped_row smoke detail reuse passed_head)" = "$SCOPED_HV3" ] || fail "post-interrupt reuse candidate"
+
+# (8) The exit code alone never implies an interruption: a lane that exits 143
+# by itself (no forwarded signal) is a real failure, recorded and vetoing.
+printf 'guide v9\n' > "$SCOPED_REPO/docs/guide.md"
+SCOPED_HV9="$(scoped_commit docs-v9)"
+printf '143\n' > "$TEST_ROOT/scoped-fail-smoke"
+set +e
+scoped_run smoke >"$TEST_ROOT/scoped-exit143.out" 2>&1
+exit143=$?
+set -e
+rm -f "$TEST_ROOT/scoped-fail-smoke"
+[ "$exit143" -eq 143 ] || fail "self-exiting smoke exit was $exit143, expected 143"
+if grep -q "was interrupted" "$TEST_ROOT/scoped-exit143.out"; then
+    fail "an exit 143 without a signal was reported as an interruption"
+fi
+[ "$(scoped_failed_count)" = "$((failed_before + 1))" ] || fail "an exit 143 without a signal was not recorded as a failed head"
+printf 'guide v10\n' > "$SCOPED_REPO/docs/guide.md"
+scoped_commit docs-v10 >/dev/null
+runs_before="$(scoped_runs smoke)"
+scoped_run smoke --lane-scoped-reuse >"$TEST_ROOT/scoped-after-exit143.out" || fail "post-exit-143 run failed"
+[ "$(scoped_runs smoke)" = "$((runs_before + 1))" ] || fail "an exit-143 failure did not veto the scoped reuse"
+grep -q "lane-scoped reuse unavailable for smoke: a failed run on ${SCOPED_HV9:0:12} differs from the current tree only by inert paths" \
+    "$TEST_ROOT/scoped-after-exit143.out" || fail "exit-143 veto reason not disclosed"
 
 # The dry-run preview reports the same decisions for a commit range.
 (cd "$SCOPED_REPO" && python3 scripts/run_deploy_stage.py --preview-lane-scoped-reuse "$SCOPED_H1..$SCOPED_H2") >"$TEST_ROOT/scoped-preview.out" \
