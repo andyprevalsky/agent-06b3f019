@@ -526,7 +526,7 @@ node --test "$PROD_SESSION_TEST"
 # never drop, so the runner sizes concurrency (floor 1) instead of waiting.
 # gawk >= 5.3 (ubuntu-latest) rejects `-v load=`: "cannot use gawk builtin `load' as variable name" took every
 # production semantic job down with exit 2 once prod-mode sizing called this function (run 41250037375).
-if grep -nE -- '-v (load|and|or|xor|lshift|rshift|compl|strtonum|mktime|strftime|systime|gensub|patsplit|asort|asorti|isarray|typeof)=' "$RUNNER"; then
+if grep -nE '^[^#]*-v (load|and|or|xor|lshift|rshift|compl|strtonum|mktime|strftime|systime|gensub|patsplit|asort|asorti|isarray|typeof)=' "$RUNNER"; then
   fail "semantic_workers_for_capacity must not name an awk variable after a gawk builtin (load, and, or, xor, ...)"
 fi
 if command -v gawk >/dev/null 2>&1; then
