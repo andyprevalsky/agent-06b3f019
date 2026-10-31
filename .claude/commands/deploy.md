@@ -678,8 +678,10 @@ inert-equivalent PASSED record: every path changed since it is in the lane's
 declared inert set AND the change→test graph selects nothing in the lane
 (run_all, unmapped and never-inert paths force a rerun; a stack lane with no
 graph lanes — smoke, semantic-stack — additionally treats a non-test code file
-under `scripts/*` or `*/scripts/*` as inert when nothing in `STACK_ENTRYPOINTS`
-or a backend route reaches it in the change→test graph), and no newer failed
+under `scripts/*`, `back-end/scripts/*`, `front-end/scripts/*`,
+`agents/scripts/*` or `mac-app/scripts/*` (`_STACK_REACH_TREES`) as inert when
+nothing in `STACK_ENTRYPOINTS` or a backend route reaches it in the change→test
+graph), and no newer failed
 head on an inert-equivalent tree vetoes it. The candidate may also come from
 an earlier timing run of the same `.context/deploy-runs/` root regardless of
 its metadata `branch` (recorded as `passed_run_branch`, never compared; same
