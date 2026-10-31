@@ -1215,6 +1215,120 @@ def check_reconcile_reused_lane(tmp: Path) -> None:
     print("reconcile reused lane: ok")
 
 
+def check_cross_run_record_guards(tmp: Path, source_root: Path) -> None:
+    """The cross-run guards, each against the real decision over the fixture
+    repo: a later-started or other-branch run is not a source; a record is
+    accepted only with a finite, non-future ``finished_epoch`` (future-dated
+    ones would sort first and outrank every failed head), within the bound
+    and carrying its own run's id; and a candidate whose bytes change between
+    the read and the hit is never reused."""
+    stage = load_module("stage_guards", source_root / "scripts" / "run_deploy_stage.py")
+    git = ["git", "-C", str(source_root)]
+    head = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    branch = subprocess.run([*git, "branch", "--show-current"], check=True, capture_output=True, text=True).stdout.strip()
+    assert branch, "fixture repo must be on a branch"
+    run_root = tmp / "guard-runs"
+    now = time.time()
+
+    def run_dir(name: str, started: float, run_branch: str = branch) -> Path:
+        path = run_root / name
+        path.mkdir(parents=True)
+        (path / "metadata.json").write_text(json.dumps({"schema_version": 1, "run_id": name, "status": "completed",
+                                                          "started_epoch": started, "branch": run_branch}))
+        return path
+
+    current = run_dir("cur", now - 100)
+    earlier = run_dir("earlier", now - 200)
+    oldest = run_dir("oldest", now - 300)
+    run_dir("later", now)                      # started after the current run: never a source
+    run_dir("same-start", now - 100)           # not strictly earlier
+    run_dir("other-branch", now - 250, "other")
+    (run_root / "no-metadata").mkdir()
+    (run_root / "bad-json").mkdir()
+    (run_root / "bad-json" / "metadata.json").write_text("{not-json")
+    (run_root / "current").write_text("cur\n")  # the pointer file is not a run
+    considered = stage._considered_runs(run_root, current)
+    assert [(run.run_id, run.cross_run) for run in considered] == \
+        [("cur", False), ("earlier", True), ("oldest", True)], considered
+
+    command = ["bash", "scripts/run-predeploy-local"]
+    invocation = stage._invocation_digest(command)
+
+    def write_record(run: Path, name: str, directory: str = "scoped", **overrides: object) -> Path:
+        record = {"schema_version": 1, "stage": "smoke", "head": head, "fingerprint": "f" * 64, "run_id": run.name,
+                  "exit_code": 0, "finished_at": "2026-01-01T00:00:00Z", "finished_epoch": now - 10,
+                  "invocation": invocation, "dirty_paths": [], **overrides}
+        path = run / "passed-cache" / "smoke" / directory / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record) + "\n")
+        return path
+
+    real = write_record(earlier, "real.json")
+    write_record(earlier, "future.json", finished_epoch=now + 10 * 365 * 86400)
+    write_record(earlier, "nan.json", finished_epoch=float("nan"))
+    write_record(earlier, "old.json", finished_epoch=now - 25 * 3600)
+    write_record(earlier, "foreign.json", run_id="cur")
+    write_record(current, "in-run-future.json", finished_epoch=now + 60)
+    with patch.object(stage, "_is_ancestor", lambda ancestor, descendant: ancestor != "0" * 40):
+        write_record(oldest, "sibling.json", head="0" * 40)
+        records, rejected = stage._scoped_records_across_runs(
+            considered, "smoke", invocation, failed=False, current_head=head, now=now)
+    assert rejected == {"age": 4, "not_ancestor": 1, "foreign_run_id": 1}, rejected
+    assert [record["_record_path"] for record in records] == [str(real)], records
+    assert records[0]["_source"] == {"run_id": "earlier", "run_dir": str(earlier), "cross_run": True}
+    # Failures are never filtered: every one of them can veto.
+    failed = write_record(earlier, "x.json", directory="scoped-failed", exit_code=1, finished_epoch=now + 60)
+    failures, _ = stage._scoped_records_across_runs(
+        considered, "smoke", invocation, failed=True, current_head=head, now=now)
+    assert [record["_record_path"] for record in failures] == [str(failed)], failures
+    failed.unlink()
+    for extra in ("future.json", "nan.json", "old.json", "foreign.json"):
+        (earlier / "passed-cache" / "smoke" / "scoped" / extra).unlink()
+    (current / "passed-cache" / "smoke" / "scoped" / "in-run-future.json").unlink()
+    (oldest / "passed-cache" / "smoke" / "scoped" / "sibling.json").unlink()
+
+    # _record_is_intact: the bytes read must still be the bytes on disk.
+    [loaded] = stage._load_scoped_records(real.parent, "smoke", invocation)
+    assert stage._record_is_intact(loaded)
+    original = real.read_bytes()
+    real.write_bytes(original + b"\n")
+    assert not stage._record_is_intact(loaded)
+    real.write_bytes(original)
+    assert stage._record_is_intact(loaded)
+    assert not stage._record_is_intact({"_record_digest": loaded["_record_digest"]})
+
+    # The real decision over the fixture repo: the cross-run record is the
+    # hit; when its bytes change after the read (inside the judge, before the
+    # hit) the decision misses and says so.
+    rules = stage._SCOPED_REUSE_LANES["smoke"]
+
+    def inert_judge(rules, changed, judge):
+        return [{"path": path, "rule": "inert:test"} for path in changed], [], judge
+
+    def mutate_then_judge(rules, changed, judge):
+        real.write_bytes(original + b"\n")
+        return inert_judge(rules, changed, judge)
+
+    with patch.object(stage, "_judge_changes", inert_judge):
+        decision = stage._scoped_reuse_decision(run_root, current, "smoke", rules, command)
+    assert decision.hit and decision.record["_record_path"] == str(real), decision.provenance()
+    assert decision.provenance()["cross_run"] is True and decision.provenance()["passed_run_dir"] == str(earlier)
+    with patch.object(stage, "_judge_changes", mutate_then_judge):
+        decision = stage._scoped_reuse_decision(run_root, current, "smoke", rules, command)
+    assert not decision.hit, decision.provenance()
+    assert decision.miss_reason == "1 candidate record(s) changed or vanished before the hit", decision.miss_reason
+    real.write_bytes(original)
+
+    def vanish_then_judge(rules, changed, judge):
+        real.unlink()
+        return inert_judge(rules, changed, judge)
+
+    with patch.object(stage, "_judge_changes", vanish_then_judge):
+        decision = stage._scoped_reuse_decision(run_root, current, "smoke", rules, command)
+    assert not decision.hit and decision.candidates == 1, decision.provenance()
+    print("cross-run record guards: ok")
+
+
 def check_scoped_inert_tables() -> None:
     """Pin the lane-scoped reuse tables: the exact never-inert patterns, the
     scoped lanes with their command markers, inert sets and graph lanes, and
@@ -1393,6 +1507,7 @@ def main() -> int:
         check_lane_scoped_reuse(tmp, env, source_root)
         check_reconcile_reused_lane(tmp)
         check_scoped_inert_tables()
+        check_cross_run_record_guards(tmp, source_root)
         check_plan_scaling()
         check_structural_memory_floor()
         check_macos_memory(tmp, env)

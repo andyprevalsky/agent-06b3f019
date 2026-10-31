@@ -375,10 +375,29 @@ scoped_stage --finish >/dev/null || fail "xa finish failed"
 # with the source run id, run dir and record path; nothing is copied.
 printf 'guide x1\n' > "$SCOPED_REPO/docs/guide.md"
 XRUN_H1="$(scoped_commit docs-x1)"
+# Planted beside xa's real smoke record: a copy claiming another run's id
+# (newer, so it would sort first) and a copy dated ten years ahead (which
+# would sort first and lift the veto threshold above every failed head).
+# Both are rejected and counted; the real record is the candidate.
+plant_record() {
+    python3 - "$@" <<'PLANT_EOF'
+import json, pathlib, sys
+source_dir, name, run_id, epoch_delta = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3], float(sys.argv[4])
+[real] = [p for p in source_dir.glob("*.json") if not p.name.startswith(("foreign", "future"))]
+record = json.loads(real.read_text())
+record["run_id"] = run_id
+record["finished_epoch"] = float(record["finished_epoch"]) + epoch_delta
+(source_dir / name).write_text(json.dumps(record, sort_keys=True) + "\n")
+PLANT_EOF
+}
+plant_record "$RUN_ROOT/xa/passed-cache/smoke/scoped" foreign.json elsewhere 1
+plant_record "$RUN_ROOT/xa/passed-cache/smoke/scoped" future.json xa 315360000
 scoped_stage --start --run-id xb >/dev/null
 SCOPED_RUN_ID=xb
 smoke_runs="$(scoped_runs smoke)"
 scoped_run smoke --lane-scoped-reuse >"$TEST_ROOT/xrun-xb-smoke.out" || fail "xb smoke failed"
+[ "$(scoped_row smoke detail reuse rejected_cross_run foreign_run_id)" = 1 ] || fail "a record claiming another run's id was not rejected"
+[ "$(scoped_row smoke detail reuse rejected_cross_run age)" = 1 ] || fail "a future-dated cross-run record was not rejected"
 [ "$(scoped_runs smoke)" = "$smoke_runs" ] || fail "cross-run docs-only commit reran smoke"
 grep -qF "reused passed deploy stage (lane-scoped): smoke passed_head=${XRUN_H0:0:12} current_head=${XRUN_H1:0:12} inert_paths=1 passed_run=xa cross_run=true" \
     "$TEST_ROOT/xrun-xb-smoke.out" || fail "cross-run reuse of smoke was not disclosed with its source run"
@@ -419,6 +438,7 @@ grep -qF "lane-scoped reuse unavailable for smoke: a failed run on ${XRUN_H2:0:1
 [ "$(scoped_row smoke detail reuse scoped vetoed_by_failed_head cross_run)" = "true" ] || fail "cross-run veto cross_run"
 [ "$(scoped_row smoke detail reuse scoped passed_run_id)" = "xa" ] || fail "cross-run veto candidate run"
 [ "$(scoped_row smoke detail reuse scoped cross_run)" = "true" ] || fail "cross-run veto candidate cross_run"
+[ "$(scoped_row smoke detail reuse scoped rejected_cross_run age)" = 1 ] || fail "the future-dated record must stay rejected when a veto applies"
 scoped_run backend-coverage-blackbox --reuse-passed >/dev/null || fail "xc backend failed"
 # (f) Flag off: unchanged. Same tree as run xc's backend pass, new run: the
 # exact-input cache is per run, so the lane executes again and nothing scoped
@@ -433,11 +453,14 @@ scoped_run backend-coverage-blackbox --reuse-passed >"$TEST_ROOT/xrun-xd-off.out
 if grep -q "lane-scoped" "$TEST_ROOT/xrun-xd-off.out"; then
     fail "flag-off run mentioned lane-scoped reuse"
 fi
+plant_record "$RUN_ROOT/xd/passed-cache/backend-coverage-blackbox/scoped" future.json planted 315360000
 scoped_run backend-coverage-blackbox --lane-scoped-reuse >"$TEST_ROOT/xrun-xd-on.out" || fail "xd flag-on run failed"
 [ "$(scoped_runs backend-coverage-blackbox)" = "$((backend_runs + 1))" ] || fail "xd in-run pass was not reused"
 [ "$(scoped_row backend-coverage-blackbox detail reuse cross_run)" = "false" ] || fail "in-run candidate must precede cross-run ones"
-[ "$(scoped_row backend-coverage-blackbox detail reuse passed_run_id)" = "xd" ] || fail "newest-first ordering across runs"
+[ "$(scoped_row backend-coverage-blackbox detail reuse passed_run_id)" = "xd" ] || fail "newest-first ordering across runs (or a future-dated in-run record won)"
+[ "$(scoped_row backend-coverage-blackbox detail reuse rejected_cross_run age)" = 1 ] || fail "a future-dated in-run record was not rejected"
 grep -qF "inert_paths=0 passed_run=xd cross_run=false" "$TEST_ROOT/xrun-xd-on.out" || fail "in-run hit disclosure"
+rm "$RUN_ROOT/xd/passed-cache/backend-coverage-blackbox/scoped/future.json"
 # (d) Age bound: 25 h old cross-run records are ignored even when the
 # environment asks for a wider bound; the environment can only lower it.
 printf 'guide x4\n' > "$SCOPED_REPO/docs/guide.md"
@@ -517,20 +540,33 @@ grep -qF "no prior pass of this lane" "$TEST_ROOT/xrun-xh-probes.out" || fail "n
 # neither breaks the decision (an in-run hit, cross_run false).
 rm -rf "$RUN_ROOT/xa"
 printf '{not-json\n' > "$RUN_ROOT/xb/metadata.json"
+python3 - "$RUN_ROOT/xc/metadata.json" <<'LATER_EOF'
+import json, sys, time
+path = sys.argv[1]
+metadata = json.loads(open(path).read())
+metadata["started_epoch"] = time.time() + 3600  # a run that "starts" after the current one is not earlier
+open(path, "w").write(json.dumps(metadata))
+LATER_EOF
 printf 'guide sibling 2\n' > "$SCOPED_REPO/docs/guide.md"
 scoped_commit docs-sibling-2 >/dev/null
 scoped_run live-probes --lane-scoped-reuse >"$TEST_ROOT/xrun-xh-probes2.out" || fail "xh live-probes 2 failed"
 [ "$(scoped_runs live-probes)" = "$((probes_runs + 1))" ] || fail "in-run reuse after retiring an earlier run dir"
 [ "$(scoped_row live-probes detail reuse cross_run)" = "false" ] || fail "in-run hit labelled cross-run"
-[ "$(scoped_row live-probes detail reuse considered_runs)" = '["xh", "xg", "xf", "xe", "xd", "xc"]' ] \
-    || fail "retired or unreadable runs still considered"
+[ "$(scoped_row live-probes detail reuse considered_runs)" = '["xh", "xg", "xf", "xe", "xd"]' ] \
+    || fail "retired, unreadable or later-started runs still considered"
 if grep -q "lane-scoped reuse decision failed" "$TEST_ROOT/xrun-xh-probes2.out"; then
     fail "a retired run dir broke the decision"
 fi
+scoped_stage --summary >"$TEST_ROOT/xrun-xh-summary.out" || fail "xh summary failed"
+grep -qF "Reused lane-scoped passes (inert changes only, not executed on these bytes): live-probes=1" \
+    "$TEST_ROOT/xrun-xh-summary.out" || fail "summary does not count the in-run reuse"
+if grep -q "cross-run:" "$TEST_ROOT/xrun-xh-summary.out"; then
+    fail "an in-run reuse was labelled cross-run in the summary"
+fi
 scoped_stage --finish >/dev/null || fail "xh finish failed"
 scoped_stage --history >"$TEST_ROOT/xrun-history.out" || fail "xrun history failed"
-grep -q "Reused lane-scoped passes (inert changes only, not executed on these bytes): .*live-probes=1" \
-    "$TEST_ROOT/xrun-history.out" || fail "history does not count the reuse"
+grep -q "Reused lane-scoped passes (inert changes only, not executed on these bytes): .*live-probes=1.* (cross-run: smoke=1)" \
+    "$TEST_ROOT/xrun-history.out" || fail "history does not distinguish the cross-run reuse"
 unset SCOPED_RUN_ID
 # Back to the exact-input fixture run for the scenarios below.
 RUN_ROOT="$TEST_ROOT/reuse"

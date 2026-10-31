@@ -399,6 +399,10 @@ def render_summary(run_dir: Path) -> str:
             f"{float(row.get('duration_seconds', 0.0)):>7.1f}s  "
             f"{row.get('log', '')}"
         )
+    reused_scoped = _reused_scoped_counts(rows)
+    if reused_scoped[0]:
+        lines.append("")
+        lines.append(_reused_scoped_line(*reused_scoped))
     metadata_path = run_dir / "metadata.json"
     try:
         metadata = json.loads(metadata_path.read_text())
@@ -424,6 +428,34 @@ def render_summary(run_dir: Path) -> str:
     return "\n".join(lines)
 
 
+def _reused_scoped_counts(rows: Sequence[dict]) -> tuple[dict[str, int], dict[str, int]]:
+    """Per-stage counts of ``reused-scoped`` rows and, separately, of those
+    whose provenance says the pass came from an earlier timing run."""
+    reused_scoped: dict[str, int] = defaultdict(int)
+    cross_run: dict[str, int] = defaultdict(int)
+    for row in rows:
+        if row.get("status") != "reused-scoped":
+            continue
+        stage = str(row.get("stage", ""))
+        reused_scoped[stage] += 1
+        reuse = (row.get("detail") or {}).get("reuse") or {}
+        if isinstance(reuse, dict) and reuse.get("cross_run"):
+            cross_run[stage] += 1
+    return reused_scoped, cross_run
+
+
+def _reused_scoped_line(reused_scoped: dict[str, int], cross_run: dict[str, int]) -> str:
+    """The status label stays ``reused-scoped``; the suffix tells humans which
+    of those passes were read from an earlier run."""
+    line = (
+        "Reused lane-scoped passes (inert changes only, not executed on these bytes): "
+        + ", ".join(f"{stage}={count}" for stage, count in sorted(reused_scoped.items()))
+    )
+    if cross_run:
+        line += " (cross-run: " + ", ".join(f"{stage}={count}" for stage, count in sorted(cross_run.items())) + ")"
+    return line
+
+
 def render_history(run_root: Path) -> str:
     runs: list[tuple[Path, list[dict]]] = []
     for path in sorted(run_root.glob("*/stages.jsonl")):
@@ -437,14 +469,13 @@ def render_history(run_root: Path) -> str:
     passed_durations: dict[str, list[float]] = defaultdict(list)
     passes: dict[str, int] = defaultdict(int)
     reused: dict[str, int] = defaultdict(int)
-    reused_scoped: dict[str, int] = defaultdict(int)
+    reused_scoped, cross_run = _reused_scoped_counts([row for _, rows in runs for row in rows])
     for _, rows in runs:
         for row in rows:
             if row.get("status") == "reused":
                 reused[str(row.get("stage", ""))] += 1
                 continue
             if row.get("status") == "reused-scoped":
-                reused_scoped[str(row.get("stage", ""))] += 1
                 continue
             stage = str(row.get("stage", ""))
             duration = row.get("duration_seconds")
@@ -475,10 +506,7 @@ def render_history(run_root: Path) -> str:
             + ", ".join(f"{stage}={count}" for stage, count in sorted(reused.items()))
         )
     if reused_scoped:
-        lines.append(
-            "Reused lane-scoped passes (inert changes only, not executed on these bytes): "
-            + ", ".join(f"{stage}={count}" for stage, count in sorted(reused_scoped.items()))
-        )
+        lines.append(_reused_scoped_line(reused_scoped, cross_run))
 
     run_spans: list[float] = []
     completed_names: list[str] = []

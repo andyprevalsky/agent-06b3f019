@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -358,7 +359,9 @@ def _record_cache_hit(run_dir: Path, stage: str, fingerprint: str) -> None:
 # invocation digest, its passed head is an ancestor of (or equal to) the
 # current head (git merge-base --is-ancestor: a rebased or amended branch never
 # matches), the record finished within _CROSS_RUN_MAX_AGE_SECONDS
-# (DEPLOY_LANE_SCOPED_REUSE_MAX_AGE_SECONDS may only lower it) and the record
+# (DEPLOY_LANE_SCOPED_REUSE_MAX_AGE_SECONDS may only lower it; a future-dated
+# or non-finite timestamp is rejected everywhere, so a corrupt or clock-stepped
+# record can never sort first and outrank a failed head) and the record
 # file is still byte-identical when the hit is taken. Records are never copied
 # into the current run: the row names the source run id, run dir and record
 # path with cross_run=true, and candidates stay ordered newest first across
@@ -692,10 +695,13 @@ def _scoped_records_across_runs(
     runs: Sequence[_ConsideredRun], stage: str, invocation: str, *, failed: bool, current_head: str, now: float,
 ) -> tuple[list[dict], dict[str, int]]:
     """The lane's PASSED (or, with ``failed``, failed) records across the
-    considered runs, newest first, each annotated with its source run. A
-    cross-run pass must be fresh, an ancestor of the current head and carry
-    its own run's id; cross-run failures veto regardless (never fewer vetoes).
-    The rejection counts explain a miss."""
+    considered runs, newest first, each annotated with its source run. Every
+    pass needs a finite, non-future ``finished_epoch`` (a future-dated record
+    would sort first and set the veto threshold beyond every failed head); a
+    cross-run pass must additionally be within the age bound, an ancestor of
+    the current head and carry its own run's id. Failures veto regardless
+    (never fewer vetoes). The rejection counts explain a miss: ``age`` covers
+    the bound, future-dated and non-finite timestamps of any run."""
 
     max_age = _cross_run_max_age_seconds()
     rejected = {"age": 0, "not_ancestor": 0, "foreign_run_id": 0}
@@ -704,13 +710,18 @@ def _scoped_records_across_runs(
     for run in runs:
         directory = (_scoped_failed_dir if failed else _scoped_records_dir)(run.run_dir, stage)
         for record in _load_scoped_records(directory, stage, invocation):
-            if run.cross_run and not failed:
-                if record.get("run_id") != run.run_id:
-                    rejected["foreign_run_id"] += 1
-                    continue
-                if now - float(record.get("finished_epoch") or 0.0) > max_age:
-                    rejected["age"] += 1
-                    continue
+            if failed:
+                record["_source"] = {"run_id": run.run_id, "run_dir": str(run.run_dir), "cross_run": run.cross_run}
+                records.append(record)
+                continue
+            if run.cross_run and record.get("run_id") != run.run_id:
+                rejected["foreign_run_id"] += 1
+                continue
+            age = now - float(record.get("finished_epoch") or 0.0)
+            if not math.isfinite(age) or age < 0 or (run.cross_run and age > max_age):
+                rejected["age"] += 1
+                continue
+            if run.cross_run:
                 head = record["head"]
                 if head not in ancestry:
                     ancestry[head] = _is_ancestor(head, current_head)
@@ -898,6 +909,7 @@ def _scoped_reuse_decision(
         return decision
     judge: _GraphJudge | None = None
     first_blocked: list[dict] = []
+    changed_before_hit = 0
     for record in records:
         try:
             changed = _changed_between(record["head"], current_head, dirty, untracked, record.get("dirty_paths") or [])
@@ -917,7 +929,8 @@ def _scoped_reuse_decision(
                 )
                 return decision
             if (record.get("_source") or {}).get("cross_run") and not _record_is_intact(record):
-                continue  # the source run dir was retired between the read and the hit
+                changed_before_hit += 1  # the source record changed or vanished between the read and the hit
+                continue
             decision.hit = True
             decision.record = record
             decision.changed = judged
@@ -926,11 +939,12 @@ def _scoped_reuse_decision(
             first_blocked = blocked
             decision.record = record
     decision.blocked = first_blocked
-    decision.miss_reason = (
-        f"{len(first_blocked)} changed path(s) are not provably inert"
-        if first_blocked
-        else "no candidate pass head is reachable in this repository"
-    )
+    if first_blocked:
+        decision.miss_reason = f"{len(first_blocked)} changed path(s) are not provably inert"
+    elif changed_before_hit:
+        decision.miss_reason = f"{changed_before_hit} candidate record(s) changed or vanished before the hit"
+    else:
+        decision.miss_reason = "no candidate pass head is reachable in this repository"
     return decision
 
 
