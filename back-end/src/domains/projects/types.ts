@@ -72,6 +72,10 @@ export const projectFolderSchema = z.object({ name: projectNameSchema }).strict(
 
 export const projectIdSchema = z.string().uuid();
 
+export const projectFolderPositionSchema = z
+  .object({ beforeId: projectIdSchema.nullable() })
+  .strict();
+
 const variableNameSchema = z
   .string()
   .regex(/^[A-Za-z_][A-Za-z0-9_.-]{0,199}$/, 'invalid variable name');

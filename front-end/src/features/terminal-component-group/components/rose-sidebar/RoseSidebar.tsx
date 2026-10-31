@@ -41,8 +41,8 @@
  *   [PENDING(x)] --agent created (it becomes selected) | an agent row picked--> [NONE]
  *   While an agent is selected nothing is pending. When the terminal supplies
  *   roseActions.newAgentProjectId (the create request's project_id), that value
- *   decides the pending project, so the ring always matches where the agent lands.
- *   PENDING(x) puts the liquid-metal ring + shadow + glow on x's icon.
+ *   decides the pending project. The desktop composer labels that destination;
+ *   project icons keep their normal appearance.
  *
  * PANELS: project settings beside the bar (useRoseSidebarProjects); archive dialog;
  * rename dialog (useAgentRowActions); delete-project confirm dialog.

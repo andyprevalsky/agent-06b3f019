@@ -15,13 +15,8 @@
  * icons' x (name faded out, no buttons), expanded shows the full row. Active
  * (its settings open, or it holds the selected agent) = rose color + semibold.
  *
- * PENDING (owned by RoseSidebar): after its "+" the next new agent is created in
- * this project; the icon wears the liquid-metal ring + shadow + glow (ProjectIcon)
- *   [REST] --"+"--> [PENDING] --agent created | another agent / project picked--> [REST]
- *
- * HomeProjectRow: the Home project (every agent without a project), last in the
- * bar: Home icon · "Home" · [+ new agent in Home]; same widths, active and
- * pending rules; no menu (Home cannot be renamed or deleted).
+ * Clicking a project's icon toggles its contents; Home has the same control.
+ * The composer labels the next agent's destination without decorating the icon.
  *
  * NewProjectRow: [IDLE] folder-plus · "New project" (collapsed: icon only, same top
  *   slot, so expanding never shifts the rows below) --click--> [EDITING] inline input
@@ -54,7 +49,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import type { Project } from '@/lib/api/projects';
 import { cn } from '@/lib/utils';
 
-import ProjectIcon, { PendingProjectFrame } from './ProjectIcon';
+import ProjectIcon from './ProjectIcon';
 import { ROSE_ACTIVE_COLOR } from './roseSidebarLayout';
 
 const MENU_SURFACE =
@@ -128,6 +123,9 @@ export interface RoseProjectRowProps {
   /** The next new agent is created in this project (its "+" was clicked). */
   isPending?: boolean;
   onCreateAgent: () => void;
+  contentsOpen?: boolean;
+  contentsToggleDisabled?: boolean;
+  onToggleContents?: () => void;
   onCreateFolder?: () => void;
   onOpenSettings: () => void;
   onStartRename: () => void;
@@ -230,7 +228,18 @@ export default function RoseProjectRow(props: RoseProjectRowProps) {
           className={cn(ROW, tone.className)}
           style={tone.style}
         >
-          <ProjectIcon repoUrl={project.repoUrl} pending={isPending} />
+          <button
+            type="button"
+            aria-label={`${props.contentsOpen === false ? 'Expand' : 'Collapse'} ${project.name} project`}
+            aria-expanded={props.contentsOpen !== false}
+            aria-controls={`rose-project-group-${project.id}`}
+            title={`${props.contentsOpen === false ? 'Expand' : 'Collapse'} ${project.name}`}
+            onClick={props.onToggleContents}
+            disabled={props.contentsToggleDisabled}
+            className="flex-none rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring hover:bg-muted"
+          >
+            <ProjectIcon repoUrl={project.repoUrl} />
+          </button>
           {props.isRenaming && isExpanded ? (
             <InlineNameInput
               label={`Rename ${project.name}`}
@@ -279,10 +288,16 @@ export function HomeProjectRow({
   isActive,
   isPending,
   onCreateAgent,
+  contentsOpen = true,
+  contentsToggleDisabled = false,
+  onToggleContents,
 }: {
   isExpanded: boolean;
   isActive: boolean;
   isPending: boolean;
+  contentsOpen?: boolean;
+  contentsToggleDisabled?: boolean;
+  onToggleContents?: () => void;
   /** Absent (e.g. the mobile list, which has its own New Super Agent): no "+". */
   onCreateAgent?: () => void;
 }) {
@@ -294,9 +309,18 @@ export function HomeProjectRow({
       className={cn(ROW, tone.className)}
       style={tone.style}
     >
-      <PendingProjectFrame pending={isPending}>
+      <button
+        type="button"
+        aria-label={`${contentsOpen ? 'Collapse' : 'Expand'} Home project`}
+        aria-expanded={contentsOpen}
+        aria-controls="rose-project-group-home"
+        title={`${contentsOpen ? 'Collapse' : 'Expand'} Home`}
+        onClick={onToggleContents}
+        disabled={contentsToggleDisabled}
+        className="flex-none rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring hover:bg-muted"
+      >
         <Home className="h-5 w-5 flex-none" strokeWidth={1.7} />
-      </PendingProjectFrame>
+      </button>
       <RowName isExpanded={isExpanded}>Home</RowName>
       {isExpanded && onCreateAgent !== undefined && <NewAgentHereButton onClick={onCreateAgent} />}
     </div>

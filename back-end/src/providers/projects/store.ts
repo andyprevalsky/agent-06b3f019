@@ -27,11 +27,18 @@ export interface ProjectFolderRecord {
   id: string;
   name: string;
   projectId: string;
+  sortOrder: number;
 }
 
+export const folderOrderBy = [
+  { sortOrder: 'asc' as const },
+  { name: 'asc' as const },
+  { id: 'asc' as const },
+];
+
 const folderSelection = {
-  select: { id: true, name: true, projectId: true },
-  orderBy: { name: 'asc' as const },
+  select: { id: true, name: true, projectId: true, sortOrder: true },
+  orderBy: folderOrderBy,
 };
 
 export interface ProjectRecord {
@@ -181,6 +188,8 @@ export async function updateProject(
 /** Works with both immediate db-push FKs and deferred migration FKs. */
 export async function deleteProject(id: string): Promise<void> {
   await runTransactionWithRetry(async (tx) => {
+    // Match folder writes' lock order before touching agents or cascading folders.
+    await tx.$queryRaw`SELECT "id" FROM "Project" WHERE "id" = ${id} FOR UPDATE`;
     await tx.agent.updateMany({
       where: { projectId: id, folderId: { not: null } },
       data: { folderId: null },
