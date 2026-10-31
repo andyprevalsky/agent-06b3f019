@@ -1231,7 +1231,10 @@ def main() -> int:
         # it: every scenario sets the admission knobs it needs explicitly, so
         # the base environment carries none of them (in-process runs patch
         # os.environ with clear=True for the same reason).
-        env = {**{key: value for key, value in os.environ.items() if not key.startswith("DEPLOY_ADMISSION_")},
+        # A launcher exports FACTORY_METADATA_FILE for its own worktree; the
+        # telemetry scenario selects its own fixture snapshot explicitly.
+        env = {**{key: value for key, value in os.environ.items()
+                  if not key.startswith("DEPLOY_ADMISSION_") and key != "FACTORY_METADATA_FILE"},
                "DEPLOY_RUN_ROOT": str(tmp / "runs"), "DEPLOY_PIPELINE_SOURCE_ROOT": str(source_root)}
         start_timing(tmp / "runs", env)
         marker = tmp / "slow-finished"
@@ -1340,6 +1343,8 @@ def main() -> int:
         check_wait_since_and_no_row_failures(tmp, env)
         check_watchdog_receipts(tmp, env)
         check_follow_source(tmp, env)
+        check_lane_teardown(tmp, env)
+        check_attempt_refreshes_factory_snapshot(tmp, env)
         check_fix_loop_cap(tmp, env)
         check_interrupted_rounds_and_dead_supervisor_deferral()
         check_wait_follows_supersede_behind_stage_failure(tmp)
@@ -1370,7 +1375,8 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     repo.mkdir()
     scripts = repo / "scripts"
     scripts.mkdir()
-    for name in ("run_deploy_pipeline.py", "deploy_stage_wait.py", "classify-agent-runtime-changes.sh"):
+    for name in ("run_deploy_pipeline.py", "deploy_stage_wait.py", "factory_metadata.py",
+                 "classify-agent-runtime-changes.sh"):
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
     (repo / ".gitignore").write_text(".context/\n__pycache__/\n")
     git = ["git", "-C", str(repo), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
@@ -1651,6 +1657,330 @@ def check_follow_source(tmp: Path, env: dict[str, str]) -> None:
     assert ledger_before == ledger_after, "speculative gates must never touch the review-cycle ledger"
     # Without --follow-source the same edit is still a stale run, never a pass.
     assert "superseded" not in json.dumps(json.loads((tmp / "state" / "receipt.json").read_text())["status"])
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return stat[stat.rindex(")") + 2:].split()[0] not in ("Z", "X")
+
+
+def check_lane_teardown(tmp: Path, env: dict[str, str]) -> None:
+    """A superseded lane is signalled as a process group, but the smoke lane's
+    chain starts its isolated stack in a session of its own (``run.sh
+    --benchmark`` under benchmarks/local.py), so the group TERM never reaches
+    it: on #1640 two such stacks outlived their superseded smoke lanes, kept
+    live owner records under .context/benchmarks and blocked the semantic
+    latency gate (3600 s wait) until a human TERMed them. The supervisor now
+    waits (bounded) for every owner record the lane's own processes wrote,
+    TERMs the run's live controller (never a wrapper above it, never the stack
+    while the controller lives), lets a controller that keeps publishing
+    cleanup progress drain past the wait bound, SIGKILLs only a run that shows
+    no progress after the controller's shutdown budget, writes a receipt and
+    reports it; a record whose pid the lane never started (another run) is
+    reported and left alone."""
+    pipeline = load_module("pipeline_teardown", DRIVER)
+    source_root = Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])
+    context_root = source_root / ".context" / "benchmarks"
+    context_root.mkdir(parents=True, exist_ok=True)
+    probe = source_root / ".pipeline-teardown-probe.tmp"
+    probe.unlink(missing_ok=True)
+    scripts = tmp / "teardown-scripts"
+    scripts.mkdir()
+    # The "stack": records its own pid like local.py's local-stack-owner.json,
+    # then idles. "stubborn" ignores TERM like a stack hung in its teardown.
+    (scripts / "stack.sh").write_text(
+        "#!/bin/bash\n"
+        "mkdir -p \"$1\"\n"
+        "[ \"$2\" = stubborn ] && trap '' TERM\n"
+        "printf '{\"version\":1,\"run_id\":\"%s\",\"pid\":%d,\"token\":\"fixture\","
+        "\"native_identity\":\"fixture\",\"birth\":\"fixture\"}\\n' \"$(basename \"$1\")\" \"$$\" "
+        "> \"$1/local-stack-owner.json.tmp\"\n"
+        "mv \"$1/local-stack-owner.json.tmp\" \"$1/local-stack-owner.json\"\n"
+        "exec sleep 300\n"
+    )
+    # The "controller": like benchmarks/local.py it runs in its own session under
+    # a generated run id that embeds its pid, starts the stack with a scrubbed
+    # environment (owned only through the parent chain) and, on TERM, drains for
+    # longer than the wait bound while publishing cleanup-status progress.
+    (scripts / "controller.sh").write_text(
+        "#!/bin/bash\n"
+        "run_dir=\"$1/$(date +%s)-$$-7\"\n"
+        "mkdir -p \"$run_dir\"\n"
+        "env -i /bin/sleep 300 </dev/null >/dev/null 2>&1 &\n"
+        "stack=$!\n"
+        "printf '{\"version\":1,\"run_id\":\"%s\",\"pid\":%d,\"token\":\"fixture\","
+        "\"native_identity\":\"fixture\",\"birth\":\"fixture\"}\\n' \"$(basename \"$run_dir\")\" \"$stack\" "
+        "> \"$run_dir/local-stack-owner.json.tmp\"\n"
+        "mv \"$run_dir/local-stack-owner.json.tmp\" \"$run_dir/local-stack-owner.json\"\n"
+        "printf '%s\\n' \"$run_dir\" > \"$2\"\n"
+        "drain() {\n"
+        "  trap '' TERM\n"
+        "  for step in 1 2 3 4 5 6; do\n"
+        "    printf 'version=2\\nstate=pending\\nstep=%s\\n' \"$step\" > \"$run_dir/local-stack-cleanup.status.tmp\"\n"
+        "    mv -f \"$run_dir/local-stack-cleanup.status.tmp\" \"$run_dir/local-stack-cleanup.status\"\n"
+        "    sleep 0.5\n"
+        "  done\n"
+        "  kill \"$stack\" 2>/dev/null\n"
+        "  wait \"$stack\" 2>/dev/null\n"
+        "  printf 'version=2\\nstate=clean\\n' > \"$run_dir/local-stack-cleanup.status.tmp\"\n"
+        "  mv -f \"$run_dir/local-stack-cleanup.status.tmp\" \"$run_dir/local-stack-cleanup.status\"\n"
+        "  exit 0\n"
+        "}\n"
+        "trap drain TERM\n"
+        "while kill -0 \"$stack\" 2>/dev/null; do wait \"$stack\"; done\n"
+    )
+    # The lane: like run-predeploy-local -> local.py it starts its stack or
+    # controller in a new session with its own service log (never the stage
+    # wrapper's output pipe) and waits on its work; once the fix (probe) exists
+    # it passes at once.
+    (scripts / "lane.sh").write_text(
+        "#!/bin/bash\n"
+        "[ -f \"$3\" ] && exit 0\n"
+        "if [ \"$2\" = controller ]; then\n"
+        "  setsid bash \"$(dirname \"$0\")/controller.sh\" \"$1\" \"$4\" >/dev/null 2>&1 </dev/null &\n"
+        "else\n"
+        "  setsid bash \"$(dirname \"$0\")/stack.sh\" \"$1\" \"$2\" >/dev/null 2>&1 </dev/null &\n"
+        "fi\n"
+        "sleep 60\n"
+    )
+    run_dirs = {name: context_root / f"teardown-{name}" for name in ("stack", "stubborn")}
+    marker = tmp / "controller-run-dir"
+    plan = tmp / "teardown-plan.json"
+    state = tmp / "teardown-state"
+    lane = str(scripts / "lane.sh")
+    write_plan(plan, [
+        {"name": "controller", "reuse_passed": False,
+         "command": ["bash", lane, str(context_root), "controller", str(probe), str(marker)]},
+        {"name": "stack", "reuse_passed": False,
+         "command": ["bash", lane, str(run_dirs["stack"]), "plain", str(probe), "-"]},
+        {"name": "stubborn", "reuse_passed": False,
+         "command": ["bash", lane, str(run_dirs["stubborn"]), "stubborn", str(probe), "-"]},
+    ])
+    # A run dir older than the lanes (a dead controller's record): never a candidate.
+    old = context_root / "1700000000-1-1"
+    old.mkdir()
+    (old / "local-stack-owner.json").write_text(json.dumps({"version": 1, "run_id": old.name, "pid": 1}))
+    stale = time.time() - 600
+    os.utime(old / "local-stack-owner.json", (stale, stale))
+    os.utime(old, (stale, stale))
+    # Another run's live owner: a pid the lanes never started carries no lane token.
+    foreign = subprocess.Popen(["sleep", "300"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+    foreign_dir = context_root / "teardown-foreign"
+    # wait bound 1 s; the last resort may run 6 s after the TERM, and only
+    # when nothing progressed for a whole wait bound.
+    scenario_env = {**env, "DEPLOY_PIPELINE_TEARDOWN_WAIT_SECONDS": "1",
+                    "DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS": "6"}
+    supervisor = subprocess.Popen(
+        [sys.executable, str(DRIVER), "run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED,
+         "--follow-source", "--settle-seconds", "0.5", "--poll-seconds", "0.2", "--fix-loop-cap", "0"],
+        env=scenario_env, stdout=subprocess.PIPE, text=True,
+    )
+    owners: dict[str, int] = {}
+    controller_pid = 0
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not (marker.exists() and all(
+                (d / "local-stack-owner.json").exists() for d in run_dirs.values())):
+            time.sleep(0.1)
+        controller_dir = Path(marker.read_text().strip())
+        controller_pid = int(controller_dir.name.split("-")[1])
+        run_dirs["controller"] = controller_dir
+        for name, run_dir in run_dirs.items():
+            owners[name] = json.loads((run_dir / "local-stack-owner.json").read_text())["pid"]
+        foreign_dir.mkdir()
+        (foreign_dir / "local-stack-owner.json").write_text(json.dumps(
+            {"version": 1, "run_id": foreign_dir.name, "pid": foreign.pid, "token": "x",
+             "native_identity": "x", "birth": "x"}))
+        probe.write_text("fixed\n")
+        out, _ = supervisor.communicate(timeout=120)
+        assert supervisor.returncode == 0, (supervisor.returncode, out)
+        receipt = json.loads((state / "receipt.json").read_text())
+        assert receipt["status"] == "passed" and receipt["attempt"] == 2, receipt["status"]
+        history = [json.loads(line) for line in (state / "history.jsonl").read_text().splitlines()]
+        superseded = history[-1]
+        assert superseded["status"] == "superseded"
+        assert sorted(superseded["superseded_lanes"]) == ["controller", "stack", "stubborn"]
+        expectations = {"controller": "terminated", "stack": "terminated", "stubborn": "killed"}
+        details: dict[str, dict] = {}
+        for name, expected in expectations.items():
+            lane_state = superseded["lanes"][name]
+            assert lane_state["status"] == "superseded" and lane_state["lane_token"].startswith(f"{name}.1."), lane_state
+            summary = lane_state["teardown"]
+            assert summary["outcome"] == expected, (name, summary)
+            assert summary["survivors"] == [] and summary["eperm"] == [], (name, summary)
+            assert not _process_alive(owners[name]), f"{name}'s stack outlived its teardown"
+            detail_path = Path(summary["receipt"])
+            assert detail_path == state / "teardown" / f"attempt-1-{name}.json", detail_path
+            detail = json.loads(detail_path.read_text())
+            details[name] = detail
+            assert detail["older_run_dirs"] == 1 and all(r["run_id"] != old.name for r in detail["records"])
+            assert detail["wait_seconds"] == 1.0 and detail["kill_after_seconds"] == 6.0, detail
+            assert detail["kill_after_source"] == "DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS", detail
+            assert detail["lingering"] == [], detail["lingering"]
+            assert f"PIPELINE_LANE_TEARDOWN attempt=1 lane={name} outcome={expected} owned=" in out, out
+            assert f"receipt={detail_path}" in out, out
+        # Plain stack, no controller left: the exact owner pid is TERMed and exits.
+        stack = superseded["lanes"]["stack"]["teardown"]
+        assert stack["owned_pids"] == [owners["stack"]] and stack["escalated"] == [owners["stack"]], stack
+        assert stack["killed"] == [] and [p["phase"] for p in details["stack"]["phases"]] == ["wait", "term"]
+        assert [(r["pid"], r["path"]) for r in details["stack"]["owned"]] == \
+            [(owners["stack"], str(run_dirs["stack"] / "local-stack-owner.json"))], details["stack"]["owned"]
+        # Live controller: it alone is TERMed (never its stack, never a wrapper),
+        # its stack is owned through the parent chain despite a scrubbed
+        # environment, and its 3 s drain with progress receipts outlives the 1 s
+        # wait bound without being killed; the receipt ends with its clean status.
+        controller = superseded["lanes"]["controller"]["teardown"]
+        assert controller["escalated"] == [controller_pid], controller
+        assert controller["owned_pids"] == sorted([controller_pid, owners["controller"]]), controller
+        assert controller["killed"] == [] and [p["phase"] for p in details["controller"]["phases"]] == ["wait", "term"]
+        term = details["controller"]["phases"][1]
+        assert term["seconds"] >= 2.5 and term["stall"] is None, term
+        owned_kinds = {(r["pid"], r["kind"]) for r in details["controller"]["owned"]}
+        assert owned_kinds == {(controller_pid, "run-id-controller"), (owners["controller"], "local-stack-owner.json")}, owned_kinds
+        cleanup = [r for r in details["controller"]["records"] if r["kind"] == "local-stack-cleanup.status"]
+        assert cleanup and cleanup[0]["status"] == "receipt" and cleanup[0]["state"] == "clean", cleanup
+        assert not _process_alive(controller_pid), "the controller outlived its drain"
+        # TERM-ignoring stack: the last resort runs only after the kill-after
+        # bound passed with no progress for a whole wait bound.
+        stubborn = superseded["lanes"]["stubborn"]["teardown"]
+        assert stubborn["escalated"] == [owners["stubborn"]] and stubborn["killed"] == [owners["stubborn"]], stubborn
+        phases = details["stubborn"]["phases"]
+        assert [p["phase"] for p in phases] == ["wait", "term", "kill"], phases
+        assert phases[1]["seconds"] >= 6.0 and phases[1]["stall"].startswith("no progress"), phases[1]
+        assert phases[1]["last_progress_age_s"] >= 1.0, phases[1]
+        assert phases[2]["note"].startswith("last resort"), phases[2]
+        # Token scoping: each teardown saw the other lanes' live stacks as foreign
+        # and left them for their own teardown; nothing ever touched the other run.
+        assert controller["foreign_pids"] == sorted([foreign.pid, owners["stack"], owners["stubborn"]]), controller
+        assert stack["foreign_pids"] == sorted([foreign.pid, owners["stubborn"]]), stack
+        assert stubborn["foreign_pids"] == [foreign.pid], stubborn
+        assert _process_alive(foreign.pid), "a foreign owner record's process must never be signalled"
+        assert f"foreign={foreign.pid}" in out.split("lane=stubborn")[1].split("\n")[0], out
+        # Lanes that passed were never signalled: no teardown, no receipt.
+        assert "teardown" not in receipt["lanes"]["stack"] and not list((state / "teardown").glob("attempt-2-*"))
+        # Both bounds are validated before any lane starts.
+        for variable in ("DEPLOY_PIPELINE_TEARDOWN_WAIT_SECONDS", "DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS"):
+            bad = run_driver("run", "--plan", str(plan), "--state-dir", str(tmp / "teardown-bad"), *UNBOUNDED,
+                             env={**env, variable: "soon"})
+            assert bad.returncode == 2 and variable in bad.stderr, (variable, bad.returncode, bad.stderr)
+            assert not (tmp / "teardown-bad" / "receipt.json").exists()
+    finally:
+        probe.unlink(missing_ok=True)
+        if supervisor.poll() is None:
+            supervisor.kill()
+            supervisor.wait()
+        for pid in (*owners.values(), foreign.pid, controller_pid):
+            if pid:
+                try:
+                    os.kill(pid, 9)
+                except ProcessLookupError:
+                    pass
+        foreign.wait()
+        shutil.rmtree(context_root, ignore_errors=True)
+    # Without the override the last resort waits for the controller's published
+    # shutdown budget plus the margin; this fixture has no agents/ producer, so
+    # the documented default applies, and the real checkout asks the producer.
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS", None)
+        assert pipeline.teardown_kill_after_seconds() == (2175.0 + 120.0, "default + 120s margin")
+        real = load_module("pipeline_teardown_real", ROOT / "scripts" / "run_deploy_pipeline.py")
+        published = int(subprocess.run(
+            [sys.executable, str(ROOT / "agents/scripts/local_worker_supervisor.py"), "--shutdown-timeout"],
+            cwd=ROOT / "agents", check=True, stdout=subprocess.PIPE, text=True).stdout)
+        assert real.teardown_kill_after_seconds() == (
+            published + 120.0, "local_worker_supervisor.py --shutdown-timeout + 120s margin")
+    # Ownership through the parent chain when a child's environment cannot be
+    # read (a root child), zombies never count, and a lane-owned pid the
+    # supervisor may not signal is recorded as eperm instead of aborting.
+    fake = tmp / "teardown-fake-proc"
+    stat_tail = "0 0 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 {start} 0 0 0 0"
+    for pid, comm, state_char, ppid, start in ((100, "ctrl", "S", 1, 5000), (101, "sudo", "S", 100, 5001),
+                                               (102, "other", "S", 1, 5002), (103, "gone", "Z", 100, 5003)):
+        (fake / str(pid)).mkdir(parents=True)
+        (fake / str(pid) / "stat").write_text(f"{pid} ({comm}) {state_char} {ppid} " + stat_tail.format(start=start) + "\n")
+    (fake / "100" / "environ").write_bytes(b"HOME=/x\0DEPLOY_PIPELINE_LANE_TOKEN=tok\0")
+    (fake / "101" / "environ").write_bytes(b"secret\0")
+    (fake / "101" / "environ").chmod(0)
+    (fake / "102" / "environ").write_bytes(b"DEPLOY_PIPELINE_LANE_TOKEN=other\0")
+    try:
+        owned, processes = pipeline.lane_owned_processes("tok", proc=fake)
+    finally:
+        (fake / "101" / "environ").chmod(0o600)
+    assert sorted(owned) == [100, 101] and owned[100]["token"] is True and owned[101]["token"] is False, owned
+    assert 103 not in processes and 102 in processes, sorted(processes)
+    with patch.object(pipeline.os, "kill", side_effect=PermissionError):
+        assert pipeline._signal_pids([4242], {4242: {"comm": "sudo"}}, pipeline.signal.SIGKILL) == [
+            {"pid": 4242, "comm": "sudo", "signal": "SIGKILL", "error": "eperm"}]
+    with patch.object(pipeline.os, "kill", side_effect=ProcessLookupError):
+        assert pipeline._signal_pids([4242], {}, pipeline.signal.SIGTERM) == []
+    records = [{"run_id": "1-77-1", "kind": "run-id-controller", "pid": 77, "status": "owned"},
+               {"run_id": "1-77-1", "kind": "local-stack-owner.json", "pid": 88, "status": "owned"},
+               {"run_id": "custom", "kind": "local-stack-owner.json", "pid": 99, "status": "owned"},
+               {"run_id": "1-66-1", "kind": "run-id-controller", "pid": 66, "status": "exited"},
+               {"run_id": "1-66-1", "kind": "services.json", "pid": 55, "status": "owned"}]
+    assert pipeline._escalation_targets(records, [88, 99, 55, 77]) == [77, 99, 55]
+    print("lane teardown: ok")
+
+
+def check_attempt_refreshes_factory_snapshot(tmp: Path, env: dict[str, str]) -> None:
+    """Every attempt re-stamps the selected factory telemetry snapshot with the
+    head it freezes (observed_at + validation.source_sha and its evidence), so a
+    superseding attempt's stage rows carry the launched head; nothing else in
+    the snapshot changes. A snapshot that is not this checkout's own .context/
+    file (a sibling deploy's file inherited through the environment) is reported
+    and left alone, a retrospective keeps its observation, and a snapshot with
+    keys outside the allowlist is rejected unchanged."""
+    source_root = Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])
+    snapshot = source_root / ".context" / "factory-metadata.json"
+    snapshot.parent.mkdir(exist_ok=True)
+    sample = {"schema_version": 1, "observed_at": "2026-10-28T02:35:09+00:00", "record_type": "snapshot",
+              "execution": {"model": "test-model"}, "validation": {"source_sha": "0" * 40},
+              "evidence": {"execution.model": "fixture receipt", "validation.source_sha": "stale fixture head"}}
+    snapshot.write_text(json.dumps(sample))
+    head = subprocess.run(["git", "-C", str(source_root), "rev-parse", "HEAD"], check=True,
+                          stdout=subprocess.PIPE, text=True).stdout.strip()
+    plan = tmp / "telemetry-plan.json"
+    write_plan(plan, [{"name": "telemetry-lane", "command": ["true"], "reuse_passed": False}])
+    selected = {**env, "FACTORY_METADATA_FILE": str(snapshot)}
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(tmp / "telemetry-state"), *UNBOUNDED, env=selected)
+    assert ran.returncode == 0, (ran.returncode, ran.stderr)
+    assert f"PIPELINE_TELEMETRY factory metadata: refreshed {snapshot}" in ran.stdout and head in ran.stdout, ran.stdout
+    refreshed = json.loads(snapshot.read_text())
+    assert refreshed["validation"]["source_sha"] == head and refreshed["observed_at"] != sample["observed_at"]
+    assert refreshed["execution"] == sample["execution"] and refreshed["evidence"]["execution.model"] == "fixture receipt"
+    assert "run_deploy_pipeline attempt 1" in refreshed["evidence"]["validation.source_sha"]
+    assert head in refreshed["evidence"]["validation.source_sha"], refreshed["evidence"]
+    receipt = json.loads((tmp / "telemetry-state" / "receipt.json").read_text())
+    rows = [json.loads(line) for line in (Path(receipt["stage_run_dir"]) / "stages.jsonl").read_text().splitlines()]
+    row = [r for r in rows if r.get("stage") == "telemetry-lane"][-1]
+    assert row["telemetry"]["validation"]["source_sha"] == head, row["telemetry"]
+    elsewhere = tmp / "elsewhere-factory-metadata.json"
+    elsewhere.write_text(json.dumps(sample))
+    before = elsewhere.read_bytes()
+    outside = run_driver("run", "--plan", str(plan), "--state-dir", str(tmp / "telemetry-outside"), *UNBOUNDED,
+                         env={**env, "FACTORY_METADATA_FILE": str(elsewhere)})
+    assert outside.returncode == 0 and "factory metadata: not refreshed" in outside.stdout, outside.stdout
+    assert "is not this checkout's" in outside.stdout, outside.stdout
+    assert elsewhere.read_bytes() == before, "a snapshot outside the checkout must never be re-stamped"
+    snapshot.write_text(json.dumps({**sample, "record_type": "retrospective"}))
+    before = snapshot.read_bytes()
+    retro = run_driver("run", "--plan", str(plan), "--state-dir", str(tmp / "telemetry-retro"), *UNBOUNDED,
+                       env=selected)
+    assert retro.returncode == 0 and "retrospective" in retro.stdout and "not refreshed" in retro.stdout, retro.stdout
+    assert snapshot.read_bytes() == before, "a retrospective keeps its original observation"
+    snapshot.write_text(json.dumps({**sample, "api_key": "must-not-leak"}))
+    before = snapshot.read_bytes()
+    rejected = run_driver("run", "--plan", str(plan), "--state-dir", str(tmp / "telemetry-rejected"), *UNBOUNDED,
+                          env=selected)
+    assert rejected.returncode != 0 and "PIPELINE_TELEMETRY factory metadata: rejected" in rejected.stderr, rejected.stderr
+    assert "must-not-leak" not in rejected.stdout + rejected.stderr
+    assert snapshot.read_bytes() == before, "an invalid snapshot must be left exactly as found"
+    snapshot.unlink()
+    print("attempt factory snapshot refresh: ok")
 
 
 def check_fix_loop_cap(tmp: Path, env: dict[str, str]) -> None:

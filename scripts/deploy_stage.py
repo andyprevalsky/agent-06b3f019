@@ -20,7 +20,9 @@ from typing import Iterator, Sequence
 
 # Resolve the sibling module however this file is loaded (script, import, or by path).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-load_metadata = importlib.import_module("factory_metadata").load_metadata
+factory_metadata = importlib.import_module("factory_metadata")
+load_metadata = factory_metadata.load_metadata
+ROOT = Path(__file__).resolve().parents[1]
 
 ACTIVE_STATUSES = {"active", "finishing"}
 
@@ -135,23 +137,40 @@ def start_lifecycle(
     started_epoch: float,
     git_sha: str,
     branch: str,
-) -> None:
-    """Initialize a run and publish it only after the metadata is durable."""
+) -> dict:
+    """Initialize a run and publish it only after the metadata is durable.
+
+    The selected factory telemetry snapshot is re-stamped first with this
+    launch's head (``observed_at``, ``validation.source_sha``), so the run
+    defaults and every stage row carry the head actually launched; the
+    returned refresh report says whether and why not. An invalid snapshot
+    refuses the run before anything is written.
+    """
 
     _validate_identifier(run_id, "deploy run id")
     with _lifecycle_lock(run_root):
         current_path = run_root / "current"
+        stale_pointer = False
         if current_path.exists():
             current_id = _read_current_run_id(run_root)
             current_metadata = _read_metadata(run_root / current_id)
             if current_metadata.get("status") in ACTIVE_STATUSES:
                 raise LifecycleError(f"deploy timing run already active: {current_id}")
-            current_path.unlink()
+            stale_pointer = True
 
         run_dir = run_root / run_id
         metadata_path = run_dir / "metadata.json"
         if metadata_path.exists():
             raise LifecycleError(f"deploy timing run already exists: {run_id}")
+        # Only a start that will actually publish this run re-stamps the
+        # snapshot: a refused start (run already active) leaves it untouched.
+        try:
+            refresh = factory_metadata.refresh_selected_snapshot(
+                git_sha, producer="run-deploy-stage --start", checkout=ROOT)
+        except ValueError as error:
+            raise LifecycleError(f"factory metadata snapshot rejected, run not started: {error}") from error
+        if stale_pointer:
+            current_path.unlink()
         (run_dir / "logs").mkdir(parents=True, exist_ok=True)
         init_run(
             run_dir,
@@ -164,6 +183,7 @@ def start_lifecycle(
         pointer = current_path.with_name(f".{current_path.name}.{os.getpid()}.tmp")
         pointer.write_text(f"{run_id}\n")
         pointer.replace(current_path)
+    return refresh
 
 
 def admit_stage(run_root: Path, *, token: str, pid: int) -> str:
@@ -547,7 +567,7 @@ def main() -> int:
     values.pop("command")
     try:
         if args.command == "lifecycle-start":
-            start_lifecycle(**values)
+            print(start_lifecycle(**values)["message"])
         elif args.command == "lifecycle-admit":
             print(admit_stage(**values))
         elif args.command == "lifecycle-release":
