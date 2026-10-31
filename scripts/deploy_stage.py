@@ -369,12 +369,13 @@ def render_summary(run_dir: Path) -> str:
     run_id = run_dir.name
     if not rows:
         return f"Deploy run {run_id}: no timed stages recorded"
-    lines = [f"Deploy run {run_id}", "", "Stage                         Status    Duration  Log"]
-    lines.append("----------------------------  --------  --------  ------------------------------")
+    # 13 columns fit every status, including "reused-scoped".
+    lines = [f"Deploy run {run_id}", "", "Stage                         Status         Duration  Log"]
+    lines.append("----------------------------  -------------  --------  ------------------------------")
     for row in rows:
         lines.append(
             f"{str(row.get('stage', '')):<28}  "
-            f"{str(row.get('status', '')):<8}  "
+            f"{str(row.get('status', '')):<13}  "
             f"{float(row.get('duration_seconds', 0.0)):>7.1f}s  "
             f"{row.get('log', '')}"
         )
@@ -416,10 +417,14 @@ def render_history(run_root: Path) -> str:
     passed_durations: dict[str, list[float]] = defaultdict(list)
     passes: dict[str, int] = defaultdict(int)
     reused: dict[str, int] = defaultdict(int)
+    reused_scoped: dict[str, int] = defaultdict(int)
     for _, rows in runs:
         for row in rows:
             if row.get("status") == "reused":
                 reused[str(row.get("stage", ""))] += 1
+                continue
+            if row.get("status") == "reused-scoped":
+                reused_scoped[str(row.get("stage", ""))] += 1
                 continue
             stage = str(row.get("stage", ""))
             duration = row.get("duration_seconds")
@@ -448,6 +453,11 @@ def render_history(run_root: Path) -> str:
         lines.append(
             "Reused exact-input passes: "
             + ", ".join(f"{stage}={count}" for stage, count in sorted(reused.items()))
+        )
+    if reused_scoped:
+        lines.append(
+            "Reused lane-scoped passes (inert changes only, not executed on these bytes): "
+            + ", ".join(f"{stage}={count}" for stage, count in sorted(reused_scoped.items()))
         )
 
     run_spans: list[float] = []
