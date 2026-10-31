@@ -119,6 +119,27 @@
       ]
     },
     {
+      "_why": "Backend assets (Rose skills, rose-tools, user-ui, code-preview, display, agent-graph CLI, vCard) are read at run time by the providers that ship them, through computed paths no import names; their tests observe an asset change only through those readers.",
+      "from": ["back-end/src/assets/*"],
+      "to_files": [
+        "back-end/src/providers/roseSkills/skills.ts",
+        "back-end/src/providers/userUi/workspace.ts",
+        "back-end/src/providers/userUi/seed.ts",
+        "back-end/src/providers/agentTools/displayBundle.ts",
+        "back-end/src/providers/agentTools/workspace.ts",
+        "back-end/src/providers/codePreview/assets.ts",
+        "back-end/src/providers/agentGraph/cli.ts",
+        "back-end/src/domains/vcard/config.ts"
+      ]
+    },
+    {
+      "_why": "The compiled Electron startup blackbox runs tsc over tsconfig.main.json (main/**, shared/**) and boots the emitted bundle; no import names those sources.",
+      "from": ["mac-app/main/*", "mac-app/shared/*"],
+      "to_lanes": {
+        "mac-app-vitest": ["mac-app/tests/blackbox/electron-compiled-startup.blackbox.ts"]
+      }
+    },
+    {
       "_why": "Prompts/commands are text read by structural gates and agent prompt-invariant domains.",
       "from": [
         ".claude/commands/*",
