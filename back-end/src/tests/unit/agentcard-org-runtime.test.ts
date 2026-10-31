@@ -390,6 +390,74 @@ async function main(): Promise<void> {
     );
     assert.equal(stuckTimeoutCalls, 3, 'AbortSignal timeout retries must stay bounded');
 
+    // undici reports a connection that never reached the provider as `TypeError: fetch failed`
+    // with the cause code on `.cause` (`UND_ERR_CONNECT_TIMEOUT` after its 10 s connect timeout,
+    // ECONNREFUSED, EAI_AGAIN). treasury-rails 2026-10-31: one such connect timeout on
+    // `list_recoveries` after ~60 healthy calls failed the deploy gate with
+    // `retryable=false` while 19.9 s of retry budget remained. It is the same transient class as
+    // the AbortSignal timeout and is safe for every tool because no request was sent.
+    const fetchFailed = (code: string, message = 'fetch failed'): TypeError =>
+      Object.assign(new TypeError(message), { cause: Object.assign(new Error(code), { code }) });
+    let connectTimeoutCalls = 0;
+    const connectTimeoutThenOkRuntime = new AgentCardOrgRuntime(undefined, async () => {
+      connectTimeoutCalls += 1;
+      if (connectTimeoutCalls === 1) throw fetchFailed('UND_ERR_CONNECT_TIMEOUT');
+      return new Response(
+        JSON.stringify({ result: { structuredContent: { card: { id: 'c1' } } } }),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }
+      );
+    });
+    assert.deepEqual(
+      await connectTimeoutThenOkRuntime.callTool('create_card', { amount_cents: 1300 }),
+      { structuredContent: { card: { id: 'c1' } } }
+    );
+    assert.equal(
+      connectTimeoutCalls,
+      2,
+      'a connect-phase fetch failure (request never sent) must be retried for any tool'
+    );
+
+    // A socket dropped after the request left (ECONNRESET, undici socket/headers timeouts) may
+    // have reached the provider: replay only the idempotent reads, exactly like the text throttle.
+    let resetReadCalls = 0;
+    const resetThenOkReadRuntime = new AgentCardOrgRuntime(undefined, async () => {
+      resetReadCalls += 1;
+      if (resetReadCalls === 1) throw fetchFailed('ECONNRESET');
+      return new Response(JSON.stringify({ result: { structuredContent: { recoveries: [] } } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    assert.deepEqual(await resetThenOkReadRuntime.callTool('list_recoveries', { limit: 100 }), {
+      structuredContent: { recoveries: [] },
+    });
+    assert.equal(resetReadCalls, 2, 'a reset read must be replayed within the retry budget');
+
+    let resetMutationCalls = 0;
+    const resetMutationRuntime = new AgentCardOrgRuntime(undefined, async () => {
+      resetMutationCalls += 1;
+      throw fetchFailed('ECONNRESET');
+    });
+    await assert.rejects(
+      () => resetMutationRuntime.callTool('recover_funds', { cardholder_id: 'ch-1' }),
+      (error: unknown) => error instanceof TypeError && error.message === 'fetch failed'
+    );
+    assert.equal(resetMutationCalls, 1, 'a reset mutation must never be replayed');
+
+    let unknownCauseCalls = 0;
+    const unknownCauseRuntime = new AgentCardOrgRuntime(undefined, async () => {
+      unknownCauseCalls += 1;
+      throw fetchFailed('ERR_TLS_CERT_ALTNAME_INVALID');
+    });
+    await assert.rejects(
+      () => unknownCauseRuntime.callTool('list_recoveries', { limit: 100 }),
+      (error: unknown) => error instanceof TypeError && error.message === 'fetch failed'
+    );
+    assert.equal(unknownCauseCalls, 1, 'a fetch failure without a transient cause is a real error');
+
     // Non-throttle failures must never be retried — retrying a real error would multiply load.
     let hardFailureCalls = 0;
     const hardFailureRuntime = new AgentCardOrgRuntime(async () => {

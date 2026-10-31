@@ -140,6 +140,49 @@ function looksLikeMcpTimeoutError(error: unknown): boolean {
   return /aborted due to timeout|operation was aborted/i.test(errorMessage(error));
 }
 
+/**
+ * undici surfaces a request that never produced an HTTP response as `TypeError: fetch failed`
+ * with the Node/undici error on `.cause` (an AggregateError for a multi-address ECONNREFUSED).
+ * Connect-phase codes mean the request never left this process: undici's own 10 s connect
+ * timeout (`UND_ERR_CONNECT_TIMEOUT`), a refused port or a transient resolver failure. The
+ * request-phase codes mean the socket died after the request may have reached the provider.
+ * treasury-rails 2026-10-31: one connect timeout on `list_recoveries` after ~60 healthy calls
+ * failed the deploy gate as `retryable=false` while 19.9 s of retry budget remained.
+ */
+const CONNECT_PHASE_FETCH_FAILURE_CODES = new Set([
+  'UND_ERR_CONNECT_TIMEOUT',
+  'ECONNREFUSED',
+  'EAI_AGAIN',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+]);
+const REQUEST_PHASE_FETCH_FAILURE_CODES = new Set([
+  'ECONNRESET',
+  'ECONNABORTED',
+  'EPIPE',
+  'UND_ERR_SOCKET',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+]);
+
+/** The transient transport code behind a `fetch failed`, or undefined for any other failure. */
+function fetchTransportFailureCode(error: unknown): string | undefined {
+  if (!(error instanceof Error) || error.message !== 'fetch failed') return undefined;
+  const codes: string[] = [];
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 4 || typeof value !== 'object' || value === null) return;
+    const record = value as { code?: unknown; cause?: unknown; errors?: unknown };
+    if (typeof record.code === 'string') codes.push(record.code);
+    visit(record.cause, depth + 1);
+    if (Array.isArray(record.errors)) for (const nested of record.errors) visit(nested, depth + 1);
+  };
+  visit((error as { cause?: unknown }).cause, 0);
+  return codes.find(
+    (code) =>
+      CONNECT_PHASE_FETCH_FAILURE_CODES.has(code) || REQUEST_PHASE_FETCH_FAILURE_CODES.has(code)
+  );
+}
+
 function looksLikeTransientUnavailableError(error: unknown): boolean {
   return (
     /temporarily unavailable|service unavailable/i.test(errorMessage(error)) ||
@@ -302,6 +345,23 @@ async function callOrgMcpTool(
         signal: AbortSignal.timeout(ORG_MCP_TOOL_TIMEOUT_MS),
       });
     } catch (error) {
+      const transportCode = fetchTransportFailureCode(error);
+      if (
+        transportCode !== undefined &&
+        (CONNECT_PHASE_FETCH_FAILURE_CODES.has(transportCode) ||
+          IDEMPOTENT_READ_TOOLS.has(toolName))
+      ) {
+        // A request that never reached the provider is safe to replay for every tool; a socket
+        // that died after the request left is replayed only for the idempotent reads, exactly
+        // like the text-only throttle. Same transient class as the AbortSignal timeout below.
+        throw new AgentCardOrgRuntimeError(
+          `AgentCard Organization MCP ${toolName} is temporarily unavailable: ` +
+            `tools/call transport failed (${transportCode})`,
+          503,
+          'agentcard_org_mcp_unavailable',
+          { tool: toolName, error: errorMessage(error), transport_code: transportCode }
+        );
+      }
       if (!looksLikeMcpTimeoutError(error)) throw error;
       // Convert AbortSignal.timeout into the same transient-unavailable class as a
       // structured 503 so callToolWithRateLimitRetry retries instead of failing the
