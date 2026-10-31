@@ -335,6 +335,55 @@ resolve_frontend_dist_dir() {
     printf '%s/.context/frontend-builds/%s\n' "${workspace_root%/}" "$dist_key"
 }
 
+# A benchmark controller (agents/benchmarks/local.py) starts an isolated stack in
+# its own session and stops it on exit. A SIGKILL of the controller (a wrapper's
+# grace timer) skips that, so the stack watches its owner: RUN_SH_OWNER_PID plus
+# RUN_SH_OWNER_START (/proc start time) guard against PID reuse.
+stack_owner_process_gone() {
+    local pid="${RUN_SH_OWNER_PID:-}" expected="${RUN_SH_OWNER_START:-}" stat fields
+    [ -n "$pid" ] || return 1
+    if [ -r "/proc/$pid/stat" ]; then
+        stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 0
+        fields="${stat##*) }"
+        # A killed but not yet reaped owner (zombie) is gone.
+        [ "${fields%% *}" = Z ] && return 0
+        [ -n "$expected" ] || return 1
+        [ "$(printf '%s\n' "$fields" | awk '{print $20}')" = "$expected" ] && return 1
+        return 0
+    fi
+    kill -0 "$pid" 2>/dev/null && return 1
+    return 0
+}
+
+# Runs from the moment the service cleanup trap exists (service start, builds,
+# tunnels and steady state): TERM this script through its normal teardown once
+# the owner is gone. Bootstrap before that point is checked once at install.
+start_stack_owner_watch() {
+    [ -n "${RUN_SH_OWNER_PID:-}" ] || return 0
+    local stack_pid=$$
+    (
+        trap - EXIT HUP INT TERM
+        while kill -0 "$stack_pid" 2>/dev/null; do
+            if stack_owner_process_gone; then
+                echo ""
+                echo "⚠️  Stack owner PID $RUN_SH_OWNER_PID exited without stopping this stack — shutting down all services."
+                kill -TERM "$stack_pid" 2>/dev/null
+                exit 0
+            fi
+            sleep 1
+        done
+    ) &
+    STACK_OWNER_WATCH_PID=$!
+}
+
+# Teardown waits for its child jobs; the watcher must not be one of them.
+stop_stack_owner_watch() {
+    [ -n "${STACK_OWNER_WATCH_PID:-}" ] || return 0
+    kill "$STACK_OWNER_WATCH_PID" 2>/dev/null || true
+    wait "$STACK_OWNER_WATCH_PID" 2>/dev/null || true
+    STACK_OWNER_WATCH_PID=""
+}
+
 if [ "${RUN_SH_SOURCE_ONLY:-false}" = "true" ]; then
     return 0 2>/dev/null || exit 0
 fi
@@ -2634,6 +2683,7 @@ cleanup() {
     if $SHUTTING_DOWN; then return; fi
     SHUTTING_DOWN=true
     run_ignore_repeated_teardown_signals
+    stop_stack_owner_watch
     local cleanup_failed=false
     echo "🛑 Stopping all services... (triggered by: $(caller 0 2>/dev/null || echo 'EXIT trap'), DB_OWNED_BY_US=$DB_OWNED_BY_US)"
     if ! run_publish_stack_cleanup_status pending; then
@@ -2692,6 +2742,7 @@ cleanup() {
 }
 trap 'release_seed_lock_if_held; cleanup' EXIT
 run_install_teardown_signal_traps
+start_stack_owner_watch
 
 # Wrapper: run a service and write its exit code to a temp file on failure
 FAIL_DIR=$(mktemp -d)

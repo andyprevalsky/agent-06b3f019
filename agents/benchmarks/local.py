@@ -325,6 +325,15 @@ def _owned_shutdown_timeout() -> int:
     return seconds
 
 
+def _own_process_start_ticks() -> str:
+    """This process's kernel start time (/proc stat field 22); empty off Linux."""
+    try:
+        stat = Path(f"/proc/{os.getpid()}/stat").read_text()
+        return stat.rsplit(") ", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return ""
+
+
 def _record_stack_cleanup_owner(stack: ServiceStack, process: subprocess.Popen, token: str) -> None:
     native_identity = _process_identity_tools()["current_identity"](process.pid)
     birth = subprocess.run(
@@ -1932,6 +1941,14 @@ def start_services(
         # apply_public_tunnel_env() (already applied above; keep EPHEMERAL
         # pinned off here for the non-isolated path).
         env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0"
+
+    if stack.isolated:
+        # The stack runs in its own session, so no signal to this controller's
+        # group reaches it. A wrapper's grace-period SIGKILL of this process
+        # would otherwise orphan it; run.sh shuts down once this exact process
+        # (pid + start time) is gone.
+        env["RUN_SH_OWNER_PID"] = str(os.getpid())
+        env["RUN_SH_OWNER_START"] = _own_process_start_ticks()
 
     try:
         with open(stack.service_log, "w") as service_log:

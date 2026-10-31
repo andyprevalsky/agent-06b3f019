@@ -522,4 +522,92 @@ run_signal_case "TERM-INT-HUP-burst" TERM INT HUP TERM
 )
 echo "PASS: run_process_cwd_in_tree never claims a nested worktree"
 
+# An isolated benchmark stack runs in its own session; a SIGKILL of its
+# controller (a wrapper's grace timer) skips the controller's teardown. run.sh
+# must notice the exact owner is gone (pid + /proc start time) and shut down.
+(
+    export CONDUCTOR_PORT=61900 CONDUCTOR_WORKSPACE_NAME=owner-watch-test RUN_SH_SOURCE_ONLY=true
+    # shellcheck source=/dev/null
+    source "$ROOT_DIR/scripts/run.sh"
+    set +e
+    unset RUN_SH_OWNER_PID RUN_SH_OWNER_START
+    stack_owner_process_gone && { echo "FAIL: a stack without an owner shut down" >&2; exit 1; }
+    sleep 1000 >/dev/null 2>&1 &
+    owner=$!
+    trap 'kill -KILL "$owner" 2>/dev/null || true' EXIT
+    export RUN_SH_OWNER_PID="$owner"
+    if [ -r "/proc/$owner/stat" ]; then
+        stat=$(cat "/proc/$owner/stat")
+        export RUN_SH_OWNER_START=$(printf '%s\n' "${stat##*) }" | awk '{print $20}')
+        stack_owner_process_gone && { echo "FAIL: live owner treated as gone" >&2; exit 1; }
+        RUN_SH_OWNER_START=$((RUN_SH_OWNER_START + 1)) stack_owner_process_gone \
+            || { echo "FAIL: a reused owner PID was treated as the owner" >&2; exit 1; }
+    else
+        stack_owner_process_gone && { echo "FAIL: live owner treated as gone" >&2; exit 1; }
+    fi
+    kill -KILL "$owner"; wait "$owner" 2>/dev/null
+    stack_owner_process_gone || { echo "FAIL: SIGKILLed owner not detected" >&2; exit 1; }
+    # A killed owner its parent has not reaped yet (zombie) is gone too.
+    if [ -d /proc/self ]; then
+        bash -c 'sleep 0.2 & echo $! > "$1"; exec sleep 30' _ "$TMP_ROOT/zombie.pid" >/dev/null 2>&1 &
+        zombie_parent=$!
+        for _ in $(seq 1 50); do [ -s "$TMP_ROOT/zombie.pid" ] && break; sleep 0.1; done
+        zombie=$(cat "$TMP_ROOT/zombie.pid")
+        for _ in $(seq 1 50); do
+            state=$(awk '{print $3}' "/proc/$zombie/stat" 2>/dev/null || true)
+            [ "$state" = Z ] && break
+            sleep 0.1
+        done
+        RUN_SH_OWNER_PID="$zombie" RUN_SH_OWNER_START= stack_owner_process_gone \
+            || { kill "$zombie_parent" 2>/dev/null; echo "FAIL: a zombie owner was treated as alive" >&2; exit 1; }
+        kill "$zombie_parent" 2>/dev/null; wait "$zombie_parent" 2>/dev/null
+    fi
+    # The watcher runs from the moment the service cleanup trap exists.
+    awk "/run_install_teardown_signal_traps\$/{getline; if (\$0 == \"start_stack_owner_watch\") found=1} END{exit !found}" \
+        "$ROOT_DIR/scripts/run.sh" || { echo "FAIL: run.sh does not watch its owner once teardown traps exist" >&2; exit 1; }
+    grep -q 'env\["RUN_SH_OWNER_PID"\] = str(os.getpid())' "$ROOT_DIR/agents/benchmarks/local.py" \
+        || { echo "FAIL: local.py does not publish itself as the isolated stack owner" >&2; exit 1; }
+)
+echo "PASS: an isolated stack shuts down when its exact owner process is gone"
+
+# Live: the watcher TERMs the stack script (its teardown trap) once the owner dies.
+(
+    sleep 1000 >/dev/null 2>&1 &
+    owner=$!
+    trap 'kill -KILL "$owner" 2>/dev/null || true' EXIT
+    RUN_SH_OWNER_PID="$owner" RUN_SH_OWNER_START= ROOT_DIR="$ROOT_DIR" OUT="$TMP_ROOT/watch.out" \
+        bash -c 'export CONDUCTOR_PORT=61901 CONDUCTOR_WORKSPACE_NAME=owner-watch-live RUN_SH_SOURCE_ONLY=true
+            source "$ROOT_DIR/scripts/run.sh" >/dev/null 2>&1
+            trap "echo TEARDOWN >> \"\$OUT\"; exit 143" TERM
+            start_stack_owner_watch
+            echo READY >> "$OUT"
+            for _ in $(seq 1 300); do sleep 0.1; done
+            echo NO_TEARDOWN >> "$OUT"' >/dev/null 2>&1 &
+    stack=$!
+    for _ in $(seq 1 50); do grep -q READY "$TMP_ROOT/watch.out" 2>/dev/null && break; sleep 0.1; done
+    kill -KILL "$owner"; wait "$owner" 2>/dev/null || true
+    wait "$stack" 2>/dev/null || true
+    grep -q TEARDOWN "$TMP_ROOT/watch.out" && ! grep -q NO_TEARDOWN "$TMP_ROOT/watch.out" \
+        || { echo "FAIL: watcher did not TERM the stack after its owner died: $(cat "$TMP_ROOT/watch.out")" >&2; exit 1; }
+)
+echo "PASS: the owner watcher tears the stack down within seconds of a SIGKILLed owner"
+
+# A normal stop (owner still alive) must not wait on the watcher: teardown ends
+# with a bare `wait`, and the watcher only exits once the stack is gone.
+(
+    sleep 1000 >/dev/null 2>&1 &
+    owner=$!
+    trap 'kill -KILL "$owner" 2>/dev/null || true' EXIT
+    RUN_SH_OWNER_PID="$owner" RUN_SH_OWNER_START= ROOT_DIR="$ROOT_DIR" \
+        timeout 20 bash -c 'export CONDUCTOR_PORT=61902 CONDUCTOR_WORKSPACE_NAME=owner-watch-stop RUN_SH_SOURCE_ONLY=true
+            source "$ROOT_DIR/scripts/run.sh" >/dev/null 2>&1
+            start_stack_owner_watch
+            stop_stack_owner_watch
+            wait' >/dev/null 2>&1 \
+        || { echo "FAIL: teardown waited on the owner watcher while the owner was alive" >&2; exit 1; }
+    awk '/^cleanup\(\) \{/{c=1} c && /stop_stack_owner_watch/{found=1; exit} c && /^}/{exit} END{exit !found}' \
+        "$ROOT_DIR/scripts/run.sh" || { echo "FAIL: cleanup does not stop the owner watcher" >&2; exit 1; }
+)
+echo "PASS: a normal stop does not wait on the owner watcher"
+
 echo "All run process cleanup tests passed."
