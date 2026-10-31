@@ -945,6 +945,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-shard-coordinator.test.py`,
 `python3 scripts/tests/cloudbench-controller-orphan-drain.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
+`bash scripts/tests/claude-review-fallback.test.sh`,
 `python3 scripts/tests/claude-review-fallback-diagnose.test.py`,
 `python3 scripts/tests/read-graphide-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
@@ -2188,17 +2189,28 @@ When CodeRabbit is unavailable, make at most one zero-touch retry (`@coderabbita
 
 **What to do, mechanically:**
 
-1. Record in `TEST_REPORT`:
+1. Record in `TEST_REPORT` the row `skip` prints:
    `Code Review | ⚠️ Skipped | reviewers usage-exhausted (CodeRabbit <reason>; Claude fallback disabled)`
-2. Close the open cycle as **clean** — this is the only result that satisfies `require-mergeable`:
+2. Close the open cycle as **clean** — the only result that satisfies `require-mergeable` —
+   through the versioned disposition, which requires the CodeRabbit comment naming
+   `REVIEW_HEAD` with `Review limit reached`/`usage spending cap` (id + `updated_at`; the
+   comment is mutable) plus the rate-limited check run, refuses when any substantive review
+   of `REVIEW_HEAD` exists (empty-body reply wrappers are not reviews), records the evidence
+   on the cycle and appends `.context/deploy-review-dispositions.jsonl`:
    ```bash
-   python3 scripts/deploy_review_cycle.py finish --head "$REVIEW_HEAD" --result clean
+   python3 scripts/deploy_review_cycle.py skip --head "$REVIEW_HEAD" --pr "$PR_NUMBER" --reason usage-cap
    ```
-   **Never use `--result unavailable`.** It is an accepted value but it hard-fails
-   `require-mergeable` at Phase 3 entry and again at Step 12, and it cannot be undone in
-   place (a second `finish` and a re-`start` on the same HEAD are both rejected) — you
-   would have to `start --reset` or hand-edit `.context/deploy-review-cycle.json`. The
-   ledger has no `--note`/`--reason` flag; the note lives in `TEST_REPORT` and the PR body.
+   **Never use `--result unavailable` for exhaustion.** `unavailable` is only for a cycle
+   whose HEAD a gate fix superseded before any review arrived: it hard-fails
+   `require-mergeable`, consumes no review budget, and the superseding HEAD re-`start`s
+   the same `--kind` (`deploy_review_cycle.py next` prints it; the Step 10 count-based
+   derivation is wrong here) without `--reset`, keeping the entry in the ledger.
+   After three review rounds on the PR (ledger cycles plus `--prior-rounds` from restarted
+   deploys of it), remaining findings may be deferred under the user's standing
+   pre-authorization (never a security- or prod-impacting one): reply `[DEFERRED] <target>`
+   on each, then `python3 scripts/deploy_review_cycle.py override --head "$REVIEW_HEAD"
+   --pr "$PR_NUMBER" --finding-ids <ids> --deferred-to <PR/branch>` records
+   `Code Review | ⚠️ Overridden | …` with the ids and target (ledger result `clean`).
 3. Surface the exhaustion and its concrete risk (**this diff merged unreviewed**) in the PR body and in the final handoff.
 4. **Proceed to merge.** Do not open a new review cycle for the same HEAD.
 
@@ -2345,16 +2357,14 @@ cycle:
 
 ```bash
 REVIEW_HEAD=$(git rev-parse HEAD)
-REVIEW_COUNT=$(python3 scripts/deploy_review_cycle.py status | python3 -c \
-  'import json,sys; print(len(json.load(sys.stdin)["cycles"]))')
-[ "$REVIEW_COUNT" -lt 3 ] || {
+REVIEW_NEXT=$(python3 scripts/deploy_review_cycle.py next) || {
   python3 scripts/record_factory_event.py deploy outcome blocked
   python3 scripts/factory_ledger.py publish
-  echo "review cycle cap reached; deploy is review-unstable" >&2
+  echo "the ledger refused another review cycle (see above); deploy is review-unstable" >&2
   exit 1
 }
-REVIEW_KIND=incremental
-[ "$REVIEW_COUNT" -lt 2 ] || REVIEW_KIND=verification
+REVIEW_KIND=$(printf '%s' "$REVIEW_NEXT" | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["kind"])')
 python3 scripts/deploy_review_cycle.py start --kind "$REVIEW_KIND" --head "$REVIEW_HEAD"
 python3 scripts/record_factory_event.py deploy stage-start code-review
 git push origin HEAD

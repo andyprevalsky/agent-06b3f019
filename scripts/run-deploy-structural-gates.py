@@ -454,6 +454,10 @@ GATES = (
         ("python3", "scripts/tests/wait-for-code-review.test.py"),
     ),
     Gate(
+        "claude-review-fallback",
+        ("bash", "scripts/tests/claude-review-fallback.test.sh"),
+    ),
+    Gate(
         "claude-review-fallback-diagnose",
         ("python3", "scripts/tests/claude-review-fallback-diagnose.test.py"),
     ),
