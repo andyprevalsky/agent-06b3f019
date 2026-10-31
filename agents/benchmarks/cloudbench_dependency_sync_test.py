@@ -85,7 +85,7 @@ def test_exact_recovery_consumes_runtime_receipt_failed_startup_archive(tmp_path
     owner, machine, donor = "7a" * 16, "deadbeef000001", "feedface000001"
     run_id, app, clone = "failed-run", "bench-app", "cloudbench-active"
     token = owner + "-0"
-    registry = tmp_path / "ownership" / owner
+    registry = tmp_path / "cloudbench-fleet-ownership" / owner
     audit = tmp_path / "audits" / owner
     run = tmp_path / "runs" / run_id
     output = run / "startup-rejected"
@@ -222,10 +222,14 @@ raise SystemExit(99)
         "cloudbench_validate_primary_runtime_evidence", "cloudbench_validate_worker_evidence_coverage", "cloudbench_collect_remaining_runtime_evidence"))
     select_start = fleet.index("    local forensic_manifest", fleet.index("recover_exact_stale_fleet_owner() {"))
     selection = fleet[select_start:fleet.index("    registry_owner_alive", select_start)].replace("    local forensic_manifest", "    forensic_manifest=\"\"")
+    identity = _fleet_pid_identity_helpers(fleet)
     script = f"""set -uo pipefail
+{identity}
 APP={app}
 registry={shlex.quote(str(registry))}; meta="$registry/meta"
 FLEET_AUDIT_ROOT={shlex.quote(str(audit.parent))}; POOL_CLAIMS_DIR={shlex.quote(str(tmp_path / 'claims'))}
+GIT_COMMON_DIR={shlex.quote(str(tmp_path))}
+FLEET_OWNER_PID_START="$(fleet_pid_start_time $$)"
 FLEET_REGISTRY_DIR=""; FLEET_REGISTRY_PUBLISHED=0; KEEP_CLONES=0; RUN_ID=outer; CLOUDBENCH_BARRIER_TOKEN=outer
 RUNTIME_EVIDENCE_RECOVERY_HELPER={shlex.quote(str(tmp_path / 'refusing-collector.py'))}
 STARTUP_FAILURE_ARCHIVE_HELPER={shlex.quote(str(ROOT / 'scripts/cloudbench-startup-failure-archive.py'))}
@@ -10738,6 +10742,36 @@ def _extract_fleet_function(source: str, signature: str) -> str:
             heredoc_terminator = next(value for value in match.groups() if value)
         if line.startswith("}") and stripped == "}":
             function = source[start : offset + len(line)]
+            # Extracted callers still execute their real phase guards. Keep the
+            # R122 dependencies with them instead of treating a missing command
+            # as a negative result (or replacing the guard with a stub).
+            dependencies = {
+                "cloudbench_collect_remaining_runtime_evidence() {": (
+                    "fleet_has_replaced_preconfig_phase() {",
+                    "fleet_recovery_verify_replaced_preconfig() {",
+                ),
+                "fleet_recovery_verify_replaced_preconfig() {": ("fleet_has_replaced_preconfig() {",),
+                "fleet_recovery_confirm_replaced_preconfig() {": ("fleet_recovery_verify_replaced_preconfig() {",),
+                "fleet_recovery_prepare_replaced_preconfig() {": (
+                    "fleet_has_replaced_preconfig() {",
+                    "fleet_recovery_verify_replaced_preconfig() {",
+                    "fleet_recovery_confirm_replaced_preconfig() {",
+                ),
+                "fleet_recovery_reconnect_guest_shutdowns() {": ("fleet_recovery_confirm_replaced_preconfig() {",),
+                "fleet_recovery_confirm_runtime_evidence() {": (
+                    "fleet_recovery_prepare_replaced_preconfig() {",
+                    "fleet_recovery_verify_replaced_preconfig() {",
+                ),
+                "fleet_replaced_preconfig_verify_before_reap() {": (
+                    "fleet_has_replaced_preconfig_phase() {",
+                    "fleet_recovery_verify_replaced_preconfig() {",
+                ),
+                "fleet_reap_registry_record_native() {": ("fleet_replaced_preconfig_verify_before_reap() {",),
+                "fleet_validate_reap_cohort() {": ("fleet_current_disposable_registry() {",),
+                "release_registry_recovery_lock() {": ("release_registry_recovery_guard() {",),
+            }.get(signature, ())
+            if dependencies:
+                return "\n".join(_extract_fleet_function(source, dependency) for dependency in dependencies) + "\n" + function
             if signature == "cleanup() {" and "fleet_native_reap_open() {" in source:
                 return (
                     _extract_fleet_function(source, "fleet_native_reap_open() {")
@@ -14042,6 +14076,7 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
     """Exact recovery must prove every configured guest ack before provider reap."""
     fleet = fleet_source_text()
     signatures = (
+        "fly_with_timeout() {",
         "machine_status_exact_read() {",
         "machine_config_exact_read() {",
         "registry_machine_details() {",
@@ -14057,6 +14092,7 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
         "cleanup_stale_owner_recovery_proxies() {",
         "fleet_recovery_reconnect_guest_shutdowns() {",
         "acquire_registry_recovery_lock() {",
+        "release_registry_recovery_lock() {",
         "recover_exact_stale_fleet_owner() {",
     )
     # The pre-fix controller has no quarantine recovery functions, so this
@@ -14080,7 +14116,7 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
     clones = registry / "clones"
     clones.mkdir(parents=True)
     audit_root = tmp_path / "audits"
-    audit_root.mkdir()
+    (audit_root / owner).mkdir(parents=True)
     runs_root = tmp_path / "runs"
     run_dir = runs_root / run_id
     run_dir.mkdir(parents=True)
@@ -14167,6 +14203,8 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
 APP=bench-app
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
 FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
+CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(ROOT / "scripts"))}
+POOL_CLAIMS_DIR={shlex.quote(str(tmp_path / "claims"))}
 FLEET_OWNER_HOST=test-host
 FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
 FLEET_OWNER_TOKEN={owner}
@@ -14245,7 +14283,8 @@ VM
 STATUS
       fi
       ;;
-    "machines list "*|*"neighbor"*) return 99 ;;
+    "machines list -a") cat {shlex.quote(str(run_dir / "machines.json"))} ;;
+    *"neighbor"*) return 99 ;;
     *) return 98 ;;
   esac
 }}
@@ -14336,7 +14375,7 @@ recover_exact_stale_fleet_owner {owner}
     assert "proxy 62002 8011 fdaa::102" in call_lines
     assert all("fdaa::999" not in line and "neighbor" not in line for line in call_lines)
     assert sum(line.startswith("provider machine status ") for line in call_lines) == 4
-    assert all("provider machines list" not in line for line in call_lines)
+    assert sum(line.startswith("provider machines list ") for line in call_lines) == 1
     assert sum(line.startswith("shutdown http://") for line in call_lines) == 2
     assert sum(line.startswith("shutdown-health http://") for line in call_lines) == 2
     transition_index = call_lines.index("audit-recovery")
@@ -30537,7 +30576,7 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
     run = tmp_path / "runs" / run_id
     out = run / task
     out.mkdir(parents=True)
-    registry = tmp_path / "registries" / owner
+    registry = tmp_path / "cloudbench-fleet-ownership" / owner
     audit = tmp_path / "audits" / owner
     (registry / "clones").mkdir(parents=True)
     (audit / "fresh").mkdir(parents=True)
@@ -31115,7 +31154,7 @@ def test_failed_fleet_forensic_archive_admits_exact_reaper_before_final_release(
     """Preserve originals before mutation; only final native release closes recovery."""
     test_failed_fleet_forensic_retirement_requires_originals_and_provider_absence(tmp_path, "none")
     owner = "a" * 32
-    registry = tmp_path / "registries" / owner
+    registry = tmp_path / "cloudbench-fleet-ownership" / owner
     run = tmp_path / "runs/fixture-run"
     audit_record = tmp_path / "audits" / owner / "fresh/clone"
     meta = registry / "meta"
@@ -31135,6 +31174,8 @@ def test_failed_fleet_forensic_archive_admits_exact_reaper_before_final_release(
         _extract_fleet_function(fleet_source_text(), signature)
         for signature in (
             "registry_meta_value() {",
+            "acquire_registry_recovery_lock() {",
+            "release_registry_recovery_lock() {",
             "fleet_registry_cleanup_state() {",
             "fleet_recovery_confirm_forensic_retirement() {",
             "fleet_recovery_confirm_runtime_evidence() {",
@@ -31145,9 +31186,14 @@ def test_failed_fleet_forensic_archive_admits_exact_reaper_before_final_release(
             "finalize_terminal_projection() {",
         )
     )
+    identity = _fleet_pid_identity_helpers(fleet_source_text())
     events = tmp_path / "events"
     script = f"""set -u
+{identity}
 APP=bench-app
+GIT_COMMON_DIR={shlex.quote(str(tmp_path))}
+CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(ROOT / "scripts"))}
+FLEET_OWNER_PID_START="$(fleet_pid_start_time $$)"
 FLEET_OWNER_HOST=fixture-host
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(registry.parent))}
 FLEET_AUDIT_ROOT={shlex.quote(str(audit_record.parents[2]))}
@@ -31161,7 +31207,6 @@ FAULT={shlex.quote(fault)}
 cloudbench_fsync_directory() {{ :; }}
 registry_owner_alive() {{ return 1; }}
 release_cleanup_disk_reserve() {{ :; }}
-acquire_registry_recovery_lock() {{ mkdir -p "$1/recovery-lock"; }}
 fleet_recovery_retire_one_sealed_machine() {{ return 2; }}
 fleet_recovery_confirm_pool_claims() {{ :; }}
 recover_registry_audit_only_fresh() {{ :; }}
