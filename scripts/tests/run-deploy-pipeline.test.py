@@ -32,7 +32,7 @@ import tempfile
 import threading
 import time
 from contextlib import ExitStack
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1357,6 +1357,8 @@ def main() -> int:
         check_dependencies_through_unphased_lanes(tmp, env)
         check_simulate_legacy_plan_group3(tmp, env)
         check_production_fly_wait(tmp, env)
+        check_production_semantic(tmp, env)
+        check_semantic_workflow_source_sha()
     print("run-deploy-pipeline: all checks passed")
     return 0
 
@@ -1567,6 +1569,324 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     assert ran.returncode == 1 and "monitor-cooperative-cutover.ts --verify failed (exit 3)" in ran.stdout, ran.stdout
     assert "dispatch" not in call_lines(), call_lines()
     print("production fly wait: ok")
+
+
+def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
+    """``production-semantic`` (deploy.md Step 13b) dispatches the production
+    semantic workflow with ``source_sha=<merged SHA>``, binds to the newest run
+    created after the dispatch whose title names that SHA (an older run, even
+    one titled with the same SHA, and a newer run of another SHA are never
+    adopted whatever their headSha), polls it, records the run under
+    ``semantic`` in production.json, exits non-zero unless the run succeeded,
+    reruns only failed jobs exactly once with ``--retry-failed-once`` and
+    refuses a second retry. gh is a fake executable on PATH; the receipt the
+    Fly gate writes is required first."""
+    merged = "1" * 40
+    other_head = "2" * 40
+    fake = tmp / "semantic-fake"
+    fake.mkdir()
+    bin_dir = fake / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "$*" >> "$FAKE_GH_DIR/calls.log"\n'
+        'case "$1 $2" in\n'
+        '  "workflow run") [ -f "$FAKE_GH_DIR/dispatch-fail" ] && { echo "HTTP 422: Unexpected inputs provided" >&2; exit 1; }; exit 0 ;;\n'
+        '  "run list") n=$(cat "$FAKE_GH_DIR/list-count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE_GH_DIR/list-count"\n'
+        '    f="$FAKE_GH_DIR/list-$n.json"; [ -f "$f" ] || f="$FAKE_GH_DIR/list-last.json"; cat "$f" ;;\n'
+        '  "run rerun") touch "$FAKE_GH_DIR/rerun-done"; exit 0 ;;\n'
+        '  "run view") prefix=view; [ -f "$FAKE_GH_DIR/rerun-done" ] && prefix=rerun-view\n'
+        '    n=$(cat "$FAKE_GH_DIR/$prefix-count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE_GH_DIR/$prefix-count"\n'
+        '    f="$FAKE_GH_DIR/$prefix-$n.json"; [ -f "$f" ] || f="$FAKE_GH_DIR/$prefix-last.json"; cat "$f" ;;\n'
+        '  *) echo "unexpected gh $*" >&2; exit 1 ;;\n'
+        "esac\n")
+    (bin_dir / "gh").chmod(0o755)
+    sem_env = {**env, "PATH": f"{bin_dir}:{env.get('PATH', os.environ.get('PATH', ''))}", "FAKE_GH_DIR": str(fake)}
+    sem_env.pop("DEPLOY_GH_BIN", None)
+    calls = fake / "calls.log"
+    repo = tmp / "semantic-source"
+    repo.mkdir()
+    past = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    later = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def row(run_id: int, created: str, sha: str, head: str, status: str = "in_progress") -> dict:
+        return {"databaseId": run_id, "createdAt": created, "headSha": head, "status": status, "conclusion": None,
+                "event": "workflow_dispatch", "url": f"https://github.com/acme/rose/actions/runs/{run_id}",
+                "displayTitle": f"Production semantic gate source_sha={sha}"}
+
+    # An older run titled with the same SHA (yesterday's deploy of it), an older
+    # run of another SHA, the run this dispatch creates (headSha = main's later
+    # head, title = merged SHA) and a newer run of another SHA.
+    old_same = row(100, past, merged, merged, "completed")
+    old_other = row(101, past, "3" * 40, "3" * 40, "completed")
+    ours = row(200, future, merged, other_head)
+    newer_other = row(300, later, "4" * 40, "4" * 40)
+
+    def job(name: str, conclusion: str | None, status: str = "completed") -> dict:
+        return {"name": name, "status": status, "conclusion": conclusion, "url": f"https://github.com/acme/rose/actions/runs/200/job/{abs(hash(name)) % 1000}"}
+
+    lifecycle = [f"Chat full-lifecycle latency ratchet ({path})" for path in ("direct_answer", "web_search", "agent_plan", "agent_execute")]
+    all_success = [job("Semantic frontend flows", "success"), *[job(name, "success") for name in lifecycle]]
+    semantic_failed = [job("Semantic frontend flows", "failure"), *[job(name, "success") for name in lifecycle]]
+
+    def view(status: str, conclusion: str | None, attempt: int, jobs: list[dict]) -> dict:
+        return {"status": status, "conclusion": conclusion, "attempt": attempt, "url": ours["url"], "headSha": other_head,
+                "displayTitle": ours["displayTitle"], "createdAt": future, "updatedAt": later, "jobs": jobs}
+
+    def reset(lists: list[list[dict]], views: list[dict], rerun_views: list[dict] | None = None) -> None:
+        for stale in list(fake.glob("list-*")) + list(fake.glob("view-*")) + list(fake.glob("rerun-*")):
+            stale.unlink()
+        calls.unlink(missing_ok=True)
+        (fake / "dispatch-fail").unlink(missing_ok=True)
+        for index, rows in enumerate(lists, start=1):
+            (fake / f"list-{index}.json").write_text(json.dumps(rows))
+        (fake / "list-last.json").write_text(json.dumps(lists[-1]))
+        for index, payload in enumerate(views, start=1):
+            (fake / f"view-{index}.json").write_text(json.dumps(payload))
+        (fake / "view-last.json").write_text(json.dumps(views[-1]))
+        for index, payload in enumerate(rerun_views or [], start=1):
+            (fake / f"rerun-view-{index}.json").write_text(json.dumps(payload))
+        if rerun_views:
+            (fake / "rerun-view-last.json").write_text(json.dumps(rerun_views[-1]))
+
+    def write_gate(state: Path, sha: str = merged, status: str = "passed") -> None:
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "production.json").write_text(json.dumps({
+            "schema_version": 1, "merged_sha": sha, "status": status, "github_waits": [{"workflow": "deploy-agents.yml",
+            "kind": "run-start", "outcome": "found"}], "fly": {"required": False}, "semantic_dispatch": {"gate": "open"}}))
+
+    def run_semantic(state: Path, *extra: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(DRIVER), "production-semantic", "--merged-sha", merged, "--state-dir", str(state),
+             "--poll-seconds", "0.05", "--start-timeout", "0.5", *extra],
+            env=sem_env, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+
+    def call_lines() -> list[str]:
+        return calls.read_text().splitlines() if calls.exists() else []
+
+    def receipt_of(state: Path) -> dict:
+        return json.loads((state / "production.json").read_text())
+
+    # 1. Success: the run is not listed on the first poll; then it is picked
+    #    among older and newer runs; three views until completed/success.
+    state = tmp / "semantic-state"
+    write_gate(state)
+    reset([[old_other, old_same], [newer_other, ours, old_other, old_same]],
+          [view("queued", None, 1, []), view("in_progress", None, 1, [job("Semantic frontend flows", None, "in_progress")]),
+           view("completed", "success", 1, all_success)])
+    ran = run_semantic(state)
+    assert ran.returncode == 0, ran.stdout
+    lines = call_lines()
+    assert lines[0] == ("workflow run chat-lifecycle-ratchet.yml --ref main -f source_sha=" + merged +
+                        " -f frontend_url=https://www.roselabs.ai -f backend_url=https://navi-j9a9.onrender.com"), lines
+    list_calls = [line for line in lines if line.startswith("run list")]
+    assert len(list_calls) == 2 and "--workflow chat-lifecycle-ratchet.yml" in list_calls[0], list_calls
+    assert "--event workflow_dispatch" in list_calls[0] and "--branch main" in list_calls[0], list_calls
+    view_calls = [line for line in lines if line.startswith("run view")]
+    assert len(view_calls) == 3 and all(line.startswith("run view 200 --json") for line in view_calls), lines
+    assert not any(" 100 " in f" {line} " or " 101 " in f" {line} " or " 300 " in f" {line} " for line in lines), lines
+    assert not any(line.startswith("run rerun") for line in lines), lines
+    assert "SEMANTIC_RUN_ID=200" in ran.stdout and "SEMANTIC_LANE_END " in ran.stdout, ran.stdout
+    assert ran.stdout.index("SEMANTIC_RUN_ID=200") < ran.stdout.index("SEMANTIC_LANE_END"), ran.stdout
+    assert "PIPELINE_SEMANTIC status=passed exit=0 run=200" in ran.stdout, ran.stdout
+    receipt = receipt_of(state)
+    assert receipt["status"] == "passed" and receipt["merged_sha"] == merged, receipt  # the Fly decision is untouched
+    entry = receipt["semantic"]
+    assert entry["outcome"] == "passed" and entry["run_id"] == "200" and entry["url"] == ours["url"], entry
+    assert entry["head_sha"] == other_head and entry["source_sha"] == merged, entry
+    assert entry["display_title"] == ours["displayTitle"] and entry["created_at"] == future, entry
+    assert entry["completed_at"] == later and entry["conclusion"] == "success" and entry["attempt"] == 1, entry
+    assert entry["status"] == "completed" and entry["retry"] is None, entry
+    assert entry["dispatch"]["ref"] == "main" and entry["dispatch"]["at"], entry["dispatch"]
+    assert entry["dispatch"]["inputs"] == {"source_sha": merged, "frontend_url": "https://www.roselabs.ai",
+                                           "backend_url": "https://navi-j9a9.onrender.com"}, entry["dispatch"]
+    assert [(j["name"], j["conclusion"]) for j in entry["jobs"]] == [(j["name"], "success") for j in all_success], entry["jobs"]
+    waits = receipt["github_waits"]
+    assert waits[0]["workflow"] == "deploy-agents.yml", waits  # the Fly gate's own wait is preserved
+    semantic_waits = [w for w in waits if w["workflow"] == "chat-lifecycle-ratchet.yml"]
+    assert [w["kind"] for w in semantic_waits] == ["run-start", "run-complete"], semantic_waits
+    assert semantic_waits[0] == {**semantic_waits[0], "run_id": "200", "polls": 2, "outcome": "found", "head": merged}
+    assert semantic_waits[1] == {**semantic_waits[1], "run_id": "200", "polls": 3, "conclusion": "success", "attempt": 1}
+
+    # 2. Failure without the retry flag: exit 1, no rerun, the earlier passed
+    #    entry is kept in semantic_history.
+    reset([[ours, old_same]], [view("completed", "failure", 1, semantic_failed)])
+    ran = run_semantic(state)
+    assert ran.returncode == 1, ran.stdout
+    assert "PIPELINE_SEMANTIC status=failed exit=1 run=200" in ran.stdout and "conclusion=failure" in ran.stdout, ran.stdout
+    assert "Semantic frontend flows=failure" in ran.stdout and "SEMANTIC_LANE_END " in ran.stdout, ran.stdout
+    assert not any(line.startswith("run rerun") for line in call_lines()), call_lines()
+    receipt = receipt_of(state)
+    assert receipt["semantic"]["outcome"] == "failed" and receipt["semantic"]["conclusion"] == "failure", receipt["semantic"]
+    assert receipt["semantic"]["error"] == "run 200 concluded failure", receipt["semantic"]
+    assert [h["outcome"] for h in receipt["semantic_history"]] == ["passed"], receipt["semantic_history"]
+    assert receipt["status"] == "passed", "the Fly gate decision must not be rewritten by the semantic lane"
+
+    # 3. One retry of that recorded failed run: no new dispatch, `gh run rerun
+    #    200 --failed`, the stale completed attempt-1 view is not accepted, the
+    #    attempt-2 success is; the justification is recorded.
+    reset([[ours]], [view("completed", "failure", 1, semantic_failed)],
+          rerun_views=[view("completed", "failure", 1, semantic_failed), view("in_progress", None, 2, semantic_failed),
+                       view("completed", "success", 2, all_success)])
+    ran = run_semantic(state, "--retry-failed-once", "provider outage: Kernel 502 in the semantic job")
+    assert ran.returncode == 0, ran.stdout
+    lines = call_lines()
+    assert lines[0] == "run rerun 200 --failed", lines
+    assert not any(line.startswith("workflow run") or line.startswith("run list") for line in lines), lines
+    assert len([line for line in lines if line.startswith("run view 200")]) == 3, lines
+    assert "SEMANTIC_RUN_ID=200" in ran.stdout and "retry=failed-jobs run=200" in ran.stdout, ran.stdout
+    entry = receipt_of(state)["semantic"]
+    assert entry["outcome"] == "passed" and entry["conclusion"] == "success" and entry["attempt"] == 2, entry
+    retry = entry["retry"]
+    assert retry["justification"] == "provider outage: Kernel 502 in the semantic job", retry
+    assert retry["previous_attempt"] == 1 and retry["previous_conclusion"] == "failure" and retry["attempt"] == 2, retry
+    assert retry["failed_jobs"] == ["Semantic frontend flows"], retry
+
+    # 4. A second retry is refused without any gh call; the receipt keeps the first.
+    reset([[ours]], [view("completed", "success", 2, all_success)])
+    ran = run_semantic(state, "--retry-failed-once", "again")
+    assert ran.returncode == 2 and "already used its one --retry-failed-once" in ran.stdout, ran.stdout
+    assert call_lines() == [], call_lines()
+    assert receipt_of(state)["semantic"]["retry"]["justification"].startswith("provider outage"), receipt_of(state)["semantic"]
+
+    # 5. Flag on a fresh dispatch: dispatch, fail, rerun failed jobs once, fail
+    #    again -> exit 1 with the retry recorded; a further flagged call is refused.
+    state5 = tmp / "semantic-state-5"
+    write_gate(state5)
+    reset([[ours]], [view("completed", "failure", 1, semantic_failed)],
+          rerun_views=[view("completed", "failure", 2, semantic_failed)])
+    ran = run_semantic(state5, "--retry-failed-once", "flaky runner")
+    assert ran.returncode == 1, ran.stdout
+    lines = call_lines()
+    assert lines[0].startswith("workflow run chat-lifecycle-ratchet.yml") and lines.count("run rerun 200 --failed") == 1, lines
+    entry = receipt_of(state5)["semantic"]
+    assert entry["outcome"] == "failed" and entry["attempt"] == 2 and entry["retry"]["attempt"] == 2, entry
+    calls.unlink()
+    ran = run_semantic(state5, "--retry-failed-once", "once more")
+    assert ran.returncode == 2 and call_lines() == [], (ran.stdout, call_lines())
+
+    # 6. No passed Fly-gate receipt for this SHA: refused before any gh call.
+    for state6, sha, status in ((tmp / "semantic-state-6a", merged, "failed"), (tmp / "semantic-state-6b", other_head, "passed")):
+        write_gate(state6, sha, status)
+        reset([[ours]], [view("completed", "success", 1, all_success)])
+        ran = run_semantic(state6)
+        assert ran.returncode == 2 and "Fly lane gate is not open" in ran.stdout and call_lines() == [], ran.stdout
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(tmp / "semantic-state-6c")
+    assert ran.returncode == 2 and "no receipt" in ran.stdout and call_lines() == [], ran.stdout
+
+    # 7. Only older runs (one titled with the same SHA) ever appear: the dispatch
+    #    is unconfirmed, nothing is adopted or polled, exit 1.
+    state7 = tmp / "semantic-state-7"
+    write_gate(state7)
+    reset([[old_same, old_other]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state7)
+    assert ran.returncode == 1 and "an older run is never adopted" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert lines[0].startswith("workflow run") and not any(line.startswith("run view") for line in lines), lines
+    assert len([line for line in lines if line.startswith("run list")]) >= 2, lines
+    receipt = receipt_of(state7)
+    assert receipt["semantic"]["outcome"] == "failed" and receipt["semantic"]["run_id"] is None, receipt["semantic"]
+    assert receipt["github_waits"][-1] == {**receipt["github_waits"][-1], "kind": "run-start", "outcome": "timeout",
+                                           "workflow": "chat-lifecycle-ratchet.yml"}, receipt["github_waits"]
+
+    # 8. The dispatch itself fails (e.g. main's workflow lacks the input): exit 1
+    #    with gh's message, no discovery.
+    state8 = tmp / "semantic-state-8"
+    write_gate(state8)
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    (fake / "dispatch-fail").touch()
+    ran = run_semantic(state8)
+    assert ran.returncode == 1 and "Unexpected inputs provided" in ran.stdout, ran.stdout
+    assert [line.split()[0:2] for line in call_lines()] == [["workflow", "run"]], call_lines()
+
+    # 9. A malformed SHA is a usage error before anything runs.
+    ran = subprocess.run([sys.executable, str(DRIVER), "production-semantic", "--merged-sha", "main", "--state-dir", str(state)],
+                         env=sem_env, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+    assert ran.returncode == 2 and "full 40-hex commit SHA" in ran.stdout, ran.stdout
+
+    # 10. DEPLOY_GH_BIN selects the gh binary (boxes.dev's PATH wrapper swaps
+    #     the token); with it set, the PATH gh is never consulted.
+    (bin_dir / "gh-real").write_text("#!/usr/bin/env bash\n"
+                                     'echo "$*" >> "$FAKE_GH_DIR/real-calls.log"\n'
+                                     'exec "$(dirname "$0")/gh" "$@"\n')
+    (bin_dir / "gh-real").chmod(0o755)
+    state10 = tmp / "semantic-state-10"
+    write_gate(state10)
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = subprocess.run(
+        [sys.executable, str(DRIVER), "production-semantic", "--merged-sha", merged, "--state-dir", str(state10),
+         "--poll-seconds", "0.05", "--start-timeout", "0.5"],
+        env={**sem_env, "PATH": "/usr/bin:/bin", "DEPLOY_GH_BIN": str(bin_dir / "gh-real")},
+        cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+    assert ran.returncode == 0, ran.stdout
+    real_calls = (fake / "real-calls.log").read_text().splitlines()
+    assert len(real_calls) == len(call_lines()) == 3 and real_calls[0].startswith("workflow run"), (real_calls, call_lines())
+
+    # Selection rule in-process: newest matching only, by createdAt then id.
+    pipeline = load_module("pipeline_semantic_select", DRIVER)
+    dispatched = datetime(2026, 10, 31, 12, 0, 0, tzinfo=timezone.utc)
+    rows = [
+        {"databaseId": 1, "createdAt": "2026-10-31T11:59:54Z", "displayTitle": f"x source_sha={merged}"},  # 6 s early: older
+        {"databaseId": 2, "createdAt": "2026-10-31T11:59:56Z", "displayTitle": f"x source_sha={merged}"},  # within skew
+        {"databaseId": 3, "createdAt": "2026-10-31T12:00:10Z", "displayTitle": f"x source_sha={other_head}"},
+        {"databaseId": 4, "createdAt": "2026-10-31T12:00:05Z", "displayTitle": f"x source_sha={merged}", "event": "push"},
+        {"databaseId": 5, "createdAt": "2026-10-31T12:00:05Z", "displayTitle": f"x source_sha={merged}"},
+        {"databaseId": 6, "createdAt": "2026-10-31T12:00:05Z", "displayTitle": f"x source_sha={merged}"},
+        {"databaseId": 7, "createdAt": "not a time", "displayTitle": f"x source_sha={merged}"},
+        "junk",
+    ]
+    assert pipeline.semantic_select_run(rows, merged, dispatched)["databaseId"] == 6, "newest match, id breaks the tie"
+    assert pipeline.semantic_select_run(rows[:2], merged, dispatched)["databaseId"] == 2
+    assert pipeline.semantic_select_run(rows[:1] + rows[2:4], merged, dispatched) is None
+    assert pipeline.semantic_select_run(None, merged, dispatched) is None
+    print("production semantic: ok")
+
+
+def check_semantic_workflow_source_sha() -> None:
+    """The production semantic workflow accepts ``source_sha`` and every
+    checkout in both jobs uses it: a dispatch checks out exactly that commit
+    (verified to be on the default branch before any checkout) or the
+    dispatched ref's head, a deployment event still checks out the trusted
+    default branch, the effective commit is recorded in job outputs and the
+    step summary, and the run title names it for the CLI watcher."""
+    try:
+        import yaml
+    except ImportError as error:  # pragma: no cover - environment defect, never a silent skip
+        raise AssertionError("PyYAML is required to validate .github/workflows/chat-lifecycle-ratchet.yml: "
+                             "run this gate with agents/venv activated") from error
+    path = ROOT / ".github" / "workflows" / "chat-lifecycle-ratchet.yml"
+    workflow = yaml.safe_load(path.read_text())
+    triggers = workflow.get("on", workflow.get(True))
+    inputs = triggers["workflow_dispatch"]["inputs"]
+    assert "source_sha" in inputs and inputs["source_sha"].get("required") is False, inputs
+    assert inputs["source_sha"].get("default", "") == "", "source_sha must default to the dispatched ref's head"
+    assert "inputs.source_sha" in workflow["run-name"] and "github.sha" in workflow["run-name"], workflow["run-name"]
+    assert "github.event_name == 'workflow_dispatch'" in workflow["run-name"], "deployment runs must not claim a source_sha"
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"semantic", "lifecycle"}, list(jobs)
+    for name, job in jobs.items():
+        steps = job["steps"]
+        checkouts = [i for i, step in enumerate(steps) if str(step.get("uses", "")).startswith("actions/checkout")]
+        assert len(checkouts) == 1, f"{name}: exactly one checkout, found {len(checkouts)}"
+        index = checkouts[0]
+        ref = steps[index]["with"]["ref"]
+        assert "inputs.source_sha ||" in ref, f"{name}: checkout must prefer inputs.source_sha: {ref}"
+        assert "github.event_name == 'workflow_dispatch' && github.sha" in ref, f"{name}: dispatch default is the ref head: {ref}"
+        assert ref.rstrip().endswith("github.event.repository.default_branch }}"), f"{name}: deployment events keep the trusted default branch: {ref}"
+        assert steps[index]["with"].get("filter") == "blob:none", f"{name}: blob-filtered checkout retained"
+        before = steps[:index]
+        assert len(before) == 1 and "uses" not in before[0], f"{name}: only the source_sha verification precedes the checkout"
+        verify = before[0]
+        assert verify.get("if") == "inputs.source_sha != ''", f"{name}: verification runs only for an explicit source_sha: {verify.get('if')}"
+        assert "compare/${DEFAULT_BRANCH}...${SOURCE_SHA}" in verify["run"] and "identical|behind" in verify["run"], verify["run"]
+        assert verify["env"]["SOURCE_SHA"] == "${{ inputs.source_sha }}" and verify["env"]["GH_TOKEN"] == "${{ github.token }}", verify["env"]
+        record = steps[index + 1]
+        assert record.get("id") == "source" and "git rev-parse HEAD" in record["run"], f"{name}: record the effective commit right after checkout"
+        assert "GITHUB_OUTPUT" in record["run"] and "GITHUB_STEP_SUMMARY" in record["run"], record["run"]
+        assert job["outputs"] == {"source_sha": "${{ steps.source.outputs.sha }}"}, job.get("outputs")
+    print("semantic workflow source_sha: ok")
 
 
 def check_follow_source(tmp: Path, env: dict[str, str]) -> None:
