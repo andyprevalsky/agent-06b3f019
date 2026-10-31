@@ -590,7 +590,12 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     fireEvent.click(row());
     expect(await screen.findByTestId('code-agent-view')).toBeInTheDocument();
     expect(urlParams().get('agent-id')).toBe(OWNER);
-    fireEvent.click(within(screen.getByTestId('rose-home-project-row')).getByRole('button'));
+    fireEvent.click(
+      within(screen.getByTestId('rose-home-project-row')).getByRole('button', {
+        name: 'Create Super Agent',
+        exact: true,
+      }),
+    );
     expect(view()).toBeNull();
     expect(urlParams().get('code-agent')).toBeNull();
     expect(await screen.findByPlaceholderText('Enter any goal')).toBeInTheDocument();
