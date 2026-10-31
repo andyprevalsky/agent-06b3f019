@@ -14,7 +14,9 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Sequence
 
@@ -40,9 +42,22 @@ def _utc_timestamp() -> str:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-root", required=True, type=Path)
+    parser.add_argument("--run-root", type=Path, help="required unless --preview-lane-scoped-reuse")
     parser.add_argument("--reuse-passed", action="store_true")
-    parser.add_argument("stage")
+    parser.add_argument(
+        "--lane-scoped-reuse",
+        action="store_true",
+        help="reuse a prior PASSED result of this lane when every change since it is provably inert "
+        "(the pipeline passes it from the plan's lane_scoped_reuse; DEPLOY_LANE_SCOPED_REUSE=0 disables it, "
+        "the environment never enables it); only lanes in _SCOPED_REUSE_LANES qualify",
+    )
+    parser.add_argument(
+        "--preview-lane-scoped-reuse",
+        metavar="PASSED_HEAD[..CURRENT_HEAD]",
+        help="dry run: print the lane-scoped reuse decision of every scoped lane for the changes between "
+        "PASSED_HEAD and CURRENT_HEAD (default HEAD plus the worktree) and exit; runs nothing",
+    )
+    parser.add_argument("stage", nargs="?")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser
 
@@ -225,6 +240,10 @@ def _worktree_fingerprint(command: Sequence[str], stage: str = "") -> str:
 # as a new unit inside the same deploy run never matched its own pass: on
 # 2026-10-30 the 33-minute coverage lane and the 10-minute structural lane
 # re-ran on identical bytes on every retry. cwd is hashed on its own.
+# run_deploy_pipeline.py stamps every lane launch with a fresh
+# DEPLOY_PIPELINE_LANE_TOKEN (teardown ownership of the processes the lane
+# starts; echoed as each row's detail.lane_token so the receipt lane matches
+# its own row); it identifies the lane process, not a gate input.
 _PROCESS_IDENTITY_ENV = frozenset(
     {
         "_",
@@ -244,13 +263,24 @@ _PROCESS_IDENTITY_ENV = frozenset(
         "SSH_CLIENT",
         "SSH_CONNECTION",
         "SSH_TTY",
+        "DEPLOY_PIPELINE_LANE_TOKEN",
     }
 )
 _PROCESS_IDENTITY_ENV_PREFIXES = ("LISTEN_",)
 
 
+# Scheduling knobs decide whether a lane may skip, never what it runs, so they
+# stay out of every fingerprint: toggling lane-scoped reuse must not turn an
+# identical pass into an exact-input miss.
+_SCHEDULING_ONLY_ENV = frozenset({"DEPLOY_LANE_SCOPED_REUSE"})
+
+
 def _is_process_identity_env(name: str) -> bool:
-    return name in _PROCESS_IDENTITY_ENV or name.startswith(_PROCESS_IDENTITY_ENV_PREFIXES)
+    return (
+        name in _PROCESS_IDENTITY_ENV
+        or name in _SCHEDULING_ONLY_ENV
+        or name.startswith(_PROCESS_IDENTITY_ENV_PREFIXES)
+    )
 
 
 def _hash_invocation(digest: "hashlib._Hash", command: Sequence[str]) -> None:
@@ -284,6 +314,506 @@ def _record_cache_hit(run_dir: Path, stage: str, fingerprint: str) -> None:
     temporary.replace(path)
 
 
+# ---------------------------------------------------------------------------
+# Lane-scoped reuse (default OFF). Enabled per invocation only by
+# --lane-scoped-reuse, which run_deploy_pipeline.py passes when the plan sets
+# "lane_scoped_reuse": true: the plan is the single reviewed enabling surface.
+# DEPLOY_LANE_SCOPED_REUSE=0 is a kill switch (never an enabler) and, like the
+# flag, stays out of every fingerprint.
+#
+# An exact-input miss reruns a lane even when the only change since its pass
+# is a docs page or another package's test, so a one-line agents test fix cost
+# a full backend/smoke/semantic rerun. A lane listed in _SCOPED_REUSE_LANES may
+# instead reuse its most recent PASSED result for the identical command, cwd
+# and environment when EVERY path that differs between the passed tree and the
+# current tree is provably inert for that lane. The differing paths are the
+# git diff between the passed head and HEAD, the dirty paths recorded when the
+# pass ran, the current worktree diff and the current untracked non-ignored
+# files. A path is inert only when BOTH hold:
+#   (a) it matches one of the lane's declared inert patterns below and none of
+#       the never-inert patterns (fnmatch on repo-relative paths, `*` crosses
+#       `/`, the convention of scripts/test-map/edges.json), and
+#   (b) scripts/select_affected_tests.py selects no test of the lane's graph
+#       lanes for that path and does not fall back to ALL: a run_all trigger
+#       (lockfiles, env examples, the Prisma schema, migrations, runners,
+#       shared configs) or an unmapped file always reruns.
+# Anything else reruns the lane; when in doubt it reruns. Only lanes whose
+# suites cannot read the inert trees are listed, and each hit records the
+# passed head, fingerprint, run id and the rule that judged every path under
+# a distinct "reused-scoped" status, so no scorecard can show it as a pass
+# executed on the current bytes. A lane name alone proves nothing about what
+# ran under it (the _LEDGER_FREE_COMMANDS precedent): a stage is judged by a
+# lane's inert set only when its argv carries that lane's real command marker.
+# A failed run of the lane records its head too, and a candidate pass is
+# vetoed when the current tree differs from a failed head only by inert paths.
+_SCOPED_REUSE_ENV = "DEPLOY_LANE_SCOPED_REUSE"
+# The pipeline stamps every lane launch with this token (process identity,
+# excluded from fingerprints); the stage echoes it in each row's detail so the
+# receipt lane is matched to its own row regardless of start-time skew.
+_LANE_TOKEN_ENV = "DEPLOY_PIPELINE_LANE_TOKEN"
+# Never inert for any lane: prompts, commands and skills are read by structural
+# gates and prompt-invariant suites, the agent instructions are read by tests,
+# and CI/editor configuration changes what runs.
+_NEVER_INERT = (
+    ".claude/*",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "*/CLAUDE.md",
+    "*/AGENTS.md",
+    ".github/*",
+    ".conductor/*",
+    ".cursor/*",
+)
+# Documentation trees no deploy suite executes. Markdown elsewhere is NOT
+# inert: prompts and skills ship as .md and are loaded at run time.
+_INERT_DOCS = (
+    "docs/*",
+    "README.md",
+    "*/README.md",
+    "research/*",
+    "pitch-deck/*",
+    "prompt-review/*",
+    "claude-code-src/*",
+)
+# Test trees of each package. agents/tests/e2e and agents/tests/env_defaults.py
+# are deliberately absent: agents/benchmarks/run_benchmark.py imports
+# tests.e2e.test_helpers, so the smoke and semantic stacks execute them.
+_INERT_AGENTS_TESTS = ("agents/tests/blackbox/*", "agents/tests/unit/*", "agents/tests/demo_cache/*")
+_INERT_BACKEND_TESTS = ("back-end/src/tests/*",)
+_INERT_FRONTEND_TESTS = ("front-end/src/tests/*",)
+_INERT_MAC_TESTS = ("mac-app/tests/*",)
+_INERT_SCRIPT_TESTS = ("scripts/tests/*",)
+
+
+@dataclass(frozen=True)
+class _ScopedLane:
+    """Inert patterns of one lane and the selector lanes whose selection must
+    stay empty. Empty ``graph_lanes`` means the lane runs no selector-mapped
+    suite (it executes runtime code), so (b) reduces to the selector not
+    falling back to ALL."""
+
+    inert: tuple[str, ...]
+    graph_lanes: tuple[str, ...]
+    runs: str
+    # Substrings one of which must appear in the stage's argv: the lane's real
+    # command. Any other command under the same stage name is never scoped.
+    markers: tuple[str, ...]
+
+
+_SCOPED_REUSE_LANES: dict[str, _ScopedLane] = {
+    # npm run test:coverage:sharded: backend blackbox shards, contract and unit
+    # tests, then scripts/tests/blackbox-backend-teardown.test.sh, so
+    # scripts/tests is NOT inert here.
+    "backend-coverage-blackbox": _ScopedLane(
+        inert=(*_INERT_DOCS, *_INERT_AGENTS_TESTS, *_INERT_FRONTEND_TESTS, *_INERT_MAC_TESTS),
+        graph_lanes=("backend-blackbox", "backend-unit"),
+        runs="backend blackbox/contract/unit suites under coverage",
+        markers=("test:coverage:sharded", "run-coverage-sharded"),
+    ),
+    # scripts/run_deploy_live_probes.py: the credential, Amplitude and chat
+    # router failover backend blackbox domains through the blackbox runner.
+    "live-probes": _ScopedLane(
+        inert=(*_INERT_DOCS, *_INERT_AGENTS_TESTS, *_INERT_FRONTEND_TESTS, *_INERT_MAC_TESTS),
+        graph_lanes=("backend-blackbox", "backend-unit"),
+        runs="backend live-probe blackbox domains",
+        markers=("run_deploy_live_probes.py",),
+    ),
+    # bash scripts/run-coverage.sh: agents blackbox domains plus unit and DEMO
+    # cache pytest; its benchmark domain executes scripts/tests fixtures, so
+    # scripts/tests is NOT inert here.
+    "agents-coverage-blackbox": _ScopedLane(
+        inert=(*_INERT_DOCS, *_INERT_BACKEND_TESTS, *_INERT_FRONTEND_TESTS, *_INERT_MAC_TESTS),
+        graph_lanes=("agents-blackbox", "agents-pytest"),
+        runs="agents blackbox/unit/demo-cache suites under coverage",
+        markers=("run-coverage.sh",),
+    ),
+    # scripts/run-predeploy-local: a real stack (backend, worker, frontend)
+    # running benchmark tasks; it executes runtime code from every package and
+    # reads agents/benchmarks (catalog and history), so only documentation and
+    # the packages' test trees are inert.
+    "smoke": _ScopedLane(
+        inert=(
+            *_INERT_DOCS, *_INERT_AGENTS_TESTS, *_INERT_BACKEND_TESTS, *_INERT_FRONTEND_TESTS,
+            *_INERT_MAC_TESTS, *_INERT_SCRIPT_TESTS,
+        ),
+        graph_lanes=(),
+        runs="the local pre-deploy benchmark stack",
+        markers=("run-predeploy-local",),
+    ),
+    # run.sh --benchmark stack plus front-end/scripts/run-semantic-tests.sh
+    # (Playwright specs under front-end/tests-e2e, which are not inert).
+    "semantic-stack": _ScopedLane(
+        inert=(
+            *_INERT_DOCS, *_INERT_AGENTS_TESTS, *_INERT_BACKEND_TESTS, *_INERT_FRONTEND_TESTS,
+            *_INERT_MAC_TESTS, *_INERT_SCRIPT_TESTS,
+        ),
+        graph_lanes=(),
+        runs="the semantic Playwright suite on a full local stack",
+        markers=("run-semantic-tests.sh",),
+    ),
+}
+
+
+def _scoped_lane(stage: str, command: Sequence[str]) -> _ScopedLane | None:
+    """The lane's rules only when ``stage`` is a scoped lane AND its argv
+    carries that lane's real command marker; otherwise None (never scoped)."""
+
+    rules = _SCOPED_REUSE_LANES.get(stage)
+    if rules is None:
+        return None
+    joined = " ".join(os.fsdecode(argument) for argument in command)
+    return rules if any(marker in joined for marker in rules.markers) else None
+
+
+def _scoped_reuse_enabled(flag: bool) -> bool:
+    """The flag enables; DEPLOY_LANE_SCOPED_REUSE=0 disables even with the flag."""
+
+    return flag and os.environ.get(_SCOPED_REUSE_ENV) != "0"
+
+
+def _lane_token() -> str | None:
+    return os.environ.get(_LANE_TOKEN_ENV) or None
+
+
+def _scoped_records_dir(run_dir: Path, stage: str) -> Path:
+    return run_dir / "passed-cache" / stage / "scoped"
+
+
+def _scoped_failed_dir(run_dir: Path, stage: str) -> Path:
+    return run_dir / "passed-cache" / stage / "scoped-failed"
+
+
+def _invocation_digest(command: Sequence[str]) -> str:
+    """cwd + argv + environment (minus process identity and scheduling knobs):
+    a scoped record is only comparable to the identical invocation."""
+
+    digest = hashlib.sha256()
+    _hash_invocation(digest, command)
+    return digest.hexdigest()
+
+
+def _worktree_state() -> tuple[str, list[str], list[str]]:
+    """HEAD, tracked paths that differ from HEAD (staged or not; renames
+    listed as delete + add) and untracked non-ignored paths."""
+
+    head = _git_output("rev-parse", "HEAD").decode().strip()
+    dirty = sorted(set(_split_paths(_git_output("diff", "--no-ext-diff", "--no-renames", "--name-only", "-z", "HEAD"))))
+    untracked = sorted(set(_split_paths(_git_output("ls-files", "--others", "--exclude-standard", "-z"))))
+    return head, dirty, untracked
+
+
+def _scoped_record(stage: str, fingerprint: str, command: Sequence[str], run_id: str,
+                   head: str, dirty: Sequence[str], untracked: Sequence[str], exit_code: int) -> dict:
+    return {
+        "schema_version": 1,
+        "stage": stage,
+        "head": head,
+        "fingerprint": fingerprint,
+        "run_id": run_id,
+        "exit_code": exit_code,
+        "finished_at": _utc_timestamp(),
+        "finished_epoch": time.time(),
+        "invocation": _invocation_digest(command),
+        "dirty_paths": sorted({*dirty, *untracked}),
+    }
+
+
+def _write_scoped_record(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n")
+    temporary.replace(path)
+
+
+def _record_scoped_pass(
+    run_dir: Path, stage: str, fingerprint: str, command: Sequence[str], run_id: str,
+    head: str, dirty: Sequence[str], untracked: Sequence[str],
+) -> None:
+    """Remember the head a real pass ran on (every pass of a scoped lane's real
+    command is recorded; only the lookup is opt-in). Dirty and untracked paths
+    at pass time are kept so a later decision judges them like every other
+    difference."""
+
+    _write_scoped_record(
+        _scoped_records_dir(run_dir, stage) / f"{fingerprint}.json",
+        _scoped_record(stage, fingerprint, command, run_id, head, dirty, untracked, 0),
+    )
+
+
+def _record_scoped_failure(
+    run_dir: Path, stage: str, fingerprint: str, command: Sequence[str], run_id: str,
+    head: str, dirty: Sequence[str], untracked: Sequence[str], exit_code: int,
+) -> None:
+    """Remember the head a real failure ran on: a later candidate pass is
+    vetoed when the current tree differs from this head only by inert paths
+    (the failure, not the pass, is the latest evidence about these bytes)."""
+
+    _write_scoped_record(
+        _scoped_failed_dir(run_dir, stage) / f"{fingerprint}-{int(time.time() * 1000)}.json",
+        _scoped_record(stage, fingerprint, command, run_id, head, dirty, untracked, exit_code),
+    )
+
+
+def _load_scoped_records(directory: Path, stage: str, invocation: str) -> list[dict]:
+    records = []
+    try:
+        candidates = list(directory.glob("*.json"))
+    except OSError:
+        return []
+    for path in candidates:
+        try:
+            payload = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if (
+            isinstance(payload, dict)
+            and payload.get("schema_version") == 1
+            and payload.get("stage") == stage
+            and payload.get("invocation") == invocation
+            and isinstance(payload.get("head"), str)
+            and isinstance(payload.get("fingerprint"), str)
+        ):
+            records.append(payload)
+    records.sort(key=lambda record: float(record.get("finished_epoch") or 0.0), reverse=True)
+    return records
+
+
+def _judge_declared(path: str, rules: _ScopedLane) -> tuple[bool, str]:
+    """(a): the lane's declared inert set, never-inert patterns first."""
+
+    for pattern in _NEVER_INERT:
+        if fnmatch(path, pattern):
+            return False, f"never-inert:{pattern}"
+    for pattern in rules.inert:
+        if fnmatch(path, pattern):
+            return True, f"inert:{pattern}"
+    return False, "not in the lane's declared inert set"
+
+
+class _GraphJudge:
+    """(b): one selector over the current tree, queried per changed path."""
+
+    def __init__(self) -> None:
+        import select_affected_tests  # sibling module; the graph build is the slow part
+
+        self._selector = select_affected_tests.Selector()
+
+    def judge(self, path: str, rules: _ScopedLane) -> tuple[bool, str]:
+        selection = self._selector.select([path])
+        if selection.all_lanes:
+            return False, "graph:ALL (" + "; ".join(selection.reasons) + ")"
+        selected = {
+            lane: sorted(selection.selected.get(lane, ()))
+            for lane in rules.graph_lanes
+            if selection.selected.get(lane)
+        }
+        if selected:
+            listed = "; ".join(f"{lane}: {', '.join(units[:5])}" for lane, units in selected.items())
+            return False, f"graph:selects {listed}"
+        if rules.graph_lanes:
+            return True, "graph:no " + "/".join(rules.graph_lanes) + " test selected"
+        return True, "graph:no ALL fallback"
+
+
+@dataclass
+class _ScopedDecision:
+    hit: bool
+    stage: str
+    rules: _ScopedLane
+    current_head: str
+    record: dict | None = None
+    changed: list[dict] = field(default_factory=list)
+    miss_reason: str = ""
+    blocked: list[dict] = field(default_factory=list)
+    candidates: int = 0
+    vetoed_by: dict | None = None
+
+    def provenance(self) -> dict:
+        rules = self.rules
+        out: dict = {
+            "kind": "scoped",
+            "current_head": self.current_head,
+            "command_marker": list(rules.markers),
+            "graph_lanes": list(rules.graph_lanes),
+            "inert_patterns": list(rules.inert),
+            "never_inert_patterns": list(_NEVER_INERT),
+        }
+        if self.record is not None:
+            out.update(
+                passed_head=self.record["head"],
+                passed_fingerprint=self.record["fingerprint"],
+                passed_run_id=self.record.get("run_id"),
+                passed_at=self.record.get("finished_at"),
+            )
+        if self.hit:
+            out["changed"] = self.changed
+        else:
+            out["miss_reason"] = self.miss_reason
+            out["candidates"] = self.candidates
+            if self.blocked:
+                out["blocked"] = self.blocked[:20]
+            if self.vetoed_by is not None:
+                out["vetoed_by_failed_head"] = self.vetoed_by
+        return out
+
+
+def _judge_changes(
+    rules: _ScopedLane, changed: Sequence[str], judge: "_GraphJudge | None"
+) -> tuple[list[dict], list[dict], "_GraphJudge | None"]:
+    """Every changed path with the rule that judged it; blocked ones separately.
+    The selector is built lazily, only once every path has passed (a)."""
+
+    judged: list[dict] = []
+    blocked: list[dict] = []
+    for path in changed:
+        inert, rule = _judge_declared(path, rules)
+        judged.append({"path": path, "rule": rule})
+        if not inert:
+            blocked.append(judged[-1])
+    if blocked:
+        return judged, blocked, judge
+    if judge is None:
+        judge = _GraphJudge()
+    for entry in judged:
+        inert, rule = judge.judge(entry["path"], rules)
+        entry["graph"] = rule
+        if not inert:
+            blocked.append(entry)
+    return judged, blocked, judge
+
+
+def _changed_between(passed_head: str, current_head: str, dirty: Sequence[str], untracked: Sequence[str],
+                     recorded_dirty: Sequence[str]) -> list[str]:
+    tree = _split_paths(_git_output("diff", "--no-ext-diff", "--no-renames", "--name-only", "-z", passed_head, current_head))
+    return sorted({*tree, *dirty, *untracked, *recorded_dirty})
+
+
+def _failed_head_veto(
+    run_dir: Path, stage: str, rules: _ScopedLane, invocation: str, current_head: str,
+    dirty: Sequence[str], untracked: Sequence[str], judge: "_GraphJudge | None", *, newer_than: float,
+) -> tuple[dict | None, "_GraphJudge | None"]:
+    """The failed record, newer than the candidate pass, whose head differs
+    from the current tree only by inert paths, if any: that failure is the
+    latest evidence about these bytes, so the older pass may not be reused
+    over it. A pass recorded after the failure supersedes it."""
+
+    for record in _load_scoped_records(_scoped_failed_dir(run_dir, stage), stage, invocation):
+        if float(record.get("finished_epoch") or 0.0) <= newer_than:
+            continue
+        try:
+            changed = _changed_between(record["head"], current_head, dirty, untracked, record.get("dirty_paths") or [])
+        except subprocess.CalledProcessError:
+            continue
+        judged, blocked, judge = _judge_changes(rules, changed, judge)
+        if not blocked:
+            return {
+                "failed_head": record["head"],
+                "failed_at": record.get("finished_at"),
+                "failed_run_id": record.get("run_id"),
+                "exit_code": record.get("exit_code"),
+                "inert_changes_since_failure": judged,
+            }, judge
+    return None, judge
+
+
+def _scoped_reuse_decision(run_dir: Path, stage: str, rules: _ScopedLane, command: Sequence[str]) -> _ScopedDecision:
+    current_head, dirty, untracked = _worktree_state()
+    invocation = _invocation_digest(command)
+    records = _load_scoped_records(_scoped_records_dir(run_dir, stage), stage, invocation)
+    decision = _ScopedDecision(hit=False, stage=stage, rules=rules, current_head=current_head, candidates=len(records))
+    if not records:
+        decision.miss_reason = "no prior pass of this lane for the identical command, cwd and environment"
+        return decision
+    judge: _GraphJudge | None = None
+    first_blocked: list[dict] = []
+    for record in records:
+        try:
+            changed = _changed_between(record["head"], current_head, dirty, untracked, record.get("dirty_paths") or [])
+        except subprocess.CalledProcessError:
+            continue  # the passed head is not in this repository any more
+        judged, blocked, judge = _judge_changes(rules, changed, judge)
+        if not blocked:
+            veto, judge = _failed_head_veto(
+                run_dir, stage, rules, invocation, current_head, dirty, untracked, judge,
+                newer_than=float(record.get("finished_epoch") or 0.0),
+            )
+            if veto is not None:
+                decision.record = record
+                decision.vetoed_by = veto
+                decision.miss_reason = (
+                    f"a failed run on {veto['failed_head'][:12]} differs from the current tree only by inert paths"
+                )
+                return decision
+            decision.hit = True
+            decision.record = record
+            decision.changed = judged
+            return decision
+        if not first_blocked:
+            first_blocked = blocked
+            decision.record = record
+    decision.blocked = first_blocked
+    decision.miss_reason = (
+        f"{len(first_blocked)} changed path(s) are not provably inert"
+        if first_blocked
+        else "no candidate pass head is reachable in this repository"
+    )
+    return decision
+
+
+def _print_scoped_hit(decision: _ScopedDecision) -> None:
+    record = decision.record or {}
+    print(
+        f"== reused passed deploy stage (lane-scoped): {decision.stage} "
+        f"passed_head={record.get('head', '')[:12]} current_head={decision.current_head[:12]} "
+        f"inert_paths={len(decision.changed)} =="
+    )
+    for entry in decision.changed:
+        print(f"   inert: {entry['path']} ({entry['rule']}; {entry.get('graph', '')})")
+
+
+def _print_scoped_miss(decision: _ScopedDecision) -> None:
+    print(f"== lane-scoped reuse unavailable for {decision.stage}: {decision.miss_reason} ==")
+    for entry in decision.blocked[:20]:
+        print(f"   rerun: {entry['path']} ({entry['rule']}; {entry.get('graph', 'graph not consulted')})")
+
+
+def _preview_lane_scoped_reuse(spec: str) -> int:
+    """Dry run over a commit range: which scoped lanes would reuse a pass made
+    on PASSED_HEAD at CURRENT_HEAD (default: HEAD plus the worktree), and why.
+    The selector graph is built from the checked-out tree."""
+
+    passed_head, _, current_spec = spec.partition("..")
+    try:
+        passed_head = _git_output("rev-parse", "--verify", f"{passed_head}^{{commit}}").decode().strip()
+        if current_spec:
+            current_head = _git_output("rev-parse", "--verify", f"{current_spec}^{{commit}}").decode().strip()
+            dirty: list[str] = []
+            untracked: list[str] = []
+        else:
+            current_head, dirty, untracked = _worktree_state()
+        changed = _changed_between(passed_head, current_head, dirty, untracked, [])
+    except subprocess.CalledProcessError as error:
+        print(f"could not resolve {spec!r}: {error.stderr.decode(errors='replace').strip()}", file=sys.stderr)
+        return 2
+    print(f"lane-scoped reuse preview: passed_head={passed_head[:12]} current_head={current_head[:12]} "
+          f"changed_paths={len(changed)} (each lane assumed to run its real command; failed-head records not consulted)")
+    judge: _GraphJudge | None = None
+    reused = 0
+    for stage, rules in _SCOPED_REUSE_LANES.items():
+        judged, blocked, judge = _judge_changes(rules, changed, judge)
+        if blocked:
+            print(f"  {stage}: RERUN ({len(blocked)} path(s) not provably inert)")
+            for entry in blocked[:20]:
+                print(f"      {entry['path']} ({entry['rule']}; {entry.get('graph', 'graph not consulted')})")
+        else:
+            reused += 1
+            print(f"  {stage}: REUSED-SCOPED ({len(judged)} inert path(s))")
+            for entry in judged:
+                print(f"      {entry['path']} ({entry['rule']}; {entry.get('graph', '')})")
+    print(f"lane-scoped reuse preview: {reused}/{len(_SCOPED_REUSE_LANES)} lane(s) would be reused-scoped")
+    return 0
+
+
 def _append_reused(
     run_dir: Path,
     run_id: str,
@@ -291,10 +821,19 @@ def _append_reused(
     fingerprint: str,
     telemetry: dict,
     invoked_epoch: float,
+    *,
+    status: str = "reused",
+    reuse: dict | None = None,
+    started_epoch: float | None = None,
 ) -> None:
-    """Record an exact-input reuse so reviews can count skipped reruns."""
+    """Record an exact-input reuse so reviews can count skipped reruns.
+
+    A lane-scoped reuse records ``status="reused-scoped"`` with its provenance
+    and starts at the stage's invocation so the pipeline matches its row.
+    """
 
     now = time.time()
+    started = now if started_epoch is None else started_epoch
     try:
         append_stage(
             run_dir,
@@ -302,24 +841,32 @@ def _append_reused(
             stage=stage,
             started_at=_utc_timestamp(),
             finished_at=_utc_timestamp(),
-            started_epoch=now,
+            started_epoch=started,
             finished_epoch=now,
             exit_code=0,
             log="",
             telemetry=telemetry,
-            status="reused",
+            status=status,
             detail={
                 "schema_version": 1,
                 "outcome": {"exit_code": 0, "failure_class": None},
-                "reuse": reuse_detail(run_dir, fingerprint, requested=True, hit=True),
+                "reuse": reuse if reuse is not None else reuse_detail(run_dir, fingerprint, requested=True, hit=True),
                 "timing": {"setup_seconds": round(max(0.0, now - invoked_epoch), 3), "exec_seconds": 0.0},
+                **({"lane_token": _lane_token()} if _lane_token() else {}),
             },
         )
     except OSError as error:
         print(f"warning: could not append reused stage record: {error}", file=sys.stderr)
 
 
-def _run_logged(log_path: Path, command: Sequence[str]) -> int:
+def _run_logged(log_path: Path, command: Sequence[str]) -> tuple[int, int]:
+    """Run ``command`` and return ``(exit code, forwarded signal or 0)``.
+
+    The signal is the first one this runner received and forwarded to the
+    command (a lane the pipeline superseded, an operator's Ctrl-C). It is
+    reported separately from the exit code because a command can legitimately
+    exit 143 on its own; only the runner knows whether it was interrupted."""
+
     received_signal = 0
     child: subprocess.Popen[bytes] | None = None
     kill_timer_started = False
@@ -352,7 +899,7 @@ def _run_logged(log_path: Path, command: Sequence[str]) -> int:
     try:
         with log_path.open("wb") as log_handle:
             if received_signal:
-                return 128 + received_signal
+                return 128 + received_signal, received_signal
             try:
                 child = subprocess.Popen(
                     command,
@@ -362,7 +909,7 @@ def _run_logged(log_path: Path, command: Sequence[str]) -> int:
                 )
             except OSError as error:
                 print(f"could not start command: {error}", file=sys.stderr)
-                return 127
+                return 127, received_signal
             if received_signal:
                 forward(received_signal, None)
 
@@ -397,10 +944,10 @@ def _run_logged(log_path: Path, command: Sequence[str]) -> int:
                 child.wait()
 
     if received_signal:
-        return 128 + received_signal
+        return 128 + received_signal, received_signal
     if child_exit < 0:
-        return 128 - child_exit
-    return child_exit
+        return 128 - child_exit, 0
+    return child_exit, 0
 
 
 def _source_in_background() -> tuple[threading.Thread, dict]:
@@ -422,11 +969,18 @@ def _source_in_background() -> tuple[threading.Thread, dict]:
 def main() -> int:
     invoked_epoch = time.time()
     args = _parser().parse_args()
+    if args.preview_lane_scoped_reuse:
+        return _preview_lane_scoped_reuse(args.preview_lane_scoped_reuse)
     command = list(args.command)
     if command and command[0] == "--":
         command.pop(0)
-    if not command or re.fullmatch(r"[A-Za-z0-9._-]+", args.stage) is None:
-        print("run_deploy_stage.py: valid STAGE and COMMAND are required", file=sys.stderr)
+    if (
+        args.run_root is None
+        or not command
+        or not args.stage
+        or re.fullmatch(r"[A-Za-z0-9._-]+", args.stage) is None
+    ):
+        print("run_deploy_stage.py: --run-root, a valid STAGE and COMMAND are required", file=sys.stderr)
         return 2
 
     try:
@@ -448,8 +1002,12 @@ def main() -> int:
     # stage a lane launches without --reuse-passed) is reusable by a later
     # --reuse-passed run of the identical command; only the lookup is opt-in.
     fingerprint: str | None = None
+    worktree_state: tuple[str, list[str], list[str]] | None = None
+    scoped_rules = _scoped_lane(args.stage, command)
     try:
         fingerprint = _worktree_fingerprint(command, args.stage)
+        if scoped_rules is not None:
+            worktree_state = _worktree_state()
     except (OSError, subprocess.SubprocessError) as error:
         print(f"warning: could not fingerprint deploy inputs: {error}", file=sys.stderr)
     if args.reuse_passed and fingerprint is not None and _cache_hit(run_dir, args.stage, fingerprint):
@@ -460,6 +1018,31 @@ def main() -> int:
             print(f"warning: could not release deploy stage admission: {error}", file=sys.stderr)
         print(f"== reused passed deploy stage: {args.stage} ({_fingerprint_scope(args.stage, command)} + command) ==")
         return 0
+    # Lane-scoped reuse: only after the exact lookup missed, only for the
+    # listed lanes, only when enabled. Any error in the decision reruns.
+    scoped_decision: _ScopedDecision | None = None
+    if _scoped_reuse_enabled(args.lane_scoped_reuse) and scoped_rules is not None:
+        try:
+            scoped_decision = _scoped_reuse_decision(run_dir, args.stage, scoped_rules, command)
+        except Exception as error:  # a scheduling decision must never fail a gate: rerun instead
+            print(f"warning: lane-scoped reuse decision failed; rerunning {args.stage}: {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            scoped_decision = None
+        if scoped_decision is not None and scoped_decision.hit and scoped_decision.record is not None:
+            reuse = {"requested": True, "hit": True, "fingerprint": scoped_decision.record["fingerprint"][:12],
+                     **scoped_decision.provenance()}
+            _append_reused(
+                run_dir, run_id, args.stage, scoped_decision.record["fingerprint"], telemetry, invoked_epoch,
+                status="reused-scoped", reuse=reuse, started_epoch=invoked_epoch,
+            )
+            try:
+                release_stage(args.run_root, run_id=run_id, token=token)
+            except (LifecycleError, OSError) as error:
+                print(f"warning: could not release deploy stage admission: {error}", file=sys.stderr)
+            _print_scoped_hit(scoped_decision)
+            return 0
+        if scoped_decision is not None:
+            _print_scoped_miss(scoped_decision)
 
     log_relative = f"logs/{args.stage}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{os.getpid()}.log"
     log_path = run_dir / log_relative
@@ -470,7 +1053,7 @@ def main() -> int:
 
     source_thread, source = _source_in_background()
     sampler = HostSampler().start()
-    stage_exit = _run_logged(log_path, command)
+    stage_exit, interrupted_by = _run_logged(log_path, command)
     finished_epoch = time.time()
     host = sampler.stop()
     source_thread.join(timeout=30)
@@ -485,13 +1068,18 @@ def main() -> int:
             host=host,
             source=dict(source),
             attempt=attempt_detail(run_dir, args.stage, source),
-            reuse=reuse_detail(
-                run_dir / "passed-cache" / args.stage,
-                fingerprint,
-                requested=args.reuse_passed,
-                hit=False,
-            ),
+            reuse={
+                **reuse_detail(
+                    run_dir / "passed-cache" / args.stage,
+                    fingerprint,
+                    requested=args.reuse_passed,
+                    hit=False,
+                ),
+                **({"scoped": scoped_decision.provenance()} if scoped_decision is not None else {}),
+            },
         )
+        if _lane_token():
+            detail["lane_token"] = _lane_token()
     except Exception as error:  # Telemetry must never change a gate result.
         print(f"warning: could not build stage detail: {type(error).__name__}", file=sys.stderr)
         detail = None
@@ -516,11 +1104,31 @@ def main() -> int:
     except (LifecycleError, OSError) as error:
         print(f"warning: could not release deploy stage admission: {error}", file=sys.stderr)
 
+    # An interrupted lane (the pipeline superseding its run, an operator's
+    # Ctrl-C) says nothing about the head: it is not recorded as a failure, so
+    # it never vetoes a later lane-scoped reuse of a real pass. The runner's
+    # own forwarded signal decides this, never the exit code: a gate can exit
+    # 143 by itself, and that is a real failure.
+    if interrupted_by:
+        print(
+            f"deploy stage {args.stage} was interrupted by signal {interrupted_by}; "
+            "its exit is not recorded as a failed head",
+            file=sys.stderr,
+        )
+    elif stage_exit != 0 and fingerprint is not None and worktree_state is not None:
+        try:
+            head, dirty, untracked = worktree_state
+            _record_scoped_failure(run_dir, args.stage, fingerprint, command, run_id, head, dirty, untracked, stage_exit)
+        except OSError as error:
+            print(f"warning: could not record the failed head for lane-scoped reuse: {error}", file=sys.stderr)
     if stage_exit == 0 and fingerprint is not None:
         try:
             finished_fingerprint = _worktree_fingerprint(command, args.stage)
             if finished_fingerprint == fingerprint:
                 _record_cache_hit(run_dir, args.stage, fingerprint)
+                if worktree_state is not None:
+                    head, dirty, untracked = worktree_state
+                    _record_scoped_pass(run_dir, args.stage, fingerprint, command, run_id, head, dirty, untracked)
             else:
                 print(
                     f"warning: deploy inputs changed while {args.stage} ran; pass was not cached",
