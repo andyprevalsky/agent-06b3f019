@@ -766,8 +766,8 @@ receipt shows the bootstrap ended is `aborted` when it left no manifest or a
 `clean` cleanup receipt, and is set aside under `_aborted/` (renamed, never
 deleted, classification written beside the evidence); one that left a manifest
 without a clean receipt is `stranded`: reported and left in place for
-`--reconcile-cleanup`. An own `bootstrapping` run is waited out (the grace, at
-most) and refuses the launch if still bootstrapping after it. An unreadable
+`--reconcile-cleanup`. An own `bootstrapping` run is waited out (the grace plus one
+poll, at most) and refuses the launch if still bootstrapping after it. An unreadable
 record, a symlinked `.context/benchmarks` or an unavailable `/proc` is
 `unknown` and refuses the launch (`PIPELINE_OWNER_RUNS_REFUSED`, every lane
 `failed`, not a fix-loop round) — never move a run dir by hand while a process
@@ -2716,7 +2716,7 @@ cd "$(git rev-parse --show-toplevel)"
 # that changed those paths means the merged backend never ran as-is: the gate
 # blocks and that is a manual decision; an unrelated live commit or any such
 # change keeps waiting. Records `render` (status, live_commit,
-# observed_live_commit, merged_sha, backend_diff, evidence) in
+# observed_live_commit, merged_sha, backend_diff, equivalence) in
 # .context/deploy-pipeline/production.json; prints RENDER_LIVE or
 # RENDER_SOURCE_EQUIVALENT live=<sha> merged=<sha> reason=<code>. Exit 2 =
 # Render API, git or credential failure (fail closed; repair and rerun),
