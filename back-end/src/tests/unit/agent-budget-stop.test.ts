@@ -29,6 +29,10 @@ const client = { workflow: { getHandle(id: string, run: unknown, options: unknow
     assert.equal(name, 'stop_at_browser_budget');
     assert.deepEqual(options, { args: [{ budget: 100, first_run_id: RUN }] });
     if (mode === 'rpc-error') throw new Error('offline');
+    if (mode.startsWith('pending')) return { accepted: false, pending: true, task_id: mode === 'pending-bad-id' ? 'foreign' : TASK,
+      run_id: RUN, first_run_id: mode === 'pending-wrong-run' ? 'old' : RUN,
+      deadline: mode === 'pending-nan' ? Number.NaN : 12345,
+      ...(mode === 'pending-extra' ? { ignored: true } : {}) };
     return { accepted: true, task_id: mode === 'bad-receipt' ? 'foreign' : TASK,
       run_id: RUN, first_run_id: RUN, deadline: 12345 };
   } };
@@ -42,13 +46,15 @@ async function main() {
   } });
   const { pauseAtBrowserBudgetForUser } = await import('../../domains/agents/agentBudgetStopService');
   for (mode of ['valid', 'wrong-owner', 'terminal', 'missing-run', 'malformed', 'unknown-key',
-    'generation-changed', 'user-paused-race', 'rpc-error', 'bad-receipt']) {
+    'generation-changed', 'user-paused-race', 'rpc-error', 'bad-receipt',
+    'pending', 'pending-bad-id', 'pending-wrong-run', 'pending-nan', 'pending-extra']) {
     reads = updates = 0;
     const body = mode === 'malformed' ? { budget: true } : mode === 'unknown-key' ? { budget: 100, force: true } : { budget: 100 };
     const result = await pauseAtBrowserBudgetForUser(ID, 'owner', body);
     assert.equal(result.accepted, mode === 'valid', mode);
+    assert.equal('pending' in result && result.pending === true, mode === 'pending', mode);
     if (['wrong-owner', 'terminal', 'missing-run', 'malformed', 'unknown-key'].includes(mode)) assert.equal(updates, 0, mode);
   }
-  console.log('PASS 10 budget-stop endpoint owner/generation/refusal controls');
+  process.stdout.write('PASS 15 budget-stop endpoint owner/generation/refusal controls\n');
 }
 void main();

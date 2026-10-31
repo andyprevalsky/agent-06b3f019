@@ -9,7 +9,7 @@ export async function pauseAtBrowserBudgetForUser(agentId: string, userId: strin
   const parsed = Request.safeParse(body);
   if (!parsed.success) return { accepted: false };
   const before = await repo.findAgent(agentId, userId);
-  if (!before || before.status !== 'ACTIVE' || !before.temporalWorkflowId || !before.temporalFirstExecutionRunId) {
+  if (!before || before.status !== 'ACTIVE' || (before.temporalWorkflowId ?? '') === '' || (before.temporalFirstExecutionRunId ?? '') === '') {
     return { accepted: false };
   }
   try {
@@ -24,9 +24,12 @@ export async function pauseAtBrowserBudgetForUser(agentId: string, userId: strin
     if (!after || after.temporalWorkflowId !== before.temporalWorkflowId ||
         after.temporalFirstExecutionRunId !== before.temporalFirstExecutionRunId ||
         after.status !== 'ACTIVE') return { accepted: false };
-    const receipt = z.object({ accepted: z.literal(true), task_id: z.string().uuid(),
-      run_id: z.string().uuid(), first_run_id: z.literal(before.temporalFirstExecutionRunId),
-      deadline: z.number().finite().positive() }).strict().safeParse(result);
+    const identity = { task_id: z.string().uuid(), run_id: z.string().uuid(),
+      first_run_id: z.literal(before.temporalFirstExecutionRunId), deadline: z.number().finite().positive() };
+    const receipt = z.union([
+      z.object({ accepted: z.literal(true), ...identity }).strict(),
+      z.object({ accepted: z.literal(false), pending: z.literal(true), ...identity }).strict(),
+    ]).safeParse(result);
     return receipt.success ? receipt.data : { accepted: false };
   } catch {
     // Caller retains its ordinary pause path. No status write or retry here.

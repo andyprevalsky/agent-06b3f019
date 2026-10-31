@@ -48,11 +48,12 @@ import tempfile
 import time
 import unicodedata
 import uuid
+import math
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterator, List, Literal, Optional, Sequence, Tuple
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 
 import httpx
@@ -4530,14 +4531,28 @@ async def post_world_model_update_events(base_url: str, agent_id: str) -> None:
             return
 
 
-async def pause_at_browser_budget(base_url: str, agent_id: str, budget: int) -> bool:
+async def pause_at_browser_budget(
+    base_url: str, agent_id: str, budget: int, *, include_pending: bool = False
+) -> bool | Literal["pending"]:
     """Ask for an exact finalizer handoff; refusal retains ordinary pause."""
     try:
         headers = await _api_headers()
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(f"{base_url}/api/agents/{agent_id}/browser-budget-stop",
                                      headers=headers, json={"budget": budget})
-        return resp.status_code == 200 and resp.json().get("accepted") is True
+        if resp.status_code != 200:
+            return False
+        result = resp.json()
+        if result.get("accepted") is True:
+            return True
+        if (include_pending and result.get("accepted") is False and result.get("pending") is True
+                and set(result) == {"accepted", "pending", "task_id", "run_id", "first_run_id", "deadline"}
+                and type(result["deadline"]) in (int, float)
+                and math.isfinite(result["deadline"]) and result["deadline"] > 0):
+            for field in ("task_id", "run_id", "first_run_id"):
+                uuid.UUID(result[field])
+            return "pending"
+        return False
     except Exception:
         return False
 
@@ -5149,7 +5164,15 @@ async def _poll_agent(
                 data["_benchmark"]["browser_steps"] = used_steps
                 data["_benchmark"]["browser_step_budget"] = step_budget
                 print(f"    🧭 Browser step budget reached: {used_steps}/{step_budget} — pausing for polar judge")
-                if await pause_at_browser_budget(base_url, agent_id, step_budget):
+                budget_response = await pause_at_browser_budget(
+                    base_url, agent_id, step_budget, include_pending=True
+                )
+                if budget_response == "pending":
+                    # No acceptance is cached: the next ordinary poll rechecks
+                    # owner, generation, requirements and the existing deadline.
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
+                if budget_response is True:
                     budget_stop_pending = {
                         "step_budget_reached": True, "browser_steps": used_steps,
                         "browser_step_budget": step_budget,

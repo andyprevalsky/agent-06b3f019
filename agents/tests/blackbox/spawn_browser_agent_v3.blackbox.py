@@ -35881,6 +35881,311 @@ async def test_foreground_trace_detached_context_is_not_foreground():
     ], events
     assert trace._active_tasks == {}
 
+async def _exercise_disconnected_playwright_full_activity(mode="reconnect"):
+    neutral=True
+    resume=mode == "resume"
+    resume_url="about:blank"
+    """Original reconnect shape: next native action must use a live input client."""
+    from contextlib import ExitStack
+
+    from structlog.testing import capture_logs
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+    from helpers.activity_generation_drain import WORKER_SHUTDOWN
+
+    env = ActivityEnvironment()
+    old_page = SimpleNamespace(is_closed=lambda: False)
+    new_page = SimpleNamespace(is_closed=lambda: False)
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[old_page])], close=AsyncMock(), is_connected=lambda: True)
+    new_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[new_page])], close=AsyncMock(), is_connected=lambda: True)
+    fake_playwright = _FakePlaywright(fake_browser)
+    new_playwright = _FakePlaywright(new_browser)
+    new_retired = asyncio.Event()
+    async def retire_new():
+        new_retired.set()
+    new_playwright.stop.side_effect = retire_new
+    old_retired = asyncio.Event()
+    if mode == "retire_order":
+        async def connect_after_retirement(*args, **kwargs):
+            assert fake_playwright.stop.await_count == 1, "old disconnected driver must retire before new attachment"
+            return new_browser
+        new_playwright.chromium.connect_over_cdp.side_effect = connect_after_retirement
+    if mode == "old_stop_cancel":
+        old_stop_count = 0
+        async def cancelled_old_retirement():
+            nonlocal old_stop_count
+            old_stop_count += 1
+            if old_stop_count == 1:
+                raise asyncio.CancelledError()
+            old_retired.set()
+        fake_playwright.stop.side_effect = cancelled_old_retirement
+    if mode == "focus_disconnect":
+        async def disconnect_while_foregrounding():
+            new_page.is_closed = lambda: True
+            new_browser.is_connected = lambda: False
+        new_page.bring_to_front = AsyncMock(side_effect=disconnect_while_foregrounding)
+        new_browser.contexts[0].new_cdp_session = AsyncMock(return_value=SimpleNamespace(
+            send=AsyncMock(return_value={"targetInfo": {"targetId": "same-target"}}), detach=AsyncMock()))
+    if mode == "attach_failure":
+        new_playwright.chromium.connect_over_cdp.side_effect = RuntimeError("fixture attach failure")
+    if mode == "cancel_attach":
+        new_playwright.chromium.connect_over_cdp.side_effect = asyncio.CancelledError()
+    if mode == "empty_context":
+        new_browser.contexts = []
+    class RecordingHumanizer(_FakeHumanizer):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.input_page = kwargs['input_page']
+        async def initialize_cursor(self, *args, **kwargs):
+            await super().initialize_cursor(*args, **kwargs)
+            if mode == "humanizer_disconnect" and self.input_page is new_page:
+                new_page.is_closed = lambda: True
+                new_browser.is_connected = lambda: False
+    session_data = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://live",
+        "fingerprint_injection": None,
+        "passwords": [],
+        "auth_options": {"realm": "example.com"},
+        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "user_settings": {},
+    }
+    if neutral:
+        session_data.update(
+            auth_realm="",
+            auth_options={'realm': '',
+             'steel_session': None,
+             'cookie_bundles': [],
+             'passwords': [],
+             'passkeys': [],
+             'email_otp': {'available': False,
+                           'connected_emails': [],
+                           'match_for_site_account': None},
+             'readable_identifiers': [],
+             'minted': None},
+            passkeys=[], auth_credential_ref=None, current_url=resume_url, same_session_available=True,
+        )
+    final_url = "about:blank" if neutral else "https://example.com/cart"
+    llm_step = AsyncMock(
+        return_value={
+            "action": {"action": "scroll", "thinking": "Looking for the cart", "params": {"direction": "down"}},
+            "usage": {"prompt_tokens": 900, "completion_tokens": 60, "actual_model": "rose-1-browser-use"},
+            "mode": "waterfall",
+        }
+    )
+    executed_steps = []
+    seen_input_pages = []
+
+    async def execute_step_while_deploy_lands(*args, **kwargs):
+        executed_steps.append(args[2] if len(args) > 2 else kwargs.get("unified_action"))
+        if len(executed_steps) == 1:
+            # CDP downstream closure invalidates the local Playwright browser;
+            # the native DOM client is already reconnected before step two.
+            if mode != "healthy":
+                from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer, _Client
+
+                class ClosedUpstream:
+                    close_code = 1000
+                    close_reason = ""
+                    def __aiter__(self):
+                        return self
+                    async def __anext__(self):
+                        raise StopAsyncIteration
+
+                class InputClient:
+                    async def close(self, **kwargs):
+                        fake_browser.contexts = []
+                        fake_browser.is_connected = lambda: False
+                        old_page.is_closed = lambda: True
+
+                native_client = SimpleNamespace(close=AsyncMock())
+                upstream = ClosedUpstream()
+                mux = SingleCdpConnectionMultiplexer("ws://fixture.invalid", arm_webauthn=False)
+                mux._upstream = upstream
+                mux._clients = {_Client(InputClient(), 1), _Client(native_client, 2)}
+                await mux._read_upstream(upstream)
+                native_client.close.assert_awaited_once()
+                assert not fake_browser.is_connected()
+                # Native browser-use reconnect is external to this fixture;
+                # its existing DOM service is live for the next step.
+            if mode == "missing_endpoint":
+                _FakeDomService.last_instance.cdp_url = None
+            _FakeDomService.last_instance.mark_secret_used()
+            if mode == "focus_disconnect":
+                _FakeDomService.last_instance.session.agent_focus_target_id = "same-target"
+        else:
+            assert _FakeDomService.last_instance.secret_values_used
+            seen_input_pages.append(kwargs['humanizer'].input_page)
+            env.worker_shutdown()
+        return {"success": True, "message": "Scrolled down", "current_url": final_url}
+
+    close_mock = AsyncMock()
+    cache_setup = AsyncMock()
+    diagnostics_setup = AsyncMock()
+    if mode == "setup_failure":
+        diagnostics_setup.side_effect = [None, RuntimeError("fixture configure failure")]
+    if mode == "disconnect_during_setup":
+        async def disconnect_in_setup(page, **kwargs):
+            if page is new_page:
+                new_browser.is_connected = lambda: False
+                new_page.is_closed = lambda: True
+        diagnostics_setup.side_effect = disconnect_in_setup
+    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+    patch_targets = [
+        patch.dict(os.environ, {"BROWSER_AGENT_PARALLEL_CDP_CONNECT": "true" if mode == "parallel" else "false"}),
+        patch("domains.spawn_browser_agent_v3.handler.write_through_enabled_for_user", return_value=True),
+        patch("domains.spawn_browser_agent_v3.handler._install_fast_mode_network_cache", cache_setup),
+        patch("domains.spawn_browser_agent_v3.handler._botsigged_diagnostics_enabled", return_value=True),
+        patch("domains.spawn_browser_agent_v3.handler._install_botsigged_diagnostics", diagnostics_setup),
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[native_start])),
+        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation", llm_step),
+        patch("domains.spawn_browser_agent_v3.handler.execute_action", side_effect=execute_step_while_deploy_lands),
+        patch("domains.spawn_browser_agent_v3.handler.build_browser_verifier_context", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", RecordingHumanizer),
+        patch(
+            "playwright.async_api.async_playwright", side_effect=[_FakeAsyncPlaywright(fake_playwright), _FakeAsyncPlaywright(new_playwright)]
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+
+    if neutral:
+        patch_targets.extend([
+            patch.object(_FakeDomService, "get_page_identity", AsyncMock(return_value={"url": "about:blank", "title": ""})),
+            patch.object(_FakeDomService, "get_browser_state", AsyncMock(return_value={"url": "about:blank", "screenshot": None})),
+            patch.object(_FakeDomService, "get_current_url", AsyncMock(return_value="about:blank")),
+            patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", AsyncMock(return_value=session_data)),
+        ])
+    with ExitStack() as stack:
+        for patch_target in patch_targets:
+            stack.enter_context(patch_target)
+        captured = stack.enter_context(capture_logs())
+        failure = None
+        try:
+            result = await env.run(
+                spawn_browser_agent_activity_v3,
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Add the socks to the cart",
+                tool_call_id="tool-1",
+                task_id="task-1",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                start_url="about:blank" if neutral else "https://example.com",
+                is_resume=resume,
+            )
+        except (RuntimeError, IndexError, asyncio.CancelledError) as exc:
+            if mode not in {"missing_endpoint", "attach_failure", "empty_context", "cancel_attach", "setup_failure", "disconnect_during_setup", "humanizer_disconnect", "focus_disconnect", "old_stop_cancel"}:
+                raise
+            failure = exc
+        if mode == "old_stop_cancel":
+            await asyncio.wait_for(old_retired.wait(), 1)
+        elif mode in {"attach_failure", "empty_context", "cancel_attach", "setup_failure", "disconnect_during_setup", "humanizer_disconnect", "focus_disconnect"}:
+            await asyncio.wait_for(new_retired.wait(), 1)
+
+
+    if mode in {"missing_endpoint", "attach_failure", "empty_context", "cancel_attach", "setup_failure", "disconnect_during_setup", "humanizer_disconnect", "focus_disconnect", "old_stop_cancel"}:
+        if mode in {"cancel_attach", "old_stop_cancel"}:
+            assert failure is None and result["status"] == "cancelled", result
+        else:
+            assert failure is not None, (mode, "invalid attach must not continue", result)
+        assert len(executed_steps) == 1 and llm_step.await_count == 1
+        assert not seen_input_pages
+        if mode == "old_stop_cancel":
+            await asyncio.wait_for(old_retired.wait(), 1)
+            new_playwright.chromium.connect_over_cdp.assert_not_awaited()
+            return
+        if mode != "missing_endpoint":
+            new_playwright.stop.assert_awaited_once()
+            if mode in {"humanizer_disconnect", "focus_disconnect"}:
+                # The committed handle is owned by normal terminal cleanup.
+                new_browser.close.assert_awaited_once()
+            else:
+                new_browser.close.assert_not_awaited()
+        return
+
+    assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
+    assert result["yield_reason"] == WORKER_SHUTDOWN, result
+    step_phases = [entry for entry in captured if entry.get("event") == "browser.step.phases"]
+    assert [entry.get("step") for entry in step_phases] == [1, 2], (
+        f"the step that ran before the drain yield must report its phases: {step_phases}"
+    )
+    assert "execute_action" in step_phases[0]["phases_ms"], step_phases[0]
+    assert llm_step.await_count == 2, "the activity must not start another step after the drain began"
+    assert len(executed_steps) == 2, executed_steps
+    assert result["step_count"] == 2, result
+    assert result["session_id"] == "session-1" and result["cdp_url"] == "ws://live", result
+    assert result["task_id"] == "task-1", result
+    close_mock.assert_not_awaited()
+    assert result["current_url"] == final_url, result
+    assert final_url in result.get("visited_urls", []), result
+    turn_tool_calls = [
+        call["function"]["name"]
+        for message in result.get("browser_turn_messages", [])
+        for call in message.get("tool_calls") or []
+    ]
+    assert turn_tool_calls == ["scroll", "scroll"], f"the completed step must ride the resume payload: {turn_tool_calls}"
+    assert result.get("reasoning_messages") == ["Looking for the cart", "Looking for the cart"], result
+    llm_usage = [item for item in result.get("usage_items") or [] if item.get("type") == "llm"]
+    assert llm_usage and llm_usage[0]["input_tokens"] == 1800, result.get("usage_items")
+
+    assert seen_input_pages == ([old_page] if mode == "healthy" else [new_page]), "second action received stale Playwright input page"
+    assert cache_setup.await_count == (1 if mode == "healthy" else 2)
+    assert diagnostics_setup.await_count == (1 if mode == "healthy" else 2)
+    assert diagnostics_setup.await_args_list[0].args[0] is old_page
+    if mode != "healthy":
+        assert diagnostics_setup.await_args_list[1].args[0] is new_page
+    if mode == "healthy":
+        assert fake_playwright.chromium.connect_over_cdp.await_count == 1
+        new_playwright.chromium.connect_over_cdp.assert_not_awaited()
+        return
+    assert fake_playwright.chromium.connect_over_cdp.await_count == 1
+    assert new_playwright.chromium.connect_over_cdp.await_count == 1
+    fake_playwright.stop.assert_awaited_once()
+    fake_browser.close.assert_not_awaited()
+    assert all(call.args == ("ws://live",) for call in fake_playwright.chromium.connect_over_cdp.await_args_list + new_playwright.chromium.connect_over_cdp.await_args_list)
+
+
+
+async def test_disconnected_playwright_full_activity():
+    await _exercise_disconnected_playwright_full_activity()
+
+
+async def test_disconnected_playwright_lifecycle_guards():
+    for mode in ("healthy", "resume", "parallel"):
+        await _exercise_disconnected_playwright_full_activity(mode)
+
+
+async def test_disconnected_playwright_refusal_cleanup():
+    for mode in ("missing_endpoint", "attach_failure", "empty_context", "cancel_attach", "setup_failure", "disconnect_during_setup"):
+        await _exercise_disconnected_playwright_full_activity(mode)
+
+
+async def test_disconnected_playwright_handoff_liveness():
+    for mode in ("retire_order", "humanizer_disconnect", "focus_disconnect", "old_stop_cancel"):
+        await _exercise_disconnected_playwright_full_activity(mode)
+
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     from browser_operational_projection_fixtures import (
@@ -38466,6 +38771,10 @@ async def run_all_tests():
         "activity_checkpoints_at_step_boundary_on_worker_shutdown",
         test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown,
     )
+    await r.record_async("disconnected_playwright_full_activity", test_disconnected_playwright_full_activity)
+    await r.record_async("disconnected_playwright_lifecycle_guards", test_disconnected_playwright_lifecycle_guards)
+    await r.record_async("disconnected_playwright_refusal_cleanup", test_disconnected_playwright_refusal_cleanup)
+    await r.record_async("disconnected_playwright_handoff_liveness", test_disconnected_playwright_handoff_liveness)
     await r.record_async("neutral_initialization_reaches_first_browser_step", test_neutral_initialization_reaches_first_browser_step)
     await r.record_async("neutral_resume_reaches_first_browser_step", test_neutral_resume_reaches_first_browser_step)
     await r.record_async("neutral_resume_rejects_empty_inventory_at_web_url", test_neutral_resume_rejects_empty_inventory_at_web_url)

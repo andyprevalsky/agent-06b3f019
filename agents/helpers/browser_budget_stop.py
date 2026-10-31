@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import math
 from typing import Any
 
 from temporalio import activity, workflow
@@ -18,7 +19,8 @@ def register_finalizer(owner: Any, *, task_id: str, tool_id: str,
     """Only the native, single-browser root can own this optional handshake."""
     if _blocked(owner) or getattr(owner, "_browser_execution_task_id", None) != tool_id:
         return None
-    if type(limit) is not int or limit <= 0 or timeout_seconds <= 0:
+    if (type(limit) is not int or limit <= 0 or type(timeout_seconds) not in (int, float)
+            or not math.isfinite(timeout_seconds) or timeout_seconds <= 0):
         return None
     info = workflow.info()
     ticket = {"version": 1, "agent_id": owner.agent_id, "workflow_id": info.workflow_id,
@@ -30,7 +32,8 @@ def register_finalizer(owner: Any, *, task_id: str, tool_id: str,
     if records is None:
         records = owner._browser_finalizers = {}
     records[tool_id] = {"ticket": ticket, "timeout_seconds": timeout_seconds,
-                        "phase": "acting", "deadline": None, "accepted": False}
+                        "phase": "acting", "deadline": None, "accepted": False,
+                        "pending_deadline": workflow.now().timestamp() + timeout_seconds}
     return ticket
 
 
@@ -70,14 +73,30 @@ def request_budget_stop(owner: Any, request: dict) -> dict:
         return {"accepted": False}
     record = next(iter(records.values()))
     ticket = record["ticket"]
-    if (record["phase"] != "finalizing" or request["budget"] != ticket["limit"]
+    if (request["budget"] != ticket["limit"]
+            or ticket["agent_id"] != owner.agent_id or ticket["workflow_id"] != info.workflow_id
+            or ticket["first_run_id"] != info.first_execution_run_id
             or ticket["run_id"] != info.run_id or ticket["tool_id"] != getattr(owner, "_browser_execution_task_id", None)
-            or ticket["requirement_revision"] != getattr(owner, "_response_schema_revision", None)
-            or workflow.now().timestamp() >= record["deadline"]):
+            or ticket["requirement_revision"] != getattr(owner, "_response_schema_revision", None)):
         return {"accepted": False}
     # Native entry owns exactly one background task. Never defer other work.
     active = getattr(owner, "_background_tasks", {})
     if set(active) != {ticket["tool_id"]}:
+        return {"accepted": False}
+    now = workflow.now().timestamp()
+    if record["phase"] == "acting":
+        deadline = record.get("pending_deadline")
+        if (type(deadline) not in (int, float) or not math.isfinite(deadline)
+                or now >= deadline):
+            return {"accepted": False}
+        # This is not acceptance: every ordinary poll must revalidate the same
+        # native owner until its existing activity announces finalizer readiness.
+        return {"accepted": False, "pending": True, "task_id": ticket["task_id"],
+                "run_id": ticket["run_id"], "first_run_id": ticket["first_run_id"],
+                "deadline": deadline}
+    if (record["phase"] != "finalizing"
+            or type(record["deadline"]) not in (int, float)
+            or not math.isfinite(record["deadline"]) or now >= record["deadline"]):
         return {"accepted": False}
     record["accepted"] = True
     return {"accepted": True, "task_id": ticket["task_id"], "run_id": ticket["run_id"],

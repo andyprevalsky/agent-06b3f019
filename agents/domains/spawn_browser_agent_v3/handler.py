@@ -3106,6 +3106,16 @@ async def _synchronize_playwright_page_with_agent_focus(
     return current_page
 
 
+def _require_live_playwright_client(playwright_browser: Any, page: Any) -> None:
+    """Do not publish a locally known disconnected client or closed input page."""
+    connected = getattr(playwright_browser, "is_connected", None)
+    if callable(connected) and connected() is False:
+        raise RuntimeError("Playwright client disconnected during attachment or focus binding")
+    is_closed = getattr(page, "is_closed", None)
+    if callable(is_closed) and is_closed() is True:
+        raise RuntimeError("Playwright input page closed during attachment or focus binding")
+
+
 async def _rebind_browser_tab_runtime(
     *,
     dom_service: Any,
@@ -3127,6 +3137,7 @@ async def _rebind_browser_tab_runtime(
         focus_cache=focus_cache,
     )
     if focused_page is current_page:
+        _require_live_playwright_client(playwright_browser, focused_page)
         return current_page, humanizer
     if browser_recorder is not None:
         browser_recorder.page = focused_page
@@ -3143,6 +3154,7 @@ async def _rebind_browser_tab_runtime(
     )
     await trace_foreground_await("cursor_initialize", rebound_humanizer.initialize_cursor(start_pos=(640, 400)))
     rebound_humanizer.set_cursor_observer(cursor_observer)
+    _require_live_playwright_client(playwright_browser, focused_page)
     return focused_page, rebound_humanizer
 
 
@@ -9069,6 +9081,74 @@ async def _spawn_browser_agent_activity_v3_real(
         # ===== PHASE 2: PARALLEL SETUP =====
         t_parallel = time.monotonic()
 
+        async def _configure_playwright_browser(_pw_browser):
+            """Apply the same per-client setup on initial attach and reconnect."""
+            _pw_context = _pw_browser.contexts[0]
+            _pw_page = _pw_context.pages[0]
+
+            # Fast Mode: replay uses a Playwright route; write-through records via a
+            # response listener only (routing every request breaks Stripe Elements).
+            fast_mode_write_through = write_through_enabled_for_user(user_id)
+            if goal and (fast_mode_cache_enabled or fast_mode_write_through):
+                await _install_fast_mode_network_cache(
+                    _pw_context,
+                    goal,
+                    read_enabled=fast_mode_cache_enabled,
+                    write_enabled=fast_mode_cache_enabled or fast_mode_write_through,
+                    agent_id=agent_id,
+                )
+
+            if _botsigged_diagnostics_enabled(start_url):
+                await _install_botsigged_diagnostics(_pw_page, agent_id=agent_id, task_id=task_id)
+
+            t = time.monotonic()
+            fingerprint_injection_enabled = _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True)
+            if fingerprint_injection and fingerprint_injection_enabled:
+                from helpers.fingerprint_injection import apply_fingerprint_injection
+
+                injection_success = await apply_fingerprint_injection(_pw_page, fingerprint_injection)
+                if injection_success:
+                    logger.info(
+                        "\U0001f510 Applied fingerprint injection via CDP (Sec-CH-UA-Platform, init scripts)"
+                    )
+                else:
+                    logger.warning(
+                        "\u26a0\ufe0f Failed to apply fingerprint injection - browser may leak real fingerprint"
+                    )
+            elif fingerprint_injection and not fingerprint_injection_enabled:
+                logger.info("\U0001f510 Browser-agent fingerprint injection disabled by env")
+            else:
+                logger.info("\U0001f510 No fingerprint injection data provided - using provider defaults")
+            _record_timing("parallel.browser.fingerprint", t)
+            return _pw_context, _pw_page
+
+        async def _connect_playwright(connection_cdp_url, *, on_attach=None):
+            """Attach an input client without replacing the native browser session."""
+            from playwright.async_api import async_playwright
+
+            t = time.monotonic()
+            instance = await async_playwright().start()
+            browser = None
+            if on_attach is not None:
+                on_attach(instance, None)
+            try:
+                browser = await instance.chromium.connect_over_cdp(connection_cdp_url)
+                if on_attach is not None:
+                    on_attach(instance, browser)
+                _record_timing("parallel.browser.playwright_connect", t)
+                context, page = await _configure_playwright_browser(browser)
+                _require_live_playwright_client(browser, page)
+                return instance, browser, context, page
+            except BaseException:
+                # Initial setup already owns its partial handles. A later
+                # client-only attach must release its driver without closing
+                # the existing remote browser.
+                if on_attach is None:
+                    await _stop_playwright_resources(
+                        browser, instance, agent_id, close_browser=False,
+                    )
+                raise
+
         async def _setup_browser():
             """Connect DOMService + Playwright, apply fingerprint, init humanizer."""
             nonlocal playwright_driver_pid
@@ -9102,6 +9182,11 @@ async def _spawn_browser_agent_activity_v3_real(
             _playwright_instance = None
             _playwright_browser = None
 
+            def _own_playwright(instance, browser):
+                nonlocal _playwright_instance, _playwright_browser, playwright_driver_pid
+                _playwright_instance, _playwright_browser = instance, browser
+                playwright_driver_pid = getattr(_playwright_driver_process(instance), "pid", None)
+
             async def _connect_dom():
                 t = time.monotonic()
                 await _dom_service.connect()
@@ -9109,67 +9194,6 @@ async def _spawn_browser_agent_activity_v3_real(
                 logger.info("\U0001f310 Connected to browser via CDP")
                 return await _dom_service.session.get_current_page()
 
-            async def _connect_playwright():
-                """Connect Playwright, then apply everything that only needs the
-                Playwright side (fast-mode route, botsigged diagnostics,
-                fingerprint injection) while DOMService is still attaching."""
-                nonlocal _playwright_browser, _playwright_instance, playwright_driver_pid
-                t = time.monotonic()
-                from playwright.async_api import async_playwright
-
-                _pw_instance = await async_playwright().start()
-                _playwright_instance = _pw_instance
-                playwright_driver_pid = getattr(_playwright_driver_process(_pw_instance), "pid", None)
-                try:
-                    _pw_browser = await _pw_instance.chromium.connect_over_cdp(connection_cdp_url)
-                except BaseException:
-                    _driver_process = _playwright_driver_process(_pw_instance)
-                    with contextlib.suppress(Exception):
-                        await _pw_instance.stop()
-                    await _reap_playwright_driver_process(_driver_process, agent_id)
-                    _playwright_instance = None
-                    raise
-                _playwright_browser = _pw_browser
-                _record_timing("parallel.browser.playwright_connect", t)
-                _pw_context = _pw_browser.contexts[0]
-                _pw_page = _pw_context.pages[0]
-
-                # Fast Mode: replay uses a Playwright route; write-through records via a
-                # response listener only (routing every request breaks Stripe Elements).
-                fast_mode_write_through = write_through_enabled_for_user(user_id)
-                if goal and (fast_mode_cache_enabled or fast_mode_write_through):
-                    await _install_fast_mode_network_cache(
-                        _pw_context,
-                        goal,
-                        read_enabled=fast_mode_cache_enabled,
-                        write_enabled=fast_mode_cache_enabled or fast_mode_write_through,
-                        agent_id=agent_id,
-                    )
-
-                if _botsigged_diagnostics_enabled(start_url):
-                    await _install_botsigged_diagnostics(_pw_page, agent_id=agent_id, task_id=task_id)
-
-                t = time.monotonic()
-                fingerprint_injection_enabled = _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True)
-                if fingerprint_injection and fingerprint_injection_enabled:
-                    from helpers.fingerprint_injection import apply_fingerprint_injection
-
-                    injection_success = await apply_fingerprint_injection(_pw_page, fingerprint_injection)
-                    if injection_success:
-                        logger.info(
-                            "\U0001f510 Applied fingerprint injection via CDP (Sec-CH-UA-Platform, init scripts)"
-                        )
-                    else:
-                        logger.warning(
-                            "\u26a0\ufe0f Failed to apply fingerprint injection - browser may leak real fingerprint"
-                        )
-                elif fingerprint_injection and not fingerprint_injection_enabled:
-                    logger.info("\U0001f510 Browser-agent fingerprint injection disabled by env")
-                else:
-                    logger.info("\U0001f510 No fingerprint injection data provided - using provider defaults")
-                _record_timing("parallel.browser.fingerprint", t)
-
-                return _pw_instance, _pw_browser, _pw_context, _pw_page
 
             try:
                 if _env_enabled("BROWSER_AGENT_PARALLEL_CDP_CONNECT", False):
@@ -9180,7 +9204,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     (
                         _dom_page,
                         (_playwright_instance, _playwright_browser, _playwright_context, _input_page),
-                    ) = await asyncio.gather(_connect_dom(), _connect_playwright())
+                    ) = await asyncio.gather(_connect_dom(), _connect_playwright(connection_cdp_url, on_attach=_own_playwright))
                 else:
                     _dom_page = await _connect_dom()
                     (
@@ -9188,7 +9212,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         _playwright_browser,
                         _playwright_context,
                         _input_page,
-                    ) = await _connect_playwright()
+                    ) = await _connect_playwright(connection_cdp_url, on_attach=_own_playwright)
             except BaseException:
                 with contextlib.suppress(Exception):
                     await _dom_service.disconnect()
@@ -10361,6 +10385,35 @@ async def _spawn_browser_agent_activity_v3_real(
             # -> foreground provider tab -> rebind humanizer + recorder.
             # This runs before observation so the LLM, synthesized input, and
             # customer live view all refer to the same authoritative tab.
+            is_connected = getattr(playwright_browser, "is_connected", None)
+            if callable(is_connected) and is_connected() is False:
+                # The shared CDP upstream closes both clients. browser-use can
+                # reconnect itself; Playwright leaves closed Page objects behind.
+                # Reattach only that client to the current DOMService endpoint.
+                input_cdp_url = getattr(dom_service, "cdp_url", None)
+                if not isinstance(input_cdp_url, str) or not input_cdp_url:
+                    raise RuntimeError("Disconnected Playwright client has no current CDP endpoint")
+                # Keep the disconnected handles owned until retirement ends.
+                # Cancellation here leaves them available to ordinary cleanup.
+                await _stop_playwright_resources(
+                    playwright_browser, playwright_instance, agent_id,
+                    close_browser=False, driver_pid=playwright_driver_pid,
+                )
+                (
+                    playwright_instance, playwright_browser, _, input_page,
+                ) = await foreground_trace.run("tab_rebind", _connect_playwright(input_cdp_url))
+                playwright_driver_pid = getattr(_playwright_driver_process(playwright_instance), "pid", None)
+                tab_focus_cache = TabFocusCache()
+                humanizer = await _replace_browser_humanizer(
+                    current_humanizer=humanizer,
+                    enabled=_env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True),
+                    dom_page=dom_page, input_page=input_page,
+                    cursor_observer=observe_cursor, humanizer_factory=BrowserHumanizer,
+                    serial_cdp_keyboard=is_single_cdp_client_provider(browser_session_metadata.get("provider")),
+                )
+                if browser_recorder is not None:
+                    browser_recorder.page = input_page
+
             input_page, humanizer = await foreground_trace.run("tab_rebind", _rebind_browser_tab_runtime(
                 dom_service=dom_service,
                 dom_page=dom_page,

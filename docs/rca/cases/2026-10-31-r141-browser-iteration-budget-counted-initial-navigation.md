@@ -54,3 +54,11 @@ None specific.
 ## Reusable lesson
 
 A count of distinct observed counter values is not the counter's current value. Keep trajectory evidence and native execution limits separate when initialization is numbered zero.
+
+## Follow-up: iteration100 before finalizer readiness
+
+A separate offline reproduction on exactd2e68c4ea7b546bc17ce6831f71d3e454134ec4f showed that the corrected native counter can report iteration100 while its last action/bookkeeping is still running. The real workflow guard refuses an `acting` finalizer; the real poller then takes its ordinary pause fallback. The same owner/ticket after acknowledgement is accepted. This proves a prospective ordering race, not that it occurred in the original R141 run: that run's independently proved premature decision was at iteration99 and its original ticket/response body is missing.
+
+Qualified follow-up patchaff689410af967d96cc9eb80a3a9893867e28ecfa774b269aa17aa075c2ab6c0 adds a distinct validated pending response. It binds the native owner, active task, workflow/run/first-run, requirement revision, user state and deadline on every request. Pending is never cached as acceptance. Its deadline is registration time plus the existing activity timeout, conservatively no later than the subsequently started activity's deadline. The poller waits only its existing ordinary interval and revalidates; expiry, cancellation, stale identity/revision and malformed responses retain immediate refusal/pause. Native100, caller/activity limits and original outcomes remain unchanged.
+
+Independent B review grounded all six exact paths, the actual registered entries and the baselineRED/candidateGREEN ordering proof. Five repeated candidate rounds pass, including all seventeen registered pending-guard variants, acting-to-ready, never-ready expiry, revision/cancel/stale-run and malformed-response controls. Forty-one helper guards and fifteen backend contract cases pass; original trajectory/minimum-step semantics remain intact. The local investigator has not applied the patch; parent integration and combined gates are separate evidence. No retrospective task success or universal finalizer-completion claim follows.
