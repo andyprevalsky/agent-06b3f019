@@ -29,8 +29,11 @@ def polar():
     return module
 
 
-async def execute_receipt(fixture, append=True, mask_number=False):
+async def execute_receipt(fixture, append=True, mask_number=False, restrict_navigation=False):
     from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.action_batch import BrowserActionBatch
+    from domains.spawn_browser_agent_v3.navigation_policy import NavigationPolicyBarrier
     history=ActionHistory()
     history.restore_entries(fixture['prior_steps'])
     async def execute_action(*args, **kwargs):
@@ -44,11 +47,33 @@ async def execute_receipt(fixture, append=True, mask_number=False):
     policy.register_secret_refs({'cvv:test':'29'} if mask_number else {})
     body=copy.deepcopy(wrapper.body)
     body=[n for n in body if not isinstance(n,ast.Nonlocal)]
-    ns=dict(action_history=history,execute_action=execute_action,args=(),kwargs={},
+    identity={'target_id':'receipt-target','url':'https://example.com'}
+    policy.get_parked_page_identity=lambda: dict(identity)
+    navigation_policy=NavigationPolicyBarrier(fixture['task_id'])
+    if restrict_navigation:
+        navigation_policy.deny('receipt-session',identity)
+    ns=dict(vars(handler))
+    ns.update(action_history=history,execute_action=execute_action,args=(),
+            kwargs={'action':{'action':fixture['action'],'params':fixture['params']}},
             secret_refs={'cvv:test':'29'} if mask_number else {},_auth_context_for_url=lambda _: {},
-            current_url='https://example.com',dom_service=policy,
+            current_url=identity['url'],dom_service=policy,
+            navigation_policy=navigation_policy,policy_decision_tab=None,
+            action_batch=BrowserActionBatch(lambda *_:None),session_id='receipt-session',
+            task_id=fixture['task_id'],session_credential_ref=None,
+            instruction_state={},schema_user_instruction_count=0,
             signed_in_realm_for_secret_refs=lambda *_:None,
             MINTED_NEW_PASSWORD_REF='pwd:minted')
+    # Execute the current policy gate, with its real authority helpers. The
+    # ordinary receipt fixture starts with an inactive policy and empty batch.
+    helpers=[]
+    for name in ('_credential_binding','_policy_authority','_policy_action_error'):
+        node=copy.deepcopy(next(n for n in ast.walk(activity())
+                                if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name==name))
+        node.body=[ast.Global(names=n.names) if isinstance(n,ast.Nonlocal) else n for n in node.body]
+        helpers.append(node)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=helpers,type_ignores=[])),
+                 '<actual-policy-boundary>','exec'),ns)
+    ns['policy_decision_authority']=ns['_policy_authority']()
     call=compile_body(body,ns,'run')
     return await call()
 
@@ -120,3 +145,12 @@ async def test_polar_browser_identity_is_scoped_and_content_stays_private():
     from helpers.llm import convert_context_to_messages
     before=convert_context_to_messages([row]);row['metadata']={}
     assert before==convert_context_to_messages([row])
+
+
+@pytest.mark.asyncio
+async def test_polar_browser_active_policy_cannot_mint_receipt_identity():
+    from domains.spawn_browser_agent_v3.navigation_policy import NavigationPolicyBarrier
+    f=json.loads(FIXTURE.read_text())
+    result=await execute_receipt(f,restrict_navigation=True)
+    assert result == {'success':False,'error':NavigationPolicyBarrier.feedback}
+    assert 'action_step' not in result

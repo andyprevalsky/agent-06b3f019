@@ -33503,7 +33503,7 @@ def test_exact_recovery_consumes_runtime_receipt_completed_absent_primary(
     }
     original_meta = meta.read_bytes()
     original_latch = (registry / "guest-cleanup-unconfirmed").read_bytes()
-    functions = "\n".join(fixture["extract"](fleet_source_text(), name) for name in (
+    functions = "\n".join(_extract_fleet_function(fleet_source_text(), name + "() {") for name in (
         "registry_meta_value", "fleet_registry_cleanup_state",
         "fleet_registry_build_guest_recovery_plan", "fleet_recovery_reconnect_guest_shutdowns",
         "cleanup_stale_owner_recovery_proxies", "cloudbench_confirm_guest_shutdowns",
@@ -33570,6 +33570,7 @@ fleet_recovery_reconnect_guest_shutdowns "$REGISTRY"
 '''
     env = dict(os.environ, APP=fixture["APP"], OWNER=fixture["OWNER"], REGISTRY=str(registry),
                FLEET_OWNERSHIP_ROOT=str(registry.parent), FLEET_AUDIT_ROOT=str(audit.parent),
+               CLOUDBENCH_SCRIPT_SNAPSHOT=str(ROOT / "scripts"),
                SEALED_MACHINE_RETIREMENT_HELPER=str(ROOT / "scripts/cloudbench-sealed-machine-retirement.py"),
                SOURCE_HELPER="", POOL_CLAIMS_DIR="", RUN_ID="current-recovery-caller",
                ABSENT=mid, ABSENT_STATUS="2" if fault == "unreadable" else "1",

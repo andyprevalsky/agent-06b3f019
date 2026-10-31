@@ -91,6 +91,19 @@ root's full forensic family then passed 97 cases in 52.91 seconds. The complete
 registered gate remains pending a new rerun; these controls do not establish a
 whole-gate pass.
 
+A later complete gate passed 376 tests before the dependency-sync receipt fixture
+failed through its alternate extractor. That sole call now uses the shared real
+helper extractor and supplies the actual script snapshot. All 22 related cases
+passed independently; production ownership checks and negative assertions remain
+unchanged.
+
+Remaining-case triage then exposed the action-identity fixture extracting the
+current action wrapper without its navigation-policy helpers. The fixture now
+compiles those real helpers and provides the real inactive policy and empty batch.
+An added active-policy test verifies denial cannot mint a receipt. All five cases
+passed independently and in the root checkout (6.15 seconds). No runtime behavior
+or benchmark grade changed. A complete registered-gate pass remains unverified.
+
 The source-bound bootstrap fixture used a disposable local Git repository built
 from supplied source bytes, because its normal test machinery reads committed
 blobs. Those local commits are not historical 618430 ancestry. Initial attempts
