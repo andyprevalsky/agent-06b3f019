@@ -1597,7 +1597,7 @@ def check_versioned_group4_lanes(tmp: Path) -> None:
     follow-up 13 replaced the 1536 MB estimate) runs Step 6c alone after the
     lanes that drive run-blackbox-tests.sh against victoria_<workspace>.
     Budget math on the recorded 7979 MB devbox: semantic-stack is deferred
-    behind backend coverage (6108 + 4571) and smoke (6108 + 4150) by memory
+    behind backend coverage (6108 + 2560) and smoke (6108 + 4150) by memory
     and behind agents coverage (6108 + 1152 would fit) by the sweep edge;
     e2b-smoke (6108 + 812 = 6920) overlaps it there and on the launcher's
     8755 MB budget. Backend coverage keeps its width formula (2560 / 3072),
