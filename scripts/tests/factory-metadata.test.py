@@ -61,11 +61,14 @@ def git_checkout(root: Path) -> Path:
 
 class FactoryMetadataTest(unittest.TestCase):
     def test_start_refreshes_snapshot_for_launched_head(self):
-        """`run-deploy-stage --start` re-stamps the selected snapshot with the
-        head it launches (observed_at, validation.source_sha and that field's
-        evidence) and nothing else, so the run defaults carry the launched
-        head; a later head is re-stamped again. A snapshot outside the checkout
-        is reported and left alone; non-allowlisted keys refuse the run with
+        """`run-deploy-stage --start` re-stamps the checkout's own
+        .context/factory-metadata.json with the head it launches (observed_at,
+        validation.source_sha and that field's evidence) and nothing else, so
+        the run defaults carry the launched head; a later head is re-stamped
+        again. A refused start (run already active) touches nothing. A file
+        anywhere else, including a nested worktree's .context/ under this
+        checkout, is reported and left alone; a retrospective keeps its
+        observation; non-allowlisted keys refuse the run (wrapper exit 1) with
         the file untouched. Until now a launcher patched the file by hand."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -88,6 +91,14 @@ class FactoryMetadataTest(unittest.TestCase):
             def finish() -> None:
                 subprocess.run(["bash", wrapper, "--finish"], env=env, cwd=checkout, check=True, capture_output=True)
 
+            def untouched(path: Path, run_id: str, **overrides: str) -> subprocess.CompletedProcess:
+                before = path.read_bytes()
+                result = start(run_id, **overrides)
+                self.assertIn("factory metadata: not refreshed", result.stdout)
+                self.assertEqual(path.read_bytes(), before)
+                finish()
+                return result
+
             first_head = head()
             first = start("first")
             self.assertIn(f"factory metadata: refreshed {snapshot}", first.stdout)
@@ -103,10 +114,17 @@ class FactoryMetadataTest(unittest.TestCase):
             self.assertEqual(refreshed["usage"], original["usage"])
             kept = {k: v for k, v in refreshed["evidence"].items() if k != "validation.source_sha"}
             self.assertEqual(kept, {k: v for k, v in original["evidence"].items() if k != "validation.source_sha"})
-            self.assertEqual(set(refreshed), set(original) | {"schema_version", "record_type"} & set(refreshed))
+            self.assertEqual(set(refreshed), set(original))
             self.assertEqual(load_metadata(snapshot)["validation"]["source_sha"], first_head)
             run_metadata = json.loads((root / "deploy-runs/first/metadata.json").read_text())
             self.assertEqual(run_metadata["telemetry"]["validation"]["source_sha"], first_head)
+            # A refused start (the run is still active) never rewrites the live snapshot.
+            snapshot.write_text(json.dumps(original))
+            before = snapshot.read_bytes()
+            refused = start("again", check=False)
+            self.assertEqual(refused.returncode, 1)
+            self.assertIn("already active", refused.stderr)
+            self.assertEqual(snapshot.read_bytes(), before)
             finish()
             (checkout / "tracked").write_text("v2\n")
             subprocess.run([*git, "add", "."], check=True, capture_output=True)
@@ -116,18 +134,26 @@ class FactoryMetadataTest(unittest.TestCase):
             start("second")
             self.assertEqual(json.loads(snapshot.read_text())["validation"]["source_sha"], second_head)
             finish()
+            # Not this checkout's .context/ snapshot: elsewhere, a nested
+            # worktree's .context/ under this checkout, or another directory here.
             elsewhere = root / "elsewhere-factory-metadata.json"
-            elsewhere.write_text(json.dumps(original))
-            before = elsewhere.read_bytes()
-            outside = start("third", FACTORY_METADATA_FILE=str(elsewhere))
-            self.assertIn("factory metadata: not refreshed", outside.stdout)
-            self.assertIn("outside", outside.stdout)
-            self.assertEqual(elsewhere.read_bytes(), before)
-            finish()
+            nested = checkout / ".claude" / "worktrees" / "other" / ".context" / "factory-metadata.json"
+            misplaced = checkout / "other" / "factory-metadata.json"
+            for path in (elsewhere, nested, misplaced):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(original))
+                result = untouched(path, f"skip-{path.parent.parent.name}", FACTORY_METADATA_FILE=str(path))
+                self.assertIn("is not this checkout's", result.stdout)
+            # A retrospective record keeps its original observation.
+            snapshot.write_text(json.dumps({**original, "record_type": "retrospective"}))
+            result = untouched(snapshot, "retro")
+            self.assertIn("retrospective", result.stdout)
+            # Non-allowlisted keys: refused before the run exists, file untouched, value never echoed.
             snapshot.write_text(json.dumps({**original, "api_key": "must-not-leak"}))
             before = snapshot.read_bytes()
             failed = start("fourth", check=False)
-            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(failed.returncode, 1)
+            self.assertIn("failed to initialize deploy timing run", failed.stderr)
             self.assertIn("factory metadata snapshot rejected", failed.stderr)
             self.assertNotIn("must-not-leak", failed.stdout + failed.stderr)
             self.assertEqual(snapshot.read_bytes(), before)

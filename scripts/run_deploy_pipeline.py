@@ -1333,32 +1333,54 @@ def _terminate_lanes(processes: dict[str, subprocess.Popen[bytes]], signum: int)
 # Every lane therefore carries a unique token in its environment. A process is
 # lane-owned when its environment carries the token or a live parent chain
 # leads to one that does; nothing else (no name pattern, no port, no cwd) makes
-# a process a target. After a terminated lane's wrapper exits, the supervisor
-# waits (bounded) for the lane-owned pid of every owner record under the
-# benchmark context root to exit, escalates once with TERM to the topmost live
-# lane-owned ancestor of each survivor (the local.py controller while it lives,
-# otherwise the exact owner pid: a run.sh already tearing down ignores the
-# repeated signal, one that never got a signal starts its cleanup), and as the
-# documented last resort after the second bound SIGKILLs every surviving
-# lane-owned process so nothing outlives the attempt. A record whose pid is
-# alive but not lane-owned is foreign (another deploy, another run-bench task,
-# a reused pid): it is reported in the receipt and never signalled.
+# a process a target. After a terminated lane's wrapper exits, the supervisor:
+#
+# 1. waits (bounded, ``wait``) for the lane-owned pid of every owner record
+#    under the benchmark context root to exit on its own;
+# 2. TERMs once the benchmarks/local.py controller of each surviving run (the
+#    pid its generated run id embeds) while it lives — it owns the cleanup —
+#    and only a run without a live controller gets the TERM on the exact owner
+#    pid itself (a run.sh already tearing down ignores the repeated signal, one
+#    that never got a signal starts its cleanup). Bash wrappers above the
+#    controller are never targets: TERMing them would only orphan it;
+# 3. then waits at least the controller's own published shutdown budget
+#    (``local_worker_supervisor.py --shutdown-timeout``, the same producer
+#    local.py uses for its stack cleanup: WORKER_SHUTDOWN_GRACE_PERIOD + the
+#    recording finalize timeout + 30 s, 2175 s by default, plus a margin), and
+#    SIGKILLs the surviving lane-owned processes as the documented last resort
+#    only when the run shows no progress for a whole ``wait`` bound: no owned
+#    process exited and no owner record or ``local-stack-cleanup.status``
+#    receipt changed. A draining stack that keeps publishing progress is left
+#    to finish up to a hard ceiling of twice that budget.
+#
+# A record whose pid is alive but not lane-owned is foreign (another deploy,
+# another run-bench task, a reused pid): it is reported in the receipt and
+# never signalled. A lane-owned process the supervisor may not signal (a root
+# child reached through the parent chain) is recorded as ``eperm`` and left.
 LANE_TOKEN_ENV = "DEPLOY_PIPELINE_LANE_TOKEN"
 OWNER_RECORD_NAMES = ("local-stack-owner.json", "local-benchmark-owner.json")
 STACK_MANIFEST_NAME = "services.json"
+STACK_CLEANUP_STATUS_NAME = "local-stack-cleanup.status"
 # A generated run id embeds its benchmarks/local.py controller pid (see
 # scripts/lib/isolated-benchmarks.sh), which covers the bootstrap before any
-# owner record exists.
+# owner record exists and names the process that owns the run's cleanup.
 GENERATED_RUN_ID = re.compile(r"\d+-(\d+)-\d+")
+CONTROLLER_RECORD_KIND = "run-id-controller"
 TEARDOWN_WAIT_ENV = "DEPLOY_PIPELINE_TEARDOWN_WAIT_SECONDS"
 DEFAULT_TEARDOWN_WAIT_SECONDS = 120.0
+TEARDOWN_KILL_AFTER_ENV = "DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS"
+# agents/scripts/local_worker_supervisor.py --shutdown-timeout with its defaults
+# (2100 + 45 + 30); used only when that producer cannot be asked.
+DEFAULT_CONTROLLER_SHUTDOWN_SECONDS = 2175.0
+TEARDOWN_KILL_AFTER_MARGIN_SECONDS = 120.0
+SHUTDOWN_BUDGET_SCRIPT = ROOT / "agents" / "scripts" / "local_worker_supervisor.py"
 TEARDOWN_KILL_WAIT_SECONDS = 10.0
 TEARDOWN_POLL_SECONDS = 0.5
 # Owner records older than this before the lane started cannot be its own.
 TEARDOWN_RECORD_SLACK_SECONDS = 1.0
 TEARDOWN_LAST_RESORT_NOTE = (
-    "last resort after the second bound: SIGKILL every surviving lane-owned process; a run-owned "
-    "database or Docker container may remain, reconcile with "
+    "last resort: SIGKILL every surviving lane-owned process after the controller's shutdown budget "
+    "passed with no progress; a run-owned database or Docker container may remain, reconcile with "
     "`scripts/run-bench --local --run-id <run> --reconcile-cleanup`"
 )
 
@@ -1368,17 +1390,56 @@ def benchmark_context_root() -> Path:
     return ROOT / ".context" / "benchmarks"
 
 
-def teardown_wait_seconds() -> float:
-    raw = os.environ.get(TEARDOWN_WAIT_ENV)
+def _seconds_env(name: str, default: float | None) -> float | None:
+    raw = os.environ.get(name)
     if raw is None:
-        return DEFAULT_TEARDOWN_WAIT_SECONDS
+        return default
     try:
         value = float(raw)
     except ValueError as error:
-        raise ValueError(f"{TEARDOWN_WAIT_ENV} must be a number of seconds: {raw!r}") from error
+        raise ValueError(f"{name} must be a number of seconds: {raw!r}") from error
     if value < 0:
-        raise ValueError(f"{TEARDOWN_WAIT_ENV} must not be negative: {raw!r}")
+        raise ValueError(f"{name} must not be negative: {raw!r}")
     return value
+
+
+def teardown_wait_seconds() -> float:
+    value = _seconds_env(TEARDOWN_WAIT_ENV, DEFAULT_TEARDOWN_WAIT_SECONDS)
+    assert value is not None
+    return value
+
+
+def controller_shutdown_budget_seconds() -> tuple[float, str]:
+    """(seconds, source): the stack controller's published cleanup budget, read
+    from the same producer benchmarks/local.py uses; the documented default
+    when that producer cannot be asked."""
+    try:
+        result = subprocess.run(
+            [sys.executable, str(SHUTDOWN_BUDGET_SCRIPT), "--shutdown-timeout"],
+            cwd=SHUTDOWN_BUDGET_SCRIPT.parent.parent, capture_output=True, text=True, timeout=5, check=True,
+        )
+        seconds = float(int(result.stdout.strip()))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return DEFAULT_CONTROLLER_SHUTDOWN_SECONDS, "default"
+    if seconds <= 0:
+        return DEFAULT_CONTROLLER_SHUTDOWN_SECONDS, "default"
+    return seconds, "local_worker_supervisor.py --shutdown-timeout"
+
+
+def teardown_kill_after_override() -> tuple[float, str] | None:
+    """The explicit ``DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS`` bound, validated."""
+    override = _seconds_env(TEARDOWN_KILL_AFTER_ENV, None)
+    return None if override is None else (override, TEARDOWN_KILL_AFTER_ENV)
+
+
+def teardown_kill_after_seconds() -> tuple[float, str]:
+    """(seconds after the TERM before the last resort may run, source). The
+    producer is asked only when a teardown actually has survivors."""
+    override = teardown_kill_after_override()
+    if override is not None:
+        return override
+    budget, source = controller_shutdown_budget_seconds()
+    return budget + TEARDOWN_KILL_AFTER_MARGIN_SECONDS, f"{source} + {TEARDOWN_KILL_AFTER_MARGIN_SECONDS:.0f}s margin"
 
 
 def lane_token(name: str, attempt: int) -> str:
@@ -1386,7 +1447,7 @@ def lane_token(name: str, attempt: int) -> str:
 
 
 def _proc_processes(proc: Path) -> dict[int, dict]:
-    """``{pid: {"ppid", "comm", "start"}}`` for every process /proc lists now."""
+    """``{pid: {"ppid", "comm", "start"}}`` for every live process /proc lists now."""
     processes: dict[int, dict] = {}
     try:
         entries = os.listdir(proc)
@@ -1416,7 +1477,7 @@ def _carries_lane_token(proc: Path, pid: int, token: str) -> bool:
     try:
         environ = (proc / str(pid) / "environ").read_bytes()
     except OSError:
-        return False  # exited, or another user's process (never ours)
+        return False  # exited, or a process whose environment we may not read
     return f"{LANE_TOKEN_ENV}={token}".encode() in environ.split(b"\0")
 
 
@@ -1426,9 +1487,9 @@ def lane_owned_processes(token: str, proc: Path | None = None,
 
     A process is lane-owned when its environment carries the lane token or a
     live parent chain leads to one that does (a child whose environment was
-    scrubbed). ``cache`` remembers the token check per (pid, start time) so a
-    poll loop reads each process's environment once; a reused pid has a new
-    start time and is checked again.
+    scrubbed or cannot be read). ``cache`` remembers the token check per
+    (pid, start time) so a poll loop reads each process's environment once; a
+    reused pid has a new start time and is checked again.
     """
     proc = PROC_ROOT if proc is None else proc
     cache = {} if cache is None else cache
@@ -1461,11 +1522,20 @@ def _record_pid(payload: object, field: str) -> int | None:
     return pid
 
 
+def _cleanup_status_state(path: Path) -> str | None:
+    for line in path.read_text().splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key == "state":
+            return value.strip()
+    return None
+
+
 def lane_owner_records(context_root: Path, since_epoch: float) -> tuple[list[dict], int]:
-    """Owner records (stack, benchmark, manifest, generated run-id controller)
-    under ``context_root`` modified since ``since_epoch``, and the count of
-    older run directories left out: a record written before the lane started
-    cannot be the lane's own. Ownership itself is decided by the lane token."""
+    """Owner records (stack, benchmark, manifest, cleanup status, generated
+    run-id controller) under ``context_root`` modified since ``since_epoch``,
+    and the count of older run directories left out: a record written before
+    the lane started cannot be the lane's own. Ownership itself is decided by
+    the lane token."""
     records: list[dict] = []
     older = 0
     if not context_root.is_dir():
@@ -1474,12 +1544,16 @@ def lane_owner_records(context_root: Path, since_epoch: float) -> tuple[list[dic
         if run_dir.is_symlink() or not run_dir.is_dir():
             continue
         found: list[dict] = []
-        for name in (*OWNER_RECORD_NAMES, STACK_MANIFEST_NAME):
+        for name in (*OWNER_RECORD_NAMES, STACK_MANIFEST_NAME, STACK_CLEANUP_STATUS_NAME):
             path = run_dir / name
             if path.is_symlink() or not path.is_file():
                 continue
             try:
                 modified = path.stat().st_mtime
+                if name == STACK_CLEANUP_STATUS_NAME:
+                    found.append({"path": str(path), "run_id": run_dir.name, "kind": name, "pid": None,
+                                  "modified_epoch": modified, "state": _cleanup_status_state(path)})
+                    continue
                 payload = json.loads(path.read_text())
             except (OSError, ValueError):
                 found.append({"path": str(path), "run_id": run_dir.name, "kind": name, "pid": None,
@@ -1499,7 +1573,7 @@ def lane_owner_records(context_root: Path, since_epoch: float) -> tuple[list[dic
         except OSError:
             continue
         if generated:
-            found.append({"path": str(run_dir), "run_id": run_dir.name, "kind": "run-id-controller",
+            found.append({"path": str(run_dir), "run_id": run_dir.name, "kind": CONTROLLER_RECORD_KIND,
                           "pid": int(generated.group(1)), "modified_epoch": dir_modified})
         recent = [r for r in found if r["modified_epoch"] is None
                   or r["modified_epoch"] >= since_epoch - TEARDOWN_RECORD_SLACK_SECONDS]
@@ -1512,7 +1586,9 @@ def lane_owner_records(context_root: Path, since_epoch: float) -> tuple[list[dic
 def _classify_records(records: list[dict], owned: dict[int, dict], processes: dict[int, dict]) -> None:
     for record in records:
         pid = record["pid"]
-        if pid is None:
+        if record["kind"] == STACK_CLEANUP_STATUS_NAME:
+            record["status"] = "receipt"
+        elif pid is None:
             record["status"] = "unreadable"
         elif pid in owned:
             record["status"] = "owned"
@@ -1524,35 +1600,50 @@ def _classify_records(records: list[dict], owned: dict[int, dict], processes: di
             record["status"] = "exited"
 
 
-def _escalation_targets(pids: list[int], owned: dict[int, dict]) -> list[int]:
-    """The topmost live lane-owned ancestor of each surviving owner pid: the
-    controller while it lives (one TERM, it owns the cleanup), else the pid."""
+def _escalation_targets(records: list[dict], alive: list[int]) -> list[int]:
+    """One TERM target per surviving owner: its run's live lane-owned controller
+    (the pid the generated run id embeds) while it lives, because it owns the
+    cleanup; the exact owner pid only when no controller is left. Never a bash
+    wrapper above the controller."""
+    controllers = {r["run_id"]: r["pid"] for r in records
+                   if r["kind"] == CONTROLLER_RECORD_KIND and r["status"] == "owned"}
     targets: list[int] = []
-    for pid in pids:
-        current = pid
-        seen = {current}
-        while owned.get(current, {}).get("ppid") in owned and owned[current]["ppid"] not in seen:
-            current = owned[current]["ppid"]
-            seen.add(current)
-        if current not in targets:
-            targets.append(current)
+    for pid in alive:
+        runs = {r["run_id"] for r in records if r["pid"] == pid and r["status"] == "owned"}
+        target = next((controllers[run] for run in sorted(runs) if run in controllers), pid)
+        if target not in targets:
+            targets.append(target)
     return targets
 
 
 def _signal_pids(pids: list[int], owned: dict[int, dict], signum: int) -> list[dict]:
     signalled: list[dict] = []
     for pid in pids:
+        entry = {"pid": pid, "comm": owned.get(pid, {}).get("comm"), "signal": signal.Signals(signum).name}
         try:
             os.kill(pid, signum)
         except ProcessLookupError:
             continue
-        signalled.append({"pid": pid, "comm": owned.get(pid, {}).get("comm"), "signal": signal.Signals(signum).name})
+        except PermissionError:
+            # Lane-owned through the parent chain but not ours to signal (a
+            # root child of setup-db.sh): recorded, left alone, never fatal.
+            entry["error"] = "eperm"
+        signalled.append(entry)
     return signalled
 
 
+def _teardown_progress(records: list[dict], owned: dict[int, dict]) -> tuple:
+    """What a draining run changes while it makes progress: the set of live
+    lane-owned processes and every owner/cleanup receipt's modification time
+    and state."""
+    return (tuple(sorted(owned)),
+            tuple((r["path"], r["modified_epoch"], r.get("state")) for r in records))
+
+
 def teardown_lane(name: str, *, attempt: int, token: str, started_epoch: float, state_dir: Path,
-                  wait_seconds: float | None = None, context_root: Path | None = None,
-                  proc: Path | None = None, kill_wait_seconds: float = TEARDOWN_KILL_WAIT_SECONDS,
+                  wait_seconds: float | None = None, kill_after: tuple[float, str] | None = None,
+                  context_root: Path | None = None, proc: Path | None = None,
+                  kill_wait_seconds: float = TEARDOWN_KILL_WAIT_SECONDS,
                   poll_seconds: float = TEARDOWN_POLL_SECONDS) -> dict:
     """Wait for, then reap, every stack/benchmark owner the terminated lane left
     behind (see the section comment) and write the receipt to
@@ -1562,8 +1653,9 @@ def teardown_lane(name: str, *, attempt: int, token: str, started_epoch: float, 
     started = time.monotonic()
     cache: dict[tuple[int, int], bool] = {}
     receipt: dict = {
-        "schema_version": 1, "lane": name, "attempt": attempt, "token": token, "started_at": _now(),
+        "schema_version": 2, "lane": name, "attempt": attempt, "token": token, "started_at": _now(),
         "lane_started_epoch": started_epoch, "context_root": str(context_root), "wait_seconds": wait_seconds,
+        "kill_after_seconds": None, "kill_after_source": "not needed",
         "phases": [], "records": [], "older_run_dirs": 0, "owned": [], "foreign": [], "lingering": [],
     }
     # Classifications accumulate: the final observation sees a reaped owner as
@@ -1585,11 +1677,11 @@ def teardown_lane(name: str, *, attempt: int, token: str, started_epoch: float, 
         alive = sorted({record["pid"] for record in records if record["status"] == "owned"})
         return records, alive, owned
 
-    def wait_until(deadline: float) -> tuple[list[int], dict[int, dict]]:
+    def wait_until(deadline: float) -> tuple[list[dict], list[int], dict[int, dict]]:
         while True:
-            _, alive, owned = observe()
+            records, alive, owned = observe()
             if not alive or time.monotonic() >= deadline:
-                return alive, owned
+                return records, alive, owned
             time.sleep(poll_seconds)
 
     def phase(label: str, alive: list[int], since: float, **extra: object) -> None:
@@ -1598,19 +1690,38 @@ def teardown_lane(name: str, *, attempt: int, token: str, started_epoch: float, 
 
     since = time.monotonic()
     first_alive = observe()[1]
-    alive, owned = wait_until(since + wait_seconds)
+    records, alive, owned = wait_until(since + wait_seconds)
     phase("wait", alive, since)
     outcome = "exited" if first_alive else "clean"
     if alive:
+        kill_after_seconds, kill_after_source = teardown_kill_after_seconds() if kill_after is None else kill_after
+        receipt.update(kill_after_seconds=kill_after_seconds, kill_after_source=kill_after_source)
         since = time.monotonic()
-        signalled = _signal_pids(_escalation_targets(alive, owned), owned, signal.SIGTERM)
-        alive, owned = wait_until(since + wait_seconds)
-        phase("term", alive, since, signalled=signalled)
+        signalled = _signal_pids(_escalation_targets(records, alive), owned, signal.SIGTERM)
+        fingerprint, last_progress = _teardown_progress(records, owned), since
+        stall: str | None = None
+        while True:
+            records, alive, owned = observe()
+            if not alive:
+                break
+            now = time.monotonic()
+            current = _teardown_progress(records, owned)
+            if current != fingerprint:
+                fingerprint, last_progress = current, now
+            if now - since >= kill_after_seconds and now - last_progress >= wait_seconds:
+                stall = "no progress for a whole wait bound after the controller's shutdown budget"
+                break
+            if now - since >= 2 * kill_after_seconds:
+                stall = "hard ceiling: twice the controller's shutdown budget"
+                break
+            time.sleep(poll_seconds)
+        phase("term", alive, since, signalled=signalled,
+              last_progress_age_s=round(time.monotonic() - last_progress, 2), stall=stall)
         outcome = "terminated"
         if alive:
             since = time.monotonic()
             killed = _signal_pids(sorted(owned), owned, signal.SIGKILL)
-            alive, owned = wait_until(since + kill_wait_seconds)
+            records, alive, owned = wait_until(since + kill_wait_seconds)
             phase("kill", alive, since, signalled=killed, note=TEARDOWN_LAST_RESORT_NOTE)
             outcome = "killed" if not alive else "failed"
     receipt["lingering"] = [{"pid": pid, "comm": info["comm"]} for pid, info in sorted(owned.items())]
@@ -1624,14 +1735,15 @@ def teardown_lane(name: str, *, attempt: int, token: str, started_epoch: float, 
 
 
 def _teardown_summary(receipt: dict) -> dict:
+    signalled = [s for p in receipt["phases"] for s in p.get("signalled", [])]
     return {
         "outcome": receipt["outcome"], "receipt": receipt["receipt"], "wall_s": receipt["wall_s"],
-        "owned_pids": sorted({r["pid"] for r in receipt["owned"]}
-                             | {s["pid"] for p in receipt["phases"] for s in p.get("signalled", [])}),
+        "owned_pids": sorted({r["pid"] for r in receipt["owned"]} | {s["pid"] for s in signalled}),
         "foreign_pids": sorted({r["pid"] for r in receipt["foreign"]}),
         "survivors": receipt["survivors"],
         "escalated": [s["pid"] for p in receipt["phases"] if p["phase"] == "term" for s in p["signalled"]],
         "killed": [s["pid"] for p in receipt["phases"] if p["phase"] == "kill" for s in p["signalled"]],
+        "eperm": sorted({s["pid"] for s in signalled if s.get("error") == "eperm"}),
     }
 
 
@@ -1642,8 +1754,8 @@ def _teardown_log_line(attempt: int, name: str, summary: dict) -> str:
     return (f"PIPELINE_LANE_TEARDOWN attempt={attempt} lane={name} outcome={summary['outcome']} "
             f"owned={pids(summary['owned_pids'])} foreign={pids(summary['foreign_pids'])} "
             f"escalated={pids(summary['escalated'])} killed={pids(summary['killed'])} "
-            f"survivors={pids(summary['survivors'])} wall_s={summary['wall_s']} receipt={summary['receipt']}")
-
+            f"eperm={pids(summary['eperm'])} survivors={pids(summary['survivors'])} "
+            f"wall_s={summary['wall_s']} receipt={summary['receipt']}")
 
 def _probe_source() -> dict[str, str] | None:
     """Current source digest, or None while git is busy (index.lock, commit in flight)."""
@@ -1695,6 +1807,7 @@ def run(
     state_dir.mkdir(parents=True, exist_ok=True)
     try:
         teardown_wait = teardown_wait_seconds()
+        teardown_kill_after = teardown_kill_after_override()
     except ValueError as error:
         print(f"PIPELINE_TEARDOWN: {error}", file=sys.stderr, flush=True)
         return 2
@@ -1743,7 +1856,7 @@ def run(
             host=host, live_budget=live_budget, budget_mb=budget_mb,
             attempt=attempt, supersedes=supersedes, loop=loop,
             follow_source=follow_source, settle_seconds=settle_seconds, poll_seconds=poll_seconds,
-            teardown_wait=teardown_wait,
+            teardown_wait=teardown_wait, teardown_kill_after=teardown_kill_after,
             payload=payload,
         )
         if outcome != "superseded":
@@ -1779,6 +1892,7 @@ def _run_attempt(
     poll_seconds: float,
     payload: dict | None = None,
     teardown_wait: float | None = None,
+    teardown_kill_after: tuple[float, str] | None = None,
 ) -> tuple[dict, str]:
     """One attempt on one frozen source; returns (receipt, "done" | "superseded")."""
     # The kill switch for a matched control run (DEPLOY_ADMISSION_CREDIT=0) is
@@ -2102,7 +2216,7 @@ def _run_attempt(
         lane_state = receipt["lanes"][name]
         teardown = teardown_lane(name, attempt=attempt, token=lane_state["lane_token"],
                                  started_epoch=lane_state["started_epoch"], state_dir=state_dir,
-                                 wait_seconds=teardown_wait)
+                                 wait_seconds=teardown_wait, kill_after=teardown_kill_after)
         lane_state["teardown"] = _teardown_summary(teardown)
         print(_teardown_log_line(attempt, name, lane_state["teardown"]), flush=True)
     if signalled_lanes:

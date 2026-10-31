@@ -196,14 +196,18 @@ def refresh_snapshot(path: str | Path, *, head: str, producer: str, now: datetim
 
 
 def refresh_selected_snapshot(head: str, *, producer: str, checkout: str | Path) -> dict:
-    """Refresh ``FACTORY_METADATA_FILE`` when it lives inside ``checkout``.
+    """Refresh ``FACTORY_METADATA_FILE`` when it is ``checkout``'s own
+    ``.context/`` snapshot.
 
-    A snapshot describes the checkout it lives in. One elsewhere (another
-    deploy's worktree inherited through the environment, a test fixture) is
-    left alone and reported, so no sibling checkout or test can re-stamp a
-    live deploy's telemetry. Returns ``{"status", "path", "message"}`` with
-    status ``unset`` | ``missing`` | ``outside`` | ``refreshed`` (plus
-    ``telemetry`` when refreshed); an invalid snapshot raises ``ValueError``.
+    A snapshot describes the checkout whose ``.context/`` holds it. One
+    anywhere else (a nested worktree's ``.context/`` under the canonical
+    checkout, a sibling deploy's file inherited through the environment, a
+    test fixture) is left alone and reported, so no other checkout or test can
+    re-stamp a live deploy's telemetry. A retrospective record keeps its
+    original observation and is reported, not rewritten. Returns
+    ``{"status", "path", "message"}`` with status ``unset`` | ``missing`` |
+    ``outside`` | ``retrospective`` | ``refreshed`` (plus ``telemetry`` when
+    refreshed); an invalid snapshot raises ``ValueError``.
     """
     selected = os.environ.get(SELECTED_SNAPSHOT_ENV)
     if not selected:
@@ -215,11 +219,14 @@ def refresh_selected_snapshot(head: str, *, producer: str, checkout: str | Path)
     except OSError:
         return {"status": "missing", "path": str(path),
                 "message": f"factory metadata: not refreshed, {path} is missing"}
-    try:
-        resolved.relative_to(Path(checkout).resolve())
-    except ValueError:
+    if resolved.parent != (Path(checkout) / ".context").resolve():
         return {"status": "outside", "path": str(path),
-                "message": f"factory metadata: not refreshed, {path} is outside {checkout}"}
+                "message": f"factory metadata: not refreshed, {path} is not this checkout's "
+                           f"{Path(checkout) / '.context'} snapshot"}
+    if _read_snapshot(resolved).get("record_type", "snapshot") != "snapshot":
+        return {"status": "retrospective", "path": str(path),
+                "message": f"factory metadata: not refreshed, {path} is a retrospective record and keeps "
+                           "its original observation"}
     telemetry = refresh_snapshot(resolved, head=head, producer=producer)
     return {"status": "refreshed", "path": str(path), "telemetry": telemetry,
             "message": (f"factory metadata: refreshed {path} observed_at={telemetry['observed_at']} "

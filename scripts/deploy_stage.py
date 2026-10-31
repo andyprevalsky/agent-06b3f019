@@ -148,24 +148,29 @@ def start_lifecycle(
     """
 
     _validate_identifier(run_id, "deploy run id")
-    try:
-        refresh = factory_metadata.refresh_selected_snapshot(
-            git_sha, producer="run-deploy-stage --start", checkout=ROOT)
-    except ValueError as error:
-        raise LifecycleError(f"factory metadata snapshot rejected, run not started: {error}") from error
     with _lifecycle_lock(run_root):
         current_path = run_root / "current"
+        stale_pointer = False
         if current_path.exists():
             current_id = _read_current_run_id(run_root)
             current_metadata = _read_metadata(run_root / current_id)
             if current_metadata.get("status") in ACTIVE_STATUSES:
                 raise LifecycleError(f"deploy timing run already active: {current_id}")
-            current_path.unlink()
+            stale_pointer = True
 
         run_dir = run_root / run_id
         metadata_path = run_dir / "metadata.json"
         if metadata_path.exists():
             raise LifecycleError(f"deploy timing run already exists: {run_id}")
+        # Only a start that will actually publish this run re-stamps the
+        # snapshot: a refused start (run already active) leaves it untouched.
+        try:
+            refresh = factory_metadata.refresh_selected_snapshot(
+                git_sha, producer="run-deploy-stage --start", checkout=ROOT)
+        except ValueError as error:
+            raise LifecycleError(f"factory metadata snapshot rejected, run not started: {error}") from error
+        if stale_pointer:
+            current_path.unlink()
         (run_dir / "logs").mkdir(parents=True, exist_ok=True)
         init_run(
             run_dir,
