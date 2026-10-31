@@ -261,17 +261,30 @@ def check_memory_admission(tmp: Path, env: dict[str, str]) -> None:
 
 
 def check_max_parallel_default(tmp: Path, env: dict[str, str]) -> None:
-    """Without --max-parallel the host default (>= 2) bounds concurrency."""
+    """Without --max-parallel the host default (>= 2) bounds concurrency.
+
+    The cap is judged on the host sample the driver recorded in its receipt,
+    not on a second sample taken here: the default is a function of live
+    MemAvailable, and on a box whose memory moves while another deploy runs
+    (2026-10-31: the budget swung 1.2 GB in 10 s beside the 4-lane threshold)
+    two samples can land on different sides of a lane boundary, which made
+    this check report 4 lanes against a cap of 3 that the driver never used.
+    The lane count covers the largest possible default so the bound is always
+    observable."""
     pipeline = load_module("run_deploy_pipeline_cap_under_test", DRIVER)
-    cap = pipeline.default_max_parallel(pipeline.host_resources())
     state = tmp / "cap"
     plan = tmp / "cap-plan.json"
-    count = cap + 2
+    count = pipeline.CEILING_CPUS // 2 + 2
     write_plan(plan, [{"name": f"lane-{i}", "command": ["sleep", "1"], "reuse_passed": False, "memory_mb": 1}
                       for i in range(count)])
     assert run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--memory-budget-mb", "1048576",
                       env=env).returncode == 0
-    lanes = json.loads((state / "receipt.json").read_text())["lanes"]
+    receipt = json.loads((state / "receipt.json").read_text())
+    cap = receipt["max_parallel"]
+    assert cap == pipeline.default_max_parallel(receipt["host"]), (
+        f"the driver's cap {cap} is not the host default of its own recorded sample {receipt['host']}")
+    assert 1 <= cap <= pipeline.CEILING_CPUS // 2 < count, (cap, count)
+    lanes = receipt["lanes"]
     events = sorted([(lane["started_epoch"], 1) for lane in lanes.values()]
                     + [(lane["finished_epoch"], -1) for lane in lanes.values()])
     peak = level = 0
