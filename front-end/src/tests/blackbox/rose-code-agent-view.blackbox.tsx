@@ -176,9 +176,7 @@ function requests(method: string, path: string) {
   return capturedRequests.filter((r) => r.method === method && new URL(r.url).pathname === path);
 }
 
-function urlParams() {
-  return new URL(window.location.href).searchParams;
-}
+const urlParams = () => new URL(window.location.href).searchParams;
 
 const row = () => screen.getByTestId(`rose-code-agent-row-${TASK}`);
 const view = () => screen.queryByTestId('code-agent-view');
@@ -590,12 +588,8 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     fireEvent.click(row());
     expect(await screen.findByTestId('code-agent-view')).toBeInTheDocument();
     expect(urlParams().get('agent-id')).toBe(OWNER);
-    fireEvent.click(
-      within(screen.getByTestId('rose-home-project-row')).getByRole('button', {
-        name: 'Create Super Agent',
-        exact: true,
-      }),
-    );
+    const home = within(screen.getByTestId('rose-home-project-row'));
+    fireEvent.click(home.getByRole('button', { name: 'Create Super Agent' }));
     expect(view()).toBeNull();
     expect(urlParams().get('code-agent')).toBeNull();
     expect(await screen.findByPlaceholderText('Enter any goal')).toBeInTheDocument();
