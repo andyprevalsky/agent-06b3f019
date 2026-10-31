@@ -831,11 +831,13 @@ def _judge_declared(path: str, rules: _ScopedLane) -> tuple[bool, str]:
 
 
 class _GraphJudge:
-    """(b): one selector over the current tree, queried per changed path. For
-    stack lanes every path is additionally judged by reach from
-    STACK_ENTRYPOINTS; ``declared`` is False for a path that reached the graph
-    through _reach_eligible rather than the lane's inert set, which also makes
-    a run_lanes trigger (shared test infrastructure) a rerun."""
+    """(b): one selector over the current tree, queried per changed path. A
+    declared-inert path (``declared``) gets exactly the selector verdict, never
+    the entrypoint or reverse-index checks: a checkout or fixture without the
+    stack entrypoints still reuses on a docs-only change. Only a path that
+    reached the graph through _reach_eligible (``declared=False``) is judged
+    by reach from STACK_ENTRYPOINTS, where a run_lanes trigger (shared test
+    infrastructure) or a missing entrypoint also reruns."""
 
     def __init__(self) -> None:
         self._module = _selector_module()
@@ -866,7 +868,9 @@ class _GraphJudge:
             return False, f"graph:selects {listed}"
         if rules.graph_lanes:
             return True, "graph:no " + "/".join(rules.graph_lanes) + " test selected"
-        triggers = [] if declared else self._lane_triggers(path)
+        if declared:
+            return True, "graph:no ALL fallback"
+        triggers = self._lane_triggers(path)
         if triggers:
             return False, "graph:run_lanes trigger for " + ", ".join(triggers[:5])
         missing = [entry for entry in STACK_ENTRYPOINTS if entry not in self._selector.graph.fileset]

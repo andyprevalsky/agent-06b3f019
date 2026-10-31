@@ -1629,6 +1629,34 @@ def check_scoped_inert_tables() -> None:
     for name in ("backend-coverage-blackbox", "live-probes", "agents-coverage-blackbox"):
         assert not eligible(name, "back-end/scripts/coverage-process-lock.py"), name
         assert stage._reach_eligible("scripts/x.py", stage._SCOPED_REUSE_LANES[name]) == (False, "lane has graph lanes")
+    # The judge consults neither the entrypoints nor the reverse index for a
+    # declared-inert path (deploy-stage gate regression: its fixture carries
+    # no entrypoint and a docs-only commit reran smoke); an undeclared path
+    # fails closed when an entrypoint is missing from the graph.
+    class _NoSelection:
+        all_lanes, reasons, selected, full_lanes = False, [], {}, set()
+
+    class _NoEntrypointSelector:
+        config = {"run_lanes": []}
+
+        class graph:
+            fileset: set = set()
+
+        def select(self, changed):
+            return _NoSelection()
+
+        def upstream(self, changed):
+            raise AssertionError("reverse index consulted for a declared-inert path")
+
+    judge = stage._GraphJudge.__new__(stage._GraphJudge)
+    judge._module, judge._selector = stage._selector_module(), _NoEntrypointSelector()
+    smoke = stage._SCOPED_REUSE_LANES["smoke"]
+    assert judge.judge("docs/guide.md", smoke) == (True, "graph:no ALL fallback")
+    assert judge.judge("back-end/src/tests/unit/x.test.ts", smoke, declared=True) == (True, "graph:no ALL fallback")
+    assert judge.judge("back-end/scripts/x.py", smoke, declared=False) == \
+        (False, "graph:stack entrypoint missing: scripts/run-predeploy-local")
+    assert judge.judge("docs/guide.md", stage._SCOPED_REUSE_LANES["backend-coverage-blackbox"]) == \
+        (True, "graph:no backend-blackbox/backend-unit test selected")
     assert not inert("agents-coverage-blackbox", "agents/tests/blackbox/rose.blackbox.py")
     assert all(inert(n, "agents/tests/blackbox/rose.blackbox.py") for n in every if n != "agents-coverage-blackbox")
     assert not inert("backend-coverage-blackbox", "back-end/src/tests/blackbox/x.blackbox.ts")

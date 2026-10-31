@@ -211,6 +211,20 @@ done
 [ "$(scoped_row smoke detail reuse changed 0 graph)" = "graph:no ALL fallback" ] || fail "runtime lane graph rule"
 [ "$(scoped_row backend-coverage-blackbox detail reuse changed 0 graph)" = "graph:no backend-blackbox/backend-unit test selected" ] \
     || fail "backend lane graph rule"
+# The declared-inert judgement above is independent of the stack entrypoints:
+# this fixture lacks most of them (only bootstrap.ts exists), and the reach
+# judgement (a second chance only for paths the inert set rejected) is neither
+# consulted for a docs-only change nor allowed to fail closed on their absence
+# (deploy 13 round 1 reran smoke here with "graph:stack entrypoint missing").
+SCOPED_ENTRYPOINTS="$(cd "$SCOPED_REPO" && python3 -c 'import sys; sys.path.insert(0, "scripts"); import run_deploy_stage as s; print("\n".join(s.STACK_ENTRYPOINTS))')" \
+    || fail "could not read STACK_ENTRYPOINTS from the fixture copy"
+[ -n "$SCOPED_ENTRYPOINTS" ] || fail "STACK_ENTRYPOINTS is empty"
+SCOPED_MISSING=0
+while IFS= read -r entrypoint; do
+    [ -e "$SCOPED_REPO/$entrypoint" ] || SCOPED_MISSING=$((SCOPED_MISSING + 1))
+done <<<"$SCOPED_ENTRYPOINTS"
+[ "$SCOPED_MISSING" -gt 0 ] || fail "scoped fixture carries every stack entrypoint: the missing-entrypoint scenario is gone"
+[ "$(scoped_row semantic-stack detail reuse changed 0 graph)" = "graph:no ALL fallback" ] || fail "semantic lane graph rule"
 # The exact-input cache never learns a scoped hit: the current bytes were not executed.
 [ "$(ls "$RUN_ROOT/scoped/passed-cache/smoke/"*.json | wc -l | tr -d ' ')" = 1 ] || fail "scoped hit was cached as an exact pass"
 
@@ -417,9 +431,10 @@ grep -q "Reused lane-scoped passes (inert changes only, not executed on these by
     || fail "history does not count lane-scoped reuse separately"
 
 # Cross-run discovery: a lane may reuse a PASSED record read in place from an
-# EARLIER timing run of the same run root when the earlier run's metadata names
-# the same branch, the invocation is identical, the passed head is an ancestor
-# of HEAD and the record is under the age bound; failed heads recorded in any
+# EARLIER timing run of the same run root (any branch: the metadata branch is
+# recorded in the row, never compared) when the invocation is identical, the
+# passed head is an ancestor of HEAD and the record is under the age bound;
+# failed heads recorded in any
 # considered run veto; the exact --reuse-passed cache stays per run; flag off is
 # unchanged. Fresh run root, same fixture repository (HEAD is docs-v6).
 RUN_ROOT="$TEST_ROOT/xrun"
@@ -564,27 +579,35 @@ DEPLOY_LANE_SCOPED_REUSE_MAX_AGE_SECONDS=1 scoped_run backend-coverage-blackbox 
 scoped_run backend-coverage-blackbox --reuse-passed >/dev/null || fail "xf exact run failed"
 [ "$(scoped_runs backend-coverage-blackbox)" = "$((backend_runs + 1))" ] || fail "the age-bound env var changed the exact fingerprint"
 scoped_stage --finish >/dev/null || fail "xf finish failed"
-# (b) A run started on another branch is never a source, even at an ancestor
-# head: semantic-stack passes only in run xo (branch "other") and reruns on
-# the original branch.
+# (b) A run started on another branch is a source like any other once its
+# passed head is an ancestor of HEAD: the branch is recorded, never compared
+# (a follow-up branch or the next deploy of the same tree reuses a green
+# pass; PR-14). semantic-stack passes only in run xo (branch "other", at xf's
+# head) and is reused on the original branch with its source branch in the
+# row; the other branch likewise sees the original branch's earlier runs.
 git -C "$SCOPED_REPO" checkout -q -b other
+XRUN_HO="$(git -C "$SCOPED_REPO" rev-parse HEAD)"
 scoped_stage --start --run-id xo >/dev/null
 SCOPED_RUN_ID=xo
 scoped_run semantic-stack --lane-scoped-reuse >"$TEST_ROOT/xrun-xo-semantic.out" || fail "xo semantic failed"
-grep -qF "(1 run(s) considered)" "$TEST_ROOT/xrun-xo-semantic.out" || fail "another branch's runs were considered"
+grep -qF "no prior pass of this lane for the identical command, cwd and environment (7 run(s) considered)" \
+    "$TEST_ROOT/xrun-xo-semantic.out" || fail "another branch did not consider the original branch's earlier runs"
 scoped_stage --finish >/dev/null || fail "xo finish failed"
 git -C "$SCOPED_REPO" checkout -q "$XRUN_BRANCH"
 printf 'guide x6\n' > "$SCOPED_REPO/docs/guide.md"
-scoped_commit docs-x6 >/dev/null
+XRUN_H6="$(scoped_commit docs-x6)"
 scoped_stage --start --run-id xg >/dev/null
 SCOPED_RUN_ID=xg
 semantic_runs="$(scoped_runs semantic-stack)"
 scoped_run semantic-stack --lane-scoped-reuse >"$TEST_ROOT/xrun-xg-semantic.out" || fail "xg semantic failed"
-[ "$(scoped_runs semantic-stack)" = "$((semantic_runs + 1))" ] || fail "a pass from a run on another branch was reused"
-grep -qF "no prior pass of this lane for the identical command, cwd and environment (7 run(s) considered)" \
-    "$TEST_ROOT/xrun-xg-semantic.out" || fail "other-branch miss not disclosed"
-[ "$(scoped_row semantic-stack detail reuse scoped considered_runs)" = '["xg", "xf", "xe", "xd", "xc", "xb", "xa"]' ] \
-    || fail "considered runs must exclude the other branch's run and stay newest first"
+[ "$(scoped_runs semantic-stack)" = "$semantic_runs" ] || fail "an ancestor-head pass from a run on another branch was not reused"
+grep -qF "reused passed deploy stage (lane-scoped): semantic-stack passed_head=${XRUN_HO:0:12} current_head=${XRUN_H6:0:12} inert_paths=1 passed_run=xo cross_run=true" \
+    "$TEST_ROOT/xrun-xg-semantic.out" || fail "cross-branch reuse not disclosed"
+[ "$(scoped_row semantic-stack detail reuse passed_run_id)" = xo ] || fail "cross-branch row lacks the source run"
+[ "$(scoped_row semantic-stack detail reuse passed_run_branch)" = other ] || fail "cross-branch row lacks the source branch"
+[ "$(scoped_row semantic-stack detail reuse cross_run)" = "true" ] || fail "cross-branch hit not labelled cross-run"
+[ "$(scoped_row semantic-stack detail reuse considered_runs)" = '["xg", "xo", "xf", "xe", "xd", "xc", "xb", "xa"]' ] \
+    || fail "considered runs must include the other branch's run, newest first"
 scoped_stage --finish >/dev/null || fail "xg finish failed"
 # (c) A pass on a head that is not an ancestor of HEAD (a sibling commit after
 # a reset) is never reused: live-probes passed only in run xa at H0.
@@ -617,8 +640,8 @@ scoped_commit docs-sibling-2 >/dev/null
 scoped_run live-probes --lane-scoped-reuse >"$TEST_ROOT/xrun-xh-probes2.out" || fail "xh live-probes 2 failed"
 [ "$(scoped_runs live-probes)" = "$((probes_runs + 1))" ] || fail "in-run reuse after retiring an earlier run dir"
 [ "$(scoped_row live-probes detail reuse cross_run)" = "false" ] || fail "in-run hit labelled cross-run"
-[ "$(scoped_row live-probes detail reuse considered_runs)" = '["xh", "xg", "xf", "xe", "xd"]' ] \
-    || fail "retired, unreadable or later-started runs still considered"
+[ "$(scoped_row live-probes detail reuse considered_runs)" = '["xh", "xg", "xo", "xf", "xe", "xd"]' ] \
+    || fail "retired, unreadable or later-started runs still considered (the other branch's run stays)"
 if grep -q "lane-scoped reuse decision failed" "$TEST_ROOT/xrun-xh-probes2.out"; then
     fail "a retired run dir broke the decision"
 fi
@@ -630,8 +653,8 @@ if grep -q "cross-run:" "$TEST_ROOT/xrun-xh-summary.out"; then
 fi
 scoped_stage --finish >/dev/null || fail "xh finish failed"
 scoped_stage --history >"$TEST_ROOT/xrun-history.out" || fail "xrun history failed"
-grep -q "Reused lane-scoped passes (inert changes only, not executed on these bytes): .*live-probes=1.* (cross-run: smoke=1)" \
-    "$TEST_ROOT/xrun-history.out" || fail "history does not distinguish the cross-run reuse"
+grep -q "Reused lane-scoped passes (inert changes only, not executed on these bytes): .*live-probes=1.* (cross-run: semantic-stack=1, smoke=1)" \
+    "$TEST_ROOT/xrun-history.out" || fail "history does not distinguish the cross-run reuses (smoke in xb, semantic-stack from the other branch's xo)"
 unset SCOPED_RUN_ID
 # Back to the exact-input fixture run for the scenarios below.
 RUN_ROOT="$TEST_ROOT/reuse"
