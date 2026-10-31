@@ -592,4 +592,22 @@ echo "PASS: an isolated stack shuts down when its exact owner process is gone"
 )
 echo "PASS: the owner watcher tears the stack down within seconds of a SIGKILLed owner"
 
+# A normal stop (owner still alive) must not wait on the watcher: teardown ends
+# with a bare `wait`, and the watcher only exits once the stack is gone.
+(
+    sleep 1000 >/dev/null 2>&1 &
+    owner=$!
+    trap 'kill -KILL "$owner" 2>/dev/null || true' EXIT
+    RUN_SH_OWNER_PID="$owner" RUN_SH_OWNER_START= ROOT_DIR="$ROOT_DIR" \
+        timeout 20 bash -c 'export CONDUCTOR_PORT=61902 CONDUCTOR_WORKSPACE_NAME=owner-watch-stop RUN_SH_SOURCE_ONLY=true
+            source "$ROOT_DIR/scripts/run.sh" >/dev/null 2>&1
+            start_stack_owner_watch
+            stop_stack_owner_watch
+            wait' >/dev/null 2>&1 \
+        || { echo "FAIL: teardown waited on the owner watcher while the owner was alive" >&2; exit 1; }
+    awk '/^cleanup\(\) \{/{c=1} c && /stop_stack_owner_watch/{found=1; exit} c && /^}/{exit} END{exit !found}' \
+        "$ROOT_DIR/scripts/run.sh" || { echo "FAIL: cleanup does not stop the owner watcher" >&2; exit 1; }
+)
+echo "PASS: a normal stop does not wait on the owner watcher"
+
 echo "All run process cleanup tests passed."

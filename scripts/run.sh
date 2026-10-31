@@ -376,6 +376,14 @@ start_stack_owner_watch() {
     STACK_OWNER_WATCH_PID=$!
 }
 
+# Teardown waits for its child jobs; the watcher must not be one of them.
+stop_stack_owner_watch() {
+    [ -n "${STACK_OWNER_WATCH_PID:-}" ] || return 0
+    kill "$STACK_OWNER_WATCH_PID" 2>/dev/null || true
+    wait "$STACK_OWNER_WATCH_PID" 2>/dev/null || true
+    STACK_OWNER_WATCH_PID=""
+}
+
 if [ "${RUN_SH_SOURCE_ONLY:-false}" = "true" ]; then
     return 0 2>/dev/null || exit 0
 fi
@@ -2675,6 +2683,7 @@ cleanup() {
     if $SHUTTING_DOWN; then return; fi
     SHUTTING_DOWN=true
     run_ignore_repeated_teardown_signals
+    stop_stack_owner_watch
     local cleanup_failed=false
     echo "🛑 Stopping all services... (triggered by: $(caller 0 2>/dev/null || echo 'EXIT trap'), DB_OWNED_BY_US=$DB_OWNED_BY_US)"
     if ! run_publish_stack_cleanup_status pending; then
