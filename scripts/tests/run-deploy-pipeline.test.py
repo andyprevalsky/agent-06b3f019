@@ -799,17 +799,21 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     print("observation validity: ok")
 
 
-def check_stack_owner_dependency(tmp: Path, env: dict[str, str]) -> None:
-    """semantic-stack's ``run.sh --benchmark`` startup runs kill-services.sh
-    against every runtime process this worktree owns, so it must never start
-    while the local smoke lane or the AgentCard lifecycle lane (their own
-    local stacks) is running. On #1640 only memory kept them apart (4096 +
-    4096 MB against an 8188 MB budget). The plan loader now appends the edge
-    (declared edges kept, receipt ``after`` shows it); with unbounded memory
-    only the dependency can hold semantic-stack back. Plans without a
-    stack-owning lane and lanes with other names are untouched, and a plan
-    that would close a cycle through the implied edge is refused."""
+def check_semantic_stack_beside_stack_owners(tmp: Path, env: dict[str, str]) -> None:
+    """Follow-up "an" (2026-10-31): semantic-stack's ``run.sh --benchmark``
+    sweeps spare every process of a live isolated run (kill-services.test.sh,
+    run-isolated-cloud-kill.test.sh), so the loader no longer appends the
+    implied ``after`` edges from semantic-stack to the stack-owning lanes
+    (``STACK_KILLER_LANES`` is empty): with unbounded memory semantic-stack
+    starts while smoke and agentcard-lifecycle are still running and the
+    receipt's ``after`` shows only its declared edge. Memory still rules: when
+    smoke + semantic-stack exceed the budget, admission defers semantic-stack
+    until smoke releases its reservation, without touching any declaration.
+    The edge mechanism itself is kept for a future stack-killing lane: with a
+    lane listed, edges are appended, never duplicated, and a plan that would
+    close a cycle through the implied edge is refused."""
     pipeline = load_module("pipeline_stack_owner", DRIVER)
+    assert pipeline.STACK_KILLER_LANES == () and pipeline.STACK_OWNER_LANES == ("smoke", "agentcard-lifecycle")
     plan = tmp / "stack-owner-plan.json"
     state = tmp / "stack-owner"
     marker = tmp / "semantic-started"
@@ -825,39 +829,69 @@ def check_stack_owner_dependency(tmp: Path, env: dict[str, str]) -> None:
     receipt = json.loads((state / "receipt.json").read_text())
     assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["status"])
     lanes = receipt["lanes"]
-    assert lanes["semantic-stack"]["started_epoch"] >= max(lanes["smoke"]["finished_epoch"],
-                                                            lanes["agentcard-lifecycle"]["finished_epoch"]), \
-        "semantic-stack started while a lane owning a worktree stack was still running"
-    assert receipt["after"]["semantic-stack"] == ["cov", "smoke", "agentcard-lifecycle"], receipt["after"]
+    assert lanes["semantic-stack"]["started_epoch"] < min(lanes["smoke"]["finished_epoch"],
+                                                           lanes["agentcard-lifecycle"]["finished_epoch"]), \
+        "semantic-stack must be admitted while the stack-owning lanes are still running"
+    assert receipt["after"]["semantic-stack"] == ["cov"], receipt["after"]
     assert receipt["after"]["smoke"] == [] and receipt["after"]["agentcard-lifecycle"] == [], receipt["after"]
     assert lanes["smoke"]["started_epoch"] < lanes["cov"]["finished_epoch"], "owners are not held back"
-    # No stack-owning lane in the plan: nothing is added; other names are untouched.
+    # Memory, not an edge, keeps them apart when both declarations do not fit:
+    # cov (25) + smoke (40) fit a 70 MB budget, semantic-stack (40) does not
+    # beside smoke, so it waits for smoke's reservation and is admitted after
+    # a recorded budget deferral. The declarations are the plan's own.
+    budget_state = tmp / "stack-owner-budget"
     write_plan(plan, [
-        {"name": "cov", "command": ["true"], "group": "3"},
-        {"name": "semantic-stack", "command": ["true"], "after": ["cov"], "group": "4"},
-        {"name": "semantic", "command": ["true"], "group": "4"},
-        {"name": "smoke-like", "command": ["true"], "group": "4", "phase": "coverage"},
-    ])
-    loaded = {lane.name: lane for lane in pipeline.load_plan_payload(plan)[0]}
-    assert loaded["semantic-stack"].after == ["cov"] and loaded["semantic"].after == [], loaded
-    # An implied edge never duplicates a declared one, and a plan that makes an
-    # owner wait for the killer is a cycle, refused before any lane starts.
-    write_plan(plan, [
-        {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage"},
-        {"name": "semantic-stack", "command": ["true"], "after": ["smoke"], "group": "4"},
-    ])
-    assert pipeline.load_plan_payload(plan)[0][1].after == ["smoke"]
-    write_plan(plan, [
-        {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage", "after": ["semantic-stack"]},
-        {"name": "semantic-stack", "command": ["true"], "group": "4"},
-    ])
-    try:
-        pipeline.load_plan_payload(plan)
-    except ValueError as error:
-        assert "cyclic" in str(error), error
-    else:
-        raise AssertionError("an owner that waits for semantic-stack must be refused as a cycle")
-    print("stack owner dependency: ok")
+        {"name": "cov", "command": ["sleep", "0.4"], "reuse_passed": False, "group": "3", "memory_mb": 25},
+        {"name": "smoke", "command": ["sleep", "1.5"], "reuse_passed": False, "group": "4", "phase": "coverage",
+         "memory_mb": 40},
+        {"name": "semantic-stack", "command": ["true"], "after": ["cov"], "reuse_passed": False, "group": "4",
+         "memory_mb": 40},
+    ], schedule={"policy": "legacy"})
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(budget_state), "--max-parallel", "0",
+                     "--memory-budget-mb", "70", env=env, timeout=120)
+    receipt = json.loads((budget_state / "receipt.json").read_text())
+    assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["status"])
+    lanes = receipt["lanes"]
+    assert receipt["after"]["semantic-stack"] == ["cov"], receipt["after"]
+    assert lanes["smoke"]["started_epoch"] < lanes["cov"]["finished_epoch"], "cov and smoke fit the budget together"
+    assert lanes["semantic-stack"]["started_epoch"] >= lanes["smoke"]["finished_epoch"], \
+        "40 + 40 MB declared must never run together under a 70 MB budget"
+    deferred = lanes["semantic-stack"]["admission"]["deferred"]
+    assert deferred and deferred["first"]["reason"] == "budget" and deferred["checks"] >= 1, deferred
+    assert deferred["first"]["reserved_declared_mb"] == 40 and deferred["first"]["memory_mb"] == 40, deferred
+    assert {lane["memory_mb"] for lane in (lanes["smoke"], lanes["semantic-stack"])} == {40}, "declarations unchanged"
+    # The implied-edge mechanism, with a killer lane listed: edges appended to
+    # the declared ones, no duplicates, other names untouched, cycles refused.
+    with patch.object(pipeline, "STACK_KILLER_LANES", ("semantic-stack",)):
+        write_plan(plan, [
+            {"name": "cov", "command": ["true"], "group": "3"},
+            {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage"},
+            {"name": "agentcard-lifecycle", "command": ["true"], "group": "4", "phase": "coverage"},
+            {"name": "semantic-stack", "command": ["true"], "after": ["cov"], "group": "4"},
+            {"name": "semantic", "command": ["true"], "group": "4"},
+            {"name": "smoke-like", "command": ["true"], "group": "4", "phase": "coverage"},
+        ])
+        loaded = {lane.name: lane for lane in pipeline.load_plan_payload(plan)[0]}
+        assert loaded["semantic-stack"].after == ["cov", "smoke", "agentcard-lifecycle"], loaded
+        assert loaded["semantic"].after == [] and loaded["smoke"].after == [], loaded
+        write_plan(plan, [
+            {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage"},
+            {"name": "semantic-stack", "command": ["true"], "after": ["smoke"], "group": "4"},
+        ])
+        assert pipeline.load_plan_payload(plan)[0][1].after == ["smoke"]
+        write_plan(plan, [
+            {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage", "after": ["semantic-stack"]},
+            {"name": "semantic-stack", "command": ["true"], "group": "4"},
+        ])
+        try:
+            pipeline.load_plan_payload(plan)
+        except ValueError as error:
+            assert "cyclic" in str(error), error
+        else:
+            raise AssertionError("an owner that waits for a listed killer lane must be refused as a cycle")
+    # Without a listed killer lane the same cycle plan is simply an edge.
+    assert pipeline.load_plan_payload(plan)[0][0].after == ["semantic-stack"]
+    print("semantic-stack beside stack owners: ok")
 
 
 def check_wait_receipt_contract(tmp: Path, pipeline=None, scenario="both") -> None:
@@ -1331,7 +1365,7 @@ def main() -> int:
         with patch.dict(os.environ, {"DEPLOY_ADMISSION_CREDIT": "0"}):
             check_materialized_reservation_credit(tmp / "inherited-flag", env)
         check_observation_validity(tmp, env)
-        check_stack_owner_dependency(tmp, env)
+        check_semantic_stack_beside_stack_owners(tmp, env)
         check_lane_scoped_reuse(tmp, env, source_root)
         check_reconcile_reused_lane(tmp)
         check_scoped_inert_tables()

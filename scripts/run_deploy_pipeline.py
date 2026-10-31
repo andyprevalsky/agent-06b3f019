@@ -69,12 +69,10 @@ keeps its whole declaration, and the declarations themselves are unchanged.
 control run on the identical plan and head: observations are still sampled
 and recorded, every running lane classifies as ``disabled``, the whole
 declarations are reserved (the pre-credit accounting) and the receipt and
-every admission record carry ``credit: disabled``; the semantic-stack
-ownership edge below is not affected by the flag. An
-unphased lane (``semantic-stack``: its ``run.sh --benchmark`` startup runs
-``kill-services.sh``, which terminates a running smoke stack) keeps the
-declared-peak accounting, so this change cannot admit it beside a stack it
-would kill. Every decision is kept on the lane for audit: ``admission``
+every admission record carry ``credit: disabled``. An unphased lane
+(``semantic-stack``) keeps the declared-peak accounting: no observed-usage
+credit, so its declaration plus the running lanes' whole declarations must
+fit live headroom. Every decision is kept on the lane for audit: ``admission``
 (``admitted``/``refused`` with headroom, budget, declared and live
 reservations, the running lanes with their observed usage, and the deferral
 history) and ``waiting`` while deferred. The smoke lane stays at 4096 MB: the
@@ -159,17 +157,23 @@ backend-coverage-blackbox (2560 MB) it fits the budget. A plan with
 The deploy.md ``semantic-stack`` lane (4096 MB; its own ``run.sh --benchmark``
 stack, Playwright semantics, latency ratchet, E2B smoke) deliberately keeps its
 ``after`` edges on backend coverage and live-probes instead of joining the
-coverage phase, and trails every stack-owning lane for an ownership reason,
-not a memory one: its startup runs ``scripts/kill-services.sh``, which
-terminates every runtime process owned by this worktree, including the
-coverage shards' instrumented backends, the local smoke lane's per-run
-benchmark stack and the AgentCard lifecycle lane's ``run-bench --local``
-stack. The plan loader therefore appends implied ``after`` edges from each
-``STACK_KILLER_LANES`` lane to every ``STACK_OWNER_LANES`` lane in the plan
-(``implied_stack_dependencies``; the receipt's ``after`` map shows them and
-declared edges are kept), so semantic-stack can never be admitted while smoke
-or agentcard-lifecycle is running, whatever the memory accounting says (on
-#1640 only 4096 + 4096 MB against an 8188 MB budget kept them apart).
+coverage phase. It may be admitted beside the stack-owning lanes (the local
+smoke lane's per-run benchmark stack, the AgentCard lifecycle lane's
+``run-bench --local`` stack) whenever memory allows: its startup and EXIT
+sweeps (``kill_stale_same_worktree_benchmark_stack`` and
+``scripts/kill-services.sh``) leave every process of a live isolated run alone
+through the run's owner record, manifest and the ``BENCHMARK_RUN_ID`` each of
+its processes carries (``scripts/tests/kill-services.test.sh``,
+``scripts/tests/run-isolated-cloud-kill.test.sh``). Until follow-up "an"
+(2026-10-31) the loader appended implied ``after`` edges from each
+``STACK_KILLER_LANES`` lane to every ``STACK_OWNER_LANES`` lane
+(``implied_stack_dependencies``: kept for a lane whose sweep is not run-scoped;
+``STACK_KILLER_LANES`` is now empty and declared edges are always kept), which
+held semantic-stack back behind the whole smoke lane every round. The two
+4096 MB declarations still have to fit together: against this devbox's budget
+(7998 MB on the 2026-10-31 speed-followup-6 attempt, 8188 MB on #1640)
+admission defers semantic-stack until smoke releases its reservation, with the
+declarations unchanged; a freer or larger host admits them side by side.
 Memory still rules out the overlap with the coverage lanes on this host:
 measured on #1639 (8 cores / 16007 MB, watchdog cap 14471 MB), the coverage
 phase's whole-box MemAvailable floor was 6485 MB (9522 MB used) and
@@ -726,15 +730,19 @@ def load_plan(path: Path) -> list[Lane]:
     return load_plan_payload(path)[0]
 
 
-# Ownership boundary, not a memory question: the deploy.md ``semantic-stack``
-# lane starts its own ``run.sh --benchmark`` stack, whose startup runs
-# ``scripts/kill-services.sh`` against every runtime process this worktree
-# owns. A lane that owns such a stack (the local smoke lane's per-run
-# benchmark stack, the AgentCard lifecycle lane's ``run-bench --local`` stack)
-# must therefore have exited before it starts. On #1640 only memory kept them
-# apart (4096 + 4096 MB against an 8188 MB budget, 4 MB from admitting both),
-# so the loader adds the edge explicitly; declared edges are never removed.
-STACK_KILLER_LANES = ("semantic-stack",)
+# Ownership boundary, not a memory question: a lane whose own stack startup or
+# teardown sweeps would terminate another lane's stack must wait for every
+# lane that owns one (the local smoke lane's per-run benchmark stack, the
+# AgentCard lifecycle lane's ``run-bench --local`` stack); the loader adds
+# that edge explicitly and declared edges are never removed. The deploy.md
+# ``semantic-stack`` lane was listed here until follow-up "an" (2026-10-31):
+# its ``run.sh --benchmark`` sweeps (``kill_stale_same_worktree_benchmark_stack``
+# and ``scripts/kill-services.sh``) now spare every process of a live isolated
+# run (owner record, live manifest or the ``BENCHMARK_RUN_ID`` its processes
+# carry; regressions in scripts/tests/kill-services.test.sh and
+# scripts/tests/run-isolated-cloud-kill.test.sh), so only memory admission
+# decides whether it runs beside smoke. No current lane needs the edge.
+STACK_KILLER_LANES: tuple[str, ...] = ()
 STACK_OWNER_LANES = ("smoke", "agentcard-lifecycle")
 
 
@@ -2044,8 +2052,8 @@ def _run_attempt(
     by_name = {lane.name: lane for lane in lanes}
     # Phased lanes are designed to run together: admitting one charges only the
     # running lanes' unmaterialized declarations against live headroom. Unphased
-    # lanes keep the declared-peak accounting (semantic-stack's startup kills a
-    # running smoke stack; memory is what keeps them apart).
+    # lanes keep the declared-peak accounting (semantic-stack beside the smoke
+    # stack: both whole declarations must fit, no observed-usage credit).
     credit_lanes = {lane.name for lane in phased_lanes(lanes)}
     pending = list(order)
     superseding: dict | None = None  # the settled new source once detected
