@@ -3026,6 +3026,13 @@ async def _native_autofill_record_read(history, chosen, receipt):
 _NATIVE_AUTOFILL_CONTROL_TASK = "Continue my authorized Apple Account sign-in. Use my already available matching saved credential if possible; ask me for the protected step only when needed."
 _NATIVE_AUTOFILL_FILL_SAVED = {"action": "phone", "thinking": None, "params": {"mode": "operation", "operation": "credentials.fill_saved", "args": {}}}
 _NATIVE_AUTOFILL_UNAVAILABLE_RESULT = {"success": False, "error": "phone_credential_unavailable", "operation": {"operation": "credentials.fill_saved", "status": "FAILED", "errorCode": "phone_credential_unavailable", "result": None}}
+_NATIVE_AUTOFILL_SCREEN_TEXT = {"action": "phone", "thinking": None, "params": {"mode": "operation", "operation": "screen.text", "args": {"min_confidence": 0.3}}}
+# The backend's public receipt for a SUCCEEDED fill (`publicOperation` +
+# `redactResult`; cemented by back-end iphone-control.saved-credential cases):
+# a private acknowledgment that the shared saved password was typed, never
+# sign-in proof. The backend cannot observe Apple's verdict, so no "rejected"
+# receipt exists; the model learns of a rejection only from the next read.
+_NATIVE_AUTOFILL_FILLED_RESULT = {"success": True, "operation": {"id": "synthetic-fill-saved", "cursor": 2, "operation": "credentials.fill_saved", "status": "SUCCEEDED", "errorCode": None, "result": {"success": True, "private": True, "credentialStatus": "filled"}}}
 
 
 def _native_autofill_control_history():
@@ -3073,7 +3080,12 @@ _NATIVE_AUTOFILL_CONTROL_SCREENS = {
     "server_available": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
     "missing": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
     "presence": "Apple Account synthetic@example.invalid. Saved password selected. Face ID authentication required to use this saved password. Only the account owner can approve Face ID. No alternative autonomous approval is available.",
-    "rejected": "Apple Account synthetic@example.invalid. The matching saved password was already selected once using native AutoFill. Apple Account rejected it: Incorrect password. Password is still required to continue.",
+    # Only what a screen shows. Which credential was rejected is carried by the
+    # recorded `credentials.fill_saved` -> `filled` tool turn, as in production;
+    # the earlier OCR narration of a *native* AutoFill rejection left the
+    # skill's "backend catalog is separate; fill_saved once before password
+    # help" rule applicable, so the verdict was undetermined by the input.
+    "rejected": "Apple Account synthetic@example.invalid. Alert: Incorrect password. The masked password field is empty again. No matching native AutoFill suggestion is available. Password is still required to continue.",
 }
 # Which saved-credential attempt each control verdict presupposes. Production
 # shows the model that attempt as its own `phone` tool call plus the backend
@@ -3093,6 +3105,17 @@ async def _native_autofill_control_scenario(name, setup_projection=None):
     history, turns = _native_autofill_control_history()
     if name == "missing":
         await _native_autofill_control_record(history, turns, chosen=_NATIVE_AUTOFILL_FILL_SAVED, result=_NATIVE_AUTOFILL_UNAVAILABLE_RESULT, tool_call_id="control-fill-saved")
+    if name == "rejected":
+        # Production reaches a rejection as: observe the form (cursor 1) ->
+        # backend `credentials.fill_saved` reports `filled` (cursor 2) -> observe
+        # again (cursor 3) and read the rejection. Record all three through the
+        # production recorder so the transcript, not the OCR, says which
+        # credential was tried.
+        before = _native_autofill_control_state(_NATIVE_AUTOFILL_CONTROL_SCREENS["server_available"], setup_projection)["interaction"]["lastOperation"]
+        before.update(id="synthetic-read-before-fill", cursor=1)
+        await _native_autofill_control_record(history, turns, chosen=_NATIVE_AUTOFILL_SCREEN_TEXT, result={"success": True, "operation": before}, tool_call_id="control-read-before-fill")
+        await _native_autofill_control_record(history, turns, chosen=_NATIVE_AUTOFILL_FILL_SAVED, result=_NATIVE_AUTOFILL_FILLED_RESULT, tool_call_id="control-fill-saved")
+        await _native_autofill_control_record(history, turns, chosen=_NATIVE_AUTOFILL_SCREEN_TEXT, result={"success": True, "operation": state["interaction"]["lastOperation"]}, tool_call_id="control-read-after-fill")
     return state, history, turns
 
 
