@@ -3152,6 +3152,55 @@ def check_owner_run_preflight(tmp: Path, env: dict[str, str]) -> None:
     assert linked["set_aside"] == [] and [r["classification"] for r in linked["refused"]] == ["unknown"], linked
     assert "symlink" in linked["refused"][0]["reason"], linked["refused"]
     assert (unit_root / "1700000000-999-1").is_dir() and not (unit_root / "_aborted" / "1700000000-999-1").exists()
+    # A run directory removed by a concurrent cleanup after ``is_dir()``
+    # succeeded (PR #1656 review, 2026-10-31): the FileNotFoundError from its
+    # newest-mtime stat or from a record read made the run ``unknown`` and the
+    # preflight refused the whole attempt. A confirmed-vanished run is
+    # ``finished`` (reported, never refused, never renamed); the same error
+    # while the directory still exists stays ``unknown`` (fail closed).
+    vanishing = unit("1700000000-997-1", 600, benchmark="not_started")
+    original_newest_mtime = pipeline._newest_mtime
+
+    def vanish_before_stat(run_dir: Path) -> float:
+        if run_dir == vanishing:
+            shutil.rmtree(run_dir)
+        return original_newest_mtime(run_dir)
+
+    with patch.object(pipeline, "_newest_mtime", vanish_before_stat):
+        gone = pipeline.reconcile_owner_runs(unit_root, tmp / "owner-runs-vanished-state", stage="unit", proc=fake,
+                                             identity_of=lambda pid: "", grace_seconds=90,
+                                             run_ids={vanishing.name, "stack-exited"})
+    assert gone["refused"] == [] and gone["set_aside"] == [], gone
+    assert gone["counts"]["finished"] == 2 and gone["counts"]["unknown"] == 0, gone["counts"]
+    row = next(run for run in gone["runs"] if run["run_id"] == vanishing.name)
+    assert row["classification"] == "finished" and "vanished" in row["reason"] and row["action"] == "left", row
+    assert not vanishing.exists() and not (unit_root / "_aborted" / vanishing.name).exists()
+    assert vanishing.name in (tmp / "owner-runs-vanished-state" / "owner-runs.jsonl").read_text()
+    # The same race on an owner-record read (the directory goes between is_file() and read_text()).
+    vanishing = unit("1700000000-997-1", 600, benchmark="not_started")
+    original_read_text = Path.read_text
+
+    def vanish_before_read(self: Path, *args, **kwargs):
+        if self.parent == vanishing:
+            shutil.rmtree(vanishing)
+        return original_read_text(self, *args, **kwargs)
+
+    with patch.object(Path, "read_text", vanish_before_read):
+        gone = pipeline.classify_owner_runs(unit_root, proc=fake, identity_of=lambda pid: "", now=now,
+                                            grace_seconds=90, run_ids={vanishing.name})
+    assert [run["classification"] for run in gone] == ["finished"] and "vanished" in gone[0]["reason"], gone
+    assert not vanishing.exists()
+    # Control: a FileNotFoundError while the run directory still exists is not a vanished run.
+    present = unit("1700000000-996-1", 600, benchmark="not_started")
+
+    def phantom_missing(run_dir: Path) -> float:
+        raise FileNotFoundError(f"phantom {run_dir}")
+
+    with patch.object(pipeline, "_newest_mtime", phantom_missing):
+        kept = pipeline.classify_owner_runs(unit_root, proc=fake, identity_of=lambda pid: "", now=now,
+                                            grace_seconds=90, run_ids={present.name})
+    assert [run["classification"] for run in kept] == ["unknown"], kept
+    assert kept[0]["reason"] == "run dir unreadable (FileNotFoundError)" and present.is_dir(), kept
     # Grace comes from the same variable run.sh / kill-services.sh honour.
     with patch.dict(os.environ, {"BENCHMARK_STARTUP_GRACE_SECONDS": "7"}):
         assert pipeline.bootstrap_grace_seconds() == 7.0

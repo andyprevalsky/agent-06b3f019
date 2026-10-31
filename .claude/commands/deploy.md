@@ -767,7 +767,9 @@ receipt shows the bootstrap ended is `aborted` when it left no manifest or a
 deleted, classification written beside the evidence); one that left a manifest
 without a clean receipt is `stranded`: reported and left in place for
 `--reconcile-cleanup`. An own `bootstrapping` run is waited out (the grace plus one
-poll, at most) and refuses the launch if still bootstrapping after it. An unreadable
+poll, at most) and refuses the launch if still bootstrapping after it. A run
+directory that a concurrent cleanup removes mid-classification is `finished`
+(reported, never refused). An unreadable
 record, a symlinked `.context/benchmarks` or an unavailable `/proc` is
 `unknown` and refuses the launch (`PIPELINE_OWNER_RUNS_REFUSED`, every lane
 `failed`, not a fix-loop round) — never move a run dir by hand while a process

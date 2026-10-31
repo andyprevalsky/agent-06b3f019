@@ -1981,8 +1981,30 @@ def bootstrap_grace_seconds() -> float:
     return DEFAULT_BOOTSTRAP_GRACE_SECONDS
 
 
-def _read_json_record(path: Path) -> tuple[dict | None, str | None]:
-    """(payload, error): (None, None) when absent; an error names why it is unreadable."""
+class OwnerRunVanished(Exception):
+    """The run directory disappeared while it was being classified: a
+    concurrent cleanup removed it after ``is_dir()`` succeeded."""
+
+
+def _raise_if_run_vanished(run_dir: Path, error: OSError) -> None:
+    """A ``FileNotFoundError`` while reading a run means the run vanished only
+    when the run directory itself is confirmed gone (``lstat`` -> ENOENT).
+    Any other error (EACCES, ...) or a missing file under a directory that
+    still exists keeps the caller's fail-closed ``unknown`` path."""
+    if not isinstance(error, FileNotFoundError):
+        return
+    try:
+        os.lstat(run_dir)
+    except FileNotFoundError:
+        raise OwnerRunVanished(str(run_dir)) from error
+    except OSError:
+        return
+
+
+def _read_json_record(path: Path, *, run_dir: Path | None = None) -> tuple[dict | None, str | None]:
+    """(payload, error): (None, None) when absent; an error names why it is
+    unreadable. With ``run_dir``, a read that fails because that run directory
+    vanished raises ``OwnerRunVanished`` instead."""
     if path.is_symlink():
         return None, "symlink"
     if not path.is_file():
@@ -1990,6 +2012,8 @@ def _read_json_record(path: Path) -> tuple[dict | None, str | None]:
     try:
         payload = json.loads(path.read_text())
     except (OSError, ValueError) as error:
+        if run_dir is not None and isinstance(error, OSError):
+            _raise_if_run_vanished(run_dir, error)
         return None, f"unreadable ({type(error).__name__})"
     if not isinstance(payload, dict):
         return None, "not a JSON object"
@@ -2086,12 +2110,32 @@ def native_process_identity(pid: int) -> str:
     return identity if isinstance(identity, str) else ""
 
 
+VANISHED_RUN_REASON = ("run directory vanished during classification (removed concurrently): "
+                       "nothing left to set aside")
+
+
 def classify_owner_run(run_dir: Path, *, proc: Path, processes: dict[int, dict] | None,
                        carriers: dict[str, list[int]], identity_of, now: float, grace_seconds: float) -> dict | None:
     """One isolated run directory -> ``{"run_id", "path", "classification",
     "reason", "pids", "age_s", "records"}``; ``None`` for a directory that is
     not a run (no owner record, no manifest, no generated run id).
-    ``processes is None`` (unavailable table) makes every run unknown."""
+    ``processes is None`` (unavailable table) makes every run unknown. A run
+    directory that vanishes while it is being read (a concurrent cleanup
+    removed it after ``is_dir()`` succeeded) is ``finished``: reported, never
+    ``unknown``, so one concurrent cleanup cannot refuse a launch."""
+    try:
+        return _classify_present_owner_run(run_dir, proc=proc, processes=processes, carriers=carriers,
+                                           identity_of=identity_of, now=now, grace_seconds=grace_seconds)
+    except OwnerRunVanished:
+        return {"run_id": run_dir.name, "path": str(run_dir), "classification": OWNER_RUN_FINISHED,
+                "reason": VANISHED_RUN_REASON, "pids": [], "age_s": None, "records": []}
+
+
+def _classify_present_owner_run(run_dir: Path, *, proc: Path, processes: dict[int, dict] | None,
+                                carriers: dict[str, list[int]], identity_of, now: float,
+                                grace_seconds: float) -> dict | None:
+    """``classify_owner_run`` for a run directory that is present; raises
+    ``OwnerRunVanished`` when the directory disappears mid-classification."""
     run_id = run_dir.name
     result: dict = {"run_id": run_id, "path": str(run_dir), "classification": OWNER_RUN_UNKNOWN,
                     "reason": "", "pids": [], "age_s": None, "records": []}
@@ -2101,12 +2145,13 @@ def classify_owner_run(run_dir: Path, *, proc: Path, processes: dict[int, dict] 
     try:
         newest = _newest_mtime(run_dir)
     except OSError as error:
+        _raise_if_run_vanished(run_dir, error)
         result["reason"] = f"run dir unreadable ({type(error).__name__})"
         return result
     payloads: dict[str, dict | None] = {}
     errors: list[str] = []
     for name in (STACK_OWNER_NAME, BENCHMARK_OWNER_NAME, STACK_MANIFEST_NAME):
-        payload, error = _read_json_record(run_dir / name)
+        payload, error = _read_json_record(run_dir / name, run_dir=run_dir)
         payloads[name] = payload
         if error:
             errors.append(f"{name}: {error}")
@@ -2121,6 +2166,7 @@ def classify_owner_run(run_dir: Path, *, proc: Path, processes: dict[int, dict] 
             cleanup_state = _cleanup_status_state(cleanup_path)
             result["records"].append(STACK_CLEANUP_STATUS_NAME)
         except OSError as error:
+            _raise_if_run_vanished(run_dir, error)
             errors.append(f"{STACK_CLEANUP_STATUS_NAME}: unreadable ({type(error).__name__})")
     if not result["records"] and not errors and not generated:
         return None
