@@ -14,6 +14,9 @@ budgets to the host, ``run`` caps concurrent lanes and admits them against a
 declared-memory budget, refusing a lane that can never fit. ``wait`` requires
 ``--since`` so a previous iteration's receipt can never be reported, and it
 reports lanes that failed before any stage row existed instead of hanging.
+Live admission (2026-10-30, #1640): a phased lane is charged only the running
+lanes' unmaterialized declarations against live headroom (their usage is
+already in MemAvailable); unphased and unobserved lanes keep the declared sum.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -172,7 +176,7 @@ def check_macos_memory(tmp: Path, env: dict[str, str]) -> None:
          patch.object(pipeline.os, "getloadavg", return_value=(1.5, 1.0, 0.5)), \
          patch.object(pipeline, "_watchdog_cap_mb", return_value=None), \
          patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
-         patch.dict(os.environ, env):
+         patch.dict(os.environ, env, clear=True):
         host = pipeline.host_resources()
         assert host["mem_total_mb"] == 32768 and host["mem_available_mb"] == 13312, host
         page_size = 4096
@@ -391,7 +395,7 @@ def check_live_headroom_and_child_rusage(tmp: Path, env: dict[str, str]) -> None
                 "mem_available_mb": 2300 if marker.exists() else 8192}
     with patch.object(pipeline, "host_resources", side_effect=host), \
          patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
-         patch.dict(os.environ, env):
+         patch.dict(os.environ, env, clear=True):
         result = pipeline.run(plan, state, max_parallel=2)
     receipt = json.loads((state / "receipt.json").read_text())
     assert result == 1 and not victim.exists(), "live MemAvailable fell but the next lane was still launched"
@@ -401,6 +405,443 @@ def check_live_headroom_and_child_rusage(tmp: Path, env: dict[str, str]) -> None
     child = receipt["lanes"]["pressure"]
     assert child["peak_rss_mb"] > 0 and child["rusage_source"] == "wait4", child
     print("live headroom refusal + per-lane child rusage: ok")
+
+
+def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> None:
+    """Follow-up ah (#1640, 2026-10-30): live headroom already contains what
+    the running lanes use, so charging their whole declarations against it
+    again made the 4096 MB smoke lane wait 16 min beside the two coverage
+    lanes (3712 + 4096 > ~4700 headroom). A phased lane now reserves only the
+    running lanes' unmaterialized declarations (declared - observed
+    process-tree PSS, sampled at 1 Hz) against live headroom; the startup
+    budget still caps declared totals; an unphased lane (semantic-stack, whose
+    startup kills a running stack) keeps the declared accounting; an unobserved
+    lane keeps its whole declaration; every decision's inputs land in the
+    receipt. Budget 300 at start, headroom 120 once the holder has allocated:
+    holder (100) + joiner (60) exceed 120 declared, but 100 - ~70 observed + 60
+    fit, so joiner must start while holder is still running."""
+    pipeline = load_module("pipeline_materialized_credit", DRIVER)
+    marker = tmp / "holder-allocated"
+    plan = tmp / "credit-plan.json"
+    holder_command = [sys.executable, "-c",
+                      "import pathlib, time; block = b'x' * (60 * 1024 * 1024); "
+                      f"pathlib.Path({str(marker)!r}).touch(); time.sleep(4); del block"]
+
+    def write(joined: Path, unphased: Path) -> None:
+        write_plan(plan, [
+            {"name": "gate", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 1},
+            {"name": "holder", "command": holder_command, "reuse_passed": False, "group": "3", "memory_mb": 100},
+            {"name": "joiner", "command": ["touch", str(joined)], "after": ["gate"], "reuse_passed": False,
+             "group": "3", "memory_mb": 60},
+            {"name": "unphased", "command": ["touch", str(unphased)], "after": ["gate"], "reuse_passed": False,
+             "group": "4", "memory_mb": 60},
+        ], schedule={"policy": "legacy"})
+
+    def host() -> dict:
+        # No MemTotal/watchdog: headroom is MemAvailable less the 2 GiB reserve.
+        return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if marker.exists() else 300)}
+
+    seen_flag: list[str] = []  # what the driver's process actually saw in each arm
+
+    def run(state: Path, extra_env: dict[str, str] | None = None, **patches) -> dict:
+        if marker.exists():
+            marker.unlink()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(pipeline, "host_resources", side_effect=host))
+            stack.enter_context(patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])))
+            # clear=True: a flag exported by the parent (the control run's
+            # DEPLOY_ADMISSION_CREDIT=0) must not leak into an arm that did not set it.
+            stack.enter_context(patch.dict(os.environ, {**env, **(extra_env or {})}, clear=True))
+            seen_flag.append(os.environ.get("DEPLOY_ADMISSION_CREDIT", "<unset>"))
+            for name, value in patches.items():
+                stack.enter_context(patch.object(pipeline, name, value))
+            result = pipeline.run(plan, state, max_parallel=0)
+        receipt = json.loads((state / "receipt.json").read_text())
+        assert result == 0 and receipt["status"] == "passed", (result, receipt["status"], receipt["lanes"])
+        assert receipt["memory_budget_mb"] == 300, receipt["memory_budget_mb"]
+        return receipt
+
+    if sys.platform == "linux":
+        write(tmp / "credit-joined", tmp / "credit-unphased")
+        receipt = run(tmp / "credit")
+        lanes = receipt["lanes"]
+        assert "DEPLOY_ADMISSION_CREDIT" not in env and seen_flag[-1] == "<unset>", \
+            f"the true-unset default is under test here; the driver saw {seen_flag[-1]!r}"
+        enabled_receipt = receipt
+        holder, joiner, unphased = lanes["holder"], lanes["joiner"], lanes["unphased"]
+        assert joiner["started_epoch"] < holder["finished_epoch"], \
+            "joiner fits beside holder's unmaterialized reservation and must not wait for it"
+        assert holder["tree_peak_anon_mb"] >= 50, holder
+        admission = joiner["admission"]
+        assert admission["decision"] == "admitted" and admission["accounting"] == "unmaterialized", admission
+        assert admission["headroom_mb"] == 120 and admission["budget_mb"] == 300 and admission["memory_mb"] == 60
+        assert admission["reserved_declared_mb"] == 100 and admission["reserved_live_mb"] < 60, admission
+        assert admission["running"]["holder"]["memory_mb"] == 100 and admission["running"]["holder"]["tree_anon_mb"] >= 50
+        assert admission["running"]["holder"]["observation"] == "fresh", admission["running"]
+        assert admission["running"]["holder"]["tree_pss_mb"] >= admission["running"]["holder"]["tree_anon_mb"], \
+            "total PSS is recorded beside the anonymous credit basis"
+        assert holder["tree_peak_pss_mb"] >= holder["tree_peak_anon_mb"] >= 50, holder
+        assert 0 <= admission["running"]["holder"]["observed_age_s"] <= pipeline.OBSERVATION_MAX_AGE_SECONDS
+        assert holder["tree_sampled_at"] and holder["tree_sampled_mono"] is not None, holder
+        assert admission["deferred"]["first"]["reason"] == "headroom", admission["deferred"]
+        assert admission["deferred"]["first"]["running"]["holder"]["observation"] == "unknown", admission["deferred"]
+        assert admission["deferred"]["checks"] >= 1 and admission["deferred"]["reason"] == "headroom", admission
+        assert admission["deferred"]["last"]["reserved_live_mb"] + 60 > 120, admission["deferred"]
+        assert unphased["started_epoch"] >= holder["finished_epoch"], \
+            "an unphased lane keeps the declared accounting beside a running stack"
+        assert unphased["admission"]["accounting"] == "declared", unphased["admission"]
+        assert "waiting" not in joiner and "waiting" not in unphased, "deferral history moves under admission"
+        # Kill switch for a matched control run: identical plan and head with
+        # DEPLOY_ADMISSION_CREDIT=0. Sampling and recording continue, every
+        # running lane classifies as disabled, the whole declaration is reserved
+        # (pre-credit accounting) and the records say so.
+        write(tmp / "disabled-joined", tmp / "disabled-unphased")
+        receipt = run(tmp / "disabled", extra_env={"DEPLOY_ADMISSION_CREDIT": "0"})
+        lanes = receipt["lanes"]
+        holder, joiner = lanes["holder"], lanes["joiner"]
+        assert joiner["started_epoch"] >= holder["finished_epoch"], \
+            "DEPLOY_ADMISSION_CREDIT=0 must reserve the holder's whole declaration (no credit)"
+        assert enabled_receipt["admission_credit"] == "enabled" and admission["credit"] == "enabled", admission
+        assert enabled_receipt["lanes"]["unphased"]["admission"]["credit"] == "enabled"
+        assert receipt["admission_credit"] == "disabled", receipt["admission_credit"]
+        assert joiner["admission"]["credit"] == "disabled" and lanes["unphased"]["admission"]["credit"] == "disabled"
+        last = joiner["admission"]["deferred"]["last"]
+        assert last["reserved_live_mb"] == last["reserved_declared_mb"] == 100 and last["accounting"] == "unmaterialized", last
+        assert last["running"]["holder"]["observation"] == "disabled", last["running"]
+        assert last["running"]["holder"]["tree_anon_mb"] >= 50 and last["running"]["holder"]["tree_pss_mb"] >= 50, \
+            "observations are still sampled and recorded for evidence"
+        assert holder["tree_peak_anon_mb"] >= 50 and holder["tree_sampled_at"], holder
+        assert seen_flag[-1] == "0", seen_flag
+        # Explicit "enabled" arm (DEPLOY_ADMISSION_CREDIT=1), separate from the
+        # true-unset default: the credit applies and the records say enabled.
+        write(tmp / "enabled-joined", tmp / "enabled-unphased")
+        receipt = run(tmp / "enabled", extra_env={"DEPLOY_ADMISSION_CREDIT": "1"})
+        lanes = receipt["lanes"]
+        assert seen_flag[-1] == "1", seen_flag
+        assert lanes["joiner"]["started_epoch"] < lanes["holder"]["finished_epoch"], "an explicit 1 credits"
+        assert receipt["admission_credit"] == "enabled" and lanes["joiner"]["admission"]["credit"] == "enabled", receipt
+        assert lanes["joiner"]["admission"]["reserved_live_mb"] < 60, lanes["joiner"]["admission"]
+    else:
+        print("materialized reservation credit: process-tree sampling is Linux-only; conservative path only")
+    # Unobserved usage (macOS, unreadable /proc) keeps the whole declaration: joiner waits.
+    write(tmp / "unobserved-joined", tmp / "unobserved-unphased")
+    lanes = run(tmp / "unobserved", sample_lane_tree_memory=lambda pids: {})["lanes"]
+    assert lanes["joiner"]["started_epoch"] >= lanes["holder"]["finished_epoch"], lanes["joiner"]
+    assert lanes["joiner"]["admission"]["running"] == {} and lanes["holder"]["tree_anon_mb"] is None, lanes
+    assert "tree_peak_anon_mb" not in lanes["holder"], lanes["holder"]
+    last = lanes["joiner"]["admission"]["deferred"]["last"]["running"]["holder"]
+    assert last["tree_anon_mb"] is None and last["observation"] == "unknown", last
+    assert pipeline.unmaterialized_mb(100, None) == 100 and pipeline.unmaterialized_mb(100, 70.4) == 30
+    assert pipeline.unmaterialized_mb(100, 250.0) == 0
+    print("materialized reservation credit: ok")
+
+
+def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
+    """Review of f3127ca41: the credit must bind to a fresh, fully observed
+    PSS sample. (1) Summed RSS is never a PSS substitute: shared pages count
+    once per process and would over-credit the lane, so a tree with any live
+    process whose smaps_rollup is unreadable is unknown. (2) Every sampling
+    pass re-marks every running lane: a lane sampled at 80 MB whose later
+    passes fail (process gone, /proc unreadable, PID reuse) is unknown again,
+    not still credited 80 MB; and an observation older than
+    OBSERVATION_MAX_AGE_SECONDS is stale. Unknown and stale keep the whole
+    declaration; only fresh credits."""
+    pipeline = load_module("pipeline_observation_validity", DRIVER)
+    # (2) Stale after a sampling failure. The holder is observed once at 80 MB
+    # (first pass, ~1 s) and never again; the joiner becomes eligible only at
+    # ~2.5 s, by which time the failed passes must have made the holder unknown.
+    marker = tmp / "validity-holder-allocated"
+    plan = tmp / "validity-plan.json"
+    state = tmp / "validity"
+    write_plan(plan, [
+        {"name": "gate", "command": ["sleep", "2.5"], "reuse_passed": False, "group": "3", "memory_mb": 1},
+        {"name": "holder", "command": [sys.executable, "-c",
+                                       f"import pathlib, time; pathlib.Path({str(marker)!r}).touch(); time.sleep(5)"],
+         "reuse_passed": False, "group": "3", "memory_mb": 100},
+        {"name": "joiner", "command": ["true"], "after": ["gate"], "reuse_passed": False, "group": "3",
+         "memory_mb": 60},
+    ], schedule={"policy": "legacy"})
+    calls: list[set[int]] = []
+
+    def flaky_sampler(pids: set[int]) -> dict[int, dict | None]:
+        calls.append(set(pids))
+        return {pid: {"anon_mb": 80.0, "pss_mb": 96.0} for pid in pids} if len(calls) == 1 else {}
+
+    def host() -> dict:
+        return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if marker.exists() else 300)}
+
+    with patch.object(pipeline, "host_resources", side_effect=host), \
+         patch.object(pipeline, "sample_lane_tree_memory", side_effect=flaky_sampler), \
+         patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
+         patch.dict(os.environ, env, clear=True):
+        result = pipeline.run(plan, state, max_parallel=0)
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert result == 0 and receipt["status"] == "passed", (result, receipt["lanes"])
+    holder, joiner = receipt["lanes"]["holder"], receipt["lanes"]["joiner"]
+    assert len(calls) >= 3, f"the sampler must have failed after its first pass: {len(calls)} passes"
+    assert joiner["started_epoch"] >= holder["finished_epoch"], \
+        "a stale 80 MB observation stayed credited after sampling failed"
+    assert holder["tree_peak_anon_mb"] == 80.0 and holder["tree_peak_pss_mb"] == 96.0, holder
+    assert holder["tree_anon_mb"] is None and holder["tree_pss_mb"] is None, holder
+    last = joiner["admission"]["deferred"]["last"]["running"]["holder"]
+    assert last == {"memory_mb": 100, "tree_anon_mb": None, "tree_pss_mb": None,
+                    "observed_age_s": last["observed_age_s"], "observation": "unknown"} \
+        and last["observed_age_s"] is not None, last
+    # (1) Anonymous PSS only. A rollup unreadable for one live process, or
+    # lacking Pss / Pss_Anon, makes the tree unknown (never summed RSS); a
+    # file-backed footprint with zero Pss_Anon is observed as 0 MB and leaves
+    # the growth reservation untouched: those pages are still in MemAvailable.
+    proc = tmp / "fake-proc"
+    for pid, ppid in ((100, 1), (101, 100), (102, 101), (200, 1)):
+        (proc / str(pid)).mkdir(parents=True)
+        fields = ["S", str(ppid), str(pid), str(pid)] + ["0"] * 17 + ["1000", "25000"]  # ... vsize, rss pages
+        (proc / str(pid) / "stat").write_text(f"{pid} (fake) {' '.join(fields)}\n")
+    (proc / "not-a-pid").mkdir()
+    rollup = "Rss: 4096 kB\nPss: 2048 kB\nPss_Dirty: 1024 kB\nPss_Anon: 1024 kB\nPss_File: 1024 kB\nPss_Shmem: 0 kB\n"
+    for pid in (100, 101):
+        (proc / str(pid) / "smaps_rollup").write_text(rollup)
+    assert pipeline.sample_lane_tree_memory({100, 200}, proc) == {100: None, 200: None}, "102 and 200 lack a rollup"
+    (proc / "102" / "smaps_rollup").write_text("Rss: 4096 kB\nPss: 1024 kB\nPss_Anon: 512 kB\nPss_File: 512 kB\n")
+    assert pipeline.sample_lane_tree_memory({100}, proc) == {100: {"anon_mb": 2.5, "pss_mb": 5.0}}, \
+        "anon 1 + 1 + 0.5 MB, total 2 + 2 + 1 MB over 100, 101, 102"
+    shutil.rmtree(proc / "102")  # exited since the listing: gone, not unknown
+    listing = os.listdir(proc)
+    with patch.object(pipeline.os, "listdir", return_value=listing + ["102"]):
+        assert pipeline.sample_lane_tree_memory({100}, proc) == {100: {"anon_mb": 2.0, "pss_mb": 4.0}}
+    (proc / "101" / "smaps_rollup").write_text("Rss: 4096 kB\nPss: 2048 kB\nPss_File: 2048 kB\n")  # no Pss_Anon
+    assert pipeline.sample_lane_tree_memory({100}, proc) == {100: None}, "a rollup without Pss_Anon is unknown"
+    (proc / "101" / "smaps_rollup").write_text("Rss: 4096 kB\nPss_Anon: 1024 kB\n")  # no Pss
+    assert pipeline.sample_lane_tree_memory({100}, proc) == {100: None}, "a rollup without Pss is unknown"
+    (proc / "101" / "smaps_rollup").write_text(rollup)
+    (proc / "100" / "smaps_rollup").write_text(
+        "Rss: 92160 kB\nPss: 92160 kB\nPss_Dirty: 0 kB\nPss_Anon: 0 kB\nPss_File: 92160 kB\nPss_Shmem: 0 kB\n")
+    file_backed = pipeline.sample_lane_tree_memory({100}, proc)
+    assert file_backed == {100: {"anon_mb": 1.0, "pss_mb": 92.0}}, file_backed
+    assert pipeline.unmaterialized_mb(100, 0.0) == 100 and pipeline.unmaterialized_mb(100, 1.0) == 99, \
+        "90 MB of file-backed PSS reduces no reservation; only the anonymous MB do"
+    assert pipeline.sample_lane_tree_memory({100}, tmp / "no-such-proc") == {100: None}
+    assert pipeline.sample_lane_tree_memory(set(), proc) == {}
+    # A fresh observation with zero anonymous memory and a large file-backed
+    # footprint credits nothing: the joiner must still wait for the holder.
+    anon_marker = tmp / "anon-holder-allocated"
+    anon_plan = tmp / "anon-plan.json"
+    anon_state = tmp / "anon"
+    write_plan(anon_plan, [
+        {"name": "gate", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 1},
+        {"name": "holder", "command": [sys.executable, "-c",
+                                       f"import pathlib, time; pathlib.Path({str(anon_marker)!r}).touch(); "
+                                       "time.sleep(3.5)"],
+         "reuse_passed": False, "group": "3", "memory_mb": 100},
+        {"name": "joiner", "command": ["true"], "after": ["gate"], "reuse_passed": False, "group": "3",
+         "memory_mb": 60},
+    ], schedule={"policy": "legacy"})
+
+    def anon_host() -> dict:
+        return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if anon_marker.exists() else 300)}
+
+    with patch.object(pipeline, "host_resources", side_effect=anon_host), \
+         patch.object(pipeline, "sample_lane_tree_memory",
+                      side_effect=lambda pids: {pid: {"anon_mb": 0.0, "pss_mb": 95.0} for pid in pids}), \
+         patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
+         patch.dict(os.environ, env, clear=True):
+        result = pipeline.run(anon_plan, anon_state, max_parallel=0)
+    receipt = json.loads((anon_state / "receipt.json").read_text())
+    assert result == 0 and receipt["status"] == "passed", (result, receipt["lanes"])
+    holder, joiner = receipt["lanes"]["holder"], receipt["lanes"]["joiner"]
+    assert joiner["started_epoch"] >= holder["finished_epoch"], \
+        "95 MB of file-backed PSS with zero Pss_Anon reduced the holder's growth reservation"
+    last = joiner["admission"]["deferred"]["last"]["running"]["holder"]
+    assert last["observation"] == "fresh" and last["tree_anon_mb"] == 0.0 and last["tree_pss_mb"] == 95.0, last
+    assert joiner["admission"]["deferred"]["last"]["reserved_live_mb"] == 100, joiner["admission"]["deferred"]
+    assert holder["tree_peak_anon_mb"] == 0.0 and holder["tree_peak_pss_mb"] == 95.0, holder
+    # A delayed scan: the observation is as old as the scan's START. The first
+    # pass takes 3.5 s (over the 3 s limit) and reports 80 MB when it returns;
+    # the gate exits during that scan, so the joiner's first check runs right
+    # after it and must see the holder stale (not fresh because the scan "just
+    # finished"), then unknown as later passes fail; it waits for the holder.
+    slow_marker = tmp / "slow-holder-allocated"
+    slow_plan = tmp / "slow-scan-plan.json"
+    slow_state = tmp / "slow-scan"
+    write_plan(slow_plan, [
+        {"name": "gate", "command": ["sleep", "4.0"], "reuse_passed": False, "group": "3", "memory_mb": 1},
+        {"name": "holder", "command": [sys.executable, "-c",
+                                       f"import pathlib, time; pathlib.Path({str(slow_marker)!r}).touch(); "
+                                       "time.sleep(6.5)"],
+         "reuse_passed": False, "group": "3", "memory_mb": 100},
+        {"name": "joiner", "command": ["true"], "after": ["gate"], "reuse_passed": False, "group": "3",
+         "memory_mb": 60},
+    ], schedule={"policy": "legacy"})
+    slow_calls: list[float] = []
+
+    def slow_sampler(pids: set[int]) -> dict[int, dict | None]:
+        slow_calls.append(time.monotonic())
+        if len(slow_calls) == 1:
+            time.sleep(pipeline.OBSERVATION_MAX_AGE_SECONDS + 0.5)
+            return {pid: {"anon_mb": 80.0, "pss_mb": 96.0} for pid in pids}
+        return {}
+
+    def slow_host() -> dict:
+        return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if slow_marker.exists() else 300)}
+
+    with patch.object(pipeline, "host_resources", side_effect=slow_host), \
+         patch.object(pipeline, "sample_lane_tree_memory", side_effect=slow_sampler), \
+         patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
+         patch.dict(os.environ, env, clear=True):
+        result = pipeline.run(slow_plan, slow_state, max_parallel=0)
+    receipt = json.loads((slow_state / "receipt.json").read_text())
+    assert result == 0 and receipt["status"] == "passed", (result, receipt["lanes"])
+    holder, joiner = receipt["lanes"]["holder"], receipt["lanes"]["joiner"]
+    assert joiner["started_epoch"] >= holder["finished_epoch"], \
+        "an observation from a scan older than the limit was credited because the scan had just returned"
+    first = joiner["admission"]["deferred"]["first"]["running"]["holder"]
+    assert first["observation"] == "stale" and first["tree_anon_mb"] == 80.0, first
+    assert first["observed_age_s"] >= pipeline.OBSERVATION_MAX_AGE_SECONDS, first
+    assert joiner["admission"]["deferred"]["last"]["running"]["holder"]["observation"] == "unknown", joiner
+    assert holder["tree_peak_anon_mb"] == 80.0 and holder["tree_sampled_at"], holder
+    # Fresh, stale (too old, unstamped), invalid (from the future) and unknown
+    # observations on the monotonic clock. The raw elapsed value is compared;
+    # only the displayed age is rounded (3.04 s must not read as 3.0 and pass,
+    # -0.04 s must not read as -0.0 and pass).
+    now = 1_000.0
+    limit = pipeline.OBSERVATION_MAX_AGE_SECONDS
+
+    def classify(age: float) -> tuple[float | None, dict]:
+        return pipeline.fresh_tree_anon_mb({"tree_anon_mb": 80.0, "tree_pss_mb": 96.0,
+                                            "tree_sampled_mono": now - age}, now)
+
+    fresh, detail = classify(1.0)
+    assert fresh == 80.0 and detail == {"tree_anon_mb": 80.0, "tree_pss_mb": 96.0, "observed_age_s": 1.0,
+                                        "observation": "fresh"}, detail
+    assert classify(limit - 0.04) == (80.0, {"tree_anon_mb": 80.0, "tree_pss_mb": 96.0,
+                                             "observed_age_s": round(limit - 0.04, 2), "observation": "fresh"})
+    assert classify(limit)[0] == 80.0, "exactly the limit is still fresh"
+    over, detail = classify(limit + 0.04)
+    assert over is None and detail["observation"] == "stale" and detail["observed_age_s"] == round(limit + 0.04, 2), \
+        f"{limit + 0.04:.2f} s must not round down to the limit: {detail}"
+    stale, detail = classify(limit + 0.1)
+    assert stale is None and detail["observation"] == "stale" and detail["tree_anon_mb"] == 80.0, detail
+    future, detail = classify(-0.04)
+    assert future is None and detail["observation"] == "invalid" and detail["observed_age_s"] == -0.04, \
+        f"-0.04 s must not round to -0.0 and pass: {detail}"
+    future, detail = classify(-5.0)
+    assert future is None and detail == {"tree_anon_mb": 80.0, "tree_pss_mb": 96.0, "observed_age_s": -5.0,
+                                         "observation": "invalid"}, detail
+    assert pipeline.fresh_tree_anon_mb({"tree_anon_mb": 80.0}, now) == (None, {
+        "tree_anon_mb": 80.0, "tree_pss_mb": None, "observed_age_s": None, "observation": "stale"})
+    assert pipeline.fresh_tree_anon_mb({"tree_anon_mb": None, "tree_sampled_mono": now}, now)[1]["observation"] == "unknown"
+    assert pipeline.fresh_tree_anon_mb({}, now) == (None, {"tree_anon_mb": None, "tree_pss_mb": None,
+                                                        "observed_age_s": None, "observation": "unknown"})
+    assert pipeline.fresh_tree_anon_mb({"tree_anon_mb": 80.0, "tree_sampled_mono": time.monotonic()})[0] == 80.0, \
+        "the default clock is monotonic, not wall time"
+    # A delayed host probe: the holder is observed fresh (80 MB) at ~1 s, the
+    # gate exits at ~1.5 s and the joiner's admission probe then takes 3.2 s.
+    # The classification must be made after that probe, at the decision point,
+    # where the sample is ~3.8 s old: stale, no credit, the joiner waits (later
+    # passes fail, so it keeps waiting for the holder). A prompt probe crediting
+    # a fresh sample is the first scenario of check_materialized_reservation_credit.
+    probe_marker = tmp / "probe-holder-allocated"
+    gate_marker = tmp / "probe-gate-done"
+    probe_plan = tmp / "probe-plan.json"
+    probe_state = tmp / "probe"
+    write_plan(probe_plan, [
+        {"name": "gate", "command": ["bash", "-c", f"sleep 1.5; touch {gate_marker}"], "reuse_passed": False,
+         "group": "3", "memory_mb": 1},
+        {"name": "holder", "command": [sys.executable, "-c",
+                                       f"import pathlib, time; pathlib.Path({str(probe_marker)!r}).touch(); "
+                                       "time.sleep(6.5)"],
+         "reuse_passed": False, "group": "3", "memory_mb": 100},
+        {"name": "joiner", "command": ["true"], "after": ["gate"], "reuse_passed": False, "group": "3",
+         "memory_mb": 60},
+    ], schedule={"policy": "legacy"})
+    probe_calls: list[int] = []
+    slow_probes: list[float] = []
+
+    def once_sampler(pids: set[int]) -> dict[int, dict | None]:
+        probe_calls.append(len(pids))
+        return {pid: {"anon_mb": 80.0, "pss_mb": 96.0} for pid in pids} if len(probe_calls) == 1 else {}
+
+    def delayed_host() -> dict:
+        if gate_marker.exists() and not slow_probes:
+            slow_probes.append(time.monotonic())
+            time.sleep(pipeline.OBSERVATION_MAX_AGE_SECONDS + 0.2)
+        return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if probe_marker.exists() else 300)}
+
+    with patch.object(pipeline, "host_resources", side_effect=delayed_host), \
+         patch.object(pipeline, "sample_lane_tree_memory", side_effect=once_sampler), \
+         patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
+         patch.dict(os.environ, env, clear=True):
+        result = pipeline.run(probe_plan, probe_state, max_parallel=0)
+    receipt = json.loads((probe_state / "receipt.json").read_text())
+    assert result == 0 and receipt["status"] == "passed", (result, receipt["lanes"])
+    holder, joiner = receipt["lanes"]["holder"], receipt["lanes"]["joiner"]
+    assert slow_probes and holder["tree_peak_anon_mb"] == 80.0, (slow_probes, holder)
+    assert joiner["started_epoch"] >= holder["finished_epoch"], \
+        "a sample that expired during the host probe was still credited at the decision"
+    first = joiner["admission"]["deferred"]["first"]["running"]["holder"]
+    assert first["observation"] == "stale" and first["observed_age_s"] > pipeline.OBSERVATION_MAX_AGE_SECONDS, first
+    assert joiner["admission"]["deferred"]["first"]["reserved_live_mb"] == 100, joiner["admission"]["deferred"]
+    print("observation validity: ok")
+
+
+def check_stack_owner_dependency(tmp: Path, env: dict[str, str]) -> None:
+    """semantic-stack's ``run.sh --benchmark`` startup runs kill-services.sh
+    against every runtime process this worktree owns, so it must never start
+    while the local smoke lane or the AgentCard lifecycle lane (their own
+    local stacks) is running. On #1640 only memory kept them apart (4096 +
+    4096 MB against an 8188 MB budget). The plan loader now appends the edge
+    (declared edges kept, receipt ``after`` shows it); with unbounded memory
+    only the dependency can hold semantic-stack back. Plans without a
+    stack-owning lane and lanes with other names are untouched, and a plan
+    that would close a cycle through the implied edge is refused."""
+    pipeline = load_module("pipeline_stack_owner", DRIVER)
+    plan = tmp / "stack-owner-plan.json"
+    state = tmp / "stack-owner"
+    marker = tmp / "semantic-started"
+    write_plan(plan, [
+        {"name": "cov", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3"},
+        {"name": "smoke", "command": ["sleep", "1.5"], "reuse_passed": False, "group": "4", "phase": "coverage"},
+        {"name": "agentcard-lifecycle", "command": ["sleep", "1.0"], "reuse_passed": False, "group": "4",
+         "phase": "coverage"},
+        {"name": "semantic-stack", "command": ["touch", str(marker)], "after": ["cov"], "reuse_passed": False,
+         "group": "4"},
+    ], schedule={"policy": "legacy"})
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, env=env, timeout=120)
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["status"])
+    lanes = receipt["lanes"]
+    assert lanes["semantic-stack"]["started_epoch"] >= max(lanes["smoke"]["finished_epoch"],
+                                                            lanes["agentcard-lifecycle"]["finished_epoch"]), \
+        "semantic-stack started while a lane owning a worktree stack was still running"
+    assert receipt["after"]["semantic-stack"] == ["cov", "smoke", "agentcard-lifecycle"], receipt["after"]
+    assert receipt["after"]["smoke"] == [] and receipt["after"]["agentcard-lifecycle"] == [], receipt["after"]
+    assert lanes["smoke"]["started_epoch"] < lanes["cov"]["finished_epoch"], "owners are not held back"
+    # No stack-owning lane in the plan: nothing is added; other names are untouched.
+    write_plan(plan, [
+        {"name": "cov", "command": ["true"], "group": "3"},
+        {"name": "semantic-stack", "command": ["true"], "after": ["cov"], "group": "4"},
+        {"name": "semantic", "command": ["true"], "group": "4"},
+        {"name": "smoke-like", "command": ["true"], "group": "4", "phase": "coverage"},
+    ])
+    loaded = {lane.name: lane for lane in pipeline.load_plan_payload(plan)[0]}
+    assert loaded["semantic-stack"].after == ["cov"] and loaded["semantic"].after == [], loaded
+    # An implied edge never duplicates a declared one, and a plan that makes an
+    # owner wait for the killer is a cycle, refused before any lane starts.
+    write_plan(plan, [
+        {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage"},
+        {"name": "semantic-stack", "command": ["true"], "after": ["smoke"], "group": "4"},
+    ])
+    assert pipeline.load_plan_payload(plan)[0][1].after == ["smoke"]
+    write_plan(plan, [
+        {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage", "after": ["semantic-stack"]},
+        {"name": "semantic-stack", "command": ["true"], "group": "4"},
+    ])
+    try:
+        pipeline.load_plan_payload(plan)
+    except ValueError as error:
+        assert "cyclic" in str(error), error
+    else:
+        raise AssertionError("an owner that waits for semantic-stack must be refused as a cycle")
+    print("stack owner dependency: ok")
 
 
 def check_wait_receipt_contract(tmp: Path, pipeline=None, scenario="both") -> None:
@@ -534,8 +975,13 @@ def main() -> int:
         tmp = Path(raw)
         source_root = make_source_root(tmp / "source")
         DRIVER = source_root / "scripts" / "run_deploy_pipeline.py"
-        env = {**os.environ, "DEPLOY_RUN_ROOT": str(tmp / "runs"),
-               "DEPLOY_PIPELINE_SOURCE_ROOT": str(source_root)}
+        # The matched control run exports DEPLOY_ADMISSION_CREDIT=0 for the whole
+        # pipeline, and the structural lane that executes this suite inherits
+        # it: every scenario sets the admission knobs it needs explicitly, so
+        # the base environment carries none of them (in-process runs patch
+        # os.environ with clear=True for the same reason).
+        env = {**{key: value for key, value in os.environ.items() if not key.startswith("DEPLOY_ADMISSION_")},
+               "DEPLOY_RUN_ROOT": str(tmp / "runs"), "DEPLOY_PIPELINE_SOURCE_ROOT": str(source_root)}
         start_timing(tmp / "runs", env)
         marker = tmp / "slow-finished"
         plan = tmp / "plan.json"
@@ -624,6 +1070,14 @@ def main() -> int:
 
         check_wait_receipt_contract(tmp)
         check_live_headroom_and_child_rusage(tmp, env)
+        check_materialized_reservation_credit(tmp, env)
+        # Control: the suite itself inherits the control run's flag and every
+        # credit scenario (default on, explicitly off, unobserved) still holds.
+        (tmp / "inherited-flag").mkdir()
+        with patch.dict(os.environ, {"DEPLOY_ADMISSION_CREDIT": "0"}):
+            check_materialized_reservation_credit(tmp / "inherited-flag", env)
+        check_observation_validity(tmp, env)
+        check_stack_owner_dependency(tmp, env)
         check_plan_scaling()
         check_structural_memory_floor()
         check_macos_memory(tmp, env)

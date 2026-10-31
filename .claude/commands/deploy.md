@@ -382,10 +382,17 @@ CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -v '^agents/benchmarks/histor
 # 1471.98 MiB largest-child peak rounded up with a 25% margin for each worker.
 # run reserves 2 GiB for other processes below both available memory and the
 # watchdog cap, rechecks whole-box headroom before every admission, and never
-# admits reservations over that headroom. A lane that cannot fit alone fails
+# admits declared totals over the startup budget. Against live headroom, which
+# already contains what the running lanes use, a phased lane is charged only
+# their unmaterialized declarations (declared minus the lane's freshly sampled
+# anonymous process-tree PSS, Pss_Anon: file-backed pages are still counted in
+# MemAvailable); unphased lanes (semantic-stack) and unobserved usage keep
+# the declared sum (#1640: smoke waited 16 min on a double-counted 3712 MB).
+# A lane that cannot fit alone fails
 # visibly without starting. Explicit resource limits can only tighten memory
 # admission. Receipts include timestamped MemAvailable samples, per-lane child
-# peak RSS (wait4/getrusage), load peaks and memory-watchdog TERM records.
+# peak RSS (wait4/getrusage), per-lane process-tree PSS, every admission's
+# inputs, load peaks and memory-watchdog TERM records.
 # Account for Postgres, Docker and other agents outside the deploy cgroup:
 # MemoryHigh on one unit does not protect the rest of this 16 GiB box.
 BACKEND_BLACKBOX_WORKERS=4
@@ -1057,8 +1064,11 @@ Group 3 lanes alone). The local smoke lane (Group 4, 4096 MB) declares
 exclusive structural lane instead of being admitted first and holding that
 lane's memory (#1638 attempt 5 ran smoke alone for ~22 min; 11–24 min across attempts); the AgentCard lane
 declares the same phase. Undeclared Group 4 lanes stay unphased, and a plan's
-own `after` edges are never removed: `live-probes` and `semantic-stack` start
-as soon as their declared dependencies and memory allow.
+own `after` edges are never removed: `live-probes` starts as soon as its
+declared dependencies and memory allow, and `semantic-stack` additionally
+waits for the stack-owning lanes (`smoke`, `agentcard-lifecycle`) because its
+`run.sh --benchmark` startup runs `kill-services.sh` against every runtime
+process this worktree owns; the driver adds those edges to the plan itself.
 
 **Retry after a failure: failed-first, still a full sweep.** Rerun the same
 stage with `BACKEND_COVERAGE_FAILED_FIRST=1` in the `env` above. The previously
