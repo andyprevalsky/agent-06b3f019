@@ -54,8 +54,9 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          # The harness stays trusted: only a commit the default branch already
-          # contains may be checked out (compare status identical/behind).
+          # The harness stays trusted: only a full commit SHA the default branch
+          # already contains may be checked out (compare status identical/behind).
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::source_sha must be a full 40-hex commit SHA, got '${SOURCE_SHA}'"; exit 1; }
           status=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${DEFAULT_BRANCH}...${SOURCE_SHA}" --jq .status)
           case "$status" in
             identical|behind) echo "source_sha ${SOURCE_SHA} is on ${DEFAULT_BRANCH} (${status})" ;;
@@ -160,6 +161,7 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::source_sha must be a full 40-hex commit SHA, got '${SOURCE_SHA}'"; exit 1; }
           status=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${DEFAULT_BRANCH}...${SOURCE_SHA}" --jq .status)
           case "$status" in
             identical|behind) echo "source_sha ${SOURCE_SHA} is on ${DEFAULT_BRANCH} (${status})" ;;

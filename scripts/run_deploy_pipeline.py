@@ -3001,6 +3001,13 @@ def cutover_verify(fly: dict, merged_sha: str, expected_hash: str, *, root: Path
             "expected_hash": expected_hash, "queue_read": "ok", "monitor_verify_exit": 0, "monitor_tail": tail}
 
 
+def _read_receipt(path: Path) -> object:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = None, *, root: Path | None = None,
                expected_hash: str | None = None, timeout: float = DEFAULT_FLY_TIMEOUT,
                start_timeout: float = DEFAULT_FLY_START_TIMEOUT, poll_seconds: float = DEFAULT_FLY_POLL_SECONDS) -> int:
@@ -3023,6 +3030,17 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
     receipt: dict = {"schema_version": PRODUCTION_SCHEMA, "merged_sha": merged_sha, "started_at": _now(),
                      "started_epoch": time.time(), "github_waits": waits, "status": "running",
                      "fly": {"required": None}, "cutover_verify": None, "semantic_dispatch": None}
+    # Re-running the Step 13b block (production -> production-semantic) must not
+    # forget the semantic lane of the same merged SHA: its recorded run, the one
+    # consumed retry and its GitHub waits are carried forward so a resumed watch
+    # or `--retry-failed-once` binds to that run and a second retry stays refused.
+    previous = _read_receipt(receipt_path)
+    if isinstance(previous, dict) and previous.get("merged_sha") == merged_sha:
+        for key in ("semantic", "semantic_history"):
+            if key in previous:
+                receipt[key] = previous[key]
+        waits.extend(wait for wait in previous.get("github_waits") or []
+                     if isinstance(wait, dict) and wait.get("workflow") == SEMANTIC_WORKFLOW)
     write_receipt(receipt_path, receipt)
 
     def finish(status: str, code: int, error: str | None = None) -> int:
@@ -3196,24 +3214,25 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
                         poll_seconds: float = DEFAULT_SEMANTIC_POLL_SECONDS, sleep=time.sleep) -> int:
     """deploy.md Step 13b. Requires the ``production`` (Fly lane) receipt for
     this merged SHA to have passed in ``state_dir`` (never dispatch while a
-    surface is still cutting over), dispatches ``chat-lifecycle-ratchet.yml``
-    on ``main`` with ``source_sha=<merged_sha>`` plus the URLs, binds to the
-    newest run created after the dispatch whose title names that SHA, polls it
-    every ``poll_seconds`` within ``timeout``, records run id/url/headSha/
-    effective source_sha/created/completed/conclusion/per-job conclusions under
+    surface is still cutting over). When the receipt already names a run of
+    this SHA that is not ``completed`` (a CLI-side timeout or interruption),
+    it resumes watching that run instead of dispatching again. Otherwise it
+    dispatches ``chat-lifecycle-ratchet.yml`` on ``main`` with
+    ``source_sha=<merged_sha>`` plus the URLs and binds to the newest run
+    created after the dispatch whose title names that SHA. It polls every
+    ``poll_seconds`` within ``timeout``, records run id/url/headSha/effective
+    source_sha/created/completed/conclusion/per-job conclusions under
     ``semantic`` in ``production.json`` (every GitHub wait joins
     ``github_waits``) and exits 0 only when the run concluded ``success``.
     ``retry_justification`` (``--retry-failed-once``) reruns only the failed
-    jobs of this SHA's recorded failed run (or of the run this invocation
-    dispatched) exactly once, recording the justification; a second retry is
-    refused with exit 2. Exit 1 = not green (failed, timed out, never started),
-    2 = refused/usage/tooling error."""
+    jobs of this SHA's run (the recorded or resumed one, or the one this
+    invocation dispatched) exactly once; the justification is recorded once
+    ``gh run rerun`` succeeded. A second retry is refused with exit 2. Exit 1
+    = not green (failed, timed out, never started), 2 = refused/usage/tooling
+    error."""
     root = SOURCE_ROOT if root is None else root
     receipt_path = state_dir / PRODUCTION_RECEIPT
-    try:
-        receipt = json.loads(receipt_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        receipt = None
+    receipt = _read_receipt(receipt_path)
     if not isinstance(receipt, dict) or receipt.get("merged_sha") != merged_sha or receipt.get("status") != "passed":
         found = ("no receipt" if not isinstance(receipt, dict)
                  else f"receipt merged_sha={receipt.get('merged_sha')} status={receipt.get('status')}")
@@ -3223,8 +3242,10 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
         return 2
     waits = receipt.setdefault("github_waits", [])
     previous = receipt.get("semantic") if isinstance(receipt.get("semantic"), dict) else None
-    retrying_previous = False
-    if retry_justification is not None and previous is not None:
+    has_run = previous is not None and bool(previous.get("run_id"))
+    # A recorded run that never reached `completed` is resumed, never replaced.
+    resume = has_run and previous.get("status") != "completed"
+    if retry_justification is not None and previous is not None and not resume:
         if previous.get("retry"):
             print(f"PIPELINE_SEMANTIC status=refused exit=2 run {previous.get('run_id')} already used its one "
                   f"--retry-failed-once ({previous['retry'].get('at')}: {previous['retry'].get('justification')}); a "
@@ -3234,8 +3255,8 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
             print(f"PIPELINE_SEMANTIC status=refused exit=2 run {previous.get('run_id')} for {merged_sha} already "
                   "succeeded; nothing to retry (dispatch again without --retry-failed-once to re-verify)", flush=True)
             return 2
-        retrying_previous = bool(previous.get("run_id")) and previous.get("status") == "completed"
-    if retrying_previous:
+    retrying_previous = retry_justification is not None and has_run and not resume
+    if resume or retrying_previous:
         entry = previous
     else:
         if previous is not None:
@@ -3262,18 +3283,33 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
         run_id = str(entry["run_id"])
         failed_jobs = [job.get("name") for job in entry.get("jobs", [])
                        if job.get("conclusion") not in ("success", "skipped")]
+        print(f"PIPELINE_SEMANTIC retry=failed-jobs run={run_id} previous_conclusion={entry.get('conclusion')} "
+              f"jobs={','.join(str(name) for name in failed_jobs) or 'none'}: {justification}", flush=True)
+        # A rejected rerun (e.g. 403) must not consume the single retry.
+        _gh_text(["run", "rerun", run_id, "--failed"], root)
         entry["retry"] = {"justification": justification, "at": _now(), "previous_attempt": entry.get("attempt"),
                           "previous_conclusion": entry.get("conclusion"), "failed_jobs": failed_jobs, "attempt": None}
         write_receipt(receipt_path, receipt)
-        print(f"PIPELINE_SEMANTIC retry=failed-jobs run={run_id} previous_conclusion={entry.get('conclusion')} "
-              f"jobs={','.join(str(name) for name in failed_jobs) or 'none'}: {justification}", flush=True)
-        _gh_text(["run", "rerun", run_id, "--failed"], root)
         _semantic_wait_complete(run_id, root=root, waits=waits, entry=entry, min_attempt=int(entry.get("attempt") or 1) + 1,
                                 timeout=timeout, poll_seconds=poll_seconds, sleep=sleep)
         entry["retry"]["attempt"] = entry.get("attempt")
 
     try:
-        if retrying_previous:
+        if resume:
+            run_id = str(entry["run_id"])
+            print(f"PIPELINE_SEMANTIC resume run={run_id} status={entry.get('status')} source_sha={merged_sha}: "
+                  "watching the recorded run instead of dispatching again", flush=True)
+            print(f"SEMANTIC_RUN_ID={run_id}", flush=True)
+            retry = entry.get("retry") if isinstance(entry.get("retry"), dict) else None
+            min_attempt = int(retry.get("previous_attempt") or 0) + 1 if retry else int(entry.get("attempt") or 1)
+            _semantic_wait_complete(run_id, root=root, waits=waits, entry=entry, min_attempt=min_attempt,
+                                    timeout=timeout, poll_seconds=poll_seconds, sleep=sleep)
+            if retry and retry.get("attempt") is None:
+                retry["attempt"] = entry.get("attempt")
+            if entry["conclusion"] != "success" and retry_justification is not None and not retry:
+                write_receipt(receipt_path, receipt)
+                rerun_failed(retry_justification)
+        elif retrying_previous:
             print(f"PIPELINE_SEMANTIC resume run={entry['run_id']} conclusion={entry.get('conclusion')} "
                   f"source_sha={merged_sha}: rerunning failed jobs once", flush=True)
             print(f"SEMANTIC_RUN_ID={entry['run_id']}", flush=True)
@@ -3304,7 +3340,9 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
                         f"no {SEMANTIC_WORKFLOW} run titled source_sha={merged_sha} created after the dispatch at "
                         f"{entry['dispatch']['at']} appeared within {start_timeout:.0f}s; the dispatch is unconfirmed: "
                         f"inspect `gh run list --workflow {SEMANTIC_WORKFLOW} --event workflow_dispatch` (an older run "
-                        "is never adopted) and rerun this command"
+                        f"is never adopted; a run GitHub stamped more than {DISPATCH_CLOCK_SKEW_S:.0f}s before this "
+                        "host's dispatch clock counts as older, so check the host clock if the run exists) and rerun "
+                        "this command"
                     )
                 sleep(min(10.0, poll_seconds))
             run_id = str(row.get("databaseId"))
@@ -3335,9 +3373,10 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
         print(f"PIPELINE_SEMANTIC status=passed exit=0 run={entry['run_id']} attempt={entry['attempt']} "
               f"source_sha={merged_sha} head_sha={entry['head_sha']} url={entry['url']} jobs: {jobs}", flush=True)
         return finish("passed", 0)
+    retry_state = "used" if entry.get("retry") else "available (--retry-failed-once \"<justification>\")"
     print(f"PIPELINE_SEMANTIC status=failed exit=1 run={entry['run_id']} attempt={entry['attempt']} "
-          f"conclusion={entry['conclusion']} url={entry['url']} jobs: {jobs}; the deployment is not complete: inspect "
-          "the run's Playwright artifacts and service logs (deploy.md Step 13b)", flush=True)
+          f"conclusion={entry['conclusion']} url={entry['url']} jobs: {jobs}; retry={retry_state}; the deployment is "
+          "not complete: inspect the run's Playwright artifacts and service logs (deploy.md Step 13b)", flush=True)
     return finish("failed", 1, f"run {entry['run_id']} concluded {entry['conclusion']}")
 
 
