@@ -109,6 +109,21 @@ def check_extraction_precision(selector: sat.Selector) -> None:
         mutant = sat.strip_comments("x.test.ts", regex_lines[0])
     check("scripts/critical.sh" not in mutant,
           "TS: the regex assertions are load-bearing (a division-only mutant drops the edge)")
+    # A division after `)`/`}` whose span reaches a template literal (PR #1656
+    # review, 2026-10-31): read as a regex it swallowed the template opener and
+    # flipped template state, so a `//` inside a LATER template (an https URL
+    # naming a script) was erased as a line comment.
+    for flipped in (
+        "const s = (a) / 2 + `x/${b}`;\nconst u = `https://${host}/scripts/critical.sh`;\n",
+        "const o = {}\n/ 2 + `y/${c}`;\nconst u = `https://${host}/scripts/critical.sh`;\n",
+    ):
+        check("scripts/critical.sh" in sat.strip_comments("x.test.ts", flipped),
+              "TS: a division after `)`/`}` reaching a template literal keeps a path in a later template: "
+              + flipped.splitlines()[0][:40])
+    kept_regex = sat.strip_comments(
+        "x.test.ts", "if (ok) /\\/\\/x/.test(s) && run('scripts/critical.sh'); // docs/rca/cases/case.md\n")
+    check("/\\/\\/x/" in kept_regex and "scripts/critical.sh" in kept_regex and "docs/rca/cases/case.md" not in kept_regex,
+          "TS: a genuine regex after `)` without a backtick is still a regex literal (kept; the trailing comment goes)")
 
     py_files = ["agents/tests/unit/test_x.py", "agents/helpers/llm.py", "agents/helpers/keep.py", "scripts/critical.sh"]
     documented = (

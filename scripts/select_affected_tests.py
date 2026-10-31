@@ -278,6 +278,10 @@ _PROCESS_MATCH = re.compile(r"\b(?:pkill|pgrep|killall)\b|\bps\b[^\n]*\|\s*grep\
 # `++`/`--` (where a regex cannot legally start) mean division. Known
 # residual: a division after `)`/`}` followed on the SAME physical line by two
 # `/`-bearing string literals can hide a path in the second one; a regex after
+# `)`/`}` is refused when its candidate span contains a backtick (that is a
+# division reaching into a template literal, `(a) / 2 + \`x/${b}\``; read as a
+# regex it would swallow the template opener and flip template state for every
+# later line, erasing a `//` inside a later template as a comment); a regex after
 # `]`/identifier/number (invalid syntax anyway) can drop the rest of its line.
 # Strings end at the newline and templates fall back to raw, so damage never
 # crosses a line. A repo-wide scan (2026-10-31, 3,583 TS/JS files) found 3
@@ -321,6 +325,17 @@ def _ts_regex_allowed(last_kind: str, last_text: str) -> bool:
     if token[0].isalnum() or token[0] in "_$" or token in {"]", "++", "--"}:
         return False
     return True  # includes `)`: `if (ok) /re/.test(s)` must survive
+
+
+def _ts_regex_ambiguous(last_kind: str, last_text: str) -> bool:
+    """The previous token ends with `)` or `}`: a `/` after it may be either a
+    regex literal (``if (ok) /re/.test(s)``) or a division (``(a) / 2``)."""
+    if last_kind == "op":
+        return last_text == "}"
+    if last_kind != "plain":
+        return False
+    tail = _TS_TAIL_RE.search(last_text[-96:].rstrip()[-48:])
+    return tail is not None and tail.group(1) == ")"
 
 
 def _strip_ts_comments(source: str) -> str:
@@ -386,7 +401,10 @@ def _strip_ts_comments(source: str) -> str:
         if kind == "slash":
             if _ts_regex_allowed(last_kind, last_text):
                 regex = _TS_REGEX_RE.match(source, match.start())
-                if regex is not None:
+                # After the ambiguous `)`/`}` a candidate holding a backtick is
+                # a division whose span reached a template literal: fall
+                # through to division rather than swallow the template opener.
+                if regex is not None and ("`" not in regex.group() or not _ts_regex_ambiguous(last_kind, last_text)):
                     out.append(regex.group())
                     pos = regex.end()
                     last_kind, last_text = "value", regex.group()
