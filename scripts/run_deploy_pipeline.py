@@ -183,7 +183,18 @@ not a schedule change.
 Plan file (JSON): {"lanes": [{"name", "command": [...], "cwd": "back-end",
 "env": {...}, "after": ["lane"], "reuse_passed": true, "group": "3",
 "memory_mb": 1024, "exclusive": false, "phase": ""}], "max_parallel": 4,
-"memory_budget_mb": 9000, "schedule": {"policy": "phased"}}
+"memory_budget_mb": 9000, "schedule": {"policy": "phased"},
+"lane_scoped_reuse": false}
+
+``lane_scoped_reuse`` (default false; ``DEPLOY_LANE_SCOPED_REUSE=1`` also
+enables it) passes ``--lane-scoped-reuse`` to every lane: a lane listed in
+``run_deploy_stage._SCOPED_REUSE_LANES`` whose exact-input lookup missed may
+reuse its most recent PASSED result when every path changed since that pass
+is provably inert for it (declared inert set AND no selected test in the
+change->test graph). Its stage row and receipt lane carry the distinct
+``reused-scoped`` status with the passed head, fingerprint, run id and the
+rule that judged every changed path; it is a pass for the waiter and
+``overall`` but never a fresh pass of the current bytes.
 """
 
 from __future__ import annotations
@@ -227,7 +238,16 @@ DEFAULT_FIX_LOOP_CAP = 2
 DEFAULT_SETTLE_SECONDS = 10.0
 DEFAULT_POLL_SECONDS = 2.0
 DEFAULT_MAX_ATTEMPTS = 20
-TERMINAL_LANE = {"passed", "failed", "superseded"}
+TERMINAL_LANE = {"passed", "failed", "superseded", "reused-scoped"}
+# Lane statuses that satisfy the run: a lane-scoped reuse executed nothing on
+# the current bytes and keeps its own label everywhere it is reported.
+PASSING_LANE = {"passed", "reused-scoped"}
+LANE_SCOPED_REUSE_ENV = "DEPLOY_LANE_SCOPED_REUSE"
+
+
+def lane_scoped_reuse_enabled(payload: dict | None) -> bool:
+    """Plan field ``lane_scoped_reuse`` or ``DEPLOY_LANE_SCOPED_REUSE=1``; default off."""
+    return bool((payload or {}).get("lane_scoped_reuse")) or os.environ.get(LANE_SCOPED_REUSE_ENV) == "1"
 # Internal waiter event: the supervisor superseded the attempt being waited on.
 _SUPERSEDED_EVENT = -1
 # run-deploy-stage rejects any other stage name before it writes a row.
@@ -770,7 +790,7 @@ def overall(lanes: dict[str, dict]) -> str:
     statuses = [lane["status"] for lane in lanes.values()]
     if any(status == "failed" for status in statuses):
         return "failed" if all(s in TERMINAL_LANE for s in statuses) else "failing"
-    if all(status == "passed" for status in statuses):
+    if all(status in PASSING_LANE for status in statuses):
         return "passed"
     return "running"
 
@@ -1442,6 +1462,7 @@ def _run_attempt(
     payload: dict | None = None,
 ) -> tuple[dict, str]:
     """One attempt on one frozen source; returns (receipt, "done" | "superseded")."""
+    lane_scoped_reuse = lane_scoped_reuse_enabled(payload)
     # The kill switch for a matched control run (DEPLOY_ADMISSION_CREDIT=0) is
     # read per attempt and recorded on the receipt and every admission.
     credit_enabled = admission_credit_enabled()
@@ -1470,6 +1491,8 @@ def _run_attempt(
         "fix_loop": loop,
         "stage_run_dir": _stage_run_dir(),
         "source_root": str(SOURCE_ROOT),
+        "lane_scoped_reuse": lane_scoped_reuse,
+        "reused_scoped_lanes": [],
         "host": host,
         "host_peak": sample_host_peak({}, host),
         "host_samples": [{"at": _now(), **host, "headroom_mb": live_budget}],
@@ -1552,6 +1575,15 @@ def _run_attempt(
                     status = "superseded"
                 else:
                     status = "passed" if process.returncode == 0 else "failed"
+                if status == "passed" and lane_scoped_reuse:
+                    # A lane-scoped reuse exits 0 like a pass; its stage row
+                    # carries the distinct status and provenance, which the
+                    # receipt lane must keep (never shown as a fresh pass).
+                    row = _lane_stage_row({**receipt, "lanes": {name: lane_state}}, name)
+                    if row is not None and row.get("status") == "reused-scoped":
+                        status = "reused-scoped"
+                        lane_state["reuse"] = (row.get("detail") or {}).get("reuse")
+                        receipt["reused_scoped_lanes"] = sorted({*receipt.get("reused_scoped_lanes", []), name})
                 lane_state.update(
                     status=status,
                     exit=process.returncode,
@@ -1657,6 +1689,8 @@ def _run_attempt(
                 argv = ["bash", str(STAGE_WRAPPER), lane.name]
                 if lane.reuse_passed:
                     argv.append("--reuse-passed")
+                if lane_scoped_reuse:
+                    argv.append("--lane-scoped-reuse")
                 argv += ["--", *lane.command]
                 log_path = log_dir / f"{lane.name}.log"
                 try:

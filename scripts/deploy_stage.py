@@ -416,10 +416,14 @@ def render_history(run_root: Path) -> str:
     passed_durations: dict[str, list[float]] = defaultdict(list)
     passes: dict[str, int] = defaultdict(int)
     reused: dict[str, int] = defaultdict(int)
+    reused_scoped: dict[str, int] = defaultdict(int)
     for _, rows in runs:
         for row in rows:
             if row.get("status") == "reused":
                 reused[str(row.get("stage", ""))] += 1
+                continue
+            if row.get("status") == "reused-scoped":
+                reused_scoped[str(row.get("stage", ""))] += 1
                 continue
             stage = str(row.get("stage", ""))
             duration = row.get("duration_seconds")
@@ -448,6 +452,11 @@ def render_history(run_root: Path) -> str:
         lines.append(
             "Reused exact-input passes: "
             + ", ".join(f"{stage}={count}" for stage, count in sorted(reused.items()))
+        )
+    if reused_scoped:
+        lines.append(
+            "Reused lane-scoped passes (inert changes only, not executed on these bytes): "
+            + ", ".join(f"{stage}={count}" for stage, count in sorted(reused_scoped.items()))
         )
 
     run_spans: list[float] = []

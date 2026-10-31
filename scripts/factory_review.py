@@ -1736,8 +1736,8 @@ def ledger_deploy_turns(rows: Sequence[dict[str, Any]]) -> list[Turn]:
                 stage.get("status") != "passed",
             )
             for index, stage in enumerate(group["stages"])
-            # An exact-input reuse executed nothing; diagnostics count it.
-            if stage.get("status") != "reused"
+            # An exact-input or lane-scoped reuse executed nothing; diagnostics count it.
+            if stage.get("status") not in ("reused", "reused-scoped")
         ]
         invocations.extend(
             _ledger_event_invocation(f"ledger-event-{group['key']}-{index}", event, origin)
