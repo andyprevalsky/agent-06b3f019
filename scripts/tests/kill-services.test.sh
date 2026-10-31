@@ -795,4 +795,122 @@ assert_dead "$own_stack_pid" "this worktree's own run.sh"
 )
 echo "PASS: the sweep never crosses into a nested Git worktree or out through .."
 
+# ── The semantic lane's sweep beside a LIVE isolated smoke stack ──────────────
+#
+# Follow-up "an" (2026-10-31): /deploy serialized `semantic-stack` after the
+# stack-owning lanes (`smoke`, `agentcard-lifecycle`) because this sweep, run by
+# the semantic lane's non-isolated `run.sh --benchmark` at startup and at EXIT,
+# was believed to kill the smoke lane's isolated stack in the same worktree.
+# That stack is a distinct run (`.context/benchmarks/<run>/`: an owner record and
+# a manifest with its own ports and workspace), and every process it launches
+# carries BENCHMARK_RUN_ID. Its run.sh and the descendants of that process were
+# already protected through the owner record; a service that lost that ancestry
+# (reparented to init: a detached tunnel, a child whose wrapper exited) was not,
+# and the argv/cwd sweeps reaped it. Every process of a live isolated run must
+# survive the sweep, while this workspace's own stale stack and the leftovers of
+# finished or unknown runs are still reaped.
+rm -rf "$WORKTREE/.context/benchmarks" "$WORKTREE/.claude"
+cat > "$WORKTREE/scripts/run.sh" <<'ISOLATED'
+#!/usr/bin/env bash
+( cd "$(dirname "$0")/../agents" && exec python3 worker.py ) &
+wait
+ISOLATED
+chmod +x "$WORKTREE/scripts/run.sh"
+
+start_isolated_run() {  # <run-id> <backend-port>: a live isolated stack with owner record + manifest
+    local run_id="$1" port="$2" stack_pid identity run_dir
+    (cd "$WORKTREE" && BENCHMARK_RUN_ID="$run_id" BENCHMARK_ISOLATED_RUN=true \
+        CONDUCTOR_WORKSPACE_NAME="worktree-bench-$run_id" CONDUCTOR_PORT="$port" \
+        exec bash scripts/run.sh --benchmark) > /dev/null 2>&1 &
+    stack_pid=$!
+    identity="$(python3 "$WORKTREE/scripts/process-identity.py" "$stack_pid")"
+    [ -n "$identity" ] || {
+        echo "FAIL: could not capture isolated stack identity for $run_id" >&2
+        exit 1
+    }
+    run_dir="$WORKTREE/.context/benchmarks/$run_id"
+    mkdir -p "$run_dir"
+    python3 - "$run_dir" "$run_id" "$stack_pid" "$identity" "$port" <<'PY'
+import json
+import sys
+
+run_dir, run_id, pid, identity, port = sys.argv[1:]
+with open(f"{run_dir}/local-stack-owner.json", "w") as handle:
+    json.dump({"version": 1, "run_id": run_id, "token": "fixture", "pid": int(pid),
+               "native_identity": identity, "birth": "fixture"}, handle)
+with open(f"{run_dir}/services.json", "w") as handle:
+    json.dump({"status": "running", "run_sh_pid": int(pid), "services": [],
+               "workspace": f"worktree-bench-{run_id}",
+               "ports": {"backend": int(port), "frontend": int(port) + 1}}, handle)
+PY
+    printf '%s' "$stack_pid"
+}
+
+# A worker of <run-id> that no longer descends from its stack: the outer
+# subshell exits at once, so the worker is reparented away from this test. Both
+# levels redirect, or the inner shell would hold this $(...) pipe open.
+detached_run_worker() {  # <run-id> <marker>
+    local pid attempt
+    ( ( cd "$WORKTREE/agents" && BENCHMARK_RUN_ID="$1" exec python3 worker.py "$2" ) > /dev/null 2>&1 & )
+    for attempt in $(seq 1 30); do
+        pid="$(pgrep -f "worker\.py $2\$" 2>/dev/null | head -1 || true)"
+        if [ -n "$pid" ]; then
+            printf '%s' "$pid"
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "FAIL: detached worker for $1 did not start" >&2
+    exit 1
+}
+
+marker="semantic-sweep-$$"
+live_stack_pid="$(start_isolated_run smoke-live 20110)"
+PIDS+=("$live_stack_pid")
+live_worker_pid="$(wait_for_child "$live_stack_pid")"
+PIDS+=("$live_worker_pid")
+live_detached_pid="$(detached_run_worker smoke-live "$marker-live")"
+PIDS+=("$live_detached_pid")
+# A run that is still bootstrapping: directory created, nothing published yet.
+mkdir -p "$WORKTREE/.context/benchmarks/smoke-boot"
+boot_detached_pid="$(detached_run_worker smoke-boot "$marker-boot")"
+PIDS+=("$boot_detached_pid")
+# Leftovers that grant nothing: a finished run (manifest stopped, owner gone)
+# and a run id with no run directory at all.
+mkdir -p "$WORKTREE/.context/benchmarks/smoke-done"
+printf '{"version": 1, "run_id": "smoke-done", "token": "fixture", "pid": 999997, "native_identity": "linux:gone:1", "birth": "fixture"}\n' \
+    > "$WORKTREE/.context/benchmarks/smoke-done/local-stack-owner.json"
+printf '{"status": "stopped", "run_sh_pid": 999997, "services": [], "ports": {"backend": 20120}}\n' \
+    > "$WORKTREE/.context/benchmarks/smoke-done/services.json"
+done_detached_pid="$(detached_run_worker smoke-done "$marker-done")"
+PIDS+=("$done_detached_pid")
+ghost_detached_pid="$(detached_run_worker smoke-ghost "$marker-ghost")"
+PIDS+=("$ghost_detached_pid")
+# This workspace's own stale stack (the semantic lane's previous run.sh): no run
+# id, listed in the worktree manifest on its own ports.
+(cd "$WORKTREE" && exec bash scripts/run.sh --benchmark) > /dev/null 2>&1 &
+own_stale_stack_pid=$!
+PIDS+=("$own_stale_stack_pid")
+own_stale_worker_pid="$(wait_for_child "$own_stale_stack_pid")"
+PIDS+=("$own_stale_worker_pid")
+cat > "$WORKTREE/.context/services.json" <<JSON
+{"status": "running", "run_sh_pid": $own_stale_stack_pid, "services": [], "ports": {"backend": 20010, "frontend": 20011}}
+JSON
+sleep 0.3
+
+(cd "$WORKTREE" && bash scripts/kill-services.sh > "$TMP_ROOT/semantic-sweep.log" 2>&1) || true
+
+assert_alive "$live_stack_pid" "live isolated run.sh (owner record)"
+assert_alive "$live_worker_pid" "live isolated stack's worker"
+assert_alive "$live_detached_pid" "detached worker carrying a live run's BENCHMARK_RUN_ID"
+assert_alive "$boot_detached_pid" "detached worker of an isolated run that is still bootstrapping"
+assert_dead "$own_stale_stack_pid" "this workspace's own stale run.sh"
+assert_dead "$own_stale_worker_pid" "this workspace's own stale worker"
+assert_dead "$done_detached_pid" "leftover worker of a finished isolated run"
+assert_dead "$ghost_detached_pid" "worker naming an isolated run that does not exist"
+echo "PASS: the sweep leaves every process of a live isolated run alone and reaps its own stale stack"
+
+kill_pid_tree "$live_stack_pid"
+kill "$live_detached_pid" "$boot_detached_pid" 2>/dev/null || true
+
 echo "All kill-services tests passed."
