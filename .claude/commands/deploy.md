@@ -1166,12 +1166,11 @@ owner record, live manifest or the `BENCHMARK_RUN_ID` its processes carry
 (`scripts/tests/kill-services.test.sh`,
 `scripts/tests/run-isolated-cloud-kill.test.sh`), so semantic-stack may run
 beside them whenever both whole declarations fit live headroom. On the recorded
-7979 MB budget they do not: 6108 + 4150 (smoke) and 6108 + 4571 (backend
-coverage, max(1536 + 512 x workers, 1.25x its 3656.3 MB recorded tree peak))
-exceed it, so admission defers semantic-stack until both release their
-reservations, declarations unchanged (6108 + 1152 beside agents coverage would
-fit; the sweep edge holds it there); 6108 + 812 lets `e2b-smoke` overlap it on
-this budget and on the launcher host's 8755 MB.
+7979 MB budget they do not: 6108 + 4150 (smoke) and 6108 + 2560 (backend
+coverage) exceed it, so admission defers semantic-stack until both release
+their reservations, declarations unchanged (6108 + 1152 beside agents coverage
+would fit; the sweep edge holds it there), and 6108 + 812 lets `e2b-smoke`
+overlap it on this budget as on the launcher host's 8755 MB.
 
 **Retry after a failure: failed-first, still a full sweep.** Rerun the same
 stage with `BACKEND_COVERAGE_FAILED_FIRST=1` in the `env` above. The previously

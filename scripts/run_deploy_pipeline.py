@@ -199,11 +199,9 @@ smoke alone for ~22 min), and in the coverage phase it waited the whole 9-10
 min exclusive phase on every round although the structural lane's process
 tree never exceeded 2575 MB (19 recorded attempts). With the lane declared at
 its recorded peak x1.25 (3220 MB at three workers) the two fit the recorded
-7979 MB budget together (7370 MB), the coverage lanes (4571 + 1152 MB) still
-wait for the exclusive phase (7370 + 4571 > 7979), and beside the 4571 MB
-backend-coverage-blackbox lane (follow-up 13) the smoke lane fits the 8755 MB
-launcher budget by declaration (8721 MB) and this one only through the
-admission credit for its observed usage. A plan
+7979 MB budget together (7370 MB), the coverage lanes (2560 + 1152 MB) still
+wait for the exclusive phase (7370 + 2560 > 7979), and beside
+backend-coverage-blackbox the smoke lane fits the budget afterwards. A plan
 with ``"schedule": {"policy": "legacy"}`` keeps the previous all-at-once
 admission.
 
@@ -227,11 +225,11 @@ the run's owner record, manifest and ``BENCHMARK_RUN_ID``
 (``scripts/tests/kill-services.test.sh``,
 ``scripts/tests/run-isolated-cloud-kill.test.sh``; ``STACK_KILLER_LANES`` is
 empty since follow-up "an"). Memory still decides on this devbox: on the
-recorded 7979 MB budget 6108 + 4571 (backend coverage) and 6108 + 4150
+recorded 7979 MB budget 6108 + 2560 (backend coverage) and 6108 + 4150
 (smoke) exceed the budget, so admission defers semantic-stack until both
 release their reservations, declarations unchanged; 6108 + 1152 (agents
 coverage) would fit, which is why the sweep edge, not memory, holds it there.
-On the launcher host's 8755 MB budget the same holds (6108 + 4571 > 8755;
+On the launcher host's 8755 MB budget the same holds (6108 + 3072 > 8755;
 6108 + 812 fits). ``e2b-smoke`` (Group 4, unphased,
 ``run-deploy-semantic-stack.sh --e2b-smoke-only``, 812 MB = 1.25x the 649.1
 MB peak of its first receipt, follow-up 13) runs the Step 6c Claude Code E2B
@@ -393,17 +391,6 @@ SEMANTIC_STACK_RECORDED_TREE_PEAK_MB = 4886.2
 # 1536 MB estimate the lane carried before any receipt measured it alone;
 # re-pin when a receipt exceeds it.
 E2B_SMOKE_RECORDED_TREE_PEAK_MB = 649.1
-# Backend coverage lane (sharded blackbox + unit coverage): process-tree peak
-# of the first receipt of the split Group 4 lanes (run 20261031-164809-1083486,
-# head a334edca1, 2026-10-31; lanes["backend-coverage-blackbox"].
-# tree_peak_pss_mb, 3705.7 MB RSS), 580 MB over the 3072 MB its width formula
-# (1536 + 512 x workers) declared there. The lane declares the larger of that
-# formula and LANE_PEAK_MARGIN x this pin (4571 MB) so wider plans still
-# scale; earlier launcher receipts recorded up to 4556.8 MB at two workers,
-# whose margin (5696 MB) could not share the 8755 MB launcher budget with the
-# 4150 MB smoke lane -- scripts/tests/run-deploy-pipeline.test.py pins that
-# known under-margin deliberately. Re-pin when a receipt exceeds it.
-BACKEND_COVERAGE_RECORDED_TREE_PEAK_MB = 3656.3
 # Kept free for the agent harness, the Docker DB and the 15 GB memory watchdog.
 MEMORY_RESERVE_MB = 2048
 DEFAULT_LANE_MEMORY_MB = 1024
@@ -599,18 +586,6 @@ def e2b_smoke_lane_memory_mb() -> int:
     """Declared reservation of the Group 4 Step 6c E2B smoke lane:
     LANE_PEAK_MARGIN over its largest recorded process-tree peak (812 MB)."""
     return int(math.ceil(LANE_PEAK_MARGIN * E2B_SMOKE_RECORDED_TREE_PEAK_MB))
-
-
-def backend_coverage_lane_memory_mb(workers_blackbox: int, workers_unit: int) -> int:
-    """Declared reservation of the backend coverage lane at the given shard
-    widths: the larger of its width formula (1536 MB + 512 MB per blackbox or
-    unit worker, which keeps scaling deploy.md's 4 + 6 worker ceiling to
-    6656 MB) and LANE_PEAK_MARGIN over its largest recorded process-tree peak
-    (4571 MB, which wins at the 2-3 worker widths the recorded hosts plan)."""
-    if workers_blackbox < 1 or workers_unit < 1:
-        raise ValueError("backend coverage lane widths must be positive")
-    formula = 1536 + 512 * (workers_blackbox + workers_unit)
-    return max(formula, int(math.ceil(LANE_PEAK_MARGIN * BACKEND_COVERAGE_RECORDED_TREE_PEAK_MB)))
 
 
 def structural_workers_within(available_mb: int, planned: int) -> int:
@@ -3490,7 +3465,7 @@ def standard_plan(args: argparse.Namespace) -> dict:
                 "CONTRACT_TEST_CONCURRENCY": str(workers["backend_blackbox"]),
                 "BACKEND_UNIT_CONCURRENCY": str(workers["backend_unit"]),
             }, retry_env={"BACKEND_COVERAGE_FAILED_FIRST": "1"},
-                memory_mb=backend_coverage_lane_memory_mb(workers["backend_blackbox"], workers["backend_unit"]))
+                memory_mb=1536 + 512 * (workers["backend_blackbox"] + workers["backend_unit"]))
         if args.frontend:
             lane("frontend-coverage-blackbox",
                  ["npm", "run", "test:coverage", "--", f"--maxWorkers={workers['frontend']}"], "front-end",
@@ -3516,9 +3491,7 @@ def standard_plan(args: argparse.Namespace) -> dict:
             # first and unphased, this stack (then 4096 MB) once held the memory the
             # 6544 MB lane needed, #1638: smoke-only for 13-23 min). The
             # coverage lanes never wait for it; beside backend-coverage-
-            # blackbox (4571 MB since follow-up 13) both declarations fit the
-            # 8755 MB launcher budget (8721), while the 7979 MB devbox budget
-            # relies on the admission credit for the stack's observed usage.
+            # blackbox (2560 MB) it fits the budget afterwards.
             lane("smoke", ["bash", "scripts/run-predeploy-local"], group="4", memory_mb=smoke_lane_memory_mb(),
                  phase=PHASE_STACK)
         if args.agentcard:
@@ -3538,7 +3511,7 @@ def standard_plan(args: argparse.Namespace) -> dict:
             # --benchmark stack, UI semantics, latency ratchet. 6108 MB is the
             # pinned 1.25x margin over the recorded 4886.2 MB peak; on the
             # recorded 7979 MB budget that defers it behind backend coverage
-            # (6108 + 4571 > 7979) and smoke (+ 4150) by memory alone, and the
+            # (6108 + 2560 > 7979) and smoke (+ 4150) by memory alone, and the
             # sweep edges hold it behind agents/frontend coverage. It never
             # waits for backend coverage or the live probes by edge.
             lane("semantic-stack", list(SEMANTIC_STACK_COMMAND), group="4",

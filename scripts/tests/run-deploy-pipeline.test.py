@@ -1511,14 +1511,18 @@ RECORDED_LANE_PEAK_PSS_MB = {
     "canonical-seed-whatsapp-content": 58.7,  # 19 samples
     "backend-coverage-blackbox": 4556.8,   # 15 samples
 }
-# Knowingly under the margin (4571 MB = 1.25x the 3656.3 MB first split-lane
-# receipt, run 20261031-164809-1083486, vs 4556.8 MB largest recorded): the
-# honest 5696 MB cannot share the launcher's 8755 MB budget with the 4150 MB
-# smoke lane (9846 MB) and would serialize the two longest lanes (~+18 min per
-# round); 4571 + 4150 = 8721 still fits it. Its growth is bounded by the live
-# headroom check and the admission credit; pinned here so right-sizing it is a
-# deliberate schedule decision (follow-up 13 lifted it from the 2560/3072 MB
-# formula after the lane peaked 580 MB over its 3072 MB reservation).
+# Knowingly under-declared: backend coverage declares its width formula (1536
+# + 512 x workers: 2560 MB here, 3072 MB at the launcher width) although its
+# recorded tree peak is 3656.3 MB on run 20261031-164809-1083486 (head
+# a334edca1) and 4556.8 MB in history.jsonl. The honest 1.25x declaration
+# (5696 MB) would serialize it behind smoke (+18 min per round): on that run's
+# 8890 MB budget the three coverage-phase peaks alone sum to 8865 MB (smoke
+# 3319.4 + backend 4556.8 + agents 989.3), so no margin fits beside them. The
+# lane relies on the PR-11 live-headroom admission plus the host's measured
+# floor (mem_available_min 6452 MB on that run); the true lever is re-deriving
+# the budget from the measured floor, not relaxing declarations. Pinned here
+# so right-sizing it is a deliberate schedule decision (follow-up 13 replayed
+# the 4571/5696 alternatives: both defer a coverage lane for 18-20 min).
 KNOWN_UNDER_DECLARED_LANES = {"backend-coverage-blackbox"}
 # The devbox host the receipts recorded: 8 cores, MemAvailable 11563 MB of
 # 16007 MB, watchdog cap 14471 MB -> memory_budget_mb 7979 (20261031-115354).
@@ -1538,8 +1542,7 @@ def check_recorded_peak_reservations() -> None:
     for name, peak in RECORDED_LANE_PEAK_PSS_MB.items():
         declared = lanes[name]["memory_mb"]
         if name in KNOWN_UNDER_DECLARED_LANES:
-            assert declared < 1.25 * peak, \
-                f"{name}: {declared} MB now covers 1.25 x the {peak} MB peak; drop the exception"
+            assert declared < peak, f"{name}: {declared} MB now covers the {peak} MB peak; drop the exception"
             continue
         assert declared >= 1.25 * peak, f"{name}: declares {declared} MB, recorded tree peak {peak} MB (x1.25 = {1.25 * peak:.0f})"
         checked += 1
@@ -1547,12 +1550,11 @@ def check_recorded_peak_reservations() -> None:
     structural, smoke = lanes["deploy-command-structural"], lanes["smoke"]
     assert structural["memory_mb"] == 3220 and structural["exclusive"] is True, structural
     assert smoke["memory_mb"] == 4150 == math.ceil(1.25 * 3319.4), smoke
-    # Follow-up 13: the backend coverage lane declares max(formula, margin x
-    # recorded); at the recorded devbox width (1536 + 512 x 2 = 2560 MB) the
-    # recorded margin wins.
+    # The under-declared lane keeps its width formula (follow-up 13 kept it
+    # after replaying the honest alternatives, see KNOWN_UNDER_DECLARED_LANES).
     backend = lanes["backend-coverage-blackbox"]
     width = int(backend["env"]["BLACKBOX_TEST_CONCURRENCY"]) + int(backend["env"]["BACKEND_UNIT_CONCURRENCY"])
-    assert backend["memory_mb"] == 4571 == math.ceil(1.25 * 3656.3) > 1536 + 512 * width, (backend, width)
+    assert backend["memory_mb"] == 1536 + 512 * width == 2560, (backend, width)
     assert structural["memory_mb"] + smoke["memory_mb"] <= plan["memory_budget_mb"], \
         "the right-sized structural lane and the smoke lane fit the recorded budget together"
     assert structural["memory_mb"] + smoke["memory_mb"] + lanes["backend-coverage-blackbox"]["memory_mb"] \
@@ -1598,24 +1600,17 @@ def check_versioned_group4_lanes(tmp: Path) -> None:
     behind backend coverage (6108 + 4571) and smoke (6108 + 4150) by memory
     and behind agents coverage (6108 + 1152 would fit) by the sweep edge;
     e2b-smoke (6108 + 812 = 6920) overlaps it there and on the launcher's
-    8755 MB budget. Backend coverage declares max(1536 + 512 x workers, 1.25
-    x 3656.3 recorded) = 4571 at both hosts' widths after peaking 3656.3 MB
-    against its 3072 MB formula on run 20261031-164809-1083486."""
+    8755 MB budget. Backend coverage keeps its width formula (2560 / 3072),
+    see KNOWN_UNDER_DECLARED_LANES."""
     pipeline = load_module("run_deploy_pipeline_group4_tails", DRIVER)
     assert pipeline.LIVE_PROBES_RECORDED_TREE_PEAK_MB == 769.7
     assert pipeline.SEMANTIC_STACK_RECORDED_TREE_PEAK_MB == 4886.2
     assert pipeline.E2B_SMOKE_RECORDED_TREE_PEAK_MB == 649.1
-    assert pipeline.BACKEND_COVERAGE_RECORDED_TREE_PEAK_MB == 3656.3
+    assert not hasattr(pipeline, "BACKEND_COVERAGE_RECORDED_TREE_PEAK_MB"), "backend coverage keeps its width formula"
     assert not hasattr(pipeline, "E2B_SMOKE_ESTIMATED_MEMORY_MB"), "the e2b-smoke estimate is replaced by its receipt"
     assert pipeline.live_probes_lane_memory_mb() == 963 == math.ceil(1.25 * 769.7)
     assert pipeline.semantic_stack_lane_memory_mb() == 6108 == math.ceil(1.25 * 4886.2)
     assert pipeline.e2b_smoke_lane_memory_mb() == 812 == math.ceil(1.25 * 649.1)
-    # Backend coverage: max(formula, margin x recorded). The recorded margin
-    # exceeds the formula at the devbox (2 -> 2560 MB) and launcher (3 ->
-    # 3072 MB) widths; the deploy.md ceiling (4 + 6 workers) still scales.
-    assert pipeline.backend_coverage_lane_memory_mb(2, 1) == 4571 == math.ceil(1.25 * 3656.3) > 1536 + 512 * 3
-    assert pipeline.backend_coverage_lane_memory_mb(1, 1) == 4571 > 1536 + 512 * 2
-    assert pipeline.backend_coverage_lane_memory_mb(4, 6) == 1536 + 512 * 10 == 6656 > 4571
     assert set(VERSIONED_TAIL_LANES) <= set(pipeline.DEFAULT_LANE_SECONDS), "simulate must not call the tails UNMEASURED"
     script = ROOT / pipeline.SEMANTIC_STACK_SCRIPT
     assert script.is_file() and os.access(script, os.X_OK), script
@@ -1666,7 +1661,7 @@ def check_versioned_group4_lanes(tmp: Path) -> None:
     assert semantic["memory_mb"] + lanes["smoke"]["memory_mb"] > budget
     assert semantic["memory_mb"] + lanes["agents-coverage-blackbox"]["memory_mb"] <= budget, \
         "only the sweep edge keeps semantic-stack behind agents coverage on this budget"
-    assert lanes["backend-coverage-blackbox"]["memory_mb"] == 4571, lanes["backend-coverage-blackbox"]
+    assert lanes["backend-coverage-blackbox"]["memory_mb"] == 2560, lanes["backend-coverage-blackbox"]
     assert semantic["memory_mb"] + e2b["memory_mb"] == 6920 <= budget, \
         "re-pinned from their first receipts, the two Group 4 tails overlap on the recorded devbox too"
     launcher = plan_json("--group", "all", "--backend", "--agents", "--frontend", "--smoke", "local",
@@ -1677,8 +1672,7 @@ def check_versioned_group4_lanes(tmp: Path) -> None:
     assert launcher_lanes["semantic-stack"]["after"] == ["deploy-command-structural", "frontend-coverage-blackbox",
                                                          "agents-coverage-blackbox"]
     assert launcher["workers"]["backend_blackbox"] + launcher["workers"]["backend_unit"] == 3, launcher["workers"]
-    assert launcher_lanes["backend-coverage-blackbox"]["memory_mb"] == 4571 > 1536 + 512 * 3, \
-        "max(formula, margin x recorded) exceeds the 3072 MB formula at the launcher width"
+    assert launcher_lanes["backend-coverage-blackbox"]["memory_mb"] == 3072 == 1536 + 512 * 3
     assert 6108 + launcher_lanes["backend-coverage-blackbox"]["memory_mb"] > 8755
     assert 6108 + launcher_lanes["agents-coverage-blackbox"]["memory_mb"] <= 8755
     assert 6108 + launcher_lanes["e2b-smoke"]["memory_mb"] <= 8755, "the two tails overlap on the launcher budget"
@@ -1919,13 +1913,22 @@ def check_static_ceiling_credits_observed_lanes(tmp: Path, env: dict[str, str]) 
 def check_recorded_budget_admits_coverage_beside_smoke(tmp: Path, env: dict[str, str]) -> None:
     """The recorded #1658 round-1 shape on its 8755 MB budget: quick lanes,
     smoke (stack, 4150) beside the exclusive structural lane (4293), then
-    backend-coverage (3072) and agents-coverage (1536) must run together while
-    smoke still runs: 4150 + 3072 + 1536 = 8758 declared exceeds the budget,
-    but smoke's observed usage leaves room under both ceilings."""
+    backend-coverage (the generated plan's declaration at the launcher width,
+    3072) and agents-coverage (1536) must run together while smoke still
+    runs: 4150 + 3072 + 1536 = 8758 declared exceeds the budget, but smoke's
+    observed usage leaves room under both ceilings. The backend declaration
+    is read from the real plan so an honest re-pin surfaces its schedule
+    effect here (follow-up 13 replayed 4571 and 5696: each defers a coverage
+    lane 18-20 min) instead of passing on a literal."""
     if sys.platform != "linux":
         print("recorded budget coverage admission: skipped (Linux /proc sampling)")
         return
     pipeline = load_module("pipeline_recorded_budget", DRIVER)
+    launcher = plan_json("--group", "all", "--backend", "--agents", "--frontend", "--smoke", "local",
+                         "--host-cpus", "8", "--host-mem-mb", "12339", "--host-total-mem-mb", "16007",
+                         "--host-watchdog-mb", "14471")
+    backend_mb = next(lane["memory_mb"] for lane in launcher["lanes"] if lane["name"] == "backend-coverage-blackbox")
+    assert launcher["memory_budget_mb"] == 8755 and backend_mb == 3072, (launcher["memory_budget_mb"], backend_mb)
     plan = tmp / "recorded-budget-plan.json"
     state = tmp / "recorded-budget"
     smoke_command = [sys.executable, "-c",
@@ -1936,7 +1939,7 @@ def check_recorded_budget_admits_coverage_beside_smoke(tmp: Path, env: dict[str,
          "memory_mb": 4293},
         {"name": "smoke", "command": smoke_command, "reuse_passed": False, "group": "4", "memory_mb": 4150,
          "phase": "stack"},
-        {"name": "backend", "command": ["sleep", "3"], "reuse_passed": False, "group": "3", "memory_mb": 3072},
+        {"name": "backend", "command": ["sleep", "3"], "reuse_passed": False, "group": "3", "memory_mb": backend_mb},
         {"name": "agents", "command": ["sleep", "0.5"], "reuse_passed": False, "group": "3", "memory_mb": 1536},
     ], schedule={"policy": "phased"})
     ledger = tmp / "recorded-budget-ledger.json"
@@ -1968,7 +1971,7 @@ def check_recorded_budget_admits_coverage_beside_smoke(tmp: Path, env: dict[str,
     assert agents["started_epoch"] < backend["finished_epoch"], "agents-coverage runs together with backend-coverage"
     assert agents["started_epoch"] < smoke["finished_epoch"], "while the smoke stack still runs"
     admission = agents["admission"]
-    assert admission["decision"] == "admitted" and admission["reserved_declared_mb"] == 4150 + 3072, admission
+    assert admission["decision"] == "admitted" and admission["reserved_declared_mb"] == 4150 + backend_mb, admission
     assert admission["reserved_static_mb"] + 1536 <= 8755 < admission["reserved_declared_mb"] + 1536, admission
     assert admission["running"]["smoke"]["observation"] == "fresh", admission["running"]
     print("recorded budget admits coverage beside smoke: ok")
