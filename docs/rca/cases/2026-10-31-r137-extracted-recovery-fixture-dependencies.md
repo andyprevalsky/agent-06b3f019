@@ -65,7 +65,9 @@ retaining exact-Machine, neighbor-exclusion and authenticated-shutdown assertion
 Its former blanket no-list assertion is replaced by exactly one read, matching
 the current controller contract. No production helper, ownership rule, native check, unsafe-owner refusal,
 timeout, benchmark criterion or cleanup behavior changes.
-Independent review and integration remain pending at this writing.
+Independent review qualified the exact test-only patch after 69 controls passed
+in 59.89 seconds. Root integrated it in `6da3e47c7` after its own 69 controls
+passed in 68.78 seconds.
 
 ## Validation
 
@@ -79,6 +81,15 @@ the 27 interrupted-gate failures is included, with related adverse cases.
 All three additional adjacent cases also failed on the unchanged baseline.
 Diff checking and Python compilation pass. This is not a full registered-gate
 pass; that gate still requires a completed rerun after qualification.
+
+The first full registered rerun passed 268 tests, then exposed one missed caller
+of the shared forensic setup. The setup used `cloudbench-fleet-ownership`, while
+the builder fixture still addressed `registries`, producing `FileNotFoundError`
+before its assertions. A one-line caller-path correction preserves all original
+assertions. Independent review reproduced the failure and checked all callers;
+root's full forensic family then passed 97 cases in 52.91 seconds. The complete
+registered gate remains pending a new rerun; these controls do not establish a
+whole-gate pass.
 
 The source-bound bootstrap fixture used a disposable local Git repository built
 from supplied source bytes, because its normal test machinery reads committed

@@ -31064,7 +31064,7 @@ def test_failed_fleet_forensic_archive_builder_preserves_mixed_originals(tmp_pat
     """The existing builder feeds ordinary recovery without rewriting original history."""
     test_failed_fleet_forensic_retirement_requires_originals_and_provider_absence(tmp_path, "retired-absent")
     owner, machine, retired_machine = "a" * 32, "b" * 14, "e" * 14
-    run, registry = tmp_path / "runs/fixture-run", tmp_path / "registries" / owner
+    run, registry = tmp_path / "runs/fixture-run", tmp_path / "cloudbench-fleet-ownership" / owner
     audit = tmp_path / "audits" / owner
     retained = tmp_path / "retained-original-forensic"
     (run / "_forensic").rename(retained)
