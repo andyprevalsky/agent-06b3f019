@@ -190,3 +190,21 @@ export async function deleteProjectFolder(projectId: string, folderId: string): 
   });
   if (!response.ok) throw new Error('Could not delete folder. Try again.');
 }
+
+export async function moveProjectFolder(
+  projectId: string,
+  folderId: string,
+  beforeId: string | null,
+): Promise<ProjectFolder[]> {
+  const response = await fetch(
+    `${projectUrl(projectId)}/folders/${encodeURIComponent(folderId)}/position`,
+    {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ beforeId }),
+    },
+  );
+  if (response.status === 409) throw new Error('Folders changed. Try moving the folder again.');
+  if (!response.ok) throw new Error('Could not reorder folders. Try again.');
+  return ((await response.json()) as { folders: ProjectFolder[] }).folders;
+}

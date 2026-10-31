@@ -1,4 +1,5 @@
 /** Folder regressions registered by the existing projects blackbox suite. */
+import './projects-folder-order.cases';
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
