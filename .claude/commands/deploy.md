@@ -2356,16 +2356,14 @@ cycle:
 
 ```bash
 REVIEW_HEAD=$(git rev-parse HEAD)
-REVIEW_COUNT=$(python3 scripts/deploy_review_cycle.py status | python3 -c \
-  'import json,sys; print(len(json.load(sys.stdin)["cycles"]))')
-[ "$REVIEW_COUNT" -lt 3 ] || {
+REVIEW_NEXT=$(python3 scripts/deploy_review_cycle.py next) || {
   python3 scripts/record_factory_event.py deploy outcome blocked
   python3 scripts/factory_ledger.py publish
-  echo "review cycle cap reached; deploy is review-unstable" >&2
+  echo "the ledger refused another review cycle (see above); deploy is review-unstable" >&2
   exit 1
 }
-REVIEW_KIND=incremental
-[ "$REVIEW_COUNT" -lt 2 ] || REVIEW_KIND=verification
+REVIEW_KIND=$(printf '%s' "$REVIEW_NEXT" | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["kind"])')
 python3 scripts/deploy_review_cycle.py start --kind "$REVIEW_KIND" --head "$REVIEW_HEAD"
 python3 scripts/record_factory_event.py deploy stage-start code-review
 git push origin HEAD

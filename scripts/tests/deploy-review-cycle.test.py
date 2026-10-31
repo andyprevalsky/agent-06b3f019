@@ -560,5 +560,27 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {"number": 1, "kind": "initial", "replaces": HEAD_C})
 
+    def test_deploy_step10_derives_the_kind_from_next(self) -> None:
+        """deploy.md Step 10 must take the kind from ``next``: a count of ledger
+        entries says ``verification`` after [findings, unavailable], which the
+        ledger refuses for the superseding HEAD (PR 1656, 2026-10-31)."""
+        deploy_md = (ROOT / ".claude" / "commands" / "deploy.md").read_text()
+        step10 = deploy_md.split("## Step 10: Handle review results", 1)[1].split("\n# Phase 3", 1)[0]
+        self.assertIn("REVIEW_NEXT=$(python3 scripts/deploy_review_cycle.py next)", step10)
+        self.assertNotIn('len(json.load(sys.stdin)["cycles"])', step10)
+        derivation = step10.split("REVIEW_NEXT=", 1)[1]
+        derivation = "REVIEW_NEXT=" + derivation.split("python3 scripts/deploy_review_cycle.py start", 1)[0]
+        derivation = derivation.replace("{\n", "{ exit 9\n", 1)  # never run the blocked branch here
+        MODULE.finish_cycle(self.state_path, head=HEAD_C, result="findings")
+        MODULE.start_cycle(self.state_path, head="b" * 40, kind="incremental")
+        MODULE.finish_cycle(self.state_path, head="b" * 40, result="unavailable")
+        cwd = self.root / "step10"
+        (cwd / ".context").mkdir(parents=True)
+        (cwd / "scripts").symlink_to(ROOT / "scripts")
+        (cwd / ".context" / "deploy-review-cycle.json").write_bytes(self.state_path.read_bytes())
+        result = subprocess.run(["bash", "-c", derivation + 'printf %s "$REVIEW_KIND"'], cwd=cwd,
+                                capture_output=True, text=True, check=False)
+        self.assertEqual((result.returncode, result.stdout), (0, "incremental"), result.stderr)
+
 if __name__ == "__main__":
     unittest.main()
