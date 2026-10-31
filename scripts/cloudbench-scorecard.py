@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import hashlib
 import json
 import math
 import re
@@ -592,8 +593,108 @@ def campaign_receipts(fleet: Path, card: dict) -> tuple[bool, bool]:
                           and lifecycle.get("hub_publication_failed") is False)
 
 
-def load_campaign(run_dir: Path) -> dict:
-    summary = read_json(run_dir / "summary.json") or {}
+def operator_end_bindings(paths, *, now: float) -> dict:
+    """Validate explicit custodian bindings; never discover or rewrite process receipts."""
+    bindings = {}
+    if paths and (type(now) not in (int, float) or not math.isfinite(now) or now <= 0):
+        raise ValueError("operator end receipt requires a finite render time")
+    for path in paths or []:
+        path = Path(path)
+        try:
+            binding = json.loads(path.read_bytes())
+            if not isinstance(binding, dict) or binding.get("schema") != "campaign-operator-end-v1":
+                raise ValueError("invalid binding schema")
+            def bound_path(key):
+                value = binding.get(key)
+                if not isinstance(value, str) or not value:
+                    raise ValueError("missing " + key)
+                target = Path(value)
+                return (path.parent / target).resolve() if not target.is_absolute() else target.resolve()
+            run = bound_path("run_dir")
+            raw_summary = (run / "summary.json").read_bytes()
+            raw_process = bound_path("process_receipt").read_bytes()
+            for key, raw in (("summary_sha256", raw_summary), ("process_sha256", raw_process)):
+                if not re.fullmatch(r"[0-9a-f]{64}", str(binding.get(key) or "")) or hashlib.sha256(raw).hexdigest() != binding[key]:
+                    raise ValueError("mismatched " + key)
+            summary, process = json.loads(raw_summary), json.loads(raw_process)
+            if not isinstance(summary, dict) or not isinstance(process, dict):
+                raise ValueError("expected summary and process objects")
+            campaign = summary.get("campaign_id")
+            if campaign != binding.get("campaign_id") or campaign != run.name:
+                raise ValueError("campaign identity mismatch")
+            if summary.get("status") != "running" or summary.get("finished_at") is not None:
+                raise ValueError("summary already finalized or not running")
+            source = binding.get("source_ref")
+            if not isinstance(source, str) or not re.fullmatch(r"[0-9a-f]{40}", source) or process.get("source") != source:
+                raise ValueError("operator source mismatch")
+            pid, code = process.get("pid"), process.get("exit_code")
+            if type(pid) is not int or pid <= 0 or type(code) is not int or not -255 <= code <= 255:
+                raise ValueError("invalid terminal process identity/status")
+            if not re.fullmatch(r"[1-9][0-9]*", str(process.get("birth_ticks") or "")) or not UUID.fullmatch(str(process.get("boot") or "")):
+                raise ValueError("missing process birth identity")
+            def finite(value):
+                if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                    raise ValueError("invalid process timestamp")
+                return float(value)
+            start = finite(process.get("whole_cli_started_epoch"))
+            end = finite(process.get("finished_at"))
+            summary_start = epoch_of(summary.get("started_at"))
+            e2e_start = epoch_of(summary.get("e2e_started_at_epoch"))
+            if (abs((epoch_of(process.get("whole_cli_started_utc")) or 0) - start) > 0.00001 or end < start or end > now
+                    or summary_start is None or not 0 <= summary_start - start <= 5
+                    or e2e_start is None or not 0 <= e2e_start - start <= 5):
+                raise ValueError("operator/campaign clock mismatch")
+            stamp = datetime.fromtimestamp(summary_start, timezone.utc).strftime("%Y%m%d-%H%M%S")
+            if campaign != f"campaign-{stamp}-{pid}":
+                raise ValueError("campaign/process identity mismatch")
+            jobs, argv = summary.get("jobs"), process.get("argv")
+            if not isinstance(jobs, list) or not jobs or not all(isinstance(j, dict) for j in jobs):
+                raise ValueError("invalid campaign jobs")
+            if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv) or Path(argv[0]).name != "run-bench":
+                raise ValueError("invalid operator command")
+            tasks = sorted({j.get("task") for j in jobs if isinstance(j.get("task"), str)})
+            selected = argv[1:next((i for i, a in enumerate(argv[1:], 1) if a.startswith("-")), len(argv))]
+            def flag(name):
+                if argv.count(name) != 1 or argv.index(name) + 1 >= len(argv):
+                    raise ValueError("missing or duplicated " + name)
+                return int(argv[argv.index(name) + 1])
+            runs, concurrency = flag("-k"), flag("--concurrency")
+            if any(type(value) is not int or value <= 0 for value in
+                   (summary.get("runs"), summary.get("concurrency"), summary.get("task_count"), summary.get("total_jobs"), process.get("concurrency"))):
+                raise ValueError("invalid campaign counts")
+            if (sorted(selected) != tasks or len(tasks) != summary.get("task_count")
+                    or runs != summary.get("runs") or concurrency != summary.get("concurrency")
+                    or type(process.get("original_jobs")) is not int
+                    or process["original_jobs"] != len(jobs) or len(jobs) != summary.get("total_jobs")
+                    or len(jobs) != len(tasks) * runs or process.get("concurrency") != concurrency):
+                raise ValueError("operator/campaign command scope mismatch")
+            if {(j.get("task"), j.get("run")) for j in jobs} != {(task, r) for task in tasks for r in range(1, runs + 1)}:
+                raise ValueError("campaign job membership mismatch")
+            for job in jobs:
+                finished = epoch_of(job.get("finished_at"))
+                if finished is not None and (not math.isfinite(finished) or finished > end):
+                    raise ValueError("job evidence postdates operator end")
+            if run in bindings:
+                raise ValueError("duplicate operator binding")
+            bindings[run] = dict(ended_at=end, exit_code=code, source_ref=source,
+                                 summary_sha256=binding["summary_sha256"], process_sha256=binding["process_sha256"])
+        except (OSError, ValueError, TypeError, OverflowError) as error:
+            raise ValueError(f"operator end receipt refused: {path}: {error}") from error
+    return bindings
+
+
+def load_campaign(run_dir: Path, operator_ends=None) -> dict:
+    operator = (operator_ends or {}).get(run_dir.resolve())
+    if operator:
+        try:
+            raw = (run_dir / "summary.json").read_bytes()
+        except OSError as error:
+            raise ValueError("operator end receipt: summary unavailable during rendering") from error
+        if hashlib.sha256(raw).hexdigest() != operator["summary_sha256"]:
+            raise ValueError("operator end receipt: summary changed during rendering")
+        summary = json.loads(raw)
+    else:
+        summary = read_json(run_dir / "summary.json") or {}
     exp = empty_experiment("campaign", run_dir)
     exp["id"] = summary.get("campaign_id") or run_dir.name
     exp["scheduled_total"] = summary.get("group_total") or summary.get("total_jobs")
@@ -690,6 +791,17 @@ def load_campaign(run_dir: Path) -> dict:
         exp["state"] = {"passed": "COMPLETE", "failed": "FAILED", "cancelled": "ABORTED"}.get(status, "INCOMPLETE")
         if summary.get("e2e_timeout_exceeded"):
             exp["state_reason"] = "whole-experiment deadline exceeded"
+    operator = (operator_ends or {}).get(run_dir.resolve())
+    if operator:
+        source = exp.get("source_ref")
+        if refs - {operator["source_ref"]} or (source and not operator["source_ref"].startswith(source)):
+            raise ValueError("operator end receipt conflicts with campaign source")
+        exp["ended_at"] = operator["ended_at"]
+        exp["end_evidence"] = "hash-bound operator process receipt (summary unfinalized)"
+        exp["state"] = "FAILED" if operator["exit_code"] else "INCOMPLETE"
+        exp["state_reason"] = f'operator ended (exit {operator["exit_code"]}); summary unfinalized'
+        exp["summary_finalized"] = False
+        exp["operator_end"] = dict(operator)
     _job_lifecycle(exp)
     return finish_experiment(exp)
 
@@ -1014,14 +1126,14 @@ def load_waves(run_dir: Path, deep: bool = True) -> dict:
     return finish
 
 
-def load(run_dir: Path, deep: bool = True) -> dict:
+def load(run_dir: Path, deep: bool = True, operator_ends=None) -> dict:
     run_dir = Path(run_dir).absolute()
     if (run_dir / "batch.json").exists() and (read_json(run_dir / "batch.json") or {}).get("schema") == "run-bench-sharded-waves-v1":
         return load_waves(run_dir, deep)
     if (run_dir / "coordination.json").exists():
         return load_sharded(run_dir, deep)
     if (run_dir / "summary.json").exists() and (read_json(run_dir / "summary.json") or {}).get("jobs") is not None:
-        return load_campaign(run_dir)
+        return load_campaign(run_dir, operator_ends)
     if (run_dir / "_batch/report-card.json").exists() or (run_dir / "report-card.json").exists():
         return load_fleet(run_dir)
     abort = read_json(run_dir / "preallocation-abort.json")
@@ -1085,9 +1197,10 @@ def stale_overlay_rows(rows: list[dict], kind: str, *, now: float, evidence_at: 
 def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None, iterations: int | None = None,
           agents=None, issues=None, history_ids: list[str] | None = None,
           global_acceptance=None, selected_tasks=None, selected_tasks_sha256=None, global_history=None, telemetry=None, global_runs=None, telemetry_membership=None, telemetry_sources=None, telemetry_receipt=None, telemetry_receipt_sha256=None,
-          now: float | None = None, deep: bool = True) -> dict:
+          now: float | None = None, deep: bool = True, operator_end_receipts=None) -> dict:
     now = time.time() if now is None else now
-    exp = load(run_dir, deep)
+    operator_ends = operator_end_bindings(operator_end_receipts, now=now)
+    exp = load(run_dir, deep, operator_ends=operator_ends)
     entries = ledger_mod.read(ledger)
     every = ledger_mod.experiments(entries)
     mine = next((e for e in every if e["id"] == exp["id"] or e.get("run_dir") == exp["run_dir"]), None)
@@ -1095,6 +1208,8 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
     for key in ("label", "tasks", "runs", "source_ref", "task_ref", "surface"):
         if exp.get(key) is None and mine and mine.get(key) is not None:
             exp[key] = mine[key]
+    if exp.get("operator_end") and exp.get("source_ref") and not exp["operator_end"]["source_ref"].startswith(exp["source_ref"]):
+        raise ValueError("operator end receipt conflicts with recorded source")
     if exp.get("label") is None:
         exp["label"] = (mine or {}).get("slice") or exp["id"]
     history_entries = ledger_mod.experiments(entries, goal) if goal else ([mine] if mine else [])
@@ -1111,6 +1226,9 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
             raise ValueError("history scope must include the current recorded experiment")
         history_entries = [dict(entry, number=index + 1) for index, entry in enumerate(
             entry for entry in every if entry["id"] in selected)]
+    scoped_paths = {Path(run_dir).resolve()} | {Path(e["run_dir"]).resolve() for e in history_entries if e.get("run_dir")}
+    if set(operator_ends) - scoped_paths:
+        raise ValueError("operator end receipt is outside the selected campaign/history scope")
     number = next((e["number"] for e in history_entries if mine and e["id"] == mine["id"]), None)
     rate = ledger_mod.launch_rate(history_entries, now) if history_entries else None
     history_limit = 10 if iterations is not None else 3
@@ -1122,7 +1240,7 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
             item = dict(exp, number=entry["number"])
         else:
             path = Path(entry.get("run_dir") or "")
-            item = load(path, deep=False) if entry.get("run_dir") and path.exists() else _from_ledger(entry)
+            item = load(path, deep=False, operator_ends=operator_ends) if entry.get("run_dir") and path.exists() else _from_ledger(entry)
             item["number"] = entry["number"]
             item["label"] = entry.get("slice") or item.get("label") or entry["id"]
         history.append(_history_row(item))
@@ -1137,7 +1255,7 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
                 item = exp
             else:
                 path = Path(entry.get("run_dir") or "")
-                item = load(path, deep=False) if entry.get("run_dir") and path.exists() else _from_ledger(entry)
+                item = load(path, deep=False, operator_ends=operator_ends) if entry.get("run_dir") and path.exists() else _from_ledger(entry)
             outcomes, scored = item.get("outcomes"), item.get("scored")
             trend.append({"number": entry["number"], "rate": outcomes["PASS"] / scored if outcomes and scored else None,
                           "running": item.get("state") == "RUNNING"})
@@ -1326,7 +1444,7 @@ def _history_row(exp: dict) -> dict:
             "progress", "outcomes", "scored", "terminal_attempts", "infra_attempts", "infra_jobs", "cost",
             "harness_classified", "released", "rows_source", "end_evidence", "cancelled_before_release",
             "infra_unattributed_cancelled", "infra_confirmed_jobs",
-            "never_started")
+            "never_started", "summary_finalized", "operator_end")
     return {k: exp.get(k) for k in keys}
 
 
@@ -1853,7 +1971,8 @@ def render_text(card: dict) -> str:
                         + (" · INFRA UNCLASSIFIED" if h.get("infra_unattributed_cancelled") else
                            f' · INFRA {h.get("infra_attempts")}/{h.get("terminal_attempts")}' if h.get("terminal_attempts") else " · NO TERMINAL ATTEMPTS")
                         + (f' · {ho["CANCELLED"]} cancelled' if ho.get("CANCELLED") else "")
-                        + (f' · {h["scheduled_total"]} never started' if h.get("never_started") else "") if ho else " · UNMEASURED"))
+                        + (f' · {h["scheduled_total"]} never started' if h.get("never_started") else "") if ho else " · UNMEASURED")
+                     + (f' · {h["state_reason"]}' if h.get("operator_end") else ""))
     lines.append("ACTIVE SUB-AGENTS / PARENT")
     lines += [f'  {a.get("status") or "🔄"} {a["name"]}' for a in card.get("agents") or []] or ["  No active agents"]
     lines.append("ISSUES / NEXT ACTION")
@@ -1964,6 +2083,7 @@ def main(argv=None) -> int:
     parser.add_argument("--agents", type=Path, help="JSON list of active sub-agent rows")
     parser.add_argument("--issues", type=Path, help="JSON list of {text, owner, action, severity}")
     parser.add_argument("--ledger", type=Path, help="experiments ledger (default: git-common)")
+    parser.add_argument("--operator-end-receipt", type=Path, action="append", help="explicit hash-bound campaign operator-end binding (repeat for history)")
     parser.add_argument("--goal", help="experiment goal for numbering and history")
     parser.add_argument("--history-id", action="append", help="exact recorded experiment ID in this descent (repeat across cohort rotations)")
     parser.add_argument("--iterations", type=int, help="completed descent iterations; controls the >3 trend threshold")
@@ -1998,7 +2118,7 @@ def main(argv=None) -> int:
     issues = read_json(args.issues) if args.issues else None
     try:
         card = build(args.run_dir, ledger=args.ledger or ledger_mod.ledger_path(HERE.parent), goal=args.goal,
-                     iterations=args.iterations,
+                     iterations=args.iterations, operator_end_receipts=args.operator_end_receipt,
                      history_ids=args.history_id,
                      global_acceptance=args.global_acceptance, selected_tasks=args.selected_tasks,
                      selected_tasks_sha256=args.selected_tasks_sha256, global_history=args.global_history, telemetry=args.telemetry, global_runs=args.global_runs, telemetry_membership=args.telemetry_membership, telemetry_sources=args.telemetry_sources, telemetry_receipt=args.telemetry_receipt, telemetry_receipt_sha256=args.telemetry_receipt_sha256,

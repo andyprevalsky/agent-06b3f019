@@ -6,6 +6,7 @@ to rewrite them after an intentional presentation change.
 """
 
 import io
+import hashlib
 import json
 import os
 import re
@@ -191,6 +192,115 @@ class Scorecard(unittest.TestCase):
         document = CARD["render_html"](data)
         self.assertEqual(CARD["validate_html"](document), [])
         return document
+
+    def operator_fixture(self):
+        run = self.f.campaign()
+        summary = json.loads((run / "summary.json").read_text())
+        summary["concurrency"] = 2
+        write(run / "summary.json", summary)
+        process = dict(source="1387ae608e7cfb8e3f0a876daae92093f503b465", pid=7, birth_ticks="100", boot="6af9c450-c2c8-4647-a911-8ab19a296bbf",
+                       argv=["scripts/run-bench", *[f"task-{i}" for i in range(1, 6)], "-k", "1", "--concurrency", "2"],
+                       original_jobs=5, concurrency=2, whole_cli_started_epoch=T0,
+                       whole_cli_started_utc="2026-10-18T19:28:52+00:00", exit_code=1, finished_at=T0 + 2000)
+        receipt = write(self.tmp / "process.json", process)
+        binding = dict(schema="campaign-operator-end-v1", run_dir=str(run), campaign_id=run.name,
+                       source_ref="1387ae608e7cfb8e3f0a876daae92093f503b465", process_receipt=str(receipt),
+                       summary_sha256=hashlib.sha256((run / "summary.json").read_bytes()).hexdigest(),
+                       process_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest())
+        return run, receipt, write(self.tmp / "operator-end.json", binding)
+
+    def test_operator_end_preserves_unfinalized_summary_and_job_truth(self):
+        run, receipt, binding = self.operator_fixture()
+        original = (run / "summary.json").read_bytes()
+        before = render(run, self.f)
+        self.assertEqual(before["experiment"]["state"], "RUNNING")
+        after = render(run, self.f, operator_end_receipts=[binding])
+        exp = after["experiment"]
+        self.assertEqual(exp["state"], "FAILED")
+        self.assertFalse(exp["summary_finalized"])
+        self.assertEqual(exp["ended_at"], T0 + 2000)
+        self.assertIn("summary unfinalized", exp["state_reason"])
+        for key in ("progress", "outcomes", "released", "lifecycle_verified", "scored", "rows_source"):
+            self.assertEqual(exp[key], before["experiment"][key], key)
+        self.assertEqual((run / "summary.json").read_bytes(), original)
+        self.assertFalse(json.loads(original).get("finished_at"))
+        self.assertEqual(after["since"]["state"], "ENDED")
+        self.assertIn("summary unfinalized", self.valid(after))
+        self.assertIn("summary unfinalized", CARD["render_text"](after))
+        self.assertEqual(after["history"][0]["operator_end"]["process_sha256"], hashlib.sha256(receipt.read_bytes()).hexdigest())
+
+    def test_operator_end_history_uses_same_bound_source(self):
+        run, _, binding = self.operator_fixture()
+        current = self.f.fleet()
+        # Same recorded goal; the old campaign must not silently reload as RUNNING.
+        LEDGER["record"]("launch", current.name, ledger=self.f.ledger, goal="campaign-goal", kind="fleet",
+                         run_dir=str(current), triggered_at=T0 + 2100)
+        value = render(current, self.f, goal="campaign-goal", operator_end_receipts=[binding], iterations=2)
+        old = next(row for row in value["history"] if row["id"] == run.name)
+        self.assertEqual(old["state"], "FAILED")
+        self.assertFalse(old["summary_finalized"])
+        self.assertEqual(old["ended_at"], T0 + 2000)
+        self.assertIn("operator ended (exit 1); summary unfinalized", CARD["render_text"](value))
+
+    def test_operator_end_refuses_stale_or_conflicting_inputs(self):
+        for target, key, value, rehash in (
+            ("binding", "summary_sha256", "0" * 64, False),
+            ("binding", "process_sha256", "0" * 64, False),
+            ("binding", "campaign_id", "other", False),
+            ("binding", "source_ref", "b" * 40, False),
+            ("process", "pid", 8, True), ("process", "birth_ticks", "", True),
+            ("process", "boot", "other", True), ("process", "exit_code", True, True),
+            ("process", "finished_at", None, True), ("process", "finished_at", float("nan"), True),
+            ("process", "finished_at", NOW + 1, True), ("process", "finished_at", T0 - 1, True),
+            ("process", "original_jobs", 4, True), ("process", "whole_cli_started_epoch", T0 - 20, True),
+            ("process", "argv", ["scripts/run-bench", "other", "-k", "1", "--concurrency", "2"], True),
+            ("summary", "finished_at", "2026-10-18T20:00:00Z", True),
+        ):
+            with self.subTest(target=target, key=key, value=value):
+                run, receipt, binding_path = self.operator_fixture()
+                binding = json.loads(binding_path.read_text())
+                path = {"binding": binding_path, "process": receipt, "summary": run / "summary.json"}[target]
+                payload = json.loads(path.read_text()); payload[key] = value; write(path, payload)
+                if rehash:
+                    binding[target + "_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+                    write(binding_path, binding)
+                with self.assertRaises(ValueError):
+                    render(run, self.f, operator_end_receipts=[binding_path])
+        run, _, binding = self.operator_fixture()
+        with self.assertRaises(ValueError):
+            render(run, self.f, operator_end_receipts=[binding, binding])
+        (run / "summary.json").write_text((run / "summary.json").read_text() + " ")
+        with self.assertRaises(ValueError):
+            render(run, self.f, operator_end_receipts=[binding])
+
+    def test_operator_end_zero_is_incomplete_and_finished_summary_unchanged(self):
+        run, receipt, binding_path = self.operator_fixture()
+        process = json.loads(receipt.read_text()); process["exit_code"] = 0; write(receipt, process)
+        binding = json.loads(binding_path.read_text()); binding["process_sha256"] = hashlib.sha256(receipt.read_bytes()).hexdigest()
+        write(binding_path, binding)
+        result = render(run, self.f, operator_end_receipts=[binding_path])
+        self.assertEqual(result["experiment"]["state"], "INCOMPLETE")
+        summary = json.loads((run / "summary.json").read_text())
+        summary.update(status="failed", finished_at="2026-10-18T20:00:00Z")
+        write(run / "summary.json", summary)
+        result = render(run, self.f)
+        self.assertEqual(result["experiment"]["state"], "FAILED")
+        self.assertEqual(result["experiment"]["end_evidence"], "summary.json finished_at")
+
+    def test_operator_end_cli_and_changed_snapshot_refuse(self):
+        run, _, binding = self.operator_fixture()
+        args = [sys.executable, str(ROOT / "scripts/cloudbench-scorecard.py"), str(run), "--ledger", str(self.f.ledger),
+                "--operator-end-receipt", str(binding), "--json", "--now", str(NOW)]
+        result = subprocess.run(args, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(json.loads(result.stdout)["experiment"]["summary_finalized"])
+        ends = CARD["operator_end_bindings"]([binding], now=NOW)
+        (run / "summary.json").write_text((run / "summary.json").read_text() + " ")
+        with self.assertRaisesRegex(ValueError, "summary changed"):
+            CARD["load_campaign"](run, ends)
+        result = subprocess.run(args, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("refused", result.stderr)
 
     def test_descent_does_not_reload_history_for_unused_batch_trend(self):
         paths = []
