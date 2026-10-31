@@ -160,9 +160,10 @@ scoped_run() {
 scoped_runs() {
     wc -l < "$TEST_ROOT/scoped-count-$1" | tr -d ' '
 }
-# scoped_row LANE KEY [KEY...]: a field of the lane's latest stage row.
+# scoped_row LANE KEY [KEY...]: a field of the lane's latest stage row in the
+# run $SCOPED_RUN_ID (default: the "scoped" run).
 scoped_row() {
-    python3 - "$RUN_ROOT/scoped/stages.jsonl" "$@" <<'PYEOF'
+    python3 - "$RUN_ROOT/${SCOPED_RUN_ID:-scoped}/stages.jsonl" "$@" <<'PYEOF'
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
 value = [row for row in rows if row.get("stage") == sys.argv[2]][-1]
@@ -349,6 +350,188 @@ grep -q "^smoke  *reused-scoped " "$TEST_ROOT/scoped-finish.out" || fail "summar
 scoped_stage --history >"$TEST_ROOT/scoped-history.out" || fail "scoped history failed"
 grep -q "Reused lane-scoped passes (inert changes only, not executed on these bytes): .*smoke=" "$TEST_ROOT/scoped-history.out" \
     || fail "history does not count lane-scoped reuse separately"
+
+# Cross-run discovery: a lane may reuse a PASSED record read in place from an
+# EARLIER timing run of the same run root when the earlier run's metadata names
+# the same branch, the invocation is identical, the passed head is an ancestor
+# of HEAD and the record is under the age bound; failed heads recorded in any
+# considered run veto; the exact --reuse-passed cache stays per run; flag off is
+# unchanged. Fresh run root, same fixture repository (HEAD is docs-v6).
+RUN_ROOT="$TEST_ROOT/xrun"
+XRUN_H0="$(git -C "$SCOPED_REPO" rev-parse HEAD)"
+XRUN_BRANCH="$(git -C "$SCOPED_REPO" branch --show-current)"
+[ -n "$XRUN_BRANCH" ] || fail "fixture repository is not on a branch"
+scoped_stage --start --run-id xa >/dev/null
+SCOPED_RUN_ID=xa
+for lane in smoke backend-coverage-blackbox live-probes; do
+    runs_before="$(scoped_runs "$lane")"
+    scoped_run "$lane" --lane-scoped-reuse >"$TEST_ROOT/xrun-xa-$lane.out" || fail "xa $lane failed"
+    [ "$(scoped_runs "$lane")" = "$((runs_before + 1))" ] || fail "xa $lane did not run in a fresh run root"
+    grep -qF "lane-scoped reuse unavailable for $lane: no prior pass of this lane for the identical command, cwd and environment (1 run(s) considered)" \
+        "$TEST_ROOT/xrun-xa-$lane.out" || fail "xa $lane did not report the single considered run"
+done
+scoped_stage --finish >/dev/null || fail "xa finish failed"
+# (a) Docs-only commit in the next run: smoke reuses run xa's pass in place,
+# with the source run id, run dir and record path; nothing is copied.
+printf 'guide x1\n' > "$SCOPED_REPO/docs/guide.md"
+XRUN_H1="$(scoped_commit docs-x1)"
+scoped_stage --start --run-id xb >/dev/null
+SCOPED_RUN_ID=xb
+smoke_runs="$(scoped_runs smoke)"
+scoped_run smoke --lane-scoped-reuse >"$TEST_ROOT/xrun-xb-smoke.out" || fail "xb smoke failed"
+[ "$(scoped_runs smoke)" = "$smoke_runs" ] || fail "cross-run docs-only commit reran smoke"
+grep -qF "reused passed deploy stage (lane-scoped): smoke passed_head=${XRUN_H0:0:12} current_head=${XRUN_H1:0:12} inert_paths=1 passed_run=xa cross_run=true" \
+    "$TEST_ROOT/xrun-xb-smoke.out" || fail "cross-run reuse of smoke was not disclosed with its source run"
+[ "$(scoped_row smoke status)" = "reused-scoped" ] || fail "cross-run smoke row status"
+[ "$(scoped_row smoke detail reuse cross_run)" = "true" ] || fail "cross-run smoke row lacks cross_run"
+[ "$(scoped_row smoke detail reuse passed_run_id)" = "xa" ] || fail "cross-run smoke row passed_run_id"
+[ "$(scoped_row smoke detail reuse passed_run_dir)" = "$RUN_ROOT/xa" ] || fail "cross-run smoke row passed_run_dir"
+[ "$(scoped_row smoke detail reuse passed_head)" = "$XRUN_H0" ] || fail "cross-run smoke row passed_head"
+[ "$(scoped_row smoke detail reuse considered_runs)" = '["xb", "xa"]' ] || fail "cross-run smoke row considered_runs"
+XRUN_RECORD="$(scoped_row smoke detail reuse passed_record)"
+case "$XRUN_RECORD" in
+    "$RUN_ROOT/xa/passed-cache/smoke/scoped/"*.json) ;;
+    *) fail "cross-run smoke row does not name run xa's record: $XRUN_RECORD" ;;
+esac
+[ -f "$XRUN_RECORD" ] || fail "cross-run record is not the file in run xa"
+[ ! -e "$RUN_ROOT/xb/passed-cache/smoke" ] || fail "a cross-run hit copied or cached a record into the current run"
+# (e) A failed head recorded in run xb vetoes run xa's pass in run xc.
+printf 'guide x2\n' > "$SCOPED_REPO/docs/guide.md"
+XRUN_H2="$(scoped_commit docs-x2)"
+touch "$TEST_ROOT/scoped-fail-smoke"
+if scoped_run smoke >"$TEST_ROOT/xrun-xb-fail.out"; then
+    fail "fail-marked smoke run reported success (xb)"
+fi
+rm -f "$TEST_ROOT/scoped-fail-smoke"
+printf 'guide x3\n' > "$SCOPED_REPO/docs/guide.md"
+scoped_commit docs-x3 >/dev/null
+scoped_stage --finish >/dev/null || fail "xb finish failed"
+scoped_stage --start --run-id xc >/dev/null
+SCOPED_RUN_ID=xc
+smoke_runs="$(scoped_runs smoke)"
+scoped_run smoke --lane-scoped-reuse >"$TEST_ROOT/xrun-xc-smoke.out" || fail "xc smoke failed"
+[ "$(scoped_runs smoke)" = "$((smoke_runs + 1))" ] || fail "a failed head from an earlier run did not veto the cross-run reuse"
+grep -qF "lane-scoped reuse unavailable for smoke: a failed run on ${XRUN_H2:0:12} differs from the current tree only by inert paths" \
+    "$TEST_ROOT/xrun-xc-smoke.out" || fail "cross-run veto reason not disclosed"
+[ "$(scoped_row smoke status)" = "passed" ] || fail "xc vetoed smoke row status"
+[ "$(scoped_row smoke detail reuse scoped vetoed_by_failed_head failed_run_id)" = "xb" ] || fail "cross-run veto failed_run_id"
+[ "$(scoped_row smoke detail reuse scoped vetoed_by_failed_head failed_run_dir)" = "$RUN_ROOT/xb" ] || fail "cross-run veto failed_run_dir"
+[ "$(scoped_row smoke detail reuse scoped vetoed_by_failed_head cross_run)" = "true" ] || fail "cross-run veto cross_run"
+[ "$(scoped_row smoke detail reuse scoped passed_run_id)" = "xa" ] || fail "cross-run veto candidate run"
+[ "$(scoped_row smoke detail reuse scoped cross_run)" = "true" ] || fail "cross-run veto candidate cross_run"
+scoped_run backend-coverage-blackbox --reuse-passed >/dev/null || fail "xc backend failed"
+# (f) Flag off: unchanged. Same tree as run xc's backend pass, new run: the
+# exact-input cache is per run, so the lane executes again and nothing scoped
+# is mentioned; with the flag the in-run pass (newest) wins over run xc's.
+scoped_stage --finish >/dev/null || fail "xc finish failed"
+scoped_stage --start --run-id xd >/dev/null
+SCOPED_RUN_ID=xd
+backend_runs="$(scoped_runs backend-coverage-blackbox)"
+scoped_run backend-coverage-blackbox --reuse-passed >"$TEST_ROOT/xrun-xd-off.out" || fail "xd flag-off run failed"
+[ "$(scoped_runs backend-coverage-blackbox)" = "$((backend_runs + 1))" ] || fail "the exact-input cache crossed runs"
+[ "$(scoped_row backend-coverage-blackbox status)" = "passed" ] || fail "xd flag-off row status"
+if grep -q "lane-scoped" "$TEST_ROOT/xrun-xd-off.out"; then
+    fail "flag-off run mentioned lane-scoped reuse"
+fi
+scoped_run backend-coverage-blackbox --lane-scoped-reuse >"$TEST_ROOT/xrun-xd-on.out" || fail "xd flag-on run failed"
+[ "$(scoped_runs backend-coverage-blackbox)" = "$((backend_runs + 1))" ] || fail "xd in-run pass was not reused"
+[ "$(scoped_row backend-coverage-blackbox detail reuse cross_run)" = "false" ] || fail "in-run candidate must precede cross-run ones"
+[ "$(scoped_row backend-coverage-blackbox detail reuse passed_run_id)" = "xd" ] || fail "newest-first ordering across runs"
+grep -qF "inert_paths=0 passed_run=xd cross_run=false" "$TEST_ROOT/xrun-xd-on.out" || fail "in-run hit disclosure"
+# (d) Age bound: 25 h old cross-run records are ignored even when the
+# environment asks for a wider bound; the environment can only lower it.
+printf 'guide x4\n' > "$SCOPED_REPO/docs/guide.md"
+scoped_commit docs-x4 >/dev/null
+scoped_stage --finish >/dev/null || fail "xd finish failed"
+scoped_stage --start --run-id xe >/dev/null
+SCOPED_RUN_ID=xe
+python3 - "$RUN_ROOT" <<'AGE_EOF'
+import json, pathlib, sys, time
+aged = 0
+for path in pathlib.Path(sys.argv[1]).glob("*/passed-cache/backend-coverage-blackbox/scoped/*.json"):
+    record = json.loads(path.read_text())
+    record["finished_epoch"] = time.time() - 25 * 3600
+    path.write_text(json.dumps(record, sort_keys=True) + "\n")
+    aged += 1
+assert aged == 3, aged
+AGE_EOF
+backend_runs="$(scoped_runs backend-coverage-blackbox)"
+DEPLOY_LANE_SCOPED_REUSE_MAX_AGE_SECONDS=1000000000 scoped_run backend-coverage-blackbox --lane-scoped-reuse \
+    >"$TEST_ROOT/xrun-xe-backend.out" || fail "xe backend failed"
+[ "$(scoped_runs backend-coverage-blackbox)" = "$((backend_runs + 1))" ] || fail "a 25 h old cross-run record was reused (the age bound was raised)"
+grep -qF "no prior pass of this lane for the identical command, cwd and environment (5 run(s) considered)" \
+    "$TEST_ROOT/xrun-xe-backend.out" || fail "aged-record miss not disclosed"
+[ "$(scoped_row backend-coverage-blackbox detail reuse scoped rejected_cross_run age)" = 3 ] || fail "aged records not counted"
+printf 'guide x5\n' > "$SCOPED_REPO/docs/guide.md"
+scoped_commit docs-x5 >/dev/null
+scoped_stage --finish >/dev/null || fail "xe finish failed"
+scoped_stage --start --run-id xf >/dev/null
+SCOPED_RUN_ID=xf
+sleep 2
+backend_runs="$(scoped_runs backend-coverage-blackbox)"
+DEPLOY_LANE_SCOPED_REUSE_MAX_AGE_SECONDS=1 scoped_run backend-coverage-blackbox --lane-scoped-reuse \
+    >"$TEST_ROOT/xrun-xf-backend.out" || fail "xf backend failed"
+[ "$(scoped_runs backend-coverage-blackbox)" = "$((backend_runs + 1))" ] || fail "the lowered age bound did not exclude a 2 s old cross-run record"
+[ "$(scoped_row backend-coverage-blackbox detail reuse scoped rejected_cross_run age)" = 4 ] || fail "lowered-bound rejections"
+scoped_run backend-coverage-blackbox --reuse-passed >/dev/null || fail "xf exact run failed"
+[ "$(scoped_runs backend-coverage-blackbox)" = "$((backend_runs + 1))" ] || fail "the age-bound env var changed the exact fingerprint"
+scoped_stage --finish >/dev/null || fail "xf finish failed"
+# (b) A run started on another branch is never a source, even at an ancestor
+# head: semantic-stack passes only in run xo (branch "other") and reruns on
+# the original branch.
+git -C "$SCOPED_REPO" checkout -q -b other
+scoped_stage --start --run-id xo >/dev/null
+SCOPED_RUN_ID=xo
+scoped_run semantic-stack --lane-scoped-reuse >"$TEST_ROOT/xrun-xo-semantic.out" || fail "xo semantic failed"
+grep -qF "(1 run(s) considered)" "$TEST_ROOT/xrun-xo-semantic.out" || fail "another branch's runs were considered"
+scoped_stage --finish >/dev/null || fail "xo finish failed"
+git -C "$SCOPED_REPO" checkout -q "$XRUN_BRANCH"
+printf 'guide x6\n' > "$SCOPED_REPO/docs/guide.md"
+scoped_commit docs-x6 >/dev/null
+scoped_stage --start --run-id xg >/dev/null
+SCOPED_RUN_ID=xg
+semantic_runs="$(scoped_runs semantic-stack)"
+scoped_run semantic-stack --lane-scoped-reuse >"$TEST_ROOT/xrun-xg-semantic.out" || fail "xg semantic failed"
+[ "$(scoped_runs semantic-stack)" = "$((semantic_runs + 1))" ] || fail "a pass from a run on another branch was reused"
+grep -qF "no prior pass of this lane for the identical command, cwd and environment (7 run(s) considered)" \
+    "$TEST_ROOT/xrun-xg-semantic.out" || fail "other-branch miss not disclosed"
+[ "$(scoped_row semantic-stack detail reuse scoped considered_runs)" = '["xg", "xf", "xe", "xd", "xc", "xb", "xa"]' ] \
+    || fail "considered runs must exclude the other branch's run and stay newest first"
+scoped_stage --finish >/dev/null || fail "xg finish failed"
+# (c) A pass on a head that is not an ancestor of HEAD (a sibling commit after
+# a reset) is never reused: live-probes passed only in run xa at H0.
+git -C "$SCOPED_REPO" reset -q --hard "$XRUN_H0^"
+printf 'guide sibling\n' > "$SCOPED_REPO/docs/guide.md"
+XRUN_HS="$(scoped_commit docs-sibling)"
+if git -C "$SCOPED_REPO" merge-base --is-ancestor "$XRUN_H0" "$XRUN_HS"; then
+    fail "fixture: the sibling commit descends from H0"
+fi
+scoped_stage --start --run-id xh >/dev/null
+SCOPED_RUN_ID=xh
+probes_runs="$(scoped_runs live-probes)"
+scoped_run live-probes --lane-scoped-reuse >"$TEST_ROOT/xrun-xh-probes.out" || fail "xh live-probes failed"
+[ "$(scoped_runs live-probes)" = "$((probes_runs + 1))" ] || fail "a pass on a non-ancestor head was reused across runs"
+[ "$(scoped_row live-probes detail reuse scoped rejected_cross_run not_ancestor)" = 1 ] || fail "non-ancestor rejection not counted"
+grep -qF "no prior pass of this lane" "$TEST_ROOT/xrun-xh-probes.out" || fail "non-ancestor miss not disclosed"
+# A retired run dir is simply absent and unreadable metadata excludes a run;
+# neither breaks the decision (an in-run hit, cross_run false).
+rm -rf "$RUN_ROOT/xa"
+printf '{not-json\n' > "$RUN_ROOT/xb/metadata.json"
+printf 'guide sibling 2\n' > "$SCOPED_REPO/docs/guide.md"
+scoped_commit docs-sibling-2 >/dev/null
+scoped_run live-probes --lane-scoped-reuse >"$TEST_ROOT/xrun-xh-probes2.out" || fail "xh live-probes 2 failed"
+[ "$(scoped_runs live-probes)" = "$((probes_runs + 1))" ] || fail "in-run reuse after retiring an earlier run dir"
+[ "$(scoped_row live-probes detail reuse cross_run)" = "false" ] || fail "in-run hit labelled cross-run"
+[ "$(scoped_row live-probes detail reuse considered_runs)" = '["xh", "xg", "xf", "xe", "xd", "xc"]' ] \
+    || fail "retired or unreadable runs still considered"
+if grep -q "lane-scoped reuse decision failed" "$TEST_ROOT/xrun-xh-probes2.out"; then
+    fail "a retired run dir broke the decision"
+fi
+scoped_stage --finish >/dev/null || fail "xh finish failed"
+scoped_stage --history >"$TEST_ROOT/xrun-history.out" || fail "xrun history failed"
+grep -q "Reused lane-scoped passes (inert changes only, not executed on these bytes): .*live-probes=1" \
+    "$TEST_ROOT/xrun-history.out" || fail "history does not count the reuse"
+unset SCOPED_RUN_ID
 # Back to the exact-input fixture run for the scenarios below.
 RUN_ROOT="$TEST_ROOT/reuse"
 # Every pass is cached, so a standalone run (no --reuse-passed: a first manual

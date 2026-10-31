@@ -196,7 +196,12 @@ graph, and no failed run on an inert-equivalent head). Its stage row and
 receipt lane carry the distinct ``reused-scoped`` status with the passed
 head, fingerprint, run id and the rule that judged every changed path; it is
 a pass for the waiter and ``overall`` but never a fresh pass of the current
-bytes. The receipt lane is relabelled from its own stage row (matched by the
+bytes. The candidate may come from an earlier timing run of the same run root
+(same metadata ``branch``, same invocation, passed head an ancestor of HEAD,
+record under 24 h, read in place and never copied): the row's ``reuse`` then
+carries ``cross_run: true`` with ``passed_run_id``/``passed_run_dir`` and the
+lane is also listed in ``reused_scoped_cross_run_lanes``.
+The receipt lane is relabelled from its own stage row (matched by the
 per-launch ``DEPLOY_PIPELINE_LANE_TOKEN`` the row echoes) whether or not this
 plan enabled the feature, so a receipt can never call a reused lane passed.
 """
@@ -897,8 +902,13 @@ def reconcile_reused_lane(receipt: dict, name: str, lane_state: dict, *, finishe
     row = _lane_stage_row(probe, name)
     if row is None or row.get("status") != "reused-scoped":
         return "passed"
-    lane_state["reuse"] = (row.get("detail") or {}).get("reuse")
+    reuse = (row.get("detail") or {}).get("reuse")
+    lane_state["reuse"] = reuse
     receipt["reused_scoped_lanes"] = sorted({*receipt.get("reused_scoped_lanes", []), name})
+    if isinstance(reuse, dict) and reuse.get("cross_run"):
+        # The pass came from an earlier timing run, not this one: distinguished
+        # so no reader mistakes it for a reuse of this run's own evidence.
+        receipt["reused_scoped_cross_run_lanes"] = sorted({*receipt.get("reused_scoped_cross_run_lanes", []), name})
     return "reused-scoped"
 
 
@@ -2013,6 +2023,7 @@ def _run_attempt(
         "source_root": str(SOURCE_ROOT),
         "lane_scoped_reuse": lane_scoped_reuse,
         "reused_scoped_lanes": [],
+        "reused_scoped_cross_run_lanes": [],
         "host": host,
         "host_peak": sample_host_peak({}, host),
         "host_samples": [{"at": _now(), **host, "headroom_mb": live_budget}],
@@ -2578,9 +2589,11 @@ def verify(state_dir: Path, expect_head: str | None = None) -> int:
         )
         return EXIT_STALE
     reused_scoped = receipt.get("reused_scoped_lanes") or []
+    cross_run = receipt.get("reused_scoped_cross_run_lanes") or []
     print(
         f"PIPELINE_VERIFY status=bound exit=0 head={current['head']} digest={current['digest'][:12]} "
-        f"attempt={receipt.get('attempt', 1)} reused_scoped={','.join(reused_scoped) or '-'}"
+        f"attempt={receipt.get('attempt', 1)} reused_scoped={','.join(reused_scoped) or '-'} "
+        f"cross_run={','.join(cross_run) or '-'}"
     )
     return 0
 

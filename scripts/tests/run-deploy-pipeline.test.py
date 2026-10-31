@@ -56,11 +56,24 @@ def load_module(name: str, path: Path):
     return module
 
 
-def start_timing(run_root: Path, env: dict[str, str]) -> None:
+def start_timing(run_root: Path, env: dict[str, str], cwd: Path | None = None) -> None:
+    """Start a timing run; its metadata records the branch and head of ``cwd``
+    (the real checkout unless a scenario binds the run to its fixture repo)."""
     subprocess.run(
         ["bash", str(DRIVER.parent / "run-deploy-stage"), "--start"],
+        cwd=ROOT if cwd is None else cwd, env=env, check=True, stdout=subprocess.DEVNULL,
+    )
+
+
+def finish_timing(env: dict[str, str]) -> str:
+    """Close the active timing run and return its id."""
+    run_root = Path(env["DEPLOY_RUN_ROOT"])
+    run_id = (run_root / "current").read_text().splitlines()[0].strip()
+    subprocess.run(
+        ["bash", str(DRIVER.parent / "run-deploy-stage"), "--finish"],
         cwd=ROOT, env=env, check=True, stdout=subprocess.DEVNULL,
     )
+    return run_id
 
 
 def write_plan(path: Path, lanes: list[dict], **extra: object) -> None:
@@ -998,7 +1011,9 @@ def check_lane_scoped_reuse(tmp: Path, env: dict[str, str], source_root: Path) -
     # the phase estimates of the other scenarios with 0-second passes.
     ledger = tmp / "scoped-lanes.json"
     env = {**env, "DEPLOY_RUN_ROOT": str(tmp / "scoped-runs"), "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}
-    start_timing(tmp / "scoped-runs", env)
+    # Timing runs bound to the fixture repo: cross-run discovery compares the
+    # branch each run's metadata recorded, which must be the fixture's.
+    start_timing(tmp / "scoped-runs", env, cwd=source_root)
     git = ["git", "-C", str(source_root), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
 
     def commit_docs(text: str) -> str:
@@ -1076,6 +1091,44 @@ def check_lane_scoped_reuse(tmp: Path, env: dict[str, str], source_root: Path) -
     recorded = json.loads(ledger.read_text())["lanes"]
     assert all(sample.get("status") != "reused-scoped" for samples in recorded.values() for sample in samples)
     assert len(recorded["smoke"]) == 1 and len(recorded["quick-gate"]) == 2, recorded
+    assert receipt["reused_scoped_cross_run_lanes"] == [], receipt["reused_scoped_cross_run_lanes"]
+
+    # Cross-run: the green run is closed (--finish) and a test-only sync needs
+    # a new --start run. Its own passed-cache is empty, so the scoped lanes
+    # reuse the first run's records in place (same branch, ancestor head,
+    # fresh): the receipt names the source run and lists the lanes as
+    # cross-run reuse; nothing executes and no duration is recorded.
+    first_run_id = finish_timing(env)
+    first_run_dir = tmp / "scoped-runs" / first_run_id
+    start_timing(tmp / "scoped-runs", env, cwd=source_root)
+    cross_head = commit_docs("guide v2 cross-run\n")
+    receipt = run_and_wait(plan)
+    assert receipt["status"] == "passed", receipt["status"]
+    assert receipt["stage_run_dir"] != str(first_run_dir), receipt["stage_run_dir"]
+    assert receipt["reused_scoped_lanes"] == ["backend-coverage-blackbox", "smoke"], receipt["reused_scoped_lanes"]
+    assert receipt["reused_scoped_cross_run_lanes"] == ["backend-coverage-blackbox", "smoke"], \
+        receipt["reused_scoped_cross_run_lanes"]
+    for name in ("backend-coverage-blackbox", "smoke"):
+        lane_state = receipt["lanes"][name]
+        assert lane_state["status"] == "reused-scoped" and lane_state["exit"] == 0, (name, lane_state)
+        reuse = lane_state["reuse"]
+        assert reuse["kind"] == "scoped" and reuse["hit"] is True and reuse["cross_run"] is True, reuse
+        assert reuse["passed_run_id"] == first_run_id and reuse["passed_run_dir"] == str(first_run_dir), reuse
+        assert reuse["passed_head"] == first_head and reuse["current_head"] == cross_head, reuse
+        record = Path(reuse["passed_record"])
+        assert record.parent == first_run_dir / "passed-cache" / name / "scoped" and record.is_file(), reuse
+        assert reuse["considered_runs"] == [Path(receipt["stage_run_dir"]).name, first_run_id], reuse
+        assert runs(name) == 1, f"{name} executed despite the cross-run scoped reuse"
+    assert not (Path(receipt["stage_run_dir"]) / "passed-cache" / "smoke").exists(), "record copied into the new run"
+    assert receipt["lanes"]["quick-gate"]["status"] == "passed" and runs("quick-gate") == 3
+    assert receipt["lanes"]["live-probes"]["status"] == "passed" and runs("live-probes") == 3
+    verified = run_driver("verify", "--state-dir", str(state), "--expect-head", cross_head, env=env)
+    assert verified.returncode == 0, verified.stdout
+    assert "reused_scoped=backend-coverage-blackbox,smoke cross_run=backend-coverage-blackbox,smoke" in verified.stdout, \
+        verified.stdout
+    recorded = json.loads(ledger.read_text())["lanes"]
+    assert all(sample.get("status") != "reused-scoped" for samples in recorded.values() for sample in samples)
+    assert len(recorded["smoke"]) == 1 and len(recorded["quick-gate"]) == 3, recorded
 
     # Default off: the same kind of commit reruns both lanes as plain passes.
     write_plan(plan, lanes)
@@ -1088,7 +1141,7 @@ def check_lane_scoped_reuse(tmp: Path, env: dict[str, str], source_root: Path) -
     assert runs("backend-coverage-blackbox") == 2 and runs("smoke") == 2, "flag off must rerun"
     assert "reuse" not in receipt["lanes"]["smoke"]
     verified = run_driver("verify", "--state-dir", str(state), "--expect-head", third_head, env=env)
-    assert verified.returncode == 0 and "reused_scoped=-" in verified.stdout, verified.stdout
+    assert verified.returncode == 0 and "reused_scoped=- cross_run=-" in verified.stdout, verified.stdout
     # The environment can never enable: the same plan with DEPLOY_LANE_SCOPED_REUSE=1 still reruns.
     fourth_head = commit_docs("guide v4\n")
     since = time.time()
@@ -1112,9 +1165,11 @@ def check_reconcile_reused_lane(tmp: Path) -> None:
     run_dir.mkdir()
     base = 1_700_000_000.0
     provenance = {"kind": "scoped", "passed_head": "a" * 40, "current_head": "b" * 40, "changed": []}
+    cross_run_provenance = {**provenance, "cross_run": True, "passed_run_id": "earlier", "passed_run_dir": "/runs/earlier"}
 
     def row(stage: str, status: str, started: float, token: str | None) -> dict:
-        detail = {"reuse": provenance if status == "reused-scoped" else {"requested": False}}
+        reuse = cross_run_provenance if stage == "backend-coverage-blackbox" else provenance
+        detail = {"reuse": reuse if status == "reused-scoped" else {"requested": False}}
         if token:
             detail["lane_token"] = token
         return {"stage": stage, "status": status, "started_epoch": started, "finished_epoch": started + 1.0,
@@ -1142,6 +1197,9 @@ def check_reconcile_reused_lane(tmp: Path) -> None:
                         "semantic-stack": "passed", "agents-coverage-blackbox": "passed"}, outcomes
     assert receipt["lanes"]["smoke"]["reuse"] == provenance and "reuse" not in receipt["lanes"]["live-probes"]
     assert receipt["reused_scoped_lanes"] == ["backend-coverage-blackbox", "smoke"], receipt["reused_scoped_lanes"]
+    # Only the lane whose row says cross_run is listed as a cross-run reuse.
+    assert receipt["lanes"]["backend-coverage-blackbox"]["reuse"] == cross_run_provenance
+    assert receipt["reused_scoped_cross_run_lanes"] == ["backend-coverage-blackbox"], receipt["reused_scoped_cross_run_lanes"]
     assert pipeline.overall({"a": {"status": "reused-scoped"}, "b": {"status": "passed"}}) == "passed"
     assert pipeline.overall({"a": {"status": "reused-scoped"}, "b": {"status": "running"}}) == "running"
     # An older driver's receipt that still says "passed" records no sample for a reused-scoped row.

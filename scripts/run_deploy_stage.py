@@ -270,9 +270,11 @@ _PROCESS_IDENTITY_ENV_PREFIXES = ("LISTEN_",)
 
 
 # Scheduling knobs decide whether a lane may skip, never what it runs, so they
-# stay out of every fingerprint: toggling lane-scoped reuse must not turn an
-# identical pass into an exact-input miss.
-_SCHEDULING_ONLY_ENV = frozenset({"DEPLOY_LANE_SCOPED_REUSE"})
+# stay out of every fingerprint: toggling lane-scoped reuse (or lowering its
+# cross-run age bound) must not turn an identical pass into an exact-input miss.
+_SCOPED_REUSE_ENV = "DEPLOY_LANE_SCOPED_REUSE"
+_CROSS_RUN_MAX_AGE_ENV = "DEPLOY_LANE_SCOPED_REUSE_MAX_AGE_SECONDS"
+_SCHEDULING_ONLY_ENV = frozenset({_SCOPED_REUSE_ENV, _CROSS_RUN_MAX_AGE_ENV})
 
 
 def _is_process_identity_env(name: str) -> bool:
@@ -346,7 +348,23 @@ def _record_cache_hit(run_dir: Path, stage: str, fingerprint: str) -> None:
 # lane's inert set only when its argv carries that lane's real command marker.
 # A failed run of the lane records its head too, and a candidate pass is
 # vetoed when the current tree differs from a failed head only by inert paths.
-_SCOPED_REUSE_ENV = "DEPLOY_LANE_SCOPED_REUSE"
+#
+# Cross-run discovery. A deploy whose green timing run was closed with
+# --finish and then needed a test-only sync starts a new run whose own
+# passed-cache is empty, so the follow-up reran every lane. The decision
+# therefore also reads PASSED records in place from EARLIER run dirs of the
+# same run root when ALL of these hold: the earlier run's metadata names the
+# same non-empty branch as the current run's, the record carries the identical
+# invocation digest, its passed head is an ancestor of (or equal to) the
+# current head (git merge-base --is-ancestor: a rebased or amended branch never
+# matches), the record finished within _CROSS_RUN_MAX_AGE_SECONDS
+# (DEPLOY_LANE_SCOPED_REUSE_MAX_AGE_SECONDS may only lower it) and the record
+# file is still byte-identical when the hit is taken. Records are never copied
+# into the current run: the row names the source run id, run dir and record
+# path with cross_run=true, and candidates stay ordered newest first across
+# runs. Failed heads recorded in ANY considered run veto exactly as in-run
+# ones do (never fewer vetoes). The exact --reuse-passed cache stays per run.
+_CROSS_RUN_MAX_AGE_SECONDS = 24 * 60 * 60.0
 # The pipeline stamps every lane launch with this token (process identity,
 # excluded from fingerprints); the stage echoes it in each row's detail so the
 # receipt lane is matched to its own row regardless of start-time skew.
@@ -562,7 +580,8 @@ def _load_scoped_records(directory: Path, stage: str, invocation: str) -> list[d
         return []
     for path in candidates:
         try:
-            payload = json.loads(path.read_text())
+            raw = path.read_bytes()
+            payload = json.loads(raw)
         except (json.JSONDecodeError, OSError):
             continue
         if (
@@ -573,9 +592,135 @@ def _load_scoped_records(directory: Path, stage: str, invocation: str) -> list[d
             and isinstance(payload.get("head"), str)
             and isinstance(payload.get("fingerprint"), str)
         ):
+            # Where the record was read and what it contained: a cross-run hit
+            # re-checks both so a retired run dir is a miss, never a copy.
+            payload["_record_path"] = str(path)
+            payload["_record_digest"] = hashlib.sha256(raw).hexdigest()
             records.append(payload)
     records.sort(key=lambda record: float(record.get("finished_epoch") or 0.0), reverse=True)
     return records
+
+
+def _record_is_intact(record: dict) -> bool:
+    """The record file still exists byte-for-byte where it was read."""
+
+    try:
+        raw = Path(record["_record_path"]).read_bytes()
+    except (KeyError, OSError):
+        return False
+    return hashlib.sha256(raw).hexdigest() == record.get("_record_digest")
+
+
+def _cross_run_max_age_seconds() -> float:
+    """24 h unless DEPLOY_LANE_SCOPED_REUSE_MAX_AGE_SECONDS lowers it; the
+    environment can never widen the bound."""
+
+    raw = (os.environ.get(_CROSS_RUN_MAX_AGE_ENV) or "").strip()
+    if not raw:
+        return _CROSS_RUN_MAX_AGE_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return _CROSS_RUN_MAX_AGE_SECONDS
+    if value != value or value < 0:  # NaN or negative: keep the default
+        return _CROSS_RUN_MAX_AGE_SECONDS
+    return min(value, _CROSS_RUN_MAX_AGE_SECONDS)
+
+
+def _run_metadata(run_dir: Path) -> dict | None:
+    try:
+        payload = json.loads((run_dir / "metadata.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+@dataclass(frozen=True)
+class _ConsideredRun:
+    run_id: str
+    run_dir: Path
+    cross_run: bool
+
+
+def _considered_runs(run_root: Path, run_dir: Path) -> list[_ConsideredRun]:
+    """The current run first, then every earlier run dir of the same root
+    whose metadata names the same non-empty branch, newest first. A retired
+    run dir is simply absent; unreadable metadata, another branch, a missing
+    branch or a later start excludes a run."""
+
+    runs = [_ConsideredRun(run_dir.name, run_dir, False)]
+    current = _run_metadata(run_dir) or {}
+    branch = current.get("branch")
+    try:
+        started = float(current.get("started_epoch"))
+    except (TypeError, ValueError):
+        return runs
+    if not isinstance(branch, str) or not branch:
+        return runs
+    try:
+        entries = [entry for entry in run_root.iterdir() if entry.is_dir()]
+    except OSError:
+        return runs
+    earlier: list[tuple[float, _ConsideredRun]] = []
+    for entry in entries:
+        if entry.name == run_dir.name or re.fullmatch(r"[A-Za-z0-9._-]+", entry.name) is None:
+            continue
+        metadata = _run_metadata(entry)
+        if metadata is None or metadata.get("branch") != branch:
+            continue
+        try:
+            entry_started = float(metadata.get("started_epoch"))
+        except (TypeError, ValueError):
+            continue
+        if entry_started >= started:
+            continue
+        earlier.append((entry_started, _ConsideredRun(entry.name, entry, True)))
+    earlier.sort(key=lambda item: item[0], reverse=True)
+    runs.extend(run for _, run in earlier)
+    return runs
+
+
+def _is_ancestor(ancestor: str, descendant: str) -> bool:
+    completed = subprocess.run(
+        ("git", "merge-base", "--is-ancestor", ancestor, descendant),
+        cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return completed.returncode == 0
+
+
+def _scoped_records_across_runs(
+    runs: Sequence[_ConsideredRun], stage: str, invocation: str, *, failed: bool, current_head: str, now: float,
+) -> tuple[list[dict], dict[str, int]]:
+    """The lane's PASSED (or, with ``failed``, failed) records across the
+    considered runs, newest first, each annotated with its source run. A
+    cross-run pass must be fresh, an ancestor of the current head and carry
+    its own run's id; cross-run failures veto regardless (never fewer vetoes).
+    The rejection counts explain a miss."""
+
+    max_age = _cross_run_max_age_seconds()
+    rejected = {"age": 0, "not_ancestor": 0, "foreign_run_id": 0}
+    ancestry: dict[str, bool] = {}
+    records: list[dict] = []
+    for run in runs:
+        directory = (_scoped_failed_dir if failed else _scoped_records_dir)(run.run_dir, stage)
+        for record in _load_scoped_records(directory, stage, invocation):
+            if run.cross_run and not failed:
+                if record.get("run_id") != run.run_id:
+                    rejected["foreign_run_id"] += 1
+                    continue
+                if now - float(record.get("finished_epoch") or 0.0) > max_age:
+                    rejected["age"] += 1
+                    continue
+                head = record["head"]
+                if head not in ancestry:
+                    ancestry[head] = _is_ancestor(head, current_head)
+                if not ancestry[head]:
+                    rejected["not_ancestor"] += 1
+                    continue
+            record["_source"] = {"run_id": run.run_id, "run_dir": str(run.run_dir), "cross_run": run.cross_run}
+            records.append(record)
+    records.sort(key=lambda record: float(record.get("finished_epoch") or 0.0), reverse=True)
+    return records, rejected
 
 
 def _judge_declared(path: str, rules: _ScopedLane) -> tuple[bool, str]:
@@ -627,6 +772,8 @@ class _ScopedDecision:
     blocked: list[dict] = field(default_factory=list)
     candidates: int = 0
     vetoed_by: dict | None = None
+    considered_runs: list[str] = field(default_factory=list)
+    rejected_cross_run: dict[str, int] = field(default_factory=dict)
 
     def provenance(self) -> dict:
         rules = self.rules
@@ -637,13 +784,19 @@ class _ScopedDecision:
             "graph_lanes": list(rules.graph_lanes),
             "inert_patterns": list(rules.inert),
             "never_inert_patterns": list(_NEVER_INERT),
+            "considered_runs": list(self.considered_runs),
+            "rejected_cross_run": dict(self.rejected_cross_run),
         }
         if self.record is not None:
+            source = self.record.get("_source") or {}
             out.update(
                 passed_head=self.record["head"],
                 passed_fingerprint=self.record["fingerprint"],
                 passed_run_id=self.record.get("run_id"),
+                passed_run_dir=source.get("run_dir"),
+                passed_record=self.record.get("_record_path"),
                 passed_at=self.record.get("finished_at"),
+                cross_run=bool(source.get("cross_run")),
             )
         if self.hit:
             out["changed"] = self.changed
@@ -689,15 +842,16 @@ def _changed_between(passed_head: str, current_head: str, dirty: Sequence[str], 
 
 
 def _failed_head_veto(
-    run_dir: Path, stage: str, rules: _ScopedLane, invocation: str, current_head: str,
+    failed_records: Sequence[dict], rules: _ScopedLane, current_head: str,
     dirty: Sequence[str], untracked: Sequence[str], judge: "_GraphJudge | None", *, newer_than: float,
 ) -> tuple[dict | None, "_GraphJudge | None"]:
-    """The failed record, newer than the candidate pass, whose head differs
-    from the current tree only by inert paths, if any: that failure is the
-    latest evidence about these bytes, so the older pass may not be reused
-    over it. A pass recorded after the failure supersedes it."""
+    """The failed record (from any considered run), newer than the candidate
+    pass, whose head differs from the current tree only by inert paths, if
+    any: that failure is the latest evidence about these bytes, so the older
+    pass may not be reused over it. A pass recorded after the failure
+    supersedes it."""
 
-    for record in _load_scoped_records(_scoped_failed_dir(run_dir, stage), stage, invocation):
+    for record in failed_records:
         if float(record.get("finished_epoch") or 0.0) <= newer_than:
             continue
         try:
@@ -706,23 +860,41 @@ def _failed_head_veto(
             continue
         judged, blocked, judge = _judge_changes(rules, changed, judge)
         if not blocked:
+            source = record.get("_source") or {}
             return {
                 "failed_head": record["head"],
                 "failed_at": record.get("finished_at"),
                 "failed_run_id": record.get("run_id"),
+                "failed_run_dir": source.get("run_dir"),
+                "cross_run": bool(source.get("cross_run")),
                 "exit_code": record.get("exit_code"),
                 "inert_changes_since_failure": judged,
             }, judge
     return None, judge
 
 
-def _scoped_reuse_decision(run_dir: Path, stage: str, rules: _ScopedLane, command: Sequence[str]) -> _ScopedDecision:
+def _scoped_reuse_decision(
+    run_root: Path, run_dir: Path, stage: str, rules: _ScopedLane, command: Sequence[str],
+) -> _ScopedDecision:
     current_head, dirty, untracked = _worktree_state()
     invocation = _invocation_digest(command)
-    records = _load_scoped_records(_scoped_records_dir(run_dir, stage), stage, invocation)
-    decision = _ScopedDecision(hit=False, stage=stage, rules=rules, current_head=current_head, candidates=len(records))
+    now = time.time()
+    runs = _considered_runs(run_root, run_dir)
+    records, rejected = _scoped_records_across_runs(
+        runs, stage, invocation, failed=False, current_head=current_head, now=now,
+    )
+    failed_records, _ = _scoped_records_across_runs(
+        runs, stage, invocation, failed=True, current_head=current_head, now=now,
+    )
+    decision = _ScopedDecision(
+        hit=False, stage=stage, rules=rules, current_head=current_head, candidates=len(records),
+        considered_runs=[run.run_id for run in runs], rejected_cross_run=rejected,
+    )
     if not records:
-        decision.miss_reason = "no prior pass of this lane for the identical command, cwd and environment"
+        decision.miss_reason = (
+            "no prior pass of this lane for the identical command, cwd and environment "
+            f"({len(runs)} run(s) considered)"
+        )
         return decision
     judge: _GraphJudge | None = None
     first_blocked: list[dict] = []
@@ -734,7 +906,7 @@ def _scoped_reuse_decision(run_dir: Path, stage: str, rules: _ScopedLane, comman
         judged, blocked, judge = _judge_changes(rules, changed, judge)
         if not blocked:
             veto, judge = _failed_head_veto(
-                run_dir, stage, rules, invocation, current_head, dirty, untracked, judge,
+                failed_records, rules, current_head, dirty, untracked, judge,
                 newer_than=float(record.get("finished_epoch") or 0.0),
             )
             if veto is not None:
@@ -744,6 +916,8 @@ def _scoped_reuse_decision(run_dir: Path, stage: str, rules: _ScopedLane, comman
                     f"a failed run on {veto['failed_head'][:12]} differs from the current tree only by inert paths"
                 )
                 return decision
+            if (record.get("_source") or {}).get("cross_run") and not _record_is_intact(record):
+                continue  # the source run dir was retired between the read and the hit
             decision.hit = True
             decision.record = record
             decision.changed = judged
@@ -762,10 +936,12 @@ def _scoped_reuse_decision(run_dir: Path, stage: str, rules: _ScopedLane, comman
 
 def _print_scoped_hit(decision: _ScopedDecision) -> None:
     record = decision.record or {}
+    source = record.get("_source") or {}
     print(
         f"== reused passed deploy stage (lane-scoped): {decision.stage} "
         f"passed_head={record.get('head', '')[:12]} current_head={decision.current_head[:12]} "
-        f"inert_paths={len(decision.changed)} =="
+        f"inert_paths={len(decision.changed)} passed_run={record.get('run_id', '')} "
+        f"cross_run={'true' if source.get('cross_run') else 'false'} =="
     )
     for entry in decision.changed:
         print(f"   inert: {entry['path']} ({entry['rule']}; {entry.get('graph', '')})")
@@ -1016,7 +1192,7 @@ def main() -> int:
     scoped_decision: _ScopedDecision | None = None
     if _scoped_reuse_enabled(args.lane_scoped_reuse) and scoped_rules is not None:
         try:
-            scoped_decision = _scoped_reuse_decision(run_dir, args.stage, scoped_rules, command)
+            scoped_decision = _scoped_reuse_decision(args.run_root, run_dir, args.stage, scoped_rules, command)
         except Exception as error:  # a scheduling decision must never fail a gate: rerun instead
             print(f"warning: lane-scoped reuse decision failed; rerunning {args.stage}: {type(error).__name__}: {error}",
                   file=sys.stderr)
