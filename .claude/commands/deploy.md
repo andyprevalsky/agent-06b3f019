@@ -378,16 +378,19 @@ CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -v '^agents/benchmarks/histor
 # Each lane declares memory_mb; plan also derives a default --max-parallel
 # from cores and usable memory, capped at seven lanes. Structural --max-workers
 # is passed explicitly so its worker count matches its memory reservation.
-# Structural reserves 1024 MiB plus 1840 MiB per active suite: the recorded
-# 1471.98 MiB largest-child peak rounded up with a 25% margin for each worker.
+# Structural reserves a pinned 1.25x margin over its largest recorded
+# process-tree peak scaled to its width (3220 MiB at three workers); its width
+# is still sized by the 1840 MiB per-suite floor (1471.98 MiB largest child x1.25).
 # run reserves 2 GiB for other processes below both available memory and the
 # watchdog cap, rechecks whole-box headroom before every admission, and never
-# admits declared totals over the startup budget. Against live headroom, which
-# already contains what the running lanes use, a phased lane is charged only
-# their unmaterialized declarations (declared minus the lane's freshly sampled
+# admits unmaterialized declared totals over the startup budget. Against the
+# startup budget and against live headroom, which already contains what the
+# running lanes use, a phased lane is charged only the running lanes'
+# unmaterialized declarations (declared minus the lane's freshly sampled
 # anonymous process-tree PSS, Pss_Anon: file-backed pages are still counted in
 # MemAvailable); unphased lanes (semantic-stack) and unobserved usage keep
-# the declared sum (#1640: smoke waited 16 min on a double-counted 3712 MB).
+# the declared sum (#1640: smoke waited 16 min on a double-counted 3712 MB;
+# #1658 round 1: agents-coverage waited ~14 min on 8758 declared vs 8755).
 # A lane that cannot fit alone fails
 # visibly without starting. Explicit resource limits can only tighten memory
 # admission. Receipts include timestamped MemAvailable samples, per-lane child
@@ -1118,17 +1121,27 @@ database) the shards still run: shard `i/N` owns the derived
 (`back-end/scripts/coverage-database-url.mjs`), so never substitute the
 unsharded `npm run test:coverage` there; the 2026-10-29 deploy did and paid
 a 1,505 s single sweep. `run_deploy_pipeline.py plan` emits the sharded
-command, phases Group 3 (quick lanes → `deploy-command-structural` alone at
-full budget-backed width → the coverage lanes together, longest recorded
+command, phases Group 3 (quick lanes → `deploy-command-structural` alone among
+the Group 3 lanes at full budget-backed width → the coverage lanes together, longest recorded
 first) from `.context/deploy-durations/pipeline-lanes.json`, and
 `run_deploy_pipeline.py simulate --plan <plan> --legacy-plan <plan --schedule legacy>`
 projects the union wall from the same ledger (plus a `group3` block for the
-Group 3 lanes alone). The local smoke lane (Group 4, 4096 MB) declares
-`"phase": "coverage"` in the plan: it joins the coverage phase beside
-`backend-coverage-blackbox` (4096 + 2560 MB fit the budget) after the
-exclusive structural lane instead of being admitted first and holding that
-lane's memory (#1638 attempt 5 ran smoke alone for ~22 min; 11–24 min across attempts); the AgentCard lane
-declares the same phase. Undeclared Group 4 lanes stay unphased, and a plan's
+Group 3 lanes alone). The local smoke lane (Group 4, 4150 MB: a pinned 1.25x
+margin over its largest recorded 3319 MB process-tree peak;
+`SMOKE_RECORDED_TREE_PEAK_MB`) declares
+`"phase": "stack"` in the plan: it is admitted right after the quick lanes
+beside the exclusive structural lane, which now reserves a pinned 1.25x margin
+over the largest recorded process-tree peak (2575 MB over 19 passed
+three-worker attempts in the 2026-10-30/31 receipts;
+`STRUCTURAL_RECORDED_TREE_PEAK_MB`, re-pin when a receipt exceeds it) — 3220 MB
+at three workers, down from 6544 —, so 3220 + 4150 MB fit the ~8 GB
+budget together, and no later phase waits for it: the coverage lanes still
+wait for the exclusive lane, and beside `backend-coverage-blackbox` (4150 +
+2560 MB) smoke fits the budget afterwards. Admitted first and unphased, the
+smoke lane had held the memory the structural lane needed (#1638 attempt 5
+ran smoke alone for ~22 min; 11–24 min across attempts); in the coverage
+phase it waited the whole 9–10 min exclusive phase every round. The AgentCard
+lane declares the same phase. Undeclared Group 4 lanes stay unphased, and a plan's
 own `after` edges are never removed: `live-probes` starts as soon as its
 declared dependencies and memory allow. `semantic-stack` keeps only its
 declared edges and may be admitted beside the stack-owning lanes (`smoke`,
@@ -1138,7 +1151,7 @@ declared edges and may be admitted beside the stack-owning lanes (`smoke`,
 process of a live isolated run through its owner record, live manifest or the
 `BENCHMARK_RUN_ID` its processes carry (`scripts/tests/kill-services.test.sh`,
 `scripts/tests/run-isolated-cloud-kill.test.sh`). On a ~8 GB budget
-4096 + 4096 MB still defers semantic-stack until smoke releases its reservation.
+4150 + 4096 MB still defers semantic-stack until smoke releases its reservation.
 
 **Retry after a failure: failed-first, still a full sweep.** Rerun the same
 stage with `BACKEND_COVERAGE_FAILED_FIRST=1` in the `env` above. The previously
@@ -2190,11 +2203,12 @@ When CodeRabbit is unavailable, make at most one zero-touch retry (`@coderabbita
 **What to do, mechanically:**
 
 1. Record in `TEST_REPORT` the row `skip` prints:
-   `Code Review | ⚠️ Skipped | reviewers usage-exhausted (CodeRabbit <reason>; Claude fallback disabled)`
+   `Code Review | ⚠️ Skipped | reviewers usage-exhausted (CodeRabbit: '<quote>', issue comment <id> updated <ts> naming commit <sha9>; check run <id> <conclusion> '<title>'; Claude fallback disabled)`
 2. Close the open cycle as **clean** — the only result that satisfies `require-mergeable` —
    through the versioned disposition, which requires the CodeRabbit comment naming
    `REVIEW_HEAD` with `Review limit reached`/`usage spending cap` (id + `updated_at`; the
-   comment is mutable) plus the rate-limited check run, refuses when any substantive review
+   comment is mutable) plus a non-success CodeRabbit check run on `REVIEW_HEAD` (e.g.
+   `Review rate limited`), refuses when any substantive review
    of `REVIEW_HEAD` exists (empty-body reply wrappers are not reviews), records the evidence
    on the cycle and appends `.context/deploy-review-dispositions.jsonl`:
    ```bash
@@ -2203,8 +2217,8 @@ When CodeRabbit is unavailable, make at most one zero-touch retry (`@coderabbita
    **Never use `--result unavailable` for exhaustion.** `unavailable` is only for a cycle
    whose HEAD a gate fix superseded before any review arrived: it hard-fails
    `require-mergeable`, consumes no review budget, and the superseding HEAD re-`start`s
-   the same `--kind` (`deploy_review_cycle.py next` prints it; the Step 10 count-based
-   derivation is wrong here) without `--reset`, keeping the entry in the ledger.
+   the same `--kind` (`deploy_review_cycle.py next` prints it; Step 10 reads it)
+   without `--reset`, keeping the entry in the ledger.
    After three review rounds on the PR (ledger cycles that delivered a review — an
    `unavailable` cycle does not count — plus `--prior-rounds` from restarted
    deploys of it), remaining findings may be deferred under the user's standing

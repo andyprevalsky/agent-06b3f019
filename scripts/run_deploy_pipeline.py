@@ -25,8 +25,18 @@ This supervisor only schedules lanes and writes one atomic receipt:
 Admission accounting (follow-up ah, measured on #1640, 2026-10-30). Two
 checks admit a pending lane. The startup budget (``memory_budget_mb``, the
 smaller of the plan's and the headroom at attempt start) caps the declared
-total of the running lanes plus the candidate; it is a static ceiling and
-never double-counts. The live check samples the host again and requires the
+total of the running lanes plus the candidate; it is a static ceiling that
+does not contain the running lanes' usage. Since follow-up PR-11 (#1658 round
+1, 2026-10-31) a phased candidate is charged, against that ceiling as well,
+only the unmaterialized declaration of each freshly observed running lane
+(``reserved_static_mb`` beside ``reserved_declared_mb`` in the waiting and
+admission records): the plan had sized the coverage lanes' workers one by one
+and their declarations with the smoke lane summed to 8758 MB against an 8755
+MB budget, so agents-coverage (1536 MB) waited ~14 min on reason ``budget``
+for backend-coverage to finish while live headroom had 157 MB to spare. An
+unobserved, stale or unknown lane, a disabled credit and an unphased
+candidate keep the whole declarations; the never-fits refusal is unchanged
+and the live check remains the binding bound. The live check samples the host again and requires the
 candidate to fit ``memory_budget_mb`` of that sample (MemAvailable and the
 watchdog cap, less the 2 GiB reserve). That headroom already contains what
 the running lanes use, so charging their whole declarations against it again
@@ -75,12 +85,10 @@ credit, so its declaration plus the running lanes' whole declarations must
 fit live headroom. Every decision is kept on the lane for audit: ``admission``
 (``admitted``/``refused`` with headroom, budget, declared and live
 reservations, the running lanes with their observed usage, and the deferral
-history) and ``waiting`` while deferred. The smoke lane stays at 4096 MB: the
-only window in which it ran with idle siblings (#1639 attempt 1, 14:28-14:41Z,
-backend/agents idle at 66/126 MB) measured a whole-box footprint of 3492 MB
-median / 4905 MB peak, so it is not shown to be over-declared; right-size from
-recorded ``tree_peak_anon_mb`` / ``tree_peak_pss_mb`` once passed runs carry
-them.
+history) and ``waiting`` while deferred. The smoke lane reserves a pinned
+1.25x margin over its largest recorded process-tree peak (3319.4 MB
+``tree_peak_pss_mb`` on the 20261031-115354 attempt; ``SMOKE_RECORDED_TREE_PEAK_MB``,
+re-pin when a receipt exceeds it): 4150 MB.
 
   With ``--follow-source`` the supervisor keeps hashing the source while lanes
   run. Once a change has settled (``--settle-seconds`` without further edits)
@@ -180,14 +188,22 @@ under the existing budgets, longest recorded first, so frontend and backend
 overlap inside the agents window. Phases are implied ``after`` dependencies:
 no lane is skipped, every lane remains a full sweep, failed lanes still run
 first within their phase and Group 4 lanes are untouched unless they declare
-``"phase": "coverage"``: such a lane joins the coverage phase (after the quick
-and exclusive phases) instead of starting at attempt start. The 4096 MB local
-smoke lane declares it, because admitted first it held the memory the
-exclusive structural lane (6544 MB of a 7752 MB budget) needed and the
-pipeline ran smoke alone for ~22 min on #1638 attempt 5 (11-24 min across
-attempts, 2026-10-30); beside
-backend-coverage-blackbox (2560 MB) it fits the budget. A plan with
-``"schedule": {"policy": "legacy"}`` keeps the previous all-at-once admission.
+a phase. ``"phase": "coverage"`` joins the coverage phase (after the quick
+and exclusive phases) instead of starting at attempt start. ``"phase":
+"stack"`` is admitted right after the quick phase, beside the exclusive lane
+whenever both declarations fit the budget, and no later phase waits for it.
+The 4150 MB local smoke lane declares ``stack`` (follow-up lane-memory-b,
+2026-10-31): unphased and admitted first it had held the memory the
+structural lane needed (6544 MB of a 7752 MB budget; #1638 attempt 5 ran
+smoke alone for ~22 min), and in the coverage phase it waited the whole 9-10
+min exclusive phase on every round although the structural lane's process
+tree never exceeded 2575 MB (19 recorded attempts). With the lane declared at
+its recorded peak x1.25 (3220 MB at three workers) the two fit the recorded
+7979 MB budget together (7370 MB), the coverage lanes (2560 + 1152 MB) still
+wait for the exclusive phase (7370 + 2560 > 7979), and beside
+backend-coverage-blackbox the smoke lane fits the budget afterwards. A plan
+with ``"schedule": {"policy": "legacy"}`` keeps the previous all-at-once
+admission.
 
 The deploy.md ``semantic-stack`` lane (4096 MB; its own ``run.sh --benchmark``
 stack, Playwright semantics, latency ratchet, E2B smoke) deliberately keeps its
@@ -204,8 +220,8 @@ its processes carries (``scripts/tests/kill-services.test.sh``,
 ``STACK_KILLER_LANES`` lane to every ``STACK_OWNER_LANES`` lane
 (``implied_stack_dependencies``: kept for a lane whose sweep is not run-scoped;
 ``STACK_KILLER_LANES`` is now empty and declared edges are always kept), which
-held semantic-stack back behind the whole smoke lane every round. The two
-4096 MB declarations still have to fit together: against this devbox's budget
+held semantic-stack back behind the whole smoke lane every round. The 4150
+and 4096 MB declarations still have to fit together: against this devbox's budget
 (7998 MB on the 2026-10-31 speed-followup-6 attempt, 8188 MB on #1640)
 admission defers semantic-stack until smoke releases its reservation, with the
 declarations unchanged; a freer or larger host admits them side by side.
@@ -251,6 +267,7 @@ import argparse
 import hashlib
 from collections.abc import Mapping
 import json
+import math
 import os
 import re
 import runpy
@@ -328,9 +345,28 @@ CEILING_CPUS = 14
 CEILING_MEM_MB = 32768
 MIN_WORKERS = 1
 STRUCTURAL_RUNNER_MAX_WORKERS = 8  # scripts/run-deploy-structural-gates.py DEFAULT_MAX_WORKERS
+STRUCTURAL_RUNNER_SCRIPT = "run-deploy-structural-gates.py"
 # 20261028-174430 stage receipt: largest structural child 1471.98 MiB.
-# Round its 1.25x margin up, and reserve that footprint for every active suite.
+# Round its 1.25x margin up: the per-suite floor that sizes the lane's width
+# (how many suites the budget can back if every active one hits that ceiling).
 STRUCTURAL_WORKER_MEMORY_MB = 1840
+STRUCTURAL_CHILD_PEAK_MB = 1471.98
+# Whole-lane reservation (follow-up "lane-memory-b", 2026-10-31): the suites
+# never all peak together. Across 19 passed attempts in the 2026-10-30/31
+# devbox deploys (`.context/deploy-pipeline/history.jsonl`, lanes[].
+# tree_peak_pss_mb) the lane's process tree peaked at 2427.8-2575.4 MB at
+# three workers while the per-suite floor declared 6544 MB (2.5x), which kept
+# the 4096 MB smoke lane waiting ~9 min behind it on a ~8 GB budget. The lane
+# declares LANE_PEAK_MARGIN times the recorded tree peak scaled to its width,
+# never below the margin over a single suite's recorded child peak.
+STRUCTURAL_RECORDED_TREE_PEAK_MB = 2575.4
+STRUCTURAL_RECORDED_WORKERS = 3
+LANE_PEAK_MARGIN = 1.25
+# Local smoke lane: largest recorded process-tree peak (3319.4 MB on the
+# 20261031-115354 attempt, lanes[].tree_peak_pss_mb); re-pin when a receipt
+# exceeds it. The AgentCard lifecycle lane (its own run-bench --local stack,
+# no recorded peak yet) declares the same reservation.
+SMOKE_RECORDED_TREE_PEAK_MB = 3319.4
 # Kept free for the agent harness, the Docker DB and the 15 GB memory watchdog.
 MEMORY_RESERVE_MB = 2048
 DEFAULT_LANE_MEMORY_MB = 1024
@@ -344,9 +380,13 @@ LANE_DURATION_SAMPLES = 20
 QUICK_LANE_SECONDS = 90.0
 SCHEDULE_PHASED = "phased"
 SCHEDULE_LEGACY = "legacy"
-# The only phase a lane outside Group 3 may declare (``Lane.phase``).
+# Phases a lane outside Group 3 may declare (``Lane.phase``): ``coverage``
+# joins the coverage lanes after the quick and exclusive phases; ``stack`` is
+# admitted right after the quick phase, beside the exclusive structural lane
+# whenever both declarations fit, and nothing is ever held behind it.
 PHASE_COVERAGE = "coverage"
-LANE_PHASES = ("", PHASE_COVERAGE)
+PHASE_STACK = "stack"
+LANE_PHASES = ("", PHASE_COVERAGE, PHASE_STACK)
 # Safe default order when no duration has been recorded yet (seconds observed
 # on the 2026-10-29 deploy-1627 runs; only their relative order matters).
 DEFAULT_LANE_SECONDS = {
@@ -482,6 +522,31 @@ def default_max_parallel(host: dict) -> int:
 def structural_runner_workers(host: dict) -> int:
     """scripts/run-deploy-structural-gates.py's host default (same formula)."""
     return scale_workers(STRUCTURAL_RUNNER_MAX_WORKERS, host)
+
+
+def structural_lane_memory_mb(workers: int) -> int:
+    """Declared reservation of the structural lane at ``workers`` suites: the
+    recorded process-tree peak scaled to that width, never below one suite's
+    recorded child peak, with LANE_PEAK_MARGIN (3 workers: 3220 MB)."""
+    if workers < 1:
+        raise ValueError("structural lane width must be positive")
+    scaled = STRUCTURAL_RECORDED_TREE_PEAK_MB * workers / STRUCTURAL_RECORDED_WORKERS
+    return int(math.ceil(LANE_PEAK_MARGIN * max(scaled, STRUCTURAL_CHILD_PEAK_MB)))
+
+
+def smoke_lane_memory_mb() -> int:
+    """Declared reservation of the local smoke stack: LANE_PEAK_MARGIN over its
+    largest recorded process-tree peak (4150 MB)."""
+    return int(math.ceil(LANE_PEAK_MARGIN * SMOKE_RECORDED_TREE_PEAK_MB))
+
+
+def structural_workers_within(available_mb: int, planned: int) -> int:
+    """The widest structural lane, at most ``planned``, whose declared
+    reservation fits ``available_mb``; 0 when not even one worker fits."""
+    for workers in range(planned, 0, -1):
+        if structural_lane_memory_mb(workers) <= available_mb:
+            return workers
+    return 0
 
 
 def memory_budget_mb(host: dict) -> int | None:
@@ -781,9 +846,11 @@ class Lane:
     # Runs alone in its own phase at full host width (deploy-command-structural).
     exclusive: bool = False
     # Declared phase for a lane outside Group 3: "coverage" admits it with the
-    # coverage lanes, after the quick and exclusive phases (the local smoke
-    # lane). Empty keeps a Group 4 lane unphased; Group 3 lanes are phased from
-    # their recorded durations regardless.
+    # coverage lanes, after the quick and exclusive phases; "stack" admits it
+    # right after the quick phase beside the exclusive structural lane when
+    # both declarations fit, and no later phase waits for it (the local smoke
+    # and AgentCard stacks). Empty keeps a Group 4 lane unphased; Group 3 lanes
+    # are phased from their recorded durations regardless.
     phase: str = ""
 
 
@@ -1129,7 +1196,7 @@ def _closed_subset(candidates: list[Lane], explicit: dict[str, list[str]], place
 
 def phased_lanes(lanes: list[Lane]) -> list[Lane]:
     """Group 3 plus every lane that declares a phase (the local smoke lane)."""
-    return [lane for lane in lanes if lane.group == "3" or lane.phase == PHASE_COVERAGE]
+    return [lane for lane in lanes if lane.group == "3" or lane.phase in (PHASE_COVERAGE, PHASE_STACK)]
 
 
 def phased_dependencies(lanes: list[Lane]) -> dict[str, list[str]]:
@@ -1193,6 +1260,13 @@ def schedule_phases(lanes: list[Lane], estimates: dict[str, dict]) -> list[dict]
             emitted = sorted(_closed_subset(quick, explicit, placed), key=seconds)
             if emitted:
                 phases.append({"phase": "quick", "lanes": [l.name for l in emitted]})
+        if not emitted and not any(p["phase"] == PHASE_STACK for p in phases):
+            # Stack lanes start as soon as the quick lanes are done: beside the
+            # exclusive lane when memory allows, else as soon as it releases.
+            stack = [l for l in remaining if not l.exclusive and l.phase == PHASE_STACK]
+            emitted = sorted(_closed_subset(stack, explicit, placed), key=seconds, reverse=True)
+            if emitted:
+                phases.append({"phase": PHASE_STACK, "lanes": [l.name for l in emitted]})
         if not emitted:
             ready_exclusive = sorted((l for l in remaining if l.exclusive and all(d in placed for d in explicit[l.name])),
                                      key=seconds, reverse=True)
@@ -1212,13 +1286,16 @@ def schedule_phases(lanes: list[Lane], estimates: dict[str, dict]) -> list[dict]
 
 
 def implied_dependencies(phases: list[dict]) -> dict[str, list[str]]:
-    """Every lane of phase k waits for every lane of phases < k."""
+    """Every lane of phase k waits for every lane of phases < k, except that
+    no lane waits for a ``stack`` phase: its lanes wait for the quick phase
+    and run beside whatever memory admits after it."""
     implied: dict[str, list[str]] = {}
     earlier: list[str] = []
     for phase in phases:
         for name in phase["lanes"]:
             implied[name] = list(earlier)
-        earlier.extend(phase["lanes"])
+        if phase["phase"] != PHASE_STACK:
+            earlier.extend(phase["lanes"])
     return implied
 
 
@@ -1271,17 +1348,24 @@ def fit_exclusive_lane(lane: Lane, available_mb: int) -> Lane | None:
     the last MB was refused at admission without running a single gate
     (PR1634 coordinator, 2026-10-29). Narrowing it keeps every gate running at
     the width the box can actually back; None when not even MIN_WORKERS fit,
-    which stays a refusal.
+    which stays a refusal. Only the structural runner's own command is sized by
+    the structural formula: any other exclusive lane (a custom ``--plan`` lane
+    with its own ``--max-workers``) keeps its declared ``memory_mb``.
     """
     planned = _lane_workers(lane)
-    if not lane.exclusive or planned is None:
+    if not lane.exclusive or planned is None or not _runs_structural_gates(lane):
         return None
-    workers = min(planned, int((available_mb - 1024) // STRUCTURAL_WORKER_MEMORY_MB))
+    workers = structural_workers_within(int(available_mb), planned)
     if workers < MIN_WORKERS:
         return None
     index = lane.command.index("--max-workers") + 1
     command = [*lane.command[:index], str(workers), *lane.command[index + 1:]]
-    return replace(lane, command=command, memory_mb=1024 + STRUCTURAL_WORKER_MEMORY_MB * workers)
+    return replace(lane, command=command, memory_mb=structural_lane_memory_mb(workers))
+
+
+def _runs_structural_gates(lane: Lane) -> bool:
+    """Whether the lane's command executes scripts/run-deploy-structural-gates.py."""
+    return any(Path(part).name == STRUCTURAL_RUNNER_SCRIPT for part in lane.command)
 
 
 def _list_schedule(order: list[Lane], seconds: dict[str, float], after: dict[str, list[str]],
@@ -2769,7 +2853,17 @@ def _run_attempt(
                         pending[pending.index(lane)] = fitted
                         by_name[lane.name] = fitted
                         lane = fitted
+                static_reserved = reserved  # the static ceiling's charge for the running lanes
                 if budget_mb is not None:
+                    if lane.memory_mb > budget_mb and running and fit_exclusive_lane(lane, budget_mb) is not None:
+                        # An exclusive lane planned wider than this attempt's budget
+                        # while a stack lane holds memory (CodeRabbit on #1658): it
+                        # is resized once the running lanes release their share,
+                        # so defer instead of refusing a lane that can still fit.
+                        _record_waiting(receipt["lanes"][lane.name], {
+                            "at": _now(), "budget_mb": budget_mb, "memory_mb": lane.memory_mb,
+                            "reserved_declared_mb": reserved}, "budget")
+                        continue
                     if lane.memory_mb > budget_mb:
                         # It can never fit: fail loudly now instead of starting it
                         # into cgroup throttling or the host memory watchdog.
@@ -2781,11 +2875,27 @@ def _run_attempt(
                             note=f"refused: needs {lane.memory_mb} MB, memory budget {budget_mb} MB",
                         )
                         continue
-                    if reserved + lane.memory_mb > budget_mb:
+                    # Follow-up PR-11 (#1658 round 1, 2026-10-31): the plan's
+                    # declarations may over-subscribe the start budget by a few
+                    # MB (smoke 4150 + backend 3072 + agents 1536 = 8758 vs 8755)
+                    # while the live check has room to spare; a phased candidate
+                    # therefore charges a freshly observed running lane only its
+                    # unmaterialized declaration here too. Unobserved lanes, a
+                    # disabled credit and unphased candidates keep whole
+                    # declarations; the live check below stays the binding bound.
+                    static_running: dict = {}
+                    if lane.name in credit_lanes and running_states:
+                        static_observations = classify_observations(running_states, credit_enabled)
+                        static_reserved = sum(unmaterialized_mb(by_name[name].memory_mb, static_observations[name][0])
+                                              for name in running_states)
+                        static_running = {name: {"memory_mb": by_name[name].memory_mb, **detail}
+                                          for name, (_, detail) in static_observations.items()}
+                    if static_reserved + lane.memory_mb > budget_mb:
                         # Admitted when running lanes release their declared share.
                         _record_waiting(receipt["lanes"][lane.name], {
                             "at": _now(), "budget_mb": budget_mb, "memory_mb": lane.memory_mb,
-                            "reserved_declared_mb": reserved}, "budget")
+                            "reserved_declared_mb": reserved, "reserved_static_mb": static_reserved,
+                            "running": static_running}, "budget")
                         continue
                 if pass_sample is None:
                     pass_sample = runtime_host_resources()
@@ -2801,8 +2911,9 @@ def _run_attempt(
                                      for name in running_states)
                 accounting = "unmaterialized" if lane.name in credit_lanes else "declared"
                 live_reserved = unmaterialized if accounting == "unmaterialized" else reserved
-                inputs = _admission_inputs(lane, headroom, budget_mb, reserved, live_reserved, accounting,
-                                           observations, by_name, credit_enabled)
+                inputs = {**_admission_inputs(lane, headroom, budget_mb, reserved, live_reserved, accounting,
+                                              observations, by_name, credit_enabled),
+                          "reserved_static_mb": static_reserved}
                 if headroom is None or live_reserved + lane.memory_mb > headroom:
                     if headroom is None and receipt["host_samples"][-1].get("error") != sample.get("error"):
                         receipt["host_samples"].append({"at": _now(), **sample, "headroom_mb": headroom})
@@ -3268,7 +3379,7 @@ def standard_plan(args: argparse.Namespace) -> dict:
             workers["structural"] = exclusive_structural_workers(host)
         lane("deploy-command-structural", ["python3", "scripts/run-deploy-structural-gates.py",
              "--max-workers", str(workers["structural"])],
-             memory_mb=1024 + STRUCTURAL_WORKER_MEMORY_MB * workers["structural"],
+             memory_mb=structural_lane_memory_mb(workers["structural"]),
              exclusive=args.schedule == SCHEDULE_PHASED)
         lane("seed-cache-decision", ["bash", "scripts/tests/seed-cache-decision.test.sh"], memory_mb=256)
         lane("canonical-seed-whatsapp-content", ["bash", "scripts/tests/canonical-seed-whatsapp-content.test.sh"],
@@ -3292,11 +3403,14 @@ def standard_plan(args: argparse.Namespace) -> dict:
         if args.smoke == "cloud":
             lane("smoke", ["bash", "scripts/run-predeploy-cloud"], group="4", memory_mb=1024)
         elif args.smoke == "local":
-            # Coverage phase: admitted first, this 4096 MB stack held the memory
-            # the exclusive structural lane needed (#1638: smoke-only for 13-23
-            # min). Beside backend-coverage-blackbox (2560 MB) it fits the budget.
-            lane("smoke", ["bash", "scripts/run-predeploy-local"], group="4", memory_mb=4096,
-                 phase=PHASE_COVERAGE)
+            # Stack phase: starts after the quick lanes beside the exclusive
+            # structural lane (3220 + 4150 MB fit a ~8 GB budget; admitted
+            # first and unphased, this stack (then 4096 MB) once held the memory the
+            # 6544 MB lane needed, #1638: smoke-only for 13-23 min). The
+            # coverage lanes never wait for it; beside backend-coverage-
+            # blackbox (2560 MB) it fits the budget afterwards.
+            lane("smoke", ["bash", "scripts/run-predeploy-local"], group="4", memory_mb=smoke_lane_memory_mb(),
+                 phase=PHASE_STACK)
         if args.agentcard:
             # Alongside smoke, never after it: its own isolated local stack in
             # the same declared phase (no edge between the two).
@@ -3307,7 +3421,7 @@ def standard_plan(args: argparse.Namespace) -> dict:
                      "BENCHMARK_ATTEMPT_SUITE": "predeploy",
                      "BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY": "0",
                      "BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1",
-                 }, reuse_passed=False, memory_mb=4096, phase=PHASE_COVERAGE)
+                 }, reuse_passed=False, memory_mb=smoke_lane_memory_mb(), phase=PHASE_STACK)
     for entry in lanes:
         if entry["group"] == "4":
             entry.setdefault("reuse_passed", False)

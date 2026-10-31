@@ -26,6 +26,7 @@ import importlib.util
 import inspect
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -140,7 +141,8 @@ def check_plan_scaling() -> None:
     # The actual structural command uses its exclusive-phase, budget-backed width.
     assert lanes["deploy-command-structural"]["command"][-2:] == ["--max-workers", "3"]
     assert lanes["deploy-command-structural"]["exclusive"] is True
-    assert lanes["deploy-command-structural"]["memory_mb"] == 1024 + 1840 * 3 <= devbox["memory_budget_mb"]
+    assert lanes["deploy-command-structural"]["memory_mb"] == pipeline.structural_lane_memory_mb(3) == 3220 \
+        <= devbox["memory_budget_mb"]
     assert [runner.default_max_workers(c) for c in (1, 2, 4, 8, 14, 32)] == [1, 1, 2, 4, 8, 8]
     assert runner.default_max_workers() <= runner.DEFAULT_MAX_WORKERS
     assert pipeline.scale_workers(1, {"cpus": 2, "mem_available_mb": 4096}) == 1
@@ -150,17 +152,26 @@ def check_plan_scaling() -> None:
 
 
 def check_structural_memory_floor() -> None:
-    # Captured largest child: 1471.98 MiB in the original 20261028-174430
-    # stage receipt. Every concurrently active suite can reach that floor.
+    """The lane's width is still sized by the 1471.98 MiB largest-child floor
+    (20261028-174430 stage receipt) so no active suite is starved, but its
+    reservation is the recorded whole-tree peak with a 1.25x margin: 19 passed
+    attempts (2026-10-30/31 devbox deploys) peaked at 2427.8-2575.4 MB at three
+    workers while 1024 + 1840 * 3 = 6544 MB was declared, which held the 4096
+    MB smoke lane behind it for ~9 min per round on a ~8 GB budget."""
+    pipeline = load_module("run_deploy_pipeline_floor", DRIVER)
     for cpus, available, expected_workers in ((1, 8000, 1), (8, 11000, 3), (14, 32768, 8)):
         plan = plan_json("--group", "3", "--host-cpus", str(cpus),
                          "--host-mem-mb", str(available))
         workers = plan["workers"]["structural"]
         assert workers == expected_workers, plan
         lane = next(lane for lane in plan["lanes"] if lane["name"] == "deploy-command-structural")
-        floor = 1024 + 1471.98 * 1.25 * workers
-        assert lane["memory_mb"] >= floor, (workers, lane["memory_mb"], floor)
-    print("structural reservations cover measured per-worker floor: ok")
+        assert lane["memory_mb"] == pipeline.structural_lane_memory_mb(workers), (workers, lane["memory_mb"])
+        assert lane["memory_mb"] >= 1.25 * 2575.4 * workers / 3, "recorded tree peak scaled to the width"
+        assert lane["memory_mb"] >= 1.25 * 1471.98, "never below one suite's recorded child peak"
+    assert pipeline.structural_lane_memory_mb(3) == 3220 < 1024 + 1840 * 3, "right-sized from 6544 MB"
+    assert pipeline.structural_lane_memory_mb(1) == 1840, "one worker keeps the per-suite floor"
+    assert [pipeline.structural_workers_within(mb, 3) for mb in (7979, 3220, 3219, 1840, 1839)] == [3, 3, 2, 1, 0]
+    print("structural reservations cover the recorded tree peak: ok")
 
 
 def check_macos_memory(tmp: Path, env: dict[str, str]) -> None:
@@ -1051,23 +1062,31 @@ def check_exclusive_lane_resizes_to_free_memory(tmp: Path, env: dict[str, str]) 
     refused (PR1634 coordinator, 2026-10-29), and is still refused below one
     worker. Exact widths: the pure fitter; the driver: a real narrowed spawn."""
     pipeline = load_module("pipeline_fit_exclusive", DRIVER)
-    floor = pipeline.STRUCTURAL_WORKER_MEMORY_MB
-    lane = pipeline.Lane("deploy-command-structural", ["python3", "x.py", "--max-workers", "3"],
-                         memory_mb=1024 + floor * 3, exclusive=True)
-    fitted = pipeline.fit_exclusive_lane(lane, 1024 + floor * 2 + 50)
-    assert fitted.command[-2:] == ["--max-workers", "2"] and fitted.memory_mb == 1024 + floor * 2, fitted
-    assert pipeline.fit_exclusive_lane(lane, 1024 + floor * 9).command[-1] == "3", "never wider than planned"
-    assert pipeline.fit_exclusive_lane(lane, 1024 + floor - 1) is None, "below one worker stays a refusal"
+    declared = pipeline.structural_lane_memory_mb
+    lane = pipeline.Lane("deploy-command-structural",
+                         ["python3", "scripts/run-deploy-structural-gates.py", "--max-workers", "3"],
+                         memory_mb=declared(3), exclusive=True)
+    fitted = pipeline.fit_exclusive_lane(lane, declared(2) + 50)
+    assert fitted.command[-2:] == ["--max-workers", "2"] and fitted.memory_mb == declared(2), fitted
+    assert pipeline.fit_exclusive_lane(lane, declared(9)).command[-1] == "3", "never wider than planned"
+    assert pipeline.fit_exclusive_lane(lane, declared(1) - 1) is None, "below one worker stays a refusal"
     assert pipeline.fit_exclusive_lane(pipeline.Lane("other", ["true"], exclusive=False), 10**6) is None
     assert pipeline.fit_exclusive_lane(pipeline.Lane("no-flag", ["true"], exclusive=True), 10**6) is None
+    # CodeRabbit on #1658: the structural formula sizes only the structural
+    # runner's own command; a custom exclusive plan lane keeps its declaration.
+    custom = pipeline.Lane("custom-exclusive", ["python3", "x.py", "--max-workers", "3"], memory_mb=5000,
+                           exclusive=True)
+    assert pipeline.fit_exclusive_lane(custom, 10**6) is None and custom.memory_mb == 5000, custom
+    assert pipeline.fit_exclusive_lane(custom, 4000) is None, "never resized by the structural formula"
     state = tmp / "resize"
     plan = tmp / "resize-plan.json"
     probe = tmp / "resize-args.txt"
     write_plan(plan, [{"name": "structural", "exclusive": True, "reuse_passed": False,
-                       "memory_mb": 1024 + floor * 3,
-                       "command": ["bash", "-c", f"printf '%s\\n' \"$@\" > {probe}", "_", "--max-workers", "3"]}])
+                       "memory_mb": declared(3),
+                       "command": ["bash", "-c", f"printf '%s\\n' \"$@\" > {probe}",
+                                   "scripts/run-deploy-structural-gates.py", "--max-workers", "3"]}])
     run = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
-                     "--memory-budget-mb", str(1024 + floor * 2 + 50), env=env)
+                     "--memory-budget-mb", str(declared(2) + 50), env=env)
     assert run.returncode == 0, run.stdout + run.stderr
     receipt = json.loads((state / "receipt.json").read_text())["lanes"]["structural"]
     args = probe.read_text().split()
@@ -1075,7 +1094,7 @@ def check_exclusive_lane_resizes_to_free_memory(tmp: Path, env: dict[str, str]) 
     assert receipt["status"] == "passed" and 1 <= workers <= 2, (receipt, args)
     assert receipt["note"].startswith(f"resized: 3 -> {workers} workers") and "PIPELINE_LANE_RESIZED" in run.stdout, \
         (receipt, run.stdout)
-    assert receipt["memory_mb"] == 1024 + floor * workers, receipt
+    assert receipt["memory_mb"] == declared(workers), receipt
     run = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
                      "--memory-budget-mb", "1000", env=env)
     receipt = json.loads((state / "receipt.json").read_text())["lanes"]["structural"]
@@ -1477,6 +1496,319 @@ def check_scoped_inert_tables() -> None:
     print("scoped inert tables: ok")
 
 
+# Largest ``lanes[<name>].tree_peak_pss_mb`` the pipeline receipts recorded per
+# lane (``.context/deploy-pipeline/history.jsonl`` of the 2026-10-30/31 devbox
+# deploys, 43 attempts; receipt schema: ``tree_peak_pss_mb`` / ``tree_peak_anon_mb``
+# on each lane, ``memory_mb`` its declaration). Recorded, never estimated.
+RECORDED_LANE_PEAK_PSS_MB = {
+    "deploy-command-structural": 2575.4,   # 19 samples, 3 workers
+    "smoke": 3319.4,                       # 14 samples; 20261031-115354 receipt (deploy 9 round 2)
+    "agents-coverage-blackbox": 743.1,     # 15 samples
+    "eslint": 1857.8,                      # 19 samples
+    "typescript": 1553.3,                  # 19 samples
+    "backend-structural": 285.7,           # 19 samples
+    "seed-cache-decision": 23.7,           # 19 samples
+    "canonical-seed-whatsapp-content": 58.7,  # 19 samples
+    "backend-coverage-blackbox": 4556.8,   # 15 samples
+}
+# Knowingly under-declared (2560 MB vs 4556.8 MB recorded): the honest 5696 MB
+# cannot share the recorded 7979 MB budget with the 4096 MB smoke lane
+# (9792 MB) and would serialize the two longest lanes (~+18 min per round).
+# Its growth is bounded by the live headroom check and the admission credit;
+# pinned here so right-sizing it is a deliberate schedule decision.
+KNOWN_UNDER_DECLARED_LANES = {"backend-coverage-blackbox"}
+# The devbox host the receipts recorded: 8 cores, MemAvailable 11563 MB of
+# 16007 MB, watchdog cap 14471 MB -> memory_budget_mb 7979 (20261031-115354).
+RECORDED_DEVBOX = ("--host-cpus", "8", "--host-mem-mb", "11563", "--host-total-mem-mb", "16007",
+                   "--host-watchdog-mb", "14471")
+
+
+def check_recorded_peak_reservations() -> None:
+    """Follow-up lane-memory-b (2026-10-31): every standard-plan lane with
+    recorded peak data declares at least 1.25x that peak on the recorded host,
+    except the pinned known under-declaration, which must still be under
+    (so the exception cannot silently outlive its reason)."""
+    plan = plan_json("--group", "all", "--backend", "--agents", "--smoke", "local", *RECORDED_DEVBOX)
+    assert plan["memory_budget_mb"] == 7979, plan["memory_budget_mb"]
+    lanes = {lane["name"]: lane for lane in plan["lanes"]}
+    checked = 0
+    for name, peak in RECORDED_LANE_PEAK_PSS_MB.items():
+        declared = lanes[name]["memory_mb"]
+        if name in KNOWN_UNDER_DECLARED_LANES:
+            assert declared < peak, f"{name}: {declared} MB now covers the {peak} MB peak; drop the exception"
+            continue
+        assert declared >= 1.25 * peak, f"{name}: declares {declared} MB, recorded tree peak {peak} MB (x1.25 = {1.25 * peak:.0f})"
+        checked += 1
+    assert checked == len(RECORDED_LANE_PEAK_PSS_MB) - len(KNOWN_UNDER_DECLARED_LANES)
+    structural, smoke = lanes["deploy-command-structural"], lanes["smoke"]
+    assert structural["memory_mb"] == 3220 and structural["exclusive"] is True, structural
+    assert smoke["memory_mb"] == 4150 == math.ceil(1.25 * 3319.4), smoke
+    assert structural["memory_mb"] + smoke["memory_mb"] <= plan["memory_budget_mb"], \
+        "the right-sized structural lane and the smoke lane fit the recorded budget together"
+    assert structural["memory_mb"] + smoke["memory_mb"] + lanes["backend-coverage-blackbox"]["memory_mb"] \
+        > plan["memory_budget_mb"], "the coverage lanes still wait for the exclusive phase on this budget"
+    print("recorded peak reservations: ok")
+
+
+def check_stack_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
+    """Follow-up lane-memory-b (2026-10-31): on #1639/#1640 and the
+    speed-followup deploys the 27 min smoke lane started only when the 9-10 min
+    exclusive structural lane (declared 6544 MB, recorded tree peak <= 2575 MB)
+    released its reservation, and semantic-stack waited for smoke in turn
+    (~50 min rounds). A Group 4 lane may declare ``"phase": "stack"``: it is
+    admitted right after the quick phase, beside the exclusive lane when both
+    declarations fit the budget, no later phase waits for it, and the
+    coverage lanes still wait for the exclusive lane. Values mirror the
+    recorded plan at 1/40 scale: budget 200 = 7979, structural 80 = 3220,
+    smoke 104 = 4150, cov 64 = 2560 (80 + 104 fit; 80 + 104 + 64 do not)."""
+    def sample(wall: float, concurrent: int) -> dict:
+        return {"wall_s": wall, "status": "passed", "concurrent": concurrent, "at": "2026-10-31T00:00:00Z"}
+
+    ledger = tmp / "stack-phase-ledger.json"
+    ledger.write_text(json.dumps({"schema_version": 1, "lanes": {
+        "quick": [sample(5.0, 3)], "big": [sample(550.0, 1)], "cov": [sample(1100.0, 3)], "smoke": [sample(1600.0, 2)],
+        "probe": [sample(40.0, 3)],  # recorded, so the coverage order (longest first) is deterministic
+    }}))
+    env = {**env, "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}
+    plan = tmp / "stack-phase-plan.json"
+    state = tmp / "stack-phase"
+    write_plan(plan, [
+        {"name": "quick", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10},
+        {"name": "big", "command": ["sleep", "0.6"], "reuse_passed": False, "group": "3", "exclusive": True,
+         "memory_mb": 80},
+        {"name": "cov", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 64},
+        # Long enough that quick -> big -> cov -> probe -> semantic (five admission
+        # passes) still end inside it on a loaded host.
+        {"name": "smoke", "command": ["sleep", "4"], "reuse_passed": False, "group": "4", "memory_mb": 104,
+         "phase": "stack"},
+        {"name": "probe", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10,
+         "after": ["big", "cov"]},
+        {"name": "semantic", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "4", "memory_mb": 10,
+         "after": ["big", "cov", "probe"]},
+    ], schedule={"policy": "phased"})
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
+                     "--memory-budget-mb", "200", env=env, timeout=120)
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["status"])
+    lanes = receipt["lanes"]
+    assert all(lane["status"] == "passed" for lane in lanes.values()), lanes
+    phases = [(p["phase"], p["lanes"]) for p in receipt["schedule"]["phases"]]
+    assert phases == [("quick", ["quick"]), ("stack", ["smoke"]), ("exclusive", ["big"]), ("coverage", ["cov", "probe"])], phases
+    assert receipt["after"]["smoke"] == ["quick"], "the stack lane waits only for the quick phase"
+    assert receipt["after"]["big"] == ["quick"], "the exclusive lane does not wait for the stack lane"
+    assert receipt["after"]["cov"] == ["quick", "big"], "coverage waits for the exclusive lane, never for the stack lane"
+    assert receipt["after"]["semantic"] == ["big", "cov", "probe"], "declared edges kept, no implied edges added"
+    big, smoke, cov = lanes["big"], lanes["smoke"], lanes["cov"]
+    assert smoke["started_epoch"] >= lanes["quick"]["finished_epoch"], "the stack lane waits for the quick phase"
+    assert big["started_epoch"] < smoke["started_epoch"], "plan order: the exclusive lane is admitted first"
+    assert smoke["started_epoch"] < big["finished_epoch"], "smoke starts beside the exclusive lane"
+    assert smoke["admission"]["decision"] == "admitted" and not smoke["admission"].get("deferred"), smoke["admission"]
+    assert big["admission"].get("note") is None and lanes["big"].get("note") is None, "the exclusive lane runs at planned width"
+    assert cov["started_epoch"] >= big["finished_epoch"], "coverage waits for the exclusive lane"
+    assert cov["started_epoch"] < smoke["finished_epoch"], "coverage overlaps the smoke lane"
+    assert lanes["semantic"]["started_epoch"] < smoke["finished_epoch"], "semantic is not gated by the smoke lane"
+
+    # Too small a budget for both: the exclusive lane (first in plan order)
+    # runs at planned width and the stack lane waits for its release, which is
+    # exactly the previous coverage-phase behaviour (never smoke first).
+    tight = tmp / "stack-phase-tight"
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(tight), "--max-parallel", "0",
+                     "--memory-budget-mb", "150", env=env, timeout=120)
+    receipt = json.loads((tight / "receipt.json").read_text())
+    assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr)
+    big, smoke = receipt["lanes"]["big"], receipt["lanes"]["smoke"]
+    assert big.get("note") is None, "no resize: 80 fits 150; 80 + 104 does not"
+    assert smoke["started_epoch"] >= big["finished_epoch"], "smoke waits for the exclusive lane's release"
+    assert smoke["admission"]["deferred"]["reason"] == "budget", smoke["admission"]
+    print("stack phase lanes: ok")
+
+
+def check_exclusive_lane_defers_behind_stack_lane(tmp: Path, env: dict[str, str]) -> None:
+    """CodeRabbit on #1658 (Major): with a stack lane running, the exclusive
+    structural lane skipped the resize step and the static budget check refused
+    a lane planned wider than this attempt's budget (six workers, 6439 MB, vs a
+    6000 MB budget). It must defer with a ``budget`` waiting record and be
+    resized by fit_exclusive_lane once the running lanes release their share;
+    a lane that can never fit (not even one worker) stays refused."""
+    pipeline = load_module("pipeline_defer_exclusive", DRIVER)
+    declared = pipeline.structural_lane_memory_mb
+    assert declared(6) == 6439, declared(6)
+    probe = tmp / "defer-args.txt"
+    plan = tmp / "defer-plan.json"
+    state = tmp / "defer"
+    # ``gate`` (unphased, admitted at attempt start) holds the exclusive lane
+    # back until the stack lane is running: in plan order the exclusive lane
+    # would otherwise be admitted first and resized alone.
+    write_plan(plan, [
+        {"name": "quick", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10},
+        {"name": "gate", "command": ["sleep", "0.8"], "reuse_passed": False, "group": "4", "memory_mb": 10},
+        {"name": "big", "exclusive": True, "reuse_passed": False, "group": "3", "memory_mb": declared(6),
+         "after": ["gate"],
+         "command": ["bash", "-c", f"printf '%s\\n' \"$@\" > {probe}",
+                     "scripts/run-deploy-structural-gates.py", "--max-workers", "6"]},
+        {"name": "smoke", "command": ["sleep", "2.5"], "reuse_passed": False, "group": "4", "memory_mb": 4150,
+         "phase": "stack"},
+    ], schedule={"policy": "phased"})
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
+                     "--memory-budget-mb", "6000", env=env, timeout=120)
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["lanes"]["big"])
+    big, smoke = receipt["lanes"]["big"], receipt["lanes"]["smoke"]
+    assert smoke["status"] == "passed" and big["status"] == "passed", (smoke, big)
+    assert smoke["started_epoch"] < receipt["lanes"]["gate"]["finished_epoch"], "the stack lane ran before big was ready"
+    assert big["admission"]["deferred"]["reason"] == "budget", big["admission"]
+    assert big["admission"]["deferred"]["first"]["memory_mb"] == declared(6), big["admission"]
+    assert big["started_epoch"] >= smoke["finished_epoch"], "resized and admitted once the stack lane released"
+    args = probe.read_text().split()
+    workers = int(args[args.index("--max-workers") + 1])
+    assert 1 <= workers <= 5 and big["memory_mb"] == declared(workers) <= 6000, (workers, big)
+    assert big["note"].startswith(f"resized: 6 -> {workers} workers") and "PIPELINE_LANE_RESIZED" in ran.stdout, \
+        (big, ran.stdout)
+    # A lane that can never fit is still refused, stack lane or not.
+    never = tmp / "defer-never"
+    write_plan(plan, [
+        {"name": "big", "exclusive": True, "reuse_passed": False, "group": "3", "memory_mb": declared(6),
+         "command": ["bash", "-c", "true", "scripts/run-deploy-structural-gates.py", "--max-workers", "6"]},
+        {"name": "smoke", "command": ["sleep", "0.5"], "reuse_passed": False, "group": "4", "memory_mb": 500,
+         "phase": "stack"},
+    ], schedule={"policy": "phased"})
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(never), "--max-parallel", "0",
+                     "--memory-budget-mb", str(declared(1) - 1), env=env, timeout=120)
+    big = json.loads((never / "receipt.json").read_text())["lanes"]["big"]
+    assert ran.returncode == 1 and big["status"] == "failed" and big["note"].startswith("refused: needs"), big
+    print("exclusive lane defers behind the stack lane: ok")
+
+
+def check_static_ceiling_credits_observed_lanes(tmp: Path, env: dict[str, str]) -> None:
+    """Follow-up PR-11 (#1658 round 1, 2026-10-31): smoke 4150 + backend 3072
+    + agents 1536 = 8758 MB declared against an 8755 MB budget deferred
+    agents-coverage on reason ``budget`` for ~14 min although the live check
+    had 157 MB to spare. The static ceiling now charges a phased candidate
+    only the freshly observed running lanes' unmaterialized declarations;
+    unobserved lanes, a disabled credit and an unphased candidate keep the
+    whole declarations. Budget 150: holder (100) + joiner (60) exceed it
+    declared, but 100 - ~70 observed + 60 fit; live headroom (300) is never the
+    binding check here."""
+    if sys.platform != "linux":
+        print("static ceiling credit: skipped (Linux /proc sampling)")
+        return
+    pipeline = load_module("pipeline_static_credit", DRIVER)
+    marker = tmp / "static-holder-allocated"
+    plan = tmp / "static-credit-plan.json"
+    holder_command = [sys.executable, "-c",
+                      "import pathlib, time; block = b'x' * (60 * 1024 * 1024); "
+                      f"pathlib.Path({str(marker)!r}).touch(); time.sleep(5); del block"]
+
+    def write(group: str) -> None:
+        write_plan(plan, [
+            {"name": "gate", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 1},
+            {"name": "holder", "command": holder_command, "reuse_passed": False, "group": "3", "memory_mb": 100},
+            {"name": "joiner", "command": ["sleep", "0.2"], "after": ["gate"], "reuse_passed": False,
+             "group": group, "memory_mb": 60},
+        ], schedule={"policy": "legacy"})
+
+    def host() -> dict:
+        return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + 300}
+
+    def run(state: Path, extra_env: dict[str, str] | None = None) -> dict:
+        if marker.exists():
+            marker.unlink()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(pipeline, "host_resources", side_effect=host))
+            stack.enter_context(patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])))
+            stack.enter_context(patch.dict(os.environ, {**env, **(extra_env or {})}, clear=True))
+            result = pipeline.run(plan, state, max_parallel=0, budget_mb=150)
+        receipt = json.loads((state / "receipt.json").read_text())
+        assert result == 0 and receipt["status"] == "passed", (result, receipt["status"], receipt["lanes"])
+        assert receipt["memory_budget_mb"] == 150, receipt["memory_budget_mb"]
+        return receipt["lanes"]
+
+    write("3")
+    lanes = run(tmp / "static-credit")
+    holder, joiner = lanes["holder"], lanes["joiner"]
+    assert joiner["started_epoch"] < holder["finished_epoch"], \
+        "a phased candidate fits the budget beside the holder's unmaterialized reservation"
+    admission = joiner["admission"]
+    assert admission["decision"] == "admitted" and admission["budget_mb"] == 150, admission
+    assert admission["reserved_declared_mb"] == 100 and admission["reserved_static_mb"] < 60, admission
+    assert admission["reserved_live_mb"] < 60, "the same credit applies against live headroom"
+    deferred = admission.get("deferred")
+    if deferred:  # the holder was not yet observed when the gate finished
+        assert deferred["reason"] == "budget" and deferred["first"]["reserved_static_mb"] == 100, deferred
+        assert deferred["first"]["running"]["holder"]["observation"] in {"unknown", "stale"}, deferred
+
+    lanes = run(tmp / "static-credit-off", {"DEPLOY_ADMISSION_CREDIT": "0"})
+    holder, joiner = lanes["holder"], lanes["joiner"]
+    assert joiner["started_epoch"] >= holder["finished_epoch"], "with the credit disabled the whole declarations rule"
+    waited = joiner["admission"]["deferred"]
+    assert waited["reason"] == "budget" and waited["last"]["reserved_static_mb"] == 100, waited
+    assert waited["last"]["running"]["holder"]["observation"] == "disabled", waited
+
+    write("4")  # unphased candidate: declared-peak accounting, no credit
+    lanes = run(tmp / "static-credit-unphased")
+    assert lanes["joiner"]["started_epoch"] >= lanes["holder"]["finished_epoch"], lanes["joiner"]
+    assert lanes["joiner"]["admission"]["deferred"]["last"]["reserved_static_mb"] == 100, lanes["joiner"]["admission"]
+    print("static ceiling credit: ok")
+
+
+def check_recorded_budget_admits_coverage_beside_smoke(tmp: Path, env: dict[str, str]) -> None:
+    """The recorded #1658 round-1 shape on its 8755 MB budget: quick lanes,
+    smoke (stack, 4150) beside the exclusive structural lane (4293), then
+    backend-coverage (3072) and agents-coverage (1536) must run together while
+    smoke still runs: 4150 + 3072 + 1536 = 8758 declared exceeds the budget,
+    but smoke's observed usage leaves room under both ceilings."""
+    if sys.platform != "linux":
+        print("recorded budget coverage admission: skipped (Linux /proc sampling)")
+        return
+    pipeline = load_module("pipeline_recorded_budget", DRIVER)
+    plan = tmp / "recorded-budget-plan.json"
+    state = tmp / "recorded-budget"
+    smoke_command = [sys.executable, "-c",
+                     "import time; block = b'x' * (60 * 1024 * 1024); time.sleep(8); del block"]
+    write_plan(plan, [
+        {"name": "quick", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10},
+        {"name": "structural", "command": ["sleep", "0.6"], "reuse_passed": False, "group": "3", "exclusive": True,
+         "memory_mb": 4293},
+        {"name": "smoke", "command": smoke_command, "reuse_passed": False, "group": "4", "memory_mb": 4150,
+         "phase": "stack"},
+        {"name": "backend", "command": ["sleep", "3"], "reuse_passed": False, "group": "3", "memory_mb": 3072},
+        {"name": "agents", "command": ["sleep", "0.5"], "reuse_passed": False, "group": "3", "memory_mb": 1536},
+    ], schedule={"policy": "phased"})
+    ledger = tmp / "recorded-budget-ledger.json"
+    ledger.write_text(json.dumps({"schema_version": 1, "lanes": {
+        "quick": [{"wall_s": 5.0, "status": "passed", "concurrent": 3, "at": "2026-10-31T00:00:00Z"}],
+        "structural": [{"wall_s": 486.0, "status": "passed", "concurrent": 2, "at": "2026-10-31T00:00:00Z"}],
+        "backend": [{"wall_s": 1100.0, "status": "passed", "concurrent": 3, "at": "2026-10-31T00:00:00Z"}],
+        "agents": [{"wall_s": 1400.0, "status": "passed", "concurrent": 3, "at": "2026-10-31T00:00:00Z"}],
+        "smoke": [{"wall_s": 1600.0, "status": "passed", "concurrent": 2, "at": "2026-10-31T00:00:00Z"}],
+    }}))
+
+    def host() -> dict:
+        return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + 8755}
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(pipeline, "host_resources", side_effect=host))
+        stack.enter_context(patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])))
+        stack.enter_context(patch.dict(os.environ, {**env, "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}, clear=True))
+        result = pipeline.run(plan, state, max_parallel=0, budget_mb=8755)
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert result == 0 and receipt["status"] == "passed", (result, receipt["status"], receipt["lanes"])
+    assert receipt["memory_budget_mb"] == 8755, receipt["memory_budget_mb"]
+    kinds = [p["phase"] for p in receipt["schedule"]["phases"]]
+    assert kinds == ["quick", "stack", "exclusive", "coverage"], receipt["schedule"]["phases"]
+    lanes = receipt["lanes"]
+    structural, smoke, backend, agents = lanes["structural"], lanes["smoke"], lanes["backend"], lanes["agents"]
+    assert smoke["started_epoch"] < structural["finished_epoch"], "smoke runs beside the structural lane"
+    assert backend["started_epoch"] >= structural["finished_epoch"], "coverage waits for the exclusive lane"
+    assert agents["started_epoch"] < backend["finished_epoch"], "agents-coverage runs together with backend-coverage"
+    assert agents["started_epoch"] < smoke["finished_epoch"], "while the smoke stack still runs"
+    admission = agents["admission"]
+    assert admission["decision"] == "admitted" and admission["reserved_declared_mb"] == 4150 + 3072, admission
+    assert admission["reserved_static_mb"] + 1536 <= 8755 < admission["reserved_declared_mb"] + 1536, admission
+    assert admission["running"]["smoke"]["observation"] == "fresh", admission["running"]
+    print("recorded budget admits coverage beside smoke: ok")
+
+
 def main() -> int:
     global DRIVER
     with tempfile.TemporaryDirectory(prefix="deploy-pipeline-test-") as raw:
@@ -1613,6 +1945,11 @@ def main() -> int:
         check_stage_receipt_seed(tmp, env)
         check_passed_only_estimates_and_dag_phases(tmp, env)
         check_declared_phase_lanes(tmp, env)
+        check_stack_phase_lanes(tmp, env)
+        check_exclusive_lane_defers_behind_stack_lane(tmp, env)
+        check_static_ceiling_credits_observed_lanes(tmp, env)
+        check_recorded_budget_admits_coverage_beside_smoke(tmp, env)
+        check_recorded_peak_reservations()
         check_dependencies_through_unphased_lanes(tmp, env)
         check_simulate_legacy_plan_group3(tmp, env)
         check_receipt_readers(tmp)
@@ -3835,18 +4172,21 @@ def check_declared_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
     assert lanes["semantic"]["started_epoch"] < smoke["finished_epoch"], "semantic is not gated by the smoke lane"
     assert lanes["g4-free"]["started_epoch"] < lanes["quick"]["finished_epoch"], "undeclared Group 4 stays unphased"
 
-    # The standard plan declares the phase for the local smoke lane and the
-    # AgentCard lifecycle lane; the cloud smoke lane stays unphased.
+    # The standard plan declares the stack phase for the local smoke lane and
+    # the AgentCard lifecycle lane (check_stack_phase_lanes); the cloud smoke
+    # lane stays unphased.
     local = {lane["name"]: lane for lane in plan_json("--group", "4", "--smoke", "local", "--agentcard")["lanes"]}
-    assert local["smoke"]["phase"] == "coverage" and local["smoke"]["memory_mb"] == 4096, local["smoke"]
-    assert local["agentcard-lifecycle"]["phase"] == "coverage", local["agentcard-lifecycle"]
+    assert local["smoke"]["phase"] == "stack" and local["smoke"]["memory_mb"] == 4150, local["smoke"]
+    assert local["agentcard-lifecycle"]["phase"] == "stack" and local["agentcard-lifecycle"]["memory_mb"] == 4150, \
+        local["agentcard-lifecycle"]
     cloud = {lane["name"]: lane for lane in plan_json("--group", "4", "--smoke", "cloud")["lanes"]}
     assert not cloud["smoke"].get("phase"), cloud["smoke"]
     phased_plan = plan_json("--group", "all", "--backend", "--smoke", "local", "--schedule", "phased")
-    coverage = [p for p in phased_plan["schedule"]["phases"] if p["phase"] == "coverage"]
-    assert coverage and "smoke" in coverage[-1]["lanes"] and "backend-coverage-blackbox" in coverage[-1]["lanes"], \
-        phased_plan["schedule"]["phases"]
-    assert phased_plan["schedule"]["phases"][0]["phase"] == "quick" and "smoke" not in phased_plan["schedule"]["phases"][0]["lanes"]
+    kinds = [p["phase"] for p in phased_plan["schedule"]["phases"]]
+    assert kinds == ["quick", "stack", "exclusive", "coverage"], phased_plan["schedule"]["phases"]
+    assert phased_plan["schedule"]["phases"][1]["lanes"] == ["smoke"], phased_plan["schedule"]["phases"]
+    assert "backend-coverage-blackbox" in phased_plan["schedule"]["phases"][3]["lanes"], phased_plan["schedule"]["phases"]
+    assert "smoke" not in phased_plan["schedule"]["phases"][0]["lanes"]
     assert "smoke" in phased_plan["schedule"]["estimates"], "the smoke lane has a default estimate"
 
     # simulate projects the declared lane beside Group 3 and reports the Group 3-only wall separately.
