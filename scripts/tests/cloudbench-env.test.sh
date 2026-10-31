@@ -4096,6 +4096,17 @@ python3 "$ROOT_DIR/scripts/tests/cloudbench-provider-contract.test.py"
 # tunnel served after the thaw (chat-mode). Fakes advance a file-backed clock
 # instead of sleeping, so the replay is offline and deterministic.
 (
+  # The production helper uses exec: an in-process function is not a native
+  # executable. Prove that distinction without allowing a real Fly fallback.
+  shell_only_rc=0
+  (
+    PATH="$TMP_ROOT/no-native-fly-fixture"
+    flyctl() { : > "$TMP_ROOT/shell-only-fly-called"; }
+    exec flyctl proxy
+  ) 2> "$TMP_ROOT/shell-only-fly-exec.log" || shell_only_rc=$?
+  [ "$shell_only_rc" -eq 127 ] && [ ! -e "$TMP_ROOT/shell-only-fly-called" ] ||
+    fail "exec must not resolve an in-process flyctl function"
+
   stall_replay() {  # <variant A|B> ; fakes share state through STALL_* files
     local variant="$1" stall_dir="$TMP_ROOT/proxy-host-stall-$1"
     mkdir -p "$stall_dir"
@@ -4124,17 +4135,24 @@ python3 "$ROOT_DIR/scripts/tests/cloudbench-provider-contract.test.py"
       printf '%s\n' "$((now + secs))" > "$STALL_CLOCK"
       command sleep 0.02
     }
-    flyctl() {  # A: attempts 1-4 die on the Fly GraphQL 503 (pause after #4); B: always alive
-      local n
-      n=$(( $(cat "$STALL_COUNT" 2>/dev/null || echo 0) + 1 ))
-      if [ "$STALL_VARIANT" = A ] && [ "$n" -eq 4 ]; then : > "$STALL_MARKER"; fi
-      printf '%s\n' "$n" > "$STALL_COUNT"
-      if [ "$STALL_VARIANT" = A ] && [ "$n" -le 4 ]; then
-        echo 'Error: failed to run mutation($input: ValidateWireGuardPeersInput!) { validateWireGuardPeers(input: $input) { invalidPeerIps } }: server returned a non-200 status code: 503'
-        return 1
-      fi
-      exec sleep 60
-    }
+    mkdir -p "$stall_dir/bin"
+    local PATH="$stall_dir/bin:$PATH"
+    export PATH
+    cat > "$stall_dir/bin/flyctl" <<'FAKE_STALL_PROXY'
+#!/usr/bin/env bash
+# A: attempts 1-4 die on the Fly GraphQL 503; B: always alive.
+n=$(( $(cat "$STALL_COUNT" 2>/dev/null || echo 0) + 1 ))
+if [ "$STALL_VARIANT" = A ] && [ "$n" -eq 4 ]; then : > "$STALL_MARKER"; fi
+printf '%s\n' "$n" > "$STALL_COUNT"
+if [ "$STALL_VARIANT" = A ] && [ "$n" -le 4 ]; then
+  echo 'Error: failed to run mutation($input: ValidateWireGuardPeersInput!) { validateWireGuardPeers(input: $input) { invalidPeerIps } }: server returned a non-200 status code: 503'
+  exit 1
+fi
+exec sleep 60
+FAKE_STALL_PROXY
+    chmod +x "$stall_dir/bin/flyctl"
+    [ "$(command -v flyctl)" = "$stall_dir/bin/flyctl" ] ||
+      fail "host-stall replay must resolve its executable Fly fixture"
     curl() {
       case " $* " in
         *" -w %{http_code} "*)
@@ -4191,7 +4209,16 @@ python3 "$ROOT_DIR/scripts/tests/cloudbench-provider-contract.test.py"
   retain_dir="$TMP_ROOT/proxy-log-retention"
   mkdir -p "$retain_dir"
   CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0
-  flyctl() { exec sleep 60; }
+  mkdir -p "$retain_dir/bin"
+  PATH="$retain_dir/bin:$PATH"
+  export PATH
+  cat > "$retain_dir/bin/flyctl" <<'FAKE_RETAIN_PROXY'
+#!/usr/bin/env bash
+exec sleep 60
+FAKE_RETAIN_PROXY
+  chmod +x "$retain_dir/bin/flyctl"
+  [ "$(command -v flyctl)" = "$retain_dir/bin/flyctl" ] ||
+    fail "log-retention replay must resolve its executable Fly fixture"
   curl() {
     case " $* " in *" -w %{http_code} "*) printf 204 ;; esac
     return 0
