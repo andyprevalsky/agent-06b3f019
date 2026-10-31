@@ -26,8 +26,8 @@ sources:
   - commit f039142da
   - agent ea6390fd-4c8e-433f-8b3d-a9b4b04aa77d
   - commit a334edca1
-repro: replay of the dumped attempt-1 execute_loop input through RoseClient().complete(pool="rose-1-oss") with SpawnAgentRoseDesktopTool.model_validate on the returned tool call; permanent regression not yet registered (see Solution)
-status: open
+repro: agents/tests/blackbox/llm.blackbox.py::test_structured_exclusion_carries_into_next_activity_attempt (+ test_structured_retry_feedback_narrows_to_model_level_branch_error) and agents/tests/blackbox/rose.blackbox.py::test_waterfall_logs_structured_exclusion_reason_separately_from_cut_off (+ test_truncation_labels_cut_off_models_without_relabeling_structured_exclusions); model-capability replay via RoseClient().complete(pool="rose-1-oss") on the dumped attempt-1 input
+status: mitigated
 ---
 
 ## Problem
@@ -66,15 +66,20 @@ Deepest owned causes (Step 5a):
 
 ## Solution
 
-Not yet implemented (45-minute diagnosis budget; coordinator forbade local stack runs). Proposed, in order:
+Landed on `fix/rose-1-oss-browser-spawn-schema` (owned harness defects 2-4 above; each regression observed failing on the pre-fix sources and passing after, both via the domain `run_all_tests` registration):
 
-1. Pool/config repair (owned, no approval): give rose-1-oss a leg that passes the controlled replay on this call, or stop pinning root execute-loop work with required nested spawn parameters to legs measured at 0/21. Any new leg must keep the pool open-weights and be measured on the same replay before landing (deepseek-v3.2 measured 1/2 — not sufficient alone).
-2. Carry `_skip_models` across `run_agent.structured_output_retry` attempts within one turn (candidate-exclusion bug, owned, no approval); regression in `agents/tests/blackbox/llm.blackbox.py`.
-3. Fix `_selected_tool_errors` to recognise a branch whose only error is a model-level `value_error` at loc length 3 (owned); regression in `llm.blackbox.py` using the dumped arguments.
-4. Log the real skip reason in `waterfall.py` (`structured_output_excluded` vs `reply_cut_off_at_output_limit`).
-5. Schema-level alternative (approval-gated, proposal only): the browser spawn path does not read `output_schema` in `tools/spawn_browser_agent_v3.py`; if the workflow can synthesize a default schema for browser children as it already does for schema-less roots ("Generated output_schema synchronously"), the `type='browser'` requirement could become a soft default instead of a hard reject. Needs parent approval and a load-bearing check before proposing further.
+- (b) `LLMStructuredOutputError.excluded_models` carries the candidates excluded after two invalid replies; `call_llm_activity` reports them in `ApplicationError.details` (`{"excluded_models": [...]}`) and accepts them back as its new trailing positional `skip_models`; `run_agent` unions them into `skip_models_on_llm_retry` for the in-process inner retry and the activity path, and resets that set together with `exclude_anthropic_family_on_llm_retry` / `bypass_fast_mode_cache_on_llm_retry` once a response is accepted. Boundary: the exclusion lives for one LLM call sequence (all attempts of the same turn) and the next turn starts with the full pool — the exclusion answers this context's sampling pathology, not the model's fitness for later turns (browser steps, summaries) on the same pool. Regression: `test_structured_exclusion_carries_into_next_activity_attempt` (requests `[kimi, kimi, qwen]` then, with the reported exclusion, `[qwen, qwen]`).
+- (c) `_selected_tool_errors` treats a three-part loc (`tool_calls.<i>.<branch>`, a model-level validator error) as a branch entry, so the matching branch is selected and the summary becomes `1 validation error(s): …output_schema is required when type='browser'.` instead of 22 union errors. Regression: `test_structured_retry_feedback_narrows_to_model_level_branch_error` (dumped kimi arguments through `create_agent_action_model`, offline).
+- (d) `waterfall_complete(skip_reasons=…)` logs `structured_output_excluded` for llm.py exclusions and keeps `reply_cut_off_at_output_limit` for truncation.py cut-offs; `truncation.py` labels the models it adds and preserves incoming labels. Regressions: `test_waterfall_logs_structured_exclusion_reason_separately_from_cut_off`, `test_truncation_labels_cut_off_models_without_relabeling_structured_exclusions`.
 
-Outcome proof for the exact benchmark is pending the deploy's smoke lane (no local `run-bench --local` permitted on this box during the deploy round).
+10k-agent behaviour: per-call frozensets and one extra activity argument; no shared state, no new I/O.
+
+Still proposals (not implemented; approval-gated or needing a measured leg):
+
+1. Pool/config repair: give rose-1-oss a leg that passes the controlled replay on this call, or stop pinning root execute-loop work with required nested spawn parameters to legs measured at 0/21. Any new leg must keep the pool open-weights and be measured on the same replay before landing (deepseek-v3.2 measured 1/2 — not sufficient alone). Coordinator held this back from the fix branch.
+2. Schema-level alternative (approval-gated, proposal only): the browser spawn path does not read `output_schema` in `tools/spawn_browser_agent_v3.py`; if the workflow can synthesize a default schema for browser children as it already does for schema-less roots ("Generated output_schema synchronously"), the `type='browser'` requirement could become a soft default instead of a hard reject. Needs parent approval and a load-bearing check before proposing further.
+
+Outcome proof for the exact benchmark is pending the deploy's smoke lane (no local `run-bench --local` permitted on this box during the deploy round). The landed fixes raise the rescuer's attempts from 3 to up to 7 per turn; they do not make kimi-k3 or qwen3.8-27b emit the field, so `mitigated`, not `fixed`.
 
 ## Human feedback
 
