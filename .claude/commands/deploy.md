@@ -1124,11 +1124,17 @@ first) from `.context/deploy-durations/pipeline-lanes.json`, and
 `run_deploy_pipeline.py simulate --plan <plan> --legacy-plan <plan --schedule legacy>`
 projects the union wall from the same ledger (plus a `group3` block for the
 Group 3 lanes alone). The local smoke lane (Group 4, 4096 MB) declares
-`"phase": "coverage"` in the plan: it joins the coverage phase beside
-`backend-coverage-blackbox` (4096 + 2560 MB fit the budget) after the
-exclusive structural lane instead of being admitted first and holding that
-lane's memory (#1638 attempt 5 ran smoke alone for ~22 min; 11–24 min across attempts); the AgentCard lane
-declares the same phase. Undeclared Group 4 lanes stay unphased, and a plan's
+`"phase": "stack"` in the plan: it is admitted right after the quick lanes
+beside the exclusive structural lane, which now reserves its recorded
+process-tree peak x1.25 (3220 MB at three workers; 19 attempts peaked at
+2428–2575 MB while 6544 MB was declared), so 3220 + 4096 MB fit the ~8 GB
+budget together, and no later phase waits for it: the coverage lanes still
+wait for the exclusive lane, and beside `backend-coverage-blackbox` (4096 +
+2560 MB) smoke fits the budget afterwards. Admitted first and unphased, the
+smoke lane had held the memory the structural lane needed (#1638 attempt 5
+ran smoke alone for ~22 min; 11–24 min across attempts); in the coverage
+phase it waited the whole 9–10 min exclusive phase every round. The AgentCard
+lane declares the same phase. Undeclared Group 4 lanes stay unphased, and a plan's
 own `after` edges are never removed: `live-probes` starts as soon as its
 declared dependencies and memory allow. `semantic-stack` keeps only its
 declared edges and may be admitted beside the stack-owning lanes (`smoke`,
@@ -2190,11 +2196,12 @@ When CodeRabbit is unavailable, make at most one zero-touch retry (`@coderabbita
 **What to do, mechanically:**
 
 1. Record in `TEST_REPORT` the row `skip` prints:
-   `Code Review | ⚠️ Skipped | reviewers usage-exhausted (CodeRabbit <reason>; Claude fallback disabled)`
+   `Code Review | ⚠️ Skipped | reviewers usage-exhausted (CodeRabbit: '<quote>', issue comment <id> updated <ts> naming commit <sha9>; check run <id> <conclusion> '<title>'; Claude fallback disabled)`
 2. Close the open cycle as **clean** — the only result that satisfies `require-mergeable` —
    through the versioned disposition, which requires the CodeRabbit comment naming
    `REVIEW_HEAD` with `Review limit reached`/`usage spending cap` (id + `updated_at`; the
-   comment is mutable) plus the rate-limited check run, refuses when any substantive review
+   comment is mutable) plus a non-success CodeRabbit check run on `REVIEW_HEAD` (e.g.
+   `Review rate limited`), refuses when any substantive review
    of `REVIEW_HEAD` exists (empty-body reply wrappers are not reviews), records the evidence
    on the cycle and appends `.context/deploy-review-dispositions.jsonl`:
    ```bash
@@ -2203,8 +2210,8 @@ When CodeRabbit is unavailable, make at most one zero-touch retry (`@coderabbita
    **Never use `--result unavailable` for exhaustion.** `unavailable` is only for a cycle
    whose HEAD a gate fix superseded before any review arrived: it hard-fails
    `require-mergeable`, consumes no review budget, and the superseding HEAD re-`start`s
-   the same `--kind` (`deploy_review_cycle.py next` prints it; the Step 10 count-based
-   derivation is wrong here) without `--reset`, keeping the entry in the ledger.
+   the same `--kind` (`deploy_review_cycle.py next` prints it; Step 10 reads it)
+   without `--reset`, keeping the entry in the ledger.
    After three review rounds on the PR (ledger cycles that delivered a review — an
    `unavailable` cycle does not count — plus `--prior-rounds` from restarted
    deploys of it), remaining findings may be deferred under the user's standing

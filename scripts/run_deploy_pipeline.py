@@ -180,14 +180,22 @@ under the existing budgets, longest recorded first, so frontend and backend
 overlap inside the agents window. Phases are implied ``after`` dependencies:
 no lane is skipped, every lane remains a full sweep, failed lanes still run
 first within their phase and Group 4 lanes are untouched unless they declare
-``"phase": "coverage"``: such a lane joins the coverage phase (after the quick
-and exclusive phases) instead of starting at attempt start. The 4096 MB local
-smoke lane declares it, because admitted first it held the memory the
-exclusive structural lane (6544 MB of a 7752 MB budget) needed and the
-pipeline ran smoke alone for ~22 min on #1638 attempt 5 (11-24 min across
-attempts, 2026-10-30); beside
-backend-coverage-blackbox (2560 MB) it fits the budget. A plan with
-``"schedule": {"policy": "legacy"}`` keeps the previous all-at-once admission.
+a phase. ``"phase": "coverage"`` joins the coverage phase (after the quick
+and exclusive phases) instead of starting at attempt start. ``"phase":
+"stack"`` is admitted right after the quick phase, beside the exclusive lane
+whenever both declarations fit the budget, and no later phase waits for it.
+The 4096 MB local smoke lane declares ``stack`` (follow-up lane-memory-b,
+2026-10-31): unphased and admitted first it had held the memory the
+structural lane needed (6544 MB of a 7752 MB budget; #1638 attempt 5 ran
+smoke alone for ~22 min), and in the coverage phase it waited the whole 9-10
+min exclusive phase on every round although the structural lane's process
+tree never exceeded 2575 MB (19 recorded attempts). With the lane declared at
+its recorded peak x1.25 (3220 MB at three workers) the two fit the recorded
+7979 MB budget together (7316 MB), the coverage lanes (2560 + 1152 MB) still
+wait for the exclusive phase (7316 + 2560 > 7979), and beside
+backend-coverage-blackbox the smoke lane fits the budget afterwards. A plan
+with ``"schedule": {"policy": "legacy"}`` keeps the previous all-at-once
+admission.
 
 The deploy.md ``semantic-stack`` lane (4096 MB; its own ``run.sh --benchmark``
 stack, Playwright semantics, latency ratchet, E2B smoke) deliberately keeps its
@@ -251,6 +259,7 @@ import argparse
 import hashlib
 from collections.abc import Mapping
 import json
+import math
 import os
 import re
 import runpy
@@ -329,8 +338,21 @@ CEILING_MEM_MB = 32768
 MIN_WORKERS = 1
 STRUCTURAL_RUNNER_MAX_WORKERS = 8  # scripts/run-deploy-structural-gates.py DEFAULT_MAX_WORKERS
 # 20261028-174430 stage receipt: largest structural child 1471.98 MiB.
-# Round its 1.25x margin up, and reserve that footprint for every active suite.
+# Round its 1.25x margin up: the per-suite floor that sizes the lane's width
+# (how many suites the budget can back if every active one hits that ceiling).
 STRUCTURAL_WORKER_MEMORY_MB = 1840
+STRUCTURAL_CHILD_PEAK_MB = 1471.98
+# Whole-lane reservation (follow-up "lane-memory-b", 2026-10-31): the suites
+# never all peak together. Across 19 passed attempts in the 2026-10-30/31
+# devbox deploys (`.context/deploy-pipeline/history.jsonl`, lanes[].
+# tree_peak_pss_mb) the lane's process tree peaked at 2427.8-2575.4 MB at
+# three workers while the per-suite floor declared 6544 MB (2.5x), which kept
+# the 4096 MB smoke lane waiting ~9 min behind it on a ~8 GB budget. The lane
+# declares LANE_PEAK_MARGIN times the recorded tree peak scaled to its width,
+# never below the margin over a single suite's recorded child peak.
+STRUCTURAL_RECORDED_TREE_PEAK_MB = 2575.4
+STRUCTURAL_RECORDED_WORKERS = 3
+LANE_PEAK_MARGIN = 1.25
 # Kept free for the agent harness, the Docker DB and the 15 GB memory watchdog.
 MEMORY_RESERVE_MB = 2048
 DEFAULT_LANE_MEMORY_MB = 1024
@@ -344,9 +366,13 @@ LANE_DURATION_SAMPLES = 20
 QUICK_LANE_SECONDS = 90.0
 SCHEDULE_PHASED = "phased"
 SCHEDULE_LEGACY = "legacy"
-# The only phase a lane outside Group 3 may declare (``Lane.phase``).
+# Phases a lane outside Group 3 may declare (``Lane.phase``): ``coverage``
+# joins the coverage lanes after the quick and exclusive phases; ``stack`` is
+# admitted right after the quick phase, beside the exclusive structural lane
+# whenever both declarations fit, and nothing is ever held behind it.
 PHASE_COVERAGE = "coverage"
-LANE_PHASES = ("", PHASE_COVERAGE)
+PHASE_STACK = "stack"
+LANE_PHASES = ("", PHASE_COVERAGE, PHASE_STACK)
 # Safe default order when no duration has been recorded yet (seconds observed
 # on the 2026-10-29 deploy-1627 runs; only their relative order matters).
 DEFAULT_LANE_SECONDS = {
@@ -482,6 +508,25 @@ def default_max_parallel(host: dict) -> int:
 def structural_runner_workers(host: dict) -> int:
     """scripts/run-deploy-structural-gates.py's host default (same formula)."""
     return scale_workers(STRUCTURAL_RUNNER_MAX_WORKERS, host)
+
+
+def structural_lane_memory_mb(workers: int) -> int:
+    """Declared reservation of the structural lane at ``workers`` suites: the
+    recorded process-tree peak scaled to that width, never below one suite's
+    recorded child peak, with LANE_PEAK_MARGIN (3 workers: 3220 MB)."""
+    if workers < 1:
+        raise ValueError("structural lane width must be positive")
+    scaled = STRUCTURAL_RECORDED_TREE_PEAK_MB * workers / STRUCTURAL_RECORDED_WORKERS
+    return int(math.ceil(LANE_PEAK_MARGIN * max(scaled, STRUCTURAL_CHILD_PEAK_MB)))
+
+
+def structural_workers_within(available_mb: int, planned: int) -> int:
+    """The widest structural lane, at most ``planned``, whose declared
+    reservation fits ``available_mb``; 0 when not even one worker fits."""
+    for workers in range(planned, 0, -1):
+        if structural_lane_memory_mb(workers) <= available_mb:
+            return workers
+    return 0
 
 
 def memory_budget_mb(host: dict) -> int | None:
@@ -781,9 +826,11 @@ class Lane:
     # Runs alone in its own phase at full host width (deploy-command-structural).
     exclusive: bool = False
     # Declared phase for a lane outside Group 3: "coverage" admits it with the
-    # coverage lanes, after the quick and exclusive phases (the local smoke
-    # lane). Empty keeps a Group 4 lane unphased; Group 3 lanes are phased from
-    # their recorded durations regardless.
+    # coverage lanes, after the quick and exclusive phases; "stack" admits it
+    # right after the quick phase beside the exclusive structural lane when
+    # both declarations fit, and no later phase waits for it (the local smoke
+    # and AgentCard stacks). Empty keeps a Group 4 lane unphased; Group 3 lanes
+    # are phased from their recorded durations regardless.
     phase: str = ""
 
 
@@ -1129,7 +1176,7 @@ def _closed_subset(candidates: list[Lane], explicit: dict[str, list[str]], place
 
 def phased_lanes(lanes: list[Lane]) -> list[Lane]:
     """Group 3 plus every lane that declares a phase (the local smoke lane)."""
-    return [lane for lane in lanes if lane.group == "3" or lane.phase == PHASE_COVERAGE]
+    return [lane for lane in lanes if lane.group == "3" or lane.phase in (PHASE_COVERAGE, PHASE_STACK)]
 
 
 def phased_dependencies(lanes: list[Lane]) -> dict[str, list[str]]:
@@ -1193,6 +1240,13 @@ def schedule_phases(lanes: list[Lane], estimates: dict[str, dict]) -> list[dict]
             emitted = sorted(_closed_subset(quick, explicit, placed), key=seconds)
             if emitted:
                 phases.append({"phase": "quick", "lanes": [l.name for l in emitted]})
+        if not emitted and not any(p["phase"] == PHASE_STACK for p in phases):
+            # Stack lanes start as soon as the quick lanes are done: beside the
+            # exclusive lane when memory allows, else as soon as it releases.
+            stack = [l for l in remaining if not l.exclusive and l.phase == PHASE_STACK]
+            emitted = sorted(_closed_subset(stack, explicit, placed), key=seconds, reverse=True)
+            if emitted:
+                phases.append({"phase": PHASE_STACK, "lanes": [l.name for l in emitted]})
         if not emitted:
             ready_exclusive = sorted((l for l in remaining if l.exclusive and all(d in placed for d in explicit[l.name])),
                                      key=seconds, reverse=True)
@@ -1212,13 +1266,16 @@ def schedule_phases(lanes: list[Lane], estimates: dict[str, dict]) -> list[dict]
 
 
 def implied_dependencies(phases: list[dict]) -> dict[str, list[str]]:
-    """Every lane of phase k waits for every lane of phases < k."""
+    """Every lane of phase k waits for every lane of phases < k, except that
+    no lane waits for a ``stack`` phase: its lanes wait for the quick phase
+    and run beside whatever memory admits after it."""
     implied: dict[str, list[str]] = {}
     earlier: list[str] = []
     for phase in phases:
         for name in phase["lanes"]:
             implied[name] = list(earlier)
-        earlier.extend(phase["lanes"])
+        if phase["phase"] != PHASE_STACK:
+            earlier.extend(phase["lanes"])
     return implied
 
 
@@ -1276,12 +1333,12 @@ def fit_exclusive_lane(lane: Lane, available_mb: int) -> Lane | None:
     planned = _lane_workers(lane)
     if not lane.exclusive or planned is None:
         return None
-    workers = min(planned, int((available_mb - 1024) // STRUCTURAL_WORKER_MEMORY_MB))
+    workers = structural_workers_within(int(available_mb), planned)
     if workers < MIN_WORKERS:
         return None
     index = lane.command.index("--max-workers") + 1
     command = [*lane.command[:index], str(workers), *lane.command[index + 1:]]
-    return replace(lane, command=command, memory_mb=1024 + STRUCTURAL_WORKER_MEMORY_MB * workers)
+    return replace(lane, command=command, memory_mb=structural_lane_memory_mb(workers))
 
 
 def _list_schedule(order: list[Lane], seconds: dict[str, float], after: dict[str, list[str]],
@@ -3268,7 +3325,7 @@ def standard_plan(args: argparse.Namespace) -> dict:
             workers["structural"] = exclusive_structural_workers(host)
         lane("deploy-command-structural", ["python3", "scripts/run-deploy-structural-gates.py",
              "--max-workers", str(workers["structural"])],
-             memory_mb=1024 + STRUCTURAL_WORKER_MEMORY_MB * workers["structural"],
+             memory_mb=structural_lane_memory_mb(workers["structural"]),
              exclusive=args.schedule == SCHEDULE_PHASED)
         lane("seed-cache-decision", ["bash", "scripts/tests/seed-cache-decision.test.sh"], memory_mb=256)
         lane("canonical-seed-whatsapp-content", ["bash", "scripts/tests/canonical-seed-whatsapp-content.test.sh"],
@@ -3292,11 +3349,14 @@ def standard_plan(args: argparse.Namespace) -> dict:
         if args.smoke == "cloud":
             lane("smoke", ["bash", "scripts/run-predeploy-cloud"], group="4", memory_mb=1024)
         elif args.smoke == "local":
-            # Coverage phase: admitted first, this 4096 MB stack held the memory
-            # the exclusive structural lane needed (#1638: smoke-only for 13-23
-            # min). Beside backend-coverage-blackbox (2560 MB) it fits the budget.
+            # Stack phase: starts after the quick lanes beside the exclusive
+            # structural lane (3220 + 4096 MB fit a ~8 GB budget; admitted
+            # first and unphased, this 4096 MB stack once held the memory the
+            # 6544 MB lane needed, #1638: smoke-only for 13-23 min). The
+            # coverage lanes never wait for it; beside backend-coverage-
+            # blackbox (2560 MB) it fits the budget afterwards.
             lane("smoke", ["bash", "scripts/run-predeploy-local"], group="4", memory_mb=4096,
-                 phase=PHASE_COVERAGE)
+                 phase=PHASE_STACK)
         if args.agentcard:
             # Alongside smoke, never after it: its own isolated local stack in
             # the same declared phase (no edge between the two).
@@ -3307,7 +3367,7 @@ def standard_plan(args: argparse.Namespace) -> dict:
                      "BENCHMARK_ATTEMPT_SUITE": "predeploy",
                      "BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY": "0",
                      "BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1",
-                 }, reuse_passed=False, memory_mb=4096, phase=PHASE_COVERAGE)
+                 }, reuse_passed=False, memory_mb=4096, phase=PHASE_STACK)
     for entry in lanes:
         if entry["group"] == "4":
             entry.setdefault("reuse_passed", False)
