@@ -167,7 +167,10 @@ const REQUEST_PHASE_FETCH_FAILURE_CODES = new Set([
 
 /** The transient transport code behind a `fetch failed`, or undefined for any other failure. */
 function fetchTransportFailureCode(error: unknown): string | undefined {
-  if (!(error instanceof Error) || error.message !== 'fetch failed') return undefined;
+  // `fetch failed`: no response at all; `terminated`: undici aborted the body read mid-stream.
+  if (!(error instanceof Error) || !['fetch failed', 'terminated'].includes(error.message)) {
+    return undefined;
+  }
   const codes: string[] = [];
   const visit = (value: unknown, depth: number): void => {
     if (depth > 4 || typeof value !== 'object' || value === null) return;
@@ -374,7 +377,36 @@ async function callOrgMcpTool(
         { tool: toolName, error: errorMessage(error) }
       );
     }
-    const bodyText = await response.text();
+    let bodyText: string;
+    try {
+      bodyText = await response.text();
+    } catch (error) {
+      // Headers arrived, so the request reached the provider: replay the body-read failure only
+      // for the idempotent reads (a mutation may already have changed provider state).
+      const transportCode = fetchTransportFailureCode(error);
+      if (!IDEMPOTENT_READ_TOOLS.has(toolName)) {
+        // A mutation must never be replayed after its request reached the provider, even when
+        // the body read aborted on the tools/call timeout (the outer classifier would otherwise
+        // treat that AbortError as the retryable timeout class).
+        // The message must not echo the underlying text: the outer classifier matches
+        // "aborted due to timeout" by wording and would retry this error.
+        throw new AgentCardOrgRuntimeError(
+          `AgentCard Organization MCP ${toolName} response body read failed after the request ` +
+            `reached the provider (${transportCode ?? 'body-read-aborted'}); not replayed`,
+          502,
+          'agentcard_org_mcp_unavailable',
+          { tool: toolName, error: errorMessage(error), transport_code: transportCode ?? null }
+        );
+      }
+      if (transportCode === undefined) throw error;
+      throw new AgentCardOrgRuntimeError(
+        `AgentCard Organization MCP ${toolName} is temporarily unavailable: ` +
+          `tools/call response body read failed (${transportCode})`,
+        503,
+        'agentcard_org_mcp_unavailable',
+        { tool: toolName, error: errorMessage(error), transport_code: transportCode }
+      );
+    }
     let parsed: Record<string, unknown>;
     try {
       parsed = selectMcpJsonRpcFrame(parseMcpJsonRpcFrames(bodyText), bodyText);

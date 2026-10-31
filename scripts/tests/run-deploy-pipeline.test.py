@@ -393,6 +393,27 @@ def make_source_root(path: Path) -> Path:
 
 def check_watchdog_receipts(tmp: Path, env: dict[str, str]) -> None:
     """Memory-watchdog TERMs inside the run window land in the receipt."""
+    # The window is compared against the stamp's own resolution: the watchdog
+    # floors ``at`` to the millisecond (other producers to the second), so a
+    # TERM 0.3 ms after a run started at 20.4237 is stamped 20.423 and a bare
+    # ``started_epoch <= at`` dropped it. Observed as ``watchdog_terminations
+    # == []`` at load 0.9 when the poll below landed within a millisecond of
+    # the receipt (started 1793445378.524657, stamped ...18.524Z, -0.657 ms).
+    pipeline = load_module("pipeline_watchdog_window", DRIVER)
+    second = datetime(2026, 10, 31, 9, 34, 20, tzinfo=timezone.utc).timestamp()
+    started_epoch, finished_epoch = second + 0.4237, second + 2.9237
+    rows = tmp / "watchdog-window.jsonl"
+    rows.write_text("".join(json.dumps({"pid": pid, "at": at}) + "\n" for pid, at in [
+        (1, "2026-10-31T09:34:20.423Z"),  # TERM at 20.4239, 0.2 ms after the start, floored past it
+        (2, "2026-10-31T09:34:20.422Z"),  # its whole millisecond precedes the start
+        (3, "2026-10-31T09:34:20Z"),      # second resolution: 20.9 is stamped 20
+        (4, "2026-10-31T09:34:19Z"),      # the second before the start
+        (5, "2026-10-31T09:34:22.923Z"),  # 0.7 ms before the finish
+        (6, "2026-10-31T09:34:22.924Z"),  # after the finish
+    ]))
+    inside = [row["pid"] for row in pipeline.watchdog_terminations(started_epoch, finished_epoch, log=rows)]
+    assert inside == [1, 3, 5], f"a stamp floored past the start must stay inside the window: {inside}"
+    assert pipeline.watchdog_terminations(started_epoch, finished_epoch, log=tmp / "absent.jsonl") == []
     log = tmp / "terminations.jsonl"
     state = tmp / "watchdog"
     plan = tmp / "watchdog-plan.json"
@@ -555,9 +576,21 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
         last = joiner["admission"]["deferred"]["last"]
         assert last["reserved_live_mb"] == last["reserved_declared_mb"] == 100 and last["accounting"] == "unmaterialized", last
         assert last["running"]["holder"]["observation"] == "disabled", last["running"]
-        assert last["running"]["holder"]["tree_anon_mb"] >= 50 and last["running"]["holder"]["tree_pss_mb"] >= 50, \
-            "observations are still sampled and recorded for evidence"
+        # Sampling still saw the 60 MB block (held for 4 s against the 1 Hz
+        # sampler: the peak is deterministic) and the final deferral still
+        # recorded the latest sample. That sample is the one taken before the
+        # holder's reap and may postdate its ``del block`` (the stage wrapper's
+        # teardown keeps the lane alive ~0.1-0.3 s after the command exits and
+        # the 1 Hz pass drifts into that window under load), so the record is
+        # bound to the sampled state, never to the block's size.
         assert holder["tree_peak_anon_mb"] >= 50 and holder["tree_sampled_at"], holder
+        recorded = last["running"]["holder"]
+        assert recorded["tree_anon_mb"] is not None and recorded["tree_pss_mb"] is not None, \
+            "observations are still sampled and recorded for evidence"
+        assert 0 < recorded["tree_anon_mb"] <= recorded["tree_pss_mb"], recorded
+        assert recorded["tree_anon_mb"] <= holder["tree_peak_anon_mb"] and \
+            recorded["tree_pss_mb"] <= holder["tree_peak_pss_mb"], (recorded, holder)
+        assert recorded["observed_age_s"] is not None and recorded["observed_age_s"] >= 0, recorded
         assert seen_flag[-1] == "0", seen_flag
         # Explicit "enabled" arm (DEPLOY_ADMISSION_CREDIT=1), separate from the
         # true-unset default: the credit applies and the records say enabled.

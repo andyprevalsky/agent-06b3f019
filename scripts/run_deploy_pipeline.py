@@ -685,8 +685,26 @@ def _iso_epoch(value: object) -> float | None:
         return None
 
 
+def _iso_epoch_interval(value: object) -> tuple[float, float] | None:
+    """The instants a truncated ISO stamp can name: ``[start, start + resolution)``.
+    The watchdog writes ``at`` to the millisecond ("…:41.333Z") and other
+    producers to the second ("…:41Z"); the digits it keeps are a floor, so a
+    TERM at 41.3337 is stamped 41.333 and one at 41.9 is stamped 41."""
+    start = _iso_epoch(value)
+    if start is None:
+        return None
+    fraction = re.search(r"\d{2}:\d{2}:\d{2}\.(\d+)", str(value))
+    return start, start + 10 ** -(len(fraction.group(1)) if fraction else 0)
+
+
 def watchdog_terminations(started_epoch: float, finished_epoch: float, log: Path = WATCHDOG_LOG) -> list[dict]:
-    """Memory-watchdog TERM receipts whose ``at`` falls inside the run window."""
+    """Memory-watchdog TERM receipts whose ``at`` falls inside the run window.
+
+    ``at`` is a floor at the stamp's own resolution while ``started_epoch`` is
+    a full-precision float: a TERM 0.4 ms after the run started is stamped
+    the millisecond before it, so comparing the bare stamp dropped every TERM
+    in the run's first resolution unit. The stamp's whole interval must miss
+    the window for the row to be outside it."""
     try:
         lines = log.read_text().splitlines()
     except OSError:
@@ -699,8 +717,8 @@ def watchdog_terminations(started_epoch: float, finished_epoch: float, log: Path
             continue
         if not isinstance(row, dict):
             continue
-        at = _iso_epoch(row.get("at"))
-        if at is not None and started_epoch <= at <= finished_epoch:
+        interval = _iso_epoch_interval(row.get("at"))
+        if interval is not None and interval[1] > started_epoch and interval[0] <= finished_epoch:
             found.append(row)
     return found
 

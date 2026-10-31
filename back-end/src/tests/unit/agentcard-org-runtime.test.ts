@@ -458,6 +458,100 @@ async function main(): Promise<void> {
     );
     assert.equal(unknownCauseCalls, 1, 'a fetch failure without a transient cause is a real error');
 
+    // The socket can also die after the headers arrived: undici then rejects `response.text()`
+    // with `TypeError: terminated` (cause UND_ERR_SOCKET). The request reached the provider, so
+    // only the idempotent reads are replayed (CodeRabbit PR #1656 finding 4431365241).
+    const terminatedBody = (): Response =>
+      ({
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        text: async () => {
+          throw Object.assign(new TypeError('terminated'), {
+            cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
+          });
+        },
+      }) as unknown as Response;
+    let terminatedReadCalls = 0;
+    const terminatedThenOkReadRuntime = new AgentCardOrgRuntime(undefined, async () => {
+      terminatedReadCalls += 1;
+      if (terminatedReadCalls === 1) return terminatedBody();
+      return new Response(JSON.stringify({ result: { structuredContent: { recoveries: [] } } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    assert.deepEqual(
+      await terminatedThenOkReadRuntime.callTool('list_recoveries', { limit: 100 }),
+      { structuredContent: { recoveries: [] } }
+    );
+    assert.equal(terminatedReadCalls, 2, 'a read whose body read was terminated must be replayed');
+
+    let terminatedMutationCalls = 0;
+    const terminatedMutationRuntime = new AgentCardOrgRuntime(undefined, async () => {
+      terminatedMutationCalls += 1;
+      return terminatedBody();
+    });
+    await assert.rejects(
+      () => terminatedMutationRuntime.callTool('recover_funds', { cardholder_id: 'ch-1' }),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        error.status === 502 &&
+        /response body read failed after the request reached the provider \(UND_ERR_SOCKET\)/.test(
+          error.message
+        )
+    );
+    assert.equal(
+      terminatedMutationCalls,
+      1,
+      'a mutation whose body read was terminated must never be replayed (headers arrived)'
+    );
+
+    // AbortSignal.timeout can also fire during the body read, after the headers arrived. The outer
+    // classifier treats an AbortError as the retryable timeout class, so a mutation would be
+    // replayed although the request reached the provider: the body-read catch must turn it into a
+    // non-retryable error for mutations and leave reads on the retry path (CodeRabbit PR #1657).
+    const abortedBody = (): Response =>
+      ({
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        text: async () => {
+          const abort = new Error('The operation was aborted due to timeout');
+          abort.name = 'AbortError';
+          throw abort;
+        },
+      }) as unknown as Response;
+    let abortedMutationCalls = 0;
+    const abortedMutationRuntime = new AgentCardOrgRuntime(undefined, async () => {
+      abortedMutationCalls += 1;
+      return abortedBody();
+    });
+    await assert.rejects(
+      () => abortedMutationRuntime.callTool('recover_funds', { cardholder_id: 'ch-1' }),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        error.status === 502 &&
+        /response body read failed/.test(error.message)
+    );
+    assert.equal(
+      abortedMutationCalls,
+      1,
+      'a mutation whose body read was aborted must never be replayed (headers arrived)'
+    );
+
+    let abortedReadCalls = 0;
+    const abortedThenOkReadRuntime = new AgentCardOrgRuntime(undefined, async () => {
+      abortedReadCalls += 1;
+      if (abortedReadCalls === 1) return abortedBody();
+      return new Response(JSON.stringify({ result: { structuredContent: { recoveries: [] } } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    assert.deepEqual(await abortedThenOkReadRuntime.callTool('list_recoveries', { limit: 100 }), {
+      structuredContent: { recoveries: [] },
+    });
+    assert.equal(abortedReadCalls, 2, 'an aborted read body is replayed like a timeout');
+
     // Non-throttle failures must never be retried — retrying a real error would multiply load.
     let hardFailureCalls = 0;
     const hardFailureRuntime = new AgentCardOrgRuntime(async () => {
