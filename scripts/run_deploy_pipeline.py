@@ -130,6 +130,22 @@ them.
   with the operator's next action (the exact resume command) and never
   dispatches (the #1639 chain dispatched while Fly was still cutting over and
   4/5 production semantic jobs failed, 2026-10-30).
+* ``production-semantic`` is the Step 13b dispatch itself. It requires the
+  passed ``production`` receipt for the same merged SHA, dispatches
+  ``chat-lifecycle-ratchet.yml`` on ``main`` with ``source_sha=<merged SHA>``
+  (``workflow_dispatch`` refs must be branches or tags, so the exact commit
+  travels as an input the workflow checks out and names in its run title),
+  binds to the newest run created after the dispatch whose title names that
+  SHA (an older run or another commit's run is never adopted, whatever its
+  headSha), polls it every 30 s within a bounded total, prints
+  ``SEMANTIC_RUN_ID=`` and ``SEMANTIC_LANE_END <ts>``, records run id, url,
+  headSha, effective source_sha, created/completed, conclusion and per-job
+  conclusions under ``semantic`` in ``production.json`` and exits 0 only when
+  the run concluded ``success``. ``--retry-failed-once "<justification>"``
+  reruns only the failed jobs (``gh run rerun <id> --failed``) exactly once,
+  recording the justification; a second retry is refused. The #1646 deploy
+  (2026-10-31) dispatched ``--ref main`` after a data-only commit had landed,
+  so the run tested a later head and needed a separate equivalence proof.
 
 Group 3 admission schedule (EXP-L). Lanes that ran concurrently on the
 8-core/15 GB devbox thrashed each other (deploy-command-structural 1,555 s
@@ -219,7 +235,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import deploy_stage_wait  # scripts/ is sys.path[0]: one waiter for every /deploy gate
@@ -2792,24 +2808,35 @@ def agent_cutover_required(changed: list[str], root: Path | None = None) -> dict
     return {"required": bool(runtime or workflow), "runtime_files": runtime, "workflow_changed": workflow}
 
 
-def _gh_json(arguments: list[str], root: Path) -> object:
-    """``gh ... --json`` parsed; a failed call raises with gh's own message."""
-    completed = subprocess.run(["gh", *arguments], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               text=True, timeout=GH_TIMEOUT_SECONDS)
+def _gh_executable() -> str:
+    """``DEPLOY_GH_BIN`` names the GitHub CLI binary to run. On boxes.dev the
+    ``gh`` wrapper on PATH replaces GH_TOKEN with an App token that cannot
+    dispatch workflows (HTTP 403); deploy.md Step 13b exports the real binary
+    with the repo's workflow-scoped token. Every gh call here goes through
+    this one resolver so a test can stub gh on PATH."""
+    return os.environ.get("DEPLOY_GH_BIN") or "gh"
+
+
+def _gh_text(arguments: list[str], root: Path, *, timeout: float = GH_TIMEOUT_SECONDS) -> str:
+    """``gh ...`` stdout; a failed call raises with gh's own message."""
+    completed = subprocess.run([_gh_executable(), *arguments], cwd=root, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, timeout=timeout)
     if completed.returncode != 0:
         raise ProductionGateError(f"gh {' '.join(arguments[:3])} failed: {completed.stderr.strip() or completed.stdout.strip()}")
+    return completed.stdout
+
+
+def _gh_json(arguments: list[str], root: Path) -> object:
+    """``gh ... --json`` parsed; a failed call raises with gh's own message."""
+    output = _gh_text(arguments, root)
     try:
-        return json.loads(completed.stdout or "null")
+        return json.loads(output or "null")
     except json.JSONDecodeError as error:
         raise ProductionGateError(f"gh {' '.join(arguments[:3])} returned invalid JSON: {error}") from error
 
 
 def _gh_run_log(run_id: str, root: Path) -> str:
-    completed = subprocess.run(["gh", "run", "view", run_id, "--log"], cwd=root, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, text=True, timeout=GH_TIMEOUT_SECONDS * 5)
-    if completed.returncode != 0:
-        raise ProductionGateError(f"gh run view {run_id} --log failed: {completed.stderr.strip()}")
-    return completed.stdout
+    return _gh_text(["run", "view", run_id, "--log"], root, timeout=GH_TIMEOUT_SECONDS * 5)
 
 
 def recover_job_id(log: str, run_id: str) -> str:
@@ -2986,6 +3013,13 @@ def cutover_verify(fly: dict, merged_sha: str, expected_hash: str, *, root: Path
             "expected_hash": expected_hash, "queue_read": "ok", "monitor_verify_exit": 0, "monitor_tail": tail}
 
 
+def _read_receipt(path: Path) -> object:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = None, *, root: Path | None = None,
                expected_hash: str | None = None, timeout: float = DEFAULT_FLY_TIMEOUT,
                start_timeout: float = DEFAULT_FLY_START_TIMEOUT, poll_seconds: float = DEFAULT_FLY_POLL_SECONDS) -> int:
@@ -3008,6 +3042,17 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
     receipt: dict = {"schema_version": PRODUCTION_SCHEMA, "merged_sha": merged_sha, "started_at": _now(),
                      "started_epoch": time.time(), "github_waits": waits, "status": "running",
                      "fly": {"required": None}, "cutover_verify": None, "semantic_dispatch": None}
+    # Re-running the Step 13b block (production -> production-semantic) must not
+    # forget the semantic lane of the same merged SHA: its recorded run, the one
+    # consumed retry and its GitHub waits are carried forward so a resumed watch
+    # or `--retry-failed-once` binds to that run and a second retry stays refused.
+    previous = _read_receipt(receipt_path)
+    if isinstance(previous, dict) and previous.get("merged_sha") == merged_sha:
+        for key in ("semantic", "semantic_history"):
+            if key in previous:
+                receipt[key] = previous[key]
+        waits.extend(wait for wait in previous.get("github_waits") or []
+                     if isinstance(wait, dict) and wait.get("workflow") == SEMANTIC_WORKFLOW)
     write_receipt(receipt_path, receipt)
 
     def finish(status: str, code: int, error: str | None = None) -> int:
@@ -3068,6 +3113,289 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
         receipt["semantic_dispatch"] = {"command": None, "gate": "open"}
     print(f"PIPELINE_PRODUCTION status=open exit=0 head={merged_sha} receipt={receipt_path}", flush=True)
     return finish("passed", 0)
+
+
+# ── Post-merge production semantic gate (deploy.md Step 13b) ──────────────────
+# ``production-semantic`` dispatches the trusted production semantic workflow
+# on the exact merged commit and watches the run that dispatch created. The
+# #1646 deploy (2026-10-31) ran ``gh workflow run ... --ref main`` after a
+# data-only commit had landed on main, so the run's headSha was not the merged
+# SHA and the deploy had to record a separate source-equivalence proof.
+# ``workflow_dispatch`` refs must be branches or tags, so the commit travels as
+# the workflow's ``source_sha`` input and the workflow's run-name names it;
+# the watcher binds to that title, never to the branch head.
+SEMANTIC_WORKFLOW = "chat-lifecycle-ratchet.yml"
+SEMANTIC_DISPATCH_REF = "main"
+SEMANTIC_FRONTEND_URL = "https://www.roselabs.ai"
+SEMANTIC_BACKEND_URL = "https://navi-j9a9.onrender.com"
+SEMANTIC_TITLE_PATTERN = re.compile(r"source_sha=([0-9a-f]{40})")
+# Both workflow jobs allow 30 minutes plus runner queueing; the run is polled
+# every 30 s (the repo's 5000/h token quota is shared with other lanes).
+DEFAULT_SEMANTIC_START_TIMEOUT = 300.0
+DEFAULT_SEMANTIC_TIMEOUT = 3600.0
+DEFAULT_SEMANTIC_POLL_SECONDS = 30.0
+# GitHub stamps createdAt on its own clock: a run stamped up to this much
+# before the local dispatch clock still belongs to this dispatch; anything
+# older never matches.
+DISPATCH_CLOCK_SKEW_S = 5.0
+SEMANTIC_RUN_FIELDS = "databaseId,createdAt,headSha,displayTitle,status,conclusion,url,event"
+SEMANTIC_VIEW_FIELDS = "status,conclusion,attempt,url,headSha,displayTitle,createdAt,updatedAt,jobs"
+
+
+def _parse_github_time(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def semantic_select_run(rows: object, merged_sha: str, dispatched_at: datetime) -> dict | None:
+    """The newest ``workflow_dispatch`` run this dispatch created: created no
+    earlier than the dispatch clock (minus ``DISPATCH_CLOCK_SKEW_S``) and
+    titled ``source_sha=<merged_sha>`` by the workflow's run-name. Older runs
+    and runs of another source commit never match, whatever their headSha
+    (the branch head at dispatch time, which may be a later commit)."""
+    earliest = dispatched_at - timedelta(seconds=DISPATCH_CLOCK_SKEW_S)
+    matches: list[tuple[datetime, int, dict]] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        created = _parse_github_time(row.get("createdAt"))
+        title = SEMANTIC_TITLE_PATTERN.search(str(row.get("displayTitle") or ""))
+        if created is None or created < earliest or title is None or title.group(1) != merged_sha:
+            continue
+        if row.get("event") not in (None, "workflow_dispatch"):
+            continue
+        matches.append((created, int(row.get("databaseId") or 0), row))
+    if not matches:
+        return None
+    matches.sort(key=lambda item: (item[0], item[1]))
+    return matches[-1][2]
+
+
+def _semantic_jobs(view: dict) -> list[dict]:
+    jobs = view.get("jobs")
+    if not isinstance(jobs, list):
+        return []
+    return [{"name": job.get("name"), "status": job.get("status"), "conclusion": job.get("conclusion"),
+             "url": job.get("url")} for job in jobs if isinstance(job, dict)]
+
+
+def _semantic_wait_complete(run_id: str, *, root: Path, waits: list[dict], entry: dict, min_attempt: int,
+                            timeout: float, poll_seconds: float, sleep) -> None:
+    """Poll the run until it is ``completed`` at an attempt >= ``min_attempt``
+    (right after ``gh run rerun`` the view can still show the previous
+    completed attempt). Run identity, GitHub status, attempt, per-job
+    conclusions and the wait land in ``entry``/``waits`` as they are learned."""
+    started = time.monotonic()
+    polls = 0
+    while True:
+        polls += 1
+        payload = _gh_json(["run", "view", run_id, "--json", SEMANTIC_VIEW_FIELDS], root)
+        view = payload if isinstance(payload, dict) else {}
+        attempt = int(view.get("attempt") or 0)
+        entry.update(status=view.get("status"), attempt=attempt or entry.get("attempt"),
+                     url=view.get("url") or entry.get("url"), head_sha=view.get("headSha") or entry.get("head_sha"),
+                     display_title=view.get("displayTitle") or entry.get("display_title"),
+                     created_at=view.get("createdAt") or entry.get("created_at"), jobs=_semantic_jobs(view))
+        if view.get("status") == "completed" and attempt >= min_attempt:
+            conclusion = str(view.get("conclusion") or "none")
+            entry.update(conclusion=conclusion, completed_at=view.get("updatedAt"))
+            waits.append({"workflow": SEMANTIC_WORKFLOW, "kind": "run-complete", "run_id": run_id, "attempt": attempt,
+                          "polls": polls, "waited_s": round(time.monotonic() - started, 1), "status": "completed",
+                          "conclusion": conclusion, "outcome": "completed"})
+            return
+        if time.monotonic() - started >= timeout:
+            waits.append({"workflow": SEMANTIC_WORKFLOW, "kind": "run-complete", "run_id": run_id, "attempt": attempt,
+                          "polls": polls, "waited_s": round(time.monotonic() - started, 1),
+                          "status": view.get("status"), "outcome": "timeout"})
+            raise ProductionGateError(
+                f"{SEMANTIC_WORKFLOW} run {run_id} ({view.get('url') or 'no url'}) is still {view.get('status')} after "
+                f"{timeout:.0f}s; the gate is not green: keep observing it (`gh run view {run_id}`) and rerun this "
+                "command once it is terminal"
+            )
+        sleep(poll_seconds)
+
+
+def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str = SEMANTIC_FRONTEND_URL,
+                        backend_url: str = SEMANTIC_BACKEND_URL, retry_justification: str | None = None,
+                        root: Path | None = None, timeout: float = DEFAULT_SEMANTIC_TIMEOUT,
+                        start_timeout: float = DEFAULT_SEMANTIC_START_TIMEOUT,
+                        poll_seconds: float = DEFAULT_SEMANTIC_POLL_SECONDS, sleep=time.sleep) -> int:
+    """deploy.md Step 13b. Requires the ``production`` (Fly lane) receipt for
+    this merged SHA to have passed in ``state_dir`` (never dispatch while a
+    surface is still cutting over). When the receipt already names a run of
+    this SHA that is not ``completed`` (a CLI-side timeout or interruption),
+    it resumes watching that run instead of dispatching again. Otherwise it
+    dispatches ``chat-lifecycle-ratchet.yml`` on ``main`` with
+    ``source_sha=<merged_sha>`` plus the URLs and binds to the newest run
+    created after the dispatch whose title names that SHA. It polls every
+    ``poll_seconds`` within ``timeout``, records run id/url/headSha/effective
+    source_sha/created/completed/conclusion/per-job conclusions under
+    ``semantic`` in ``production.json`` (every GitHub wait joins
+    ``github_waits``) and exits 0 only when the run concluded ``success``.
+    ``retry_justification`` (``--retry-failed-once``) reruns only the failed
+    jobs of this SHA's run (the recorded or resumed one, or the one this
+    invocation dispatched) exactly once; the justification is recorded once
+    ``gh run rerun`` succeeded. A second retry is refused with exit 2. Exit 1
+    = not green (failed, timed out, never started), 2 = refused/usage/tooling
+    error."""
+    root = SOURCE_ROOT if root is None else root
+    receipt_path = state_dir / PRODUCTION_RECEIPT
+    receipt = _read_receipt(receipt_path)
+    if not isinstance(receipt, dict) or receipt.get("merged_sha") != merged_sha or receipt.get("status") != "passed":
+        found = ("no receipt" if not isinstance(receipt, dict)
+                 else f"receipt merged_sha={receipt.get('merged_sha')} status={receipt.get('status')}")
+        print(f"PIPELINE_SEMANTIC status=refused exit=2 the Fly lane gate is not open for {merged_sha} ({receipt_path}: "
+              f"{found}); run `python3 scripts/run_deploy_pipeline.py production --merged-sha {merged_sha} --state-dir "
+              f"{state_dir}` first and dispatch production semantics only when it exits 0", flush=True)
+        return 2
+    waits = receipt.setdefault("github_waits", [])
+    previous = receipt.get("semantic") if isinstance(receipt.get("semantic"), dict) else None
+    has_run = previous is not None and bool(previous.get("run_id"))
+    # A recorded run that never reached `completed` is resumed, never replaced.
+    resume = has_run and previous.get("status") != "completed"
+    if retry_justification is not None and previous is not None and not resume:
+        if previous.get("retry"):
+            print(f"PIPELINE_SEMANTIC status=refused exit=2 run {previous.get('run_id')} already used its one "
+                  f"--retry-failed-once ({previous['retry'].get('at')}: {previous['retry'].get('justification')}); a "
+                  "second retry is never allowed: fix the root cause in a new PR and repeat the deploy loop", flush=True)
+            return 2
+        if previous.get("conclusion") == "success":
+            print(f"PIPELINE_SEMANTIC status=refused exit=2 run {previous.get('run_id')} for {merged_sha} already "
+                  "succeeded; nothing to retry (dispatch again without --retry-failed-once to re-verify)", flush=True)
+            return 2
+    retrying_previous = retry_justification is not None and has_run and not resume
+    if resume or retrying_previous:
+        entry = previous
+    else:
+        if previous is not None:
+            receipt.setdefault("semantic_history", []).append(previous)
+        entry = {"workflow": SEMANTIC_WORKFLOW, "merged_sha": merged_sha, "started_at": _now(), "outcome": "running",
+                 "dispatch": {"ref": SEMANTIC_DISPATCH_REF, "at": None,
+                              "inputs": {"source_sha": merged_sha, "frontend_url": frontend_url,
+                                         "backend_url": backend_url}},
+                 "run_id": None, "url": None, "head_sha": None, "source_sha": None, "display_title": None,
+                 "created_at": None, "completed_at": None, "attempt": None, "status": None, "conclusion": None,
+                 "jobs": [], "retry": None}
+    receipt["semantic"] = entry
+    started_epoch = time.time()
+
+    def finish(outcome: str, code: int, error: str | None = None) -> int:
+        entry.update(outcome=outcome, finished_at=_now(), wall_s=round(time.time() - started_epoch, 1))
+        if error:
+            entry["error"] = error
+        write_receipt(receipt_path, receipt)
+        print(f"SEMANTIC_LANE_END {entry['finished_at']} exit={code}", flush=True)
+        return code
+
+    def rerun_failed(justification: str) -> None:
+        run_id = str(entry["run_id"])
+        failed_jobs = [job.get("name") for job in entry.get("jobs", [])
+                       if job.get("conclusion") not in ("success", "skipped")]
+        print(f"PIPELINE_SEMANTIC retry=failed-jobs run={run_id} previous_conclusion={entry.get('conclusion')} "
+              f"jobs={','.join(str(name) for name in failed_jobs) or 'none'}: {justification}", flush=True)
+        # A rejected rerun (e.g. 403) must not consume the single retry.
+        _gh_text(["run", "rerun", run_id, "--failed"], root)
+        entry["retry"] = {"justification": justification, "at": _now(), "previous_attempt": entry.get("attempt"),
+                          "previous_conclusion": entry.get("conclusion"), "failed_jobs": failed_jobs, "attempt": None}
+        write_receipt(receipt_path, receipt)
+        _semantic_wait_complete(run_id, root=root, waits=waits, entry=entry, min_attempt=int(entry.get("attempt") or 1) + 1,
+                                timeout=timeout, poll_seconds=poll_seconds, sleep=sleep)
+        entry["retry"]["attempt"] = entry.get("attempt")
+
+    try:
+        if resume:
+            run_id = str(entry["run_id"])
+            print(f"PIPELINE_SEMANTIC resume run={run_id} status={entry.get('status')} source_sha={merged_sha}: "
+                  "watching the recorded run instead of dispatching again", flush=True)
+            print(f"SEMANTIC_RUN_ID={run_id}", flush=True)
+            retry = entry.get("retry") if isinstance(entry.get("retry"), dict) else None
+            min_attempt = int(retry.get("previous_attempt") or 0) + 1 if retry else int(entry.get("attempt") or 1)
+            _semantic_wait_complete(run_id, root=root, waits=waits, entry=entry, min_attempt=min_attempt,
+                                    timeout=timeout, poll_seconds=poll_seconds, sleep=sleep)
+            if retry and retry.get("attempt") is None:
+                retry["attempt"] = entry.get("attempt")
+            if entry["conclusion"] != "success" and retry_justification is not None and not retry:
+                write_receipt(receipt_path, receipt)
+                rerun_failed(retry_justification)
+        elif retrying_previous:
+            print(f"PIPELINE_SEMANTIC resume run={entry['run_id']} conclusion={entry.get('conclusion')} "
+                  f"source_sha={merged_sha}: rerunning failed jobs once", flush=True)
+            print(f"SEMANTIC_RUN_ID={entry['run_id']}", flush=True)
+            rerun_failed(retry_justification or "")
+        else:
+            dispatched_at = datetime.now(timezone.utc).replace(microsecond=0)
+            entry["dispatch"]["at"] = dispatched_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+            write_receipt(receipt_path, receipt)
+            _gh_text(["workflow", "run", SEMANTIC_WORKFLOW, "--ref", SEMANTIC_DISPATCH_REF,
+                      "-f", f"source_sha={merged_sha}", "-f", f"frontend_url={frontend_url}",
+                      "-f", f"backend_url={backend_url}"], root)
+            print(f"PIPELINE_SEMANTIC dispatched workflow={SEMANTIC_WORKFLOW} ref={SEMANTIC_DISPATCH_REF} "
+                  f"source_sha={merged_sha} at={entry['dispatch']['at']}", flush=True)
+            discovery_started = time.monotonic()
+            polls = 0
+            while True:
+                polls += 1
+                rows = _gh_json(["run", "list", "--workflow", SEMANTIC_WORKFLOW, "--event", "workflow_dispatch",
+                                 "--branch", SEMANTIC_DISPATCH_REF, "--limit", "20", "--json", SEMANTIC_RUN_FIELDS], root)
+                row = semantic_select_run(rows, merged_sha, dispatched_at)
+                if row is not None:
+                    break
+                if time.monotonic() - discovery_started >= start_timeout:
+                    waits.append({"workflow": SEMANTIC_WORKFLOW, "kind": "run-start", "head": merged_sha, "run_id": None,
+                                  "polls": polls, "waited_s": round(time.monotonic() - discovery_started, 1),
+                                  "outcome": "timeout"})
+                    raise ProductionGateError(
+                        f"no {SEMANTIC_WORKFLOW} run titled source_sha={merged_sha} created after the dispatch at "
+                        f"{entry['dispatch']['at']} appeared within {start_timeout:.0f}s; the dispatch is unconfirmed: "
+                        f"inspect `gh run list --workflow {SEMANTIC_WORKFLOW} --event workflow_dispatch` (an older run "
+                        f"is never adopted; a run GitHub stamped more than {DISPATCH_CLOCK_SKEW_S:.0f}s before this "
+                        "host's dispatch clock counts as older, so check the host clock if the run exists) and rerun "
+                        "this command"
+                    )
+                sleep(min(10.0, poll_seconds))
+            run_id = str(row.get("databaseId"))
+            entry.update(run_id=run_id, url=row.get("url"), head_sha=row.get("headSha"), source_sha=merged_sha,
+                         display_title=row.get("displayTitle"), created_at=row.get("createdAt"),
+                         status=row.get("status"))
+            waits.append({"workflow": SEMANTIC_WORKFLOW, "kind": "run-start", "head": merged_sha, "run_id": run_id,
+                          "polls": polls, "waited_s": round(time.monotonic() - discovery_started, 1), "outcome": "found"})
+            write_receipt(receipt_path, receipt)
+            print(f"SEMANTIC_RUN_ID={run_id}", flush=True)
+            print(f"PIPELINE_SEMANTIC run={run_id} url={entry['url']} head_sha={entry['head_sha']} "
+                  f"source_sha={merged_sha} created={entry['created_at']}", flush=True)
+            _semantic_wait_complete(run_id, root=root, waits=waits, entry=entry, min_attempt=1, timeout=timeout,
+                                    poll_seconds=poll_seconds, sleep=sleep)
+            if entry["conclusion"] != "success" and retry_justification is not None:
+                write_receipt(receipt_path, receipt)
+                rerun_failed(retry_justification)
+    except ProductionGateError as error:
+        print(f"PIPELINE_SEMANTIC status=blocked exit=1 {error}", flush=True)
+        return finish("failed", 1, str(error))
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
+        detail = getattr(error, "stderr", "") or ""
+        message = f"{type(error).__name__}: {error} {detail.strip() if isinstance(detail, str) else ''}".strip()
+        print(f"PIPELINE_SEMANTIC status=error exit=2 {message}", flush=True)
+        return finish("error", 2, message)
+    jobs = " ".join(f"{job.get('name')}={job.get('conclusion')}" for job in entry["jobs"]) or "no jobs"
+    if entry["conclusion"] == "success":
+        print(f"PIPELINE_SEMANTIC status=passed exit=0 run={entry['run_id']} attempt={entry['attempt']} "
+              f"source_sha={merged_sha} head_sha={entry['head_sha']} url={entry['url']} jobs: {jobs}", flush=True)
+        return finish("passed", 0)
+    retry_state = "used" if entry.get("retry") else "available (--retry-failed-once \"<justification>\")"
+    print(f"PIPELINE_SEMANTIC status=failed exit=1 run={entry['run_id']} attempt={entry['attempt']} "
+          f"conclusion={entry['conclusion']} url={entry['url']} jobs: {jobs}; retry={retry_state}; the deployment is "
+          "not complete: inspect the run's Playwright artifacts and service logs (deploy.md Step 13b)", flush=True)
+    return finish("failed", 1, f"run {entry['run_id']} concluded {entry['conclusion']}")
+
+
+def _full_sha(value: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise argparse.ArgumentTypeError(f"expected a full 40-hex commit SHA, got {value!r}")
+    return value
 
 
 def _env_int(name: str, default: int) -> int:
@@ -3140,6 +3468,23 @@ def main(argv: list[str] | None = None) -> int:
                                    help="precomputed agent workflow surface hash (default: scripts/agent_workflow_surface_hash.py)")
     production_parser.add_argument("dispatch", nargs=argparse.REMAINDER,
                                    help="-- <command> run only once the gate is open (e.g. gh workflow run ...)")
+    semantic_parser = sub.add_parser(
+        "production-semantic",
+        help="post-merge Step 13b: dispatch chat-lifecycle-ratchet.yml on main with source_sha=<merged SHA>, bind to "
+             "the run that dispatch created, poll it and record it under `semantic` in production.json; exit 0 only "
+             "when every job succeeded (requires the passed `production` receipt for the same SHA)")
+    semantic_parser.add_argument("--merged-sha", required=True, type=_full_sha)
+    semantic_parser.add_argument("--state-dir", type=Path, required=True)
+    semantic_parser.add_argument("--frontend-url", default=SEMANTIC_FRONTEND_URL)
+    semantic_parser.add_argument("--backend-url", default=SEMANTIC_BACKEND_URL)
+    semantic_parser.add_argument("--retry-failed-once", metavar="JUSTIFICATION", default=None,
+                                 help="rerun only the failed jobs of this SHA's run once (`gh run rerun <id> --failed`) "
+                                      "and record this justification; a second retry is refused")
+    semantic_parser.add_argument("--timeout", type=float, default=DEFAULT_SEMANTIC_TIMEOUT,
+                                 help="seconds to wait for the run to complete once it exists")
+    semantic_parser.add_argument("--start-timeout", type=float, default=DEFAULT_SEMANTIC_START_TIMEOUT,
+                                 help="seconds to wait for the dispatched run to appear")
+    semantic_parser.add_argument("--poll-seconds", type=float, default=DEFAULT_SEMANTIC_POLL_SECONDS)
     simulate_parser = sub.add_parser("simulate", help="project the Group 3 union wall: phased vs legacy")
     simulate_parser.add_argument("--plan", type=Path, required=True)
     simulate_parser.add_argument("--max-parallel", type=int, default=None)
@@ -3177,6 +3522,11 @@ def main(argv: list[str] | None = None) -> int:
             dispatch.pop(0)
         return production(args.merged_sha, args.state_dir, dispatch or None, expected_hash=args.expected_hash,
                           timeout=args.timeout, start_timeout=args.start_timeout, poll_seconds=args.poll_seconds)
+    if args.action == "production-semantic":
+        return production_semantic(args.merged_sha, args.state_dir, frontend_url=args.frontend_url,
+                                   backend_url=args.backend_url, retry_justification=args.retry_failed_once,
+                                   timeout=args.timeout, start_timeout=args.start_timeout,
+                                   poll_seconds=args.poll_seconds)
     return wait(args.state_dir, args.timeout, args.stall_seconds, args.since)
 
 
