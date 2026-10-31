@@ -59,12 +59,15 @@ cd "$ROOT_DIR" || exit 2
 . scripts/lib/deploy-local-env.sh
 # Refuses without CONDUCTOR_PORT; exports SMOKE_*_URL, LOCAL_DB_PORT, the
 # strict run.sh port contract and a unique deploy Temporal queue.
-configure_deploy_local_env || exit 2
+# The fallback precedes the normalizer so the stack and the E2B smoke read one
+# workspace identity; the normalizer still exports the .cloud-env name when the
+# trust flag is unset.
 export CONDUCTOR_WORKSPACE_NAME="${CONDUCTOR_WORKSPACE_NAME:-$(basename "$ROOT_DIR")}"
+configure_deploy_local_env || exit 2
 
 require_command() {
     command -v "$1" >/dev/null 2>&1 && return 0
-    echo "$1 is required (install the PostgreSQL client tools)." >&2
+    echo "$1 is required but was not found on PATH (pg_isready, psql and createdb come from the PostgreSQL client tools)." >&2
     return 2
 }
 
@@ -153,8 +156,8 @@ for _ in $(seq 1 300); do
         echo "Step5 stack exited before readiness (see .context/deploy-smoke.log)" >&2
         exit 1
     fi
-    if curl -sf "$SMOKE_BASE_URL/health" >/dev/null && curl -sf "$SMOKE_HEALTH_URL/health" >/dev/null \
-        && curl -sf "$SMOKE_FRONTEND_URL" >/dev/null \
+    if curl -sf --max-time 5 "$SMOKE_BASE_URL/health" >/dev/null && curl -sf --max-time 5 "$SMOKE_HEALTH_URL/health" >/dev/null \
+        && curl -sf --max-time 5 "$SMOKE_FRONTEND_URL" >/dev/null \
         && [ "$(jq -r '.status' .context/services.json 2>/dev/null)" = running ]; then
         ready=1
         break

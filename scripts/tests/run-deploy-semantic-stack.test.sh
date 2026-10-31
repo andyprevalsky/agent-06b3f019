@@ -42,6 +42,11 @@ require_text "$SCRIPT" 'bash scripts/run-deploy-stage semantic-latency -- bash f
 require_text "$SCRIPT" 'bash ../scripts/run-deploy-stage claude-code-e2b-smoke -- bash scripts/run-blackbox-tests.sh claude-code' "E2B smoke keeps its Step 6c stage record"
 require_text "$SCRIPT" 'BLACKBOX_SMOKE=1' "E2B smoke must run the real sandbox cases"
 require_text "$SCRIPT" 'db_name="victoria_$CONDUCTOR_WORKSPACE_NAME"' "E2B smoke must name the isolated workspace test database"
+require_text "$SCRIPT" 'curl -sf --max-time 5 "$SMOKE_BASE_URL/health"' "readiness probes must bound each curl so a wedged port cannot hang the 600 s loop"
+# The workspace-name fallback must be exported before the normalizer runs so the stack and the E2B smoke read one identity.
+EXPORT_LINE=$(grep -n '^export CONDUCTOR_WORKSPACE_NAME=' "$SCRIPT" | head -1 | cut -d: -f1)
+CONFIGURE_LINE=$(grep -n '^configure_deploy_local_env || exit 2' "$SCRIPT" | head -1 | cut -d: -f1)
+[ -n "$EXPORT_LINE" ] && [ -n "$CONFIGURE_LINE" ] && [ "$EXPORT_LINE" -lt "$CONFIGURE_LINE" ] || fail "CONDUCTOR_WORKSPACE_NAME fallback (line ${EXPORT_LINE:-?}) must precede configure_deploy_local_env (line ${CONFIGURE_LINE:-?})"
 require_text "$SCRIPT" 'BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8 TRACE_ARCHIVE_ENABLED=0' "stack launch must keep the deploy.md Step 5 environment"
 require_text "$SCRIPT" 'bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1 &' "stack must be the Step 5 run.sh --benchmark launch"
 require_text "$SCRIPT" 'configure_deploy_local_env || exit 2' "the deploy environment library must gate every mode"
