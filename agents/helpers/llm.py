@@ -131,6 +131,17 @@ class LLMStructuredOutputError(ValueError):
         self.excluded_models = frozenset(excluded_models)
 
 
+class StructuredReplyShapeError(ValueError):
+    """The provider completed, but its reply held no JSON object to validate.
+
+    Reasoning-only replies (no content, no tool call) and non-object JSON (an
+    array or scalar) are structured-output failures of the model that produced
+    them, exactly like a schema-invalid object: the bounded re-generation must
+    count them toward excluding that candidate, or two such replies leave the
+    model eligible and the next attempt selects it again.
+    """
+
+
 # A malformed / schema-invalid structured output is non-deterministic (the model
 # occasionally emits an incomplete tool call, e.g. {"tool": "think"} with no
 # fields). Re-generate up to this many extra times before surfacing the error — a
@@ -3647,7 +3658,9 @@ async def call_llm_structured_streaming(
                     actual_model=actual_model,
                     pool_name=pool_name,
                 )
-                raise ValueError(f"No JSON content received in response (chunks={chunk_count}, model={actual_model})")
+                raise StructuredReplyShapeError(
+                    f"No JSON content received in response (chunks={chunk_count}, model={actual_model})"
+                )
 
             # Extract JSON from markdown code block if present
             # Look for ```json ... ``` pattern, or just raw JSON
@@ -3696,6 +3709,11 @@ async def call_llm_structured_streaming(
                         logger.info(f"📦 Extracted raw JSON, explanation={len(explanation_text)} chars")
 
             parsed_content = json.loads(json_content)
+            if not isinstance(parsed_content, dict):
+                raise StructuredReplyShapeError(
+                    f"Structured reply must be a JSON object, got {type(parsed_content).__name__} "
+                    f"(model={actual_model})"
+                )
 
             # Defensive recovery path: malformed upstream streams can sometimes wrap
             # another agent JSON payload inside response text. If outer tool_calls are
@@ -3783,7 +3801,7 @@ async def call_llm_structured_streaming(
             parse_elapsed = (_safe_time() - request_start_time) if request_start_time else 0
             failed_model = (
                 model_key(actual_model)
-                if isinstance(e, (json.JSONDecodeError, ValidationError))
+                if isinstance(e, (json.JSONDecodeError, ValidationError, StructuredReplyShapeError))
                 and actual_model
                 and actual_model
                 not in {"unknown", "fast-cache", "fast-mode-soft-complete", "fast-mode-scrape-passthrough"}
