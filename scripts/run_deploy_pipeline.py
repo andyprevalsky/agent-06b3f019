@@ -335,6 +335,7 @@ CEILING_CPUS = 14
 CEILING_MEM_MB = 32768
 MIN_WORKERS = 1
 STRUCTURAL_RUNNER_MAX_WORKERS = 8  # scripts/run-deploy-structural-gates.py DEFAULT_MAX_WORKERS
+STRUCTURAL_RUNNER_SCRIPT = "run-deploy-structural-gates.py"
 # 20261028-174430 stage receipt: largest structural child 1471.98 MiB.
 # Round its 1.25x margin up: the per-suite floor that sizes the lane's width
 # (how many suites the budget can back if every active one hits that ceiling).
@@ -1337,10 +1338,12 @@ def fit_exclusive_lane(lane: Lane, available_mb: int) -> Lane | None:
     the last MB was refused at admission without running a single gate
     (PR1634 coordinator, 2026-10-29). Narrowing it keeps every gate running at
     the width the box can actually back; None when not even MIN_WORKERS fit,
-    which stays a refusal.
+    which stays a refusal. Only the structural runner's own command is sized by
+    the structural formula: any other exclusive lane (a custom ``--plan`` lane
+    with its own ``--max-workers``) keeps its declared ``memory_mb``.
     """
     planned = _lane_workers(lane)
-    if not lane.exclusive or planned is None:
+    if not lane.exclusive or planned is None or not _runs_structural_gates(lane):
         return None
     workers = structural_workers_within(int(available_mb), planned)
     if workers < MIN_WORKERS:
@@ -1348,6 +1351,11 @@ def fit_exclusive_lane(lane: Lane, available_mb: int) -> Lane | None:
     index = lane.command.index("--max-workers") + 1
     command = [*lane.command[:index], str(workers), *lane.command[index + 1:]]
     return replace(lane, command=command, memory_mb=structural_lane_memory_mb(workers))
+
+
+def _runs_structural_gates(lane: Lane) -> bool:
+    """Whether the lane's command executes scripts/run-deploy-structural-gates.py."""
+    return any(Path(part).name == STRUCTURAL_RUNNER_SCRIPT for part in lane.command)
 
 
 def _list_schedule(order: list[Lane], seconds: dict[str, float], after: dict[str, list[str]],
@@ -2836,6 +2844,15 @@ def _run_attempt(
                         by_name[lane.name] = fitted
                         lane = fitted
                 if budget_mb is not None:
+                    if lane.memory_mb > budget_mb and running and fit_exclusive_lane(lane, budget_mb) is not None:
+                        # An exclusive lane planned wider than this attempt's budget
+                        # while a stack lane holds memory (CodeRabbit on #1658): it
+                        # is resized once the running lanes release their share,
+                        # so defer instead of refusing a lane that can still fit.
+                        _record_waiting(receipt["lanes"][lane.name], {
+                            "at": _now(), "budget_mb": budget_mb, "memory_mb": lane.memory_mb,
+                            "reserved_declared_mb": reserved}, "budget")
+                        continue
                     if lane.memory_mb > budget_mb:
                         # It can never fit: fail loudly now instead of starting it
                         # into cgroup throttling or the host memory watchdog.

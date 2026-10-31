@@ -1063,7 +1063,8 @@ def check_exclusive_lane_resizes_to_free_memory(tmp: Path, env: dict[str, str]) 
     worker. Exact widths: the pure fitter; the driver: a real narrowed spawn."""
     pipeline = load_module("pipeline_fit_exclusive", DRIVER)
     declared = pipeline.structural_lane_memory_mb
-    lane = pipeline.Lane("deploy-command-structural", ["python3", "x.py", "--max-workers", "3"],
+    lane = pipeline.Lane("deploy-command-structural",
+                         ["python3", "scripts/run-deploy-structural-gates.py", "--max-workers", "3"],
                          memory_mb=declared(3), exclusive=True)
     fitted = pipeline.fit_exclusive_lane(lane, declared(2) + 50)
     assert fitted.command[-2:] == ["--max-workers", "2"] and fitted.memory_mb == declared(2), fitted
@@ -1071,12 +1072,19 @@ def check_exclusive_lane_resizes_to_free_memory(tmp: Path, env: dict[str, str]) 
     assert pipeline.fit_exclusive_lane(lane, declared(1) - 1) is None, "below one worker stays a refusal"
     assert pipeline.fit_exclusive_lane(pipeline.Lane("other", ["true"], exclusive=False), 10**6) is None
     assert pipeline.fit_exclusive_lane(pipeline.Lane("no-flag", ["true"], exclusive=True), 10**6) is None
+    # CodeRabbit on #1658: the structural formula sizes only the structural
+    # runner's own command; a custom exclusive plan lane keeps its declaration.
+    custom = pipeline.Lane("custom-exclusive", ["python3", "x.py", "--max-workers", "3"], memory_mb=5000,
+                           exclusive=True)
+    assert pipeline.fit_exclusive_lane(custom, 10**6) is None and custom.memory_mb == 5000, custom
+    assert pipeline.fit_exclusive_lane(custom, 4000) is None, "never resized by the structural formula"
     state = tmp / "resize"
     plan = tmp / "resize-plan.json"
     probe = tmp / "resize-args.txt"
     write_plan(plan, [{"name": "structural", "exclusive": True, "reuse_passed": False,
                        "memory_mb": declared(3),
-                       "command": ["bash", "-c", f"printf '%s\\n' \"$@\" > {probe}", "_", "--max-workers", "3"]}])
+                       "command": ["bash", "-c", f"printf '%s\\n' \"$@\" > {probe}",
+                                   "scripts/run-deploy-structural-gates.py", "--max-workers", "3"]}])
     run = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
                      "--memory-budget-mb", str(declared(2) + 50), env=env)
     assert run.returncode == 0, run.stdout + run.stderr
@@ -1615,6 +1623,62 @@ def check_stack_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
     print("stack phase lanes: ok")
 
 
+def check_exclusive_lane_defers_behind_stack_lane(tmp: Path, env: dict[str, str]) -> None:
+    """CodeRabbit on #1658 (Major): with a stack lane running, the exclusive
+    structural lane skipped the resize step and the static budget check refused
+    a lane planned wider than this attempt's budget (six workers, 6439 MB, vs a
+    6000 MB budget). It must defer with a ``budget`` waiting record and be
+    resized by fit_exclusive_lane once the running lanes release their share;
+    a lane that can never fit (not even one worker) stays refused."""
+    pipeline = load_module("pipeline_defer_exclusive", DRIVER)
+    declared = pipeline.structural_lane_memory_mb
+    assert declared(6) == 6439, declared(6)
+    probe = tmp / "defer-args.txt"
+    plan = tmp / "defer-plan.json"
+    state = tmp / "defer"
+    # ``gate`` (unphased, admitted at attempt start) holds the exclusive lane
+    # back until the stack lane is running: in plan order the exclusive lane
+    # would otherwise be admitted first and resized alone.
+    write_plan(plan, [
+        {"name": "quick", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10},
+        {"name": "gate", "command": ["sleep", "0.8"], "reuse_passed": False, "group": "4", "memory_mb": 10},
+        {"name": "big", "exclusive": True, "reuse_passed": False, "group": "3", "memory_mb": declared(6),
+         "after": ["gate"],
+         "command": ["bash", "-c", f"printf '%s\\n' \"$@\" > {probe}",
+                     "scripts/run-deploy-structural-gates.py", "--max-workers", "6"]},
+        {"name": "smoke", "command": ["sleep", "2.5"], "reuse_passed": False, "group": "4", "memory_mb": 4150,
+         "phase": "stack"},
+    ], schedule={"policy": "phased"})
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
+                     "--memory-budget-mb", "6000", env=env, timeout=120)
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["lanes"]["big"])
+    big, smoke = receipt["lanes"]["big"], receipt["lanes"]["smoke"]
+    assert smoke["status"] == "passed" and big["status"] == "passed", (smoke, big)
+    assert smoke["started_epoch"] < receipt["lanes"]["gate"]["finished_epoch"], "the stack lane ran before big was ready"
+    assert big["admission"]["deferred"]["reason"] == "budget", big["admission"]
+    assert big["admission"]["deferred"]["first"]["memory_mb"] == declared(6), big["admission"]
+    assert big["started_epoch"] >= smoke["finished_epoch"], "resized and admitted once the stack lane released"
+    args = probe.read_text().split()
+    workers = int(args[args.index("--max-workers") + 1])
+    assert 1 <= workers <= 5 and big["memory_mb"] == declared(workers) <= 6000, (workers, big)
+    assert big["note"].startswith(f"resized: 6 -> {workers} workers") and "PIPELINE_LANE_RESIZED" in ran.stdout, \
+        (big, ran.stdout)
+    # A lane that can never fit is still refused, stack lane or not.
+    never = tmp / "defer-never"
+    write_plan(plan, [
+        {"name": "big", "exclusive": True, "reuse_passed": False, "group": "3", "memory_mb": declared(6),
+         "command": ["bash", "-c", "true", "scripts/run-deploy-structural-gates.py", "--max-workers", "6"]},
+        {"name": "smoke", "command": ["sleep", "0.5"], "reuse_passed": False, "group": "4", "memory_mb": 500,
+         "phase": "stack"},
+    ], schedule={"policy": "phased"})
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(never), "--max-parallel", "0",
+                     "--memory-budget-mb", str(declared(1) - 1), env=env, timeout=120)
+    big = json.loads((never / "receipt.json").read_text())["lanes"]["big"]
+    assert ran.returncode == 1 and big["status"] == "failed" and big["note"].startswith("refused: needs"), big
+    print("exclusive lane defers behind the stack lane: ok")
+
+
 def main() -> int:
     global DRIVER
     with tempfile.TemporaryDirectory(prefix="deploy-pipeline-test-") as raw:
@@ -1752,6 +1816,7 @@ def main() -> int:
         check_passed_only_estimates_and_dag_phases(tmp, env)
         check_declared_phase_lanes(tmp, env)
         check_stack_phase_lanes(tmp, env)
+        check_exclusive_lane_defers_behind_stack_lane(tmp, env)
         check_recorded_peak_reservations()
         check_dependencies_through_unphased_lanes(tmp, env)
         check_simulate_legacy_plan_group3(tmp, env)
