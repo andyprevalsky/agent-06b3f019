@@ -129,6 +129,16 @@ it flips again, the verdict now names the served leg, and the dump under
 `.llm-dumps/unbound/*-test-native-autofill-<scenario>.json` shows the full
 transcript.
 
+Recurrence 2026-10-31 (`rejected` arm, deploy round 2 on `c7e34f56d`, 00:28Z,
+request `78274a1e4240`): the residual above understated the remaining gap. The
+`rejected` arm still sent no tool turns at all and narrated a *native* AutoFill
+rejection in OCR, so the skill's "backend catalog is separate; fill_saved once
+before password help" rule stayed applicable and the verdict was undetermined
+by the input, not merely sampled. Fixed by rebuilding that arm through the
+production recorder (`0e8c0307f`) with the invariant
+`native_autofill_control_attempt_turns`; see
+`2026-10-31-rejected-control-narrated-saved-credential-attempt-in-ocr-instead-of-production-tool-turns`.
+
 ## Human feedback
 
 The delegating thread set the bounds: do not weaken the assertion to accept
