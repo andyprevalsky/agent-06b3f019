@@ -458,6 +458,49 @@ async function main(): Promise<void> {
     );
     assert.equal(unknownCauseCalls, 1, 'a fetch failure without a transient cause is a real error');
 
+    // The socket can also die after the headers arrived: undici then rejects `response.text()`
+    // with `TypeError: terminated` (cause UND_ERR_SOCKET). The request reached the provider, so
+    // only the idempotent reads are replayed (CodeRabbit PR #1656 finding 4431365241).
+    const terminatedBody = (): Response =>
+      ({
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        text: async () => {
+          throw Object.assign(new TypeError('terminated'), {
+            cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
+          });
+        },
+      }) as unknown as Response;
+    let terminatedReadCalls = 0;
+    const terminatedThenOkReadRuntime = new AgentCardOrgRuntime(undefined, async () => {
+      terminatedReadCalls += 1;
+      if (terminatedReadCalls === 1) return terminatedBody();
+      return new Response(JSON.stringify({ result: { structuredContent: { recoveries: [] } } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    assert.deepEqual(
+      await terminatedThenOkReadRuntime.callTool('list_recoveries', { limit: 100 }),
+      { structuredContent: { recoveries: [] } }
+    );
+    assert.equal(terminatedReadCalls, 2, 'a read whose body read was terminated must be replayed');
+
+    let terminatedMutationCalls = 0;
+    const terminatedMutationRuntime = new AgentCardOrgRuntime(undefined, async () => {
+      terminatedMutationCalls += 1;
+      return terminatedBody();
+    });
+    await assert.rejects(
+      () => terminatedMutationRuntime.callTool('recover_funds', { cardholder_id: 'ch-1' }),
+      (error: unknown) => error instanceof TypeError && error.message === 'terminated'
+    );
+    assert.equal(
+      terminatedMutationCalls,
+      1,
+      'a mutation whose body read was terminated must never be replayed (headers arrived)'
+    );
+
     // Non-throttle failures must never be retried — retrying a real error would multiply load.
     let hardFailureCalls = 0;
     const hardFailureRuntime = new AgentCardOrgRuntime(async () => {
