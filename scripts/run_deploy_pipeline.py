@@ -25,8 +25,18 @@ This supervisor only schedules lanes and writes one atomic receipt:
 Admission accounting (follow-up ah, measured on #1640, 2026-10-30). Two
 checks admit a pending lane. The startup budget (``memory_budget_mb``, the
 smaller of the plan's and the headroom at attempt start) caps the declared
-total of the running lanes plus the candidate; it is a static ceiling and
-never double-counts. The live check samples the host again and requires the
+total of the running lanes plus the candidate; it is a static ceiling that
+does not contain the running lanes' usage. Since follow-up PR-11 (#1658 round
+1, 2026-10-31) a phased candidate is charged, against that ceiling as well,
+only the unmaterialized declaration of each freshly observed running lane
+(``reserved_static_mb`` beside ``reserved_declared_mb`` in the waiting and
+admission records): the plan had sized the coverage lanes' workers one by one
+and their declarations with the smoke lane summed to 8758 MB against an 8755
+MB budget, so agents-coverage (1536 MB) waited ~18 min on reason ``budget``
+for backend-coverage to finish while live headroom had 157 MB to spare. An
+unobserved, stale or unknown lane, a disabled credit and an unphased
+candidate keep the whole declarations; the never-fits refusal is unchanged
+and the live check remains the binding bound. The live check samples the host again and requires the
 candidate to fit ``memory_budget_mb`` of that sample (MemAvailable and the
 watchdog cap, less the 2 GiB reserve). That headroom already contains what
 the running lanes use, so charging their whole declarations against it again
@@ -2843,6 +2853,7 @@ def _run_attempt(
                         pending[pending.index(lane)] = fitted
                         by_name[lane.name] = fitted
                         lane = fitted
+                static_reserved = reserved  # the static ceiling's charge for the running lanes
                 if budget_mb is not None:
                     if lane.memory_mb > budget_mb and running and fit_exclusive_lane(lane, budget_mb) is not None:
                         # An exclusive lane planned wider than this attempt's budget
@@ -2864,11 +2875,27 @@ def _run_attempt(
                             note=f"refused: needs {lane.memory_mb} MB, memory budget {budget_mb} MB",
                         )
                         continue
-                    if reserved + lane.memory_mb > budget_mb:
+                    # Follow-up PR-11 (#1658 round 1, 2026-10-31): the plan's
+                    # declarations may over-subscribe the start budget by a few
+                    # MB (smoke 4150 + backend 3072 + agents 1536 = 8758 vs 8755)
+                    # while the live check has room to spare; a phased candidate
+                    # therefore charges a freshly observed running lane only its
+                    # unmaterialized declaration here too. Unobserved lanes, a
+                    # disabled credit and unphased candidates keep whole
+                    # declarations; the live check below stays the binding bound.
+                    static_running: dict = {}
+                    if lane.name in credit_lanes and running_states:
+                        static_observations = classify_observations(running_states, credit_enabled)
+                        static_reserved = sum(unmaterialized_mb(by_name[name].memory_mb, static_observations[name][0])
+                                              for name in running_states)
+                        static_running = {name: {"memory_mb": by_name[name].memory_mb, **detail}
+                                          for name, (_, detail) in static_observations.items()}
+                    if static_reserved + lane.memory_mb > budget_mb:
                         # Admitted when running lanes release their declared share.
                         _record_waiting(receipt["lanes"][lane.name], {
                             "at": _now(), "budget_mb": budget_mb, "memory_mb": lane.memory_mb,
-                            "reserved_declared_mb": reserved}, "budget")
+                            "reserved_declared_mb": reserved, "reserved_static_mb": static_reserved,
+                            "running": static_running}, "budget")
                         continue
                 if pass_sample is None:
                     pass_sample = runtime_host_resources()
@@ -2884,8 +2911,9 @@ def _run_attempt(
                                      for name in running_states)
                 accounting = "unmaterialized" if lane.name in credit_lanes else "declared"
                 live_reserved = unmaterialized if accounting == "unmaterialized" else reserved
-                inputs = _admission_inputs(lane, headroom, budget_mb, reserved, live_reserved, accounting,
-                                           observations, by_name, credit_enabled)
+                inputs = {**_admission_inputs(lane, headroom, budget_mb, reserved, live_reserved, accounting,
+                                              observations, by_name, credit_enabled),
+                          "reserved_static_mb": static_reserved}
                 if headroom is None or live_reserved + lane.memory_mb > headroom:
                     if headroom is None and receipt["host_samples"][-1].get("error") != sample.get("error"):
                         receipt["host_samples"].append({"at": _now(), **sample, "headroom_mb": headroom})

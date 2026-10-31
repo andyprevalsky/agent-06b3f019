@@ -378,16 +378,19 @@ CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -v '^agents/benchmarks/histor
 # Each lane declares memory_mb; plan also derives a default --max-parallel
 # from cores and usable memory, capped at seven lanes. Structural --max-workers
 # is passed explicitly so its worker count matches its memory reservation.
-# Structural reserves 1024 MiB plus 1840 MiB per active suite: the recorded
-# 1471.98 MiB largest-child peak rounded up with a 25% margin for each worker.
+# Structural reserves a pinned 1.25x margin over its largest recorded
+# process-tree peak scaled to its width (3220 MiB at three workers); its width
+# is still sized by the 1840 MiB per-suite floor (1471.98 MiB largest child x1.25).
 # run reserves 2 GiB for other processes below both available memory and the
 # watchdog cap, rechecks whole-box headroom before every admission, and never
-# admits declared totals over the startup budget. Against live headroom, which
-# already contains what the running lanes use, a phased lane is charged only
-# their unmaterialized declarations (declared minus the lane's freshly sampled
+# admits unmaterialized declared totals over the startup budget. Against the
+# startup budget and against live headroom, which already contains what the
+# running lanes use, a phased lane is charged only the running lanes'
+# unmaterialized declarations (declared minus the lane's freshly sampled
 # anonymous process-tree PSS, Pss_Anon: file-backed pages are still counted in
 # MemAvailable); unphased lanes (semantic-stack) and unobserved usage keep
-# the declared sum (#1640: smoke waited 16 min on a double-counted 3712 MB).
+# the declared sum (#1640: smoke waited 16 min on a double-counted 3712 MB;
+# #1658 round 1: agents-coverage waited ~18 min on 8758 declared vs 8755).
 # A lane that cannot fit alone fails
 # visibly without starting. Explicit resource limits can only tighten memory
 # admission. Receipts include timestamped MemAvailable samples, per-lane child

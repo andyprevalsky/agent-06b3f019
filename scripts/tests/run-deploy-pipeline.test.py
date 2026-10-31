@@ -1679,6 +1679,136 @@ def check_exclusive_lane_defers_behind_stack_lane(tmp: Path, env: dict[str, str]
     print("exclusive lane defers behind the stack lane: ok")
 
 
+def check_static_ceiling_credits_observed_lanes(tmp: Path, env: dict[str, str]) -> None:
+    """Follow-up PR-11 (#1658 round 1, 2026-10-31): smoke 4150 + backend 3072
+    + agents 1536 = 8758 MB declared against an 8755 MB budget deferred
+    agents-coverage on reason ``budget`` for ~18 min although the live check
+    had 157 MB to spare. The static ceiling now charges a phased candidate
+    only the freshly observed running lanes' unmaterialized declarations;
+    unobserved lanes, a disabled credit and an unphased candidate keep the
+    whole declarations. Budget 150: holder (100) + joiner (60) exceed it
+    declared, but 100 - ~70 observed + 60 fit; live headroom (300) is never the
+    binding check here."""
+    if sys.platform != "linux":
+        print("static ceiling credit: skipped (Linux /proc sampling)")
+        return
+    pipeline = load_module("pipeline_static_credit", DRIVER)
+    marker = tmp / "static-holder-allocated"
+    plan = tmp / "static-credit-plan.json"
+    holder_command = [sys.executable, "-c",
+                      "import pathlib, time; block = b'x' * (60 * 1024 * 1024); "
+                      f"pathlib.Path({str(marker)!r}).touch(); time.sleep(5); del block"]
+
+    def write(group: str) -> None:
+        write_plan(plan, [
+            {"name": "gate", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 1},
+            {"name": "holder", "command": holder_command, "reuse_passed": False, "group": "3", "memory_mb": 100},
+            {"name": "joiner", "command": ["sleep", "0.2"], "after": ["gate"], "reuse_passed": False,
+             "group": group, "memory_mb": 60},
+        ], schedule={"policy": "legacy"})
+
+    def host() -> dict:
+        return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + 300}
+
+    def run(state: Path, extra_env: dict[str, str] | None = None) -> dict:
+        if marker.exists():
+            marker.unlink()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(pipeline, "host_resources", side_effect=host))
+            stack.enter_context(patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])))
+            stack.enter_context(patch.dict(os.environ, {**env, **(extra_env or {})}, clear=True))
+            result = pipeline.run(plan, state, max_parallel=0, budget_mb=150)
+        receipt = json.loads((state / "receipt.json").read_text())
+        assert result == 0 and receipt["status"] == "passed", (result, receipt["status"], receipt["lanes"])
+        assert receipt["memory_budget_mb"] == 150, receipt["memory_budget_mb"]
+        return receipt["lanes"]
+
+    write("3")
+    lanes = run(tmp / "static-credit")
+    holder, joiner = lanes["holder"], lanes["joiner"]
+    assert joiner["started_epoch"] < holder["finished_epoch"], \
+        "a phased candidate fits the budget beside the holder's unmaterialized reservation"
+    admission = joiner["admission"]
+    assert admission["decision"] == "admitted" and admission["budget_mb"] == 150, admission
+    assert admission["reserved_declared_mb"] == 100 and admission["reserved_static_mb"] < 60, admission
+    assert admission["reserved_live_mb"] < 60, "the same credit applies against live headroom"
+    deferred = admission.get("deferred")
+    if deferred:  # the holder was not yet observed when the gate finished
+        assert deferred["reason"] == "budget" and deferred["first"]["reserved_static_mb"] == 100, deferred
+        assert deferred["first"]["running"]["holder"]["observation"] in {"unknown", "stale"}, deferred
+
+    lanes = run(tmp / "static-credit-off", {"DEPLOY_ADMISSION_CREDIT": "0"})
+    holder, joiner = lanes["holder"], lanes["joiner"]
+    assert joiner["started_epoch"] >= holder["finished_epoch"], "with the credit disabled the whole declarations rule"
+    waited = joiner["admission"]["deferred"]
+    assert waited["reason"] == "budget" and waited["last"]["reserved_static_mb"] == 100, waited
+    assert waited["last"]["running"]["holder"]["observation"] == "disabled", waited
+
+    write("4")  # unphased candidate: declared-peak accounting, no credit
+    lanes = run(tmp / "static-credit-unphased")
+    assert lanes["joiner"]["started_epoch"] >= lanes["holder"]["finished_epoch"], lanes["joiner"]
+    assert lanes["joiner"]["admission"]["deferred"]["last"]["reserved_static_mb"] == 100, lanes["joiner"]["admission"]
+    print("static ceiling credit: ok")
+
+
+def check_recorded_budget_admits_coverage_beside_smoke(tmp: Path, env: dict[str, str]) -> None:
+    """The recorded #1658 round-1 shape on its 8755 MB budget: quick lanes,
+    smoke (stack, 4150) beside the exclusive structural lane (4293), then
+    backend-coverage (3072) and agents-coverage (1536) must run together while
+    smoke still runs: 4150 + 3072 + 1536 = 8758 declared exceeds the budget,
+    but smoke's observed usage leaves room under both ceilings."""
+    if sys.platform != "linux":
+        print("recorded budget coverage admission: skipped (Linux /proc sampling)")
+        return
+    pipeline = load_module("pipeline_recorded_budget", DRIVER)
+    plan = tmp / "recorded-budget-plan.json"
+    state = tmp / "recorded-budget"
+    smoke_command = [sys.executable, "-c",
+                     "import time; block = b'x' * (60 * 1024 * 1024); time.sleep(8); del block"]
+    write_plan(plan, [
+        {"name": "quick", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10},
+        {"name": "structural", "command": ["sleep", "0.6"], "reuse_passed": False, "group": "3", "exclusive": True,
+         "memory_mb": 4293},
+        {"name": "smoke", "command": smoke_command, "reuse_passed": False, "group": "4", "memory_mb": 4150,
+         "phase": "stack"},
+        {"name": "backend", "command": ["sleep", "3"], "reuse_passed": False, "group": "3", "memory_mb": 3072},
+        {"name": "agents", "command": ["sleep", "0.5"], "reuse_passed": False, "group": "3", "memory_mb": 1536},
+    ], schedule={"policy": "phased"})
+    ledger = tmp / "recorded-budget-ledger.json"
+    ledger.write_text(json.dumps({"schema_version": 1, "lanes": {
+        "quick": [{"wall_s": 5.0, "status": "passed", "concurrent": 3, "at": "2026-10-31T00:00:00Z"}],
+        "structural": [{"wall_s": 486.0, "status": "passed", "concurrent": 2, "at": "2026-10-31T00:00:00Z"}],
+        "backend": [{"wall_s": 1100.0, "status": "passed", "concurrent": 3, "at": "2026-10-31T00:00:00Z"}],
+        "agents": [{"wall_s": 1400.0, "status": "passed", "concurrent": 3, "at": "2026-10-31T00:00:00Z"}],
+        "smoke": [{"wall_s": 1600.0, "status": "passed", "concurrent": 2, "at": "2026-10-31T00:00:00Z"}],
+    }}))
+
+    def host() -> dict:
+        return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + 8755}
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(pipeline, "host_resources", side_effect=host))
+        stack.enter_context(patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])))
+        stack.enter_context(patch.dict(os.environ, {**env, "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}, clear=True))
+        result = pipeline.run(plan, state, max_parallel=0, budget_mb=8755)
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert result == 0 and receipt["status"] == "passed", (result, receipt["status"], receipt["lanes"])
+    assert receipt["memory_budget_mb"] == 8755, receipt["memory_budget_mb"]
+    kinds = [p["phase"] for p in receipt["schedule"]["phases"]]
+    assert kinds == ["quick", "stack", "exclusive", "coverage"], receipt["schedule"]["phases"]
+    lanes = receipt["lanes"]
+    structural, smoke, backend, agents = lanes["structural"], lanes["smoke"], lanes["backend"], lanes["agents"]
+    assert smoke["started_epoch"] < structural["finished_epoch"], "smoke runs beside the structural lane"
+    assert backend["started_epoch"] >= structural["finished_epoch"], "coverage waits for the exclusive lane"
+    assert agents["started_epoch"] < backend["finished_epoch"], "agents-coverage runs together with backend-coverage"
+    assert agents["started_epoch"] < smoke["finished_epoch"], "while the smoke stack still runs"
+    admission = agents["admission"]
+    assert admission["decision"] == "admitted" and admission["reserved_declared_mb"] == 4150 + 3072, admission
+    assert admission["reserved_static_mb"] + 1536 <= 8755 < admission["reserved_declared_mb"] + 1536, admission
+    assert admission["running"]["smoke"]["observation"] == "fresh", admission["running"]
+    print("recorded budget admits coverage beside smoke: ok")
+
+
 def main() -> int:
     global DRIVER
     with tempfile.TemporaryDirectory(prefix="deploy-pipeline-test-") as raw:
@@ -1817,6 +1947,8 @@ def main() -> int:
         check_declared_phase_lanes(tmp, env)
         check_stack_phase_lanes(tmp, env)
         check_exclusive_lane_defers_behind_stack_lane(tmp, env)
+        check_static_ceiling_credits_observed_lanes(tmp, env)
+        check_recorded_budget_admits_coverage_beside_smoke(tmp, env)
         check_recorded_peak_reservations()
         check_dependencies_through_unphased_lanes(tmp, env)
         check_simulate_legacy_plan_group3(tmp, env)
