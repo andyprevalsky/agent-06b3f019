@@ -104,6 +104,16 @@ An added active-policy test verifies denial cannot mint a receipt. All five case
 passed independently and in the root checkout (6.15 seconds). No runtime behavior
 or benchmark grade changed. A complete registered-gate pass remains unverified.
 
+A separate remaining-case run exposed a proxy fixture boundary: production now
+uses `exec flyctl`, which cannot invoke the fixtures' shell functions. The first
+loop was stopped after its captured log repeatedly reported the missing executable;
+that run is interrupted evidence, not an assertion failure. A qualification sibling
+hit its unchanged 20-second timeout. The fixtures now install an exact-argv local
+executable proxy double, retaining process lifetimes, cleanup and negative guards.
+Independent review passed all 56 related controls and verified all 41 recorded
+fixture owners were absent afterward. No production runtime or time limit changed.
+The complete registered gate is still required.
+
 The source-bound bootstrap fixture used a disposable local Git repository built
 from supplied source bytes, because its normal test machinery reads committed
 blobs. Those local commits are not historical 618430 ancestry. Initial attempts

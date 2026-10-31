@@ -1,5 +1,6 @@
 from benchmarks.cloudbench_campaign_workspace_test import copy_timeout_policy
 from benchmarks.fleet_aggregate_fixture import one_aggregate_tick
+from benchmarks.fixture_proxy_cli import install_proxy_cli
 import ast
 import base64
 import copy
@@ -4546,6 +4547,7 @@ def test_autoscaler_scale_down_cancels_pending_worker_contract_is_rejected(
     worker_id = "deadbeef000003"
     output = tmp_path / "oscillating-target"
     output.mkdir()
+    proxy_bin = install_proxy_cli(tmp_path, ["proxy", "5555:3003", "fd00::1", "-a", "test-app", "--bind-addr", "127.0.0.1", "-q"], 30)
     calls = tmp_path / "desired-calls"
     observed = tmp_path / "desired-observed"
     now = tmp_path / "clock"
@@ -4558,6 +4560,7 @@ def test_autoscaler_scale_down_cancels_pending_worker_contract_is_rejected(
     provisions.write_text("0\n")
 
     script = f"""set -u
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
 APP=test-app
 RUN_ID=test-run
 BOX_HEALTH_PORT=3003
@@ -4579,7 +4582,6 @@ _machine_priv_ip() {{ printf '%s\n' fd00::1; }}
 inventory_machine_exists() {{ return 0; }}
 release_autoscaler_metrics_owner() {{ return 0; }}
 claim_autoscaler_metrics_port() {{ printf -v "$1" '%s' 5555; }}
-flyctl() {{ /bin/sleep 30; }}
 curl() {{ return 0; }}
 fleet_job_running() {{ kill -0 "$1" 2>/dev/null; }}
 cloudbench_terminate_and_wait() {{
@@ -4667,10 +4669,13 @@ test -e "$OUT/autoscaler.completed-after-child"
         text=True,
         capture_output=True,
         check=False,
+        env={**os.environ, "PATH": str(proxy_bin) + os.pathsep + os.environ.get("PATH", ""),
+             "CLOUDBENCH_SHARED_RELAY_AUTHORITY": "", "CLOUDBENCH_SHARED_RELAY_DIRECTORY": ""},
         timeout=15,
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
+    assert (tmp_path / "proxy.commands").read_text().splitlines() == ["proxy 5555:3003 fd00::1 -a test-app --bind-addr 127.0.0.1 -q"]
     assert observed.read_text().splitlines()[:4] == ["2", "1", "2", "1"]
     assert observed.read_text().splitlines()[4:] == ["<invalid>", "1", "1", "1"]
     provision_count = int(provisions.read_text().strip())
@@ -6622,8 +6627,10 @@ def test_autoscaler_publishes_failure_when_readiness_reconcile_exits(
     """Startup must not collapse a silent autoscaler return into an opaque abort."""
     autoscaler = _extract_fleet_function(fleet_source_text(), "bench_autoscaler() {")
     out_dir = tmp_path / "bench"
+    proxy_bin = install_proxy_cli(tmp_path, ["proxy", "62345:3003", "fdaa::1", "-a", "test-app", "--bind-addr", "127.0.0.1", "-q"], 60)
     script = f"""
 set -uo pipefail
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
 APP=test-app
 RUN_ID=test-run
 AUTOSCALE_POLL=1
@@ -6644,7 +6651,6 @@ cloudbench_terminate_and_wait() {{
   done
 }}
 curl() {{ return 0; }}
-flyctl() {{ while :; do sleep 60; done; }}
 fleet_job_running() {{
   local pid="${{1:-}}"
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
@@ -6665,10 +6671,13 @@ grep -F "could not reconcile worker readiness outcomes" \\
         text=True,
         capture_output=True,
         check=False,
+        env={**os.environ, "PATH": str(proxy_bin) + os.pathsep + os.environ.get("PATH", ""),
+             "CLOUDBENCH_SHARED_RELAY_AUTHORITY": "", "CLOUDBENCH_SHARED_RELAY_DIRECTORY": ""},
         timeout=5,
     )
 
     assert result.returncode == 0, result.stderr
+    assert (tmp_path / "proxy.commands").read_text().splitlines() == ["proxy 62345:3003 fdaa::1 -a test-app --bind-addr 127.0.0.1 -q"]
 
 
 def test_autoscaler_stops_cleanly_when_its_benchmark_child_finishes(
@@ -29958,6 +29967,7 @@ def test_autoscaler_runtime_handoff_preserves_collection_and_capacity(
         "same_bearer_sibling",
         "wrong_auth",
     }
+    proxy_bin = install_proxy_cli(tmp_path, ["proxy", "62345:3003", "fdaa::1", "-a", "fixture-app", "--bind-addr", "127.0.0.1", "-q"], 120)
     source = fleet_source_text()
     q = shlex.quote
     expected_token = f["token"]
@@ -30001,6 +30011,7 @@ exit {child_exit}
     )
     desired = 2 if variant.startswith("pending_") else 1
     script = f"""set -uo pipefail
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
 APP=fixture-app
 RUN_ID=fixture-fleet
 AUTOSCALE_POLL=.05
@@ -30021,7 +30032,6 @@ cloudbench_terminate_and_wait() {{
         wait "$pid" 2>/dev/null || true
     done
 }}
-flyctl() {{ exec sleep 120; }}
 curl() {{
     case "$*" in *'/shutdown-health'*) command curl "$@"; return $? ;; esac
     case " $* " in *' -o /dev/null '*) return 0 ;; esac
@@ -30053,7 +30063,8 @@ reconcile_worker_failure_outcomes() {{
 bench_autoscaler fixture-task {q(expected_machine)} fixture-workspace 0 {q(str(out))} 61000 {q(expected_token)}
 """
     env = dict(f["env"])
-    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
+    env.update(CLOUDBENCH_SHARED_RELAY_AUTHORITY="", CLOUDBENCH_SHARED_RELAY_DIRECTORY="")
+    env["PATH"] = str(proxy_bin) + os.pathsep + str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
     with (tmp_path / "collector.log").open("w") as child_log, (tmp_path / "autoscaler.log").open("w") as scaler_log:
         processes = []
         try:
@@ -30118,6 +30129,7 @@ bench_autoscaler fixture-task {q(expected_machine)} fixture-workspace 0 {q(str(o
             if variant != "missing_child":
                 release.touch()
             scaler_rc = scaler.wait(timeout=10)
+            assert (tmp_path / "proxy.commands").read_text().splitlines() == ["proxy 62345:3003 fdaa::1 -a fixture-app --bind-addr 127.0.0.1 -q"]
             release.touch(exist_ok=True)
             assert child.wait(timeout=5) == child_exit
             assert (out / "benchmark-child.finished").read_text().strip() == str(child_exit)
