@@ -674,7 +674,14 @@ an enabler; dry-run with `python3 scripts/run_deploy_stage.py
 inert-equivalent PASSED record: every path changed since it is in the lane's
 declared inert set AND the change→test graph selects nothing in the lane
 (run_all, unmapped and never-inert paths force a rerun), and no newer failed
-head on an inert-equivalent tree vetoes it.
+head on an inert-equivalent tree vetoes it. The candidate may also come from
+an earlier timing run of the same `.context/deploy-runs/` root (same metadata
+`branch`, same invocation, passed head an ancestor of HEAD, record under 24 h —
+`DEPLOY_LANE_SCOPED_REUSE_MAX_AGE_SECONDS` may only lower it — read in place,
+never copied; failed heads from any such run still veto); the row's
+`detail.reuse` then carries `cross_run: true` with
+`passed_run_id`/`passed_run_dir`/`passed_record`, and the receipt lists the
+lane in `reused_scoped_cross_run_lanes` (`PIPELINE_VERIFY … cross_run=`).
 The row's `detail.reuse` and the receipt's `lane_scoped_reuse` /
 `reused_scoped_lanes` (`reconcile_reused_lane`; `PIPELINE_VERIFY …
 reused_scoped=`) carry the provenance. For most
@@ -1098,10 +1105,15 @@ exclusive structural lane instead of being admitted first and holding that
 lane's memory (#1638 attempt 5 ran smoke alone for ~22 min; 11–24 min across attempts); the AgentCard lane
 declares the same phase. Undeclared Group 4 lanes stay unphased, and a plan's
 own `after` edges are never removed: `live-probes` starts as soon as its
-declared dependencies and memory allow, and `semantic-stack` additionally
-waits for the stack-owning lanes (`smoke`, `agentcard-lifecycle`) because its
-`run.sh --benchmark` startup runs `kill-services.sh` against every runtime
-process this worktree owns; the driver adds those edges to the plan itself.
+declared dependencies and memory allow. `semantic-stack` keeps only its
+declared edges and may be admitted beside the stack-owning lanes (`smoke`,
+`agentcard-lifecycle`) whenever both whole declarations fit live headroom: its
+`run.sh --benchmark` startup/EXIT sweeps
+(`kill_stale_same_worktree_benchmark_stack`, `kill-services.sh`) spare every
+process of a live isolated run through its owner record, live manifest or the
+`BENCHMARK_RUN_ID` its processes carry (`scripts/tests/kill-services.test.sh`,
+`scripts/tests/run-isolated-cloud-kill.test.sh`). On a ~8 GB budget
+4096 + 4096 MB still defers semantic-stack until smoke releases its reservation.
 
 **Retry after a failure: failed-first, still a full sweep.** Rerun the same
 stage with `BACKEND_COVERAGE_FAILED_FIRST=1` in the `env` above. The previously
