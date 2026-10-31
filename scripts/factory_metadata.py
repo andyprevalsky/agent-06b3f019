@@ -5,8 +5,13 @@ from __future__ import annotations
 import json
 import math
 import os
-from datetime import datetime
+import re
+from datetime import datetime, timezone
 from pathlib import Path
+
+SNAPSHOT_MAX_BYTES = 65536
+SOURCE_SHA = re.compile(r"[0-9a-f]{40}")
+SELECTED_SNAPSHOT_ENV = "FACTORY_METADATA_FILE"
 
 # Null means unrecorded, never zero. Units are explicit in field names.
 FIELDS = {
@@ -93,7 +98,7 @@ def normalize_metadata(raw: dict) -> dict:
         raise ValueError("invalid metadata record_type")
     evidence = raw.get("evidence", {})
     if not isinstance(evidence, dict):
-        raise ValueError("invalid metadata evidence: expected field-to-source mapping")  # noqa: TRY004
+        raise ValueError("invalid metadata evidence: expected field-to-source mapping")
     known = {
         f"{section}.{name}" for section, fields in FIELDS.items() for name in fields
     }
@@ -137,12 +142,85 @@ def normalize_metadata(raw: dict) -> dict:
     return out
 
 
+def _read_snapshot(path: Path) -> dict:
+    data = path.read_bytes()
+    if len(data) > SNAPSHOT_MAX_BYTES:
+        raise ValueError("factory metadata exceeds 64 KiB")
+    raw = json.loads(data)
+    normalize_metadata(raw)  # fail closed before anything reads or rewrites it
+    return raw
+
+
 def load_metadata(path: str | Path | None = None) -> dict:
     """Only an explicitly selected JSON file is read; absent configuration is unknown."""
-    selected = path or os.environ.get("FACTORY_METADATA_FILE")
+    selected = path or os.environ.get(SELECTED_SNAPSHOT_ENV)
     if not selected:
         return normalize_metadata({})
-    data = Path(selected).read_bytes()
-    if len(data) > 65536:
-        raise ValueError("factory metadata exceeds 64 KiB")
-    return normalize_metadata(json.loads(data))
+    return normalize_metadata(_read_snapshot(Path(selected)))
+
+
+def refresh_snapshot(path: str | Path, *, head: str, producer: str, now: datetime | None = None) -> dict:
+    """Re-stamp a snapshot for a newly launched head and return it normalized.
+
+    ``observed_at`` becomes the refresh time and ``validation.source_sha`` the
+    caller's ``git rev-parse HEAD``, with evidence naming that command, the
+    producer and the time. Every other field and evidence entry is carried
+    forward unchanged: the launching session's configuration did not change
+    and nothing else was re-measured here, so nothing else is written. The
+    file must already be a valid allowlisted snapshot; an invalid file or a
+    retrospective record (which keeps its original observation) is rejected
+    unchanged, never repaired or created.
+    """
+    path = Path(path)
+    if not SOURCE_SHA.fullmatch(head):
+        raise ValueError("factory metadata source_sha must be a full 40-hex commit id")
+    raw = _read_snapshot(path)
+    if raw.get("record_type", "snapshot") != "snapshot":
+        raise ValueError("only snapshot records are refreshed; a retrospective keeps its observation")
+    observed = datetime.now(timezone.utc) if now is None else now
+    if observed.tzinfo is None:
+        raise ValueError("factory metadata refresh time must be timezone-aware")
+    stamp = observed.isoformat()
+    updated = dict(raw)
+    updated["observed_at"] = stamp
+    updated["validation"] = {**(raw.get("validation") or {}), "source_sha": head}
+    updated["evidence"] = {
+        **(raw.get("evidence") or {}),
+        "validation.source_sha": f"git rev-parse HEAD ({head}) read by {producer} at {stamp}",
+    }
+    normalized = normalize_metadata(updated)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(updated, indent=2) + "\n")
+    temporary.replace(path)
+    return normalized
+
+
+def refresh_selected_snapshot(head: str, *, producer: str, checkout: str | Path) -> dict:
+    """Refresh ``FACTORY_METADATA_FILE`` when it lives inside ``checkout``.
+
+    A snapshot describes the checkout it lives in. One elsewhere (another
+    deploy's worktree inherited through the environment, a test fixture) is
+    left alone and reported, so no sibling checkout or test can re-stamp a
+    live deploy's telemetry. Returns ``{"status", "path", "message"}`` with
+    status ``unset`` | ``missing`` | ``outside`` | ``refreshed`` (plus
+    ``telemetry`` when refreshed); an invalid snapshot raises ``ValueError``.
+    """
+    selected = os.environ.get(SELECTED_SNAPSHOT_ENV)
+    if not selected:
+        return {"status": "unset", "path": None,
+                "message": f"factory metadata: {SELECTED_SNAPSHOT_ENV} unset, nothing to refresh"}
+    path = Path(selected)
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        return {"status": "missing", "path": str(path),
+                "message": f"factory metadata: not refreshed, {path} is missing"}
+    try:
+        resolved.relative_to(Path(checkout).resolve())
+    except ValueError:
+        return {"status": "outside", "path": str(path),
+                "message": f"factory metadata: not refreshed, {path} is outside {checkout}"}
+    telemetry = refresh_snapshot(resolved, head=head, producer=producer)
+    return {"status": "refreshed", "path": str(path), "telemetry": telemetry,
+            "message": (f"factory metadata: refreshed {path} observed_at={telemetry['observed_at']} "
+                        f"source_sha={head}")}

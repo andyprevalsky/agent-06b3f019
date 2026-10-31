@@ -124,12 +124,16 @@ assert float(host.get("mem_available_min_mb") or 0) > 0 and float(host.get("mem_
 PY
 # Process identity is not a deploy input: systemd stamps a fresh
 # INVOCATION_ID/JOURNAL_STREAM/SYSTEMD_EXEC_PID on every transient unit and the
-# terminal its own geometry, so a lane relaunched as a new unit must still match
-# its own pass, while a changed gate input such as DEPLOY_GATE_OVERRIDES must not.
+# terminal its own geometry, and run_deploy_pipeline.py stamps every lane attempt
+# with a fresh DEPLOY_PIPELINE_LANE_TOKEN, so a lane relaunched as a new unit must
+# still match its own pass, while a changed gate input such as
+# DEPLOY_GATE_OVERRIDES must not.
 identity_counter="$TEST_ROOT/reuse-identity-counter"
 INVOCATION_ID=0123abcd JOURNAL_STREAM=8:1 SYSTEMD_EXEC_PID=11 COLUMNS=80 LISTEN_PID=11 \
+    DEPLOY_PIPELINE_LANE_TOKEN=identity.1.0123abcd \
     reuse_stage identity --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$identity_counter" >/dev/null
 INVOCATION_ID=4567ef01 JOURNAL_STREAM=8:2 SYSTEMD_EXEC_PID=22 COLUMNS=120 LISTEN_PID=22 \
+    DEPLOY_PIPELINE_LANE_TOKEN=identity.2.4567ef01 \
     reuse_stage identity --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$identity_counter" >"$TEST_ROOT/identity.out"
 [ "$(wc -l < "$identity_counter" | tr -d ' ')" = 1 ] \
     || fail "a new systemd unit identity defeated reuse of an identical pass"

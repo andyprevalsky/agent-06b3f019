@@ -2,10 +2,12 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from deploy_stage import append_stage, init_run
 from factory_ledger import encode_rows, event_rows, pending_rows, stage_rows
-from factory_metadata import load_metadata, normalize_metadata
+from factory_metadata import load_metadata, normalize_metadata, refresh_snapshot
 
 
 def sample():
@@ -34,7 +36,126 @@ def sample():
     }
 
 
+def launch_snapshot():
+    """A launcher's snapshot: the sample plus the head it was first written for."""
+    data = sample()
+    data["validation"] = {"source_sha": "deadbeef0"}
+    data["evidence"]["validation.source_sha"] = "stale launch"
+    return data
+
+
+def git_checkout(root: Path) -> Path:
+    """A private checkout running the real --start wrapper and its lifecycle
+    scripts, so refreshing never touches this repository's own snapshot."""
+    checkout = root / "checkout"
+    (checkout / "scripts").mkdir(parents=True)
+    for name in ("run-deploy-stage", "deploy_stage.py", "factory_metadata.py"):
+        shutil.copyfile(ROOT / "scripts" / name, checkout / "scripts" / name)
+    (checkout / ".gitignore").write_text(".context/\n__pycache__/\n")
+    git = ["git", "-C", str(checkout), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    subprocess.run([*git, "add", "."], check=True, capture_output=True)
+    subprocess.run([*git, "commit", "-qm", "fixture"], check=True, capture_output=True)
+    return checkout
+
+
 class FactoryMetadataTest(unittest.TestCase):
+    def test_start_refreshes_snapshot_for_launched_head(self):
+        """`run-deploy-stage --start` re-stamps the selected snapshot with the
+        head it launches (observed_at, validation.source_sha and that field's
+        evidence) and nothing else, so the run defaults carry the launched
+        head; a later head is re-stamped again. A snapshot outside the checkout
+        is reported and left alone; non-allowlisted keys refuse the run with
+        the file untouched. Until now a launcher patched the file by hand."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = git_checkout(root)
+            snapshot = checkout / ".context" / "factory-metadata.json"
+            snapshot.parent.mkdir()
+            original = launch_snapshot()
+            snapshot.write_text(json.dumps(original))
+            env = {**os.environ, "FACTORY_METADATA_FILE": str(snapshot), "DEPLOY_RUN_ROOT": str(root / "deploy-runs")}
+            wrapper = str(checkout / "scripts/run-deploy-stage")
+            git = ["git", "-C", str(checkout), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+
+            def head() -> str:
+                return subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+
+            def start(run_id: str, check: bool = True, **overrides: str) -> subprocess.CompletedProcess:
+                return subprocess.run(["bash", wrapper, "--start", "--run-id", run_id], env={**env, **overrides},
+                                      cwd=checkout, capture_output=True, text=True, check=check)
+
+            def finish() -> None:
+                subprocess.run(["bash", wrapper, "--finish"], env=env, cwd=checkout, check=True, capture_output=True)
+
+            first_head = head()
+            first = start("first")
+            self.assertIn(f"factory metadata: refreshed {snapshot}", first.stdout)
+            self.assertIn(f"source_sha={first_head}", first.stdout)
+            refreshed = json.loads(snapshot.read_text())
+            self.assertEqual(refreshed["validation"]["source_sha"], first_head)
+            self.assertIn(first_head, refreshed["evidence"]["validation.source_sha"])
+            self.assertIn("run-deploy-stage --start", refreshed["evidence"]["validation.source_sha"])
+            observed = datetime.fromisoformat(refreshed["observed_at"])
+            self.assertIsNotNone(observed.tzinfo)
+            self.assertGreater(observed, datetime.fromisoformat("2026-10-28T02:35:09+00:00"))
+            self.assertEqual(refreshed["execution"], original["execution"])
+            self.assertEqual(refreshed["usage"], original["usage"])
+            kept = {k: v for k, v in refreshed["evidence"].items() if k != "validation.source_sha"}
+            self.assertEqual(kept, {k: v for k, v in original["evidence"].items() if k != "validation.source_sha"})
+            self.assertEqual(set(refreshed), set(original) | {"schema_version", "record_type"} & set(refreshed))
+            self.assertEqual(load_metadata(snapshot)["validation"]["source_sha"], first_head)
+            run_metadata = json.loads((root / "deploy-runs/first/metadata.json").read_text())
+            self.assertEqual(run_metadata["telemetry"]["validation"]["source_sha"], first_head)
+            finish()
+            (checkout / "tracked").write_text("v2\n")
+            subprocess.run([*git, "add", "."], check=True, capture_output=True)
+            subprocess.run([*git, "commit", "-qm", "second"], check=True, capture_output=True)
+            second_head = head()
+            self.assertNotEqual(second_head, first_head)
+            start("second")
+            self.assertEqual(json.loads(snapshot.read_text())["validation"]["source_sha"], second_head)
+            finish()
+            elsewhere = root / "elsewhere-factory-metadata.json"
+            elsewhere.write_text(json.dumps(original))
+            before = elsewhere.read_bytes()
+            outside = start("third", FACTORY_METADATA_FILE=str(elsewhere))
+            self.assertIn("factory metadata: not refreshed", outside.stdout)
+            self.assertIn("outside", outside.stdout)
+            self.assertEqual(elsewhere.read_bytes(), before)
+            finish()
+            snapshot.write_text(json.dumps({**original, "api_key": "must-not-leak"}))
+            before = snapshot.read_bytes()
+            failed = start("fourth", check=False)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("factory metadata snapshot rejected", failed.stderr)
+            self.assertNotIn("must-not-leak", failed.stdout + failed.stderr)
+            self.assertEqual(snapshot.read_bytes(), before)
+            self.assertFalse((root / "deploy-runs/fourth").exists())
+
+    def test_refresh_rejects_retrospectives_bad_heads_and_naive_clocks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "snapshot.json"
+            path.write_text(json.dumps({**sample(), "record_type": "retrospective"}))
+            before = path.read_bytes()
+            with self.assertRaises(ValueError):
+                refresh_snapshot(path, head="a" * 40, producer="test")
+            self.assertEqual(path.read_bytes(), before)
+            path.write_text(json.dumps(sample()))
+            before = path.read_bytes()
+            for head in ("", "53dcec300", "G" * 40, "A" * 40):
+                with self.subTest(head=head), self.assertRaises(ValueError):
+                    refresh_snapshot(path, head=head, producer="test")
+            with self.assertRaises(ValueError):
+                refresh_snapshot(path, head="a" * 40, producer="test", now=datetime(2026, 10, 31, 12, 0))
+            self.assertEqual(path.read_bytes(), before)
+            fixed = datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc)
+            normalized = refresh_snapshot(path, head="a" * 40, producer="test", now=fixed)
+            self.assertEqual(normalized["observed_at"], fixed.isoformat())
+            self.assertEqual(normalized["validation"]["source_sha"], "a" * 40)
+            self.assertEqual(normalized["execution"]["model"], "test-model")
+            self.assertEqual(json.loads(path.read_text())["evidence"]["execution.model"], "fixture receipt")
+
     def test_unknown_is_not_zero_or_guessed_configuration(self):
         with patch.dict(os.environ, {}, clear=True):
             value = load_metadata()

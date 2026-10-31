@@ -20,7 +20,9 @@ from typing import Iterator, Sequence
 
 # Resolve the sibling module however this file is loaded (script, import, or by path).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-load_metadata = importlib.import_module("factory_metadata").load_metadata
+factory_metadata = importlib.import_module("factory_metadata")
+load_metadata = factory_metadata.load_metadata
+ROOT = Path(__file__).resolve().parents[1]
 
 ACTIVE_STATUSES = {"active", "finishing"}
 
@@ -135,10 +137,22 @@ def start_lifecycle(
     started_epoch: float,
     git_sha: str,
     branch: str,
-) -> None:
-    """Initialize a run and publish it only after the metadata is durable."""
+) -> dict:
+    """Initialize a run and publish it only after the metadata is durable.
+
+    The selected factory telemetry snapshot is re-stamped first with this
+    launch's head (``observed_at``, ``validation.source_sha``), so the run
+    defaults and every stage row carry the head actually launched; the
+    returned refresh report says whether and why not. An invalid snapshot
+    refuses the run before anything is written.
+    """
 
     _validate_identifier(run_id, "deploy run id")
+    try:
+        refresh = factory_metadata.refresh_selected_snapshot(
+            git_sha, producer="run-deploy-stage --start", checkout=ROOT)
+    except ValueError as error:
+        raise LifecycleError(f"factory metadata snapshot rejected, run not started: {error}") from error
     with _lifecycle_lock(run_root):
         current_path = run_root / "current"
         if current_path.exists():
@@ -164,6 +178,7 @@ def start_lifecycle(
         pointer = current_path.with_name(f".{current_path.name}.{os.getpid()}.tmp")
         pointer.write_text(f"{run_id}\n")
         pointer.replace(current_path)
+    return refresh
 
 
 def admit_stage(run_root: Path, *, token: str, pid: int) -> str:
@@ -537,7 +552,7 @@ def main() -> int:
     values.pop("command")
     try:
         if args.command == "lifecycle-start":
-            start_lifecycle(**values)
+            print(start_lifecycle(**values)["message"])
         elif args.command == "lifecycle-admit":
             print(admit_stage(**values))
         elif args.command == "lifecycle-release":
