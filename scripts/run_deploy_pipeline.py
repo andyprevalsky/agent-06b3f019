@@ -3026,7 +3026,11 @@ def cutover_verify(fly: dict, merged_sha: str, expected_hash: str, *, root: Path
             "expected_hash": expected_hash, "queue_read": "ok", "monitor_verify_exit": 0, "monitor_tail": tail}
 
 
-def _read_receipt(path: Path) -> object:
+def _read_production_receipt(path: Path) -> object:
+    """``production.json`` as parsed, whatever JSON it holds (its callers check
+    the shape themselves), or None when absent or invalid. Distinct from
+    ``_read_receipt`` above, which returns only a dict (the deploy-lane
+    ``receipt.json`` contract: a non-dict file reads as no receipt)."""
     try:
         return json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
@@ -3059,7 +3063,7 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
     # forget the semantic lane of the same merged SHA: its recorded run, the one
     # consumed retry and its GitHub waits are carried forward so a resumed watch
     # or `--retry-failed-once` binds to that run and a second retry stays refused.
-    previous = _read_receipt(receipt_path)
+    previous = _read_production_receipt(receipt_path)
     if isinstance(previous, dict) and previous.get("merged_sha") == merged_sha:
         for key in ("semantic", "semantic_history"):
             if key in previous:
@@ -3257,7 +3261,7 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
     error."""
     root = SOURCE_ROOT if root is None else root
     receipt_path = state_dir / PRODUCTION_RECEIPT
-    receipt = _read_receipt(receipt_path)
+    receipt = _read_production_receipt(receipt_path)
     if not isinstance(receipt, dict) or receipt.get("merged_sha") != merged_sha or receipt.get("status") != "passed":
         found = ("no receipt" if not isinstance(receipt, dict)
                  else f"receipt merged_sha={receipt.get('merged_sha')} status={receipt.get('status')}")

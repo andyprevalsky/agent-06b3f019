@@ -21,8 +21,10 @@ already in MemAvailable); unphased and unobserved lanes keep the declared sum.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import inspect
+import io
 import json
 import os
 import re
@@ -32,7 +34,7 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -1577,11 +1579,48 @@ def main() -> int:
         check_declared_phase_lanes(tmp, env)
         check_dependencies_through_unphased_lanes(tmp, env)
         check_simulate_legacy_plan_group3(tmp, env)
+        check_receipt_readers(tmp)
         check_production_fly_wait(tmp, env)
         check_production_semantic(tmp, env)
         check_semantic_workflow_source_sha()
     print("run-deploy-pipeline: all checks passed")
     return 0
+
+
+def check_receipt_readers(tmp: Path) -> None:
+    """The driver binds one definition per module-level name (Python keeps
+    the last ``def``: a second ``_read_receipt`` added with ``production-semantic``
+    once silently replaced the deploy-lane reader for every earlier caller),
+    and the two receipt readers keep their distinct contracts: ``_read_receipt``
+    (``receipt.json``) returns a dict or None, so ``verify`` reports a non-dict
+    file as no receipt instead of crashing; ``_read_production_receipt``
+    (``production.json``) returns whatever JSON the file holds."""
+    seen: dict[str, int] = {}
+    for node in ast.parse(DRIVER.read_text()).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            assert node.name not in seen, f"{DRIVER.name} defines {node.name} twice (lines {seen[node.name]} and {node.lineno})"
+            seen[node.name] = node.lineno
+    assert {"_read_receipt", "_read_production_receipt"} <= seen.keys(), sorted(seen)
+    pipeline = load_module("pipeline_receipt_readers", DRIVER)
+    receipts = tmp / "receipt-readers"
+    receipts.mkdir()
+    (receipts / "list.json").write_text("[1, 2]\n")
+    (receipts / "dict.json").write_text('{"status": "passed"}\n')
+    (receipts / "broken.json").write_text("{\n")
+    assert pipeline._read_receipt(receipts / "list.json") is None, "receipt.json must read as a dict or nothing"
+    assert pipeline._read_production_receipt(receipts / "list.json") == [1, 2], "production.json reads as parsed"
+    assert pipeline._read_receipt(receipts / "dict.json") == {"status": "passed"}
+    assert pipeline._read_production_receipt(receipts / "dict.json") == {"status": "passed"}
+    for name in ("broken.json", "missing.json"):
+        assert pipeline._read_receipt(receipts / name) is None and pipeline._read_production_receipt(receipts / name) is None, name
+    state = receipts / "verify-state"
+    state.mkdir()
+    (state / "receipt.json").write_text("[]\n")
+    out = io.StringIO()
+    with redirect_stdout(out):
+        code = pipeline.verify(state)
+    assert code == 2 and "PIPELINE_VERIFY status=no-receipt exit=2" in out.getvalue(), (code, out.getvalue())
+    print("receipt readers: ok")
 
 
 def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
