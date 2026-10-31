@@ -340,17 +340,40 @@ resolve_frontend_dist_dir() {
 # grace timer) skips that, so the stack watches its owner: RUN_SH_OWNER_PID plus
 # RUN_SH_OWNER_START (/proc start time) guard against PID reuse.
 stack_owner_process_gone() {
-    local pid="${RUN_SH_OWNER_PID:-}" expected="${RUN_SH_OWNER_START:-}" stat start
+    local pid="${RUN_SH_OWNER_PID:-}" expected="${RUN_SH_OWNER_START:-}" stat fields
     [ -n "$pid" ] || return 1
     if [ -r "/proc/$pid/stat" ]; then
-        [ -n "$expected" ] || return 1
         stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 0
-        start=$(printf '%s\n' "${stat##*) }" | awk '{print $20}')
-        [ "$start" = "$expected" ] && return 1
+        fields="${stat##*) }"
+        # A killed but not yet reaped owner (zombie) is gone.
+        [ "${fields%% *}" = Z ] && return 0
+        [ -n "$expected" ] || return 1
+        [ "$(printf '%s\n' "$fields" | awk '{print $20}')" = "$expected" ] && return 1
         return 0
     fi
     kill -0 "$pid" 2>/dev/null && return 1
     return 0
+}
+
+# Runs from the moment the service cleanup trap exists (service start, builds,
+# tunnels and steady state): TERM this script through its normal teardown once
+# the owner is gone. Bootstrap before that point is checked once at install.
+start_stack_owner_watch() {
+    [ -n "${RUN_SH_OWNER_PID:-}" ] || return 0
+    local stack_pid=$$
+    (
+        trap - EXIT HUP INT TERM
+        while kill -0 "$stack_pid" 2>/dev/null; do
+            if stack_owner_process_gone; then
+                echo ""
+                echo "⚠️  Stack owner PID $RUN_SH_OWNER_PID exited without stopping this stack — shutting down all services."
+                kill -TERM "$stack_pid" 2>/dev/null
+                exit 0
+            fi
+            sleep 1
+        done
+    ) &
+    STACK_OWNER_WATCH_PID=$!
 }
 
 if [ "${RUN_SH_SOURCE_ONLY:-false}" = "true" ]; then
@@ -2710,6 +2733,7 @@ cleanup() {
 }
 trap 'release_seed_lock_if_held; cleanup' EXIT
 run_install_teardown_signal_traps
+start_stack_owner_watch
 
 # Wrapper: run a service and write its exit code to a temp file on failure
 FAIL_DIR=$(mktemp -d)
@@ -3078,14 +3102,6 @@ fi
 # Poll for failed children every second
 while true; do
     if $SHUTTING_DOWN; then break; fi
-
-    if stack_owner_process_gone; then
-        echo ""
-        echo "⚠️  Stack owner PID $RUN_SH_OWNER_PID exited without stopping this stack — shutting down all services."
-        cleanup
-        rm -rf "$FAIL_DIR"
-        exit 143
-    fi
 
     # Check if any process has died
     for i in "${!PIDS[@]}"; do
