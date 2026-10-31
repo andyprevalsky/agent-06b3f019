@@ -75,12 +75,10 @@ credit, so its declaration plus the running lanes' whole declarations must
 fit live headroom. Every decision is kept on the lane for audit: ``admission``
 (``admitted``/``refused`` with headroom, budget, declared and live
 reservations, the running lanes with their observed usage, and the deferral
-history) and ``waiting`` while deferred. The smoke lane stays at 4096 MB: the
-only window in which it ran with idle siblings (#1639 attempt 1, 14:28-14:41Z,
-backend/agents idle at 66/126 MB) measured a whole-box footprint of 3492 MB
-median / 4905 MB peak, so it is not shown to be over-declared; right-size from
-recorded ``tree_peak_anon_mb`` / ``tree_peak_pss_mb`` once passed runs carry
-them.
+history) and ``waiting`` while deferred. The smoke lane reserves a pinned
+1.25x margin over its largest recorded process-tree peak (3319.4 MB
+``tree_peak_pss_mb`` on the 20261031-115354 attempt; ``SMOKE_RECORDED_TREE_PEAK_MB``,
+re-pin when a receipt exceeds it): 4150 MB.
 
   With ``--follow-source`` the supervisor keeps hashing the source while lanes
   run. Once a change has settled (``--settle-seconds`` without further edits)
@@ -184,15 +182,15 @@ a phase. ``"phase": "coverage"`` joins the coverage phase (after the quick
 and exclusive phases) instead of starting at attempt start. ``"phase":
 "stack"`` is admitted right after the quick phase, beside the exclusive lane
 whenever both declarations fit the budget, and no later phase waits for it.
-The 4096 MB local smoke lane declares ``stack`` (follow-up lane-memory-b,
+The 4150 MB local smoke lane declares ``stack`` (follow-up lane-memory-b,
 2026-10-31): unphased and admitted first it had held the memory the
 structural lane needed (6544 MB of a 7752 MB budget; #1638 attempt 5 ran
 smoke alone for ~22 min), and in the coverage phase it waited the whole 9-10
 min exclusive phase on every round although the structural lane's process
 tree never exceeded 2575 MB (19 recorded attempts). With the lane declared at
 its recorded peak x1.25 (3220 MB at three workers) the two fit the recorded
-7979 MB budget together (7316 MB), the coverage lanes (2560 + 1152 MB) still
-wait for the exclusive phase (7316 + 2560 > 7979), and beside
+7979 MB budget together (7370 MB), the coverage lanes (2560 + 1152 MB) still
+wait for the exclusive phase (7370 + 2560 > 7979), and beside
 backend-coverage-blackbox the smoke lane fits the budget afterwards. A plan
 with ``"schedule": {"policy": "legacy"}`` keeps the previous all-at-once
 admission.
@@ -212,8 +210,8 @@ its processes carries (``scripts/tests/kill-services.test.sh``,
 ``STACK_KILLER_LANES`` lane to every ``STACK_OWNER_LANES`` lane
 (``implied_stack_dependencies``: kept for a lane whose sweep is not run-scoped;
 ``STACK_KILLER_LANES`` is now empty and declared edges are always kept), which
-held semantic-stack back behind the whole smoke lane every round. The two
-4096 MB declarations still have to fit together: against this devbox's budget
+held semantic-stack back behind the whole smoke lane every round. The 4150
+and 4096 MB declarations still have to fit together: against this devbox's budget
 (7998 MB on the 2026-10-31 speed-followup-6 attempt, 8188 MB on #1640)
 admission defers semantic-stack until smoke releases its reservation, with the
 declarations unchanged; a freer or larger host admits them side by side.
@@ -353,6 +351,11 @@ STRUCTURAL_CHILD_PEAK_MB = 1471.98
 STRUCTURAL_RECORDED_TREE_PEAK_MB = 2575.4
 STRUCTURAL_RECORDED_WORKERS = 3
 LANE_PEAK_MARGIN = 1.25
+# Local smoke lane: largest recorded process-tree peak (3319.4 MB on the
+# 20261031-115354 attempt, lanes[].tree_peak_pss_mb); re-pin when a receipt
+# exceeds it. The AgentCard lifecycle lane (its own run-bench --local stack,
+# no recorded peak yet) declares the same reservation.
+SMOKE_RECORDED_TREE_PEAK_MB = 3319.4
 # Kept free for the agent harness, the Docker DB and the 15 GB memory watchdog.
 MEMORY_RESERVE_MB = 2048
 DEFAULT_LANE_MEMORY_MB = 1024
@@ -518,6 +521,12 @@ def structural_lane_memory_mb(workers: int) -> int:
         raise ValueError("structural lane width must be positive")
     scaled = STRUCTURAL_RECORDED_TREE_PEAK_MB * workers / STRUCTURAL_RECORDED_WORKERS
     return int(math.ceil(LANE_PEAK_MARGIN * max(scaled, STRUCTURAL_CHILD_PEAK_MB)))
+
+
+def smoke_lane_memory_mb() -> int:
+    """Declared reservation of the local smoke stack: LANE_PEAK_MARGIN over its
+    largest recorded process-tree peak (4150 MB)."""
+    return int(math.ceil(LANE_PEAK_MARGIN * SMOKE_RECORDED_TREE_PEAK_MB))
 
 
 def structural_workers_within(available_mb: int, planned: int) -> int:
@@ -3350,12 +3359,12 @@ def standard_plan(args: argparse.Namespace) -> dict:
             lane("smoke", ["bash", "scripts/run-predeploy-cloud"], group="4", memory_mb=1024)
         elif args.smoke == "local":
             # Stack phase: starts after the quick lanes beside the exclusive
-            # structural lane (3220 + 4096 MB fit a ~8 GB budget; admitted
-            # first and unphased, this 4096 MB stack once held the memory the
+            # structural lane (3220 + 4150 MB fit a ~8 GB budget; admitted
+            # first and unphased, this stack (then 4096 MB) once held the memory the
             # 6544 MB lane needed, #1638: smoke-only for 13-23 min). The
             # coverage lanes never wait for it; beside backend-coverage-
             # blackbox (2560 MB) it fits the budget afterwards.
-            lane("smoke", ["bash", "scripts/run-predeploy-local"], group="4", memory_mb=4096,
+            lane("smoke", ["bash", "scripts/run-predeploy-local"], group="4", memory_mb=smoke_lane_memory_mb(),
                  phase=PHASE_STACK)
         if args.agentcard:
             # Alongside smoke, never after it: its own isolated local stack in
@@ -3367,7 +3376,7 @@ def standard_plan(args: argparse.Namespace) -> dict:
                      "BENCHMARK_ATTEMPT_SUITE": "predeploy",
                      "BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY": "0",
                      "BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1",
-                 }, reuse_passed=False, memory_mb=4096, phase=PHASE_STACK)
+                 }, reuse_passed=False, memory_mb=smoke_lane_memory_mb(), phase=PHASE_STACK)
     for entry in lanes:
         if entry["group"] == "4":
             entry.setdefault("reuse_passed", False)

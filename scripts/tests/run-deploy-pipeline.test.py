@@ -26,6 +26,7 @@ import importlib.util
 import inspect
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -1493,7 +1494,7 @@ def check_scoped_inert_tables() -> None:
 # on each lane, ``memory_mb`` its declaration). Recorded, never estimated.
 RECORDED_LANE_PEAK_PSS_MB = {
     "deploy-command-structural": 2575.4,   # 19 samples, 3 workers
-    "smoke": 3170.3,                       # 13 samples
+    "smoke": 3319.4,                       # 14 samples; 20261031-115354 receipt (deploy 9 round 2)
     "agents-coverage-blackbox": 743.1,     # 15 samples
     "eslint": 1857.8,                      # 19 samples
     "typescript": 1553.3,                  # 19 samples
@@ -1533,6 +1534,7 @@ def check_recorded_peak_reservations() -> None:
     assert checked == len(RECORDED_LANE_PEAK_PSS_MB) - len(KNOWN_UNDER_DECLARED_LANES)
     structural, smoke = lanes["deploy-command-structural"], lanes["smoke"]
     assert structural["memory_mb"] == 3220 and structural["exclusive"] is True, structural
+    assert smoke["memory_mb"] == 4150 == math.ceil(1.25 * 3319.4), smoke
     assert structural["memory_mb"] + smoke["memory_mb"] <= plan["memory_budget_mb"], \
         "the right-sized structural lane and the smoke lane fit the recorded budget together"
     assert structural["memory_mb"] + smoke["memory_mb"] + lanes["backend-coverage-blackbox"]["memory_mb"] \
@@ -1550,7 +1552,7 @@ def check_stack_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
     declarations fit the budget, no later phase waits for it, and the
     coverage lanes still wait for the exclusive lane. Values mirror the
     recorded plan at 1/40 scale: budget 200 = 7979, structural 80 = 3220,
-    smoke 102 = 4096, cov 64 = 2560 (80 + 102 fit; 80 + 102 + 64 do not)."""
+    smoke 104 = 4150, cov 64 = 2560 (80 + 104 fit; 80 + 104 + 64 do not)."""
     def sample(wall: float, concurrent: int) -> dict:
         return {"wall_s": wall, "status": "passed", "concurrent": concurrent, "at": "2026-10-31T00:00:00Z"}
 
@@ -1569,7 +1571,7 @@ def check_stack_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
         {"name": "cov", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 64},
         # Long enough that quick -> big -> cov -> probe -> semantic (five admission
         # passes) still end inside it on a loaded host.
-        {"name": "smoke", "command": ["sleep", "4"], "reuse_passed": False, "group": "4", "memory_mb": 102,
+        {"name": "smoke", "command": ["sleep", "4"], "reuse_passed": False, "group": "4", "memory_mb": 104,
          "phase": "stack"},
         {"name": "probe", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10,
          "after": ["big", "cov"]},
@@ -1607,7 +1609,7 @@ def check_stack_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
     receipt = json.loads((tight / "receipt.json").read_text())
     assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr)
     big, smoke = receipt["lanes"]["big"], receipt["lanes"]["smoke"]
-    assert big.get("note") is None, "no resize: 80 fits 150"
+    assert big.get("note") is None, "no resize: 80 fits 150; 80 + 104 does not"
     assert smoke["started_epoch"] >= big["finished_epoch"], "smoke waits for the exclusive lane's release"
     assert smoke["admission"]["deferred"]["reason"] == "budget", smoke["admission"]
     print("stack phase lanes: ok")
@@ -3977,8 +3979,9 @@ def check_declared_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
     # the AgentCard lifecycle lane (check_stack_phase_lanes); the cloud smoke
     # lane stays unphased.
     local = {lane["name"]: lane for lane in plan_json("--group", "4", "--smoke", "local", "--agentcard")["lanes"]}
-    assert local["smoke"]["phase"] == "stack" and local["smoke"]["memory_mb"] == 4096, local["smoke"]
-    assert local["agentcard-lifecycle"]["phase"] == "stack", local["agentcard-lifecycle"]
+    assert local["smoke"]["phase"] == "stack" and local["smoke"]["memory_mb"] == 4150, local["smoke"]
+    assert local["agentcard-lifecycle"]["phase"] == "stack" and local["agentcard-lifecycle"]["memory_mb"] == 4150, \
+        local["agentcard-lifecycle"]
     cloud = {lane["name"]: lane for lane in plan_json("--group", "4", "--smoke", "cloud")["lanes"]}
     assert not cloud["smoke"].get("phase"), cloud["smoke"]
     phased_plan = plan_json("--group", "all", "--backend", "--smoke", "local", "--schedule", "phased")

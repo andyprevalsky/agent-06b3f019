@@ -1118,18 +1118,22 @@ database) the shards still run: shard `i/N` owns the derived
 (`back-end/scripts/coverage-database-url.mjs`), so never substitute the
 unsharded `npm run test:coverage` there; the 2026-10-29 deploy did and paid
 a 1,505 s single sweep. `run_deploy_pipeline.py plan` emits the sharded
-command, phases Group 3 (quick lanes → `deploy-command-structural` alone at
-full budget-backed width → the coverage lanes together, longest recorded
+command, phases Group 3 (quick lanes → `deploy-command-structural` alone among
+the Group 3 lanes at full budget-backed width → the coverage lanes together, longest recorded
 first) from `.context/deploy-durations/pipeline-lanes.json`, and
 `run_deploy_pipeline.py simulate --plan <plan> --legacy-plan <plan --schedule legacy>`
 projects the union wall from the same ledger (plus a `group3` block for the
-Group 3 lanes alone). The local smoke lane (Group 4, 4096 MB) declares
+Group 3 lanes alone). The local smoke lane (Group 4, 4150 MB: a pinned 1.25x
+margin over its largest recorded 3319 MB process-tree peak;
+`SMOKE_RECORDED_TREE_PEAK_MB`) declares
 `"phase": "stack"` in the plan: it is admitted right after the quick lanes
-beside the exclusive structural lane, which now reserves its recorded
-process-tree peak x1.25 (3220 MB at three workers; 19 attempts peaked at
-2428–2575 MB while 6544 MB was declared), so 3220 + 4096 MB fit the ~8 GB
+beside the exclusive structural lane, which now reserves a pinned 1.25x margin
+over the largest recorded process-tree peak (2575 MB over 19 passed
+three-worker attempts in the 2026-10-30/31 receipts;
+`STRUCTURAL_RECORDED_TREE_PEAK_MB`, re-pin when a receipt exceeds it) — 3220 MB
+at three workers, down from 6544 —, so 3220 + 4150 MB fit the ~8 GB
 budget together, and no later phase waits for it: the coverage lanes still
-wait for the exclusive lane, and beside `backend-coverage-blackbox` (4096 +
+wait for the exclusive lane, and beside `backend-coverage-blackbox` (4150 +
 2560 MB) smoke fits the budget afterwards. Admitted first and unphased, the
 smoke lane had held the memory the structural lane needed (#1638 attempt 5
 ran smoke alone for ~22 min; 11–24 min across attempts); in the coverage
@@ -1144,7 +1148,7 @@ declared edges and may be admitted beside the stack-owning lanes (`smoke`,
 process of a live isolated run through its owner record, live manifest or the
 `BENCHMARK_RUN_ID` its processes carry (`scripts/tests/kill-services.test.sh`,
 `scripts/tests/run-isolated-cloud-kill.test.sh`). On a ~8 GB budget
-4096 + 4096 MB still defers semantic-stack until smoke releases its reservation.
+4150 + 4096 MB still defers semantic-stack until smoke releases its reservation.
 
 **Retry after a failure: failed-first, still a full sweep.** Rerun the same
 stage with `BACKEND_COVERAGE_FAILED_FIRST=1` in the `env` above. The previously
