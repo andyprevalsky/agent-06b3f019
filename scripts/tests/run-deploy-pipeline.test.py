@@ -1842,8 +1842,12 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     ``--retry-failed-once`` and refuses a second retry. Re-running the Fly
     gate (``production``) for the same SHA carries the semantic lane forward,
     and a run left ``in_progress`` by a CLI-side timeout is resumed, never
-    re-dispatched. gh is a fake executable on PATH; the receipt the Fly gate
-    writes is required first."""
+    re-dispatched. A dispatch gh confirmed but whose run was never adopted (a
+    failed ``gh run list`` or a discovery timeout) is recorded as
+    ``dispatched`` and resumed by the next call, which adopts its run without
+    a second ``workflow run``; only a confirmed dispatch older than the resume
+    window with still no run is abandoned and dispatched anew. gh is a fake
+    executable on PATH; the receipt the Fly gate writes is required first."""
     repo = tmp / "semantic-source"
     repo.mkdir()
     scripts = repo / "scripts"
@@ -1872,7 +1876,8 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
         'echo "$*" >> "$FAKE_GH_DIR/calls.log"\n'
         'case "$1 $2" in\n'
         '  "workflow run") [ -f "$FAKE_GH_DIR/dispatch-fail" ] && { echo "HTTP 422: Unexpected inputs provided" >&2; exit 1; }; exit 0 ;;\n'
-        '  "run list") n=$(cat "$FAKE_GH_DIR/list-count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE_GH_DIR/list-count"\n'
+        '  "run list") [ -f "$FAKE_GH_DIR/list-fail" ] && { echo "HTTP 502: Bad Gateway" >&2; exit 1; }\n'
+        '    n=$(cat "$FAKE_GH_DIR/list-count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE_GH_DIR/list-count"\n'
         '    f="$FAKE_GH_DIR/list-$n.json"; [ -f "$f" ] || f="$FAKE_GH_DIR/list-last.json"; cat "$f" ;;\n'
         '  "run rerun") [ -f "$FAKE_GH_DIR/rerun-fail" ] && { echo "HTTP 403: Resource not accessible by integration" >&2; exit 1; }\n'
         '    touch "$FAKE_GH_DIR/rerun-done"; exit 0 ;;\n'
@@ -2110,12 +2115,21 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     assert len([line for line in lines if line.startswith("run list")]) >= 2, lines
     receipt = receipt_of(state7)
     assert receipt["semantic"]["outcome"] == "failed" and receipt["semantic"]["run_id"] is None, receipt["semantic"]
+    assert receipt["semantic"]["status"] == "dispatched", "gh confirmed the dispatch: it must be recorded"
     assert receipt["github_waits"][-1] == {**receipt["github_waits"][-1], "kind": "run-start", "outcome": "timeout",
                                            "workflow": "chat-lifecycle-ratchet.yml"}, receipt["github_waits"]
-    # Without a recorded run there is nothing to resume: the next call dispatches.
+    assert "it resumes this dispatch for 900s before dispatching again" in ran.stdout, ran.stdout
+    # The confirmed dispatch is resumed: the next call looks for its run and
+    # adopts it without a second `workflow run` (the gate would run twice).
+    dispatch7 = receipt["semantic"]["dispatch"]
     reset([[ours]], [view("completed", "success", 1, all_success)])
     ran = run_semantic(state7)
-    assert ran.returncode == 0 and call_lines()[0].startswith("workflow run"), (ran.stdout, call_lines())
+    assert ran.returncode == 0 and f"PIPELINE_SEMANTIC resume dispatch at={dispatch7['at']}" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert lines[0].startswith("run list") and not any(line.startswith("workflow run") for line in lines), lines
+    receipt = receipt_of(state7)
+    assert receipt["semantic"]["run_id"] == "200" and receipt["semantic"]["outcome"] == "passed", receipt["semantic"]
+    assert receipt["semantic"]["dispatch"] == dispatch7 and "semantic_history" not in receipt, receipt
 
     # 8. The dispatch itself fails (e.g. main's workflow lacks the input): exit 1
     #    with gh's message, no discovery.
@@ -2195,8 +2209,86 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     ran = run_semantic(state12, "--retry-failed-once", "again")
     assert ran.returncode == 2 and call_lines() == [], (ran.stdout, call_lines())
 
+    # 13. `gh run list` fails right after a confirmed dispatch: exit 1 with the
+    #     dispatch recorded (status dispatched, run_id null, inputs); the next
+    #     call adopts that dispatch's run without a second `workflow run`.
+    state13 = tmp / "semantic-state-13"
+    run_gate(state13)
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    (fake / "list-fail").touch()
+    ran = run_semantic(state13)
+    assert ran.returncode == 1 and "Bad Gateway" in ran.stdout and "SEMANTIC_LANE_END " in ran.stdout, ran.stdout
+    assert [line.split()[0:2] for line in call_lines()] == [["workflow", "run"], ["run", "list"]], call_lines()
+    entry = receipt_of(state13)["semantic"]
+    assert entry["status"] == "dispatched" and entry["run_id"] is None and entry["outcome"] == "failed", entry
+    assert entry["dispatch"]["at"] and entry["dispatch"]["inputs"] == {
+        "source_sha": merged, "frontend_url": "https://www.roselabs.ai", "backend_url": "https://navi-j9a9.onrender.com"}, entry
+    dispatch13 = entry["dispatch"]
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state13)
+    assert ran.returncode == 0 and f"PIPELINE_SEMANTIC resume dispatch at={dispatch13['at']}" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert lines[0].startswith("run list") and not any(line.startswith("workflow run") for line in lines), lines
+    assert "SEMANTIC_RUN_ID=200" in ran.stdout and "PIPELINE_SEMANTIC status=passed exit=0 run=200" in ran.stdout, ran.stdout
+    receipt = receipt_of(state13)
+    entry = receipt["semantic"]
+    assert entry["outcome"] == "passed" and entry["run_id"] == "200" and entry["status"] == "completed", entry
+    assert entry["dispatch"] == dispatch13 and "semantic_history" not in receipt, receipt
+    assert [(w["kind"], w["outcome"]) for w in semantic_waits(receipt)] == [("run-start", "found"), ("run-complete", "completed")], semantic_waits(receipt)
+
+    # 14. A confirmed dispatch older than the resume window gets one more
+    #     query: its run, when listed, is adopted (14a); with no run it is
+    #     abandoned to semantic_history and the gate is dispatched anew (14b).
+    stale_at = (datetime.now(timezone.utc) - timedelta(minutes=16)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def stale_dispatch(state: Path) -> None:
+        run_gate(state)
+        reset([[ours]], [view("completed", "success", 1, all_success)])
+        (fake / "list-fail").touch()
+        assert run_semantic(state).returncode == 1
+        receipt = receipt_of(state)
+        assert receipt["semantic"]["status"] == "dispatched", receipt["semantic"]
+        receipt["semantic"]["dispatch"]["at"] = stale_at
+        (state / "production.json").write_text(json.dumps(receipt))
+
+    state14a = tmp / "semantic-state-14a"
+    stale_dispatch(state14a)
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state14a)
+    assert ran.returncode == 0 and f"resume dispatch at={stale_at}" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert lines[0].startswith("run list") and not any(line.startswith("workflow run") for line in lines), lines
+    receipt = receipt_of(state14a)
+    assert receipt["semantic"]["run_id"] == "200" and receipt["semantic"]["dispatch"]["at"] == stale_at, receipt["semantic"]
+    assert "semantic_history" not in receipt and "abandoning" not in ran.stdout, (receipt, ran.stdout)
+
+    state14b = tmp / "semantic-state-14b"
+    stale_dispatch(state14b)
+    reset([[old_same, decoy], [ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state14b)
+    assert ran.returncode == 0 and f"dispatch at={stale_at} is older than 900s with no run: abandoning it and dispatching again" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert [line.split()[0:2] for line in lines[:3]] == [["run", "list"], ["workflow", "run"], ["run", "list"]], lines
+    assert len([line for line in lines if line.startswith("workflow run")]) == 1, lines
+    receipt = receipt_of(state14b)
+    entry = receipt["semantic"]
+    assert entry["run_id"] == "200" and entry["outcome"] == "passed" and entry["dispatch"]["at"] != stale_at, entry
+    history = receipt["semantic_history"]
+    assert len(history) == 1 and history[0]["status"] == "dispatched" and history[0]["run_id"] is None, history
+    assert history[0]["dispatch"]["at"] == stale_at and history[0]["outcome"] == "abandoned", history
+    assert [w["outcome"] for w in semantic_waits(receipt) if w["kind"] == "run-start"][-2:] == ["abandoned", "found"], semantic_waits(receipt)
+
     # Selection rule in-process: newest matching only, by createdAt then id.
     pipeline = load_module("pipeline_semantic_select", DRIVER)
+    # A pending dispatch is exactly: this SHA, status dispatched, no run, a dispatch clock.
+    pending_entry = {"merged_sha": merged, "status": "dispatched", "run_id": None, "dispatch": {"at": "2026-10-31T12:00:00Z"}}
+    assert pipeline.semantic_pending_dispatch(pending_entry, merged) == datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc)
+    assert pipeline.semantic_pending_dispatch({**pending_entry, "run_id": "200"}, merged) is None
+    assert pipeline.semantic_pending_dispatch({**pending_entry, "status": None}, merged) is None
+    assert pipeline.semantic_pending_dispatch({**pending_entry, "merged_sha": other_head}, merged) is None
+    assert pipeline.semantic_pending_dispatch({**pending_entry, "dispatch": {"at": None}}, merged) is None
+    assert pipeline.semantic_pending_dispatch(None, merged) is None
+    assert pipeline.SEMANTIC_DISPATCH_RESUME_WINDOW_S == 900.0
     dispatched = datetime(2026, 10, 31, 12, 0, 0, tzinfo=timezone.utc)
     rows = [
         {"databaseId": 1, "createdAt": "2026-10-31T11:59:54Z", "displayTitle": f"x source_sha={merged}"},  # 6 s early: older

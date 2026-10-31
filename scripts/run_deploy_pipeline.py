@@ -3155,6 +3155,12 @@ DEFAULT_SEMANTIC_POLL_SECONDS = 30.0
 # before the local dispatch clock still belongs to this dispatch; anything
 # older never matches.
 DISPATCH_CLOCK_SKEW_S = 5.0
+# A dispatch `gh workflow run` confirmed (exit 0) whose run was never adopted
+# (a `gh run list` failure or a discovery timeout right after it) is a live
+# production dispatch: the next call looks for its run instead of dispatching
+# again. Only a confirmed dispatch older than this with still no run is
+# abandoned and dispatched anew.
+SEMANTIC_DISPATCH_RESUME_WINDOW_S = 15 * 60.0
 SEMANTIC_RUN_FIELDS = "databaseId,createdAt,headSha,displayTitle,status,conclusion,url,event"
 SEMANTIC_VIEW_FIELDS = "status,conclusion,attempt,url,headSha,displayTitle,createdAt,updatedAt,jobs"
 
@@ -3190,6 +3196,18 @@ def semantic_select_run(rows: object, merged_sha: str, dispatched_at: datetime) 
         return None
     matches.sort(key=lambda item: (item[0], item[1]))
     return matches[-1][2]
+
+
+def semantic_pending_dispatch(entry: object, merged_sha: str) -> datetime | None:
+    """The dispatch clock of a recorded ``semantic`` entry for ``merged_sha``
+    whose ``gh workflow run`` succeeded (``status == "dispatched"``) but that
+    never adopted a run (``run_id`` null); None for anything else."""
+    if not isinstance(entry, dict) or entry.get("run_id") or entry.get("status") != "dispatched":
+        return None
+    if entry.get("merged_sha") != merged_sha:
+        return None
+    dispatch = entry.get("dispatch") if isinstance(entry.get("dispatch"), dict) else {}
+    return _parse_github_time(dispatch.get("at"))
 
 
 def _semantic_jobs(view: dict) -> list[dict]:
@@ -3245,7 +3263,12 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
     this merged SHA to have passed in ``state_dir`` (never dispatch while a
     surface is still cutting over). When the receipt already names a run of
     this SHA that is not ``completed`` (a CLI-side timeout or interruption),
-    it resumes watching that run instead of dispatching again. Otherwise it
+    it resumes watching that run instead of dispatching again. A dispatch
+    ``gh workflow run`` confirmed but whose run was never adopted (``gh run
+    list`` failed or the discovery timed out) is recorded as ``dispatched``
+    and looked up again on the next call; only when it is older than
+    ``SEMANTIC_DISPATCH_RESUME_WINDOW_S`` and one more query finds no run is
+    it abandoned to ``semantic_history`` and dispatched anew. Otherwise it
     dispatches ``chat-lifecycle-ratchet.yml`` on ``main`` with
     ``source_sha=<merged_sha>`` plus the URLs and binds to the newest run
     created after the dispatch whose title names that SHA. It polls every
@@ -3274,6 +3297,9 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
     has_run = previous is not None and bool(previous.get("run_id"))
     # A recorded run that never reached `completed` is resumed, never replaced.
     resume = has_run and previous.get("status") != "completed"
+    # A confirmed dispatch that never adopted its run is looked up again, never
+    # dispatched again: a second `gh workflow run` would run the gate twice.
+    pending = semantic_pending_dispatch(previous, merged_sha)
     if retry_justification is not None and previous is not None and not resume:
         if previous.get("retry"):
             print(f"PIPELINE_SEMANTIC status=refused exit=2 run {previous.get('run_id')} already used its one "
@@ -3285,18 +3311,22 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
                   "succeeded; nothing to retry (dispatch again without --retry-failed-once to re-verify)", flush=True)
             return 2
     retrying_previous = retry_justification is not None and has_run and not resume
-    if resume or retrying_previous:
+
+    def new_entry() -> dict:
+        return {"workflow": SEMANTIC_WORKFLOW, "merged_sha": merged_sha, "started_at": _now(), "outcome": "running",
+                "dispatch": {"ref": SEMANTIC_DISPATCH_REF, "at": None,
+                             "inputs": {"source_sha": merged_sha, "frontend_url": frontend_url,
+                                        "backend_url": backend_url}},
+                "run_id": None, "url": None, "head_sha": None, "source_sha": None, "display_title": None,
+                "created_at": None, "completed_at": None, "attempt": None, "status": None, "conclusion": None,
+                "jobs": [], "retry": None}
+
+    if resume or retrying_previous or pending is not None:
         entry = previous
     else:
         if previous is not None:
             receipt.setdefault("semantic_history", []).append(previous)
-        entry = {"workflow": SEMANTIC_WORKFLOW, "merged_sha": merged_sha, "started_at": _now(), "outcome": "running",
-                 "dispatch": {"ref": SEMANTIC_DISPATCH_REF, "at": None,
-                              "inputs": {"source_sha": merged_sha, "frontend_url": frontend_url,
-                                         "backend_url": backend_url}},
-                 "run_id": None, "url": None, "head_sha": None, "source_sha": None, "display_title": None,
-                 "created_at": None, "completed_at": None, "attempt": None, "status": None, "conclusion": None,
-                 "jobs": [], "retry": None}
+        entry = new_entry()
     receipt["semantic"] = entry
     started_epoch = time.time()
 
@@ -3323,6 +3353,36 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
                                 timeout=timeout, poll_seconds=poll_seconds, sleep=sleep)
         entry["retry"]["attempt"] = entry.get("attempt")
 
+    def dispatch() -> datetime:
+        """``gh workflow run``; once it returned 0 the dispatch is recorded
+        (status ``dispatched``, run_id null) before any discovery, so a failed
+        ``gh run list`` or a discovery timeout never dispatches the gate twice."""
+        dispatched_at = datetime.now(timezone.utc).replace(microsecond=0)
+        entry["dispatch"]["at"] = dispatched_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+        write_receipt(receipt_path, receipt)
+        _gh_text(["workflow", "run", SEMANTIC_WORKFLOW, "--ref", SEMANTIC_DISPATCH_REF,
+                  "-f", f"source_sha={merged_sha}", "-f", f"frontend_url={frontend_url}",
+                  "-f", f"backend_url={backend_url}"], root)
+        entry["status"] = "dispatched"
+        write_receipt(receipt_path, receipt)
+        print(f"PIPELINE_SEMANTIC dispatched workflow={SEMANTIC_WORKFLOW} ref={SEMANTIC_DISPATCH_REF} "
+              f"source_sha={merged_sha} at={entry['dispatch']['at']}", flush=True)
+        return dispatched_at
+
+    def discover(dispatched_at: datetime, limit: float) -> tuple[dict | None, int, float]:
+        """Poll ``gh run list`` for up to ``limit`` seconds for the run this
+        dispatch created: (row or None, polls, waited seconds)."""
+        started = time.monotonic()
+        polls = 0
+        while True:
+            polls += 1
+            rows = _gh_json(["run", "list", "--workflow", SEMANTIC_WORKFLOW, "--event", "workflow_dispatch",
+                             "--branch", SEMANTIC_DISPATCH_REF, "--limit", "20", "--json", SEMANTIC_RUN_FIELDS], root)
+            row = semantic_select_run(rows, merged_sha, dispatched_at)
+            if row is not None or time.monotonic() - started >= limit:
+                return row, polls, round(time.monotonic() - started, 1)
+            sleep(min(10.0, poll_seconds))
+
     try:
         if resume:
             run_id = str(entry["run_id"])
@@ -3344,42 +3404,48 @@ def production_semantic(merged_sha: str, state_dir: Path, *, frontend_url: str =
             print(f"SEMANTIC_RUN_ID={entry['run_id']}", flush=True)
             rerun_failed(retry_justification or "")
         else:
-            dispatched_at = datetime.now(timezone.utc).replace(microsecond=0)
-            entry["dispatch"]["at"] = dispatched_at.strftime("%Y-%m-%dT%H:%M:%SZ")
-            write_receipt(receipt_path, receipt)
-            _gh_text(["workflow", "run", SEMANTIC_WORKFLOW, "--ref", SEMANTIC_DISPATCH_REF,
-                      "-f", f"source_sha={merged_sha}", "-f", f"frontend_url={frontend_url}",
-                      "-f", f"backend_url={backend_url}"], root)
-            print(f"PIPELINE_SEMANTIC dispatched workflow={SEMANTIC_WORKFLOW} ref={SEMANTIC_DISPATCH_REF} "
-                  f"source_sha={merged_sha} at={entry['dispatch']['at']}", flush=True)
-            discovery_started = time.monotonic()
-            polls = 0
-            while True:
-                polls += 1
-                rows = _gh_json(["run", "list", "--workflow", SEMANTIC_WORKFLOW, "--event", "workflow_dispatch",
-                                 "--branch", SEMANTIC_DISPATCH_REF, "--limit", "20", "--json", SEMANTIC_RUN_FIELDS], root)
-                row = semantic_select_run(rows, merged_sha, dispatched_at)
-                if row is not None:
-                    break
-                if time.monotonic() - discovery_started >= start_timeout:
+            row = None
+            if pending is not None:
+                dispatched_at = pending
+                age_s = time.time() - pending.timestamp()
+                stale = age_s > SEMANTIC_DISPATCH_RESUME_WINDOW_S
+                print(f"PIPELINE_SEMANTIC resume dispatch at={entry['dispatch']['at']} age={age_s:.0f}s "
+                      f"source_sha={merged_sha}: looking for that dispatch's run instead of dispatching again", flush=True)
+                # Within the window the run may still be appearing: keep polling.
+                # Past it, one more query decides: adopt the run, or abandon the dispatch.
+                row, polls, waited_s = discover(pending, 0.0 if stale else start_timeout)
+                if row is None and stale:
                     waits.append({"workflow": SEMANTIC_WORKFLOW, "kind": "run-start", "head": merged_sha, "run_id": None,
-                                  "polls": polls, "waited_s": round(time.monotonic() - discovery_started, 1),
-                                  "outcome": "timeout"})
-                    raise ProductionGateError(
-                        f"no {SEMANTIC_WORKFLOW} run titled source_sha={merged_sha} created after the dispatch at "
-                        f"{entry['dispatch']['at']} appeared within {start_timeout:.0f}s; the dispatch is unconfirmed: "
-                        f"inspect `gh run list --workflow {SEMANTIC_WORKFLOW} --event workflow_dispatch` (an older run "
-                        f"is never adopted; a run GitHub stamped more than {DISPATCH_CLOCK_SKEW_S:.0f}s before this "
-                        "host's dispatch clock counts as older, so check the host clock if the run exists) and rerun "
-                        "this command"
-                    )
-                sleep(min(10.0, poll_seconds))
+                                  "polls": polls, "waited_s": waited_s, "outcome": "abandoned"})
+                    print(f"PIPELINE_SEMANTIC dispatch at={entry['dispatch']['at']} is older than "
+                          f"{SEMANTIC_DISPATCH_RESUME_WINDOW_S:.0f}s with no run: abandoning it and dispatching again",
+                          flush=True)
+                    entry["outcome"] = "abandoned"
+                    receipt.setdefault("semantic_history", []).append(entry)
+                    entry = new_entry()
+                    receipt["semantic"] = entry
+                    pending = None
+            if pending is None:
+                dispatched_at = dispatch()
+                row, polls, waited_s = discover(dispatched_at, start_timeout)
+            if row is None:
+                waits.append({"workflow": SEMANTIC_WORKFLOW, "kind": "run-start", "head": merged_sha, "run_id": None,
+                              "polls": polls, "waited_s": waited_s, "outcome": "timeout"})
+                raise ProductionGateError(
+                    f"no {SEMANTIC_WORKFLOW} run titled source_sha={merged_sha} created after the dispatch at "
+                    f"{entry['dispatch']['at']} appeared within {start_timeout:.0f}s; the dispatch is unconfirmed: "
+                    f"inspect `gh run list --workflow {SEMANTIC_WORKFLOW} --event workflow_dispatch` (an older run "
+                    f"is never adopted; a run GitHub stamped more than {DISPATCH_CLOCK_SKEW_S:.0f}s before this "
+                    "host's dispatch clock counts as older, so check the host clock if the run exists) and rerun "
+                    f"this command (it resumes this dispatch for {SEMANTIC_DISPATCH_RESUME_WINDOW_S:.0f}s before "
+                    "dispatching again)"
+                )
             run_id = str(row.get("databaseId"))
             entry.update(run_id=run_id, url=row.get("url"), head_sha=row.get("headSha"), source_sha=merged_sha,
                          display_title=row.get("displayTitle"), created_at=row.get("createdAt"),
                          status=row.get("status"))
             waits.append({"workflow": SEMANTIC_WORKFLOW, "kind": "run-start", "head": merged_sha, "run_id": run_id,
-                          "polls": polls, "waited_s": round(time.monotonic() - discovery_started, 1), "outcome": "found"})
+                          "polls": polls, "waited_s": waited_s, "outcome": "found"})
             write_receipt(receipt_path, receipt)
             print(f"SEMANTIC_RUN_ID={run_id}", flush=True)
             print(f"PIPELINE_SEMANTIC run={run_id} url={entry['url']} head_sha={entry['head_sha']} "
