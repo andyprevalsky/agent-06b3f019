@@ -224,6 +224,32 @@ describe('one-level folders inside projects', () => {
     expect(screen.getByTestId('rose-group-home')).toBeVisible();
   });
 
+  it('keeps collapse preferences unchanged while search exposes matching groups', async () => {
+    mockProjectsApi([makeProject({ folders: [folder] })]);
+    renderBar({
+      agents: [
+        ...agents,
+        makeAgent({ agent_id: 'home-agent', goal: 'Home work', project_id: null }),
+      ],
+    });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Collapse Rose project' }));
+    const saved = localStorage.getItem('rose:collapsed-projects');
+    const search = screen.getByRole('searchbox', { name: 'Search agents' });
+    await user.type(search, 'work');
+    const project = screen.getByRole('button', { name: 'Collapse Rose project' });
+    const home = screen.getByRole('button', { name: 'Collapse Home project' });
+    expect(project).toBeDisabled();
+    expect(home).toBeDisabled();
+    await user.click(project);
+    await user.click(home);
+    expect(localStorage.getItem('rose:collapsed-projects')).toBe(saved);
+    await user.clear(search);
+    expect(screen.getByTestId('rose-group-p-rose')).not.toBeVisible();
+    expect(screen.getByTestId('rose-group-home')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Expand Rose project' })).toBeEnabled();
+  });
+
   it.each([0, 7, 42, 128, 999, 1234])(
     'places the %i-agent count within the folder icon with the full accessible count',
     (count) => {

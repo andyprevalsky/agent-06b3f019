@@ -182,6 +182,7 @@ function ProjectGroupRow({
         isExpanded={props.isExpanded}
         isPending={props.pendingGroupKey === project.id}
         contentsOpen={open}
+        contentsToggleDisabled={props.isFiltering}
         onToggleContents={onToggle}
         onCreateAgent={() => a.onCreateAgentInProject(project)}
         onCreateFolder={() => {
@@ -375,6 +376,7 @@ export default function RoseAgentGroups(props: RoseAgentGroupsProps) {
           isActive={homeView.agents.some((agent) => agent.agent_id === props.selectedAgentId)}
           isPending={props.pendingGroupKey === HOME_GROUP}
           contentsOpen={isFiltering || !collapsedProjects.has(HOME_GROUP)}
+          contentsToggleDisabled={isFiltering}
           onToggleContents={() => setProjectOpen(HOME_GROUP, collapsedProjects.has(HOME_GROUP))}
           onCreateAgent={props.projectActions.onCreateHomeAgent}
         />

@@ -124,6 +124,7 @@ export interface RoseProjectRowProps {
   isPending?: boolean;
   onCreateAgent: () => void;
   contentsOpen?: boolean;
+  contentsToggleDisabled?: boolean;
   onToggleContents?: () => void;
   onCreateFolder?: () => void;
   onOpenSettings: () => void;
@@ -234,6 +235,7 @@ export default function RoseProjectRow(props: RoseProjectRowProps) {
             aria-controls={`rose-project-group-${project.id}`}
             title={`${props.contentsOpen === false ? 'Expand' : 'Collapse'} ${project.name}`}
             onClick={props.onToggleContents}
+            disabled={props.contentsToggleDisabled}
             className="flex-none rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring hover:bg-muted"
           >
             <ProjectIcon repoUrl={project.repoUrl} />
@@ -287,12 +289,14 @@ export function HomeProjectRow({
   isPending,
   onCreateAgent,
   contentsOpen = true,
+  contentsToggleDisabled = false,
   onToggleContents,
 }: {
   isExpanded: boolean;
   isActive: boolean;
   isPending: boolean;
   contentsOpen?: boolean;
+  contentsToggleDisabled?: boolean;
   onToggleContents?: () => void;
   /** Absent (e.g. the mobile list, which has its own New Super Agent): no "+". */
   onCreateAgent?: () => void;
@@ -312,6 +316,7 @@ export function HomeProjectRow({
         aria-controls="rose-project-group-home"
         title={`${contentsOpen ? 'Collapse' : 'Expand'} Home`}
         onClick={onToggleContents}
+        disabled={contentsToggleDisabled}
         className="flex-none rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring hover:bg-muted"
       >
         <Home className="h-5 w-5 flex-none" strokeWidth={1.7} />
