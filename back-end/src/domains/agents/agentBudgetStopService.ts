@@ -1,4 +1,4 @@
-/** Defer only an already-acknowledged native browser finalizer. */
+/** Validate an owner-bound native browser finalizer handoff or pending state. */
 import { z } from 'zod';
 import * as repo from './repo';
 import { getTemporalClient, withTemporalControlDeadline } from '../../providers/temporal';
@@ -9,7 +9,9 @@ export async function pauseAtBrowserBudgetForUser(agentId: string, userId: strin
   const parsed = Request.safeParse(body);
   if (!parsed.success) return { accepted: false };
   const before = await repo.findAgent(agentId, userId);
-  if (!before || before.status !== 'ACTIVE' || (before.temporalWorkflowId ?? '') === '' || (before.temporalFirstExecutionRunId ?? '') === '') {
+  if (!before || before.status !== 'ACTIVE' ||
+      typeof before.temporalWorkflowId !== 'string' || before.temporalWorkflowId.length === 0 ||
+      typeof before.temporalFirstExecutionRunId !== 'string' || before.temporalFirstExecutionRunId.length === 0) {
     return { accepted: false };
   }
   try {
