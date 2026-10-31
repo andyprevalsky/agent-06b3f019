@@ -2613,6 +2613,7 @@ async def run_all_tests():
     r.record("native_autofill_fixture_current_dto", test_native_autofill_control_fixture_matches_current_backend_dto)
     await r.record_async("native_autofill_fixture_real_history", test_native_autofill_control_history_matches_real_serializer)
     await r.record_async("native_autofill_control_production_transcript", test_native_autofill_control_transcript_matches_production_shape)
+    await r.record_async("native_autofill_control_attempt_turns", test_native_autofill_control_scenarios_record_saved_credential_attempts_as_turns)
     await r.record_async("native_autofill_real_model_controls", test_native_autofill_real_model_synthetic_controls)
     r.record("phone_off_matches_prephone_bytes", test_phone_off_matches_prephone_bytes)
     await r.record_async("phone_off_actual_rose_request", test_phone_off_actual_rose_request)
@@ -3067,6 +3068,99 @@ def _native_autofill_read_receipt(state, observation_round):
     return receipt
 
 
+_NATIVE_AUTOFILL_CONTROL_SCREENS = {
+    "available": "Apple Account synthetic@example.invalid. Password field is masked. A matching native AutoFill suggestion for synthetic@example.invalid is already visible: Use Saved Password button at center (100, 200).",
+    "server_available": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
+    "missing": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
+    "presence": "Apple Account synthetic@example.invalid. Saved password selected. Face ID authentication required to use this saved password. Only the account owner can approve Face ID. No alternative autonomous approval is available.",
+    "rejected": "Apple Account synthetic@example.invalid. The matching saved password was already selected once using native AutoFill. Apple Account rejected it: Incorrect password. Password is still required to continue.",
+}
+# Which saved-credential attempt each control verdict presupposes. Production
+# shows the model that attempt as its own `phone` tool call plus the backend
+# receipt in `turn_messages`; an OCR sentence claiming it happened is not a
+# shape production can send.
+_NATIVE_AUTOFILL_CONTROL_ATTEMPTS = {"available": None, "server_available": None, "presence": None, "missing": "unavailable", "rejected": "filled"}
+
+
+async def _native_autofill_control_scenario(name, setup_projection=None):
+    """Build one control arm exactly as the production loop would have reached it.
+
+    Returns `(state, history, turns)`: the observed phone state the decision sees
+    plus both production stores (durable ActionHistory and the next-turn
+    transcript) holding every action the arm's verdict depends on.
+    """
+    state = _native_autofill_control_state(_NATIVE_AUTOFILL_CONTROL_SCREENS[name], setup_projection)
+    history, turns = _native_autofill_control_history()
+    if name == "missing":
+        await _native_autofill_control_record(history, turns, chosen=_NATIVE_AUTOFILL_FILL_SAVED, result=_NATIVE_AUTOFILL_UNAVAILABLE_RESULT, tool_call_id="control-fill-saved")
+    return state, history, turns
+
+
+async def test_native_autofill_control_scenarios_record_saved_credential_attempts_as_turns():
+    """Every saved-credential attempt a control verdict presupposes must be a real tool turn.
+
+    Production (`_call_browser_use_with_rotation` + `_append_browser_turn_messages`)
+    shows the model its own `phone(credentials.fill_saved)` call and the backend
+    receipt (`credentialStatus: filled|unavailable`). The backend never emits a
+    "rejected" receipt: a rejection is only visible in the next `screen.text`
+    observation, and *which* credential was rejected is visible only through
+    the prior tool turn. The 2026-10-31 00:28Z deploy-lane failure: the
+    `rejected` arm sent no turns at all and narrated a *native* AutoFill
+    rejection in OCR, so the model (correctly, per the skill's "native and
+    backend stores are separate; fill_saved once before password help") chose
+    `credentials.fill_saved` instead of requesting the protected step.
+    """
+    from domains.spawn_browser_agent_v3 import handler as h
+    captured = []
+    def provider(request):
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, text=_openai_sse([{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "assist", "type": "function", "function": {"name": "request_user_assistance_for_authentication", "arguments": '{"targetKind":"iphone","criticalReason":"password"}'}}]}, "finish_reason": "tool_calls"}]}]), headers={"Content-Type": "text/event-stream"})
+    set_mock_handler(provider)
+    try:
+        setup_projection = _native_autofill_server_setup_projection()
+        client = RoseClient(openrouter_key="synthetic")
+        for name, attempt in _NATIVE_AUTOFILL_CONTROL_ATTEMPTS.items():
+            state, history, turns = await _native_autofill_control_scenario(name, setup_projection)
+            expected = []
+            for entry, (call, receipt) in zip(history.get_entries(), zip(turns[::2], turns[1::2])):
+                h._append_browser_turn_messages(expected, unified_action={"action": entry["action"], "thinking": entry.get("thinking"), "params": entry["params"]}, result=json.loads(receipt["content"]), tool_call_id=call["tool_calls"][0]["id"])
+            assert turns == expected and len(turns) == 2 * len(history.get_entries()), (name, "control bypasses the production turn recorder")
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
+                result = await _native_autofill_control_request(client, name=name, state=state, history=history, turn_messages=turns)
+            assert result["action"]["action"] == "request_user_assistance_for_authentication", (name, result["action"])
+            transcript = [m for m in captured[-1]["messages"] if m.get("role") != "system"]
+            assert transcript[0] == {"role": "user", "content": _NATIVE_AUTOFILL_CONTROL_TASK}, (name, transcript[0])
+            assert transcript[-1]["role"] == "user" and transcript[-1]["content"].startswith("<observed_phone_state>"), (name, transcript[-1])
+            observed = json.loads(transcript[-1]["content"][len("<observed_phone_state>"):-len("</observed_phone_state>")])
+            assert observed["interaction"]["lastOperation"] == state["interaction"]["lastOperation"], name
+            calls = [m for m in transcript if m.get("role") == "assistant" and m.get("tool_calls")]
+            receipts = [m for m in transcript if m.get("role") == "tool"]
+            operations = [(json.loads(c["tool_calls"][0]["function"]["arguments"]).get("operation"), json.loads(r["content"])) for c, r in zip(calls, receipts)]
+            fills = [receipt for operation, receipt in operations if operation == "credentials.fill_saved"]
+            if attempt is None:
+                assert fills == [], (name, "verdict presupposes no saved-credential attempt", fills)
+                continue
+            assert len(fills) == 1, (name, "control narrates a saved-credential attempt instead of recording the production tool turn", [op for op, _ in operations])
+            receipt = fills[0]
+            assert receipt["operation"]["operation"] == "credentials.fill_saved", (name, receipt)
+            if attempt == "unavailable":
+                assert receipt["success"] is False and receipt["operation"]["status"] == "FAILED" and receipt["operation"]["errorCode"] == "phone_credential_unavailable", (name, receipt)
+                continue
+            # A rejection is observable only after the backend reports `filled`
+            # (back-end iphone-control.saved-credential: `{success, private, credentialStatus: 'filled'}`)
+            # and the model then re-observes the screen under a later cursor.
+            assert receipt["success"] is True and receipt["operation"]["status"] == "SUCCEEDED" and receipt["operation"]["errorCode"] is None, (name, receipt)
+            assert receipt["operation"]["result"] == {"success": True, "private": True, "credentialStatus": "filled"}, (name, receipt)
+            fill_index = operations.index(("credentials.fill_saved", receipt))
+            later_reads = [r for op, r in operations[fill_index + 1:] if op == "screen.text"]
+            assert later_reads and later_reads[-1]["operation"] == state["interaction"]["lastOperation"], (name, "rejection must be observed by a read recorded after the fill", [op for op, _ in operations])
+            assert receipt["operation"]["cursor"] < later_reads[-1]["operation"]["cursor"], (name, receipt["operation"]["cursor"], later_reads[-1]["operation"]["cursor"])
+            earlier_reads = [r for op, r in operations[:fill_index] if op == "screen.text"]
+            assert earlier_reads and earlier_reads[-1]["operation"]["cursor"] < receipt["operation"]["cursor"], (name, "credentials.fill_saved requires a current screen.text observation before it")
+    finally:
+        teardown_mock()
+
+
 async def test_native_autofill_control_transcript_matches_production_shape():
     """The control must show the model the executed-action transcript production sends.
 
@@ -3144,19 +3238,9 @@ async def test_native_autofill_control_history_matches_real_serializer():
 async def test_native_autofill_real_model_synthetic_controls():
     """Real canonical decisions on synthetic OCR; no device execution or secrets."""
     from _test_utils import live_funded_azure
-    scenarios = {
-        "available": "Apple Account synthetic@example.invalid. Password field is masked. A matching native AutoFill suggestion for synthetic@example.invalid is already visible: Use Saved Password button at center (100, 200).",
-        "server_available": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
-        "missing": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
-        "presence": "Apple Account synthetic@example.invalid. Saved password selected. Face ID authentication required to use this saved password. Only the account owner can approve Face ID. No alternative autonomous approval is available.",
-        "rejected": "Apple Account synthetic@example.invalid. The matching saved password was already selected once using native AutoFill. Apple Account rejected it: Incorrect password. Password is still required to continue.",
-    }
     setup_projection = _native_autofill_server_setup_projection()
-    async def decide(name, screen):
-        state = _native_autofill_control_state(screen, setup_projection)
-        history, turns = _native_autofill_control_history()
-        if name == "missing":
-            await _native_autofill_control_record(history, turns, chosen=_NATIVE_AUTOFILL_FILL_SAVED, result=_NATIVE_AUTOFILL_UNAVAILABLE_RESULT, tool_call_id="control-fill-saved")
+    async def decide(name):
+        state, history, turns = await _native_autofill_control_scenario(name, setup_projection)
         served = {}
         for observation_round in range(3):
             result = await _native_autofill_control_request(RoseClient(), name=name, state=state, history=history, turn_messages=turns)
@@ -3191,7 +3275,7 @@ async def test_native_autofill_real_model_synthetic_controls():
         print("Native AutoFill real synthetic control:", name, "model:", result.get("actual_model"), "usage:", json.dumps(usage), flush=True)
     teardown_mock()
     with live_funded_azure():
-        outcomes = await asyncio.wait_for(asyncio.gather(*(decide(name, screen) for name, screen in scenarios.items()), return_exceptions=True), timeout=120)
+        outcomes = await asyncio.wait_for(asyncio.gather(*(decide(name) for name in _NATIVE_AUTOFILL_CONTROL_SCREENS), return_exceptions=True), timeout=120)
         errors = [str(value) for value in outcomes if isinstance(value, BaseException)]
         assert not errors, errors
 
