@@ -37,7 +37,7 @@ function validateOutputFieldConstraints(
 }
 
 // Response schema field type
-type NestedResponseSchemaField = {
+export type NestedResponseSchemaField = {
   name: string;
   description?: string;
   type:

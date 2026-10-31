@@ -727,6 +727,41 @@ async def test_agent_rows_are_user_feedback_only_from_ancestors():
         assert wf._response_schema_revision == revision + 1
 
 
+async def test_browser_credential_rows_do_not_change_requirements():
+    from loop.run_agent import _real_user_requirement_keys
+
+    credential = {
+        "role": "USER", "message_id": "credential-row", "text": "Provider email data",
+        "metadata": {"subAgentId": "browser-task", "credential_ref": {"kind": "email_otp", "id": "inbox"},
+                     "browserCredentialContext": True},
+    }
+    human = {"role": "USER", "message_id": "human-row", "text": "Change the requested name",
+             "metadata": {}}
+    assert _real_user_requirement_keys([credential]) == set()
+    assert _real_user_requirement_keys([human]) == {("id", "human-row")}
+    # Only the backend-minted true marker is provenance; malformed/unmarked rows
+    # remain user feedback. Delivery stays USER-role with its exact credential.
+    for marker in (False, "true", 1, None):
+        row = {**credential, "metadata": {**credential["metadata"], "browserCredentialContext": marker}}
+        assert _real_user_requirement_keys([row]) == {("id", "credential-row")}
+    harness = _Harness()
+    with _workflow_env(harness):
+        wf = _workflow(harness)
+        wf._start_response_schema_refresh = lambda: None
+        revision = wf._response_schema_revision
+        wf.context = [credential]
+        wf._admit_durable_response_schema_feedback()
+        assert wf._response_schema_revision == revision
+        assert wf._response_schema_feedback == []
+        assert wf.context[0] == credential
+        wf.context.append(human)
+        wf._admit_durable_response_schema_feedback()
+        assert wf._response_schema_revision == revision + 1
+        assert wf._response_schema_feedback == [human["text"]]
+        wf._admit_durable_response_schema_feedback()
+        assert wf._response_schema_revision == revision + 1
+
+
 async def test_foreground_paths_never_background():
     harness = _Harness()
     with _workflow_env(harness):
@@ -2387,6 +2422,7 @@ def test_browser_acted_input_is_counted_only_at_the_model_request():
 async def run_all_tests():
     print("background_agents blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("browser_credential_rows_keep_requirement_revision", test_browser_credential_rows_do_not_change_requirements)
     await r.record_async(
         "bg_spawn_returns_immediately_notifies_once", test_background_spawn_returns_immediately_and_notifies_once
     )

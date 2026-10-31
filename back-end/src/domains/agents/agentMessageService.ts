@@ -18,6 +18,7 @@ import {
   type ResponseSchemaDirectAuth,
 } from '../../providers/setResponseSchema';
 import type { PostMessageBody } from './types';
+import { isAgentAuthoredRow, withCredentialProvenance } from './credentialContext';
 import * as repo from './repo';
 import { withActiveBrowserSessionShareLock } from './repoBrowserTargetedMessages';
 import { readTaskInboxMessages } from './agentToAgentService';
@@ -69,15 +70,6 @@ export function buildUserMessageSignalValue(
     });
   }
   return messageText;
-}
-
-/** USER rows written by agents rather than people (metadata flags, never text). */
-function isAgentAuthoredRow(metadata: PostMessageBody['metadata']): boolean {
-  return (
-    metadata?.agentNotification === true ||
-    metadata?.agentMessage === true ||
-    metadata?.environmentContext === true
-  );
 }
 
 /** Handle user message routing — signal workflow or run chat handler. */
@@ -319,6 +311,7 @@ export async function postMessage(
   userId?: string,
   workflowGeneration?: string
 ) {
+  body = withCredentialProvenance(body, isInternal);
   // Determine role based on auth type
   const roleResult = resolveRole(body, isInternal);
   if ('error' in roleResult) {

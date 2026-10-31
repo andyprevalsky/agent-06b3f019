@@ -251,3 +251,75 @@ Applied gates passed:15 owning verifier/helper cases in4.88s; original600
 status parser13 cases in0.595s; campaign environment10 cases in4.249s; full
 cloudbench-env shell gate; both Bash syntax checks and RCA archive validation. No production
 change, deployment, paid run or live-campaign mutation was performed.
+
+## R125 / It29 recurrence — bounded read failure, original native phase OPEN
+
+On source `691b9059a9ca3b41552be9679d712b50edcf24d5`, the It29 N2
+preflight for fleet `20261030-211322-98463` and owner
+`22096d8b2d4b49b191af4dc79f2269b0` failed with the same
+`Could not read app secrets ... (read exit=124)` boundary. The original
+custody archive SHA256 is
+`4cdfdd0a9c41a89aa19288ce2cb5dc33f9ddf71066050e008d3ec9a90afc13e8`.
+Its campaign summary has20 cancelled jobs and peak concurrency0; the canary
+controller exited1 and its owned-clones ledger is empty. No task Machine
+started. This remains an original pre-admission failure, not repaired-task
+credit.
+
+### Diagnosis and contrary evidence
+
+Two prior-case searches and the earlier Solution/feedback were read before
+forming a new hypothesis. The exact verifier invokes the existing bounded
+native read before parsing required names. The default20-second bound and
+failure refusal are intact; no faulty name parsing, ignored timeout or
+secret-gate bypass was demonstrated. The earlier standalone verification
+succeeded, but the failing invocation has no captured native PID/executable
+binding, effective credential fingerprint, request phase or goroutine stack.
+Separate relay/inventory phase logs do not fill that gap. Provider load,
+authentication failure, transport cause and specific metadata stalls remain
+unproved.
+
+The subsequently inspected installed binary SHA256
+`5041b9a563fff170fda4238b47048e9a5e714fc7ed2304668fd44bcdcd3bef83`
+embeds flyctl `v0.4.115`, revision
+`a1cf49a52b36fba66a2bf0907617bd5aadb8a727`. This identifies the later binary,
+not the missing historical child. Personally opened pinned primary source
+`internal/command/secrets/list.go` obtains secret names and then Machines and
+release metadata before emitting JSON. This is a possible unnecessary
+consumer dependency, not evidence that the original124 stalled there.
+`internal/appsecrets/secrets.go` and `minvers.go` also preserve a per-app minimum
+version when listing secrets; a future names-only replacement must not discard
+that consistency/authentication contract.
+
+### One diagnostic, no runtime repair
+
+The coordinator separately authorized one ordinary canonical
+`--verify-secrets` invocation with private `GOTRACEBACK=all` observation.
+The reviewed optional observer would send one exact-child pidfd SIGQUIT only
+near native age17seconds after identity/private-stderr checks. Actual source
+remained691b; the command instead exited0 in2.24493seconds. The observer
+captured the later child's exact argv, birth and binary identity, then exited1
+with `NATIVE_EXITED_OR_IDENTITY_LOST_NO_SIGNAL`, zero signals and no stack.
+Its prepared-mode `interrupted_diagnostic` flag does not mean this successful
+invocation was actually interrupted. No signal was sent to the native child,
+parent or process group.
+
+The diagnostic archive SHA256 is
+`f1da018fc38828d16e687ba952ae9864b8f4bfc5662504a258026af4db0077d8`;
+all17 member hashes were independently checked. The reviewed observer SHA256
+is `d04f6d00356053d4de9737813d6ae1e75850a8c897b1d6aa329854694a2ceaea`.
+Its eight local dummy controls covered exact one-shot signalling, parent
+survival, early success and identity/privacy/deadline refusal; they were not
+provider or real-Go stack tests. Both independent reviews confirmed the
+actual later success, zero signals and missing original-phase evidence.
+Before/after supplied seven-closed/five-held custody differs only by observation
+time; original grades and resources remain unchanged.
+
+No runtime patch, timeout increase, retry, cache fallback or configuration
+write was justified by this recurrence. R125 stays OPEN for the original
+native/client phase. A fresh independent qualification may proceed through all
+unchanged source/environment/capacity/retained-owner/canary gates if chosen;
+this diagnostic is neither that qualification nor GO authority. Its success
+must not relabel the original failure or discharge the five retained owners.
+A future failed secret gate still refuses admission. The reusable lesson is
+to separate a bounded failure, a later successful observation and a proven
+repair instead of manufacturing a code change to close an observability gap.
