@@ -203,6 +203,107 @@ def _iter_trajectory_messages(data: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _displayed_completion_text(message: dict[str, Any]) -> str:
+    """Project completion text shown by CompletionBubble/Card, excluding private metadata."""
+    metadata = _message_metadata(message)
+    completion = metadata.get("completionSummary")
+    if (message.get("role") != "TOOL"
+            or any(_js_truthy(metadata.get(flag)) for flag in ("artifactOnly", "hidden", "agentNotification"))
+            or metadata.get("environmentContext") is True
+            or metadata.get("messageType") in {"FINAL_ANSWER", "FAILED"}
+            or metadata.get("isFinalSummary") is not True
+            or metadata.get("toolName") != "completion_summary"
+            or str(metadata.get("toolStatus") or "").upper() != "FINISHED"
+            or not isinstance(completion, dict)
+            or ("error" in completion and type(completion["error"]) is not bool)):
+        return ""
+    presentation = completion.get("presentation")
+    if (not completion.get("error") and isinstance(presentation, dict)
+            and type(presentation.get("version")) is int and presentation["version"] == 1
+            and presentation.get("mode") == "value"
+            and isinstance(completion.get("answerText"), str)):
+        return completion["answerText"]
+
+    def file_pointer(value):
+        return isinstance(value, dict) and all(
+            isinstance(value.get(key), str) for key in ("id", "storage_path", "original_filename"))
+
+    def scalar(value):
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if type(value) is bool:
+            return "true" if value else "false"
+        if type(value) in (int, float):
+            return json.dumps(value, allow_nan=False)
+        raise ValueError("non-JSON completion value")
+
+    def block(value, ordinal=None):
+        if file_pointer(value):
+            return value["original_filename"]
+        if isinstance(value, list):
+            return "\n".join(block(item) for item in value)
+        if not isinstance(value, dict):
+            return scalar(value)
+        title_key = next((key for key in ("section_label", "title", "name", "label", "heading")
+                          if isinstance(value.get(key), str) and value[key].strip()), None)
+        lines = ([f"{ordinal}. {value[title_key]}" if ordinal is not None else value[title_key]] if title_key
+                 else [f"Item {ordinal}"] if ordinal is not None else [])
+        for key, item in value.items():
+            if key == title_key:
+                continue
+            if not isinstance(key, str):
+                raise ValueError("non-string completion key")
+            label = re.sub(r"\b\w", lambda match: match[0].upper(), key.replace("_", " "), flags=re.ASCII)
+            if isinstance(item, list) and not item:
+                continue  # StructuredField renders no empty array field.
+            text = block(item)
+            if isinstance(item, (list, dict)):
+                lines.append(label + ("\n" + text if text else ""))
+            elif text:
+                lines.append(label + ": " + text)
+        return "\n".join(lines)
+
+    def output_text(output):
+        value = output["value"]
+        if file_pointer(value):
+            return value["original_filename"]  # File widgets do not show the output label.
+        if isinstance(value, list) and value and file_pointer(value[0]):
+            if not all(file_pointer(item) for item in value):
+                raise ValueError("mixed file widget values")
+            return "\n".join(item["original_filename"] for item in value)
+        if isinstance(value, list):
+            if not value:
+                text = "No output"
+            elif all(not isinstance(item, (dict, list)) for item in value):
+                text = "\n\n".join(scalar(item) for item in value)
+            else:
+                text = "\n".join(block(item, i + 1) for i, item in enumerate(value))
+        else:
+            text = block(value)
+        return output["label"] + ("\n" + text if text else "")
+
+    summary, outputs = completion.get("summary"), completion.get("outputs", [])
+    if not isinstance(summary, str) or not isinstance(outputs, list):
+        return ""
+    if any(not isinstance(item, dict) or not isinstance(item.get("label"), str)
+           or "value" not in item for item in outputs):
+        return ""
+    try:
+        lines = (["Task Failed"] if completion.get("error") else []) + [summary]
+        lines.extend(output_text(item) for item in outputs)
+        return "\n".join(line for line in lines if line)
+    except (TypeError, ValueError, RecursionError):
+        return ""
+
+
+def _js_truthy(value: Any) -> bool:
+    """Visibility flags follow JavaScript, where empty objects/arrays are truthy."""
+    return not (value is None or value is False or type(value) in (int, float) and value == 0
+                or isinstance(value, str) and value == "")
+
+
 def build_polar_trajectory(
     data: dict[str, Any],
     *,
@@ -256,6 +357,9 @@ def build_polar_trajectory(
                 action_bits.append("Recorded action parameters: " + json.dumps(params, ensure_ascii=False, sort_keys=True))
             if text:
                 action_bits.append(text)
+            completion_text = _displayed_completion_text(message)
+            if completion_text and completion_text.strip() != text.strip():
+                action_bits.append("Displayed final answer: " + completion_text)
             observation = metadata.get("browser_observation")
             if isinstance(observation, str) and observation:
                 action_bits.append("Recorded browser observation: " + observation)

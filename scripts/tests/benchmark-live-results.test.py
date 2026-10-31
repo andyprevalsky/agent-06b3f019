@@ -28,6 +28,7 @@ if __name__ == "__main__":
             "pytest",
             "-q",
             "benchmarks/cloudbench_dependency_sync_test.py",
+            "benchmarks/polar_evaluator_test.py",
             "benchmarks/polar_browser_action_evidence_test.py",
             "benchmarks/polar_browser_action_identity_test.py",
             "benchmarks/polar_browser_verifier_input_test.py",
