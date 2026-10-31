@@ -36,6 +36,7 @@ import threading
 import time
 from contextlib import ExitStack, redirect_stdout
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -358,7 +359,8 @@ def make_source_root(path: Path) -> Path:
     scripts = path / "scripts"
     scripts.mkdir()
     for name in ("run_deploy_pipeline.py", "run-deploy-stage", "run_deploy_stage.py", "deploy_stage.py",
-                 "deploy_stage_wait.py", "factory_detail.py", "factory_metadata.py", "select_affected_tests.py"):
+                 "deploy_stage_wait.py", "factory_detail.py", "factory_metadata.py", "select_affected_tests.py",
+                 "process-identity.py"):
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
     (scripts / "test-map").mkdir()
     shutil.copyfile(ROOT / "scripts" / "test-map" / "edges.json", scripts / "test-map" / "edges.json")
@@ -1567,6 +1569,7 @@ def main() -> int:
         check_watchdog_receipts(tmp, env)
         check_follow_source(tmp, env)
         check_lane_teardown(tmp, env)
+        check_owner_run_preflight(tmp, env)
         check_attempt_refreshes_factory_snapshot(tmp, env)
         check_fix_loop_cap(tmp, env)
         check_interrupted_rounds_and_dead_supervisor_deferral()
@@ -1581,6 +1584,7 @@ def main() -> int:
         check_simulate_legacy_plan_group3(tmp, env)
         check_receipt_readers(tmp)
         check_production_fly_wait(tmp, env)
+        check_production_render(tmp, env)
         check_production_semantic(tmp, env)
         check_semantic_workflow_source_sha()
     print("run-deploy-pipeline: all checks passed")
@@ -1829,6 +1833,281 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     assert ran.returncode == 1 and "monitor-cooperative-cutover.ts --verify failed (exit 3)" in ran.stdout, ran.stdout
     assert "dispatch" not in call_lines(), call_lines()
     print("production fly wait: ok")
+
+
+def check_production_render(tmp: Path, env: dict[str, str]) -> None:
+    """``production-render`` (deploy.md Step 13a step 1) serves the merged
+    backend's proof from the Render deploys API, stubbed on loopback, over a
+    fixture repo: (a) no deploy for the merged SHA, live commit an ancestor
+    with no change under the Render service paths -> source-equivalent,
+    receipt recorded, the follow-up command runs; a root package.json change
+    or (b) a back-end change since the live commit keeps waiting to the bound;
+    (c) a live commit with the identical back-end tree that is neither an
+    ancestor nor a descendant keeps waiting (only ancestry blocks); (d) a
+    deploy for the merged SHA takes the exact-SHA path (live opens,
+    build_failed blocks); (f) a live descendant with the identical backend is
+    equivalent, (g) a live descendant that changed the backend is refused;
+    (e) a Render API error or missing credentials fails closed (exit 2)
+    without the follow-up. Every blocked receipt names the observed live
+    commit. The lane never overwrites, and is never overwritten by, the Fly
+    lane's receipt of the same merged SHA."""
+    repo = tmp / "render-source"
+    repo.mkdir()
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    for name in ("run_deploy_pipeline.py", "deploy_stage_wait.py", "factory_metadata.py",
+                 "classify-agent-runtime-changes.sh"):
+        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+    (repo / ".gitignore").write_text(".context/\n__pycache__/\n")
+    git = ["git", "-C", str(repo), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+
+    def commit(message: str, files: dict[str, str]) -> str:
+        for relative, content in files.items():
+            path = repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", message], check=True)
+        return subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+
+    commit("base", {"README": "base\n"})
+    live = commit("backend v1", {"back-end/src/server.ts": "v1\n"})
+    docs_only = commit("docs only", {"docs/notes.md": "notes\n", "scripts/tool.py": "x = 1\n"})
+    backend_change = commit("backend v2", {"back-end/src/server.ts": "v2\n"})
+    docs_after = commit("docs after", {"docs/after.md": "after\n"})
+    root_manifest = commit("root manifest", {"package.json": '{"workspaces": ["back-end"]}\n'})
+    branch = subprocess.run([*git, "rev-parse", "--abbrev-ref", "HEAD"], check=True, stdout=subprocess.PIPE,
+                            text=True).stdout.strip()
+    # `side` forks from the live commit with a docs-only change: its back-end
+    # tree is identical to every main-line commit built on `live`, so only
+    # ancestry can decide.
+    subprocess.run([*git, "checkout", "-q", "-b", "side", live], check=True)
+    sibling = commit("sibling docs", {"docs/other.md": "other\n"})
+    subprocess.run([*git, "checkout", "-q", branch], check=True)
+
+    fake = tmp / "render-fake"
+    fake.mkdir()
+    requests_log = fake / "requests.log"
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args: object) -> None:  # keep the suite's output clean
+            pass
+
+        def do_GET(self) -> None:  # http.server dispatches on this exact name
+            with requests_log.open("a") as handle:
+                handle.write(f"{self.path} auth={self.headers.get('Authorization')}\n")
+            if self.path.split("?")[0] != "/services/srv-fixture/deploys":
+                self.send_error(404)
+                return
+            if self.headers.get("Authorization") != "Bearer fixture-key":
+                self.send_error(401)
+                return
+            if (fake / "fail").exists():
+                self.send_error(500, "fixture outage")
+                return
+            count = int((fake / "count").read_text()) + 1 if (fake / "count").exists() else 1
+            (fake / "count").write_text(str(count))
+            path = fake / f"deploys-{count}.json"
+            if not path.exists():
+                path = fake / "deploys-last.json"
+            body = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    driver = scripts / "run_deploy_pipeline.py"
+    render_env = {**{key: value for key, value in env.items() if not key.startswith("RENDER_")},
+                  "DEPLOY_RENDER_API_BASE": f"http://127.0.0.1:{server.server_address[1]}",
+                  "RENDER_API_KEY": "fixture-key", "RENDER_SERVICE_ID": "srv-fixture"}
+    probes = fake / "probes.log"
+    service_paths = ["back-end/", "render.yaml", "package.json", "package-lock.json"]
+
+    def deploy(commit_id: str, status: str, deploy_id: str) -> dict:
+        return {"deploy": {"id": deploy_id, "status": status, "commit": {"id": commit_id, "message": "m"}},
+                "cursor": deploy_id}
+
+    def reset(*pages: list[dict]) -> None:
+        for stale in fake.glob("deploys-*.json"):
+            stale.unlink()
+        for stale in (fake / "count", fake / "fail", requests_log, probes):
+            stale.unlink(missing_ok=True)
+        for index, page in enumerate(pages, start=1):
+            (fake / f"deploys-{index}.json").write_text(json.dumps(page))
+        (fake / "deploys-last.json").write_text(json.dumps(pages[-1]))
+
+    def run_render(merged: str, state: Path, *extra: str, env_override: dict[str, str] | None = None
+                   ) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(driver), "production-render", "--merged-sha", merged, "--state-dir", str(state),
+             "--poll-seconds", "0.05", *extra, "--", "bash", "-c", f'echo probes >> "{probes}"'],
+            env=render_env if env_override is None else env_override, cwd=repo, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, timeout=120)
+
+    def run_fly(merged: str, state: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(driver), "production", "--merged-sha", merged, "--state-dir", str(state),
+             "--poll-seconds", "0.05", "--", "true"],
+            env={**render_env, "PATH": "/usr/bin:/bin"}, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=120)
+
+    def requests() -> list[str]:
+        return requests_log.read_text().splitlines() if requests_log.exists() else []
+
+    def receipt_of(state: Path) -> dict:
+        return json.loads((state / "production.json").read_text())
+
+    def blocked(merged: str, live_commit: str, state: Path, reason: str) -> dict:
+        """Run to a short bound against a live deploy of ``live_commit``: the
+        gate must block (exit 1), never print equivalence, never run the
+        follow-up, and record the observed live commit and ``reason``."""
+        reset([deploy(live_commit, "live", "dep-live")])
+        ran = run_render(merged, state, "--timeout", "0.3")
+        assert ran.returncode == 1, ran.stdout
+        assert "RENDER_SOURCE_EQUIVALENT" not in ran.stdout and not probes.exists(), ran.stdout
+        assert f"Render did not bring {merged[:7]} live within 0s" in ran.stdout, ran.stdout
+        assert f"live commit {live_commit[:9]} is not source-equivalent ({reason})" in ran.stdout, ran.stdout
+        assert len(requests()) >= 2, "the bounded wait must keep polling the deploys API"
+        render = receipt_of(state)["render"]
+        assert render["status"] == "timeout" and render["live_commit"] is None and render["polls"] >= 2, render
+        assert render["observed_live_commit"] == live_commit and render["observed_live_deploy_id"] == "dep-live", render
+        assert render["equivalence"]["equivalent"] is False and render["equivalence"]["reason"] == reason, render
+        assert reason in render["error"], render
+        return render
+
+    try:
+        # (a) Render skipped the merge (no deploy for it); the live deploy's commit
+        #     is an ancestor and nothing under the service paths changed: equivalent.
+        reset([deploy(live, "live", "dep-live")])
+        state_a = tmp / "render-state-a"
+        ran = run_render(docs_only, state_a)
+        assert ran.returncode == 0, ran.stdout
+        assert f"RENDER_SOURCE_EQUIVALENT live={live} merged={docs_only} reason=live-ancestor-same-backend" in ran.stdout
+        assert "RENDER_LIVE " not in ran.stdout and "PIPELINE_RENDER then exit=0" in ran.stdout, ran.stdout
+        assert probes.read_text() == "probes\n", "the follow-up command must run once the live backend is proven"
+        assert requests() == ["/services/srv-fixture/deploys?limit=20 auth=Bearer fixture-key"], requests()
+        render = receipt_of(state_a)["render"]
+        assert render["provider"] == "render" and render["status"] == "source-equivalent", render
+        assert render["merged_sha"] == docs_only and render["live_commit"] == live, render
+        assert render["observed_live_commit"] == live and render["service_paths"] == service_paths, render
+        assert render["backend_diff"] == [] and render["deploy_id"] == "dep-live" and render["polls"] == 1, render
+        equivalence = render["equivalence"]
+        assert equivalence["equivalent"] is True and equivalence["relationship"] == "ancestor", equivalence
+        assert equivalence["live_is_ancestor"] is True and equivalence["live_is_descendant"] is False, equivalence
+        assert equivalence["backend_diff"] == [] and equivalence["service_paths"] == service_paths, equivalence
+        assert equivalence["reason"] == "live-ancestor-same-backend" and "Root Directory" in equivalence["detail"]
+        assert sorted(equivalence["changed_files"]) == ["docs/notes.md", "scripts/tool.py"], equivalence
+        assert render["then"] == {**render["then"], "exit": 0} and render["then"]["command"][0] == "bash", render
+        assert receipt_of(state_a)["merged_sha"] == docs_only and "wall_s" in render, receipt_of(state_a)
+        # The Fly lane of the same merged SHA carries the Render lane forward.
+        ran = run_fly(docs_only, state_a)
+        assert ran.returncode == 0, ran.stdout
+        after = receipt_of(state_a)
+        assert after["status"] == "passed" and after["fly"]["required"] is False, after
+        assert after["render"] == render, "production must not drop the Render lane of the same merged SHA"
+
+        # A merge that changes only the root workspace manifest is a backend
+        # build input (Render resolves the root workspace graph): never equivalent.
+        render = blocked(root_manifest, docs_after, tmp / "render-state-a2", "live-ancestor-backend-changed")
+        assert render["backend_diff"] == ["package.json"] and render["equivalence"]["live_is_ancestor"] is True, render
+
+        # (b) A back-end change since the live commit is never equivalent: the
+        #     exact-SHA wait runs to its bound and blocks; no follow-up.
+        render = blocked(backend_change, live, tmp / "render-state-b", "live-ancestor-backend-changed")
+        assert render["backend_diff"] == ["back-end/src/server.ts"], render
+        assert render["equivalence"]["live_is_ancestor"] is True and "back-end/" in render["equivalence"]["detail"]
+
+        # (c) The live commit is neither an ancestor nor a descendant of the
+        #     merged SHA (a sibling branch) although their back-end trees are
+        #     identical: only ancestry blocks, and it does.
+        render = blocked(docs_only, sibling, tmp / "render-state-c", "live-unrelated")
+        assert render["backend_diff"] == [] and render["equivalence"]["relationship"] == "unrelated", render
+        assert render["equivalence"]["live_is_ancestor"] is False and render["equivalence"]["live_is_descendant"] is False
+
+        # (d) Render created a deploy for the merged SHA: the exact-SHA path is
+        #     unchanged (building twice, then live); no equivalence is consulted.
+        building = [deploy(backend_change, "build_in_progress", "dep-new"), deploy(live, "live", "dep-live")]
+        reset(building, building, [deploy(backend_change, "live", "dep-new"), deploy(live, "deactivated", "dep-live")])
+        state_d = tmp / "render-state-d"
+        ran = run_render(backend_change, state_d)
+        assert ran.returncode == 0, ran.stdout
+        assert f"RENDER_LIVE commit={backend_change} deploy=dep-new" in ran.stdout, ran.stdout
+        assert "RENDER_SOURCE_EQUIVALENT" not in ran.stdout and probes.read_text() == "probes\n", ran.stdout
+        assert ran.stdout.count("Render: status=build_in_progress") == 2 and len(requests()) == 3, ran.stdout
+        render = receipt_of(state_d)["render"]
+        assert render["status"] == "live" and render["live_commit"] == backend_change, render
+        assert render["observed_live_commit"] == backend_change and render["observed_live_deploy_id"] == "dep-new"
+        assert render["deploy_id"] == "dep-new" and render["deploy_status"] == "live" and render["polls"] == 3, render
+        assert render["equivalence"] is None and render["backend_diff"] == [], render
+        # A failed deploy for the merged SHA blocks at once, as before.
+        reset([deploy(backend_change, "build_failed", "dep-bad"), deploy(live, "live", "dep-live")])
+        state_d2 = tmp / "render-state-d2"
+        ran = run_render(backend_change, state_d2)
+        assert ran.returncode == 1 and "Render deploy build_failed for" in ran.stdout and "dep-bad" in ran.stdout, ran.stdout
+        assert not probes.exists() and len(requests()) == 1, ran.stdout
+        render = receipt_of(state_d2)["render"]
+        assert render["status"] == "deploy-failed" and render["deploy_status"] == "build_failed", render
+        assert render["observed_live_commit"] == live, render
+        # The Render lane joins an existing Fly-lane receipt of the same SHA
+        # instead of replacing it.
+        state_e = tmp / "render-state-e"
+        ran = run_fly(backend_change, state_e)
+        assert ran.returncode == 0, ran.stdout
+        reset([deploy(backend_change, "live", "dep-new")])
+        ran = run_render(backend_change, state_e)
+        assert ran.returncode == 0, ran.stdout
+        joined = receipt_of(state_e)
+        assert joined["status"] == "passed" and joined["fly"]["required"] is False, joined
+        assert joined["render"]["status"] == "live" and joined["semantic_dispatch"]["exit"] == 0, joined
+
+        # (f) Another PR deployed after the merge without touching the service
+        #     paths: the live commit is a descendant with the identical backend.
+        reset([deploy(docs_after, "live", "dep-later")])
+        state_f = tmp / "render-state-f"
+        ran = run_render(backend_change, state_f)
+        assert ran.returncode == 0, ran.stdout
+        assert (f"RENDER_SOURCE_EQUIVALENT live={docs_after} merged={backend_change} "
+                "reason=live-descendant-same-backend") in ran.stdout, ran.stdout
+        assert probes.read_text() == "probes\n", ran.stdout
+        render = receipt_of(state_f)["render"]
+        assert render["status"] == "source-equivalent" and render["live_commit"] == docs_after, render
+        assert render["merged_sha"] == backend_change and render["observed_live_commit"] == docs_after, render
+        equivalence = render["equivalence"]
+        assert equivalence["relationship"] == "descendant" and equivalence["equivalent"] is True, equivalence
+        assert equivalence["live_is_ancestor"] is False and equivalence["live_is_descendant"] is True, equivalence
+        assert equivalence["live_commit"] == docs_after and equivalence["merged_sha"] == backend_change, equivalence
+        assert equivalence["backend_diff"] == [] and equivalence["changed_files"] == ["docs/after.md"], equivalence
+
+        # (g) A descendant that changed the backend: the merged backend never ran
+        #     as-is, so the gate refuses (a manual decision), never equivalence.
+        render = blocked(docs_only, backend_change, tmp / "render-state-g", "live-descendant-backend-changed")
+        assert render["backend_diff"] == ["back-end/src/server.ts"], render
+        assert render["equivalence"]["live_is_descendant"] is True and "manual decision" in render["equivalence"]["detail"]
+
+        # (e) A Render API error fails closed: exit 2, no follow-up, error
+        #     recorded; missing credentials never reach the API.
+        reset([deploy(live, "live", "dep-live")])
+        (fake / "fail").touch()
+        state_h = tmp / "render-state-h"
+        ran = run_render(docs_only, state_h)
+        assert ran.returncode == 2 and "HTTP 500" in ran.stdout and "PIPELINE_RENDER status=error exit=2" in ran.stdout, ran.stdout
+        assert "RENDER_SOURCE_EQUIVALENT" not in ran.stdout and not probes.exists(), ran.stdout
+        render = receipt_of(state_h)["render"]
+        assert render["status"] == "error" and "HTTP 500" in render["error"] and render["then"] is None, render
+        reset([deploy(live, "live", "dep-live")])
+        ran = run_render(docs_only, tmp / "render-state-i",
+                         env_override={k: v for k, v in render_env.items() if k != "RENDER_API_KEY"})
+        assert ran.returncode == 2 and "RENDER_API_KEY not set" in ran.stdout and requests() == [], ran.stdout
+        assert not probes.exists(), ran.stdout
+        assert receipt_of(tmp / "render-state-i")["render"]["status"] == "error", receipt_of(tmp / "render-state-i")
+    finally:
+        server.shutdown()
+        server.server_close()
+    print("production render wait: ok")
 
 
 def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
@@ -2721,6 +3000,380 @@ def check_lane_teardown(tmp: Path, env: dict[str, str]) -> None:
     assert pipeline._escalation_targets(records, [88, 99, 55, 77]) == [77, 99, 55]
     print("lane teardown: ok")
 
+
+def _fake_process(proc: Path, pid: int, comm: str, *, ppid: int = 1, start: int = 5000, environ: bytes = b"",
+                  cmdline: str = "") -> None:
+    stat_tail = "0 0 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 {start} 0 0 0 0"
+    (proc / str(pid)).mkdir(parents=True)
+    (proc / str(pid) / "stat").write_text(f"{pid} ({comm}) S {ppid} " + stat_tail.format(start=start) + "\n")
+    (proc / str(pid) / "environ").write_bytes(environ)
+    (proc / str(pid) / "cmdline").write_bytes(cmdline.replace(" ", "\0").encode() + b"\0")
+
+
+def _owner_run_dir(context_root: Path, run_id: str, *, age_s: float, benchmark: dict | None = None,
+                   stack: dict | None = None, manifest: dict | None = None, cleanup: str | None = None) -> Path:
+    run_dir = context_root / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "logs").mkdir()
+    (run_dir / "logs" / "frontend.log").write_text("evidence\n")
+    for name, payload in (("local-benchmark-owner.json", benchmark), ("local-stack-owner.json", stack),
+                          ("services.json", manifest)):
+        if payload is not None:
+            (run_dir / name).write_text(json.dumps(payload))
+    if cleanup is not None:
+        (run_dir / "local-stack-cleanup.status").write_text(cleanup)
+    stamp = time.time() - age_s
+    for path in (run_dir / "logs" / "frontend.log", run_dir / "logs", *run_dir.iterdir(), run_dir):
+        os.utime(path, (stamp, stamp))
+    return run_dir
+
+
+# A pid above the kernel's default pid_max can never be alive on the host.
+DEAD_PID = 4194309
+
+
+def check_owner_run_preflight(tmp: Path, env: dict[str, str]) -> None:
+    """2026-10-31 (deploy-5 round 1, PR #1655 round 2): an isolated run stopped
+    before its controller bound a pid leaves ``local-benchmark-owner.json``
+    with ``state: not_started, pid: null`` (and/or a pid-less stack owner); the
+    launch preflight refused the deploy on it until a human moved the run to
+    ``_aborted/``. One shared classification (live / finished / aborted /
+    stranded / bootstrapping / unknown) now serves the launch preflight and the
+    lane teardown: this deploy's own aborted run is set aside (renamed,
+    evidence intact) and the launch proceeds; a run inside the bootstrap grace
+    (newest file under it) is protected and waited out; a pid-less run whose
+    run id a live process carries (environment, ``--run-id`` argv, or a
+    command line naming it when the environment is unreadable) is live and
+    never set aside; a run that left a manifest without a clean cleanup
+    receipt is stranded and left for --reconcile-cleanup; another session's
+    runs are reported, never renamed and never waited on; an unreadable
+    record, a symlinked context root or an unavailable process table refuses
+    the launch (fail closed)."""
+    pipeline = load_module("pipeline_owner_runs", DRIVER)
+    source_root = Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])
+    context_root = source_root / ".context" / "benchmarks"
+    shutil.rmtree(context_root, ignore_errors=True)
+    not_started = {"version": 1, "run_id": "", "state": "not_started", "pid": None, "native_identity": "",
+                   "token": "", "receipt": "", "signal": None}
+    stopped_manifest = {"status": "stopped", "run_sh_pid": DEAD_PID, "services": []}
+    clean = "version=2\nstate=clean\n"
+
+    # ── Unit: the classification itself, on a fake /proc ───────────────────
+    fake = tmp / "owner-runs-fake-proc"
+    _fake_process(fake, 100, "python3", cmdline="python3 benchmarks/local.py --port 1")
+    _fake_process(fake, 101, "bash", cmdline="bash scripts/run.sh --benchmark",
+                  environ=b"BENCHMARK_RUN_ID=carried-run\0")
+    _fake_process(fake, 102, "sleep", cmdline="sleep 300")
+    # Environment unreadable (EACCES): only its command line names the run.
+    _fake_process(fake, 103, "cloudflared", environ=b"secret\0",
+                  cmdline="cloudflared tunnel --logfile /x/.context/benchmarks/eacces-run/cloudflared.log")
+    (fake / "103" / "environ").chmod(0)
+    # A controller with a custom run id (run-predeploy-local's YYYYMMDD-HHMMSS-$$):
+    # the id embeds no pid and a runtime environ write never reaches /proc.
+    _fake_process(fake, 104, "python3", cmdline="python3 benchmarks/local.py --run-id 20261031-064512-555 --port 2")
+    unit_root = tmp / "owner-runs-unit"
+    identities = {102: "linux:boot:5002"}
+    now = time.time()
+
+    def unit(run_id: str, age_s: float, **records: object) -> Path:
+        bench = records.pop("benchmark", None)
+        if bench == "not_started":
+            bench = {**not_started, "run_id": run_id}
+        return _owner_run_dir(unit_root, run_id, age_s=age_s, benchmark=bench, **records)
+
+    unit("1700000000-999-1", 600, benchmark="not_started")
+    unit("1700000000-998-1", 5, benchmark="not_started")
+    unit("carried-run", 600, benchmark="not_started")
+    unit("1700000000-100-1", 600, benchmark="not_started")
+    unit("manifest-live", 600, stack={"version": 1, "run_id": "manifest-live", "pid": None},
+         manifest={"status": "running", "run_sh_pid": 101})
+    unit("stack-live", 600, stack={"version": 1, "run_id": "stack-live", "pid": 102, "native_identity": "linux:boot:5002"})
+    unit("stack-reused-pid", 600,
+         stack={"version": 1, "run_id": "stack-reused-pid", "pid": 102, "native_identity": "linux:boot:1"})
+    unit("stack-exited", 600, stack={"version": 1, "run_id": "stack-exited", "pid": 7777, "native_identity": "linux:boot:7"},
+         cleanup=clean)
+    unit("young-but-stopped", 5, benchmark="not_started", manifest=stopped_manifest, cleanup=clean)
+    unit("young-manifest-no-pid", 5, benchmark="not_started", manifest={"status": "starting", "services": []})
+    unit("stranded-pending", 600, benchmark="not_started", manifest={"status": "running", "run_sh_pid": 7777},
+         cleanup="version=2\nstate=pending\n")
+    unit("stranded-no-receipt", 600, benchmark="not_started", manifest=stopped_manifest)
+    young_log = unit("young-log", 600, benchmark="not_started")
+    (young_log / "logs" / "services.log").write_text("still bootstrapping\n")
+    unit("eacces-run", 600, benchmark="not_started")
+    unit("20261031-064512-555", 600, benchmark="not_started")
+    broken = unit("broken", 600)
+    (broken / "local-benchmark-owner.json").write_text("{not json")
+    (unit_root / "seed-cache").mkdir()
+    (unit_root / "_aborted" / "1600000000-1-1").mkdir(parents=True)
+    (unit_root / "_aborted" / "1600000000-1-1" / "local-benchmark-owner.json").write_text(json.dumps(not_started))
+    try:
+        runs = pipeline.classify_owner_runs(unit_root, proc=fake, identity_of=lambda pid: identities.get(pid, ""),
+                                            now=now, grace_seconds=90)
+    finally:
+        (fake / "103" / "environ").chmod(0o600)
+    classes = {run["run_id"]: run["classification"] for run in runs}
+    expected = {
+        "1700000000-999-1": "aborted", "1700000000-998-1": "bootstrapping", "carried-run": "live",
+        "1700000000-100-1": "live", "manifest-live": "live", "stack-live": "live", "stack-reused-pid": "finished",
+        "stack-exited": "finished", "young-but-stopped": "aborted", "young-manifest-no-pid": "stranded",
+        "stranded-pending": "stranded", "stranded-no-receipt": "stranded", "young-log": "bootstrapping",
+        "eacces-run": "live", "20261031-064512-555": "live", "broken": "unknown",
+    }
+    assert classes == expected, classes
+    by_id = {run["run_id"]: run for run in runs}
+    assert by_id["carried-run"]["pids"] == [101] and "carried by live process" in by_id["carried-run"]["reason"]
+    assert by_id["1700000000-100-1"]["pids"] == [100] and by_id["manifest-live"]["pids"] == [101]
+    assert by_id["stack-live"]["pids"] == [102] and "matching identity" in by_id["stack-live"]["reason"]
+    assert by_id["eacces-run"]["pids"] == [103] and by_id["20261031-064512-555"]["pids"] == [104], by_id
+    assert "unreadable" in by_id["broken"]["reason"], by_id["broken"]
+    assert "grace" in by_id["1700000000-998-1"]["reason"] and "bootstrap ended" in by_id["young-but-stopped"]["reason"]
+    assert by_id["young-log"]["age_s"] < 5, by_id["young-log"]
+    for run_id in ("stranded-pending", "stranded-no-receipt", "young-manifest-no-pid"):
+        assert f"--run-id {run_id} --reconcile-cleanup" in by_id[run_id]["reason"], by_id[run_id]
+    # The same record is bootstrapping now and aborted once the grace passed.
+    later = pipeline.classify_owner_runs(unit_root, proc=fake, identity_of=lambda pid: "", now=now + 100,
+                                         grace_seconds=90, run_ids={"1700000000-998-1"})
+    assert [run["classification"] for run in later] == ["aborted"], later
+    # No process table (another platform, /proc unlistable): every run unknown,
+    # a reconcile refuses and renames nothing; a symlinked root likewise.
+    missing = pipeline.classify_owner_runs(unit_root, proc=tmp / "owner-runs-missing-proc", identity_of=lambda pid: "",
+                                           now=now, grace_seconds=90)
+    assert {run["run_id"] for run in missing} == set(expected), missing
+    assert all(run["classification"] == "unknown" for run in missing), missing
+    assert all("process table" in run["reason"] for run in missing if run["run_id"] != "broken"), missing
+    unavailable = pipeline.reconcile_owner_runs(unit_root, tmp / "owner-runs-unavailable-state", stage="unit",
+                                                proc=tmp / "owner-runs-missing-proc", identity_of=lambda pid: "",
+                                                grace_seconds=90)
+    assert unavailable["set_aside"] == [] and len(unavailable["refused"]) == len(expected), unavailable["refused"]
+    link = tmp / "owner-runs-linked-root"
+    link.symlink_to(unit_root)
+    linked = pipeline.reconcile_owner_runs(link, tmp / "owner-runs-linked-state", stage="unit", proc=fake,
+                                           identity_of=lambda pid: "", grace_seconds=90)
+    assert linked["set_aside"] == [] and [r["classification"] for r in linked["refused"]] == ["unknown"], linked
+    assert "symlink" in linked["refused"][0]["reason"], linked["refused"]
+    assert (unit_root / "1700000000-999-1").is_dir() and not (unit_root / "_aborted" / "1700000000-999-1").exists()
+    # A run directory removed by a concurrent cleanup after ``is_dir()``
+    # succeeded (PR #1656 review, 2026-10-31): the FileNotFoundError from its
+    # newest-mtime stat or from a record read made the run ``unknown`` and the
+    # preflight refused the whole attempt. A confirmed-vanished run is
+    # ``finished`` (reported, never refused, never renamed); the same error
+    # while the directory still exists stays ``unknown`` (fail closed).
+    vanishing = unit("1700000000-997-1", 600, benchmark="not_started")
+    original_newest_mtime = pipeline._newest_mtime
+
+    def vanish_before_stat(run_dir: Path) -> float:
+        if run_dir == vanishing:
+            shutil.rmtree(run_dir)
+        return original_newest_mtime(run_dir)
+
+    with patch.object(pipeline, "_newest_mtime", vanish_before_stat):
+        gone = pipeline.reconcile_owner_runs(unit_root, tmp / "owner-runs-vanished-state", stage="unit", proc=fake,
+                                             identity_of=lambda pid: "", grace_seconds=90,
+                                             run_ids={vanishing.name, "stack-exited"})
+    assert gone["refused"] == [] and gone["set_aside"] == [], gone
+    assert gone["counts"]["finished"] == 2 and gone["counts"]["unknown"] == 0, gone["counts"]
+    row = next(run for run in gone["runs"] if run["run_id"] == vanishing.name)
+    assert row["classification"] == "finished" and "vanished" in row["reason"] and row["action"] == "left", row
+    assert not vanishing.exists() and not (unit_root / "_aborted" / vanishing.name).exists()
+    assert vanishing.name in (tmp / "owner-runs-vanished-state" / "owner-runs.jsonl").read_text()
+    # The same race on an owner-record read (the directory goes between is_file() and read_text()).
+    vanishing = unit("1700000000-997-1", 600, benchmark="not_started")
+    original_read_text = Path.read_text
+
+    def vanish_before_read(self: Path, *args, **kwargs):
+        if self.parent == vanishing:
+            shutil.rmtree(vanishing)
+        return original_read_text(self, *args, **kwargs)
+
+    with patch.object(Path, "read_text", vanish_before_read):
+        gone = pipeline.classify_owner_runs(unit_root, proc=fake, identity_of=lambda pid: "", now=now,
+                                            grace_seconds=90, run_ids={vanishing.name})
+    assert [run["classification"] for run in gone] == ["finished"] and "vanished" in gone[0]["reason"], gone
+    assert not vanishing.exists()
+    # Control: a FileNotFoundError while the run directory still exists is not a vanished run.
+    present = unit("1700000000-996-1", 600, benchmark="not_started")
+
+    def phantom_missing(run_dir: Path) -> float:
+        raise FileNotFoundError(f"phantom {run_dir}")
+
+    with patch.object(pipeline, "_newest_mtime", phantom_missing):
+        kept = pipeline.classify_owner_runs(unit_root, proc=fake, identity_of=lambda pid: "", now=now,
+                                            grace_seconds=90, run_ids={present.name})
+    assert [run["classification"] for run in kept] == ["unknown"], kept
+    assert kept[0]["reason"] == "run dir unreadable (FileNotFoundError)" and present.is_dir(), kept
+    # Grace comes from the same variable run.sh / kill-services.sh honour.
+    with patch.dict(os.environ, {"BENCHMARK_STARTUP_GRACE_SECONDS": "7"}):
+        assert pipeline.bootstrap_grace_seconds() == 7.0
+    with patch.dict(os.environ, {"BENCHMARK_STARTUP_GRACE_SECONDS": "soon"}):
+        assert pipeline.bootstrap_grace_seconds() == 90.0
+    # benchmarks/local.py exports the run id before it writes not_started, so
+    # every later child of a custom-id controller carries it.
+    local_py = (ROOT / "agents" / "benchmarks" / "local.py").read_text()
+    export = 'os.environ["BENCHMARK_RUN_ID"] = stack.run_id'
+    assert local_py.count(export) == 1 and local_py.index(export) < local_py.index('benchmark_owner.record("not_started")')
+
+    # ── Driver: the launch preflight on the real /proc ─────────────────────
+    plan = tmp / "owner-runs-plan.json"
+    write_plan(plan, [{"name": "quick", "command": ["true"], "reuse_passed": False}])
+    aborted_id = "1793428424-669285-80519"  # the record that blocked deploy-5 round 1
+    aborted = _owner_run_dir(context_root, aborted_id, age_s=600,
+                             benchmark={**not_started, "run_id": aborted_id},
+                             stack={"version": 1, "run_id": aborted_id, "pid": DEAD_PID, "token": "t",
+                                    "native_identity": "linux:gone:1", "birth": "x"},
+                             manifest=stopped_manifest, cleanup=clean)
+    carrier = subprocess.Popen(["sleep", "300"], env={**os.environ, "BENCHMARK_RUN_ID": "1793428424-1-2"},
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    protected = _owner_run_dir(context_root, "1793428424-1-2", age_s=600,
+                               benchmark={**not_started, "run_id": "1793428424-1-2"})
+    young = _owner_run_dir(context_root, "1793428424-1-3", age_s=0, benchmark={**not_started, "run_id": "1793428424-1-3"})
+    stranded = _owner_run_dir(context_root, "1793428424-1-5", age_s=600,
+                              benchmark={**not_started, "run_id": "1793428424-1-5"},
+                              manifest={"status": "running", "run_sh_pid": DEAD_PID, "services": []},
+                              cleanup="version=2\nstate=pending\n")
+    # Another session's run under this checkout: identical record, not named
+    # by any of this state dir's teardowns.
+    foreign = _owner_run_dir(context_root, "1793428424-1-6", age_s=600, benchmark={**not_started, "run_id": "1793428424-1-6"})
+    state = tmp / "owner-runs-state"
+    (state / "teardown").mkdir(parents=True)
+    (state / "teardown" / "attempt-0-smoke.json").write_text(json.dumps({
+        "records": [{"run_id": aborted_id}, {"run_id": young.name}, {"run_id": stranded.name}]}))
+    scenario_env = {**env, "BENCHMARK_STARTUP_GRACE_SECONDS": "2"}
+    try:
+        started = time.monotonic()
+        ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, env=scenario_env)
+        waited = time.monotonic() - started
+        assert ran.returncode == 0, (ran.returncode, ran.stdout, ran.stderr)
+        receipt = json.loads((state / "receipt.json").read_text())
+        assert receipt["status"] == "passed", receipt["status"]
+        summary = receipt["owner_runs"]
+        assert summary["stage"] == "attempt-1-preflight" and summary["refused"] == [], summary
+        # The young own record was protected until its grace passed, then set aside too.
+        assert summary["waited_s"] >= 2.0 and waited >= 2.0, (summary, waited)
+        assert summary["counts"] == {"live": 1, "finished": 0, "aborted": 3, "stranded": 1, "bootstrapping": 0,
+                                     "unknown": 0}, summary
+        assert sorted(run["run_id"] for run in summary["set_aside"]) == sorted([aborted_id, young.name]), summary
+        # The carrier-protected run is another session's too: reported, left.
+        assert sorted(summary["foreign"]) == sorted([protected.name, foreign.name]), summary
+        line = next(l for l in ran.stdout.splitlines() if l.startswith("PIPELINE_OWNER_RUNS "))
+        assert ("attempt=1 stage=attempt-1-preflight live=1 finished=0 aborted=3 stranded=1 bootstrapping=0 "
+                "unknown=0 foreign=2 set_aside=") in line and "refused=-" in line, line
+        # Set aside, never deleted: the evidence moved intact with the classification beside it.
+        for run_dir in (aborted, young):
+            assert not run_dir.exists(), run_dir
+            moved = context_root / "_aborted" / run_dir.name
+            assert (moved / "logs" / "frontend.log").read_text() == "evidence\n", moved
+            assert json.loads((moved / "local-benchmark-owner.json").read_text())["state"] == "not_started"
+            mark = json.loads((moved / "aborted-by-deploy-pipeline.json").read_text())
+            assert mark["classification"] == "aborted" and mark["original_path"] == str(run_dir), mark
+        assert (context_root / "_aborted" / aborted_id / "services.json").exists()
+        # _aborted/ itself stays as old as its oldest run (the young run sorts
+        # first and would otherwise stamp it with "now"): the shell readers'
+        # young-directory bootstrap heuristics must not see a fresh bootstrap.
+        assert time.time() - (context_root / "_aborted").stat().st_mtime >= 500, (context_root / "_aborted").stat()
+        # Stranded (manifest without a clean receipt) and foreign runs stay put.
+        assert stranded.exists() and foreign.exists(), (stranded.exists(), foreign.exists())
+        # A pid-less record whose run id a live process carries is live: untouched.
+        assert protected.exists() and _process_alive(carrier.pid)
+        assert json.loads((protected / "local-benchmark-owner.json").read_text())["pid"] is None
+        rows = {r["run_id"]: r for r in map(json.loads, (state / "owner-runs.jsonl").read_text().splitlines())}
+        assert rows[protected.name]["classification"] == "live" and rows[protected.name]["pids"] == [carrier.pid]
+        assert rows[protected.name]["action"].startswith("left") and "carried by live process" in rows[protected.name]["reason"]
+        assert rows[stranded.name]["classification"] == "stranded" and rows[stranded.name]["action"] == "left"
+        assert rows[foreign.name]["classification"] == "aborted" and rows[foreign.name]["own"] is False
+        assert rows[foreign.name]["action"] == "left (not this deploy's run)", rows[foreign.name]
+        assert {rows[r]["action"] for r in (aborted_id, young.name)} == {"set-aside"}, rows
+
+        # Unreadable record (any session's): unknown, the launch is refused, nothing moved or signalled.
+        broken = _owner_run_dir(context_root, "1793428424-1-4", age_s=600)
+        (broken / "local-stack-owner.json").write_text("{\"pid\": ")
+        since = time.time()
+        refused = run_driver("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, env=scenario_env)
+        assert refused.returncode == 1, (refused.returncode, refused.stdout, refused.stderr)
+        assert "PIPELINE_OWNER_RUNS_REFUSED attempt=1 1793428424-1-4: unknown" in refused.stderr, refused.stderr
+        receipt = json.loads((state / "receipt.json").read_text())
+        assert receipt["status"] == "failed" and receipt["refused"][0]["run_id"] == broken.name, receipt
+        assert receipt["lanes"]["quick"]["status"] == "failed", receipt["lanes"]
+        assert receipt["lanes"]["quick"]["note"].startswith("refused: owner-run preflight"), receipt["lanes"]
+        assert broken.exists() and protected.exists() and foreign.exists() and _process_alive(carrier.pid)
+        assert not (context_root / "_aborted" / broken.name).exists()
+        woke = run_driver("wait", "--state-dir", str(state), "--timeout", "10", "--since", str(since), env=scenario_env)
+        assert woke.returncode == 1, (woke.returncode, woke.stdout)
+        # A refused launch is not a completed failed round for the fix-loop cap.
+        history = [json.loads(l) for l in (state / "history.jsonl").read_text().splitlines()] + [receipt]
+        assert pipeline.fix_loop_state(history, 1)["failed_rounds"] == 0 and not pipeline.fix_loop_state(history, 1)["capped"]
+        shutil.rmtree(broken)
+        # Another session's run still bootstrapping: reported, never waited on.
+        foreign_young = _owner_run_dir(context_root, "1793428424-1-7", age_s=0,
+                                       benchmark={**not_started, "run_id": "1793428424-1-7"})
+        again = run_driver("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, env=scenario_env)
+        assert again.returncode == 0, (again.returncode, again.stderr)
+        summary = json.loads((state / "receipt.json").read_text())["owner_runs"]
+        assert summary["waited_s"] < 1.0 and summary["counts"]["bootstrapping"] == 1, summary
+        assert foreign_young.exists() and foreign.exists() and summary["set_aside"] == [], summary
+        assert sorted(summary["foreign"]) == sorted([protected.name, foreign.name, foreign_young.name]), summary
+    finally:
+        carrier.kill()
+        carrier.wait()
+        shutil.rmtree(context_root, ignore_errors=True)
+
+    # ── Teardown: a superseded lane's not_started run is set aside by the lane teardown ──
+    scripts = tmp / "owner-runs-scripts"
+    scripts.mkdir()
+    probe = source_root / ".owner-runs-probe.tmp"
+    probe.unlink(missing_ok=True)
+    # The lane: like local.py it records not_started under a generated run id
+    # that embeds the controller pid, then (the controller being stopped before
+    # it bound a benchmark child) idles until the lane is superseded.
+    (scripts / "lane.sh").write_text(
+        "#!/bin/bash\n"
+        "[ -f \"$2\" ] && exit 0\n"
+        "run_dir=\"$1/$(date +%s)-$$-9\"\n"
+        "mkdir -p \"$run_dir\"\n"
+        "printf '{\"version\":1,\"run_id\":\"%s\",\"state\":\"not_started\",\"pid\":null,\"native_identity\":\"\","
+        "\"token\":\"\",\"receipt\":\"\",\"signal\":null}\\n' \"$(basename \"$run_dir\")\" > \"$run_dir/local-benchmark-owner.json\"\n"
+        "printf '%s\\n' \"$run_dir\" > \"$3\"\n"
+        "sleep 60\n"
+    )
+    marker = tmp / "owner-runs-lane-run-dir"
+    plan = tmp / "owner-runs-teardown-plan.json"
+    write_plan(plan, [{"name": "smoke", "reuse_passed": False,
+                       "command": ["bash", str(scripts / "lane.sh"), str(context_root), str(probe), str(marker)]}])
+    state = tmp / "owner-runs-teardown-state"
+    supervisor = subprocess.Popen(
+        [sys.executable, str(DRIVER), "run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED,
+         "--follow-source", "--settle-seconds", "0.5", "--poll-seconds", "0.2", "--fix-loop-cap", "0"],
+        env={**env, "DEPLOY_PIPELINE_TEARDOWN_WAIT_SECONDS": "1", "DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS": "2",
+             "BENCHMARK_STARTUP_GRACE_SECONDS": "0"},
+        stdout=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not marker.exists():
+            time.sleep(0.1)
+        lane_run_dir = Path(marker.read_text().strip())
+        probe.write_text("fixed\n")
+        out, _ = supervisor.communicate(timeout=120)
+        assert supervisor.returncode == 0, (supervisor.returncode, out)
+        history = [json.loads(line) for line in (state / "history.jsonl").read_text().splitlines()]
+        superseded = history[-1]
+        assert superseded["status"] == "superseded" and superseded["superseded_lanes"] == ["smoke"], superseded
+        teardown = superseded["lanes"]["smoke"]["teardown"]
+        assert teardown["set_aside"] == [lane_run_dir.name], teardown
+        assert teardown["owner_runs"] == {lane_run_dir.name: "aborted"}, teardown
+        detail = json.loads(Path(teardown["receipt"]).read_text())
+        assert detail["owner_runs"]["stage"] == "attempt-1-teardown-smoke" and detail["owner_runs"]["waited_s"] < 1, detail["owner_runs"]
+        assert not lane_run_dir.exists() and (context_root / "_aborted" / lane_run_dir.name / "local-benchmark-owner.json").exists()
+        assert f"lane=smoke outcome=clean owned=- foreign=- escalated=- killed=- eperm=- survivors=- set_aside={lane_run_dir.name} " in out, out
+        # The second attempt's preflight knows that run as its own and found nothing left to set aside.
+        receipt = json.loads((state / "receipt.json").read_text())
+        assert receipt["attempt"] == 2 and receipt["owner_runs"]["set_aside"] == [] and receipt["owner_runs"]["refused"] == []
+        assert pipeline.own_run_ids_from_state(state) == {lane_run_dir.name}, pipeline.own_run_ids_from_state(state)
+    finally:
+        probe.unlink(missing_ok=True)
+        if supervisor.poll() is None:
+            supervisor.kill()
+            supervisor.wait()
+        shutil.rmtree(context_root, ignore_errors=True)
+    print("owner-run preflight and teardown: ok")
 
 def check_attempt_refreshes_factory_snapshot(tmp: Path, env: dict[str, str]) -> None:
     """Every attempt re-stamps the selected factory telemetry snapshot with the
