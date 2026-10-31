@@ -2683,15 +2683,22 @@ cd "$(git rev-parse --show-toplevel)"
 # Polls the Render deploys API (RENDER_API_KEY/RENDER_SERVICE_ID from
 # back-end/.env) up to 90 x 10 s. A deploy for the merged SHA is the authority
 # (live opens, build_failed/update_failed/canceled/pre_deploy_failed block).
-# Render auto-deploy skips a commit with no change under back-end/, so no
-# deploy ever appears (#1652, #1655 spun to the bound): the live deploy's
-# commit then opens the gate as source-equivalent only when it is an ancestor
-# of the merged SHA and `git diff <live> <merged> -- back-end/ render.yaml` is
-# empty; any back-end change or non-ancestor keeps waiting. Records `render`
-# (status, live_commit, merged_sha, backend_diff, evidence) in
+# Render auto-deploy skips a commit with no change under its Root Directory,
+# so no deploy ever appears (#1652, #1655 spun to the bound). With no deploy
+# for the merged SHA the live deploy's commit opens the gate as
+# source-equivalent only when `git diff <live> <merged> -- back-end/
+# render.yaml package.json package-lock.json` is empty AND the live commit is
+# an ancestor of the merged SHA (Render skipped the merge) or a descendant of
+# it (a later PR deployed the identical backend). This assumes the Render
+# service's Root Directory is back-end with no build filters. A descendant
+# that changed those paths means the merged backend never ran as-is: the gate
+# blocks and that is a manual decision; an unrelated live commit or any such
+# change keeps waiting. Records `render` (status, live_commit,
+# observed_live_commit, merged_sha, backend_diff, evidence) in
 # .context/deploy-pipeline/production.json; prints RENDER_LIVE or
-# RENDER_SOURCE_EQUIVALENT live=<sha> merged=<sha>. Exit 2 = Render API, git or
-# credential failure (fail closed; repair and rerun), never a pass.
+# RENDER_SOURCE_EQUIVALENT live=<sha> merged=<sha> reason=<code>. Exit 2 =
+# Render API, git or credential failure (fail closed; repair and rerun),
+# never a pass.
 python3 scripts/run_deploy_pipeline.py production-render --merged-sha "$DEPLOY_MERGED_SHA" \
   --state-dir .context/deploy-pipeline ||
   { echo "❌ Render does not serve the merged backend ${DEPLOY_MERGED_SHA:0:7}"; exit 1; }
