@@ -954,6 +954,7 @@ their assertions or test counts:
 `python3 scripts/tests/deploy-approval-batch.test.py`,
 `bash scripts/tests/prebuild-agents-image.test.sh`,
 `python3 scripts/tests/run-deploy-pipeline.test.py`,
+`bash scripts/tests/run-deploy-semantic-stack.test.sh`,
 `bash scripts/tests/backend-coverage-sharded.test.sh`,
 `python3 scripts/tests/run-deploy-structural-gates.test.py`,
 `python3 scripts/tests/final-review-script-regressions.test.py`,
@@ -1139,16 +1140,34 @@ smoke lane had held the memory the structural lane needed (#1638 attempt 5
 ran smoke alone for ~22 min; 11–24 min across attempts); in the coverage
 phase it waited the whole 9–10 min exclusive phase every round. The AgentCard
 lane declares the same phase. Undeclared Group 4 lanes stay unphased, and a plan's
-own `after` edges are never removed: `live-probes` starts as soon as its
-declared dependencies and memory allow. `semantic-stack` keeps only its
-declared edges and may be admitted beside the stack-owning lanes (`smoke`,
-`agentcard-lifecycle`) whenever both whole declarations fit live headroom: its
-`run.sh --benchmark` startup/EXIT sweeps
-(`kill_stale_same_worktree_benchmark_stack`, `kill-services.sh`) spare every
-process of a live isolated run through its owner record, live manifest or the
-`BENCHMARK_RUN_ID` its processes carry (`scripts/tests/kill-services.test.sh`,
-`scripts/tests/run-isolated-cloud-kill.test.sh`). On a ~8 GB budget
-4150 + 4096 MB still defers semantic-stack until smoke releases its reservation.
+own `after` edges are never removed. `plan --live-probes --semantic-stack
+--e2b-smoke` (default off; flag-less plans are unchanged byte for byte) adds the
+three tails that until 2026-10-31 lived only in a private launcher plan:
+`live-probes` (Group 3, `python3 scripts/run_deploy_live_probes.py`, 963 MB =
+1.25x its 769.7 MB recorded tree peak, `LIVE_PROBES_RECORDED_TREE_PEAK_MB`)
+after every other Group 3 lane (Step 4p); `semantic-stack` (Group 4,
+`bash scripts/run-deploy-semantic-stack.sh`: Steps 5 + 6b, 6507 MB = 1.25x the
+5205.2 MB peak recorded while the lane still ended with the E2B smoke,
+`SEMANTIC_STACK_RECORDED_TREE_PEAK_MB`) after `deploy-command-structural` and
+the agents/frontend coverage lanes only; and `e2b-smoke` (Group 4,
+`bash scripts/run-deploy-semantic-stack.sh --e2b-smoke-only`: Step 6c, 1536 MB
+documented estimate until its first receipt) after `live-probes` and backend
+coverage, which drive the same `run-blackbox-tests.sh` database. The
+semantic-stack edges are ownership, not memory: its non-isolated
+`run.sh --benchmark` startup/EXIT `kill-services.sh` sweeps reap same-worktree
+worker.py, Playwright-driver, npm and vite children, which the agents and
+frontend coverage lanes spawn, while backend coverage and the live probes boot
+`bootstrap.ts` backends no sweep pattern matches. The sweeps still spare every
+process of a live isolated run (`smoke`, `agentcard-lifecycle`) through its
+owner record, live manifest or the `BENCHMARK_RUN_ID` its processes carry
+(`scripts/tests/kill-services.test.sh`,
+`scripts/tests/run-isolated-cloud-kill.test.sh`), so semantic-stack may run
+beside them whenever both whole declarations fit live headroom. On the recorded
+7979 MB budget they do not: 6507 + 4150 (smoke) and 6507 + 2560 (backend
+coverage) exceed it, so admission defers semantic-stack until both release
+their reservations, declarations unchanged (6507 + 1152 beside agents coverage
+would fit; the sweep edge holds it there), and 6507 + 1536 keeps `e2b-smoke`
+serial with it; on the launcher host's 8755 MB budget the two tails overlap.
 
 **Retry after a failure: failed-first, still a full sweep.** Rerun the same
 stage with `BACKEND_COVERAGE_FAILED_FIRST=1` in the `env` above. The previously
@@ -1323,6 +1342,12 @@ python3 scripts/run_deploy_live_probes.py
 All four stage records must pass before closing the `runtime-blackbox`
 boundary.
 
+`run_deploy_pipeline.py plan --live-probes` emits this command as the
+`live-probes` lane (963 MB) with an `after` edge on every other Group 3 lane,
+so the pipeline starts it only once static, coverage and the other Group 3
+branches have exited, never in the same wave: two `run-blackbox-tests.sh`
+setups on `victoria_<workspace>` deadlocked its schema sync on 2026-10-12.
+
 `migration-preflight` runs `back-end/scripts/migration-preflight.ts` read-only
 against production for every migration in `back-end/prisma/migrations` that
 production has not applied, the set `prisma migrate deploy` will run. It fails on a
@@ -1383,6 +1408,17 @@ the Group 4 semantic gate; coverage commands already ran every repository
 blackbox exactly once. Pre-Deploy smoke runs on its own separate isolated stack
 via `run-bench --local` (or, opt-in, the cloud fleet). In benchmark mode,
 `run.sh` starts `back-end`, `front-end`, and `agents`, and skips `mac-app`.
+
+`bash scripts/run-deploy-semantic-stack.sh` is this step and Step 6b as one
+versioned command (`run_deploy_pipeline.py plan --semantic-stack` emits it as
+the `semantic-stack` lane): the Step 5.0 sweep, the exact `run.sh --benchmark`
+launch below, readiness, the two Step 6b stages and the mandatory teardown,
+all env-driven (`CONDUCTOR_PORT` required, `ROSE_USE_SYSTEM_PG`, the normalized
+`CONDUCTOR_WORKSPACE_NAME`). `--with-e2b-smoke` appends Step 6c on the same
+Postgres; `--e2b-smoke-only` runs Step 6c alone (the `e2b-smoke` lane). It
+exits 2 before starting anything when `CONDUCTOR_PORT` is unset or the stack
+database is not ready, and 1 when the stack never became ready or a stage
+failed.
 
 ```bash
 # Conductor provides the base port; run.sh fans out backend/frontend/health from it.
@@ -1909,6 +1945,13 @@ cd back-end && BLACKBOX_SMOKE=1 \
   bash ../scripts/run-deploy-stage claude-code-e2b-smoke -- \
   bash scripts/run-blackbox-tests.sh claude-code
 ```
+
+`bash scripts/run-deploy-semantic-stack.sh --e2b-smoke-only` runs this block
+without a running Step 5 stack (`run_deploy_pipeline.py plan --e2b-smoke` emits
+it as the `e2b-smoke` lane after `live-probes` and backend coverage): the
+Postgres port comes from `DEPLOY_E2B_DB_PORT`, else the running stack's
+manifest, else the deploy environment's `LOCAL_DB_PORT`, and it creates
+`victoria_$CONDUCTOR_WORKSPACE_NAME` when missing.
 
 This lane launches **its own** backend on purpose. It must not be pointed at the
 Step 5 semantic stack with `BLACKBOX_TEST_USE_EXISTING_BACKEND=1`: that stack is

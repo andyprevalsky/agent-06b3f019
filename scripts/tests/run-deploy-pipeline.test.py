@@ -1550,6 +1550,142 @@ def check_recorded_peak_reservations() -> None:
     print("recorded peak reservations: ok")
 
 
+VERSIONED_TAIL_LANES = ("live-probes", "semantic-stack", "e2b-smoke")
+VERSIONED_TAIL_FLAGS = ("--live-probes", "--semantic-stack", "--e2b-smoke")
+
+
+def _without_versioned_tails(plan: dict) -> dict:
+    """``plan`` with the three flagged lanes and their schedule entries removed."""
+    stripped = json.loads(json.dumps(plan))
+    stripped["lanes"] = [lane for lane in stripped["lanes"] if lane["name"] not in VERSIONED_TAIL_LANES]
+    schedule = stripped["schedule"]
+    schedule["estimates"] = {name: value for name, value in schedule["estimates"].items()
+                             if name not in VERSIONED_TAIL_LANES}
+    schedule["phases"] = [{"phase": phase["phase"],
+                           "lanes": [name for name in phase["lanes"] if name not in VERSIONED_TAIL_LANES]}
+                          for phase in schedule["phases"]]
+    return stripped
+
+
+def check_versioned_group4_lanes(tmp: Path) -> None:
+    """Follow-up 12 (2026-10-31): the Step 4p live probes and the Steps 5/6b/6c
+    semantic stack existed only in a private launcher plan (``live-probes``
+    1536 MB after every Group 3 lane; ``semantic-stack`` 4096 MB after the
+    structural lane, backend coverage and live-probes, running UI semantics,
+    the latency ratchet AND the E2B smoke). ``plan --live-probes
+    --semantic-stack --e2b-smoke`` versions them: flag-less plans are unchanged
+    byte for byte; ``live-probes`` (963 MB = 1.25 x 769.7 recorded) still waits
+    for every other Group 3 lane and joins the coverage phase; ``semantic-stack``
+    (6507 MB = 1.25 x 5205.2 recorded) now holds UI semantics + latency only and
+    waits for the structural lane plus the agents/frontend coverage lanes whose
+    worker.py/Playwright/npm/vite children its non-isolated run.sh sweeps would
+    reap, never for backend coverage or live-probes; ``e2b-smoke`` (1536 MB
+    documented estimate) runs Step 6c alone after the lanes that drive
+    run-blackbox-tests.sh against victoria_<workspace>. Budget math on the
+    recorded 7979 MB devbox: semantic-stack is deferred behind backend coverage
+    (6507 + 2560) and smoke (6507 + 4150) by memory and behind agents coverage
+    (6507 + 1152 would fit) by the sweep edge; e2b-smoke (6507 + 1536 > 7979)
+    cannot overlap it there but can on the launcher's 8755 MB budget."""
+    pipeline = load_module("run_deploy_pipeline_group4_tails", DRIVER)
+    assert pipeline.LIVE_PROBES_RECORDED_TREE_PEAK_MB == 769.7
+    assert pipeline.SEMANTIC_STACK_RECORDED_TREE_PEAK_MB == 5205.2
+    assert pipeline.E2B_SMOKE_ESTIMATED_MEMORY_MB == 1536
+    assert pipeline.live_probes_lane_memory_mb() == 963 == math.ceil(1.25 * 769.7)
+    assert pipeline.semantic_stack_lane_memory_mb() == 6507 == math.ceil(1.25 * 5205.2)
+    assert set(VERSIONED_TAIL_LANES) <= set(pipeline.DEFAULT_LANE_SECONDS), "simulate must not call the tails UNMEASURED"
+    script = ROOT / pipeline.SEMANTIC_STACK_SCRIPT
+    assert script.is_file() and os.access(script, os.X_OK), script
+
+    base = ("--group", "all", "--backend", "--agents", "--smoke", "local", *RECORDED_DEVBOX)
+    plain = plan_json(*base)
+    full = plan_json(*base, *VERSIONED_TAIL_FLAGS)
+    plain_text = json.dumps(plain)
+    assert not set(VERSIONED_TAIL_LANES) & {lane["name"] for lane in plain["lanes"]}
+    assert "run-deploy-semantic-stack.sh" not in plain_text and "run_deploy_live_probes" not in plain_text
+    assert json.dumps(_without_versioned_tails(full), sort_keys=True) == json.dumps(plain, sort_keys=True), \
+        "the flags may only append lanes: every other byte of the plan is unchanged"
+    assert plain["memory_budget_mb"] == full["memory_budget_mb"] == 7979
+    names = [lane["name"] for lane in full["lanes"]]
+    assert names[-3:] == ["smoke", "semantic-stack", "e2b-smoke"] and names[-4] == "live-probes", names
+    lanes = {lane["name"]: lane for lane in full["lanes"]}
+    group3 = [lane["name"] for lane in full["lanes"] if lane["group"] == "3" and lane["name"] != "live-probes"]
+
+    probes = lanes["live-probes"]
+    assert probes["command"] == ["python3", "scripts/run_deploy_live_probes.py"] and probes["cwd"] == "."
+    assert probes["group"] == "3" and probes["memory_mb"] == 963 and probes["reuse_passed"] is True
+    assert probes["after"] == group3 == ["eslint", "typescript", "backend-structural", "deploy-command-structural",
+                                         "seed-cache-decision", "canonical-seed-whatsapp-content",
+                                         "backend-coverage-blackbox", "agents-coverage-blackbox"], probes["after"]
+    assert "phase" not in probes and "exclusive" not in probes, probes
+    phases = {phase["phase"]: phase["lanes"] for phase in full["schedule"]["phases"]}
+    assert "live-probes" in phases["coverage"], phases
+    assert not any(name in lanes_in for name in ("semantic-stack", "e2b-smoke") for lanes_in in phases.values()), \
+        "the Group 4 tails stay unphased"
+
+    semantic = lanes["semantic-stack"]
+    assert semantic["command"] == ["bash", "scripts/run-deploy-semantic-stack.sh"] and semantic["cwd"] == "."
+    assert semantic["group"] == "4" and semantic["memory_mb"] == 6507 and semantic["reuse_passed"] is True
+    assert semantic["after"] == ["deploy-command-structural", "agents-coverage-blackbox"], semantic["after"]
+    assert "backend-coverage-blackbox" not in semantic["after"] and "live-probes" not in semantic["after"]
+    assert "phase" not in semantic, semantic
+
+    e2b = lanes["e2b-smoke"]
+    assert e2b["command"] == ["bash", "scripts/run-deploy-semantic-stack.sh", "--e2b-smoke-only"] and e2b["cwd"] == "."
+    assert e2b["group"] == "4" and e2b["memory_mb"] == 1536 and e2b["reuse_passed"] is True
+    assert e2b["after"] == ["backend-coverage-blackbox", "live-probes"], e2b["after"]
+    assert "phase" not in e2b, e2b
+
+    # Budget math the design accepts (honest declarations, no overlap forced).
+    budget = full["memory_budget_mb"]
+    assert semantic["memory_mb"] <= budget, "never refused outright"
+    assert semantic["memory_mb"] + lanes["backend-coverage-blackbox"]["memory_mb"] > budget
+    assert semantic["memory_mb"] + lanes["smoke"]["memory_mb"] > budget
+    assert semantic["memory_mb"] + lanes["agents-coverage-blackbox"]["memory_mb"] <= budget, \
+        "only the sweep edge keeps semantic-stack behind agents coverage on this budget"
+    assert semantic["memory_mb"] + e2b["memory_mb"] > budget
+    launcher = plan_json("--group", "all", "--backend", "--agents", "--frontend", "--smoke", "local",
+                         "--host-cpus", "8", "--host-mem-mb", "12339", "--host-total-mem-mb", "16007",
+                         "--host-watchdog-mb", "14471", *VERSIONED_TAIL_FLAGS)
+    assert launcher["memory_budget_mb"] == 8755, launcher["memory_budget_mb"]
+    launcher_lanes = {lane["name"]: lane for lane in launcher["lanes"]}
+    assert launcher_lanes["semantic-stack"]["after"] == ["deploy-command-structural", "frontend-coverage-blackbox",
+                                                         "agents-coverage-blackbox"]
+    assert 6507 + launcher_lanes["backend-coverage-blackbox"]["memory_mb"] > 8755
+    assert 6507 + launcher_lanes["agents-coverage-blackbox"]["memory_mb"] <= 8755
+    assert 6507 + launcher_lanes["e2b-smoke"]["memory_mb"] <= 8755, "the two tails overlap on the launcher budget"
+    assert launcher_lanes["live-probes"]["after"][-3:] == ["backend-coverage-blackbox", "frontend-coverage-blackbox",
+                                                           "agents-coverage-blackbox"]
+
+    # Flags follow their group: no Group 3 lane means no edges to wait on.
+    group4 = plan_json("--group", "4", "--smoke", "local", *VERSIONED_TAIL_FLAGS)
+    group4_lanes = {lane["name"]: lane for lane in group4["lanes"]}
+    assert set(group4_lanes) == {"smoke", "semantic-stack", "e2b-smoke"}, set(group4_lanes)
+    assert group4_lanes["semantic-stack"]["after"] == [] and group4_lanes["e2b-smoke"]["after"] == []
+    group3_only = plan_json("--group", "3", *VERSIONED_TAIL_FLAGS)
+    assert [lane["name"] for lane in group3_only["lanes"]][-1] == "live-probes"
+    assert not {"semantic-stack", "e2b-smoke"} & {lane["name"] for lane in group3_only["lanes"]}
+
+    # The flagged plan loads through the real loader (edges valid, DAG acyclic
+    # with the implied phase edges) and simulates: the phased live-probes lane
+    # is projected from a recorded or default duration (never unknown); the
+    # unphased Group 4 tails are outside the Group 3 projection by design.
+    plan_path = tmp / "versioned-tails-plan.json"
+    plan_path.write_text(json.dumps(full))
+    simulated = run_driver("simulate", "--plan", str(plan_path), env=dict(os.environ))
+    assert simulated.returncode == 0, simulated.stderr
+    projection = json.loads(simulated.stdout)
+    assert projection["lanes"]["live-probes"]["source"] in {"default", "ledger", "stage-receipts"}, projection["lanes"]
+    assert projection["lanes"]["live-probes"]["loaded_s"] > 0
+    assert not {"semantic-stack", "e2b-smoke"} & set(projection["lanes"]), "unphased tails are not projected"
+    assert isinstance(projection["phased_union_wall_s"], (int, float))
+
+    deploy_md = (ROOT / ".claude" / "commands" / "deploy.md").read_text()
+    for needle in ("plan --live-probes --semantic-stack", "--e2b-smoke", "scripts/run-deploy-semantic-stack.sh",
+                   "--e2b-smoke-only", "`bash scripts/tests/run-deploy-semantic-stack.test.sh`"):
+        assert needle in deploy_md, f"deploy.md must document {needle}"
+    print("versioned group 4 lanes: ok")
+
+
 def check_stack_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
     """Follow-up lane-memory-b (2026-10-31): on #1639/#1640 and the
     speed-followup deploys the 27 min smoke lane started only when the 9-10 min
@@ -1818,6 +1954,7 @@ def main() -> int:
         check_stack_phase_lanes(tmp, env)
         check_exclusive_lane_defers_behind_stack_lane(tmp, env)
         check_recorded_peak_reservations()
+        check_versioned_group4_lanes(tmp)
         check_dependencies_through_unphased_lanes(tmp, env)
         check_simulate_legacy_plan_group3(tmp, env)
         check_receipt_readers(tmp)

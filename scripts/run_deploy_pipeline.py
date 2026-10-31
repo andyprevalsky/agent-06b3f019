@@ -195,35 +195,38 @@ backend-coverage-blackbox the smoke lane fits the budget afterwards. A plan
 with ``"schedule": {"policy": "legacy"}`` keeps the previous all-at-once
 admission.
 
-The deploy.md ``semantic-stack`` lane (4096 MB; its own ``run.sh --benchmark``
-stack, Playwright semantics, latency ratchet, E2B smoke) deliberately keeps its
-``after`` edges on backend coverage and live-probes instead of joining the
-coverage phase. It may be admitted beside the stack-owning lanes (the local
-smoke lane's per-run benchmark stack, the AgentCard lifecycle lane's
-``run-bench --local`` stack) whenever memory allows: its startup and EXIT
-sweeps (``kill_stale_same_worktree_benchmark_stack`` and
-``scripts/kill-services.sh``) leave every process of a live isolated run alone
-through the run's owner record, manifest and the ``BENCHMARK_RUN_ID`` each of
-its processes carries (``scripts/tests/kill-services.test.sh``,
-``scripts/tests/run-isolated-cloud-kill.test.sh``). Until follow-up "an"
-(2026-10-31) the loader appended implied ``after`` edges from each
-``STACK_KILLER_LANES`` lane to every ``STACK_OWNER_LANES`` lane
-(``implied_stack_dependencies``: kept for a lane whose sweep is not run-scoped;
-``STACK_KILLER_LANES`` is now empty and declared edges are always kept), which
-held semantic-stack back behind the whole smoke lane every round. The 4150
-and 4096 MB declarations still have to fit together: against this devbox's budget
-(7998 MB on the 2026-10-31 speed-followup-6 attempt, 8188 MB on #1640)
-admission defers semantic-stack until smoke releases its reservation, with the
-declarations unchanged; a freer or larger host admits them side by side.
-Memory still rules out the overlap with the coverage lanes on this host:
-measured on #1639 (8 cores / 16007 MB, watchdog cap 14471 MB), the coverage
-phase's whole-box MemAvailable floor was 6485 MB (9522 MB used) and
-semantic-stack alone took MemAvailable from 11392 to 6741 MB (~4650 MB
-footprint; 1652.8 MB largest child RSS from the stage row), so overlapping
-them would reach ~14172 MB used, inside the 2048 MB reserve below the cap, and
-the declared reservations (7808 + 4096 MB) exceed the 8065 MB budget.
-Overlapping it with the coverage lanes needs a smaller stack or a larger host,
-not a schedule change.
+``plan --live-probes --semantic-stack --e2b-smoke`` (follow-up 12, 2026-10-31;
+default off) versions the tails that only the private launcher plan carried.
+``live-probes`` (Group 3, ``python3 scripts/run_deploy_live_probes.py``, 963 MB
+= 1.25x its 769.7 MB recorded peak) waits for every other Group 3 lane as
+deploy.md Step 4p orders. ``semantic-stack`` (Group 4, unphased,
+``bash scripts/run-deploy-semantic-stack.sh``: its own ``run.sh --benchmark``
+stack, Playwright UI semantics and the latency ratchet; 6507 MB = 1.25x the
+5205.2 MB peak recorded while the lane still ended with the E2B smoke) waits
+for ``deploy-command-structural`` and for the agents/frontend coverage lanes
+only: its non-isolated stack's startup and EXIT ``kill-services.sh`` sweeps
+reap same-worktree worker.py/Playwright-driver/npm/vite children, which those
+lanes spawn (``SEMANTIC_STACK_SWEEP_EDGES``), while backend coverage and the
+live probes boot ``bootstrap.ts`` backends the sweep patterns never match and
+the split lane no longer shares their ``victoria_<workspace>`` database. The
+launcher lane's edges on backend coverage and live-probes are gone; the sweeps
+still spare every process of a live isolated run (smoke, AgentCard) through
+the run's owner record, manifest and ``BENCHMARK_RUN_ID``
+(``scripts/tests/kill-services.test.sh``,
+``scripts/tests/run-isolated-cloud-kill.test.sh``; ``STACK_KILLER_LANES`` is
+empty since follow-up "an"). Memory still decides on this devbox: on the
+recorded 7979 MB budget 6507 + 2560 (backend coverage) and 6507 + 4150
+(smoke) exceed the budget, so admission defers semantic-stack until both
+release their reservations, declarations unchanged; 6507 + 1152 (agents
+coverage) would fit, which is why the sweep edge, not memory, holds it there.
+On the launcher host's 8755 MB budget the same holds (6507 + 3072 > 8755;
+6507 + 1536 fits). ``e2b-smoke`` (Group 4, unphased,
+``run-deploy-semantic-stack.sh --e2b-smoke-only``, 1536 MB documented
+estimate: no receipt measures it alone yet) runs the Step 6c Claude Code E2B
+blackbox smoke through the standalone runner after ``live-probes`` and
+backend coverage, which drive the same runner against ``victoria_<workspace>``
+(``E2B_SMOKE_DATABASE_EDGES``). 6507 + 1536 > 7979, so the two Group 4 tails
+run one after the other on this devbox and side by side on 8755.
 
 Plan file (JSON): {"lanes": [{"name", "command": [...], "cwd": "back-end",
 "env": {...}, "after": ["lane"], "reuse_passed": true, "group": "3",
@@ -357,6 +360,27 @@ LANE_PEAK_MARGIN = 1.25
 # exceeds it. The AgentCard lifecycle lane (its own run-bench --local stack,
 # no recorded peak yet) declares the same reservation.
 SMOKE_RECORDED_TREE_PEAK_MB = 3319.4
+# Step 4p live probes as a plan lane (``plan --live-probes``, follow-up 12,
+# 2026-10-31): largest recorded process-tree peak over 13 receipts of the
+# 2026-10-30/31 devbox deploys (lanes["live-probes"].tree_peak_pss_mb in
+# .context/deploy-pipeline/history.jsonl: 708.5-769.7 MB); re-pin when a
+# receipt exceeds it.
+LIVE_PROBES_RECORDED_TREE_PEAK_MB = 769.7
+# Group 4 semantic lane (``plan --semantic-stack``: its own run.sh --benchmark
+# stack, the Playwright UI semantics and the latency ratchet): largest
+# recorded process-tree peak over 10 passed receipts of the launcher lane
+# (4489.2-5205.2 MB). Those receipts also ran the Step 6c E2B smoke inside the
+# lane, which is now its own lane, so this pin is an upper bound for the split
+# lane until its own receipts exist; re-pin when a receipt exceeds it.
+SEMANTIC_STACK_RECORDED_TREE_PEAK_MB = 5205.2
+# Step 6c Claude Code E2B smoke as its own lane (``plan --e2b-smoke``): no
+# receipt measures it alone yet (the launcher ran it inside semantic-stack and
+# stage rows carry no memory telemetry). The standalone blackbox runner boots
+# one isolated bootstrap.ts backend (1021 MB largest recorded shard child
+# peak, x1.25 = 1277 MB) beside the runner process; declare the 1536 MB the
+# launcher reserved for the live-probes lane that drives the same runner.
+# Re-pin from tree_peak_pss_mb once the lane's first receipt exists.
+E2B_SMOKE_ESTIMATED_MEMORY_MB = 1536
 # Kept free for the agent harness, the Docker DB and the 15 GB memory watchdog.
 MEMORY_RESERVE_MB = 2048
 DEFAULT_LANE_MEMORY_MB = 1024
@@ -392,6 +416,12 @@ DEFAULT_LANE_SECONDS = {
     # Local smoke lane, 2026-10-30 #1638 (22.6 min alone); orders it within the
     # coverage phase and lets ``simulate`` project it on a fresh host.
     "smoke": 1358.0,
+    # Versioned Group 4 tails (follow-up 12): medians of the 2026-10-30/31
+    # stage receipts; semantic-stack without the ~45 s E2B step it used to end
+    # with. Only their relative order and ``simulate`` projections use these.
+    "live-probes": 40.0,
+    "semantic-stack": 760.0,
+    "e2b-smoke": 45.0,
 }
 
 
@@ -528,6 +558,18 @@ def smoke_lane_memory_mb() -> int:
     """Declared reservation of the local smoke stack: LANE_PEAK_MARGIN over its
     largest recorded process-tree peak (4150 MB)."""
     return int(math.ceil(LANE_PEAK_MARGIN * SMOKE_RECORDED_TREE_PEAK_MB))
+
+
+def live_probes_lane_memory_mb() -> int:
+    """Declared reservation of the Step 4p live probes lane: LANE_PEAK_MARGIN
+    over its largest recorded process-tree peak (963 MB)."""
+    return int(math.ceil(LANE_PEAK_MARGIN * LIVE_PROBES_RECORDED_TREE_PEAK_MB))
+
+
+def semantic_stack_lane_memory_mb() -> int:
+    """Declared reservation of the Group 4 semantic stack lane: LANE_PEAK_MARGIN
+    over its largest recorded process-tree peak (6507 MB)."""
+    return int(math.ceil(LANE_PEAK_MARGIN * SEMANTIC_STACK_RECORDED_TREE_PEAK_MB))
 
 
 def structural_workers_within(available_mb: int, planned: int) -> int:
@@ -3307,6 +3349,33 @@ TYPESCRIPT_COMMAND = [
     "bash", "-c",
     f"mkdir -p ../.context/tsbuildinfo && npx tsc --noEmit --incremental --tsBuildInfoFile {TSBUILDINFO}",
 ]
+# Versioned Group 4 tails (follow-up 12, 2026-10-31). Until then only the
+# private launcher plan carried the Step 4p live probes and the Step 5/6b/6c
+# semantic stack; ``plan --live-probes --semantic-stack --e2b-smoke`` emits
+# them (default off, so existing callers' plans are unchanged).
+LIVE_PROBES_COMMAND = ["python3", "scripts/run_deploy_live_probes.py"]
+SEMANTIC_STACK_SCRIPT = "scripts/run-deploy-semantic-stack.sh"
+SEMANTIC_STACK_COMMAND = ["bash", SEMANTIC_STACK_SCRIPT]
+E2B_SMOKE_COMMAND = ["bash", SEMANTIC_STACK_SCRIPT, "--e2b-smoke-only"]
+# semantic-stack's non-isolated ``run.sh --benchmark`` sweeps the worktree
+# with scripts/kill-services.sh at startup and exit (run.sh lines "Cleaning
+# stale services for this worktree before startup" and its EXIT trap). Those
+# sweeps reap every same-worktree process shaped like a service: anything
+# under agents/ running worker.py or a Playwright driver, anything under
+# front-end/ running npm/npx/vite (``service_like_process`` and the
+# ``<worktree>/agents.*worker\.py`` / ``<worktree>/front-end.*vite`` argv
+# patterns). The agents and frontend coverage lanes spawn exactly those
+# children, so the lane waits for them: an ownership edge, not a memory one.
+# Backend coverage and the live probes boot ``tsx src/bootstrap.ts`` backends
+# on CONDUCTOR_PORT+100.., which no sweep pattern matches, and the split lane
+# no longer touches their victoria_<workspace> database, so it does not wait
+# for them (the launcher plan did, which held it behind backend coverage).
+SEMANTIC_STACK_SWEEP_EDGES = ("frontend-coverage-blackbox", "agents-coverage-blackbox")
+# The E2B smoke, the live probes and backend coverage's trailing
+# blackbox-backend-teardown test all drive run-blackbox-tests.sh against the
+# same victoria_<workspace> database (prisma db push + runtime SQL hooks):
+# two at once deadlocked chat-router-failover-live on 2026-10-12. Serial.
+E2B_SMOKE_DATABASE_EDGES = ("backend-coverage-blackbox", "live-probes")
 
 
 def standard_plan(args: argparse.Namespace) -> dict:
@@ -3371,6 +3440,14 @@ def standard_plan(args: argparse.Namespace) -> dict:
             lane("agents-coverage-blackbox", ["bash", "scripts/run-coverage.sh"], "agents",
                  env={"AGENTS_COVERAGE_CONCURRENCY": str(workers["agents"])},
                  memory_mb=768 + 384 * workers["agents"])
+        if args.live_probes:
+            # Step 4p: after every Group 3 lane, as deploy.md orders it (two
+            # run-blackbox-tests.sh setups on victoria_<workspace> deadlock its
+            # schema sync; 2026-10-12). Phased into the coverage phase by its
+            # edges; its 963 MB is the pinned 1.25x margin over the recorded peak.
+            lane("live-probes", list(LIVE_PROBES_COMMAND),
+                 memory_mb=live_probes_lane_memory_mb(),
+                 after=[entry["name"] for entry in lanes if entry["group"] == "3"], reuse_passed=True)
     if args.group in {"4", "all"}:
         if args.smoke == "cloud":
             lane("smoke", ["bash", "scripts/run-predeploy-cloud"], group="4", memory_mb=1024)
@@ -3394,6 +3471,24 @@ def standard_plan(args: argparse.Namespace) -> dict:
                      "BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY": "0",
                      "BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1",
                  }, reuse_passed=False, memory_mb=smoke_lane_memory_mb(), phase=PHASE_STACK)
+        present = {entry["name"] for entry in lanes}
+        if args.semantic_stack:
+            # Steps 5 + 6b as one unphased Group 4 lane: its own run.sh
+            # --benchmark stack, UI semantics, latency ratchet. 6507 MB is the
+            # pinned 1.25x margin over the recorded 5205.2 MB peak; on the
+            # recorded 7979 MB budget that defers it behind backend coverage
+            # (6507 + 2560 > 7979) and smoke (+ 4150) by memory alone, and the
+            # sweep edges hold it behind agents/frontend coverage. It never
+            # waits for backend coverage or the live probes by edge.
+            lane("semantic-stack", list(SEMANTIC_STACK_COMMAND), group="4",
+                 memory_mb=semantic_stack_lane_memory_mb(),
+                 after=[name for name in ("deploy-command-structural", *SEMANTIC_STACK_SWEEP_EDGES)
+                        if name in present], reuse_passed=True)
+        if args.e2b_smoke:
+            # Step 6c alone: the standalone blackbox runner, no stack. Serial on
+            # victoria_<workspace> behind the lanes that drive the same runner.
+            lane("e2b-smoke", list(E2B_SMOKE_COMMAND), group="4", memory_mb=E2B_SMOKE_ESTIMATED_MEMORY_MB,
+                 after=[name for name in E2B_SMOKE_DATABASE_EDGES if name in present], reuse_passed=True)
     for entry in lanes:
         if entry["group"] == "4":
             entry.setdefault("reuse_passed", False)
@@ -4508,6 +4603,12 @@ def main(argv: list[str] | None = None) -> int:
     plan_parser.add_argument("--agents", action="store_true")
     plan_parser.add_argument("--smoke", choices=("cloud", "local", "skip"), default="cloud")
     plan_parser.add_argument("--agentcard", action="store_true")
+    plan_parser.add_argument("--live-probes", action="store_true",
+                             help="Group 3: add the Step 4p live-probes lane after every other Group 3 lane")
+    plan_parser.add_argument("--semantic-stack", action="store_true",
+                             help="Group 4: add the Steps 5/6b semantic-stack lane (scripts/run-deploy-semantic-stack.sh)")
+    plan_parser.add_argument("--e2b-smoke", action="store_true",
+                             help="Group 4: add the Step 6c e2b-smoke lane (run-deploy-semantic-stack.sh --e2b-smoke-only)")
     plan_parser.add_argument("--backend-blackbox-workers", type=int, default=4)
     plan_parser.add_argument("--backend-unit-workers", type=int, default=6)
     plan_parser.add_argument("--frontend-workers", type=int, default=4)
