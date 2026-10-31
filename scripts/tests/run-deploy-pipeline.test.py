@@ -329,8 +329,24 @@ def make_source_root(path: Path) -> Path:
     scripts = path / "scripts"
     scripts.mkdir()
     for name in ("run_deploy_pipeline.py", "run-deploy-stage", "run_deploy_stage.py", "deploy_stage.py",
-                 "deploy_stage_wait.py", "factory_detail.py", "factory_metadata.py"):
+                 "deploy_stage_wait.py", "factory_detail.py", "factory_metadata.py", "select_affected_tests.py"):
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+    (scripts / "test-map").mkdir()
+    shutil.copyfile(ROOT / "scripts" / "test-map" / "edges.json", scripts / "test-map" / "edges.json")
+    # A minimal multi-package tree for the lane-scoped reuse scenario: the
+    # change->test selector needs the backend manifest, one test per lane
+    # family and a docs page nothing reads.
+    for relative, text in {
+        "back-end/package.json": '{"scripts": {"test:structural": "tsx src/tests/structural/none.test.ts"}}\n',
+        "back-end/src/bootstrap.ts": "export {};\n",
+        "back-end/src/tests/blackbox/health.blackbox.ts": "export {};\n",
+        "back-end/src/tests/unit/sample.test.ts": "export {};\n",
+        "agents/tests/blackbox/sample.blackbox.py": "x = 1\n",
+        "agents/tests/unit/test_sample.py": "def test_sample():\n    pass\n",
+        "docs/guide.md": "guide v1\n",
+    }.items():
+        (path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (path / relative).write_text(text)
     # Runtime copies bind both source checks and stage-cache keys to the same
     # private checkout. Parallel authors cannot invalidate this fixture.
     # Mirror the repository's ignore rule for .context: the driver's lane
@@ -969,6 +985,99 @@ def check_exclusive_lane_resizes_to_free_memory(tmp: Path, env: dict[str, str]) 
     print("exclusive lane resize: ok")
 
 
+def check_lane_scoped_reuse(tmp: Path, env: dict[str, str], source_root: Path) -> None:
+    """Plan ``lane_scoped_reuse`` passes ``--lane-scoped-reuse`` to every lane;
+    a docs-only commit then turns the scoped lanes into ``reused-scoped``
+    receipt lanes with the stage row's provenance, the run is green for
+    ``wait``/``verify`` and nothing executed; without the field (default) the
+    same commit reruns both lanes and records plain passes."""
+    state = tmp / "scoped-state"
+    counters = tmp / "scoped-counters"
+    counters.mkdir()
+    # Own stage run and duration ledger: these real lane names must not seed
+    # the phase estimates of the other scenarios with 0-second passes.
+    ledger = tmp / "scoped-lanes.json"
+    env = {**env, "DEPLOY_RUN_ROOT": str(tmp / "scoped-runs"), "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}
+    start_timing(tmp / "scoped-runs", env)
+    git = ["git", "-C", str(source_root), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+
+    def commit_docs(text: str) -> str:
+        (source_root / "docs" / "guide.md").write_text(text)
+        subprocess.run([*git, "add", "docs/guide.md"], check=True)
+        subprocess.run([*git, "commit", "-qm", "docs"], check=True)
+        return subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+
+    def lane(name: str, **extra: object) -> dict:
+        return {"name": name, "command": ["bash", "-c", f'printf run >> "{counters / name}"'],
+                "reuse_passed": False, "memory_mb": 1, **extra}
+
+    def runs(name: str) -> int:
+        return len((counters / name).read_text()) // 3 if (counters / name).exists() else 0
+
+    def run_and_wait(plan: Path) -> dict:
+        since = time.time()
+        ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, env=env)
+        assert ran.returncode == 0, ran.stderr + ran.stdout
+        waited = run_driver("wait", "--state-dir", str(state), "--timeout", "20", "--since", str(since), env=env)
+        assert waited.returncode == 0, waited.stdout
+        return json.loads((state / "receipt.json").read_text())
+
+    lanes = [lane("backend-coverage-blackbox", group="3"), lane("smoke", group="4", phase="coverage"),
+             lane("quick-gate", group="3")]
+    plan = tmp / "scoped-plan.json"
+    write_plan(plan, lanes, lane_scoped_reuse=True)
+    first_head = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    receipt = run_driver("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, env=env)
+    assert receipt.returncode == 0, receipt.stderr
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert receipt["lane_scoped_reuse"] is True and receipt["reused_scoped_lanes"] == []
+    assert {name: lane["status"] for name, lane in receipt["lanes"].items()} == {
+        "backend-coverage-blackbox": "passed", "smoke": "passed", "quick-gate": "passed"}, receipt["lanes"]
+    assert runs("backend-coverage-blackbox") == 1 and runs("smoke") == 1 and runs("quick-gate") == 1
+
+    second_head = commit_docs("guide v2\n")
+    receipt = run_and_wait(plan)
+    assert receipt["status"] == "passed", receipt["status"]
+    assert receipt["reused_scoped_lanes"] == ["backend-coverage-blackbox", "smoke"], receipt["reused_scoped_lanes"]
+    for name in ("backend-coverage-blackbox", "smoke"):
+        lane_state = receipt["lanes"][name]
+        assert lane_state["status"] == "reused-scoped", (name, lane_state)
+        assert lane_state["exit"] == 0
+        reuse = lane_state["reuse"]
+        assert reuse["kind"] == "scoped" and reuse["hit"] is True, reuse
+        assert reuse["passed_head"] == first_head and reuse["current_head"] == second_head, reuse
+        assert len(reuse["passed_fingerprint"]) == 64 and reuse["passed_run_id"], reuse
+        assert reuse["changed"] == [{"path": "docs/guide.md", "rule": "inert:docs/*",
+                                     "graph": reuse["changed"][0]["graph"]}], reuse["changed"]
+        assert reuse["changed"][0]["graph"].startswith("graph:no "), reuse["changed"][0]
+        assert runs(name) == 1, f"{name} executed despite the scoped reuse"
+    # A lane the scoped table does not list keeps today's behaviour: it reruns.
+    assert receipt["lanes"]["quick-gate"]["status"] == "passed" and runs("quick-gate") == 2
+    run_dir = Path(receipt["stage_run_dir"])
+    rows = [json.loads(line) for line in (run_dir / "stages.jsonl").read_text().splitlines() if line.strip()]
+    scoped_rows = [row for row in rows if row.get("status") == "reused-scoped"]
+    assert sorted(row["stage"] for row in scoped_rows) == ["backend-coverage-blackbox", "smoke"], scoped_rows
+    assert all(row["detail"]["reuse"]["passed_head"] == first_head for row in scoped_rows)
+    verified = run_driver("verify", "--state-dir", str(state), "--expect-head", second_head, env=env)
+    assert verified.returncode == 0, verified.stdout
+    # A reused-scoped lane records no duration sample: nothing was measured.
+    recorded = json.loads(ledger.read_text())["lanes"]
+    assert all(sample.get("status") != "reused-scoped" for samples in recorded.values() for sample in samples)
+    assert len(recorded["smoke"]) == 1 and len(recorded["quick-gate"]) == 2, recorded
+
+    # Default off: the same kind of commit reruns both lanes as plain passes.
+    write_plan(plan, lanes)
+    third_head = commit_docs("guide v3\n")
+    receipt = run_and_wait(plan)
+    assert receipt["lane_scoped_reuse"] is False and receipt["reused_scoped_lanes"] == []
+    assert {name: lane["status"] for name, lane in receipt["lanes"].items()} == {
+        "backend-coverage-blackbox": "passed", "smoke": "passed", "quick-gate": "passed"}, receipt["lanes"]
+    assert runs("backend-coverage-blackbox") == 2 and runs("smoke") == 2, "flag off must rerun"
+    assert "reuse" not in receipt["lanes"]["smoke"]
+    verified = run_driver("verify", "--state-dir", str(state), "--expect-head", third_head, env=env)
+    assert verified.returncode == 0, verified.stdout
+
+
 def main() -> int:
     global DRIVER
     with tempfile.TemporaryDirectory(prefix="deploy-pipeline-test-") as raw:
@@ -1078,6 +1187,7 @@ def main() -> int:
             check_materialized_reservation_credit(tmp / "inherited-flag", env)
         check_observation_validity(tmp, env)
         check_stack_owner_dependency(tmp, env)
+        check_lane_scoped_reuse(tmp, env, source_root)
         check_plan_scaling()
         check_structural_memory_floor()
         check_macos_memory(tmp, env)

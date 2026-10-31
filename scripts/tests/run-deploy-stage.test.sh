@@ -98,6 +98,193 @@ for _ in 1 2; do
     fi
 done
 [ "$(wc -l < "$failed_counter" | tr -d ' ')" = 2 ] || fail "failed gate was reused"
+
+# Lane-scoped reuse (default OFF). A lane in _SCOPED_REUSE_LANES may reuse its
+# prior PASSED result for the identical command when every path changed since
+# that pass is inert for it: in the lane's declared inert set AND selecting
+# none of its tests in the change->test graph (run_all triggers and unmapped
+# files always rerun). The hit is labelled "reused-scoped" with provenance.
+# This runs in its own committed fixture repository that carries the selector
+# and a minimal multi-package tree, so the real checkout never influences it.
+SCOPED_REPO="$TEST_ROOT/scoped-repo"
+mkdir -p "$SCOPED_REPO/scripts/test-map" "$SCOPED_REPO/back-end/src/tests/blackbox" \
+    "$SCOPED_REPO/back-end/src/tests/unit" "$SCOPED_REPO/back-end/prisma" \
+    "$SCOPED_REPO/agents/tests/blackbox" "$SCOPED_REPO/agents/tests/unit" "$SCOPED_REPO/docs"
+cp "$ROOT_DIR/scripts/run-deploy-stage" "$ROOT_DIR/scripts/run_deploy_stage.py" \
+    "$ROOT_DIR/scripts/deploy_stage.py" "$ROOT_DIR/scripts/factory_metadata.py" \
+    "$ROOT_DIR/scripts/factory_detail.py" "$ROOT_DIR/scripts/select_affected_tests.py" "$SCOPED_REPO/scripts/"
+cp "$ROOT_DIR/scripts/test-map/edges.json" "$SCOPED_REPO/scripts/test-map/"
+printf '{"scripts": {"test:structural": "tsx src/tests/structural/none.test.ts"}}\n' > "$SCOPED_REPO/back-end/package.json"
+printf 'export {};\n' > "$SCOPED_REPO/back-end/src/bootstrap.ts"
+# A backend blackbox that reads a docs page: the graph must veto that page.
+printf 'const contract = "docs/contract.md";\nexport { contract };\n' > "$SCOPED_REPO/back-end/src/tests/blackbox/health.blackbox.ts"
+printf 'export {};\n' > "$SCOPED_REPO/back-end/src/tests/unit/sample.test.ts"
+printf 'model A { id Int @id }\n' > "$SCOPED_REPO/back-end/prisma/schema.prisma"
+printf 'x = 1\n' > "$SCOPED_REPO/agents/tests/blackbox/sample.blackbox.py"
+printf 'def test_sample():\n    pass\n' > "$SCOPED_REPO/agents/tests/unit/test_sample.py"
+printf 'guide v1\n' > "$SCOPED_REPO/docs/guide.md"
+printf 'contract v1\n' > "$SCOPED_REPO/docs/contract.md"
+printf '.context/\n__pycache__/\n' > "$SCOPED_REPO/.gitignore"
+git -C "$SCOPED_REPO" init -q
+scoped_commit() {
+    git -C "$SCOPED_REPO" add -A
+    git -C "$SCOPED_REPO" -c user.name=t -c user.email=t@t commit -qm "$1"
+    git -C "$SCOPED_REPO" rev-parse HEAD
+}
+SCOPED_H1="$(scoped_commit fixture)"
+RUN_ROOT="$TEST_ROOT/scoped"
+SCOPED_LANES="backend-coverage-blackbox live-probes agents-coverage-blackbox smoke semantic-stack"
+scoped_stage() {
+    (cd "$SCOPED_REPO" && DEPLOY_RUN_ROOT="$RUN_ROOT" bash scripts/run-deploy-stage "$@")
+}
+# scoped_run LANE [FLAG...]: the lane's counting command; prints the lane's stdout.
+scoped_run() {
+    local lane="$1"
+    shift
+    scoped_stage "$lane" "$@" -- bash -c 'printf "run\n" >> "$1"' _ "$TEST_ROOT/scoped-count-$lane"
+}
+scoped_runs() {
+    wc -l < "$TEST_ROOT/scoped-count-$1" | tr -d ' '
+}
+# scoped_row LANE KEY [KEY...]: a field of the lane's latest stage row.
+scoped_row() {
+    python3 - "$RUN_ROOT/scoped/stages.jsonl" "$@" <<'PYEOF'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+value = [row for row in rows if row.get("stage") == sys.argv[2]][-1]
+for key in sys.argv[3:]:
+    value = value[int(key)] if isinstance(value, list) else value.get(key)
+print(value if isinstance(value, str) else json.dumps(value))
+PYEOF
+}
+scoped_stage --start --run-id scoped >/dev/null
+for lane in $SCOPED_LANES; do
+    scoped_run "$lane" --lane-scoped-reuse >"$TEST_ROOT/scoped-first-$lane.out" \
+        || fail "first $lane run failed"
+    [ "$(scoped_runs "$lane")" = 1 ] || fail "$lane did not run at H1"
+    grep -q "lane-scoped reuse unavailable for $lane: no prior pass" "$TEST_ROOT/scoped-first-$lane.out" \
+        || fail "$lane did not disclose the missing prior pass"
+done
+
+# (1) Docs-only commit: every scoped lane reuses its H1 pass with provenance.
+printf 'guide v2\n' > "$SCOPED_REPO/docs/guide.md"
+SCOPED_H2="$(scoped_commit docs)"
+for lane in $SCOPED_LANES; do
+    scoped_run "$lane" --lane-scoped-reuse >"$TEST_ROOT/scoped-docs-$lane.out" || fail "docs-only $lane failed"
+    [ "$(scoped_runs "$lane")" = 1 ] || fail "docs-only commit reran $lane"
+    grep -q "reused passed deploy stage (lane-scoped): $lane passed_head=${SCOPED_H1:0:12} current_head=${SCOPED_H2:0:12} inert_paths=1" \
+        "$TEST_ROOT/scoped-docs-$lane.out" || fail "docs-only reuse of $lane was not disclosed"
+    [ "$(scoped_row "$lane" status)" = "reused-scoped" ] || fail "$lane row is not labelled reused-scoped"
+    [ "$(scoped_row "$lane" exit_code)" = 0 ] || fail "$lane reused row exit code"
+    [ "$(scoped_row "$lane" detail reuse kind)" = "scoped" ] || fail "$lane row lacks reuse kind"
+    [ "$(scoped_row "$lane" detail reuse passed_head)" = "$SCOPED_H1" ] || fail "$lane row lacks the passed head"
+    [ "$(scoped_row "$lane" detail reuse current_head)" = "$SCOPED_H2" ] || fail "$lane row lacks the current head"
+    [ "$(scoped_row "$lane" detail reuse passed_run_id)" = "scoped" ] || fail "$lane row lacks the passed run id"
+    SCOPED_FP="$(scoped_row "$lane" detail reuse passed_fingerprint)"
+    [ "${#SCOPED_FP}" = 64 ] || fail "$lane row lacks the passed fingerprint"
+    [ -f "$RUN_ROOT/scoped/passed-cache/$lane/$SCOPED_FP.json" ] || fail "$lane passed fingerprint is not the recorded pass"
+    [ "$(scoped_row "$lane" detail reuse changed 0 path)" = "docs/guide.md" ] || fail "$lane row lacks the judged path"
+    [ "$(scoped_row "$lane" detail reuse changed 0 rule)" = "inert:docs/*" ] || fail "$lane row lacks the inert rule"
+    scoped_row "$lane" detail reuse changed 0 graph | grep -q '^graph:no ' || fail "$lane row lacks the graph rule"
+done
+[ "$(scoped_row smoke detail reuse changed 0 graph)" = "graph:no ALL fallback" ] || fail "runtime lane graph rule"
+[ "$(scoped_row backend-coverage-blackbox detail reuse changed 0 graph)" = "graph:no backend-blackbox/backend-unit test selected" ] \
+    || fail "backend lane graph rule"
+# The exact-input cache never learns a scoped hit: the current bytes were not executed.
+[ "$(ls "$RUN_ROOT/scoped/passed-cache/smoke/"*.json | wc -l | tr -d ' ')" = 1 ] || fail "scoped hit was cached as an exact pass"
+
+# (5) Flag off: today's behaviour, the lane reruns and records a plain pass.
+scoped_run backend-coverage-blackbox --reuse-passed >"$TEST_ROOT/scoped-off.out" || fail "flag-off run failed"
+[ "$(scoped_runs backend-coverage-blackbox)" = 2 ] || fail "lane-scoped reuse fired without its flag"
+[ "$(scoped_row backend-coverage-blackbox status)" = "passed" ] || fail "flag-off row is not a plain pass"
+if grep -q "lane-scoped" "$TEST_ROOT/scoped-off.out"; then
+    fail "flag-off run mentioned lane-scoped reuse"
+fi
+# DEPLOY_LANE_SCOPED_REUSE is a scheduling knob: setting it must not break the exact-input match.
+scoped_stage backend-coverage-blackbox --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$TEST_ROOT/scoped-count-backend-coverage-blackbox" >/dev/null
+[ "$(scoped_runs backend-coverage-blackbox)" = 2 ] || fail "exact reuse of the flag-off pass missed"
+DEPLOY_LANE_SCOPED_REUSE=1 scoped_run backend-coverage-blackbox --reuse-passed >"$TEST_ROOT/scoped-exact.out" || fail "env exact run failed"
+[ "$(scoped_runs backend-coverage-blackbox)" = 2 ] || fail "the scheduling env var changed the exact fingerprint"
+grep -q "== reused passed deploy stage: backend-coverage-blackbox" "$TEST_ROOT/scoped-exact.out" || fail "exact reuse must precede the scoped lookup"
+
+# (2) Agents test-only commit (enabled through the environment): agents
+# coverage reruns; backend, live probes, smoke and semantic are reused-scoped.
+printf 'x = 2\n' > "$SCOPED_REPO/agents/tests/blackbox/sample.blackbox.py"
+SCOPED_H3="$(scoped_commit agents-test)"
+for lane in $SCOPED_LANES; do
+    DEPLOY_LANE_SCOPED_REUSE=1 scoped_run "$lane" >"$TEST_ROOT/scoped-agents-$lane.out" || fail "agents-test $lane failed"
+done
+[ "$(scoped_runs agents-coverage-blackbox)" = 2 ] || fail "agents test change did not rerun agents coverage"
+grep -q "rerun: agents/tests/blackbox/sample.blackbox.py (not in the lane's declared inert set" \
+    "$TEST_ROOT/scoped-agents-agents-coverage-blackbox.out" || fail "agents rerun reason not disclosed"
+[ "$(scoped_row agents-coverage-blackbox status)" = "passed" ] || fail "agents rerun row status"
+[ "$(scoped_row agents-coverage-blackbox detail reuse scoped miss_reason)" = "1 changed path(s) are not provably inert" ] \
+    || fail "agents rerun row lacks the scoped miss reason"
+[ "$(scoped_row agents-coverage-blackbox detail reuse scoped blocked 0 path)" = "agents/tests/blackbox/sample.blackbox.py" ] \
+    || fail "agents rerun row lacks the blocking path"
+[ "$(scoped_runs backend-coverage-blackbox)" = 2 ] || fail "agents test change reran backend coverage"
+[ "$(scoped_row backend-coverage-blackbox detail reuse passed_head)" = "$SCOPED_H2" ] || fail "backend did not reuse its latest pass"
+for lane in live-probes smoke semantic-stack; do
+    [ "$(scoped_runs "$lane")" = 1 ] || fail "agents test change reran $lane"
+    [ "$(scoped_row "$lane" status)" = "reused-scoped" ] || fail "$lane not reused-scoped after agents test change"
+    [ "$(scoped_row "$lane" detail reuse current_head)" = "$SCOPED_H3" ] || fail "$lane provenance head"
+done
+
+# A docs page a backend blackbox reads: declared inert, but the graph selects
+# the test, so the backend lanes rerun while the others stay reused.
+printf 'contract v2\n' > "$SCOPED_REPO/docs/contract.md"
+scoped_commit contract >/dev/null
+for lane in $SCOPED_LANES; do
+    scoped_run "$lane" --lane-scoped-reuse >"$TEST_ROOT/scoped-contract-$lane.out" || fail "contract $lane failed"
+done
+[ "$(scoped_runs backend-coverage-blackbox)" = 3 ] || fail "graph-selected docs page did not rerun backend coverage"
+[ "$(scoped_runs live-probes)" = 2 ] || fail "graph-selected docs page did not rerun live probes"
+[ "$(scoped_row backend-coverage-blackbox detail reuse scoped blocked 0 rule)" = "inert:docs/*" ] || fail "contract declared rule"
+[ "$(scoped_row backend-coverage-blackbox detail reuse scoped blocked 0 graph)" = "graph:selects backend-blackbox: health" ] \
+    || fail "contract graph veto not recorded"
+[ "$(scoped_runs agents-coverage-blackbox)" = 2 ] || fail "contract page reran agents coverage"
+[ "$(scoped_runs smoke)" = 1 ] && [ "$(scoped_runs semantic-stack)" = 1 ] || fail "contract page reran a runtime lane"
+
+# (3) Schema/migration or lockfile change: nothing is reused.
+printf 'model A { id Int @id\n  b Int }\n' > "$SCOPED_REPO/back-end/prisma/schema.prisma"
+printf '{}\n' > "$SCOPED_REPO/package-lock.json"
+scoped_commit schema >/dev/null
+for lane in $SCOPED_LANES; do
+    scoped_run "$lane" --lane-scoped-reuse >"$TEST_ROOT/scoped-schema-$lane.out" || fail "schema $lane failed"
+    [ "$(scoped_row "$lane" status)" = "passed" ] || fail "schema change left $lane reused"
+    grep -q "rerun: back-end/prisma/schema.prisma (not in the lane's declared inert set" "$TEST_ROOT/scoped-schema-$lane.out" \
+        || fail "schema rerun reason not disclosed for $lane"
+done
+[ "$(scoped_runs smoke)" = 2 ] || fail "schema change did not rerun smoke"
+
+# (4) An unmapped file inside another package's test tree passes the declared
+# set but the graph falls back to ALL: nothing is reused.
+printf 'export const helper = 1;\n' > "$SCOPED_REPO/back-end/src/tests/helpers.unmapped.ts"
+scoped_commit unmapped >/dev/null
+for lane in agents-coverage-blackbox smoke semantic-stack; do
+    scoped_run "$lane" --lane-scoped-reuse >"$TEST_ROOT/scoped-unmapped-$lane.out" || fail "unmapped $lane failed"
+    [ "$(scoped_row "$lane" status)" = "passed" ] || fail "unmapped file left $lane reused"
+    [ "$(scoped_row "$lane" detail reuse scoped blocked 0 rule)" = "inert:back-end/src/tests/*" ] || fail "unmapped declared rule for $lane"
+    scoped_row "$lane" detail reuse scoped blocked 0 graph | grep -q '^graph:ALL (unmapped files reach no test: back-end/src/tests/helpers.unmapped.ts' \
+        || fail "unmapped graph veto not recorded for $lane"
+done
+[ "$(scoped_runs smoke)" = 3 ] || fail "unmapped file did not rerun smoke"
+
+# The dry-run preview reports the same decisions for a commit range.
+(cd "$SCOPED_REPO" && python3 scripts/run_deploy_stage.py --preview-lane-scoped-reuse "$SCOPED_H1..$SCOPED_H2") >"$TEST_ROOT/scoped-preview.out" \
+    || fail "preview failed"
+grep -q "5/5 lane(s) would be reused-scoped" "$TEST_ROOT/scoped-preview.out" || fail "docs-only preview"
+(cd "$SCOPED_REPO" && python3 scripts/run_deploy_stage.py --preview-lane-scoped-reuse "$SCOPED_H2..$SCOPED_H3") >"$TEST_ROOT/scoped-preview3.out" \
+    || fail "preview 3 failed"
+grep -q "agents-coverage-blackbox: RERUN (1 path(s) not provably inert)" "$TEST_ROOT/scoped-preview3.out" || fail "agents preview"
+grep -q "4/5 lane(s) would be reused-scoped" "$TEST_ROOT/scoped-preview3.out" || fail "agents-test preview"
+scoped_stage --finish >"$TEST_ROOT/scoped-finish.out" || fail "scoped finish failed"
+grep -q "^smoke  *reused-scoped " "$TEST_ROOT/scoped-finish.out" || fail "summary does not show the reused-scoped label"
+scoped_stage --history >"$TEST_ROOT/scoped-history.out" || fail "scoped history failed"
+grep -q "Reused lane-scoped passes (inert changes only, not executed on these bytes): .*smoke=" "$TEST_ROOT/scoped-history.out" \
+    || fail "history does not count lane-scoped reuse separately"
+# Back to the exact-input fixture run for the scenarios below.
+RUN_ROOT="$TEST_ROOT/reuse"
 # Every pass is cached, so a standalone run (no --reuse-passed: a first manual
 # gate, or an inner stage a lane launches) is reusable by a later
 # --reuse-passed run of the identical command; only the lookup is opt-in.
