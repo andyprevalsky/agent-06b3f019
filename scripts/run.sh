@@ -617,22 +617,53 @@ PYEOF
     [ -n "$(find "$run_dir" -maxdepth 0 -type d -mmin "-$grace_min" 2>/dev/null)" ]
 }
 
+# An isolated run's manifest is live only while its status is starting/running
+# AND its run_sh_pid is still a live run.sh. Once run.sh is gone nothing owns
+# the listed services: kill-services.sh (the EXIT sweep) reaps them, so the
+# startup sweep must not shield the leftovers of a SIGKILLed run.sh forever.
+# One predicate for both sweeps (kill-services.sh load_live_isolated_runs). A
+# malformed manifest is a NON-match, never a reason to preserve a stale pid.
+isolated_manifest_is_live() {  # <manifest>
+    MANIFEST="$1" python3 - <<'PYEOF'
+import json, os, subprocess, sys
+
+try:
+    with open(os.environ["MANIFEST"]) as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
+if not isinstance(data, dict):
+    sys.exit(1)
+if str(data.get("status", "")).strip().lower() not in {"starting", "running"}:
+    sys.exit(1)
+pid = data.get("run_sh_pid")
+if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+    sys.exit(1)
+command = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                         capture_output=True, text=True, check=False).stdout
+sys.exit(0 if "run.sh" in command else 1)
+PYEOF
+}
+
 pid_belongs_to_active_isolated_benchmark() {
     local pid=$1
+    # Live manifests, decided once per candidate: status and a live run.sh.
+    local manifest live_manifests=()
+    for manifest in "$PWD"/.context/benchmarks/*/services.json; do
+        [ -f "$manifest" ] || continue
+        isolated_manifest_is_live "$manifest" && live_manifests+=("$manifest")
+    done
     # Walk the ancestry: manifests record root/service PIDs, but kill_stale_tree
     # recurses into descendants. A child of an ACTIVE isolated run must be just
     # as protected as its root, or the recursive pass kills the live stack.
     local probe="$pid" hops=0
     while [ -n "$probe" ] && [ "$probe" != "0" ] && [ "$probe" != "1" ] && [ "$hops" -lt 12 ]; do
-        local manifest
-        for manifest in "$PWD"/.context/benchmarks/*/services.json; do
-            [ -f "$manifest" ] || continue
+        for manifest in ${live_manifests[@]+"${live_manifests[@]}"}; do
             PID="$probe" MANIFEST="$manifest" python3 - <<'PYEOF' && return 0
 import json, os, sys
 
-# Only `starting` and `running` are live; run.sh emits nothing else that means
-# "in flight". A malformed manifest is a NON-match, never a reason to preserve
-# a stale pid — and it must not raise outside the parse guard.
+# The manifest is already known live; a parse failure here is still a
+# NON-match and must not raise outside the parse guard.
 try:
     with open(os.environ["MANIFEST"]) as handle:
         data = json.load(handle)
@@ -683,17 +714,7 @@ PYEOF
                 # leftover children for as long as the run directory exists.
                 isolated_run_still_starting "$run_dir" && return 0
             else
-                MANIFEST="$run_dir/services.json" python3 - <<'PYEOF' && return 0
-import json, os, sys
-
-try:
-    with open(os.environ["MANIFEST"]) as handle:
-        data = json.load(handle)
-except Exception:
-    sys.exit(1)
-live = isinstance(data, dict) and str(data.get("status", "")).strip().lower() in {"starting", "running"}
-sys.exit(0 if live else 1)
-PYEOF
+                isolated_manifest_is_live "$run_dir/services.json" && return 0
             fi
         fi
     fi

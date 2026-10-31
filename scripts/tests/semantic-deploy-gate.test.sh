@@ -182,7 +182,9 @@ require_text "$RUNNER" '127\.([0-9]{1,3}\.){2}[0-9]{1,3}' "prod semantic loopbac
 require_text "$RUNNER" 'localhost|*.localhost|::1' "prod semantic loopback check must cover localhost and IPv6 ::1"
 require_text "$RUNNER" 'curl -4 -sfL --max-time 20 -o /dev/null "$FRONTEND_URL"' "prod frontend probe must force IPv4, follow redirects, and bound wait"
 require_text "$WORKFLOW" "default: https://www.roselabs.ai" "workflow_dispatch frontend default must match the hardened www probe"
-require_text "$DEPLOY_COMMAND" "-f frontend_url=https://www.roselabs.ai" "/deploy production semantic dispatch must target www"
+require_text "$DEPLOY_COMMAND" "--frontend-url https://www.roselabs.ai" "/deploy production semantic dispatch must target www"
+require_text "$WORKFLOW" "source_sha:" "production semantic gate must accept the exact merged commit (source_sha)"
+require_count "$WORKFLOW" 'ref: ${{ inputs.source_sha || (github.event_name == '"'"'workflow_dispatch'"'"' && github.sha) || github.event.repository.default_branch }}' "2" "both semantic checkouts must check out source_sha on dispatch and the trusted default branch on deployment events"
 require_text "$WORKFLOW" "SEMANTIC_GREP_INVERT: chat full-lifecycle latency" "UI semantic job must exclude the separately gated latency spec"
 require_text "$WORKFLOW" "SEMANTIC_WORKERS: 1" "latency ratchet must avoid renderer contention"
 require_text "$WORKFLOW" "--prod chat-lifecycle-latency" "production gate must run the lifecycle ratchet"
@@ -466,10 +468,15 @@ require_agentcard_command '--max-concurrency 1 --no-dashboard' "/deploy must pre
 if grep -Fq 'bash scripts/run-agentcard-lifecycle-task.sh' "$DEPLOY_COMMAND"; then
   fail "/deploy must not tear down and rebuild the shared stack for each AgentCard task"
 fi
-require_text "$DEPLOY_COMMAND" "gh workflow run chat-lifecycle-ratchet.yml" "/deploy must dispatch the production semantic gate"
+require_text "$DEPLOY_COMMAND" 'python3 scripts/run_deploy_pipeline.py production-semantic --merged-sha "$DEPLOY_MERGED_SHA"' "/deploy must dispatch the production semantic gate through the versioned CLI on the exact merged SHA"
+if grep -Fq "gh workflow run chat-lifecycle-ratchet.yml" "$DEPLOY_COMMAND"; then
+  fail "/deploy must not dispatch the production semantic workflow by hand: the raw dispatch tests main's later head, not the merged SHA (#1646)"
+fi
+require_text "$DEPLOY_COMMAND" 'export GH_TOKEN DEPLOY_GH_BIN=/opt/devbox-tools/gh/current/bin/gh' "/deploy must hand the CLI the workflow-scoped gh binary on boxes.dev"
 require_text "$DEPLOY_COMMAND" 'STACK_PORTS=$(bash scripts/resolve-deploy-stack-db.sh) || exit 1' "/deploy E2B smoke must fail closed when it cannot resolve the running stack"
 require_text "$DEPLOY_COMMAND" 'BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$SMOKE_DB_PORT/victoria_$CONDUCTOR_WORKSPACE_NAME"' "/deploy E2B smoke must name the isolated workspace test database"
-require_text "$DEPLOY_COMMAND" 'gh run watch "$SEMANTIC_RUN_ID" --exit-status' "/deploy must block on production semantic success"
+require_text "$DEPLOY_COMMAND" 'echo "❌ production semantic gate is not green for $DEPLOY_MERGED_SHA"; exit 1; }' "/deploy must block on production semantic success"
+require_text "$DEPLOY_COMMAND" '--retry-failed-once "<justification>"' "/deploy must document the single failed-jobs retry"
 require_text "$DEPLOY_COMMAND" "Start every applicable provider lane concurrently" "/deploy must not serialize independent production providers"
 require_text "$DEPLOY_COMMAND" "Do not wait for the independent Mac release lane" "production semantics must overlap Mac release work"
 require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export BENCHMARK_SKIP_WMH_BUILD=1' "AgentCard lifecycle stacks must skip unrelated WMH build/refresh before readiness"

@@ -21,18 +21,21 @@ already in MemAvailable); unphased and unobserved lanes keep the declared sum.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import inspect
+import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from contextlib import ExitStack
-from datetime import datetime, timezone
+from contextlib import ExitStack, redirect_stdout
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -56,11 +59,24 @@ def load_module(name: str, path: Path):
     return module
 
 
-def start_timing(run_root: Path, env: dict[str, str]) -> None:
+def start_timing(run_root: Path, env: dict[str, str], cwd: Path | None = None) -> None:
+    """Start a timing run; its metadata records the branch and head of ``cwd``
+    (the real checkout unless a scenario binds the run to its fixture repo)."""
     subprocess.run(
         ["bash", str(DRIVER.parent / "run-deploy-stage"), "--start"],
+        cwd=ROOT if cwd is None else cwd, env=env, check=True, stdout=subprocess.DEVNULL,
+    )
+
+
+def finish_timing(env: dict[str, str]) -> str:
+    """Close the active timing run and return its id."""
+    run_root = Path(env["DEPLOY_RUN_ROOT"])
+    run_id = (run_root / "current").read_text().splitlines()[0].strip()
+    subprocess.run(
+        ["bash", str(DRIVER.parent / "run-deploy-stage"), "--finish"],
         cwd=ROOT, env=env, check=True, stdout=subprocess.DEVNULL,
     )
+    return run_id
 
 
 def write_plan(path: Path, lanes: list[dict], **extra: object) -> None:
@@ -247,17 +263,30 @@ def check_memory_admission(tmp: Path, env: dict[str, str]) -> None:
 
 
 def check_max_parallel_default(tmp: Path, env: dict[str, str]) -> None:
-    """Without --max-parallel the host default (>= 2) bounds concurrency."""
+    """Without --max-parallel the host default (>= 2) bounds concurrency.
+
+    The cap is judged on the host sample the driver recorded in its receipt,
+    not on a second sample taken here: the default is a function of live
+    MemAvailable, and on a box whose memory moves while another deploy runs
+    (2026-10-31: the budget swung 1.2 GB in 10 s beside the 4-lane threshold)
+    two samples can land on different sides of a lane boundary, which made
+    this check report 4 lanes against a cap of 3 that the driver never used.
+    The lane count covers the largest possible default so the bound is always
+    observable."""
     pipeline = load_module("run_deploy_pipeline_cap_under_test", DRIVER)
-    cap = pipeline.default_max_parallel(pipeline.host_resources())
     state = tmp / "cap"
     plan = tmp / "cap-plan.json"
-    count = cap + 2
+    count = pipeline.CEILING_CPUS // 2 + 2
     write_plan(plan, [{"name": f"lane-{i}", "command": ["sleep", "1"], "reuse_passed": False, "memory_mb": 1}
                       for i in range(count)])
     assert run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--memory-budget-mb", "1048576",
                       env=env).returncode == 0
-    lanes = json.loads((state / "receipt.json").read_text())["lanes"]
+    receipt = json.loads((state / "receipt.json").read_text())
+    cap = receipt["max_parallel"]
+    assert cap == pipeline.default_max_parallel(receipt["host"]), (
+        f"the driver's cap {cap} is not the host default of its own recorded sample {receipt['host']}")
+    assert 1 <= cap <= pipeline.CEILING_CPUS // 2 < count, (cap, count)
+    lanes = receipt["lanes"]
     events = sorted([(lane["started_epoch"], 1) for lane in lanes.values()]
                     + [(lane["finished_epoch"], -1) for lane in lanes.values()])
     peak = level = 0
@@ -799,17 +828,21 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     print("observation validity: ok")
 
 
-def check_stack_owner_dependency(tmp: Path, env: dict[str, str]) -> None:
-    """semantic-stack's ``run.sh --benchmark`` startup runs kill-services.sh
-    against every runtime process this worktree owns, so it must never start
-    while the local smoke lane or the AgentCard lifecycle lane (their own
-    local stacks) is running. On #1640 only memory kept them apart (4096 +
-    4096 MB against an 8188 MB budget). The plan loader now appends the edge
-    (declared edges kept, receipt ``after`` shows it); with unbounded memory
-    only the dependency can hold semantic-stack back. Plans without a
-    stack-owning lane and lanes with other names are untouched, and a plan
-    that would close a cycle through the implied edge is refused."""
+def check_semantic_stack_beside_stack_owners(tmp: Path, env: dict[str, str]) -> None:
+    """Follow-up "an" (2026-10-31): semantic-stack's ``run.sh --benchmark``
+    sweeps spare every process of a live isolated run (kill-services.test.sh,
+    run-isolated-cloud-kill.test.sh), so the loader no longer appends the
+    implied ``after`` edges from semantic-stack to the stack-owning lanes
+    (``STACK_KILLER_LANES`` is empty): with unbounded memory semantic-stack
+    starts while smoke and agentcard-lifecycle are still running and the
+    receipt's ``after`` shows only its declared edge. Memory still rules: when
+    smoke + semantic-stack exceed the budget, admission defers semantic-stack
+    until smoke releases its reservation, without touching any declaration.
+    The edge mechanism itself is kept for a future stack-killing lane: with a
+    lane listed, edges are appended, never duplicated, and a plan that would
+    close a cycle through the implied edge is refused."""
     pipeline = load_module("pipeline_stack_owner", DRIVER)
+    assert pipeline.STACK_KILLER_LANES == () and pipeline.STACK_OWNER_LANES == ("smoke", "agentcard-lifecycle")
     plan = tmp / "stack-owner-plan.json"
     state = tmp / "stack-owner"
     marker = tmp / "semantic-started"
@@ -825,39 +858,69 @@ def check_stack_owner_dependency(tmp: Path, env: dict[str, str]) -> None:
     receipt = json.loads((state / "receipt.json").read_text())
     assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["status"])
     lanes = receipt["lanes"]
-    assert lanes["semantic-stack"]["started_epoch"] >= max(lanes["smoke"]["finished_epoch"],
-                                                            lanes["agentcard-lifecycle"]["finished_epoch"]), \
-        "semantic-stack started while a lane owning a worktree stack was still running"
-    assert receipt["after"]["semantic-stack"] == ["cov", "smoke", "agentcard-lifecycle"], receipt["after"]
+    assert lanes["semantic-stack"]["started_epoch"] < min(lanes["smoke"]["finished_epoch"],
+                                                           lanes["agentcard-lifecycle"]["finished_epoch"]), \
+        "semantic-stack must be admitted while the stack-owning lanes are still running"
+    assert receipt["after"]["semantic-stack"] == ["cov"], receipt["after"]
     assert receipt["after"]["smoke"] == [] and receipt["after"]["agentcard-lifecycle"] == [], receipt["after"]
     assert lanes["smoke"]["started_epoch"] < lanes["cov"]["finished_epoch"], "owners are not held back"
-    # No stack-owning lane in the plan: nothing is added; other names are untouched.
+    # Memory, not an edge, keeps them apart when both declarations do not fit:
+    # cov (25) + smoke (40) fit a 70 MB budget, semantic-stack (40) does not
+    # beside smoke, so it waits for smoke's reservation and is admitted after
+    # a recorded budget deferral. The declarations are the plan's own.
+    budget_state = tmp / "stack-owner-budget"
     write_plan(plan, [
-        {"name": "cov", "command": ["true"], "group": "3"},
-        {"name": "semantic-stack", "command": ["true"], "after": ["cov"], "group": "4"},
-        {"name": "semantic", "command": ["true"], "group": "4"},
-        {"name": "smoke-like", "command": ["true"], "group": "4", "phase": "coverage"},
-    ])
-    loaded = {lane.name: lane for lane in pipeline.load_plan_payload(plan)[0]}
-    assert loaded["semantic-stack"].after == ["cov"] and loaded["semantic"].after == [], loaded
-    # An implied edge never duplicates a declared one, and a plan that makes an
-    # owner wait for the killer is a cycle, refused before any lane starts.
-    write_plan(plan, [
-        {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage"},
-        {"name": "semantic-stack", "command": ["true"], "after": ["smoke"], "group": "4"},
-    ])
-    assert pipeline.load_plan_payload(plan)[0][1].after == ["smoke"]
-    write_plan(plan, [
-        {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage", "after": ["semantic-stack"]},
-        {"name": "semantic-stack", "command": ["true"], "group": "4"},
-    ])
-    try:
-        pipeline.load_plan_payload(plan)
-    except ValueError as error:
-        assert "cyclic" in str(error), error
-    else:
-        raise AssertionError("an owner that waits for semantic-stack must be refused as a cycle")
-    print("stack owner dependency: ok")
+        {"name": "cov", "command": ["sleep", "0.4"], "reuse_passed": False, "group": "3", "memory_mb": 25},
+        {"name": "smoke", "command": ["sleep", "1.5"], "reuse_passed": False, "group": "4", "phase": "coverage",
+         "memory_mb": 40},
+        {"name": "semantic-stack", "command": ["true"], "after": ["cov"], "reuse_passed": False, "group": "4",
+         "memory_mb": 40},
+    ], schedule={"policy": "legacy"})
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(budget_state), "--max-parallel", "0",
+                     "--memory-budget-mb", "70", env=env, timeout=120)
+    receipt = json.loads((budget_state / "receipt.json").read_text())
+    assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["status"])
+    lanes = receipt["lanes"]
+    assert receipt["after"]["semantic-stack"] == ["cov"], receipt["after"]
+    assert lanes["smoke"]["started_epoch"] < lanes["cov"]["finished_epoch"], "cov and smoke fit the budget together"
+    assert lanes["semantic-stack"]["started_epoch"] >= lanes["smoke"]["finished_epoch"], \
+        "40 + 40 MB declared must never run together under a 70 MB budget"
+    deferred = lanes["semantic-stack"]["admission"]["deferred"]
+    assert deferred and deferred["first"]["reason"] == "budget" and deferred["checks"] >= 1, deferred
+    assert deferred["first"]["reserved_declared_mb"] == 40 and deferred["first"]["memory_mb"] == 40, deferred
+    assert {lane["memory_mb"] for lane in (lanes["smoke"], lanes["semantic-stack"])} == {40}, "declarations unchanged"
+    # The implied-edge mechanism, with a killer lane listed: edges appended to
+    # the declared ones, no duplicates, other names untouched, cycles refused.
+    with patch.object(pipeline, "STACK_KILLER_LANES", ("semantic-stack",)):
+        write_plan(plan, [
+            {"name": "cov", "command": ["true"], "group": "3"},
+            {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage"},
+            {"name": "agentcard-lifecycle", "command": ["true"], "group": "4", "phase": "coverage"},
+            {"name": "semantic-stack", "command": ["true"], "after": ["cov"], "group": "4"},
+            {"name": "semantic", "command": ["true"], "group": "4"},
+            {"name": "smoke-like", "command": ["true"], "group": "4", "phase": "coverage"},
+        ])
+        loaded = {lane.name: lane for lane in pipeline.load_plan_payload(plan)[0]}
+        assert loaded["semantic-stack"].after == ["cov", "smoke", "agentcard-lifecycle"], loaded
+        assert loaded["semantic"].after == [] and loaded["smoke"].after == [], loaded
+        write_plan(plan, [
+            {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage"},
+            {"name": "semantic-stack", "command": ["true"], "after": ["smoke"], "group": "4"},
+        ])
+        assert pipeline.load_plan_payload(plan)[0][1].after == ["smoke"]
+        write_plan(plan, [
+            {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage", "after": ["semantic-stack"]},
+            {"name": "semantic-stack", "command": ["true"], "group": "4"},
+        ])
+        try:
+            pipeline.load_plan_payload(plan)
+        except ValueError as error:
+            assert "cyclic" in str(error), error
+        else:
+            raise AssertionError("an owner that waits for a listed killer lane must be refused as a cycle")
+    # Without a listed killer lane the same cycle plan is simply an edge.
+    assert pipeline.load_plan_payload(plan)[0][0].after == ["semantic-stack"]
+    print("semantic-stack beside stack owners: ok")
 
 
 def check_wait_receipt_contract(tmp: Path, pipeline=None, scenario="both") -> None:
@@ -998,7 +1061,9 @@ def check_lane_scoped_reuse(tmp: Path, env: dict[str, str], source_root: Path) -
     # the phase estimates of the other scenarios with 0-second passes.
     ledger = tmp / "scoped-lanes.json"
     env = {**env, "DEPLOY_RUN_ROOT": str(tmp / "scoped-runs"), "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}
-    start_timing(tmp / "scoped-runs", env)
+    # Timing runs bound to the fixture repo: cross-run discovery compares the
+    # branch each run's metadata recorded, which must be the fixture's.
+    start_timing(tmp / "scoped-runs", env, cwd=source_root)
     git = ["git", "-C", str(source_root), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
 
     def commit_docs(text: str) -> str:
@@ -1076,6 +1141,44 @@ def check_lane_scoped_reuse(tmp: Path, env: dict[str, str], source_root: Path) -
     recorded = json.loads(ledger.read_text())["lanes"]
     assert all(sample.get("status") != "reused-scoped" for samples in recorded.values() for sample in samples)
     assert len(recorded["smoke"]) == 1 and len(recorded["quick-gate"]) == 2, recorded
+    assert receipt["reused_scoped_cross_run_lanes"] == [], receipt["reused_scoped_cross_run_lanes"]
+
+    # Cross-run: the green run is closed (--finish) and a test-only sync needs
+    # a new --start run. Its own passed-cache is empty, so the scoped lanes
+    # reuse the first run's records in place (same branch, ancestor head,
+    # fresh): the receipt names the source run and lists the lanes as
+    # cross-run reuse; nothing executes and no duration is recorded.
+    first_run_id = finish_timing(env)
+    first_run_dir = tmp / "scoped-runs" / first_run_id
+    start_timing(tmp / "scoped-runs", env, cwd=source_root)
+    cross_head = commit_docs("guide v2 cross-run\n")
+    receipt = run_and_wait(plan)
+    assert receipt["status"] == "passed", receipt["status"]
+    assert receipt["stage_run_dir"] != str(first_run_dir), receipt["stage_run_dir"]
+    assert receipt["reused_scoped_lanes"] == ["backend-coverage-blackbox", "smoke"], receipt["reused_scoped_lanes"]
+    assert receipt["reused_scoped_cross_run_lanes"] == ["backend-coverage-blackbox", "smoke"], \
+        receipt["reused_scoped_cross_run_lanes"]
+    for name in ("backend-coverage-blackbox", "smoke"):
+        lane_state = receipt["lanes"][name]
+        assert lane_state["status"] == "reused-scoped" and lane_state["exit"] == 0, (name, lane_state)
+        reuse = lane_state["reuse"]
+        assert reuse["kind"] == "scoped" and reuse["hit"] is True and reuse["cross_run"] is True, reuse
+        assert reuse["passed_run_id"] == first_run_id and reuse["passed_run_dir"] == str(first_run_dir), reuse
+        assert reuse["passed_head"] == first_head and reuse["current_head"] == cross_head, reuse
+        record = Path(reuse["passed_record"])
+        assert record.parent == first_run_dir / "passed-cache" / name / "scoped" and record.is_file(), reuse
+        assert reuse["considered_runs"] == [Path(receipt["stage_run_dir"]).name, first_run_id], reuse
+        assert runs(name) == 1, f"{name} executed despite the cross-run scoped reuse"
+    assert not (Path(receipt["stage_run_dir"]) / "passed-cache" / "smoke").exists(), "record copied into the new run"
+    assert receipt["lanes"]["quick-gate"]["status"] == "passed" and runs("quick-gate") == 3
+    assert receipt["lanes"]["live-probes"]["status"] == "passed" and runs("live-probes") == 3
+    verified = run_driver("verify", "--state-dir", str(state), "--expect-head", cross_head, env=env)
+    assert verified.returncode == 0, verified.stdout
+    assert "reused_scoped=backend-coverage-blackbox,smoke cross_run=backend-coverage-blackbox,smoke" in verified.stdout, \
+        verified.stdout
+    recorded = json.loads(ledger.read_text())["lanes"]
+    assert all(sample.get("status") != "reused-scoped" for samples in recorded.values() for sample in samples)
+    assert len(recorded["smoke"]) == 1 and len(recorded["quick-gate"]) == 3, recorded
 
     # Default off: the same kind of commit reruns both lanes as plain passes.
     write_plan(plan, lanes)
@@ -1088,7 +1191,7 @@ def check_lane_scoped_reuse(tmp: Path, env: dict[str, str], source_root: Path) -
     assert runs("backend-coverage-blackbox") == 2 and runs("smoke") == 2, "flag off must rerun"
     assert "reuse" not in receipt["lanes"]["smoke"]
     verified = run_driver("verify", "--state-dir", str(state), "--expect-head", third_head, env=env)
-    assert verified.returncode == 0 and "reused_scoped=-" in verified.stdout, verified.stdout
+    assert verified.returncode == 0 and "reused_scoped=- cross_run=-" in verified.stdout, verified.stdout
     # The environment can never enable: the same plan with DEPLOY_LANE_SCOPED_REUSE=1 still reruns.
     fourth_head = commit_docs("guide v4\n")
     since = time.time()
@@ -1112,9 +1215,11 @@ def check_reconcile_reused_lane(tmp: Path) -> None:
     run_dir.mkdir()
     base = 1_700_000_000.0
     provenance = {"kind": "scoped", "passed_head": "a" * 40, "current_head": "b" * 40, "changed": []}
+    cross_run_provenance = {**provenance, "cross_run": True, "passed_run_id": "earlier", "passed_run_dir": "/runs/earlier"}
 
     def row(stage: str, status: str, started: float, token: str | None) -> dict:
-        detail = {"reuse": provenance if status == "reused-scoped" else {"requested": False}}
+        reuse = cross_run_provenance if stage == "backend-coverage-blackbox" else provenance
+        detail = {"reuse": reuse if status == "reused-scoped" else {"requested": False}}
         if token:
             detail["lane_token"] = token
         return {"stage": stage, "status": status, "started_epoch": started, "finished_epoch": started + 1.0,
@@ -1142,6 +1247,9 @@ def check_reconcile_reused_lane(tmp: Path) -> None:
                         "semantic-stack": "passed", "agents-coverage-blackbox": "passed"}, outcomes
     assert receipt["lanes"]["smoke"]["reuse"] == provenance and "reuse" not in receipt["lanes"]["live-probes"]
     assert receipt["reused_scoped_lanes"] == ["backend-coverage-blackbox", "smoke"], receipt["reused_scoped_lanes"]
+    # Only the lane whose row says cross_run is listed as a cross-run reuse.
+    assert receipt["lanes"]["backend-coverage-blackbox"]["reuse"] == cross_run_provenance
+    assert receipt["reused_scoped_cross_run_lanes"] == ["backend-coverage-blackbox"], receipt["reused_scoped_cross_run_lanes"]
     assert pipeline.overall({"a": {"status": "reused-scoped"}, "b": {"status": "passed"}}) == "passed"
     assert pipeline.overall({"a": {"status": "reused-scoped"}, "b": {"status": "running"}}) == "running"
     # An older driver's receipt that still says "passed" records no sample for a reused-scoped row.
@@ -1155,6 +1263,120 @@ def check_reconcile_reused_lane(tmp: Path) -> None:
     recorded = pipeline.record_lane_durations(stale, ledger)
     assert "smoke" not in recorded and len(recorded["agents-coverage-blackbox"]) == 1, recorded
     print("reconcile reused lane: ok")
+
+
+def check_cross_run_record_guards(tmp: Path, source_root: Path) -> None:
+    """The cross-run guards, each against the real decision over the fixture
+    repo: a later-started or other-branch run is not a source; a record is
+    accepted only with a finite, non-future ``finished_epoch`` (future-dated
+    ones would sort first and outrank every failed head), within the bound
+    and carrying its own run's id; and a candidate whose bytes change between
+    the read and the hit is never reused."""
+    stage = load_module("stage_guards", source_root / "scripts" / "run_deploy_stage.py")
+    git = ["git", "-C", str(source_root)]
+    head = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    branch = subprocess.run([*git, "branch", "--show-current"], check=True, capture_output=True, text=True).stdout.strip()
+    assert branch, "fixture repo must be on a branch"
+    run_root = tmp / "guard-runs"
+    now = time.time()
+
+    def run_dir(name: str, started: float, run_branch: str = branch) -> Path:
+        path = run_root / name
+        path.mkdir(parents=True)
+        (path / "metadata.json").write_text(json.dumps({"schema_version": 1, "run_id": name, "status": "completed",
+                                                          "started_epoch": started, "branch": run_branch}))
+        return path
+
+    current = run_dir("cur", now - 100)
+    earlier = run_dir("earlier", now - 200)
+    oldest = run_dir("oldest", now - 300)
+    run_dir("later", now)                      # started after the current run: never a source
+    run_dir("same-start", now - 100)           # not strictly earlier
+    run_dir("other-branch", now - 250, "other")
+    (run_root / "no-metadata").mkdir()
+    (run_root / "bad-json").mkdir()
+    (run_root / "bad-json" / "metadata.json").write_text("{not-json")
+    (run_root / "current").write_text("cur\n")  # the pointer file is not a run
+    considered = stage._considered_runs(run_root, current)
+    assert [(run.run_id, run.cross_run) for run in considered] == \
+        [("cur", False), ("earlier", True), ("oldest", True)], considered
+
+    command = ["bash", "scripts/run-predeploy-local"]
+    invocation = stage._invocation_digest(command)
+
+    def write_record(run: Path, name: str, directory: str = "scoped", **overrides: object) -> Path:
+        record = {"schema_version": 1, "stage": "smoke", "head": head, "fingerprint": "f" * 64, "run_id": run.name,
+                  "exit_code": 0, "finished_at": "2026-01-01T00:00:00Z", "finished_epoch": now - 10,
+                  "invocation": invocation, "dirty_paths": [], **overrides}
+        path = run / "passed-cache" / "smoke" / directory / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record) + "\n")
+        return path
+
+    real = write_record(earlier, "real.json")
+    write_record(earlier, "future.json", finished_epoch=now + 10 * 365 * 86400)
+    write_record(earlier, "nan.json", finished_epoch=float("nan"))
+    write_record(earlier, "old.json", finished_epoch=now - 25 * 3600)
+    write_record(earlier, "foreign.json", run_id="cur")
+    write_record(current, "in-run-future.json", finished_epoch=now + 60)
+    with patch.object(stage, "_is_ancestor", lambda ancestor, descendant: ancestor != "0" * 40):
+        write_record(oldest, "sibling.json", head="0" * 40)
+        records, rejected = stage._scoped_records_across_runs(
+            considered, "smoke", invocation, failed=False, current_head=head, now=now)
+    assert rejected == {"age": 4, "not_ancestor": 1, "foreign_run_id": 1}, rejected
+    assert [record["_record_path"] for record in records] == [str(real)], records
+    assert records[0]["_source"] == {"run_id": "earlier", "run_dir": str(earlier), "cross_run": True}
+    # Failures are never filtered: every one of them can veto.
+    failed = write_record(earlier, "x.json", directory="scoped-failed", exit_code=1, finished_epoch=now + 60)
+    failures, _ = stage._scoped_records_across_runs(
+        considered, "smoke", invocation, failed=True, current_head=head, now=now)
+    assert [record["_record_path"] for record in failures] == [str(failed)], failures
+    failed.unlink()
+    for extra in ("future.json", "nan.json", "old.json", "foreign.json"):
+        (earlier / "passed-cache" / "smoke" / "scoped" / extra).unlink()
+    (current / "passed-cache" / "smoke" / "scoped" / "in-run-future.json").unlink()
+    (oldest / "passed-cache" / "smoke" / "scoped" / "sibling.json").unlink()
+
+    # _record_is_intact: the bytes read must still be the bytes on disk.
+    [loaded] = stage._load_scoped_records(real.parent, "smoke", invocation)
+    assert stage._record_is_intact(loaded)
+    original = real.read_bytes()
+    real.write_bytes(original + b"\n")
+    assert not stage._record_is_intact(loaded)
+    real.write_bytes(original)
+    assert stage._record_is_intact(loaded)
+    assert not stage._record_is_intact({"_record_digest": loaded["_record_digest"]})
+
+    # The real decision over the fixture repo: the cross-run record is the
+    # hit; when its bytes change after the read (inside the judge, before the
+    # hit) the decision misses and says so.
+    rules = stage._SCOPED_REUSE_LANES["smoke"]
+
+    def inert_judge(rules, changed, judge):
+        return [{"path": path, "rule": "inert:test"} for path in changed], [], judge
+
+    def mutate_then_judge(rules, changed, judge):
+        real.write_bytes(original + b"\n")
+        return inert_judge(rules, changed, judge)
+
+    with patch.object(stage, "_judge_changes", inert_judge):
+        decision = stage._scoped_reuse_decision(run_root, current, "smoke", rules, command)
+    assert decision.hit and decision.record["_record_path"] == str(real), decision.provenance()
+    assert decision.provenance()["cross_run"] is True and decision.provenance()["passed_run_dir"] == str(earlier)
+    with patch.object(stage, "_judge_changes", mutate_then_judge):
+        decision = stage._scoped_reuse_decision(run_root, current, "smoke", rules, command)
+    assert not decision.hit, decision.provenance()
+    assert decision.miss_reason == "1 candidate record(s) changed or vanished before the hit", decision.miss_reason
+    real.write_bytes(original)
+
+    def vanish_then_judge(rules, changed, judge):
+        real.unlink()
+        return inert_judge(rules, changed, judge)
+
+    with patch.object(stage, "_judge_changes", vanish_then_judge):
+        decision = stage._scoped_reuse_decision(run_root, current, "smoke", rules, command)
+    assert not decision.hit and decision.candidates == 1, decision.provenance()
+    print("cross-run record guards: ok")
 
 
 def check_scoped_inert_tables() -> None:
@@ -1331,10 +1553,11 @@ def main() -> int:
         with patch.dict(os.environ, {"DEPLOY_ADMISSION_CREDIT": "0"}):
             check_materialized_reservation_credit(tmp / "inherited-flag", env)
         check_observation_validity(tmp, env)
-        check_stack_owner_dependency(tmp, env)
+        check_semantic_stack_beside_stack_owners(tmp, env)
         check_lane_scoped_reuse(tmp, env, source_root)
         check_reconcile_reused_lane(tmp)
         check_scoped_inert_tables()
+        check_cross_run_record_guards(tmp, source_root)
         check_plan_scaling()
         check_structural_memory_floor()
         check_macos_memory(tmp, env)
@@ -1356,9 +1579,48 @@ def main() -> int:
         check_declared_phase_lanes(tmp, env)
         check_dependencies_through_unphased_lanes(tmp, env)
         check_simulate_legacy_plan_group3(tmp, env)
+        check_receipt_readers(tmp)
         check_production_fly_wait(tmp, env)
+        check_production_semantic(tmp, env)
+        check_semantic_workflow_source_sha()
     print("run-deploy-pipeline: all checks passed")
     return 0
+
+
+def check_receipt_readers(tmp: Path) -> None:
+    """The driver binds one definition per module-level name (Python keeps
+    the last ``def``: a second ``_read_receipt`` added with ``production-semantic``
+    once silently replaced the deploy-lane reader for every earlier caller),
+    and the two receipt readers keep their distinct contracts: ``_read_receipt``
+    (``receipt.json``) returns a dict or None, so ``verify`` reports a non-dict
+    file as no receipt instead of crashing; ``_read_production_receipt``
+    (``production.json``) returns whatever JSON the file holds."""
+    seen: dict[str, int] = {}
+    for node in ast.parse(DRIVER.read_text()).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            assert node.name not in seen, f"{DRIVER.name} defines {node.name} twice (lines {seen[node.name]} and {node.lineno})"
+            seen[node.name] = node.lineno
+    assert {"_read_receipt", "_read_production_receipt"} <= seen.keys(), sorted(seen)
+    pipeline = load_module("pipeline_receipt_readers", DRIVER)
+    receipts = tmp / "receipt-readers"
+    receipts.mkdir()
+    (receipts / "list.json").write_text("[1, 2]\n")
+    (receipts / "dict.json").write_text('{"status": "passed"}\n')
+    (receipts / "broken.json").write_text("{\n")
+    assert pipeline._read_receipt(receipts / "list.json") is None, "receipt.json must read as a dict or nothing"
+    assert pipeline._read_production_receipt(receipts / "list.json") == [1, 2], "production.json reads as parsed"
+    assert pipeline._read_receipt(receipts / "dict.json") == {"status": "passed"}
+    assert pipeline._read_production_receipt(receipts / "dict.json") == {"status": "passed"}
+    for name in ("broken.json", "missing.json"):
+        assert pipeline._read_receipt(receipts / name) is None and pipeline._read_production_receipt(receipts / name) is None, name
+    state = receipts / "verify-state"
+    state.mkdir()
+    (state / "receipt.json").write_text("[]\n")
+    out = io.StringIO()
+    with redirect_stdout(out):
+        code = pipeline.verify(state)
+    assert code == 2 and "PIPELINE_VERIFY status=no-receipt exit=2" in out.getvalue(), (code, out.getvalue())
+    print("receipt readers: ok")
 
 
 def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
@@ -1567,6 +1829,540 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     assert ran.returncode == 1 and "monitor-cooperative-cutover.ts --verify failed (exit 3)" in ran.stdout, ran.stdout
     assert "dispatch" not in call_lines(), call_lines()
     print("production fly wait: ok")
+
+
+def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
+    """``production-semantic`` (deploy.md Step 13b) dispatches the production
+    semantic workflow with ``source_sha=<merged SHA>``, binds to the newest run
+    created after the dispatch whose title names that SHA (an older run, even
+    one titled with the same SHA, a newer run of another SHA and a decoy whose
+    headSha is the merged SHA but carries no title are never adopted), polls
+    it, records the run under ``semantic`` in production.json, exits non-zero
+    unless the run succeeded, reruns only failed jobs exactly once with
+    ``--retry-failed-once`` and refuses a second retry. Re-running the Fly
+    gate (``production``) for the same SHA carries the semantic lane forward,
+    and a run left ``in_progress`` by a CLI-side timeout is resumed, never
+    re-dispatched. A dispatch gh confirmed but whose run was never adopted (a
+    failed ``gh run list`` or a discovery timeout) is recorded as
+    ``dispatched`` and resumed by the next call, which adopts its run without
+    a second ``workflow run``; only a confirmed dispatch older than the resume
+    window with still no run is abandoned and dispatched anew. gh is a fake
+    executable on PATH; the receipt the Fly gate writes is required first."""
+    repo = tmp / "semantic-source"
+    repo.mkdir()
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    for name in ("run_deploy_pipeline.py", "deploy_stage_wait.py", "factory_metadata.py",
+                 "classify-agent-runtime-changes.sh"):
+        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+    (repo / ".gitignore").write_text(".context/\n__pycache__/\n")
+    git = ["git", "-C", str(repo), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    for message, files in (("base", {"README": "base\n"}), ("backend only", {"back-end/src/x.ts": "y\n"})):
+        for relative, content in files.items():
+            (repo / relative).parent.mkdir(parents=True, exist_ok=True)
+            (repo / relative).write_text(content)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", message], check=True)
+    merged = subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+    other_head = "2" * 40
+    driver = scripts / "run_deploy_pipeline.py"
+    fake = tmp / "semantic-fake"
+    fake.mkdir()
+    bin_dir = fake / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "$*" >> "$FAKE_GH_DIR/calls.log"\n'
+        'case "$1 $2" in\n'
+        '  "workflow run") [ -f "$FAKE_GH_DIR/dispatch-fail" ] && { echo "HTTP 422: Unexpected inputs provided" >&2; exit 1; }; exit 0 ;;\n'
+        '  "run list") [ -f "$FAKE_GH_DIR/list-fail" ] && { echo "HTTP 502: Bad Gateway" >&2; exit 1; }\n'
+        '    n=$(cat "$FAKE_GH_DIR/list-count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE_GH_DIR/list-count"\n'
+        '    f="$FAKE_GH_DIR/list-$n.json"; [ -f "$f" ] || f="$FAKE_GH_DIR/list-last.json"; cat "$f" ;;\n'
+        '  "run rerun") [ -f "$FAKE_GH_DIR/rerun-fail" ] && { echo "HTTP 403: Resource not accessible by integration" >&2; exit 1; }\n'
+        '    touch "$FAKE_GH_DIR/rerun-done"; exit 0 ;;\n'
+        '  "run view") prefix=view; [ -f "$FAKE_GH_DIR/rerun-done" ] && prefix=rerun-view\n'
+        '    n=$(cat "$FAKE_GH_DIR/$prefix-count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE_GH_DIR/$prefix-count"\n'
+        '    f="$FAKE_GH_DIR/$prefix-$n.json"; [ -f "$f" ] || f="$FAKE_GH_DIR/$prefix-last.json"; cat "$f" ;;\n'
+        '  *) echo "unexpected gh $*" >&2; exit 1 ;;\n'
+        "esac\n")
+    (bin_dir / "gh").chmod(0o755)
+    sem_env = {**env, "PATH": f"{bin_dir}:{env.get('PATH', os.environ.get('PATH', ''))}", "FAKE_GH_DIR": str(fake)}
+    sem_env.pop("DEPLOY_GH_BIN", None)
+    calls = fake / "calls.log"
+    past = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    later = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def row(run_id: int, created: str, sha: str | None, head: str, status: str = "in_progress") -> dict:
+        title = f"Production semantic gate source_sha={sha}" if sha else "Production semantic gate deployment=77"
+        return {"databaseId": run_id, "createdAt": created, "headSha": head, "status": status, "conclusion": None,
+                "event": "workflow_dispatch", "url": f"https://github.com/acme/rose/actions/runs/{run_id}",
+                "displayTitle": title}
+
+    # An older run titled with the same SHA (yesterday's deploy of it), an older
+    # run of another SHA, the run this dispatch creates (headSha = main's later
+    # head, title = merged SHA), a newer run of another SHA and a decoy whose
+    # headSha is the merged SHA but whose title names no source commit.
+    old_same = row(100, past, merged, merged, "completed")
+    old_other = row(101, past, "3" * 40, "3" * 40, "completed")
+    ours = row(200, future, merged, other_head)
+    newer_other = row(300, later, "4" * 40, "4" * 40)
+    decoy = row(400, later, None, merged)
+
+    def job(name: str, conclusion: str | None, status: str = "completed") -> dict:
+        return {"name": name, "status": status, "conclusion": conclusion, "url": f"https://github.com/acme/rose/actions/runs/200/job/{abs(hash(name)) % 1000}"}
+
+    lifecycle = [f"Chat full-lifecycle latency ratchet ({path})" for path in ("direct_answer", "web_search", "agent_plan", "agent_execute")]
+    all_success = [job("Semantic frontend flows", "success"), *[job(name, "success") for name in lifecycle]]
+    semantic_failed = [job("Semantic frontend flows", "failure"), *[job(name, "success") for name in lifecycle]]
+    running_jobs = [job("Semantic frontend flows", None, "in_progress")]
+
+    def view(status: str, conclusion: str | None, attempt: int, jobs: list[dict]) -> dict:
+        return {"status": status, "conclusion": conclusion, "attempt": attempt, "url": ours["url"], "headSha": other_head,
+                "displayTitle": ours["displayTitle"], "createdAt": future, "updatedAt": later, "jobs": jobs}
+
+    def reset(lists: list[list[dict]], views: list[dict], rerun_views: list[dict] | None = None) -> None:
+        for stale in list(fake.glob("list-*")) + list(fake.glob("view-*")) + list(fake.glob("rerun-*")):
+            stale.unlink()
+        calls.unlink(missing_ok=True)
+        (fake / "dispatch-fail").unlink(missing_ok=True)
+        for index, rows in enumerate(lists, start=1):
+            (fake / f"list-{index}.json").write_text(json.dumps(rows))
+        (fake / "list-last.json").write_text(json.dumps(lists[-1]))
+        for index, payload in enumerate(views, start=1):
+            (fake / f"view-{index}.json").write_text(json.dumps(payload))
+        (fake / "view-last.json").write_text(json.dumps(views[-1]))
+        for index, payload in enumerate(rerun_views or [], start=1):
+            (fake / f"rerun-view-{index}.json").write_text(json.dumps(payload))
+        if rerun_views:
+            (fake / "rerun-view-last.json").write_text(json.dumps(rerun_views[-1]))
+
+    def run_gate(state: Path) -> dict:
+        """The real Fly gate for a merge without agent runtime changes: it opens
+        without any gh call and writes the receipt the semantic lane requires."""
+        calls.unlink(missing_ok=True)
+        ran = subprocess.run([sys.executable, str(driver), "production", "--merged-sha", merged, "--state-dir", str(state),
+                              "--expected-hash", "feedface"], env=sem_env, cwd=repo, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, timeout=120)
+        assert ran.returncode == 0 and not calls.exists(), ran.stdout
+        return receipt_of(state)
+
+    def write_gate(state: Path, sha: str, status: str) -> None:
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "production.json").write_text(json.dumps({"schema_version": 1, "merged_sha": sha, "status": status,
+                                                            "github_waits": [], "fly": {"required": False}}))
+
+    def run_semantic(state: Path, *extra: str, env_override: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(driver), "production-semantic", "--merged-sha", merged, "--state-dir", str(state),
+             "--poll-seconds", "0.05", "--start-timeout", "0.5", *extra],
+            env=env_override or sem_env, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+
+    def call_lines() -> list[str]:
+        return calls.read_text().splitlines() if calls.exists() else []
+
+    def receipt_of(state: Path) -> dict:
+        return json.loads((state / "production.json").read_text())
+
+    def semantic_waits(receipt: dict) -> list[dict]:
+        return [w for w in receipt["github_waits"] if w["workflow"] == "chat-lifecycle-ratchet.yml"]
+
+    # 1. Success: the run is not listed on the first poll; then it is picked
+    #    among older, newer and decoy runs; three views until completed/success.
+    state = tmp / "semantic-state"
+    gate = run_gate(state)
+    assert gate["status"] == "passed" and gate["fly"]["required"] is False and "semantic" not in gate, gate
+    reset([[old_other, old_same, decoy], [newer_other, decoy, ours, old_other, old_same]],
+          [view("queued", None, 1, []), view("in_progress", None, 1, running_jobs), view("completed", "success", 1, all_success)])
+    ran = run_semantic(state, "--frontend-url", "https://preview.roselabs.ai", "--backend-url", "https://api.roselabs.ai")
+    assert ran.returncode == 0, ran.stdout
+    lines = call_lines()
+    assert lines[0] == ("workflow run chat-lifecycle-ratchet.yml --ref main -f source_sha=" + merged +
+                        " -f frontend_url=https://preview.roselabs.ai -f backend_url=https://api.roselabs.ai"), lines
+    list_calls = [line for line in lines if line.startswith("run list")]
+    assert len(list_calls) == 2 and "--workflow chat-lifecycle-ratchet.yml" in list_calls[0], list_calls
+    assert "--event workflow_dispatch" in list_calls[0] and "--branch main" in list_calls[0], list_calls
+    view_calls = [line for line in lines if line.startswith("run view")]
+    assert len(view_calls) == 3 and all(line.startswith("run view 200 --json") for line in view_calls), lines
+    assert not any(f" {decoy_id} " in f" {line} " for line in lines for decoy_id in (100, 101, 300, 400)), lines
+    assert not any(line.startswith("run rerun") for line in lines), lines
+    assert "SEMANTIC_RUN_ID=200" in ran.stdout and "SEMANTIC_LANE_END " in ran.stdout, ran.stdout
+    assert ran.stdout.index("SEMANTIC_RUN_ID=200") < ran.stdout.index("SEMANTIC_LANE_END"), ran.stdout
+    assert "PIPELINE_SEMANTIC status=passed exit=0 run=200" in ran.stdout, ran.stdout
+    receipt = receipt_of(state)
+    assert receipt["status"] == "passed" and receipt["merged_sha"] == merged, receipt  # the Fly decision is untouched
+    entry = receipt["semantic"]
+    assert entry["outcome"] == "passed" and entry["run_id"] == "200" and entry["url"] == ours["url"], entry
+    assert entry["head_sha"] == other_head and entry["source_sha"] == merged, entry
+    assert entry["display_title"] == ours["displayTitle"] and entry["created_at"] == future, entry
+    assert entry["completed_at"] == later and entry["conclusion"] == "success" and entry["attempt"] == 1, entry
+    assert entry["status"] == "completed" and entry["retry"] is None, entry
+    assert entry["dispatch"]["ref"] == "main" and entry["dispatch"]["at"], entry["dispatch"]
+    assert entry["dispatch"]["inputs"] == {"source_sha": merged, "frontend_url": "https://preview.roselabs.ai",
+                                           "backend_url": "https://api.roselabs.ai"}, entry["dispatch"]
+    assert [(j["name"], j["conclusion"]) for j in entry["jobs"]] == [(j["name"], "success") for j in all_success], entry["jobs"]
+    waits = semantic_waits(receipt)
+    assert [w["kind"] for w in waits] == ["run-start", "run-complete"], waits
+    assert waits[0] == {**waits[0], "run_id": "200", "polls": 2, "outcome": "found", "head": merged}
+    assert waits[1] == {**waits[1], "run_id": "200", "polls": 3, "conclusion": "success", "attempt": 1}
+
+    # 2. Failure without the retry flag: exit 1, no rerun, the earlier passed
+    #    entry is kept in semantic_history. The default URLs are the production ones.
+    reset([[ours, old_same]], [view("completed", "failure", 1, semantic_failed)])
+    ran = run_semantic(state)
+    assert ran.returncode == 1, ran.stdout
+    assert call_lines()[0].endswith("-f frontend_url=https://www.roselabs.ai -f backend_url=https://navi-j9a9.onrender.com"), call_lines()
+    assert "PIPELINE_SEMANTIC status=failed exit=1 run=200" in ran.stdout and "conclusion=failure" in ran.stdout, ran.stdout
+    assert "Semantic frontend flows=failure" in ran.stdout and "SEMANTIC_LANE_END " in ran.stdout, ran.stdout
+    assert 'retry=available (--retry-failed-once "<justification>")' in ran.stdout, ran.stdout
+    assert not any(line.startswith("run rerun") for line in call_lines()), call_lines()
+    receipt = receipt_of(state)
+    assert receipt["semantic"]["outcome"] == "failed" and receipt["semantic"]["conclusion"] == "failure", receipt["semantic"]
+    assert receipt["semantic"]["error"] == "run 200 concluded failure", receipt["semantic"]
+    assert [h["outcome"] for h in receipt["semantic_history"]] == ["passed"], receipt["semantic_history"]
+    assert receipt["status"] == "passed", "the Fly gate decision must not be rewritten by the semantic lane"
+    assert len(semantic_waits(receipt)) == 4, semantic_waits(receipt)
+
+    # 2b. The Step 13b block is re-run: `production` for the same SHA carries the
+    #     semantic lane (run, history, waits) forward instead of forgetting it.
+    gate = run_gate(state)
+    assert gate["status"] == "passed" and gate["started_at"], gate
+    assert gate["semantic"] == receipt["semantic"] and gate["semantic_history"] == receipt["semantic_history"], gate
+    assert semantic_waits(gate) == semantic_waits(receipt) and not [w for w in gate["github_waits"] if w["workflow"] != "chat-lifecycle-ratchet.yml"], gate["github_waits"]
+
+    # 3. One retry of that recorded failed run: no new dispatch, `gh run rerun
+    #    200 --failed`, the stale completed attempt-1 view is not accepted, the
+    #    attempt-2 success is; the justification is recorded.
+    reset([[ours]], [view("completed", "failure", 1, semantic_failed)],
+          rerun_views=[view("completed", "failure", 1, semantic_failed), view("in_progress", None, 2, semantic_failed),
+                       view("completed", "success", 2, all_success)])
+    ran = run_semantic(state, "--retry-failed-once", "provider outage: Kernel 502 in the semantic job")
+    assert ran.returncode == 0, ran.stdout
+    lines = call_lines()
+    assert lines[0] == "run rerun 200 --failed", lines
+    assert not any(line.startswith("workflow run") or line.startswith("run list") for line in lines), lines
+    assert len([line for line in lines if line.startswith("run view 200")]) == 3, lines
+    assert "SEMANTIC_RUN_ID=200" in ran.stdout and "retry=failed-jobs run=200" in ran.stdout, ran.stdout
+    entry = receipt_of(state)["semantic"]
+    assert entry["outcome"] == "passed" and entry["conclusion"] == "success" and entry["attempt"] == 2, entry
+    retry = entry["retry"]
+    assert retry["justification"] == "provider outage: Kernel 502 in the semantic job", retry
+    assert retry["previous_attempt"] == 1 and retry["previous_conclusion"] == "failure" and retry["attempt"] == 2, retry
+    assert retry["failed_jobs"] == ["Semantic frontend flows"], retry
+
+    # 4. A second retry is refused without any gh call, also after the Fly gate
+    #    re-ran; the receipt keeps the first.
+    run_gate(state)
+    reset([[ours]], [view("completed", "success", 2, all_success)])
+    ran = run_semantic(state, "--retry-failed-once", "again")
+    assert ran.returncode == 2 and "already used its one --retry-failed-once" in ran.stdout, ran.stdout
+    assert call_lines() == [], call_lines()
+    assert receipt_of(state)["semantic"]["retry"]["justification"].startswith("provider outage"), receipt_of(state)["semantic"]
+
+    # 5. Flag on a fresh dispatch: dispatch, fail, rerun failed jobs once, fail
+    #    again -> exit 1 with the retry recorded; a further flagged call is refused.
+    state5 = tmp / "semantic-state-5"
+    run_gate(state5)
+    reset([[ours]], [view("completed", "failure", 1, semantic_failed)],
+          rerun_views=[view("completed", "failure", 2, semantic_failed)])
+    ran = run_semantic(state5, "--retry-failed-once", "flaky runner")
+    assert ran.returncode == 1 and "retry=used" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert lines[0].startswith("workflow run chat-lifecycle-ratchet.yml") and lines.count("run rerun 200 --failed") == 1, lines
+    entry = receipt_of(state5)["semantic"]
+    assert entry["outcome"] == "failed" and entry["attempt"] == 2 and entry["retry"]["attempt"] == 2, entry
+    calls.unlink()
+    ran = run_semantic(state5, "--retry-failed-once", "once more")
+    assert ran.returncode == 2 and call_lines() == [], (ran.stdout, call_lines())
+
+    # 5b. A rejected rerun (403) does not consume the single retry: the next
+    #     flagged call reruns the recorded run.
+    state5b = tmp / "semantic-state-5b"
+    run_gate(state5b)
+    reset([[ours]], [view("completed", "failure", 1, semantic_failed)])
+    (fake / "rerun-fail").touch()
+    ran = run_semantic(state5b, "--retry-failed-once", "token lacked actions:write")
+    assert ran.returncode == 1 and "Resource not accessible by integration" in ran.stdout, ran.stdout
+    entry = receipt_of(state5b)["semantic"]
+    assert entry["retry"] is None and entry["run_id"] == "200" and entry["status"] == "completed", entry
+    reset([[ours]], [view("completed", "failure", 1, semantic_failed)],
+          rerun_views=[view("completed", "success", 2, all_success)])
+    ran = run_semantic(state5b, "--retry-failed-once", "token fixed")
+    assert ran.returncode == 0 and call_lines()[0] == "run rerun 200 --failed", (ran.stdout, call_lines())
+    entry = receipt_of(state5b)["semantic"]
+    assert entry["retry"]["justification"] == "token fixed" and entry["retry"]["attempt"] == 2 and entry["outcome"] == "passed", entry
+
+    # 6. No passed Fly-gate receipt for this SHA: refused before any gh call.
+    for state6, sha, status in ((tmp / "semantic-state-6a", merged, "failed"), (tmp / "semantic-state-6b", other_head, "passed")):
+        write_gate(state6, sha, status)
+        reset([[ours]], [view("completed", "success", 1, all_success)])
+        ran = run_semantic(state6)
+        assert ran.returncode == 2 and "Fly lane gate is not open" in ran.stdout and call_lines() == [], ran.stdout
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(tmp / "semantic-state-6c")
+    assert ran.returncode == 2 and "no receipt" in ran.stdout and call_lines() == [], ran.stdout
+
+    # 7. Only older runs (one titled with the same SHA) and the decoy ever
+    #    appear: the dispatch is unconfirmed, nothing is adopted or polled, exit 1.
+    state7 = tmp / "semantic-state-7"
+    run_gate(state7)
+    reset([[old_same, old_other, decoy]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state7)
+    assert ran.returncode == 1 and "an older run is never adopted" in ran.stdout and "host clock" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert lines[0].startswith("workflow run") and not any(line.startswith("run view") for line in lines), lines
+    assert len([line for line in lines if line.startswith("run list")]) >= 2, lines
+    receipt = receipt_of(state7)
+    assert receipt["semantic"]["outcome"] == "failed" and receipt["semantic"]["run_id"] is None, receipt["semantic"]
+    assert receipt["semantic"]["status"] == "dispatched", "gh confirmed the dispatch: it must be recorded"
+    assert receipt["github_waits"][-1] == {**receipt["github_waits"][-1], "kind": "run-start", "outcome": "timeout",
+                                           "workflow": "chat-lifecycle-ratchet.yml"}, receipt["github_waits"]
+    assert "it resumes this dispatch for 900s before dispatching again" in ran.stdout, ran.stdout
+    # The confirmed dispatch is resumed: the next call looks for its run and
+    # adopts it without a second `workflow run` (the gate would run twice).
+    dispatch7 = receipt["semantic"]["dispatch"]
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state7)
+    assert ran.returncode == 0 and f"PIPELINE_SEMANTIC resume dispatch at={dispatch7['at']}" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert lines[0].startswith("run list") and not any(line.startswith("workflow run") for line in lines), lines
+    receipt = receipt_of(state7)
+    assert receipt["semantic"]["run_id"] == "200" and receipt["semantic"]["outcome"] == "passed", receipt["semantic"]
+    assert receipt["semantic"]["dispatch"] == dispatch7 and "semantic_history" not in receipt, receipt
+
+    # 8. The dispatch itself fails (e.g. main's workflow lacks the input): exit 1
+    #    with gh's message, no discovery.
+    state8 = tmp / "semantic-state-8"
+    run_gate(state8)
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    (fake / "dispatch-fail").touch()
+    ran = run_semantic(state8)
+    assert ran.returncode == 1 and "Unexpected inputs provided" in ran.stdout, ran.stdout
+    assert [line.split()[0:2] for line in call_lines()] == [["workflow", "run"]], call_lines()
+
+    # 9. A malformed SHA is a usage error before anything runs.
+    ran = subprocess.run([sys.executable, str(driver), "production-semantic", "--merged-sha", "main", "--state-dir", str(state)],
+                         env=sem_env, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+    assert ran.returncode == 2 and "full 40-hex commit SHA" in ran.stdout, ran.stdout
+
+    # 10. DEPLOY_GH_BIN selects the gh binary (boxes.dev's PATH wrapper swaps
+    #     the token); with it set, the PATH gh is never consulted.
+    (bin_dir / "gh-real").write_text("#!/usr/bin/env bash\n"
+                                     'echo "$*" >> "$FAKE_GH_DIR/real-calls.log"\n'
+                                     'exec "$(dirname "$0")/gh" "$@"\n')
+    (bin_dir / "gh-real").chmod(0o755)
+    state10 = tmp / "semantic-state-10"
+    run_gate(state10)
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state10, env_override={**sem_env, "PATH": "/usr/bin:/bin", "DEPLOY_GH_BIN": str(bin_dir / "gh-real")})
+    assert ran.returncode == 0, ran.stdout
+    real_calls = (fake / "real-calls.log").read_text().splitlines()
+    assert len(real_calls) == len(call_lines()) == 3 and real_calls[0].startswith("workflow run"), (real_calls, call_lines())
+
+    # 11. A CLI-side timeout leaves the run in_progress; the next call resumes
+    #     that run (no dispatch, no discovery) and goes green.
+    state11 = tmp / "semantic-state-11"
+    run_gate(state11)
+    reset([[ours]], [view("in_progress", None, 1, running_jobs)])
+    ran = run_semantic(state11, "--timeout", "0.2")
+    assert ran.returncode == 1 and "is still in_progress after 0s" in ran.stdout, ran.stdout
+    entry = receipt_of(state11)["semantic"]
+    assert entry["run_id"] == "200" and entry["status"] == "in_progress" and entry["outcome"] == "failed", entry
+    assert semantic_waits(receipt_of(state11))[-1] == {**semantic_waits(receipt_of(state11))[-1], "kind": "run-complete", "outcome": "timeout"}
+    reset([[ours]], [view("in_progress", None, 1, running_jobs), view("completed", "success", 1, all_success)])
+    ran = run_semantic(state11)
+    assert ran.returncode == 0 and "PIPELINE_SEMANTIC resume run=200 status=in_progress" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert lines and all(line.startswith("run view 200") for line in lines) and len(lines) == 2, lines
+    entry = receipt_of(state11)["semantic"]
+    assert entry["outcome"] == "passed" and entry["conclusion"] == "success" and entry["retry"] is None, entry
+    assert entry["dispatch"]["at"] and entry["run_id"] == "200", entry
+
+    # 12. Timeout, then a flagged resume: the run concluded failure meanwhile,
+    #     failed jobs are rerun once in the same call; a timeout during the
+    #     retry watch resumes at the retry attempt; a later flag is refused.
+    state12 = tmp / "semantic-state-12"
+    run_gate(state12)
+    reset([[ours]], [view("in_progress", None, 1, running_jobs)])
+    ran = run_semantic(state12, "--timeout", "0.2")
+    assert ran.returncode == 1 and receipt_of(state12)["semantic"]["status"] == "in_progress", ran.stdout
+    reset([[ours]], [view("completed", "failure", 1, semantic_failed)],
+          rerun_views=[view("completed", "failure", 1, semantic_failed), view("in_progress", None, 2, running_jobs)])
+    ran = run_semantic(state12, "--retry-failed-once", "runner lost the browser", "--timeout", "0.3")
+    assert ran.returncode == 1 and "resume run=200" in ran.stdout and "retry=failed-jobs run=200" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert not any(line.startswith("workflow run") or line.startswith("run list") for line in lines), lines
+    assert lines.count("run rerun 200 --failed") == 1, lines
+    entry = receipt_of(state12)["semantic"]
+    assert entry["retry"]["justification"] == "runner lost the browser" and entry["retry"]["attempt"] is None, entry
+    assert entry["status"] == "in_progress" and entry["attempt"] == 2, entry
+    reset([[ours]], [view("completed", "failure", 1, semantic_failed)],
+          rerun_views=[view("completed", "success", 2, all_success)])
+    (fake / "rerun-done").touch()  # the rerun already happened on GitHub
+    ran = run_semantic(state12)
+    assert ran.returncode == 0 and "resume run=200 status=in_progress" in ran.stdout, ran.stdout
+    assert call_lines() == ["run view 200 --json " + "status,conclusion,attempt,url,headSha,displayTitle,createdAt,updatedAt,jobs"], call_lines()
+    entry = receipt_of(state12)["semantic"]
+    assert entry["outcome"] == "passed" and entry["attempt"] == 2 and entry["retry"]["attempt"] == 2, entry
+    calls.unlink()
+    ran = run_semantic(state12, "--retry-failed-once", "again")
+    assert ran.returncode == 2 and call_lines() == [], (ran.stdout, call_lines())
+
+    # 13. `gh run list` fails right after a confirmed dispatch: exit 1 with the
+    #     dispatch recorded (status dispatched, run_id null, inputs); the next
+    #     call adopts that dispatch's run without a second `workflow run`.
+    state13 = tmp / "semantic-state-13"
+    run_gate(state13)
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    (fake / "list-fail").touch()
+    ran = run_semantic(state13)
+    assert ran.returncode == 1 and "Bad Gateway" in ran.stdout and "SEMANTIC_LANE_END " in ran.stdout, ran.stdout
+    assert [line.split()[0:2] for line in call_lines()] == [["workflow", "run"], ["run", "list"]], call_lines()
+    entry = receipt_of(state13)["semantic"]
+    assert entry["status"] == "dispatched" and entry["run_id"] is None and entry["outcome"] == "failed", entry
+    assert entry["dispatch"]["at"] and entry["dispatch"]["inputs"] == {
+        "source_sha": merged, "frontend_url": "https://www.roselabs.ai", "backend_url": "https://navi-j9a9.onrender.com"}, entry
+    dispatch13 = entry["dispatch"]
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state13)
+    assert ran.returncode == 0 and f"PIPELINE_SEMANTIC resume dispatch at={dispatch13['at']}" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert lines[0].startswith("run list") and not any(line.startswith("workflow run") for line in lines), lines
+    assert "SEMANTIC_RUN_ID=200" in ran.stdout and "PIPELINE_SEMANTIC status=passed exit=0 run=200" in ran.stdout, ran.stdout
+    receipt = receipt_of(state13)
+    entry = receipt["semantic"]
+    assert entry["outcome"] == "passed" and entry["run_id"] == "200" and entry["status"] == "completed", entry
+    assert entry["dispatch"] == dispatch13 and "semantic_history" not in receipt, receipt
+    assert [(w["kind"], w["outcome"]) for w in semantic_waits(receipt)] == [("run-start", "found"), ("run-complete", "completed")], semantic_waits(receipt)
+
+    # 14. A confirmed dispatch older than the resume window gets one more
+    #     query: its run, when listed, is adopted (14a); with no run it is
+    #     abandoned to semantic_history and the gate is dispatched anew (14b).
+    stale_at = (datetime.now(timezone.utc) - timedelta(minutes=16)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def stale_dispatch(state: Path) -> None:
+        run_gate(state)
+        reset([[ours]], [view("completed", "success", 1, all_success)])
+        (fake / "list-fail").touch()
+        assert run_semantic(state).returncode == 1
+        receipt = receipt_of(state)
+        assert receipt["semantic"]["status"] == "dispatched", receipt["semantic"]
+        receipt["semantic"]["dispatch"]["at"] = stale_at
+        (state / "production.json").write_text(json.dumps(receipt))
+
+    state14a = tmp / "semantic-state-14a"
+    stale_dispatch(state14a)
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state14a)
+    assert ran.returncode == 0 and f"resume dispatch at={stale_at}" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert lines[0].startswith("run list") and not any(line.startswith("workflow run") for line in lines), lines
+    receipt = receipt_of(state14a)
+    assert receipt["semantic"]["run_id"] == "200" and receipt["semantic"]["dispatch"]["at"] == stale_at, receipt["semantic"]
+    assert "semantic_history" not in receipt and "abandoning" not in ran.stdout, (receipt, ran.stdout)
+
+    state14b = tmp / "semantic-state-14b"
+    stale_dispatch(state14b)
+    reset([[old_same, decoy], [ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state14b)
+    assert ran.returncode == 0 and f"dispatch at={stale_at} is older than 900s with no run: abandoning it and dispatching again" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert [line.split()[0:2] for line in lines[:3]] == [["run", "list"], ["workflow", "run"], ["run", "list"]], lines
+    assert len([line for line in lines if line.startswith("workflow run")]) == 1, lines
+    receipt = receipt_of(state14b)
+    entry = receipt["semantic"]
+    assert entry["run_id"] == "200" and entry["outcome"] == "passed" and entry["dispatch"]["at"] != stale_at, entry
+    history = receipt["semantic_history"]
+    assert len(history) == 1 and history[0]["status"] == "dispatched" and history[0]["run_id"] is None, history
+    assert history[0]["dispatch"]["at"] == stale_at and history[0]["outcome"] == "abandoned", history
+    assert [w["outcome"] for w in semantic_waits(receipt) if w["kind"] == "run-start"][-2:] == ["abandoned", "found"], semantic_waits(receipt)
+
+    # Selection rule in-process: newest matching only, by createdAt then id.
+    pipeline = load_module("pipeline_semantic_select", DRIVER)
+    # A pending dispatch is exactly: this SHA, status dispatched, no run, a dispatch clock.
+    pending_entry = {"merged_sha": merged, "status": "dispatched", "run_id": None, "dispatch": {"at": "2026-10-31T12:00:00Z"}}
+    assert pipeline.semantic_pending_dispatch(pending_entry, merged) == datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc)
+    assert pipeline.semantic_pending_dispatch({**pending_entry, "run_id": "200"}, merged) is None
+    assert pipeline.semantic_pending_dispatch({**pending_entry, "status": None}, merged) is None
+    assert pipeline.semantic_pending_dispatch({**pending_entry, "merged_sha": other_head}, merged) is None
+    assert pipeline.semantic_pending_dispatch({**pending_entry, "dispatch": {"at": None}}, merged) is None
+    assert pipeline.semantic_pending_dispatch(None, merged) is None
+    assert pipeline.SEMANTIC_DISPATCH_RESUME_WINDOW_S == 900.0
+    dispatched = datetime(2026, 10, 31, 12, 0, 0, tzinfo=timezone.utc)
+    rows = [
+        {"databaseId": 1, "createdAt": "2026-10-31T11:59:54Z", "displayTitle": f"x source_sha={merged}"},  # 6 s early: older
+        {"databaseId": 2, "createdAt": "2026-10-31T11:59:56Z", "displayTitle": f"x source_sha={merged}"},  # within skew
+        {"databaseId": 3, "createdAt": "2026-10-31T12:00:10Z", "displayTitle": f"x source_sha={other_head}"},
+        {"databaseId": 4, "createdAt": "2026-10-31T12:00:05Z", "displayTitle": f"x source_sha={merged}", "event": "push"},
+        {"databaseId": 5, "createdAt": "2026-10-31T12:00:05Z", "displayTitle": f"x source_sha={merged}"},
+        {"databaseId": 6, "createdAt": "2026-10-31T12:00:05Z", "displayTitle": f"x source_sha={merged}"},
+        {"databaseId": 7, "createdAt": "not a time", "displayTitle": f"x source_sha={merged}"},
+        {"databaseId": 8, "createdAt": "2026-10-31T12:00:30Z", "displayTitle": "x deployment=1", "headSha": merged},  # decoy
+        "junk",
+    ]
+    assert pipeline.semantic_select_run(rows, merged, dispatched)["databaseId"] == 6, "newest match, id breaks the tie"
+    assert pipeline.semantic_select_run(rows[:2], merged, dispatched)["databaseId"] == 2
+    assert pipeline.semantic_select_run(rows[:1] + rows[2:4] + rows[7:], merged, dispatched) is None
+    assert pipeline.semantic_select_run(None, merged, dispatched) is None
+    print("production semantic: ok")
+
+
+def check_semantic_workflow_source_sha() -> None:
+    """The production semantic workflow accepts ``source_sha`` and every
+    checkout in both jobs uses it: a dispatch checks out exactly that commit
+    (validated as a full SHA and verified to be on the default branch before
+    any checkout) or the dispatched ref's head, a deployment event still
+    checks out the trusted default branch, the effective commit is recorded in
+    job outputs and the step summary, and the run title carries the exact
+    marker the CLI watcher parses."""
+    try:
+        import yaml  # transitive dependency of agents/venv (huggingface_hub); the gate runs with that venv active
+    except ImportError as error:  # pragma: no cover - environment defect, never a silent skip
+        raise AssertionError("PyYAML is required to validate .github/workflows/chat-lifecycle-ratchet.yml: "
+                             "run this gate with agents/venv activated") from error
+    path = ROOT / ".github" / "workflows" / "chat-lifecycle-ratchet.yml"
+    workflow = yaml.safe_load(path.read_text())
+    triggers = workflow.get("on", workflow.get(True))
+    inputs = triggers["workflow_dispatch"]["inputs"]
+    assert "source_sha" in inputs and inputs["source_sha"].get("required") is False, inputs
+    assert inputs["source_sha"].get("default", "") == "", "source_sha must default to the dispatched ref's head"
+    run_name = workflow["run-name"]
+    assert "github.event_name == 'workflow_dispatch'" in run_name, "deployment runs must not claim a source_sha"
+    marker = re.search(r"format\('([a-z_]+=)\{0\}', inputs\.source_sha \|\| github\.sha\)", run_name)
+    assert marker, f"run-name must format the source commit marker from inputs.source_sha || github.sha: {run_name}"
+    pipeline = load_module("pipeline_semantic_marker", DRIVER)
+    assert pipeline.SEMANTIC_TITLE_PATTERN.pattern == marker.group(1) + "([0-9a-f]{40})", (
+        f"CLI marker {pipeline.SEMANTIC_TITLE_PATTERN.pattern!r} must match the workflow run-name marker {marker.group(1)!r}")
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"semantic", "lifecycle"}, list(jobs)
+    for name, job in jobs.items():
+        steps = job["steps"]
+        checkouts = [i for i, step in enumerate(steps) if str(step.get("uses", "")).startswith("actions/checkout")]
+        assert len(checkouts) == 1, f"{name}: exactly one checkout, found {len(checkouts)}"
+        index = checkouts[0]
+        ref = steps[index]["with"]["ref"]
+        assert "inputs.source_sha ||" in ref, f"{name}: checkout must prefer inputs.source_sha: {ref}"
+        assert "github.event_name == 'workflow_dispatch' && github.sha" in ref, f"{name}: dispatch default is the ref head: {ref}"
+        assert ref.rstrip().endswith("github.event.repository.default_branch }}"), f"{name}: deployment events keep the trusted default branch: {ref}"
+        assert steps[index]["with"].get("filter") == "blob:none", f"{name}: blob-filtered checkout retained"
+        before = steps[:index]
+        assert len(before) == 1 and "uses" not in before[0], f"{name}: only the source_sha verification precedes the checkout"
+        verify = before[0]
+        assert verify.get("if") == "inputs.source_sha != ''", f"{name}: verification runs only for an explicit source_sha: {verify.get('if')}"
+        script = verify["run"]
+        assert '[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||' in script, f"{name}: validate the SHA before calling GitHub: {script}"
+        assert script.index("=~ ^[0-9a-f]{40}$") < script.index("gh api"), f"{name}: SHA validation must precede gh api"
+        assert "compare/${DEFAULT_BRANCH}...${SOURCE_SHA}" in script, script
+        labels = re.findall(r"^\s*([a-z|]+)\)", script, re.MULTILINE)
+        assert labels == ["identical|behind"], f"{name}: only identical|behind may pass, found case labels {labels}: {script}"
+        assert re.search(r"^\s*\*\).*exit 1", script, re.MULTILINE), f"{name}: any other compare status fails closed"
+        assert verify["env"]["SOURCE_SHA"] == "${{ inputs.source_sha }}" and verify["env"]["GH_TOKEN"] == "${{ github.token }}", verify["env"]
+        record = steps[index + 1]
+        assert record.get("id") == "source" and "git rev-parse HEAD" in record["run"], f"{name}: record the effective commit right after checkout"
+        assert "GITHUB_OUTPUT" in record["run"] and "GITHUB_STEP_SUMMARY" in record["run"], record["run"]
+        assert job["outputs"] == {"source_sha": "${{ steps.source.outputs.sha }}"}, job.get("outputs")
+    print("semantic workflow source_sha: ok")
 
 
 def check_follow_source(tmp: Path, env: dict[str, str]) -> None:
