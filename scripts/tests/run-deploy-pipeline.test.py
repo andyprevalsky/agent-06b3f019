@@ -57,11 +57,24 @@ def load_module(name: str, path: Path):
     return module
 
 
-def start_timing(run_root: Path, env: dict[str, str]) -> None:
+def start_timing(run_root: Path, env: dict[str, str], cwd: Path | None = None) -> None:
+    """Start a timing run; its metadata records the branch and head of ``cwd``
+    (the real checkout unless a scenario binds the run to its fixture repo)."""
     subprocess.run(
         ["bash", str(DRIVER.parent / "run-deploy-stage"), "--start"],
+        cwd=ROOT if cwd is None else cwd, env=env, check=True, stdout=subprocess.DEVNULL,
+    )
+
+
+def finish_timing(env: dict[str, str]) -> str:
+    """Close the active timing run and return its id."""
+    run_root = Path(env["DEPLOY_RUN_ROOT"])
+    run_id = (run_root / "current").read_text().splitlines()[0].strip()
+    subprocess.run(
+        ["bash", str(DRIVER.parent / "run-deploy-stage"), "--finish"],
         cwd=ROOT, env=env, check=True, stdout=subprocess.DEVNULL,
     )
+    return run_id
 
 
 def write_plan(path: Path, lanes: list[dict], **extra: object) -> None:
@@ -1033,7 +1046,9 @@ def check_lane_scoped_reuse(tmp: Path, env: dict[str, str], source_root: Path) -
     # the phase estimates of the other scenarios with 0-second passes.
     ledger = tmp / "scoped-lanes.json"
     env = {**env, "DEPLOY_RUN_ROOT": str(tmp / "scoped-runs"), "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}
-    start_timing(tmp / "scoped-runs", env)
+    # Timing runs bound to the fixture repo: cross-run discovery compares the
+    # branch each run's metadata recorded, which must be the fixture's.
+    start_timing(tmp / "scoped-runs", env, cwd=source_root)
     git = ["git", "-C", str(source_root), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
 
     def commit_docs(text: str) -> str:
@@ -1111,6 +1126,44 @@ def check_lane_scoped_reuse(tmp: Path, env: dict[str, str], source_root: Path) -
     recorded = json.loads(ledger.read_text())["lanes"]
     assert all(sample.get("status") != "reused-scoped" for samples in recorded.values() for sample in samples)
     assert len(recorded["smoke"]) == 1 and len(recorded["quick-gate"]) == 2, recorded
+    assert receipt["reused_scoped_cross_run_lanes"] == [], receipt["reused_scoped_cross_run_lanes"]
+
+    # Cross-run: the green run is closed (--finish) and a test-only sync needs
+    # a new --start run. Its own passed-cache is empty, so the scoped lanes
+    # reuse the first run's records in place (same branch, ancestor head,
+    # fresh): the receipt names the source run and lists the lanes as
+    # cross-run reuse; nothing executes and no duration is recorded.
+    first_run_id = finish_timing(env)
+    first_run_dir = tmp / "scoped-runs" / first_run_id
+    start_timing(tmp / "scoped-runs", env, cwd=source_root)
+    cross_head = commit_docs("guide v2 cross-run\n")
+    receipt = run_and_wait(plan)
+    assert receipt["status"] == "passed", receipt["status"]
+    assert receipt["stage_run_dir"] != str(first_run_dir), receipt["stage_run_dir"]
+    assert receipt["reused_scoped_lanes"] == ["backend-coverage-blackbox", "smoke"], receipt["reused_scoped_lanes"]
+    assert receipt["reused_scoped_cross_run_lanes"] == ["backend-coverage-blackbox", "smoke"], \
+        receipt["reused_scoped_cross_run_lanes"]
+    for name in ("backend-coverage-blackbox", "smoke"):
+        lane_state = receipt["lanes"][name]
+        assert lane_state["status"] == "reused-scoped" and lane_state["exit"] == 0, (name, lane_state)
+        reuse = lane_state["reuse"]
+        assert reuse["kind"] == "scoped" and reuse["hit"] is True and reuse["cross_run"] is True, reuse
+        assert reuse["passed_run_id"] == first_run_id and reuse["passed_run_dir"] == str(first_run_dir), reuse
+        assert reuse["passed_head"] == first_head and reuse["current_head"] == cross_head, reuse
+        record = Path(reuse["passed_record"])
+        assert record.parent == first_run_dir / "passed-cache" / name / "scoped" and record.is_file(), reuse
+        assert reuse["considered_runs"] == [Path(receipt["stage_run_dir"]).name, first_run_id], reuse
+        assert runs(name) == 1, f"{name} executed despite the cross-run scoped reuse"
+    assert not (Path(receipt["stage_run_dir"]) / "passed-cache" / "smoke").exists(), "record copied into the new run"
+    assert receipt["lanes"]["quick-gate"]["status"] == "passed" and runs("quick-gate") == 3
+    assert receipt["lanes"]["live-probes"]["status"] == "passed" and runs("live-probes") == 3
+    verified = run_driver("verify", "--state-dir", str(state), "--expect-head", cross_head, env=env)
+    assert verified.returncode == 0, verified.stdout
+    assert "reused_scoped=backend-coverage-blackbox,smoke cross_run=backend-coverage-blackbox,smoke" in verified.stdout, \
+        verified.stdout
+    recorded = json.loads(ledger.read_text())["lanes"]
+    assert all(sample.get("status") != "reused-scoped" for samples in recorded.values() for sample in samples)
+    assert len(recorded["smoke"]) == 1 and len(recorded["quick-gate"]) == 3, recorded
 
     # Default off: the same kind of commit reruns both lanes as plain passes.
     write_plan(plan, lanes)
@@ -1123,7 +1176,7 @@ def check_lane_scoped_reuse(tmp: Path, env: dict[str, str], source_root: Path) -
     assert runs("backend-coverage-blackbox") == 2 and runs("smoke") == 2, "flag off must rerun"
     assert "reuse" not in receipt["lanes"]["smoke"]
     verified = run_driver("verify", "--state-dir", str(state), "--expect-head", third_head, env=env)
-    assert verified.returncode == 0 and "reused_scoped=-" in verified.stdout, verified.stdout
+    assert verified.returncode == 0 and "reused_scoped=- cross_run=-" in verified.stdout, verified.stdout
     # The environment can never enable: the same plan with DEPLOY_LANE_SCOPED_REUSE=1 still reruns.
     fourth_head = commit_docs("guide v4\n")
     since = time.time()
@@ -1147,9 +1200,11 @@ def check_reconcile_reused_lane(tmp: Path) -> None:
     run_dir.mkdir()
     base = 1_700_000_000.0
     provenance = {"kind": "scoped", "passed_head": "a" * 40, "current_head": "b" * 40, "changed": []}
+    cross_run_provenance = {**provenance, "cross_run": True, "passed_run_id": "earlier", "passed_run_dir": "/runs/earlier"}
 
     def row(stage: str, status: str, started: float, token: str | None) -> dict:
-        detail = {"reuse": provenance if status == "reused-scoped" else {"requested": False}}
+        reuse = cross_run_provenance if stage == "backend-coverage-blackbox" else provenance
+        detail = {"reuse": reuse if status == "reused-scoped" else {"requested": False}}
         if token:
             detail["lane_token"] = token
         return {"stage": stage, "status": status, "started_epoch": started, "finished_epoch": started + 1.0,
@@ -1177,6 +1232,9 @@ def check_reconcile_reused_lane(tmp: Path) -> None:
                         "semantic-stack": "passed", "agents-coverage-blackbox": "passed"}, outcomes
     assert receipt["lanes"]["smoke"]["reuse"] == provenance and "reuse" not in receipt["lanes"]["live-probes"]
     assert receipt["reused_scoped_lanes"] == ["backend-coverage-blackbox", "smoke"], receipt["reused_scoped_lanes"]
+    # Only the lane whose row says cross_run is listed as a cross-run reuse.
+    assert receipt["lanes"]["backend-coverage-blackbox"]["reuse"] == cross_run_provenance
+    assert receipt["reused_scoped_cross_run_lanes"] == ["backend-coverage-blackbox"], receipt["reused_scoped_cross_run_lanes"]
     assert pipeline.overall({"a": {"status": "reused-scoped"}, "b": {"status": "passed"}}) == "passed"
     assert pipeline.overall({"a": {"status": "reused-scoped"}, "b": {"status": "running"}}) == "running"
     # An older driver's receipt that still says "passed" records no sample for a reused-scoped row.
@@ -1190,6 +1248,120 @@ def check_reconcile_reused_lane(tmp: Path) -> None:
     recorded = pipeline.record_lane_durations(stale, ledger)
     assert "smoke" not in recorded and len(recorded["agents-coverage-blackbox"]) == 1, recorded
     print("reconcile reused lane: ok")
+
+
+def check_cross_run_record_guards(tmp: Path, source_root: Path) -> None:
+    """The cross-run guards, each against the real decision over the fixture
+    repo: a later-started or other-branch run is not a source; a record is
+    accepted only with a finite, non-future ``finished_epoch`` (future-dated
+    ones would sort first and outrank every failed head), within the bound
+    and carrying its own run's id; and a candidate whose bytes change between
+    the read and the hit is never reused."""
+    stage = load_module("stage_guards", source_root / "scripts" / "run_deploy_stage.py")
+    git = ["git", "-C", str(source_root)]
+    head = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    branch = subprocess.run([*git, "branch", "--show-current"], check=True, capture_output=True, text=True).stdout.strip()
+    assert branch, "fixture repo must be on a branch"
+    run_root = tmp / "guard-runs"
+    now = time.time()
+
+    def run_dir(name: str, started: float, run_branch: str = branch) -> Path:
+        path = run_root / name
+        path.mkdir(parents=True)
+        (path / "metadata.json").write_text(json.dumps({"schema_version": 1, "run_id": name, "status": "completed",
+                                                          "started_epoch": started, "branch": run_branch}))
+        return path
+
+    current = run_dir("cur", now - 100)
+    earlier = run_dir("earlier", now - 200)
+    oldest = run_dir("oldest", now - 300)
+    run_dir("later", now)                      # started after the current run: never a source
+    run_dir("same-start", now - 100)           # not strictly earlier
+    run_dir("other-branch", now - 250, "other")
+    (run_root / "no-metadata").mkdir()
+    (run_root / "bad-json").mkdir()
+    (run_root / "bad-json" / "metadata.json").write_text("{not-json")
+    (run_root / "current").write_text("cur\n")  # the pointer file is not a run
+    considered = stage._considered_runs(run_root, current)
+    assert [(run.run_id, run.cross_run) for run in considered] == \
+        [("cur", False), ("earlier", True), ("oldest", True)], considered
+
+    command = ["bash", "scripts/run-predeploy-local"]
+    invocation = stage._invocation_digest(command)
+
+    def write_record(run: Path, name: str, directory: str = "scoped", **overrides: object) -> Path:
+        record = {"schema_version": 1, "stage": "smoke", "head": head, "fingerprint": "f" * 64, "run_id": run.name,
+                  "exit_code": 0, "finished_at": "2026-01-01T00:00:00Z", "finished_epoch": now - 10,
+                  "invocation": invocation, "dirty_paths": [], **overrides}
+        path = run / "passed-cache" / "smoke" / directory / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record) + "\n")
+        return path
+
+    real = write_record(earlier, "real.json")
+    write_record(earlier, "future.json", finished_epoch=now + 10 * 365 * 86400)
+    write_record(earlier, "nan.json", finished_epoch=float("nan"))
+    write_record(earlier, "old.json", finished_epoch=now - 25 * 3600)
+    write_record(earlier, "foreign.json", run_id="cur")
+    write_record(current, "in-run-future.json", finished_epoch=now + 60)
+    with patch.object(stage, "_is_ancestor", lambda ancestor, descendant: ancestor != "0" * 40):
+        write_record(oldest, "sibling.json", head="0" * 40)
+        records, rejected = stage._scoped_records_across_runs(
+            considered, "smoke", invocation, failed=False, current_head=head, now=now)
+    assert rejected == {"age": 4, "not_ancestor": 1, "foreign_run_id": 1}, rejected
+    assert [record["_record_path"] for record in records] == [str(real)], records
+    assert records[0]["_source"] == {"run_id": "earlier", "run_dir": str(earlier), "cross_run": True}
+    # Failures are never filtered: every one of them can veto.
+    failed = write_record(earlier, "x.json", directory="scoped-failed", exit_code=1, finished_epoch=now + 60)
+    failures, _ = stage._scoped_records_across_runs(
+        considered, "smoke", invocation, failed=True, current_head=head, now=now)
+    assert [record["_record_path"] for record in failures] == [str(failed)], failures
+    failed.unlink()
+    for extra in ("future.json", "nan.json", "old.json", "foreign.json"):
+        (earlier / "passed-cache" / "smoke" / "scoped" / extra).unlink()
+    (current / "passed-cache" / "smoke" / "scoped" / "in-run-future.json").unlink()
+    (oldest / "passed-cache" / "smoke" / "scoped" / "sibling.json").unlink()
+
+    # _record_is_intact: the bytes read must still be the bytes on disk.
+    [loaded] = stage._load_scoped_records(real.parent, "smoke", invocation)
+    assert stage._record_is_intact(loaded)
+    original = real.read_bytes()
+    real.write_bytes(original + b"\n")
+    assert not stage._record_is_intact(loaded)
+    real.write_bytes(original)
+    assert stage._record_is_intact(loaded)
+    assert not stage._record_is_intact({"_record_digest": loaded["_record_digest"]})
+
+    # The real decision over the fixture repo: the cross-run record is the
+    # hit; when its bytes change after the read (inside the judge, before the
+    # hit) the decision misses and says so.
+    rules = stage._SCOPED_REUSE_LANES["smoke"]
+
+    def inert_judge(rules, changed, judge):
+        return [{"path": path, "rule": "inert:test"} for path in changed], [], judge
+
+    def mutate_then_judge(rules, changed, judge):
+        real.write_bytes(original + b"\n")
+        return inert_judge(rules, changed, judge)
+
+    with patch.object(stage, "_judge_changes", inert_judge):
+        decision = stage._scoped_reuse_decision(run_root, current, "smoke", rules, command)
+    assert decision.hit and decision.record["_record_path"] == str(real), decision.provenance()
+    assert decision.provenance()["cross_run"] is True and decision.provenance()["passed_run_dir"] == str(earlier)
+    with patch.object(stage, "_judge_changes", mutate_then_judge):
+        decision = stage._scoped_reuse_decision(run_root, current, "smoke", rules, command)
+    assert not decision.hit, decision.provenance()
+    assert decision.miss_reason == "1 candidate record(s) changed or vanished before the hit", decision.miss_reason
+    real.write_bytes(original)
+
+    def vanish_then_judge(rules, changed, judge):
+        real.unlink()
+        return inert_judge(rules, changed, judge)
+
+    with patch.object(stage, "_judge_changes", vanish_then_judge):
+        decision = stage._scoped_reuse_decision(run_root, current, "smoke", rules, command)
+    assert not decision.hit and decision.candidates == 1, decision.provenance()
+    print("cross-run record guards: ok")
 
 
 def check_scoped_inert_tables() -> None:
@@ -1370,6 +1542,7 @@ def main() -> int:
         check_lane_scoped_reuse(tmp, env, source_root)
         check_reconcile_reused_lane(tmp)
         check_scoped_inert_tables()
+        check_cross_run_record_guards(tmp, source_root)
         check_plan_scaling()
         check_structural_memory_floor()
         check_macos_memory(tmp, env)
