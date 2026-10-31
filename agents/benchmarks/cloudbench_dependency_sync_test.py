@@ -26449,7 +26449,10 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown(
     # reserve owners, independently of real fleets sharing the host device.
     transport = tmp_path / "accounting-transport"
     transport.mkdir()
-    namespace = int(hashlib.sha256(str(tmp_path).encode()).hexdigest()[:14], 16)
+    # Per-run ledger namespace: the host-wide admission ledger outlives pytest basetemps,
+    # whose numbering restarts whenever the basetemp root is recreated, so a key derived
+    # from tmp_path alone can collide with an earlier (killed) run's leftover entry.
+    namespace = int(hashlib.sha256(f"{tmp_path}:{os.getpid()}:{time.time_ns()}".encode()).hexdigest()[:14], 16)
     (transport / "reserve_namespace.py").write_text(
         "import os\nfrom pathlib import Path\noriginal = Path.lstat\ndef isolated(self, *args, **kwargs):\n    observed = original(self, *args, **kwargs)\n    if str(self) == os.environ['RESERVE_TEST_PARENT']:\n        fields = list(observed)\n        fields[2] = int(os.environ['RESERVE_TEST_DEVICE'])\n        return os.stat_result(fields)\n    return observed\nPath.lstat = isolated\n"
     )
@@ -32959,7 +32962,10 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_with_stable_owner_identit
     exact = tmp_path / "identity-reserve"
     transport = tmp_path / "transport"
     transport.mkdir()
-    namespace = int(hashlib.sha256(str(tmp_path).encode()).hexdigest()[:14], 16)
+    # Per-run ledger namespace: the host-wide admission ledger outlives pytest basetemps,
+    # whose numbering restarts whenever the basetemp root is recreated, so a key derived
+    # from tmp_path alone can collide with an earlier (killed) run's leftover entry.
+    namespace = int(hashlib.sha256(f"{tmp_path}:{os.getpid()}:{time.time_ns()}".encode()).hexdigest()[:14], 16)
     (transport / "sitecustomize.py").write_text("""
 import os
 from pathlib import Path
@@ -33072,9 +33078,20 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_after_pending_member_depa
     import fcntl
 
     reserve = _extract_fleet_function(fleet_source_text(), "reserve_cleanup_disk_space() {")
-    namespace = int(hashlib.sha256(str(tmp_path).encode()).hexdigest()[:14], 16)
+    # Per-run ledger namespace: the host-wide admission ledger outlives pytest basetemps,
+    # whose numbering restarts whenever the basetemp root is recreated, so a key derived
+    # from tmp_path alone can collide with an earlier (killed) run's leftover entry.
+    namespace = int(hashlib.sha256(f"{tmp_path}:{os.getpid()}:{time.time_ns()}".encode()).hexdigest()[:14], 16)
     admission = Path("/tmp") / f"rose-cloudbench-cleanup-admission-{os.getuid()}" / str(namespace)
     assert not admission.exists()
+    # Regression (deploy 2026-10-31, structural gate benchmark-live-results[3/6]): a run at a
+    # recycled tmp_path string that died before cleanup leaves its entry behind; the
+    # observed leftover was a bare admission.lock from three days earlier. That stale entry
+    # must neither block this run nor be consumed by it.
+    legacy = admission.parent / str(int(hashlib.sha256(str(tmp_path).encode()).hexdigest()[:14], 16))
+    assert legacy != admission
+    legacy.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (legacy / "admission.lock").touch(mode=0o600)
     exact = tmp_path / "reserve"
     neighbor = tmp_path / "neighbor"
     neighbor.write_bytes(b"unrelated")
@@ -33155,6 +33172,8 @@ reserve_cleanup_disk_space
             if peer is not None:
                 assert peer.poll() is None
         assert neighbor.read_bytes() == b"unrelated"
+        assert admission.is_dir(), "reserve accounted outside this run's ledger namespace"
+        assert (legacy / "admission.lock").is_file(), "stale foreign ledger entry was consumed"
     finally:
         lock.close()
         if peer is not None:
@@ -33163,6 +33182,7 @@ reserve_cleanup_disk_space
         exact.unlink(missing_ok=True)
         if admission.exists():
             shutil.rmtree(admission)
+        shutil.rmtree(legacy, ignore_errors=True)
 
 
 @pytest.mark.parametrize("parent_state", ["missing", "root-private", "runtime-owned"])
