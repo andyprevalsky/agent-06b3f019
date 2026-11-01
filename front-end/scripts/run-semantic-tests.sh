@@ -184,11 +184,14 @@ PY
 # Unknown inputs never cap.
 # Args: requested cpus load1 mem_free_pct
 semantic_workers_for_capacity() {
-  awk -v req="$1" -v cpus="$2" -v load="$3" -v mem="$4" \
+  # "load" is a reserved builtin name in gawk >= 5.3 (the ubuntu-latest runner):
+  # `awk -v load=` is fatal there, so the variable is load1 (RCA 2026-10-31
+  # production semantic gate exit 2 on every job after prod-mode sizing landed).
+  awk -v req="$1" -v cpus="$2" -v load1="$3" -v mem="$4" \
     -v min_mem="${SEMANTIC_MIN_MEM_FREE_PCT:-20}" 'BEGIN {
     n = req + 0
     if (cpus != "") {
-      slots = int(cpus - (load != "" ? load : 0))
+      slots = int(cpus - (load1 != "" ? load1 : 0))
       if (slots < n) n = slots
     }
     if (mem != "" && mem + 0 < min_mem + 0) n = 1

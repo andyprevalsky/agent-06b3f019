@@ -524,6 +524,14 @@ node --test "$PROD_SESSION_TEST"
 # 14 cores, four Chromium workers left one renderer frozen for 34s and a 30s
 # chip poll failed without ever observing a value. Other workspaces' load may
 # never drop, so the runner sizes concurrency (floor 1) instead of waiting.
+# gawk >= 5.3 (ubuntu-latest) rejects `-v load=`: "cannot use gawk builtin `load' as variable name" took every
+# production semantic job down with exit 2 once prod-mode sizing called this function (run 41250037375).
+if grep -nE '^[^#]*-v (load|and|or|xor|lshift|rshift|compl|strtonum|mktime|strftime|systime|gensub|patsplit|asort|asorti|isarray|typeof)=' "$RUNNER"; then
+  fail "semantic_workers_for_capacity must not name an awk variable after a gawk builtin (load, and, or, xor, ...)"
+fi
+if command -v gawk >/dev/null 2>&1; then
+  gawk -v load1=1 'BEGIN { exit (load1 == 1 ? 0 : 1) }' || fail "gawk must accept the renamed load1 variable"
+fi
 eval "$(sed -n '/^semantic_workers_for_capacity() {/,/^}/p' "$RUNNER")"
 [ "$(semantic_workers_for_capacity 4 14 56.20 44)" = 1 ] || fail "an overloaded host must drop semantic workers to one"
 [ "$(semantic_workers_for_capacity 4 14 1.50 60)" = 4 ] || fail "an idle host must keep the requested semantic workers"

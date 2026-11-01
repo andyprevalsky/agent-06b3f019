@@ -43,6 +43,16 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 DRIVER = ROOT / "scripts" / "run_deploy_pipeline.py"
+# What the stack lanes execute (pinned against run_deploy_stage.STACK_ENTRYPOINTS
+# in check_scoped_inert_tables; the fixture repo materializes each one).
+STACK_ENTRYPOINTS = (
+    "scripts/run-predeploy-local", "scripts/run-bench", "scripts/run.sh", "scripts/lib/seed-cache.sh",
+    "scripts/restore-seed-dump.sh", "scripts/save-seed-dump.sh", "scripts/validate-canonical-seed-dump.sh",
+    "back-end/src/bootstrap.ts", "back-end/scripts/seed-local.ts", "back-end/scripts/seed-dump-cache.ts",
+    "back-end/scripts/ensure-fast-mode-cache-schema.ts", "back-end/scripts/ensure-agent-network-grep-indexes.ts",
+    "back-end/scripts/generate-test-session.ts", "agents/worker.py", "agents/benchmarks/run_benchmark.py",
+    "front-end/src/main.tsx", "front-end/scripts/run-semantic-tests.sh",
+)
 STRUCTURAL_RUNNER = ROOT / "scripts" / "run-deploy-structural-gates.py"
 # Generic scenarios must not depend on this host's free memory or core count.
 UNBOUNDED = ["--max-parallel", "0", "--memory-budget-mb", "1048576"]
@@ -386,6 +396,15 @@ def make_source_root(path: Path) -> Path:
         "agents/tests/blackbox/sample.blackbox.py": "x = 1\n",
         "agents/tests/unit/test_sample.py": "def test_sample():\n    pass\n",
         "docs/guide.md": "guide v1\n",
+        # A tooling script only the backend coverage runner and one backend
+        # unit test execute: the stack lanes judge it by reach (PR-14).
+        "back-end/scripts/coverage-process-lock.py": "import json\n",
+        "back-end/scripts/run-coverage.sh": "#!/usr/bin/env bash\npython3 scripts/coverage-process-lock.py\n",
+        "back-end/src/tests/unit/coverage-process-registry.test.ts":
+            "import { execFileSync } from 'node:child_process';\n"
+            "execFileSync('python3', ['scripts/coverage-process-lock.py']);\n",
+        # Every stack entrypoint exists (a missing one fails the reach judgement closed).
+        **{entrypoint: "# fixture entrypoint\n" for entrypoint in STACK_ENTRYPOINTS},
     }.items():
         (path / relative).parent.mkdir(parents=True, exist_ok=True)
         (path / relative).write_text(text)
@@ -1257,6 +1276,91 @@ def check_lane_scoped_reuse(tmp: Path, env: dict[str, str], source_root: Path) -
     assert runs("smoke") == 3 and receipt["lanes"]["smoke"]["status"] == "passed", receipt["lanes"]["smoke"]
     assert receipt["source"]["head"] == fourth_head and since > 0
 
+    # Cross-deploy reuse on a tooling change (PR-14): a script only the
+    # coverage runners execute, a backend unit test and a docs page change
+    # after a green run that was closed. The stack lanes (smoke,
+    # semantic-stack) judge the script by reach and reuse the earlier run's
+    # pass in place; the coverage lanes rerun and name the paths that blocked
+    # them; each rerun lane's log starts with its own (flushed) decision.
+    tooling_counters = tmp / "scoped-tooling-counters"
+    tooling_counters.mkdir()
+    tooling_markers = {"backend-coverage-blackbox": "npm run test:coverage:sharded",
+                       "agents-coverage-blackbox": "bash scripts/run-coverage.sh",
+                       "smoke": "bash scripts/run-predeploy-local",
+                       "semantic-stack": "bash front-end/scripts/run-semantic-tests.sh"}
+
+    def tooling_lane(name: str) -> dict:
+        return {"name": name, "reuse_passed": False, "memory_mb": 1,
+                "command": ["bash", "-c", f'printf run >> "{tooling_counters / name}"; echo TOOLING-LANE-OUTPUT',
+                            tooling_markers[name]]}
+
+    def tooling_runs(name: str) -> int:
+        return len((tooling_counters / name).read_text()) // 3 if (tooling_counters / name).exists() else 0
+
+    tooling_plan = tmp / "scoped-tooling-plan.json"
+    write_plan(tooling_plan, [tooling_lane(name) for name in tooling_markers], lane_scoped_reuse=True)
+    receipt = run_and_wait(tooling_plan)
+    assert receipt["status"] == "passed" and receipt["reused_scoped_lanes"] == [], receipt
+    assert all(tooling_runs(name) == 1 for name in tooling_markers), {name: tooling_runs(name) for name in tooling_markers}
+    base_run_id = finish_timing(env)
+    base_run_dir = tmp / "scoped-runs" / base_run_id
+    script = "back-end/scripts/coverage-process-lock.py"
+    unit_test = "back-end/src/tests/unit/coverage-process-registry.test.ts"
+    (source_root / script).write_text("import json\nTIMEOUT = 2\n")
+    (source_root / unit_test).write_text((source_root / unit_test).read_text() + "// v2\n")
+    (source_root / "docs" / "guide.md").write_text("guide v5\n")
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "tooling"], check=True)
+    tooling_head = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    start_timing(tmp / "scoped-runs", env, cwd=source_root)
+    receipt = run_and_wait(tooling_plan)
+    assert receipt["status"] == "passed", receipt["status"]
+    new_run_dir = Path(receipt["stage_run_dir"])
+    assert new_run_dir != base_run_dir
+    assert receipt["reused_scoped_lanes"] == ["semantic-stack", "smoke"], receipt["reused_scoped_lanes"]
+    assert receipt["reused_scoped_cross_run_lanes"] == ["semantic-stack", "smoke"], receipt["reused_scoped_cross_run_lanes"]
+    for name in ("smoke", "semantic-stack"):
+        lane_state = receipt["lanes"][name]
+        assert lane_state["status"] == "reused-scoped" and lane_state["exit"] == 0, (name, lane_state)
+        reuse = lane_state["reuse"]
+        assert reuse["hit"] is True and reuse["cross_run"] is True, reuse
+        assert reuse["passed_run_id"] == base_run_id and reuse["passed_run_dir"] == str(base_run_dir), reuse
+        assert reuse["passed_head"] == fourth_head and reuse["current_head"] == tooling_head, reuse
+        assert reuse["passed_run_branch"] == subprocess.run(
+            [*git, "branch", "--show-current"], check=True, capture_output=True, text=True).stdout.strip(), reuse
+        changed = {entry["path"]: entry for entry in reuse["changed"]}
+        assert set(changed) == {script, unit_test, "docs/guide.md"}, changed
+        assert changed[script]["rule"] == "not in the lane's declared inert set; stack lane: judged by reach", changed
+        assert changed[script]["graph"] == "graph:no ALL fallback; unreached from the stack entrypoints", changed
+        assert changed[unit_test]["rule"] == "inert:back-end/src/tests/*", changed
+        assert changed["docs/guide.md"]["rule"] == "inert:docs/*", changed
+        assert tooling_runs(name) == 1, f"{name} executed despite the cross-deploy scoped reuse"
+        assert not (new_run_dir / "passed-cache" / name).exists(), "record copied into the new run"
+        log = Path(lane_state["log"]).read_text()
+        assert f"== reused passed deploy stage (lane-scoped): {name} " in log, log[-800:]
+    rows = [json.loads(line) for line in (new_run_dir / "stages.jsonl").read_text().splitlines() if line.strip()]
+    for name, blocked_paths in (("backend-coverage-blackbox", [script, unit_test]), ("agents-coverage-blackbox", [script])):
+        lane_state = receipt["lanes"][name]
+        assert lane_state["status"] == "passed" and tooling_runs(name) == 2, (name, lane_state, tooling_runs(name))
+        [row] = [row for row in rows if row["stage"] == name]
+        scoped = row["detail"]["reuse"]["scoped"]
+        assert scoped["miss_reason"] == f"{len(blocked_paths)} changed path(s) are not provably inert", scoped
+        assert [entry["path"] for entry in scoped["blocked"]] == blocked_paths, scoped["blocked"]
+        assert all(entry["rule"] == "not in the lane's declared inert set" for entry in scoped["blocked"]), scoped
+        # The decision line is flushed before the command starts: the lane
+        # log's last round begins with its own miss, not the previous one's.
+        log = Path(lane_state["log"]).read_text()
+        miss = f"== lane-scoped reuse unavailable for {name}: {scoped['miss_reason']} =="
+        assert miss in log, log[-800:]
+        tail = log[log.rindex(miss):]
+        assert "TOOLING-LANE-OUTPUT" in tail, f"{name}: the decision must precede the command's first output byte"
+        assert tail.index(f"== deploy stage: {name} ==") < tail.index("TOOLING-LANE-OUTPUT"), tail[:600]
+        for path in blocked_paths:
+            assert f"   rerun: {path} (not in the lane's declared inert set; graph not consulted)" in tail, tail[:600]
+    verified = run_driver("verify", "--state-dir", str(state), "--expect-head", tooling_head, env=env)
+    assert verified.returncode == 0, verified.stdout
+    assert "reused_scoped=semantic-stack,smoke cross_run=semantic-stack,smoke" in verified.stdout, verified.stdout
+
 
 def check_reconcile_reused_lane(tmp: Path) -> None:
     """The receipt relabels a 0-exit lane from its own stage row whatever the
@@ -1321,11 +1425,13 @@ def check_reconcile_reused_lane(tmp: Path) -> None:
 
 def check_cross_run_record_guards(tmp: Path, source_root: Path) -> None:
     """The cross-run guards, each against the real decision over the fixture
-    repo: a later-started or other-branch run is not a source; a record is
+    repo: a later-started run is not a source while an earlier run of another
+    branch is (its branch is recorded, never compared; PR-14); a record is
     accepted only with a finite, non-future ``finished_epoch`` (future-dated
-    ones would sort first and outrank every failed head), within the bound
-    and carrying its own run's id; and a candidate whose bytes change between
-    the read and the hit is never reused."""
+    ones would sort first and outrank every failed head), within the bound,
+    with a passed head that is an ancestor of HEAD and carrying its own run's
+    id; and a candidate whose bytes change between the read and the hit is
+    never reused."""
     stage = load_module("stage_guards", source_root / "scripts" / "run_deploy_stage.py")
     git = ["git", "-C", str(source_root)]
     head = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
@@ -1346,14 +1452,16 @@ def check_cross_run_record_guards(tmp: Path, source_root: Path) -> None:
     oldest = run_dir("oldest", now - 300)
     run_dir("later", now)                      # started after the current run: never a source
     run_dir("same-start", now - 100)           # not strictly earlier
-    run_dir("other-branch", now - 250, "other")
+    other_branch = run_dir("other-branch", now - 250, "other")
+    run_dir("no-branch", now - 260, "")        # no branch recorded: still a source (guards decide)
     (run_root / "no-metadata").mkdir()
     (run_root / "bad-json").mkdir()
     (run_root / "bad-json" / "metadata.json").write_text("{not-json")
     (run_root / "current").write_text("cur\n")  # the pointer file is not a run
     considered = stage._considered_runs(run_root, current)
-    assert [(run.run_id, run.cross_run) for run in considered] == \
-        [("cur", False), ("earlier", True), ("oldest", True)], considered
+    assert [(run.run_id, run.cross_run, run.branch) for run in considered] == \
+        [("cur", False, branch), ("earlier", True, branch), ("other-branch", True, "other"),
+         ("no-branch", True, None), ("oldest", True, branch)], considered
 
     command = ["bash", "scripts/run-predeploy-local"]
     invocation = stage._invocation_digest(command)
@@ -1373,13 +1481,20 @@ def check_cross_run_record_guards(tmp: Path, source_root: Path) -> None:
     write_record(earlier, "old.json", finished_epoch=now - 25 * 3600)
     write_record(earlier, "foreign.json", run_id="cur")
     write_record(current, "in-run-future.json", finished_epoch=now + 60)
+    # Another branch with an ancestor head is a source; the same branch with a
+    # non-ancestor head is not.
+    other = write_record(other_branch, "other.json", run_id="other-branch", finished_epoch=now - 20)
     with patch.object(stage, "_is_ancestor", lambda ancestor, descendant: ancestor != "0" * 40):
         write_record(oldest, "sibling.json", head="0" * 40)
         records, rejected = stage._scoped_records_across_runs(
             considered, "smoke", invocation, failed=False, current_head=head, now=now)
     assert rejected == {"age": 4, "not_ancestor": 1, "foreign_run_id": 1}, rejected
-    assert [record["_record_path"] for record in records] == [str(real)], records
-    assert records[0]["_source"] == {"run_id": "earlier", "run_dir": str(earlier), "cross_run": True}
+    assert [record["_record_path"] for record in records] == [str(real), str(other)], records
+    assert records[0]["_source"] == {"run_id": "earlier", "run_dir": str(earlier), "cross_run": True,
+                                     "branch": branch}
+    assert records[1]["_source"] == {"run_id": "other-branch", "run_dir": str(other_branch), "cross_run": True,
+                                     "branch": "other"}
+    other.unlink()
     # Failures are never filtered: every one of them can veto.
     failed = write_record(earlier, "x.json", directory="scoped-failed", exit_code=1, finished_epoch=now + 60)
     failures, _ = stage._scoped_records_across_runs(
@@ -1417,6 +1532,7 @@ def check_cross_run_record_guards(tmp: Path, source_root: Path) -> None:
         decision = stage._scoped_reuse_decision(run_root, current, "smoke", rules, command)
     assert decision.hit and decision.record["_record_path"] == str(real), decision.provenance()
     assert decision.provenance()["cross_run"] is True and decision.provenance()["passed_run_dir"] == str(earlier)
+    assert decision.provenance()["passed_run_branch"] == branch, decision.provenance()
     with patch.object(stage, "_judge_changes", mutate_then_judge):
         decision = stage._scoped_reuse_decision(run_root, current, "smoke", rules, command)
     assert not decision.hit, decision.provenance()
@@ -1488,6 +1604,59 @@ def check_scoped_inert_tables() -> None:
         assert inert(name, "scripts/tests/some-gate.test.sh"), name
     for name in every:
         assert inert(name, "docs/rca/cases/x.md") and inert(name, "README.md") and inert(name, "agents/README.md"), name
+    # Reach judgement (PR-14): the stack entrypoints are pinned and exist; only
+    # a non-test code file under a tooling tree, outside the declared set of a
+    # stack lane, is eligible. Everything else keeps the declared-only rule.
+    assert stage.STACK_ENTRYPOINTS == STACK_ENTRYPOINTS, stage.STACK_ENTRYPOINTS
+    for entrypoint in stage.STACK_ENTRYPOINTS:
+        assert (ROOT / entrypoint).is_file(), f"stack entrypoint {entrypoint} is gone: update STACK_ENTRYPOINTS"
+    assert stage._STACK_REACH_TREES == ("scripts/*", "back-end/scripts/*", "front-end/scripts/*", "agents/scripts/*",
+                                        "mac-app/scripts/*"), stage._STACK_REACH_TREES
+
+    def eligible(name: str, path: str) -> bool:
+        return stage._reach_eligible(path, stage._SCOPED_REUSE_LANES[name])[0]
+
+    for name in ("smoke", "semantic-stack"):
+        assert eligible(name, "back-end/scripts/coverage-process-lock.py"), name
+        assert eligible(name, "scripts/run_deploy_stage.py") and eligible(name, "agents/scripts/backfill_x.py"), name
+        for path in ("back-end/src/domains/x/service.ts", "agents/tools/x.py", "front-end/src/App.tsx",
+                     "agents/tests/e2e/test_helpers.py", "agents/tests/env_defaults.py", "front-end/tests-e2e/chat.spec.ts",
+                     "agents/benchmarks/fixtures/x.json", "agents/benchmarks/tasks.json", "back-end/prisma/migrations/x/m.sql",
+                     "back-end/scripts/prisma-local-push.test.sh", "scripts/tests/x.test.py", "scripts/run-bench",
+                     "front-end/postcss.config.js", "front-end/playwright.config.ts", "package.json", "agents/prompts/x.md",
+                     "back-end/scripts/README.md", "scripts/lib/seed-cache.sh"):
+            assert not eligible(name, path) or path == "scripts/lib/seed-cache.sh", (name, path)
+    for name in ("backend-coverage-blackbox", "live-probes", "agents-coverage-blackbox"):
+        assert not eligible(name, "back-end/scripts/coverage-process-lock.py"), name
+        assert stage._reach_eligible("scripts/x.py", stage._SCOPED_REUSE_LANES[name]) == (False, "lane has graph lanes")
+    # The judge consults neither the entrypoints nor the reverse index for a
+    # declared-inert path (deploy-stage gate regression: its fixture carries
+    # no entrypoint and a docs-only commit reran smoke); an undeclared path
+    # fails closed when an entrypoint is missing from the graph.
+    class _NoSelection:
+        all_lanes, reasons, selected, full_lanes = False, [], {}, set()
+
+    class _NoEntrypointSelector:
+        config = {"run_lanes": []}
+
+        class graph:
+            fileset: set = set()
+
+        def select(self, changed):
+            return _NoSelection()
+
+        def upstream(self, changed):
+            raise AssertionError("reverse index consulted for a declared-inert path")
+
+    judge = stage._GraphJudge.__new__(stage._GraphJudge)
+    judge._module, judge._selector = stage._selector_module(), _NoEntrypointSelector()
+    smoke = stage._SCOPED_REUSE_LANES["smoke"]
+    assert judge.judge("docs/guide.md", smoke) == (True, "graph:no ALL fallback")
+    assert judge.judge("back-end/src/tests/unit/x.test.ts", smoke, declared=True) == (True, "graph:no ALL fallback")
+    assert judge.judge("back-end/scripts/x.py", smoke, declared=False) == \
+        (False, "graph:stack entrypoint missing: scripts/run-predeploy-local")
+    assert judge.judge("docs/guide.md", stage._SCOPED_REUSE_LANES["backend-coverage-blackbox"]) == \
+        (True, "graph:no backend-blackbox/backend-unit test selected")
     assert not inert("agents-coverage-blackbox", "agents/tests/blackbox/rose.blackbox.py")
     assert all(inert(n, "agents/tests/blackbox/rose.blackbox.py") for n in every if n != "agents-coverage-blackbox")
     assert not inert("backend-coverage-blackbox", "back-end/src/tests/blackbox/x.blackbox.ts")

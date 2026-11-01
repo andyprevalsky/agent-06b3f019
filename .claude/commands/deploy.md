@@ -676,10 +676,16 @@ an enabler; dry-run with `python3 scripts/run_deploy_stage.py
 `_SCOPED_REUSE_LANES` running its real command marker reuses the newest
 inert-equivalent PASSED record: every path changed since it is in the lane's
 declared inert set AND the change→test graph selects nothing in the lane
-(run_all, unmapped and never-inert paths force a rerun), and no newer failed
+(run_all, unmapped and never-inert paths force a rerun; a stack lane with no
+graph lanes — smoke, semantic-stack — additionally treats a non-test code file
+under `scripts/*`, `back-end/scripts/*`, `front-end/scripts/*`,
+`agents/scripts/*` or `mac-app/scripts/*` (`_STACK_REACH_TREES`) as inert when
+nothing in `STACK_ENTRYPOINTS` or a backend route reaches it in the change→test
+graph), and no newer failed
 head on an inert-equivalent tree vetoes it. The candidate may also come from
-an earlier timing run of the same `.context/deploy-runs/` root (same metadata
-`branch`, same invocation, passed head an ancestor of HEAD, record under 24 h —
+an earlier timing run of the same `.context/deploy-runs/` root regardless of
+its metadata `branch` (recorded as `passed_run_branch`, never compared; same
+invocation, passed head an ancestor of HEAD, record under 24 h —
 `DEPLOY_LANE_SCOPED_REUSE_MAX_AGE_SECONDS` may only lower it — read in place,
 never copied; failed heads from any such run still veto); the row's
 `detail.reuse` then carries `cross_run: true` with
