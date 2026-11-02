@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the real staged coordinator; no provider, database, or app processes."""
 from concurrent.futures import ThreadPoolExecutor
+import copy
 import json
 import os
 from pathlib import Path
@@ -228,8 +229,44 @@ class Cycle(unittest.TestCase):
     def test_remote_binding_must_name_its_actual_transport(self):
         gate = self.plan['gates'][1]
         gate.update(worker_transport='ssh', worker_host='worker.example', worker_root='/repo')
-        with self.assertRaisesRegex(ValueError, 'SSH binding'):
+        with self.assertRaisesRegex(ValueError, 'ssh transport has no remote cancel'):
             c.initialize(self.plan, self.root)
+
+    def test_saved_ssh_binding_is_refused_on_verify_and_refresh(self):
+        # a state saved before the refusal existed: same plan, gate rebound to ssh (finding 4447557475)
+        self.state.update(phase='ready', ready=True)
+        plan = copy.deepcopy(self.plan)
+        plan['gates'][1].update(worker_transport='ssh', worker_host='worker.example', worker_root='/repo',
+                                command=['ssh', 'worker.example', 'python3 scripts/deploy_test_worker.py --stdio'],
+                                case_protocol=True, result_transport='stdout', timeout_seconds=10,
+                                worker_recipe={'cases': {'a': {'command': ['true']}, 'b': {'command': ['true']}}})
+        plan['gates'][1].pop('cwd')
+        self.state.update(plan=plan, plan_digest=c.digest(plan)); c.write(self.directory / 'cycle.json', self.state)
+        self.assertEqual(2, c.verify_saved(self.directory, self.root))
+        stale = dict(self.state, phase='stale', ready=False)
+        with self.assertRaisesRegex(ValueError, 'ssh transport has no remote cancel'):
+            c.refresh(stale, plan, {**plan, 'source': c.source(self.root)}, self.root)
+
+    def test_focused_recipe_must_be_identical_except_for_narrowed_checks(self):
+        gate = self.plan['gates'][1]  # finding 4447557578 follow-up
+        bound = {'cases': {'a': {'command': ['true'], 'env': {'X': '1'}}, 'b': {'command': ['true']}},
+                 'cleanup': {'command': ['true']}}
+        gate.update(case_protocol=True, worker_recipe=bound)
+        self.state = c.initialize(self.plan, self.root)
+        self.failure(); self.state.update(phase='needs-focused-plan', repair_gates=['api'])
+        self.state['failures'][-1]['disposition'] = 'blocking'
+        altered = {'cases': {'a': {'command': ['true'], 'env': {'X': '2'}}}, 'cleanup': {'command': ['true']}}
+        with self.assertRaisesRegex(ValueError, 'identical to the bound recipe'):
+            c.focused_plan(self.state, self.plan, {'source': self.state['source'], 'gates': {'api': {
+                'command': gate['command'], 'checks': ['a'], 'worker_recipe': altered}}})
+        no_cleanup = {'cases': {'a': bound['cases']['a']}}
+        with self.assertRaisesRegex(ValueError, 'identical to the bound recipe'):
+            c.focused_plan(self.state, self.plan, {'source': self.state['source'], 'gates': {'api': {
+                'command': gate['command'], 'checks': ['a'], 'worker_recipe': no_cleanup}}})
+        narrowed = {'cases': {'a': bound['cases']['a']}, 'cleanup': bound['cleanup']}
+        c.focused_plan(self.state, self.plan, {'source': self.state['source'], 'gates': {'api': {
+            'command': gate['command'], 'checks': ['a'], 'worker_recipe': narrowed}}})
+        self.assertEqual('focused', self.state['phase'])
 
     def test_nested_worker_checkout_and_overlapping_listener_ports_are_rejected(self):
         import copy
@@ -241,6 +278,110 @@ class Cycle(unittest.TestCase):
                 elif kind=='port-offset': b['env']['CONDUCTOR_PORT']='12020'
                 else: b['env']['CONDUCTOR_PORT']='65000'
                 with self.assertRaises(ValueError): c.initialize(plan,self.root)
+
+    def test_quick_gate_keeps_its_declared_timeout_and_defaults_to_120(self):
+        self.plan['gates'][0]['timeout_seconds'] = 300  # finding 4447557550
+        with patch.object(c, 'run_command', return_value=(0, False, False, False)) as runner:
+            c.execute(self.plan['gates'][0], self.state, self.directory, self.root)
+            self.assertEqual(300, runner.call_args.kwargs['timeout'])
+
+    def test_focused_task_cannot_drop_the_bound_worker_recipe(self):
+        gate = self.plan['gates'][1]  # finding 4447557578
+        gate.update(case_protocol=True, worker_recipe={'cases': {'a': {'command': ['true']}, 'b': {'command': ['true']}}})
+        self.state = c.initialize(self.plan, self.root)
+        self.failure(); self.state.update(phase='needs-focused-plan', repair_gates=['api'])
+        self.state['failures'][-1]['disposition'] = 'blocking'
+        with self.assertRaisesRegex(ValueError, 'bound worker'):
+            c.focused_plan(self.state, self.plan, {'source': self.state['source'], 'gates': {'api': {
+                'command': ['bash', '-c', 'heavy command on the coordinator checkout'], 'checks': ['a']}}})
+        self.assertEqual('needs-focused-plan', self.state['phase'])
+
+    def test_report_lists_blocking_failures(self):
+        failure = self.failure()  # finding 4447557591
+        c.adjudicate(self.state, self.report(failure))  # INTRODUCED -> blocking
+        self.assertEqual('needs-focused-plan', self.state['phase'])
+        plan = self.root / 'plan.json'; c.write(plan, self.plan); c.write(self.directory / 'cycle.json', self.state)
+        import contextlib, io
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            self.assertEqual(0, c.main(['report', '--plan', str(plan), '--state-dir', str(self.directory), '--root', str(self.root)]))
+        text = (self.directory / 'report.md').read_text()
+        self.assertIn('BLOCKING', text); self.assertIn('real failure', text); self.assertIn('Deploy validation: needs-focused-plan', text)
+
+    def test_pending_post_merge_qualifies_ready_but_blocks_completion_until_resolved(self):
+        failure = self.failure()
+        packet = {"test": "api::a", "command": ["true"], "scope": "api/a", "error": "AssertionError: boom",
+                  "source": self.state["source"]["head"], "evidence": ["original.log"]}
+        c.adjudicate(self.state, self.report(failure, attribution="NOT_INTRODUCED", post_merge=packet))
+        self.assertTrue(self.state["ready"]); self.assertEqual("ready", self.state["phase"])
+        kept = next(f for f in self.state["failures"] if f["id"] == failure["id"])
+        self.assertEqual("FAIL", kept["native_result"]); self.assertEqual("pending post-merge", kept["disposition"])
+        self.assertEqual([failure["id"]], [p["id"] for p in self.state["pending_post_merge"]])
+        plan = self.directory / "plan.json"; c.write(plan, self.plan); c.write(self.directory / "cycle.json", self.state)
+        # pre-merge readiness is NOT blocked by a pending packet (Phase 3 verify must pass so the merge can happen)
+        self.assertEqual(0, c.verify_saved(self.directory, self.root))
+        args = ["--plan", str(plan), "--state-dir", str(self.directory), "--root", str(self.root)]
+        import contextlib, io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(0, c.main(["verify", *args]))
+        self.assertEqual(1, json.loads(out.getvalue().strip().splitlines()[-1])["pending_post_merge"])  # count reported
+        # completion (post-merge) is blocked until the packet is dispatched and resolved
+        self.assertEqual(1, c.main(["complete", *args]))
+        self.assertEqual(2, c.main(["verify", "--require-resolved", *args]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, c.main(["report", *args]))
+        self.assertIn("Pending post-merge: 1", (self.directory / "report.md").read_text())
+        # a plain blocking failure still fails verify exactly as before (no loosening)
+        blocked = copy.deepcopy(self.state); blocked.update(phase="needs-focused-plan", ready=False)
+        c.write(self.directory / "cycle.json", blocked)
+        self.assertEqual(2, c.main(["verify", *args])); self.assertEqual(1, c.verify_saved(self.directory, self.root))
+        c.write(self.directory / "cycle.json", self.state)
+        with self.assertRaisesRegex(ValueError, "repair link"):
+            c.resolve_post_merge(self.state, failure["id"], "")
+        with self.assertRaisesRegex(ValueError, "repair-thread or Rose repair-agent link"):
+            c.resolve_post_merge(self.state, failure["id"], "http://example.com/not-a-repair")
+        self.assertEqual(0, c.main(["resolve", *args, "--occurrence", failure["id"],
+                                    "--repair-agent", "https://boxes.dev/thread/thr_post_merge_repair"]))
+        self.assertEqual(0, c.main(["verify", *args])); self.assertEqual(0, c.main(["complete", *args]))
+        self.assertEqual(0, c.main(["verify", "--require-resolved", *args]))
+        saved = c.read(self.directory / "cycle.json")
+        self.assertEqual([], saved["pending_post_merge"])
+        self.assertEqual("delegated / waived", next(f for f in saved["failures"] if f["id"] == failure["id"])["disposition"])
+        self.assertEqual("FAIL", next(f for f in saved["failures"] if f["id"] == failure["id"])["native_result"])
+
+    def test_pending_post_merge_is_re_executed_after_a_refresh_that_changes_its_inputs(self):
+        self.plan['gates'][1]['input_paths'] = ['code']  # api's fingerprint follows only this file
+        self.state = c.initialize(self.plan, self.root)
+        failure = self.failure()
+        packet = {"test": "api::a", "command": ["true"], "scope": "api/a", "error": "AssertionError: boom",
+                  "source": self.state["source"]["head"], "evidence": ["original.log"]}
+        c.adjudicate(self.state, self.report(failure, attribution="NOT_INTRODUCED", post_merge=packet))
+        self.assertIn('api/a', self.state['skips']); self.assertEqual(1, len(self.state['pending_post_merge']))
+        # unchanged fingerprint for api (a new unrelated file): the pending skip is carried
+        unchanged = copy.deepcopy(self.state); unchanged['phase'] = 'stale'
+        (self.root / 'other').write_text('unrelated')
+        c.refresh(unchanged, self.plan, {**self.plan, 'source': c.source(self.root)}, self.root)
+        self.assertEqual('pending post-merge', unchanged['skips']['api/a']['disposition'])
+        self.assertEqual(1, len(unchanged['pending_post_merge']))
+        # changed fingerprint: skip dropped, no synthetic result, history retained, case re-executes
+        (self.root / 'other').unlink(); (self.root / 'code').write_text('changed inputs')
+        self.state['phase'] = 'stale'
+        new = {**self.plan, 'source': c.source(self.root)}
+        c.refresh(self.state, self.plan, new, self.root)
+        self.assertNotIn('api/a', self.state['skips']); self.assertEqual([], self.state['pending_post_merge'])
+        self.assertEqual(packet, self.state['superseded_pending_post_merge'][0]['packet'])
+        self.assertFalse(any(f['native_result'].startswith('prior waived') for f in self.state['failures']))
+        original = next(f for f in self.state['failures'] if f['id'] == failure['id'])
+        self.assertEqual(('FAIL', 'pending post-merge'), (original['native_result'], original['disposition']))
+        self.assertFalse(self.state.get('pending'))
+        while self.state['phase'] in {'quick', 'final'}:
+            c.run_phase(new, self.state, self.directory, self.root)
+        self.assertTrue(self.state['ready'])
+        api = next(r for r in self.state['attempts'][-1]['results'] if r['gate'] == 'api')
+        self.assertEqual({'a': 'PASS', 'b': 'PASS'}, api['cases'])  # 'a' executed again, not SKIP
+        self.assertEqual([], self.state['pending_post_merge'])
+
 
     def test_quick_timeout_bound_is_120_seconds(self):
         with patch.object(c, 'run_command', return_value=(0, False, False, False)) as runner:

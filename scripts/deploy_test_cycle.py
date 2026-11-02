@@ -257,14 +257,23 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
            "DEPLOY_GATE_RESULT": str(result_path), "DEPLOY_GATE_TOKEN": token,
            "DEPLOY_LANE_SCOPED_REUSE": "0", "DEPLOY_CYCLE_FRESH": "1"}
     started = time.time()
-    timeout = 120 if gate.get("quick") else gate.get("timeout_seconds")
+    timeout = gate.get("timeout_seconds", 120 if gate.get("quick") else None)  # declared wins; 120 s is the quick default
     timed_out = cancelled = lingering = False
+    if (gate.get("category") == "agentcard-lifecycle"
+            and gate.get("worker_transport") not in {"local-isolated", "boxes-thread"}):
+        raise ValueError("AgentCard native lifecycle requires its validated worker binding")
+    native_producer = (gate.get("native_cloud") is True
+                       or (gate.get("category") == "agentcard-lifecycle"
+                           and gate.get("worker_transport") in {"local-isolated", "boxes-thread"}))
+    lifecycle = "native-producer" if native_producer else "owned"
+    native_cleanup_reference = None
     with (folder / "output.log").open("wb") as output, (folder / 'stderr.log').open('wb') as stderr:
         try:
             code, timed_out, cancelled, lingering = run_command(gate["command"],
                 cwd=root / gate.get("cwd", "."), env=env, output=output, timeout=timeout,
                 input_path=folder / 'request.json' if gate.get('result_transport') == 'stdout' else None,
-                stderr_output=stderr if gate.get('result_transport') == 'stdout' else None)
+                stderr_output=stderr if gate.get('result_transport') == 'stdout' else None,
+                owned_lifecycle=lifecycle == "owned")
         except OSError as error:
             output.write(str(error).encode())
             code = 127
@@ -285,6 +294,13 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
             if result_path.stat().st_size > MAX_RECEIPT_BYTES:
                 raise ValueError('worker receipt exceeds transport limit')
             result = read(result_path)
+            if lifecycle == 'native-producer':
+                native_cleanup_reference = {
+                    'result': str(result_path), 'native_directory': result.get('fleet_directory'),
+                    'cleanup_complete': result.get('cleanup_complete') is True,
+                    'result_sha256': hashlib.sha256(result_path.read_bytes()).hexdigest(),
+                    'native_evidence': result.get('evidence', {}),
+                }
             if isinstance(result.get('evidence'), dict):
                 worker_evidence = result['evidence']
             raw_cases, complete = validate_result(result, request, code,
@@ -299,6 +315,10 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
         complete = True
     else:
         reason = "missing complete case receipt"
+    if native_producer and (not valid or not complete):
+        # Native producers can intentionally retain recovery resources. Unknown
+        # native cleanup must be reconciled before another attempt can resume.
+        lingering = True
     if not valid:
         # Unknown/unexecuted work is a blocking outcome; cannot waive this via
         # a known constituent failure or by treating launcher exit0 as coverage.
@@ -311,6 +331,11 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
               "source": state["source"], "started_at": started, "finished_at": time.time(),
               "command": gate["command"], "log": str(folder / "output.log"),
               "stderr_log": str(folder / 'stderr.log'), "token": token}
+    result['lifecycle'] = lifecycle
+    result['native_cleanup_reference'] = native_cleanup_reference
+    if native_producer and (timed_out or cancelled or lingering):
+        result['cleanup_owner'] = {'request_token': token, 'worker_root': str(root / gate.get('cwd', '.')),
+                                   'native_cleanup_reference': native_cleanup_reference}
     result['worker_evidence'] = worker_evidence
     result['worker_result'] = str(result_path) if result_path.exists() else None
     write(folder / "receipt.json", result)
@@ -391,6 +416,12 @@ def adjudicate(state: dict, report: dict) -> None:
             state["skips"][failure["check"]] = {"source": state["source"], "rca": entry,
                                                    "disposition": disposition,
                                                    "input_fingerprint": state["input_fingerprints"][failure["gate"]]}
+            if disposition == "pending post-merge":
+                # Pre-merge READY may proceed; completion stays blocked until the parent dispatches
+                # this packet after merge and records the actual repair link (resolve action).
+                state.setdefault("pending_post_merge", []).append({
+                    "id": failure["id"], "check": failure["check"], "gate": failure["gate"],
+                    "native_result": failure["native_result"], "packet": entry["post_merge"]})
     state.pop("pending")
     if repair:
         state["repair_gates"] = sorted(set(state["repair_gates"]) | repair)
@@ -427,11 +458,19 @@ def focused_plan(state: dict, plan: dict, payload: dict) -> None:
                     if f["gate"] == gate and f.get("disposition") in {"blocking", "execution required"}}
         if not required <= set(task["checks"]):
             raise ValueError("focused command omits an unresolved failing check")
+        if 'worker_recipe' in original[gate] and 'worker_recipe' not in task:
+            raise ValueError('focused task must keep the bound worker recipe and transport')  # finding 4447557578
         if 'worker_recipe' in task:
             validate_recipe(task['worker_recipe'], task['checks'])
             if ('worker_recipe' not in original[gate]
                     or task['command'] != original[gate]['command']):
                 raise ValueError('focused recipes must keep the bound worker transport')
+            bound, focused = original[gate]['worker_recipe'], task['worker_recipe']
+            # Identity except the permitted narrowing of cases to the focused checks: a focused run
+            # must execute the bound case commands/env/cwd and setup/cleanup exactly.
+            if (any(bound.get(k) != focused.get(k) for k in (bound.keys() | focused.keys()) - {'cases'})
+                    or any(focused['cases'][name] != bound['cases'].get(name) for name in focused['cases'])):
+                raise ValueError('focused recipe must be identical to the bound recipe except for narrowed checks')
     state["focused"] = tasks
     state["phase"] = "focused"
 
@@ -537,11 +576,17 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     if (new["source"] == state["source"] and digest(new) == state["plan_digest"]
             and fingerprints == state["input_fingerprints"]):
         raise ValueError("refresh requires actual changed source or plan")
-    carry, revisit = {}, []
+    carry, revisit, superseded_pending = {}, [], []
     for key, skip in state["skips"].items():
         gate = key.split("/", 1)[0]
         if skip.get("input_fingerprint") == fingerprints.get(gate):
             carry[key] = {**skip, "source": new["source"], "original_source": skip["source"]}
+        elif skip.get("disposition") == "pending post-merge":
+            # A pending qualification is not an executed handoff: with changed inputs the case simply
+            # runs again in the next full sweep. The original native FAIL + packet stay in history;
+            # no synthetic result is written. Only a test that actually failed can be pending.
+            superseded_pending.extend({**p, "superseded": "changed inputs; case re-executes", "source": skip["source"]}
+                                      for p in state.get("pending_post_merge", []) if p["check"] == key)
         else:
             revisit.append({"id": uuid.uuid4().hex, "check": key, "gate": gate,
                             "source": new["source"], "native_result": "prior waived failure; changed inputs",
@@ -549,6 +594,10 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
                             "complete": True, "phase": "refresh", "prior_waiver": skip})
     state["superseded_skips"] = [*state.get("superseded_skips", []), *state["skips"].values()]
     state["skips"] = carry
+    if superseded_pending:
+        done = {p["id"] for p in superseded_pending}
+        state["superseded_pending_post_merge"] = [*state.get("superseded_pending_post_merge", []), *superseded_pending]
+        state["pending_post_merge"] = [p for p in state.get("pending_post_merge", []) if p["id"] not in done]
     state["failures"].extend(revisit)
     if revisit:
         state["pending"] = list(dict.fromkeys([*state.get("pending", []), *[f["id"] for f in revisit]]))
@@ -557,6 +606,32 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
                  input_fingerprints=fingerprints, environment=environment_digest(),
                  phase="quick", next_after_quick="triage" if state.get("pending") else
                  ("needs-focused-plan" if state["repair_gates"] else "final"))
+
+
+def resolve_post_merge(state: dict, occurrence_id: str, repair_agent: str) -> None:
+    from deploy_failure_report import decision
+    if not isinstance(repair_agent, str) or not repair_agent.strip():
+        raise ValueError("resolving a pending post-merge packet requires the actual repair link")
+    pending = next((p for p in state.get("pending_post_merge", []) if p["id"] == occurrence_id), None)
+    failure = next((f for f in state["failures"] if f["id"] == occurrence_id), None)
+    if pending is None or failure is None or failure.get("disposition") != "pending post-merge":
+        raise ValueError("only a recorded pending post-merge occurrence can be resolved")
+    entry = {k: v for k, v in failure["rca"].items() if k != "post_merge"}
+    entry["repair_agent"] = repair_agent
+    disposition = decision(entry)  # validates the link
+    failure.update(rca={**entry, "resolved_post_merge": pending["packet"]}, disposition=disposition)
+    skip = state["skips"].get(failure["check"])
+    if skip is not None:
+        skip.update(rca=failure["rca"], disposition=disposition)
+    state["pending_post_merge"] = [p for p in state["pending_post_merge"] if p["id"] != occurrence_id]
+
+
+def pending_completion_block(state: dict) -> str | None:
+    pending = state.get("pending_post_merge") or []
+    if pending:
+        return (f"{len(pending)} pending post-merge packet(s) block completion; "
+                "dispatch after merge and resolve with the repair link")
+    return None
 
 
 def verify_saved(directory: Path, root: Path, expect_head: str | None = None) -> int:
@@ -568,6 +643,8 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
         validate_plan(plan, root)
         if state["phase"] != "ready" or state["ready"] is not True:
             return 1
+        # Pending post-merge packets do not block pre-merge readiness (Phase 3 verify); the
+        # separate completion check (`complete` / `--require-resolved`) refuses until resolved.
         if (state["source"] != source(root) or state["plan_digest"] != digest(plan)
                 or state["environment"] != environment_digest()
                 or state["input_fingerprints"] != input_fingerprints(plan, root)
@@ -580,7 +657,11 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rca", "verify", "report"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rca", "verify", "report", "resolve", "complete"])
+    parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
+    parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")
+    parser.add_argument("--require-resolved", action="store_true",
+                        help="verify: also refuse while pending post-merge packets exist (post-merge completion)")
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--input", type=Path)
@@ -625,7 +706,17 @@ def main(argv: list[str] | None = None) -> int:
                     jobs = [pool.submit(launch_rca, path, args.rca_launcher) for path in requests]
                     for job in jobs:
                         job.result()
+            elif args.action == "resolve":
+                resolve_post_merge(state, args.occurrence, args.repair_agent)
+            elif args.action == "complete":
+                # Post-merge completion (Step 12a / before the final scorecard): every packet dispatched and resolved.
+                blocked = pending_completion_block(state)
+                if blocked:
+                    print(f"DEPLOY_CYCLE INCOMPLETE: {blocked}", file=sys.stderr)
+                    return 1
             elif args.action == "verify":
+                if args.require_resolved and pending_completion_block(state):
+                    raise ValueError(pending_completion_block(state))
                 if (not state["ready"] or state["phase"] != "ready"
                         or source(args.root) != state["source"] or digest(plan) != state["plan_digest"]
                         or environment_digest() != state["environment"]
@@ -635,14 +726,18 @@ def main(argv: list[str] | None = None) -> int:
                 from deploy_failure_report import render
                 failures = [{**f["rca"], "disposition": f["disposition"]}
                             for f in state["failures"] if "rca" in f]
-                text = render({"failures": failures}, f"Deploy validation: {state['phase']}\n"
-                              f"Source: {state['source']['head']}\nPending RCA: {len(state.get('pending', []))}")
+                header = (f"Deploy validation: {state['phase']}\nSource: {state['source']['head']}\n"
+                          f"Pending RCA: {len(state.get('pending', []))}\n"
+                          f"Pending post-merge: {len(state.get('pending_post_merge', []))}\n")
+                # The header is not a scorecard: pass none so BLOCKING failures render (finding 4447557591).
+                text = header + render({"failures": failures})
                 (directory / "report.md").write_text(text)
                 print(text, end="")
                 return 0
             write(state_path, state)
             print(json.dumps({"phase": state["phase"], "ready": state["ready"],
-                              "failures": len(state.get("pending", [])), "source": state["source"]}))
+                              "failures": len(state.get("pending", [])), "source": state["source"],
+                              "pending_post_merge": len(state.get("pending_post_merge", []))}))
             return 1 if args.action in {"run", "resume"} and not state["ready"] else 0
     except (ImportError, ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
         print(f"DEPLOY_CYCLE BLOCKED: {error}", file=sys.stderr)

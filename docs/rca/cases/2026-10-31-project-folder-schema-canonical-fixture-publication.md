@@ -172,3 +172,40 @@ must not be called unrelated without checking the schema change and publication.
 ## Reusable lesson
 
 Publish and verify the reviewed fixture for every changed schema key before running smokes, and establish causality before applying an unrelated-failure override.
+
+
+### November 2, 2026 PR1662 cloud/PG15 integration prerequisite
+
+The new staged deploy integration made cloud smoke mandatory where base
+bf92cbd98ab436af20f9a8d647c32e748c67e93a documented local smoke by default.
+The earlier comment-only rekey repair above published PG16 only; the matching
+PG15 key remained absent. The schema SHA1 was already 049dc6b64d546bc8969fc864fcaf891ca82568d0
+on base6f3f53201, bf92cbd98 and frozen7be0644bb164763af1526ead7b426e2d5e909f4a.
+Gate: INTRODUCED applies to omitted preparation of the newly mandatory cloud
+fixture, not to a newly authored schema change. Independent review confirmed
+that scope in /var/tmp/pr1662-pg15-seed-review.json.
+
+Native campaign f9d1709a9c89c45ae901d7684e1a0dd9d4e6b046a8827fad4531ac41f5d8161b
+stopped after r001-j0013 failed its PG15 seed preflight. The fixed-total 1/17
+infrastructure predicate then cancelled the other members; no task assertion
+was exercised. The target native HEAD returned3; reviewed predecessor
+ a7c48e4f351c50bc4e00b11ffe55a7b104230d8b-pg15-victoria-prod-sync-v1-whatsapp-v2
+returned0 and downloaded an authentic pg_dump15.19 archive.
+
+The unchanged native migrate-canonical-seed.sh ran in a private fixture with an
+owned pgvector:pg15 container. Prisma reported an empty schema migration. Both
+restores passed the canonical validator (3825 WhatsApp messages, connected
+integration,241 archived trajectory rows across3 roots, and named profile), all
+table counts matched, and the absent target was uploaded and downloaded with
+byte-identical verification. Final PG15 archive:31144906 bytes, SHA256
+ e1439aed8adda5cca62f5c1e7834c24b756fe65a75efb0362700a0fc48c0e275.
+
+The unchanged native cloudbench-seed-get.sh now exits0 in1.24s with that same
+SHA256; HEAD changed3 to0. The publication process exited0 and exact container
+canonical-seed-pg15-3210543 was confirmed absent after its cleanup trap. All16
+original fleet cleanup receipts show empty clone IDs and verified provider
+release; the central viewer retains its explicit native owner transfer policy.
+No task definitions, thresholds, schema, provider settings or parent source
+changed. The full17-task smoke remains UNVERIFIED until the deploy owner reruns
+it. Evidence: /var/tmp/pr1662-pg15-seed-repair/report.json, publication.log,
+native-consumer-receipt.json and original-campaign-cleanup.json.

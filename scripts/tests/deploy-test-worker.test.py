@@ -55,6 +55,57 @@ class Worker(unittest.TestCase):
         self.coordinator_temp.cleanup()
         self.temp.cleanup()
 
+    def test_native_producer_and_generic_use_their_declared_cleanup_authority(self):
+        for kind in ('generic', 'cloud', 'agentcard'):
+            native = kind in {'cloud', 'agentcard'}
+            with self.subTest(kind=kind):
+                gate = {'name': kind, 'checks': ['first'], 'command': ['fixture'],
+                        'case_protocol': True, 'native_cloud': kind == 'cloud',
+                        'category': 'agentcard-lifecycle' if 'agentcard' in kind else kind,
+                        'worker_transport': 'local-isolated' if kind == 'agentcard' else None}
+                state = {'phase': 'initial', 'round': 0, 'skips': {},
+                         'source': {'head': 'a' * 40, 'digest': 'b' * 64}}
+                def launch(_argv, **kwargs):
+                    self.assertEqual(not native, kwargs['owned_lifecycle'])
+                    request = cycle.read(Path(kwargs['env']['DEPLOY_GATE_REQUEST']))
+                    result = {key: request[key] for key in ('token', 'source', 'gate')}
+                    result.update(cases={'first': 'PASS'}, complete=True,
+                                  cleanup_complete=True, reused=False, fleet_directory='/native/fleet')
+                    cycle.write(Path(kwargs['env']['DEPLOY_GATE_RESULT']), result)
+                    return 0, False, False, False
+                with patch.object(cycle, 'run_command', side_effect=launch):
+                    result = cycle.execute(gate, state, self.coordinator / '.context/routing', self.coordinator)
+                self.assertEqual('PASS', result['status'])
+                self.assertEqual('native-producer' if native else 'owned', result['lifecycle'])
+                if native:
+                    self.assertEqual('/native/fleet', result['native_cleanup_reference']['native_directory'])
+                    self.assertTrue(result['native_cleanup_reference']['cleanup_complete'])
+                else:
+                    self.assertIsNone(result['native_cleanup_reference'])
+
+    def test_unbound_agentcard_lifecycle_refuses_before_launch(self):
+        gate = {'name': 'agentcard', 'checks': ['first'], 'command': ['fixture'],
+                'category': 'agentcard-lifecycle'}
+        state = {'phase': 'initial', 'round': 0, 'skips': {},
+                 'source': {'head': 'a' * 40, 'digest': 'b' * 64}}
+        with patch.object(cycle, 'run_command') as launch:
+            with self.assertRaisesRegex(ValueError, 'validated worker binding'):
+                cycle.execute(gate, state, self.coordinator / '.context/unbound', self.coordinator)
+            launch.assert_not_called()
+
+    def test_interrupted_native_producer_records_cleanup_owner_and_blocks_credit(self):
+        gate = {'name': 'native', 'checks': ['first'], 'command': ['fixture'], 'native_cloud': True}
+        state = {'phase': 'initial', 'round': 0, 'skips': {},
+                 'source': {'head': 'a' * 40, 'digest': 'b' * 64}}
+        for index, native_result in enumerate(((-signal.SIGKILL, True, False, True),
+                                                  (1, False, False, False))):
+            with patch.object(cycle, 'run_command', return_value=native_result):
+                result = cycle.execute(gate, state, self.coordinator / f'.context/routing-{index}', self.coordinator)
+            self.assertEqual({'first': 'UNVERIFIED'}, result['cases'])
+            self.assertTrue(result['lingering_group'])
+            self.assertEqual(result['token'], result['cleanup_owner']['request_token'])
+            self.assertFalse(result['complete'])
+
     def test_failure_does_not_stop_other_cases(self):
         result=worker.execute(self.request,self.root)
         self.assertEqual({'first':'FAIL','second':'PASS'},result['cases'])
@@ -239,18 +290,17 @@ class Worker(unittest.TestCase):
         state=cycle.initialize(plan,self.coordinator)
         state.update(phase='needs-focused-plan',repair_gates=['gate'],failures=[
             {'gate':'gate','check':'gate/first','disposition':'blocking'}])
+        with self.assertRaisesRegex(ValueError,'identical to the bound recipe'):  # a "fixed" command is not a focus
+            cycle.focused_plan(state,plan,{'source':state['source'],'gates':{'gate':{
+                'command':gate['command'],'checks':['first'],
+                'worker_recipe':{'cases':{'first':{'command':[sys.executable,'-c','pass']}}}}}})
         cycle.focused_plan(state,plan,{'source':state['source'],'gates':{'gate':{
             'command':gate['command'],'checks':['first'],
-            'worker_recipe':{'cases':{'first':{'command':[sys.executable,'-c','pass']}}}}}})
+            'worker_recipe':{'cases':{'first':self.recipe['cases']['first']}}}}})
         focused=cycle.execute(cycle.records(plan,state)[0],state,
                               self.coordinator/'.context/coordinator',self.coordinator)
-        self.assertEqual({'first':'PASS'},focused['cases'])
+        self.assertEqual({'first':'FAIL'},focused['cases'])  # the bound case command ran unchanged
         cycle.advance(state,[focused])
-        self.assertEqual('failed-gates',state['phase'])
-        full=cycle.execute(cycle.records(plan,state)[0],state,
-                           self.coordinator/'.context/coordinator',self.coordinator)
-        self.assertEqual({'first':'FAIL','second':'PASS'},full['cases'])
-        cycle.advance(state,[full])
         self.assertEqual('triage',state['phase'])
         self.assertFalse(state['ready'])
 
@@ -371,6 +421,26 @@ class Cloud(unittest.TestCase):
         path=self.fleet/'_batch/run.json';document=cycle.read(path)
         document['tasks'][1]=copy.deepcopy(document['tasks'][0]);cycle.write(path,document)
         with self.assertRaises(ValueError):self.collect()
+
+    def test_non_object_native_task_entry_is_unverified_not_a_crash(self):
+        path=self.fleet/'failing/cloudbench-run.json'  # finding 4447557526
+        for bad in (['x'], [None], []):
+            with self.subTest(tasks=bad):
+                document=cycle.read(path);document['tasks']=bad;cycle.write(path,document)
+                cases,details,_,_=self.collect()
+                self.assertEqual('UNVERIFIED',cases['failing']);self.assertIn('unverified',details['failing'])
+                self.assertEqual('PASS',cases['passing'])
+
+    def test_unexpected_adapter_error_still_writes_the_unverified_receipt(self):
+        request=self.root/'request.json';result=self.root/'result.json';cycle.write(request,self.request)
+        with patch.object(self.cloud,'execute',side_effect=RuntimeError('unexpected')), \
+             patch.dict(os.environ,{'DEPLOY_GATE_REQUEST':str(request),'DEPLOY_GATE_RESULT':str(result)}), \
+             patch.object(sys,'argv',['deploy_test_cloud','--root',str(self.root)]):
+            code=self.cloud.main()
+        self.assertEqual(3,code)
+        receipt=cycle.read(result)
+        self.assertEqual({'passing':'UNVERIFIED','failing':'UNVERIFIED'},receipt['cases'])
+        self.assertFalse(receipt['complete']);self.assertFalse(receipt['cleanup_complete']);self.assertIn('unexpected',receipt['reason'])
 
     def test_cancelled_case_does_not_become_skipped(self):
         path=self.fleet/'failing/cloudbench-run.json';document=cycle.read(path)
@@ -538,12 +608,13 @@ class CloudCampaign(unittest.TestCase):
 
 
 FAKE_CLI = """#!/usr/bin/env python3
-import json, os, sys
+import json, os, sys, time
 calls = os.environ['FAKE_DVB_CALLS']; config = json.load(open(os.environ['FAKE_DVB_CONFIG']))
 with open(calls, 'a') as stream: stream.write(json.dumps(sys.argv[1:]) + '\\n')
 key = sys.argv[2]
 if key == 'list' and '--all' not in sys.argv: key = 'list_page1'  # native CLI: one page unless --all
 reply = config.get(key, {'rc': 1, 'stdout': {}, 'stderr': 'unsupported'})
+time.sleep(reply.get('sleep', 0))
 sys.stdout.write(json.dumps(reply.get('stdout', {}))); sys.stderr.write(reply.get('stderr', ''))
 raise SystemExit(reply.get('rc', 0))
 """
@@ -785,6 +856,22 @@ class Boxes(unittest.TestCase):
         self.assertEqual(2, proc.returncode); self.assertIn('DEPLOY_BOXES BLOCKED', proc.stderr)
         self.assertFalse(self.calls.exists()); self.assertFalse((self.coordinator / 'r.json').exists())
 
+    def test_native_cli_wait_returns_cleanup_owner_inside_original_deadline(self):
+        self.configure(reply=self.reply(), wait={'sleep': 3, 'rc': 0,
+            'stdout': self.wrap({'turnId': 'turn-1'}, status='running')})
+        started = time.monotonic()
+        result = self.run_adapter(deadline=0.8)
+        self.assertLess(time.monotonic() - started, 1.2)
+        self.assertFalse(result['cleanup_complete'])
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['cleanup_owner']['request_token'], 'tok-1')
+        state = cycle.read(self.coordinator / '.context/deploy-boxes' /
+                           __import__('hashlib').sha256(b'tok-1').hexdigest() / 'state.json')
+        self.assertIsNotNone(state['sent_attempted_at'])
+        calls = self.calls_of('wait')
+        self.assertTrue(calls)
+        self.assertTrue(calls[0][calls[0].index('--timeout') + 1].endswith('ms'))
+
     def test_timeout_or_cancel_is_unverified_and_names_the_remote_cleanup_owner(self):
         self.configure(reply=self.reply(), wait={'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'}, status='running')})
         result = self.run_adapter(deadline=0.2)
@@ -1011,6 +1098,24 @@ local_runner = load('controller_local', 'scripts/run-cloudbench-controller-local
 
 
 class LocalController(unittest.TestCase):
+    def test_nested_helpers_use_the_prepared_project_python(self):
+        with tempfile.TemporaryDirectory(prefix='controller-python-', dir='/var/tmp') as raw:
+            root = Path(raw)
+            python_bin = root / 'agents' / 'venv' / 'bin'
+            python_bin.mkdir(parents=True)
+            project_python = python_bin / 'python3'
+            project_python.symlink_to(sys.executable)
+            command = shlex.join(['python3', '-c',
+                'import sys; assert sys.executable == ' + repr(str(project_python))])
+            try:
+                with patch.dict(os.environ, {'PATH': '/usr/bin:/bin'}), contextlib.redirect_stdout(io.StringIO()):
+                    row = local_runner.run_case(root, root, 'nested-python', command)
+                self.assertEqual(row['status'], 'PASS', Path(row['log']).read_text())
+                self.assertTrue(row['supervision']['quiescent'])
+            finally:
+                if 'row' in locals() and Path(row['fixture_tmp']).exists():
+                    shutil.rmtree(row['fixture_tmp'])
+
     def test_complete_documented_inventory_and_registration(self):
         text = (ROOT / '.claude/commands/deploy.md').read_text()
         section = text.split('## Step 4cb:', 1)[1].split('## Step 4c:', 1)[0]
@@ -1478,6 +1583,133 @@ class Backend(unittest.TestCase):
             result = self.backend.execute(self.request, self.root)
         self.assertTrue(all(v == 'UNVERIFIED' for k, v in result['cases'].items() if k != 'teardown'))
         self.assertFalse(result['complete']); self.assertFalse(result['source_unchanged'])
+
+
+class GenericLifecycle(unittest.TestCase):
+    def setUp(self):
+        import deploy_test_process
+        self.process = deploy_test_process
+        self.temp = tempfile.TemporaryDirectory(prefix='generic-lifecycle-')
+        self.root = Path(self.temp.name)
+        self.process.CANCEL.clear()
+
+    def tearDown(self):
+        self.process.CANCEL.clear()
+        self.temp.cleanup()
+
+    def test_default_forced_kill_refuses_resume_even_after_group_is_gone(self):
+        script = self.root / 'ignores-term.py'
+        script.write_text("import signal,time\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\ntime.sleep(30)\n")
+        with (self.root / 'forced.log').open('wb') as output:
+            code, timed_out, cancelled, lingering = self.process.run_command(
+                [sys.executable, str(script)], cwd=self.root, env=os.environ.copy(),
+                output=output, timeout=.2)
+        self.assertEqual(-signal.SIGKILL, code)
+        self.assertTrue(timed_out)
+        self.assertFalse(cancelled)
+        self.assertTrue(lingering, 'forced kill cannot authorize resume')
+
+    def test_wedged_supervisor_is_bounded_and_descendants_remain_unverified(self):
+        helper = self.root / 'deploy_test_supervisor.py'
+        helper.write_text("import signal,time\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\ntime.sleep(30)\n")
+        started = time.monotonic()
+        with patch.object(self.process, '__file__', str(self.root / 'deploy_test_process.py')), \
+                (self.root / 'wedged.log').open('wb') as output:
+            code, timed_out, cancelled, lingering = self.process.run_command(
+                ['true'], cwd=self.root, env=os.environ.copy(), output=output,
+                timeout=.2, owned_lifecycle=True)
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertEqual(-signal.SIGKILL, code)
+        self.assertTrue(timed_out)
+        self.assertFalse(cancelled)
+        self.assertTrue(lingering)
+        watchdog = cycle.read(self.root / 'wedged.log.process.json.watchdog.json')
+        self.assertTrue(watchdog['supervisor_reaped'])
+        self.assertFalse(watchdog['descendants_quiescent'])
+        self.assertIn('descendants unverified', watchdog['reason'])
+
+    def test_watchdog_evidence_error_keeps_cleanup_unknown(self):
+        from unittest.mock import MagicMock
+        process = MagicMock(pid=12345, returncode=-signal.SIGKILL)
+        process.poll.return_value = None
+        with patch.object(self.process.subprocess, 'Popen', return_value=process), \
+                patch.object(self.process.time, 'monotonic', side_effect=[0, 14, 14]), \
+                patch.object(Path, 'write_text', side_effect=OSError('evidence unavailable')):
+            result = self.process.run_command(['true'], cwd=self.root, env=os.environ.copy(),
+                                              output=io.BytesIO(), timeout=.2, owned_lifecycle=True)
+        self.assertEqual((-signal.SIGKILL, True, False, True), result)
+        process.kill.assert_called_once_with()
+
+    def test_unsupported_owned_platform_refuses_before_launch(self):
+        with patch.object(self.process.sys, 'platform', 'darwin'), \
+                patch.object(self.process.subprocess, 'Popen',
+                             side_effect=AssertionError('worker launched without ownership')) as launch, \
+                (self.root / 'refused.log').open('wb') as output:
+            with self.assertRaisesRegex(OSError, 'owned worker lifecycle requires Linux'):
+                self.process.run_command(['true'], cwd=self.root, env=os.environ.copy(),
+                                         output=output, timeout=1, owned_lifecycle=True)
+            launch.assert_not_called()
+
+    def test_nested_case_is_reaped_and_forced_owner_blocks_resume(self):
+        child = self.root / 'child.py'
+        worker_path = self.root / 'worker.py'
+        ready = self.root / 'ready'
+        child.write_text(
+            "import os,signal,sys,time\nfrom pathlib import Path\n"
+            "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+            "Path(sys.argv[1]).write_text(str(os.getpid()))\ntime.sleep(30)\n")
+        worker_path.write_text(
+            "import sys,os,time\nfrom pathlib import Path\n"
+            f"sys.path.insert(0,{str(ROOT / 'scripts')!r})\n"
+            "import deploy_test_process as p\n"
+            "with p.cancellation_handlers():\n"
+            " with open(sys.argv[3],'wb') as output:\n"
+            "  p.run_command([sys.executable,sys.argv[1],sys.argv[2]],cwd=Path.cwd(),"
+            "env=os.environ.copy(),output=output,timeout=None)\n"
+            " p.CANCEL.clear()\n time.sleep(.2)\n")
+        with (self.root / 'outer.log').open('wb') as output:
+            result = self.process.run_command(
+                [sys.executable, str(worker_path), str(child), str(ready), str(self.root / 'inner.log')],
+                cwd=self.root, env=os.environ.copy(), output=output, timeout=.2,
+                owned_lifecycle=True)
+        self.assertTrue(ready.exists())
+        pid = int(ready.read_text())
+        if Path(f'/proc/{pid}').exists():
+            spec = importlib.util.spec_from_file_location('owned_cleanup_identity', ROOT / 'scripts/process-identity.py')
+            identity = importlib.util.module_from_spec(spec); spec.loader.exec_module(identity)
+            command_line = Path(f'/proc/{pid}/cmdline').read_bytes()
+            self.assertIn(os.fsencode(str(child)), command_line)
+            self.addCleanup(identity.main, ['process-identity.py', '--expect',
+                identity.current_identity(pid), '--signal', 'KILL', str(pid)])
+        print(json.dumps({'native_result': result, 'nested_child_exists': Path(f'/proc/{pid}').exists()}))
+        self.assertTrue(result[1])
+        self.assertFalse(Path(f'/proc/{pid}').exists(), 'nested session survived owner return')
+        self.assertTrue(result[3], 'forced owner cannot authorize resume')
+        receipt = cycle.read(self.root / 'outer.log.process.json')
+        self.assertTrue(receipt['quiescent'])
+        self.assertTrue(receipt['kill_sent'])
+
+    def test_worker_cleanup_finishes_before_owner_returns(self):
+        script = self.root / 'worker.py'
+        marker = self.root / 'cleanup-finished'
+        script.write_text(
+            "import sys,os,time\nfrom pathlib import Path\n"
+            f"sys.path.insert(0,{str(ROOT / 'scripts')!r})\n"
+            "import deploy_test_process as p\n"
+            "with p.cancellation_handlers():\n"
+            " with open(sys.argv[2],'wb') as output:\n"
+            "  p.run_command([sys.executable,'-c','import time;time.sleep(30)'],"
+            "cwd=Path.cwd(),env=os.environ.copy(),output=output,timeout=None)\n"
+            " p.CANCEL.clear()\n time.sleep(.2)\n Path(sys.argv[1]).write_text('done')\n")
+        with (self.root / 'outer.log').open('wb') as output:
+            code, timed_out, cancelled, lingering = self.process.run_command(
+                [sys.executable, str(script), str(marker), str(self.root / 'inner.log')],
+                cwd=self.root, env=os.environ.copy(), output=output, timeout=.2,
+                owned_lifecycle=True)
+        self.assertEqual(code, 0)
+        self.assertTrue(timed_out)
+        self.assertFalse(lingering)
+        self.assertEqual(marker.read_text(), 'done')
 
 
 if __name__=='__main__': unittest.main()

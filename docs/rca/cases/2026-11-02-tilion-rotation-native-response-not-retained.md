@@ -17,6 +17,7 @@ tags:
   - proxy-rotation
 sources:
   - PR #1662
+  - commit 7be0644bb164763af1526ead7b426e2d5e909f4a
   - commit 067495d51582f3946d5a5b980ccc8416b66dff02
   - commit 6f3f53201faac3a3e70de099e7c211cee6770fad
   - plan:/var/tmp/staged-deploy-implementation/.context/deploy-pipeline/rca/c66eb1133bd641edadd3d117273cdb2d.json
@@ -117,8 +118,8 @@ condition without the screenshot change. This supports NOT_INTRODUCED at the
 observed rejection boundary; it is not a repaired-source PASS. Original raw
 field shape and original pre/post IP remain unknown. Worker A independently reviewed native evidence and the source comparison,
 approving the limited NOT_INTRODUCED attribution. It did not claim a fixed
-RCA, review a source patch or authorize ignoring freshness. The local replay
-artifacts were supplied afterward for inspection.
+RCA, review a source patch or authorize ignoring freshness. The reviewer subsequently read the exact replay fixture, source comparison
+and both replay logs and confirmed no remaining attribution objection.
 
 ## Human feedback
 
@@ -139,3 +140,26 @@ Work remains limited to private proofs and a drafted exact fix; parent retains
 source integration and deployment. No assertion change or provider retry is
 authorized by this ownership record. The handoff is separate from the RCA
 attribution and does not turn either native failure into a pass.
+
+## Successor recurrence 024f3d37965341c4939da1be5887357a
+
+The fresh successor run on 7be0644bb164763af1526ead7b426e2d5e909f4a
+(source digest 8448a1822106d530f7938f3fae5470f9468881d8304949137bb659873e044a3d)
+records browser-provider FAIL. All relevant provider, route and parity-test
+bytes are unchanged from 067495d51. At server lines 82119-82133, task
+3a2181d7-2cdc-5d90-8766-d0d2333e02a9 takes rotationsUsed=1. Native request
+4f31d5bfb3484f3e returns 200 in 2331ms, logs rotated=true and
+freshAllocation=false, then backend returns 409 carried_state_required.
+Domain line 663 is the same first-rotation failure, not a later assertion.
+Server SHA256 cdc0e9cae7f712ac92b91cf4110ec3544cddb5498109d01f1d575c819da63aa1;
+domain SHA256 16e3409e44f6ba9ddcf355551cc4a2514b33f9bdc71744bc7d71fbbc741c53a7.
+The case-aware producer records 243 complete case outcomes, one FAIL, with
+coverage thresholds, teardown, units and FPS all PASS and cleanup complete.
+These are successor receipts, not retroactive passes for c66. The existing
+repair remains OPEN: no freshness assertion was weakened. Source-bound
+original request/result and full domain/server logs were read; new native
+raw body and pre/post IP are still absent. The c774 native proof and unchanged
+local adapter replay support the same limited NOT_INTRODUCED attribution;
+Worker A independently reviewed the new logs and source hashes and confirmed
+no objection to this limited source attribution. Native FAIL and repair OPEN
+remain unchanged.

@@ -34,7 +34,10 @@ def generate(template, inventory, root):
                    script, '--root', checkout, '--stdio']
         timeout = slot.get('timeout_seconds', gate.get('timeout_seconds'))
         if mode == 'ssh':
-            command = ['ssh', slot['worker_host'], shlex.join(command)]
+            # Timeout/cancel would signal only the local ssh client; the remote worker and its
+            # services would keep running with no owned cleanup receipt (finding 4447557475).
+            raise ValueError(f'{name}: ssh transport has no remote cancel/cleanup path (finding 4447557475); '
+                             'use boxes-thread or local-isolated')
         elif mode == 'boxes-thread':
             for key in ('worker_thread', 'worker_host', 'coordinator_thread'):
                 if not isinstance(slot.get(key), str) or not slot[key]:

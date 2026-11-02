@@ -1,12 +1,18 @@
 """Owned subprocess lifetime for staged deploy workers (no broad host cleanup)."""
 from contextlib import contextmanager
 import os
+import json
+from pathlib import Path
+import sys
+import tempfile
 import signal
 import subprocess
 import threading
 import time
 
 CANCEL = threading.Event()
+# Ten seconds for TERM, two for reap, one for receipt publication.
+OWNED_DRAIN_SECONDS = 13.0
 
 
 @contextmanager
@@ -22,7 +28,13 @@ def cancellation_handlers():
             signal.signal(s, handler)
 
 
-def run_command(argv, *, cwd, env, output, timeout, input_path=None, stderr_output=None):
+def run_command(argv, *, cwd, env, output, timeout, input_path=None, stderr_output=None,
+                owned_lifecycle=False):
+    if owned_lifecycle:
+        if sys.platform != "linux":
+            raise OSError("owned worker lifecycle requires Linux")
+        return run_owned(argv, cwd=cwd, env=env, output=output, timeout=timeout,
+                         input_path=input_path, stderr_output=stderr_output)
     incoming = open(input_path, 'rb') if input_path else None
     try:
         proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=incoming, stdout=output,
@@ -33,6 +45,7 @@ def run_command(argv, *, cwd, env, output, timeout, input_path=None, stderr_outp
             incoming.close()
     deadline = None if timeout is None else time.monotonic() + timeout
     timed_out = False
+    forced = False
     while proc.poll() is None:
         timed_out = deadline is not None and time.monotonic() >= deadline
         if CANCEL.is_set() or timed_out:
@@ -45,6 +58,7 @@ def run_command(argv, *, cwd, env, output, timeout, input_path=None, stderr_outp
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
+                forced = True
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
@@ -64,4 +78,75 @@ def run_command(argv, *, cwd, env, output, timeout, input_path=None, stderr_outp
         lingering = True
     except ProcessLookupError:
         pass
-    return proc.returncode, timed_out, CANCEL.is_set(), lingering
+    return proc.returncode, timed_out, CANCEL.is_set(), lingering or forced
+
+
+def run_owned(argv, *, cwd, env, output, timeout, input_path, stderr_output):
+    """Supervise the whole worker, allowing its setup/services to live until cleanup."""
+    name = getattr(output, 'name', None)
+    if isinstance(name, str) and Path(name).is_absolute():
+        receipt = Path(name + '.process.json')
+    else:
+        folder = Path(tempfile.mkdtemp(prefix='deploy-process-', dir='/var/tmp'))
+        receipt = folder / 'process.json'
+    command = [sys.executable, '-B', str(Path(__file__).with_name('deploy_test_supervisor.py')),
+               '--receipt', str(receipt)]
+    deadline = None if timeout is None else time.monotonic() + timeout
+    if deadline is not None:
+        command += ['--deadline', str(deadline)]
+    command += ['--', *argv]
+    incoming = open(input_path, 'rb') if input_path else None
+    try:
+        proc = subprocess.Popen(command, cwd=cwd, env=env, stdin=incoming, stdout=output,
+                                stderr=stderr_output if stderr_output is not None else subprocess.STDOUT,
+                                start_new_session=True)
+    finally:
+        if incoming:
+            incoming.close()
+    cancelled = False
+    cleanup_deadline = None if deadline is None else deadline + OWNED_DRAIN_SECONDS
+    while proc.poll() is None:
+        if CANCEL.is_set() and not cancelled:
+            cancelled = True
+            proc.terminate()  # The retained, unreaped supervisor owns descendant cleanup.
+            cancel_limit = time.monotonic() + OWNED_DRAIN_SECONDS
+            cleanup_deadline = cancel_limit if cleanup_deadline is None else min(cleanup_deadline, cancel_limit)
+        if cleanup_deadline is not None and time.monotonic() >= cleanup_deadline:
+            # A wedged supervisor cannot extend the gate indefinitely. Killing
+            # this retained child says nothing about its descendants: fail closed.
+            proc.kill()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+            watchdog = receipt.with_name(receipt.name + '.watchdog.json')
+            try:
+                watchdog.write_text(json.dumps({
+                    'supervisor_pid': proc.pid, 'supervisor_reaped': proc.returncode is not None,
+                    'descendants_quiescent': False, 'deadline': deadline, 'cancelled': cancelled,
+                    'reason': 'owned supervisor exceeded cleanup bound; descendants unverified',
+                }, indent=2) + '\n')
+            except OSError:
+                pass  # Evidence failure must not erase the unknown cleanup outcome.
+            try:
+                output.write(f'owned supervisor cleanup unverified: {watchdog}\n'.encode())
+            except (OSError, ValueError):
+                pass
+            return (proc.returncode if proc.returncode is not None else 127,
+                    deadline is not None and time.monotonic() >= deadline, cancelled, True)
+        try:
+            proc.wait(timeout=.1)
+        except subprocess.TimeoutExpired:
+            continue
+    try:
+        value = json.loads(receipt.read_text())
+        if not isinstance(value, dict) or value.get('supervisor_pid') != proc.pid:
+            raise ValueError('supervisor receipt identity mismatch')
+        code = value['native_exit']
+        if not isinstance(code, int):
+            raise ValueError('supervisor did not observe a native exit')
+        lingering = (value.get('quiescent') is not True or bool(value.get('kill_sent'))
+                     or value.get('orphaned_children') is True or bool(value.get('error')))
+        return code, bool(value.get('timed_out')), cancelled or bool(value.get('cancelled')), lingering
+    except (OSError, ValueError, KeyError, TypeError):
+        return proc.returncode or 127, deadline is not None and time.monotonic() >= deadline, cancelled, True

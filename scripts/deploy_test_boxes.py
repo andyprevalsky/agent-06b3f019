@@ -9,11 +9,13 @@ hash to the worker's own sha256sum are parsed. Anything else is UNVERIFIED.
 This adapter never allocates devboxes, threads or services.
 """
 import argparse
+from contextlib import suppress
 import base64
 import hashlib
 import json
 import math
 import os
+import signal
 from pathlib import Path
 import shlex
 import shutil
@@ -29,6 +31,9 @@ from deploy_test_result import MAX_RECEIPT_BYTES, validate as validate_result
 TRANSPORT = 'boxes-thread'
 LIST_ARGV = ['threads', 'list', '--all', '--json']  # every page; the first page alone omits older threads
 CLI = 'dvb-onbox'
+CLI_MAX_SECONDS = 20.0
+CLI_CUSHION_SECONDS = 0.25
+COMPLETION_RESERVE_SECONDS = 1.0
 MAX_PROMPT_BYTES = 32 * 1024  # `threads send --prompt-file` bound; the result side is bound by its sha256 only
 INLINE_REQUEST_BYTES = 8 * 1024
 ZB64_BEGIN, ZB64_END = 'DEPLOY_GATE_REQUEST_ZB64_BEGIN', 'DEPLOY_GATE_REQUEST_ZB64_END'
@@ -48,8 +53,28 @@ def run_cli(argv, *, timeout):
     binary = shutil.which(CLI)
     if binary is None:
         raise ValueError('dvb-onbox CLI is not available on PATH')
-    done = subprocess.run([binary, *argv], capture_output=True, timeout=timeout, check=False)
-    return done.returncode, done.stdout, done.stderr
+    command = [binary, *argv]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True)
+    end = time.monotonic() + timeout
+    while True:
+        remaining = end - time.monotonic()
+        if CANCEL.is_set() or remaining <= 0:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGTERM)
+            try:
+                out, err = process.communicate(timeout=CLI_CUSHION_SECONDS)
+            except subprocess.TimeoutExpired:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                out, err = process.communicate()
+            raise subprocess.TimeoutExpired(command, timeout, output=out, stderr=err)
+        try:
+            out, err = process.communicate(timeout=min(.1, remaining))
+            return process.returncode, out, err
+        except subprocess.TimeoutExpired:
+            continue
+
 
 
 def default_python(worker_root):
@@ -104,12 +129,14 @@ def build_prompt(request, binding):
         'echo "DEPLOY_GATE_WORKER_PGID $$"',
         f'DEPLOY_GATE_REQUEST="$PWD/request.json" DEPLOY_GATE_RESULT="$PWD/result.json" '
         f'DEPLOY_GATE_TOKEN={shlex.quote(token)} DEPLOY_LANE_SCOPED_REUSE=0 DEPLOY_CYCLE_FRESH=1 '
+        f'{shlex.quote(binding["python"])} {shlex.quote(root + "/scripts/deploy_test_supervisor.py")} '
+        '--receipt "$PWD/process.json" -- '
         f'{shlex.quote(binding["python"])} {shlex.quote(root + "/scripts/" + worker_script)} '
         f'--root {shlex.quote(root)} '
         '> stdout.log 2> stderr.log && rc=0 || rc=$?; echo "DEPLOY_GATE_WORKER_EXIT $rc"',
         'sum=$(sha256sum result.json | cut -d" " -f1); echo "DEPLOY_GATE_RESULT_SHA256 $sum"',
         f'dvb-onbox threads message --to {shlex.quote(binding["coordinator_thread"])} '
-        '--attach "$PWD/result.json" --attach "$PWD/stderr.log" '
+        '--attach "$PWD/result.json" --attach "$PWD/stderr.log" --attach "$PWD/process.json" '
         f'--message "DEPLOY_GATE_RESULT token={token} sha256=$sum exit=$rc" '
         f'--idempotency-key {shlex.quote(token + "-result")} --json || true',
         f'if [ "$(wc -c < result.json)" -le {INLINE_FALLBACK_BYTES} ]; then echo {BEGIN}; cat result.json; echo {END}; fi',
@@ -319,6 +346,7 @@ def receipt(binding, state, native_sha, canonical_sha, native_exit, source=None)
 
 
 def execute(request, root, binding, deadline_seconds):
+    started_at = time.time()
     if (type(deadline_seconds) not in (int, float) or not math.isfinite(deadline_seconds)
             or deadline_seconds <= 0):
         raise ValueError('boxes-thread transport requires its existing gate deadline')
@@ -339,9 +367,12 @@ def execute(request, root, binding, deadline_seconds):
         state = read(state_path) if state_path.exists() else {
             'token': request['token'], 'idempotency_key': request['token'], 'prompt_sha256': prompt_sha,
             'thread': binding['worker_thread'], 'host': binding['worker_host'],
-            'worker_root': binding['worker_root'], 'deadline_at': time.time() + deadline_seconds,
+            'worker_root': binding['worker_root'], 'deadline_at': started_at + deadline_seconds,
+            'completion_reserve_seconds': min(COMPLETION_RESERVE_SECONDS, deadline_seconds / 10),
             'sent_attempted_at': None, 'turn_id': None, 'message_id': None,
             'cli_log': str(directory / 'cli.log'), 'stderr_log': str(directory / 'stderr.log')}
+        state['completion_reserve_seconds'] = min(COMPLETION_RESERVE_SECONDS,
+            max(0, state['deadline_at'] - started_at) / 10)
         (directory / 'prompt.txt').write_text(prompt)
         try:
             with cancellation_handlers():
@@ -354,7 +385,10 @@ def execute(request, root, binding, deadline_seconds):
 
 def _cli(argv, state, log, timeout):
     log.write((shlex.join(argv) + '\n').encode())
-    code, out, err = run_cli(argv, timeout=timeout)
+    remaining = state['deadline_at'] - state.get('completion_reserve_seconds', 0) - time.time()
+    if CANCEL.is_set() or remaining <= 0:
+        raise subprocess.TimeoutExpired(argv, max(0, remaining))
+    code, out, err = run_cli(argv, timeout=min(timeout, CLI_MAX_SECONDS, remaining))
     log.write(out + b'\n')
     if err:
         with open(state['stderr_log'], 'ab') as stream:
@@ -374,7 +408,7 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
                           f'prompt {len(prompt.encode())} B > {MAX_PROMPT_BYTES} B send bound '
                           f'(canonical request {sizes["request_bytes"]} B, compressed {sizes["compressed"]})')
     def remaining():
-        return state['deadline_at'] - time.time()
+        return state['deadline_at'] - state.get('completion_reserve_seconds', 0) - time.time()
     try:
         if state.get('turn_id') is None:
             code, out, err = _cli(LIST_ARGV, state, log, max(1, remaining()))
@@ -433,9 +467,11 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
             if remaining() <= 0:
                 return unverified(request, binding, state, 'original deadline passed before a terminal turn',
                                   cleanup_owner=True)
+            call_seconds = min(CLI_MAX_SECONDS, remaining())
+            wait_ms = max(1, int((call_seconds - min(CLI_CUSHION_SECONDS, call_seconds / 10)) * 1000))
             code, out, err = _cli(['threads', 'wait', thread, '--turn', state['turn_id'], '--timeout',
-                                   f'{max(1, int(min(remaining(), 300)))}s', '--json'],
-                                  state, log, max(1, remaining()) + 30)
+                                   f'{wait_ms}ms', '--json'],
+                                  state, log, call_seconds)
             status = _status(_same_host(_envelope(out), binding)) if code == 0 else None
             if status in TERMINAL:
                 break
@@ -445,13 +481,13 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
             return unverified(request, binding, state, f'turn ended without a result: {status}',
                               stderr=err.decode(errors='replace'), cleanup_owner=True)
         code, out, err = _cli(['threads', 'result', thread, '--turn', state['turn_id'], '--json'],
-                              state, log, max(1, remaining()) + 30)
+                              state, log, remaining())
         if code != 0:
             return unverified(request, binding, state, f'threads result exited {code}',
                               stderr=err.decode(errors='replace'), cleanup_owner=True)
         document, native_exit, native_sha, stderr, pgid, source = collect_result(
             _envelope(out), binding, not_before=state['sent_attempted_at'] or 0,
-            deadline_at=state['deadline_at'], poll=poll, directory=directory)
+            deadline_at=state['deadline_at'] - state.get('completion_reserve_seconds', 0), poll=poll, directory=directory)
         if stderr:
             with open(state['stderr_log'], 'a') as stream:
                 stream.write(stderr)
@@ -463,7 +499,12 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
         document['transport_receipt']['pgid'] = pgid
         return document
     except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
-        return unverified(request, binding, state, str(error),
+        reason = str(error)
+        if isinstance(error, subprocess.TimeoutExpired):
+            reason = ('send_indeterminate_unadopted' if state.get('sent_attempted_at') is not None
+                      and state.get('turn_id') is None else 'cancelled during native CLI call'
+                      if CANCEL.is_set() else 'original deadline passed during native CLI call')
+        return unverified(request, binding, state, reason,
                           cleanup_owner=state.get('sent_attempted_at') is not None)
 
 

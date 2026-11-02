@@ -141,6 +141,50 @@ class FailurePolicyTest(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaises(ValueError):
                 MODULE.decision(self.occurrence(**kind))
 
+    def packet(self):
+        return {"test": "providers/kernel.blackbox.ts::live parity", "command": ["npm", "run", "test:coverage:sharded"],
+                "scope": "blackbox:kernel", "error": "Error: upstream reset\n    at parity (kernel.blackbox.ts:88)",
+                "source": "7be0644bb164763af1526ead7b426e2d5e909f4a", "evidence": ["coverage/shard-1.log:412"]}
+
+    def test_failed_not_introduced_packet_is_pending_post_merge_without_any_waiver(self):
+        entry = self.occurrence(attribution="NOT_INTRODUCED", native_result="FAIL / exit 1", post_merge=self.packet())
+        self.assertEqual("pending post-merge", MODULE.decision(entry))
+        with tempfile.TemporaryDirectory() as directory:
+            report = MODULE.record(Path(directory) / "report.json", entry)
+            self.assertEqual("pending post-merge", report["failures"][0]["disposition"])
+            text = MODULE.render(report)
+            self.assertIn("PENDING POST-MERGE", text); self.assertIn("kernel.blackbox.ts::live parity", text)
+            self.assertIn("upstream reset", text); self.assertIn("coverage/shard-1.log:412", text)
+            for forbidden in ("DELEGATED", "waived", "PASS", "Repair:"):
+                self.assertNotIn(forbidden, text)
+            # the transition to delegated requires a real post-merge repair link
+            with self.assertRaisesRegex(ValueError, "repair link"):
+                MODULE.resolve_post_merge(Path(directory) / "report.json", "failure-1", "")
+            resolved = MODULE.resolve_post_merge(Path(directory) / "report.json", "failure-1",
+                                                 "https://boxes.dev/thread/thr_post_merge_repair")
+            self.assertEqual("delegated / waived", resolved["failures"][0]["disposition"])
+            self.assertEqual(self.packet(), resolved["failures"][0]["resolved_post_merge"])
+            self.assertIn("DELEGATED", MODULE.render(resolved)); self.assertNotIn("PENDING", MODULE.render(resolved))
+
+    def test_pending_post_merge_is_refused_for_incomplete_packets_links_or_nonfailed_results(self):
+        good = self.occurrence(attribution="NOT_INTRODUCED", native_result="FAIL / exit 1", post_merge=self.packet())
+        for field in MODULE.PACKET_FIELDS:
+            with self.subTest(missing=field):
+                with self.assertRaisesRegex(ValueError, "packet requires"):
+                    MODULE.decision({**good, "post_merge": {k: v for k, v in self.packet().items() if k != field}})
+        for result in ("UNVERIFIED", "UNKNOWN"):
+            with self.subTest(native_result=result), self.assertRaisesRegex(ValueError, "actually ran and failed"):
+                MODULE.decision({**good, "native_result": result})
+        for attribution in ("INTRODUCED", "UNKNOWN"):
+            with self.subTest(attribution=attribution), self.assertRaisesRegex(ValueError, "stay blocking"):
+                MODULE.decision({**good, "attribution": attribution})
+        with self.assertRaisesRegex(ValueError, "cannot carry"):
+            MODULE.decision({**good, "repair_agent": "https://boxes.dev/thread/thr_x"})
+        with self.assertRaisesRegex(ValueError, "cannot carry"):
+            MODULE.decision({**good, "external_provider": {"name": "p", "reason": "outage"}})
+        with self.assertRaisesRegex(ValueError, "cannot carry"):
+            MODULE.decision({**good, "execute_unverified": True})
+
     def test_canonical_instructions_and_tools_are_wired(self):
         deploy = (ROOT / ".claude/commands/deploy.md").read_text()
         policy = (ROOT / ".claude/shared/deploy-failure-policy.md").read_text()

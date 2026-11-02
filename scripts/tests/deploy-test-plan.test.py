@@ -109,13 +109,16 @@ class Selection(unittest.TestCase):
         self.assertTrue(recipe['aggregate'])
         self.assertIn('--stdio',bindings['be']['command'])
 
-    def test_remote_inventory_quotes_the_prepared_path(self):
-        from deploy_test_bindings import generate
+    def test_ssh_inventory_is_refused_until_a_remote_cancel_path_exists(self):
+        from deploy_test_bindings import generate  # finding 4447557475: no remote cancel/cleanup over ssh
         inventory={'be':{'id':'be-worker','transport':'ssh','worker_host':'test-worker',
                          'worker_root':'/prepared source'}}
-        binding=generate(self.template,inventory,p.ROOT)['be']
-        self.assertEqual(['ssh','test-worker'],binding['command'][:2])
-        self.assertIn("'/prepared source/scripts/deploy_test_worker.py'",binding['command'][2])
+        with self.assertRaisesRegex(ValueError,'be: ssh transport has no remote cancel/cleanup path'):
+            generate(self.template,inventory,p.ROOT)
+        boxes={'be':{'id':'be-worker','transport':'boxes-thread','worker_thread':'ph-a','worker_host':'devbox-a',
+                     'coordinator_thread':'ph-c','worker_root':'/prepared source','timeout_seconds':60,
+                     'env':{'CONDUCTOR_WORKSPACE_NAME':'be','CONDUCTOR_PORT':'12000'}}}
+        self.assertEqual('--thread',generate(self.template,boxes,p.ROOT)['be']['command'][2])
 
     def test_native_cloud_binding_preserves_each_task_in_the_plan(self):
         from deploy_test_bindings import generate

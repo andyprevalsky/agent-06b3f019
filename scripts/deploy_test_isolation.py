@@ -24,6 +24,10 @@ def validate(plan, root):
                 raise ValueError('cloud smoke must use the actual cloud benchmark launcher')
             continue
         if mode == 'ssh':
+            # Fail closed on saved plans too: timeout/cancel cannot reach the remote worker (finding 4447557475).
+            raise ValueError(f"{gate.get('name')}: ssh transport has no remote cancel/cleanup path "
+                             '(finding 4447557475); use boxes-thread or local-isolated')
+        if mode == 'ssh':
             host = gate.get('worker_host')
             if (not isinstance(host, str) or not host or host.startswith('-')
                     or Path(args[0]).name != 'ssh' or len(args) < 3 or args[1] != host):

@@ -128,6 +128,7 @@ def run_case(root, folder, name, command):
     log = folder / (name + '.log')
     temporary = Path(tempfile.mkdtemp(prefix='cloudbench-local-' + name + '-', dir='/var/tmp'))
     env = {**os.environ, 'TMPDIR': str(temporary), 'PYTHONDONTWRITEBYTECODE': '1'}
+    env['PATH'] = str(root / 'agents' / 'venv' / 'bin') + os.pathsep + env.get('PATH', '')
     temporary_identity = temporary.stat()
     supervisor_receipt = folder / (name + '.supervisor.json')
     supervisor = Path(__file__).with_name('cloudbench-local-supervisor.py')

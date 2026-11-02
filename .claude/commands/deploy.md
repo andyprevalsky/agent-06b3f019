@@ -2663,6 +2663,18 @@ an actual failed test. Record the returned repair links in DELEGATED; do not
 wait for acknowledgement or repair completion. Failures discovered by the
 post-merge production checks use the same protocol when they occur.
 
+After recording each actual repair link with the cycle's `resolve` action,
+check completion before the final scorecard:
+
+```bash
+python3 scripts/deploy_test_cycle.py complete \
+  --plan "$DEPLOY_TEST_CYCLE_STATE_DIR/plan.json" \
+  --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR"
+```
+
+A non-zero `DEPLOY_CYCLE INCOMPLETE` result is a named blocker: dispatch and
+resolve the remaining packets before claiming the deploy complete.
+
 ## Step 13: Wait for deploys
 
 Determine which deploy workflows are relevant based on what files changed in the PR. Check using `git diff "$DEPLOY_MERGED_SHA^1" "$DEPLOY_MERGED_SHA" --name-only`; never substitute the latest `main`, which may already belong to a later PR:

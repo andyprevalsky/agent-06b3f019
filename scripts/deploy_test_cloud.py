@@ -64,9 +64,12 @@ def collect_fleet(request, root, fleet, started, native_exit):
             issues = validate_run_file(child, [name], not_before_epoch=started,
                                        expected_execution_provenance=provenance)
             finish = float((fleet / name / 'bench-e2e.finished-epoch').read_text())
-            task = read(child)['tasks'][0]
+            tasks = read(child).get('tasks')
+            if issues or not isinstance(tasks, list) or len(tasks) != 1 or not isinstance(tasks[0], dict):
+                raise ValueError('unverified native task document')  # finding 4447557526
+            task = tasks[0]
             outcome = str(task.get('benchmark_status') or task.get('status') or '').upper()
-            if issues or not math.isfinite(finish) or finish < started or task.get('cleanup_failure'):
+            if not math.isfinite(finish) or finish < started or task.get('cleanup_failure'):
                 raise ValueError('unverified native task or task cleanup')
             if task.get('passed') is True and outcome == 'PASSED':
                 cases[name] = 'PASS'
@@ -225,13 +228,24 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=ROOT)
     args = parser.parse_args()
+    request = None
     try:
-        result = execute(read(Path(os.environ['DEPLOY_GATE_REQUEST'])), args.root.resolve())
+        request = read(Path(os.environ['DEPLOY_GATE_REQUEST']))
+        result = execute(request, args.root.resolve())
         write(Path(os.environ['DEPLOY_GATE_RESULT']), result)
         return 0 if result['complete'] and all(v == 'PASS' for v in result['cases'].values()) else 1
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f'DEPLOY_CLOUD BLOCKED: {error}', file=sys.stderr)
         return 2
+    except Exception as error:  # unexpected: still a fail-closed UNVERIFIED receipt, distinct exit (finding 4447557526)
+        print(f'DEPLOY_CLOUD UNVERIFIED: {type(error).__name__}: {error}', file=sys.stderr)
+        if isinstance(request, dict) and 'DEPLOY_GATE_RESULT' in os.environ:
+            receipt = {k: request.get(k) for k in ('token', 'source', 'gate')}
+            receipt.update(cases=dict.fromkeys(request.get('checks', []), 'UNVERIFIED'), complete=False,
+                           cleanup_complete=False, reused=False, evidence={},
+                           reason=f'unexpected adapter error: {type(error).__name__}: {error}')
+            write(Path(os.environ['DEPLOY_GATE_RESULT']), receipt)
+        return 3
 
 
 if __name__ == '__main__':
