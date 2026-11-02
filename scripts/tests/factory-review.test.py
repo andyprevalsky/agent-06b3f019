@@ -1879,6 +1879,116 @@ class LedgerSourceTest(unittest.TestCase):
         self.assertEqual(completed.consumed_approval_durations, (3600.0,))
         self.assertEqual(FACTORY_REVIEW.deploy_duration(completed), 5000.0)
 
+    def test_explicit_run_identity_keeps_post_merge_events_with_original_stages(self) -> None:
+        rows = [
+            stage("run-1", "prettier", 0, 10),
+            stage("run-1", "smoke", 10, 40, status="failed"),
+            stage("other-run", "prettier", 45, 50),
+        ]
+        for name, value, at, branch in (
+            ("stage-start", "production-verify", 60, "feat/x"),
+            ("stage-finish", "production-verify", 120, "main"),
+            ("outcome", "completed", 130, "feat/x-2"),
+        ):
+            rows.append({**event("deploy", name, value, at, branch), "run_id": "run-1"})
+        turns = FACTORY_REVIEW.ledger_deploy_turns(sorted(rows, key=LEDGER.row_epoch))
+        completed = [turn for turn in turns if turn.status == "completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0].turn_id, "run-1")
+        self.assertEqual(completed[0].duration, 130)
+        self.assertEqual(
+            FACTORY_REVIEW.deploy_turn_values(completed[0])["Production verify"].durations,
+            (60,),
+        )
+        self.assertEqual(next(turn for turn in turns if turn.turn_id == "other-run").status, "incomplete")
+
+    def test_unknown_explicit_run_never_falls_back_to_a_matching_branch(self) -> None:
+        rows = [stage("run-1", "prettier", 0, 10),
+                {**event("deploy", "outcome", "completed", 20), "run_id": "not-collected"}]
+        turns = FACTORY_REVIEW.ledger_deploy_turns(rows)
+        self.assertEqual(next(turn for turn in turns if turn.turn_id == "run-1").status, "incomplete")
+        self.assertFalse(any(turn.status == "completed" for turn in turns))
+
+    def test_reporting_only_coverage_is_not_a_runtime_test_execution(self) -> None:
+        turns = FACTORY_REVIEW.ledger_deploy_turns([
+            stage("run-1", "backend-coverage-report", 0, 36),
+            {**event("deploy", "outcome", "completed", 40), "run_id": "run-1"},
+        ])
+        values = FACTORY_REVIEW.deploy_turn_values(turns[0])
+        self.assertEqual(values["Coverage"].wall_seconds, 36)
+        self.assertEqual(values["Runtime blackbox"].wall_seconds, 0)
+
+    def test_event_writer_binds_only_active_deploy_run(self) -> None:
+        run_root = self.root / "runs"
+        run_dir = run_root / "run-1"
+        run_dir.mkdir(parents=True)
+        (run_root / "current").write_text("run-1\n")
+        metadata_path = run_dir / "metadata.json"
+        metadata_path.write_text(json.dumps({"run_id": "run-1", "status": "active"}))
+        log = self.root / "events.jsonl"
+        def emit(workflow: str, name: str, value: str) -> dict:
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/record_factory_event.py"), workflow, name, value],
+                cwd=ROOT,
+                env={"FACTORY_EVENT_LOG": str(log), "DEPLOY_RUN_ROOT": str(run_root)},
+                text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(log.read_text().splitlines()[-1])
+        self.assertEqual(emit("deploy", "outcome", "completed").get("run_id"), "run-1")
+        self.assertIsNone(emit("rca", "outcome", "fixed").get("run_id"))
+        metadata_path.write_text(json.dumps({"run_id": "run-1", "status": "completed"}))
+        self.assertIsNone(emit("deploy", "outcome", "completed").get("run_id"))
+        (run_root / "current").write_text("../foreign\n")
+        self.assertIsNone(emit("deploy", "outcome", "completed").get("run_id"))
+
+    def test_append_only_identity_enrichment_is_published_once_and_read_once(self) -> None:
+        original = event("deploy", "outcome", "completed", 130, "feat/x-2")
+        enriched = {**original, "run_id": "run-1"}
+        local = self.root / "context"
+        local.mkdir()
+        (local / "factory-events.jsonl").write_text(json.dumps(enriched) + "\n")
+        old = json.dumps(original) + "\n"
+        self.assertEqual(LEDGER.pending_rows(old, [local])[0]["run_id"], "run-1")
+        combined = old + json.dumps(enriched) + "\n"
+        self.assertEqual(LEDGER.pending_rows(combined, [local]), [])
+        (local / "factory-events.jsonl").write_text(combined)
+        self.assertEqual(LEDGER.pending_rows("", [local])[0]["run_id"], "run-1")
+        original_metadata = {**original, "telemetry": {"usage": {"cost_usd": 3.0}}}
+        changed_metadata = {**enriched, "telemetry": {"usage": {"cost_usd": 0.0}}}
+        self.assertFalse(LEDGER.is_identity_enrichment(original_metadata, changed_metadata))
+        ledger = self.root / "factory.jsonl"
+        ledger.write_text(json.dumps(stage("run-1", "prettier", 0, 10)) + "\n" + combined)
+        rows = FACTORY_REVIEW.load_ledger_rows(ledger, [])
+        self.assertEqual(len(rows), 2)
+        turns = FACTORY_REVIEW.ledger_deploy_turns(rows)
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(turns[0].duration, 130)
+
+    def test_finished_stage_admission_retains_identity_until_deploy_outcome(self) -> None:
+        run_root = self.root / "runs"
+        log = self.root / "events.jsonl"
+        environment = {"DEPLOY_RUN_ROOT": str(run_root), "FACTORY_EVENT_LOG": str(log)}
+        for args in (("--start", "--run-id", "run-1"), ("--finish",)):
+            result = subprocess.run(["bash", str(ROOT / "scripts/run-deploy-stage"), *args],
+                                    cwd=ROOT, env=environment, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            if args[0] == "--start":
+                blocked = subprocess.run([sys.executable, str(ROOT / "scripts/record_factory_event.py"),
+                                          "deploy", "outcome", "blocked"], cwd=ROOT,
+                                         env=environment, text=True, capture_output=True)
+                self.assertEqual(blocked.returncode, 0, blocked.stderr)
+                self.assertEqual((run_root / "factory-current").read_text().strip(), "run-1")
+        self.assertFalse((run_root / "current").exists())
+        self.assertEqual((run_root / "factory-current").read_text().strip(), "run-1")
+        for name, value in (("stage-start", "production-verify"), ("outcome", "completed")):
+            result = subprocess.run([sys.executable, str(ROOT / "scripts/record_factory_event.py"),
+                                     "deploy", name, value], cwd=ROOT, env=environment,
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(log.read_text().splitlines()[-1])["run_id"], "run-1")
+        self.assertFalse((run_root / "factory-current").exists())
+
     def test_run_without_outcome_is_excluded_not_zero(self) -> None:
         turns = FACTORY_REVIEW.ledger_deploy_turns([stage("run-1", "prettier", 0, 10)])
         self.assertEqual(turns[0].status, "incomplete")
