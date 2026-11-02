@@ -163,7 +163,7 @@ describe('app-wiring/hooks', () => {
           networkTracking: true,
           webVitals: true,
           frustrationInteractions: true,
-          elementInteractions: { viewportContentUpdated: { enabled: false } },
+          elementInteractions: { viewportContentUpdated: { enabled: true } },
         },
         transport: { type: 'fetch', enableKeepalive: true },
       });

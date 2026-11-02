@@ -54,9 +54,7 @@ export function initAmplitude(): void {
       networkTracking: true,
       webVitals: true,
       frustrationInteractions: true,
-      // SDK exposure maps retain removed elements on query-only navigation.
-      // Keep click/change capture and replay without retaining old trajectories.
-      elementInteractions: { viewportContentUpdated: { enabled: false } },
+      elementInteractions: { viewportContentUpdated: { enabled: true } },
     },
     transport: { type: 'fetch', enableKeepalive: true },
   });
