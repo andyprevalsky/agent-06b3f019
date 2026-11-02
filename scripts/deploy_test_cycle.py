@@ -123,7 +123,8 @@ def input_fingerprints(plan: dict, root: Path) -> dict:
     # Runtime configuration is an input even when Git ignores its secrets and
     # the gate narrows its source globs. Never let source selection hide it.
     runtime_config = {}
-    for rel in [".env", "env.sh", "back-end/.env", "agents/.env", "front-end/.env", "front-end/.env.local"]:
+    for rel in [".env", "env.sh", "back-end/.env", "agents/.env", "agents/.env.benchmark-temporal",
+                "front-end/.env", "front-end/.env.local"]:
         if (root / rel).is_file():
             runtime_config[rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
     return {g["name"]: digest({"files": {p: h for p, h in files.items()
@@ -371,7 +372,10 @@ def adjudicate(state: dict, report: dict) -> None:
                 or entry.get("native_result") != failure["native_result"]):
             raise ValueError("RCA receipt has the wrong source or check")
         disposition = decision(entry)
-        if disposition != "blocking" and not failure["complete"]:
+        if disposition == "execution required":
+            if failure["complete"]:
+                raise ValueError("execution recovery requires an incomplete occurrence")
+        elif disposition != "blocking" and not failure["complete"]:
             raise ValueError("unverified/incomplete execution cannot be waived as a completed case")
         decisions.append((failure, entry, disposition))
     # Atomic transition: UNKNOWN leaves every occurrence open, never drops peers.
@@ -381,7 +385,7 @@ def adjudicate(state: dict, report: dict) -> None:
     for failure, entry, disposition in decisions:
         failure["rca"] = entry
         failure["disposition"] = disposition
-        if disposition == "blocking":
+        if disposition in {"blocking", "execution required"}:
             repair.add(failure["gate"])
         else:
             state["skips"][failure["check"]] = {"source": state["source"], "rca": entry,
@@ -420,7 +424,7 @@ def focused_plan(state: dict, plan: dict, payload: dict) -> None:
         if not task.get("checks") or not set(task["checks"]) <= allowed[gate]:
             raise ValueError("focused check list is not in the gate inventory")
         required = {f["check"].split("/", 1)[1] for f in state["failures"]
-                    if f["gate"] == gate and f.get("disposition") == "blocking"}
+                    if f["gate"] == gate and f.get("disposition") in {"blocking", "execution required"}}
         if not required <= set(task["checks"]):
             raise ValueError("focused command omits an unresolved failing check")
         if 'worker_recipe' in task:

@@ -29,6 +29,11 @@ def decision(entry: dict) -> str:
         raise ValueError("Failure identity, description, evidence and original native result are required")
     link = entry.get("repair_agent")
     external = entry.get("external_provider")
+    execute = entry.get("execute_unverified", False)
+    if type(execute) is not bool:
+        raise ValueError("execute_unverified must be an explicit boolean")
+    if execute and (entry["native_result"] != "UNVERIFIED" or not link or external):
+        raise ValueError("Execution recovery requires an unverified result and a repair handoff")
     if external:
         if link:
             raise ValueError("External provider failures must not have a repair handoff")
@@ -45,7 +50,7 @@ def decision(entry: dict) -> str:
         boxes = u.netloc == "boxes.dev" and re.fullmatch(r"/thread/[A-Za-z0-9_-]+", unquote(u.path)) is not None
         if u.scheme != "https" or not (rose or boxes):
             raise ValueError("A boxes.dev repair-thread or Rose repair-agent link is required")
-        return "delegated / waived"
+        return "execution required" if execute else "delegated / waived"
     return "blocking"
 
 
@@ -78,6 +83,10 @@ def render(report: dict, scorecard: str = "") -> str:
         if blocking:
             lines.append("BLOCKING")
             lines.extend(f"- {e['description']} — {e['native_result']} · Evidence: {e['evidence']}" for e in blocking)
+    executions = [e for e in report["failures"] if e["disposition"] == "execution required"]
+    if executions:
+        lines.extend(["", "EXECUTION REQUIRED"])
+        lines.extend(f"- {e['description']} — {e['native_result']} · Evidence: {e['evidence']} · Repair: {e['repair_agent']}" for e in executions)
     handed = [e for e in report["failures"] if e["disposition"] == "delegated / waived"]
     if handed:
         lines.extend(["", "DELEGATED"])

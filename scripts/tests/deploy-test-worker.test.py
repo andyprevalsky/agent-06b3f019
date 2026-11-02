@@ -69,6 +69,50 @@ class Worker(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'overwrite'):
                 worker.prepare_checkout(self.root,target)
 
+    def test_copy_config_preserves_benchmark_temporal_routing(self):
+        (self.root/'.gitignore').write_text('.env\n.env.*\n')
+        subprocess.run(['git', '-C', str(self.root), 'add', '.gitignore'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'ignore private config'], check=True)
+        agents = self.root/'agents'
+        agents.mkdir()
+        (agents/'.env').write_text(
+            'TEMPORAL_ADDRESS=cloud.fixture:7233\n'
+            'TEMPORAL_NAMESPACE=rose-labs-us-east-1.tch2n\n'
+            'TEMPORAL_API_KEY=fixture-prod\n')
+        override = agents/'.env.benchmark-temporal'
+        override.write_text(
+            'CLOUDBENCH_GUEST_TEMPORAL_ADDRESS=bench.fixture:7233\n'
+            'CLOUDBENCH_GUEST_TEMPORAL_NAMESPACE=rose-labs-bench.tch2n\n'
+            'CLOUDBENCH_GUEST_TEMPORAL_API_KEY=fixture-bench\n')
+        for config in (agents/'.env', override):
+            config.chmod(0o600)
+        original_override = override.read_bytes()
+        original_owner = override.stat().st_uid
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(('TEMPORAL_', 'CLOUDBENCH_GUEST_TEMPORAL'))}
+
+        def route(checkout):
+            return subprocess.run(
+                ['bash', '-c', '. scripts/lib/cloudbench-env.sh && stack_bench_temporal_exports "$1"',
+                 '_', str(checkout/'agents/.env')],
+                cwd=ROOT, env=env, text=True, capture_output=True, check=False)
+
+        self.assertEqual(0, route(self.root).returncode)
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)/'worker'
+            worker.prepare_checkout(self.root, target, copy_config=True)
+            result = route(target)
+            self.assertEqual(0, result.returncode, result.stderr)
+            copied = target/'agents/.env.benchmark-temporal'
+            self.assertEqual(original_override, override.read_bytes())
+            self.assertEqual(original_override, copied.read_bytes())
+            self.assertEqual(0o600, copied.stat().st_mode & 0o777)
+            self.assertEqual(0o600, override.stat().st_mode & 0o777)
+            self.assertEqual(original_owner, override.stat().st_uid)
+            self.assertEqual(os.geteuid(), copied.stat().st_uid)
+            self.assertIn('TEMPORAL_NAMESPACE=rose-labs-bench.tch2n', result.stdout)
+
     def test_private_umask_preserves_source_but_executable_changes_do_not(self):
         (self.root/'code').chmod(0o644)
         executable = self.root/'run-fixture'
@@ -337,6 +381,153 @@ class Cloud(unittest.TestCase):
         self.assertNotIn('failing',argv)
         self.assertEqual('1',launch.call_args.kwargs['env']['CLOUDBENCH_SKIP_LOCAL_PATCH'])
         self.assertTrue(result['complete'])
+
+
+class CloudCampaign(unittest.TestCase):
+    def setUp(self):
+        Cloud.setUp(self)
+        import shutil
+        self.runs = self.root/'.context/runs'
+        self.runs.mkdir(parents=True)
+        shutil.rmtree(self.fleet)
+        self.campaign = self.root/'.context/campaigns/request'
+        self.campaign.mkdir(parents=True)
+        self.request['checks'] = [f'task-{i}' for i in range(17)]
+        jobs=[]
+        for i,name in enumerate(self.request['checks']):
+            fleet=self.runs/f'fleet-{i}'
+            cycle.write(fleet/'execution-provenance.json',self.binding)
+            cycle.write(fleet/'_batch/lifecycle.json',{'version':1,'status':'verified','run_id':fleet.name,
+                'workspace_root':str(self.root),'controller_exit_code':0,'fleet_owner_token':f'owner-{i}',
+                'hub_publication_failed':False,'audit_sha256':'b'*64})
+            cycle.write(fleet/'_batch/run.json',self.provenance.stamp_run_document({
+                'run_id':fleet.name,'timestamp':datetime.fromtimestamp(2,timezone.utc).isoformat(),
+                'tasks':[{'name':name,'passed':True,'benchmark_status':'PASSED','status':'COMPLETED'}],
+                'summary':{'total':1}},self.binding))
+            cycle.write(fleet/name/'cloudbench-run.json',cycle.read(fleet/'_batch/run.json'))
+            (fleet/name/'bench-e2e.finished-epoch').write_text('3')
+            (fleet/'teardown-ownership').mkdir()
+            (fleet/'teardown-ownership/source-audit').write_text('sha256='+'b'*64+'\n')
+            (fleet/'teardown-ownership/provider-teardown-verified.epoch').write_text('3')
+            log=self.campaign/f'job-{i}.log'
+            log.write_text(f'{self.root}/scripts/run-bench monitor {fleet}\n')
+            jobs.append({'job_id':f'job-{i}','task':name,'run':1,'attempt':1,'attempts':[],
+                'status':'passed','controller_exit_code':0,'log':str(log),
+                'started_at':datetime.fromtimestamp(2,timezone.utc).isoformat(),
+                'finished_at':datetime.fromtimestamp(3,timezone.utc).isoformat()})
+        self.summary={'campaign_id':'request','runs':1,'retry_infra':0,'concurrency':16,'peak_concurrency':16,
+            'task_count':17,'total_jobs':17,'status':'passed','jobs':jobs,
+            'started_at':datetime.fromtimestamp(2,timezone.utc).isoformat(),
+            'finished_at':datetime.fromtimestamp(3,timezone.utc).isoformat()}
+        self.seal_campaign(self.campaign)
+
+    def seal_campaign(self, directory):
+        import runpy, hashlib
+        cycle.write(directory/'summary.json',self.summary)
+        native=runpy.run_path(str(ROOT/'scripts/run-bench-campaign.py'))
+        record=native['campaign_group_record'](self.summary)
+        cycle.write(directory/'hub-group.json',record)
+        cycle.write(directory/'hub-group-publication-ack.private.json',{'pid':2147483647,'token':'c'*32,
+            'record_sha256':hashlib.sha256(json.dumps(record,sort_keys=True).encode()).hexdigest()})
+
+    def tearDown(self): Cloud.tearDown(self)
+
+    def campaign_collect(self):
+        return self.cloud.collect_campaign(self.request,self.root,self.runs,self.campaign,1,0,16)
+
+    def test_all_seventeen_native_receipts_survive_bounded_campaign(self):
+        cases,details,cleaned,_=self.campaign_collect()
+        self.assertEqual(dict.fromkeys(self.request['checks'],'PASS'),cases)
+        self.assertEqual(17,len(details));self.assertTrue(cleaned)
+
+    def test_queued_job_and_missing_native_receipt_remain_unknown(self):
+        self.summary['status']='failed';self.summary['jobs'][-1]['status']='queued'
+        cycle.write(self.campaign/'summary.json',self.summary)
+        cases,_,cleaned,_=self.campaign_collect()
+        self.assertEqual('UNVERIFIED',cases['task-16']);self.assertEqual('PASS',cases['task-0'])
+        self.assertFalse(cleaned)
+
+    def test_wrong_provenance_and_missing_cleanup_are_not_passed(self):
+        for path in [self.runs/'fleet-16/execution-provenance.json',
+                     self.runs/'fleet-15/teardown-ownership/provider-teardown-verified.epoch']:
+            path.unlink()
+        cases,_,cleaned,_=self.campaign_collect()
+        self.assertEqual('UNVERIFIED',cases['task-16']);self.assertEqual('UNVERIFIED',cases['task-15'])
+        self.assertEqual('PASS',cases['task-0']);self.assertFalse(cleaned)
+
+    def test_duplicate_job_and_over_capacity_are_rejected(self):
+        for field,value in [('jobs',self.summary['jobs'][:-1]+[self.summary['jobs'][0]]),
+                            ('peak_concurrency',17)]:
+            with self.subTest(field=field):
+                cycle.write(self.campaign/'summary.json',{**self.summary,field:value})
+                with self.assertRaises(ValueError):self.campaign_collect()
+
+    def test_native_failure_stays_failed_and_passing_peers_remain_passed(self):
+        fleet=self.runs/'fleet-16'
+        for path in [fleet/'_batch/run.json',fleet/'task-16/cloudbench-run.json']:
+            doc=cycle.read(path);doc['tasks'][0].update(passed=False,benchmark_status='FAILED',status='FAILED')
+            cycle.write(path,doc)
+        doc=cycle.read(fleet/'_batch/lifecycle.json');doc['controller_exit_code']=1
+        cycle.write(fleet/'_batch/lifecycle.json',doc)
+        self.summary['status']='failed';self.summary['jobs'][-1].update(status='failed',controller_exit_code=1)
+        self.seal_campaign(self.campaign)
+        cases,_,cleaned,_=self.cloud.collect_campaign(self.request,self.root,self.runs,self.campaign,1,1,16)
+        self.assertEqual('FAIL',cases['task-16']);self.assertEqual('PASS',cases['task-0']);self.assertTrue(cleaned)
+
+    def test_execute_seventeen_tasks_crosses_real_capacity_and_receipt_boundary(self):
+        import shutil
+        import runpy
+        capacity=runpy.run_path(str(ROOT/'scripts/cloudbench-provider-capacity.py'))
+        def launch(argv, **kwargs):
+            width=int(argv[argv.index('--concurrency')+1]) if '--concurrency' in argv else 17
+            admitted=capacity['check'](width,browser_provider='tilion')
+            if admitted:
+                return admitted,False,False,False
+            target_runs=Path(kwargs['env']['CLOUDBENCH_RUNS_ROOT'])
+            target_campaign=Path(kwargs['env']['RUN_BENCH_CAMPAIGN_ROOT'])/kwargs['env']['RUN_BENCH_CAMPAIGN_ID']
+            target_campaign.mkdir(parents=True)
+            for index,job in enumerate(self.summary['jobs']):
+                destination=target_runs/f'fleet-{index}'
+                shutil.copytree(self.runs/f'fleet-{index}',destination)
+                log=target_campaign/f'job-{index}.log'
+                log.write_text(f'{self.root}/scripts/run-bench monitor {destination}\n')
+                job['log']=str(log)
+            self.summary['campaign_id']=target_campaign.name
+            self.seal_campaign(target_campaign)
+            return 0,False,False,False
+        with patch.dict(os.environ,{'CLOUDBENCH_BROWSER_PROVIDER':'tilion','CLOUDBENCH_PROVIDER_LIMITS_FILE':str(ROOT/'scripts/cloudbench-provider-limits.json')}), \
+             patch.object(self.cloud,'source',return_value=self.request['source']), \
+             patch.object(self.cloud,'run_command',side_effect=launch), \
+             patch.object(self.cloud.time,'time',return_value=1):
+            result=self.cloud.execute(self.request,self.root)
+        self.assertEqual(dict.fromkeys(self.request['checks'],'PASS'),result['cases'])
+        self.assertTrue(result['complete']);self.assertTrue(result['cleanup_complete'])
+
+    def test_parent_cleanup_and_publication_gaps_remain_incomplete(self):
+        self.test_native_failure_stays_failed_and_passing_peers_remain_passed()
+        for field,value in [('shared_inventory_failed',True),
+                            ('startup_cohorts',[{'cleanup_budget_retirement_pending':True}])]:
+            with self.subTest(field=field):
+                cycle.write(self.campaign/'summary.json',{**self.summary,field:value})
+                self.assertFalse(self.cloud.collect_campaign(self.request,self.root,self.runs,self.campaign,1,1,16)[2])
+        cycle.write(self.campaign/'summary.json',self.summary)
+        ack=self.campaign/'hub-group-publication-ack.private.json'
+        ack.unlink()
+        self.assertFalse(self.cloud.collect_campaign(self.request,self.root,self.runs,self.campaign,1,1,16)[2])
+        self.seal_campaign(self.campaign)
+        value=cycle.read(ack);value['record_sha256']='0'*64;cycle.write(ack,value)
+        self.assertFalse(self.cloud.collect_campaign(self.request,self.root,self.runs,self.campaign,1,1,16)[2])
+
+    def test_campaign_command_preserves_inventory_and_uses_registry_capacity(self):
+        with patch.dict(os.environ,{'CLOUDBENCH_BROWSER_PROVIDER':'tilion','CLOUDBENCH_PROVIDER_LIMITS_FILE':str(ROOT/'scripts/cloudbench-provider-limits.json')}), \
+             patch.object(self.cloud,'source',return_value=self.request['source']), \
+             patch.object(self.cloud,'run_command',return_value=(0,False,False,False)) as launch, \
+             patch.object(self.cloud,'collect_campaign',return_value=(dict.fromkeys(self.request['checks'],'PASS'),{},True,'campaign')):
+            result=self.cloud.execute(self.request,self.root)
+        argv=launch.call_args.args[0]
+        self.assertEqual(['bash','scripts/run-bench',*self.request['checks'],'--runs','1',
+                          '--concurrency','16','--ref','a'*40],argv)
+        self.assertNotIn('--wait',argv);self.assertTrue(result['complete'])
 
 
 FAKE_CLI = """#!/usr/bin/env python3

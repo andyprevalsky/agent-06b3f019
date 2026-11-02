@@ -41,7 +41,8 @@ def prepare_checkout(root: Path, target: Path, copy_config: bool = False) -> dic
     subprocess.run(['git', 'clone', '--quiet', '--no-hardlinks', '--local', str(root), str(target)], check=True)
     subprocess.run(['git', 'checkout', '--quiet', '--detach', expected['head']], cwd=target, check=True)
     if copy_config:
-        for rel in ('.env', 'env.sh', 'back-end/.env', 'agents/.env', 'front-end/.env', 'front-end/.env.local'):
+        for rel in ('.env', 'env.sh', 'back-end/.env', 'agents/.env', 'agents/.env.benchmark-temporal',
+                    'front-end/.env', 'front-end/.env.local'):
             origin, destination = root / rel, target / rel
             if origin.is_file():
                 destination.parent.mkdir(parents=True, exist_ok=True)

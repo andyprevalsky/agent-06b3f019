@@ -192,6 +192,11 @@ of its tests ran. A mixed skip/run gate must use this protocol.
    exception becomes SKIP. Original native failures remain in the history.
    **If all failures are waived, advance without rerunning them.** An unexecuted
    check is not a waiver and cannot be hidden by a provider exception.
+   For an incomplete execution whose underlying defect has a canonical
+   NOT_INTRODUCED repair handoff, explicitly set `execute_unverified: true` in
+   that occurrence's report to enter execution recovery. It records
+   `execution required`, not SKIP: focused, full-failed and final runs remain
+   required. This cannot authorize UNKNOWN causes or external-provider waivers.
 5. For actual fixes, refresh to the new frozen source/plan, then run the quick
    checks again. Use `focus --input focused.json` to name the original failing
    checks plus relevant regressions and their real focused argv. Every blocking

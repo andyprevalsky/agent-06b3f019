@@ -31,6 +31,32 @@ class FailurePolicyTest(unittest.TestCase):
         self.assertEqual(MODULE.decision(e), "delegated / waived")
         self.assertNotIn("acknowledgement", e)
 
+    def test_execution_recovery_is_recorded_and_rendered_without_a_waiver(self):
+        entry = self.occurrence(attribution="NOT_INTRODUCED", native_result="UNVERIFIED",
+            repair_agent="https://boxes.dev/thread/thr_owned_repair", execute_unverified=True)
+        self.assertEqual("execution required", MODULE.decision(entry))
+        with tempfile.TemporaryDirectory() as directory:
+            report = MODULE.record(Path(directory)/"report.json", entry)
+            self.assertEqual("execution required", report["failures"][0]["disposition"])
+            for prefix in ("", "Existing scorecard"):
+                text = MODULE.render(report, prefix)
+                self.assertIn("EXECUTION REQUIRED", text)
+                self.assertIn("UNVERIFIED", text)
+                self.assertIn(entry["evidence"], text)
+                self.assertNotIn("DELEGATED", text)
+                self.assertNotIn("waived", text)
+                self.assertNotIn("PASS", text)
+
+    def test_execution_recovery_cannot_override_waiver_authority(self):
+        original = self.occurrence(attribution="NOT_INTRODUCED", native_result="UNVERIFIED",
+            repair_agent="https://boxes.dev/thread/thr_owned_repair", execute_unverified=True)
+        for changes in ({"attribution":"UNKNOWN"}, {"attribution":"INTRODUCED"},
+                        {"repair_agent":None}, {"native_result":"FAIL"},
+                        {"execute_unverified":"true"},
+                        {"external_provider":{"name":"provider","reason":"outage"}}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                MODULE.decision({**original, **changes})
+
     def test_nonintroduced_without_handoff_is_not_silently_waived(self):
         self.assertEqual(MODULE.decision(self.occurrence(attribution="NOT_INTRODUCED")), "blocking")
 

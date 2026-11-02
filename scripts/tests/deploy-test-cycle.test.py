@@ -132,6 +132,46 @@ class Cycle(unittest.TestCase):
             c.adjudicate(self.state, self.report(f, 'NOT_INTRODUCED',
                          external_provider={'name': 'provider', 'reason': 'outage'}))
 
+    def test_handed_off_unverified_execution_requires_full_recovery_not_skip(self):
+        f = self.failure()
+        f['complete'] = False
+        f['native_result'] = 'UNVERIFIED'
+        c.adjudicate(self.state, self.report(f, 'NOT_INTRODUCED',
+                     repair_agent='https://boxes.dev/thread/repair', execute_unverified=True))
+        self.assertEqual('needs-focused-plan', self.state['phase'])
+        self.assertFalse(self.state['ready'])
+        self.assertEqual({}, self.state['skips'])
+        self.assertEqual(['api'], self.state['repair_gates'])
+        self.assertEqual('execution required', f['disposition'])
+        self.assertEqual('NOT_INTRODUCED', f['rca']['attribution'])
+        with self.assertRaises(ValueError):
+            c.focused_plan(self.state, self.plan, {'source': self.state['source'],
+                           'gates': {'api': {'command': ['true'], 'checks': ['b']}}})
+        c.focused_plan(self.state, self.plan, {'source': self.state['source'],
+                       'gates': {'api': {'command': ['true'], 'checks': ['a']}}})
+        c.advance(self.state, [self.result(a='PASS')])
+        self.assertEqual('failed-gates', self.state['phase'])
+        self.assertEqual(['a', 'b'], c.records(self.plan, self.state)[0]['checks'])
+        self.assertFalse(self.state['ready'])
+        c.advance(self.state, [self.result(a='PASS', b='PASS')])
+        c.advance(self.state, [self.result('static', lint='PASS')])
+        self.assertEqual('final', self.state['phase'])
+        self.assertEqual({'api', 'ui'}, {g['name'] for g in c.records(self.plan, self.state)})
+        self.assertFalse(self.state['ready'])
+
+    def test_execution_recovery_cannot_authorize_unknown_or_external_waivers(self):
+        for attribution, fields in [('UNKNOWN', {}),
+                ('NOT_INTRODUCED', {'external_provider': {'name':'provider','reason':'outage'}})]:
+            with self.subTest(attribution=attribution):
+                f = self.failure()
+                f['complete'] = False
+                with self.assertRaises(ValueError):
+                    c.adjudicate(self.state, self.report(f, attribution,
+                                 execute_unverified=True, **fields))
+                self.assertEqual('triage', self.state['phase'])
+                self.assertFalse(self.state['ready'])
+                self.assertEqual({}, self.state['skips'])
+
     def test_focus_must_include_failed_case_not_arbitrary_green_subset(self):
         f = self.failure(); c.adjudicate(self.state, self.report(f))
         with self.assertRaises(ValueError):
@@ -383,6 +423,26 @@ assert len(list(p.iterdir()))==2
         self.assertEqual(0,c.verify_saved(self.directory,self.root))
         config.write_text('VITE_ORIGIN=second')
         self.assertEqual(5,c.verify_saved(self.directory,self.root))
+
+    def test_ignored_benchmark_temporal_env_invalidates_ready_receipt(self):
+        with (self.root/'.git/info/exclude').open('a') as stream:
+            stream.write('agents/.env.benchmark-temporal\n')
+        config = self.root/'agents/.env.benchmark-temporal'
+        config.parent.mkdir()
+        config.write_text('CLOUDBENCH_GUEST_TEMPORAL_API_KEY=fixture-first\n')
+        config.chmod(0o600)
+        for gate in self.plan['gates']:
+            gate['input_paths'] = ['code']
+        state = c.initialize(self.plan, self.root)
+        c.run_phase(self.plan, state, self.directory, self.root)
+        c.run_phase(self.plan, state, self.directory, self.root)
+        self.assertEqual(0, c.verify_saved(self.directory, self.root))
+        original_source = c.source(self.root)
+        config.write_text('CLOUDBENCH_GUEST_TEMPORAL_API_KEY=fixture-second\n')
+        self.assertEqual(original_source, c.source(self.root))
+        self.assertEqual(5, c.verify_saved(self.directory, self.root))
+        config.unlink()
+        self.assertEqual(5, c.verify_saved(self.directory, self.root))
 
     def test_cli_runs_real_commands_and_refuses_reinitialization(self):
         plan_path=self.root/'.context/plan.json';c.write(plan_path,self.plan)

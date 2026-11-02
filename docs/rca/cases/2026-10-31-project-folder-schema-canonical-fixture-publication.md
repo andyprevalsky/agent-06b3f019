@@ -132,6 +132,36 @@ Independent review found and corrected cleanup ownership/publication ordering
 before execution. This repairs the prerequisite, not yet the pending complete
 smoke or AgentCard outcomes; no cold sync, migration, timeout or benchmark edit.
 
+
+### November 2, 2026 missing-lsof recurrence — PR1662
+
+Occurrence 761cdfb859e54c82a65900dd42e18a77 repeats the environment prerequisite
+noted in this case's deployment followup. The full original native log (SHA256
+fb091ee4e1bb28d7487b0319a7df929cbf3438929f1b488f82121f2b0c8ac955) names exactly
+three failed cleanup assertions, with 123 of 124 domains passing. The two earlier
+observer/listener checks and the reparented portless worker check all fail when
+lsof is unavailable. This is not a recurrence of the main planner-data defect.
+
+The worker's original post-run, pre-install probe recorded lsof ENOENT, and its
+package state was not installed. A private actual-process fixture extracted the
+unchanged owning functions and tests from main
+6f3f53201faac3a3e70de099e7c211cee6770fad and PR1662 frozen
+ e99c91f55b9444f01a90bd4e8efc18315faeb51b. Both revisions failed all three exact
+assertions with lsof absent; both passed the identical assertions with only
+lsof added to the fixture PATH. Production code, test definitions, coverage
+runners, run-deploy-stage and cloud-init.sh are byte-identical at those boundaries.
+Gate: NOT_INTRODUCED. The original command environment was not captured; the
+later native probe and controlled reproduction are distinguished from an
+in-run environment snapshot.
+
+The deploy owner authorized lsof installation on the recorded worker; apt
+installed 4.95.0-1build3 with zero removals and a clean source tree afterward.
+The existing cloud-init.sh already declares and installs this prerequisite.
+No application change or weaker cleanup assertion is needed. The original
+aggregate remains UNVERIFIED, exit 1; full coverage has not been reexecuted by
+this investigator. Parent retains deployment and aggregate-verification
+ownership. Detailed proof is retained in /var/tmp/rca761-agents-coverage.
+
 ## Human feedback
 
 The user challenged the smoke skip, asked exactly which failures had been

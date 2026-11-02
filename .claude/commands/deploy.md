@@ -3402,8 +3402,12 @@ failing lane is listed first, and lanes that never ran are omitted.
 
 ### Required post-deploy: cloud-origin local Mac execution and computer use
 
-This is an explicit user acceptance gate. Keep it **OPEN** until witnessed on an
-owned connected Mac; offline relay tests or a tool acknowledgement are insufficient.
+This is an explicit user acceptance gate when an owned Mac is connected. If a
+read-only check of the intended account proves no owned Mac is connected, record
+`SKIPPED — no connected Mac` and continue the deploy without creating or connecting
+a device. An authentication error or unavailable inventory is not proof of absence.
+When a Mac is connected, keep this gate **OPEN** until witnessed there; offline
+relay tests or a tool acknowledgement are insufficient.
 Do not start a new database, migrate production, replace encryption keys, or reset
 sign-in/app data to satisfy it. Preserve Freedom and all its blocking services.
 
@@ -3428,8 +3432,9 @@ sign-in/app data to satisfy it. Preserve Freedom and all its blocking services.
    cloud fallback may be created. Close only the test-owned session and preserve
    the Mac app, granted files, data, user services and Freedom.
 
-Owner: Code Main. Missing connected Mac/access/consent keeps this acceptance OPEN;
-report that prerequisite instead of marking a mocked or Linux-only run successful.
+Owner: Code Main. No connected Mac is the explicit skip above. Missing access or
+consent for a connected Mac keeps acceptance OPEN; report that prerequisite instead
+of marking a mocked or Linux-only run successful.
 
 ## Required factory execution metadata
 
