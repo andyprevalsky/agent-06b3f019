@@ -100,6 +100,16 @@ class Cycle(unittest.TestCase):
         self.assertEqual('triage', self.state['phase'])
         self.assertFalse(self.state['ready'])
 
+    def test_missing_policy_helper_blocks_without_traceback(self):
+        f=self.failure()
+        plan=self.root/'.context/plan.json';report=self.root/'.context/rca.json'
+        c.write(plan,self.plan);c.write(report,self.report(f));c.write(self.directory/'cycle.json',self.state)
+        with patch.dict(sys.modules,{'deploy_failure_report':None}):
+            code=c.main(['triage','--plan',str(plan),'--state-dir',str(self.directory),
+                         '--root',str(self.root),'--input',str(report)])
+        self.assertEqual(2,code)
+        self.assertEqual('triage',c.read(self.directory/'cycle.json')['phase'])
+
     def test_wrong_source_or_missing_constituent_refused(self):
         f = self.failure()
         report = self.report(f); report['failures'][0]['source'] = {'head': 'wrong'}

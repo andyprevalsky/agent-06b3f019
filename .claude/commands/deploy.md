@@ -143,8 +143,8 @@ Preserve its original failure/skip receipt, source, timestamps and cleanup;
 record the provider, test, reason and evidence time as `⚠️ Skipped`, never PASS.
 Keep all other tests running. Missing evidence, assertions, authentication or
 permission errors, local disk exhaustion and generic outages do not qualify;
-handle those under their existing rules. The provider-outage retry cadence
-above does not apply to confirmed credit/storage exhaustion.
+handle those under the controlling failure policy. Older outage-retry
+instructions do not apply to confirmed credit/storage exhaustion.
 
 Validate terminal task outcomes, not just a successful launcher exit. A skipped
 task is not a passed task. The final report and generated scorecard warnings

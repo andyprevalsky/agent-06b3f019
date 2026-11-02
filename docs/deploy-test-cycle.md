@@ -56,6 +56,32 @@ The cloud smoke adapter uses the benchmark CLI, keeps its existing task selectio
 and raw run receipts, and returns all selected outcomes. If no appropriate worker
 is bound, planning refuses; it does not quietly serialize the suite locally.
 
+`scripts/deploy_test_worker.py` is the supplied case-aware executor for an
+already prepared isolated checkout. Use it directly with request/result paths,
+or `--stdio` over the existing worker transport. For example, a worker binding
+can set `command` to an SSH argv ending in `python3 scripts/deploy_test_worker.py
+--stdio`, `result_transport` to `stdout`, and `recipe` to:
+
+```json
+{
+  "cases": {
+    "coordinator": {"command": ["python3", "scripts/tests/deploy-test-cycle.test.py"]},
+    "selection": {"command": ["python3", "scripts/tests/deploy-test-plan.test.py"]},
+    "worker": {"command": ["python3", "scripts/tests/deploy-test-worker.test.py"]}
+  }
+}
+```
+
+This example validates the three new modules; it does not replace the full
+deploy-tooling category. The recipe's IDs must exactly match the full gate
+inventory supplied by the template. `setup` and `cleanup` use the same command
+shape; service-owning recipes require cleanup. Every active case runs even if
+a peer fails. Source mismatch, setup failure, signal, timeout or cleanup failure
+produces unverified evidence, not a completed test that can be waived. Each
+result carries the recipe digest, command, native exit, timings and log hash.
+Provisioning, authentication and native-resource teardown remain with the
+existing worker owner; this adapter allocates nothing.
+
 ## Result protocol
 
 The coordinator supplies `DEPLOY_GATE_REQUEST` (JSON file) and

@@ -54,6 +54,20 @@ class Selection(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'worker binding missing'):
             p.select(self.template,['back-end/src/one.ts'],self.result,self.bindings)
 
+    def test_case_recipe_is_bound_into_plan(self):
+        self.bindings['be'].update(recipe={'cases':{'be':{'command':['true']}}},
+                                   result_transport='stdout')
+        plan=p.select(self.template,['back-end/src/one.ts'],self.result,self.bindings)
+        gate=next(g for g in plan['gates'] if g['name']=='be')
+        self.assertTrue(gate['case_protocol'])
+        self.assertEqual('stdout',gate['result_transport'])
+        self.assertEqual({'be'},set(gate['worker_recipe']['cases']))
+
+    def test_recipe_cannot_replace_full_gate_inventory(self):
+        self.bindings['be']['recipe']={'cases':{'other':{'command':['true']}}}
+        with self.assertRaisesRegex(ValueError,'full registered'):
+            p.select(self.template,['back-end/src/one.ts'],self.result,self.bindings)
+
     def test_selection_removes_artificial_cross_gate_ordering(self):
         self.template['gates'][1]['after']=['lint','smoke']
         plan=p.select(self.template,['back-end/src/one.ts'],self.result,self.bindings)

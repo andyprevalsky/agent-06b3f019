@@ -22,9 +22,14 @@ def cancellation_handlers():
             signal.signal(s, handler)
 
 
-def run_command(argv, *, cwd, env, output, timeout):
-    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=output, stderr=subprocess.STDOUT,
-                            start_new_session=True)
+def run_command(argv, *, cwd, env, output, timeout, input_path=None):
+    incoming = open(input_path, 'rb') if input_path else None
+    try:
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=incoming, stdout=output,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    finally:
+        if incoming:
+            incoming.close()
     deadline = None if timeout is None else time.monotonic() + timeout
     timed_out = False
     while proc.poll() is None:

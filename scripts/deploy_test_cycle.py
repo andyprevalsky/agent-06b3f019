@@ -25,6 +25,7 @@ import time
 import uuid
 
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
+from deploy_test_result import validate as validate_result, validate_recipe
 
 ROOT = Path(__file__).resolve().parents[1]
 QUICK = {"format", "eslint", "typescript", "backend-structural", "application-structural"}
@@ -145,6 +146,10 @@ def validate_plan(plan: dict) -> None:
             raise ValueError(f"{name}: explicit unique check inventory required")
         if not all(isinstance(c, str) and c and "\0" not in c for c in checks):
             raise ValueError(f"{name}: invalid check identifier")
+        if 'worker_recipe' in gate:
+            validate_recipe(gate['worker_recipe'], checks)
+        if gate.get('result_transport', 'file') not in ('file', 'stdout'):
+            raise ValueError('unknown result transport')
         paths = gate.get("input_paths", ["*"])
         if not isinstance(paths, list) or not paths or not all(isinstance(p, str) and p for p in paths):
             raise ValueError("input_paths must be a nonempty list of source globs")
@@ -218,6 +223,8 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
     folder.mkdir(parents=True, exist_ok=False)
     request = {"token": token, "source": state["source"], "gate": name,
                "checks": active, "skips": case_skips, "phase": phase}
+    if 'worker_recipe' in gate:
+        request['worker_recipe'] = gate['worker_recipe']
     write(folder / "request.json", request)
     result_path = folder / "result.json"
     env = {**os.environ, **gate.get("env", {}), "DEPLOY_GATE_REQUEST": str(folder / "request.json"),
@@ -229,26 +236,25 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
     with (folder / "output.log").open("wb") as output:
         try:
             code, timed_out, cancelled, lingering = run_command(gate["command"],
-                cwd=root / gate.get("cwd", "."), env=env, output=output, timeout=timeout)
+                cwd=root / gate.get("cwd", "."), env=env, output=output, timeout=timeout,
+                input_path=folder / 'request.json' if gate.get('result_transport') == 'stdout' else None)
         except OSError as error:
             output.write(str(error).encode())
             code = 127
     cases = {c: "SKIP" for c in case_skips}
     valid = False
+    complete = False
     reason = None
+    if gate.get('result_transport') == 'stdout':
+        try:
+            write(result_path, read(folder / 'output.log'))
+        except (OSError, ValueError):
+            pass
     if result_path.exists():
         try:
             result = read(result_path)
-            raw_cases = result["cases"]
-            if (result.get("token") != token or result.get("source") != state["source"]
-                    or result.get("gate") != name or result.get("complete") is not True
-                    or result.get("reused", False) is not False
-                    or not isinstance(raw_cases, dict) or set(raw_cases) != set(active)
-                    or any(v not in {"PASS", "FAIL"} for v in raw_cases.values())):
-                raise ValueError("worker result identity/inventory mismatch")
-            # Signal/timeout/launcher crash must not be converted into a provider skip.
-            if code not in (0, 1) or timed_out or cancelled or lingering or (code == 0) != all(v == "PASS" for v in raw_cases.values()):
-                raise ValueError("worker exit and test results disagree")
+            raw_cases, complete = validate_result(result, request, code,
+                invalid_process=timed_out or cancelled or lingering)
             cases.update(raw_cases)
             valid = True
         except (KeyError, TypeError, ValueError) as error:
@@ -256,6 +262,7 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
     elif code == 0 and not (gate.get("case_protocol") or cancelled or timed_out or lingering):
         cases.update({c: "PASS" for c in active})
         valid = True
+        complete = True
     else:
         reason = "missing complete case receipt"
     if not valid:
@@ -264,7 +271,8 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
         cases.update({c: "UNVERIFIED" for c in active})
     status = "PASS" if all(v in TERMINAL_OK for v in cases.values()) else "FAIL"
     result = {"gate": name, "status": status, "cases": cases, "native_exit": code,
-              "executed": True, "complete": valid, "reason": reason, "timed_out": timed_out,
+              "executed": True, "complete": valid and complete, "reason": reason, "timed_out": timed_out,
+              "case_complete": {c: valid and v != 'UNVERIFIED' for c, v in cases.items()},
               "cancelled": cancelled, "lingering_group": lingering,
               "source": state["source"], "started_at": started, "finished_at": time.time(),
               "command": gate["command"], "log": str(folder / "output.log"), "token": token}
@@ -281,7 +289,7 @@ def failed_cases(state: dict, results: list[dict]) -> list[dict]:
                 key = result["gate"] + "/" + check
                 failed.append({"id": uuid.uuid4().hex, "check": key, "native_result": verdict,
                                "gate": result["gate"], "source": state["source"],
-                               "complete": result.get("complete", False), "phase": phase,
+                               "complete": result.get("case_complete", {}).get(check, result.get("complete", False)), "phase": phase,
                                "evidence": result.get("log"), "command": result.get("command")})
     return failed
 
@@ -539,6 +547,8 @@ def main(argv: list[str] | None = None) -> int:
                 if args.action == "resume":
                     if state["phase"] != "interrupted":
                         raise ValueError("resume requires an interrupted cycle")
+                    if any(r.get('lingering_group') for r in state['attempts'][-1]['results']):
+                        raise ValueError('worker descendants remain; reconcile owned cleanup before resuming')
                     state["phase"] = state.pop("resume_phase")
                 with cancellation_handlers():
                     while state["phase"] in {"quick", "initial", "focused", "failed-gates", "final"}:
@@ -582,7 +592,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"phase": state["phase"], "ready": state["ready"],
                               "failures": len(state.get("pending", [])), "source": state["source"]}))
             return 1 if args.action in {"run", "resume"} and not state["ready"] else 0
-    except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
+    except (ImportError, ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
         print(f"DEPLOY_CYCLE BLOCKED: {error}", file=sys.stderr)
         return 2
 
