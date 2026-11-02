@@ -19,8 +19,11 @@ production checks in this command, overriding older all-green, retry, escalation
 repair wording for those failures. Independent correctness/security review
 findings retain the existing Step 10 requirements; only comments about an
 exact recorded qualifying test/gate failure may reference its existing
-handoff. INTRODUCED and UNKNOWN test/gate failures remain blocking. An evidenced
-NOT INTRODUCED failed test is retained for post-merge handoff; it does not
+handoff. The assigned repair remains owned and blocking until its required
+validation passes, regardless of INTRODUCED/NOT_INTRODUCED attribution; never
+waive or re-delegate it. INTRODUCED and UNKNOWN additional test/gate failures
+remain blocking. An evidenced NOT INTRODUCED failed test outside the assigned
+repair is retained for post-merge handoff; it does not
 block merge, and its actual post-merge handoff waives that exact failure
 without waiting for the independent repair to finish.
 External provider outages or exhausted credits are non-blocking, receive no
