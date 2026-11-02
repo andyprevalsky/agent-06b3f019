@@ -90,12 +90,24 @@ let previousScripts: readonly string[] | null = null;
 export function rosePreviousStartupScripts(): readonly string[] {
   if (previousScripts === null) {
     const dir = resolve(REPO_ROOT, ROSE_PREVIOUS_STARTUP_SCRIPTS_DIR);
-    previousScripts = readdirSync(dir)
-      .filter((name) => name.endsWith('.sh'))
-      .sort()
-      .map((name) => readFileSync(resolve(dir, name), 'utf8'));
+    previousScripts = readPreviousStartupScripts(dir);
   }
   return previousScripts;
+}
+
+/** Optional historical defaults may be absent from a backend-only deployment. */
+export function readPreviousStartupScripts(dir: string): readonly string[] {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | null)?.code !== 'ENOENT') throw error;
+    return [];
+  }
+  return names
+    .filter((name) => name.endsWith('.sh'))
+    .sort()
+    .map((name) => readFileSync(resolve(dir, name), 'utf8'));
 }
 
 export function roseSyncScript(): string {

@@ -4,6 +4,8 @@ import { folderOrderBy, newSyncSalt } from '../../providers/projects/store';
 
 export {
   claimSyncRevision,
+  commitSyncPush,
+  syncSnapshotMatchesRepo,
   countEnvFiles,
   createProject,
   deleteEnvFile,
@@ -18,6 +20,7 @@ export {
   listEnvFiles,
   listProjects,
   updateProject,
+  ProjectRepositoryBusyError,
   upsertEnvFile,
   userExists,
   writeSyncSnapshot,

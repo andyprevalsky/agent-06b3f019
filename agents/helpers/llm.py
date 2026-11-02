@@ -767,6 +767,7 @@ async def _flash_agent_auth_contexts(
     exclude_anthropic_family: bool = False,
 ) -> Tuple[Optional[ClaudeAuthContext], Optional[GptAuthContext]]:
     """Reuse a lease; otherwise try Terra then Opus, with broker-owned cooldowns."""
+    exclude_anthropic_family = anthropic_family_excluded(exclude_anthropic_family)
     seen_tokens = {context.token for context in (gpt, claude) if context is not None}
 
     async def fetch_next(
@@ -4424,7 +4425,7 @@ async def call_llm(
                     lineage_key=compute_token_lineage_key,
                     agent_id=agent_id,
                     demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
-                    exclude_anthropic_family=_exclude_anthropic_family,
+                    exclude_anthropic_family=anthropic_family_excluded(),
                 )
             try:
                 rose_response = await rose_client.collect(

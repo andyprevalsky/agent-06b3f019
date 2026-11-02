@@ -44,6 +44,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { prisma } from '../../providers/database';
+import { ExchangeRateLimiter } from '../../domains/projects/cliLoginService';
 
 const REPO_ROOT = resolve(__dirname, '../../../..');
 const ROSE_SYNC = join(REPO_ROOT, 'scripts', 'rose-sync');
@@ -400,4 +401,62 @@ test('real CLI: agent-init stores the credential 0600 outside the repo; push use
   );
   assert(reuse.status !== 0, 'a used code cannot sign in again');
   assert(/copy a fresh setup prompt/i.test(reuse.stderr), `reuse guidance: ${reuse.stderr}`);
+});
+
+test('rate limit: distributed failures retain per-client denial without blocking unrelated clients', () => {
+  const warningLines: string[] = [];
+  const originalWrite = process.stdout.write;
+  // This synchronous case owns the capture and restores it even on failure.
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    warningLines.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    const now = 1_000_000;
+    const windowMs = 15 * 60_000;
+    const limiter = new ExchangeRateLimiter(10, windowMs, 600, 10_000);
+    for (let client = 0; client < 60; client++) {
+      const key = `distributed-${client}`;
+      for (let failure = 0; failure < 10; failure++) {
+        assert(limiter.check(key, now).allowed, 'each client retains its exact ten-failure limit');
+        limiter.recordFailure(key, now);
+      }
+    }
+    assert(
+      limiter.check('unrelated-legitimate-client', now).allowed,
+      'a distributed failure threshold must not deny unrelated clients'
+    );
+    const denied = limiter.check('distributed-0', now);
+    assert(!denied.allowed, 'the attacking address remains blocked');
+    if (!denied.allowed) assert(denied.retryAfterS === 900, 'per-client Retry-After is unchanged');
+    assert(limiter.check('distributed-0', now + windowMs).allowed, 'per-client window rolls over');
+    const bounded = new ExchangeRateLimiter(2, 1000, 2, 1);
+    bounded.recordFailure('tracked', now);
+    bounded.recordFailure('overflow-a', now);
+    assert(
+      bounded.check('tracked', now).allowed,
+      'overflow failures do not spend a tracked client quota'
+    );
+    bounded.recordFailure('overflow-b', now);
+    assert(
+      !bounded.check('overflow-c', now).allowed,
+      'bounded-memory overflow quota remains enforced'
+    );
+    assert(bounded.check('overflow-c', now + 1000).allowed, 'overflow window still resets');
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+  const alerts = warningLines.filter(
+    (line) =>
+      line.includes('ProjectCliLogin') &&
+      line.includes('CLI exchange address-spraying threshold reached')
+  );
+  assert(
+    alerts.length === 2,
+    'each limiter emits exactly one warning when its global threshold is crossed'
+  );
+  assert(
+    alerts.every((line) => !line.includes('distributed-')),
+    'the warning carries counters, never client keys'
+  );
 });

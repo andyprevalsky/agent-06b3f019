@@ -181,12 +181,15 @@ export async function startMaintenance(
   // so a bad snapshot can never keep a project failing.
   const lastStatus = await store.lastFinishedStatus(project.id);
   const fromSnapshotId =
-    project.templateSnapshotId !== null && (lastStatus === null || lastStatus === 'SUCCEEDED')
+    project.templateSnapshotId !== null &&
+    project.templateSnapshotAt !== null &&
+    (lastStatus === null || lastStatus === 'SUCCEEDED')
       ? project.templateSnapshotId
       : null;
   const now = deps.now();
   const claim = await store.claimRun({
     projectId: project.id,
+    expectedRepoUrl: project.repoUrl,
     trigger: options.trigger,
     mode: options.mode,
     ...(options.slotKey !== undefined ? { slotKey: options.slotKey } : {}),

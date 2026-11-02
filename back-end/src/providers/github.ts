@@ -101,7 +101,10 @@ export async function fetchGithubBranchHeadSha(
   try {
     const response = await fetch(
       `https://api.github.com/repos/${owner}/${repo}/commits/${encodeURIComponent(branch)}`,
-      { headers: { ...githubApiAuthHeaders(), Accept: 'application/vnd.github.sha' } }
+      {
+        headers: { ...githubApiAuthHeaders(), Accept: 'application/vnd.github.sha' },
+        signal: AbortSignal.timeout(10_000),
+      }
     );
     if (!response.ok) {
       log.warn('GitHub branch head lookup failed', {

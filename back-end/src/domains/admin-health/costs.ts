@@ -116,6 +116,12 @@ const MODEL_RATES: Record<string, ModelRates> = {
   'openai/gpt-6-sol': openAi(2, 10, 1.25),
   // Same OpenRouter rate as agents/providers/rose/pricing.py.
   'openai/gpt-6.1-sol': openAi(2, 10, 1.25),
+  // Standard API-equivalent Terra rates (30-minute cache writes), not actual
+  // speed/long-context/retention-adjusted charges. Published by both routes:
+  // https://developers.openai.com/api/docs/models/gpt-6.1-terra
+  // https://openrouter.ai/openai/gpt-6.1-terra/
+  'gpt-6.1-terra': { ...openAi(1, 5, 1.25), cacheReadMultiplier: 0.05 },
+  'openai/gpt-6.1-terra': { ...openAi(1, 5, 1.25), cacheReadMultiplier: 0.05 },
   // Historical Cerebras chat primary (archived 2026-08-20). Keep for ledger rows.
   'zai-glm-4.7': uncached(2.25, 2.75),
   'z-ai/glm-4.7': openRouter(0.4, 1.75),

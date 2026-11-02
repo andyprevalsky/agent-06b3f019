@@ -21,8 +21,10 @@
  * stored only as SHA-256 and compared in constant time after the indexed
  * lookup. The credential is 256 random bits, also hashed at rest, accepted by
  * no router other than /api/projects, and cannot mint codes or delete
- * projects. Failed exchanges are rate-limited per client address with a global
- * backstop. Codes and credentials travel only in POST bodies / headers.
+ * projects. Failed exchanges are rate-limited per client address. The global
+ * address-spraying threshold emits one structured warning per window; it does
+ * not deny unrelated clients. The bounded overflow bucket retains its shared
+ * per-client failure quota. Codes and credentials travel only in POST bodies / headers.
  *
  * 10k-agent behaviour: minting is a user action (one indexed delete of the
  * user's dead rows + one insert); exchange is one conditional update; each
@@ -158,10 +160,11 @@ export async function verifyCliCredential(token: string): Promise<CliCredentialS
 }
 
 /**
- * Fixed-window FAILED-attempt counter: `limit` failures per key and
- * `globalLimit` failures in total per window block further attempts until the
- * window ends. Only failures count, so a legitimate exchange never spends the
- * quota (several users behind one proxy address cannot lock each other out).
+ * Fixed-window FAILED-attempt counter: `limit` failures per key block that key
+ * until the window ends. `globalLimit` failures trigger one address-spraying
+ * warning per window, never process-wide denial. Only failures count, so a
+ * legitimate exchange never spends the quota; a shared client address shares
+ * the failed-attempt quota.
  * Memory is bounded: once `maxKeys` addresses are tracked in a window, further
  * unseen addresses share one overflow bucket.
  */
@@ -195,7 +198,7 @@ export class ExchangeRateLimiter {
   ): { allowed: true } | { allowed: false; retryAfterS: number } {
     this.roll(now);
     const count = this.failures.get(this.bucket(rawKey)) ?? 0;
-    if (count < this.limit && this.total < this.globalLimit) return { allowed: true };
+    if (count < this.limit) return { allowed: true };
     const retryAfterS = Math.max(1, Math.ceil((this.windowStart + this.windowMs - now) / 1000));
     return { allowed: false, retryAfterS };
   }
@@ -206,5 +209,13 @@ export class ExchangeRateLimiter {
     const key = this.bucket(rawKey);
     this.failures.set(key, (this.failures.get(key) ?? 0) + 1);
     this.total += 1;
+    if (this.total === this.globalLimit) {
+      log.warn('CLI exchange address-spraying threshold reached', {
+        failures: this.total,
+        threshold: this.globalLimit,
+        trackedAddressBuckets: this.failures.size,
+        windowMs: this.windowMs,
+      });
+    }
   }
 }

@@ -5,7 +5,8 @@
  * default and, when unchanged, the Rose startup timeout; an edited script or
  * timeout is never overwritten. Registered by projects.blackbox.ts.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { test } from 'node:test';
 import {
@@ -13,6 +14,7 @@ import {
   planRoseProjectSetup,
   ROSE_PREVIOUS_STARTUP_SCRIPTS_DIR,
   roseSyncScript,
+  readPreviousStartupScripts,
   ROSE_PROJECT_STARTUP_TIMEOUT_S,
   type RoseSetupDeps,
 } from '../../domains/projects/roseProject';
@@ -38,6 +40,43 @@ export function registerRoseStartupUpgradeCases(ctx: {
   roseStartup: string;
 }): void {
   const { roseOwner, roseRepo, roseStartup } = ctx;
+  test('optional previous defaults tolerate only a missing directory', () => {
+    const dir = mkdtempSync(resolve(tmpdir(), 'rose-previous-defaults-'));
+    try {
+      assert(
+        readPreviousStartupScripts(resolve(dir, 'missing')).length === 0,
+        'missing history is empty'
+      );
+      writeFileSync(resolve(dir, 'z.sh'), 'last');
+      writeFileSync(resolve(dir, 'a.sh'), 'first');
+      writeFileSync(resolve(dir, 'ignored.txt'), 'ignored');
+      assert(
+        JSON.stringify(readPreviousStartupScripts(dir)) === JSON.stringify(['first', 'last']),
+        'shell scripts retain sorted full contents'
+      );
+      let error: unknown;
+      try {
+        readPreviousStartupScripts(resolve(dir, 'a.sh'));
+      } catch (caught) {
+        error = caught;
+      }
+      assert(
+        (error as NodeJS.ErrnoException)?.code === 'ENOTDIR',
+        'non-ENOENT directory errors propagate'
+      );
+      mkdirSync(resolve(dir, 'bad.sh'));
+      error = undefined;
+      try {
+        readPreviousStartupScripts(dir);
+      } catch (caught) {
+        error = caught;
+      }
+      assert((error as NodeJS.ErrnoException)?.code === 'EISDIR', 'script read errors propagate');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   /** The Rose default as first shipped (2026-10-20): what Andy's prod project still stores. */
   const ROSE_STARTUP_2026_10_20 = readFileSync(
     resolve(__dirname, '../../../..', ROSE_PREVIOUS_STARTUP_SCRIPTS_DIR, '2026-10-20.sh'),

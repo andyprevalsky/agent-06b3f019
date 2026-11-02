@@ -300,8 +300,18 @@ export async function upsertProjectByName(
 ): Promise<{ project: ProjectDto; created: boolean }> {
   const existing = await repo.findProjectByName(userId, body.name);
   if (!existing) return { project: await createProject(userId, body), created: true };
-  const updated = await repo.updateProject(existing.id, settingsData(body));
-  return { project: await projectDto(userId, updated), created: false };
+  try {
+    const updated = await repo.updateProject(existing.id, settingsData(body));
+    return { project: await projectDto(userId, updated), created: false };
+  } catch (error) {
+    if (error instanceof repo.ProjectRepositoryBusyError) {
+      throw new ProjectError(
+        409,
+        'Wait for the project sync to finish before changing its repository'
+      );
+    }
+    throw error;
+  }
 }
 
 export async function updateProject(
@@ -315,6 +325,12 @@ export async function updateProject(
     return await projectDto(userId, updated);
   } catch (err) {
     if (isUniqueViolation(err)) throw new ProjectError(409, 'A project with this name exists');
+    if (err instanceof repo.ProjectRepositoryBusyError) {
+      throw new ProjectError(
+        409,
+        'Wait for the project sync to finish before changing its repository'
+      );
+    }
     throw err;
   }
 }

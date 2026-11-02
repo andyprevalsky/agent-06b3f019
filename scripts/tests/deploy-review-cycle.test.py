@@ -473,6 +473,22 @@ class OverrideDispositionTest(unittest.TestCase):
             self.override(self.data)
         self.assertIn("this ledger records 2", str(raised.exception))
 
+    def test_quota_skipped_clean_cycles_do_not_count_as_delivered_rounds(self) -> None:
+        state = MODULE.read_state(self.state_path)
+        first = state["cycles"][0]
+        first.update(result="clean", disposition="skipped", skip_reason="usage-cap")
+        state["cycles"][1].update(result="clean", disposition="skipped", skip_reason="usage-cap")
+        MODULE.write_state(self.state_path, state)
+        before = self.state_path.read_bytes()
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "this ledger records 1"):
+            self.override(self.data, prior_rounds=0)
+        self.assertEqual(self.state_path.read_bytes(), before, "rejection must preserve ledger/history")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "this ledger records 2"):
+            self.override(self.data, prior_rounds=1)
+        cycle = self.override(self.data, prior_rounds=2)
+        self.assertEqual(cycle["rounds"], 3)
+        self.assertEqual(MODULE.read_state(self.state_path)["cycles"][0], first)
+
     def test_override_records_findings_target_and_rounds(self) -> None:
         cycle = self.override(self.data, prior_rounds=1)
         self.assertEqual((cycle["result"], cycle["disposition"], cycle["rounds"]),

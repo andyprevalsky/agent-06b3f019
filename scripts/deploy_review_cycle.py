@@ -657,7 +657,10 @@ def override_cycle(
     entries = state["cycles"]
     assert isinstance(entries, list)
     # Only cycles that delivered a review count: an `unavailable` cycle consumed no review budget.
-    rounds = len(budget_cycles(entries)) + prior_rounds
+    rounds = sum(
+        cycle.get("disposition") != "skipped" and not cycle.get("skip_reason")
+        for cycle in budget_cycles(entries)
+    ) + prior_rounds
     if rounds < MIN_OVERRIDE_ROUNDS:
         raise ReviewCycleError(
             f"override is pre-authorized only after {MIN_OVERRIDE_ROUNDS} review rounds; "

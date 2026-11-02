@@ -52,6 +52,7 @@ export type ClaimResult =
 
 export interface ClaimInput {
   projectId: string;
+  expectedRepoUrl?: string;
   trigger: MaintenanceTrigger;
   mode: MaintenanceMode;
   slotKey?: string;
@@ -87,6 +88,7 @@ export async function claimRun(input: ClaimInput): Promise<ClaimResult> {
       const leased = await tx.project.updateMany({
         where: {
           id: input.projectId,
+          ...(input.expectedRepoUrl !== undefined ? { repoUrl: input.expectedRepoUrl } : {}),
           ...(input.previousWatchedSha !== undefined
             ? { maintenanceWatchedSha: input.previousWatchedSha }
             : {}),
@@ -371,6 +373,7 @@ export interface MaintenanceProject {
   maintenanceScript: string | null;
   maintenanceTimeoutS: number;
   templateSnapshotId: string | null;
+  templateSnapshotAt: Date | null;
   templateSnapshotSize: unknown;
   sandboxSize: unknown;
 }
@@ -388,6 +391,7 @@ export async function findMaintenanceProject(
       maintenanceScript: true,
       maintenanceTimeoutS: true,
       templateSnapshotId: true,
+      templateSnapshotAt: true,
       templateSnapshotSize: true,
       sandboxSize: true,
     },

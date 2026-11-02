@@ -3315,8 +3315,16 @@ failing lane is listed first, and lanes that never ran are omitted.
 
 ### Required post-deploy: cloud-origin local Mac execution and computer use
 
-This is an explicit user acceptance gate. Keep it **OPEN** until witnessed on an
-owned connected Mac; offline relay tests or a tool acknowledgement are insufficient.
+This is an explicit user acceptance gate when an owned Mac is available.
+**Standing user instruction, November 2, 2026:** if no Mac is available, skip
+this test and continue deployment. First inspect owner-scoped device discovery;
+when it establishes that no connected Mac is available, record **SKIPPED — no
+Mac available** with the timestamp and discovery evidence in the deploy report.
+Do not wait for a Mac, request one, or block an otherwise eligible deployment.
+This is an availability skip, not a passing Mac test. When a Mac is available,
+keep the acceptance **OPEN** until witnessed; offline relay tests or a tool
+acknowledgement are insufficient. Access or consent failures on an available
+Mac are not covered by the no-device exception.
 Do not start a new database, migrate production, replace encryption keys, or reset
 sign-in/app data to satisfy it. Preserve Freedom and all its blocking services.
 
@@ -3341,8 +3349,9 @@ sign-in/app data to satisfy it. Preserve Freedom and all its blocking services.
    cloud fallback may be created. Close only the test-owned session and preserve
    the Mac app, granted files, data, user services and Freedom.
 
-Owner: Code Main. Missing connected Mac/access/consent keeps this acceptance OPEN;
-report that prerequisite instead of marking a mocked or Linux-only run successful.
+Owner: Code Main. With no available connected Mac, apply the recorded skip above.
+Otherwise missing access/consent keeps this acceptance OPEN; report that
+prerequisite instead of marking a mocked or Linux-only run successful.
 
 ## Required factory execution metadata
 

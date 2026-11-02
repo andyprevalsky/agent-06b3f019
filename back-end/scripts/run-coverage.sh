@@ -335,7 +335,7 @@ codex_funded_fallback_configured() {
       continue
     fi
     IFS=',' read -r -a names <<< "$(backend_env_value "AZURE_FOUNDRY_DEPLOYMENTS$slot")"
-    for name in "${names[@]}"; do
+    for name in ${names[@]+"${names[@]}"}; do
       name="${name#"${name%%[![:space:]]*}"}"
       name="${name%"${name##*[![:space:]]}"}"
       [[ "$name" == "$deployment" ]] && return 0

@@ -70,7 +70,7 @@ codex_fallback() {
   local functions
   functions="$(awk '/^backend_env_value\(\) \{$/ { on = 1 } on { print } on && /^codex_funded_fallback_configured\(\) \{$/ { last = 1 } last && /^}$/ { exit }' "$runner")"
   [ -n "$functions" ] || fail "case 5: $runner has no Codex fallback preflight"
-  env -i PATH="$PATH" BACKEND_DIR="$fixture" "$@" bash -c "set -euo pipefail; $functions
+  env -i PATH="$PATH" BACKEND_DIR="$fixture" "$@" "${CODEX_PREFLIGHT_TEST_BASH:-bash}" -c "set -euo pipefail; $functions
 if codex_funded_fallback_configured; then printf 0; else printf 1; fi"
 }
 
@@ -89,6 +89,10 @@ for runner in "$BLACKBOX" "$COVERAGE"; do
   }
   expect 0 "a later slot lists gpt-6.1-sol, trailing slash" \
     "$(printf 'AZURE_FOUNDRY_ENDPOINT=https://other.openai.azure.com\nAZURE_FOUNDRY_API_KEY=k1\nAZURE_FOUNDRY_DEPLOYMENTS=gpt-6-sol\nAZURE_FOUNDRY_ENDPOINT_2=%s/\nAZURE_FOUNDRY_API_KEY_2="k2"\nAZURE_FOUNDRY_DEPLOYMENTS_2="gpt-6-sol, gpt-6.1-sol"' "$SOUTH")"
+  expect 1 "endpoint and key with no deployments is not funded" \
+    "$(printf 'AZURE_FOUNDRY_ENDPOINT=%s\nAZURE_FOUNDRY_API_KEY=k1' "$WESTUS")"
+  expect 0 "empty first slot must not hide a funded later slot" \
+    "$(printf 'AZURE_FOUNDRY_ENDPOINT=%s\nAZURE_FOUNDRY_API_KEY=k1\nAZURE_FOUNDRY_ENDPOINT_2=%s\nAZURE_FOUNDRY_API_KEY_2=k2\nAZURE_FOUNDRY_DEPLOYMENTS_2=gpt-6.1-sol' "$WESTUS" "$SOUTH")"
   expect 1 "GPT_API_KEY alone is not a Codex fallback" 'GPT_API_KEY=sk-openai'
   expect 1 "a region whose deployments omit gpt-6.1-sol" \
     "$(printf 'AZURE_FOUNDRY_ENDPOINT=%s\nAZURE_FOUNDRY_API_KEY=k1\nAZURE_FOUNDRY_DEPLOYMENTS=gpt-6-sol' "$WESTUS")"
