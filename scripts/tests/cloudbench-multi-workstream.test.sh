@@ -901,7 +901,7 @@ reset_fake_state() {
     cat > "$FAKE_DIR/state.json" <<'JSON'
 {
   "secrets": ["AGENTS_ENV_B64", "BACKEND_ENV_B64", "AGENTS_ENV_SHA256",
-              "BACKEND_ENV_SHA256", "CLOUDBENCH_BROWSER_PROVIDER", "GITHUB_TOKEN"],
+              "BACKEND_ENV_SHA256", "CLOUDBENCH_BROWSER_PROVIDER", "CLOUDBENCH_WORKER_BROWSER_PROVIDER", "GITHUB_TOKEN"],
   "machines": [
     {"id": "aaaa0000000001", "name": "cloudbench-warm", "state": "stopped",
      "region": "iad", "private_ip": "",

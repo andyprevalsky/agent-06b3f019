@@ -917,7 +917,7 @@ cloudbench_require_agentcard_org_oauth "$REPO_DIR/back-end/.env" || finish 1
 cloudbench_apply_compute_token_authority "$REPO_DIR/back-end/.env" || finish 1
 cloudbench_validate_browser_provider_contract \
     "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
-    "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || finish 1
+    "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_WORKER_BROWSER_PROVIDER:-}" || finish 1
 FRONTEND_SUPABASE_URL="$(cloudbench_env_value "$REPO_DIR/back-end/.env" VITE_SUPABASE_URL)"
 [ -n "$FRONTEND_SUPABASE_URL" ] || FRONTEND_SUPABASE_URL="$(cloudbench_env_value "$REPO_DIR/back-end/.env" SUPABASE_URL)"
 FRONTEND_SUPABASE_ANON_KEY="$(cloudbench_env_value "$REPO_DIR/back-end/.env" VITE_SUPABASE_ANON_KEY)"
