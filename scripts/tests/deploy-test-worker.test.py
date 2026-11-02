@@ -145,6 +145,28 @@ class Worker(unittest.TestCase):
         self.assertEqual(1,len(failures))
         self.assertFalse(failures[0]['complete'])
 
+    def test_focused_worker_recipe_never_replaces_the_full_failed_gate(self):
+        gate=self.bind_gate({'name':'gate','worker':'isolated-test','checks':['first','second'],
+              'case_protocol':True,'worker_recipe':self.recipe,'result_transport':'stdout','timeout_seconds':10,
+              'command':[sys.executable,str(ROOT/'scripts/deploy_test_worker.py'),
+                         '--root',str(self.root),'--stdio']})
+        plan={'source':self.request['source'],'gates':[
+            *[{'name':name,'quick':True,'category':name,'checks':[name],'command':['true']}
+              for name in ('format','eslint','typescript','backend-structural')],gate]}
+        state=cycle.initialize(plan,self.coordinator)
+        state.update(phase='needs-focused-plan',repair_gates=['gate'],failures=[
+            {'gate':'gate','check':'gate/first','disposition':'blocking'}])
+        cycle.focused_plan(state,plan,{'source':state['source'],'gates':{'gate':{
+            'command':gate['command'],'checks':['first'],
+            'worker_recipe':{'cases':{'first':{'command':[sys.executable,'-c','pass']}}}}}})
+        focused=cycle.execute(cycle.records(plan,state)[0],state,
+                              self.coordinator/'.context/coordinator',self.coordinator)
+        self.assertEqual({'first':'PASS'},focused['cases'])
+        state['phase']='failed-gates'
+        full=cycle.execute(cycle.records(plan,state)[0],state,
+                           self.coordinator/'.context/coordinator',self.coordinator)
+        self.assertEqual({'first':'FAIL','second':'PASS'},full['cases'])
+
     def test_wrong_recipe_digest_is_rejected(self):
         from deploy_test_result import validate
         result=worker.execute(self.request,self.root);result['recipe_digest']='wrong'

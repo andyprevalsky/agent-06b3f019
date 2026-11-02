@@ -188,7 +188,11 @@ masquerade as runtime edits. All other tracked/untracked source, ignored runtime
 configuration and the worker commands remain bound and are rechecked.
 
 A focused JSON has `source` and a `gates` mapping, each value with argv `command`
-and `checks`. Never relax a test's assertions/timeouts to fit this cycle. Preserve
+and `checks`. With a case-aware worker, keep its transport `command` and add a
+`worker_recipe` containing the focused test commands for exactly those checks.
+That temporary recipe applies only to the focused phase; the following full
+failed-gate and final phases execute the original bound recipe. Never relax a
+test's assertions/timeouts to fit this cycle. Preserve
 failure histories across source changes, skipped outcomes in the final report,
 and delegated/external alerts from the canonical failure-report renderer.
 

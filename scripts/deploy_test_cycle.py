@@ -202,9 +202,16 @@ def records(plan: dict, state: dict) -> list[dict]:
     if phase == "quick":
         return [g for g in gates if g.get("quick")]
     if phase == "focused":
-        return [dict(g, command=state["focused"][g["name"]]["command"],
-                     checks=state["focused"][g["name"]]["checks"])
-                for g in gates if g["name"] in state["repair_gates"]]
+        selected = []
+        for gate in gates:
+            if gate['name'] not in state['repair_gates']:
+                continue
+            task = state['focused'][gate['name']]
+            focused = dict(gate, command=task['command'], checks=task['checks'])
+            if 'worker_recipe' in task:
+                focused['worker_recipe'] = task['worker_recipe']
+            selected.append(focused)
+        return selected
     if phase == "failed-gates":
         return [g for g in gates if g["name"] in state["repair_gates"]]
     if phase in {"initial", "final"}:
@@ -390,6 +397,7 @@ def focused_plan(state: dict, plan: dict, payload: dict) -> None:
     if set(tasks) != set(state["repair_gates"]):
         raise ValueError("focused plan must cover every blocking gate")
     allowed = {g["name"]: set(g["checks"]) for g in plan["gates"]}
+    original = {g['name']: g for g in plan['gates']}
     for gate, task in tasks.items():
         command(task.get("command"))
         if not task.get("checks") or not set(task["checks"]) <= allowed[gate]:
@@ -398,6 +406,11 @@ def focused_plan(state: dict, plan: dict, payload: dict) -> None:
                     if f["gate"] == gate and f.get("disposition") == "blocking"}
         if not required <= set(task["checks"]):
             raise ValueError("focused command omits an unresolved failing check")
+        if 'worker_recipe' in task:
+            validate_recipe(task['worker_recipe'], task['checks'])
+            if ('worker_recipe' not in original[gate]
+                    or task['command'] != original[gate]['command']):
+                raise ValueError('focused recipes must keep the bound worker transport')
     state["focused"] = tasks
     state["phase"] = "focused"
 
