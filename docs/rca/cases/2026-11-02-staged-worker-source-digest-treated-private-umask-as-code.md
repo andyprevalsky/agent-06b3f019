@@ -20,7 +20,7 @@ sources:
   - commit 9de8ece5ca45a7036cacd8efcfd4ccce3e1edac4
   - agent ph79y59z4c9fzf7smas449zz518heama
 repro: scripts/tests/deploy-test-worker.test.py Worker.test_private_umask_preserves_source_but_executable_changes_do_not
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -67,8 +67,7 @@ identity remain bound. No protected file permissions, private umasks, fixture
 budgets, provider settings or gate outcomes need changing. The fix removes the
 extra host-local identity rather than adding a fallback around a failed check.
 Golden reference: not applicable, no prompt/agent-behavior approval hunk.
-The deployment's independent review and final actual worker validation remain
-pending; this record stays open until those proofs are accepted.
+Independent adversarial review by ph7dbr4a6n4nyz48k82brswy9n8h4c8e found no blocking or major findings on patch ccd89db1dd0324e24b54d7ed071696ce6380bf74609b0b31bcd10e3991562f70. It verified content/path/type/link/owner-exec changes invalidate source identity, while private read/write modes do not. The unchanged real worker B reproduction passed on9dabe67cf with equal source/clone hashes and the original0077 modes unchanged. Other full deployment gates remain separate and pending; this closes only the preparation identity defect.
 
 ## Human feedback
 
