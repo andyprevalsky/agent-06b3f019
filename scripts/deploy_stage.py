@@ -192,6 +192,12 @@ def start_lifecycle(
         pointer = current_path.with_name(f".{current_path.name}.{os.getpid()}.tmp")
         pointer.write_text(f"{run_id}\n")
         pointer.replace(current_path)
+        # Stage admission ends before review/merge/production. Their factory
+        # events still belong to this deployment until its outcome is emitted.
+        factory_pointer = run_root / "factory-current"
+        pointer = factory_pointer.with_name(f".{factory_pointer.name}.{os.getpid()}.tmp")
+        pointer.write_text(f"{run_id}\n")
+        pointer.replace(factory_pointer)
     return refresh
 
 

@@ -185,6 +185,43 @@ The CLI requires `--instruction-file` pointing at that instruction's explicit
 `rose-agent-spawn: true` declaration. Tool discovery, general autonomy and an
 agent's own desire to delegate do not authorize independent spawning.
 
+## Scorecard freshness: latest merge from this workspace
+
+Every scorecard publication or refresh describes the most recent source or
+instruction change merged to `main` **from this workspace**, including `/push`,
+small rule changes and reporting-only updates. Capture the exact merge SHA
+when this workspace merges; fetch `origin/main` and verify that it contains
+that SHA before publishing. Do not substitute another workspace's newer merge
+or an automatic factory-history/data-only commit.
+
+Maintain one ignored workspace pointer at
+`.context/deploy-scorecard-latest.json` under the canonical source workspace
+(`ROSE_DEPLOY_SOURCE_WORKSPACE` when set, otherwise the Git root), so prepared
+deploy checkouts and later pushes share one pointer: merge SHA, change scope, delivery mode
+(`/deploy` or `/push`), matching run/report and timing references, and latest
+published card URL. Update its merge binding immediately after this workspace
+merges. After publishing, update the URL and matching completion receipt
+together. Keep older run receipts and cards as history.
+
+When the merge binding changes, mark the previous card historical until the
+replacement is published; never advertise its old URL as the new merge's card.
+Before publishing, require the card's merge binding to equal that workspace
+pointer's latest merge. If this workspace has merged another change, rebuild
+the title, deployed summary, elapsed time, per-stage bars and current outcomes
+from the newer change's own receipts. Never present an older completed release
+as the current update or copy its elapsed time, gates or exceptions into an
+unrelated newer update. Preserve unresolved obligations with their original
+scope and evidence. An active pre-merge attempt stays explicitly in progress;
+it does not replace a completed card with a false SHIPPED claim.
+
+Keep the actual clock for the matching update; rendering does not restart it.
+Use recorded intervals, retain retries and show parallel overlap without
+adding concurrent durations. Missing timing stays unrecorded. Distinguish
+rules/tooling merged to main and HTML publication from a production-service
+rollout; do not imply that a full deploy ran for a reporting-only change.
+Store SHA and provenance internally without restoring hash noise to the card.
+Human-approval and prompt-edit safeguards are unchanged.
+
 ## Deploy report and scorecard
 
 Keep a cumulative **DELEGATED** section containing only each handed-off
