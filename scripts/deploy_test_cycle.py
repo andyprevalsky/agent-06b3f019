@@ -25,10 +25,12 @@ import time
 import uuid
 
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
-from deploy_test_result import validate as validate_result, validate_recipe
+from deploy_test_result import MAX_RECEIPT_BYTES, preserve_contract, validate as validate_result, validate_recipe
+from deploy_test_isolation import validate as validate_isolation
 
 ROOT = Path(__file__).resolve().parents[1]
 QUICK = {"format", "eslint", "typescript", "backend-structural", "application-structural"}
+REQUIRED_QUICK = {"format", "eslint", "typescript"}
 TERMINAL_OK = {"PASS", "SKIP"}
 NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -128,7 +130,7 @@ def command(value: object) -> list[str]:
     return value
 
 
-def validate_plan(plan: dict) -> None:
+def validate_plan(plan: dict, root: Path = ROOT) -> None:
     gates = plan.get("gates")
     if not isinstance(gates, list) or not gates:
         raise ValueError("plan needs gates")
@@ -176,12 +178,15 @@ def validate_plan(plan: dict) -> None:
             raise ValueError('remote transport requires its existing gate deadline')
         if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
             raise ValueError("timeout_seconds must be a finite positive number")
-    if not any(g.get("quick") for g in gates):
-        raise ValueError("quick checks required")
+    quick_categories = {g.get('category') for g in gates if g.get('quick')}
+    if (not REQUIRED_QUICK <= quick_categories or
+            not quick_categories & {'backend-structural', 'application-structural'}):
+        raise ValueError("format, eslint, typescript and application structural quick checks are required")
+    validate_isolation(plan, root)
 
 
 def initialize(plan: dict, root: Path) -> dict:
-    validate_plan(plan)
+    validate_plan(plan, root)
     if plan.get("source") != source(root):
         raise ValueError("plan source is stale")
     return {"version": 1, "plan": plan, "source": plan["source"], "plan_digest": digest(plan),
@@ -227,6 +232,7 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
                "checks": active, "skips": case_skips, "phase": phase}
     if 'worker_recipe' in gate:
         request['worker_recipe'] = gate['worker_recipe']
+        request['worker_root'] = gate.get('worker_root', str((root / gate['cwd']).resolve()))
     write(folder / "request.json", request)
     result_path = folder / "result.json"
     env = {**os.environ, **gate.get("env", {}), "DEPLOY_GATE_REQUEST": str(folder / "request.json"),
@@ -235,11 +241,12 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
     started = time.time()
     timeout = 120 if gate.get("quick") else gate.get("timeout_seconds")
     timed_out = cancelled = lingering = False
-    with (folder / "output.log").open("wb") as output:
+    with (folder / "output.log").open("wb") as output, (folder / 'stderr.log').open('wb') as stderr:
         try:
             code, timed_out, cancelled, lingering = run_command(gate["command"],
                 cwd=root / gate.get("cwd", "."), env=env, output=output, timeout=timeout,
-                input_path=folder / 'request.json' if gate.get('result_transport') == 'stdout' else None)
+                input_path=folder / 'request.json' if gate.get('result_transport') == 'stdout' else None,
+                stderr_output=stderr if gate.get('result_transport') == 'stdout' else None)
         except OSError as error:
             output.write(str(error).encode())
             code = 127
@@ -249,11 +256,15 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
     reason = None
     if gate.get('result_transport') == 'stdout':
         try:
+            if (folder / 'output.log').stat().st_size > MAX_RECEIPT_BYTES:
+                raise ValueError('worker receipt exceeds transport limit')
             write(result_path, read(folder / 'output.log'))
         except (OSError, ValueError):
             pass
     if result_path.exists():
         try:
+            if result_path.stat().st_size > MAX_RECEIPT_BYTES:
+                raise ValueError('worker receipt exceeds transport limit')
             result = read(result_path)
             raw_cases, complete = validate_result(result, request, code,
                 invalid_process=timed_out or cancelled or lingering)
@@ -277,7 +288,8 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
               "case_complete": {c: valid and v != 'UNVERIFIED' for c, v in cases.items()},
               "cancelled": cancelled, "lingering_group": lingering,
               "source": state["source"], "started_at": started, "finished_at": time.time(),
-              "command": gate["command"], "log": str(folder / "output.log"), "token": token}
+              "command": gate["command"], "log": str(folder / "output.log"),
+              "stderr_log": str(folder / 'stderr.log'), "token": token}
     write(folder / "receipt.json", result)
     return result
 
@@ -470,9 +482,9 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
 
 
 def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
-    validate_plan(new)
     if digest(old) != state["plan_digest"]:
         raise ValueError("previous plan does not match the frozen selection")
+    validate_plan(new, root)
     if state.get("pending"):
         raise ValueError("adjudicate pending occurrences before binding a changed source")
     if state["phase"] not in {"needs-focused-plan", "focused", "triage", "stale"}:
@@ -484,6 +496,7 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     if not old_gates.keys() <= new_gates.keys():
         raise ValueError("repair cannot silently remove originally selected gates")
     for name, gate in old_gates.items():
+        preserve_contract(gate, new_gates[name])
         if not set(gate["checks"]) <= set(new_gates[name]["checks"]):
             raise ValueError("repair cannot silently remove originally selected checks")
     fingerprints = input_fingerprints(new, root)
@@ -516,7 +529,9 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
     try:
         state = read(directory / "cycle.json")
         plan = state["plan"]
-        validate_plan(plan)
+        if state["plan_digest"] != digest(plan):
+            return 5
+        validate_plan(plan, root)
         if state["phase"] != "ready" or state["ready"] is not True:
             return 1
         if (state["source"] != source(root) or state["plan_digest"] != digest(plan)

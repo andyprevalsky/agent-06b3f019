@@ -26,15 +26,25 @@ class Cycle(unittest.TestCase):
                         'user.email=test@example.com', 'commit', '-qm', 'fixture'], check=True)
         self.directory = self.root / '.context' / 'cycle'
         (self.root / '.git' / 'info' / 'exclude').write_text('.context/\n')
+        self.workers = tempfile.TemporaryDirectory()
+        for name in ('api', 'ui'):
+            (Path(self.workers.name) / name).mkdir()
         self.plan = {'source': c.source(self.root), 'gates': [
             {'name': 'static', 'category': 'eslint', 'quick': True, 'command': ['true'], 'checks': ['lint']},
             {'name': 'api', 'worker': 'api-worker', 'command': ['true'], 'checks': ['a', 'b']},
             {'name': 'ui', 'worker': 'ui-worker', 'command': ['true'], 'checks': ['c']},
-        ]}
+        ] + [{'name':name,'category':name,'quick':True,'command':['true'],'checks':[name]}
+             for name in ('format','typescript','backend-structural')]}
+        for index, gate in enumerate(self.plan['gates'][1:3]):
+            gate.update(worker_transport='local-isolated',
+                        cwd=str(Path(self.workers.name) / gate['name']),
+                        env={'CONDUCTOR_WORKSPACE_NAME': gate['name'],
+                             'CONDUCTOR_PORT': str(12000 + index * 12000)})
         self.state = c.initialize(self.plan, self.root)
 
     def tearDown(self):
         c.CANCEL.clear()
+        self.workers.cleanup()
         self.temp.cleanup()
 
     def result(self, gate='api', **cases):
@@ -154,6 +164,44 @@ class Cycle(unittest.TestCase):
         self.plan['gates'][0]['category'] = 'deploy-command-structural'
         with self.assertRaises(ValueError): c.validate_plan(self.plan)
 
+    def test_mandatory_quick_checks_cannot_be_omitted(self):
+        self.plan['gates']=[g for g in self.plan['gates'] if g['name']!='format']
+        with self.assertRaisesRegex(ValueError,'quick checks are required'):
+            c.validate_plan(self.plan)
+
+    def test_worker_cannot_run_in_coordinator_checkout(self):
+        self.plan['gates'][1]['cwd'] = str(self.root)
+        with self.assertRaisesRegex(ValueError, 'outside the coordinator'):
+            c.initialize(self.plan, self.root)
+
+    def test_workers_cannot_share_checkout_database_or_port(self):
+        import copy
+        for field in ('cwd', 'CONDUCTOR_WORKSPACE_NAME', 'CONDUCTOR_PORT'):
+            with self.subTest(field=field):
+                plan = copy.deepcopy(self.plan)
+                a, b = plan['gates'][1:3]
+                if field == 'cwd': b[field] = a[field]
+                else: b['env'][field] = a['env'][field]
+                with self.assertRaisesRegex(ValueError, 'must not share'):
+                    c.initialize(plan, self.root)
+
+    def test_remote_binding_must_name_its_actual_transport(self):
+        gate = self.plan['gates'][1]
+        gate.update(worker_transport='ssh', worker_host='worker.example', worker_root='/repo')
+        with self.assertRaisesRegex(ValueError, 'SSH binding'):
+            c.initialize(self.plan, self.root)
+
+    def test_nested_worker_checkout_and_overlapping_listener_ports_are_rejected(self):
+        import copy
+        for kind in ('nested-root', 'port-offset', 'invalid-range'):
+            with self.subTest(kind=kind):
+                plan=copy.deepcopy(self.plan)
+                a,b=plan['gates'][1:3]
+                if kind=='nested-root': b['cwd']=str(Path(a['cwd'])/'nested')
+                elif kind=='port-offset': b['env']['CONDUCTOR_PORT']='12020'
+                else: b['env']['CONDUCTOR_PORT']='65000'
+                with self.assertRaises(ValueError): c.initialize(plan,self.root)
+
     def test_quick_timeout_bound_is_120_seconds(self):
         with patch.object(c, 'run_command', return_value=(0, False, False, False)) as runner:
             c.execute(self.plan['gates'][0], self.state, self.directory, self.root)
@@ -184,8 +232,9 @@ end=time.monotonic()+2
 while len(list(p.iterdir()))<2 and time.monotonic()<end: time.sleep(.01)
 assert len(list(p.iterdir()))==2
 """
-        for g in self.plan['gates'][1:]:
-            g.update(command=[sys.executable,'-c',script], env={'BARRIER':str(barrier),'WORKER':g['name']})
+        for g in self.plan['gates'][1:3]:
+            g.update(command=[sys.executable,'-c',script],
+                     env={**g['env'], 'BARRIER':str(barrier),'WORKER':g['name']})
         self.state=c.initialize(self.plan,self.root);self.state['phase']='initial'
         c.run_phase(self.plan,self.state,self.directory,self.root)
         self.assertTrue(self.state['ready'])
@@ -258,6 +307,23 @@ assert len(list(p.iterdir()))==2
         new={**forged,'source':c.source(self.root)}
         with self.assertRaisesRegex(ValueError,'previous plan'):
             c.refresh(self.state,forged,new,self.root)
+
+    def test_repair_cannot_swap_full_gate_command_for_a_green_command(self):
+        f=self.failure();c.adjudicate(self.state,self.report(f))
+        new=__import__('copy').deepcopy(self.plan)
+        new['gates'][1]['command']=['echo','not the original tests']
+        with self.assertRaisesRegex(ValueError,'full gate command'):
+            c.refresh(self.state,self.plan,new,self.root)
+
+    def test_repair_cannot_swap_the_worker_case_recipe(self):
+        self.plan['gates'][1]['worker_recipe']={'cases':{'a':{'command':['true']},'b':{'command':['false']}}}
+        self.plan['gates'][1]['case_protocol']=True
+        self.state=c.initialize(self.plan,self.root)
+        f=self.failure();c.adjudicate(self.state,self.report(f))
+        new=__import__('copy').deepcopy(self.plan)
+        new['gates'][1]['worker_recipe']['cases']['b']['command']=['true']
+        with self.assertRaisesRegex(ValueError,'original case command'):
+            c.refresh(self.state,self.plan,new,self.root)
 
     def test_worker_exit_zero_with_failed_case_blocks(self):
         g=self.plan['gates'][1];g['case_protocol']=True
@@ -355,8 +421,9 @@ assert len(list(p.iterdir()))==2
         finally: timer.join()
         self.assertEqual('interrupted',self.state['phase'])
         self.assertFalse(self.state['ready'])
-        self.assertTrue(self.state['attempts'][-1]['results'][0]['cancelled'])
-        self.assertNotEqual(0,self.state['attempts'][-1]['results'][0]['native_exit'])
+        result=next(r for r in self.state['attempts'][-1]['results'] if r['gate']=='static')
+        self.assertTrue(result['cancelled'])
+        self.assertNotEqual(0,result['native_exit'])
 
 
     def test_ambiguous_rca_submit_is_not_automatically_repeated(self):

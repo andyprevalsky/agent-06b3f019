@@ -13,11 +13,61 @@ import json
 import math
 import os
 from pathlib import Path
+import select
+import shutil
+import subprocess
 import sys
 import time
 
 from deploy_test_cycle import ROOT, command, digest, read, source, write
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
+
+MAX_REQUEST_BYTES = 16 * 1024 * 1024
+
+
+def prepare_checkout(root: Path, target: Path, copy_config: bool = False) -> dict:
+    """Prepare a new checkout from committed source; never mutate an existing one."""
+    root, target = root.resolve(), target.resolve()
+    if target == root or root in target.parents or target in root.parents:
+        raise ValueError('prepared checkout must be separate from the source')
+    if target.exists() and any(target.iterdir()):
+        raise ValueError('refusing to overwrite an existing worker checkout')
+    expected = source(root)
+    for args in (['diff', '--name-only', 'HEAD'], ['ls-files', '--others', '--exclude-standard']):
+        paths = subprocess.run(['git', *args], cwd=root, capture_output=True,
+                               text=True, check=True).stdout.splitlines()
+        if any(not p.startswith('agents/benchmarks/history/') for p in paths):
+            raise ValueError('commit the frozen source before preparing workers')
+    subprocess.run(['git', 'clone', '--quiet', '--no-hardlinks', '--local', str(root), str(target)], check=True)
+    subprocess.run(['git', 'checkout', '--quiet', '--detach', expected['head']], cwd=target, check=True)
+    if copy_config:
+        for rel in ('.env', 'env.sh', 'back-end/.env', 'agents/.env', 'front-end/.env', 'front-end/.env.local'):
+            origin, destination = root / rel, target / rel
+            if origin.is_file():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(origin, destination)
+                destination.chmod(0o600)
+    if source(root) != expected or source(target) != expected:
+        raise ValueError('prepared checkout differs from the frozen source')
+    return {'source': expected, 'worker_root': str(target), 'configuration_copied': copy_config}
+
+
+def read_request(timeout: float) -> dict:
+    """Bound a remote sender that never closes stdin or sends excessive data."""
+    end = time.monotonic() + timeout
+    chunks, size = [], 0
+    while True:
+        remaining = end - time.monotonic()
+        if remaining <= 0 or not select.select([sys.stdin], [], [], remaining)[0]:
+            raise ValueError('worker request timed out')
+        chunk = os.read(sys.stdin.fileno(), min(65536, MAX_REQUEST_BYTES + 1 - size))
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > MAX_REQUEST_BYTES:
+            raise ValueError('worker request exceeds transport limit')
+        chunks.append(chunk)
+    return json.loads(b''.join(chunks))
 
 
 def execute(request: dict, root: Path) -> dict:
@@ -32,6 +82,8 @@ def execute(request: dict, root: Path) -> dict:
         raise ValueError('full gate omitted registered cases')
     if source(root) != request['source']:
         raise ValueError('worker source differs from requested freeze')
+    if request.get('worker_root', str(root)) != str(root.resolve()):
+        raise ValueError('worker ran in a different checkout than its isolation binding')
     for case in cases.values():
         command(case['command'])
     for spec in [*cases.values(), recipe.get('setup'), recipe.get('cleanup')]:
@@ -74,7 +126,8 @@ def execute(request: dict, root: Path) -> dict:
     statuses = {name: row['status'] for name, row in rows.items()}
     result = {k: request[k] for k in ('token', 'source', 'gate')}
     result.update(cases=statuses, complete=all(s in ('PASS', 'FAIL') for s in statuses.values()),
-                  reused=False, evidence=rows, recipe_digest=digest(recipe), cleanup_complete=cleaned)
+                  reused=False, evidence=rows, recipe_digest=digest(recipe), cleanup_complete=cleaned,
+                  worker_root=str(root.resolve()))
     write(folder / 'result.json', result)
     return result
 
@@ -87,7 +140,7 @@ def run_step(name: str, spec: dict, root: Path, folder: Path) -> dict:
         code, timeout, cancelled, lingering = run_command(command(spec['command']),
             cwd=root / spec.get('cwd', '.'), env=env, output=stream, timeout=spec.get('timeout_seconds'))
     status = 'PASS' if code == 0 else 'FAIL'
-    if code not in (0, 1) or timeout or cancelled or lingering:
+    if code not in (0, 1) or timeout or cancelled or lingering or (code and spec.get('aggregate')):
         status = 'UNVERIFIED'
     raw = log.read_bytes()
     return {'status': status, 'native_exit': code, 'command': spec['command'],
@@ -100,9 +153,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=ROOT)
     parser.add_argument('--stdio', action='store_true')
+    parser.add_argument('--request-timeout', type=float, default=30)
+    parser.add_argument('--prepare-checkout', type=Path, help='new isolated checkout from the committed freeze')
+    parser.add_argument('--copy-config', action='store_true', help='copy private config locally without printing it')
     args = parser.parse_args()
     try:
-        request = json.load(sys.stdin) if args.stdio else read(Path(os.environ['DEPLOY_GATE_REQUEST']))
+        if args.prepare_checkout:
+            print(json.dumps(prepare_checkout(args.root, args.prepare_checkout, args.copy_config)))
+            return 0
+        if not math.isfinite(args.request_timeout) or args.request_timeout <= 0:
+            raise ValueError('invalid request timeout')
+        request = read_request(args.request_timeout) if args.stdio else read(Path(os.environ['DEPLOY_GATE_REQUEST']))
         result = execute(request, args.root.resolve())
         if args.stdio:
             print(json.dumps(result))

@@ -22,11 +22,12 @@ def cancellation_handlers():
             signal.signal(s, handler)
 
 
-def run_command(argv, *, cwd, env, output, timeout, input_path=None):
+def run_command(argv, *, cwd, env, output, timeout, input_path=None, stderr_output=None):
     incoming = open(input_path, 'rb') if input_path else None
     try:
         proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=incoming, stdout=output,
-                                stderr=subprocess.STDOUT, start_new_session=True)
+                                stderr=stderr_output if stderr_output is not None else subprocess.STDOUT,
+                                start_new_session=True)
     finally:
         if incoming:
             incoming.close()

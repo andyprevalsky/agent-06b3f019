@@ -15,6 +15,7 @@ from pathlib import Path
 
 from deploy_test_cycle import ROOT, QUICK, source, validate_plan, write
 from select_affected_tests import Selector, changed_files
+from deploy_test_bindings import generate as generate_bindings
 
 GRAPH_LANES = {
     'backend-coverage-blackbox': ['backend-unit', 'backend-blackbox'],
@@ -79,6 +80,9 @@ def select(template: dict, changed: list[str], result: dict, binding: dict) -> d
             gate.update(worker=worker['id'], command=worker['command'], cwd=worker.get('cwd', str(ROOT)),
                         env={**gate.get('env', {}), **worker.get('env', {})})
             gate['worker_transport'] = worker.get('transport', 'explicit')
+            for key in ('worker_host', 'worker_root'):
+                if key in worker:
+                    gate[key] = worker[key]
             if 'timeout_seconds' in worker:
                 gate['timeout_seconds'] = worker['timeout_seconds']
             if worker.get('case_protocol'):
@@ -122,7 +126,9 @@ def standard_template() -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--template', type=Path, help='optional case-aware recipes; default existing full gate commands')
-    parser.add_argument('--workers', type=Path, required=True)
+    workers = parser.add_mutually_exclusive_group(required=True)
+    workers.add_argument('--workers', type=Path, help='explicit existing adapter bindings')
+    workers.add_argument('--inventory', type=Path, help='prepared worker identities; generate full-suite bindings')
     parser.add_argument('--base', default='origin/main')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
@@ -131,7 +137,9 @@ def main() -> int:
     result = {'all': selected.all_lanes, 'reasons': selected.reasons,
               'lanes': {k: sorted(v) for k, v in selected.selected.items()}}
     template = json.loads(args.template.read_text()) if args.template else standard_template()
-    plan = select(template, changed, result, json.loads(args.workers.read_text()))
+    bindings = (generate_bindings(template, json.loads(args.inventory.read_text()), ROOT)
+                if args.inventory else json.loads(args.workers.read_text()))
+    plan = select(template, changed, result, bindings)
     write(args.output, plan)
     print(json.dumps({'selected': [g['name'] for g in plan['gates']], 'omitted': plan['omitted']}))
     return 0

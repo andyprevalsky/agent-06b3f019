@@ -22,8 +22,9 @@ supply case-aware adapters instead. Platform-unavailable Mac checks are recorded
 as unverified omissions under the standing Linux exception, never passed.
 
 Recipes contain a `gates` array, with `name`, `category`, argv `command`, and
-explicit stable `checks` IDs. Quick categories are `format`, `eslint`,
-`typescript`, and application `backend-structural` / `application-structural`.
+explicit stable `checks` IDs. Every plan must include `format`, `eslint`,
+`typescript`, and application `backend-structural` / `application-structural`
+as mandatory quick categories.
 The coordinator launches all quick checks together and gives each at most120s.
 Formatter **checks** retain the existing TypeScript/TSX scope; automatic
 formatting precedes the source freeze.
@@ -40,7 +41,11 @@ Every selected nonquick gate needs a worker binding:
   },
   "backend-coverage-blackbox": {
     "id": "independent-backend-worker",
-    "command": ["path/to/provisioned-worker-adapter", "backend"]
+    "transport": "local-isolated",
+    "cwd": "/prepared-workers/backend",
+    "worker_root": "/prepared-workers/backend",
+    "env": {"CONDUCTOR_WORKSPACE_NAME": "deploy-backend", "CONDUCTOR_PORT": "12000"},
+    "timeout_seconds": 3600
   }
 }
 ```
@@ -51,7 +56,34 @@ checkout, database, ports and teardown. It must validate the requested source
 before executing and return results. The orchestrator launches every selected
 worker concurrently; it does not add dependencies between coverage, semantics,
 smoke, AgentCard, live probes or E2B. Existing worker safety and cleanup remain.
-Do not pretend an executor label provides isolation: inspect the worker setup.
+The planner rejects bindings inside the coordinator checkout, overlapping
+worker roots, or shared workspace/database identities and ports. SSH bindings
+name their actual host and prepared root; the returned receipt must match that
+root. These checks do not provision a host or prove its capacity: the owner must
+still prepare private caches/services and verify the worker setup.
+
+The JSON above is an inventory for already provisioned workers. Use
+`--inventory inventory.json` instead of `--workers workers.json` to generate
+commands from those identity/transport/root/env/deadline fields.
+`deploy_test_bindings.py` generates the actual
+transport and the unchanged full-suite recipe from the versioned template.
+The illustrative 3600-second transport deadline must be replaced with the
+gate's existing deadline, not treated as a new test timeout. Listener port
+footprints use the existing port allocator's offsets; base ports alone are
+not sufficient proof that workers cannot collide.
+Multi-case templates need their actual `recipe`; an aggregate nonzero exit is
+UNVERIFIED rather than proof that every constituent ran. It cannot be waived.
+
+For a new local worker checkout, after committing the exact source freeze run
+`python3 scripts/deploy_test_worker.py --root "$SOURCE" --prepare-checkout
+"$NEW_WORKER_ROOT"`. The command refuses dirty source or an existing checkout,
+clones the exact commit, and verifies equal source digests. `--copy-config`
+explicitly copies the private local configuration without displaying it;
+prepare the pinned dependencies through `CLAUDE.md` before starting gates.
+For an existing remote host, prepare that same commit and configuration there
+through its existing owner, then use `transport: ssh`, `worker_host` and
+`worker_root` in the inventory. The worker independently verifies the requested
+source before executing. This path does not allocate machines or waive setup.
 
 The cloud smoke adapter uses the benchmark CLI, keeps its existing task selection
 and raw run receipts, and returns all selected outcomes. If no appropriate worker
@@ -85,6 +117,8 @@ existing worker owner; this adapter allocates nothing.
 Streamed transports must also bind `timeout_seconds` to the existing gate's
 outer deadline. Do not invent a shorter test budget or leave the transport
 unbounded.
+Worker stderr is preserved separately from its stdout JSON receipt. Request
+input and receipt size are bounded; an incomplete transport cannot become PASS.
 
 ## Result protocol
 

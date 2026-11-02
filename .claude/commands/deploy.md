@@ -37,6 +37,10 @@ Use `scripts/deploy_test_plan.py` and `scripts/deploy_test_cycle.py` as describe
 in `docs/deploy-test-cycle.md`. This policy supersedes older full-rerun,
 sequential-lane, diagnostic-only selection and outage-retry instructions below.
 The source/approval/whole-devbox and production-verification requirements remain.
+In the older predeployment recipes below, "no skip" means every check inside
+a selected category is required (subject to the controlling failure policy).
+Only the quick categories below are always selected. Source/approval guards
+and post-deployment requirements are not made optional by test selection.
 
 Use one state directory throughout planning, execution and Phase 3:
 `DEPLOY_TEST_CYCLE_STATE_DIR=${DEPLOY_TEST_CYCLE_STATE_DIR:-.context/deploy-pipeline}`.
@@ -576,7 +580,7 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
    - Step 2b: `eslint` verify (0 errors)
    - Step 3: `tsc --noEmit`
    - Step 4: structural tests (no skip)
-   - Step 4s: deploy environment + command structural tests (no skip)
+   - Step 4s: deploy environment + command structural tests (full suite when selected)
    - Step 4m-lint: mac-app format:check + lint + type-check (skip if `CHANGED_MAC_APP` is empty)
    - Step 4cb: cloud benchmark controller regressions (skip if `CHANGED_CLOUDBENCH` is empty). If
      `CHANGED_AGENTS` is also non-empty, defer this lane until Step 4g exits; the agents
@@ -775,7 +779,7 @@ never opens or closes a review cycle, and never requests a review, so the
 bounded `deploy_review_cycle.py` ledger is untouched; push the batch once the
 open cycle is terminal exactly as before. Every receipt is bound to the HEAD
 plus source digest it ran on, and Phase 3 runs
-`python3 scripts/run_deploy_pipeline.py verify --state-dir <dir> --expect-head "$(git rev-parse HEAD)"`
+`python3 scripts/run_deploy_pipeline.py verify --require-staged --state-dir <dir> --expect-head "$(git rev-parse HEAD)"`
 before `require-mergeable`: a green receipt from other bytes exits `5` and
 the gates rerun.
 
@@ -924,7 +928,7 @@ template, `docs/rca/`). `scripts/tests/semantic-deploy-gate.test.sh` fails if a
 
 If any invariant fails, fix the violation. The test output includes remediation guidance (e.g., "Move the needed logic to service.ts or extract to a provider.").
 
-## Step 4s: Deploy environment + command structural tests (no skip)
+## Step 4s: Deploy environment + command structural tests (full suite when selected)
 
 The concurrent runner executes exactly these independent suites, without changing
 their assertions or test counts:
@@ -1031,8 +1035,8 @@ The descend gate owns its behavioral fixtures. The semantic deploy gate
 verifies its registration and documented command without recursively executing
 it, so it runs once in the complete registry.
 
-The compact benchmark gates above run on every deploy, including deploys
-without cloud-runner changes. They exercise the canonical CLI dispatch (including
+When the deploy-tooling category is selected, run every compact benchmark gate
+above, including those without direct cloud-runner changes. They exercise the canonical CLI dispatch (including
 one 50-task dispatch and production-only routing), completed LIVE-query evidence,
 exact composite-root cleanup, and quiesced resource retirement offline. Larger
 paid fleet campaigns remain explicit human-requested validation; they are not
@@ -1366,7 +1370,7 @@ Step 4p launches the exact `run-deploy-stage credential-health` command with
 
 Anthropic/Claude is intentionally non-blocking in this gate: the probe should still run by default and report `WARN` on exhausted credits, rejected auth, or provider availability problems, but future deploys may proceed without human approval when only this provider fails. The optional `DEPLOY_GATE_OVERRIDES=credential-health:anthropic` path remains available when an operator wants an explicit audited skip instead of a live probe. Parallel.ai is also warn-only.
 
-## Step 4h: Live Amplitude admin-health probe (no skip)
+## Step 4h: Live Amplitude admin-health probe (when its live-probe category is selected)
 
 Run this once after all parallel Group 3 branches finish and before recording
 the `runtime-blackbox` finish boundary. Step 4p launches the exact
@@ -1425,7 +1429,7 @@ failure, blocks the deploy. A block means the failover could not serve that
 turn at that moment: diagnose it from the printed host, connect, and response
 timings and the `openrouter_fast_chat.end` records before rerunning.
 
-## Step 4r: Cold-seed memory ratchet (no skip)
+## Step 4r: Cold-seed memory ratchet (when selected)
 
 Measure five full cold seeds against the newest cached production dump. Every
 run gets a fresh target database and must pass the source/target fidelity
@@ -1598,8 +1602,8 @@ in one assistant message with separate parallel Bash tool calls:
 1. CodeRabbit review waiter (Step 9; already running since the freeze push).
 2. Smoke benchmarks (Step 6; skip only under its documented classifier).
 3. AgentCard lifecycle (Step 6a; skip only when its classifier is empty).
-4. Semantic tests (Step 6b; never skip).
-5. Claude Code E2B sandbox smoke (Step 6c; NEVER skip — runs on every deploy).
+4. Semantic tests (Step 6b; complete suite when selected).
+5. Claude Code E2B sandbox smoke (Step 6c; complete suite when selected).
 
 Matching Group 4 rows in `/factory-review` therefore share a real start phase.
 Do not wait for one lane before starting another. All applicable lanes must be
@@ -1915,7 +1919,7 @@ Stripe, or prove native cleanup; retain that liability and its evidence.
 
 Semantic tests exercise real user flows through Playwright/Chromium against the full local stack (backend + worker + **frontend**). They are the only gate that proves realtime broadcasts reach the UI and that the login path still works end-to-end.
 
-**Semantic tests run on every /deploy unless the user explicitly overrides that gate.** This is independent of the smoke-benchmark change classifier: documentation-only, test-only, frontend-only, and backend-only deploys all run the complete semantic suite by default. A deploy changes production state even when the app diff is small, so the user-visible frontend contract is normally re-proven.
+**When selected by the affected-category plan, run the complete semantic suite.** Frontend, backend and agent changes can select it through consumer dependencies and integration triggers; documentation-only changes need not. An unknown dependency selects all categories. This predeploy selection does not waive the required post-deploy production semantic verification.
 
 ### Running semantic tests
 
@@ -1962,10 +1966,10 @@ After all Group 4 lanes pass or have exact qualified exceptions, run the mandato
 fails, preserve the failed agent long enough to collect diagnostics, complete
 any payment lifecycle cleanup, then tear down before restarting the Test Loop.
 
-## Step 6c: Claude Code E2B sandbox smoke (NO SKIP — real E2B sandbox)
+## Step 6c: Claude Code E2B sandbox smoke (when selected — real E2B sandbox)
 
-**This gate is NON-SKIPPABLE. It runs on every `/deploy` regardless of the change
-classifier or which paths changed.** It is the only gate that proves the Claude
+**Run this complete gate when the affected-category plan selects it.**
+It is the only gate that proves the Claude
 Code agent path works end-to-end through a real E2B sandbox: DB credential read →
 decrypt → sandbox create → `ws-server.mjs` overlay → Claude Code CLI invocation →
 Anthropic → completion. A regression here (e.g. a CLI-arg contract break like the
@@ -1973,8 +1977,8 @@ Anthropic → completion. A regression here (e.g. a CLI-arg contract break like 
 ignored the positional prompt under `--output-format stream-json` and every
 session exited 1) is invisible to the ordinary back-end blackbox suite because
 Step 4a's coverage run deliberately keeps `BLACKBOX_SMOKE` unset and never spins a
-real sandbox. Do NOT downgrade this to WARN, gate it behind a change classifier,
-or skip it because "claude-code wasn't touched."
+real sandbox. When selected, run it in full; only an evidence-bound exception
+under the controlling failure policy can turn a failed case into SKIP.
 
 With the full stack from Step 5 still running, resolve its actual backend and
 database ports from the live service manifest. Create the separate local
@@ -2101,7 +2105,7 @@ unchanged. Do not drop remaining unexecuted checks.
 
 # ║ lifecycle surface changed ║
 
-# ║ 6b. Semantic tests: 100% pass on every /deploy; never skipped. ║
+# ║ 6b. Semantic tests: complete selected suite must pass or have an exact exception. ║
 
 # ║ Includes four chat paths × five full-lifecycle samples. ║
 

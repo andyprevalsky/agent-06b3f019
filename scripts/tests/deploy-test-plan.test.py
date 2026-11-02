@@ -2,6 +2,7 @@
 import copy
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -16,17 +17,28 @@ class Selection(unittest.TestCase):
             {'name':'be','category':'backend-coverage-blackbox','command':['true'],'checks':['be']},
             {'name':'fe','category':'frontend-coverage-blackbox','command':['true'],'checks':['fe']},
             {'name':'smoke','category':'smoke','command':['true'],'checks':['smoke']},
-        ]}
-        self.bindings = {n:{'id':n+'-isolated','command':['true'],'transport':
-                           'benchmark-cloud-cli' if n=='smoke' else 'explicit'} for n in ['be','fe','smoke']}
+        ] + [{'name':name,'category':name,'command':['true'],'checks':[name]}
+             for name in ('format','typescript','backend-structural')]}
+        self.workers = tempfile.TemporaryDirectory()
+        self.bindings = {n:{'id':n+'-isolated','command':['true'],
+                           'transport':'local-isolated',
+                           'cwd':str(Path(self.workers.name)/n),
+                           'env':{'CONDUCTOR_WORKSPACE_NAME':n,
+                                  'CONDUCTOR_PORT':str(12000+i*12000)}}
+                         for i,n in enumerate(['be','fe','smoke'])}
+        self.bindings['smoke'].update(transport='benchmark-cloud-cli',
+                                     command=['bash','scripts/run-predeploy-cloud'])
         self.result = {'all':False,'reasons':[], 'lanes':{'backend-unit':['test-one'],'frontend-vitest':[]}}
         self.mock = patch.object(p,'source',return_value={'head':'fixed','digest':'fixed'});self.mock.start()
 
-    def tearDown(self): self.mock.stop()
+    def tearDown(self):
+        self.mock.stop()
+        self.workers.cleanup()
 
     def test_untouched_frontend_omitted(self):
         plan=p.select(self.template,['back-end/src/one.ts'],self.result,self.bindings)
-        self.assertEqual({'lint','be','smoke'},{x['name'] for x in plan['gates']})
+        self.assertEqual({'lint','be','smoke','format','typescript','backend-structural'},
+                         {x['name'] for x in plan['gates']})
         self.assertEqual('fe',plan['omitted'][0]['gate'])
 
     def test_api_change_can_select_frontend_via_graph(self):
@@ -37,12 +49,12 @@ class Selection(unittest.TestCase):
     def test_unknown_source_selects_all(self):
         self.result.update(all=True,reasons=['unmapped source'])
         plan=p.select(self.template,['new-language/source'],self.result,self.bindings)
-        self.assertEqual(4,len(plan['gates']))
+        self.assertEqual(7,len(plan['gates']))
 
     def test_documentation_only_keeps_quick_phase(self):
         self.result['lanes']['backend-unit']=[]
         plan=p.select(self.template,['docs/guide.md'],self.result,self.bindings)
-        self.assertEqual(['lint'],[x['name'] for x in plan['gates']])
+        self.assertEqual(['lint','format','typescript','backend-structural'],[x['name'] for x in plan['gates']])
 
     def test_cloud_smoke_required(self):
         self.bindings['smoke']['transport']='local'
@@ -75,9 +87,30 @@ class Selection(unittest.TestCase):
 
     def test_new_category_cannot_silently_disappear(self):
         self.template['gates'].append({'name':'new','command':['true'],'checks':['new']})
-        self.bindings['new']={'id':'new-worker','command':['true']}
+        self.bindings['new']={'id':'new-worker','command':['true'],
+            'transport':'local-isolated','cwd':str(Path(self.workers.name)/'new'),
+            'env':{'CONDUCTOR_WORKSPACE_NAME':'new','CONDUCTOR_PORT':'48000'}}
         plan=p.select(self.template,['docs/guide.md'],self.result,self.bindings)
         self.assertIn('new',[x['name'] for x in plan['gates']])
+
+    def test_inventory_generates_the_original_full_command(self):
+        from deploy_test_bindings import generate
+        inventory={'be':{'id':'be-worker','transport':'local-isolated',
+            'worker_root':str(Path(self.workers.name)/'be'),'timeout_seconds':60,
+            'env':{'CONDUCTOR_WORKSPACE_NAME':'be','CONDUCTOR_PORT':'12000'}}}
+        bindings=generate(self.template,inventory,p.ROOT)
+        recipe=bindings['be']['recipe']['cases']['be']
+        self.assertEqual(self.template['gates'][1]['command'],recipe['command'])
+        self.assertTrue(recipe['aggregate'])
+        self.assertIn('--stdio',bindings['be']['command'])
+
+    def test_remote_inventory_quotes_the_prepared_path(self):
+        from deploy_test_bindings import generate
+        inventory={'be':{'id':'be-worker','transport':'ssh','worker_host':'test-worker',
+                         'worker_root':'/prepared source'}}
+        binding=generate(self.template,inventory,p.ROOT)['be']
+        self.assertEqual(['ssh','test-worker'],binding['command'][:2])
+        self.assertIn("'/prepared source/scripts/deploy_test_worker.py'",binding['command'][2])
 
 
 if __name__=='__main__':unittest.main()

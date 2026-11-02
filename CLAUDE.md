@@ -1028,7 +1028,10 @@ deploy lane, the tests a change can reach. Rules:
   `scripts/test-map/edges.json`, or name the path literally in the test.
 - `scripts/deploy_test_plan.py` may select complete affected gate categories for
   the staged deploy flow in `docs/deploy-test-cycle.md`; unknown impact expands
-  selection. Focused test subsets remain diagnostic/repair evidence only. After
+  selection. Format, ESLint, TypeScript and application structural checks always
+  run in the quick phase. Other predeployment categories run when selected;
+  production checks and source/approval guards retain their own requirements.
+  Focused test subsets remain diagnostic/repair evidence only. After
   repairs, full failed gates and the final complete selected gate set must pass
   on the frozen source. Coverage thresholds inside a selected full gate remain
   unchanged; a focused subset cannot masquerade as a full coverage pass.
