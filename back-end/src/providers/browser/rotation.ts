@@ -2,6 +2,10 @@ import type { BrowserProviderName } from './types';
 import type { KernelProxyType } from './kernelProxy';
 import { browserProviderEnabled } from './config';
 import { TilionApiError } from './tilionClient';
+export {
+  ProxyRotationExhaustedError,
+  RotationSessionNotFoundError,
+} from '../browserRotationErrors';
 
 export const ROTATION_CAP = 4;
 

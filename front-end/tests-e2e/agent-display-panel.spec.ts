@@ -1,4 +1,4 @@
-/** Inline, expandable agent display + opaque WebGL iframe, with deterministic local API fixtures. */
+/** Real inline display + opaque WebGL iframe, with deterministic local API fixtures. */
 import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { FRONTEND_URL } from './helpers';
@@ -6,7 +6,7 @@ const OWNER = 'display-preview';
 const GAME_URL = 'https://display-preview.rose.test/game.html';
 const html = readFileSync(new URL('./fixtures/agent-display-game.html', import.meta.url), 'utf8');
 
-test('desktop agent display runs real WebGL inline, expands in place and keeps controls in its sandbox', async ({
+test('desktop inline display expands real WebGL output and keeps controls in its sandbox', async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -91,16 +91,29 @@ test('desktop agent display runs real WebGL inline, expands in place and keeps c
     await route.fulfill({ json: body });
   });
   await page.goto(`${FRONTEND_URL}/?agent-id=${OWNER}`, { waitUntil: 'domcontentloaded' });
-  // Displays render inline in the chat (0490bb1cc): no Agent Display icon or panel.
-  await expect(page.getByRole('button', { name: 'Browser', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Agent Display', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Open agent display/ })).toHaveCount(0);
   await expect(page.getByTestId('agent-display-drawer')).toHaveCount(0);
-  const toggle = page.getByTestId('display-toggle');
+  const browser = page.getByRole('button', { name: 'Browser', exact: true });
+  await expect(browser).toHaveAttribute('aria-pressed', 'false');
+  const display = page.locator(
+    '[data-message-id="game-display"][data-message-kind="display-media"]',
+  );
+  const toggle = display.getByTestId('display-toggle');
   await expect(toggle).toHaveAccessibleName('Expand display: Orbit Runner');
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
-  const iframe = page.getByTitle('game.html');
+  const iframe = display.getByTestId('display-html-frame');
+  await expect(iframe).toHaveCount(1);
+  await expect(iframe).toHaveAttribute('src', GAME_URL);
   await expect(iframe).toHaveAttribute('sandbox', 'allow-scripts allow-pointer-lock allow-popups');
-  const game = page.frameLocator('[data-testid="display-html-frame"]');
+  const originalFrame = await iframe.elementHandle();
+  await toggle.click();
+  await expect(toggle).toHaveAccessibleName('Collapse display: Orbit Runner');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  expect((await iframe.boundingBox())!.height).toBeGreaterThan(480);
+  const game = page.frameLocator(
+    '[data-message-id="game-display"] [data-testid="display-html-frame"]',
+  );
   const canvas = game.locator('canvas');
   await expect(canvas).toHaveAttribute('data-ready', 'true');
   await canvas.click();
@@ -113,16 +126,20 @@ test('desktop agent display runs real WebGL inline, expands in place and keeps c
   await expect
     .poll(async () => Number(await canvas.getAttribute('data-frames')))
     .toBeGreaterThan(3);
-  // Expanding keeps the same running frame (no remount, no reload).
-  const frames = Number(await canvas.getAttribute('data-frames'));
+  const framesBeforeToggle = Number(await canvas.getAttribute('data-frames'));
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(iframe).toHaveCount(1);
   await toggle.click();
   await expect(toggle).toHaveAttribute('aria-expanded', 'true');
-  await expect(toggle).toHaveAccessibleName('Collapse display: Orbit Runner');
+  expect(await iframe.evaluate((element, original) => element === original, originalFrame)).toBe(
+    true,
+  );
+  await expect(canvas).toHaveAttribute('data-ready', 'true');
   await expect
     .poll(async () => Number(await canvas.getAttribute('data-frames')))
-    .toBeGreaterThan(frames);
-  expect((await iframe.boundingBox())!.height).toBeGreaterThan(480);
-  // The final segment is retained as a user-facing clip with the display expanded.
+    .toBeGreaterThan(framesBeforeToggle);
+  // The final segment retains the same live frame with the inline display expanded.
   await page.waitForTimeout(1500);
   await canvas.click();
   await page.keyboard.down('ArrowLeft');

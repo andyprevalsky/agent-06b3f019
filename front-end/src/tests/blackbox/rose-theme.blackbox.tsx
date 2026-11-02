@@ -9,6 +9,10 @@ import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { flushSync } from 'react-dom';
 
+// Resolve the real lazy-renderer module with the fixture dependencies.
+// The bounded assertion still waits for its mount and passive canvas sizing.
+import '@/features/terminal-component-group/components/SmallTileAnimationCanvasRenderer';
+
 import AgentStatusIndicator from '@/features/terminal-component-group/components/AgentStatusIndicator';
 import type { AgentRunStatus } from '@/features/terminal-component-group/components/agentRunState';
 import { MobileGridEnergyPillsCanvas } from '@/features/terminal/components/GridEnergyPills';

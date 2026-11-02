@@ -23,7 +23,7 @@
  *
  * Usage: bash scripts/run-blackbox-tests.sh project-workspace
  */
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import {
   chmodSync,
@@ -115,16 +115,26 @@ function buildFixtureRepo(): { checkout: string; remote: string; outsideEnv: str
   return { checkout, remote, outsideEnv };
 }
 
-function runSync(s: Session, args: string[]) {
-  const out = spawnSync(process.execPath, [ROSE_SYNC, ...args, '--json'], {
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      ROSE_TOKEN: s.token,
-      ROSE_API_URL: BASE_URL,
-      ROSE_API_KEY: '',
-      ROSE_USER_ID: '',
-    },
+// Keep native CLI work from blocking pooled HTTP socket close/expiry events.
+function runChild(file: string, args: string[], env = process.env) {
+  return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
+    execFile(file, args, { encoding: 'utf8', env }, (error, stdout, stderr) => {
+      resolve({
+        status: error ? (typeof error.code === 'number' ? error.code : null) : 0,
+        stdout,
+        stderr,
+      });
+    });
+  });
+}
+
+async function runSync(s: Session, args: string[]) {
+  const out = await runChild(process.execPath, [ROSE_SYNC, ...args, '--json'], {
+    ...process.env,
+    ROSE_TOKEN: s.token,
+    ROSE_API_URL: BASE_URL,
+    ROSE_API_KEY: '',
+    ROSE_USER_ID: '',
   });
   leakTexts.push(['rose-sync output', out.stdout + out.stderr]);
   assert(out.status === 0, `rose-sync ${args.join(' ')} failed: ${out.stderr}${out.stdout}`);
@@ -254,7 +264,7 @@ test('sync → restore → startup ok, with incremental re-sync and no secret le
     startupTimeoutS: 60,
   });
 
-  const first = runSync(s, ['push', '--dir', checkout, '--project', project.id]);
+  const first = await runSync(s, ['push', '--dir', checkout, '--project', project.id]);
   assert(first.revision === 1, `first revision ${first.revision}`);
   assert(
     JSON.stringify([...first.written].sort()) === JSON.stringify(['.env', 'app/.env.local']),
@@ -264,7 +274,7 @@ test('sync → restore → startup ok, with incremental re-sync and no secret le
     first.gitBundle === 'written' && first.uncommittedPatch === 'written',
     'artifacts written'
   );
-  const second = runSync(s, ['push', '--dir', checkout, '--project', project.id]);
+  const second = await runSync(s, ['push', '--dir', checkout, '--project', project.id]);
   assert(
     second.written.length === 0 && second.unchanged.length === 2,
     'no-op re-sync uploads nothing'
@@ -274,7 +284,7 @@ test('sync → restore → startup ok, with incremental re-sync and no secret le
     'artifacts unchanged'
   );
   writeFileSync(join(checkout, 'app', '.env.local'), 'APP_MODE=staging\n');
-  const third = runSync(s, ['push', '--dir', checkout, '--project', project.id]);
+  const third = await runSync(s, ['push', '--dir', checkout, '--project', project.id]);
   assert(
     JSON.stringify(third.written) === JSON.stringify(['app/.env.local']),
     `only changed file: ${third.written}`
@@ -410,9 +420,11 @@ test('seed-rose: Rose project gets its startup script and six env files (PJ4)', 
     mkdirSync(join(repo, rel, '..'), { recursive: true });
     symlinkSync(real, join(repo, rel));
   }
-  const out = spawnSync(process.execPath, [ROSE_SYNC, 'seed-rose', '--dir', repo, '--json'], {
-    encoding: 'utf8',
-    env: { ...process.env, ROSE_TOKEN: s.token, ROSE_API_URL: BASE_URL, ROSE_API_KEY: '' },
+  const out = await runChild(process.execPath, [ROSE_SYNC, 'seed-rose', '--dir', repo, '--json'], {
+    ...process.env,
+    ROSE_TOKEN: s.token,
+    ROSE_API_URL: BASE_URL,
+    ROSE_API_KEY: '',
   });
   leakTexts.push(['seed-rose output', out.stdout + out.stderr]);
   assert(out.status === 0, `seed-rose failed: ${out.stderr}${out.stdout}`);
@@ -494,6 +506,36 @@ test('startup failure and timeout are reported, and the timeout is enforced', as
   );
   assert(Date.now() - t0 < 15_000, 'runProjectStartup enforced the timeout');
   assert(!report.outputTail.includes('never'), 'the script was stopped before finishing');
+});
+
+test('project CLI child yields the event loop, drains output and preserves failure status', async () => {
+  let advanced = false;
+  const heartbeat = setImmediate(() => {
+    advanced = true;
+  });
+  try {
+    const out = await runChild(process.execPath, [
+      '-e',
+      'setTimeout(() => { process.stdout.write("fixture stdout"); process.stderr.write("fixture stderr"); }, 25)',
+    ]);
+    assert(advanced, 'the parent event loop must run while the CLI child is pending');
+    assert(
+      out.status === 0 && out.stdout === 'fixture stdout' && out.stderr === 'fixture stderr',
+      'the joined CLI child must preserve both output streams'
+    );
+    const failed = await runChild(process.execPath, [
+      '-e',
+      'process.stdout.write("partial output"); process.stderr.write("fixture failure"); process.exitCode = 7',
+    ]);
+    assert(
+      failed.status === 7 &&
+        failed.stdout === 'partial output' &&
+        failed.stderr === 'fixture failure',
+      'nonzero CLI exit remains a failure with its captured output'
+    );
+  } finally {
+    clearImmediate(heartbeat);
+  }
 });
 
 test('secret-leak scan: fixture secret absent from every surface', async () => {

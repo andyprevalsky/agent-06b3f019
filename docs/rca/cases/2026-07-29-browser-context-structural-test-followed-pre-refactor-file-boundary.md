@@ -95,6 +95,24 @@ execution of that actual callable. The repair unifies fixture dependencies and
 adds no production process, request, timeout change, or work at 10,000 agents.
 Cloud acceptance receives no credit from these fixture tests.
 
+
+### November 2, 2026 recurrence — direct workflow owner extracted
+
+PR1580 extracted startDirectWorkflow from agentLifecycleService.ts into
+agentDirectStartService.ts for independent-spawn retry reuse, but the unchanged
+unit contract still searched the old file. Native unit failed with
+`startDirectWorkflow startAgentWorkflowExecution params should be found`.
+Gate: INTRODUCED by this extraction. The actual taskQueue pass-through remains
+in the extracted owner; no runtime queue behavior is changed to satisfy a test.
+
+Point the original source-reader at agentDirectStartService.ts. Every assertion
+is retained, including descendant taskQueue and durable-start deadline checks.
+The same unit then passes, with the corrected-path diagnostic taking0.277s and
+canonical four-file account/direct-start unit invocation passing4/4. Evidence:
+.context/deploy-boxes-default-20261102/direct-taskqueue-proof/ and
+stabilization-account.log. This source-ownership repair has no DB/provider call
+or budget change and does not substitute for final full backend acceptance.
+
 ## Human feedback
 
 None recorded.

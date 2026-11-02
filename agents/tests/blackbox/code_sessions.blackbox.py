@@ -41,6 +41,10 @@ _CLI_SESSION_ID = "0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
 _STUB_CLI = r"""
 import json, os, pathlib, subprocess, sys, time
 
+first_start_delay = float(os.environ.get("STUB_FIRST_START_DELAY_S", "0"))
+if first_start_delay and not os.environ.get("CLAUDE_CODE_RESUME_SESSION_ID"):
+    time.sleep(first_start_delay)
+
 # stream-json input: the task prompt is the first JSON line; the ws-server
 # keeps stdin open until every written turn has its result.
 for line in sys.stdin:
@@ -89,6 +93,7 @@ if resume is None and os.environ.get("STUB_MODE") not in ("finish", "rate_limit"
     notes.write_text("uncommitted work\n")
     emit({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "sleep 99999"}}]}})
+    (gate / "tool_started").touch()
     while not (gate / "tool_done").exists():
         time.sleep(0.05)
     emit({"type": "user", "tool_use_result": {"stdout": "done", "stderr": ""},
@@ -244,6 +249,13 @@ class _Backend:
         code_session_id = kwargs.get("code_session_id") or "6c1d6f1e-0000-4000-8000-00000000c0de"
         resume_env = {"CLAUDE_CODE_RESUME_SESSION_ID": _CLI_SESSION_ID} if len(self.created) > 1 else {}
         ws_url = await self.session_home.start(**resume_env)
+        if self.resize_after is not None and len(self.created) == 1:
+            # This fixture injects a CLI-originated request: the conversation
+            # and its in-flight tool must exist before attachment can report it.
+            await _wait_until(
+                lambda: (self.session_home.tmp / "tool_started").exists(),
+                "the initial CLI tool to start",
+            )
         return {
             "task_id": f"task-{len(self.created)}",
             "sandbox_id": "sb-persistent",
@@ -478,13 +490,20 @@ async def test_idle_past_every_old_limit_is_paused_not_failed_then_resumes():
         with backend.patched(clock=_virtual_clock(2000.0)):
             env = ActivityEnvironment()
             first = asyncio.create_task(env.run(service.spawn_claude_code_activity, *_activity_args()))
-            await _wait_until(lambda: session_home.runs(), "the CLI to start")
-            await asyncio.sleep(2.5)  # ~5000 virtual seconds with Bash in flight
-            assert not first.done(), f"an in-flight tool must keep the session attached: {first.result()}"
-            assert backend.closed == [], f"nothing may close a working session: {backend.closed}"
-            assert backend.keepalives >= 5, f"attached sessions keep their sandbox alive: {backend.keepalives}"
-            session_home.release("tool_done")
-            paused = await asyncio.wait_for(first, timeout=30)
+            try:
+                await _wait_until(lambda: session_home.runs(), "the CLI to start")
+                await _wait_until(lambda: backend.keepalives > 0, "the first attached-session keepalive")
+                await asyncio.sleep(2.5)  # ~5000 virtual seconds with Bash in flight
+                assert not first.done(), f"an in-flight tool must keep the session attached: {first.result()}"
+                assert backend.closed == [], f"nothing may close a working session: {backend.closed}"
+                assert backend.keepalives >= 5, f"attached sessions keep their sandbox alive: {backend.keepalives}"
+                session_home.release("tool_done")
+                paused = await asyncio.wait_for(first, timeout=30)
+            finally:
+                if not first.done():
+                    first.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await first
 
         assert paused["status"] == "paused" and paused["success"] is False, paused
         assert "not failed" in paused["message"], paused["message"]
@@ -647,7 +666,7 @@ async def test_cancelled_spawner_unblocks_a_child_waiting_for_its_answer():
         session_home.cleanup()
 
 
-async def test_resize_request_moves_session_and_next_attempt_reattaches():
+async def test_resize_request_moves_session_and_next_attempt_reattaches(*, first_start_delay_s: float = 0):
     """C16: the CLI's `rose env size` reaches the activity on a keepalive while a tool is in flight.
 
     The activity detaches (no close: the backend's resize owns the old sandbox),
@@ -661,7 +680,7 @@ async def test_resize_request_moves_session_and_next_attempt_reattaches():
     from domains.spawn_claude_code_agent import service
     from domains.spawn_claude_code_agent.config import CODE_AGENT_DRAIN_YIELD_STATUS
 
-    session_home = _SessionHome()
+    session_home = _SessionHome(extra_env={"STUB_FIRST_START_DELAY_S": str(first_start_delay_s)})
     backend = _Backend(session_home, resize_after=2)
     try:
         with backend.patched(clock=_virtual_clock(2000.0)):
@@ -704,6 +723,11 @@ async def test_resize_request_moves_session_and_next_attempt_reattaches():
         assert "notes: uncommitted work" in texts, f"the resumed session keeps its files: {texts}"
     finally:
         session_home.cleanup()
+
+
+async def test_resize_request_waits_for_initial_cli_tool_start():
+    """A CLI-originated resize cannot precede its conversation and in-flight tool."""
+    await test_resize_request_moves_session_and_next_attempt_reattaches(first_start_delay_s=2.2)
 
 
 async def _usage_limit_then_retry(availability_on_retry: dict) -> tuple[dict, dict, _Backend, _SessionHome]:
@@ -1245,6 +1269,10 @@ async def _run_all_tests():
     await r.record_async(
         "resize_request_moves_session_and_reattaches",
         test_resize_request_moves_session_and_next_attempt_reattaches,
+    )
+    await r.record_async(
+        "resize_waits_for_initial_cli_tool_start",
+        test_resize_request_waits_for_initial_cli_tool_start,
     )
     await r.record_async(
         "usage_limit_saves_session_and_retry_leases_next",

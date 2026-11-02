@@ -1380,6 +1380,153 @@ class ExportResume(unittest.TestCase):
         with self.assertRaises(ValueError):
             M["verify_stage"](self.value, stage)
 
+    def _collector_stage(self):
+        collector = self.root / "collector.py"
+        collector.write_bytes(self.collector.read_bytes())
+        collector.chmod(0o644)
+        self.value["collector_path"] = str(collector)
+        stage = self.root / "source-policy-stage"
+        stage.mkdir(mode=0o700)
+        for name, raw in self.payloads.items():
+            (stage / name).write_bytes(raw)
+            (stage / name).chmod(0o600)
+        return collector, stage
+
+    def test_collector_source_policy_preserves_private_record_guards(self):
+        collector, stage = self._collector_stage()
+        for mode in (0o644, 0o444, 0o600):
+            collector.chmod(mode)
+            M["verify_stage"](self.value, stage)
+        collector.chmod(0o644)
+        with self.assertRaisesRegex(ValueError, "private current-owner file required"):
+            M["read"](collector)
+        for mode in (0o664, 0o646, 0o666):
+            with self.subTest(mode=oct(mode)):
+                collector.chmod(mode)
+                with self.assertRaises(ValueError):
+                    M["verify_stage"](self.value, stage)
+        collector.chmod(0o600)
+        alias = self.root / "collector-alias.py"
+        os.link(collector, alias)
+        with self.assertRaises(ValueError):
+            M["verify_stage"](self.value, stage)
+        alias.unlink()
+        alias.symlink_to(collector)
+        self.value["collector_path"] = str(alias)
+        with self.assertRaises(ValueError):
+            M["verify_stage"](self.value, stage)
+        self.value["collector_path"] = str(collector)
+        with mock.patch.object(M["os"], "geteuid", return_value=os.geteuid() + 1):
+            with self.assertRaises(ValueError):
+                M["verify_stage"](self.value, stage)
+        original = collector.read_bytes()
+        collector.write_bytes(original + b'\nraise AssertionError("untrusted collector executed")\n')
+        with self.assertRaisesRegex(ValueError, "original verify collector differs"):
+            M["verify_stage"](self.value, stage)
+        for size in (0, 16 * 1024 * 1024):
+            with self.subTest(size=size):
+                os.truncate(collector, size)
+                with self.assertRaises(ValueError):
+                    M["verify_stage"](self.value, stage)
+
+    def test_collector_path_replacement_during_read_is_refused(self):
+        collector, stage = self._collector_stage()
+        collector.chmod(0o600)
+        original_fdopen = os.fdopen
+        @contextlib.contextmanager
+        def replacing_fdopen(*args, **kwargs):
+            with original_fdopen(*args, **kwargs) as stream:
+                original_read = stream.read
+                def replacing_read(size):
+                    raw = original_read(size)
+                    replacement = self.root / "replacement.py"
+                    replacement.write_bytes(raw)
+                    replacement.chmod(0o600)
+                    os.replace(replacement, collector)
+                    return raw
+                with mock.patch.object(stream, "read", side_effect=replacing_read):
+                    yield stream
+        with mock.patch.object(M["os"], "fdopen", side_effect=replacing_fdopen):
+            with self.assertRaisesRegex(ValueError, "collector source changed while reading"):
+                M["verify_stage"](self.value, stage)
+
+    def test_late_collector_replacement_never_executes_during_data_hashing(self):
+        collector, stage = self._collector_stage()
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        source = scripts / "cloudbench-controller-export.py"
+        collector.rename(source)
+        self.value["collector_path"] = str(source)
+        self.value["state"]["source_root"] = str(self.root)
+        original = source.read_bytes()
+        marker = self.root / "untrusted-collector-executed"
+        replacement_bytes = original + f'\nPath({str(marker)!r}).write_text("untrusted replacement executed")\n'.encode()
+        scope = M["verify_stage"].__globals__
+        reader = scope["read_collector_source"]
+        calls = []
+
+        def swap_after_checked_read(path):
+            raw = reader(path)
+            calls.append(path)
+            if len(calls) == 2:
+                replacement = scripts / "replacement.py"
+                replacement.write_bytes(replacement_bytes)
+                replacement.chmod(0o644)
+                replacement.replace(source)
+            return raw
+
+        with mock.patch.dict(scope, HERE=scripts, read_collector_source=swap_after_checked_read):
+            hashes = M["verify_stage"](self.value, stage)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(source.read_bytes(), replacement_bytes)
+        self.assertEqual(hashes["launch.json"], self.binding["launch_sha256"])
+        self.assertFalse(marker.exists(), "data hashing executed a replaced collector pathname")
+
+    def test_data_hash_accepts_relative_regular_path_and_controls_missing_target(self):
+        target = self.root / "relative-payload"
+        target.write_bytes(b"owned export payload")
+        with contextlib.chdir(self.root):
+            self.assertEqual(M["file_sha"](Path("relative-payload")), M["sha"](target.read_bytes()))
+        alias = self.root / "missing-payload-link"
+        alias.symlink_to(self.root / "missing-payload")
+        with self.assertRaisesRegex(ValueError, "continuation source path is redirected"):
+            M["file_sha"](alias)
+
+    def test_data_hash_preserves_physical_single_link_and_stable_read_guards(self):
+        target = self.root / "data"
+        target.write_bytes(b"original export payload")
+        self.assertEqual(M["file_sha"](target), M["sha"](target.read_bytes()))
+        alias = self.root / "data-alias"
+        alias.symlink_to(target)
+        with self.assertRaises(ValueError):
+            M["file_sha"](alias)
+        alias.unlink()
+        os.link(target, alias)
+        with self.assertRaises(ValueError):
+            M["file_sha"](target)
+        alias.unlink()
+        original_fdopen = os.fdopen
+
+        @contextlib.contextmanager
+        def replacing_fdopen(*args, **kwargs):
+            with original_fdopen(*args, **kwargs) as stream:
+                original_read = stream.read
+                replaced = False
+                def replacing_read(size):
+                    nonlocal replaced
+                    raw = original_read(size)
+                    if not replaced:
+                        replacement = self.root / "replacement-data"
+                        replacement.write_bytes(b"changed export payload")
+                        replacement.replace(target)
+                        replaced = True
+                    return raw
+                with mock.patch.object(stream, "read", side_effect=replacing_read):
+                    yield stream
+        with mock.patch.object(M["os"], "fdopen", side_effect=replacing_fdopen):
+            with self.assertRaisesRegex(ValueError, "continuation source changed"):
+                M["file_sha"](target)
+
     def test_checkout_mode_collector_is_accepted_but_world_writable_or_linked_is_refused(self):
         stage = self.root / "stage"
         stage.mkdir(mode=0o700)
@@ -1398,6 +1545,7 @@ class ExportResume(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "physical collector source required"):
             M["read_source"](alias)
 
+
     def test_verify_executes_the_hashed_collector_bytes_not_the_path(self):
         stage = self.root / "stage"
         stage.mkdir(mode=0o700)
@@ -1415,6 +1563,7 @@ class ExportResume(unittest.TestCase):
         with mock.patch.object(M["runpy"], "run_path", side_effect=run_path):
             hashes = M["verify_stage"](self.value, stage)
         self.assertEqual(hashes["launch.json"], self.binding["launch_sha256"])
+
 
     def test_all_remote_children_join_before_canonical_marker_and_no_replay(self):
         api = self.api()
@@ -1781,4 +1930,6 @@ class CleanupClock(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    with tempfile.TemporaryDirectory(prefix="export-resume-tests-") as suite_tmp:
+        with mock.patch.dict(os.environ, {"TMPDIR": suite_tmp}), mock.patch.object(tempfile, "tempdir", suite_tmp):
+            unittest.main()

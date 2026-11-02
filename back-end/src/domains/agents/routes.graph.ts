@@ -30,6 +30,7 @@ import * as graphService from './agentGraphService';
 import * as questionService from './agentGraphQuestionService';
 import * as sendService from './agentGraphSendService';
 import { killGraphAgent } from './agentGraphKillService';
+import { mountAccountAgentRoutes } from './routes.account';
 
 const log = createLogger('AgentGraphRoutes');
 const router = Router();
@@ -106,6 +107,8 @@ function graphAuth(req: GraphRequest, res: Response, next: NextFunction): void {
     req.graphCaller = {
       userId: claims.sub,
       rootAgentId: claims.rootAgentId,
+      accountAccess: claims.accountAccess,
+      accountSpawnGrant: claims.accountSpawnGrant,
       self: {
         kind: 'code',
         id: claims.sessionId,
@@ -144,6 +147,8 @@ function caller(req: GraphRequest): graphService.GraphCaller {
   if (req.graphCaller === undefined) throw new Error('graphAuth did not resolve a caller');
   return req.graphCaller;
 }
+
+mountAccountAgentRoutes(router, graphAuth, (req) => caller(req as GraphRequest));
 
 router.delete(
   '/agents/:id',

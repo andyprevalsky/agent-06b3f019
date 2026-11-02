@@ -10,12 +10,16 @@ first_bad_boundary: agents/benchmarks/run_benchmark.py _refresh_browser_archive_
 symptoms:
   - "Cloud evidence finalization failed: TimeoutError"
   - "archive: TimeoutError"
+  - "KeyError: snapshots"
+  - "test_failed_archive_retains_last_observation_without_publishing_it"
 tags:
   - cloud-fleet
   - archive
   - concurrency
 sources:
   - PR #1299
+  - commit 4c118e0de38c3a0c3f3b1dd93d3b30d89d099608
+  - plan:.context/deploy-fresh-20261027/rca-archive-observation/FINAL.json
   - fleet run 20260930-135320-4167
   - agent 70a3592f-c3c6-47b0-892b-31274d9c1749
 repro: agents/benchmarks/cloud_batch_cleanup_test.py::test_large_archive_tree_does_not_overload_snapshot_reads
@@ -113,3 +117,50 @@ independent 30-minute E2E cutoff. Benchmark FAILURE may remain FAILURE.
 
 Bound archive read fanout and preserve the exact unfinished phase before the
 archive deadline expires.
+
+
+## October28 recurrence — completed diagnostic snapshots lost before gather returned
+
+The fresh940d agents benchmark owner failed the existing retained-observation
+assertion at cloud_batch_cleanup_test.py841 with KeyError snapshots after the
+expected timeout. The final historical observation phase was not preserved, so
+its exact scheduler ordering remains unknown. The original0.01-second case
+passed in isolation; that baseline pass is not presented as a repair.
+
+The same observation boundary still recorded a completed fetch's ID immediately
+but deferred recording its returned snapshot until every sibling fetch finished.
+Cancellation after one get_agent return, or a timeout while another read remained
+pending, therefore discarded known evidence. A later loop also replaced the
+observation before its next tree fetch. This is a recurrence of the incomplete
+phase/evidence-retention contract described above, not evidence of missing
+recordings or a new live-backend timeout cause.
+
+The correction retains each completed get_agent response immediately in a
+last-known diagnostic map and carries that map into the next incomplete
+observation. Readiness and published messages/tree still use only the unchanged
+successful full gather. The semaphore remains8, every deadline is unchanged,
+ready remains false on incomplete paths, and never-returned snapshots are not
+invented. Old IDs may remain in diagnostic last-known data; they cannot admit a
+current archive. Memory remains linear in observed tree agents.
+
+The same private Python3.11 pytest command selected five existing owner/readiness
+cases and two new permanent controls. The controls exercise actual parent
+cancellation immediately after a fetch returns, a partial gather timeout and a
+no-completed-fetch timeout, and verify pending coroutines run finally. Original
+sourcea1c0000e exited1 in1.765s,5PASS/2FAIL with missing snapshots. Candidate
+7e26ff68 exited0 in1.556s,7PASS. All272 old assertion ASTs remain in order;
+the candidate has284. The command and exact test hash are retained in
+plan:.context/deploy-fresh-20261027/rca-archive-observation/FINAL.json.
+Both commands joined; no live service, DB, browser or provider was started.
+
+Patchc60515acf8a9944cc404fed5d66a6f7f30765c327bff3f931b7c66f47f85c41a
+was independently reviewed and applied in4c118e0d. This proves the narrow
+known-snapshot retention repair. The historical archive-timeout cause and fresh
+combined native verification are not closed by this diagnostic correction;
+this case retains its mitigated status. No additional human feedback was
+recorded for this recurrence.
+
+The4c118 full benchmark domain subsequently passed in542.771s under the
+normal agents coverage run. This verifies the registered local boundary on the
+combined runtime; it does not reproduce or diagnose the September live archive
+timeout, so the existing mitigated status remains.
