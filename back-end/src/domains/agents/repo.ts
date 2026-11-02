@@ -218,6 +218,7 @@ export async function findExecutionModeFlagsByIds(agentIds: string[], userId?: s
       memoryEnabled: true,
       isBenchmark: true,
       projectId: true,
+      folderId: true,
     },
   });
 }

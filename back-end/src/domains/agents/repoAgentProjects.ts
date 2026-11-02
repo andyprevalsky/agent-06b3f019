@@ -1,10 +1,6 @@
-/**
- * Project lookups for agent creation (Agent.projectId). Owner-scoped: a
- * project id the caller does not own resolves to nothing.
- */
+/** Indexed owner-scoped lookups for agent project/folder placement. */
 import { prisma } from '../../providers/database';
 
-/** Subset of `projectIds` owned by `userId` (one indexed query). */
 export async function findOwnedProjectIds(projectIds: string[], userId: string): Promise<string[]> {
   if (projectIds.length === 0) return [];
   const rows = await prisma.project.findMany({
@@ -14,14 +10,17 @@ export async function findOwnedProjectIds(projectIds: string[], userId: string):
   return rows.map((row) => row.id);
 }
 
-/** The parent agent's project (owner-scoped), or null. */
-export async function findParentProjectId(
-  parentAgentId: string,
-  userId: string
-): Promise<string | null> {
-  const parent = await prisma.agent.findFirst({
-    where: { id: parentAgentId, userId },
-    select: { projectId: true },
+export async function findOwnedFolders(folderIds: string[], userId: string) {
+  if (folderIds.length === 0) return [];
+  return prisma.projectFolder.findMany({
+    where: { id: { in: folderIds }, project: { userId } },
+    select: { id: true, projectId: true },
   });
-  return parent?.projectId ?? null;
+}
+
+export async function findParentPlacement(parentAgentId: string, userId: string) {
+  return prisma.agent.findFirst({
+    where: { id: parentAgentId, userId },
+    select: { projectId: true, folderId: true },
+  });
 }

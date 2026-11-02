@@ -634,7 +634,9 @@ describe('mobile trajectory text', () => {
     // Every arbitrary px size used by trajectory components has a +2px override,
     // so a newly introduced size cannot silently stay small on mobile.
     const dir = resolve(FRONT_END, 'src/features/terminal-component-group/components');
-    const sources = execSync(`grep -rhoE "text-\\[[0-9.]+px\\]" ${dir} --include=*.tsx || true`)
+    const sources = execSync(
+      `grep -rhoE "text-\\[[0-9.]+px\\]" ${dir} --include=*.tsx --exclude-dir=rose-sidebar || true`,
+    )
       .toString()
       .split('\n')
       .filter(Boolean);

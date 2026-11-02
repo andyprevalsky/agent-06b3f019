@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import ssl
-from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Mapping, Optional
 
 import httpx
 import structlog
@@ -100,6 +100,10 @@ def _openrouter_tool_choice(tool_choice: Any, model: str = "") -> Any:
 
 
 DEFAULT_REASONING_EFFORT = "xhigh"
+
+# `rose.waterfall.step_skipped` reasons for a model in `skip_models`.
+SKIP_REASON_CUT_OFF = "reply_cut_off_at_output_limit"
+SKIP_REASON_STRUCTURED_OUTPUT_EXCLUDED = "structured_output_excluded"
 
 
 def _uses_explicit_gemini_prompt_cache(model: str) -> bool:
@@ -214,6 +218,7 @@ async def waterfall_complete(
     cache_namespace: Optional[str] = None,
     skip_cache_write: bool = False,
     skip_models: FrozenSet[str] = frozenset(),
+    skip_reasons: Optional[Mapping[str, str]] = None,
     browser_use: bool = False,
     stream_guard: Optional[Callable[[AsyncIterator[StreamChunk]], AsyncIterator[StreamChunk]]] = None,
 ) -> AsyncIterator[StreamChunk]:
@@ -226,7 +231,10 @@ async def waterfall_complete(
 
     for idx, model in enumerate(pool_spec.waterfall):
         if model_key(model) in skip_models:
-            # Its reply was cut off at the output limit even with a larger one (truncation.py).
+            # Either its reply was cut off at the output limit even with a larger
+            # one (truncation.py, the default) or the structured-output retry
+            # excluded it after two invalid replies (helpers/llm.py). Log the
+            # real reason: the two need different repairs.
             logger.warning(
                 "rose.waterfall.step_skipped",
                 request_id=request_id,
@@ -236,7 +244,7 @@ async def waterfall_complete(
                 step=idx + 1,
                 total=len(pool_spec.waterfall),
                 model=model,
-                reason="reply_cut_off_at_output_limit",
+                reason=(skip_reasons or {}).get(model_key(model), SKIP_REASON_CUT_OFF),
             )
             continue
         if exclude_anthropic_family and is_anthropic_model(model):

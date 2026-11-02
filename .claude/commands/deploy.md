@@ -378,14 +378,24 @@ CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -v '^agents/benchmarks/histor
 # Each lane declares memory_mb; plan also derives a default --max-parallel
 # from cores and usable memory, capped at seven lanes. Structural --max-workers
 # is passed explicitly so its worker count matches its memory reservation.
-# Structural reserves 1024 MiB plus 1840 MiB per active suite: the recorded
-# 1471.98 MiB largest-child peak rounded up with a 25% margin for each worker.
+# Structural reserves a pinned 1.25x margin over its largest recorded
+# process-tree peak scaled to its width (3220 MiB at three workers); its width
+# is still sized by the 1840 MiB per-suite floor (1471.98 MiB largest child x1.25).
 # run reserves 2 GiB for other processes below both available memory and the
 # watchdog cap, rechecks whole-box headroom before every admission, and never
-# admits reservations over that headroom. A lane that cannot fit alone fails
+# admits unmaterialized declared totals over the startup budget. Against the
+# startup budget and against live headroom, which already contains what the
+# running lanes use, a phased lane is charged only the running lanes'
+# unmaterialized declarations (declared minus the lane's freshly sampled
+# anonymous process-tree PSS, Pss_Anon: file-backed pages are still counted in
+# MemAvailable); unphased lanes (semantic-stack) and unobserved usage keep
+# the declared sum (#1640: smoke waited 16 min on a double-counted 3712 MB;
+# #1658 round 1: agents-coverage waited ~14 min on 8758 declared vs 8755).
+# A lane that cannot fit alone fails
 # visibly without starting. Explicit resource limits can only tighten memory
 # admission. Receipts include timestamped MemAvailable samples, per-lane child
-# peak RSS (wait4/getrusage), load peaks and memory-watchdog TERM records.
+# peak RSS (wait4/getrusage), per-lane process-tree PSS, every admission's
+# inputs, load peaks and memory-watchdog TERM records.
 # Account for Postgres, Docker and other agents outside the deploy cgroup:
 # MemoryHigh on one unit does not protect the rest of this 16 GiB box.
 BACKEND_BLACKBOX_WORKERS=4
@@ -655,7 +665,35 @@ supervisor; a receipt started before `--since` belongs to an earlier iteration
 and never satisfies the wait, and a lane that failed before writing a stage row
 (refused by the memory budget, spawn error) wakes it like any other failure.
 Never arm a second, different waiter for the same lanes. An exact-input
-`--reuse-passed` hit records `reused`, which both count as a pass. For most
+`--reuse-passed` hit records `reused`, which both count as a pass; a
+lane-scoped reuse records the distinct `reused-scoped` (a pass for the waiter
+and `overall`, never shown as a fresh pass of the current bytes). Enabled by
+the plan field `lane_scoped_reuse` (default off), which the pipeline forwards as
+`--lane-scoped-reuse`, or by that flag on a direct `scripts/run_deploy_stage.py`
+invocation for one stage (`DEPLOY_LANE_SCOPED_REUSE=0` is a kill switch, never
+an enabler; dry-run with `python3 scripts/run_deploy_stage.py
+--preview-lane-scoped-reuse PASSED_HEAD[..CURRENT_HEAD]`), a lane in
+`_SCOPED_REUSE_LANES` running its real command marker reuses the newest
+inert-equivalent PASSED record: every path changed since it is in the lane's
+declared inert set AND the change→test graph selects nothing in the lane
+(run_all, unmapped and never-inert paths force a rerun; a stack lane with no
+graph lanes — smoke, semantic-stack — additionally treats a non-test code file
+under `scripts/*`, `back-end/scripts/*`, `front-end/scripts/*`,
+`agents/scripts/*` or `mac-app/scripts/*` (`_STACK_REACH_TREES`) as inert when
+nothing in `STACK_ENTRYPOINTS` or a backend route reaches it in the change→test
+graph), and no newer failed
+head on an inert-equivalent tree vetoes it. The candidate may also come from
+an earlier timing run of the same `.context/deploy-runs/` root regardless of
+its metadata `branch` (recorded as `passed_run_branch`, never compared; same
+invocation, passed head an ancestor of HEAD, record under 24 h —
+`DEPLOY_LANE_SCOPED_REUSE_MAX_AGE_SECONDS` may only lower it — read in place,
+never copied; failed heads from any such run still veto); the row's
+`detail.reuse` then carries `cross_run: true` with
+`passed_run_id`/`passed_run_dir`/`passed_record`, and the receipt lists the
+lane in `reused_scoped_cross_run_lanes` (`PIPELINE_VERIFY … cross_run=`).
+The row's `detail.reuse` and the receipt's `lane_scoped_reuse` /
+`reused_scoped_lanes` (`reconcile_reused_lane`; `PIPELINE_VERIFY …
+reused_scoped=`) carry the provenance. For most
 lanes the exact input is HEAD, the worktree diff and untracked files, cwd,
 argv and the environment minus process/session/terminal identity variables
 (e.g. systemd `INVOCATION_ID`, `JOURNAL_STREAM`, `SYSTEMD_EXEC_PID`,
@@ -703,6 +741,48 @@ plus source digest it ran on, and Phase 3 runs
 `python3 scripts/run_deploy_pipeline.py verify --state-dir <dir> --expect-head "$(git rev-parse HEAD)"`
 before `require-mergeable`: a green receipt from other bytes exits `5` and
 the gates rerun.
+
+**Lane teardown after a supersede or termination.** Each lane launch carries a
+unique `DEPLOY_PIPELINE_LANE_TOKEN`; after a signalled lane's wrapper exits the
+supervisor reads the owner records under `.context/benchmarks/` written since
+the lane started (reported, never deleted) and signals only the token-owned
+processes they name; foreign records are reported, never signalled. It writes
+`<state-dir>/teardown/attempt-<n>-<lane>.json`, prints
+`PIPELINE_LANE_TEARDOWN … outcome=`, waits `DEPLOY_PIPELINE_TEARDOWN_WAIT_SECONDS`
+(default 120) for them to exit, TERMs each surviving run's live
+`benchmarks/local.py` controller, else the record's exact owner pid (`run.sh`),
+never a bash wrapper, and SIGKILLs lane-owned survivors as the last resort after
+the kill-after budget (`local_worker_supervisor.py --shutdown-timeout`, 2175 s by
+default, plus a 120 s margin; `DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS`
+overrides it) passed with no progress for a whole wait bound, or at the hard
+ceiling of twice that budget even while the stack still publishes progress.
+Outcomes `killed` and `failed` (survivors after SIGKILL) require
+`scripts/run-bench --local --run-id <run> --reconcile-cleanup` before the next
+smoke lane — an operator instruction in the receipt note, not enforced.
+
+**Owner-run classification.** Before each attempt, and again in the lane
+teardown for that lane's own runs, the supervisor classifies every run under
+`.context/benchmarks/` (`PIPELINE_OWNER_RUNS … live/finished/aborted/stranded/
+bootstrapping/unknown` counts; every row appended to
+`<state-dir>/owner-runs.jsonl`). The preflight acts only on this deploy's own
+runs (those its earlier lane teardown receipts named); another session's run
+is classified and reported, never renamed or waited on (an `unknown` one still
+refuses). A pid-less run that no live process carries (`BENCHMARK_RUN_ID` in
+its environment, `--run-id` on its command line, or a command line naming the
+run when its environment cannot be read) past the startup grace
+(`BENCHMARK_STARTUP_GRACE_SECONDS`, 90 s by default) or whose manifest/cleanup
+receipt shows the bootstrap ended is `aborted` when it left no manifest or a
+`clean` cleanup receipt, and is set aside under `_aborted/` (renamed, never
+deleted, classification written beside the evidence); one that left a manifest
+without a clean receipt is `stranded`: reported and left in place for
+`--reconcile-cleanup`. An own `bootstrapping` run is waited out (the grace plus one
+poll, at most) and refuses the launch if still bootstrapping after it. A run
+directory that a concurrent cleanup removes mid-classification is `finished`
+(reported, never refused). An unreadable
+record, a symlinked `.context/benchmarks` or an unavailable `/proc` is
+`unknown` and refuses the launch (`PIPELINE_OWNER_RUNS_REFUSED`, every lane
+`failed`, not a fix-loop round) — never move a run dir by hand while a process
+still carries its run id.
 
 **Fix-loop cap (`FIX_LOOP_CAP`, exit 6).** After two consecutive completed
 failed rounds in the same state dir (`--fix-loop-cap`, env
@@ -875,6 +955,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-shard-coordinator.test.py`,
 `python3 scripts/tests/cloudbench-controller-orphan-drain.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
+`bash scripts/tests/claude-review-fallback.test.sh`,
 `python3 scripts/tests/claude-review-fallback-diagnose.test.py`,
 `python3 scripts/tests/read-graphide-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
@@ -883,6 +964,7 @@ their assertions or test counts:
 `python3 scripts/tests/deploy-approval-batch.test.py`,
 `bash scripts/tests/prebuild-agents-image.test.sh`,
 `python3 scripts/tests/run-deploy-pipeline.test.py`,
+`bash scripts/tests/run-deploy-semantic-stack.test.sh`,
 `bash scripts/tests/backend-coverage-sharded.test.sh`,
 `python3 scripts/tests/run-deploy-structural-gates.test.py`,
 `python3 scripts/tests/final-review-script-regressions.test.py`,
@@ -1047,19 +1129,55 @@ database) the shards still run: shard `i/N` owns the derived
 (`back-end/scripts/coverage-database-url.mjs`), so never substitute the
 unsharded `npm run test:coverage` there; the 2026-10-29 deploy did and paid
 a 1,505 s single sweep. `run_deploy_pipeline.py plan` emits the sharded
-command, phases Group 3 (quick lanes → `deploy-command-structural` alone at
-full budget-backed width → the coverage lanes together, longest recorded
+command, phases Group 3 (quick lanes → `deploy-command-structural` alone among
+the Group 3 lanes at full budget-backed width → the coverage lanes together, longest recorded
 first) from `.context/deploy-durations/pipeline-lanes.json`, and
 `run_deploy_pipeline.py simulate --plan <plan> --legacy-plan <plan --schedule legacy>`
 projects the union wall from the same ledger (plus a `group3` block for the
-Group 3 lanes alone). The local smoke lane (Group 4, 4096 MB) declares
-`"phase": "coverage"` in the plan: it joins the coverage phase beside
-`backend-coverage-blackbox` (4096 + 2560 MB fit the budget) after the
-exclusive structural lane instead of being admitted first and holding that
-lane's memory (#1638 attempt 5 ran smoke alone for ~22 min; 11–24 min across attempts); the AgentCard lane
-declares the same phase. Undeclared Group 4 lanes stay unphased, and a plan's
-own `after` edges are never removed: `live-probes` and `semantic-stack` start
-as soon as their declared dependencies and memory allow.
+Group 3 lanes alone). The local smoke lane (Group 4, 4150 MB: a pinned 1.25x
+margin over its largest recorded 3319 MB process-tree peak;
+`SMOKE_RECORDED_TREE_PEAK_MB`) declares
+`"phase": "stack"` in the plan: it is admitted right after the quick lanes
+beside the exclusive structural lane, which now reserves a pinned 1.25x margin
+over the largest recorded process-tree peak (2575 MB over 19 passed
+three-worker attempts in the 2026-10-30/31 receipts;
+`STRUCTURAL_RECORDED_TREE_PEAK_MB`, re-pin when a receipt exceeds it) — 3220 MB
+at three workers, down from 6544 —, so 3220 + 4150 MB fit the ~8 GB
+budget together, and no later phase waits for it: the coverage lanes still
+wait for the exclusive lane, and beside `backend-coverage-blackbox` (4150 +
+2560 MB) smoke fits the budget afterwards. Admitted first and unphased, the
+smoke lane had held the memory the structural lane needed (#1638 attempt 5
+ran smoke alone for ~22 min; 11–24 min across attempts); in the coverage
+phase it waited the whole 9–10 min exclusive phase every round. The AgentCard
+lane declares the same phase. Undeclared Group 4 lanes stay unphased, and a plan's
+own `after` edges are never removed. `plan --live-probes --semantic-stack
+--e2b-smoke` (default off; flag-less plans are unchanged byte for byte) adds the
+three tails that until 2026-10-31 lived only in a private launcher plan:
+`live-probes` (Group 3, `python3 scripts/run_deploy_live_probes.py`, 963 MB =
+1.25x its 769.7 MB recorded tree peak, `LIVE_PROBES_RECORDED_TREE_PEAK_MB`)
+after every other Group 3 lane (Step 4p); `semantic-stack` (Group 4,
+`bash scripts/run-deploy-semantic-stack.sh`: Steps 5 + 6b, 6108 MB = 1.25x the
+4886.2 MB peak of its first split-lane receipt,
+`SEMANTIC_STACK_RECORDED_TREE_PEAK_MB`) after `deploy-command-structural` and
+the agents/frontend coverage lanes only; and `e2b-smoke` (Group 4,
+`bash scripts/run-deploy-semantic-stack.sh --e2b-smoke-only`: Step 6c, 812 MB =
+1.25x its 649.1 MB recorded tree peak) after `live-probes` and backend
+coverage, which drive the same `run-blackbox-tests.sh` database. The
+semantic-stack edges are ownership, not memory: its non-isolated
+`run.sh --benchmark` startup/EXIT `kill-services.sh` sweeps reap same-worktree
+worker.py, Playwright-driver, npm and vite children, which the agents and
+frontend coverage lanes spawn, while backend coverage and the live probes boot
+`bootstrap.ts` backends no sweep pattern matches. The sweeps still spare every
+process of a live isolated run (`smoke`, `agentcard-lifecycle`) through its
+owner record, live manifest or the `BENCHMARK_RUN_ID` its processes carry
+(`scripts/tests/kill-services.test.sh`,
+`scripts/tests/run-isolated-cloud-kill.test.sh`), so semantic-stack may run
+beside them whenever both whole declarations fit live headroom. On the recorded
+7979 MB budget they do not: 6108 + 4150 (smoke) and 6108 + 2560 (backend
+coverage) exceed it, so admission defers semantic-stack until both release
+their reservations, declarations unchanged (6108 + 1152 beside agents coverage
+would fit; the sweep edge holds it there), and 6108 + 812 lets `e2b-smoke`
+overlap it on this budget as on the launcher host's 8755 MB.
 
 **Retry after a failure: failed-first, still a full sweep.** Rerun the same
 stage with `BACKEND_COVERAGE_FAILED_FIRST=1` in the `env` above. The previously
@@ -1234,6 +1352,12 @@ python3 scripts/run_deploy_live_probes.py
 All four stage records must pass before closing the `runtime-blackbox`
 boundary.
 
+`run_deploy_pipeline.py plan --live-probes` emits this command as the
+`live-probes` lane (963 MB) with an `after` edge on every other Group 3 lane,
+so the pipeline starts it only once static, coverage and the other Group 3
+branches have exited, never in the same wave: two `run-blackbox-tests.sh`
+setups on `victoria_<workspace>` deadlocked its schema sync on 2026-10-12.
+
 `migration-preflight` runs `back-end/scripts/migration-preflight.ts` read-only
 against production for every migration in `back-end/prisma/migrations` that
 production has not applied, the set `prisma migrate deploy` will run. It fails on a
@@ -1294,6 +1418,17 @@ the Group 4 semantic gate; coverage commands already ran every repository
 blackbox exactly once. Pre-Deploy smoke runs on its own separate isolated stack
 via `run-bench --local` (or, opt-in, the cloud fleet). In benchmark mode,
 `run.sh` starts `back-end`, `front-end`, and `agents`, and skips `mac-app`.
+
+`bash scripts/run-deploy-semantic-stack.sh` is this step and Step 6b as one
+versioned command (`run_deploy_pipeline.py plan --semantic-stack` emits it as
+the `semantic-stack` lane): the Step 5.0 sweep, the exact `run.sh --benchmark`
+launch below, readiness, the two Step 6b stages and the mandatory teardown,
+all env-driven (`CONDUCTOR_PORT` required, `ROSE_USE_SYSTEM_PG`, the normalized
+`CONDUCTOR_WORKSPACE_NAME`). `--with-e2b-smoke` appends Step 6c on the same
+Postgres; `--e2b-smoke-only` runs Step 6c alone (the `e2b-smoke` lane). It
+exits 2 before starting anything when `CONDUCTOR_PORT` is unset or the stack
+database is not ready, and 1 when the stack never became ready or a stage
+failed.
 
 ```bash
 # Conductor provides the base port; run.sh fans out backend/frontend/health from it.
@@ -1821,6 +1956,13 @@ cd back-end && BLACKBOX_SMOKE=1 \
   bash scripts/run-blackbox-tests.sh claude-code
 ```
 
+`bash scripts/run-deploy-semantic-stack.sh --e2b-smoke-only` runs this block
+without a running Step 5 stack (`run_deploy_pipeline.py plan --e2b-smoke` emits
+it as the `e2b-smoke` lane after `live-probes` and backend coverage): the
+Postgres port comes from `DEPLOY_E2B_DB_PORT`, else the running stack's
+manifest, else the deploy environment's `LOCAL_DB_PORT`, and it creates
+`victoria_$CONDUCTOR_WORKSPACE_NAME` when missing.
+
 This lane launches **its own** backend on purpose. It must not be pointed at the
 Step 5 semantic stack with `BLACKBOX_TEST_USE_EXISTING_BACKEND=1`: that stack is
 capture-only by contract, and `run-blackbox-tests.sh` rejects a capture-only
@@ -2110,17 +2252,30 @@ When CodeRabbit is unavailable, make at most one zero-touch retry (`@coderabbita
 
 **What to do, mechanically:**
 
-1. Record in `TEST_REPORT`:
-   `Code Review | ⚠️ Skipped | reviewers usage-exhausted (CodeRabbit <reason>; Claude fallback disabled)`
-2. Close the open cycle as **clean** — this is the only result that satisfies `require-mergeable`:
+1. Record in `TEST_REPORT` the row `skip` prints:
+   `Code Review | ⚠️ Skipped | reviewers usage-exhausted (CodeRabbit: '<quote>', issue comment <id> updated <ts> naming commit <sha9>; check run <id> <conclusion> '<title>'; Claude fallback disabled)`
+2. Close the open cycle as **clean** — the only result that satisfies `require-mergeable` —
+   through the versioned disposition, which requires the CodeRabbit comment naming
+   `REVIEW_HEAD` with `Review limit reached`/`usage spending cap` (id + `updated_at`; the
+   comment is mutable) plus a non-success CodeRabbit check run on `REVIEW_HEAD` (e.g.
+   `Review rate limited`), refuses when any substantive review
+   of `REVIEW_HEAD` exists (empty-body reply wrappers are not reviews), records the evidence
+   on the cycle and appends `.context/deploy-review-dispositions.jsonl`:
    ```bash
-   python3 scripts/deploy_review_cycle.py finish --head "$REVIEW_HEAD" --result clean
+   python3 scripts/deploy_review_cycle.py skip --head "$REVIEW_HEAD" --pr "$PR_NUMBER" --reason usage-cap
    ```
-   **Never use `--result unavailable`.** It is an accepted value but it hard-fails
-   `require-mergeable` at Phase 3 entry and again at Step 12, and it cannot be undone in
-   place (a second `finish` and a re-`start` on the same HEAD are both rejected) — you
-   would have to `start --reset` or hand-edit `.context/deploy-review-cycle.json`. The
-   ledger has no `--note`/`--reason` flag; the note lives in `TEST_REPORT` and the PR body.
+   **Never use `--result unavailable` for exhaustion.** `unavailable` is only for a cycle
+   whose HEAD a gate fix superseded before any review arrived: it hard-fails
+   `require-mergeable`, consumes no review budget, and the superseding HEAD re-`start`s
+   the same `--kind` (`deploy_review_cycle.py next` prints it; Step 10 reads it)
+   without `--reset`, keeping the entry in the ledger.
+   After three review rounds on the PR (ledger cycles that delivered a review — an
+   `unavailable` cycle does not count — plus `--prior-rounds` from restarted
+   deploys of it), remaining findings may be deferred under the user's standing
+   pre-authorization (never a security- or prod-impacting one): reply `[DEFERRED] <target>`
+   on each, then `python3 scripts/deploy_review_cycle.py override --head "$REVIEW_HEAD"
+   --pr "$PR_NUMBER" --finding-ids <ids> --deferred-to <PR/branch>` records
+   `Code Review | ⚠️ Overridden | …` with the ids and target (ledger result `clean`).
 3. Surface the exhaustion and its concrete risk (**this diff merged unreviewed**) in the PR body and in the final handoff.
 4. **Proceed to merge.** Do not open a new review cycle for the same HEAD.
 
@@ -2272,16 +2427,14 @@ cycle:
 
 ```bash
 REVIEW_HEAD=$(git rev-parse HEAD)
-REVIEW_COUNT=$(python3 scripts/deploy_review_cycle.py status | python3 -c \
-  'import json,sys; print(len(json.load(sys.stdin)["cycles"]))')
-[ "$REVIEW_COUNT" -lt 3 ] || {
+REVIEW_NEXT=$(python3 scripts/deploy_review_cycle.py next) || {
   python3 scripts/record_factory_event.py deploy outcome blocked
   python3 scripts/factory_ledger.py publish
-  echo "review cycle cap reached; deploy is review-unstable" >&2
+  echo "the ledger refused another review cycle (see above); deploy is review-unstable" >&2
   exit 1
 }
-REVIEW_KIND=incremental
-[ "$REVIEW_COUNT" -lt 2 ] || REVIEW_KIND=verification
+REVIEW_KIND=$(printf '%s' "$REVIEW_NEXT" | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["kind"])')
 python3 scripts/deploy_review_cycle.py start --kind "$REVIEW_KIND" --head "$REVIEW_HEAD"
 python3 scripts/record_factory_event.py deploy stage-start code-review
 git push origin HEAD
@@ -2630,25 +2783,29 @@ Render has no GitHub Actions run to watch, so the only proof a backend deploy is
 
 ```bash
 python3 scripts/record_factory_event.py deploy production-start render
-cd "$(git rev-parse --show-toplevel)/back-end" && source .env
-MERGED_SHA="$DEPLOY_MERGED_SHA"   # immutable merge commit captured in Step 12
-echo "Waiting for Render to deploy ${MERGED_SHA:0:7}..."
-DEPLOY_OK=""
-for i in $(seq 1 90); do  # up to ~15 min at 10s (Render builds can be slow)
-  read -r STATUS COMMIT < <(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
-    "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys?limit=1" \
-    | python3 -c "import sys,json; d=json.load(sys.stdin)[0]['deploy']; print(d.get('status',''), (d.get('commit') or {}).get('id','')[:7])")
-  echo "  Render: status=$STATUS commit=$COMMIT (want ${MERGED_SHA:0:7})"
-  case "$STATUS" in
-    live)
-      if [ "$COMMIT" = "${MERGED_SHA:0:7}" ]; then DEPLOY_OK=1; break; fi ;;
-    build_failed|update_failed|canceled|pre_deploy_failed)
-      echo "❌ Render deploy $STATUS for $COMMIT"; DEPLOY_OK="failed"; break ;;
-  esac
-  sleep 10
-done
-[ "$DEPLOY_OK" = "1" ] || { echo "❌ Render did not bring ${MERGED_SHA:0:7} live (last status: $STATUS)"; exit 1; }
-echo "✅ Render live on ${MERGED_SHA:0:7}"
+cd "$(git rev-parse --show-toplevel)"
+# Polls the Render deploys API (RENDER_API_KEY/RENDER_SERVICE_ID from
+# back-end/.env) up to 90 x 10 s. A deploy for the merged SHA is the authority
+# (live opens, build_failed/update_failed/canceled/pre_deploy_failed block).
+# Render auto-deploy skips a commit with no change under its Root Directory,
+# so no deploy ever appears (#1652, #1655 spun to the bound). With no deploy
+# for the merged SHA the live deploy's commit opens the gate as
+# source-equivalent only when `git diff <live> <merged> -- back-end/
+# render.yaml package.json package-lock.json` is empty AND the live commit is
+# an ancestor of the merged SHA (Render skipped the merge) or a descendant of
+# it (a later PR deployed the identical backend). This assumes the Render
+# service's Root Directory is back-end with no build filters. A descendant
+# that changed those paths means the merged backend never ran as-is: the gate
+# blocks and that is a manual decision; an unrelated live commit or any such
+# change keeps waiting. Records `render` (status, live_commit,
+# observed_live_commit, merged_sha, backend_diff, equivalence) in
+# .context/deploy-pipeline/production.json; prints RENDER_LIVE or
+# RENDER_SOURCE_EQUIVALENT live=<sha> merged=<sha> reason=<code>. Exit 2 =
+# Render API, git or credential failure (fail closed; repair and rerun),
+# never a pass.
+python3 scripts/run_deploy_pipeline.py production-render --merged-sha "$DEPLOY_MERGED_SHA" \
+  --state-dir .context/deploy-pipeline ||
+  { echo "❌ Render does not serve the merged backend ${DEPLOY_MERGED_SHA:0:7}"; exit 1; }
 python3 scripts/record_factory_event.py deploy production-finish render
 ```
 
@@ -2928,7 +3085,7 @@ jobs use a sparse, blob-filtered checkout.
 # dispatch workflows; call its binary with the repo's workflow-scoped token.
 if [ -x /opt/devbox-tools/gh/current/bin/gh ]; then
   GH_TOKEN=$(set -a && . back-end/.env >/dev/null && printf %s "$GITHUB_TOKEN")
-  export GH_TOKEN
+  export GH_TOKEN DEPLOY_GH_BIN=/opt/devbox-tools/gh/current/bin/gh
   gh() { /opt/devbox-tools/gh/current/bin/gh "$@"; }
 fi
 # Fly lane gate (agents runtime changes only): the exact deploy-agents.yml run
@@ -2942,30 +3099,21 @@ python3 scripts/run_deploy_pipeline.py production --merged-sha "$DEPLOY_MERGED_S
   --state-dir .context/deploy-pipeline ||
   { echo "❌ Fly lane is not live/verified for $DEPLOY_MERGED_SHA; not dispatching production semantics"; exit 1; }
 python3 scripts/record_factory_event.py deploy production-start semantic
-SEMANTIC_DISPATCH_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-gh workflow run chat-lifecycle-ratchet.yml --ref main \
-  -f frontend_url=https://www.roselabs.ai \
-  -f backend_url=https://navi-j9a9.onrender.com
-
-SEMANTIC_RUN_ID=""
-for i in $(seq 1 40); do
-  SEMANTIC_RUN_ID=$(gh run list \
-    --workflow chat-lifecycle-ratchet.yml \
-    --event workflow_dispatch \
-    --branch main \
-    --limit 20 \
-    --json databaseId,createdAt \
-    --jq ".[] | select(.createdAt >= \"$SEMANTIC_DISPATCH_TS\") | .databaseId" \
-    | head -1)
-  [ -n "$SEMANTIC_RUN_ID" ] && break
-  sleep 5
-done
-[ -n "$SEMANTIC_RUN_ID" ] || { echo "❌ Production semantic workflow did not start"; exit 1; }
-gh run watch "$SEMANTIC_RUN_ID" --exit-status
+# Dispatches chat-lifecycle-ratchet.yml on main with source_sha=$DEPLOY_MERGED_SHA
+# (the harness checks out that exact commit; #1646's raw dispatch ran main's
+# later data-only head and needed a separate equivalence proof), binds to the
+# run this dispatch created (never an older run), polls every 30 s, records
+# run id, url, headSha, source_sha and per-job conclusions under `semantic` in
+# .context/deploy-pipeline/production.json and exits non-zero unless every job
+# succeeded. Prints SEMANTIC_RUN_ID=<id> and SEMANTIC_LANE_END <ts>.
+python3 scripts/run_deploy_pipeline.py production-semantic --merged-sha "$DEPLOY_MERGED_SHA" \
+  --state-dir .context/deploy-pipeline \
+  --frontend-url https://www.roselabs.ai --backend-url https://navi-j9a9.onrender.com ||
+  { echo "❌ production semantic gate is not green for $DEPLOY_MERGED_SHA"; exit 1; }
 python3 scripts/record_factory_event.py deploy production-finish semantic
 ```
 
-This is a hard deployment gate. If the workflow fails, the deployment is not complete: inspect its Playwright artifacts and service logs. For a provider outage, follow "Provider outages: report and retry every 10 minutes" above; use `gh run rerun "$SEMANTIC_RUN_ID" --failed` once the prior attempt is terminal so only failed jobs are retried. Retain successful jobs under their original execution provenance and audit the retry's actual checkout SHA and results. For a code defect, fix the root cause in a new PR and repeat the deploy loop. Do not report success or proceed to Step 14 while this check is red.
+This is a hard deployment gate. If the workflow fails, the deployment is not complete: inspect its Playwright artifacts and service logs. For a provider outage, follow "Provider outages: report and retry every 10 minutes" above; once the prior attempt is terminal, rerun the same command with `--retry-failed-once "<justification>"` so only failed jobs are retried (`gh run rerun <id> --failed`, recorded in production.json; exactly one retry, a second is refused). Retain successful jobs under their original execution provenance and audit the retry's actual checkout SHA and results. For a code defect, fix the root cause in a new PR and repeat the deploy loop. Do not report success or proceed to Step 14 while this check is red.
 
 If no workflow-scoped token is available, `gh workflow run` returns HTTP 403
 `Resource not accessible by integration`. In that case, run the workflow's two
@@ -3204,5 +3352,10 @@ usage and cost, worker attribution, resource/concurrency context, disjoint wait
 times and validation provenance. Every known value requires a timestamped source;
 unavailable values stay explicitly unknown. Never guess historical settings or
 publish raw transcripts, secrets or signed URLs. Set `FACTORY_METADATA_FILE`
-before collection, append snapshots for changes and publish the ledger. Final
+before collection, append snapshots for changes and publish the ledger.
+`run-deploy-stage --start` and every pipeline attempt re-stamp it
+(`factory_metadata.refresh_snapshot`: `observed_at` and `validation.source_sha`
+only) when it is a file directly under this checkout's `.context/` (normally
+`.context/factory-metadata.json`); a retrospective record, a file elsewhere, an
+`unset` or `missing` file is skipped and reported. Final
 scorecards report model/effort/tier and collection gaps alongside timings.

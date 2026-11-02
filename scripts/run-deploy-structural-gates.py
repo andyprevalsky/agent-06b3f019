@@ -455,6 +455,10 @@ GATES = (
         ("python3", "scripts/tests/wait-for-code-review.test.py"),
     ),
     Gate(
+        "claude-review-fallback",
+        ("bash", "scripts/tests/claude-review-fallback.test.sh"),
+    ),
+    Gate(
         "claude-review-fallback-diagnose",
         ("python3", "scripts/tests/claude-review-fallback-diagnose.test.py"),
     ),
@@ -476,6 +480,7 @@ GATES = (
         ("bash", "scripts/tests/prebuild-agents-image.test.sh"),
     ),
     Gate("deploy-pipeline", ("python3", "scripts/tests/run-deploy-pipeline.test.py")),
+    Gate("deploy-semantic-stack", ("bash", "scripts/tests/run-deploy-semantic-stack.test.sh")),
     Gate("backend-coverage-sharded", ("bash", "scripts/tests/backend-coverage-sharded.test.sh")),
     Gate(
         "deploy-structural-runner",

@@ -8,7 +8,7 @@
  * shared row, counter or channel is touched by more than one user.
  */
 import { Prisma } from '@prisma/client';
-import { prisma } from '../database';
+import { prisma, runTransactionWithRetry } from '../database';
 import { normalizeGithubUrl } from '../github';
 import { randomBytes } from '../crypto';
 import { decryptProjectBinary, decryptProjectSecret } from './secrets';
@@ -24,7 +24,26 @@ import type {
 export const PROJECT_LIST_LIMIT = 200;
 export const MAX_ENV_FILES = 200;
 
+export interface ProjectFolderRecord {
+  id: string;
+  name: string;
+  projectId: string;
+  sortOrder: number;
+}
+
+export const folderOrderBy = [
+  { sortOrder: 'asc' as const },
+  { name: 'asc' as const },
+  { id: 'asc' as const },
+];
+
+const folderSelection = {
+  select: { id: true, name: true, projectId: true, sortOrder: true },
+  orderBy: folderOrderBy,
+};
+
 export interface ProjectRecord {
+  folders?: ProjectFolderRecord[];
   id: string;
   userId: string;
   name: string;
@@ -86,7 +105,7 @@ export async function listProjects(userId: string): Promise<ProjectWithCount[]> 
     where: { userId },
     orderBy: { createdAt: 'asc' },
     take: PROJECT_LIST_LIMIT,
-    include: { _count: { select: { envFiles: true } } },
+    include: { _count: { select: { envFiles: true } }, folders: folderSelection },
   });
 }
 
@@ -114,7 +133,7 @@ export async function findGithubConnectedRepoUrls(
 }
 
 export async function findProject(userId: string, id: string): Promise<ProjectRecord | null> {
-  return prisma.project.findFirst({ where: { id, userId } });
+  return prisma.project.findFirst({ where: { id, userId }, include: { folders: folderSelection } });
 }
 
 export async function countEnvFiles(projectId: string): Promise<number> {
@@ -150,13 +169,19 @@ export async function findProjectByName(
   userId: string,
   name: string
 ): Promise<ProjectRecord | null> {
-  return prisma.project.findUnique({ where: { userId_name: { userId, name } } });
+  return prisma.project.findUnique({
+    where: { userId_name: { userId, name } },
+    include: { folders: folderSelection },
+  });
 }
 
 export async function createProject(
   data: Omit<Prisma.ProjectUncheckedCreateInput, 'syncSalt'>
 ): Promise<ProjectRecord> {
-  return prisma.project.create({ data: { ...data, syncSalt: newSyncSalt() } });
+  return prisma.project.create({
+    data: { ...data, syncSalt: newSyncSalt() },
+    include: { folders: folderSelection },
+  });
 }
 
 /** Column value for a project's default sandbox size; null clears it (SQL NULL, C16). */
@@ -170,11 +195,20 @@ export async function updateProject(
   id: string,
   data: Prisma.ProjectUncheckedUpdateInput
 ): Promise<ProjectRecord> {
-  return prisma.project.update({ where: { id }, data });
+  return prisma.project.update({ where: { id }, data, include: { folders: folderSelection } });
 }
 
+/** Works with both immediate db-push FKs and deferred migration FKs. */
 export async function deleteProject(id: string): Promise<void> {
-  await prisma.project.delete({ where: { id } });
+  await runTransactionWithRetry(async (tx) => {
+    // Match folder writes' lock order before touching agents or cascading folders.
+    await tx.$queryRaw`SELECT "id" FROM "Project" WHERE "id" = ${id} FOR UPDATE`;
+    await tx.agent.updateMany({
+      where: { projectId: id, folderId: { not: null } },
+      data: { folderId: null },
+    });
+    await tx.project.delete({ where: { id } });
+  });
 }
 
 export async function listEnvFiles(projectId: string): Promise<ProjectEnvFileRecord[]> {

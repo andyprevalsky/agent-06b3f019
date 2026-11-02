@@ -152,6 +152,7 @@ function TerminalLayout(props: TerminalLayoutProps) {
           publishLayout={roseDesktop}
           onLogout={() => void props.agents.handleLogout()}
           onCreateAgentInProject={props.agents.handleCreateNewAgentInProject}
+          newAgentFolderId={props.agents.newAgentFolderId}
         >
           <AppViewProvider userId={accountUserId}>
             <CodeAgentViewProvider
@@ -347,6 +348,7 @@ function SidebarSection({
       roseActions={{
         onCreateAgentInProject: agents.handleCreateNewAgentInProject,
         newAgentProjectId: agents.newAgentProjectId,
+        newAgentFolderId: agents.newAgentFolderId,
       }}
       onRefreshAgents={agents.loadAgents}
       onRefreshAttention={onRefreshAttention}

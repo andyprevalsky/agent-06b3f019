@@ -51,6 +51,7 @@ function toListItem(agent: ListedAgent) {
     world_model_mode: agent.worldModelMode,
     memory_enabled: agent.memoryEnabled,
     project_id: agent.projectId,
+    folder_id: agent.folderId,
     created_at: agent.createdAt,
     updated_at: agent.updatedAt,
   };
@@ -249,9 +250,7 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
   const rawAgent = await repo.findAgentWithRelations(agentId, options.userId);
   const agent = rawAgent === null ? null : (await hydrateProgressEstimates([rawAgent]))[0];
 
-  if (!agent) {
-    return getMissingAgentDetail(agentId, options);
-  }
+  if (!agent) return getMissingAgentDetail(agentId, options);
 
   const [messages, parentGoal, toolUsages, inspectionContext] = await Promise.all([
     repo.findMessages(agentId, options.since, options.browserToolCallId),
@@ -295,6 +294,7 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
       world_model_mode: agent.worldModelMode,
       memory_enabled: agent.memoryEnabled,
       project_id: agent.projectId,
+      folder_id: agent.folderId,
       token_in_price_microdollars: agent.tokenInPriceMicrodollars,
       token_out_price_microdollars: agent.tokenOutPriceMicrodollars,
       created_at: agent.createdAt,

@@ -3,15 +3,19 @@
  *
  *   main thread: heartbeat (SharedArrayBuffer, every HEARTBEAT_MS)
  *   watchdog worker: heartbeat stale > stallMs
+ *     -> one memory line at once: RSS, anonymous RSS, CPU per thread, the
+ *        container cgroup's memory (anon/file/sock) and the largest processes
+ *        (the 16 GiB limit counts every process in the container)
+ *     -> then, without blocking further memory lines, a stack capture:
  *     -> inspector.Session.connectToMainThread()
  *     -> Debugger.pause (interrupts the busy isolate at its next JS boundary)
  *     -> capture the top call frames -> Debugger.resume
- *     -> one JSON line on fd 2 (bypasses the blocked loop's stdout stream)
  *     -> while paused, read the main isolate's process.memoryUsage()
  *        (heapUsed vs external/arrayBuffers separates JS heap from Buffers)
- *   every line also carries anonymous RSS and the busiest threads' CPU from
- *   /proc, which still works when the main thread is stuck in native code
- *   while the stall lasts: the same sample (frames + memory) every reportEveryMs
+ *     -> a separate 'event loop stall stack' line; 'pause timed out' means the
+ *        main thread is inside native code
+ *   while the stall lasts: a memory line and a fresh capture every reportEveryMs
+ *   every line is written to fd 2 (bypasses the blocked loop's stdout stream)
  *
  * Why: the backend was OOM-killed at 16 GiB six times (2026-09-18 .. 10-27).
  * Each time the event loop froze for 40-70 s while memory climbed, and every
@@ -81,6 +85,40 @@ function busyThreads() {
   }
 }
 
+// The cgroup limit counts every process in the container, so name the biggest.
+function containerProcesses() {
+  try {
+    const page = 4096;
+    const rows = [];
+    for (const pid of fs.readdirSync('/proc')) {
+      if (!/^\\d+$/.test(pid)) continue;
+      try {
+        const rss = Number(fs.readFileSync('/proc/' + pid + '/statm', 'utf8').split(' ')[1]) * page;
+        const comm = fs.readFileSync('/proc/' + pid + '/comm', 'utf8').trim();
+        rows.push({ pid: Number(pid), comm, rss_mb: Math.round(rss / 1048576) });
+      } catch {}
+    }
+    return rows.sort((a, b) => b.rss_mb - a.rss_mb).slice(0, 5);
+  } catch {
+    return undefined;
+  }
+}
+
+function cgroupMemory() {
+  try {
+    const stat = fs.readFileSync('/sys/fs/cgroup/memory.stat', 'utf8');
+    const field = (name) => {
+      const match = new RegExp('^' + name + ' ([0-9]+)$', 'm').exec(stat);
+      return match ? Math.round(Number(match[1]) / 1048576) : undefined;
+    };
+    let current;
+    try { current = Math.round(Number(fs.readFileSync('/sys/fs/cgroup/memory.current', 'utf8')) / 1048576); } catch {}
+    return { current_mb: current, anon_mb: field('anon'), file_mb: field('file'), sock_mb: field('sock') };
+  } catch {
+    return undefined;
+  }
+}
+
 function emit(record) {
   try {
     fs.writeSync(2, JSON.stringify({ timestamp: new Date().toISOString(), level: 'error', component: 'EventLoopStall', ...record }) + '\\n');
@@ -91,6 +129,16 @@ function captureMainStack() {
   return new Promise((resolve) => {
     const session = new inspector.Session();
     let settled = false;
+    const post = (method, params, callback) => {
+      if (settled) return;
+      try {
+        session.post(method, params, (error, result) => {
+          if (!settled && callback) callback(error, result);
+        });
+      } catch (error) {
+        finish([], String(error && error.message ? error.message : error));
+      }
+    };
     const finish = (frames, error, memory) => {
       if (settled) return;
       settled = true;
@@ -101,6 +149,7 @@ function captureMainStack() {
     try {
       session.connectToMainThread();
       session.on('Debugger.paused', (message) => {
+        if (settled) return;
         const frames = (message.params.callFrames || []).slice(0, 25).map((frame) => ({
           fn: frame.functionName || '(anonymous)',
           url: frame.url,
@@ -109,7 +158,7 @@ function captureMainStack() {
         }));
         const top = (message.params.callFrames || [])[0];
         if (!top) return finish(frames);
-        session.post(
+        post(
           'Debugger.evaluateOnCallFrame',
           { callFrameId: top.callFrameId, expression: 'JSON.stringify(globalThis.process.memoryUsage())', silent: true, returnByValue: true },
           (error, result) => {
@@ -123,8 +172,10 @@ function captureMainStack() {
           }
         );
       });
-      session.post('Debugger.enable', () => session.post('Debugger.pause'));
-      setTimeout(() => finish([], 'pause timed out'), 5000);
+      post('Debugger.enable', {}, () => post('Debugger.pause', {}));
+      // A main thread inside native code (zlib, JSON, Buffer, sharp) never reaches
+      // a pause point; the timeout names that case instead of waiting forever.
+      setTimeout(() => finish([], 'pause timed out: main thread did not reach JavaScript'), 5000);
     } catch (error) {
       finish([], String(error && error.message ? error.message : error));
     }
@@ -135,14 +186,33 @@ let stalledSince = 0;
 let lastReport = 0;
 let capturing = false;
 
-async function sample(message) {
-  capturing = true;
-  const { frames, error, memory } = await captureMainStack();
-  capturing = false;
-  emit({ message, stall_ms: Date.now() - stalledSince, rss_mb: rssMb(), anon_mb: anonMb(), memory, threads: busyThreads(), frames, capture_error: error });
+function memorySample(message) {
+  const usage = process.memoryUsage();
+  emit({
+    message,
+    stall_ms: Date.now() - stalledSince,
+    rss_mb: rssMb(),
+    anon_mb: anonMb(),
+    process_memory: { rss_mb: Math.round(usage.rss / 1048576) },
+    cgroup: cgroupMemory(),
+    processes: containerProcesses(),
+    threads: busyThreads(),
+  });
 }
 
-setInterval(async () => {
+function captureStack() {
+  if (capturing) return;
+  capturing = true;
+  const since = stalledSince;
+  captureMainStack().then(({ frames, error, memory }) => {
+    capturing = false;
+    emit({ message: 'event loop stall stack', stall_ms: Date.now() - since, rss_mb: rssMb(), anon_mb: anonMb(), memory, frames, capture_error: error });
+  });
+}
+
+// Memory lines never wait on a stack capture: when the main thread is stuck in
+// native code the capture cannot complete, and those are the lines that matter.
+setInterval(() => {
   const now = Date.now();
   const lag = now - beat[0];
   if (lag < stallMs) {
@@ -152,17 +222,18 @@ setInterval(async () => {
     stalledSince = 0;
     return;
   }
-  if (capturing) return;
   if (stalledSince === 0) {
     stalledSince = beat[0];
     lastReport = now;
     busyThreads();
-    await sample('event loop stall');
+    memorySample('event loop stall');
+    captureStack();
     return;
   }
   if (now - lastReport >= reportEveryMs) {
     lastReport = now;
-    await sample('event loop stall continues');
+    memorySample('event loop stall continues');
+    captureStack();
   }
 }, Math.max(50, Math.min(1000, Math.floor(stallMs / 4))));
 `;
@@ -185,6 +256,11 @@ export function startEventLoopStallWatchdog(options: EventLoopStallWatchdogOptio
       stallMs: options.stallMs ?? 5_000,
       reportEveryMs: options.reportEveryMs ?? 5_000,
     },
+  });
+  worker.on('error', (error) => {
+    process.stderr.write(
+      `${JSON.stringify({ level: 'error', component: 'EventLoopStall', message: 'watchdog worker failed', error: String(error) })}\n`
+    );
   });
   worker.unref();
   started = worker;

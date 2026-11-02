@@ -25,6 +25,7 @@ for (const width of [1280, 390]) {
     const now = new Date().toISOString();
     let project: Project = {
       id: 'p-rose',
+      folders: [{ id: 'f-ui', name: 'Interface', projectId: 'p-rose' }],
       name: 'Rose',
       repoUrl: 'https://github.com/Rose-Ai-Labs/rose',
       githubConnected: true,
@@ -56,6 +57,7 @@ for (const width of [1280, 390]) {
       title: 'Rose work',
       goal: 'Rose work',
       project_id: 'p-rose',
+      folder_id: 'f-ui',
       status: 'COMPLETED',
       source: 'WEB',
       model: 'rose-1-flash',
@@ -86,6 +88,11 @@ for (const width of [1280, 390]) {
           return route.fulfill({ json: created, status: 201 });
         }
         body = { projects };
+      } else if (path === '/api/projects/p-rose/folders' && request.method() === 'POST') {
+        const folder = { id: 'f-new', name: request.postDataJSON().name, projectId: 'p-rose' };
+        project = { ...project, folders: [...project.folders, folder] };
+        projects = projects.map((p) => (p.id === project.id ? project : p));
+        return route.fulfill({ json: folder, status: 201 });
       } else if (path === '/api/projects/p-rose' && request.method() === 'PUT') {
         const input = request.postDataJSON();
         writes.push(input);
@@ -103,7 +110,21 @@ for (const width of [1280, 390]) {
       } else if (path.endsWith('/env-files')) body = { envFiles: [] };
       else if (path === '/api/agents') body = { agents: [agent] };
       else if (path === '/api/agents/code-agents') body = { code_agents: [] };
-      else if (path === '/api/agents/tree') body = { agents: [] };
+      else if (path === '/api/agents/tree')
+        body = {
+          agents: [
+            { ...agent, progress: 1, tools_in_use: [] },
+            {
+              ...agent,
+              agent_id: 'navigation-child',
+              parent_agent_id: agent.agent_id,
+              title: null,
+              goal: 'Audit navigation',
+              progress: 1,
+              tools_in_use: [],
+            },
+          ],
+        };
       else if (path === '/api/attention-requests') body = { requests: [] };
       else if (path === '/api/invite-codes/check') body = { needsInviteCode: false };
       else if (request.method() !== 'GET') return route.fulfill({ status: 204 });
@@ -120,6 +141,45 @@ for (const width of [1280, 390]) {
     }
     const row = page.getByTestId('rose-project-row-p-rose').filter({ visible: true });
     await expect(row).toBeVisible();
+    const folderRow = page.getByTestId('rose-folder-f-ui').filter({ visible: true });
+    await expect(folderRow.getByText('Rose work', { exact: true })).toBeVisible();
+    await folderRow.getByRole('button', { name: 'Expand Rose work', exact: true }).click();
+    await expect(folderRow.getByText('Audit navigation', { exact: true })).toBeVisible();
+    await expect(folderRow.getByTestId('rose-agent-children-project-agent')).toContainText(
+      'Audit navigation',
+    );
+    await page.screenshot({
+      path: `/tmp/rose-folder-subagent-${width}.png`,
+      clip: { x: 0, y: 0, width: width < 768 ? 390 : 235, height: width < 768 ? 510 : 370 },
+    });
+
+    await folderRow.getByRole('button', { name: 'Collapse folder Interface' }).click();
+    await expect(folderRow.getByText('Rose work', { exact: true })).toHaveCount(0);
+    await folderRow.getByRole('button', { name: 'Expand folder Interface' }).click();
+    await row.getByRole('button', { name: 'New folder in Rose' }).click();
+    const folderName = page.getByRole('textbox', { name: 'New folder name' });
+    await folderName.fill('Research');
+    await folderName.press('Enter');
+    await expect(page.getByTestId('rose-folder-f-new').filter({ visible: true })).toHaveText(
+      /Research/,
+    );
+    await page.screenshot({ path: `/tmp/rose-project-folders-${width}.png` });
+    await folderRow.getByRole('button', { name: 'Create Super Agent in Interface' }).click();
+    await expect(page.getByTestId('new-agent-location')).toHaveText(
+      'New agent in Rose / Interface',
+    );
+    if (width < 768) await expect(page.getByRole('dialog')).toHaveCount(0);
+    if (width < 768) await expect(page.getByTestId('new-agent-location')).toBeHidden();
+    else await expect(page.getByTestId('new-agent-location')).toBeVisible();
+    await page.screenshot({ path: `/tmp/rose-folder-target-${width}.png` });
+    if (width < 768) await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+    else await page.getByTestId('rose-sidebar').hover({ position: { x: 30, y: 100 } });
+    await row.getByRole('button', { name: 'Create Super Agent', exact: true }).click();
+    await expect(page.getByTestId('new-agent-location')).toHaveText('New agent in Rose');
+    if (width < 768) await expect(page.getByTestId('new-agent-location')).toBeHidden();
+    else await expect(page.getByTestId('new-agent-location')).toBeVisible();
+    if (width < 768) await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+    else await page.getByTestId('rose-sidebar').hover({ position: { x: 30, y: 100 } });
     await expect(page.getByRole('button', { name: 'Projects', exact: true })).toHaveCount(0);
     await row.getByRole('button', { name: 'Rose project settings' }).click();
     const settings =

@@ -13,7 +13,10 @@ import type { ClientSource } from '@/lib/clientSource';
  * and the sidebar refresh happen after the new conversation is visible. Fast
  * Mode and Simulator Mode are captured in the create request for that agent.
  *
- * NEW-AGENT PROJECT (Rose Desktop project "+"):
+ * NEW-AGENT LOCATION (Rose Desktop project/folder "+"):
+ *   [PROJECT] --setNewAgentFolderId(id)--> [FOLDER] --create ok--> [HOME]
+ *   [FOLDER] --create fails--> [FOLDER] (kept for retry)
+ *   [FOLDER] --setNewAgentProjectId(id|null)--> [PROJECT|HOME] (folder cleared)
  *   [HOME] --setNewAgentProjectId(id)--> [IN PROJECT id] --create ok--> [HOME]
  *   [IN PROJECT id] --create fails--> [IN PROJECT id] (kept for the retry)
  *   [IN PROJECT id] --setNewAgentProjectId(null) (New Super Agent)--> [HOME]
@@ -114,7 +117,12 @@ export function useMessageSending({
   // World Model simulator — session-only, account-scoped, default off, never persisted client-side.
   const [simulatorMode, setSimulatorModeState] = useState(false);
   // Project the next new agent is created in (Rose Desktop project "+"); null = Home.
-  const [newAgentProjectId, setNewAgentProjectId] = useState<string | null>(null);
+  const [newAgentProjectId, setNewAgentProjectIdState] = useState<string | null>(null);
+  const [newAgentFolderId, setNewAgentFolderId] = useState<string | null>(null);
+  const setNewAgentProjectId = useCallback((projectId: string | null) => {
+    setNewAgentProjectIdState(projectId);
+    setNewAgentFolderId(null);
+  }, []);
 
   const messageInputRef = useRef<string>('');
   const pendingSubmitRef = useRef(false);
@@ -281,6 +289,7 @@ export function useMessageSending({
                 ? { world_model_mode: simulatorMode ? 'simulate' : 'real' }
                 : {}),
               ...(newAgentProjectId !== null ? { project_id: newAgentProjectId } : {}),
+              ...(newAgentFolderId !== null ? { folder_id: newAgentFolderId } : {}),
             });
             if (newAgent.agent_id !== agentId) {
               throw new Error('Created agent ID did not match the requested agent ID');
@@ -351,6 +360,8 @@ export function useMessageSending({
       clientSource,
       pendingPriceLimitCents,
       newAgentProjectId,
+      newAgentFolderId,
+      setNewAgentProjectId,
       agentDetail,
       userCanUseFastMode,
       userCanUseSimulator,
@@ -400,6 +411,8 @@ export function useMessageSending({
     simulatorMode,
     setSimulatorMode,
     newAgentProjectId,
+    newAgentFolderId,
+    setNewAgentFolderId,
     setNewAgentProjectId,
     handleSendMessage,
   };
