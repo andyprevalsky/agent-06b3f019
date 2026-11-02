@@ -1482,6 +1482,16 @@ class ExportResume(unittest.TestCase):
         self.assertEqual(hashes["launch.json"], self.binding["launch_sha256"])
         self.assertFalse(marker.exists(), "data hashing executed a replaced collector pathname")
 
+    def test_data_hash_accepts_relative_regular_path_and_controls_missing_target(self):
+        target = self.root / "relative-payload"
+        target.write_bytes(b"owned export payload")
+        with contextlib.chdir(self.root):
+            self.assertEqual(M["file_sha"](Path("relative-payload")), M["sha"](target.read_bytes()))
+        alias = self.root / "missing-payload-link"
+        alias.symlink_to(self.root / "missing-payload")
+        with self.assertRaisesRegex(ValueError, "continuation source path is redirected"):
+            M["file_sha"](alias)
+
     def test_data_hash_preserves_physical_single_link_and_stable_read_guards(self):
         target = self.root / "data"
         target.write_bytes(b"original export payload")

@@ -2307,6 +2307,8 @@ Inspect the newest CodeRabbit-authored content from all three endpoints. Treat C
 
 **The Claude fallback review is DISABLED (user, October 28, 2026).** Never add the `claude-review-fallback` label, never start `claude-code-review-fallback.yml`, and never wait on or repair it. Its `CLAUDE_CODE_OAUTH_TOKEN` secret has been revoked since 2026-07-24, so it only added wait time. The workflow file stays inert (label/manual dispatch only). If someone dispatches it manually, its `Diagnose Claude failure` step classifies a failure as `CREDENTIAL_INVALID` (401, revoked secret) or `USAGE_EXHAUSTED` (429); `is_error:true`, 1 turn, ~2s and `$0` alone are not exhaustion (RCA 2026-10-28). That diagnosis never re-enables the fallback in `/deploy`.
 
+When CodeRabbit is unavailable, never close it `clean` merely because the Claude fallback is disabled.
+
 When CodeRabbit is unavailable, make at most one zero-touch retry (`@coderabbitai full review` for a false-green). Apply the controlling failure policy to the diagnosed result: evidenced outages or usage exhaustion are non-blocking external exceptions, with no repair handoff and no waiting for recovery. A missing, failed, timed-out, service-error, false-green or file-limit review alone does not establish an outage; unresolved attribution remains blocking. Preserve the exact reviewer result and exception evidence, never report an unavailable review as passed.
 
 ### Review-provider usage exhaustion: TANK THROUGH, never ask
@@ -3187,10 +3189,12 @@ python3 scripts/record_factory_event.py deploy production-finish semantic
 
 Inspect failed workflow Playwright artifacts and service logs, then apply the controlling failure policy. An evidenced provider outage or exhausted credits receives an external exception and no handoff. A NOT INTRODUCED defect receives a repair handoff and waiver. Fix INTRODUCED defects and rerun affected checks; UNKNOWN remains blocking. Preserve native failures and execution provenance. Proceed to Step 14 only after every requirement is verified or has an exact qualified exception.
 
-When triage requires one further execution of a terminal failed production run,
-rerun the same command with `--retry-failed-once "<justification>"`; the existing
-CLI retries only failed jobs once and refuses a second retry. A qualified SKIP
-does not trigger this retry.
+For a required same-source retry of a non-waived failure, wait until the prior
+attempt is terminal, then rerun the same command with
+`--retry-failed-once "<justification>"`. The CLI retries only failed jobs once,
+refuses a second retry, preserves successful jobs' execution provenance, and
+records the retry's checkout SHA. A qualified SKIP does not trigger this retry.
+
 
 If no workflow-scoped token is available, `gh workflow run` returns HTTP 403
 `Resource not accessible by integration`. In that case, run the workflow's two

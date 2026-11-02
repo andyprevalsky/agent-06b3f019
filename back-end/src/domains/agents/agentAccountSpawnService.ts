@@ -28,11 +28,22 @@ function independentId(userId: string, key: string): string {
 
 export async function spawnAccountAgent(caller: GraphCaller, input: AccountSpawnInput) {
   requireAccountAccess(caller);
+  // Account access and a client declaration are not spawn authorization.
+  // The signed claim binds one request to an instruction checked by trusted code.
+  const grant = caller.accountSpawnGrant;
   if (
+    grant === undefined ||
+    grant === null ||
+    typeof grant.path !== 'string' ||
+    !grant.path ||
+    typeof grant.sha256 !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(grant.sha256) ||
+    grant.requestId !== input.id ||
     input.instruction?.explicitly_authorized !== true ||
-    !/^[a-f0-9]{64}$/.test(input.instruction.sha256)
+    input.instruction.path !== grant.path ||
+    input.instruction.sha256 !== grant.sha256
   ) {
-    throw new AgentGraphError(403, 'An existing explicit spawn instruction is required');
+    throw new AgentGraphError(403, 'A trusted source-bound spawn grant is required');
   }
   if ((await repo.ownedAccountPlacement(caller.userId, input.project, input.folder)) === null) {
     throw new AgentGraphError(404, 'Project/folder not found in this account');

@@ -19,7 +19,11 @@
  * request (O(depth) indexed lookups), one short ws per code-agent message,
  * no fan-out and no shared channel.
  */
-import { mintAgentGraphToken, type AgentGraphClaims } from '../../providers/agentGraph/token';
+import {
+  mintAgentGraphToken,
+  type AgentGraphClaims,
+  type AccountSpawnGrant,
+} from '../../providers/agentGraph/token';
 import { executeUserDataGrep, type UserDataGrepResult } from '../../providers/userDataSearch';
 import * as graphRepo from './repoGraph';
 
@@ -34,6 +38,7 @@ export interface GraphCaller {
   rootAgentId: string;
   self: GraphSelf;
   accountAccess?: boolean;
+  accountSpawnGrant?: AccountSpawnGrant;
 }
 
 export class AgentGraphError extends Error {
@@ -273,6 +278,7 @@ export function refreshCodeSessionToken(claims: AgentGraphClaims): {
     sessionId: claims.sessionId,
     provider: claims.provider,
     accountAccess: claims.accountAccess,
+    accountSpawnGrant: claims.accountSpawnGrant,
   });
   return { token, expires_at: expiresAt };
 }

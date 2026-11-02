@@ -3378,6 +3378,7 @@ async def test_click_coordinates_follow_an_element_the_page_re_rendered():
 async def test_tilion_pause_releases_socket_before_backend_checkpoint():
     """Native worker close helper hands Tilion's one socket to checkpoint capture."""
     import ast
+    from helpers.workflow_generation import WorkflowGenerationSealed
     from pathlib import Path
     from types import SimpleNamespace
     from aiohttp import web
@@ -3393,8 +3394,9 @@ async def test_tilion_pause_releases_socket_before_backend_checkpoint():
     factory.body.append(helper)
     factory.body.extend(ast.parse('async def pause():\n    await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url, require_complete_passkeys=True)\n    if cleanup_failure is not None:\n        raise BrowserSessionCloseError(session_id, True, cleanup_failure.get("http_status"))\nreturn pause').body)
 
-    for failure in (None, "disconnect_error", "disconnect_hung", "passkey_error"):
+    for failure in (None, "disconnect_error", "disconnect_hung", "passkey_error", "recorder_error", "recorder_hung"):
         events, requests, pending = [], [], set()
+        release_marks = asyncio.Event()
         async with _chromium() as (playwright, _browser, endpoint):
             async with FakeTilionGateway(endpoint) as gateway:
                 from browser_tools.dom_service import DOMService
@@ -3441,9 +3443,21 @@ async def test_tilion_pause_releases_socket_before_backend_checkpoint():
                         await pw_browser.contexts[0].add_cookies([{"name":"pause-proof", "value":"retained", "url":"https://fixture.test/"}])
                         recorder = BrowserAgentRecorder(page=page, agent_id="pause-fixture", task_id="pause-fixture", session_id=TILION_SESSION, browser_url="https://fixture.test/", session_metadata={"provider":"tilion"})
                         await recorder.start()
+                        if failure == "recorder_hung":
+                            async def stuck_mark():
+                                try:
+                                    await release_marks.wait()
+                                except asyncio.CancelledError:
+                                    await release_marks.wait()
+                            mark = asyncio.create_task(stuck_mark())
+                            recorder._mark_tasks.add(mark)
+                            mark.add_done_callback(recorder._mark_tasks.discard)
                         original_recording_close = recorder.close
                         async def recording_close(**options):
                             assert gateway.active == 1, "recording must finish before socket handoff"
+                            events.append("recording_attempted")
+                            if failure == "recorder_error":
+                                raise OSError("fixture optional recording failure")
                             result = await original_recording_close(**options)
                             assert result is not None and result.exists()
                             events.append("recording_captured")
@@ -3475,7 +3489,7 @@ async def test_tilion_pause_releases_socket_before_backend_checkpoint():
                                 upstream.close = rejected_upstream_close
                             upstream.wait_closed = rejected_upstream_wait_closed
                         namespace = {
-                            "asyncio":asyncio,"contextlib":contextlib,"Dict":dict,"Any":object,"BrowserSessionCloseError":BrowserSessionCloseError,
+                            "asyncio":asyncio,"contextlib":contextlib,"Dict":dict,"Any":object,"BrowserSessionCloseError":BrowserSessionCloseError,"WorkflowGenerationSealed":WorkflowGenerationSealed,
                             "close_browser_session":close_browser_session,"_stop_kernel_replay_before_session_close":lambda _rec: asyncio.sleep(0),
                             "browser_recorder":recorder,"config":SimpleNamespace(backend=SimpleNamespace(api_url=f"http://127.0.0.1:{port}",api_key="")),
                             "session_id":TILION_SESSION,"current_url":"https://fixture.test/","credential_signin_realms":set(),"task_id":"pause-fixture",
@@ -3488,9 +3502,14 @@ async def test_tilion_pause_releases_socket_before_backend_checkpoint():
                         }
                         exec(compile(ast.fix_missing_locations(ast.Module(body=[*definitions,factory],type_ignores=[])),"native-close-helper","exec"),namespace)
                         pause = namespace["factory"]()
-                        if failure is None:
+                        if failure in (None, "recorder_error", "recorder_hung"):
+                            pause_started = time.monotonic()
                             await pause()
-                            assert events.index("passkeys_captured") < events.index("recording_captured") < events.index("socket_released") < events.index("backend_checkpoint")
+                            assert time.monotonic() - pause_started < BROWSER_DISCONNECT_TIMEOUT_SECONDS + 5
+                            if failure is None:
+                                assert events.index("passkeys_captured") < events.index("recording_captured") < events.index("socket_released") < events.index("backend_checkpoint")
+                            else:
+                                assert events.index("passkeys_captured") < events.index("recording_attempted") < events.index("socket_released") < events.index("backend_checkpoint")
                             assert events[-1] == "backend_checkpoint_complete"
                             assert events.count("usage_banked") == 1
                             assert events.index("socket_released") < events.index("usage_banked") < events.index("backend_checkpoint")
@@ -3508,6 +3527,7 @@ async def test_tilion_pause_releases_socket_before_backend_checkpoint():
                         if failure in ("disconnect_error","disconnect_hung"):
                             assert "recording_captured" in events
                     finally:
+                        release_marks.set()
                         if "upstream" in locals():
                             upstream.close = original_upstream_close
                             upstream.wait_closed = original_upstream_wait_closed
@@ -3585,6 +3605,7 @@ async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
         ("tilion_checkpoint_waits_for_pending_dial_and_real_close", test_tilion_checkpoint_waits_for_pending_dial_and_real_close),
+        ("checkpoint_recorder_close_bounds_and_control_signals", test_checkpoint_recorder_close_bounds_and_control_signals),
         ("tilion_pause_releases_socket_before_backend_checkpoint", test_tilion_pause_releases_socket_before_backend_checkpoint),
         ("fake_gateway_rejects_second_direct_client", test_fake_gateway_rejects_second_direct_client),
         ("tilion_worker_attach_uses_one_upstream_socket", test_tilion_worker_attach_uses_one_upstream_socket),
@@ -3667,3 +3688,123 @@ async def run_all_tests():
     ]:
         await result.record_async(name, test)
     return result.all_passed
+
+
+async def test_checkpoint_recorder_close_bounds_and_control_signals():
+    """Actual close helper keeps optional recording separate from custody proof."""
+    import ast
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from domains.spawn_browser_agent_v3.repo import BrowserSessionCloseError
+    from domains.spawn_browser_agent_v3.config import BROWSER_DISCONNECT_TIMEOUT_SECONDS
+
+    tree = ast.parse((Path(__file__).resolve().parents[2] / "domains/spawn_browser_agent_v3/handler.py").read_text())
+    names = {"_await_bounded_browser_cleanup"}
+    definitions = [n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name in names]
+    helper = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_close_browser_with_cleanup_receipt")
+    factory = ast.parse("def factory():\n    cleanup_failure = None\n    dom_service = initial_dom\n").body[0]
+    factory.body.append(helper)
+    factory.body.extend(ast.parse("return _close_browser_with_cleanup_receipt, lambda: dom_service, lambda: cleanup_failure").body)
+    failures = []
+    for mode in ("ok", "error", "hung", "cancel", "sealed", "caller_cancel", "false", "missing", "mock", "truthy"):
+        events, retained = [], set()
+        release = asyncio.Event()
+        started = asyncio.Event()
+
+        async def record(**options):
+            assert options == {"include_steel_media": False, "archive_artifacts": False}
+            events.append("record")
+            started.set()
+            if mode == "error":
+                raise OSError("recording failed")
+            if mode == "cancel":
+                raise asyncio.CancelledError()
+            if mode == "sealed":
+                raise WorkflowGenerationSealed("closed generation")
+            if mode in {"hung", "caller_cancel"}:
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    events.append("record_cancelled")
+                    await release.wait()
+
+        async def detach(*args):
+            events.append("detach")
+            return True
+
+        async def confirmed(callback):
+            return await callback()
+
+        async def capture(callback):
+            events.append("passkeys")
+            return True
+
+        async def stop(recorder):
+            events.append("replay")
+
+        async def close(*args, **kwargs):
+            events.append("checkpoint")
+
+        service = SimpleNamespace(disconnect=detach, cdp_multiplexer=SimpleNamespace(disconnect_confirmed=confirmed))
+        if mode != "missing":
+            service.single_cdp_client = False if mode == "false" else MagicMock() if mode == "mock" else 1 if mode == "truthy" else True
+
+        # Exercise the real production budget argument with a deterministic
+        # wait boundary; no wall-clock or production timeout is changed.
+        async def wait(tasks, timeout):
+            assert timeout == BROWSER_DISCONNECT_TIMEOUT_SECONDS
+            if mode == "hung" and not started.is_set():
+                await started.wait()
+                return set(), set(tasks)
+            return await asyncio.wait(tasks, timeout=timeout)
+
+        loop_api = SimpleNamespace(**{n: getattr(asyncio, n) for n in ("create_task", "CancelledError", "Task")}, wait=wait)
+        namespace = dict(asyncio=loop_api, contextlib=contextlib, Any=Any, Dict=Dict,
+            WorkflowGenerationSealed=WorkflowGenerationSealed, BrowserSessionCloseError=BrowserSessionCloseError,
+            initial_dom=service, session_id="owned", task_id="task", config=None,
+            browser_recorder=SimpleNamespace(close=record), credential_signin_realms=set(),
+            _capture_browser_passkey_usage=capture, record_passkey_usage_once=None,
+            _stop_kernel_replay_before_session_close=stop, _disconnect_browser=detach,
+            _tilion_leave_session=lambda: events.append("bank"), close_browser_session=close,
+            world_state_receipt_summary=lambda receipt: [], extract_error_message=str,
+            logger=SimpleNamespace(warning=lambda *a, **k: None, info=lambda *a, **k: None),
+            BROWSER_DISCONNECT_TIMEOUT_SECONDS=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+            _background_browser_cleanup_tasks=retained, _EXPIRED_OPTIONAL_CDP_TASK_NAME="review-owned-cleanup")
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[*definitions, factory], type_ignores=[])), "checkpoint-recorder-contract", "exec"), namespace)
+        call, current, receipt = namespace["factory"]()
+        runner = asyncio.create_task(call("owned", pause=True, require_complete_passkeys=True))
+        try:
+            if mode == "caller_cancel":
+                await started.wait()
+                runner.cancel()
+            expected = asyncio.CancelledError if mode in {"cancel", "caller_cancel"} else WorkflowGenerationSealed if mode == "sealed" else None
+            try:
+                await asyncio.wait_for(asyncio.shield(runner), timeout=0.5)
+            except BaseException as error:
+                if expected is None or not isinstance(error, expected):
+                    raise AssertionError((mode, type(error).__name__, events)) from error
+            else:
+                assert expected is None, (mode, "control signal swallowed", events)
+            if expected:
+                assert "detach" not in events and "checkpoint" not in events and "bank" not in events, (mode, events)
+                assert current() is service and receipt() is not None
+            else:
+                assert current() is None and receipt() is None
+                assert events.count("bank") == 1
+                assert events.index("detach") < events.index("bank") < events.index("checkpoint")
+                if mode in {"false", "missing", "mock", "truthy"}:
+                    assert "record" not in events and events.index("detach") < events.index("replay")
+                else:
+                    assert events.index("record") < events.index("detach")
+        except Exception as error:
+            failures.append((mode, str(error)))
+        finally:
+            release.set()
+            if not runner.done():
+                runner.cancel()
+            await asyncio.gather(runner, *retained, return_exceptions=True)
+            await asyncio.sleep(0)
+            assert not retained, (mode, "owned task leaked")
+    assert not failures, failures

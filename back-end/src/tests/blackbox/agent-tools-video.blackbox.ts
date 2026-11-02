@@ -99,15 +99,15 @@ before(async () => {
     saved[name] = process.env[name];
   }
   server = createServer((req, res) => {
-    // Ignore method-only host probes before invoking any scenario handler.
-    if (req.method !== 'GET' && req.method !== 'POST') {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
     // Other local non-API probes never reach a Gemini scenario handler.
     if (!(req.url ?? '').split('?')[0].startsWith('/v1beta/')) {
       res.statusCode = 404;
+      res.end();
+      return;
+    }
+    // Ignore method-only host probes before invoking any scenario handler.
+    if (req.method !== 'GET' && req.method !== 'POST') {
+      res.statusCode = 405;
       res.end();
       return;
     }

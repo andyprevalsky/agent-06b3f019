@@ -10,10 +10,11 @@ import argparse
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import tempfile
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 
 def decision(entry: dict) -> str:
@@ -41,7 +42,7 @@ def decision(entry: dict) -> str:
             raise ValueError("Introduced and unknown failures cannot get delegation waivers")
         u = urlparse(link)
         rose = u.netloc in {"www.roselabs.ai", "roselabs.ai"} and bool(parse_qs(u.query).get("agent-id"))
-        boxes = u.netloc == "boxes.dev" and u.path.startswith("/thread/") and bool(u.path.removeprefix("/thread/"))
+        boxes = u.netloc == "boxes.dev" and re.fullmatch(r"/thread/[A-Za-z0-9_-]+", unquote(u.path)) is not None
         if u.scheme != "https" or not (rose or boxes):
             raise ValueError("A boxes.dev repair-thread or Rose repair-agent link is required")
         return "delegated / waived"
@@ -72,6 +73,11 @@ def record(path: Path, entry: dict) -> dict:
 
 def render(report: dict, scorecard: str = "") -> str:
     lines = [scorecard.rstrip()] if scorecard.strip() else []
+    if not scorecard.strip():
+        blocking = [e for e in report["failures"] if e["disposition"] == "blocking"]
+        if blocking:
+            lines.append("BLOCKING")
+            lines.extend(f"- {e['description']} — {e['native_result']} · Evidence: {e['evidence']}" for e in blocking)
     handed = [e for e in report["failures"] if e["disposition"] == "delegated / waived"]
     if handed:
         lines.extend(["", "DELEGATED"])

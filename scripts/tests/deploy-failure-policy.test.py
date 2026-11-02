@@ -46,6 +46,21 @@ class FailurePolicyTest(unittest.TestCase):
             with self.subTest(link=link), self.assertRaises(ValueError):
                 MODULE.decision(self.occurrence(attribution="NOT_INTRODUCED", repair_agent=link))
 
+    def test_dot_segments_and_nonthread_paths_cannot_waive(self):
+        for path in ["..", ".", "%2e%2e", "%2E", "thr_owned/../", "thr_owned/other", "%2f..", "thr_owned%2fother"]:
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                MODULE.decision(self.occurrence(attribution="NOT_INTRODUCED", repair_agent="https://boxes.dev/thread/" + path))
+
+    def test_empty_scorecard_still_shows_blocking_native_results(self):
+        entry = {**self.occurrence(), "disposition": "blocking"}
+        text = MODULE.render({"failures": [entry]})
+        self.assertIn("BLOCKING", text)
+        self.assertIn(entry["description"], text)
+        self.assertIn(entry["native_result"], text)
+        self.assertIn(entry["evidence"], text)
+        self.assertNotIn("PASS", text)
+        self.assertEqual(MODULE.render({"failures": [entry]}, "Existing scorecard\n"), "Existing scorecard\n")
+
     def test_external_outage_and_credit_exhaustion_never_require_or_accept_handoff(self):
         for reason in ["outage", "credits exhausted"]:
             e = self.occurrence(attribution="NOT_INTRODUCED", external_provider={"name": "Example", "reason": reason})
