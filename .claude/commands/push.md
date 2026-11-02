@@ -134,6 +134,12 @@ If on main already (linear commits), just push:
 git push origin main
 ```
 
+Immediately after either successful push above, capture the exact pushed
+`HEAD` and bind it in the canonical source workspace's
+`.context/deploy-scorecard-latest.json` under the controlling scorecard-freshness
+rule. Do this before Step 4 fetches/switches branches; do not infer this
+workspace's shipped SHA from a later global `origin/main`.
+
 ## Step 4: New branch
 
 Run `/new_branch_with_context` to sync with main and create a fresh branch for the next task.
@@ -141,6 +147,13 @@ Run `/new_branch_with_context` to sync with main and create a fresh branch for t
 ## Step 5: Done
 
 Report what was pushed (files changed, commit summary) and the new branch name.
+
+Before publishing a scorecard, follow **Scorecard freshness: latest merge from
+this workspace** in `.claude/shared/deploy-failure-policy.md`. Bind the just-merged
+change in `.context/deploy-scorecard-latest.json` and use its own scope and
+recorded timing, even for small rule or reporting updates. Distinguish this
+merge/publish delivery from a production-service rollout; never reuse the
+previous full deploy's title, clock or gate results.
 
 ## Required factory execution metadata
 
