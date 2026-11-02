@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 from pathlib import Path
 import subprocess
 import sys
@@ -122,6 +123,43 @@ CASES = [
 # TMPDIR; it does not share Python mocks or shell state with sibling processes.
 
 
+def remove_suite_temporary(temporary, expected):
+    """Restore owner directory access only inside the quiescent private fixture."""
+    def require_owned(current):
+        if current.st_dev != expected.st_dev or current.st_uid != os.geteuid():
+            raise RuntimeError('suite temporary tree contains a foreign entry')
+
+    def require_root():
+        current = temporary.lstat()
+        if (not stat.S_ISDIR(current.st_mode)
+                or (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino)):
+            raise RuntimeError('suite temporary directory identity changed')
+        require_owned(current)
+
+    def read_failed(error):
+        raise error
+
+    require_root()
+    descriptor = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        current = os.fstat(descriptor)
+        if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+            raise RuntimeError('suite temporary directory identity changed')
+        require_owned(current)
+        for _, directories, files, directory in os.fwalk(
+                '.', topdown=True, dir_fd=descriptor, follow_symlinks=False,
+                onerror=read_failed):
+            current = os.fstat(directory)
+            require_owned(current)
+            for name in directories + files:
+                require_owned(os.stat(name, dir_fd=directory, follow_symlinks=False))
+            os.fchmod(directory, stat.S_IMODE(current.st_mode) | stat.S_IRWXU)
+        require_root()
+        shutil.rmtree(temporary)
+    finally:
+        os.close(descriptor)
+
+
 def run_case(root, folder, name, command):
     if CANCEL.is_set():
         return {'name': name, 'status': 'UNVERIFIED', 'reason': 'cancelled before execution'}
@@ -158,10 +196,7 @@ def run_case(root, folder, name, command):
                    fixture_tmp=str(temporary), supervisor_exit=supervisor_exit,
                    supervisor_receipt=str(supervisor_receipt), supervision=supervision)
         if status == 'PASS':
-            current = temporary.lstat()
-            if (current.st_dev, current.st_ino) != (temporary_identity.st_dev, temporary_identity.st_ino):
-                raise RuntimeError('suite temporary directory identity changed')
-            shutil.rmtree(temporary)
+            remove_suite_temporary(temporary, temporary_identity)
             row['fixture_tmp_removed'] = True
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
         row = dict(name=name, status='UNVERIFIED', reason=str(error),

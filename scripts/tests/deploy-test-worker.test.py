@@ -608,12 +608,16 @@ class CloudCampaign(unittest.TestCase):
 
 
 FAKE_CLI = """#!/usr/bin/env python3
-import json, os, sys, time
+import json, os, signal, sys, time
 calls = os.environ['FAKE_DVB_CALLS']; config = json.load(open(os.environ['FAKE_DVB_CONFIG']))
 with open(calls, 'a') as stream: stream.write(json.dumps(sys.argv[1:]) + '\\n')
 key = sys.argv[2]
 if key == 'list' and '--all' not in sys.argv: key = 'list_page1'  # native CLI: one page unless --all
 reply = config.get(key, {'rc': 1, 'stdout': {}, 'stderr': 'unsupported'})
+if isinstance(reply, list):
+    count = sum(json.loads(line)[1] == key for line in open(calls))
+    reply = reply[min(count - 1, len(reply) - 1)]
+if reply.get('ignore_term'): signal.signal(signal.SIGTERM, signal.SIG_IGN)
 time.sleep(reply.get('sleep', 0))
 sys.stdout.write(json.dumps(reply.get('stdout', {}))); sys.stderr.write(reply.get('stderr', ''))
 raise SystemExit(reply.get('rc', 0))
@@ -856,12 +860,64 @@ class Boxes(unittest.TestCase):
         self.assertEqual(2, proc.returncode); self.assertIn('DEPLOY_BOXES BLOCKED', proc.stderr)
         self.assertFalse(self.calls.exists()); self.assertFalse((self.coordinator / 'r.json').exists())
 
-    def test_native_cli_wait_returns_cleanup_owner_inside_original_deadline(self):
+    def test_native_wait_slice_timeout_reobserves_same_turn_without_resending(self):
+        self.configure(reply=self.reply(), wait=[
+            {'sleep': .6, 'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'}, status='running')},
+            {'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'})}])
+        with patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
+            result = self.run_adapter(deadline=5)
+        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
+        self.assertEqual(1, len(self.calls_of('send')))
+        waits = self.calls_of('wait')
+        self.assertEqual(2, len(waits))
+        self.assertEqual(['turn-1', 'turn-1'], [row[row.index('--turn') + 1] for row in waits])
+        self.assertEqual('turn-1', result['transport_receipt']['turn_id'])
+
+    def test_cancellation_during_native_wait_keeps_owner_and_never_resends(self):
         self.configure(reply=self.reply(), wait={'sleep': 3, 'rc': 0,
+            'stdout': self.wrap({'turnId': 'turn-1'}, status='running')})
+        timer = threading.Timer(.3, self.boxes.CANCEL.set)
+        started = time.monotonic(); timer.start()
+        try:
+            result = self.run_adapter(deadline=5)
+        finally:
+            timer.cancel(); timer.join()
+        self.assertLess(time.monotonic() - started, 1.2)
+        self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+        self.assertIn('cancelled', result['reason'])
+        self.assertEqual('turn-1', result['cleanup_owner']['turn_id'])
+        self.assertEqual(1, len(self.calls_of('send')))
+        self.assertEqual([], self.calls_of('result'))
+
+    def test_native_wait_cli_error_is_unverified_without_retry_or_resend(self):
+        self.configure(reply=self.reply(), wait={'rc': 2, 'stderr': 'native wait failed'})
+        result = self.run_adapter(deadline=5)
+        self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+        self.assertEqual('threads wait exited 2', result['reason'])
+        self.assertEqual('turn-1', result['cleanup_owner']['turn_id'])
+        self.assertEqual(1, len(self.calls_of('wait')))
+        self.assertEqual(1, len(self.calls_of('send')))
+
+    def test_short_nonwait_timeout_keeps_the_positive_original_deadline(self):
+        self.configure(reply=self.reply(), result={'sleep': 3, 'rc': 0,
+            'stdout': self.wrap({'turnId': 'turn-1', 'output': {'text': self.reply()}})})
+        with patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
+            result = self.run_adapter(deadline=5)
+        self.assertEqual('native CLI call timed out before the original deadline', result['reason'])
+        self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+        self.assertEqual('turn-1', result['cleanup_owner']['turn_id'])
+        self.assertEqual(1, len(self.calls_of('send')))
+        self.assertEqual(1, len(self.calls_of('result')))
+
+    def test_native_cli_wait_returns_cleanup_owner_inside_original_deadline(self):
+        self.configure(reply=self.reply(), wait={'sleep': 3, 'ignore_term': True, 'rc': 0,
             'stdout': self.wrap({'turnId': 'turn-1'}, status='running')})
         started = time.monotonic()
         result = self.run_adapter(deadline=0.8)
-        self.assertLess(time.monotonic() - started, 1.2)
+        elapsed = time.monotonic() - started
+        print(json.dumps({'ignores_term_deadline': .8, 'elapsed': elapsed}))
+        self.assertLess(elapsed, .8)
+        self.assertEqual('original deadline passed during native CLI call', result['reason'])
         self.assertFalse(result['cleanup_complete'])
         self.assertFalse(result['complete'])
         self.assertEqual(result['cleanup_owner']['request_token'], 'tok-1')
@@ -1098,6 +1154,107 @@ local_runner = load('controller_local', 'scripts/run-cloudbench-controller-local
 
 
 class LocalController(unittest.TestCase):
+    def test_quiescent_readonly_fixture_cleanup_preserves_symlink_target(self):
+        with tempfile.TemporaryDirectory(prefix='controller-readonly-', dir='/var/tmp') as raw:
+            root = Path(raw)
+            outside = root / 'outside'
+            outside.mkdir()
+            sentinel = outside / 'sentinel'
+            sentinel.write_text('outside evidence')
+            sentinel.chmod(0o444)
+            outside.chmod(0o555)
+            before = (outside.stat().st_mode, sentinel.stat().st_mode, sentinel.read_bytes())
+            body = (
+                "import os; from pathlib import Path; p=Path(os.environ['TMPDIR']); "
+                "d=p/'audit'; d.mkdir(); e=d/'expected-fresh'; e.mkdir(); "
+                "f=d/'evidence'; f.write_text('retained'); f.chmod(0o444); "
+                "e.chmod(0o500); d.chmod(0o500); "
+                "(p/'outside-link').symlink_to(" + repr(str(outside)) + ", target_is_directory=True)"
+            )
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    row = local_runner.run_case(root, root, 'readonly', shlex.join([sys.executable, '-c', body]))
+                self.assertEqual(row['status'], 'PASS', row)
+                self.assertEqual(row['native_exit'], 0)
+                self.assertTrue(row['supervision']['quiescent'])
+                self.assertTrue(row['fixture_tmp_removed'])
+                self.assertFalse(Path(row['fixture_tmp']).exists())
+                self.assertEqual((outside.stat().st_mode, sentinel.stat().st_mode, sentinel.read_bytes()), before)
+            finally:
+                outside.chmod(0o755)
+                if 'row' in locals():
+                    temporary = Path(row['fixture_tmp'])
+                    if temporary.exists():
+                        for path in (temporary / 'audit', temporary / 'audit/expected-fresh'):
+                            if path.is_dir():
+                                path.chmod(0o755)
+                        shutil.rmtree(temporary)
+
+    def test_failed_readonly_fixture_is_retained(self):
+        with tempfile.TemporaryDirectory(prefix='controller-failed-readonly-', dir='/var/tmp') as raw:
+            root = Path(raw)
+            body = "import os; from pathlib import Path; p=Path(os.environ['TMPDIR'])/'expected-fresh'; p.mkdir(); p.chmod(0o555); raise SystemExit(1)"
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    row = local_runner.run_case(root, root, 'failed-readonly', shlex.join([sys.executable, '-c', body]))
+                self.assertEqual(row['status'], 'FAIL')
+                self.assertNotIn('fixture_tmp_removed', row)
+                self.assertEqual((Path(row['fixture_tmp']) / 'expected-fresh').stat().st_mode & 0o777, 0o555)
+            finally:
+                if 'row' in locals():
+                    temporary = Path(row['fixture_tmp'])
+                    (temporary / 'expected-fresh').chmod(0o755)
+                    shutil.rmtree(temporary)
+
+    def test_cleanup_refuses_replaced_or_linked_root(self):
+        with tempfile.TemporaryDirectory(prefix='controller-root-guard-', dir='/var/tmp') as raw:
+            root = Path(raw)
+            original, replacement = root / 'original', root / 'replacement'
+            original.mkdir()
+            expected = original.stat()
+            original.rename(root / 'retained')
+            replacement.mkdir()
+            (replacement / 'evidence').write_text('foreign root evidence')
+            replacement.chmod(0o555)
+            replacement.rename(original)
+            try:
+                with self.assertRaisesRegex(RuntimeError, 'identity changed'):
+                    local_runner.remove_suite_temporary(original, expected)
+                self.assertEqual((original / 'evidence').read_text(), 'foreign root evidence')
+                self.assertEqual(original.stat().st_mode & 0o777, 0o555)
+                original.rename(replacement)
+                original.symlink_to(replacement, target_is_directory=True)
+                with self.assertRaisesRegex(RuntimeError, 'identity changed'):
+                    local_runner.remove_suite_temporary(original, expected)
+                self.assertEqual(replacement.stat().st_mode & 0o777, 0o555)
+            finally:
+                for path in (original, replacement):
+                    if path.is_dir() and not path.is_symlink():
+                        path.chmod(0o755)
+
+    def test_cleanup_refuses_foreign_entry_without_changing_it(self):
+        with tempfile.TemporaryDirectory(prefix='controller-foreign-guard-', dir='/var/tmp') as raw:
+            root = Path(raw)
+            foreign = root / 'foreign'
+            foreign.mkdir()
+            (foreign / 'evidence').write_text('preserve')
+            foreign.chmod(0o555)
+            real_stat = os.stat
+            def observe(path, *args, **kwargs):
+                result = real_stat(path, *args, **kwargs)
+                if path == 'foreign' and kwargs.get('follow_symlinks') is False:
+                    return __import__('types').SimpleNamespace(st_dev=result.st_dev,
+                        st_ino=result.st_ino, st_mode=result.st_mode, st_uid=os.geteuid() + 1)
+                return result
+            try:
+                with patch.object(local_runner.os, 'stat', side_effect=observe):
+                    with self.assertRaisesRegex(RuntimeError, 'foreign entry'):
+                        local_runner.remove_suite_temporary(root, root.stat())
+                self.assertEqual(foreign.stat().st_mode & 0o777, 0o555)
+                self.assertEqual((foreign / 'evidence').read_text(), 'preserve')
+            finally:
+                foreign.chmod(0o755)
+
     def test_nested_helpers_use_the_prepared_project_python(self):
         with tempfile.TemporaryDirectory(prefix='controller-python-', dir='/var/tmp') as raw:
             root = Path(raw)

@@ -48,26 +48,37 @@ ERR_BEGIN, ERR_END = 'DEPLOY_GATE_STDERR_BEGIN', 'DEPLOY_GATE_STDERR_END'
 EXIT_LINE, SHA_LINE, PGID_LINE = 'DEPLOY_GATE_WORKER_EXIT', 'DEPLOY_GATE_RESULT_SHA256', 'DEPLOY_GATE_WORKER_PGID'
 
 
-def run_cli(argv, *, timeout):
+def run_cli(argv, *, timeout, completion_deadline=None):
     """The only dvb-onbox call site; tests put a fake executable on PATH."""
     binary = shutil.which(CLI)
     if binary is None:
         raise ValueError('dvb-onbox CLI is not available on PATH')
+    completion_end = time.monotonic() + timeout
+    if completion_deadline is not None:
+        completion_end = min(completion_end, time.monotonic() + max(0, completion_deadline - time.time()))
     command = [binary, *argv]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                start_new_session=True)
-    end = time.monotonic() + timeout
+    end = completion_end - min(CLI_CUSHION_SECONDS, timeout / 10)
     while True:
         remaining = end - time.monotonic()
         if CANCEL.is_set() or remaining <= 0:
             with suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGTERM)
+            budget = max(0, completion_end - time.monotonic())
+            grace = min(CLI_CUSHION_SECONDS, budget / 2)
             try:
-                out, err = process.communicate(timeout=CLI_CUSHION_SECONDS)
+                out, err = process.communicate(timeout=grace)
             except subprocess.TimeoutExpired:
                 with suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGKILL)
-                out, err = process.communicate()
+                reap_budget = min(CLI_CUSHION_SECONDS, max(0, completion_end - time.monotonic()))
+                try:
+                    out, err = process.communicate(timeout=reap_budget)
+                except subprocess.TimeoutExpired as error:
+                    out, err = error.output or b'', error.stderr or b''
+                    process.stdout.close(); process.stderr.close()
+                    process.poll()  # Reap only if ready; never extend the original deadline.
             raise subprocess.TimeoutExpired(command, timeout, output=out, stderr=err)
         try:
             out, err = process.communicate(timeout=min(.1, remaining))
@@ -388,7 +399,8 @@ def _cli(argv, state, log, timeout):
     remaining = state['deadline_at'] - state.get('completion_reserve_seconds', 0) - time.time()
     if CANCEL.is_set() or remaining <= 0:
         raise subprocess.TimeoutExpired(argv, max(0, remaining))
-    code, out, err = run_cli(argv, timeout=min(timeout, CLI_MAX_SECONDS, remaining))
+    code, out, err = run_cli(argv, timeout=min(timeout, CLI_MAX_SECONDS, remaining),
+                             completion_deadline=state['deadline_at'])
     log.write(out + b'\n')
     if err:
         with open(state['stderr_log'], 'ab') as stream:
@@ -469,13 +481,26 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
                                   cleanup_owner=True)
             call_seconds = min(CLI_MAX_SECONDS, remaining())
             wait_ms = max(1, int((call_seconds - min(CLI_CUSHION_SECONDS, call_seconds / 10)) * 1000))
-            code, out, err = _cli(['threads', 'wait', thread, '--turn', state['turn_id'], '--timeout',
-                                   f'{wait_ms}ms', '--json'],
-                                  state, log, call_seconds)
+            try:
+                code, out, err = _cli(['threads', 'wait', thread, '--turn', state['turn_id'], '--timeout',
+                                       f'{wait_ms}ms', '--json'],
+                                      state, log, call_seconds)
+            except subprocess.TimeoutExpired:
+                if CANCEL.is_set() or remaining() <= 0:
+                    raise
+                # Reobserve this saved turn; only its bounded wait ended.
+                log.write(b'native wait slice expired; reobserving the same turn\n')
+                time.sleep(min(poll, max(0, remaining())))
+                if CANCEL.is_set() or remaining() <= 0:
+                    raise
+                continue
             status = _status(_same_host(_envelope(out), binding)) if code == 0 else None
             if status in TERMINAL:
                 break
-            if code != 0 or status in PENDING or status is None:
+            if code != 0:
+                return unverified(request, binding, state, f'threads wait exited {code}',
+                                  stderr=err.decode(errors='replace'), cleanup_owner=True)
+            if status in PENDING or status is None:
                 time.sleep(min(poll, max(0, remaining())))
                 continue
             return unverified(request, binding, state, f'turn ended without a result: {status}',
@@ -503,7 +528,8 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
         if isinstance(error, subprocess.TimeoutExpired):
             reason = ('send_indeterminate_unadopted' if state.get('sent_attempted_at') is not None
                       and state.get('turn_id') is None else 'cancelled during native CLI call'
-                      if CANCEL.is_set() else 'original deadline passed during native CLI call')
+                      if CANCEL.is_set() else 'original deadline passed during native CLI call'
+                      if remaining() <= 0 else 'native CLI call timed out before the original deadline')
         return unverified(request, binding, state, reason,
                           cleanup_owner=state.get('sent_attempted_at') is not None)
 
