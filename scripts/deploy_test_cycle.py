@@ -18,6 +18,7 @@ import math
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -88,8 +89,14 @@ def source(root: Path) -> dict:
             data = path.read_bytes()
         h.update(raw + b"\0" + data + b"\0")
         if path.exists():
-            h.update(str(path.lstat().st_mode & 0o777).encode())
+            h.update(str(source_mode(path)).encode())
     return {"head": sha, "digest": h.hexdigest()}
+
+
+def source_mode(path: Path) -> int:
+    """Match Git's file type/executable identity across private clone umasks."""
+    mode = path.lstat().st_mode
+    return stat.S_IFMT(mode) | (mode & stat.S_IXUSR)
 
 
 def environment_digest() -> str:
@@ -111,7 +118,7 @@ def input_fingerprints(plan: dict, root: Path) -> dict:
             content = path.read_bytes()
         else:
             content = b"DELETED"
-        mode = path.lstat().st_mode if path.exists() or path.is_symlink() else None
+        mode = source_mode(path) if path.exists() or path.is_symlink() else None
         files[os.fsdecode(raw)] = digest([hashlib.sha256(content).hexdigest(), mode])
     # Runtime configuration is an input even when Git ignores its secrets and
     # the gate narrows its source globs. Never let source selection hide it.

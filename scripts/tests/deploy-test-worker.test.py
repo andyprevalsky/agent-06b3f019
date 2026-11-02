@@ -4,6 +4,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 import copy
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -66,6 +67,32 @@ class Worker(unittest.TestCase):
             self.assertEqual(cycle.source(self.root),cycle.source(target))
             with self.assertRaisesRegex(ValueError,'overwrite'):
                 worker.prepare_checkout(self.root,target)
+
+    def test_private_umask_preserves_source_but_executable_changes_do_not(self):
+        (self.root/'code').chmod(0o644)
+        executable = self.root/'run-fixture'
+        executable.write_text('#!/bin/sh\nexit 0\n')
+        executable.chmod(0o755)
+        subprocess.run(['git','-C',str(self.root),'add','.'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=test','-c',
+                        'user.email=test@example.com','commit','-qm','executable fixture'],check=True)
+        before = cycle.source(self.root)
+        plan = {'gates':[{'name':'fixture','command':['true'],'checks':['fixture']}]}
+        before_inputs = cycle.input_fingerprints(plan,self.root)
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)/'private-worker'
+            previous = os.umask(0o077)
+            try:
+                worker.prepare_checkout(self.root,target)
+            finally:
+                os.umask(previous)
+            self.assertEqual(0o600,(target/'code').stat().st_mode & 0o777)
+            self.assertEqual(0o700,(target/'run-fixture').stat().st_mode & 0o777)
+            self.assertEqual(before,cycle.source(target))
+            self.assertEqual(before_inputs,cycle.input_fingerprints(plan,target))
+            (target/'run-fixture').chmod(0o600)
+            self.assertNotEqual(before,cycle.source(target))
+            self.assertNotEqual(before_inputs,cycle.input_fingerprints(plan,target))
 
     def test_dirty_source_is_refused_before_preparation(self):
         (self.root/'code').write_text('not frozen')
