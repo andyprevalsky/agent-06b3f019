@@ -327,6 +327,15 @@ async function main() {
       },
     };
     await assert.rejects(
+      () => spawn.spawnAccountAgent(caller, input),
+      (error) => error.status === 403
+    );
+    caller.accountSpawnGrant = {
+      path: input.instruction.path,
+      sha256: input.instruction.sha256,
+      requestId: input.id,
+    };
+    await assert.rejects(
       () => spawn.spawnAccountAgent(caller, { ...input, folder: wrongFolder.id }),
       /not found/
     );
@@ -357,6 +366,14 @@ async function main() {
       (await prisma.agent.findUniqueOrThrow({ where: { id: row.id } })).parentAgentId,
       null
     );
+    await assert.rejects(
+      () => spawn.spawnAccountAgent(caller, { ...input, id: 'not-granted' }),
+      (error) => error.status === 403
+    );
+    caller.accountSpawnGrant = {
+      ...caller.accountSpawnGrant,
+      requestId: 'interrupted-start',
+    };
     failStarts = 2;
     await assert.rejects(
       () => spawn.spawnAccountAgent(caller, { ...input, id: 'interrupted-start' }),
@@ -400,6 +417,53 @@ async function main() {
         'PASS default-off HTTP flag: list/read/spawn/send unavailable, no allocation or workflow admission'
       );
       process.env.ROSE_ACCOUNT_AGENTS_ENABLED = 'true';
+      // Real signed-token HTTP path, with workflow launch still intercepted above.
+      const sessionId = randomUUID();
+      await prisma.claudeCodeSession.create({
+        data: {
+          id: sessionId,
+          agentId: owner.id,
+          sandboxId: 'fixture-' + sessionId,
+          goal: 'Signed authorization proof',
+          codeProvider: 'codex',
+        },
+      });
+      const { mintAgentGraphToken } = require(root + '/src/providers/agentGraph/token.ts');
+      const httpInput = { ...input, id: 'signed-http' };
+      const { token } = mintAgentGraphToken({
+        sub: user,
+        rootAgentId: owner.id,
+        ownerAgentId: owner.id,
+        sessionId,
+        provider: 'codex',
+        accountAccess: true,
+        accountSpawnGrant: {
+          path: input.instruction.path,
+          sha256: input.instruction.sha256,
+          requestId: httpInput.id,
+        },
+      });
+      const post = (body) =>
+        fetch(process.env.TEST_BASE_URL + '/api/agent-graph/account/spawn', {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer ' + token,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(body),
+        });
+      const started = await post(httpInput);
+      assert.equal(started.status, 200);
+      const startedBody = await started.json();
+      const retried = await post(httpInput);
+      assert.equal(retried.status, 200);
+      const retriedBody = await retried.json();
+      assert.equal(retriedBody.agent_id, startedBody.agent_id);
+      assert.equal(retriedBody.duplicate, true);
+      assert.equal((await post({ ...httpInput, id: 'ungranted-http' })).status, 403);
+      assert.equal((await post({ ...httpInput, goal: 'changed' })).status, 409);
+      assert.equal(launches, 3, 'only one additional root launch for the valid signed request');
+      console.log('PASS signed HTTP grant: one durable root, retry free, changed id/body denied');
       require(root + '/src/tests/blackbox/agents-account.cases.ts');
       const harness = require(root + '/src/tests/blackbox/agents-blackbox-harness.ts');
       assert.equal(harness.tests.length, 1);

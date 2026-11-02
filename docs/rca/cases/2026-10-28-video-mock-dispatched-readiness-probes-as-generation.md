@@ -35,6 +35,26 @@ Reject paths outside the mock's /v1beta/ API namespace with404 before parsing, c
 
 The earlier default503-only proposal was rejected because probes could still affect an active scenario's counter. Exact final patchc3369c0ddf45be629bc12e87daa8861c16b3a2de1dea84d03003015046cf0d00 received independent GROUNDED review. Source and native process/database/listener cleanup receipts are in the referenced report. Broader coverage acceptance remains separate.
 
+
+### November 2, 2026 recurrence — merged guard precedence
+
+Merging current main into PR1580 placed its method-only405 guard before this
+case's unrelated-path404 guard. The unchanged new HEAD / assertion therefore
+failed405!=404, while14 other native video cases passed. Gate: INTRODUCED by
+the integration: premerge28735 retains path-first precedence, main has the
+method guard without this test, and a959/6ff combine them in reversed order.
+
+Move only the path guard before the method guard. The identical memory-only
+callback-prefix control failed405!=404 in0.0411s and passed in0.0386s; HEAD
+/v1beta/ remains405, GET / remains404, and no scenario is consumed. All15 test
+bodies and93 assertions remain unchanged. Full15-case acceptance remains a
+separate final-snapshot gate. Evidence: .context/deploy-boxes-default-20261102/
+video-attribution/. Six earlier compiler probes exhausted memory and were TERMd
+by the managed watchdog; they are excluded from proof and all victims were
+verified absent. Concurrent browser startup may have been pressured; that
+coverage failure is not independently attributed or waived and needs fresh
+acceptance. No production video/provider behavior changed.
+
 ## Human feedback
 
 No new feedback was recorded; preserve all original assertions and do not disable host services to accommodate an incomplete mock.

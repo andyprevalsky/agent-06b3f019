@@ -201,8 +201,12 @@ def obj(path):
 
 def file_sha(path):
     # Hash payload bytes directly without re-executing mutable collector code.
-    path = Path(path)
-    need(path.resolve(strict=True) == path, "continuation source path is redirected")
+    path = Path(path).absolute()
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        resolved = None
+    need(resolved == path, "continuation source path is redirected")
     with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as source:
         before = os.fstat(source.fileno())
         need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1, "unsafe continuation source")

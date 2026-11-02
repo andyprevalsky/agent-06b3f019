@@ -68,6 +68,9 @@ for deploy repairs belongs to the separately authorized migration branch;
 this deploy does not authorize Rose spawning. Do not enable the flag in
 production as part of this release. Tests may opt in only in their isolated
 processes and disposable databases.
+Spawning also requires a signed, source-bound grant for the exact instruction
+and request ID. Current workspace preparation does not issue these grants; trusted
+issuance belongs to the separate migration.
 
 Use the boxes.dev read/delegation skills and these commands:
 

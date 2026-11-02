@@ -93,6 +93,20 @@ The coordinator required the original provider limits, assertions and source
 freeze to remain intact; these are coordination constraints, not new direct
 human feedback.
 
+
+### November 2, 2026 recurrence — import binding lost during merge
+
+The integration preserved this fixture's explicit clean_env()/clear=True scope
+but selected `from unittest import mock` alongside main's new `patch.dict`
+setUp call. Three of16 canonical cases errored with NameError before assertions.
+Gate: INTRODUCED against main a3c4929f3: main's matching import passes16/16,
+merged6ff fails3 setup cases, and qualifying that same call as mock.patch.dict
+passes16/16. Native private times:8.901s red,10.117s main,10.245s green.
+Root applied the one-line change and canonical owner again passed16/16 in
+10.463s. All limits, policy inputs, assertions and deadlines remain unchanged.
+Evidence: .context/deploy-boxes-default-20261102/command-rca/. No provider, DB
+or model call was made; native children were joined and temporary trees retired.
+
 ## Human feedback
 
 None recorded for this fixture.

@@ -302,7 +302,7 @@ class ProviderCapacityBrowserProviderTests(unittest.TestCase):
 class ProviderCapacityCampaignTests(unittest.TestCase):
     def setUp(self) -> None:
         # In-process helper calls need the same isolated policy as subprocesses.
-        environment = patch.dict(os.environ, clean_env(), clear=True)
+        environment = mock.patch.dict(os.environ, clean_env(), clear=True)
         environment.start()
         self.addCleanup(environment.stop)
         self.tmp = Path(tempfile.mkdtemp(prefix="provider-capacity-campaign-"))

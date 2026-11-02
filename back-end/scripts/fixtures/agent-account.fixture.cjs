@@ -236,6 +236,38 @@ async function main() {
       explicitly_authorized: true,
     },
   };
+  await check('client assertion is not server authorization', async () => {
+    await assert.rejects(
+      () => spawnService.spawnAccountAgent(caller, input),
+      (error) => error.status === 403
+    );
+    assert.equal(allocations, 0);
+  });
+  // Fixture-only authority. Production workspace preparation grants none.
+  caller.accountSpawnGrant = {
+    path: input.instruction.path,
+    sha256: input.instruction.sha256,
+    requestId: input.id,
+  };
+  await check('trusted grant binds instruction path, digest and request id', async () => {
+    for (const instruction of [
+      { ...input.instruction, sha256: 'b'.repeat(64) },
+      { ...input.instruction, path: 'AGENTS.md' },
+    ])
+      await assert.rejects(
+        () => spawnService.spawnAccountAgent(caller, { ...input, instruction }),
+        (error) => error.status === 403
+      );
+    await assert.rejects(
+      () =>
+        spawnService.spawnAccountAgent(caller, {
+          ...input,
+          id: 'not-granted',
+        }),
+      (error) => error.status === 403
+    );
+    assert.equal(allocations, 0);
+  });
   await check(
     'spawn denied without explicit instructions or matching account/project/folder before allocation',
     async () => {
@@ -280,6 +312,37 @@ async function main() {
       });
     }
   );
+  await check(
+    'one grant cannot fund new requests; identical sibling-session retry is free',
+    async () => {
+      const before = allocations;
+      for (let i = 0; i < 12; i++)
+        await assert.rejects(
+          () =>
+            spawnService.spawnAccountAgent(caller, {
+              ...input,
+              id: 'new-' + i,
+            }),
+          (error) => error.status === 403
+        );
+      const sibling = {
+        ...caller,
+        self: {
+          kind: 'code',
+          id: ids[219],
+          ownerAgentId: caller.self.id,
+          provider: 'codex',
+        },
+      };
+      assert.equal((await spawnService.spawnAccountAgent(sibling, input)).duplicate, true);
+      assert.equal(allocations, before);
+    }
+  );
+  // A distinct trusted grant authorizes another request using the SAME instruction.
+  caller.accountSpawnGrant = {
+    ...caller.accountSpawnGrant,
+    requestId: 'ambiguous',
+  };
   await check(
     'ambiguous workflow start retries same reserved root, not a second allocation',
     async () => {

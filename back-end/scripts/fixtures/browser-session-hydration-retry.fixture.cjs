@@ -35,7 +35,8 @@ let prisma,
   failGoto = true,
   pendingGoto;
 const nativeIds = new Set(),
-  receipts = [];
+  receipts = [],
+  releases = [];
 const contexts = new Map();
 const browser = (id) => {
   let context = contexts.get(id);
@@ -151,6 +152,17 @@ const nativeResume = async (taskId) => {
 };
 Module._load = function (id, parent, isMain) {
   const owner = parent?.filename ?? '';
+  if (owner === candidate + '/browser/resumeHydrationCleanup.ts' && id === './sessionCleanup')
+    return {
+      releaseSupersededBrowser: async (release) => {
+        assert.equal(release.previousProvider, 'kernel');
+        assert.equal(release.operation, 'resume');
+        assert(nativeIds.has(release.previousSessionId));
+        releases.push({ ...release });
+        // Preserve unconfirmed native custody while observing the attempted release.
+        return false;
+      },
+    };
   if (owner === candidate + '/browser/checkpoint.ts' && id === '../projects/secrets')
     return { encryptProjectSecret: (value) => value, decryptProjectSecret: (value) => value };
   if (owner === candidate + '/browser/checkpoint.ts' && id === '../codeSessions/artifactStore')
@@ -677,6 +689,7 @@ async function preHydrationRetry() {
     const other = await fixture(),
       first = await failed(other);
     const before = creates;
+    const releasesBefore = releases.length;
     if (control === 'hydration-started') {
       failGoto = true;
       failClose = true;
@@ -713,6 +726,20 @@ async function preHydrationRetry() {
     });
     assert.equal(held.response, null, control + ' must not restore the predecessor receipt');
     assert.equal(creates, before);
+    assert.deepEqual(
+      releases.slice(releasesBefore),
+      control === 'changed-request'
+        ? [
+            {
+              taskId: other.id,
+              previousProvider: 'kernel',
+              previousSessionId: first.binding.sessionId,
+              operation: 'resume',
+            },
+          ]
+        : [],
+      control + ' must release only its exact owned failed candidate'
+    );
     receipts.push({ kind: 'pre-hydration-negative-' + control, passed: true });
   }
 }

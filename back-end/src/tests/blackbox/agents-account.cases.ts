@@ -86,6 +86,11 @@ test('agent account — bounded navigation, tenant isolation and rejected spawn 
     const checked = verifyAgentGraphToken((await refreshed.json()).token);
     assert(checked.ok);
     assert.equal(checked.claims.accountAccess, true);
+    assert.equal(
+      checked.claims.accountSpawnGrant,
+      undefined,
+      'refresh does not grant spawn authority'
+    );
     const impostor = mintAgentGraphToken({ ...claim, sub: foreignId, accountAccess: true }).token;
     assert.equal(
       (await fetch(`${base}/agents`, { headers: { Authorization: 'Bearer ' + impostor } })).status,
@@ -130,21 +135,102 @@ test('agent account — bounded navigation, tenant isolation and rejected spawn 
     } while (offset < Array.from(text).length);
     assert.equal(reconstructed, text);
     const before = await prisma.agent.count({ where: { userId } });
+    const spawnRequestId = randomUUID();
+    const spawnGrant = {
+      path: '.claude/commands/deploy.md',
+      sha256: 'a'.repeat(64),
+      requestId: spawnRequestId,
+    };
+    const spawnToken = mintAgentGraphToken({
+      ...claim,
+      accountAccess: true,
+      accountSpawnGrant: spawnGrant,
+    }).token;
+    const grantRefresh = await fetch(`${BASE_URL}/api/agent-graph/token`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + spawnToken },
+    });
+    assert.equal(grantRefresh.status, 200);
+    const refreshedGrant = verifyAgentGraphToken((await grantRefresh.json()).token);
+    assert(refreshedGrant.ok);
+    assert.deepEqual(refreshedGrant.claims.accountSpawnGrant, spawnGrant);
+    const forgedParts = scoped.split('.');
+    forgedParts[1] = Buffer.from(
+      JSON.stringify({
+        ...JSON.parse(Buffer.from(forgedParts[1], 'base64url').toString('utf8')),
+        accountSpawnGrant: spawnGrant,
+      })
+    ).toString('base64url');
+    const forged = await fetch(`${base}/agents`, {
+      headers: { Authorization: 'Bearer ' + forgedParts.join('.') },
+    });
+    assert.equal(forged.status, 401, 'editing a bearer payload cannot mint a grant');
+    for (const changedSource of [
+      { ...claim, rootAgentId: randomUUID() },
+      { ...claim, ownerAgentId: randomUUID() },
+      { ...claim, sessionId: randomUUID() },
+    ]) {
+      const sourceToken = mintAgentGraphToken({
+        ...changedSource,
+        accountAccess: true,
+        accountSpawnGrant: spawnGrant,
+      }).token;
+      const sourceDenied = await fetch(`${base}/agents`, {
+        headers: { Authorization: 'Bearer ' + sourceToken },
+      });
+      assert.equal(sourceDenied.status, 401, 'grant retains the verified source/session boundary');
+    }
+    const spawnBody = {
+      project: projectId,
+      folder: randomUUID(),
+      title: 'must not allocate',
+      goal: 'not authorized here',
+      id: spawnRequestId,
+      instruction: {
+        path: spawnGrant.path,
+        sha256: spawnGrant.sha256,
+        explicitly_authorized: true,
+      },
+    };
+    const bodyClaim = await fetch(`${base}/spawn`, {
+      method: 'POST',
+      headers: { ...scopedHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...spawnBody, accountSpawnGrant: spawnGrant }),
+    });
+    assert.equal(bodyClaim.status, 400, 'the request body cannot introduce a grant');
+    const missingGrant = await fetch(`${base}/spawn`, {
+      method: 'POST',
+      headers: { ...scopedHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify(spawnBody),
+    });
+    assert.equal(missingGrant.status, 403);
+    for (const changedGrant of [
+      { ...spawnGrant, path: 'AGENTS.md' },
+      { ...spawnGrant, sha256: 'b'.repeat(64) },
+      { ...spawnGrant, requestId: randomUUID() },
+    ]) {
+      const changedToken = mintAgentGraphToken({
+        ...claim,
+        accountAccess: true,
+        accountSpawnGrant: changedGrant,
+      }).token;
+      const mismatch = await fetch(`${base}/spawn`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + changedToken,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(spawnBody),
+      });
+      assert.equal(mismatch.status, 403);
+    }
     const denied = await fetch(`${base}/spawn`, {
       method: 'POST',
-      headers,
-      body: JSON.stringify({
-        project: projectId,
-        folder: randomUUID(),
-        title: 'must not allocate',
-        goal: 'not authorized here',
-        id: randomUUID(),
-        instruction: {
-          path: '.claude/commands/deploy.md',
-          sha256: 'a'.repeat(64),
-          explicitly_authorized: true,
-        },
-      }),
+      headers: {
+        Authorization: 'Bearer ' + spawnToken,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(spawnBody),
     });
     assert.equal(denied.status, 404);
     assert.equal(await prisma.agent.count({ where: { userId } }), before);

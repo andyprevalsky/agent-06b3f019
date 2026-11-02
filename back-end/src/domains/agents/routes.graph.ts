@@ -108,6 +108,7 @@ function graphAuth(req: GraphRequest, res: Response, next: NextFunction): void {
       userId: claims.sub,
       rootAgentId: claims.rootAgentId,
       accountAccess: claims.accountAccess,
+      accountSpawnGrant: claims.accountSpawnGrant,
       self: {
         kind: 'code',
         id: claims.sessionId,
