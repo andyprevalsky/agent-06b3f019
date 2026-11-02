@@ -3038,6 +3038,58 @@ async def _page_target_id(context: Any, page: Any, cache: Optional[TabFocusCache
     return target_id
 
 
+_FOCUS_DIAGNOSTIC_LIMIT = 256
+_FOCUS_FALLBACK_REASONS = frozenset({
+    "missing_focus", "missing_context", "focus_or_membership_changed",
+    "no_matching_page", "client_disconnected", "input_page_closed",
+})
+
+
+def _record_playwright_focus_fallback(
+    reason: str, *, playwright_browser: Any, current_page: Any, session: Any = None, dom_service: Any = None,
+) -> None:
+    """Report bounded local SDK state only; never query CDP or affect control flow."""
+    if type(reason) is not str or reason not in _FOCUS_FALLBACK_REASONS:
+        return
+    details: Dict[str, Any] = {
+        "focus_present": "unavailable", "context_count": "unavailable",
+        "page_count": "unavailable", "live_candidate_count": "unavailable",
+        "current_closed": "unavailable", "client_connected": "unavailable",
+        "counts_capped": False,
+    }
+    try:
+        def local_flag(owner: Any, name: str) -> Any:
+            method = getattr(owner, name, None)
+            value = method() if callable(method) else None
+            return value if type(value) is bool else "unavailable"
+
+        details["current_closed"] = local_flag(current_page, "is_closed")
+        details["client_connected"] = local_flag(playwright_browser, "is_connected")
+        if session is None and dom_service is not None:
+            session = getattr(dom_service, "session", None)
+        if session is not None:
+            focus = getattr(session, "agent_focus_target_id", None)
+            details["focus_present"] = type(focus) is str and len(focus) > 0
+        contexts = getattr(playwright_browser, "contexts", None)
+        if type(contexts) in (list, tuple):
+            details["context_count"] = min(len(contexts), _FOCUS_DIAGNOSTIC_LIMIT)
+            details["counts_capped"] = len(contexts) > _FOCUS_DIAGNOSTIC_LIMIT
+            pages = getattr(contexts[0], "pages", None) if contexts else []
+            if type(pages) in (list, tuple):
+                details["page_count"] = min(len(pages), _FOCUS_DIAGNOSTIC_LIMIT)
+                details["counts_capped"] |= len(pages) > _FOCUS_DIAGNOSTIC_LIMIT
+                flags = [local_flag(page, "is_closed") for page in pages[:_FOCUS_DIAGNOSTIC_LIMIT]]
+                if all(type(flag) is bool for flag in flags):
+                    details["live_candidate_count"] = sum(flag is False for flag in flags)
+    except Exception:
+        # A diagnostic getter must not replace the original fallback or failure.
+        pass
+    try:
+        logger.info("browser.focus_fallback", reason=reason, **details)
+    except Exception:
+        pass
+
+
 async def _synchronize_playwright_page_with_agent_focus(
     *,
     dom_service: Any,
@@ -3057,6 +3109,10 @@ async def _synchronize_playwright_page_with_agent_focus(
     focused_target_id = getattr(session, "agent_focus_target_id", None)
     contexts = getattr(playwright_browser, "contexts", None) or []
     if not focused_target_id or not contexts:
+        _record_playwright_focus_fallback(
+            "missing_focus" if not focused_target_id else "missing_context",
+            playwright_browser=playwright_browser, current_page=current_page, session=session,
+        )
         return current_page
 
     context = contexts[0]
@@ -3089,10 +3145,18 @@ async def _synchronize_playwright_page_with_agent_focus(
             if target_id != focused_target_id:
                 continue
             if getattr(session, "agent_focus_target_id", None) != focused_target_id or not is_live_member(page):
+                _record_playwright_focus_fallback(
+                    "focus_or_membership_changed", playwright_browser=playwright_browser,
+                    current_page=current_page, session=session,
+                )
                 return current_page
             if focus_cache is None or focus_cache.foreground != foreground_key or page is not current_page:
                 await trace_foreground_await("foreground", page.bring_to_front(), target_id=target_id)
                 if getattr(session, "agent_focus_target_id", None) != focused_target_id or not is_live_member(page):
+                    _record_playwright_focus_fallback(
+                        "focus_or_membership_changed", playwright_browser=playwright_browser,
+                        current_page=current_page, session=session,
+                    )
                     return current_page
                 if focus_cache is not None:
                     focus_cache.foreground = foreground_key
@@ -3103,16 +3167,26 @@ async def _synchronize_playwright_page_with_agent_focus(
                 error=str(exc),
             )
 
+    _record_playwright_focus_fallback(
+        "no_matching_page", playwright_browser=playwright_browser,
+        current_page=current_page, session=session,
+    )
     return current_page
 
 
-def _require_live_playwright_client(playwright_browser: Any, page: Any) -> None:
+def _require_live_playwright_client(playwright_browser: Any, page: Any, *, dom_service: Any = None) -> None:
     """Do not publish a locally known disconnected client or closed input page."""
     connected = getattr(playwright_browser, "is_connected", None)
     if callable(connected) and connected() is False:
+        _record_playwright_focus_fallback(
+            "client_disconnected", playwright_browser=playwright_browser, current_page=page, dom_service=dom_service,
+        )
         raise RuntimeError("Playwright client disconnected during attachment or focus binding")
     is_closed = getattr(page, "is_closed", None)
     if callable(is_closed) and is_closed() is True:
+        _record_playwright_focus_fallback(
+            "input_page_closed", playwright_browser=playwright_browser, current_page=page, dom_service=dom_service,
+        )
         raise RuntimeError("Playwright input page closed during attachment or focus binding")
 
 
@@ -3137,7 +3211,9 @@ async def _rebind_browser_tab_runtime(
         focus_cache=focus_cache,
     )
     if focused_page is current_page:
-        _require_live_playwright_client(playwright_browser, focused_page)
+        _require_live_playwright_client(
+            playwright_browser, focused_page, dom_service=dom_service,
+        )
         return current_page, humanizer
     if browser_recorder is not None:
         browser_recorder.page = focused_page
@@ -3154,7 +3230,9 @@ async def _rebind_browser_tab_runtime(
     )
     await trace_foreground_await("cursor_initialize", rebound_humanizer.initialize_cursor(start_pos=(640, 400)))
     rebound_humanizer.set_cursor_observer(cursor_observer)
-    _require_live_playwright_client(playwright_browser, focused_page)
+    _require_live_playwright_client(
+        playwright_browser, focused_page, dom_service=dom_service,
+    )
     return focused_page, rebound_humanizer
 
 

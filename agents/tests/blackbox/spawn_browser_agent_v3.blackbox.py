@@ -36186,6 +36186,131 @@ async def test_disconnected_playwright_handoff_liveness():
         await _exercise_disconnected_playwright_full_activity(mode)
 
 
+async def test_playwright_focus_fallback_diagnostics():
+    from structlog.testing import capture_logs
+    from domains.spawn_browser_agent_v3 import handler
+
+    class Page:
+        def __init__(self, closed):
+            self.closed = closed
+            self.bring_to_front = AsyncMock()
+        def is_closed(self):
+            return self.closed
+
+    class Humanizer:
+        def __init__(self, **kwargs):
+            self.initialize_cursor = AsyncMock()
+        def set_cursor_observer(self, observer):
+            pass
+
+    for mode in ("healthy", "missing_focus", "missing_page", "missing_context"):
+        old, live = Page(True), Page(False)
+        context = SimpleNamespace(pages=[old] if mode == "missing_page" else [old, live])
+        context.new_cdp_session = AsyncMock(side_effect=AssertionError("no CDP lookup expected"))
+        browser = SimpleNamespace(contexts=[] if mode == "missing_context" else [context], is_connected=lambda: True)
+        service = SimpleNamespace(session=SimpleNamespace(agent_focus_target_id=None if mode == "missing_focus" else "target-new"))
+        cache = handler.TabFocusCache()
+        cache.target_ids[old], cache.target_ids[live] = "target-old", "target-new"
+        old_humanizer = SimpleNamespace(close=AsyncMock())
+        with capture_logs() as events:
+            if mode == "healthy":
+                page, _ = await handler._rebind_browser_tab_runtime(
+                    dom_service=service, dom_page=object(), playwright_browser=browser,
+                    current_page=old, humanizer=old_humanizer, browser_recorder=None,
+                    cursor_observer=None, humanizer_factory=Humanizer, focus_cache=cache,
+                )
+                assert page is live
+            else:
+                try:
+                    await handler._rebind_browser_tab_runtime(
+                        dom_service=service, dom_page=object(), playwright_browser=browser,
+                        current_page=old, humanizer=old_humanizer, browser_recorder=None,
+                        cursor_observer=None, humanizer_factory=Humanizer, focus_cache=cache,
+                    )
+                except RuntimeError as error:
+                    assert str(error) == "Playwright input page closed during attachment or focus binding"
+                else:
+                    raise AssertionError("closed-page refusal changed")
+        records = [event for event in events if event.get("event") == "browser.focus_fallback"]
+        if mode == "healthy":
+            assert records == []
+            old_humanizer.close.assert_awaited_once()
+        else:
+            reason = {"missing_focus": "missing_focus", "missing_page": "no_matching_page", "missing_context": "missing_context"}[mode]
+            assert [record["reason"] for record in records] == [reason, "input_page_closed"]
+            record = records[0]
+            assert record["focus_present"] is (mode != "missing_focus")
+            assert record["context_count"] == (0 if mode == "missing_context" else 1)
+            assert record["live_candidate_count"] == (1 if mode == "missing_focus" else 0)
+            assert record["current_closed"] is True and record["client_connected"] is True
+            old_humanizer.close.assert_not_awaited()
+        context.new_cdp_session.assert_not_awaited()
+
+
+def test_playwright_focus_diagnostics_private_and_bounded():
+    from structlog.testing import capture_logs
+    from domains.spawn_browser_agent_v3 import handler
+
+    reads = []
+    class Page:
+        url = "https://secret.invalid/?token=DO_NOT_LOG"
+        def is_closed(self):
+            reads.append(1)
+            return False
+    pages = [Page() for _ in range(300)]
+    browser = SimpleNamespace(contexts=[SimpleNamespace(pages=pages)], is_connected=lambda: True)
+    service = SimpleNamespace(session=SimpleNamespace(agent_focus_target_id="PRIVATE_TARGET"))
+    with capture_logs() as events:
+        handler._record_playwright_focus_fallback("no_matching_page", playwright_browser=browser, current_page=pages[0], dom_service=service)
+        handler._record_playwright_focus_fallback("DO_NOT_LOG", playwright_browser=browser, current_page=pages[0])
+    assert len(events) == 1
+    record = events[0]
+    assert record["page_count"] == record["live_candidate_count"] == 256
+    assert record["counts_capped"] is True and len(reads) == 257
+    assert "DO_NOT_LOG" not in json.dumps(record) and "PRIVATE_TARGET" not in json.dumps(record)
+    assert set(record) == {"event", "log_level", "reason", "focus_present", "context_count", "page_count", "live_candidate_count", "current_closed", "client_connected", "counts_capped"}
+
+
+async def test_playwright_focus_diagnostics_preserve_failure_and_cancellation():
+    from domains.spawn_browser_agent_v3 import handler
+
+    class Page:
+        def __init__(self, closed):
+            self.closed = closed
+            self.bring_to_front = AsyncMock()
+        def is_closed(self):
+            return self.closed
+    old, live = Page(True), Page(False)
+    browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[old, live])], is_connected=lambda: True)
+    service = SimpleNamespace(session=SimpleNamespace(agent_focus_target_id="target-new"))
+    with patch.object(handler.logger, "info", side_effect=OSError("diagnostic sink unavailable")):
+        try:
+            handler._require_live_playwright_client(browser, old, dom_service=service)
+        except RuntimeError as error:
+            assert str(error) == "Playwright input page closed during attachment or focus binding"
+        else:
+            raise AssertionError("logger failure replaced required refusal")
+    class BrokenLocalState:
+        @property
+        def contexts(self):
+            raise ValueError("PRIVATE_DIAGNOSTIC_VALUE")
+    with patch.object(handler.logger, "info") as logged:
+        handler._record_playwright_focus_fallback("missing_context", playwright_browser=BrokenLocalState(), current_page=old)
+        assert "PRIVATE_DIAGNOSTIC_VALUE" not in str(logged.call_args)
+    cache = handler.TabFocusCache()
+    cache.target_ids[old], cache.target_ids[live] = "target-old", "target-new"
+    cancelled = asyncio.CancelledError("original cancellation")
+    live.bring_to_front.side_effect = cancelled
+    try:
+        await handler._synchronize_playwright_page_with_agent_focus(
+            dom_service=service, playwright_browser=browser, current_page=old, focus_cache=cache,
+        )
+    except asyncio.CancelledError as error:
+        assert error is cancelled
+    else:
+        raise AssertionError("cancellation was swallowed")
+
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     from browser_operational_projection_fixtures import (
@@ -36195,6 +36320,9 @@ async def run_all_tests():
     )
 
     r = BlackboxResult()
+    await r.record_async("playwright_focus_fallback_diagnostics", test_playwright_focus_fallback_diagnostics)
+    r.record("playwright_focus_diagnostics_private_and_bounded", test_playwright_focus_diagnostics_private_and_bounded)
+    await r.record_async("playwright_focus_diagnostics_preserve_failure_and_cancellation", test_playwright_focus_diagnostics_preserve_failure_and_cancellation)
     await r.record_async("browser_budget_finalizer_handoff", test_browser_budget_finalizer_handoff)
     r.record("browser_budget_finalizer_guards", test_browser_budget_finalizer_guards)
     await r.record_async("cdp_stall_probe_bounds_session_attachment", test_cdp_stall_probe_bounds_session_attachment)
