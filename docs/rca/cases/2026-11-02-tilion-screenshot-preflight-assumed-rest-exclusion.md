@@ -18,6 +18,8 @@ tags:
   - vendor-contract
 sources:
   - PR #1580 release 6ff4bcae6d0da979e8c6feb24c011f2698935108
+  - PR #1662 occurrence c625a65da0e6429b8966142b607ff1bf
+  - commit e99c91f55b9444f01a90bd4e8efc18315faeb51b
   - commit a3c4929f3bbd296766013a7545439b682015a6ef
   - agent thr_11a122c55dd54e1599d206740c56128b independent repair
   - agent thr_11a122c55dd54e1599d206740c56128b capture back-end/src/tests/fixtures/tilion-contract-observations.json
@@ -82,6 +84,34 @@ the original event. The 4409 multiplexer archive case is a relative, not a
 recurrence: no Rose multiplexer participates here. Archive searches were
 `session_driven_by_client 4409 screenshot` and `Tilion REST CDP ownership contract`;
 read the regional-host multiplexer case and the RCA process feedback.
+
+### Later occurrence on PR1662 (2026-11-02)
+
+The independent RCA owner supplied occurrence `c625a65da0e6429b8966142b607ff1bf`
+from frozen source `e99c91f55b9444f01a90bd4e8efc18315faeb51b` and base
+`6f3f53201faac3a3e70de099e7c211cee6770fad`. This repair owner fetched both
+commits and verified that the native fixture's SHA256 is
+`7659f3560e77bf051402e4f3381c089238d0a670ab257c050bde476f80c5c2d5` at both,
+identical to pinned main `a3c4929f3`. This is a recurrence of the existing stale
+preflight expectation, assigned to the existing repair rather than a new fix.
+
+The supplied direct-native replay at 20:39:46Z bypassed deploy wrappers and
+failed the unchanged HTTP409 assertion: screenshot HTTP200, `ok=true`,
+`beside_client=true`, Example Domain URL, with primary CDP connected before and
+after the response. Its supplied image SHA256
+`bf72779fb0dfaf0db2483ec478581d242fd93f98f4ba9168ac5b4ddd4b018f69` equals
+this repair's final native screenshot. DELETE of its exact-owned session
+`sess_a651efc83eec4e1e8606467220b3639b` returned 204. This owner inspected the
+supplied metadata/digest, not an additional full raw screenshot. The supplied
+response and native-event receipts are retained in `later_occurrences` in the
+observations fixture.
+
+Gate: NOT_INTRODUCED for this unchanged native boundary. Preserve the PR1662
+aggregate as **UNVERIFIED**, native exit 1; its downstream parity/report/teardown
+are not certified by this receipt. The original 18:25 event's missing response,
+origin and post-call state remain unrecovered. The integration owner is carrying
+repair commit `99aff0a553b53af8f48464c3432577ea818e0ff9` into PR1662; this
+recurrence adds evidence only and starts no competing deployment or cutover.
 
 ## Solution
 
