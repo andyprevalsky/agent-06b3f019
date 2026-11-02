@@ -7343,8 +7343,10 @@ CLOUDBENCH_GUEST_NATIVE_STOP_CALL_TIMEOUT=2
 # Controller cleanup runs as the EXIT trap of a signalled controller, where a
 # bare `return` reports the status from before the trap (here 143).
 cleanup() {{
+  native_stop_started=$SECONDS
   fleet_native_stop_undelivered_guests 0
   status=$?
+  printf 'native_stop_seconds=%s\\n' "$((SECONDS - native_stop_started))"
   trap - EXIT
   exit "$status"
 }}
@@ -7392,10 +7394,11 @@ exit 143
     assert receipt["verified_state"] == initial, receipt
     assert 1 <= len(stops) <= 3 and receipt["stop_requests"] == len(stops), (stops, receipt)
     if case == "stop-always-fails":
-        # Retries continue until the attempt cap or the shared deadline. Bash
-        # SECONDS has one-second granularity, so a six-tick window can consume
-        # as little as five wall-clock seconds when it begins mid-tick.
-        assert len(stops) == 3 or elapsed >= 5, (stops, elapsed)
+        # The owning deadline uses Bash SECONDS, whose integer ticks can reach
+        # six before Python observes six full monotonic seconds. Check that
+        # clock for exhaustion; the independent wall-clock bound above stays strict.
+        native_seconds = int(result.stdout.removeprefix("native_stop_seconds=").strip())
+        assert len(stops) == 3 or native_seconds >= 6, (stops, native_seconds, elapsed)
 
 
 def test_guest_shutdown_child_confirmation_native_stop_counts_only_sent_requests(tmp_path: Path) -> None:
@@ -36493,6 +36496,68 @@ fleet_reap_registry_record_native {shlex.quote(str(registry))} stale 2 0 {shlex.
         assert not any(call.startswith("audit ") for call in call_log)
         assert record.read_text() == "name=cloudbench-late\nvolume_id=vol_late\n"
         assert "does not mount owned volume vol_late; retaining record" in result.stderr
+
+
+@pytest.mark.parametrize("reaches_stopped", [True, False])
+def test_guest_shutdown_child_confirmation_native_stop_success_is_verified_in_last_budget_tick(tmp_path: Path, reaches_stopped: bool) -> None:
+    """A successful stop still needs an observed state, before the same deadline."""
+    fleet = fleet_source_text()
+    names = (
+        "fly_with_timeout() {", "registry_meta_value() {", "machine_status_exact_read() {",
+        "machine_config_exact_read() {", "registry_machine_details() {", "machine_volume_id() {",
+        "fleet_native_stop_call_budget() {", "fleet_native_stop_send() {",
+        "fleet_native_stop_publish_receipt() {", "fleet_native_stop_verify_guest() {",
+    )
+    functions = "\n".join(_extract_fleet_function(fleet, name) for name in names)
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    for name, value in {"id": _NATIVE_STOP_MACHINE, "state": "started", "name": _NATIVE_STOP_CLONE,
+                        "volume": _NATIVE_STOP_VOLUME, "stop-failures": "0"}.items():
+        (fake / name).write_text(value)
+    if reaches_stopped:
+        (fake / "stop-to").write_text("stopped")
+    state_dir = tmp_path / "request"
+    state_dir.mkdir()
+    (state_dir / "0.request").write_text(
+        f"kind=fresh\nvolume_id={_NATIVE_STOP_VOLUME}\nrequests=1\nlast_request=0\nrequested_epoch=1\n")
+    out = tmp_path / "output"
+    out.mkdir()
+    script = f"""set -uo pipefail
+FAKE={shlex.quote(str(fake))}
+APP=bench-app
+RUN_ID=20261012-041236-2223459
+FLEET_OWNER_TOKEN={_NATIVE_STOP_OWNER}
+CHILD_OUT=({shlex.quote(str(out))})
+CHILD_BENCH=(bench-owned)
+CHILD_MACHINE=({_NATIVE_STOP_MACHINE})
+CLOUDBENCH_GUEST_NATIVE_STOP_CALL_TIMEOUT=2
+{_NATIVE_STOP_FAKE_FLY}
+{functions}
+deadline=$((SECONDS + 6))
+# The earlier request/identity phase has consumed five ticks. Do not alter
+# SECONDS or the production deadline: exercise its final valid tick.
+while [ "$SECONDS" -lt "$((deadline - 1))" ]; do sleep 0.01; done
+fleet_native_stop_verify_guest 0 {shlex.quote(str(state_dir))} "$deadline"
+"""
+    started = time.monotonic()
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    elapsed = time.monotonic() - started
+    receipt = json.loads((out / "guest-native-stop.json").read_text())
+    calls = (fake / "calls").read_text().splitlines()
+    stops = [line for line in calls if line.startswith("machine stop ")]
+    assert elapsed < 14, elapsed
+    assert stops == [f"machine stop {_NATIVE_STOP_MACHINE} -a bench-app"], calls
+    assert not any("destroy" in line for line in calls), calls
+    assert receipt["stop_requests"] == 2, receipt
+    assert receipt["machine_id"] == _NATIVE_STOP_MACHINE and receipt["volume_id"] == _NATIVE_STOP_VOLUME
+    if reaches_stopped:
+        assert result.returncode == 0, result.stderr
+        assert receipt["verified"] is True and receipt["verified_state"] == "stopped", receipt
+        assert calls[-1].startswith("machine status "), calls
+    else:
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert receipt["verified"] is False and receipt["verified_state"] == "started", receipt
+        assert "retaining ownership" in result.stderr
 
 
 def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost_readiness_regressions() -> None:

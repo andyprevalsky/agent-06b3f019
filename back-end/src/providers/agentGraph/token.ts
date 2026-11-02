@@ -16,6 +16,13 @@ export const AGENT_GRAPH_SCOPE = 'agent-graph';
 export const AGENT_GRAPH_TOKEN_TTL_SECONDS = 2 * 60 * 60;
 const TOKEN_PREFIX = 'rag.';
 
+/** Issued only by trusted code after checking an existing instruction source. */
+export interface AccountSpawnGrant {
+  path: string;
+  sha256: string;
+  requestId: string;
+}
+
 export interface AgentGraphClaims {
   /** userId */
   sub: string;
@@ -26,6 +33,10 @@ export interface AgentGraphClaims {
   /** ClaudeCodeSession.id (the code agent's id in the graph). */
   sessionId: string;
   provider: 'claude' | 'codex';
+  /** Explicit account coordination; legacy tokens retain tree-only behavior. */
+  accountAccess?: boolean;
+  /** Absent for ordinary sessions; never synthesized from a request body. */
+  accountSpawnGrant?: AccountSpawnGrant;
   iat: number;
   exp: number;
 }

@@ -21,14 +21,13 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, FailureError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
-from helpers.workflow_safe import context_logger
-from helpers.wmh_activity_policy import wmh_activity_timeout_options
-
 # Import pass-through for workflow context:
 # - Our own modules are safe (config.py has no import-time side effects)
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
+    from helpers.workflow_safe import context_logger
+    from helpers.wmh_activity_policy import wmh_activity_timeout_options
     from domains.agent_messaging.handler import kill_agent, send_message_to_agent
     from domains.spawn_agent.config import is_demo_cache_task, is_oai_demo_mass_agent_task
     from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore

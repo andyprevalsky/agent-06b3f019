@@ -142,6 +142,18 @@ class LiveDisplayTest(unittest.TestCase):
             upstream.server_close()
             thread.join()
 
+    def test_inflight_frame_preserves_429(self):
+        self.server.upstream = self.base
+        self.server.predict_lock.acquire()
+        try:
+            with self.assertRaises(HTTPError) as error:
+                self.get("/fixture-capability/frame")
+            self.assertEqual(error.exception.code, 429)
+            self.assertEqual(json.load(error.exception), {"error": "Frame already generating"})
+        finally:
+            self.server.predict_lock.release()
+
+
     def test_private_modal_provider_never_exposes_credentials(self):
         from types import SimpleNamespace
         import sys

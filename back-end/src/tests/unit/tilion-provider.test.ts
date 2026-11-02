@@ -14,6 +14,7 @@
  */
 import assert from 'node:assert/strict';
 import { mock } from 'node:test';
+import { assertTilionRotationAcknowledgements } from './tilion-rotation-contract.support';
 import { fakeSessionRecord, FakeTilionServer } from './tilion-fake-server.support';
 
 type Row = Record<string, unknown> & { id: string; sessionId: string };
@@ -580,52 +581,23 @@ async function main(): Promise<void> {
       tilion.TilionUncarriedStateError
     );
 
-    // ── G2: residential rotate-ip in place when Tilion allocates a fresh exit ──
-    rotateReplies.push({
-      status: 200,
-      body: {
-        session_id: rotated.sessionId,
-        rotated: true,
-        region: 'us-east-1',
-        fresh_allocation: true,
-      },
+    const finalSessionId = await assertTilionRotationAcknowledgements({
+      tilion,
+      sessionId: rotated.sessionId,
+      rows,
+      live,
+      rotateReplies,
+      server,
+      getCdpConnects: () => cdpConnects,
+      restored,
+      replaceWithWorkerState: () =>
+        tilion.rotateTilionSession('task-a', 'residential', {
+          carriedState: {
+            cookies: [{ ...harvestedState.cookies[0], value: 'worker-2' }],
+            origins: [],
+          },
+        }),
     });
-    const inPlace = await tilion.rotateTilionSession('task-a', 'residential');
-    assert.equal(inPlace.sessionId, rotated.sessionId);
-    assert.equal(inPlace.previousSessionId, rotated.sessionId, 'in place: caller must not release');
-    assert.deepEqual(inPlace.ipRotation, {
-      rotated: true,
-      freshAllocation: true,
-      region: 'us-east-1',
-    });
-    assert.equal(rows.get('task-a')?.proxyTier, 'residential');
-    assert.equal(rows.get('task-a')?.kernelProxySource, 'tilion_residential_rotated_us-east-1');
-    assert.equal(live.has(rotated.sessionId), true, 'in-place rotation keeps the session');
-
-    // fresh_allocation false is no proof: replacement with the worker's state.
-    rotateReplies.push({
-      status: 200,
-      body: {
-        session_id: rotated.sessionId,
-        rotated: true,
-        region: 'us-east-1',
-        fresh_allocation: false,
-      },
-    });
-    restored.cookies.length = 0;
-    const unproven = await tilion.rotateTilionSession('task-a', 'residential', {
-      carriedState: { cookies: [{ ...harvestedState.cookies[0], value: 'worker-2' }], origins: [] },
-    });
-    assert.notEqual(
-      unproven.sessionId,
-      rotated.sessionId,
-      'stale exit must fall back to replacement'
-    );
-    assert.equal(unproven.previousSessionId, rotated.sessionId);
-    assert.equal(unproven.ipRotation, undefined);
-    assert.equal((restored.cookies[0] as { value: string }).value, 'worker-2');
-    assert.equal(server.callsTo('POST', /\/rotate-ip$/).length, 3);
-    const finalSessionId = unproven.sessionId;
 
     // ── close failure keeps the row retryable ───────────────────────────────
     deleteStatus = [503, 503, 503, 503];
