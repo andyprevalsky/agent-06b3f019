@@ -8,14 +8,15 @@ classification: our-bug
 problem_class: fixture-environment-data-mismatch
 first_bad_boundary: Attachment collector searched result.json-- while native delivery writes result--
 symptoms:
-  - Large complete worker results stayed UNVERIFIED despite successful file delivery
+  - "attachment_missing"
+  - "CLI did not return an ok JSON envelope"
 tags:
   - deploy
   - worker-transport
   - receipt-provenance
 sources:
-  - PR1662
-  - adapter-v2 patch 6e02de83e8c44952f8d8516be4d22c17816a2d279b13539af420d1410f5a4163
+  - PR #1662
+  - commit cb6be800df7dde9db5d95d639b2564fdc4c30b9a
 repro: scripts/tests/deploy-test-worker.test.py Boxes.test_large_result_passes_via_attachment_or_hash_matching_inline_only
 status: fixed
 ---
@@ -41,7 +42,7 @@ new boxes worker receipt collector. Native delivery evidence and the exact
 before/after logs are retained in `.context/preparation/transport-attachment-`
 `basename-{before,after}.log` on the originating deployment.
 
-## Solution and proof
+## Solution
 
 Search the native `result--*.json` spelling as well as the old spelling. The
 declared full SHA256, request token, source, recipe, root, native exit and
