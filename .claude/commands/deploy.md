@@ -2597,7 +2597,11 @@ After the merge is confirmed and refs are refreshed, dispatch every pending
 NOT INTRODUCED failed-test packet under the controlling failure policy.
 Create new devboxes from current main containing `$DEPLOY_MERGED_SHA`, with
 explicit high effort and normal speed, and start each repair's `/goal` through
-its own finished deploy scorecard. Include the exact test, command, scope,
+its own finished deploy scorecard. Use a different devbox from this deploy,
+automatically place it in the project's Bugs folder and verify membership
+using the controlling policy's commands. The goal and deploy coordinator
+both live there; no local coordinator may keep this box open for the repair.
+Include the exact test, command, scope,
 verbatim error and original evidence. Never dispatch an observation without
 an actual failed test. Record the returned repair links in DELEGATED; do not
 wait for acknowledgement or repair completion. Failures discovered by the
