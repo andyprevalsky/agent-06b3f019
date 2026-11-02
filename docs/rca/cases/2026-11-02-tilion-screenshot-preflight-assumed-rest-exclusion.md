@@ -21,6 +21,9 @@ sources:
   - PR #1662 occurrence c625a65da0e6429b8966142b607ff1bf
   - commit e99c91f55b9444f01a90bd4e8efc18315faeb51b
   - commit a3c4929f3bbd296766013a7545439b682015a6ef
+  - PR #1663 https://github.com/Rose-Ai-Labs/rose/pull/1663
+  - commit 72a8bd7bf7e3a92b5717d13d617c2954bf453fca
+  - plan:GitHub workflow41545037873 https://github.com/Rose-Ai-Labs/rose/actions/runs/41545037873
   - agent thr_11a122c55dd54e1599d206740c56128b independent repair
   - agent thr_11a122c55dd54e1599d206740c56128b capture back-end/src/tests/fixtures/tilion-contract-observations.json
   - agent thr_11a122c55dd54e1599d206740c56128b capture back-end/src/tests/fixtures/tilion-attached-screenshot.json
@@ -214,8 +217,65 @@ the exact target/URL, decoded JPEG pixels, stable viewport, usable original CDP,
 second-client 4409, detached screenshot, and DELETE 204/204/410. All nine original
 negative controls exited 0. No live sessions were retained by those invocations.
 
-The first unchanged full invocation on 79edd36b9 exited 1: 237/239 domains passed, 353 unit files and isolated FPS passed. This preflight passed; downstream rotation and agent-tools WebGL failed. Coverage threshold merge and trailing teardown were not executed. Full original-command acceptance remains pending a new native pass; no earlier aggregate is reclassified.
-Deployment is in progress on PR1663; merge and production verification are not yet claimed.
+The first unchanged full invocation on 79edd36b9 exited 1: 237/239 domains passed, 353 unit files and isolated FPS passed. This preflight passed; downstream rotation and agent-tools WebGL failed. Coverage threshold merge and trailing teardown were not executed. The final unchanged full invocation and deployment completed as recorded below; no earlier aggregate is reclassified.
+
+### Completed original invocation and production verification
+
+On source `647ae11f86f0997c838cb0f1e72f795a2e36af33`, the exact original command
+ran from 22:45:25Z to 23:05:27Z (1202.2 seconds), native exit 0:
+
+```sh
+cd back-end && BLACKBOX_TEST_CONCURRENCY=1 CONTRACT_TEST_CONCURRENCY=1 BACKEND_UNIT_CONCURRENCY=1 npm run test:coverage:sharded
+```
+
+All 239 blackbox domains, 353 unit files, isolated FPS, merged coverage thresholds
+and the command's trailing backend teardown passed. Statements/lines were 90.07%,
+branches 82.70% and functions 93.04%, against unchanged 88/76/87/88 thresholds.
+The live screenshot preflight enforced same-target decoded JPEG, stable viewport,
+working original CDP, rejected extra client and DELETE 204/204/410. The full live
+parity also passed actual same-session storage and IP movement. Private original
+logs and terminal receipt are retained under the replacement owner's
+`.context/tilion-owner/original-run-2/`; the first aggregate remains native FAIL.
+
+PR1663 merged at `72a8bd7bf7e3a92b5717d13d617c2954bf453fca` on November 2 at
+23:14:34Z. Its backend/agent/frontend runtime trees are identical to the tested
+source. Render deployment `dep-dbkhin15efls738a42ig` became LIVE on that exact
+merge at 23:22:33Z. Authenticated production probes passed (15/15 endpoint,
+CORS and schema checks, health and DB-backed agents HTTP 200); 100 post-deploy
+log samples contained zero matching errors. Production semantic workflow
+41545037873 passed all five jobs on that same source, completing at 23:29:28Z.
+No agent runtime cutover applied; read-only live pointer generation was
+`bc9c325ce31a`. This archive publication changes documentation only and does not
+claim a second production rollout.
+
+Other final-source gates passed: all 85 structural gates / 91 jobs, UI 42/42,
+four lifecycle paths with five terminal samples each, real Claude E2B domain
+57/57, and seed fidelity 5/5 (169 MB maximum against unchanged 228 MB budget).
+The normal smoke wrapper exited 0 with seven PASS and two qualified SKIPs:
+Claude credentials unavailable, and the shared-cache task's Codex judge unable
+to acquire a token. Metadata independently proved the sole pooled token cooled
+at the incident; no provider 429 or exhausted-credit claim is inferred. The
+unchanged receipt validator retained its Claude-credential BLOCKED result;
+`/deploy`'s explicit Claude exception is applied separately, never fabricated
+as a resource confirmation. The unexecuted Claude smoke and absent judge
+verdict are not passing coverage. The independent mandatory real E2B test passed.
+
+The earlier unrelated bootstrap deadline and Kernel payment-close native
+failures remain preserved and have independent post-merge repair goals at
+https://boxes.dev/thread/thr_edb51868b4634dc5ba02d1176d0d1bcc and
+https://boxes.dev/thread/thr_d97a7426b3b148eead5bbf492f692a1c. Later green runs do
+not reconstruct those historical causes. CodeRabbit's spending cap and
+Graphide's review allowance prevented substantive external review; their
+native skips are retained. No quota, credential or financial facts were changed.
+
+All exact-owned provider sessions and benchmark roots have terminal cleanup
+receipts. Three finished validation helpers were archived; all four isolated
+local test databases were dropped only after proving zero consumers. The fresh
+scoped intended-account query at 23:30:48Z proved zero registered Mac devices;
+the user's explicit no-connected-Mac condition authorizes SKIP, not a witness
+PASS. Freedom and the original workspace remain untouched. Original 18:25
+response and post-call socket evidence remain unavailable; current proof never
+relabels that historical aggregate.
 
 ## Human feedback
 
