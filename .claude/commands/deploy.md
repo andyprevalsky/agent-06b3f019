@@ -31,6 +31,43 @@ Diagnose every test/gate failure with `/RCA` before routing it. Its response
 must include an evidence-backed `Gate: INTRODUCED` or `Gate: NOT_INTRODUCED`.
 Unresolved attribution remains UNKNOWN and blocking.
 
+## Staged validation and RCA dispositions (current execution policy)
+
+Use `scripts/deploy_test_plan.py` and `scripts/deploy_test_cycle.py` as described
+in `docs/deploy-test-cycle.md`. This policy supersedes older full-rerun,
+sequential-lane, diagnostic-only selection and outage-retry instructions below.
+The source/approval/whole-devbox and production-verification requirements remain.
+
+- Format checks, lint, types and application structural checks run concurrently
+  in the quick phase (under two minutes). Deploy-tooling regressions are an
+  affected suite, not part of the quick phase.
+- Select complete affected categories using the dependency graph and conservative
+  runtime triggers. Unknown impact expands selection. Record every inclusion and
+  omission; do not silently cut coverage to meet a quota.
+- After quick checks pass, start every selected independent suite concurrently
+  on its own isolated worker. Cloud smoke runs through the benchmark CLI. No
+  coverage/semantic/smoke/AgentCard/live/E2B sibling ordering edges. Each worker
+  still owns its actual setup, resource safety and cleanup.
+- Start independent `/RCA` investigations concurrently as failures arrive;
+  retain healthy running work. Group a shared cause only after reading evidence.
+  Use the canonical `.claude/shared/deploy-failure-policy.md` and
+  `scripts/deploy_failure_report.py` attribution/waiver decision.
+- Only actual blocking FAILs enter the focused repair loop: preserve the failing
+  tests/assertions/timeouts, fix the underlying cause, rerun failing tests plus
+  affected regressions, then run the full failed gates in parallel. When those
+  pass, run quick checks and all selected gates once on the final frozen source,
+  with no pass-cache substitution for that final sweep. A clean initial sweep
+  already counts as the final sweep and is not duplicated.
+- Qualified SKIPs do not initiate any rerun. Keep original native failures and
+  waiver evidence; they remain SKIP/warnings, never PASS. Mixed aggregates must
+  account for every constituent check; unexecuted work still needs execution.
+  INTRODUCED or unresolved attribution remains blocking. Source changes require
+  renewed evidence only for skips whose actual input fingerprint changed.
+- A failure in final verification returns to parallel `/RCA`; never call the
+  deployment ready because a focused subset passed. `deploy_test_cycle.py verify`
+  must pass on the exact current source/plan before the existing merge gates.
+
+
 ## Canonical human-approval format
 
 Every human approval request in this command—including prompt or

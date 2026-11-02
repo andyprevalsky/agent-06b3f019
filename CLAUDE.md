@@ -1026,9 +1026,12 @@ deploy lane, the tests a change can reach. Rules:
   subprocess paths computed at runtime, env) that the graph cannot see: add an
   `edges` entry (`from` globs → `to_files` or `to_lanes`) to
   `scripts/test-map/edges.json`, or name the path literally in the test.
-- Selected subsets are diagnostic-only and cannot satisfy a deploy gate. They
-  omit the lane's global coverage threshold; deployment still requires the
-  complete final suite and its unchanged global coverage thresholds.
+- `scripts/deploy_test_plan.py` may select complete affected gate categories for
+  the staged deploy flow in `docs/deploy-test-cycle.md`; unknown impact expands
+  selection. Focused test subsets remain diagnostic/repair evidence only. After
+  repairs, full failed gates and the final complete selected gate set must pass
+  on the frozen source. Coverage thresholds inside a selected full gate remain
+  unchanged; a focused subset cannot masquerade as a full coverage pass.
 
 ## Deploy command regression scheduling
 

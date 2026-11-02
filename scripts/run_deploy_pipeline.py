@@ -3341,6 +3341,11 @@ def wait(state_dir: Path, timeout: float, stall_seconds: float = 0.0, since: flo
 
 def verify(state_dir: Path, expect_head: str | None = None) -> int:
     """Exit 0 only for a passed receipt bound to the current HEAD and bytes."""
+    if (state_dir / "cycle.json").exists():
+        from deploy_test_cycle import verify_saved
+        code = verify_saved(state_dir, SOURCE_ROOT, expect_head)
+        print(f"PIPELINE_VERIFY status={'bound-staged' if code == 0 else 'staged-not-ready'} exit={code}")
+        return code
     receipt = _read_receipt(state_dir / "receipt.json")
     if receipt is None:
         print("PIPELINE_VERIFY status=no-receipt exit=2")

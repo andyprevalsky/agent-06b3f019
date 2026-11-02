@@ -1,0 +1,578 @@
+#!/usr/bin/env python3
+"""Source-bound staged /deploy validation. Does not merge or deploy production.
+
+Every selected worker is launched concurrently. Worker commands own their isolated
+checkout/services; the coordinator never removes host safeguards or grants skips.
+/RCA receipts use deploy_failure_report.decision, the shared ownership policy.
+"""
+from __future__ import annotations
+
+import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
+from fnmatch import fnmatchcase
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+from deploy_test_process import CANCEL, cancellation_handlers, run_command
+
+ROOT = Path(__file__).resolve().parents[1]
+QUICK = {"format", "eslint", "typescript", "backend-structural", "application-structural"}
+TERMINAL_OK = {"PASS", "SKIP"}
+NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def digest(value: object) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def read(path: Path) -> dict:
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict):
+        raise ValueError(f"expected object: {path}")
+    return value
+
+
+def write(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(value, stream, indent=2, allow_nan=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
+@contextmanager
+def exclusive(directory: Path):
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / "lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
+def source(root: Path) -> dict:
+    def git(*args: str) -> bytes:
+        return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True).stdout
+    sha = git("rev-parse", "HEAD").decode().strip()
+    # Include untracked/non-ignored files; state/logs must live in ignored .context.
+    paths = git("ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")
+    h = hashlib.sha256(sha.encode())
+    for raw in sorted(set(paths) - {b""}):
+        path = root / os.fsdecode(raw)
+        if not path.exists() and not path.is_symlink():
+            data = b"DELETED"
+        elif path.is_symlink():
+            data = b"SYMLINK\0" + os.fsencode(os.readlink(path))
+        else:
+            data = path.read_bytes()
+        h.update(raw + b"\0" + data + b"\0")
+        if path.exists():
+            h.update(str(path.lstat().st_mode & 0o777).encode())
+    return {"head": sha, "digest": h.hexdigest()}
+
+
+def environment_digest() -> str:
+    transient = {"_", "PWD", "OLDPWD", "SHLVL", "INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID"}
+    return digest({k: v for k, v in os.environ.items() if k not in transient})
+
+
+def input_fingerprints(plan: dict, root: Path) -> dict:
+    paths = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                           cwd=root, check=True, capture_output=True).stdout.split(b"\0")
+    files = {}
+    for raw in set(paths) - {b""}:
+        path = root / os.fsdecode(raw)
+        if path.is_symlink():
+            content = os.fsencode(os.readlink(path))
+        elif path.exists():
+            content = path.read_bytes()
+        else:
+            content = b"DELETED"
+        mode = path.lstat().st_mode if path.exists() or path.is_symlink() else None
+        files[os.fsdecode(raw)] = digest([hashlib.sha256(content).hexdigest(), mode])
+    # Configuration is an input even when Git correctly ignores its secrets.
+    for rel in [".env", "env.sh", "back-end/.env", "agents/.env", "front-end/.env.local"]:
+        if (root / rel).is_file():
+            files[rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
+    return {g["name"]: digest({"files": {p: h for p, h in files.items()
+                            if any(fnmatchcase(p, glob) for glob in g.get("input_paths", ["*"]))},
+                            "command": g["command"], "env": g.get("env", {}),
+                            "worker": g.get("worker"), "checks": g["checks"],
+                            "environment": environment_digest()}) for g in plan["gates"]}
+
+
+def command(value: object) -> list[str]:
+    if not isinstance(value, list) or not value or not all(isinstance(x, str) and x for x in value):
+        raise ValueError("command must be a nonempty argv list")
+    return value
+
+
+def validate_plan(plan: dict) -> None:
+    gates = plan.get("gates")
+    if not isinstance(gates, list) or not gates:
+        raise ValueError("plan needs gates")
+    names, workers = set(), set()
+    for gate in gates:
+        name = gate.get("name", "")
+        if not isinstance(name, str) or not NAME.fullmatch(name) or name in names:
+            raise ValueError("gate names must be unique safe identifiers")
+        names.add(name)
+        command(gate.get("command"))
+        if any("--reuse-passed" in arg for arg in gate["command"]):
+            raise ValueError("staged runs require fresh execution, not pass-cache reuse")
+        checks = gate.get("checks")
+        if not isinstance(checks, list) or not checks or len(set(checks)) != len(checks):
+            raise ValueError(f"{name}: explicit unique check inventory required")
+        if not all(isinstance(c, str) and c and "\0" not in c for c in checks):
+            raise ValueError(f"{name}: invalid check identifier")
+        paths = gate.get("input_paths", ["*"])
+        if not isinstance(paths, list) or not paths or not all(isinstance(p, str) and p for p in paths):
+            raise ValueError("input_paths must be a nonempty list of source globs")
+        quick = gate.get("quick", False)
+        if not isinstance(quick, bool):
+            raise ValueError("quick must be boolean")
+        if quick and gate.get("category") not in QUICK:
+            raise ValueError("only application structural/static checks belong in quick phase")
+        if not quick:
+            # Separate worker identities prevent silently turning the new fanout
+            # into simultaneous heavy commands on the coordinator's checkout.
+            worker = gate.get("worker")
+            if not isinstance(worker, str) or not worker or worker in workers or worker == "coordinator":
+                raise ValueError(f"{name}: bind an independent isolated worker before execution")
+            workers.add(worker)
+        if not isinstance(gate.get("env", {}), dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in gate.get("env", {}).items()
+        ):
+            raise ValueError("env must map strings to strings")
+        if gate.get("after"):
+            raise ValueError("cross-gate after dependencies are not allowed; setup belongs inside its worker")
+    if not any(g.get("quick") for g in gates):
+        raise ValueError("quick checks required")
+
+
+def initialize(plan: dict, root: Path) -> dict:
+    validate_plan(plan)
+    if plan.get("source") != source(root):
+        raise ValueError("plan source is stale")
+    return {"version": 1, "plan": plan, "source": plan["source"], "plan_digest": digest(plan),
+            "phase": "quick", "next_after_quick": "initial", "round": 0,
+            "repair_gates": [], "skips": {}, "attempts": [], "failures": [],
+            "focused": {}, "ready": False, "environment": environment_digest(),
+            "input_fingerprints": input_fingerprints(plan, root)}
+
+
+def records(plan: dict, state: dict) -> list[dict]:
+    phase = state["phase"]
+    gates = plan["gates"]
+    if phase == "quick":
+        return [g for g in gates if g.get("quick")]
+    if phase == "focused":
+        return [dict(g, command=state["focused"][g["name"]]["command"],
+                     checks=state["focused"][g["name"]]["checks"])
+                for g in gates if g["name"] in state["repair_gates"]]
+    if phase == "failed-gates":
+        return [g for g in gates if g["name"] in state["repair_gates"]]
+    if phase in {"initial", "final"}:
+        return [g for g in gates if not g.get("quick")]
+    raise ValueError(f"phase {phase} is not executable")
+
+
+def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
+    name, phase = gate["name"], state["phase"]
+    token = uuid.uuid4().hex
+    case_skips = {key.split("/", 1)[1]: value for key, value in state["skips"].items()
+                  if key.startswith(name + "/") and value["source"] == state["source"]}
+    active = [c for c in gate["checks"] if c not in case_skips]
+    if not active:
+        return {"gate": name, "status": "SKIP", "cases": {c: "SKIP" for c in gate["checks"]},
+                "native_exit": None, "executed": False, "source": state["source"]}
+    # A worker must explicitly consume the case inventory, including exclusions.
+    # Without a case-aware worker mixed skip/run would either rerun skipped tests
+    # or silently omit checks, so reject it before launch.
+    if case_skips and not gate.get("case_protocol"):
+        raise ValueError(f"{name}: mixed skips require the worker's case protocol")
+    folder = directory / "attempts" / str(state["round"]) / phase / name
+    folder.mkdir(parents=True, exist_ok=False)
+    request = {"token": token, "source": state["source"], "gate": name,
+               "checks": active, "skips": case_skips, "phase": phase}
+    write(folder / "request.json", request)
+    result_path = folder / "result.json"
+    env = {**os.environ, **gate.get("env", {}), "DEPLOY_GATE_REQUEST": str(folder / "request.json"),
+           "DEPLOY_GATE_RESULT": str(result_path), "DEPLOY_GATE_TOKEN": token,
+           "DEPLOY_LANE_SCOPED_REUSE": "0", "DEPLOY_CYCLE_FRESH": "1"}
+    started = time.time()
+    timeout = 120 if gate.get("quick") else gate.get("timeout_seconds")
+    timed_out = cancelled = lingering = False
+    with (folder / "output.log").open("wb") as output:
+        try:
+            code, timed_out, cancelled, lingering = run_command(gate["command"],
+                cwd=root / gate.get("cwd", "."), env=env, output=output, timeout=timeout)
+        except OSError as error:
+            output.write(str(error).encode())
+            code = 127
+    cases = {c: "SKIP" for c in case_skips}
+    valid = False
+    reason = None
+    if result_path.exists():
+        try:
+            result = read(result_path)
+            raw_cases = result["cases"]
+            if (result.get("token") != token or result.get("source") != state["source"]
+                    or result.get("gate") != name or result.get("complete") is not True
+                    or result.get("reused", False) is not False
+                    or not isinstance(raw_cases, dict) or set(raw_cases) != set(active)
+                    or any(v not in {"PASS", "FAIL"} for v in raw_cases.values())):
+                raise ValueError("worker result identity/inventory mismatch")
+            # Signal/timeout/launcher crash must not be converted into a provider skip.
+            if code not in (0, 1) or timed_out or cancelled or lingering or (code == 0) != all(v == "PASS" for v in raw_cases.values()):
+                raise ValueError("worker exit and test results disagree")
+            cases.update(raw_cases)
+            valid = True
+        except (KeyError, TypeError, ValueError) as error:
+            reason = str(error)
+    elif code == 0 and not (gate.get("case_protocol") or cancelled or timed_out or lingering):
+        cases.update({c: "PASS" for c in active})
+        valid = True
+    else:
+        reason = "missing complete case receipt"
+    if not valid:
+        # Unknown/unexecuted work is a blocking outcome; cannot waive this via
+        # a known constituent failure or by treating launcher exit0 as coverage.
+        cases.update({c: "UNVERIFIED" for c in active})
+    status = "PASS" if all(v in TERMINAL_OK for v in cases.values()) else "FAIL"
+    result = {"gate": name, "status": status, "cases": cases, "native_exit": code,
+              "executed": True, "complete": valid, "reason": reason, "timed_out": timed_out,
+              "cancelled": cancelled, "lingering_group": lingering,
+              "source": state["source"], "started_at": started, "finished_at": time.time(),
+              "command": gate["command"], "log": str(folder / "output.log"), "token": token}
+    write(folder / "receipt.json", result)
+    return result
+
+
+def failed_cases(state: dict, results: list[dict]) -> list[dict]:
+    phase = state["phase"]
+    failed = []
+    for result in results:
+        for check, verdict in result["cases"].items():
+            if verdict not in TERMINAL_OK:
+                key = result["gate"] + "/" + check
+                failed.append({"id": uuid.uuid4().hex, "check": key, "native_result": verdict,
+                               "gate": result["gate"], "source": state["source"],
+                               "complete": result.get("complete", False), "phase": phase,
+                               "evidence": result.get("log"), "command": result.get("command")})
+    return failed
+
+
+def advance(state: dict, results: list[dict], failures: list[dict] | None = None) -> None:
+    phase = state["phase"]
+    state["attempts"].append({"phase": phase, "source": state["source"], "results": results})
+    failed = failed_cases(state, results) if failures is None else failures
+    if failed:
+        state["failures"].extend(failed)
+        state["pending"] = list(dict.fromkeys([*state.get("pending", []), *[f["id"] for f in failed]]))
+        state["failure_phase"] = phase
+        state["phase"] = "triage"
+        return
+    if phase == "quick":
+        state["phase"] = state.pop("next_after_quick", "initial")
+    elif phase == "initial":
+        state.update(phase="ready", ready=True)
+    elif phase == "focused":
+        state["phase"] = "failed-gates"
+    elif phase == "failed-gates":
+        state.update(phase="quick", next_after_quick="final")
+    elif phase == "final":
+        state.update(phase="ready", ready=True)
+
+
+def adjudicate(state: dict, report: dict) -> None:
+    from deploy_failure_report import decision
+    if state["phase"] != "triage":
+        raise ValueError("no failures awaiting RCA")
+    entries = report.get("failures", [])
+    by_id = {entry["id"]: entry for entry in entries}
+    if len(by_id) != len(entries) or set(by_id) != set(state["pending"]):
+        raise ValueError("RCA dispositions must cover every pending occurrence exactly once")
+    pending = [f for f in state["failures"] if f["id"] in state["pending"]]
+    decisions = []
+    for failure in pending:
+        entry = by_id[failure["id"]]
+        if (entry.get("source") != failure["source"] or entry.get("check") != failure["check"]
+                or entry.get("command") != failure.get("command")):
+            raise ValueError("RCA receipt has the wrong source or check")
+        disposition = decision(entry)
+        if disposition != "blocking" and not failure["complete"]:
+            raise ValueError("unverified/incomplete execution cannot be waived as a completed case")
+        decisions.append((failure, entry, disposition))
+    # Atomic transition: UNKNOWN leaves every occurrence open, never drops peers.
+    if any(d == "blocking" and e.get("attribution") != "INTRODUCED" for _, e, d in decisions):
+        raise ValueError("UNKNOWN or unhanded-off failure still blocks; finish /RCA attribution")
+    repair = set()
+    for failure, entry, disposition in decisions:
+        failure["rca"] = entry
+        failure["disposition"] = disposition
+        if disposition == "blocking":
+            repair.add(failure["gate"])
+        else:
+            state["skips"][failure["check"]] = {"source": state["source"], "rca": entry,
+                                                   "disposition": disposition,
+                                                   "input_fingerprint": state["input_fingerprints"][failure["gate"]]}
+    state.pop("pending")
+    if repair:
+        state["repair_gates"] = sorted(set(state["repair_gates"]) | repair)
+        state["phase"] = "needs-focused-plan"
+    else:
+        # Waivers never trigger a rerun. Continue precisely where this round
+        # would have gone if the waived cases had been SKIP initially.
+        prior = state["failure_phase"]
+        state["phase"] = {"quick": state.get("next_after_quick", "initial"), "initial": "ready",
+                          "focused": "failed-gates", "failed-gates": "quick", "final": "ready",
+                          "refresh": "needs-focused-plan" if state["repair_gates"] else "final"}[prior]
+        if prior == "failed-gates":
+            state["next_after_quick"] = "final"
+        if state["phase"] == "triage":
+            state["phase"] = "needs-focused-plan" if state["repair_gates"] else "final"
+        state["ready"] = state["phase"] == "ready"
+
+
+def focused_plan(state: dict, plan: dict, payload: dict) -> None:
+    if state["phase"] != "needs-focused-plan":
+        raise ValueError("focused plan is only accepted for diagnosed failures")
+    if payload.get("source") != state["source"]:
+        raise ValueError("focused plan source is stale")
+    tasks = payload.get("gates", {})
+    if set(tasks) != set(state["repair_gates"]):
+        raise ValueError("focused plan must cover every blocking gate")
+    allowed = {g["name"]: set(g["checks"]) for g in plan["gates"]}
+    for gate, task in tasks.items():
+        command(task.get("command"))
+        if not task.get("checks") or not set(task["checks"]) <= allowed[gate]:
+            raise ValueError("focused check list is not in the gate inventory")
+        required = {f["check"].split("/", 1)[1] for f in state["failures"]
+                    if f["gate"] == gate and f.get("disposition") == "blocking"}
+        if not required <= set(task["checks"]):
+            raise ValueError("focused command omits an unresolved failing check")
+    state["focused"] = tasks
+    state["phase"] = "focused"
+
+
+def rca_requests(state: dict, directory: Path) -> list[Path]:
+    paths = []
+    for failure in [*state["failures"], *state.get("live_failures", [])]:
+        if failure["id"] not in [*state.get("pending", []), *[f["id"] for f in state.get("live_failures", [])]]:
+            continue
+        path = directory / "rca" / (failure["id"] + ".json")
+        write(path, {**failure, "instruction": "/RCA: diagnose this occurrence; return the evidence-backed "
+                    "INTRODUCED/NOT_INTRODUCED gate under .claude/shared/deploy-failure-policy.md. "
+                    "UNKNOWN blocks. Group with an existing root cause only after reading evidence. "
+                    "Do not deploy or weaken assertions/timeouts. Independent failures run concurrently."})
+        paths.append(path)
+    return paths
+
+
+def launch_rca(path: Path, launcher: list[str]) -> None:
+    # One service launch per occurrence even when a second observer calls rca.
+    with exclusive(path.parent / (path.stem + ".launch-lock")):
+        receipt = path.with_suffix(".launch.json")
+        if receipt.exists():
+            return
+        submission = path.with_suffix(".submitted.json")
+        if submission.exists():
+            raise ValueError(f"RCA submission may have succeeded; reconcile {path.stem} before retrying")
+        write(submission, {"request_id": path.stem, "state": "submission-started", "at": time.time()})
+        outcome = subprocess.run([*launcher, str(path)], capture_output=True, check=True, timeout=120)
+        value = json.loads(outcome.stdout)
+        if not isinstance(value, dict) or value.get("ok") is not True:
+            raise ValueError("RCA launcher did not confirm submission")
+        write(receipt, value)
+
+
+def run_phase(plan: dict, state: dict, directory: Path, root: Path,
+              launcher: list[str] | None = None) -> None:
+    if (source(root) != state["source"] or digest(plan) != state["plan_digest"]
+            or environment_digest() != state["environment"]
+            or input_fingerprints(plan, root) != state["input_fingerprints"]):
+        raise ValueError("source/plan changed; refresh after RCA before running")
+    selected = records(plan, state)
+    state["round"] += 1
+    state["live_failures"] = []
+    results = []
+    launched = []
+    with ThreadPoolExecutor(max_workers=max(1, len(selected))) as rc_pool:
+        with ThreadPoolExecutor(max_workers=max(1, len(selected))) as pool:
+            futures = {pool.submit(execute, gate, state, directory, root): gate for gate in selected}
+            for future in as_completed(futures):
+                gate = futures[future]
+                try:
+                    result = future.result()
+                except (ValueError, OSError) as error:
+                    result = {"gate": gate["name"], "status": "FAIL", "complete": False,
+                              "cases": {c: "UNVERIFIED" for c in gate["checks"]},
+                              "source": state["source"], "reason": str(error)}
+                results.append(result)
+                fresh = failed_cases(state, [result])
+                state["live_failures"].extend(fresh)
+                write(directory / "cycle.json", state)
+                # Publish and dispatch each failure while healthy siblings run.
+                for path in rca_requests(state, directory):
+                    if launcher and not CANCEL.is_set() and path.stem in {f["id"] for f in fresh}:
+                        launched.append(rc_pool.submit(launch_rca, path, launcher))
+        failures = state.pop("live_failures")
+        if CANCEL.is_set():
+            state["attempts"].append({"phase": state["phase"], "results": results, "interrupted": True})
+            state.update(resume_phase=state["phase"], phase="interrupted", ready=False)
+        elif (source(root) != state["source"] or environment_digest() != state["environment"]
+              or input_fingerprints(plan, root) != state["input_fingerprints"]):
+            state["attempts"].append({"phase": state["phase"], "results": results, "stale": True})
+            state.update(phase="stale", ready=False)
+        else:
+            advance(state, results, failures)
+        for job in launched:
+            try:
+                job.result()
+            except (ValueError, OSError, subprocess.SubprocessError) as error:
+                state.setdefault("rca_launch_errors", []).append(str(error))
+        write(directory / "cycle.json", state)
+
+
+def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
+    validate_plan(new)
+    if state["phase"] not in {"needs-focused-plan", "focused", "triage", "stale"}:
+        raise ValueError("source refresh only at the repair boundary")
+    if new["source"] != source(root):
+        raise ValueError("new plan is not bound to current source")
+    old_gates = {g["name"]: g for g in old["gates"]}
+    new_gates = {g["name"]: g for g in new["gates"]}
+    if not old_gates.keys() <= new_gates.keys():
+        raise ValueError("repair cannot silently remove originally selected gates")
+    for name, gate in old_gates.items():
+        if not set(gate["checks"]) <= set(new_gates[name]["checks"]):
+            raise ValueError("repair cannot silently remove originally selected checks")
+    fingerprints = input_fingerprints(new, root)
+    if (new["source"] == state["source"] and digest(new) == state["plan_digest"]
+            and fingerprints == state["input_fingerprints"]):
+        raise ValueError("refresh requires actual changed source or plan")
+    carry, revisit = {}, []
+    for key, skip in state["skips"].items():
+        gate = key.split("/", 1)[0]
+        if skip.get("input_fingerprint") == fingerprints.get(gate):
+            carry[key] = {**skip, "source": new["source"], "original_source": skip["source"]}
+        else:
+            revisit.append({"id": uuid.uuid4().hex, "check": key, "gate": gate,
+                            "source": new["source"], "native_result": "prior waived failure; changed inputs",
+                            "command": new_gates[gate]["command"],
+                            "complete": True, "phase": "refresh", "prior_waiver": skip})
+    state["superseded_skips"] = [*state.get("superseded_skips", []), *state["skips"].values()]
+    state["skips"] = carry
+    state["failures"].extend(revisit)
+    if revisit:
+        state["pending"] = list(dict.fromkeys([*state.get("pending", []), *[f["id"] for f in revisit]]))
+        state["failure_phase"] = "refresh"
+    state.update(plan=new, source=new["source"], plan_digest=digest(new), ready=False, focused={},
+                 input_fingerprints=fingerprints, environment=environment_digest(),
+                 phase="quick", next_after_quick="triage" if state.get("pending") else
+                 ("needs-focused-plan" if state["repair_gates"] else "final"))
+
+
+def verify_saved(directory: Path, root: Path, expect_head: str | None = None) -> int:
+    try:
+        state = read(directory / "cycle.json")
+        plan = state["plan"]
+        validate_plan(plan)
+        if (state["phase"] != "ready" or state["ready"] is not True
+                or state["source"] != source(root) or state["plan_digest"] != digest(plan)
+                or state["environment"] != environment_digest()
+                or state["input_fingerprints"] != input_fingerprints(plan, root)
+                or (expect_head is not None and state["source"]["head"] != expect_head)):
+            return 1
+        return 0
+    except (OSError, ValueError, KeyError, TypeError):
+        return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rca", "verify", "report"])
+    parser.add_argument("--plan", type=Path, required=True)
+    parser.add_argument("--state-dir", type=Path, required=True)
+    parser.add_argument("--input", type=Path)
+    parser.add_argument("--root", type=Path, default=ROOT)
+    parser.add_argument("--rca-launcher", nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+    try:
+        plan = read(args.plan)
+        directory = args.state_dir.resolve()
+        with exclusive(directory):
+            state_path = directory / "cycle.json"
+            state = initialize(plan, args.root) if args.action == "init" else read(state_path)
+            if args.action == "init" and state_path.exists():
+                raise ValueError("existing cycle must not be reset")
+            if args.action in {"run", "resume"}:
+                if args.action == "resume":
+                    if state["phase"] != "interrupted":
+                        raise ValueError("resume requires an interrupted cycle")
+                    state["phase"] = state.pop("resume_phase")
+                with cancellation_handlers():
+                    while state["phase"] in {"quick", "initial", "focused", "failed-gates", "final"}:
+                        run_phase(plan, state, directory, args.root, args.rca_launcher)
+            elif args.action == "triage":
+                if args.input is None:
+                    raise ValueError("--input RCA report required")
+                adjudicate(state, read(args.input))
+            elif args.action == "focus":
+                if args.input is None:
+                    raise ValueError("--input focused command plan required")
+                focused_plan(state, plan, read(args.input))
+            elif args.action == "refresh":
+                if args.input is None:
+                    raise ValueError("--input previous plan required")
+                refresh(state, read(args.input), plan, args.root)
+            elif args.action == "rca":
+                requests = rca_requests(state, directory)
+                if state["phase"] != "triage" or not requests or not args.rca_launcher:
+                    raise ValueError("pending RCA requests and explicit boxes.dev launcher required")
+                with ThreadPoolExecutor(max_workers=len(requests)) as pool:
+                    jobs = [pool.submit(launch_rca, path, args.rca_launcher) for path in requests]
+                    for job in jobs:
+                        job.result()
+            elif args.action == "verify":
+                if (not state["ready"] or state["phase"] != "ready"
+                        or source(args.root) != state["source"] or digest(plan) != state["plan_digest"]
+                        or environment_digest() != state["environment"]
+                        or input_fingerprints(plan, args.root) != state["input_fingerprints"]):
+                    raise ValueError("cycle not complete on exact current source and plan")
+            elif args.action == "report":
+                from deploy_failure_report import render
+                failures = [{**f["rca"], "disposition": f["disposition"]}
+                            for f in state["failures"] if "rca" in f]
+                text = render({"failures": failures}, f"Deploy validation: {state['phase']}\n"
+                              f"Source: {state['source']['head']}\nPending RCA: {len(state.get('pending', []))}")
+                (directory / "report.md").write_text(text)
+                print(text, end="")
+                return 0
+            write(state_path, state)
+            print(json.dumps({"phase": state["phase"], "ready": state["ready"],
+                              "failures": len(state.get("pending", [])), "source": state["source"]}))
+            return 1 if args.action in {"run", "resume"} and state["phase"] in {"triage", "stale", "interrupted"} else 0
+    except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
+        print(f"DEPLOY_CYCLE BLOCKED: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
