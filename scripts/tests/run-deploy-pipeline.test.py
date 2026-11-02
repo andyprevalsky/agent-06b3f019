@@ -2160,7 +2160,7 @@ def main() -> int:
         # A launcher exports FACTORY_METADATA_FILE for its own worktree; the
         # telemetry scenario selects its own fixture snapshot explicitly.
         env = {**{key: value for key, value in os.environ.items()
-                  if not key.startswith("DEPLOY_ADMISSION_") and key != "FACTORY_METADATA_FILE"},
+                  if not key.startswith("DEPLOY_ADMISSION_") and key not in {"FACTORY_METADATA_FILE", "DEPLOY_LANE_SCOPED_REUSE"}},
                "DEPLOY_RUN_ROOT": str(tmp / "runs"), "DEPLOY_PIPELINE_SOURCE_ROOT": str(source_root)}
         start_timing(tmp / "runs", env)
         marker = tmp / "slow-finished"

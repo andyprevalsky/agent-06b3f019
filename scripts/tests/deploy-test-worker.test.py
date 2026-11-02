@@ -3,6 +3,13 @@
 from pathlib import Path
 from datetime import datetime, timezone
 import copy
+import contextlib
+import importlib.util
+import io
+import shlex
+import shutil
+import signal
+import threading
 import json
 import os
 import subprocess
@@ -534,7 +541,9 @@ FAKE_CLI = """#!/usr/bin/env python3
 import json, os, sys
 calls = os.environ['FAKE_DVB_CALLS']; config = json.load(open(os.environ['FAKE_DVB_CONFIG']))
 with open(calls, 'a') as stream: stream.write(json.dumps(sys.argv[1:]) + '\\n')
-reply = config.get(sys.argv[2], {'rc': 1, 'stdout': {}, 'stderr': 'unsupported'})
+key = sys.argv[2]
+if key == 'list' and '--all' not in sys.argv: key = 'list_page1'  # native CLI: one page unless --all
+reply = config.get(key, {'rc': 1, 'stdout': {}, 'stderr': 'unsupported'})
 sys.stdout.write(json.dumps(reply.get('stdout', {}))); sys.stderr.write(reply.get('stderr', ''))
 raise SystemExit(reply.get('rc', 0))
 """
@@ -597,8 +606,16 @@ class Boxes(unittest.TestCase):
     def configure(self, reply, send=None, wait=None, read=None, result=None, host=None, listed=None):
         cycle.write(self.config, {
             'list': listed or {'rc': 0, 'stdout': {'schemaVersion': 1, 'ok': True, 'data': {'threads': [
+                {'clientThreadId': 'ph-newer-rca', 'executionInstanceId': 'other-devbox', 'activeTurnId': None,
+                 'status': 'idle', 'notificationsMuted': True, 'agent': 'codex'},
                 {'clientThreadId': 'ph-worker', 'executionInstanceId': host or self.host, 'activeTurnId': None,
-                 'status': 'idle', 'notificationsMuted': True, 'agent': 'claude'}]}}},
+                 'status': 'idle', 'notificationsMuted': True, 'agent': 'claude'}],
+                'pagination': {'complete': True, 'nextCursor': None}}}},
+            # first page as the native CLI returns it without --all: newer threads only, worker not listed
+            'list_page1': {'rc': 0, 'stdout': {'schemaVersion': 1, 'ok': True, 'data': {'threads': [
+                {'clientThreadId': 'ph-newer-rca', 'executionInstanceId': 'other-devbox', 'activeTurnId': None,
+                 'status': 'idle', 'notificationsMuted': True, 'agent': 'codex'}],
+                'pagination': {'complete': False, 'nextCursor': 'page-2'}}}},
             'send': send or {'rc': 0, 'stdout': {**json.loads((ROOT / 'scripts/tests/fixtures/boxes-thread-send-receipt.json').read_text()), 'threadId': self.binding['worker_thread'], 'turnId': 'turn-1', 'messageId': 'peer_1'}},
             'wait': wait or {'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'}, host)},
             'result': result or {'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1', 'output': {'text': reply}}, host)},
@@ -610,6 +627,19 @@ class Boxes(unittest.TestCase):
 
     def run_adapter(self, deadline=30):
         return self.boxes.execute(self.request, self.coordinator, self.binding, deadline)
+
+    def test_worker_is_resolved_from_the_complete_thread_inventory_not_the_first_page(self):
+        self.configure(reply=self.reply(inline=False)); self.attach(self.native_bytes)
+        result = self.run_adapter()
+        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
+        listing = self.calls_of('list')
+        self.assertEqual(1, len(listing)); self.assertIn('--all', listing[0])
+        # the pre-fix argv sees only the first page: never resolve a host from a partial inventory, never send
+        __import__('shutil').rmtree(self.coordinator / '.context'); self.calls.unlink()
+        with patch.object(self.boxes, 'LIST_ARGV', ['threads', 'list', '--json']):
+            result = self.run_adapter()
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
+        self.assertEqual('thread_inventory_incomplete', result['reason']); self.assertEqual([], self.calls_of('send'))
 
     def test_happy_path_returns_the_exact_native_document_with_bindings(self):
         self.configure(reply=self.reply(inline=False)); self.attach(self.native_bytes)
@@ -916,6 +946,193 @@ class Boxes(unittest.TestCase):
         self.assertIn('request control-project-threads', result['transport_receipt']['cli_error']['text'])
         self.assertIn('request control-project-threads', Path(result['transport_receipt']['cli_log']).read_text())
         self.assertEqual(1, len(self.calls_of('send')))  # no retry loop
+
+
+def load(name, relative):
+    spec = importlib.util.spec_from_file_location(name, ROOT / relative)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+local_runner = load('controller_local', 'scripts/run-cloudbench-controller-local.py')
+
+
+class LocalController(unittest.TestCase):
+    def test_complete_documented_inventory_and_registration(self):
+        text = (ROOT / '.claude/commands/deploy.md').read_text()
+        section = text.split('## Step 4cb:', 1)[1].split('## Step 4c:', 1)[0]
+        block = section.split('```bash\n')[2].split('```', 1)[0]
+        commands = []
+        for line in block.replace('\\\n', '').splitlines():
+            line = line.strip()
+            if line.startswith('if ['):
+                break
+            if line and not line.startswith('#'):
+                commands.append(shlex.split(line))
+        self.assertEqual([shlex.split(command) for _, command in local_runner.CASES], commands)
+        self.assertEqual(len(commands), 12)
+        self.assertEqual(len({name for name, _ in local_runner.CASES}), 12)
+        registry = load('local_gate_registry', 'scripts/run-deploy-structural-gates.py')
+        gate = next(gate for gate in registry.GATES if gate.name == 'deploy-test-worker')
+        self.assertIn('scripts/tests/deploy-test-worker.test.py', gate.command)
+
+    def test_staged_linux_template_and_existing_remote_template(self):
+        planner = load('local_gate_planner', 'scripts/deploy_test_plan.py')
+        response = subprocess.CompletedProcess([], 0, '{"lanes":[]}', '')
+        for platform, command in (
+            ('linux', [sys.executable, 'scripts/run-cloudbench-controller-local.py']),
+            ('darwin', [sys.executable, 'scripts/run-cloudbench-controller-local.py']),
+        ):
+            with patch.object(planner.sys, 'platform', platform), patch.object(planner.subprocess, 'run', return_value=response):
+                gate = next(g for g in planner.standard_template()['gates'] if g['name'] == 'cloudbench-controller')
+            self.assertEqual(gate['command'], command)
+            self.assertNotIn('platform', gate)
+
+    def run_fixture(self, commands, *, changed=False, cancelled=False):
+        with tempfile.TemporaryDirectory(prefix='controller-local-test-', dir='/var/tmp') as temporary:
+            root = Path(temporary)
+            before = {'head': 'fixture', 'digest': 'before'}
+            after = {**before, 'digest': 'after'} if changed else before
+            def invoke(argv, **kwargs):
+                kwargs['output'].write(b'controlled native output\n')
+                receipt = Path(argv[argv.index('--receipt') + 1])
+                receipt.write_text(json.dumps(dict(native_exit=0, cancelled=cancelled,
+                    quiescent=True, orphaned_children=False, error=None)))
+                return 0, False, cancelled, False
+            real = contextlib.nullcontext() if not cancelled else patch.object(local_runner, 'run_command', side_effect=invoke)
+            with patch.object(local_runner, 'CASES', commands), patch.object(local_runner, 'source', side_effect=[before, after]), patch.object(sys, 'argv', ['controller-local', '--root', str(root), '--max-workers', '12']), contextlib.redirect_stdout(io.StringIO()), real:
+                result = local_runner.main()
+            result_path = next(root.glob('.context/cloudbench-local/run-*/result.json'))
+            rows = json.loads(result_path.read_text())
+            logs = {row['name']: Path(row['log']).read_text() for row in rows['cases']}
+            for row in rows['cases']:
+                if 'fixture_tmp' in row and Path(row['fixture_tmp']).exists():
+                    shutil.rmtree(row['fixture_tmp'])
+            return result, rows, logs
+
+    def test_twelve_native_processes_isolated_and_failure_preserved(self):
+        body = "import os,time; print('start',time.time(),os.environ['TMPDIR'],flush=True); time.sleep(.2); print('end',time.time(),flush=True)"
+        commands = [(f'case-{i}', shlex.join([sys.executable, '-c', body + ('; raise SystemExit(1)' if i == 4 else '; raise SystemExit(78)' if i == 5 else '')])) for i in range(12)]
+        code, result, logs = self.run_fixture(commands)
+        self.assertEqual(code, 1)
+        self.assertFalse(result['complete'])
+        self.assertEqual(len(result['cases']), 12)
+        self.assertEqual(result['cases'][4]['status'], 'FAIL')
+        self.assertEqual(result['cases'][4]['native_exit'], 1)
+        self.assertEqual(result['cases'][5]['status'], 'UNVERIFIED')
+        self.assertEqual(result['cases'][5]['native_exit'], 78)
+        intervals, directories = [], []
+        for log in logs.values():
+            start, end = [line.split() for line in log.splitlines()]
+            intervals.extend([(float(start[1]), 1), (float(end[1]), -1)])
+            directories.append(start[2])
+        active = peak = 0
+        for _, delta in sorted(intervals):
+            active += delta
+            peak = max(peak, active)
+        self.assertGreater(peak, 1)
+        self.assertEqual(len(set(directories)), 12)
+
+    def test_all_pass_requires_unchanged_source(self):
+        command = [('success', shlex.join([sys.executable, '-c', 'print("success")']))]
+        code, result, _ = self.run_fixture(command)
+        self.assertEqual(code, 0)
+        self.assertTrue(result['complete'])
+        self.assertTrue(result['cases'][0]['fixture_tmp_removed'])
+        code, result, _ = self.run_fixture(command, changed=True)
+        self.assertEqual(code, 1)
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['cases'][0]['status'], 'UNVERIFIED')
+        self.assertEqual(result['cases'][0]['reason'], 'source changed')
+
+
+    def test_cancelled_suite_reaps_an_escaped_term_ignoring_child(self):
+        with tempfile.TemporaryDirectory(prefix='controller-escape-', dir='/var/tmp') as raw:
+            folder = Path(raw)
+            ready = folder / 'ready'
+            child = folder / 'child.py'
+            parent = folder / 'parent.py'
+            child.write_text(
+                "import os,signal,sys,time\nfrom pathlib import Path\n"
+                "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+                "Path(sys.argv[1]).write_text(str(os.getpid()))\ntime.sleep(30)\n")
+            parent.write_text(
+                "import subprocess,sys,time\n"
+                "p=subprocess.Popen([sys.executable,sys.argv[1],sys.argv[2]],start_new_session=True)\n"
+                "try:\n time.sleep(30)\nfinally:\n p.kill();p.wait()\n")
+            owned = {}
+            identity = load('local_escape_identity', 'scripts/process-identity.py')
+
+            def cancel_when_ready():
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if ready.exists() and ready.read_text().strip():
+                        owned['pid'] = int(ready.read_text())
+                        owned['birth'] = identity.current_identity(owned['pid'])
+                        local_runner.CANCEL.set()
+                        return
+                    time.sleep(0.01)
+                local_runner.CANCEL.set()
+
+            waiter = threading.Thread(target=cancel_when_ready)
+            local_runner.CANCEL.clear()
+            waiter.start()
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    row = local_runner.run_case(ROOT, folder, 'escaped', shlex.join([
+                        sys.executable, str(parent), str(child), str(ready)]))
+                waiter.join(6)
+                self.assertIn('pid', owned)
+                self.assertEqual(row['status'], 'UNVERIFIED')
+                self.assertTrue(row['supervision']['quiescent'])
+                self.assertFalse(Path(f"/proc/{owned['pid']}").exists())
+            finally:
+                local_runner.CANCEL.clear()
+                waiter.join(6)
+                if 'birth' in owned and Path(f"/proc/{owned['pid']}").exists():
+                    identity.main(['process-identity.py', '--expect', owned['birth'],
+                                   '--signal', 'KILL', str(owned['pid'])])
+
+
+    def test_supervisor_errors_leave_one_unverified_receipt_without_cleanup_retry(self):
+        for fault in ('spawn', 'missing', 'malformed', 'cleanup'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as raw:
+                folder = Path(raw)
+
+                def launch(argv, **kwargs):
+                    if fault == 'spawn':
+                        raise OSError('controlled spawn refusal')
+                    if fault == 'missing':
+                        return 78, False, False, False
+                    receipt = Path(argv[argv.index('--receipt') + 1])
+                    value = [] if fault == 'malformed' else dict(
+                        native_exit=0, quiescent=True, cancelled=False,
+                        orphaned_children=False, error=None)
+                    receipt.write_text(json.dumps(value))
+                    return 0, False, False, False
+
+                with patch.object(local_runner, 'run_command', side_effect=launch), \
+                     patch.object(local_runner.shutil, 'rmtree', side_effect=OSError('controlled cleanup refusal')) as cleanup, \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    row = local_runner.run_case(ROOT, folder, fault, 'true')
+                self.assertEqual(row['status'], 'UNVERIFIED')
+                self.assertIn('reason', row)
+                self.assertEqual(json.loads((folder / (fault + '.json')).read_text()), row)
+                self.assertEqual(cleanup.call_count, 1 if fault == 'cleanup' else 0)
+                self.assertTrue(Path(row['fixture_tmp']).is_dir())
+                shutil.rmtree(row['fixture_tmp'])
+
+    def test_cancelled_native_result_is_never_a_pass(self):
+        code, result, logs = self.run_fixture([('cancelled', ['unused'])], cancelled=True)
+        self.assertEqual(code, 1)
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['cases'][0]['status'], 'UNVERIFIED')
+        self.assertTrue(result['cases'][0]['cancelled'])
+        self.assertNotIn('fixture_tmp_removed', result['cases'][0])
+        self.assertEqual(logs['cancelled'], 'controlled native output\n')
+
 
 
 if __name__=='__main__': unittest.main()

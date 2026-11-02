@@ -75,3 +75,8 @@ not sufficient evidence for the actual platform integration.
 
 Use observed platform artifact names in transport fixtures, and prove a
 file-only result large enough to exclude a conversational inline shortcut.
+
+## Pagination
+
+`scripts/deploy_test_boxes.py:345` (82d11ee0d) listed threads with `threads list --json`, which returns only the first page (`pagination.complete: false`); once newer RCA threads filled that page the prepared worker A was absent, `resolve_host` refused, and no send occurred (`.context/preparation/all-workers-probe-binding.json`, `.context/deploy-boxes/95262bce6ce430c22145305c40b2992e62fdbea6e1983e1e8338e7b5d19ed2cf/cli.log` on the owner's box; `--all` lists 85 threads, `complete: true`, A's exact host).
+Fix: `LIST_ARGV` uses `--all` and a `data.pagination.complete == false` inventory is refused as `thread_inventory_incomplete` (UNVERIFIED, zero sends). Regression: `Boxes.test_worker_is_resolved_from_the_complete_thread_inventory_not_the_first_page` in `scripts/tests/deploy-test-worker.test.py` (fails on the pre-image).

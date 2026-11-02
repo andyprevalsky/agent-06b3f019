@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# These fixtures choose their reuse policy, including the explicit kill-switch case.
+unset DEPLOY_LANE_SCOPED_REUSE
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 RUN_ROOT="$TEST_ROOT/default"

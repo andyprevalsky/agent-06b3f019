@@ -124,7 +124,7 @@ def standard_template() -> dict:
     gates += [
         {"name": "format", "category": "format", "command": [sys.executable, "scripts/check_deploy_static.py", "format"],
          "checks": ["format"]},
-        {"name": "cloudbench-controller", "command": ["bash", "scripts/run-cloudbench-controller-gate"],
+        {"name": "cloudbench-controller", "command": [sys.executable, "scripts/run-cloudbench-controller-local.py"],
          "checks": ["cloudbench-controller"]},
         {"name": "seed-memory-ratchet", "command": ["bash", "scripts/measure-seed-memory.sh",
                                                    "5", "0", "0", "--enforce-budget"],

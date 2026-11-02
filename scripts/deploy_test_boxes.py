@@ -25,6 +25,7 @@ from deploy_test_process import CANCEL, cancellation_handlers
 from deploy_test_result import MAX_RECEIPT_BYTES, validate as validate_result
 
 TRANSPORT = 'boxes-thread'
+LIST_ARGV = ['threads', 'list', '--all', '--json']  # every page; the first page alone omits older threads
 CLI = 'dvb-onbox'
 MAX_PROMPT_BYTES = 32 * 1024  # `threads send --prompt-file` bound; the result side is bound by its sha256 only
 PERMISSION_CODES = ('disabled', 'denied')
@@ -342,11 +343,16 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
         return state['deadline_at'] - time.time()
     try:
         if state.get('turn_id') is None:
-            code, out, err = _cli(['threads', 'list', '--json'], state, log, max(1, remaining()))
+            code, out, err = _cli(LIST_ARGV, state, log, max(1, remaining()))
             if code != 0:
                 return unverified(request, binding, state, f'threads list exited {code}',
                                   stderr=err.decode(errors='replace'))
-            resolve_host(_envelope(out), binding)
+            inventory = _envelope(out)
+            pagination = inventory.get('pagination')
+            if isinstance(pagination, dict) and pagination.get('complete') is False:
+                # Never resolve a host from a partial page: an old worker thread may sit on page 2.
+                return unverified(request, binding, state, 'thread_inventory_incomplete')
+            resolve_host(inventory, binding)
         while state.get('turn_id') is None and state.get('sent_attempted_at') is not None:
             # Indeterminate earlier send: only adopt the existing turn; never start another attempt.
             code, out, _ = _cli(['threads', 'read', '--thread', thread, '--turns', '100', '--json'],
