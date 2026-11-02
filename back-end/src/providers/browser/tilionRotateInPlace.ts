@@ -1,11 +1,12 @@
 /**
  * In-place Tilion exit rotation (`POST rotate-ip`) for the residential step.
  * Works while the worker holds CDP (~80 ms live; CDP and storage kept). The
- * proof of a new exit is the response itself: `rotated: true` with
- * `fresh_allocation: true` means Tilion allocated a brand-new residential exit
- * (API reference §8; observed live 2026-10-21 with a changed IP). Anything else
+ * proof of exit movement is `rotated: true` for this session. The explicit
+ * `fresh_allocation` boolean distinguishes a brand-new allocation from another
+ * pooled address (API reference §8); both preserve the browser and its state.
+ * A malformed/unacknowledged response or refusal
  * (409 ip_rotation_unavailable / residential_rotation_unavailable /
- * exit_ladder_exhausted, 503, fresh_allocation false) returns null and the
+ * exit_ladder_exhausted, 503) returns null and the
  * caller replaces the session with the worker's carriedState.
  */
 import { prisma } from '../database';
@@ -32,6 +33,7 @@ export async function agentLocation(agentId: string): Promise<ProxyGeoLocation> 
 }
 
 interface RotateIpResponse {
+  session_id?: string;
   rotated?: boolean;
   fresh_allocation?: boolean;
   region?: string | null;
@@ -70,12 +72,19 @@ export async function rotateInPlace(taskId: string): Promise<TilionReplacementSe
     freshAllocation: response?.fresh_allocation === true,
     region: typeof response?.region === 'string' ? response.region : null,
   };
-  if (!ipRotation.rotated || !ipRotation.freshAllocation) {
-    log.warn('Tilion rotate-ip did not allocate a fresh exit; using a replacement session', {
-      taskId,
-      sessionId: row.sessionId,
-      ...ipRotation,
-    });
+  if (
+    !ipRotation.rotated ||
+    typeof response?.fresh_allocation !== 'boolean' ||
+    response.session_id !== row.sessionId
+  ) {
+    log.warn(
+      'Tilion rotate-ip did not acknowledge this session rotation; using a replacement session',
+      {
+        taskId,
+        sessionId: row.sessionId,
+        ...ipRotation,
+      }
+    );
     return null;
   }
   const source = `tilion_residential_rotated_${ipRotation.region ?? 'unknown'}`;
@@ -86,7 +95,7 @@ export async function rotateInPlace(taskId: string): Promise<TilionReplacementSe
   if (updated.count !== 1) {
     throw new Error(`Browser task ${taskId} changed during in-place rotation`);
   }
-  log.info('Tilion rotate-ip allocated a fresh residential exit in place', {
+  log.info('Tilion rotate-ip moved the residential exit in place', {
     taskId,
     sessionId: row.sessionId,
     ...ipRotation,

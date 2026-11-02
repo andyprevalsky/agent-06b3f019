@@ -13,6 +13,17 @@ another contributor's intended feature from the release.
 
 ## Attribution and ownership
 
+**Assigned repairs stay owned regardless of attribution.** If the task or
+`/goal` is to fix a specific issue or failed test, that failure remains the
+agent's responsibility even when `/RCA` returns `Gate: NOT_INTRODUCED`.
+The gate describes whether the compared changes caused the failure, not
+whether the assigned repair is optional or complete. Fix the assigned issue,
+prove its original acceptance test passes and finish the deploy/scorecard
+required by the assignment. Do not waive or re-delegate that failure, qualify
+it as pending post-merge delegation, or report the goal complete because it
+predates the repair. The NOT INTRODUCED delegation path below applies only
+to additional failures outside the assigned repair.
+
 Diagnose every test/gate failure with `/RCA` before deciding ownership or an
 exception. Use its evidence-backed `Gate: INTRODUCED` or
 `Gate: NOT_INTRODUCED` response; do not classify independently of that diagnosis.
@@ -28,8 +39,9 @@ to retroactively justify the delegation.
 - **INTRODUCED:** evidence links the failure to this deploying agent's changes,
   including its repairs or integration work. The deploy owner owns it; it
   blocks deployment and cannot receive a delegation waiver.
-- **NOT INTRODUCED:** evidence establishes that the failure was not introduced
-  by those changes. Read relevant existing repair agents before editing a fix.
+- **NOT INTRODUCED:** for an additional failure outside the assigned repair,
+  evidence establishes that the failure was not introduced by those changes.
+  Read relevant existing repair agents before editing a fix.
   If uncertain about a match, exchange distinguishing evidence with the owner.
   Before merge, retain the failed-test handoff packet in the existing deploy
   report and continue toward merge with that exact failure qualified as pending
