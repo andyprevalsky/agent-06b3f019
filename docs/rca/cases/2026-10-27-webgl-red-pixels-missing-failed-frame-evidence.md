@@ -65,3 +65,20 @@ new user feedback.
 ## Reusable lesson
 
 Preserve the actual failed browser frame and phase evidence before blaming a zero-pixel result on the GPU, network or readiness.
+
+## October 29 renewed investigation — U2 failed-frame evidence
+
+The original failed PNG and context lifecycle were not retained. A real local
+context-loss control produces the same zero-red result after readiness, while
+an unchanged healthy owning case passes. This demonstrates ambiguity; it does
+not establish historical context loss or attribute the original failure.
+
+A private capture proposal retains the already measured failed PNG, pixel
+ratio, threshold and hash in private files. The registered capture control
+fails with capture disabled and passes with the proposal. Under deliberate
+context loss the original pixel assertion still fails, and the exact measured
+1977-byte PNG is retained. All 16 existing assertion ASTs, case names and waits
+are preserved. Independent review accepts exact patch
+`acd27481c3ad0389f6d8fb3295538299141a340f3c9c4f779647ae2c2cb06e5a`
+for capture only; canonical source is unchanged. Historical U2 remains OPEN.
+Evidence: plan:.context/unresolved-six-20261029/webgl-process/U2-REPORT.md.

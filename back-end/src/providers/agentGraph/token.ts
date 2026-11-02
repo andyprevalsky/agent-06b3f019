@@ -26,6 +26,8 @@ export interface AgentGraphClaims {
   /** ClaudeCodeSession.id (the code agent's id in the graph). */
   sessionId: string;
   provider: 'claude' | 'codex';
+  /** Explicit account coordination; legacy tokens retain tree-only behavior. */
+  accountAccess?: boolean;
   iat: number;
   exp: number;
 }

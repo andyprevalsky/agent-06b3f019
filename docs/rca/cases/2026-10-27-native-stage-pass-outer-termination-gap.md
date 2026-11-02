@@ -74,3 +74,24 @@ The managed memory-termination ledger was absent on both observations. No signal
 sender, scheduler or memory cause was established, and no runtime repair is
 claimed. Later intentional teardown of the exact owned shared stack is separate
 from these unexpected interruptions and preserved its pre-existing database.
+
+## October 29 renewed investigation — U6 sender not recoverable
+
+Replacement session 58200 already used explicit exec and still returned 143,
+so removing a redundant shell does not explain the whole recurrence. The
+shared stack cleanup started at 05:52:29.319, inside the root's observed
+35-second sleep from 05:52:17.385 to 05:52:52.395. Ordinary fan-out cleanup
+occurred later and targeted a distinct stack; no causal edge was found.
+
+The retained records lack the initiating sender, cancellation decision and raw
+wait status. The memory ledger is absent; the queried system journal has no
+records. Numeric 143 alone cannot distinguish an explicit exit from a signal.
+The vendored 64-process LRU policy is a lead without an installed revision
+match or original occupancy evidence. None of these gaps proves or excludes
+external termination, OOM or executor eviction.
+
+Independent review accepts the documented evidence limit only. The existing
+October 27 platform report already covers tool 143 with surviving native
+groups; no duplicate report or speculative supervisor change was made.
+Historical U6 and responsibility remain OPEN. Evidence:
+plan:.context/unresolved-six-20261029/webgl-process/U6-REPORT.md.

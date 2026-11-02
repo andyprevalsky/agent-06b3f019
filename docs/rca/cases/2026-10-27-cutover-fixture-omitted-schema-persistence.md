@@ -158,3 +158,27 @@ Receipts are in plan:.context/deploy-fresh-20261027/rca-workflow-determinism-con
 and plan:.context/deploy-fresh-20261027/recovery-4c118-agents/finalized/receipt.json.
 Neither the passing current workflow owner nor this composition proves the
 cause of the earlier60-second expiry; the case remains OPEN.
+
+## October 29 renewed investigation — U1 attribution remains unresolved
+
+On frozen source `eda48ae45e92a49d196de4cc6c716db52d79a006`, the renewed
+investigation found no original worker delivery, replay CPU or completion
+acknowledgement measurements for run `2a306988-98bb-406d-ba5d-a4f80d3e1ac7`.
+Only events 122 through 291 survive. The successful `mark_finished` and the
+next task start occurred 613 ms before the unchanged 60-second deadline.
+Those observations exclude the earlier missing-schema explanation but do not
+identify which part of execution consumed the original deadline.
+
+A private capture proposal preserves native protobuf payloads from the same
+history fetch and adds scoped worker timing. The same 305-event healthy
+qualification loses 134 events in the old summary; the proposal retains all
+305 with exact protobuf equality. Its two controls are registered in the
+canonical workflow runner. Independent review accepts patch
+`d4d09d6b084027856f8ff7bd13358383726d953248ed61a5d2f6311bb5150805`
+for capture only. The 1024-event scan limit is retained, but serialization has
+no byte limit and occurs outside the existing five-second RPC budget.
+
+The proposal is not applied to canonical source. Neither that capture proof nor
+the later healthy native workflow establishes the historical timeout cause or
+assigns responsibility to this deploy. U1 remains OPEN. Evidence:
+plan:.context/unresolved-six-20261029/workflow-chat/u1/REPORT.md.

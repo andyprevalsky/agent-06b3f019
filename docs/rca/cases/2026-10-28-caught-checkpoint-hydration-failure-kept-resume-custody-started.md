@@ -290,3 +290,35 @@ proof.
 On source `292537906f13e2fbbb517edeb21454fb5d710b9a`, `agent-payment-idempotent-abandonment` passed in 347.4 seconds. The full native smoke command passed all ten local tasks and its shared-cache fanout; the separate payment command passed all three tasks. Both commands exited 0 and verified their owned isolated cleanup. All fourteen started roots were published through the unchanged evidence publisher. [Current native trajectory](https://www.roselabs.ai/?agent-id=d6bcb19f-8efa-49f0-8af7-9c66b3b331dd#benchmark-share=05391bbc-a689-40b1-a1ea-a954e4b8fdce.1795764318.8512f0907b468899f88116711e5b2768c399832139bebda4b39adac681ecaa2d).
 
 The current log records healthy normal materialization (three successful resumes with new native sessions), not activation of the guarded same-native retry. The original navigation cause remains unknown; controlled failure/recovery proof is separate. Original failures and their evidence remain unchanged; no financial return is inferred from this pass.
+
+## October 29 renewed investigation — U5 separate storage wait
+
+The b962 recurrence connected CDP, then logged storage_started at
+03:26:12.396 without storage_completed. Later native captures identify a
+pending Playwright.StorageScript.restore RPC, but no active inner-phase marker
+identifies the particular browser API being awaited.
+
+Read-only recovery located the original 03:26:02.528 checkpoint for task
+`3573cfd6-4cca-5a24-bf99-3f9a39bdaf38`: two cookies, one origin, one IndexedDB
+database with five stores and one record, three localStorage entries and three
+tab-session entries. Its encrypted SHA256 is
+`5818c4e8bd15dc4b282cf2ab628388915d21851976425570b1966ad2a98e76cf`.
+Later captured values differ and are not substituted for this original input.
+
+A real local Chromium control executes the actual adapter and restore path.
+Removing the existing logical-owner navigation guard privately allows a
+controlled merchant to hold an IndexedDB handle: the same restore stays pending
+until that exact handle closes. Current source skips the previsit and preserves
+one target and the full original state. This validates an already integrated
+guard against a controlled mechanism, not the historical merchant's behavior.
+
+A nonsecret permanent unit regression is proposed in exact patch
+`447f8a3db3a43449a1adc3a0b2fbbd6d09d32f9376f6772d04a482530c215aef`.
+The same owning unit fails with the old guard and passes with current source;
+all 20 old assertions are retained. Independent review accepts controlled
+regression scope only. Natural 60-second timeout and held-restore SIGTERM
+controls verify owned browser cleanup. No proposed source is applied.
+
+The original open handle and inner wait were not captured. Saved state does not
+record those handles, so historical U5 and attribution remain OPEN. Evidence:
+plan:.context/unresolved-six-20261029/storage-tunnel/U5-REPORT.md.

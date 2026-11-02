@@ -33,6 +33,7 @@ export interface GraphCaller {
   userId: string;
   rootAgentId: string;
   self: GraphSelf;
+  accountAccess?: boolean;
 }
 
 export class AgentGraphError extends Error {
@@ -54,7 +55,12 @@ export async function callerForAgent(agentId: string): Promise<GraphCaller> {
   if (agent === null) throw new AgentGraphError(404, 'Agent not found');
   const rootAgentId = await graphRepo.findGraphRootId(agent.id, agent.userId);
   if (rootAgentId === null) throw new AgentGraphError(404, 'Agent not found');
-  return { userId: agent.userId, rootAgentId, self: { kind: 'agent', id: agent.id } };
+  return {
+    userId: agent.userId,
+    rootAgentId,
+    self: { kind: 'agent', id: agent.id },
+    accountAccess: true,
+  };
 }
 
 /**
@@ -266,6 +272,7 @@ export function refreshCodeSessionToken(claims: AgentGraphClaims): {
     ownerAgentId: claims.ownerAgentId,
     sessionId: claims.sessionId,
     provider: claims.provider,
+    accountAccess: claims.accountAccess,
   });
   return { token, expires_at: expiresAt };
 }

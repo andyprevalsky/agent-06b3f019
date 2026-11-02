@@ -4,9 +4,8 @@
 
 import { resolveAgentProjectId } from './agentProject';
 import { randomUUID } from '../../providers/crypto';
-import { startAgentWorkflowExecution } from '../../providers/temporal';
-import { bindStartedRunIdentity } from '../../providers/workflowGeneration';
-import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/chat';
+import { handleChatMessage } from '../../providers/chat';
+import { startDirectWorkflow } from './agentDirectStartService';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
 import { deleteAgentRecursive as killAgentRecursive } from '../../providers/agentKill';
 import { assertCodeSessionShareTarget, recordCodeSessionShare } from './agentCodeSessionShare';
@@ -73,40 +72,6 @@ function runPostCreateSideEffects(
 }
 
 /* c8 ignore start -- startSubAgentWorkflow, startDirectWorkflow, startChatMode require Temporal/GitHub/LLM infrastructure */
-/** Start root agent directly in plan/execute (bypass chat). */
-async function startDirectWorkflow(
-  body: CreateAgentBody,
-  agentDbId: string,
-  userId: string,
-  verifier: { type: string },
-  priceLimitCents: number
-): Promise<string> {
-  const execution = await startAgentWorkflowExecution({
-    agentId: agentDbId,
-    userId,
-    goal: body.goal,
-    model: body.model,
-    reasoningMaxTokens: body.reasoning_max_tokens,
-    verifier: { type: verifier.type },
-    ...(body.task_queue !== undefined ? { taskQueue: body.task_queue } : {}),
-    startPhase: body.start_phase!,
-    ...(body.max_iterations !== undefined ? { maxIterations: body.max_iterations } : {}),
-    priceLimitCents,
-    ...(body.fast_mode_cache_enabled !== undefined
-      ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
-      : {}),
-    ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
-    ...(body.memory_enabled !== undefined ? { memoryEnabled: body.memory_enabled } : {}),
-    ...(body.context_gates !== undefined ? { contextGates: body.context_gates } : {}),
-  });
-  // temporalWorkflowId was set during createAgentTransaction (see comment on
-  // startSubAgentWorkflow above); bind the run so cleanup can tell this
-  // generation from a later follow-up that reuses the same Workflow ID.
-  await bindStartedRunIdentity(agentDbId, execution);
-  await broadcastAgentModeStarted(agentDbId);
-  return execution.workflowId;
-}
-
 /** Start root agent in chat mode (fire-and-forget). */
 async function startChatMode(
   body: CreateAgentBody,
@@ -153,6 +118,8 @@ async function resolveSubAgentBenchmarkFlag(
 
 /** Server-side create options that are not part of the public request body. */
 export interface CreateAgentOptions {
+  /** Internal independent spawn: recorded atomically before its workflow starts. */
+  graphSpawn?: { title: string; folderId: string; requestHash: string };
   /** Root repository for code sessions, persisted in the create transaction. */
   githubRepoUrl?: string;
   /**
@@ -248,12 +215,29 @@ export async function createAgent(
     workflowTaskQueue: body.task_queue,
     ...(await serverCreateFields(body, userId, isSubAgent, options)),
     projectId,
+    ...(options.graphSpawn === undefined
+      ? {}
+      : {
+          title: options.graphSpawn.title,
+          folderId: options.graphSpawn.folderId,
+          graphSpawnHash: options.graphSpawn.requestHash,
+        }),
     taskPath,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;
   await recordCodeSessionShare(body, userId, agent.agent.id);
 
-  const workflowId = await launchAgentWorkflow(body, agent, userId, isSubAgent, agentId, verifier);
+  const workflowId = await launchAgentWorkflow(
+    body,
+    agent,
+    userId,
+    isSubAgent,
+    agentId,
+    verifier,
+    options.graphSpawn !== undefined
+  );
+  if (options.graphSpawn !== undefined)
+    await repo.updateAgent(agentId, { temporalWorkflowStartPending: false });
 
   runPostCreateSideEffects(agent.agent.id, archiveStartFixture);
 
@@ -267,7 +251,8 @@ async function launchAgentWorkflow(
   userId: string,
   isSubAgent: boolean,
   agentId: string,
-  verifier: { type: 'FLOAT_LLM_JUDGE' }
+  verifier: { type: 'FLOAT_LLM_JUDGE' },
+  independent = false
 ): Promise<string | null> {
   if (isSubAgent) {
     try {
@@ -294,7 +279,14 @@ async function launchAgentWorkflow(
     }
   }
   if (body.start_phase !== undefined) {
-    return startDirectWorkflow(body, agent.agent.id, userId, verifier, agent.agent.priceLimitCents);
+    return startDirectWorkflow(
+      body,
+      agent.agent.id,
+      userId,
+      verifier,
+      agent.agent.priceLimitCents,
+      independent
+    );
   }
   await repo.updateAgent(agent.agent.id, { status: 'ACTIVE' });
   void startChatMode(body, agent.agent.id, userId);
