@@ -440,6 +440,32 @@ def adjudicate(state: dict, report: dict) -> None:
         state["ready"] = state["phase"] == "ready"
 
 
+def reexecute(state: dict, occurrence_id: str) -> None:
+    """Observation loss only: an incomplete UNVERIFIED occurrence re-runs its bound gate unchanged.
+
+    No attribution, waiver, skip or credit: the native UNVERIFIED record stays in history with an
+    audit reason and the gate is routed into the repair set exactly like "execution required".
+    """
+    if state["phase"] != "triage" or occurrence_id not in state.get("pending", []):
+        raise ValueError("re-execution is only accepted for an occurrence still awaiting RCA")
+    failure = next((f for f in state["failures"] if f["id"] == occurrence_id), None)
+    if failure is None:
+        raise ValueError("unknown occurrence")
+    if failure.get("rca") or failure.get("disposition") or failure.get("repair_agent"):
+        raise ValueError("occurrence already carries an attribution or handoff; use triage")
+    if failure.get("native_result") != "UNVERIFIED" or failure.get("complete"):
+        raise ValueError("only an incomplete UNVERIFIED occurrence (coordinator/observation loss) can be "
+                         "re-executed; a completed or failed test needs /RCA attribution")
+    failure["disposition"] = "execution required"
+    failure["reexecution"] = {"reason": "observation loss; re-executing unchanged gate", "at": time.time(),
+                              "native_result": failure["native_result"]}
+    state["pending"] = [i for i in state["pending"] if i != occurrence_id]
+    state["repair_gates"] = sorted(set(state["repair_gates"]) | {failure["gate"]})
+    if not state["pending"]:
+        state.pop("pending")
+        state["phase"] = "needs-focused-plan"
+
+
 def focused_plan(state: dict, plan: dict, payload: dict) -> None:
     if state["phase"] != "needs-focused-plan":
         raise ValueError("focused plan is only accepted for diagnosed failures")
@@ -657,7 +683,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rca", "verify", "report", "resolve", "complete"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rca", "verify", "report", "resolve", "complete", "reexecute"])
     parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
     parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")
     parser.add_argument("--require-resolved", action="store_true",
@@ -708,6 +734,8 @@ def main(argv: list[str] | None = None) -> int:
                         job.result()
             elif args.action == "resolve":
                 resolve_post_merge(state, args.occurrence, args.repair_agent)
+            elif args.action == "reexecute":
+                reexecute(state, args.occurrence)
             elif args.action == "complete":
                 # Post-merge completion (Step 12a / before the final scorecard): every packet dispatched and resolved.
                 blocked = pending_completion_block(state)

@@ -383,6 +383,40 @@ class Cycle(unittest.TestCase):
         self.assertEqual([], self.state['pending_post_merge'])
 
 
+    def test_observation_loss_reexecutes_the_bound_gate_without_attribution_or_credit(self):
+        self.state['phase'] = 'initial'
+        lost = {**self.result(a='UNVERIFIED', b='PASS'), 'complete': False,
+                'case_complete': {'a': False, 'b': True}, 'reason': 'coordinator lost the outer exit'}
+        c.advance(self.state, [lost, self.result('ui', c='PASS')])
+        occurrence = self.state['failures'][-1]
+        self.assertEqual(('UNVERIFIED', False), (occurrence['native_result'], occurrence['complete']))
+        # refusals: unknown id, a FAIL occurrence, a complete occurrence, an occurrence with a handoff
+        with self.assertRaisesRegex(ValueError, 'unknown occurrence|awaiting RCA'):
+            c.reexecute(self.state, 'no-such-id')
+        for mutation, message in (({'native_result': 'FAIL'}, 'needs /RCA attribution'),
+                                  ({'complete': True}, 'needs /RCA attribution'),
+                                  ({'repair_agent': 'https://boxes.dev/thread/thr_x'}, 'already carries')):
+            with self.subTest(mutation=mutation):
+                trial = copy.deepcopy(self.state); next(f for f in trial['failures'] if f['id'] == occurrence['id']).update(mutation)
+                with self.assertRaisesRegex(ValueError, message):
+                    c.reexecute(trial, occurrence['id'])
+        c.reexecute(self.state, occurrence['id'])
+        self.assertEqual('needs-focused-plan', self.state['phase']); self.assertEqual(['api'], self.state['repair_gates'])
+        self.assertNotIn('pending', self.state); self.assertEqual({}, self.state['skips']); self.assertFalse(self.state['ready'])
+        kept = next(f for f in self.state['failures'] if f['id'] == occurrence['id'])
+        self.assertEqual('UNVERIFIED', kept['native_result']); self.assertNotIn('rca', kept)
+        self.assertEqual('observation loss; re-executing unchanged gate', kept['reexecution']['reason'])
+        # the repair sequence executes the BOUND original command; a substitute is refused
+        gate = self.plan['gates'][1]
+        with self.assertRaises(ValueError):
+            c.focused_plan(self.state, self.plan, {'source': self.state['source'], 'gates': {'api': {'command': ['false'], 'checks': ['b']}}})
+        c.focused_plan(self.state, self.plan, {'source': self.state['source'], 'gates': {'api': {'command': gate['command'], 'checks': ['a']}}})
+        for expected in ('focused', 'failed-gates', 'quick', 'final'):
+            self.assertEqual(expected, self.state['phase'])
+            c.run_phase(self.plan, self.state, self.directory, self.root)
+        self.assertTrue(self.state['ready'])
+        self.assertEqual({'a': 'PASS', 'b': 'PASS'}, next(r for r in self.state['attempts'][-1]['results'] if r['gate'] == 'api')['cases'])
+
     def test_quick_timeout_bound_is_120_seconds(self):
         with patch.object(c, 'run_command', return_value=(0, False, False, False)) as runner:
             c.execute(self.plan['gates'][0], self.state, self.directory, self.root)
