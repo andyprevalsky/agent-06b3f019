@@ -1480,88 +1480,46 @@ async def classify_evaluate_cdp_stall(
     input_page: Optional[Any] = None,
     playwright_browser: Optional[Any] = None,
     timeout_s: float = 2.0,
+    probe: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Distinguish renderer-main-thread freeze from browser-process / CDP transport death.
+    """Compare fixed renderer/browser reads on existing owned CDP sessions.
 
-    Mirrors agents/tests/e2e/steel_cpu_diagnostic.py:
-    - renderer Runtime.evaluate("1+1") blocks when the page JS thread is pinned
-    - Browser.getVersion stays responsive on the browser process even then
+    The old Playwright attachment path could wait indefinitely for an abort
+    acknowledgement during timeout cancellation. No diagnostic session or SDK
+    task is created now. Missing binding is uncertainty, never renderer failure.
     """
+    from browser_tools.cdp_probe import ProbeBindingUnavailable, ProbeReadTimeout
+
     classification: Dict[str, Any] = {
-        "renderer": "skipped",
-        "browser": "skipped",
-        "verdict": "unknown",
+        "renderer": "skipped", "browser": "skipped", "verdict": "unknown",
     }
-
-    async def _renderer_ping() -> str:
-        if input_page is None:
-            return "skipped"
-        context = getattr(input_page, "context", None)
-        if context is None or not hasattr(context, "new_cdp_session"):
-            return "skipped"
-        t0 = time_module.monotonic()
-        page_cdp = None
+    if probe is None:
+        classification.update(renderer="error", browser="error",
+                              renderer_error="CDP probe binding unavailable",
+                              browser_error="CDP probe binding unavailable")
+        return classification
+    for kind in ("renderer", "browser"):
+        started = time_module.monotonic()
         try:
-            # Attachment itself sends CDP commands and can hang on the same
-            # dead transport we are diagnosing. Share the existing probe budget.
-            async with asyncio.timeout(timeout_s):
-                page_cdp = await context.new_cdp_session(input_page)
-                await page_cdp.send(
-                    "Runtime.evaluate",
-                    {"expression": "1+1", "returnByValue": True},
-                )
-            classification["renderer_ms"] = round((time_module.monotonic() - t0) * 1000)
-            return "ok"
-        except asyncio.TimeoutError:
-            classification["renderer_ms"] = round((time_module.monotonic() - t0) * 1000)
-            if page_cdp is None:
-                # No renderer probe was sent: do not authorize hard renderer
-                # recovery merely because its CDP session could not attach.
-                classification["renderer_error"] = "TimeoutError:CDP session attachment timed out"
-                return "error"
-            return "frozen"
-        except Exception as exc:
-            classification["renderer_error"] = f"{type(exc).__name__}:{extract_error_message(exc)[:120]}"
-            return "error"
-        finally:
-            if page_cdp is not None:
-                with suppress(Exception):
-                    await asyncio.wait_for(page_cdp.detach(), timeout=0.5)
-
-    async def _browser_ping() -> str:
-        if playwright_browser is None or not hasattr(playwright_browser, "new_browser_cdp_session"):
-            return "skipped"
-        t0 = time_module.monotonic()
-        browser_cdp = None
-        try:
-            async with asyncio.timeout(timeout_s):
-                browser_cdp = await playwright_browser.new_browser_cdp_session()
-                await browser_cdp.send("Browser.getVersion")
-            classification["browser_ms"] = round((time_module.monotonic() - t0) * 1000)
-            return "ok"
-        except asyncio.TimeoutError:
-            classification["browser_ms"] = round((time_module.monotonic() - t0) * 1000)
-            if browser_cdp is None:
-                classification["browser_error"] = "TimeoutError:CDP session attachment timed out"
-                return "error"
-            return "frozen"
-        except Exception as exc:
-            classification["browser_error"] = f"{type(exc).__name__}:{extract_error_message(exc)[:120]}"
-            return "error"
-        finally:
-            if browser_cdp is not None:
-                with suppress(Exception):
-                    await asyncio.wait_for(browser_cdp.detach(), timeout=0.5)
-
-    classification["renderer"] = await _renderer_ping()
-    classification["browser"] = await _browser_ping()
-    rend = classification["renderer"]
-    brow = classification["browser"]
-    if rend == "frozen" and brow == "ok":
+            await probe.read(kind, timeout_s)
+            classification[kind] = "ok"
+        except ProbeReadTimeout as error:
+            classification[kind] = "frozen" if error.sent else "error"
+            if not error.sent:
+                classification[kind + "_error"] = "CDP probe send unconfirmed"
+        except ProbeBindingUnavailable:
+            classification[kind] = "error"
+            classification[kind + "_error"] = "CDP probe binding unavailable or changed"
+        except Exception:
+            classification[kind] = "error"
+            classification[kind + "_error"] = "CDP probe request failed"
+        classification[kind + "_ms"] = round((time_module.monotonic() - started) * 1000)
+    renderer, browser = classification["renderer"], classification["browser"]
+    if renderer == "frozen" and browser == "ok":
         classification["verdict"] = "renderer_main_thread_blocked"
-    elif rend == "frozen" and brow == "frozen":
+    elif renderer == "frozen" and browser == "frozen":
         classification["verdict"] = "cdp_or_browser_process_unresponsive"
-    elif rend == "ok":
+    elif renderer == "ok":
         classification["verdict"] = "renderer_responsive_after_timeout"
     return classification
 

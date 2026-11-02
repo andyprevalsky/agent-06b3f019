@@ -16068,6 +16068,8 @@ async def test_nested_action_timeout_keeps_actual_deadline_owner():
         action_task=asyncio.current_task(),
         input_page=None,
         playwright_browser=None,
+        dom_service=None,
+        tab_focus_cache=SimpleNamespace(target_ids={}),
         agent_id="owned",
         task_id="owned-task",
         session_id="owned-session",
@@ -17634,114 +17636,278 @@ async def test_alchemy_evaluate_js_completes_on_healthy_canvas():
             await browser.close()
 
 
-async def test_cdp_stall_probe_bounds_session_attachment():
-    """R84: a dead CDP attachment must not trap post-action diagnostics."""
-    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
-    for blocked in ("renderer", "browser", "both"):
-        cancelled = []
-        async def hang(label):
-            try:
+@contextlib.asynccontextmanager
+async def _owned_probe_fixture(*, renderer="ok", browser="ok", identity=None):
+    import websockets.exceptions
+    from cdp_use.client import CDPClient
+    from browser_tools.cdp_probe import OwnedCdpProbe
+    class Socket:
+        def __init__(self):
+            self.sent = []
+            self.replies = asyncio.Queue()
+        async def send(self, raw):
+            message = json.loads(raw)
+            self.sent.append(message)
+            kind = "renderer" if message["method"] == "Runtime.evaluate" else "browser"
+            mode = renderer if kind == "renderer" else browser
+            if mode == "send_block":
                 await asyncio.Future()
-            finally:
-                cancelled.append(label)
-        renderer = SimpleNamespace(send=AsyncMock(return_value={}), detach=AsyncMock())
-        browser = SimpleNamespace(send=AsyncMock(return_value={}), detach=AsyncMock())
-        async def page_attach(page):
-            if blocked in ("renderer", "both"):
-                await hang("renderer")
-            return renderer
-        async def browser_attach():
-            if blocked in ("browser", "both"):
-                await hang("browser")
-            return browser
-        page = SimpleNamespace(context=SimpleNamespace(new_cdp_session=page_attach))
-        host = SimpleNamespace(new_browser_cdp_session=browser_attach)
+            if mode == "ok":
+                result = {"result": {"value": 2}} if kind == "renderer" else {"product": "test"}
+                await self.replies.put(json.dumps({"id": message["id"], "result": result}))
+            elif mode == "error":
+                await self.replies.put(json.dumps({"id": message["id"], "error": {"message": "test"}}))
+        async def recv(self):
+            return await self.replies.get()
+    socket = Socket()
+    client = SimpleNamespace(ws=socket, msg_id=0, pending_requests={})
+    flags = identity if identity is not None else {"current": True, "renderer": True}
+    probe = OwnedCdpProbe(client, lambda: flags["current"], "owned-session", lambda: flags["renderer"])
+    reader = asyncio.create_task(CDPClient._handle_messages(client))
+    try:
+        yield probe, client, socket, flags
+    finally:
+        reader.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reader
+        assert client.pending_requests == {}, "probe request escaped its owner"
+
+
+async def test_cdp_probe_does_not_wait_for_playwright_abort_ack():
+    """Same deadline assertion against the old SDK and new owned transport."""
+    import inspect
+    from types import MethodType
+    from playwright._impl._connection import Channel, Connection, ProtocolCallback
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+    sdk_calls = []
+    connection = SimpleNamespace(
+        _error=None,
+        _transport=SimpleNamespace(
+            on_error_future=asyncio.get_running_loop().create_future(),
+            send=lambda message: sdk_calls.append(message["method"]),
+        ),
+    )
+    def send(*args):
+        sdk_calls.append("attach")
+        return ProtocolCallback(asyncio.get_running_loop(), 1)
+    connection._send_message_to_server = send
+    connection._abort = MethodType(Connection._abort, connection)
+    channel = SimpleNamespace(_connection=connection, _object=SimpleNamespace(_guid="context"))
+    async def attach(page):
+        return await Channel._inner_send(channel, "newCDPSession", lambda _: None, {}, False)
+    legacy_page = SimpleNamespace(context=SimpleNamespace(new_cdp_session=attach))
+    async with _owned_probe_fixture(renderer="pending") as (probe, client, socket, flags):
+        kwargs = {"input_page": legacy_page, "timeout_s": .01}
+        if "probe" in inspect.signature(classify_evaluate_cdp_stall).parameters:
+            kwargs["probe"] = probe
+        task = asyncio.create_task(classify_evaluate_cdp_stall(**kwargs))
         try:
-            result = await asyncio.wait_for(classify_evaluate_cdp_stall(
-                input_page=page, playwright_browser=host, timeout_s=0.02), timeout=0.3)
-        except asyncio.TimeoutError:
-            raise AssertionError(f"unbounded CDP attachment: {blocked}")
-        assert result["verdict"] != "renderer_main_thread_blocked", result
-        for name, session in (("renderer", renderer), ("browser", browser)):
-            if blocked in (name, "both"):
-                assert result[name] == "error"
-                assert result[name + "_error"] == "TimeoutError:CDP session attachment timed out"
-                assert name in cancelled
-                session.send.assert_not_awaited()
-                session.detach.assert_not_awaited()
-            else:
-                assert result[name] == "ok"
-                session.detach.assert_awaited_once()
+            done, _ = await asyncio.wait({task}, timeout=.15)
+            assert done, "probe deadline stuck awaiting Playwright abort acknowledgement"
+            result = task.result()
+            assert result["renderer"] == "frozen" and result["browser"] == "ok"
+            assert client.pending_requests == {}
+            assert sdk_calls == []
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+async def test_cdp_stall_probe_bounds_session_attachment():
+    """No attachment is attempted; absent target binding is not renderer failure."""
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+    async with _owned_probe_fixture() as (probe, client, socket, flags):
+        flags["renderer"] = False
+        result = await classify_evaluate_cdp_stall(probe=probe, timeout_s=.02)
+        assert result["renderer"] == "error" and result["browser"] == "ok"
+        assert result["verdict"] == "unknown"
+        assert [m["method"] for m in socket.sent] == ["Browser.getVersion"]
+    result = await classify_evaluate_cdp_stall(timeout_s=.02)
+    assert result["verdict"] == "unknown" and result["renderer"] == "error"
 
 
 async def test_cdp_stall_probe_preserves_send_and_cancellation():
     from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
-    for stage in ("healthy", "send", "cancel", "foreign_error"):
-        entered = asyncio.Event()
-        detached = []
-        async def send(*args):
-            if stage == "send":
-                await asyncio.Future()
-            return {}
-        async def detach():
-            detached.append(True)
-        cdp = SimpleNamespace(send=send, detach=detach)
-        async def attach(page):
-            if stage == "cancel":
-                entered.set()
-                await asyncio.Future()
-            if stage == "foreign_error":
-                raise RuntimeError("attach unavailable")
-            return cdp
-        page = SimpleNamespace(context=SimpleNamespace(new_cdp_session=attach))
-        task = asyncio.create_task(classify_evaluate_cdp_stall(input_page=page, timeout_s=0.02))
-        if stage == "cancel":
-            await entered.wait()
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-            assert detached == []
-            continue
-        result = await asyncio.wait_for(task, 0.3)
-        assert result["renderer"] == {"healthy": "ok", "send": "frozen", "foreign_error": "error"}[stage]
-        assert result["browser"] == "skipped"
-        assert bool(detached) == (stage != "foreign_error")
+    for mode, expected in (("ok", "ok"), ("pending", "frozen"), ("error", "error"), ("send_block", "error")):
+        async with _owned_probe_fixture(renderer=mode) as (probe, client, socket, flags):
+            result = await asyncio.wait_for(classify_evaluate_cdp_stall(probe=probe, timeout_s=.02), .3)
+            assert result["renderer"] == expected
+            assert client.pending_requests == {}
+    async with _owned_probe_fixture(renderer="pending") as (probe, client, socket, flags):
+        task = asyncio.create_task(classify_evaluate_cdp_stall(probe=probe, timeout_s=1))
+        while not socket.sent:
+            await asyncio.sleep(0)
+        task.cancel("owner cancelled")
+        with pytest.raises(asyncio.CancelledError, match="owner cancelled"):
+            await task
+        assert client.pending_requests == {}
+        assert len(socket.sent) == 1
 
 
 async def test_cdp_stall_probe_keeps_renderer_browser_distinction():
     from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
-    for browser_frozen in (False, True):
-        async def renderer_send(*args):
-            await asyncio.Future()
-        async def browser_send(*args):
-            if browser_frozen:
-                await asyncio.Future()
-            return {}
-        renderer = SimpleNamespace(send=renderer_send, detach=AsyncMock())
-        browser = SimpleNamespace(send=browser_send, detach=AsyncMock())
-        page = SimpleNamespace(context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=renderer)))
-        host = SimpleNamespace(new_browser_cdp_session=AsyncMock(return_value=browser))
-        result = await asyncio.wait_for(classify_evaluate_cdp_stall(
-            input_page=page, playwright_browser=host, timeout_s=0.02), 0.3)
-        assert result["renderer"] == "frozen"
-        assert result["browser"] == ("frozen" if browser_frozen else "ok")
-        assert result["verdict"] == ("cdp_or_browser_process_unresponsive" if browser_frozen
-                                    else "renderer_main_thread_blocked")
-        renderer.detach.assert_awaited_once()
-        browser.detach.assert_awaited_once()
-    # Cancellation after attachment must detach that exact acquired session.
-    entered = asyncio.Event()
-    async def pending_send(*args):
-        entered.set()
-        await asyncio.Future()
-    renderer = SimpleNamespace(send=pending_send, detach=AsyncMock())
-    page = SimpleNamespace(context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=renderer)))
-    task = asyncio.create_task(classify_evaluate_cdp_stall(input_page=page, timeout_s=1))
-    await entered.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    renderer.detach.assert_awaited_once()
+    for renderer, browser, verdict in (("pending", "ok", "renderer_main_thread_blocked"),
+                                      ("pending", "pending", "cdp_or_browser_process_unresponsive"),
+                                      ("ok", "ok", "renderer_responsive_after_timeout")):
+        async with _owned_probe_fixture(renderer=renderer, browser=browser) as (probe, client, socket, flags):
+            result = await asyncio.wait_for(classify_evaluate_cdp_stall(probe=probe, timeout_s=.02), .3)
+            assert result["verdict"] == verdict
+            assert [m["method"] for m in socket.sent] == ["Runtime.evaluate", "Browser.getVersion"]
+            assert socket.sent[0]["sessionId"] == "owned-session"
+            assert "sessionId" not in socket.sent[1]
+
+
+async def test_owned_cdp_probe_expiry_identity_and_late_reply():
+    from browser_tools.cdp_probe import bind_native_cdp_probe, ProbeBindingUnavailable, ProbeReadTimeout
+    async with _owned_probe_fixture(renderer="pending") as (probe, client, socket, flags):
+        unrelated = asyncio.get_running_loop().create_future()
+        client.pending_requests[900] = unrelated
+        with pytest.raises(ProbeReadTimeout):
+            await probe.read("renderer", .01)
+        assert client.pending_requests == {900: unrelated}
+        await socket.replies.put(json.dumps({"id": 1, "result": {"result": {"value": 99}}}))
+        await asyncio.sleep(0)
+        assert not unrelated.done()
+        assert (await probe.read("browser", .1))["product"] == "test"
+        client.pending_requests.pop(900)
+        unrelated.cancel()
+        flags["current"] = False
+        with pytest.raises(ProbeBindingUnavailable):
+            await probe.read("browser", .1)
+        assert len(socket.sent) == 2
+    async with _owned_probe_fixture() as (unused, client, socket, flags):
+        class BoundPage:
+            def is_closed(self):
+                return False
+        page = BoundPage()
+        attached = SimpleNamespace(target_id="target", session_id="session", cdp_client=client)
+        manager = SimpleNamespace(_target_sessions={"target": {"session"}}, _sessions={"session": attached},
+                                  _targets={"target": SimpleNamespace(target_id="target", target_type="page")})
+        session = SimpleNamespace(_cdp_client_root=client, session_manager=manager, agent_focus_target_id="target")
+        service = SimpleNamespace(session=session)
+        browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[page])], is_connected=lambda: True)
+        probe = bind_native_cdp_probe(service, page, SimpleNamespace(target_ids={page: "target"}), browser)
+        assert probe is not None
+        assert (await probe.read("renderer", .1))["result"]["value"] == 2
+        manager._target_sessions["target"].clear()
+        with pytest.raises(ProbeBindingUnavailable):
+            await probe.read("renderer", .1)
+        service.session = SimpleNamespace()
+        with pytest.raises(ProbeBindingUnavailable):
+            await probe.read("browser", .1)
+
+
+async def test_native_probe_rejects_reconnect_before_first_read():
+    from browser_tools.cdp_probe import bind_native_cdp_probe, ProbeBindingUnavailable
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+    for replacement in ("socket", "pending"):
+        async with _owned_probe_fixture() as (_, client, socket, flags):
+            class Page:
+                def is_closed(self):
+                    return False
+            page = Page()
+            attached = SimpleNamespace(target_id="target", session_id="sid", cdp_client=client)
+            manager = SimpleNamespace(_target_sessions={"target": {"sid"}}, _sessions={"sid": attached},
+                                      _targets={"target": SimpleNamespace(target_id="target", target_type="page")})
+            session = SimpleNamespace(_cdp_client_root=client, session_manager=manager, agent_focus_target_id="target")
+            service = SimpleNamespace(session=session)
+            browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[page])], is_connected=lambda: True)
+            probe = bind_native_cdp_probe(service, page, SimpleNamespace(target_ids={page: "target"}), browser)
+            old_pending = client.pending_requests
+            if replacement == "socket":
+                client.ws = SimpleNamespace(send=AsyncMock(), recv=socket.recv)
+            else:
+                client.pending_requests = {}
+            for kind in ("renderer", "browser"):
+                with pytest.raises(ProbeBindingUnavailable):
+                    await probe.read(kind, .01)
+            result = await classify_evaluate_cdp_stall(probe=probe, timeout_s=.01)
+            assert result["renderer"] == result["browser"] == "error"
+            assert result["verdict"] == "unknown"
+            assert old_pending == {} and client.pending_requests == {}
+            assert socket.sent == []
+            if replacement == "socket":
+                client.ws.send.assert_not_awaited()
+
+
+async def test_native_probe_rejects_changed_binding_and_preserves_foreign_requests():
+    from browser_tools.cdp_probe import bind_native_cdp_probe, ProbeBindingUnavailable
+    for mode in ("focus", "session", "socket", "page", "membership", "target"):
+        async with _owned_probe_fixture(renderer="pending") as (_, client, socket, flags):
+            class Page:
+                closed = False
+                def is_closed(self):
+                    return self.closed
+            page = Page()
+            context = SimpleNamespace(pages=[page])
+            browser = SimpleNamespace(contexts=[context], is_connected=lambda: True)
+            attached = SimpleNamespace(target_id="target", session_id="sid", cdp_client=client)
+            target = SimpleNamespace(target_id="target", target_type="page")
+            manager = SimpleNamespace(_target_sessions={"target": {"sid"}}, _sessions={"sid": attached}, _targets={"target": target})
+            session = SimpleNamespace(_cdp_client_root=client, session_manager=manager, agent_focus_target_id="target")
+            service = SimpleNamespace(session=session)
+            probe = bind_native_cdp_probe(service, page, SimpleNamespace(target_ids={page: "target"}), browser)
+            task = asyncio.create_task(probe.read("renderer", .1))
+            while not socket.sent:
+                await asyncio.sleep(0)
+            if mode == "focus":
+                session.agent_focus_target_id = "foreign"
+            elif mode == "session":
+                service.session = SimpleNamespace()
+            elif mode == "socket":
+                client.ws = object()
+            elif mode == "page":
+                page.closed = True
+            elif mode == "membership":
+                context.pages = []
+            else:
+                manager._targets["target"] = SimpleNamespace(target_id="target", target_type="page")
+            await socket.replies.put(json.dumps({"id": socket.sent[0]["id"], "result": {"result": {"value": 2}}}))
+            with pytest.raises(ProbeBindingUnavailable):
+                await task
+            assert client.pending_requests == {}
+    async with _owned_probe_fixture() as (probe, client, socket, flags):
+        with pytest.raises(ValueError):
+            await probe.read("Page.navigate", .01)
+        assert socket.sent == []
+
+
+@contextlib.asynccontextmanager
+async def _local_raw_probe_browser(playwright):
+    """Local-only real Chromium fixture; same cdp-use owner as production."""
+    import tempfile
+    from cdp_use.client import CDPClient
+    with tempfile.TemporaryDirectory(prefix="rose-cdp-probe-") as profile:
+        context = await playwright.chromium.launch_persistent_context(
+            profile, headless=True, args=["--remote-debugging-port=0"],
+        )
+        browser = context.browser
+        assert browser is not None
+        lines = (Path(profile) / "DevToolsActivePort").read_text().splitlines()
+        client = CDPClient(f"ws://127.0.0.1:{int(lines[0])}{lines[1]}")
+        async def for_page(page):
+            from browser_tools.cdp_probe import OwnedCdpProbe
+            native = await page.context.new_cdp_session(page)
+            try:
+                target = (await native.send("Target.getTargetInfo"))["targetInfo"]["targetId"]
+            finally:
+                await native.detach()
+            result = await client.send_raw("Target.attachToTarget", {"targetId": target, "flatten": True})
+            sid = result["sessionId"]
+            return OwnedCdpProbe(client, lambda: client.ws is not None,
+                                 sid, lambda: not page.is_closed())
+        try:
+            await client.start()
+            yield browser, for_page
+        finally:
+            try:
+                assert client.pending_requests == {}, "probe request leaked before fixture shutdown"
+            finally:
+                try:
+                    await client.stop()
+                finally:
+                    await context.close()
 
 
 async def test_renderer_block_matches_evaluate_timeout_recovery_signature():
@@ -17767,106 +17933,107 @@ async def test_renderer_block_matches_evaluate_timeout_recovery_signature():
                 proc.kill()
 
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
-        try:
-            page = await browser.new_page(viewport={"width": 1280, "height": 800})
-            await page.set_content("<canvas width='480' height='150'></canvas><button disabled>Accept</button>")
-            cdp = await page.context.new_cdp_session(page)
+        async with _local_raw_probe_browser(playwright) as (browser, probe_for_page):
+            try:
+                page = await browser.new_page(viewport={"width": 1280, "height": 800})
+                await page.set_content("<canvas width='480' height='150'></canvas><button disabled>Accept</button>")
+                probe = await probe_for_page(page)
+                cdp = await page.context.new_cdp_session(page)
 
-            # Control: cancelling a long awaitPromise evaluate must not wedge CDP.
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(
+                # Control: cancelling a long awaitPromise evaluate must not wedge CDP.
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        cdp.send(
+                            "Runtime.evaluate",
+                            {
+                                "expression": (
+                                    "(async () => { await new Promise(r => setTimeout(r, 10000)); return 42; })()"
+                                ),
+                                "returnByValue": True,
+                                "awaitPromise": True,
+                            },
+                        ),
+                        timeout=0.8,
+                    )
+                await asyncio.sleep(0.2)
+                retry = await asyncio.wait_for(
                     cdp.send(
                         "Runtime.evaluate",
-                        {
-                            "expression": (
-                                "(async () => { await new Promise(r => setTimeout(r, 10000)); return 42; })()"
-                            ),
-                            "returnByValue": True,
-                            "awaitPromise": True,
-                        },
+                        {"expression": "1+1", "returnByValue": True, "awaitPromise": True},
                     ),
-                    timeout=0.8,
+                    timeout=3.0,
                 )
-            await asyncio.sleep(0.2)
-            retry = await asyncio.wait_for(
-                cdp.send(
+                assert (retry.get("result") or {}).get("value") == 2
+
+                # Block renderer without awaiting the spinning work.
+                await cdp.send(
                     "Runtime.evaluate",
-                    {"expression": "1+1", "returnByValue": True, "awaitPromise": True},
-                ),
-                timeout=3.0,
-            )
-            assert (retry.get("result") or {}).get("value") == 2
-
-            # Block renderer without awaiting the spinning work.
-            await cdp.send(
-                "Runtime.evaluate",
-                {
-                    "expression": "setTimeout(() => { while (true) {} }, 0)",
-                    "returnByValue": True,
-                    "awaitPromise": False,
-                },
-            )
-            await asyncio.sleep(0.2)
-
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(
-                    cdp.send(
-                        "Runtime.evaluate",
-                        {
-                            "expression": _ALCHEMY_STEP24_EVAL,
-                            "returnByValue": True,
-                            "awaitPromise": True,
-                        },
-                    ),
-                    timeout=2.0,
+                    {
+                        "expression": "setTimeout(() => { while (true) {} }, 0)",
+                        "returnByValue": True,
+                        "awaitPromise": False,
+                    },
                 )
+                await asyncio.sleep(0.2)
 
-            stall = await classify_evaluate_cdp_stall(
-                input_page=page,
-                playwright_browser=browser,
-                timeout_s=1.5,
-            )
-            assert stall["verdict"] == "renderer_main_thread_blocked"
-            assert stall["renderer"] == "frozen"
-            assert stall["browser"] == "ok"
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        cdp.send(
+                            "Runtime.evaluate",
+                            {
+                                "expression": _ALCHEMY_STEP24_EVAL,
+                                "returnByValue": True,
+                                "awaitPromise": True,
+                            },
+                        ),
+                        timeout=2.0,
+                    )
 
-            soft_actions = []
-            try:
-                await asyncio.wait_for(page.bring_to_front(), timeout=1.5)
-                soft_actions.append("bring_to_front")
-            except asyncio.TimeoutError:
-                soft_actions.append("bring_to_front:TimeoutError")
-            try:
-                await asyncio.wait_for(page.keyboard.press("Escape"), timeout=1.5)
-                soft_actions.append("press_escape")
-            except asyncio.TimeoutError:
-                soft_actions.append("press_escape:TimeoutError")
-            assert "bring_to_front" in soft_actions
-            assert "press_escape:TimeoutError" in soft_actions
+                stall = await classify_evaluate_cdp_stall(
+                    input_page=page,
+                    playwright_browser=browser,
+                    timeout_s=1.5, probe=probe,
+                )
+                assert stall["verdict"] == "renderer_main_thread_blocked"
+                assert stall["renderer"] == "frozen"
+                assert stall["browser"] == "ok"
 
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(
-                    cdp.send(
+                soft_actions = []
+                try:
+                    await asyncio.wait_for(page.bring_to_front(), timeout=1.5)
+                    soft_actions.append("bring_to_front")
+                except asyncio.TimeoutError:
+                    soft_actions.append("bring_to_front:TimeoutError")
+                try:
+                    await asyncio.wait_for(page.keyboard.press("Escape"), timeout=1.5)
+                    soft_actions.append("press_escape")
+                except asyncio.TimeoutError:
+                    soft_actions.append("press_escape:TimeoutError")
+                assert "bring_to_front" in soft_actions
+                assert "press_escape:TimeoutError" in soft_actions
+
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        cdp.send(
+                            "Runtime.evaluate",
+                            {"expression": "1+1", "returnByValue": True},
+                        ),
+                        timeout=1.5,
+                    )
+
+                fresh = await browser.new_page()
+                await fresh.goto("about:blank")
+                fresh_cdp = await fresh.context.new_cdp_session(fresh)
+                ok = await asyncio.wait_for(
+                    fresh_cdp.send(
                         "Runtime.evaluate",
                         {"expression": "1+1", "returnByValue": True},
                     ),
-                    timeout=1.5,
+                    timeout=2.0,
                 )
-
-            fresh = await browser.new_page()
-            await fresh.goto("about:blank")
-            fresh_cdp = await fresh.context.new_cdp_session(fresh)
-            ok = await asyncio.wait_for(
-                fresh_cdp.send(
-                    "Runtime.evaluate",
-                    {"expression": "1+1", "returnByValue": True},
-                ),
-                timeout=2.0,
-            )
-            assert (ok.get("result") or {}).get("value") == 2
-        finally:
-            await _force_close(browser)
+                assert (ok.get("result") or {}).get("value") == 2
+            finally:
+                await _force_close(browser)
 
 
 async def test_hard_recover_frozen_renderer_page_restores_evaluate():
@@ -17886,45 +18053,46 @@ async def test_hard_recover_frozen_renderer_page_restores_evaluate():
                     proc.kill()
 
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
-        try:
-            page = await browser.new_page(viewport={"width": 1280, "height": 800})
-            await page.set_content("<html><body><h1>waiver</h1></body></html>")
-            cdp = await page.context.new_cdp_session(page)
-            await cdp.send(
-                "Runtime.evaluate",
-                {
-                    "expression": "setTimeout(() => { while (true) {} }, 0)",
-                    "returnByValue": True,
-                    "awaitPromise": False,
-                },
-            )
-            await asyncio.sleep(0.2)
-            stalled = await classify_evaluate_cdp_stall(input_page=page, playwright_browser=browser, timeout_s=1.5)
-            assert stalled["verdict"] == "renderer_main_thread_blocked"
-
-            new_page, actions = await _hard_recover_frozen_renderer_page(
-                input_page=page,
-                playwright_browser=browser,
-                fallback_url="about:blank",
-            )
-            assert new_page is not None
-            assert any(a in {"new_page", "new_context_page"} or a.startswith("new_page") for a in actions)
-            recovered = await classify_evaluate_cdp_stall(
-                input_page=new_page, playwright_browser=browser, timeout_s=2.0
-            )
-            assert recovered["renderer"] == "ok"
-            cdp2 = await new_page.context.new_cdp_session(new_page)
-            result = await asyncio.wait_for(
-                cdp2.send(
+        async with _local_raw_probe_browser(playwright) as (browser, probe_for_page):
+            try:
+                page = await browser.new_page(viewport={"width": 1280, "height": 800})
+                await page.set_content("<html><body><h1>waiver</h1></body></html>")
+                probe = await probe_for_page(page)
+                cdp = await page.context.new_cdp_session(page)
+                await cdp.send(
                     "Runtime.evaluate",
-                    {"expression": "1+1", "returnByValue": True, "awaitPromise": True},
-                ),
-                timeout=3.0,
-            )
-            assert (result.get("result") or {}).get("value") == 2
-        finally:
-            await _force_close(browser)
+                    {
+                        "expression": "setTimeout(() => { while (true) {} }, 0)",
+                        "returnByValue": True,
+                        "awaitPromise": False,
+                    },
+                )
+                await asyncio.sleep(0.2)
+                stalled = await classify_evaluate_cdp_stall(input_page=page, playwright_browser=browser, timeout_s=1.5, probe=probe)
+                assert stalled["verdict"] == "renderer_main_thread_blocked"
+
+                new_page, actions = await _hard_recover_frozen_renderer_page(
+                    input_page=page,
+                    playwright_browser=browser,
+                    fallback_url="about:blank",
+                )
+                assert new_page is not None
+                assert any(a in {"new_page", "new_context_page"} or a.startswith("new_page") for a in actions)
+                recovered = await classify_evaluate_cdp_stall(
+                    input_page=new_page, playwright_browser=browser, timeout_s=2.0, probe=await probe_for_page(new_page)
+                )
+                assert recovered["renderer"] == "ok"
+                cdp2 = await new_page.context.new_cdp_session(new_page)
+                result = await asyncio.wait_for(
+                    cdp2.send(
+                        "Runtime.evaluate",
+                        {"expression": "1+1", "returnByValue": True, "awaitPromise": True},
+                    ),
+                    timeout=3.0,
+                )
+                assert (result.get("result") or {}).get("value") == 2
+            finally:
+                await _force_close(browser)
 
 
 async def test_hard_recover_frozen_renderer_page_restores_click():
@@ -17957,40 +18125,41 @@ async def test_hard_recover_frozen_renderer_page_restores_click():
             return type(exc).__name__
 
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
-        try:
-            page = await browser.new_page(viewport={"width": 1280, "height": 800})
-            await page.set_content("<html><body><button>Sign</button></body></html>")
-            assert await _timed_click(page) == "ok"
+        async with _local_raw_probe_browser(playwright) as (browser, probe_for_page):
+            try:
+                page = await browser.new_page(viewport={"width": 1280, "height": 800})
+                await page.set_content("<html><body><button>Sign</button></body></html>")
+                assert await _timed_click(page) == "ok"
 
-            cdp = await page.context.new_cdp_session(page)
-            await cdp.send(
-                "Runtime.evaluate",
-                {
-                    "expression": "setTimeout(() => { while (true) {} }, 0)",
-                    "returnByValue": True,
-                    "awaitPromise": False,
-                },
-            )
-            await asyncio.sleep(0.25)
-            stalled = await classify_evaluate_cdp_stall(input_page=page, playwright_browser=browser, timeout_s=1.5)
-            assert stalled["verdict"] == "renderer_main_thread_blocked"
-            assert await _timed_click(page) != "ok"
+                probe = await probe_for_page(page)
+                cdp = await page.context.new_cdp_session(page)
+                await cdp.send(
+                    "Runtime.evaluate",
+                    {
+                        "expression": "setTimeout(() => { while (true) {} }, 0)",
+                        "returnByValue": True,
+                        "awaitPromise": False,
+                    },
+                )
+                await asyncio.sleep(0.25)
+                stalled = await classify_evaluate_cdp_stall(input_page=page, playwright_browser=browser, timeout_s=1.5, probe=probe)
+                assert stalled["verdict"] == "renderer_main_thread_blocked"
+                assert await _timed_click(page) != "ok"
 
-            await asyncio.wait_for(page.bring_to_front(), timeout=2.0)
-            assert await _timed_click(page) != "ok", "soft bring_to_front must not restore click"
+                await asyncio.wait_for(page.bring_to_front(), timeout=2.0)
+                assert await _timed_click(page) != "ok", "soft bring_to_front must not restore click"
 
-            new_page, actions = await _hard_recover_frozen_renderer_page(
-                input_page=page,
-                playwright_browser=browser,
-                fallback_url="about:blank",
-            )
-            assert new_page is not None
-            assert any(a in {"new_page", "new_context_page"} or a.startswith("new_page") for a in actions)
-            await new_page.set_content("<html><body><button>Sign</button></body></html>")
-            assert await _timed_click(new_page) == "ok"
-        finally:
-            await _force_close(browser)
+                new_page, actions = await _hard_recover_frozen_renderer_page(
+                    input_page=page,
+                    playwright_browser=browser,
+                    fallback_url="about:blank",
+                )
+                assert new_page is not None
+                assert any(a in {"new_page", "new_context_page"} or a.startswith("new_page") for a in actions)
+                await new_page.set_content("<html><body><button>Sign</button></body></html>")
+                assert await _timed_click(new_page) == "ok"
+            finally:
+                await _force_close(browser)
 
 
 def test_action_timeout_cdp_classify_not_gated_on_evaluate():
@@ -36425,6 +36594,10 @@ async def run_all_tests():
     await r.record_async("playwright_focus_diagnostics_preserve_failure_and_cancellation", test_playwright_focus_diagnostics_preserve_failure_and_cancellation)
     await r.record_async("browser_budget_finalizer_handoff", test_browser_budget_finalizer_handoff)
     r.record("browser_budget_finalizer_guards", test_browser_budget_finalizer_guards)
+    await r.record_async("cdp_probe_does_not_wait_for_playwright_abort_ack", test_cdp_probe_does_not_wait_for_playwright_abort_ack)
+    await r.record_async("owned_cdp_probe_expiry_identity_and_late_reply", test_owned_cdp_probe_expiry_identity_and_late_reply)
+    await r.record_async("native_probe_rejects_changed_binding_and_preserves_foreign_requests", test_native_probe_rejects_changed_binding_and_preserves_foreign_requests)
+    await r.record_async("native_probe_rejects_reconnect_before_first_read", test_native_probe_rejects_reconnect_before_first_read)
     await r.record_async("cdp_stall_probe_bounds_session_attachment", test_cdp_stall_probe_bounds_session_attachment)
     await r.record_async("cdp_stall_probe_preserves_send_and_cancellation", test_cdp_stall_probe_preserves_send_and_cancellation)
     await r.record_async("cdp_stall_probe_keeps_renderer_browser_distinction", test_cdp_stall_probe_keeps_renderer_browser_distinction)

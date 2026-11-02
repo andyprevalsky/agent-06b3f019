@@ -12659,10 +12659,15 @@ Based on this feedback, I need to continue working on the task and address the i
                     classify_evaluate_cdp_stall,
                 )
 
+                from browser_tools.cdp_probe import bind_native_cdp_probe
+
                 stall: Dict[str, Any] = await classify_evaluate_cdp_stall(
                     input_page=input_page,
                     playwright_browser=playwright_browser,
                     timeout_s=2.0,
+                    probe=bind_native_cdp_probe(
+                        dom_service, input_page, tab_focus_cache, playwright_browser,
+                    ),
                 )
                 stall_log: Dict[str, Any] = {
                     "agent_id": agent_id,
