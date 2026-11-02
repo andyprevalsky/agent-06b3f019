@@ -31,12 +31,16 @@ production checks in this command, overriding older all-green, retry, escalation
 repair wording for those failures. Independent correctness/security review
 findings retain the existing Step 10 requirements; only comments about an
 exact recorded qualifying test/gate failure may reference its existing
-handoff. INTRODUCED and UNKNOWN test/gate failures remain blocking. A successful
-NOT INTRODUCED repair handoff waives that exact failure without waiting.
+handoff. INTRODUCED and UNKNOWN test/gate failures remain blocking. An evidenced
+NOT INTRODUCED failed test is retained for post-merge handoff; it does not
+block merge, and its actual post-merge handoff waives that exact failure
+without waiting for the independent repair to finish.
 External provider outages or exhausted credits are non-blocking, receive no
 handoff, and appear as alarming alerts at the very end of every scorecard.
-This workflow authorizes independent boxes.dev repair threads for those
-NOT INTRODUCED handoffs. Rose account commands remain default-off until the
+This workflow authorizes independent boxes.dev repair goals only for actual
+failed tests, created after this PR merges to main. Each owns its fix through
+its own completed deploy, at high effort and normal speed. Rose account
+commands remain default-off until the
 separate, explicitly authorized migration described in the linked policy.
 
 Diagnose every test/gate failure with `/RCA` before routing it. Its response
@@ -1740,8 +1744,9 @@ At each poll, check:
 
 **Smoke failure handling:** follow `.claude/shared/deploy-failure-policy.md`.
 Read existing repair claims before starting another investigation; send
-matching evidence, discuss uncertain matches, or spawn an independent repair
-through the policy's active backend for an evidence-backed NOT INTRODUCED failure. That handoff is
+matching evidence or discuss uncertain matches. Retain the exact failed test,
+command, scope and emitted error; dispatch its independent `/goal` only after
+this PR merges to main, through the policy's active backend. That handoff is
 non-blocking for this deploy. Do not create one repair per failed agent when
 several occurrences may share a cause, and do not spawn a repair for an
 external provider outage or exhausted credits.
@@ -2509,9 +2514,9 @@ gh pr comment "$PR_NUMBER" --body '@coderabbitai review'
 
 **Fix ALL valid issues**, regardless of whether the code was modified in this PR. "Pre-existing" or "not my code" is NOT a valid reason to skip a real bug, security issue, or correctness problem. If CodeRabbit or Claude found it, and it's a real issue, fix it. Only skip true style nits (formatting, naming preferences, etc.) that have zero correctness impact.
 
-A comment about an exact test/gate failure already handed off and recorded
-under the controlling failure policy may reference that existing waiver and
-repair link instead of duplicating its fix. This exception does not waive an
+A comment about an exact qualifying failed test may reference its recorded
+RCA and pending post-merge handoff before merge, or its actual waiver and
+repair link after dispatch, instead of duplicating its fix. This does not waive an
 independent correctness/security finding merely because it is unrelated to
 this change.
 
@@ -2520,6 +2525,7 @@ this change.
 - `[FIXED] <short solution description>` — if you fixed the issue
 - `[IGNORED] <reason>` — ONLY for pure style nits with zero correctness/security impact
 - `[DELEGATED] <failure description> — <repair-agent link>` — ONLY when the comment concerns the exact recorded qualifying NOT INTRODUCED test/gate failure already handed off under the controlling policy
+- `[POST-MERGE REPAIR] <failed test> — <RCA evidence>` — ONLY for that exact qualifying failed test before merge, while its actual handoff is deferred under the controlling policy; never invent a repair link
 
 Use `gh api` to post replies:
 
@@ -2644,6 +2650,18 @@ If `main` is already checked out in another worktree, do not force a branch dele
 ```bash
 git fetch origin main
 ```
+
+## Step 12a: Dispatch independent repairs after merge
+
+After the merge is confirmed and refs are refreshed, dispatch every pending
+NOT INTRODUCED failed-test packet under the controlling failure policy.
+Create new devboxes from current main containing `$DEPLOY_MERGED_SHA`, with
+explicit high effort and normal speed, and start each repair's `/goal` through
+its own finished deploy scorecard. Include the exact test, command, scope,
+verbatim error and original evidence. Never dispatch an observation without
+an actual failed test. Record the returned repair links in DELEGATED; do not
+wait for acknowledgement or repair completion. Failures discovered by the
+post-merge production checks use the same protocol when they occur.
 
 ## Step 13: Wait for deploys
 

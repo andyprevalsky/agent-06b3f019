@@ -69,10 +69,17 @@ inline" rule in `.claude/shared/approval-format.md`.
 
 When invoked from a repair handed off under
 `.claude/shared/deploy-failure-policy.md`, own that repair and its `/RCA` proof.
-Its originating deploy already has a waiver and does not wait for your result.
-Coordinate publication with the repository's current release owner; do not
-start a competing deployment in its workspace. New occurrences should join
-existing work through evidence and discussion. The policy's external-provider
+The handoff must identify an actually failed test, exact command and emitted
+error, scope, failure evidence and the originating merge to main. Start the
+supplied built-in `/goal` and own the fix through a passing assigned test and
+your own completed `/deploy` scorecard. Work autonomously without questions
+or expected human replies. An OPEN diagnosis, observability gap or draft PR
+does not complete this repair goal. Do not waive or re-delegate the assigned
+test. The originating deploy does not monitor or wait for your result.
+Work from current main containing its merge, in your own devbox and branch;
+coordinate concrete production overlaps with existing release work while
+carrying your deployment to completion. New occurrences should join existing
+work through evidence and discussion. The policy's external-provider
 exceptions create no repair handoff. Other user-authorized RCA work retains
 the default below.
 
