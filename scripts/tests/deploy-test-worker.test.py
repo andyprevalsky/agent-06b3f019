@@ -77,7 +77,7 @@ class Worker(unittest.TestCase):
 
     def test_real_stdio_transport_keeps_each_case_result(self):
         gate={'name':'gate','worker':'isolated-test','checks':['first','second'],
-              'case_protocol':True,'worker_recipe':self.recipe,'result_transport':'stdout',
+              'case_protocol':True,'worker_recipe':self.recipe,'result_transport':'stdout','timeout_seconds':10,
               'command':[sys.executable,str(ROOT/'scripts/deploy_test_worker.py'),
                          '--root',str(self.root),'--stdio']}
         plan={'source':self.request['source'],'gates':[
@@ -91,7 +91,7 @@ class Worker(unittest.TestCase):
     def test_partial_stdio_result_preserves_executed_peer_but_blocks_unknown(self):
         self.recipe['cases']['first']['command']=[sys.executable,'-c','raise SystemExit(7)']
         gate={'name':'gate','worker':'isolated-test','checks':['first','second'],
-              'case_protocol':True,'worker_recipe':self.recipe,'result_transport':'stdout',
+              'case_protocol':True,'worker_recipe':self.recipe,'result_transport':'stdout','timeout_seconds':10,
               'command':[sys.executable,str(ROOT/'scripts/deploy_test_worker.py'),
                          '--root',str(self.root),'--stdio']}
         plan={'source':self.request['source'],'gates':[
@@ -108,6 +108,11 @@ class Worker(unittest.TestCase):
         result=worker.execute(self.request,self.root);result['recipe_digest']='wrong'
         with self.assertRaisesRegex(ValueError,'recipe changed'):
             validate(result,self.request,1)
+
+    def test_missing_cleanup_proof_is_not_a_complete_result(self):
+        from deploy_test_result import validate
+        result=worker.execute(self.request,self.root);del result['cleanup_complete']
+        with self.assertRaises(ValueError): validate(result,self.request,1)
 
 
 if __name__=='__main__': unittest.main()

@@ -171,7 +171,7 @@ class Cycle(unittest.TestCase):
         g['command']=[sys.executable,'-c',
           "import os,json; q=json.load(open(os.environ['DEPLOY_GATE_REQUEST'])); "
           "assert q['checks']==['b']; assert 'a' in q['skips']; "
-          "json.dump({**q,'complete':True,'cases':{'b':'PASS'}},open(os.environ['DEPLOY_GATE_RESULT'],'w'))"]
+          "json.dump({**q,'complete':True,'cleanup_complete':True,'cases':{'b':'PASS'}},open(os.environ['DEPLOY_GATE_RESULT'],'w'))"]
         result=c.execute(g,self.state,self.directory,self.root)
         self.assertEqual('PASS',result['status'])
         self.assertEqual({'a':'SKIP','b':'PASS'},result['cases'])
@@ -224,7 +224,7 @@ assert len(list(p.iterdir()))==2
 
     def test_rca_dispatch_starts_while_other_gate_is_running(self):
         signal_file=self.root/'.context'/'rca-started'
-        bad="import os,json,sys; q=json.load(open(os.environ['DEPLOY_GATE_REQUEST'])); json.dump({**q,'complete':True,'cases':dict.fromkeys(q['checks'],'FAIL')},open(os.environ['DEPLOY_GATE_RESULT'],'w')); sys.exit(1)"
+        bad="import os,json,sys; q=json.load(open(os.environ['DEPLOY_GATE_REQUEST'])); json.dump({**q,'complete':True,'cleanup_complete':True,'cases':dict.fromkeys(q['checks'],'FAIL')},open(os.environ['DEPLOY_GATE_RESULT'],'w')); sys.exit(1)"
         wait="import pathlib,time; p=pathlib.Path(%r); e=time.monotonic()+3;\nwhile not p.exists() and time.monotonic()<e: time.sleep(.01)\nassert p.exists()" % str(signal_file)
         self.plan['gates'][1].update(command=[sys.executable,'-c',bad],case_protocol=True)
         self.plan['gates'][2]['command']=[sys.executable,'-c',wait]
@@ -239,6 +239,11 @@ assert len(list(p.iterdir()))==2
     def test_final_phase_rejects_pass_cache_configuration(self):
         self.plan['gates'][1]['command']=['run-deploy-stage','api','--reuse-passed']
         with self.assertRaises(ValueError): c.validate_plan(self.plan)
+
+    def test_remote_transport_cannot_run_without_its_original_deadline(self):
+        self.plan['gates'][1]['result_transport']='stdout'
+        with self.assertRaisesRegex(ValueError,'existing gate deadline'):
+            c.validate_plan(self.plan)
 
     def test_plan_removal_at_repair_boundary_is_refused(self):
         self.failure();self.state['phase']='stale'
@@ -256,7 +261,7 @@ assert len(list(p.iterdir()))==2
 
     def test_worker_exit_zero_with_failed_case_blocks(self):
         g=self.plan['gates'][1];g['case_protocol']=True
-        g['command']=[sys.executable,'-c',"import os,json; q=json.load(open(os.environ['DEPLOY_GATE_REQUEST'])); json.dump({**q,'complete':True,'cases':dict.fromkeys(q['checks'],'FAIL')},open(os.environ['DEPLOY_GATE_RESULT'],'w'))"]
+        g['command']=[sys.executable,'-c',"import os,json; q=json.load(open(os.environ['DEPLOY_GATE_REQUEST'])); json.dump({**q,'complete':True,'cleanup_complete':True,'cases':dict.fromkeys(q['checks'],'FAIL')},open(os.environ['DEPLOY_GATE_RESULT'],'w'))"]
         result=c.execute(g,self.state,self.directory,self.root)
         self.assertFalse(result['complete'])
         self.assertEqual('FAIL',result['status'])
@@ -289,16 +294,16 @@ assert len(list(p.iterdir()))==2
         c.run_phase(self.plan,self.state,self.directory,self.root)
         self.assertEqual(0,c.verify_saved(self.directory,self.root))
         (self.root/'.env').write_text('TOKEN=second')
-        self.assertEqual(1,c.verify_saved(self.directory,self.root))
+        self.assertEqual(5,c.verify_saved(self.directory,self.root))
         with self.assertRaises(ValueError): c.run_phase(self.plan,self.state,self.directory,self.root)
 
     def test_saved_verify_rejects_tampered_plan_and_wrong_head(self):
         c.run_phase(self.plan,self.state,self.directory,self.root)
         c.run_phase(self.plan,self.state,self.directory,self.root)
-        self.assertEqual(1,c.verify_saved(self.directory,self.root,'different-head'))
+        self.assertEqual(5,c.verify_saved(self.directory,self.root,'different-head'))
         saved=c.read(self.directory/'cycle.json');saved['plan']['gates'].pop()
         c.write(self.directory/'cycle.json',saved)
-        self.assertEqual(1,c.verify_saved(self.directory,self.root))
+        self.assertEqual(5,c.verify_saved(self.directory,self.root))
 
     def test_cli_runs_real_commands_and_refuses_reinitialization(self):
         plan_path=self.root/'.context/plan.json';c.write(plan_path,self.plan)
@@ -317,7 +322,13 @@ assert len(list(p.iterdir()))==2
             c.run_phase(self.plan,self.state,self.directory,self.root)
             self.assertEqual(0,pipeline.verify(self.directory,self.state['source']['head']))
             (self.root/'code').write_text('later source')
-            self.assertNotEqual(0,pipeline.verify(self.directory))
+            self.assertEqual(5,pipeline.verify(self.directory))
+
+    def test_required_staged_mode_refuses_a_legacy_green_receipt(self):
+        import run_deploy_pipeline as pipeline
+        c.write(self.directory/'receipt.json',{'status':'passed','source':self.state['source']})
+        with patch.object(pipeline,'SOURCE_ROOT',self.root):
+            self.assertEqual(2,pipeline.verify(self.directory,require_staged=True))
 
     def test_timeout_is_not_convertible_to_completed_case_skip(self):
         g=self.plan['gates'][1]

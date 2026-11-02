@@ -9,7 +9,7 @@ import sys
 from select_affected_tests import changed_files
 
 ROOT = Path(__file__).resolve().parents[1]
-EXTENSIONS = {'.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.json', '.md', '.yaml', '.yml', '.css', '.scss', '.html'}
+EXTENSIONS = {'.ts', '.tsx'}  # Preserve /deploy's existing formatting scope.
 
 
 def main() -> int:

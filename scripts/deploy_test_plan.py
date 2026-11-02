@@ -79,6 +79,8 @@ def select(template: dict, changed: list[str], result: dict, binding: dict) -> d
             gate.update(worker=worker['id'], command=worker['command'], cwd=worker.get('cwd', str(ROOT)),
                         env={**gate.get('env', {}), **worker.get('env', {})})
             gate['worker_transport'] = worker.get('transport', 'explicit')
+            if 'timeout_seconds' in worker:
+                gate['timeout_seconds'] = worker['timeout_seconds']
             if worker.get('case_protocol'):
                 gate.update(case_protocol=True, result_transport=worker.get('result_transport', 'file'))
             if 'recipe' in worker:

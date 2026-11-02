@@ -56,7 +56,7 @@ class Selection(unittest.TestCase):
 
     def test_case_recipe_is_bound_into_plan(self):
         self.bindings['be'].update(recipe={'cases':{'be':{'command':['true']}}},
-                                   result_transport='stdout')
+                                   result_transport='stdout',timeout_seconds=10)
         plan=p.select(self.template,['back-end/src/one.ts'],self.result,self.bindings)
         gate=next(g for g in plan['gates'] if g['name']=='be')
         self.assertTrue(gate['case_protocol'])

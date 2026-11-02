@@ -9,7 +9,7 @@ approvals, ownership, or failure attribution.
 ## Selection and workers
 
 `python3 scripts/deploy_test_plan.py --workers workers.json --base origin/main
---output .context/deploy-cycle/plan.json` uses the existing
+--output .context/deploy-pipeline/plan.json` uses the existing
 change-to-test graph. It includes complete categories reached by the diff and
 its consumers, plus broad integration triggers. An unknown path selects all;
 an unknown category is included. The output records every inclusion and omission.
@@ -25,7 +25,8 @@ Recipes contain a `gates` array, with `name`, `category`, argv `command`, and
 explicit stable `checks` IDs. Quick categories are `format`, `eslint`,
 `typescript`, and application `backend-structural` / `application-structural`.
 The coordinator launches all quick checks together and gives each at most120s.
-Formatter **checks** run here; automatic formatting precedes the source freeze.
+Formatter **checks** retain the existing TypeScript/TSX scope; automatic
+formatting precedes the source freeze.
 Deploy-tooling regressions are an affected category, never a quick check.
 
 Every selected nonquick gate needs a worker binding:
@@ -81,6 +82,9 @@ produces unverified evidence, not a completed test that can be waived. Each
 result carries the recipe digest, command, native exit, timings and log hash.
 Provisioning, authentication and native-resource teardown remain with the
 existing worker owner; this adapter allocates nothing.
+Streamed transports must also bind `timeout_seconds` to the existing gate's
+outer deadline. Do not invent a shorter test budget or leave the transport
+unbounded.
 
 ## Result protocol
 
@@ -94,6 +98,7 @@ The coordinator supplies `DEPLOY_GATE_REQUEST` (JSON file) and
   "source": {"head": "exact requested head", "digest": "exact requested digest"},
   "gate": "backend-coverage-blackbox",
   "complete": true,
+  "cleanup_complete": true,
   "cases": {"selected-case-id": "PASS", "another-case-id": "FAIL"}
 }
 ```
@@ -139,7 +144,7 @@ of its tests ran. A mixed skip/run gate must use this protocol.
    originally selected case in those gates. Then repeat quick checks and `run`
    **all originally selected gates once** on the final frozen source.
 7. `verify` (or the existing `run_deploy_pipeline.py verify` pointed at this cycle
-   directory) exits0 only for a ready cycle with exact current source and plan.
+   directory with `--require-staged`) exits0 only for a ready cycle with exact current source and plan.
    A failure in the final sweep returns to `/RCA`; changing code invalidates
    its evidence. Retain production source checks, review and approvals.
 
@@ -167,3 +172,11 @@ after the worker's teardown is verified. A worker that leaves descendants behind
 produces an unverified result; it is not safe to begin another stack over it.
 `report` renders the canonical delegated/provider warnings with the original
 failure records. It does not turn a skipped test into a successful observation.
+
+Use `.context/deploy-pipeline` for the cycle state, or set
+`DEPLOY_TEST_CYCLE_STATE_DIR` and use that same directory throughout. Phase 3's
+mandatory `verify --require-staged` refuses a missing staged cycle even when an
+older legacy receipt says PASS. Exit5 means source/configuration changed;
+exit1 means not ready, and exit2 means missing or malformed evidence. The staged
+runner requests `/RCA` immediately for every failure, rather than waiting for
+the legacy pipeline's repeated-round cap.

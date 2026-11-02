@@ -21,7 +21,8 @@ def validate(result, request, code, *, invalid_process=False):
     if (not isinstance(cases, dict) or set(cases) != set(request['checks'])
             or any(status not in ('PASS', 'FAIL', 'UNVERIFIED') for status in cases.values())
             or any(result.get(k) != request[k] for k in ('token', 'source', 'gate'))
-            or result.get('reused', False) is not False):
+            or result.get('reused', False) is not False
+            or result.get('cleanup_complete') is not True):
         raise ValueError('worker result identity/inventory mismatch')
     complete = all(status != 'UNVERIFIED' for status in cases.values())
     if result.get('complete') is not complete:

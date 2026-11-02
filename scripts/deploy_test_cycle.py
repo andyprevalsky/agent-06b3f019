@@ -172,6 +172,8 @@ def validate_plan(plan: dict) -> None:
         if gate.get("after"):
             raise ValueError("cross-gate after dependencies are not allowed; setup belongs inside its worker")
         timeout = gate.get("timeout_seconds")
+        if not quick and gate.get('result_transport') == 'stdout' and timeout is None:
+            raise ValueError('remote transport requires its existing gate deadline')
         if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
             raise ValueError("timeout_seconds must be a finite positive number")
     if not any(g.get("quick") for g in gates):
@@ -515,12 +517,13 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
         state = read(directory / "cycle.json")
         plan = state["plan"]
         validate_plan(plan)
-        if (state["phase"] != "ready" or state["ready"] is not True
-                or state["source"] != source(root) or state["plan_digest"] != digest(plan)
+        if state["phase"] != "ready" or state["ready"] is not True:
+            return 1
+        if (state["source"] != source(root) or state["plan_digest"] != digest(plan)
                 or state["environment"] != environment_digest()
                 or state["input_fingerprints"] != input_fingerprints(plan, root)
                 or (expect_head is not None and state["source"]["head"] != expect_head)):
-            return 1
+            return 5  # Same stale-source result as the existing pipeline verifier.
         return 0
     except (OSError, ValueError, KeyError, TypeError):
         return 2

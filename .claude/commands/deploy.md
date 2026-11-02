@@ -38,6 +38,12 @@ in `docs/deploy-test-cycle.md`. This policy supersedes older full-rerun,
 sequential-lane, diagnostic-only selection and outage-retry instructions below.
 The source/approval/whole-devbox and production-verification requirements remain.
 
+Use one state directory throughout planning, execution and Phase 3:
+`DEPLOY_TEST_CYCLE_STATE_DIR=${DEPLOY_TEST_CYCLE_STATE_DIR:-.context/deploy-pipeline}`.
+Save the selected plan there and pass that same directory to every cycle command.
+The legacy pipeline's fix-loop cap below applies only to its legacy runner;
+the staged runner requests `/RCA` on the first failure of every round.
+
 - Format checks, lint, types and application structural checks run concurrently
   in the quick phase (under two minutes). Deploy-tooling regressions are an
   affected suite, not part of the quick phase.
@@ -949,6 +955,10 @@ their assertions or test counts:
 `python3 scripts/tests/benchmark-live-results.test.py`,
 `python3 scripts/tests/jev-progress-core.test.py`,
 `python3 scripts/tests/select-affected-tests.test.py`,
+`python3 scripts/tests/deploy-test-cycle.test.py`,
+`python3 scripts/tests/deploy-test-plan.test.py`,
+`python3 scripts/tests/deploy-test-worker.test.py`,
+`python3 scripts/tests/deploy-test-static.test.py`,
 `python3 scripts/tests/benchmark-history-latest-only.test.py`,
 `python3 scripts/tests/cloudbench-full-selection.test.py`,
 `python3 -m unittest discover -s scripts/live_display -p test_*.py`,
@@ -2509,10 +2519,11 @@ accounting. An external review exception remains unavailable, never PASS.
 Enforce the ledger state rather than trusting prose:
 
 ```bash
-# Pipeline-driven gates: the green receipt must be bound to these exact bytes
-# (exit 5 = the gates ran on a different HEAD/digest; rerun them).
-[ ! -f .context/deploy-pipeline/receipt.json ] || \
-  python3 scripts/run_deploy_pipeline.py verify --state-dir .context/deploy-pipeline --expect-head "$(git rev-parse HEAD)"
+# The staged cycle must exist and be ready on these exact bytes.
+# Exit 5 means stale source/configuration; no legacy receipt can bypass this.
+DEPLOY_TEST_CYCLE_STATE_DIR=${DEPLOY_TEST_CYCLE_STATE_DIR:-.context/deploy-pipeline}
+python3 scripts/run_deploy_pipeline.py verify --require-staged \
+  --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR" --expect-head "$(git rev-parse HEAD)"
 python3 scripts/deploy_review_cycle.py require-mergeable --head "$(git rev-parse HEAD)"
 ```
 
