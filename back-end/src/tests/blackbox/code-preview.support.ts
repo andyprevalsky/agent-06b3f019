@@ -44,9 +44,10 @@ export function makeRoseFrontEndHome(home: string): string {
     const source = join(FRONT_END, entry);
     if (existsSync(source)) cpSync(source, join(frontEnd, entry), { recursive: true });
   }
-  if (existsSync(join(FRONT_END, '.env'))) {
-    copyFileSync(join(FRONT_END, '.env'), join(frontEnd, '.env'));
-  }
+  // The app throws at import without VITE_SUPABASE_* (src/lib/supabase.ts), so
+  // a checkout without the untracked front-end/.env rendered a blank preview.
+  // Use the committed public example, never this host's private env file.
+  copyFileSync(join(FRONT_END, '.env.example'), join(frontEnd, '.env'));
   symlinkSync(join(FRONT_END, 'public'), join(frontEnd, 'public'));
   const localModules = join(FRONT_END, 'node_modules');
   if (existsSync(localModules)) {

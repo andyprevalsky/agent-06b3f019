@@ -75,6 +75,13 @@ const kernel = {
   },
 };
 Module._load = function (id, parent, isMain) {
+  if (parent?.filename.endsWith('/browser/sessionCleanup.ts')) {
+    const release = (nativeId) => request('/cleanup/' + nativeId, { method: 'DELETE' });
+    if (id === './kernelSessionDelete') return { releaseKernelRemoteSession: release };
+    if (id === '../steel/session') return { releaseSteelRemoteSession: release };
+    if (id === './browserUse') return { releaseBrowserUseRemoteSession: release };
+    if (id === './tilion') return { releaseTilionRemoteSession: release };
+  }
   if (parent?.filename === indexPath && id === './sessionAuthPersist')
     return { persistSignedInBrowserState: () => request('/legacy-harvest') };
   if (parent?.filename === indexPath && id === './worldState')

@@ -37,6 +37,10 @@ import {
   measureBackendPeak,
 } from './blob-origin-fixture.helpers';
 import { ingestIndexedDBUploadJson } from '../../domains/integrations/uploadService';
+import {
+  formatUploadChildFailure,
+  type UploadChildResult,
+} from './indexeddb-upload-memory.diagnostics';
 
 assertLocalDatabase();
 
@@ -190,10 +194,11 @@ async function cleanupUser(): Promise<void> {
   await prisma.indexedDBOrigin.deleteMany({ where: { userId: USER_ID } });
 }
 
-type ChildResult = { code: number | null; stdout: string; stderr: string };
+type ChildResult = UploadChildResult;
 
 async function runChildProcess(mode: '--child' | '--control'): Promise<ChildResult> {
   return new Promise((resolvePromise) => {
+    const startedAtMs = Date.now();
     let stdout = '';
     let stderr = '';
     const child = spawn(
@@ -221,13 +226,19 @@ async function runChildProcess(mode: '--child' | '--control'): Promise<ChildResu
       stderr += String(chunk);
     });
     child.on('close', (code) => {
-      resolvePromise({ code, stdout, stderr });
+      resolvePromise({ code, stdout, stderr, startedAtMs, finishedAtMs: Date.now() });
     });
   });
 }
 
-let control: ChildResult = { code: null, stdout: '', stderr: '' };
-let treatment: ChildResult = { code: null, stdout: '', stderr: '' };
+let control: ChildResult = { code: null, stdout: '', stderr: '', startedAtMs: 0, finishedAtMs: 0 };
+let treatment: ChildResult = {
+  code: null,
+  stdout: '',
+  stderr: '',
+  startedAtMs: 0,
+  finishedAtMs: 0,
+};
 let payloadChars = 0;
 
 test(`building the fixture keeps one Postgres backend under ${BLOB_FIXTURE_BACKEND_PEAK_MB}MB`, async () => {
@@ -261,12 +272,7 @@ test(`control JSON.parse OOMs under a ${CHILD_HEAP_MB}MB heap`, async () => {
 });
 
 test(`treatment ingest survives the same ${CHILD_HEAP_MB}MB heap`, async () => {
-  assert(
-    treatment.code === 0,
-    `ingest must survive a ${CHILD_HEAP_MB}MB heap — child exited ${treatment.code}.\n` +
-      `--- stdout ---\n${treatment.stdout}\n--- stderr (tail) ---\n` +
-      `${treatment.stderr.split('\n').slice(-30).join('\n')}`
-  );
+  assert(treatment.code === 0, formatUploadChildFailure(treatment, CHILD_HEAP_MB));
 });
 
 // `batchIndex`/`totalBatches` are validated with `^-?[0-9]+$`, which admits
@@ -388,9 +394,9 @@ async function main(): Promise<void> {
     await cleanupUser();
     payloadChars = await buildPayloadFile();
     assert(payloadChars >= MIN_PAYLOAD_CHARS, `fixture payload too small: ${payloadChars} chars`);
-    console.log(
+    process.stdout.write(
       `fixture payload: ${(payloadChars / 1024 / 1024).toFixed(1)}MB at ${payloadPath} ` +
-        `(Postgres backend peak ${fixtureBackendPeakMb}MB)`
+        `(Postgres backend peak ${fixtureBackendPeakMb}MB)\n`
     );
 
     // Run control first so a broken fixture fails before we claim the fix works.
@@ -400,10 +406,10 @@ async function main(): Promise<void> {
     for (const { name, fn } of tests) {
       try {
         await fn();
-        console.log(`✅ ${name}`);
+        process.stdout.write(`✅ ${name}\n`);
       } catch (err) {
         failed += 1;
-        console.error(`❌ ${name}\n   ${(err as Error).message}`);
+        process.stderr.write(`❌ ${name}\n   ${(err as Error).message}\n`);
       }
     }
   } finally {
@@ -420,7 +426,7 @@ async function main(): Promise<void> {
     }
   }
 
-  console.log(`\n${tests.length - failed}/${tests.length} passed`);
+  process.stdout.write(`\n${tests.length - failed}/${tests.length} passed\n`);
   if (failed > 0) process.exit(1);
 }
 

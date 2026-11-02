@@ -26,6 +26,7 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
+    from helpers.workflow_safe import context_logger
     from helpers.wmh_activity_policy import wmh_activity_timeout_options
     from domains.agent_messaging.handler import kill_agent, send_message_to_agent
     from domains.spawn_agent.config import is_demo_cache_task, is_oai_demo_mass_agent_task
@@ -152,7 +153,7 @@ with workflow.unsafe.imports_passed_through():
     from workflows.background_agents import BackgroundAgentsMixin
     from workflows.environment_context import EnvironmentContextMixin
 
-logger = structlog.get_logger()
+logger = context_logger()
 
 # Loop-critical control-plane read (poll_new_messages), modelled on Claude
 # Code's session-transcript ingress client: 20 s per request

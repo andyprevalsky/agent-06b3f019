@@ -18,6 +18,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/blackbox-phone-env.sh"
+# Validated up front: the c8 report step's heap ceiling (coverage_report_node).
+source "$SCRIPT_DIR/coverage-report-heap.sh"
 ROOT_DIR="$(cd "$BACKEND_DIR/.." && pwd)"
 
 # Match run.sh and run-blackbox-tests.sh resource naming when Conductor still
@@ -61,10 +63,8 @@ esac
 # rose_user_ui versions are stored hermetically on local disk for tests (the
 # user-ui blackbox reads back published bytes); prod uses Supabase Storage.
 export USER_UI_STORAGE_BACKEND=local
-export USER_UI_STORAGE_LOCAL_DIR="${USER_UI_STORAGE_LOCAL_DIR:-$ROOT_DIR/.context/user-ui-storage}"
 # display-tool media (domains/display) uses the same hermetic local store.
 export DISPLAY_STORAGE_BACKEND=local
-export DISPLAY_STORAGE_LOCAL_DIR="${DISPLAY_STORAGE_LOCAL_DIR:-$ROOT_DIR/.context/display-storage}"
 # User-tool handlers (POST /api/user-ui/tools/run) run in a local code-session
 # HOME instead of E2B; the backend refuses this mode in production.
 export USER_TOOLS_SESSION_SANDBOX=local
@@ -118,11 +118,90 @@ for arg in "$@"; do
   [[ "$arg" == "--hold-coverage-lock-with-child" ]] && HOLD_COVERAGE_LOCK_WITH_CHILD=1
 done
 
+# Optional shard / subset selection. A shard (BACKEND_COVERAGE_SHARD=i/N, run
+# by scripts/run-coverage-sharded.sh) owns its own lock, raw V8 directory,
+# artifacts and local database, and hands its raw coverage to the coordinator's
+# merged threshold check. A subset (explicit BACKEND_COVERAGE_BLACKBOX_DOMAINS
+# or BACKEND_UNIT_TEST_FILES, used by scripts/coverage-rerun-failed.sh) only
+# re-proves failed tests: it cannot enforce thresholds, so a full run remains
+# mandatory before merge.
+COVERAGE_SHARD="${BACKEND_COVERAGE_SHARD:-}"
+SHARD_SUFFIX=""
+SHARD_DB_SUFFIX=""
+if [[ -n "$COVERAGE_SHARD" ]]; then
+  if ! [[ "$COVERAGE_SHARD" =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] ||
+    ((BASH_REMATCH[1] > BASH_REMATCH[2])); then
+    echo "❌ BACKEND_COVERAGE_SHARD must be <index>/<count> with 1 <= index <= count." >&2
+    exit 2
+  fi
+  SHARD_SUFFIX="-shard${BASH_REMATCH[1]}"
+  SHARD_DB_SUFFIX="_s${BASH_REMATCH[1]}"
+  export BACKEND_UNIT_SHARD="$COVERAGE_SHARD"
+fi
+# The dedicated unit pass of a sharded run (BACKEND_COVERAGE_UNIT_PASS=1,
+# launched by run-coverage-sharded.sh beside the blackbox shards): the unit
+# suite with its own lock, artifacts and database (`<workspace>_s0`; blackbox
+# shards are numbered from 1), handing its raw coverage to the coordinator's
+# merge directory like a shard. The unit suite's headless-browser perf probe
+# (rose-ui-cli-browser `check --examples`, fps-p50 >= 55) is host-load
+# dependent: beside two blackbox streams it failed 4/4 sharded runs and passed
+# unsharded on the same box (2026-10-30). The coordinator therefore excludes
+# that file from the concurrent pass (BACKEND_UNIT_EXCLUDE_FILES) and runs it
+# alone afterwards as a second, labelled unit pass
+# (BACKEND_COVERAGE_UNIT_PASS_LABEL=probe, BACKEND_UNIT_TEST_FILES=<probe>):
+# same `_s0` database (serial reuse), its own `-units-<label>` lock, raw
+# directory, logs and `results-<label>.json`.
+UNIT_PASS="${BACKEND_COVERAGE_UNIT_PASS:-0}"
+UNIT_PASS_LABEL="${BACKEND_COVERAGE_UNIT_PASS_LABEL:-}"
+if [[ "$UNIT_PASS" == "1" ]]; then
+  if [[ -n "$COVERAGE_SHARD" ]]; then
+    echo "❌ BACKEND_COVERAGE_UNIT_PASS runs the unit suite; it cannot also be blackbox shard $COVERAGE_SHARD." >&2
+    exit 2
+  fi
+  if [[ "${BACKEND_COVERAGE_SKIP_UNITS:-0}" == "1" ]]; then
+    echo "❌ BACKEND_COVERAGE_UNIT_PASS and BACKEND_COVERAGE_SKIP_UNITS contradict each other." >&2
+    exit 2
+  fi
+  if [[ -n "$UNIT_PASS_LABEL" ]] && ! [[ "$UNIT_PASS_LABEL" =~ ^[a-z0-9-]+$ ]]; then
+    echo "❌ BACKEND_COVERAGE_UNIT_PASS_LABEL must match [a-z0-9-]+ (got '$UNIT_PASS_LABEL')." >&2
+    exit 2
+  fi
+  export BACKEND_COVERAGE_SKIP_BLACKBOX=1
+  SHARD_SUFFIX="-units${UNIT_PASS_LABEL:+-$UNIT_PASS_LABEL}"
+  SHARD_DB_SUFFIX="_s0"
+elif [[ -n "$UNIT_PASS_LABEL" ]]; then
+  echo "❌ BACKEND_COVERAGE_UNIT_PASS_LABEL requires BACKEND_COVERAGE_UNIT_PASS=1." >&2
+  exit 2
+fi
+# The unlabelled unit pass runs every unit file except the coordinator's
+# exclusions, so it owns the unsuffixed coverage/unit-run/results.json that
+# coverage-rerun-failed.sh reads; a labelled pass owns results-<label>.json.
+UNIT_RESULTS_SUFFIX="$SHARD_SUFFIX"
+# The shard token the prepared-URL resolver derives a per-run database from.
+COVERAGE_DB_TOKEN="$COVERAGE_SHARD"
+if [[ "$UNIT_PASS" == "1" ]]; then
+  UNIT_RESULTS_SUFFIX="${UNIT_PASS_LABEL:+-$UNIT_PASS_LABEL}"
+  COVERAGE_DB_TOKEN="units"
+fi
+COVERAGE_PARTIAL=0
+# Exit status of a partial (subset) run whose selected tests all passed. Non-zero
+# on purpose: thresholds were not enforced, so it can never be a passing gate.
+COVERAGE_PARTIAL_EXIT=3
+if [[ -n "$COVERAGE_SHARD" || -n "${BACKEND_COVERAGE_BLACKBOX_DOMAINS:-}" ||
+  -n "${BACKEND_UNIT_TEST_FILES:-}" || "${BACKEND_COVERAGE_SKIP_UNITS:-0}" == "1" ||
+  "${BACKEND_COVERAGE_SKIP_BLACKBOX:-0}" == "1" ]]; then
+  COVERAGE_PARTIAL=1
+fi
+
+# Hermetic per-shard local stores (set after SHARD_SUFFIX is known).
+export USER_UI_STORAGE_LOCAL_DIR="${USER_UI_STORAGE_LOCAL_DIR:-$ROOT_DIR/.context/user-ui-storage$SHARD_SUFFIX}"
+export DISPLAY_STORAGE_LOCAL_DIR="${DISPLAY_STORAGE_LOCAL_DIR:-$ROOT_DIR/.context/display-storage$SHARD_SUFFIX}"
+
 # All coverage runs in one worktree share coverage/tmp, coverage/blackbox-run,
 # coverage/server.log, and the workspace database. Hold OS advisory locks in a
 # child that watches this shell. Unlike mkdir locks, a separately-sessioned
 # guardian reaps registered test groups after SIGKILL/OOM before unlocking.
-COVERAGE_RUN_LOCK_FILE="${BACKEND_COVERAGE_RUN_LOCK_FILE:-${BACKEND_COVERAGE_RUN_LOCK_DIR:-$BACKEND_DIR/coverage/.run-lock}}"
+COVERAGE_RUN_LOCK_FILE="${BACKEND_COVERAGE_RUN_LOCK_FILE:-${BACKEND_COVERAGE_RUN_LOCK_DIR:-$BACKEND_DIR/coverage/.run-lock$SHARD_SUFFIX}}"
 COVERAGE_RUN_LOCK_KEEPER_PID=""
 COV_PORT_LOCK_KEEPER_PID=""
 # Linux mktemp -t requires ≥3 trailing X's in the template; macOS is looser.
@@ -241,7 +320,7 @@ codex_funded_fallback_configured() {
 }
 
 # Coverage data directory (NODE_V8_COVERAGE tells Node to dump raw coverage here)
-COV_TMP="$BACKEND_DIR/coverage/tmp"
+COV_TMP="$BACKEND_DIR/coverage/tmp$SHARD_SUFFIX"
 
 # Reserve one of the two currently-unused ports inside Conductor's ten-port
 # workspace allocation. Port arithmetic outside that allocation is only a
@@ -258,8 +337,46 @@ COV_PORT_END="${BACKEND_COVERAGE_END_PORT:-$((BASE_PORT + 8))}"
 COV_PORT_LOCK_ROOT="${BACKEND_COVERAGE_PORT_LOCK_ROOT:-$ROOT_DIR/.context/test-runs/.port-locks}"
 mkdir -p "$COV_PORT_LOCK_ROOT"
 
+# A listener scan alone misses a port the kernel autobound to an outbound
+# connection (ESTABLISHED, or a client's TIME_WAIT; never LISTEN): Node's
+# dual-stack listen() on it still fails with EADDRINUSE (coverage shard 1,
+# 2026-10-28). Probe with the same bind Node/libuv performs — wildcard
+# dual-stack with SO_REUSEADDR — so such a port is skipped, while a port our
+# own previous server left in TIME_WAIT (which that listen() can reuse) is not
+# burned from the two-port shard range.
+port_rejects_bind() {
+  local port="$1"
+  # python3 already backs the reservation lock keeper; without it the probe
+  # must not silently degrade to the LISTEN-only scan that missed 56022.
+  command -v python3 >/dev/null 2>&1 || {
+    echo "❌ python3 is required to probe coverage ports with Node's bind semantics." >&2
+    exit 1
+  }
+  ! python3 - "$port" <<'PYEOF'
+import socket, sys
+port = int(sys.argv[1])
+try:
+    sock = socket.socket(socket.AF_INET6)
+    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+    target = ("::", port)
+except OSError:
+    sock = socket.socket(socket.AF_INET)
+    target = ("0.0.0.0", port)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    sock.bind(target)
+except OSError:
+    sys.exit(1)
+finally:
+    sock.close()
+PYEOF
+}
+
 port_in_use() {
   local port="$1"
+  if port_rejects_bind "$port"; then
+    return 0
+  fi
   if command -v lsof >/dev/null 2>&1; then
     lsof -tiTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
     return $?
@@ -310,7 +427,7 @@ fi
 mkdir -p "$COV_TMP"
 
 export TEST_BASE_URL="http://localhost:$COV_PORT"
-COV_LOG="$BACKEND_DIR/coverage/server.log"
+COV_LOG="$BACKEND_DIR/coverage/server$SHARD_SUFFIX.log"
 
 # Keep local blackbox coverage deterministic. back-end/.env points trace
 # archives at R2 for development/prod, but blackbox tests assert local archive
@@ -339,11 +456,11 @@ source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"
 export BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES="${BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES:-weekly}"
 # Coverage remains deterministic and still exercises the unavailable path.
 # The deploy workflow runs one focused live weekly probe afterward, so a
-# provider quota failure can be retried without rerunning all 91 deterministic domains.
+# provider quota failure can be retried without rerunning every deterministic domain.
 export AMPLITUDE_API_KEY=""
 export AMPLITUDE_SECRET_KEY=""
 # Credential health is a mandatory focused deploy stage, not deterministic code
-# coverage. Keep its real provider calls out of this 91-domain batch so a TLS or
+# coverage. Keep its real provider calls out of this deterministic batch so a TLS or
 # provider outage can be retried without rerunning every instrumented test.
 export BLACKBOX_TEST_SKIP_DOMAINS="${BLACKBOX_TEST_SKIP_DOMAINS:+$BLACKBOX_TEST_SKIP_DOMAINS,}integration-health"
 export CONTRACT_TEST_SKIP_DOMAINS="$BLACKBOX_TEST_SKIP_DOMAINS"
@@ -382,13 +499,12 @@ export CONTRACT_TEST_SKIP_DOMAINS="$(
 # calls unless the caller explicitly opts into a known-live tunnel.
 if [[ "${BACKEND_COVERAGE_USE_FAST_MODE_PROXY:-0}" != "1" ]]; then
   export FAST_MODE_ANTHROPIC_PROXY_URL=""
-  export FAST_MODE_CODEX_PROXY_URL=""
 fi
 
 # Pin the blackbox artifact dir so failures leave a known log path. Without this
 # the blackbox runner mints a random RUN_ID dir, which gets lost if the caller
 # tails output — forcing a full rerun just to find failures.
-BLACKBOX_ARTIFACT_DIR="$BACKEND_DIR/coverage/blackbox-run"
+BLACKBOX_ARTIFACT_DIR="$BACKEND_DIR/coverage/blackbox-run$SHARD_SUFFIX"
 rm -rf "$BLACKBOX_ARTIFACT_DIR"
 mkdir -p "$BLACKBOX_ARTIFACT_DIR"
 export BLACKBOX_TEST_ARTIFACT_DIR="$BLACKBOX_ARTIFACT_DIR"
@@ -418,7 +534,7 @@ fi
 # (run.sh); coverage gets this workspace's own database there, as on system
 # Postgres. Created after the Prisma freshness check, like the system path.
 use_workspace_container_db() {
-  if ! ENSURE_SYSTEM_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT")"; then
+  if ! ENSURE_SYSTEM_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT$SHARD_DB_SUFFIX")"; then
     echo "❌ Workspace name '$WORKSPACE_HINT' cannot name a test database (letters, digits, - and _ only)." >&2
     exit 1
   fi
@@ -432,34 +548,28 @@ if [[ "${ROSE_DEPLOY_WORKTREE:-0}" == "1" && "${ROSE_USE_SYSTEM_PG:-false}" == "
   exit 1
 fi
 if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
-  if ! node -e '
-    const fs = require("node:fs");
-    const path = require("node:path");
-    const url = new URL(process.env.BACKEND_COVERAGE_DATABASE_URL);
-    const identity = process.argv[1];
-    const isolated = process.env.ROSE_DEPLOY_WORKTREE === "1";
-    let expectedName = `victoria_${identity}`;
-    if (isolated) {
-      const root = fs.realpathSync(process.argv[2]);
-      if (!process.env.ROSE_DEPLOY_WORKTREE_PATH ||
-          fs.realpathSync(process.env.ROSE_DEPLOY_WORKTREE_PATH) !== root) process.exit(1);
-      const safe = identity.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 48);
-      expectedName = `victoria_deploy_${safe}`;
-      const marker = fs.readFileSync(path.join(root, ".context", "deploy-system-pg.db"), "utf8");
-      if (marker !== `${expectedName}\n` || (url.port && url.port !== "5432")) process.exit(1);
-    }
-    if (!["postgres:", "postgresql:"].includes(url.protocol) ||
-        !["localhost", "127.0.0.1"].includes(url.hostname) ||
-        decodeURIComponent(url.pathname.slice(1)) !== expectedName ||
-        url.search !== "" || url.hash !== "") process.exit(1);
-  ' "$WORKSPACE_HINT" "$ROOT_DIR"; then
+  # The prepared URL names this workspace's own database (the exact deploy
+  # marker on an isolated worktree). A shard i/N of a sharded run owns the
+  # derived `<prepared>_s<i>` database on the same server, created below by
+  # ensure_workspace_system_db like every other per-shard database, so the
+  # sharded coordinator (test:coverage:sharded) also runs on the system-PG
+  # deploy path instead of falling back to one unsharded sweep.
+  if ! COVERAGE_DB_RESOLUTION="$(node "$SCRIPT_DIR/coverage-database-url.mjs" "$WORKSPACE_HINT" "$ROOT_DIR" "$COVERAGE_DB_TOKEN")"; then
     echo "❌ BACKEND_COVERAGE_DATABASE_URL must name this workspace's local database (the exact prepared marker for an isolated deploy worktree)." >&2
     exit 1
   fi
-  LOCAL_PSQL_URL="$BACKEND_COVERAGE_DATABASE_URL"
-  if ! psql "$LOCAL_PSQL_URL" -At -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; then
+  LOCAL_PSQL_URL="$(printf '%s\n' "$COVERAGE_DB_RESOLUTION" | sed -n '1p')"
+  COVERAGE_SHARD_DB_NAME="$(printf '%s\n' "$COVERAGE_DB_RESOLUTION" | sed -n '2p')"
+  # Reachability is proven on the prepared database; a shard's derived
+  # database is created from that same server on demand.
+  if ! psql "$BACKEND_COVERAGE_DATABASE_URL" -At -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; then
     echo "❌ Isolated coverage database is not reachable." >&2
     exit 1
+  fi
+  if [[ -n "$COVERAGE_SHARD_DB_NAME" ]]; then
+    LOCAL_DB_PORT="$(node -e 'process.stdout.write(new URL(process.argv[1]).port || "5432")' "$BACKEND_COVERAGE_DATABASE_URL")"
+    ENSURE_SYSTEM_DB_NAME="$COVERAGE_SHARD_DB_NAME"
+    echo "Coverage ${COVERAGE_SHARD:+shard $COVERAGE_SHARD}${COVERAGE_SHARD:-unit pass} database: $COVERAGE_SHARD_DB_NAME (derived from the prepared workspace database)"
   fi
   DB_FOUND=true
   echo "Using explicitly validated workspace system Postgres database"
@@ -507,7 +617,7 @@ if ! $DB_FOUND; then
   if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
     # Never the shared `victoria`: this workspace's own database only.
     # Created after the Prisma freshness check: stale deps touch no DB.
-    if ! SYSTEM_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT")"; then
+    if ! SYSTEM_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT$SHARD_DB_SUFFIX")"; then
       echo "❌ Workspace name '$WORKSPACE_HINT' cannot name a test database (letters, digits, - and _ only)." >&2
       exit 1
     fi
@@ -537,7 +647,7 @@ if $DB_FOUND; then
     # stack (Step 5 run.sh, semantic tests) serves from. The destructive
     # blackbox cases get this workspace's own database inside the container,
     # the same name the standalone runner and the E2B smoke use.
-    if ! COVERAGE_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT")"; then
+    if ! COVERAGE_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT$SHARD_DB_SUFFIX")"; then
       echo "❌ Workspace name '$WORKSPACE_HINT' cannot name a test database (letters, digits, - and _ only)." >&2
       exit 1
     fi
@@ -756,33 +866,64 @@ if command -v npx >/dev/null 2>&1; then
   fi
 fi
 
+BLACKBOX_DOMAIN_ARGS=()
+if [[ -n "${BACKEND_COVERAGE_BLACKBOX_DOMAINS:-}" ]]; then
+  BLACKBOX_DOMAIN_ARGS=("$BACKEND_COVERAGE_BLACKBOX_DOMAINS")
+elif [[ -n "$COVERAGE_SHARD" ]]; then
+  BLACKBOX_DOMAIN_ARGS=("$(node "$SCRIPT_DIR/coverage-shard-plan.mjs" "$COVERAGE_SHARD" "${BACKEND_COVERAGE_SHARD_DURATIONS:-}")")
+fi
+if [[ ${#BLACKBOX_DOMAIN_ARGS[@]} -gt 0 ]]; then
+  echo "Blackbox domain selection: ${BLACKBOX_DOMAIN_ARGS[0]}"
+fi
 echo "Running blackbox and unit tests in parallel..."
 HOST_PRESSURE_LOG="$BLACKBOX_ARTIFACT_DIR/host-pressure.log"
 record_host_pressure "$HOST_PRESSURE_LOG" "suite-start"
 TEST_EXIT=0
 UNIT_EXIT=0
-launch_coverage_process_group env \
-  NODE_V8_COVERAGE="$COV_TMP" \
-  BLACKBOX_TEST_USE_EXISTING_BACKEND=1 CONTRACT_TEST_USE_EXISTING_BACKEND=1 \
-  BLACKBOX_TEST_DATABASE_URL="$LOCAL_DB_URL" CONTRACT_TEST_DATABASE_URL="$LOCAL_DB_URL" \
-  BLACKBOX_TEST_SKIP_DB_SYNC=1 CONTRACT_TEST_SKIP_DB_SYNC=1 \
-  ROSE_TEST_DB_LOCK_INHERITED_KEY="$TEST_DB_RUN_LOCK_KEY" ROSE_TEST_DB_LOCK_INHERITED_PID="$$" \
-  BACKEND_CODEX_TOKEN_SYNC_SKIP=1 \
-  BLACKBOX_TEST_CONCURRENCY="${BLACKBOX_TEST_CONCURRENCY:-4}" CONTRACT_TEST_CONCURRENCY="${CONTRACT_TEST_CONCURRENCY:-4}" \
-  BLACKBOX_TEST_CASE_CONCURRENCY="${BLACKBOX_TEST_CASE_CONCURRENCY:-30}" CONTRACT_TEST_CASE_CONCURRENCY="${CONTRACT_TEST_CASE_CONCURRENCY:-30}" \
-  bash scripts/run-blackbox-tests.sh
-BLACKBOX_PID="$LAUNCHED_COVERAGE_PID"
+if [[ "${BACKEND_COVERAGE_SKIP_BLACKBOX:-0}" != "1" ]]; then
+  launch_coverage_process_group env \
+    NODE_V8_COVERAGE="$COV_TMP" \
+    BLACKBOX_TEST_USE_EXISTING_BACKEND=1 CONTRACT_TEST_USE_EXISTING_BACKEND=1 \
+    BLACKBOX_TEST_DATABASE_URL="$LOCAL_DB_URL" CONTRACT_TEST_DATABASE_URL="$LOCAL_DB_URL" \
+    BLACKBOX_TEST_SKIP_DB_SYNC=1 CONTRACT_TEST_SKIP_DB_SYNC=1 \
+    ROSE_TEST_DB_LOCK_INHERITED_KEY="$TEST_DB_RUN_LOCK_KEY" ROSE_TEST_DB_LOCK_INHERITED_PID="$$" \
+    BACKEND_CODEX_TOKEN_SYNC_SKIP=1 \
+    BLACKBOX_TEST_CONCURRENCY="${BLACKBOX_TEST_CONCURRENCY:-4}" CONTRACT_TEST_CONCURRENCY="${CONTRACT_TEST_CONCURRENCY:-4}" \
+    BLACKBOX_TEST_CASE_CONCURRENCY="${BLACKBOX_TEST_CASE_CONCURRENCY:-30}" CONTRACT_TEST_CASE_CONCURRENCY="${CONTRACT_TEST_CASE_CONCURRENCY:-30}" \
+    bash scripts/run-blackbox-tests.sh "${BLACKBOX_DOMAIN_ARGS[@]}"
+  BLACKBOX_PID="$LAUNCHED_COVERAGE_PID"
+else
+  # Rerun of unit failures only; nothing failed in the blackbox suite.
+  echo "Blackbox suite skipped (BACKEND_COVERAGE_SKIP_BLACKBOX=1)."
+fi
 
-launch_coverage_process_group env \
-  BACKEND_UNIT_COVERAGE_DIR="$COV_TMP" \
-  BACKEND_UNIT_CONCURRENCY="${BACKEND_UNIT_CONCURRENCY:-6}" \
-  node --import tsx scripts/run-unit-tests.ts
-UNIT_PID="$LAUNCHED_COVERAGE_PID"
+if [[ "${BACKEND_COVERAGE_SKIP_UNITS:-0}" != "1" ]]; then
+  launch_coverage_process_group env \
+    BACKEND_UNIT_COVERAGE_DIR="$COV_TMP" \
+    BACKEND_UNIT_CONCURRENCY="${BACKEND_UNIT_CONCURRENCY:-6}" \
+    BACKEND_UNIT_RESULTS_FILE="$BACKEND_DIR/coverage/unit-run/results$UNIT_RESULTS_SUFFIX.json" \
+    node --import tsx scripts/run-unit-tests.ts
+  UNIT_PID="$LAUNCHED_COVERAGE_PID"
+else
+  echo "Unit suite skipped (BACKEND_COVERAGE_SKIP_UNITS=1)."
+fi
 
-wait "$BLACKBOX_PID" || TEST_EXIT=$?
-BLACKBOX_PID=""
-wait "$UNIT_PID" || UNIT_EXIT=$?
-UNIT_PID=""
+if [[ -n "$BLACKBOX_PID" ]]; then
+  wait "$BLACKBOX_PID" || TEST_EXIT=$?
+  BLACKBOX_PID=""
+  # Early-abort retry (previously failed domains first, stop when one fails
+  # again): the run can no longer pass, so stop the unit lane too.
+  if [[ "$TEST_EXIT" -ne 0 && "${BLACKBOX_TEST_ABORT_ON_PRIORITY_FAILURE:-0}" == "1" &&
+    -n "$UNIT_PID" ]] &&
+    grep -q '^PRIORITY FAILURE:' "$BLACKBOX_ARTIFACT_DIR/runner.log" 2>/dev/null; then
+    echo "Previously failed blackbox domain failed again; stopping the unit lane early."
+    kill -TERM -- "-$UNIT_PID" >/dev/null 2>&1 || true
+  fi
+fi
+if [[ -n "$UNIT_PID" ]]; then
+  wait "$UNIT_PID" || UNIT_EXIT=$?
+  UNIT_PID=""
+fi
 
 if [[ "$TEST_EXIT" -ne 0 || "$UNIT_EXIT" -ne 0 ]]; then
   echo "Backend test phase failed (blackbox exit $TEST_EXIT, unit exit $UNIT_EXIT); skipping report work until the failing lifecycle is fixed."
@@ -807,14 +948,34 @@ kill "$BACKEND_PID" 2>/dev/null || true
 wait "$BACKEND_PID" 2>/dev/null || true
 BACKEND_PID=""
 
-# Generate the coverage report and also the json-summary for the gap analysis
+if [[ ( -n "$COVERAGE_SHARD" || "$UNIT_PASS" == "1" ) && -n "${BACKEND_COVERAGE_MERGE_DIR:-}" ]]; then
+  # The coordinator enforces thresholds on the merged report of every shard
+  # and the unit pass.
+  mkdir -p "$BACKEND_COVERAGE_MERGE_DIR"
+  cp -R "$COV_TMP/." "$BACKEND_COVERAGE_MERGE_DIR/"
+  echo "${COVERAGE_SHARD:+Shard $COVERAGE_SHARD}${COVERAGE_SHARD:-Unit pass} passed; raw coverage handed to $BACKEND_COVERAGE_MERGE_DIR for the merged threshold check."
+  exit 0
+fi
+if [[ "$COVERAGE_PARTIAL" -eq 1 ]]; then
+  # A subset run is a diagnostic, never a gate result: the selected tests passed
+  # but thresholds were not checked, so it must not read as a passing gate row.
+  echo "PARTIAL coverage run: the selected tests passed but thresholds were NOT checked. Exiting $COVERAGE_PARTIAL_EXIT so this never counts as a passing gate; a full coverage run is still required before merge."
+  exit "$COVERAGE_PARTIAL_EXIT"
+fi
+
+# Generate the coverage report and also the json-summary for the gap analysis.
+# c8 merges every raw V8 file in memory: with all 347 unit files and 238
+# blackbox domains the merge died with "JavaScript heap out of memory" at
+# node's default (~2 GB) heap after every test had passed (2026-10-30). The
+# report step therefore raises the heap ceiling itself; it is a cap, not a
+# reservation, and lives here rather than in the caller's lane env.
 echo ""
 echo "=== Coverage Report ==="
 COV_EXIT=0
 if [[ "$REPORT_ONLY" -eq 1 ]]; then
-  npx c8 report --temp-directory="$COV_TMP" --reporter=text --reporter=text-summary --reporter=json-summary || COV_EXIT=$?
+  coverage_report_node npx c8 report --temp-directory="$COV_TMP" --reporter=text --reporter=text-summary --reporter=json-summary || COV_EXIT=$?
 else
-  npx c8 report --temp-directory="$COV_TMP" --reporter=text --reporter=text-summary --reporter=json-summary --check-coverage || COV_EXIT=$?
+  coverage_report_node npx c8 report --temp-directory="$COV_TMP" --reporter=text --reporter=text-summary --reporter=json-summary --check-coverage || COV_EXIT=$?
 fi
 
 # If coverage thresholds failed, show actionable guidance

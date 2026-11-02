@@ -20,10 +20,8 @@ import http from 'node:http';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { anthropicSlotKey } from '../../providers/anthropicProxyCore';
-import { codeAgentSlotKey } from '../../providers/codexProxyCore';
 import {
   buildFastModeAnthropicEnv,
-  buildFastModeCodexEnv,
   signProxyTraceSegment,
 } from '../../providers/codeAgentFastModeEnv';
 import {
@@ -129,17 +127,8 @@ async function main(): Promise<void> {
   await test('code-agent proxies record only with a server-signed recorder capability', async () => {
     // Non-recorder sessions get the plain (replay-only) trace URL; recorders a
     // signed `record.<sig>` segment bound to their exact trace.
+    // Codex never uses the cache (S30); only the Claude Code proxy exists.
     const nonRecorderWrite = resolveFastModeWriteEnabled(true, randomUUID());
-    const codexUrl = buildFastModeCodexEnv(
-      'demo goal',
-      true,
-      'https://api.example.com/codex-proxy',
-      nonRecorderWrite
-    ).CODEX_FAST_MODE_PROXY_URL;
-    assert(
-      /\/codex-proxy\/[0-9a-f]{16},[0-9a-f]{32}$/.test(codexUrl ?? ''),
-      `codex non-recorder ${codexUrl}`
-    );
     const anthropicUrl = buildFastModeAnthropicEnv(
       'demo goal',
       true,
@@ -150,13 +139,13 @@ async function main(): Promise<void> {
       /\/anthropic-proxy\/[0-9a-f]{16},[0-9a-f]{32}$/.test(anthropicUrl ?? ''),
       `anthropic ${anthropicUrl}`
     );
-    const recorderUrl = buildFastModeCodexEnv(
+    const recorderUrl = buildFastModeAnthropicEnv(
       'demo goal',
       true,
-      'https://api.example.com/codex-proxy',
+      'https://api.example.com/anthropic-proxy',
       resolveFastModeWriteEnabled(true, USER_ID)
-    ).CODEX_FAST_MODE_PROXY_URL;
-    assert(/\/record\.[0-9a-f]{32}$/.test(recorderUrl ?? ''), `codex recorder ${recorderUrl}`);
+    ).ANTHROPIC_BASE_URL;
+    assert(/\/record\.[0-9a-f]{32}$/.test(recorderUrl ?? ''), `anthropic recorder ${recorderUrl}`);
 
     // The real proxy routers against a 2xx fake upstream and the runner DB:
     // a forged or absent capability must never store a slot; a signed one does.
@@ -178,13 +167,10 @@ async function main(): Promise<void> {
     await once(upstream, 'listening');
     const upstreamPort = (upstream.address() as AddressInfo).port;
     process.env.FAST_MODE_ANTHROPIC_UPSTREAM = `http://127.0.0.1:${upstreamPort}`;
-    process.env.FAST_MODE_CODEX_UPSTREAM = `http://127.0.0.1:${upstreamPort}`;
-    const { anthropicProxyRouter, codexProxyRouter } =
-      await import('../../domains/demo-cache/routes.proxy');
+    const { anthropicProxyRouter } = await import('../../domains/demo-cache/routes.proxy');
     const app = express();
     app.use(express.json());
     app.use('/anthropic-proxy', anthropicProxyRouter);
-    app.use('/codex-proxy', codexProxyRouter);
     const proxy = app.listen(0, '127.0.0.1');
     await once(proxy, 'listening');
     const base = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`;
@@ -199,15 +185,12 @@ async function main(): Promise<void> {
     ];
     try {
       for (const c of cases) {
-        for (const kind of ['codex', 'anthropic'] as const) {
+        for (const kind of ['anthropic'] as const) {
           const trace = `${goalHash}${c.name.replace(/-/g, '')}${kind}`.slice(0, 40);
           const capability = demoCacheWriteCapability(trace);
           assert(capability !== null, 'SUPABASE_JWT_SECRET is required for the signed case');
           const mode = c.mode === 'SIGNED' ? `record.${capability}/` : c.mode;
-          const url =
-            kind === 'codex'
-              ? `${base}/codex-proxy/${signProxyTraceSegment(trace)}/${mode}backend-api/codex/responses`
-              : `${base}/anthropic-proxy/${signProxyTraceSegment(trace)}/${mode}v1/messages`;
+          const url = `${base}/anthropic-proxy/${signProxyTraceSegment(trace)}/${mode}v1/messages`;
           const res = await fetch(url, {
             method: 'POST',
             headers: {
@@ -228,8 +211,7 @@ async function main(): Promise<void> {
             res.status === 200,
             `${kind} ${c.name} status ${res.status}: ${text.slice(0, 120)}`
           );
-          const key =
-            kind === 'codex' ? codeAgentSlotKey('codex', trace, 0) : anthropicSlotKey(trace, 0);
+          const key = anthropicSlotKey(trace, 0);
           const row = await prisma.fastModeCacheEntry.findUnique({ where: { key } });
           assert((row !== null) === c.stored, `${kind} ${c.name}: stored=${row !== null}`);
           await prisma.fastModeCacheEntry.deleteMany({ where: { key } });

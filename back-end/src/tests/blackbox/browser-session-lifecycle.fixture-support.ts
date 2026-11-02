@@ -153,23 +153,51 @@ export async function launchLifecycleNative() {
   }
 }
 
-export const lifecycleTransport = (browser: Browser, failHydration: () => boolean) => ({
-  contexts: () =>
-    browser.contexts().map(
-      (context) =>
-        new Proxy(context, {
-          get(target, key) {
-            if (key === 'setStorageState' && failHydration())
-              return async () => {
-                throw new Error('fixture hydration failed');
-              };
-            const value = Reflect.get(target, key);
-            return typeof value === 'function' ? value.bind(target) : value;
-          },
-        })
-    ),
-  close: async () => {},
-});
+/**
+ * Validation transport whose restore can fail early (storage state, before any
+ * state reached the candidate) or late (the saved tab's navigation, after the
+ * checkpoint storage was already written into the candidate — the 2026-10-28
+ * agent-payment-setup-resume shape: `page.goto: Timeout 30000ms exceeded`).
+ */
+export const lifecycleTransport = (
+  browser: Browser,
+  failHydration: () => boolean,
+  failNavigation: () => boolean = () => false
+) => {
+  const failingNavigation = (page: Page) =>
+    new Proxy(page, {
+      get(target, key) {
+        if (key === 'goto')
+          return async (...args: Parameters<Page['goto']>) => {
+            if (failNavigation() && !args[0].includes('/.rose-session-restore-'))
+              throw new Error('fixture navigation failed: page.goto: Timeout 30000ms exceeded');
+            return target.goto(...args);
+          };
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+  return {
+    contexts: () =>
+      browser.contexts().map(
+        (context) =>
+          new Proxy(context, {
+            get(target, key) {
+              if (key === 'setStorageState' && failHydration())
+                return async () => {
+                  throw new Error('fixture hydration failed');
+                };
+              if (key === 'pages')
+                return () => target.pages().map((page) => failingNavigation(page));
+              if (key === 'newPage') return async () => failingNavigation(await target.newPage());
+              const value = Reflect.get(target, key);
+              return typeof value === 'function' ? value.bind(target) : value;
+            },
+          })
+      ),
+    close: async () => {},
+  };
+};
 
 export async function allocateLifecycleNative(
   natives: Map<string, Browser>,

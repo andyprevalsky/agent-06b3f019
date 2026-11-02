@@ -13871,6 +13871,48 @@ def test_fast_mode_pass_does_not_seed_timeout_history():
     assert recorded == []
     # ...but the attempt is still recorded in the run-stats ledger
     assert len(attempts) == 1 and attempts[0]["fast_mode_cache_enabled"] is True
+    # Factory reviews group attempts per benchmark run and outcome.
+    assert attempts[0]["run_id"] == run.run_id and attempts[0]["outcome_class"] == "passed"
+
+
+def test_attempt_ledger_records_run_id_and_outcome_class():
+    """Attempts carry run/campaign identity and outcome; absent values stay absent."""
+    import tempfile
+    from unittest.mock import patch
+
+    import benchmarks.timeout_history as timeout_history
+
+    with tempfile.TemporaryDirectory() as scratch:
+        ledger = pathlib.Path(scratch) / "attempts.jsonl"
+        with (
+            patch.object(timeout_history, "HISTORY_DIR", scratch),
+            patch.object(timeout_history, "ATTEMPTS_FILE", str(ledger)),
+        ):
+            with patch.dict(os.environ, {"BENCHMARK_HUB_GROUP_RUN_ID": "campaign-7"}):
+                timeout_history.record_attempt(
+                    task_name="t",
+                    passed=False,
+                    status="COMPLETED",
+                    duration_seconds=4.0,
+                    cost_cents=0.0,
+                    run_id="run-1",
+                    outcome_class="cleanup-failure",
+                )
+            with patch.dict(os.environ, {"BENCHMARK_HUB_GROUP_RUN_ID": ""}):
+                timeout_history.record_attempt(
+                    task_name="t",
+                    passed=True,
+                    status="COMPLETED",
+                    duration_seconds=2.0,
+                    cost_cents=0.0,
+                )
+        first, second = (json.loads(line) for line in ledger.read_text().splitlines())
+    assert (first["run_id"], first["group_run_id"], first["outcome_class"]) == (
+        "run-1",
+        "campaign-7",
+        "cleanup-failure",
+    )
+    assert not {"run_id", "group_run_id", "outcome_class"} & set(second)
 
 
 def test_non_fast_mode_pass_still_seeds_timeout_history():
@@ -14811,8 +14853,8 @@ def test_webdecoy_biometrics_uses_fresh_isolated_browser_state():
     assert getattr(task, "browser_profile_mode", None) == "fresh"
     assert getattr(task, "browser_auth_realm", None) == "webdecoy.com"
     assert task.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES
+    assert task.expected_browser_provider is None
     assert task.expected_browser_session_metadata_values == {
-        "profile_source": "new_user_persistent",
         "auth_source": "none",
         "cookies_injected": False,
         "cookies_count": 0,
@@ -14870,6 +14912,83 @@ def test_webdecoy_biometrics_uses_fresh_isolated_browser_state():
     finally:
         bench._restore_isolated_browser_state_scenario = original_restore
     assert restored == [(manifest, "fresh browser state")]
+
+
+def test_webdecoy_catalog_requires_provider_neutral_isolation():
+    """Check isolation state without coupling acceptance to provider labels."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = get_task_by_name("browser-biometrics-webdecoy")
+    # Captured on agent 520014be, browser_use_step_1 (2026-10-29).
+    metadata = {
+        "provider": "tilion",
+        "requested_provider": "tilion",
+        "provider_fallback_reason": None,
+        "profile_id": None,
+        "profile_source": "tilion_ephemeral",
+        "auth_source": "none",
+        "cookies_injected": False,
+        "cookies_count": 0,
+        "local_storage_origin_count": 0,
+        "indexed_db_origin_count": 0,
+        "permission_grant_count": 0,
+        "cache_storage_origin_count": 0,
+    }
+
+    def data_for(items, score="0.02"):
+        return {
+            "agent": {"status": "COMPLETED", "progress": 1.0},
+            "messages": [{"role": "TOOL", "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"}}] + [
+                {
+                    "role": "TOOL",
+                    "message": (
+                        "Visited https://webdecoy.com/product/fcaptcha-demo/. "
+                        "Clicked checkbox. Submitted invisible mode form with "
+                        "benchmark-human@example.com. Risk Score: " + score
+                    ),
+                    "metadata": {
+                        "toolName": "spawn_browser_agent",
+                        "toolStatus": "FINISHED",
+                        "action_type": "task_complete",
+                        "task_id": "browser-task-" + str(index),
+                        "browser_session_id": "session-" + str(index),
+                        "browser_session_metadata": item,
+                        "structured_response": {"fcaptcha_risk_score": score},
+                    },
+                }
+                for index, item in enumerate(items)
+            ],
+        }
+
+    actual = evaluate_task(task, data_for([metadata]), 0)
+    assert actual == (True, None), actual
+    for field in (
+        "auth_source", "cookies_injected", "cookies_count", "local_storage_origin_count",
+        "indexed_db_origin_count", "permission_grant_count", "cache_storage_origin_count",
+    ):
+        altered = dict(metadata)
+        altered[field] = "cookie_bundle" if field == "auth_source" else (
+            True if field == "cookies_injected" else 1
+        )
+        assert evaluate_task(task, data_for([altered]), 0)[0] is False, field
+        del altered[field]
+        assert evaluate_task(task, data_for([altered]), 0)[0] is False, "missing:" + field
+    # Provider and profile-source labels are not evidence of auth/storage state.
+    for provider, source in (("tilion", "tilion_ephemeral"), ("kernel", "new_user_persistent"),
+                             ("future-provider", "new-label"), (None, None)):
+        item = {**metadata, "provider": provider, "profile_source": source}
+        if provider is None:
+            item.pop("provider")
+            item.pop("profile_source")
+        assert evaluate_task(task, data_for([item]), 0) == (True, None)
+    assert evaluate_task(task, data_for([{}]), 0)[0] is False
+    # Separate sessions cannot combine partial isolation evidence.
+    split = [{**metadata, "cookies_count": 1}, {**metadata, "local_storage_origin_count": 1}]
+    assert evaluate_task(task, data_for(split), 0)[0] is False
+    # Correct isolation alone must not bypass the existing outcome ratchet.
+    passed, reason = evaluate_task(task, data_for([metadata], score="0.164"), 0)
+    assert passed is False and "ratchet" in reason.lower(), reason
 
 
 async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
@@ -26455,6 +26574,7 @@ async def run_all_tests():
         test_normal_run_never_implicitly_shortens_the_benchmark_timeout,
     )
     r.record("fast_mode_pass_skips_timeout_history", test_fast_mode_pass_does_not_seed_timeout_history)
+    r.record("attempt_ledger_records_run_id_and_outcome_class", test_attempt_ledger_records_run_id_and_outcome_class)
     r.record("non_fast_mode_pass_records_timeout_history", test_non_fast_mode_pass_still_seeds_timeout_history)
     r.record(
         "test_history_success_output_pipe_preserves_save_and_later_tasks",
@@ -26554,6 +26674,10 @@ async def run_all_tests():
     r.record(
         "webdecoy_fresh_browser_state",
         test_webdecoy_biometrics_uses_fresh_isolated_browser_state,
+    )
+    r.record(
+        "webdecoy_catalog_provider_neutral_isolation",
+        test_webdecoy_catalog_requires_provider_neutral_isolation,
     )
     await r.record_async(
         "live_fixture_setup_restore_yields",

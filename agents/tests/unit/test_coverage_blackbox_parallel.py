@@ -233,3 +233,72 @@ def test_coverage_cli_signal_retires_owned_descendants(tmp_path: Path, monkeypat
                 if identity.startswith(birth) and str(command_path) in identity:
                     os.killpg(pid, signal.SIGKILL)
         proc.communicate(timeout=5)
+
+def test_full_coverage_wrapper_ignores_inherited_domain_selector(tmp_path: Path):
+    import shutil
+
+    source = Path(__file__).resolve().parents[2] / "scripts" / "run-coverage.sh"
+    agents = tmp_path / "agents"
+    (agents / "scripts").mkdir(parents=True)
+    shutil.copyfile(source, agents / "scripts" / source.name)
+    installed = tmp_path / "chromium"
+    installed.mkdir()
+    (installed / "INSTALLATION_COMPLETE").touch()
+    output = tmp_path / "selection.json"
+    python = tmp_path / "fake-python"
+    python.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        f"location = {str(installed)!r}\n"
+        "if '--dry-run' in sys.argv:\n"
+        " print('Install location: ' + location)\n"
+        "else:\n"
+        f" json.dump(os.environ.get('AGENTS_BLACKBOX_DOMAINS'), open({str(output)!r}, 'w'))\n"
+    )
+    python.chmod(0o755)
+    coverage = tmp_path / "fake-coverage"
+    coverage.write_text("#!/bin/sh\nexit 0\n")
+    coverage.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(agents / "scripts" / source.name)],
+        env={**os.environ, "PYTHON_BIN": str(python), "COVERAGE_BIN": str(coverage), "AGENTS_BLACKBOX_DOMAINS": "one-domain"},
+        text=True, capture_output=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not json.loads(output.read_text()), "full coverage inherited a partial selector"
+
+
+def test_explicit_diagnostic_domain_selector_remains_supported(tmp_path: Path, monkeypatch):
+    runner = load_runner()
+    for name in ("alpha", "beta"):
+        (tmp_path / f"{name}.blackbox.py").touch()
+    monkeypatch.setattr(runner, "TESTS_DIR", tmp_path)
+    monkeypatch.setenv("AGENTS_BLACKBOX_DOMAINS", "beta")
+    assert runner.discover_domains() == ["beta"]
+    monkeypatch.setenv("AGENTS_BLACKBOX_DOMAINS", "unknown")
+    with pytest.raises(ValueError, match="unknown"):
+        runner.discover_domains()
+
+
+def test_explicit_diagnostic_coverage_reports_partial_scope(tmp_path: Path, monkeypatch):
+    runner = load_runner()
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "alpha.blackbox.py").touch()
+    (tests / "beta.blackbox.py").touch()
+    coverage = tmp_path / "coverage"
+    coverage.touch()
+    monkeypatch.setattr(runner, "ROOT_DIR", tmp_path)
+    monkeypatch.setattr(runner, "TESTS_DIR", tests)
+    monkeypatch.setenv("COVERAGE_BIN", str(coverage))
+    monkeypatch.setenv("AGENTS_BLACKBOX_DOMAINS", "alpha")
+
+    async def run_domain(domain, semaphore, coverage_bin, artifact_dir):
+        return runner.DomainResult(domain=domain, passed=True, duration_seconds=0, log="unused", exit_code=0)
+
+    monkeypatch.setattr(runner, "run_domain", run_domain)
+    assert asyncio.run(runner.async_main()) == 0
+    summary = json.loads(next(tmp_path.glob(".context/test-runs/*/results.json")).read_text())
+    assert summary["partial"] is True
+    assert summary["selected_domains"] == ["alpha"]
+    assert summary["total"] == 1

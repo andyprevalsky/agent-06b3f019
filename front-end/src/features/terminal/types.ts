@@ -93,7 +93,7 @@ export interface TerminalAgentActions {
   handleLoginClick: () => void;
   handleCreateNewAgent: () => void;
   /** Rose Desktop project "+": the next goal creates the agent in that project. */
-  handleCreateNewAgentInProject: (project: { id: string }) => void;
+  handleCreateNewAgentInProject: (project: { id: string }, folderId?: string | null) => void;
   handleSubmitFeedback: (feedback: BlueprintFeedback) => Promise<void>;
   refreshAgentDetail: (agentId: string) => Promise<void>;
   cleanupAgentState: () => void;
@@ -131,6 +131,8 @@ export interface TerminalUIState {
 // ── AgentChatArea slices ──────────────────────────────────────────────────
 
 export interface AgentSlice {
+  newAgentProjectId?: string | null;
+  newAgentFolderId?: string | null;
   isAuthenticated: boolean;
   isAnonymous: boolean;
   handleJoinWaitlist: () => void;

@@ -41,6 +41,8 @@ export interface Agent {
   archived_at?: string | null;
   /** Owning project (Rose Desktop groups the sidebar by it); absent/null → Home (root project). */
   project_id?: string | null;
+  /** Folder within the owning project; absent/null means the project root. */
+  folder_id?: string | null;
   model: string;
   source: 'WEB' | 'MAC_APP';
   reasoning_effort: 'off' | 'low' | 'medium' | 'high';
@@ -196,8 +198,10 @@ export interface CreateAgentPayload {
   depth?: number; // Depth >= 1 auto-responds to questions (used for agentic integrations)
   start_phase?: 'plan' | 'execute'; // Skip chat routing: start the cloud agent workflow directly
   fast_mode_cache_enabled?: boolean; // Fast Mode button → LLM provider speed (DEMO cache is prompt-matched)
+  speed?: 'standard' | 'fast' | 'ultrafast'; // Forwarded to every LLM provider; never gates a cache
   world_model_mode?: 'real' | 'simulate' | 'shadow'; // Per-agent provider/environment execution mode
   project_id?: string; // Rose Desktop: create the agent inside this project (omitted = Home)
+  folder_id?: string | null; // Optional folder within the project
 }
 
 // Sub-agent Tree Types

@@ -171,6 +171,14 @@ reproduction/diagnosis command, run:
 python3 scripts/record_factory_event.py rca stage reproduce-diagnose
 ```
 
+After each local repro or fix-verification run, record its result (N counts
+attempts from 1) so reviews can see how many repro iterations an RCA needed:
+
+```bash
+python3 scripts/record_factory_event.py rca repro-attempt reproduced --detail repro_attempt=N
+# Or: not-reproduced, fix-verified, fix-failed
+```
+
 Before post-fix verification and handoff, run:
 
 ```bash

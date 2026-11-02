@@ -902,7 +902,7 @@ When adding a benchmark to `tasks.json`, auto-attach it to this algorithm:
 
 **Every completed run is recorded — pass or fail, local or prod.** `BenchmarkRun.save()` writes the full run record (message transcripts + logs) to `runs/*.json`, appends every attempt to the attempts ledger, and full LLM trajectories land in `.llm-dumps/<agent_id>/` (always-on locally; prod goes to ClickHouse).
 
-**A branch deploy commits only its most recent runs to benchmark history (standing user rule, October 22, 2026).** Fix-and-rerun iterations leave superseded attempts in `agents/benchmarks/history/*.jsonl`; failures of code that never merged must not land on main. Before committing ledger rows from a branch, run `python3 scripts/benchmark-history-latest-only.py --base origin/main --write`. It keeps each task's most recent branch run (its latest attempt plus concurrent copies that overlap it), even when that run failed, and drops earlier attempts with their duration and span rows. Rows already on main are never touched. `--check` must pass before the ledger commit. Full run records in `runs/*.json` remain local evidence. Main/daily runs stay append-only. Regression: `scripts/tests/benchmark-history-latest-only.test.py` (deploy structural gates).
+**A branch deploy commits only its most recent runs to benchmark history (standing user rule, October 22, 2026).** Fix-and-rerun iterations leave superseded attempts in `agents/benchmarks/history/*.jsonl`; failures of code that never merged must not land on main. Before committing ledger rows from a branch, run `python3 scripts/benchmark-history-latest-only.py --base origin/main --write` (add `--apply-parked` when a deploy's local smoke lane ran: `run-predeploy-local` parks its rows under `.context/deploy-ledger-park/` inside a deploy so the tracked ledgers stay unchanged while the other gates fingerprint the worktree, and `--apply-parked` replays them first). It keeps each task's most recent branch run (its latest attempt plus concurrent copies that overlap it), even when that run failed, and drops earlier attempts with their duration and span rows. Rows already on main are never touched. `--check` must pass before the ledger commit. Full run records in `runs/*.json` remain local evidence. Main/daily runs stay append-only. Regression: `scripts/tests/benchmark-history-latest-only.test.py` (deploy structural gates).
 
 **⛔ Never rename an existing task `name`.** The name is the primary key across all history stores; a rename orphans pass history and latency baselines:
 
@@ -999,6 +999,36 @@ curl -sS -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" --get "$CLICKHOUSE_ENDPOINT"
 **`agent_cache.py`** reads `agents/navi-worker-log.txt` for `llm.cache` events and renders a tree of cache read/write/hit% per LLM call, grouped by agent. Shows every call site (plan_loop, planner, verifier, explore, execute, chat) with its model, whether it used claudeAuth (direct Anthropic = $0) or waterfall, and per-call cache metrics. Use `--all --since 5m` for a cross-agent overview after running benchmarks.
 
 Typical signatures to look for: `peer closed connection` during streaming, `[NO END]` on an LLM call (crashed/cutoff mid-stream), `Failed to fetch pricing` retries (underlying-model 404s burning 30s each), P2024 Prisma pool timeouts (5s × 3 retry on `db.findFirst`), 429 from Anthropic on the `claude_token` path (rate-limit fallback to waterfall), `thinking.adaptive.effort: Extra inputs` (effort must go in `output_config`, not `thinking`), 0% cache hit on claudeAuth (check `cache.prefix_fingerprint` hashes match across calls — differing hashes = different prefix = no cache reuse).
+
+## Change → test mapping (affected-test selection)
+
+`python3 scripts/select_affected_tests.py` (default: `origin/main` + worktree;
+`--changed-file`, `--base/--head`, `--format json|lane:<name>`) lists, per
+deploy lane, the tests a change can reach. Rules:
+
+- **Tests are auto-mapped.** Lanes discover test files by their runners' own
+  globs and the graph is rebuilt from source on every call; never hand-map a
+  new test. `scripts/tests/select-affected-tests.test.py` (deploy structural
+  gate) fails when a test file maps to no lane or a lane lacks its ALL fallback.
+- **Over-include, never under-include.** A test is selected when it
+  transitively reaches the changed file (upstream/reverse deps: Python and
+  TS imports, `vi.mock`, `@/` aliases across packages, dotted-module strings,
+  executed script paths); data-read paths select their direct readers.
+- **Cross-package edges:** a backend router mounted in `server.ts` at prefix P
+  is reached by every test file in any package that names P; agents domain
+  coverage (`scripts/test-map/agents-coverage.json`, refreshed by
+  `build_agents_coverage_map.py`) only adds selections.
+- **Unknown → run all.** Lockfiles, env examples, Prisma schema/migrations,
+  test runners, shared configs (`run_all` in `scripts/test-map/edges.json`) or
+  any changed file that reaches no test and is not declared inert selects
+  every lane in full.
+- **Dynamic dependencies** (HTTP built from variables, Temporal names,
+  subprocess paths computed at runtime, env) that the graph cannot see: add an
+  `edges` entry (`from` globs → `to_files` or `to_lanes`) to
+  `scripts/test-map/edges.json`, or name the path literally in the test.
+- Selected subsets are diagnostic-only and cannot satisfy a deploy gate. They
+  omit the lane's global coverage threshold; deployment still requires the
+  complete final suite and its unchanged global coverage thresholds.
 
 ## Deploy command regression scheduling
 

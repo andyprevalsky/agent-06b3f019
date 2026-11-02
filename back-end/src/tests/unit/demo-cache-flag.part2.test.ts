@@ -284,7 +284,7 @@ test('Claude Code session service gates proxy on DEMO cache, not the Fast Mode b
   );
 });
 
-test('Codex Code session service gates proxy on DEMO cache, not the Fast Mode button', () => {
+test('Codex Code session service never touches the DEMO cache (S30)', () => {
   const service = readFileSync(
     // Domain folder name coincides with E2B template id env; allowlist for path join.
     join(process.cwd(), 'src', 'domains', 'codex-code', 'service.ts'), // pragma: allowlist secret
@@ -292,16 +292,12 @@ test('Codex Code session service gates proxy on DEMO cache, not the Fast Mode bu
   );
   const createSession = extractFunction(service, 'createSession');
   assert.ok(
-    createSession.includes('agentFastMode'),
-    'Codex Code createSession must resolve DEMO cache via agentFastMode'
+    !createSession.includes('agentFastMode') && !createSession.includes('demoCache'),
+    'Codex Code createSession must not resolve the DEMO cache'
   );
   assert.ok(
-    createSession.includes('const fastModeCacheEnabled = fastMode.enabled'),
-    'Codex Code createSession must use demo cache enabled for the proxy'
-  );
-  assert.ok(
-    /createCodexCodeSession\([\s\S]*fastModeCacheEnabled[\s\S]*\)/.test(createSession),
-    'Codex Code createSession must pass the demo cache flag into E2B env construction'
+    /createCodexCodeSession\([\s\S]*codexSpeed[\s\S]*\)/.test(createSession),
+    'the Fast Mode button only selects Codex native speed'
   );
 });
 

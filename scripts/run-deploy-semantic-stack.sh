@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# /deploy Group 4 semantic lane as one versioned command (deploy.md Steps 5, 6b
+# and 6c; `run_deploy_pipeline.py plan --semantic-stack` / `--e2b-smoke`).
+#
+# Default mode starts this worktree's local stack through `run.sh --benchmark`
+# on the deploy stack database, runs the Playwright UI semantics (four workers,
+# latency ratchet excluded) and the chat-lifecycle latency ratchet (one worker)
+# through run-deploy-stage, then tears the stack down. The Step 6c Claude Code
+# E2B smoke is a separate step: `--e2b-smoke-only` runs it alone through the
+# standalone blackbox runner against the workspace Postgres (the `e2b-smoke`
+# pipeline lane: no stack, no sweep); `--with-e2b-smoke` appends it to the
+# stack lane, the 2026-10-30/31 launcher behaviour. Each step keeps its own
+# stage record (semantic, semantic-latency, claude-code-e2b-smoke).
+#
+# Usage:
+#   bash scripts/run-deploy-semantic-stack.sh                   # stack + UI semantics + latency ratchet
+#   bash scripts/run-deploy-semantic-stack.sh --with-e2b-smoke  # ... then the E2B smoke on the same Postgres
+#   bash scripts/run-deploy-semantic-stack.sh --e2b-smoke-only  # E2B smoke alone (no stack)
+#
+# Environment:
+#   CONDUCTOR_PORT            required; run.sh fans backend/frontend/health out from it
+#   CONDUCTOR_WORKSPACE_NAME  normalized by scripts/lib/workspace-env.sh (.cloud-env or
+#                             .context/deploy-worktree.env); defaults to the checkout basename
+#   ROSE_USE_SYSTEM_PG=true   system Postgres on localhost:5432 instead of the Docker
+#                             container on CONDUCTOR_PORT+5 (scripts/lib/deploy-local-env.sh)
+#   DEPLOY_E2B_DB_PORT        explicit Postgres port for the E2B smoke database; default is
+#                             the running stack's manifest port, else LOCAL_DB_PORT
+#
+# Exit codes: 0 every step passed; 1 a step failed or the stack never became
+# ready; 2 usage, environment or prerequisite error (nothing was started).
+set -uo pipefail
+
+usage() {
+    echo "usage: bash scripts/run-deploy-semantic-stack.sh [--with-e2b-smoke | --e2b-smoke-only]"
+    echo "  (no flag)         local stack + UI semantics + chat-lifecycle latency ratchet"
+    echo "  --with-e2b-smoke  the same, then the Claude Code E2B smoke on the workspace Postgres"
+    echo "  --e2b-smoke-only  only the Claude Code E2B smoke (standalone blackbox runner, no stack)"
+}
+
+MODE=stack
+case "${1:-}" in
+    "") ;;
+    --with-e2b-smoke) MODE=stack-and-e2b ;;
+    --e2b-smoke-only) MODE=e2b-only ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
+if [ "$#" -gt 1 ]; then
+    echo "Too many arguments: $*" >&2
+    usage >&2
+    exit 2
+fi
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$ROOT_DIR" || exit 2
+# shellcheck source=scripts/lib/workspace-env.sh
+. scripts/lib/workspace-env.sh
+# shellcheck source=scripts/lib/deploy-local-env.sh
+. scripts/lib/deploy-local-env.sh
+# Refuses without CONDUCTOR_PORT; exports SMOKE_*_URL, LOCAL_DB_PORT, the
+# strict run.sh port contract and a unique deploy Temporal queue.
+# The fallback precedes the normalizer so the stack and the E2B smoke read one
+# workspace identity; the normalizer still exports the .cloud-env name when the
+# trust flag is unset.
+export CONDUCTOR_WORKSPACE_NAME="${CONDUCTOR_WORKSPACE_NAME:-$(basename "$ROOT_DIR")}"
+configure_deploy_local_env || exit 2
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 && return 0
+    echo "$1 is required but was not found on PATH (pg_isready, psql and createdb come from the PostgreSQL client tools)." >&2
+    return 2
+}
+
+require_postgres() {
+    local port="$1" what="$2"
+    require_command pg_isready || return 2
+    if ! pg_isready -h localhost -p "$port" -U postgres -q 2>/dev/null; then
+        echo "$what: Postgres is not ready on localhost:$port (start the workspace database first; deploy.md Step 5)." >&2
+        return 2
+    fi
+}
+
+# Step 6c: the standalone blackbox runner owns its own backend (never the
+# capture-only Step 5 stack) and needs the separate victoria_<workspace>
+# database on the workspace Postgres. The port comes from DEPLOY_E2B_DB_PORT,
+# else the running stack's manifest (scripts/resolve-deploy-stack-db.sh), else
+# the deploy environment's LOCAL_DB_PORT.
+run_e2b_smoke() {
+    local backend_port="$CONDUCTOR_PORT" db_port="${DEPLOY_E2B_DB_PORT:-}" stack_ports db_name db_url
+    if [ -z "$db_port" ]; then
+        if stack_ports=$(bash scripts/resolve-deploy-stack-db.sh 2>/dev/null); then
+            read -r backend_port db_port <<< "$stack_ports"
+        else
+            db_port="$LOCAL_DB_PORT"
+        fi
+    fi
+    if ! [[ "$db_port" =~ ^[0-9]+$ ]] || (( db_port < 1 || db_port > 65535 )); then
+        echo "E2B smoke: invalid Postgres port '$db_port'." >&2
+        return 2
+    fi
+    require_postgres "$db_port" "E2B smoke" || return 2
+    require_command psql || return 2
+    db_name="victoria_$CONDUCTOR_WORKSPACE_NAME"
+    db_url="postgresql://postgres:postgres@localhost:$db_port/$db_name"
+    if ! psql "$db_url" -At -c 'SELECT 1' >/dev/null 2>&1; then
+        require_command createdb || return 2
+        if ! PGPASSWORD=postgres createdb -h localhost -p "$db_port" -U postgres "$db_name"; then
+            echo "E2B smoke: could not create $db_name on localhost:$db_port." >&2
+            return 2
+        fi
+    fi
+    echo "E2B_SMOKE_START $(date -u +%FT%TZ) db=localhost:$db_port/$db_name"
+    (
+        cd back-end || exit 2
+        CONDUCTOR_PORT="$backend_port" BLACKBOX_SMOKE=1 BLACKBOX_TEST_DATABASE_URL="$db_url" \
+            bash ../scripts/run-deploy-stage claude-code-e2b-smoke -- bash scripts/run-blackbox-tests.sh claude-code
+    )
+}
+
+if [ "$MODE" = e2b-only ]; then
+    run_e2b_smoke
+    status=$?
+    printf 'SEMANTIC_GROUP_RESULTS ui=skipped latency=skipped e2b=%s\n' "$status"
+    exit "$status"
+fi
+
+# Prerequisites before any side effect: the stack database must already be up
+# (deploy.md Step 5 pre-starts it so run.sh never owns or stops it).
+require_postgres "$LOCAL_DB_PORT" "Semantic stack" || exit 2
+require_command jq || exit 2
+require_command curl || exit 2
+
+echo "STACK_START $(date -u +%FT%TZ) epoch=$(date +%s)"
+# Step 5.0 pre-flight garbage collection: stale run.sh trees from aborted runs
+# in this worktree. Live isolated benchmark runs are spared by their owner
+# records and BENCHMARK_RUN_ID (scripts/tests/kill-services.test.sh).
+bash scripts/kill-services.sh || exit 2
+stack_pid=''
+cleanup() {
+    if [ -n "$stack_pid" ] && kill -0 "$stack_pid" 2>/dev/null; then
+        kill -TERM "$stack_pid" 2>/dev/null || true
+        wait "$stack_pid" || true
+    fi
+    bash scripts/kill-services.sh
+    echo "STACK_TEARDOWN_DONE $(date -u +%FT%TZ)"
+}
+trap cleanup EXIT
+mkdir -p .context
+BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8 TRACE_ARCHIVE_ENABLED=0 \
+    bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1 &
+stack_pid=$!
+printf 'STEP5_STACK_PID=%s\n' "$stack_pid"
+ready=0
+for _ in $(seq 1 300); do
+    if ! kill -0 "$stack_pid" 2>/dev/null; then
+        echo "Step5 stack exited before readiness (see .context/deploy-smoke.log)" >&2
+        exit 1
+    fi
+    if curl -sf --max-time 5 "$SMOKE_BASE_URL/health" >/dev/null && curl -sf --max-time 5 "$SMOKE_HEALTH_URL/health" >/dev/null \
+        && curl -sf --max-time 5 "$SMOKE_FRONTEND_URL" >/dev/null \
+        && [ "$(jq -r '.status' .context/services.json 2>/dev/null)" = running ]; then
+        ready=1
+        break
+    fi
+    sleep 2
+done
+if [ "$ready" != 1 ]; then
+    echo "Step5 stack readiness failed after 600 s (see .context/deploy-smoke.log)" >&2
+    exit 1
+fi
+echo "STACK_READY $(date -u +%FT%TZ) epoch=$(date +%s)"
+CP=$(jq -er '.ports.backend' .context/services.json) || exit 2
+DBP=$(jq -er '.database.runtime_port' .context/services.json) || exit 2
+# Step 6b: UI specs on four workers with the latency ratchet excluded, then
+# the ratchet alone on one worker (the chat-lifecycle-ratchet.yml split).
+SEMANTIC_GREP_INVERT="chat full-lifecycle latency" SEMANTIC_WORKERS=4 LOCAL_DB_PORT=$DBP BACKEND_PORT=$CP FRONTEND_PORT=$((CP + 1)) \
+    bash scripts/run-deploy-stage semantic -- bash front-end/scripts/run-semantic-tests.sh
+r1=$?
+SEMANTIC_WORKERS=1 LOCAL_DB_PORT=$DBP BACKEND_PORT=$CP FRONTEND_PORT=$((CP + 1)) \
+    bash scripts/run-deploy-stage semantic-latency -- bash front-end/scripts/run-semantic-tests.sh chat-lifecycle-latency
+r2=$?
+r3=skipped
+if [ "$MODE" = stack-and-e2b ]; then
+    run_e2b_smoke
+    r3=$?
+fi
+printf 'SEMANTIC_GROUP_RESULTS ui=%s latency=%s e2b=%s\n' "$r1" "$r2" "$r3"
+echo "STACK_LANE_END $(date -u +%FT%TZ) epoch=$(date +%s)"
+[ "$r1" = 0 ] && [ "$r2" = 0 ] && { [ "$r3" = skipped ] || [ "$r3" = 0 ]; }

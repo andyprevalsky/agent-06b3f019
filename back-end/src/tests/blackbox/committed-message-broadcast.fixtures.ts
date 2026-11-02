@@ -29,6 +29,7 @@ export type WireMessage = {
 };
 export const bodyMessages = (init?: RequestInit): WireMessage[] =>
   (JSON.parse(String(init?.body)) as { messages: WireMessage[] }).messages;
+/** An in-progress browser tool row (the ordinary committed message shape). */
 export const message = (id: string) => ({
   id,
   timestamp: new Date('2026-10-13T01:34:15.736Z'),

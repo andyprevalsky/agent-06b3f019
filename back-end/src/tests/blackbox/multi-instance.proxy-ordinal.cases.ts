@@ -9,7 +9,8 @@ type Test = (name: string, fn: () => Promise<void>) => Promise<void>;
 type Assert = (cond: unknown, msg: string) => void;
 
 export async function runProxyOrdinalCases(test: Test, assert: Assert): Promise<void> {
-  for (const kind of ['anthropic', 'codex']) {
+  // Codex never uses the DEMO cache (S30); only the Claude Code proxy reserves ordinals.
+  for (const kind of ['anthropic']) {
     await test(`${kind} Fast Mode proxy calls of one trace session get distinct slots across instances`, async () => {
       const trace = `mi${randomUUID().replace(/-/g, '')}`;
       const session = `sess-${randomUUID()}`;

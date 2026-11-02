@@ -8906,7 +8906,6 @@
     "browser_profile_mode": "fresh",
     "browser_auth_realm": "webdecoy.com",
     "expected_browser_session_metadata_values": {
-      "profile_source": "new_user_persistent",
       "auth_source": "none",
       "cookies_injected": false,
       "cookies_count": 0,

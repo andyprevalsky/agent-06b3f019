@@ -19,6 +19,9 @@
  *   the whole column (header + transcript over the root's blur backdrop + the
  *   query box as its direct channel); closing it returns to this agent's chat.
  *
+ * NEW LOCATION: no selected agent + pending project -> project / folder above composer.
+ * Selecting a project root clears the folder; Home or successful create hides it.
+ *
  * AGENTS BANNER (BackgroundAgentsBanner, attached to the top of QueryInput):
  *   0 running agents → hidden (brief "All agents finished" after the last one)
  *   N running        → "Running N agents" ⇄ expanded live hierarchy
@@ -53,6 +56,7 @@ import {
   BackgroundAgentsBanner,
   CodeAgentConversationView,
   PinnedQuestionMount,
+  NewAgentLocation,
   QueryInput,
   useAppView,
   useOpenCodeAgent,
@@ -262,6 +266,9 @@ function InputArea({
         }}
       />
 
+      {roseDesktop && !a.selectedAgentId && a.newAgentProjectId && (
+        <NewAgentLocation projectId={a.newAgentProjectId} folderId={a.newAgentFolderId} />
+      )}
       {/* Rose Desktop: a code agent's pinned question sits directly above the query box. */}
       {a.selectedAgentId && <PinnedQuestionMount />}
 

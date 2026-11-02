@@ -5,6 +5,7 @@ import { createLogicalBrowserInTransaction } from '../../providers/browser/logic
 
 import type { Prisma, AgentSource, VerifierType } from '@prisma/client';
 import { runTransactionWithRetry } from '../../providers/database';
+import type { AgentSpeed } from '../../providers/rose/speed';
 import { assertCurrentParentWorkflowGenerations } from './repoParentWorkflowFence';
 import { assertTaskPathsFree } from './repoTaskPath';
 
@@ -43,18 +44,21 @@ function optionalAgentCreateFields(params: {
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
+  speed?: AgentSpeed;
   memoryEnabled?: boolean;
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   isBenchmark?: boolean;
   githubRepoUrl?: string;
   originDeviceId?: string;
   projectId?: string | null;
-  folderId?: string;
+  folderId?: string | null;
   title?: string;
   taskPath?: string | null;
 }): Partial<Prisma.AgentUncheckedCreateInput> {
   return {
-    ...(params.folderId !== undefined ? { folderId: params.folderId } : {}),
+    ...(params.folderId !== undefined && params.folderId !== null
+      ? { folderId: params.folderId }
+      : {}),
     ...(params.title !== undefined ? { title: params.title } : {}),
     ...(params.projectId !== undefined && params.projectId !== null
       ? { projectId: params.projectId }
@@ -81,6 +85,7 @@ function optionalAgentCreateFields(params: {
     ...(params.fastModeCacheEnabled !== undefined
       ? { fastModeCacheEnabled: params.fastModeCacheEnabled }
       : {}),
+    ...(params.speed !== undefined ? { speed: params.speed } : {}),
     ...(params.memoryEnabled !== undefined ? { memoryEnabled: params.memoryEnabled } : {}),
     ...(params.worldModelMode !== undefined ? { worldModelMode: params.worldModelMode } : {}),
     ...(params.isBenchmark === true ? { isBenchmark: true } : {}),
@@ -131,6 +136,7 @@ export interface CreateAgentParams {
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
+  speed?: AgentSpeed;
   memoryEnabled?: boolean;
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   verifierType: string;
@@ -146,7 +152,7 @@ export interface CreateAgentParams {
   /** Rose Mac app device that started this root agent (C14 local code agents). */
   originDeviceId?: string;
   projectId?: string | null;
-  folderId?: string;
+  folderId?: string | null;
   title?: string;
   graphSpawnHash?: string;
   taskPath?: string | null;
@@ -223,6 +229,8 @@ export async function createAgentTransaction(params: CreateAgentParams) {
 }
 
 export interface BatchCreateAgentParams {
+  projectId?: string | null;
+  folderId?: string | null;
   agentId: string;
   userId: string;
   parentAgentId: string | null;
@@ -243,6 +251,7 @@ export interface BatchCreateAgentParams {
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
+  speed?: AgentSpeed;
   memoryEnabled?: boolean;
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   verifierType: string;

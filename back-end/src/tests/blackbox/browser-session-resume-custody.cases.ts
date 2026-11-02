@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { runBrowserLazyRetirementCustodyCase } from './browser-session-lazy-retirement.cases';
 import { runBrowserResumeRetryAfterRejectedCreateCase } from './browser-session-resume-retry.cases';
+import { runBrowserHydrationFailureCases } from './browser-session-hydration-failure.cases';
 import { fork, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
@@ -9,6 +10,7 @@ import { prisma } from '../../providers/database';
 
 type Outcome = { ok: boolean; sessionId?: string; error?: string; pid: number };
 export async function runBrowserResumeCustodyCases() {
+  await runBrowserHydrationFailureCases();
   await runBrowserLazyRetirementCustodyCase();
   await runBrowserResumeRetryAfterRejectedCreateCase();
   const url = new URL(process.env.DATABASE_URL ?? '');
@@ -174,6 +176,12 @@ export async function runBrowserResumeCustodyCases() {
           }
           res.end('{}');
         } else if (req.method === 'PATCH' || req.method === 'DELETE') {
+          // Hydration and cleanup both have uncertain outcomes in this case;
+          // custody must remain fenced after the caller loses either response.
+          if (scenario === 'hydration-unknown' && req.url?.startsWith('/cleanup/')) {
+            req.socket.destroy();
+            return;
+          }
           stops++;
           if (req.url?.endsWith(nativeId)) candidateStops++;
           res.end('{}');
@@ -352,9 +360,8 @@ export async function runBrowserResumeCustodyCases() {
           results = await combined;
         } else if (concurrent) {
           if (scenario === 'incompatible-timeout')
-            console.log(
-              'Custody timeout control',
-              JSON.stringify({ owner, contextId: context.id, sessionId: session.id })
+            process.stdout.write(
+              `Custody timeout control ${JSON.stringify({ owner, contextId: context.id, sessionId: session.id })}\n`
             );
           const first = run(freshOperation, false, false, leaderExit);
           // Provider entry and leader settlement own the complete startup lifetime.
@@ -494,12 +501,9 @@ export async function runBrowserResumeCustodyCases() {
         );
         outcomes.push({ provider, scenario, creates, hydrations, restores, stops, results });
       } catch (error) {
-        console.error('Browser resume custody case failed', {
-          provider,
-          scenario,
-          creates,
-          hydrations,
-        });
+        process.stderr.write(
+          `Browser resume custody case failed ${JSON.stringify({ provider, scenario, creates, hydrations })}\n`
+        );
         throw error;
       } finally {
         releaseNative();
@@ -539,6 +543,6 @@ export async function runBrowserResumeCustodyCases() {
       }
     }
   }
-  console.log(JSON.stringify({ cases: outcomes }, null, 2));
+  process.stdout.write(`${JSON.stringify({ cases: outcomes }, null, 2)}\n`);
   return outcomes;
 }

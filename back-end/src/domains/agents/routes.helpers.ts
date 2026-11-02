@@ -14,7 +14,7 @@ import { BenchmarkHubUnavailableError } from '../../providers/benchmarkHubErrors
 import { StaleParentWorkflowGenerationError } from '../../providers/workflowGeneration';
 import { WorldModelModeAccessError } from './agentExecutionMode';
 import { CodeSessionShareTargetNotFoundError } from '../../providers/codeSessions/branch';
-import { AgentProjectNotFoundError } from './agentProject';
+import { AgentProjectNotFoundError, AgentPlacementConflictError } from './agentProject';
 
 const log = createLogger('Agents');
 
@@ -48,6 +48,10 @@ export function handleRouteError(
   }
   if (error instanceof WorldModelModeAccessError) {
     res.status(403).json({ error: error.message });
+    return;
+  }
+  if (error instanceof AgentPlacementConflictError) {
+    res.status(400).json({ error: error.message });
     return;
   }
   if (error instanceof AgentProjectNotFoundError) {

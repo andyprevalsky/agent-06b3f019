@@ -21,7 +21,9 @@ tags:
   - sync-loop
 sources:
   - commit 1f80267cd
-repro: back-end/src/tests/blackbox/integration-accounts.pipelines.cases.ts (Gmail sync 403 rateLimitExceeded cases, quotaWall in integration-accounts.gmail-fake.ts)
+  - PR #1628
+  - commit c2cbb0f64
+repro: back-end/src/tests/blackbox/integration-accounts.gmail.cases.ts (quota-wall, token-expiry and cooldown cases; fakes in integration-accounts.gmail-fake.ts)
 status: fixed
 ---
 
@@ -117,6 +119,21 @@ Verification:
   - Wall time was 18.4 min (quota-bound).
 - The buggy run of the same command: 20,280 metadata 403s, 0 full emails,
   `Gmail API error: 403`.
+
+Review-cycle additions (CodeRabbit, PR #1628):
+- A 401 mid-sync triggers one shared token refresh. A paced 200k-message sync
+  outlives Google's one-hour access token.
+- A failed integration cools down 30 min before the next run, so a persistent
+  failure cannot loop on the quota.
+- Live reads and the OAuth first sync share the mailbox-keyed pacer.
+
+Shipped in c2cbb0f64 (merged 2026-10-29). Production verification: after
+clearing integration 26f1b782's `historyIds`, the next cron's paced full
+resyncs ran on the new code:
+- a@roselabs.ai: 938 full emails.
+- andyprevalsky111@gmail.com: 30,704/30,704 metadata, 2,034/2,034 full emails,
+  480 contacts and 2,261 messages recovered.
+- `succeeded 1, failed 0`, about 17 minutes, quota-bound.
 
 Golden reference: not applicable (no approval-gated hunk).
 

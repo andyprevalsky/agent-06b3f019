@@ -5,8 +5,11 @@ import { isDeepStrictEqual } from 'node:util';
 import { Prisma } from '@prisma/client';
 import { retryWithBackoff } from '../retry';
 import { prisma, runTransactionWithRetry } from '../database';
+import { createLogger } from '../logger';
 import { steelSessionTimeoutMs } from '../steel/sessionLifetime';
 import { isConfirmedBrowserEnd } from './sessionPersist';
+import { releaseSupersededBrowser } from './sessionCleanup';
+import { storedBrowserProvider, type BrowserSessionHealth } from './types';
 import { steelEnvironmentIdentity, SHARED_STEEL_IDENTITY } from '../steel/sessionIdentity';
 import {
   nativeRequestRejected,
@@ -16,6 +19,7 @@ import {
 
 export type HydrationTarget = { targetId: string; urlHash: string; seedUrlHash?: string };
 
+const log = createLogger('BrowserResumeCustody');
 const RESUME_TYPE = 'browser_task_resume';
 const RESUME_WAIT_MS = 30_000;
 const keyFor = (taskId: string) => `steel-browser-task-lifecycle:${taskId}`;
@@ -106,6 +110,29 @@ export interface ResumeLifecycleDependencies<T> {
   reuseCompleted: boolean;
   sourceEnded(): boolean;
   inspect(provider: string, marker: string, identity: string): Promise<Native | null>;
+  /** Release one exact native candidate; true only when the provider confirmed the release. */
+  release(provider: string, nativeId: string): Promise<boolean>;
+  /** Whether the provider reports this exact native as terminal (never a guess). */
+  ended(nativeId: string): Promise<boolean>;
+}
+
+export function failedHydrationCleanup(
+  taskId: string,
+  health: (id: string) => Promise<Pick<BrowserSessionHealth, 'sessionId' | 'status'>>
+): Pick<ResumeLifecycleDependencies<unknown>, 'release' | 'ended'> {
+  return {
+    release: (provider, nativeId) =>
+      releaseSupersededBrowser({
+        taskId,
+        previousProvider: storedBrowserProvider(provider),
+        previousSessionId: nativeId,
+        operation: 'resume',
+      }),
+    ended: async (nativeId) => {
+      const observed = await health(nativeId);
+      return observed.sessionId === nativeId && isConfirmedBrowserEnd(observed.status);
+    },
+  };
 }
 
 /**
@@ -360,6 +387,88 @@ export async function withBrowserResumeLifecycle<T>(
   };
   let hydrationTransportOpened = false;
   let hydrationTransportClosed = false;
+  // A caught hydration failure has a known owner and candidate. Settle its
+  // receipt after safe cleanup; crashed/unknown owners stay fenced.
+  const abandonFailedHydration = async (candidate: string, cause: unknown): Promise<void> => {
+    const detail = {
+      taskId,
+      provider: request.provider,
+      candidate,
+      cause: cause instanceof Error ? cause.message : String(cause),
+    };
+    try {
+      await assertOwned();
+      const binding = await deps.readBinding();
+      if (
+        binding.sessionId !== candidate ||
+        binding.contextId !== initial.contextId ||
+        binding.logicalOwnerKey !== initial.logicalOwnerKey ||
+        !['ACTIVE', 'PAUSED'].includes(binding.status) ||
+        (binding.controlState !== undefined &&
+          binding.controlState !== 'AGENT' &&
+          (binding.controlLeaseExpiresAt === null ||
+            binding.controlLeaseExpiresAt === undefined ||
+            binding.controlLeaseExpiresAt.getTime() > Date.now()))
+      )
+        throw new Error('Failed hydration candidate ownership changed');
+      const retainCandidate = request.provider === '' || candidate === request.source;
+      if (!retainCandidate) {
+        if (!(await deps.release(request.provider, candidate))) {
+          log.error(
+            'Browser resume kept custody: failed hydration candidate release unconfirmed',
+            detail
+          );
+          return;
+        }
+        if (!(await deps.ended(candidate))) {
+          log.error(
+            'Browser resume kept custody: failed hydration candidate still reported live',
+            detail
+          );
+          return;
+        }
+      }
+      const settled = { ...request, nativeId: candidate, nativeOutstanding: false };
+      await runTransactionWithRetry(async (tx) => {
+        await assertOwned(tx);
+        const paused = await tx.browserSession.updateMany({
+          where: {
+            id: taskId,
+            sessionId: candidate,
+            contextId: initial.contextId,
+            logicalOwnerKey: initial.logicalOwnerKey,
+            status: { in: ['ACTIVE', 'PAUSED'] },
+            OR: [{ controlState: 'AGENT' }, { controlLeaseExpiresAt: { lte: new Date() } }],
+          },
+          data: { status: 'PAUSED', closedAt: null },
+        });
+        if (paused.count !== 1) throw new Error('Failed hydration candidate binding changed');
+        const changed = await tx.toolSideEffect.updateMany({
+          where: { operationKey, externalId: owner, status: 'STARTED' },
+          data: {
+            status: 'RELEASED',
+            request: settled as unknown as Prisma.InputJsonObject,
+            response: {
+              phase: 'rejected',
+              source: request.source,
+              ...(retainCandidate ? { retained: candidate } : { abandoned: candidate }),
+            },
+          },
+        });
+        if (changed.count !== 1) throw new Error('Failed hydration candidate custody changed');
+      });
+      request = settled;
+      log.warn('Browser resume settled its failed hydration candidate', {
+        ...detail,
+        retained: retainCandidate,
+      });
+    } catch (cleanupError) {
+      log.error('Browser resume kept custody: failed hydration cleanup did not complete', {
+        ...detail,
+        cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+      });
+    }
+  };
   let createEntered = false;
   let createRejected = false;
   return scope.run(
@@ -560,6 +669,14 @@ export async function withBrowserResumeLifecycle<T>(
               response: { phase: 'rejected', source: request.source },
             },
           });
+        } else if (
+          request.phase === 'hydrating' &&
+          request.nativeId !== undefined &&
+          deps.retryHydration === undefined
+        ) {
+          // Acknowledged retry custody is retained by its exact receipt above.
+          // Unknown transport ownership must stay fenced, never be abandoned.
+          await abandonFailedHydration(request.nativeId, error);
         }
         throw error;
       }

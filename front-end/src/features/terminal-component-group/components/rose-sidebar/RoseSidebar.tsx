@@ -41,8 +41,8 @@
  *   [PENDING(x)] --agent created (it becomes selected) | an agent row picked--> [NONE]
  *   While an agent is selected nothing is pending. When the terminal supplies
  *   roseActions.newAgentProjectId (the create request's project_id), that value
- *   decides the pending project, so the ring always matches where the agent lands.
- *   PENDING(x) puts the liquid-metal ring + shadow + glow on x's icon.
+ *   decides the pending project. The desktop composer labels that destination;
+ *   project icons keep their normal appearance.
  *
  * PANELS: project settings beside the bar (useRoseSidebarProjects); archive dialog;
  * rename dialog (useAgentRowActions); delete-project confirm dialog.
@@ -136,6 +136,7 @@ function useCodeAgentRows(props: AppSidebarProps) {
 function usePendingNewAgentGroup(
   selectedAgentId: string | null,
   newAgentProjectId: string | null | undefined,
+  newAgentFolderId?: string | null,
 ) {
   const [clicked, setClicked] = useState<string | null>(null);
   const lastSelected = useRef(selectedAgentId);
@@ -147,7 +148,9 @@ function usePendingNewAgentGroup(
   let pending: string | null = clicked;
   if (selectedAgentId !== null) pending = null;
   else if (newAgentProjectId !== undefined) {
-    pending = newAgentProjectId ?? (clicked === HOME_GROUP ? HOME_GROUP : null);
+    pending = newAgentFolderId
+      ? `folder:${newAgentFolderId}`
+      : (newAgentProjectId ?? (clicked === HOME_GROUP ? HOME_GROUP : null));
   }
   return { pending, mark: setClicked };
 }
@@ -193,16 +196,18 @@ function RoseSidebarBar(props: AppSidebarProps) {
   const pendingGroup = usePendingNewAgentGroup(
     props.selectedAgentId,
     roseActions.newAgentProjectId,
+    roseActions.newAgentFolderId,
   );
   const createInProject = roseActions.onCreateAgentInProject;
-  const projects = useRoseSidebarProjects((project) => {
+  const projects = useRoseSidebarProjects((project, folderId) => {
     if (createInProject === undefined) {
       notYet('New agent in a project');
       return;
     }
-    pendingGroup.mark(project.id);
+    pendingGroup.mark(folderId ? `folder:${folderId}` : project.id);
     exits.close();
-    createInProject(project);
+    if (folderId) createInProject(project, folderId);
+    else createInProject(project);
   });
   const projectActions = {
     ...projects.projectActions,
