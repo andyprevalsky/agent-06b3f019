@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -336,6 +337,308 @@ class Cloud(unittest.TestCase):
         self.assertNotIn('failing',argv)
         self.assertEqual('1',launch.call_args.kwargs['env']['CLOUDBENCH_SKIP_LOCAL_PATCH'])
         self.assertTrue(result['complete'])
+
+
+FAKE_CLI = """#!/usr/bin/env python3
+import json, os, sys
+calls = os.environ['FAKE_DVB_CALLS']; config = json.load(open(os.environ['FAKE_DVB_CONFIG']))
+with open(calls, 'a') as stream: stream.write(json.dumps(sys.argv[1:]) + '\\n')
+reply = config.get(sys.argv[2], {'rc': 1, 'stdout': {}, 'stderr': 'unsupported'})
+sys.stdout.write(json.dumps(reply.get('stdout', {}))); sys.stderr.write(reply.get('stderr', ''))
+raise SystemExit(reply.get('rc', 0))
+"""
+
+
+class Boxes(unittest.TestCase):
+    """Fake dvb-onbox on PATH; nothing here contacts boxes.dev or runs services."""
+    def setUp(self):
+        import deploy_test_boxes as boxes
+        self.boxes = boxes
+        self.temp = tempfile.TemporaryDirectory(); self.root = Path(self.temp.name) / 'worker'
+        self.root.mkdir()
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        (self.root / 'code').write_text('fixture'); (self.root / '.git/info/exclude').write_text('.context/\n')
+        subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-qm', 'f'], check=True)
+        self.coordinator = Path(self.temp.name) / 'coordinator'; self.coordinator.mkdir()
+        self.recipe = {'cases': {'first': {'command': [sys.executable, '-c', 'pass']},
+                                 'second': {'command': [sys.executable, '-c', 'pass']}}}
+        self.request = {'token': 'tok-1', 'source': cycle.source(self.root), 'gate': 'gate', 'checks': ['first', 'second'],
+                        'skips': {}, 'phase': 'initial', 'worker_recipe': self.recipe, 'worker_root': str(self.root.resolve())}
+        self.envelope = json.loads((ROOT / 'scripts/tests/fixtures/boxes-thread-result-envelope.json').read_text())
+        self.host = self.envelope['data']['executionInstanceId']  # real platform-authored devbox id
+        self.binding = {'worker_thread': 'ph-worker', 'worker_host': self.host, 'worker_root': str(self.root.resolve()),
+                        'python': str(self.root.resolve() / 'agents/venv/bin/python')}
+        bin_dir = Path(self.temp.name) / 'bin'; bin_dir.mkdir()
+        cli = bin_dir / 'dvb-onbox'; cli.write_text(FAKE_CLI); cli.chmod(0o700)
+        self.calls = Path(self.temp.name) / 'calls.jsonl'; self.config = Path(self.temp.name) / 'config.json'
+        self.env = patch.dict(os.environ, {'PATH': f"{bin_dir}{os.pathsep}{os.environ['PATH']}", 'FAKE_DVB_CALLS': str(self.calls),
+                                           'FAKE_DVB_CONFIG': str(self.config), 'DEPLOY_BOXES_POLL_SECONDS': '0.01'})
+        self.env.start()
+        native = worker.execute(self.request, self.root)  # the real native worker document
+        self.native_bytes = json.dumps(native, indent=2, allow_nan=False) + '\n'
+        self.native = native
+        self.configure(reply=self.reply())
+
+    def tearDown(self):
+        self.env.stop(); cycle.CANCEL.clear(); self.temp.cleanup()
+
+    def reply(self, body=None, exit_code=0, sha=None):
+        body = self.native_bytes if body is None else body
+        sha = sha or __import__('hashlib').sha256(body.encode()).hexdigest()
+        return (f'DEPLOY_GATE_WORKER_PGID 4242\nDEPLOY_GATE_WORKER_EXIT {exit_code}\n'
+                f'DEPLOY_GATE_RESULT_SHA256 {sha}\nDEPLOY_GATE_RESULT_JSON_BEGIN\n{body}DEPLOY_GATE_RESULT_JSON_END\n'
+                'DEPLOY_GATE_STDERR_BEGIN\nworker diagnostic\nDEPLOY_GATE_STDERR_END\n')
+
+    def wrap(self, data, host=None, status='completed', messages=None):
+        # exact dvb-onbox --json envelope recorded from a real worker (fixtures/boxes-thread-result-envelope.json)
+        data = {**self.envelope['data'], 'executionInstanceId': host or self.host, 'status': status, **data}
+        if messages is not None:
+            data['transcript'] = {**self.envelope['data']['transcript'], 'messages': messages}
+        return {'schemaVersion': 1, 'ok': True, 'data': data}
+
+    def configure(self, reply, send=None, wait=None, read=None, result=None, host=None, listed=None):
+        cycle.write(self.config, {
+            'list': listed or {'rc': 0, 'stdout': {'schemaVersion': 1, 'ok': True, 'data': {'threads': [
+                {'clientThreadId': 'ph-worker', 'executionInstanceId': host or self.host, 'activeTurnId': None,
+                 'status': 'idle', 'notificationsMuted': True, 'agent': 'claude'}]}}},
+            'send': send or {'rc': 0, 'stdout': self.wrap({'status': 'delivered', 'turnId': 'turn-1', 'requestId': 'peer_1'}, host)},
+            'wait': wait or {'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'}, host)},
+            'result': result or {'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1', 'output': {'text': reply}}, host)},
+            'read': read or {'rc': 0, 'stdout': self.wrap({}, host, status='ready', messages=[])}})
+
+    def calls_of(self, name):
+        if not self.calls.exists(): return []
+        return [json.loads(l) for l in self.calls.read_text().splitlines() if json.loads(l)[1] == name]
+
+    def run_adapter(self, deadline=30):
+        return self.boxes.execute(self.request, self.coordinator, self.binding, deadline)
+
+    def test_happy_path_returns_the_exact_native_document_with_bindings(self):
+        result = self.run_adapter()
+        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
+        receipt = result.pop('transport_receipt')
+        self.assertEqual(self.native, result)  # byte-exact native document, nothing reshaped
+        self.assertEqual(('boxes-thread', 'ph-worker', self.host, 'turn-1', 'peer_1', 'tok-1', 0, 4242),
+                         (receipt['transport'], receipt['worker_thread'], receipt['worker_host'], receipt['turn_id'],
+                          receipt['message_id'], receipt['request_token'], receipt['native_exit'], receipt['pgid']))
+        self.assertEqual(self.binding['python'], receipt['remote_python'])
+        self.assertEqual(__import__('hashlib').sha256(self.native_bytes.encode()).hexdigest(), receipt['native_sha256'])
+        self.assertEqual(cycle.digest(self.native), receipt['canonical_sha256'])
+        self.assertEqual(1, len(self.calls_of('send')))
+        send = self.calls_of('send')[0]
+        self.assertEqual('tok-1', send[send.index('--idempotency-key') + 1])
+        prompt = Path(send[send.index('--prompt-file') + 1]).read_text()
+        self.assertIn(f"{self.binding['python']} {self.root.resolve()}/scripts/deploy_test_worker.py --root {self.root.resolve()}", prompt)
+        self.assertIn('DEPLOY_GATE_REQUEST="$PWD/request.json" DEPLOY_GATE_RESULT="$PWD/result.json"', prompt)
+        self.assertLessEqual(len(prompt.encode()), self.boxes.MAX_PROMPT_BYTES)
+        self.assertIn('worker diagnostic', Path(receipt['stderr_log']).read_text())
+        # the coordinator's own validator accepts the relayed document with the adapter's exit
+        from deploy_test_result import validate
+        validate({**result, 'transport_receipt': receipt}, self.request, 0)
+
+    def test_prose_only_reply_is_unverified(self):
+        self.configure(reply='Ran the gate, everything looks fine: first PASS, second PASS.')
+        result = self.run_adapter()
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
+        self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+        self.assertIn('markers', result['reason'])
+
+    def test_wrong_token_root_or_host_is_unverified(self):
+        wrong_token = self.native_bytes.replace('"tok-1"', '"tok-2"')
+        wrong_root = self.native_bytes.replace(str(self.root.resolve()), '/elsewhere')
+        for label, reply in (('token', self.reply(body=wrong_token)), ('root', self.reply(body=wrong_root))):
+            with self.subTest(label=label):
+                self.configure(reply=reply)
+                result = self.run_adapter()
+                self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()), result['reason'])
+                __import__('shutil').rmtree(self.coordinator / '.context')
+        # host identity is platform-authored: the result envelope's executionInstanceId must match the slot
+        self.configure(reply=self.reply(), result={'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1', 'output': {'text': self.reply()}}, 'other-devbox')})
+        result = self.run_adapter()
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertIn('different devbox', result['reason'])
+        __import__('shutil').rmtree(self.coordinator / '.context'); self.calls.unlink()
+        # and the listed thread must already run on that devbox before anything is sent
+        self.configure(reply=self.reply(), listed={'rc': 0, 'stdout': {'schemaVersion': 1, 'ok': True, 'data': {'threads': [
+            {'clientThreadId': 'ph-worker', 'executionInstanceId': 'other-devbox', 'activeTurnId': None, 'status': 'idle',
+             'notificationsMuted': True, 'agent': 'claude'}]}}})
+        result = self.run_adapter()
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual([], self.calls_of('send'))
+
+    def test_cli_failure_undelivered_or_oversize_prompt_is_unverified_with_stderr_kept(self):
+        for label, send in (('exit', {'rc': 3, 'stdout': {}, 'stderr': 'daemon_unavailable'}),
+                            ('status', {'rc': 0, 'stdout': self.wrap({'status': 'thread_not_ready'}), 'stderr': 'not ready'})):
+            with self.subTest(label=label):
+                self.configure(reply=self.reply(), send=send)
+                result = self.run_adapter()
+                self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
+                self.assertIn(send['stderr'], Path(result['transport_receipt']['stderr_log']).read_text())
+                __import__('shutil').rmtree(self.coordinator / '.context')
+        self.request['worker_recipe']['cases']['first']['env'] = {'PAD': 'x' * 40000}
+        self.calls.unlink()
+        result = self.run_adapter()
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
+        self.assertIn('send bound', result['reason']); self.assertEqual([], self.calls_of('send'))
+
+    def test_resume_rereads_the_same_turn_without_a_second_send(self):
+        first = self.run_adapter(); self.assertEqual('PASS', first['cases']['first'])
+        (self.coordinator / '.context/deploy-boxes').rename(self.coordinator / '.context/first')
+        __import__('shutil').copytree(self.coordinator / '.context/first', self.coordinator / '.context/deploy-boxes')
+        self.calls.unlink()
+        again = self.run_adapter()
+        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, again['cases'])
+        self.assertEqual([], self.calls_of('send'))
+        self.assertEqual('turn-1', self.calls_of('wait')[0][self.calls_of('wait')[0].index('--turn') + 1])
+
+    def test_crash_between_send_and_persist_adopts_the_existing_turn(self):
+        directory = self.coordinator / '.context/deploy-boxes' / __import__('hashlib').sha256(b'tok-1').hexdigest()
+        prompt = self.boxes.build_prompt(self.request, self.binding)
+        cycle.write(directory / 'state.json', {'token': 'tok-1', 'idempotency_key': 'tok-1', 'thread': 'ph-worker',
+            'host': self.host, 'worker_root': str(self.root.resolve()), 'deadline_at': time.time() + 30,
+            'prompt_sha256': __import__('hashlib').sha256(prompt.encode()).hexdigest(), 'sent_attempted_at': time.time(),
+            'turn_id': None, 'message_id': None, 'cli_log': str(directory / 'cli.log'), 'stderr_log': str(directory / 'stderr.log')})
+        self.configure(reply=self.reply(), read={'rc': 0, 'stdout': self.wrap({}, status='ready', messages=[
+            {'role': 'user', 'state': 'ready', 'text': 'unrelated', 'turnId': 'turn-0'},
+            {'role': 'user', 'state': 'ready', 'text': prompt, 'turnId': 'turn-7'}])})
+        result = self.run_adapter()
+        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
+        self.assertEqual([], self.calls_of('send')); self.assertEqual('turn-7', result['transport_receipt']['turn_id'])
+        # a changed prompt under the same token is never resent
+        state = cycle.read(directory / 'state.json'); state['prompt_sha256'] = 'f' * 64; state['turn_id'] = None
+        cycle.write(directory / 'state.json', state); self.calls.unlink()
+        result = self.run_adapter()
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual([], self.calls_of('send'))
+
+    def test_missing_deadline_refuses_before_any_send(self):
+        with self.assertRaisesRegex(ValueError, 'existing gate deadline'):
+            self.boxes.execute(self.request, self.coordinator, self.binding, None)
+        request = self.coordinator / 'request.json'; cycle.write(request, self.request)
+        proc = subprocess.run([sys.executable, str(ROOT / 'scripts/deploy_test_boxes.py'), '--root', str(self.coordinator),
+                               '--thread', 'ph-worker', '--host', self.host, '--worker-root', str(self.root.resolve()),
+                               '--python', self.binding['python']], capture_output=True, text=True,
+                              env={**os.environ, 'DEPLOY_GATE_REQUEST': str(request), 'DEPLOY_GATE_RESULT': str(self.coordinator / 'r.json')})
+        self.assertEqual(2, proc.returncode); self.assertIn('DEPLOY_BOXES BLOCKED', proc.stderr)
+        self.assertFalse(self.calls.exists()); self.assertFalse((self.coordinator / 'r.json').exists())
+
+    def test_timeout_or_cancel_is_unverified_and_names_the_remote_cleanup_owner(self):
+        self.configure(reply=self.reply(), wait={'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'}, status='running')})
+        result = self.run_adapter(deadline=0.2)
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
+        self.assertFalse(result['cleanup_complete']); self.assertIn('deadline', result['reason'])
+        owner = result['cleanup_owner']
+        self.assertEqual(('ph-worker', self.host, str(self.root.resolve()), 'tok-1', 'turn-1', 'peer_1'),
+                         (owner['worker_thread'], owner['worker_host'], owner['worker_root'], owner['request_token'],
+                          owner['turn_id'], owner['message_id']))
+        self.assertEqual(f"{self.root.resolve()}/.context/deploy-boxes/tok-1", owner['remote_dir'])
+        self.assertIsNone(owner['pgid'])
+
+    def test_truncated_or_oversize_result_is_unverified_never_trimmed(self):
+        truncated = self.reply().replace('DEPLOY_GATE_RESULT_JSON_END\n', '')
+        for label, result_cfg in (('truncated-markers', {'rc': 0, 'stdout': self.wrap({'output': {'text': truncated}})}),
+                                  ('payload-truncated', {'rc': 0, 'stdout': self.wrap({'output': {'text': self.reply(), 'truncated': True}})}),
+                                  ('hash-mismatch', {'rc': 0, 'stdout': self.wrap({'output': {'text': self.reply(sha='a' * 64)}})})):
+            with self.subTest(label=label):
+                self.configure(reply=self.reply(), result=result_cfg)
+                result = self.run_adapter()
+                self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
+                __import__('shutil').rmtree(self.coordinator / '.context')
+        self.configure(reply=self.reply())
+        with patch.object(self.boxes, 'MAX_RECEIPT_BYTES', 10):
+            result = self.run_adapter()
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertIn('transport limit', result['reason'])
+
+    def gate(self, name, thread, host, root, port, python=None):
+        python = python or f'{root}/agents/venv/bin/python'
+        return {'name': name, 'worker': name + '-worker', 'checks': [name], 'case_protocol': True, 'result_transport': 'file',
+                'worker_recipe': {'cases': {name: {'command': ['true']}}}, 'timeout_seconds': 60, 'worker_transport': 'boxes-thread',
+                'worker_thread': thread, 'worker_host': host, 'worker_root': root, 'remote_python': python, 'cwd': str(ROOT),
+                'env': {'CONDUCTOR_WORKSPACE_NAME': name, 'CONDUCTOR_PORT': str(port)},
+                'command': [sys.executable, str(ROOT / 'scripts/deploy_test_boxes.py'), '--thread', thread, '--host', host,
+                            '--worker-root', root, '--python', python, '--deadline-seconds', '60']}
+
+    def plan(self, *gates):
+        return {'source': self.request['source'], 'gates': [
+            *[{'name': n, 'quick': True, 'category': n, 'checks': [n], 'command': ['true']}
+              for n in ('format', 'eslint', 'typescript', 'backend-structural')], *gates]}
+
+    def test_isolation_binds_thread_host_root_and_python(self):
+        good = self.gate('api', 'ph-a', 'devbox-a', '/prepared/api', 12000)
+        cycle.validate_plan(self.plan(good))
+        from deploy_test_result import preserve_contract
+        for field, value in (('worker_thread', 'ph-b'), ('worker_host', 'devbox-b'), ('worker_root', '/prepared/other'),
+                             ('remote_python', '/prepared/api/other/python'), ('timeout_seconds', 30)):
+            with self.subTest(field=field):
+                swapped = {**good, field: value}
+                with self.assertRaisesRegex(ValueError, 'argv must bind|deadline|inside the worker root'):
+                    cycle.validate_plan(self.plan(swapped))  # gate identity and argv must agree
+                if field != 'timeout_seconds':
+                    with self.assertRaises(ValueError): preserve_contract(good, swapped)
+        with self.assertRaisesRegex(ValueError, 'inside the worker root'):
+            cycle.validate_plan(self.plan(self.gate('api', 'ph-a', 'devbox-a', '/prepared/api', 12000, python='/usr/bin/python3')))
+        for field in ('worker_thread', 'worker_host', 'timeout_seconds'):
+            with self.subTest(missing=field):
+                with self.assertRaises(ValueError): cycle.validate_plan(self.plan({k: v for k, v in good.items() if k != field}))
+
+    def test_same_host_threads_cannot_share_root_or_ports_but_different_hosts_may(self):
+        a = self.gate('api', 'ph-a', 'devbox-a', '/prepared/api', 12000)
+        for label, b in (('root', self.gate('ui', 'ph-b', 'devbox-a', '/prepared/api', 24000)),
+                         ('nested-root', self.gate('ui', 'ph-b', 'devbox-a', '/prepared/api/nested', 24000)),
+                         ('port', self.gate('ui', 'ph-b', 'devbox-a', '/prepared/ui', 12000)),
+                         ('workspace', {**self.gate('ui', 'ph-b', 'devbox-a', '/prepared/ui', 24000),
+                                        'env': {'CONDUCTOR_WORKSPACE_NAME': 'api', 'CONDUCTOR_PORT': '24000'}}),
+                         ('thread', self.gate('ui', 'ph-a', 'devbox-a', '/prepared/ui', 24000))):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(ValueError, 'must not share'): cycle.validate_plan(self.plan(a, b))
+        cycle.validate_plan(self.plan(a, self.gate('ui', 'ph-b', 'devbox-b', '/prepared/api', 12000)))
+
+    def test_inventory_without_thread_host_or_deadline_blocks_the_plan(self):
+        from deploy_test_bindings import generate
+        template = {'gates': [{'name': 'be', 'category': 'backend-coverage-blackbox', 'command': ['true'], 'checks': ['be']}]}
+        slot = {'id': 'be-worker', 'transport': 'boxes-thread', 'worker_thread': 'ph-a', 'worker_host': 'devbox-a',
+                'worker_root': '/prepared/be', 'timeout_seconds': 60, 'env': {'CONDUCTOR_WORKSPACE_NAME': 'be', 'CONDUCTOR_PORT': '12000'}}
+        binding = generate(template, {'be': slot}, ROOT)['be']
+        self.assertEqual(['--thread', 'ph-a', '--host', 'devbox-a', '--worker-root', '/prepared/be', '--python',
+                          '/prepared/be/agents/venv/bin/python', '--deadline-seconds', '60'], binding['command'][2:])
+        self.assertEqual(sys.executable, binding['command'][0]); self.assertEqual('file', binding['result_transport'])
+        for field in ('worker_thread', 'worker_host', 'timeout_seconds'):
+            with self.subTest(missing=field):
+                with self.assertRaises(ValueError): generate(template, {'be': {k: v for k, v in slot.items() if k != field}}, ROOT)
+        inventory = self.coordinator / 'inventory.json'; cycle.write(inventory, {'be': {k: v for k, v in slot.items() if k != 'worker_thread'}})
+        tpl = self.coordinator / 'template.json'; cycle.write(tpl, template)
+        proc = subprocess.run([sys.executable, str(ROOT / 'scripts/deploy_test_plan.py'), '--template', str(tpl), '--inventory',
+                               str(inventory), '--output', str(self.coordinator / 'plan.json'), '--base', 'HEAD'],
+                              capture_output=True, text=True, cwd=ROOT)
+        self.assertEqual(2, proc.returncode); self.assertIn('DEPLOY_PLAN BLOCKED', proc.stderr)
+
+    def test_send_bound_is_exactly_32_kib_and_never_truncates(self):
+        self.request.update(token='tok-2', worker_recipe={**self.recipe, 'cases': {**self.recipe['cases'],
+                            'first': {**self.recipe['cases']['first'], 'env': {'PAD': ''}}}})
+        self.assertEqual(32768, self.boxes.MAX_PROMPT_BYTES)
+        for size, expected in ((32768, 'PASS'), (32769, 'UNVERIFIED')):
+            with self.subTest(size=size):
+                self.request['token'] = f'tok-{size}'
+                self.request['worker_recipe']['cases']['first']['env']['PAD'] = ''
+                base = len(self.boxes.build_prompt(self.request, self.binding).encode())
+                self.request['worker_recipe']['cases']['first']['env']['PAD'] = 'x' * (size - base)
+                __import__('shutil').rmtree(self.root / '.context', ignore_errors=True)
+                self.native_bytes = json.dumps(worker.execute(self.request, self.root), indent=2, allow_nan=False) + '\n'
+                self.configure(reply=self.reply())
+                self.assertEqual(size, len(self.boxes.build_prompt(self.request, self.binding).encode()))
+                result = self.run_adapter()
+                self.assertEqual(expected, result['cases']['first'], result.get('reason'))
+        self.assertIn('send bound', result['reason']); self.assertEqual(1, len(self.calls_of('send')))
+
+    def test_typed_permission_denial_is_unverified_with_exact_error_kept(self):
+        denial = {'schemaVersion': 1, 'ok': False, 'error': {'code': 'thread_control_scope_denied',
+                  'message': 'request control-project-threads'}}
+        self.configure(reply=self.reply(), send={'rc': 1, 'stdout': denial, 'stderr': ''})
+        result = self.run_adapter()
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
+        self.assertEqual('transport_permission_denied', result['reason'])
+        self.assertEqual('thread_control_scope_denied', result['transport_receipt']['cli_error']['code'])
+        self.assertIn('request control-project-threads', result['transport_receipt']['cli_error']['text'])
+        self.assertIn('request control-project-threads', Path(result['transport_receipt']['cli_log']).read_text())
+        self.assertEqual(1, len(self.calls_of('send')))  # no retry loop
 
 
 if __name__=='__main__': unittest.main()

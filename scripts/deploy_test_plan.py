@@ -82,9 +82,11 @@ def select(template: dict, changed: list[str], result: dict, binding: dict) -> d
             gate.update(worker=worker['id'], command=worker['command'], cwd=worker.get('cwd', str(ROOT)),
                         env={**gate.get('env', {}), **worker.get('env', {})})
             gate['worker_transport'] = worker.get('transport', 'explicit')
-            for key in ('worker_host', 'worker_root'):
+            for key in ('worker_host', 'worker_root', 'worker_thread'):
                 if key in worker:
                     gate[key] = worker[key]
+            if worker.get('transport') == 'boxes-thread':
+                gate['remote_python'] = worker['python']
             if 'timeout_seconds' in worker:
                 gate['timeout_seconds'] = worker['timeout_seconds']
             if worker.get('case_protocol'):

@@ -9,7 +9,7 @@ _spec.loader.exec_module(_ports)
 
 def validate(plan, root):
     root = Path(root).resolve()
-    roots, workspaces, ports = set(), set(), set()
+    roots, workspaces, ports, threads = set(), set(), set(), set()
     for gate in plan['gates']:
         if gate.get('quick'):
             continue
@@ -36,6 +36,31 @@ def validate(plan, root):
             location = str(Path(location))
             if not gate.get('case_protocol') or gate.get('result_transport') != 'stdout':
                 raise ValueError('SSH binding requires the source-bound worker receipt protocol')
+        elif mode == 'boxes-thread':
+            thread, box, location, python = (gate.get(k) for k in
+                                             ('worker_thread', 'worker_host', 'worker_root', 'remote_python'))
+            if any(not isinstance(v, str) or not v or v.startswith('-') for v in (thread, box)):
+                raise ValueError('boxes-thread binding requires its prepared worker thread and devbox host')
+            if not isinstance(location, str) or not location.startswith('/') or '..' in Path(location).parts:
+                raise ValueError('boxes-thread binding requires the prepared absolute worker root')
+            location = str(Path(location))
+            if (not isinstance(python, str) or not python.startswith('/') or '..' in Path(python).parts
+                    or Path(location) not in Path(python).parents):
+                raise ValueError('boxes-thread binding requires an absolute remote python inside the worker root')
+            if (not gate.get('case_protocol') or 'worker_recipe' not in gate
+                    or gate.get('result_transport') != 'file'):
+                raise ValueError('boxes-thread binding requires the source-bound worker receipt protocol')
+            if gate.get('timeout_seconds') is None:
+                raise ValueError('boxes-thread binding requires its existing gate deadline')
+            expected = ['--thread', thread, '--host', box, '--worker-root', location, '--python', python,
+                        '--deadline-seconds', str(gate['timeout_seconds'])]
+            if (len(args) != 2 + len(expected) or args[2:] != expected
+                    or Path(args[1]).resolve() != root / 'scripts/deploy_test_boxes.py'):
+                raise ValueError('boxes-thread argv must bind the same thread, host, root, python and deadline')
+            if thread in threads:
+                raise ValueError('workers must not share a worker thread')
+            threads.add(thread)
+            host = 'boxes:' + box
         elif mode == 'local-isolated':
             host = 'local'
             location = str(Path(gate.get('cwd', root)).resolve())
@@ -45,7 +70,7 @@ def validate(plan, root):
             if gate.get('worker_root', location) != location:
                 raise ValueError('local worker root and working directory differ')
         else:
-            raise ValueError('bind a local-isolated, SSH, or cloud benchmark executor')
+            raise ValueError('bind a local-isolated, SSH, boxes-thread, or cloud benchmark executor')
         workspace = gate.get('env', {}).get('CONDUCTOR_WORKSPACE_NAME')
         port = gate.get('env', {}).get('CONDUCTOR_PORT')
         if not workspace or not port or not port.isdigit() or not 1 <= int(port) <= 65535:
