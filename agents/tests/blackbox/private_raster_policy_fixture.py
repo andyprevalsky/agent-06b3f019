@@ -129,8 +129,23 @@ async def check_printable_batch_contract():
     for native,declared,expected,arguments in [(True,"send_keys","press_key",{"key":"ENTER"}),(False,"navigate","goto",{"url":"https://fixture.test/"}),(True,"wait","wait",{"time_ms":1}),(False,"wait","wait",{"time_ms":1}),(True,"screenshot","screenshot",{}),(False,"screenshot","screenshot",{})]:
         async def same_contract(_self,**kwargs):
             first={"id":"first-real-id","name":declared,"arguments":json.dumps(arguments)}
-            return RoseResponse(tool_calls=[first,{"id":"ignored-second","name":"screenshot","arguments":"{}"}] if native else [],content="" if native else json.dumps({"action":[{declared:arguments},{"screenshot":{}}]}),actual_model="gpt-6-sol-gpt")
+            return RoseResponse(tool_calls=[first] if native else [],content="" if native else json.dumps({"action":[{declared:arguments}]}),actual_model="gpt-6-sol-gpt")
         with patch.object(RoseClient,"collect",new=same_contract),patch("helpers.observability.dump_llm_context"):
             result=await RoseClient().complete_browser_use(task="Use declared capability",browser_state={},action_history=[],available_actions=[expected],turn_messages=[])
         assert result["action"]["action"] == expected
-    print("PRINTABLE_BATCH_FIRST_CALL_MIXED_ALIASES_PUBLIC_CAPTURE_NORMALIZATION_PASS")
+    # Every member is validated: an unavailable trailing action must not disappear.
+    from providers.rose.errors import BrowserModelOutputValidationError
+    for native in (True, False):
+        async def unavailable_tail(_self, **kwargs):
+            first = {"id": "first", "name": "press_key", "arguments": '{"key":"ENTER"}'}
+            return RoseResponse(tool_calls=[first, {"id": "second", "name": "screenshot", "arguments": "{}"}] if native else [],
+                                content="" if native else json.dumps({"action": [{"press_key": {"key": "ENTER"}}, {"screenshot": {}}]}),
+                                actual_model="gpt-6-sol-gpt")
+        with patch.object(RoseClient, "collect", new=unavailable_tail), patch("helpers.observability.dump_llm_context"):
+            try:
+                await RoseClient().complete_browser_use(task="Use declared capability", browser_state={}, action_history=[], available_actions=["press_key"], turn_messages=[])
+            except BrowserModelOutputValidationError as error:
+                assert error.private_detail == "Browser action is not available in this request."
+            else:
+                raise AssertionError("Unavailable trailing action was silently dropped")
+    print("PRINTABLE_BATCH_ALIAS_AND_UNAVAILABLE_TAIL_CONTRACT_PASS")

@@ -9534,7 +9534,8 @@ def test_passkeys_rearmed_before_each_step_state_observe():
     # ensure/get_browser_state calls (comment growth previously broke an 800-char
     # window while the call order stayed correct).
     observe = source.index("observe_page_state = await", start)
-    window = source[start : observe + 120]
+    observe_end = source.index("step_timer.mark(\"observe_state\")", observe)
+    window = source[start:observe_end]
     assert "ensure_browser_overlays_suppressed()" in window
     assert window.index("ensure_browser_overlays_suppressed()") < window.index("_observe_step_page(")
 
@@ -27421,6 +27422,7 @@ async def test_spawn_browser_activity_tilion_cost_row_bills_live_session_bytes_n
             AsyncMock(
                 return_value={
                     "score": 1.0,
+                    "task_completed": True,
                     "reasoning": "Heading confirmed",
                     "structured_response": {"result": "Example Domain"},
                     "usage": {},
@@ -35780,6 +35782,7 @@ async def test_foreground_trace_outcome_privacy_and_budget():
         for _ in range(40):
             assert await trace.run("user_control", result(sentinel)) is sentinel
         assert await trace.run("PRIVATE-OPERATION", result(sentinel)) is sentinel
+    events = [event for event in events if event.get("event") == "browser.foreground.await" and event.get("trace_id") == trace._owner["trace_id"]]
     assert len(events) == ft.MAX_OPERATIONS * 2 + 1, len(events)
     assert events[-1]["state"] == "budget_exhausted"
     encoded = json.dumps(events)
@@ -35801,15 +35804,19 @@ async def test_foreground_trace_outcome_privacy_and_budget():
         tasks = [asyncio.create_task(t.run("tab_rebind", nested())) for t in (one, two)]
         await asyncio.sleep(0)
         gate.set()
+        # Global structlog capture can also receive unrelated background events.
+        ft.logger.info("unrelated.fixture.event")
         assert all(value is sentinel for value in await asyncio.gather(*tasks))
-    assert len({e["trace_id"] for e in concurrent}) == 2
+    owned_ids = {one._owner["trace_id"], two._owner["trace_id"]}
+    concurrent = [event for event in concurrent if event.get("event") == "browser.foreground.await" and event.get("trace_id") in owned_ids]
+    assert {e["trace_id"] for e in concurrent} == owned_ids
     for owner in ("one", "two"):
         rows = [e for e in concurrent if e["task_key"] == ft._identity(owner)]
         assert [e["operation"] for e in rows if e["state"] == "start"] == ["tab_rebind", "target_info"]
     # No owner context leaks after the wrapped coroutine completes.
     with capture_logs() as outside:
         assert await ft.trace_foreground_await("target_info", result(sentinel)) is sentinel
-    assert outside == []
+    assert [event for event in outside if event.get("event") == "browser.foreground.await" and event.get("trace_id") in (owned_ids | {trace._owner["trace_id"]})] == []
 
 
 async def test_foreground_trace_control_ownership_wait():
@@ -39505,11 +39512,16 @@ async def test_phone_live_completion_records_real_results_for_existing_verifier(
     from browser_tools.dom_service import ActionHistory
     tree=ast.parse(Path(handler.__file__).read_text())
     boundary=next(node for node in ast.walk(tree) if isinstance(node,ast.AsyncFunctionDef) and node.name=='_execute_action')
-    factory=ast.parse('def factory():\n    action_redaction_refs = None\n').body[0]
-    factory.body.extend([boundary,ast.Return(value=ast.Name(id='_execute_action',ctx=ast.Load()))])
+    policy = next(node for node in ast.walk(tree) if isinstance(node,ast.AsyncFunctionDef) and node.name=='_policy_action_error')
+    authority = next(node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef) and node.name=='_policy_authority')
+    factory=ast.parse('def factory():\n    action_redaction_refs = None\n    policy_decision_tab = None\n').body[0]
+    factory.body.extend([authority, policy, boundary,ast.Return(value=ast.Name(id='_execute_action',ctx=ast.Load()))])
     code=ast.fix_missing_locations(ast.Module(body=[factory],type_ignores=[]))
     history=ActionHistory()
+    from domains.spawn_browser_agent_v3.action_batch import BrowserActionBatch
     ns=dict(handler.__dict__)
+    ns.update(navigation_policy=handler.NavigationPolicyBarrier("task"),
+              action_batch=BrowserActionBatch(lambda *_args: None))
     ns.update(secret_refs={'pwd:fixture':'CANARY-PRIVATE-PASSWORD'},dom_service=SimpleNamespace(),
               action_history=history,_auth_context_for_url=AsyncMock(),current_url='https://phone-harness.com/cloud',
               config=_fake_config(),user_id='user',agent_id='agent',task_id='task',
