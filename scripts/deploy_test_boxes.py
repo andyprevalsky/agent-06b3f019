@@ -9,6 +9,7 @@ hash to the worker's own sha256sum are parsed. Anything else is UNVERIFIED.
 This adapter never allocates devboxes, threads or services.
 """
 import argparse
+import base64
 import hashlib
 import json
 import math
@@ -19,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import time
+import zlib
 
 from deploy_test_cycle import ROOT, digest, exclusive, read, write
 from deploy_test_process import CANCEL, cancellation_handlers
@@ -28,6 +30,8 @@ TRANSPORT = 'boxes-thread'
 LIST_ARGV = ['threads', 'list', '--all', '--json']  # every page; the first page alone omits older threads
 CLI = 'dvb-onbox'
 MAX_PROMPT_BYTES = 32 * 1024  # `threads send --prompt-file` bound; the result side is bound by its sha256 only
+INLINE_REQUEST_BYTES = 8 * 1024
+ZB64_BEGIN, ZB64_END = 'DEPLOY_GATE_REQUEST_ZB64_BEGIN', 'DEPLOY_GATE_REQUEST_ZB64_END'
 PERMISSION_CODES = ('disabled', 'denied')
 INLINE_FALLBACK_BYTES = 16 * 1024  # the worker inlines result.json only below this; attachments carry the rest
 ATTACHMENTS_ROOT = Path.home() / '.devbox/desktop-attachments'  # <root>/<box>/<recipient thread>/<name>--<hash16>.<ext>
@@ -61,19 +65,46 @@ def remote_directory(worker_root, token):
     return f'{worker_root}/.context/deploy-boxes/{token}'
 
 
+def canonical_request(request):
+    return json.dumps(request, sort_keys=True, separators=(',', ':')).encode()
+
+
+def request_envelope(request, binding):
+    raw = canonical_request(request)
+    sha = hashlib.sha256(raw).hexdigest()
+    if len(raw) <= INLINE_REQUEST_BYTES:
+        return [f'printf %s {shlex.quote(raw.decode())} > request.json'], {
+            'request_sha256': sha, 'request_bytes': len(raw), 'compressed': None}
+    packed = base64.b64encode(zlib.compress(raw, 9)).decode()
+    decoder = ('import sys,zlib,base64,hashlib; raw=zlib.decompress(base64.b64decode(sys.stdin.read())); '
+               f'valid=hashlib.sha256(raw).hexdigest()=="{sha}" and len(raw)=={len(raw)}; '
+               'valid or sys.exit("request hash/length mismatch"); open("request.json","wb").write(raw)')
+    lines = [f'# {ZB64_BEGIN} sha256={sha} length={len(raw)} compressed_sha256={hashlib.sha256(packed.encode()).hexdigest()}',
+             f"{shlex.quote(binding['python'])} -c {shlex.quote(decoder)} <<'{ZB64_END}' "
+             '|| { echo "DEPLOY_GATE_WORKER_EXIT 4"; exit 4; }',
+             *[packed[i:i + 76] for i in range(0, len(packed), 76)], ZB64_END]
+    return lines, {'request_sha256': sha, 'request_bytes': len(raw),
+                   'compressed': {'sha256': hashlib.sha256(packed.encode()).hexdigest(), 'bytes': len(packed)}}
+
+
 def build_prompt(request, binding):
     token, root = request['token'], binding['worker_root']
+    worker_script = binding.get('worker_script', 'deploy_test_worker.py')
+    if worker_script not in {'deploy_test_worker.py', 'deploy_test_backend.py'}:
+        raise ValueError('unsupported prepared worker entrypoint')
+    if worker_script == 'deploy_test_backend.py' and request['gate'] != 'backend-coverage-blackbox':
+        raise ValueError('backend entrypoint requires the backend coverage gate')
     remote = remote_directory(root, token)
-    body = json.dumps(request, sort_keys=True, separators=(',', ':'))
+    envelope, _ = request_envelope(request, binding)
     script = '\n'.join([
         'set -eu; umask 077',
         f'cd {shlex.quote(root)} && mkdir -p {shlex.quote(remote)} && cd {shlex.quote(remote)} '
         '|| {{ echo "DEPLOY_GATE_WORKER_EXIT 3"; exit 3; }}'.replace('{{', '{').replace('}}', '}'),
-        f'printf %s {shlex.quote(body)} > request.json',
+        *envelope,
         'echo "DEPLOY_GATE_WORKER_PGID $$"',
         f'DEPLOY_GATE_REQUEST="$PWD/request.json" DEPLOY_GATE_RESULT="$PWD/result.json" '
         f'DEPLOY_GATE_TOKEN={shlex.quote(token)} DEPLOY_LANE_SCOPED_REUSE=0 DEPLOY_CYCLE_FRESH=1 '
-        f'{shlex.quote(binding["python"])} {shlex.quote(root + "/scripts/deploy_test_worker.py")} '
+        f'{shlex.quote(binding["python"])} {shlex.quote(root + "/scripts/" + worker_script)} '
         f'--root {shlex.quote(root)} '
         '> stdout.log 2> stderr.log && rc=0 || rc=$?; echo "DEPLOY_GATE_WORKER_EXIT $rc"',
         'sum=$(sha256sum result.json | cut -d" " -f1); echo "DEPLOY_GATE_RESULT_SHA256 $sum"',
@@ -338,7 +369,10 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
     if state['prompt_sha256'] != prompt_sha:
         return unverified(request, binding, state, 'prompt changed under an already attempted request token')
     if len(prompt.encode()) > MAX_PROMPT_BYTES:
-        return unverified(request, binding, state, f'prompt exceeds the {MAX_PROMPT_BYTES} byte send bound')
+        _, sizes = request_envelope(request, binding)
+        return unverified(request, binding, state, 'prompt_too_large: '
+                          f'prompt {len(prompt.encode())} B > {MAX_PROMPT_BYTES} B send bound '
+                          f'(canonical request {sizes["request_bytes"]} B, compressed {sizes["compressed"]})')
     def remaining():
         return state['deadline_at'] - time.time()
     try:
@@ -425,6 +459,7 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
         if document.get('worker_root') != binding['worker_root']:
             raise ValueError('worker execution root differs from its isolation binding')
         document['transport_receipt'] = receipt(binding, state, native_sha, digest(document), native_exit, source)
+        document['transport_receipt']['request'] = request_envelope(request, binding)[1]
         document['transport_receipt']['pgid'] = pgid
         return document
     except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
@@ -439,6 +474,8 @@ def main():
     parser.add_argument('--host', required=True)
     parser.add_argument('--worker-root', required=True)
     parser.add_argument('--python', required=True, help='remote interpreter inside the worker root')
+    parser.add_argument('--worker-script', choices=('deploy_test_worker.py', 'deploy_test_backend.py'),
+                        default='deploy_test_worker.py')
     parser.add_argument('--coordinator-thread', required=True, help='this control thread; receives result.json attachments')
     parser.add_argument('--deadline-seconds', type=float)
     args = parser.parse_args()
@@ -447,7 +484,7 @@ def main():
             raise ValueError('boxes-thread transport requires its existing gate deadline')
         binding = {'worker_thread': args.thread, 'worker_host': args.host,
                    'worker_root': args.worker_root, 'python': args.python,
-                   'coordinator_thread': args.coordinator_thread}
+                   'coordinator_thread': args.coordinator_thread, 'worker_script': args.worker_script}
         result = execute(read(Path(os.environ['DEPLOY_GATE_REQUEST'])), args.root.resolve(), binding,
                          args.deadline_seconds)
         write(Path(os.environ['DEPLOY_GATE_RESULT']), result)

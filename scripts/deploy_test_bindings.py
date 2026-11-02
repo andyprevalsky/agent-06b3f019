@@ -20,6 +20,15 @@ def generate(template, inventory, root):
         checkout = str(Path(slot['worker_root']))
         if not Path(checkout).is_absolute():
             raise ValueError('prepared worker roots must be absolute')
+        if gate.get('native_backend'):
+            from deploy_test_backend import sweep_from_recipe
+            sweep_from_recipe(slot.get('recipe', {}), gate['checks'])
+        if gate.get('native_backend') and mode not in {'local-isolated', 'boxes-thread'}:
+            raise ValueError('native backend cases require a local-isolated or boxes-thread worker')
+        if gate.get('native_backend') and mode == 'local-isolated':
+            bindings[name] = {**slot, 'command': [sys.executable, str(root / 'scripts/deploy_test_backend.py'),
+                              '--root', checkout], 'cwd': checkout, 'case_protocol': True, 'result_transport': 'file'}
+            continue
         script = str(Path(checkout) / 'scripts/deploy_test_worker.py')
         command = [slot.get('python', sys.executable if mode == 'local-isolated' else 'python3'),
                    script, '--root', checkout, '--stdio']
@@ -37,6 +46,8 @@ def generate(template, inventory, root):
                        slot['worker_thread'], '--host', slot['worker_host'], '--worker-root', checkout,
                        '--python', slot.get('python', str(Path(checkout) / 'agents/venv/bin/python')),
                        '--coordinator-thread', slot['coordinator_thread'], '--deadline-seconds', str(timeout)]
+            if gate.get('native_backend'):
+                command += ['--worker-script', 'deploy_test_backend.py']
         elif mode != 'local-isolated':
             raise ValueError('inventory must name an existing local-isolated, SSH or boxes-thread worker')
         if 'recipe' in slot:

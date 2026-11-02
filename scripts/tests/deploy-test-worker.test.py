@@ -732,11 +732,11 @@ class Boxes(unittest.TestCase):
                 self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
                 self.assertIn(send['stderr'], Path(result['transport_receipt']['stderr_log']).read_text())
                 __import__('shutil').rmtree(self.coordinator / '.context')
-        self.request['worker_recipe']['cases']['first']['env'] = {'PAD': 'x' * 40000}
+        self.request['worker_recipe']['cases']['first']['env'] = {'PAD': os.urandom(40000).hex()}  # incompressible
         self.calls.unlink()
         result = self.run_adapter()
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
-        self.assertIn('send bound', result['reason']); self.assertEqual([], self.calls_of('send'))
+        self.assertIn('prompt_too_large', result['reason']); self.assertEqual([], self.calls_of('send'))
 
     def test_resume_rereads_the_same_turn_without_a_second_send(self):
         first = self.run_adapter(); self.assertEqual('PASS', first['cases']['first'])
@@ -876,7 +876,58 @@ class Boxes(unittest.TestCase):
                               capture_output=True, text=True, cwd=ROOT)
         self.assertEqual(2, proc.returncode); self.assertIn('DEPLOY_PLAN BLOCKED', proc.stderr)
 
+    def real_backend_request(self):
+        slot = json.loads((ROOT / 'scripts/tests/fixtures/backend-slot-aggregate.json').read_text())
+        names = json.loads((ROOT / 'scripts/tests/fixtures/backend-native-domains.json').read_text())
+        effective = [d for d in names['all_native_files'] if d not in names['excluded']]
+        self.assertEqual((240, 239), (len(names['all_native_files']), len(effective)))
+        sweep = {k: v for k, v in slot['recipe']['cases']['backend-coverage-blackbox'].items() if k != 'aggregate'}
+        sweep.update(aggregate=False, sweep='backend-coverage-blackbox')
+        checks = [f'blackbox:{d}' for d in effective] + ['units', 'fps', 'coverage-threshold', 'teardown']
+        recipe = {'cases': {c: dict(sweep) for c in checks}, 'setup': slot['recipe']['setup'], 'cleanup': slot['recipe']['cleanup']}
+        request = {'token': 'be-real', 'source': {'head': 'a' * 40, 'digest': 'b' * 64}, 'gate': 'backend-coverage-blackbox',
+                   'checks': checks, 'skips': {}, 'phase': 'initial', 'worker_recipe': recipe, 'worker_root': slot['worker_root']}
+        binding = {k: slot[k] for k in ('worker_thread', 'worker_host', 'worker_root', 'python')}
+        binding['coordinator_thread'] = 'ph-control'
+        return request, binding
+
+    def test_real_243_case_backend_request_fits_the_send_bound_through_the_compressed_envelope(self):
+        request, binding = self.real_backend_request()
+        raw = self.boxes.canonical_request(request)
+        prompt = self.boxes.build_prompt(request, binding)
+        size = len(prompt.encode())
+        print(f'\nREAL_BACKEND_PROMPT canonical_request_bytes={len(raw)} prompt_bytes={size} bound={self.boxes.MAX_PROMPT_BYTES}')
+        self.assertGreater(len(raw), 100_000); self.assertLessEqual(size, self.boxes.MAX_PROMPT_BYTES)
+        self.assertIn('DEPLOY_GATE_REQUEST_ZB64_BEGIN', prompt); self.assertNotIn('printf %s', prompt)
+        self.assertIn(f"{binding['python']} {binding['worker_root']}/scripts/deploy_test_worker.py --root {binding['worker_root']}", prompt)
+        # the decoder step reproduces the identical canonical bytes, and refuses a corrupted payload
+        script = prompt.split('```sh\n', 1)[1].split('\n```', 1)[0]
+        lines = script.split('\n'); start = next(i for i, l in enumerate(lines) if l.startswith('# DEPLOY_GATE_REQUEST_ZB64_BEGIN'))
+        end = lines.index('DEPLOY_GATE_REQUEST_ZB64_END')
+        decoder = '\n'.join(lines[start:end + 1]).replace(binding['python'], sys.executable)
+        with tempfile.TemporaryDirectory() as work:
+            proc = subprocess.run(['bash', '-c', decoder], cwd=work, capture_output=True, text=True)
+            self.assertEqual(0, proc.returncode, proc.stderr); self.assertEqual(raw, Path(work, 'request.json').read_bytes())
+            corrupted = decoder.replace(lines[start + 3][:10], lines[start + 3][:10][::-1], 1)
+            proc = subprocess.run(['bash', '-c', corrupted], cwd=work, capture_output=True, text=True)
+            self.assertEqual(4, proc.returncode); self.assertIn('DEPLOY_GATE_WORKER_EXIT 4', proc.stdout)
+        # a collector result with all 243 rows satisfies the coordinator's validator
+        from deploy_test_result import validate
+        result = {'token': 'be-real', 'source': request['source'], 'gate': request['gate'], 'cases': dict.fromkeys(request['checks'], 'PASS'),
+                  'complete': True, 'cleanup_complete': True, 'reused': False, 'worker_root': binding['worker_root'],
+                  'recipe_digest': __import__('hashlib').sha256(json.dumps(request['worker_recipe'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
+        self.assertEqual(243, len(validate(result, request, 0)[0]))
+
+    def test_incompressible_oversize_request_is_refused_as_prompt_too_large(self):
+        self.request['worker_recipe']['cases']['first']['env'] = {'NOISE': os.urandom(40000).hex()}
+        self.configure(reply=self.reply())
+        result = self.run_adapter()
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
+        self.assertTrue(result['reason'].startswith('prompt_too_large:')); self.assertIn('compressed', result['reason'])
+        self.assertEqual([], self.calls_of('send'))
+
     def test_send_bound_is_exactly_32_kib_and_never_truncates(self):
+        self.enterContext(patch.object(self.boxes, 'INLINE_REQUEST_BYTES', 10 ** 9))  # pin the bound on the inline envelope
         self.request.update(token='tok-2', worker_recipe={**self.recipe, 'cases': {**self.recipe['cases'],
                             'first': {**self.recipe['cases']['first'], 'env': {'PAD': ''}}}})
         self.assertEqual(32768, self.boxes.MAX_PROMPT_BYTES)
@@ -892,7 +943,7 @@ class Boxes(unittest.TestCase):
                 self.assertEqual(size, len(self.boxes.build_prompt(self.request, self.binding).encode()))
                 result = self.run_adapter()
                 self.assertEqual(expected, result['cases']['first'], result.get('reason'))
-        self.assertIn('send bound', result['reason']); self.assertEqual(1, len(self.calls_of('send')))
+        self.assertIn('prompt_too_large', result['reason']); self.assertEqual(1, len(self.calls_of('send')))
 
     def test_failed_cd_in_the_worker_script_exits_nonzero_and_is_unverified(self):
         binding = {**self.binding, 'worker_root': str(self.root.resolve() / 'missing')}
@@ -1133,6 +1184,292 @@ class LocalController(unittest.TestCase):
         self.assertNotIn('fixture_tmp_removed', result['cases'][0])
         self.assertEqual(logs['cancelled'], 'controlled native output\n')
 
+
+
+FAKE_NPM = """#!/usr/bin/env python3
+import json, os, sys, time
+from pathlib import Path
+cfg = json.load(open(os.environ['FAKE_RUNNER_CONFIG'])); be = Path.cwd()
+(be / 'coverage/blackbox-run-shard1').mkdir(parents=True, exist_ok=True)
+json.dump({'results': cfg['results']}, open(be / 'coverage/blackbox-run-shard1/summary.json', 'w'))
+(be / 'coverage/units.log').write_text('units'); print(cfg['unit_line']); print(cfg['fps_line'])
+if cfg['rc'] != 0 and cfg.get('archive', True):
+    f = be.parent / '.context/test-runs' / ('backend-coverage-failed-%s-%d' % (time.strftime('%Y%m%d-%H%M%S'), os.getpid()))
+    (f / 'raw-v8').mkdir(parents=True); (f / 'raw-v8/coverage-failed-shard.json').write_text(cfg.get('failed_body', '{"failed": 1}'))
+    if cfg.get('shard_log_archive'):
+        (be / 'coverage/shard-1.log').write_text('    Raw V8 coverage: %s/raw-v8\\n' % f)
+        print('Started coverage shard 1/1 (pid %d, log coverage/shard-1.log)' % (os.getpid() + int(cfg.get('wrong_pid', False))))
+    else:
+        print('    Raw V8 coverage: %s/raw-v8' % f)
+    a = be.parent / '.context/test-runs' / ('backend-coverage-merged-failed-%s-%d' % (time.strftime('%Y%m%d-%H%M%S'), os.getpid()))
+    (a / 'raw-v8').mkdir(parents=True); (a / 'raw-v8/coverage-1.json').write_text('{}')
+    if cfg.get('collide'): (a / 'raw-v8/coverage-failed-shard.json').write_text('{"different": true}')
+    print('Passing phases\\' raw coverage archived at %s/raw-v8.' % a)
+raise SystemExit(cfg['rc'])
+"""
+FAKE_NPX = """#!/usr/bin/env python3
+import json, os, sys, time
+cfg = json.load(open(os.environ['FAKE_RUNNER_CONFIG']))
+open(os.environ['FAKE_NPX_CALLS'], 'a').write(json.dumps(sys.argv[1:]) + '\\n')
+time.sleep(cfg.get('c8_sleep', 0))
+raise SystemExit(cfg.get('c8_rc', 0))
+"""
+
+
+class Backend(unittest.TestCase):
+    """Case-aware backend coverage adapter over a fake sharded runner; no services, no real c8."""
+    def setUp(self):
+        import deploy_test_backend as backend
+        self.backend = backend
+        self.temp = tempfile.TemporaryDirectory(); self.root = Path(self.temp.name) / 'root'
+        (self.root / 'back-end/scripts').mkdir(parents=True); (self.root / 'scripts/tests').mkdir(parents=True)
+        (self.root / 'back-end/src/tests/blackbox').mkdir(parents=True)
+        for d in ('alpha', 'beta', 'gamma'):
+            (self.root / f'back-end/src/tests/blackbox/{d}.blackbox.ts').write_text('export {}\n')
+        (self.root / 'back-end/src/tests/blackbox/helpers.ts').write_text('export {}\n')  # not a domain
+        (self.root / 'back-end/src/tests/blackbox/integration-health.blackbox.ts').write_text('export {}\n')  # producer-excluded
+        __import__('shutil').copyfile(ROOT / 'back-end/scripts/run-coverage.sh', self.root / 'back-end/scripts/run-coverage.sh')
+        (self.root / 'back-end/scripts/coverage-report-heap.sh').write_text('coverage_report_node() { "$@"; }\n')
+        (self.root / 'scripts/tests/blackbox-backend-teardown.test.sh').write_text('#!/bin/bash\nexit "${FAKE_TEARDOWN_RC:-0}"\n')
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        (self.root / '.git/info/exclude').write_text('.context/\nback-end/coverage/\n')
+        subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-qm', 'f'], check=True)
+        bin_dir = Path(self.temp.name) / 'bin'; bin_dir.mkdir()
+        for name, body in (('npm', FAKE_NPM), ('npx', FAKE_NPX)):
+            (bin_dir / name).write_text(body); (bin_dir / name).chmod(0o700)
+        self.config = Path(self.temp.name) / 'runner.json'; self.npx_calls = Path(self.temp.name) / 'npx.jsonl'
+        self.env = patch.dict(os.environ, {'PATH': f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                                           'FAKE_RUNNER_CONFIG': str(self.config), 'FAKE_NPX_CALLS': str(self.npx_calls)})
+        self.env.start()
+        self.request = {'token': 'be-1', 'source': cycle.source(self.root), 'gate': 'backend-coverage-blackbox',
+                        'checks': backend.checks_for(['alpha', 'beta', 'gamma']), 'skips': {}, 'phase': 'initial'}
+
+    def tearDown(self):
+        self.env.stop(); cycle.CANCEL.clear(); self.temp.cleanup()
+
+    def configure(self, rc, results, c8_rc=0, unit='✅ Unit pass passed', fps='✅ fps probe pass passed', archive=True, collide=False, shard_log_archive=False):
+        cycle.write(self.config, {'rc': rc, 'results': results, 'c8_rc': c8_rc, 'unit_line': unit, 'fps_line': fps, 'archive': archive, 'collide': collide, 'shard_log_archive': shard_log_archive})
+
+    def rows(self, **passed):
+        return [{'domain': d, 'passed': v, 'aborted': False} for d, v in passed.items()]
+
+    def test_native_list_output_is_only_a_cross_check_and_is_refused_when_polluted(self):
+        files = ['alpha', 'beta', 'gamma']
+        good = 'Available black-box test domains:\n  alpha\n  beta\n  gamma\n\nTotal: 3 domains\n'
+        self.assertEqual(files, self.backend.parse_native_list(good, files))
+        polluted = ("⚠️  TRACE_ARCHIVE_BACKEND='r2' is not a local blackbox backend; forcing local.\n"
+                    'Available black-box test domains:\n  alpha\n  alpha\n  beta\n  gamma\n\nTotal: 4 domains\n')
+        with self.assertRaisesRegex(ValueError, 'inventory_invalid'): self.backend.parse_native_list(polluted, files)
+        with self.assertRaisesRegex(ValueError, 'inventory_invalid'): self.backend.parse_native_list(good.replace('Total: 3', 'Total: 2'), files)
+        with self.assertRaisesRegex(ValueError, 'inventory_invalid'): self.backend.validate_inventory(['alpha', 'bad name'])
+
+    def test_selection_applies_only_the_producer_exclusion_and_refuses_env_skips(self):
+        proof, effective = self.backend.selection(self.root)
+        self.assertEqual({'inventory': 4, 'excluded': {'integration-health': 'owned by live-probes'}, 'effective': 3}, proof)
+        self.assertEqual(['alpha', 'beta', 'gamma'], effective)
+        self.assertEqual(['integration-health'], self.backend.producer_exclusions(ROOT))  # pinned to the real run-coverage.sh
+        self.configure(0, self.rows(alpha=True, beta=True, gamma=True) + [{'domain': 'integration-health', 'passed': False, 'aborted': False}])
+        result = self.backend.execute(self.request, self.root)
+        self.assertNotIn('blackbox:integration-health', result['cases']); self.assertTrue(all(v == 'PASS' for v in result['cases'].values()))
+        self.assertEqual(proof, result['selection']); self.assertEqual(1, len(result['evidence']['excluded_rows']))
+        __import__('shutil').rmtree(self.root / '.context')
+        with patch.dict(os.environ, {'BLACKBOX_TEST_SKIP_DOMAINS': 'integration-health,alpha'}):
+            with self.assertRaisesRegex(ValueError, 'skip_env_not_allowed'): self.backend.execute(self.request, self.root)
+        with patch.dict(os.environ, {'CONTRACT_TEST_SKIP_DOMAINS': 'integration-health'}):
+            self.request['token'] = 'be-2'
+            self.backend.execute(self.request, self.root)  # the producer's own exclusion is allowed
+
+    def test_inventory_is_frozen_from_the_runner_list(self):
+        self.assertEqual(['alpha', 'beta', 'gamma', 'integration-health'], self.backend.list_domains(self.root))
+        self.assertEqual(['blackbox:alpha', 'blackbox:beta', 'blackbox:gamma', 'units', 'fps', 'coverage-threshold', 'teardown'],
+                         self.backend.checks_for(self.backend.selection(self.root)[1]))
+        self.configure(0, self.rows(alpha=True, beta=True, gamma=True))
+        self.request['checks'] = ['blackbox:delta', 'units']
+        with self.assertRaisesRegex(ValueError, 'frozen domain list'): self.backend.execute(self.request, self.root)
+
+    def test_one_failed_domain_keeps_its_peers_and_threshold_runs_over_the_archive(self):
+        self.configure(1, self.rows(alpha=True, beta=False, gamma=True))
+        result = self.backend.execute(self.request, self.root)
+        self.assertEqual({'blackbox:alpha': 'PASS', 'blackbox:beta': 'FAIL', 'blackbox:gamma': 'PASS', 'units': 'PASS',
+                          'fps': 'PASS', 'coverage-threshold': 'PASS', 'teardown': 'PASS'}, result['cases'])
+        self.assertTrue(result['complete']); self.assertTrue(result['cleanup_complete']); self.assertEqual(1, result['native_exit'])
+        call = json.loads(self.npx_calls.read_text().splitlines()[0])
+        self.assertEqual(['c8', 'report'], call[:2]); self.assertIn('--check-coverage', call)
+        self.assertTrue(any(a.startswith('--temp-directory=') and a.endswith('/raw-v8-union') for a in call))
+
+        identity = result['evidence']['coverage-threshold']['identity']
+        self.assertEqual(2, len(identity['sources']))  # passing merged archive + this run's failed-shard raw-v8
+        union = Path(identity['union']); self.assertEqual({'coverage-1.json', 'coverage-failed-shard.json'}, {p.name for p in union.iterdir()})
+        __import__('shutil').rmtree(self.root / '.context')
+        self.configure(1, self.rows(alpha=True, beta=False, gamma=True), collide=True)  # same name, different content
+        result = self.backend.execute(self.request, self.root)
+        self.assertEqual('UNVERIFIED', result['cases']['coverage-threshold']); self.assertIn('collision', result['evidence']['coverage-threshold']['reason'])
+
+
+    def test_failed_shard_raw_archive_is_read_from_its_announced_child_log(self):
+        self.configure(1, self.rows(alpha=True, beta=False, gamma=True), shard_log_archive=True)
+        result = self.backend.execute(self.request, self.root)
+        threshold = result['evidence']['coverage-threshold']
+        self.assertEqual('PASS', result['cases']['coverage-threshold'])
+        self.assertEqual(2, len(threshold['identity']['sources']))
+        self.assertTrue(any('backend-coverage-failed-' in row['path'] for row in threshold['identity']['sources']))
+        self.assertIn(str(self.root / 'back-end/coverage/shard-1.log'), result['evidence']['shard_logs'])
+        __import__('shutil').rmtree(self.root / '.context')
+        config = cycle.read(self.config); config['wrong_pid'] = True; cycle.write(self.config, config)
+        result = self.backend.execute(self.request, self.root)
+        self.assertEqual('UNVERIFIED', result['cases']['coverage-threshold'])
+        self.assertIn('announced process', result['evidence']['coverage-threshold']['reason'])
+
+    def test_full_request_cannot_omit_cases_or_change_the_owned_root(self):
+        self.configure(0, self.rows(alpha=True, beta=True, gamma=True))
+        with self.assertRaisesRegex(ValueError, 'inventory'):
+            self.backend.execute({**self.request, 'checks': ['blackbox:alpha']}, self.root)
+        with self.assertRaisesRegex(ValueError, 'prepared binding'):
+            self.backend.execute({**self.request, 'worker_root': '/some-other-root'}, self.root)
+
+    def test_threshold_uses_the_remaining_original_request_budget(self):
+        self.configure(1, self.rows(alpha=True, beta=False, gamma=True))
+        config = cycle.read(self.config); config['c8_sleep'] = 2; cycle.write(self.config, config)
+        slot = self.owner_slot()
+        self.request['worker_recipe'] = self.backend.handoff_recipe(slot['recipe'], ['alpha', 'beta', 'gamma'], 0.25)
+        before = time.monotonic()
+        result = self.backend.execute(self.request, self.root)
+        self.assertEqual('UNVERIFIED', result['cases']['coverage-threshold'])
+        self.assertLess(time.monotonic() - before, 1.5)
+
+    def test_threshold_failure_on_partial_coverage_is_inconclusive_not_fail(self):
+        self.configure(1, self.rows(alpha=True, beta=False, gamma=True), c8_rc=1)
+        result = self.backend.execute(self.request, self.root)
+        self.assertEqual('UNVERIFIED', result['cases']['coverage-threshold']); self.assertEqual('FAIL', result['cases']['blackbox:beta'])
+        self.assertFalse(result['complete'])
+        self.configure(1, self.rows(alpha=True, beta=False, gamma=True), archive=False)
+        __import__('shutil').rmtree(self.root / '.context')
+        result = self.backend.execute(self.request, self.root)
+        self.assertEqual('UNVERIFIED', result['cases']['coverage-threshold'])
+
+    def test_missing_domain_and_failed_phases_are_reported_per_case(self):
+        self.configure(1, self.rows(alpha=True, beta=True), unit='❌ Unit pass failed (exit 1); see coverage/units.log',
+                       fps='❌ fps probe pass failed (exit 1); see coverage/units-probe.log')
+        result = self.backend.execute(self.request, self.root)
+        self.assertEqual('UNVERIFIED', result['cases']['blackbox:gamma']); self.assertEqual('FAIL', result['cases']['units'])
+        self.assertEqual('FAIL', result['cases']['fps']); self.assertFalse(result['complete'])
+
+    def test_runner_exit_zero_passes_threshold_without_a_second_report(self):
+        self.configure(0, self.rows(alpha=True, beta=True, gamma=True))
+        result = self.backend.execute(self.request, self.root)
+        self.assertTrue(all(v == 'PASS' for v in result['cases'].values())); self.assertFalse(self.npx_calls.exists())
+        from deploy_test_result import validate
+        validate(result, self.request, 0)
+
+    def test_teardown_failure_cannot_claim_cleanup(self):
+        self.configure(0, self.rows(alpha=True, beta=True, gamma=True))
+        with patch.dict(os.environ, {'FAKE_TEARDOWN_RC': '1'}):
+            result = self.backend.execute(self.request, self.root)
+        self.assertEqual('FAIL', result['cases']['teardown']); self.assertFalse(result['cleanup_complete'])
+        self.assertEqual('PASS', result['cases']['blackbox:alpha'])
+
+    def owner_slot(self):
+        slot = json.loads((ROOT / 'scripts/tests/fixtures/backend-slot-aggregate.json').read_text())
+        stage = self.root / 'scripts/run-deploy-stage'
+        stage.write_text('#!/bin/bash\nmkdir -p "$PWD/.context"\n[ "$1" = "--start" ] && { touch "$PWD/.context/setup-ran"; exit 0; }\n'
+                         '[ "$1" = "--finish" ] && { touch "$PWD/.context/finish-ran"; exit 0; }\nshift 2; exec "$@"\n')
+        (self.root / 'scripts/kill-services.sh').write_text('#!/bin/bash\nexit 0\n')
+        slot['recipe']['cases']['backend-coverage-blackbox']['command'][1] = str(stage)
+        self.request['source'] = cycle.source(self.root)  # the fake stage scripts are part of the frozen tree
+        return slot
+
+    def test_handoff_replaces_the_owner_aggregate_recipe_and_runs_it_through_the_stage_wrapper(self):
+        slot = self.owner_slot()
+        recipe = self.backend.handoff_recipe(slot['recipe'], ['alpha', 'beta', 'gamma'])
+        self.assertEqual(set(self.request['checks']), set(recipe['cases']))
+        case = recipe['cases']['blackbox:beta']
+        self.assertFalse(case['aggregate']); self.assertEqual('backend-coverage-blackbox', case['sweep'])
+        self.assertEqual(['npm', 'run', 'test:coverage:sharded'], case['command'][-3:]); self.assertEqual('3', case['env']['BACKEND_COVERAGE_SHARDS'])
+        self.assertEqual(slot['recipe']['setup'], recipe['setup']); self.assertEqual(slot['recipe']['cleanup'], recipe['cleanup'])
+        self.configure(1, self.rows(alpha=True, beta=False, gamma=True))
+        self.request['worker_recipe'] = recipe
+        result = self.backend.execute(self.request, self.root)
+        self.assertEqual('FAIL', result['cases']['blackbox:beta']); self.assertEqual('PASS', result['cases']['blackbox:alpha'])
+        self.assertEqual('PASS', result['cases']['teardown']); self.assertTrue(result['cleanup_complete'])
+        self.assertTrue((self.root / '.context/setup-ran').exists()); self.assertTrue((self.root / '.context/finish-ran').exists())
+        from deploy_test_result import validate
+        validate(result, self.request, 1)
+        # cancellation during the sweep still runs the verbatim cleanup and never claims the cases
+        __import__('shutil').rmtree(self.root / '.context'); self.request['token'] = 'be-cancel'
+        recipe['cases']['blackbox:alpha']['timeout_seconds'] = 0.2  # sweep deadline from the spec is preserved
+        for case in recipe['cases'].values(): case['timeout_seconds'] = 0.2
+        recipe['cases']['blackbox:alpha']['command'] = recipe['cases']['blackbox:alpha']['command']
+        slow = dict(self.request, worker_recipe={**recipe, 'cases': {k: {**v, 'command': ['sleep', '5']} for k, v in recipe['cases'].items()}})
+        slow_result = self.backend.execute(slow, self.root)
+        self.assertTrue(slow_result['interrupted']); self.assertTrue(all(v == 'UNVERIFIED' for k, v in slow_result['cases'].items() if k != 'teardown'))
+        self.assertTrue((self.root / '.context/finish-ran').exists()); self.assertEqual('PASS', slow_result['cases']['teardown'])
+        self.assertEqual(str(self.root / 'scripts/run-deploy-stage'), result['native_command'][1])
+        self.assertEqual(['npm', 'run', 'test:coverage:sharded'], result['native_command'][-3:])
+
+    def test_old_aggregate_recipe_is_refused_never_silently_substituted(self):
+        slot = self.owner_slot()
+        self.configure(0, self.rows(alpha=True, beta=True, gamma=True))
+        self.request['worker_recipe'] = slot['recipe']
+        with self.assertRaisesRegex(ValueError, 'single-case aggregate recipe'): self.backend.execute(self.request, self.root)
+        import deploy_test_plan as p
+        template = {'gates': [{'name': 'backend-coverage-blackbox', 'category': 'backend-coverage-blackbox', 'checks': self.request['checks'],
+                               'native_backend': True, 'case_protocol': True, 'command': ['adapter']},
+                              *[{'name': n, 'category': n, 'command': ['true'], 'checks': [n]} for n in ('format', 'eslint', 'typescript', 'backend-structural')]]}
+        binding = {'backend-coverage-blackbox': {**slot, 'command': ['adapter'], 'cwd': str(self.root)}}
+        selection = {'all': True, 'reasons': ['x'], 'lanes': {}}
+        with patch.object(p, 'source', return_value=self.request['source']), self.assertRaisesRegex(ValueError, 'single-case aggregate recipe'):
+            p.select(template, ['back-end/src/a.ts'], selection, binding)
+        from deploy_test_bindings import generate
+        with self.assertRaisesRegex(ValueError, 'single-case aggregate recipe'):
+            generate({'gates': [{**template['gates'][0], 'command': ['npm', 'run', 'test:coverage:sharded'], 'cwd': 'back-end'}]},
+                     {'backend-coverage-blackbox': slot}, ROOT)
+
+    def test_boxes_binding_runs_one_backend_adapter_not_one_sweep_per_case(self):
+        from deploy_test_bindings import generate
+        from deploy_test_boxes import build_prompt
+        slot = self.owner_slot()
+        slot['recipe'] = self.backend.handoff_recipe(slot['recipe'], ['alpha', 'beta', 'gamma'])
+        gate = {'name': 'backend-coverage-blackbox', 'checks': self.request['checks'],
+                'native_backend': True, 'command': ['npm', 'run', 'test:coverage:sharded']}
+        binding = generate({'gates': [gate]}, {'backend-coverage-blackbox': slot}, ROOT)[gate['name']]
+        self.assertEqual('deploy_test_backend.py', binding['command'][binding['command'].index('--worker-script') + 1])
+        prompt_binding = {**slot, 'worker_script': 'deploy_test_backend.py'}
+        request = {**self.request, 'worker_recipe': slot['recipe']}
+        prompt = build_prompt(request, prompt_binding)
+        self.assertIn('/scripts/deploy_test_backend.py', prompt)
+        self.assertNotIn('/scripts/deploy_test_worker.py --root', prompt)
+        with self.assertRaisesRegex(ValueError, 'backend entrypoint'):
+            build_prompt({**request, 'gate': 'another-gate'}, prompt_binding)
+
+    def test_rows_archive_and_source_are_bound_fail_closed(self):
+        self.configure(1, [{'domain': 'alpha', 'passed': 'yes', 'aborted': False}, {'domain': 'beta', 'passed': True, 'aborted': False},
+                           {'domain': 'beta', 'passed': True, 'aborted': False}, {'domain': 'gamma', 'passed': True, 'aborted': None}])
+        result = self.backend.execute(self.request, self.root)
+        self.assertEqual({'blackbox:alpha': 'UNVERIFIED', 'blackbox:beta': 'UNVERIFIED', 'blackbox:gamma': 'UNVERIFIED'},
+                         {k: v for k, v in result['cases'].items() if k.startswith('blackbox:')})
+        self.assertEqual('PASS', result['cases']['coverage-threshold'])  # announced archive, PASS on partial is sound
+        self.assertTrue(result['evidence']['coverage-threshold']['identity']['union_manifest_sha256'])
+        self.assertEqual(1, len(result['evidence']['artifacts']['summaries'])); self.assertTrue(result['evidence']['artifacts']['runner_log'])
+        __import__('shutil').rmtree(self.root / '.context')
+        self.configure(1, self.rows(alpha=True, beta=True, gamma=True) + [{'domain': 'zeta', 'passed': True, 'aborted': False}])
+        result = self.backend.execute(self.request, self.root)
+        self.assertTrue(all(v == 'UNVERIFIED' for k, v in result['cases'].items() if k.startswith('blackbox:')))
+        self.assertEqual(['zeta'], result['evidence']['unknown_domains'])
+        __import__('shutil').rmtree(self.root / '.context')
+        # an archive that this run did not announce is never credited; a stray newer one is ignored
+        stray = self.root / '.context/test-runs/backend-coverage-merged-failed-99999999-999999-1/raw-v8'; stray.mkdir(parents=True)
+        self.configure(1, self.rows(alpha=True, beta=True, gamma=True), archive=False)
+        result = self.backend.execute(self.request, self.root)
+        self.assertEqual('UNVERIFIED', result['cases']['coverage-threshold'])
+        self.assertNotIn('99999999', self.npx_calls.read_text())  # the unannounced stray archive was never reported
+        __import__('shutil').rmtree(self.root / '.context')
+        # the frozen source is re-checked after the sweep
+        self.configure(0, self.rows(alpha=True, beta=True, gamma=True))
+        with patch.object(self.backend, 'source', side_effect=[self.request['source'], {'head': 'x', 'digest': 'changed'}]):
+            result = self.backend.execute(self.request, self.root)
+        self.assertTrue(all(v == 'UNVERIFIED' for k, v in result['cases'].items() if k != 'teardown'))
+        self.assertFalse(result['complete']); self.assertFalse(result['source_unchanged'])
 
 
 if __name__=='__main__': unittest.main()

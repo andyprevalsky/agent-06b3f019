@@ -91,6 +91,11 @@ def select(template: dict, changed: list[str], result: dict, binding: dict) -> d
                 gate['timeout_seconds'] = worker['timeout_seconds']
             if worker.get('case_protocol'):
                 gate.update(case_protocol=True, result_transport=worker.get('result_transport', 'file'))
+            if gate.get('native_backend') and 'recipe' in worker and (
+                    set(worker['recipe'].get('cases', {})) != set(gate['checks'])
+                    or any(c.get('aggregate') for c in worker['recipe']['cases'].values())):
+                raise ValueError(f"{gate['name']}: slot still carries the single-case aggregate recipe; "
+                                 "regenerate it with scripts/deploy_test_backend.py --handoff-slot and init a new cycle")
             if 'recipe' in worker:
                 gate.update(worker_recipe=worker['recipe'], case_protocol=True,
                             result_transport=worker.get('result_transport', 'file'))
@@ -114,6 +119,11 @@ def standard_template() -> dict:
     for gate in gates:
         if gate['name'] == 'eslint':
             gate.update(command=[sys.executable, 'scripts/check_deploy_static.py', 'lint'], cwd='.')
+        if gate['name'] == 'backend-coverage-blackbox':
+            from deploy_test_backend import checks_for, selection
+            gate.update(checks=checks_for(selection(ROOT)[1]), native_backend=True, case_protocol=True,
+                        runner_command=gate['command'], cwd='.',
+                        command=[sys.executable, str(ROOT / 'scripts/deploy_test_backend.py')])
         if gate['name'] == 'smoke':
             tasks = subprocess.run(['bash', 'scripts/run-predeploy-cloud', '--list'], cwd=ROOT,
                                    check=True, capture_output=True, text=True).stdout.splitlines()
