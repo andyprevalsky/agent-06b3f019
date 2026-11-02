@@ -53,3 +53,7 @@ The user prioritizes native agent failures, progress zero and schema/validator d
 ## Reusable lesson
 
 A timeout is only bounded if cancellation itself is bounded. Prefer an already owned read transport with exact request cleanup and connection identity over spawning an SDK operation whose abort requires the unresponsive peer to acknowledge it.
+
+## Integration update
+
+The exact qualified runtime and regression postimages were integrated on the descent branch in commit `f67e09813e1f85e03e449a1a2c28677cf4818122`. The 1,443-case RCA archive validates after integration. This is branch-source integration only; no production deployment or new benchmark outcome is claimed. The earlier integration-pending statement records the qualification snapshot. R153 attribution and R154 benchmark outcome remain open.
