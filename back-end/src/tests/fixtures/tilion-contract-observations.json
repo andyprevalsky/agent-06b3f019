@@ -1,0 +1,587 @@
+{
+  "sources": {
+    "pinned_main": "a3c4929f3bbd296766013a7545439b682015a6ef",
+    "release": "6ff4bcae6d0da979e8c6feb24c011f2698935108"
+  },
+  "original": {
+    "at": "2026-11-02T18:25:17Z",
+    "gate": "NOT_INTRODUCED",
+    "status": 200,
+    "expected_status": 409,
+    "raw_body_retained": false,
+    "post_response_cdp_state_retained": false,
+    "runtime_origin_retained": false,
+    "session_id": "sess_a651ef5e1f3545b5b685f58c325365d5",
+    "cleanup_status": 204
+  },
+  "runs": {
+    "before": [
+      {
+        "at": "2026-11-02T18:41:26.683Z",
+        "event": "http",
+        "method": "POST",
+        "origin": "https://back.tilion.dev",
+        "route": "/v1/session",
+        "request": {
+          "idle_timeout": 120,
+          "ttl": 600
+        },
+        "status": 201,
+        "elapsedMs": 567,
+        "headers": {
+          "connection": "keep-alive",
+          "content-length": "1149",
+          "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+          "content-type": "application/json",
+          "date": "Mon, 02 Nov 2026 18:41:26 GMT",
+          "referrer-policy": "no-referrer",
+          "server": "uvicorn",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+          "vary": "Origin",
+          "x-content-type-options": "nosniff",
+          "x-frame-options": "DENY",
+          "x-request-id": "aa6755b6d18f4453"
+        },
+        "connectedAfterResponse": null,
+        "response": {
+          "session_id": "sess_a651ef609c5748b49a482146233615e8"
+        }
+      },
+      {
+        "at": "2026-11-02T18:41:26.684Z",
+        "event": "connect",
+        "origin": "wss://oregon.back.tilion.dev"
+      },
+      {
+        "at": "2026-11-02T18:41:32.344Z",
+        "event": "http",
+        "method": "POST",
+        "origin": "https://back.tilion.dev",
+        "route": "/v1/session/sess_a651ef609c5748b49a482146233615e8/screenshot",
+        "request": {},
+        "status": 200,
+        "elapsedMs": 155,
+        "headers": {
+          "connection": "keep-alive",
+          "content-length": "108640",
+          "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+          "content-type": "application/json",
+          "date": "Mon, 02 Nov 2026 18:41:32 GMT",
+          "referrer-policy": "no-referrer",
+          "server": "uvicorn",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+          "vary": "Origin",
+          "x-content-type-options": "nosniff",
+          "x-frame-options": "DENY",
+          "x-request-id": "de39a7dd7df94226"
+        },
+        "connectedAfterResponse": true,
+        "response": {
+          "ok": true,
+          "format": "jpeg",
+          "full_page": false,
+          "size_b64": 54188,
+          "tab_id": "4BE61AECC0D253C707FA1B3B50C1D901",
+          "url": "https://example.com/",
+          "beside_client": true,
+          "session_id": "sess_a651ef609c5748b49a482146233615e8"
+        },
+        "image_sha256": "7bd7d3eb396f52a0767bc58e4bf2dd6940af4ee6aec33d69203c07496e8b2be4"
+      },
+      {
+        "at": "2026-11-02T18:41:32.364Z",
+        "event": "cdp-after-screenshot",
+        "title": "Example Domain",
+        "connected": true
+      },
+      {
+        "at": "2026-11-02T18:41:32.385Z",
+        "event": "cdp-disconnected"
+      },
+      {
+        "at": "2026-11-02T18:41:32.464Z",
+        "event": "http",
+        "method": "DELETE",
+        "origin": "https://back.tilion.dev",
+        "route": "/v1/session/sess_a651ef609c5748b49a482146233615e8",
+        "request": null,
+        "status": 204,
+        "elapsedMs": 75,
+        "headers": {
+          "connection": "keep-alive",
+          "date": "Mon, 02 Nov 2026 18:41:32 GMT",
+          "location": "/v1/session/sess_a651ef609c5748b49a482146233615e8/status",
+          "referrer-policy": "no-referrer",
+          "server": "uvicorn",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+          "vary": "Origin",
+          "x-content-type-options": "nosniff",
+          "x-request-id": "b8786ad67f76491d"
+        },
+        "connectedAfterResponse": false
+      },
+      {
+        "at": "2026-11-02T18:41:32.466Z",
+        "event": "contract",
+        "result": "FAIL",
+        "error": "Error: REST screenshot while CDP attached: HTTP 200 "
+      }
+    ],
+    "after": [
+      {
+        "at": "2026-11-02T18:43:28.531Z",
+        "event": "http",
+        "method": "POST",
+        "origin": "https://back.tilion.dev",
+        "route": "/v1/session",
+        "request": {
+          "idle_timeout": 120,
+          "ttl": 600
+        },
+        "status": 201,
+        "elapsedMs": 605,
+        "headers": {
+          "connection": "keep-alive",
+          "content-length": "1148",
+          "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+          "content-type": "application/json",
+          "date": "Mon, 02 Nov 2026 18:43:28 GMT",
+          "referrer-policy": "no-referrer",
+          "server": "uvicorn",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+          "vary": "Origin",
+          "x-content-type-options": "nosniff",
+          "x-frame-options": "DENY",
+          "x-request-id": "a49d173424054560"
+        },
+        "connectedAfterResponse": null,
+        "response": {
+          "session_id": "sess_c41189ca8dcd48c1bd163a3dfd8bf326"
+        }
+      },
+      {
+        "at": "2026-11-02T18:43:28.531Z",
+        "event": "connect",
+        "origin": "wss://oregon.back.tilion.dev"
+      },
+      {
+        "at": "2026-11-02T18:43:34.387Z",
+        "event": "http",
+        "method": "POST",
+        "origin": "https://back.tilion.dev",
+        "route": "/v1/session/sess_c41189ca8dcd48c1bd163a3dfd8bf326/screenshot",
+        "request": {},
+        "status": 200,
+        "elapsedMs": 156,
+        "headers": {
+          "connection": "keep-alive",
+          "content-length": "108640",
+          "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+          "content-type": "application/json",
+          "date": "Mon, 02 Nov 2026 18:43:34 GMT",
+          "referrer-policy": "no-referrer",
+          "server": "uvicorn",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+          "vary": "Origin",
+          "x-content-type-options": "nosniff",
+          "x-frame-options": "DENY",
+          "x-request-id": "c9b33c2c35c04145"
+        },
+        "connectedAfterResponse": true,
+        "response": {
+          "ok": true,
+          "format": "jpeg",
+          "full_page": false,
+          "size_b64": 54188,
+          "tab_id": "E91C37A9B52C6B71C40F7B01E9C6486E",
+          "url": "https://example.com/",
+          "beside_client": true,
+          "session_id": "sess_c41189ca8dcd48c1bd163a3dfd8bf326"
+        },
+        "image_sha256": "7bd7d3eb396f52a0767bc58e4bf2dd6940af4ee6aec33d69203c07496e8b2be4"
+      },
+      {
+        "at": "2026-11-02T18:43:34.405Z",
+        "event": "cdp-after-screenshot",
+        "title": "Example Domain",
+        "connected": true
+      },
+      {
+        "at": "2026-11-02T18:43:34.457Z",
+        "event": "cdp-disconnected"
+      },
+      {
+        "at": "2026-11-02T18:43:34.525Z",
+        "event": "http",
+        "method": "POST",
+        "origin": "https://back.tilion.dev",
+        "route": "/v1/session/sess_c41189ca8dcd48c1bd163a3dfd8bf326/screenshot",
+        "request": {
+          "format": "jpeg",
+          "quality": 40
+        },
+        "status": 200,
+        "elapsedMs": 66,
+        "headers": {
+          "connection": "keep-alive",
+          "content-length": "78258",
+          "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+          "content-type": "application/json",
+          "date": "Mon, 02 Nov 2026 18:43:34 GMT",
+          "referrer-policy": "no-referrer",
+          "server": "uvicorn",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+          "vary": "Origin",
+          "x-content-type-options": "nosniff",
+          "x-frame-options": "DENY",
+          "x-request-id": "3a1dc9743ae841d4"
+        },
+        "connectedAfterResponse": false,
+        "response": {
+          "ok": true,
+          "format": "jpeg",
+          "full_page": false,
+          "size_b64": 39044,
+          "session_id": "sess_c41189ca8dcd48c1bd163a3dfd8bf326"
+        },
+        "image_sha256": "b316357944601a55572ea80db792aa6540091cd91501c9153df213de814d5438"
+      },
+      {
+        "at": "2026-11-02T18:43:34.641Z",
+        "event": "http",
+        "method": "DELETE",
+        "origin": "https://back.tilion.dev",
+        "route": "/v1/session/sess_c41189ca8dcd48c1bd163a3dfd8bf326",
+        "request": null,
+        "status": 204,
+        "elapsedMs": 113,
+        "headers": {
+          "connection": "keep-alive",
+          "date": "Mon, 02 Nov 2026 18:43:34 GMT",
+          "location": "/v1/session/sess_c41189ca8dcd48c1bd163a3dfd8bf326/status",
+          "referrer-policy": "no-referrer",
+          "server": "uvicorn",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+          "vary": "Origin",
+          "x-content-type-options": "nosniff",
+          "x-request-id": "9fb416141cc346b3"
+        },
+        "connectedAfterResponse": false
+      },
+      {
+        "at": "2026-11-02T18:43:34.725Z",
+        "event": "http",
+        "method": "DELETE",
+        "origin": "https://back.tilion.dev",
+        "route": "/v1/session/sess_c41189ca8dcd48c1bd163a3dfd8bf326",
+        "request": null,
+        "status": 204,
+        "elapsedMs": 81,
+        "headers": {
+          "connection": "keep-alive",
+          "date": "Mon, 02 Nov 2026 18:43:34 GMT",
+          "location": "/v1/session/sess_c41189ca8dcd48c1bd163a3dfd8bf326/status",
+          "referrer-policy": "no-referrer",
+          "server": "uvicorn",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+          "vary": "Origin",
+          "x-content-type-options": "nosniff",
+          "x-request-id": "e8cca9315f0b4e96"
+        },
+        "connectedAfterResponse": false
+      },
+      {
+        "at": "2026-11-02T18:43:34.809Z",
+        "event": "http",
+        "method": "GET",
+        "origin": "https://back.tilion.dev",
+        "route": "/v1/session/sess_c41189ca8dcd48c1bd163a3dfd8bf326",
+        "request": null,
+        "status": 410,
+        "elapsedMs": 82,
+        "headers": {
+          "connection": "keep-alive",
+          "content-length": "443",
+          "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+          "content-type": "application/json",
+          "date": "Mon, 02 Nov 2026 18:43:34 GMT",
+          "referrer-policy": "no-referrer",
+          "server": "uvicorn",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+          "vary": "Origin",
+          "x-content-type-options": "nosniff",
+          "x-frame-options": "DENY",
+          "x-request-id": "094a0c60f48d4b67"
+        },
+        "connectedAfterResponse": false,
+        "response": {
+          "detail": {
+            "session_id": "sess_c41189ca8dcd48c1bd163a3dfd8bf326",
+            "owner": "9f94e924-8286-438f-8d22-3745e47d7feb",
+            "state": "closed",
+            "mode": "ephemeral",
+            "region": null,
+            "reason": "closed",
+            "origin": "customer",
+            "cause": null,
+            "created_at": 1793645008.4940643,
+            "last_active": 1793645014.7416348,
+            "idle_timeout": 120,
+            "ttl": 600,
+            "closed_at": 1793645014.7416463,
+            "cleanup": "pending",
+            "cleaned_at": null,
+            "cleanup_finished_at": null,
+            "retained_until": 1793648614.7416463
+          }
+        }
+      },
+      {
+        "at": "2026-11-02T18:43:34.811Z",
+        "event": "contract",
+        "result": "PASS"
+      }
+    ],
+    "final_with_decoder": [
+      {
+        "at": "2026-11-02T18:47:30.475Z",
+        "event": "http",
+        "method": "POST",
+        "origin": "https://back.tilion.dev",
+        "route": "/v1/session",
+        "request": {
+          "idle_timeout": 120,
+          "ttl": 600
+        },
+        "status": 201,
+        "elapsedMs": 598,
+        "headers": {
+          "connection": "keep-alive",
+          "content-length": "1148",
+          "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+          "content-type": "application/json",
+          "date": "Mon, 02 Nov 2026 18:47:30 GMT",
+          "referrer-policy": "no-referrer",
+          "server": "uvicorn",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+          "vary": "Origin",
+          "x-content-type-options": "nosniff",
+          "x-frame-options": "DENY",
+          "x-request-id": "30655e499a2c490b"
+        },
+        "connectedAfterResponse": null,
+        "response": {
+          "session_id": "sess_c411892805e2468982ee8b519536140d"
+        }
+      },
+      {
+        "at": "2026-11-02T18:47:30.476Z",
+        "event": "connect",
+        "origin": "wss://oregon.back.tilion.dev"
+      },
+      {
+        "at": "2026-11-02T18:47:36.296Z",
+        "event": "http",
+        "method": "POST",
+        "origin": "https://back.tilion.dev",
+        "route": "/v1/session/sess_c411892805e2468982ee8b519536140d/screenshot",
+        "request": {},
+        "status": 200,
+        "elapsedMs": 178,
+        "headers": {
+          "connection": "keep-alive",
+          "content-length": "109192",
+          "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+          "content-type": "application/json",
+          "date": "Mon, 02 Nov 2026 18:47:36 GMT",
+          "referrer-policy": "no-referrer",
+          "server": "uvicorn",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+          "vary": "Origin",
+          "x-content-type-options": "nosniff",
+          "x-frame-options": "DENY",
+          "x-request-id": "89e108c62ec64475"
+        },
+        "connectedAfterResponse": true,
+        "response": {
+          "ok": true,
+          "format": "jpeg",
+          "full_page": false,
+          "size_b64": 54464,
+          "tab_id": "0144AA0BCFE429B04BFC215E08DDF733",
+          "url": "https://example.com/",
+          "beside_client": true,
+          "session_id": "sess_c411892805e2468982ee8b519536140d"
+        },
+        "image_sha256": "bf72779fb0dfaf0db2483ec478581d242fd93f98f4ba9168ac5b4ddd4b018f69"
+      },
+      {
+        "at": "2026-11-02T18:47:36.313Z",
+        "event": "cdp-after-screenshot",
+        "title": "Example Domain",
+        "connected": true
+      },
+      {
+        "at": "2026-11-02T18:47:36.460Z",
+        "event": "cdp-disconnected"
+      },
+      {
+        "at": "2026-11-02T18:47:36.540Z",
+        "event": "http",
+        "method": "POST",
+        "origin": "https://back.tilion.dev",
+        "route": "/v1/session/sess_c411892805e2468982ee8b519536140d/screenshot",
+        "request": {
+          "format": "jpeg",
+          "quality": 40
+        },
+        "status": 200,
+        "elapsedMs": 78,
+        "headers": {
+          "connection": "keep-alive",
+          "content-length": "78530",
+          "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+          "content-type": "application/json",
+          "date": "Mon, 02 Nov 2026 18:47:36 GMT",
+          "referrer-policy": "no-referrer",
+          "server": "uvicorn",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+          "vary": "Origin",
+          "x-content-type-options": "nosniff",
+          "x-frame-options": "DENY",
+          "x-request-id": "c011067c6b4e42a8"
+        },
+        "connectedAfterResponse": false,
+        "response": {
+          "ok": true,
+          "format": "jpeg",
+          "full_page": false,
+          "size_b64": 39180,
+          "session_id": "sess_c411892805e2468982ee8b519536140d"
+        },
+        "image_sha256": "5fc78e71820d0ee0f48ddd3518ea5e393c33671b2cd6624a47fa22d7e8b74d43"
+      },
+      {
+        "at": "2026-11-02T18:47:36.665Z",
+        "event": "http",
+        "method": "DELETE",
+        "origin": "https://back.tilion.dev",
+        "route": "/v1/session/sess_c411892805e2468982ee8b519536140d",
+        "request": null,
+        "status": 204,
+        "elapsedMs": 123,
+        "headers": {
+          "connection": "keep-alive",
+          "date": "Mon, 02 Nov 2026 18:47:36 GMT",
+          "location": "/v1/session/sess_c411892805e2468982ee8b519536140d/status",
+          "referrer-policy": "no-referrer",
+          "server": "uvicorn",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+          "vary": "Origin",
+          "x-content-type-options": "nosniff",
+          "x-request-id": "46bbda251e9b4763"
+        },
+        "connectedAfterResponse": false
+      },
+      {
+        "at": "2026-11-02T18:47:36.750Z",
+        "event": "http",
+        "method": "DELETE",
+        "origin": "https://back.tilion.dev",
+        "route": "/v1/session/sess_c411892805e2468982ee8b519536140d",
+        "request": null,
+        "status": 204,
+        "elapsedMs": 82,
+        "headers": {
+          "connection": "keep-alive",
+          "date": "Mon, 02 Nov 2026 18:47:36 GMT",
+          "location": "/v1/session/sess_c411892805e2468982ee8b519536140d/status",
+          "referrer-policy": "no-referrer",
+          "server": "uvicorn",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+          "vary": "Origin",
+          "x-content-type-options": "nosniff",
+          "x-request-id": "990bc6e9c87f4ea8"
+        },
+        "connectedAfterResponse": false
+      },
+      {
+        "at": "2026-11-02T18:47:36.834Z",
+        "event": "http",
+        "method": "GET",
+        "origin": "https://back.tilion.dev",
+        "route": "/v1/session/sess_c411892805e2468982ee8b519536140d",
+        "request": null,
+        "status": 410,
+        "elapsedMs": 83,
+        "headers": {
+          "connection": "keep-alive",
+          "content-length": "443",
+          "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+          "content-type": "application/json",
+          "date": "Mon, 02 Nov 2026 18:47:36 GMT",
+          "referrer-policy": "no-referrer",
+          "server": "uvicorn",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+          "vary": "Origin",
+          "x-content-type-options": "nosniff",
+          "x-frame-options": "DENY",
+          "x-request-id": "0ed2f1b3b36245c2"
+        },
+        "connectedAfterResponse": false,
+        "response": {}
+      },
+      {
+        "at": "2026-11-02T18:47:36.836Z",
+        "event": "contract",
+        "result": "PASS"
+      }
+    ]
+  },
+  "vendor_schema": {
+    "retrieved_at": "2026-11-02T18:42Z",
+    "origin": "https://back.tilion.dev",
+    "route": "/openapi.json",
+    "sha256": "a31cf7e4d6f2da206795234aaf99fd32eaf8ad626af5efbac182407b0aaaef64",
+    "meaning": "Attached screenshots observe the client page without moving its viewport; full-page/clip requests can move the viewport."
+  },
+  "fixture_sha256": "8ff75418048c2362772cc3595cf0316d165c424377efb3bb25c95795aff9b1a9",
+  "cleanup": [
+    {
+      "run": "before",
+      "id": "sess_a651ef609c5748b49a482146233615e8",
+      "status": 410,
+      "requestId": "ce92cc93be9644a2",
+      "observedAt": "2026-11-02T18:48:10.467Z"
+    },
+    {
+      "run": "after",
+      "id": "sess_c41189ca8dcd48c1bd163a3dfd8bf326",
+      "status": 410,
+      "requestId": "5a7a70f45d5b4d83",
+      "observedAt": "2026-11-02T18:48:10.575Z"
+    },
+    {
+      "run": "final",
+      "id": "sess_c411892805e2468982ee8b519536140d",
+      "status": 410,
+      "requestId": "fdcb056177594ad6",
+      "observedAt": "2026-11-02T18:48:10.656Z"
+    }
+  ],
+  "validation": {
+    "captured_response_before": "FAIL HTTP 200 versus expected 409",
+    "captured_response_after": "PASS",
+    "negative_controls": 9,
+    "corrupt_jpeg_before": "FAIL Missing expected rejection: corrupt-image",
+    "corrupt_jpeg_after": "PASS",
+    "browser_provider_domain": {
+      "result": "PASS",
+      "duration_ms": 39592,
+      "passed_domains": 1,
+      "failed_domains": 0,
+      "not_run_domains": 0
+    },
+    "scope": "offline browser-provider domain plus separate native preflight; no full-release or cross-provider live parity claim"
+  }
+}
