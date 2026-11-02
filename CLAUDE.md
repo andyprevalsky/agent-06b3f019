@@ -168,7 +168,11 @@ Deploy test-repair handoffs use the backend and commands in
 commands feature-flagged off pending a separate migration.
 These handoffs require an actual failed test and its exact error/scope, are
 created only after the originating merge to main, and run an autonomous
-`/goal` through their own completed deploy. They always use high effort and
+`/goal` through their own completed deploy. The repair goal and its deploy
+coordinator must run on a different devbox, automatically placed in the
+project's Bugs folder; never leave a repair coordinator on the originating
+box. Follow the linked policy's folder commands and verify placement.
+They always use high effort and
 normal speed (`--reasoning-effort high --speed standard` on boxes.dev),
 overriding the effort/speed inheritance and fallback below for these repair
 delegates only. Title, model and other delegation requirements remain in force.

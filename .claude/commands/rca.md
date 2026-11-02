@@ -83,7 +83,10 @@ your own completed `/deploy` scorecard. Work autonomously without questions
 or expected human replies. An OPEN diagnosis, observability gap or draft PR
 does not complete this repair goal. Do not waive or re-delegate the assigned
 test. The originating deploy does not monitor or wait for your result.
-Work from current main containing its merge, in your own devbox and branch;
+Work from current main containing its merge, in a different devbox from the
+originating deploy, automatically placed in the project's Bugs folder.
+Verify that placement before repair work. Keep the active goal and deployment
+coordinator there so the originating box can close. Use your own branch;
 coordinate concrete production overlaps with existing release work while
 carrying your deployment to completion. New occurrences should join existing
 work through evidence and discussion. The policy's external-provider

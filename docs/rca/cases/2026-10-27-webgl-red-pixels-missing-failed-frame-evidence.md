@@ -110,3 +110,15 @@ continues to fail the original pixel predicate; disabling retention makes that
 control fail. No context recovery, screenshot retry, new readiness wait or
 renderer setting is introduced. This is evidence custody, not a runtime repair.
 The original full command must still pass on its own native result.
+
+### Completed PR1663 gate, 2026-11-02
+
+The unchanged full original backend coverage invocation on source
+647ae11f86f0997c838cb0f1e72f795a2e36af33 exited 0 at23:05:27Z, including the
+original cube/GLB/module predicates and the registered real-context-loss
+capture control (agent-tools25PASS). PR1663 merged at72a8bd7bf7e3a92b5717d13d617c2954bf453fca;
+Render serves that exact merge and all five production semantic jobs in
+workflow41545037873 passed. The renderer and original waits/assertions were
+unchanged. This is a native full-gate pass plus shipped evidence retention,
+not proof of the historical zero-red cause or a rendering repair. This case
+remains OPEN because the original failed frame/context evidence is absent.
