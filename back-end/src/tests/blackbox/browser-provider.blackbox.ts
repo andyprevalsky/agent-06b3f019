@@ -1,4 +1,6 @@
 #!/usr/bin/env tsx
+import { runSteelAwareParity } from './browser-provider.steel-persistence-outage.support';
+import { steelPersistenceOutageCases } from './browser-provider.steel-persistence-outage.cases';
 
 import nodeAssert from 'node:assert/strict';
 import { assertBrowserUseMissingHealth } from './browser-provider.browser-use-health.support';
@@ -60,6 +62,7 @@ const browserUseFlagBeforeContractTests = process.env.BROWSER_AGENT_BROWSER_USE_
 process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
 
 const tests: Array<[string, () => void | Promise<void>]> = [
+  ...steelPersistenceOutageCases,
   [
     'Browser Use missing health is terminal, while other failures remain errors',
     assertBrowserUseMissingHealth,
@@ -452,6 +455,7 @@ const tests: Array<[string, () => void | Promise<void>]> = [
 
 async function main(): Promise<void> {
   let failed = 0;
+  let steelPersistenceSkipped = false;
   for (const [name, test] of tests) {
     try {
       await test();
@@ -590,22 +594,19 @@ async function main(): Promise<void> {
       'Kernel residential proxy unavailable'
     );
   } else {
-    try {
-      await runLiveProviderParity();
-      if (process.env.TEST_BASE_URL) console.log('PASS live Kernel provider parity');
-    } catch (error) {
-      failed++;
-      console.error(
-        `FAIL live Kernel provider parity: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
+    const parity = await runSteelAwareParity(
+      runLiveProviderParity,
+      Boolean(process.env.TEST_BASE_URL)
+    );
+    failed += parity.failed;
+    steelPersistenceSkipped = parity.skipped;
   }
 
   failed += await runLiveCrossProviderCases();
 
   if (failed > 0) process.exit(1);
   console.log(
-    `\nPassed ${tests.length + (process.env.TEST_BASE_URL ? 1 : 0)} browser provider test(s).`
+    `\nPassed ${tests.length + (process.env.TEST_BASE_URL && !steelPersistenceSkipped ? 1 : 0)} browser provider test(s).${steelPersistenceSkipped ? ' Steel profile-persistence live operation SKIPPED; parity is incomplete.' : ''}`
   );
 }
 

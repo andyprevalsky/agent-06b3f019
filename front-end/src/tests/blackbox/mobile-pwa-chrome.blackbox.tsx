@@ -82,6 +82,8 @@ function signIn() {
 }
 
 function makeAgent(overrides: Partial<AgentDetail> = {}): AgentDetail {
+  // Keep menu fixtures recent so the intentional old-agent section does not hide them.
+  const recentTimestamp = new Date().toISOString();
   return {
     agent_id: 'agent-1',
     goal: 'Get me 10 candidates to interview',
@@ -102,8 +104,8 @@ function makeAgent(overrides: Partial<AgentDetail> = {}): AgentDetail {
     message_count: 7,
     price_limit_cents: 1000,
     tree_cost_cents: 45,
-    created_at: '2026-10-27T00:00:00Z',
-    updated_at: '2026-10-27T00:00:00Z',
+    created_at: recentTimestamp,
+    updated_at: recentTimestamp,
     write_lock_enabled: true,
     parent_agent_id: null,
     parent_goal: null,

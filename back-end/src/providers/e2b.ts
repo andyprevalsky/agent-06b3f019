@@ -498,7 +498,6 @@ export async function createCodexCodeSession(
   const taskId = uuidv4();
   const templateId = process.env.E2B_CODEX_CODE_TEMPLATE_ID || DEFAULT_CODEX_CODE_TEMPLATE_ID;
   const { settings: agentSettings, envs: cliSettings } = await codeAgentCliEnvs('codex', agentId);
-  const model = cliSettings.CODEX_MODEL;
   const harnessMode = harnessOptions?.harnessMode ?? 'code';
   const roseApiBaseUrl = harnessOptions?.roseApiBaseUrl?.replace(/\/$/, '');
   const workDir = workDirForGithubRepo(githubRepoUrl);

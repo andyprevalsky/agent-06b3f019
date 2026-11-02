@@ -43,3 +43,9 @@ The user requested completion of deployment while preserving failed evidence and
 ## Reusable lesson
 
 Let the child atomically choose and publish its listening port. A parent bind-close-launch sequence is not a reservation, and discarded native stderr prevents later attribution.
+
+## November 2 recurrence — native discovery missing, original cause still open
+
+At frozen05449cd2d, `.context/test-runs/agents-coverage-20261102-175513-3695621/browser-tilion.log` failed chromium_native_port_ownership with missinguniqueprofileDevToolsActivePort, Chromiumstillalive and onlyDBusaddresswarningretained. Nativeport0fixwaspresent; no evidenceofEADDRINUSE. Domaincasesaresequential; earlierglobalasyncio.sleeppatchesexitbeforeownershipcase. Thus thisdoesnotreprovetheoldreleased-portcollisionorpatchcontamination.
+
+Oneexplicitlyauthorizedunchangedexactregisteredcase, privatecopywithsourcehash8dbd27be9a2f1b6446740eed7e3f172a2c615a8c40b8a802a9e5ee494e9bc60d, passed6.392s; nativefileport33707present0.933safterPopen. Externalcapturepreservesfull5772bytestderr/procstateBEFOREexistingcleanup; thesameDBuswarningoccursonpassingrun. Ownedchild/profilecleanupconfirmed. Evidence `/project/rose-speed-comparison-20261028/nov2-chromium-rca/`. No rootfix/timeout/budget/assertion/provider/DB/leasechanges. OriginalfailurecauseOPEN; passingrerunisnotfix. Preserve existingcase'smitigatedstatusunlessnewcausalprooffound; parentownsarchive/integratedgatequalification.
