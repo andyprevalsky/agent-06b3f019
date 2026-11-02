@@ -13,7 +13,9 @@ def generate(template, inventory, root):
             continue  # The selector reports missing workers only for selected gates.
         mode = slot['transport']
         if mode == 'benchmark-cloud-cli':
-            bindings[name] = {**slot, 'command': ['bash', 'scripts/run-predeploy-cloud']}
+            command = ([sys.executable, str(root / 'scripts/deploy_test_cloud.py')]
+                       if gate.get('native_cloud') else ['bash', 'scripts/run-predeploy-cloud'])
+            bindings[name] = {**slot, 'command': command}
             continue
         checkout = str(Path(slot['worker_root']))
         if not Path(checkout).is_absolute():

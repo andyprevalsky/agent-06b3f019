@@ -2417,7 +2417,7 @@ fix. Stabilize the branch as development work, then start a fresh `/deploy`.
   skipped or only non-critical findings → no effect on the cycle result.
 - **CODE RABBIT USAGE-EXHAUSTED** (confirmed quota, spending cap or review-limit exhaustion) → close the cycle `--result clean`, record the
   `⚠️ Skipped` row, and keep going under Step 9a's existing usage-exhaustion exception.
-- **CODE RABBIT UNAVAILABLE WITHOUT USAGE EXHAUSTION** (service failure, missing/timed-out review or false-green) → diagnose under Step 9a and the controlling failure policy. An evidenced provider outage receives the non-blocking external exception; an unexplained failure remains blocking. The disabled Claude fallback alone does not waive substantive review.
+- **CODE RABBIT UNAVAILABLE WITHOUT USAGE EXHAUSTION** (service failure, missing/timed-out review or false-green) → diagnose under Step 9a and the controlling failure policy. An evidenced provider outage receives the non-blocking external exception; an unexplained failure remains blocking. The disabled Claude fallback alone does not waive substantive review; never close it `clean` merely because the Claude fallback is disabled.
 - **REVIEW SKIPPED** (e.g., "Too many files!") → keep the current immutable
   HEAD blocked until a substantive review is obtained. Do not close it `clean`
   or push filter edits while the review cycle is open. CodeRabbit Free caps reviews at 150 files; the list below is

@@ -371,6 +371,17 @@ assert len(list(p.iterdir()))==2
         c.write(self.directory/'cycle.json',saved)
         self.assertEqual(5,c.verify_saved(self.directory,self.root))
 
+    def test_ignored_frontend_env_invalidates_ready_receipt(self):
+        with (self.root/'.git/info/exclude').open('a') as stream:
+            stream.write('front-end/.env\n')
+        config=self.root/'front-end/.env';config.parent.mkdir();config.write_text('VITE_ORIGIN=first')
+        state=c.initialize(self.plan,self.root)
+        c.run_phase(self.plan,state,self.directory,self.root)
+        c.run_phase(self.plan,state,self.directory,self.root)
+        self.assertEqual(0,c.verify_saved(self.directory,self.root))
+        config.write_text('VITE_ORIGIN=second')
+        self.assertEqual(5,c.verify_saved(self.directory,self.root))
+
     def test_cli_runs_real_commands_and_refuses_reinitialization(self):
         plan_path=self.root/'.context/plan.json';c.write(plan_path,self.plan)
         args=['--plan',str(plan_path),'--state-dir',str(self.directory),'--root',str(self.root)]

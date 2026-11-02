@@ -85,9 +85,18 @@ through its existing owner, then use `transport: ssh`, `worker_host` and
 `worker_root` in the inventory. The worker independently verifies the requested
 source before executing. This path does not allocate machines or waive setup.
 
-The cloud smoke adapter uses the benchmark CLI, keeps its existing task selection
-and raw run receipts, and returns all selected outcomes. If no appropriate worker
-is bound, planning refuses; it does not quietly serialize the suite locally.
+The standard cloud smoke adapter is `deploy_test_cloud.py`. Planning reads the
+existing `run-predeploy-cloud --list` selector, then the adapter calls the
+existing `run-bench` cloud CLI with the active task names, `--wait`, and the exact
+frozen `--ref`. It does not repeat the old launcher's offline structural checks:
+those belong to the selected deploy-tooling category. Native child receipts,
+execution provenance and the fleet's teardown audit must agree. Task outcomes
+stay separate: a native skip enters `/RCA` as a recorded failure until qualified;
+an already qualified skip is omitted from later CLI argv. Missing children,
+source mismatch, cancellation and cleanup gaps stay UNVERIFIED. The adapter
+does not allocate outside the existing CLI or invent a cleanup receipt.
+If no appropriate worker is bound, planning refuses; it does not quietly
+serialize the suite locally.
 
 `scripts/deploy_test_worker.py` is the supplied case-aware executor for an
 already prepared isolated checkout. Use it directly with request/result paths,

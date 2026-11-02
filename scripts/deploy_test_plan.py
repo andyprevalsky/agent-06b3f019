@@ -74,6 +74,8 @@ def select(template: dict, changed: list[str], result: dict, binding: dict) -> d
             worker = binding.get(gate['name'])
             if not worker:
                 raise ValueError(f"{gate['name']}: independent worker binding missing")
+            if not isinstance(worker.get('id'), str) or not worker['id']:
+                raise ValueError(f"{gate['name']}: worker binding requires an id")
             if category == 'smoke' and worker.get('transport') != 'benchmark-cloud-cli':
                 raise ValueError('smoke must use the cloud benchmark CLI worker')
             # Explicit launcher commands; a label alone is not a provisioned worker.
@@ -110,6 +112,13 @@ def standard_template() -> dict:
     for gate in gates:
         if gate['name'] == 'eslint':
             gate.update(command=[sys.executable, 'scripts/check_deploy_static.py', 'lint'], cwd='.')
+        if gate['name'] == 'smoke':
+            tasks = subprocess.run(['bash', 'scripts/run-predeploy-cloud', '--list'], cwd=ROOT,
+                                   check=True, capture_output=True, text=True).stdout.splitlines()
+            if not tasks or len(set(tasks)) != len(tasks):
+                raise ValueError('cloud smoke selector did not return an exact task inventory')
+            gate.update(checks=tasks, native_cloud=True, case_protocol=True,
+                        command=[sys.executable, str(ROOT / 'scripts/deploy_test_cloud.py')])
     gates += [
         {"name": "format", "category": "format", "command": [sys.executable, "scripts/check_deploy_static.py", "format"],
          "checks": ["format"]},
@@ -146,4 +155,8 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        print(f'DEPLOY_PLAN BLOCKED: {error}', file=sys.stderr)
+        raise SystemExit(2)

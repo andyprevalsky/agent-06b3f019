@@ -4228,7 +4228,7 @@ def check_standard_plan_typescript() -> None:
     assert typescript["cwd"] == "back-end", typescript
     deploy_md = (ROOT / ".claude" / "commands" / "deploy.md").read_text()
     assert typescript["command"][-1] in deploy_md, "deploy.md Step 3 must run the same incremental tsc command"
-    assert "run_deploy_pipeline.py verify --state-dir" in deploy_md, "Phase 3 must bind the receipt to HEAD"
+    assert "run_deploy_pipeline.py verify --require-staged" in deploy_md, "Phase 3 must require the staged receipt bound to HEAD"
     assert "--follow-source" in deploy_md and "FIX_LOOP_CAP" in deploy_md
 
 

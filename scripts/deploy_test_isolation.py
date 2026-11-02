@@ -16,8 +16,11 @@ def validate(plan, root):
         mode = gate.get('worker_transport')
         args = gate['command']
         if mode == 'benchmark-cloud-cli':
-            if not (len(args) >= 2 and Path(args[0]).name == 'bash'
-                    and Path(args[1]).name == 'run-predeploy-cloud'):
+            native = (gate.get('native_cloud') is True and gate.get('case_protocol') is True
+                      and len(args) == 2 and Path(args[1]).resolve() == root / 'scripts/deploy_test_cloud.py')
+            legacy = (not gate.get('native_cloud') and len(args) == 2
+                      and Path(args[0]).name == 'bash' and Path(args[1]).name == 'run-predeploy-cloud')
+            if not (native or legacy):
                 raise ValueError('cloud smoke must use the actual cloud benchmark launcher')
             continue
         if mode == 'ssh':

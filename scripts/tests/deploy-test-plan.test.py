@@ -66,6 +66,11 @@ class Selection(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'worker binding missing'):
             p.select(self.template,['back-end/src/one.ts'],self.result,self.bindings)
 
+    def test_worker_identity_is_required_with_a_clear_refusal(self):
+        del self.bindings['be']['id']
+        with self.assertRaisesRegex(ValueError,'worker binding requires an id'):
+            p.select(self.template,['back-end/src/one.ts'],self.result,self.bindings)
+
     def test_case_recipe_is_bound_into_plan(self):
         self.bindings['be'].update(recipe={'cases':{'be':{'command':['true']}}},
                                    result_transport='stdout',timeout_seconds=10)
@@ -111,6 +116,17 @@ class Selection(unittest.TestCase):
         binding=generate(self.template,inventory,p.ROOT)['be']
         self.assertEqual(['ssh','test-worker'],binding['command'][:2])
         self.assertIn("'/prepared source/scripts/deploy_test_worker.py'",binding['command'][2])
+
+    def test_native_cloud_binding_preserves_each_task_in_the_plan(self):
+        from deploy_test_bindings import generate
+        self.template['gates'][3].update(native_cloud=True,case_protocol=True,checks=['task-a','task-b'])
+        self.bindings.update(generate(self.template,{'smoke':{'id':'smoke',
+            'transport':'benchmark-cloud-cli'}},p.ROOT))
+        planned=p.select(self.template,['back-end/src/one.ts'],self.result,self.bindings)
+        smoke=next(g for g in planned['gates'] if g['name']=='smoke')
+        self.assertEqual(['task-a','task-b'],smoke['checks'])
+        self.assertTrue(smoke['case_protocol'])
+        self.assertEqual(str(p.ROOT/'scripts/deploy_test_cloud.py'),smoke['command'][1])
 
 
 if __name__=='__main__':unittest.main()

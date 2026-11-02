@@ -114,7 +114,7 @@ def input_fingerprints(plan: dict, root: Path) -> dict:
         mode = path.lstat().st_mode if path.exists() or path.is_symlink() else None
         files[os.fsdecode(raw)] = digest([hashlib.sha256(content).hexdigest(), mode])
     # Configuration is an input even when Git correctly ignores its secrets.
-    for rel in [".env", "env.sh", "back-end/.env", "agents/.env", "front-end/.env.local"]:
+    for rel in [".env", "env.sh", "back-end/.env", "agents/.env", "front-end/.env", "front-end/.env.local"]:
         if (root / rel).is_file():
             files[rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
     return {g["name"]: digest({"files": {p: h for p, h in files.items()
@@ -261,6 +261,7 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
     valid = False
     complete = False
     reason = None
+    worker_evidence = {}
     if gate.get('result_transport') == 'stdout':
         try:
             if (folder / 'output.log').stat().st_size > MAX_RECEIPT_BYTES:
@@ -273,6 +274,8 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
             if result_path.stat().st_size > MAX_RECEIPT_BYTES:
                 raise ValueError('worker receipt exceeds transport limit')
             result = read(result_path)
+            if isinstance(result.get('evidence'), dict):
+                worker_evidence = result['evidence']
             raw_cases, complete = validate_result(result, request, code,
                 invalid_process=timed_out or cancelled or lingering)
             cases.update(raw_cases)
@@ -297,6 +300,8 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
               "source": state["source"], "started_at": started, "finished_at": time.time(),
               "command": gate["command"], "log": str(folder / "output.log"),
               "stderr_log": str(folder / 'stderr.log'), "token": token}
+    result['worker_evidence'] = worker_evidence
+    result['worker_result'] = str(result_path) if result_path.exists() else None
     write(folder / "receipt.json", result)
     return result
 
@@ -311,7 +316,9 @@ def failed_cases(state: dict, results: list[dict]) -> list[dict]:
                 failed.append({"id": uuid.uuid4().hex, "check": key, "native_result": verdict,
                                "gate": result["gate"], "source": state["source"],
                                "complete": result.get("case_complete", {}).get(check, result.get("complete", False)), "phase": phase,
-                               "evidence": result.get("log"), "command": result.get("command")})
+                               "evidence": result.get("log"), "command": result.get("command"),
+                               "worker_result": result.get('worker_result'),
+                               "worker_evidence": result.get('worker_evidence', {}).get(check)})
     return failed
 
 
