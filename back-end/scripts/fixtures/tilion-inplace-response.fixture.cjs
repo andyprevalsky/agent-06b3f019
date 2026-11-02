@@ -150,7 +150,7 @@ async function main() {
   await server.start();
   process.env.TILION_BASE_URL = server.baseUrl;
   const outcomes = [];
-  function reset() {
+  function reset(control) {
     row = {
       id: 'task-owned',
       sessionId: 'sess_owned',
@@ -176,11 +176,16 @@ async function main() {
     server.reset();
     server.route('POST', /\/rotate-ip$/, () => ({
       status: 200,
-      body: { rotated: true, fresh_allocation: true, region: 'us' },
+      body: {
+        session_id: row.sessionId,
+        rotated: true,
+        fresh_allocation: control !== 'pooled',
+        region: 'us',
+      },
     }));
   }
   async function run(control) {
-    reset();
+    reset(control);
     if (control === 'reserved-provider') row.provider = 'kernel';
     const before = clone(row);
     const dependencies = {
@@ -213,9 +218,12 @@ async function main() {
         const result = await native.rotateInPlace(row.id);
         assert(result);
         assert.equal(result.previousSessionId, before.sessionId);
+        assert.equal(result.ipRotation.freshAllocation, control !== 'pooled');
         if (control === 'wrong-session') result.sessionId = 'sess_foreign';
         if (control === 'missing-proof') delete result.ipRotation;
-        if (control === 'unproven') result.ipRotation.freshAllocation = false;
+        if (control === 'unproven') delete result.ipRotation.freshAllocation;
+        if (control === 'malformed-proof') result.ipRotation.freshAllocation = 'false';
+        if (control === 'not-rotated') result.ipRotation.rotated = false;
         if (control === 'context') row.contextId = 'foreign-context';
         if (control === 'missing-row') row = null;
         if (control === 'owner') row.logicalOwnerKey = 'agent:foreign';
@@ -237,7 +245,7 @@ async function main() {
         };
       },
     };
-    if (['success', 'expired-user', 'replacement'].includes(control)) {
+    if (['success', 'pooled', 'expired-user', 'replacement'].includes(control)) {
       const result = await high.rotateBrowserProxy(
         row.id,
         'user-owned',
@@ -271,11 +279,14 @@ async function main() {
   try {
     for (const c of [
       'success',
+      'pooled',
       'expired-user',
       'replacement',
       'wrong-session',
       'missing-proof',
       'unproven',
+      'malformed-proof',
+      'not-rotated',
       'reserved-provider',
       'missing-row',
       'context',
