@@ -6,6 +6,7 @@ import { listAccountAgents, readAccountAgent, requireAccountAccess } from './age
 import { spawnAccountAgent } from './agentAccountSpawnService';
 import { sendGraphMessage } from './agentGraphSendService';
 import { AgentGraphError, type GraphCaller } from './agentGraphService';
+import { accountAgentsEnabled } from './config';
 
 const pageSchema = z
   .object({
@@ -60,7 +61,7 @@ export function mountAccountAgentRoutes(
 ): void {
   // Default off until the independently tested Rose repair-agent migration.
   router.use('/account', (_req, res, next) => {
-    if (process.env.ROSE_ACCOUNT_AGENTS_ENABLED !== 'true') {
+    if (!accountAgentsEnabled()) {
       res.status(404).json({ error: 'Rose account-agent commands are disabled' });
       return;
     }

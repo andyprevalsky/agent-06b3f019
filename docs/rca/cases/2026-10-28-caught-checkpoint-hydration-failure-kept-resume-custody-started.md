@@ -322,3 +322,12 @@ controls verify owned browser cleanup. No proposed source is applied.
 The original open handle and inner wait were not captured. Saved state does not
 record those handles, so historical U5 and attribution remain OPEN. Evidence:
 plan:.context/unresolved-six-20261029/storage-tunnel/U5-REPORT.md.
+
+
+### 2026-11-02 integration: distinguish retry receipts from cleanup eligibility
+
+On integration of `a3c4929f3` into `a959e0291`, a capability-only `retryHydration` guard incorrectly retained every failed logical candidate. The unchanged registered provider-lifecycle fixture failed its `owner-observed hydration failure reopens custody` assertion (`STARTED` instead of `RELEASED`), while the acknowledged-retry fixture passed. This is an INTRODUCED integration failure, separate from the historical unresolved browser/provider causes.
+
+Retain custody only when the exact retry acknowledgement was restored/written, or when its owned transport has not confirmed closure. Otherwise keep the incoming exact-owner release and terminal-confirmation path. The same local proof then passed all upstream failed-hydration controls, the original acknowledged-retry fixture, and the real Chromium Steel/Kernel lifecycle fixture without changing their assertions or timeouts. Its disposable database was dropped. The existing `browser-session` domain registers both fixture families, so this regression remains in the deploy path.
+
+Proof command: `node --import tsx ../.context/deploy-boxes-default-20261102/browser-merge-proof.cjs` from `back-end`; retained red/green logs are under `.context/deploy-boxes-default-20261102/`. This is local integration proof; production verification is still required, and no historical cause or financial outcome is inferred.
