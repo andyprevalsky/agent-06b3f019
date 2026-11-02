@@ -1072,9 +1072,60 @@ def verify_capture(local: Path, inventory: dict, ident: dict) -> dict[str, bytes
     return originals
 
 
-def cross_check_receipts(out: Path, ident: dict, originals: dict[str, bytes]) -> dict[str, str]:
+def verified_backend_append(out: Path, ident: dict, state: dict, captured: bytes) -> dict:
+    """Admit a bounded log extension only under the existing stopped-owner contract."""
+    try:
+        observed = state.get("backend_log")
+        if (state.get("schema_version") != "cloudbench-guest-state-v1"
+                or type(state.get("version")) is not int or state.get("version") != 1
+                or state.get("state") != "active" or state.get("driver_state") != "running"
+                or state.get("driver_token_match") is not True
+                or type(state.get("driver_pid")) is not int or state["driver_pid"] <= 0
+                or state.get("machine_id") != ident["machine_id"]
+                or state.get("guest_run_token") != ident["token"]
+                or not isinstance(observed, dict)
+                or any(observed.get(key) is not value for key, value in (
+                    ("exists", True), ("regular", True), ("symlink", False), ("within_limit", True)))
+                or type(observed.get("bytes")) is not int or observed["bytes"] <= 0):
+            raise ValueError("no exact active-driver observation")
+        prior = regular_bytes(out / "guest-cleanup.backend.log", 64 * 1024 * 1024)
+        manifest_path = out / "guest-cleanup.provider-manifest.json"
+        manifest = json_file(manifest_path)
+        if (manifest.get("kind") != "provider-active-exact-manifest"
+                or type(manifest.get("version")) is not int or manifest.get("version") != 1
+                or len(prior) != observed["bytes"]
+                or sha(prior) != (manifest.get("evidence") or {}).get("backend_log_sha256")
+                or not prior.endswith(b"\n") or not captured.endswith(b"\n")
+                or not captured.startswith(prior) or len(captured) <= len(prior)
+                or len(captured) > 64 * 1024 * 1024
+                or len(captured) - len(prior) > 1024 * 1024):
+            raise ValueError("backend is not a bounded extension of the exact prior body")
+        # This read-only validator recomputes the prior manifest, validates its
+        # stopped-Machine proof and every provider receipt, and compares the
+        # full new log's root/session/allocation/mutation/payment evidence.
+        # The capture's final fresh native proof remains independently required.
+        verifier = runpy.run_path(str(Path(__file__).with_name("cloudbench-forensic-retirement.py")))
+        verifier["verify_stopped_provider_archive"](
+            out, {"task": ident["bench"], "machine_id": ident["machine_id"], "run_token": ident["token"]},
+            ident["owner"], ident["run_id"], sha(captured), original_backend=captured,
+        )
+        return {
+            "version": 1, "kind": "stopped-provider-backend-extension",
+            "prior_bytes": len(prior), "prior_sha256": sha(prior),
+            "captured_bytes": len(captured), "captured_sha256": sha(captured),
+            "appended_bytes": len(captured) - len(prior), "appended_sha256": sha(captured[len(prior):]),
+            "provider_manifest_sha256": sha(regular_bytes(manifest_path)),
+            "machine_stopped_sha256": sha(regular_bytes(out / "guest-cleanup.machine-stopped.json")),
+            "provider_receipt_sha256": sha(regular_bytes(out / "guest-cleanup.recovery-receipt.json")),
+        }
+    except Exception as error:
+        raise CaptureFailure("backend append is not covered by exact stopped-owner evidence") from error
+
+
+def cross_check_receipts(out: Path, ident: dict, originals: dict[str, bytes]) -> dict[str, object]:
     """Bind the capture to the earlier exact recovery observation of the same guest."""
-    checks: dict[str, str] = {}
+    checks: dict[str, object] = {}
+    append_proof = None
     state_path = out / "guest-cleanup.state.json"
     if lexists(state_path):
         state = json_file(state_path)
@@ -1087,7 +1138,10 @@ def cross_check_receipts(out: Path, ident: dict, originals: dict[str, bytes]) ->
                 if observed.get("exists") is not (name in originals) or (
                     name in originals and observed.get("bytes") != len(originals[name])
                 ):
-                    raise CaptureFailure(f"capture contradicts the recovery observation of {name}")
+                    if key != "backend_log":
+                        raise CaptureFailure(f"capture contradicts the recovery observation of {name}")
+                    append_proof = verified_backend_append(out, ident, state, originals.get(name, b""))
+                    checks["backend_log_append"] = append_proof
             checks["guest-cleanup.state.json"] = sha(regular_bytes(state_path))
     manifest_path = out / "guest-cleanup.provider-manifest.json"
     if lexists(manifest_path):
@@ -1096,7 +1150,10 @@ def cross_check_receipts(out: Path, ident: dict, originals: dict[str, bytes]) ->
             evidence = manifest.get("evidence") or {}
             for key, name in (("backend_log_sha256", LOG_DIR + "backend.log"), ("run_json_sha256", CONTEXT + "run.json")):
                 if evidence.get(key) and (name not in originals or sha(originals[name]) != evidence[key]):
-                    raise CaptureFailure(f"capture contradicts the recovery manifest hash of {name}")
+                    if not (key == "backend_log_sha256" and append_proof is not None
+                            and append_proof["prior_sha256"] == evidence[key]
+                            and append_proof["captured_sha256"] == sha(originals.get(name, b""))):
+                        raise CaptureFailure(f"capture contradicts the recovery manifest hash of {name}")
             checks["guest-cleanup.provider-manifest.json"] = sha(regular_bytes(manifest_path))
     return checks
 

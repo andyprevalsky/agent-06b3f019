@@ -160,6 +160,169 @@ class StoppedArchiveExtensionTest(unittest.TestCase):
             self.verify(b"rewritten\n" + self.backend)
 
 
+    def capture_fixture(self):
+        capture = load("capture_append", ROOT / "scripts/cloudbench-original-volume-capture.py")
+        state = {
+            "schema_version": "cloudbench-guest-state-v1", "version": 1,
+            "machine_id": self.args.machine_id, "guest_run_token": self.args.guest_run_token,
+            "state": "active", "driver_state": "running", "driver_pid": 123,
+            "driver_token_match": True,
+            "backend_log": {"exists": True, "regular": True, "symlink": False,
+                            "within_limit": True, "bytes": len(self.backend)},
+            "services_manifest": {"exists": True, "bytes": 2},
+            "run_json": {"exists": True, "bytes": 2},
+        }
+        (self.out / "guest-cleanup.state.json").write_text(json.dumps(state))
+        ident = {"owner": self.args.owner, "run_id": self.args.fleet_run_id,
+                 "bench": self.args.bench, "machine_id": self.args.machine_id,
+                 "token": self.args.guest_run_token}
+        originals = {"repo/.context/cloudbench/services.json": b"{}",
+                     "repo/.context/cloudbench/run.json": b"{}",
+                     "repo/.context/cloudbench/logs/backend.log": self.backend}
+        return capture, state, ident, originals
+
+    def test_capture_cross_check_admits_bound_stopped_backend_append(self):
+        capture, state, ident, originals = self.capture_fixture()
+        tail = b"[Server] SIGTERM received, closing server...\n"
+        originals["repo/.context/cloudbench/logs/backend.log"] += tail
+        before = {path.name: path.read_bytes() for path in self.out.iterdir() if path.is_file()}
+        checks = capture.cross_check_receipts(self.out, ident, originals)
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.out.iterdir() if path.is_file()})
+        proof = checks["backend_log_append"]
+        self.assertEqual(proof["prior_sha256"], hashlib.sha256(self.backend).hexdigest())
+        self.assertEqual(proof["captured_sha256"], hashlib.sha256(self.backend + tail).hexdigest())
+        self.assertEqual(proof["appended_sha256"], hashlib.sha256(tail).hexdigest())
+        self.assertEqual(proof["appended_bytes"], len(tail))
+        self.assertEqual(proof["kind"], "stopped-provider-backend-extension")
+        for name in ("guest-cleanup.state.json", "guest-cleanup.provider-manifest.json"):
+            self.assertEqual(checks[name], hashlib.sha256((self.out/name).read_bytes()).hexdigest())
+
+    def test_capture_cross_check_keeps_exact_nonappend_contract(self):
+        capture, state, ident, originals = self.capture_fixture()
+        self.assertNotIn("backend_log_append", capture.cross_check_receipts(self.out, ident, originals))
+        for name in ("repo/.context/cloudbench/run.json", "repo/.context/cloudbench/services.json"):
+            changed = dict(originals, **{name: b"{}\n"})
+            with self.subTest(name=name), self.assertRaises(capture.CaptureFailure):
+                capture.cross_check_receipts(self.out, ident, changed)
+
+    def test_capture_backend_append_rejects_rewrite_growth_and_new_ownership(self):
+        capture, state, ident, originals = self.capture_fixture()
+        for tail in (
+            b"Created Kernel browser session sessionId=kernel_late123\n",
+            b"model=BrowserSession operation=update\n",
+            b"[HTTP] POST /api/agents -> 201\n",
+            b"model=AgentPayment operation=create\n",
+            b"invalid-utf8-\xff\n", b"incomplete-line",
+            b"x" * (1024 * 1024) + b"\n",
+        ):
+            with self.subTest(tail=tail[:50]), self.assertRaises(capture.CaptureFailure):
+                capture.cross_check_receipts(self.out, ident, dict(originals, **{
+                    "repo/.context/cloudbench/logs/backend.log": self.backend + tail}))
+        for changed in (self.backend[:-1], b"rewrite" + self.backend[7:], b"rewrite\n" + self.backend):
+            with self.subTest(change=changed[:20]), self.assertRaises(capture.CaptureFailure):
+                capture.cross_check_receipts(self.out, ident, dict(originals, **{
+                    "repo/.context/cloudbench/logs/backend.log": changed}))
+
+    def test_capture_backend_append_requires_original_body_and_stopped_receipts(self):
+        capture, state, ident, originals = self.capture_fixture()
+        originals["repo/.context/cloudbench/logs/backend.log"] += b"[Server] SIGTERM received, closing server...\n"
+        saved = {path: path.read_bytes() for path in self.out.iterdir() if path.is_file()}
+        for name in ("guest-cleanup.backend.log", "guest-cleanup.machine-stopped.json",
+                     "guest-cleanup.machine-status.txt", "guest-cleanup.recovery-receipt.json",
+                     "guest-cleanup.provider-manifest.json"):
+            path = self.out/name
+            with self.subTest(missing=name):
+                path.unlink()
+                with self.assertRaises(capture.CaptureFailure):
+                    capture.cross_check_receipts(self.out, ident, originals)
+                path.write_bytes(saved[path])
+        for field, value in (("version", True), ("state", "exited"), ("driver_state", "exited"),
+                             ("driver_token_match", False), ("driver_pid", None),
+                             ("machine_id", "c"*14), ("guest_run_token", "other-token")):
+            with self.subTest(field=field):
+                (self.out/"guest-cleanup.state.json").write_text(json.dumps(dict(state, **{field: value})))
+                with self.assertRaises(capture.CaptureFailure):
+                    capture.cross_check_receipts(self.out, ident, originals)
+        (self.out/"guest-cleanup.state.json").write_text(json.dumps(state))
+        old_body = self.out/"guest-cleanup.backend.log"
+        old_body.write_bytes(b"X" + self.backend[1:])
+        with self.assertRaises(capture.CaptureFailure):
+            capture.cross_check_receipts(self.out, ident, originals)
+        old_body.write_bytes(saved[old_body])
+        for name, field, value in (("guest-cleanup.provider-manifest.json", "version", True),
+                                   ("guest-cleanup.provider-manifest.json", "kind", "provider-exact-manifest"),
+                                   ("guest-cleanup.provider-manifest.json", "fleet_owner_token", "c"*32),
+                                   ("guest-cleanup.provider-manifest.json", "root_agent_id", "d"*32),
+                                   ("guest-cleanup.machine-stopped.json", "machine_id", "c"*14),
+                                   ("guest-cleanup.recovery-receipt.json", "results", [])):
+            path=self.out/name
+            row=json.loads(saved[path])
+            row[field]=value
+            path.write_text(json.dumps(row))
+            with self.subTest(changed=name), self.assertRaises(capture.CaptureFailure):
+                capture.cross_check_receipts(self.out, ident, originals)
+            path.write_bytes(saved[path])
+
+
+    def test_capture_publishes_append_proof_without_changing_old_receipts(self):
+        capture, state, ident, originals = self.capture_fixture()
+        originals["repo/.context/cloudbench/logs/backend.log"] += b"[Server] SIGTERM received, closing server...\n"
+        originals["bench.log"] = ("RUNSTAMP-" + ident["token"] + "\n").encode()
+        encoded = io.BytesIO()
+        with tarfile.open(fileobj=encoded, mode="w:gz") as archive:
+            for name, data in originals.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                archive.addfile(member, io.BytesIO(data))
+        payload = encoded.getvalue()
+        directory = self.out/"capture"
+        directory.mkdir(mode=0o700)
+        downloaded = directory/"download.unverified"
+        downloaded.write_bytes(payload)
+        inventory = {"version": 1, "run_token": ident["token"], "archive_bytes": len(payload),
+                     "archive_sha256": hashlib.sha256(payload).hexdigest(), "missing": [],
+                     "files": {name: {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                               for name, data in originals.items()}}
+        config = {"init": {"cmd": ["bash", "/cloudbench-boot.sh"]}}
+        initial = {"id": ident["machine_id"], "state": "stopped", "instance_id": "instance", "config": copy.deepcopy(config)}
+        calls = []
+        class NativeFixture:
+            current = copy.deepcopy(initial)
+            def machine(self, machine_id):
+                self_outer.assertEqual(machine_id, ident["machine_id"])
+                return copy.deepcopy(self.current)
+            def volume(self, volume_id):
+                return {"id": volume_id, "state": "created", "attached_machine_id": ident["machine_id"]}
+            def api(self, method, path, body=None):
+                self_outer.assertEqual(method, "POST")
+                calls.append(path)
+                if path.endswith("/start"):
+                    self.current["state"] = "started"
+                elif path.endswith("/stop"):
+                    self.current["state"] = "stopped"
+                else:
+                    self.current["config"] = copy.deepcopy(body["config"])
+        self_outer = self
+        ident.update(volume_id="vol_fixture", kind="clone", clone_name=self.args.clone_name, app="fixture-app", ordinal=0, out=self.out)
+        artifacts = {name: directory/(ident["machine_id"]+"."+name) for name in (
+            "tar.gz", "provenance.json", "original-config.private.json", "capture-failure.json")}
+        before = {path.name: path.read_bytes() for path in self.out.iterdir() if path.is_file()}
+        with patch.dict(capture.mutate_and_capture.__globals__, {
+            "guest_capture": lambda *args: (downloaded, inventory),
+        }):
+            result = capture.mutate_and_capture(NativeFixture(), ident,
+                argparse.Namespace(wait_seconds=5, attempts=1, ssh_seconds=5), directory, artifacts, initial, config)
+        self.assertEqual(result, 0)
+        proof = json.loads(artifacts["provenance.json"].read_bytes())
+        append = proof["receipt_cross_checks"]["backend_log_append"]
+        self.assertEqual(append["captured_sha256"], inventory["files"]["repo/.context/cloudbench/logs/backend.log"]["sha256"])
+        self.assertEqual(proof["proof_credit"], 0)
+        self.assertIs(proof["native_release_verified"], False)
+        self.assertEqual(calls, ["/machines/"+ident["machine_id"], "/machines/"+ident["machine_id"]+"/start",
+                                 "/machines/"+ident["machine_id"]+"/stop", "/machines/"+ident["machine_id"]])
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.out.iterdir() if path.is_file()})
+
+
 bootstrap_test = load("bootstrap_test", ROOT / "scripts/tests/cloudbench-bootstrap-recovery.test.py")
 worker_test = load("worker_test", ROOT / "agents/benchmarks/cloudbench_worker_evidence_test.py")
 
