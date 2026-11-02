@@ -19,8 +19,11 @@ production checks in this command, overriding older all-green, retry, escalation
 repair wording for those failures. Independent correctness/security review
 findings retain the existing Step 10 requirements; only comments about an
 exact recorded qualifying test/gate failure may reference its existing
-handoff. INTRODUCED and UNKNOWN test/gate failures remain blocking. An evidenced
-NOT INTRODUCED failed test is retained for post-merge handoff; it does not
+handoff. The assigned repair remains owned and blocking until its required
+validation passes, regardless of INTRODUCED/NOT_INTRODUCED attribution; never
+waive or re-delegate it. INTRODUCED and UNKNOWN additional test/gate failures
+remain blocking. An evidenced NOT INTRODUCED failed test outside the assigned
+repair is retained for post-merge handoff; it does not
 block merge, and its actual post-merge handoff waives that exact failure
 without waiting for the independent repair to finish.
 External provider outages or exhausted credits are non-blocking, receive no
@@ -2571,6 +2574,11 @@ DEPLOY_MERGED_SHA=$(gh pr view <PR_NUMBER> --json mergeCommit --jq '.mergeCommit
   { echo "❌ Could not resolve the exact merge commit for PR <PR_NUMBER>"; exit 1; }
 ```
 
+Bind this merge and its run/report in
+`.context/deploy-scorecard-latest.json` under the controlling policy's
+**Scorecard freshness: latest merge from this workspace** rule. Later card
+refreshes must use this workspace's newest merge and its own timing receipts.
+
 If `main` can be checked out in this worktree, switch back to main and pull:
 
 ```bash
@@ -3255,6 +3263,11 @@ timing from the repo on any machine.
 After the new branch is created, the final message is only this scorecard in a
 `text` block, with no prose before or after it. Fill every value from recorded
 evidence:
+
+Apply the controlling scorecard-freshness rule before every publication or
+refresh: verify the latest workspace merge binding, rebuild from its matching
+run, and update the latest-card URL and completion receipt together. Never
+reuse an older release's elapsed time for a newer update from this workspace.
 
 - Lane times come from `.context/deploy-runs/<run-id>/stages.jsonl`: sum every
   attempt of the lane (passed, failed, interrupted) and show the run count and
