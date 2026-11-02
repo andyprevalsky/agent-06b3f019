@@ -375,6 +375,8 @@ assert len(list(p.iterdir()))==2
         with (self.root/'.git/info/exclude').open('a') as stream:
             stream.write('front-end/.env\n')
         config=self.root/'front-end/.env';config.parent.mkdir();config.write_text('VITE_ORIGIN=first')
+        for gate in self.plan['gates']:
+            gate['input_paths']=['code']
         state=c.initialize(self.plan,self.root)
         c.run_phase(self.plan,state,self.directory,self.root)
         c.run_phase(self.plan,state,self.directory,self.root)

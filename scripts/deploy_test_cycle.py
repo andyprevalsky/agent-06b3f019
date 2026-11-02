@@ -113,12 +113,15 @@ def input_fingerprints(plan: dict, root: Path) -> dict:
             content = b"DELETED"
         mode = path.lstat().st_mode if path.exists() or path.is_symlink() else None
         files[os.fsdecode(raw)] = digest([hashlib.sha256(content).hexdigest(), mode])
-    # Configuration is an input even when Git correctly ignores its secrets.
+    # Runtime configuration is an input even when Git ignores its secrets and
+    # the gate narrows its source globs. Never let source selection hide it.
+    runtime_config = {}
     for rel in [".env", "env.sh", "back-end/.env", "agents/.env", "front-end/.env", "front-end/.env.local"]:
         if (root / rel).is_file():
-            files[rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
+            runtime_config[rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
     return {g["name"]: digest({"files": {p: h for p, h in files.items()
                             if any(fnmatchcase(p, glob) for glob in g.get("input_paths", ["*"]))},
+                            "runtime_config": runtime_config,
                             "command": g["command"], "env": g.get("env", {}),
                             "worker": g.get("worker"), "checks": g["checks"],
                             "environment": environment_digest()}) for g in plan["gates"]}
