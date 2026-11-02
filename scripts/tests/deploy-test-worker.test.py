@@ -1439,6 +1439,14 @@ class Backend(unittest.TestCase):
         prompt = build_prompt(request, prompt_binding)
         self.assertIn('/scripts/deploy_test_backend.py', prompt)
         self.assertNotIn('/scripts/deploy_test_worker.py --root', prompt)
+        from deploy_test_isolation import validate as validate_isolation
+        native_gate = {**gate, **binding, 'worker_transport': slot['transport'],
+                       'remote_python': slot['python'], 'worker_recipe': slot['recipe'],
+                       'result_transport': 'file', 'case_protocol': True, 'env': slot['env']}
+        validate_isolation({'gates': [native_gate]}, ROOT)
+        wrong = {**native_gate, 'command': [*native_gate['command'][:-1], 'deploy_test_worker.py']}
+        with self.assertRaisesRegex(ValueError, 'argv must bind'):
+            validate_isolation({'gates': [wrong]}, ROOT)
         with self.assertRaisesRegex(ValueError, 'backend entrypoint'):
             build_prompt({**request, 'gate': 'another-gate'}, prompt_binding)
 

@@ -54,6 +54,10 @@ def validate(plan, root):
                 raise ValueError('boxes-thread binding requires its existing gate deadline')
             expected = ['--thread', thread, '--host', box, '--worker-root', location, '--python', python,
                         '--coordinator-thread', control, '--deadline-seconds', str(gate['timeout_seconds'])]
+            if gate.get('native_backend'):
+                if gate.get('name') != 'backend-coverage-blackbox':
+                    raise ValueError('backend entrypoint is restricted to the backend coverage gate')
+                expected += ['--worker-script', 'deploy_test_backend.py']
             if (len(args) != 2 + len(expected) or args[2:] != expected
                     or Path(args[1]).resolve() != root / 'scripts/deploy_test_boxes.py'):
                 raise ValueError('boxes-thread argv must bind the same thread, host, root, python, coordinator and deadline')
