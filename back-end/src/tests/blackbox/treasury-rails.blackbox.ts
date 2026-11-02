@@ -49,6 +49,7 @@ import {
   overdueReclaimSkipped,
   pendingMintLedgerPath,
   recordPendingMint,
+  observePendingUnusedMint,
 } from './treasury-rails-pending-mints';
 
 loadDotenvWithCallerOverrides();
@@ -387,7 +388,7 @@ async function main(): Promise<void> {
   await checkEarlierUnusedMints(new Set(cardholders.map((holder) => holder.id)), ledgerPath);
 
   const mintCents = 1_300;
-  const createdCardIds = new Set<string>();
+  const cardsToClose = new Set<string>();
   let provedPoolMint = false;
   for (let mintAttempt = 1; mintAttempt <= 2; mintAttempt += 1) {
     if (mintAttempt > 1) await sweepResidualHeadroom();
@@ -399,14 +400,15 @@ async function main(): Promise<void> {
     })) as { structuredContent?: { cardId?: string } };
     const cardId = minted.structuredContent?.cardId;
     assert.ok(cardId !== undefined, 'create_card returned no cardId');
-    createdCardIds.add(cardId);
+    cardsToClose.add(cardId);
     record(`minted ${usd(mintCents)} card ${cardId}`);
 
     let cardClosed = false;
+    let issued: CardTransfer | undefined;
     try {
       // Observation only: the provider does not promise immediate transfer visibility.
       try {
-        const issued = await readCardTransfer(cardId);
+        issued = await readCardTransfer(cardId);
         console.log(
           `  issuance funding: found=${issued !== undefined} amount=${issued?.amountCents ?? 'missing'} ` +
             `transferred=${issued?.transferredCents ?? 'missing'} ` +
@@ -421,11 +423,28 @@ async function main(): Promise<void> {
       };
       assert.equal(closed.structuredContent?.status, 'CLOSED', 'close_card did not report CLOSED');
       cardClosed = true;
+      cardsToClose.delete(cardId);
       record('closed the card unused');
 
       // Keep recovering while this exact card's transfer settles. Another
       // cardholder's recover_funds yield is not evidence for this transfer.
-      const transfer = await waitForUnusedMintSettled(cardId, mintCents);
+      const transferId = issued?.raw.id;
+      const issuedAt = issued?.raw.created_at;
+      const pendingMint =
+        issued?.raw.card_id === cardId &&
+        typeof transferId === 'string' &&
+        transferId !== '' &&
+        typeof issuedAt === 'string' &&
+        Number.isFinite(Date.parse(issuedAt)) &&
+        issued.transferredCents >= 0 &&
+        issued.transferredCents <= mintCents
+          ? { cardId, transferId, cardholderId, mintCents, mintedAt: issuedAt }
+          : undefined;
+      const transfer = pendingMint
+        ? await observePendingUnusedMint(ledgerPath, pendingMint, () =>
+            waitForUnusedMintSettled(cardId, mintCents)
+          )
+        : await waitForUnusedMintSettled(cardId, mintCents);
       assert.ok(transfer !== undefined, `no company-wallet transfer listed for ${cardId}`);
       assert.ok(
         transfer.transferredCents >= 0 && transfer.transferredCents <= mintCents,
@@ -445,13 +464,15 @@ async function main(): Promise<void> {
       } else {
         const mintedAt = transfer.raw.created_at;
         assert.ok(typeof mintedAt === 'string', `transfer for ${cardId} has no created_at`);
-        recordPendingMint(ledgerPath, {
-          cardId,
-          transferId: String(transfer.raw.id),
-          cardholderId,
-          mintCents,
-          mintedAt,
-        });
+        if (pendingMint === undefined) {
+          recordPendingMint(ledgerPath, {
+            cardId,
+            transferId: String(transfer.raw.id),
+            cardholderId,
+            mintCents,
+            mintedAt,
+          });
+        }
         console.log(
           `  PENDING transfer for ${cardId} still ${outcome.status} after the in-run wait; later ` +
             `runs fail it if it is not reclaimed within ${RECLAIM_DEADLINE} of the mint ` +
@@ -471,7 +492,7 @@ async function main(): Promise<void> {
         if (!cardClosed) await callOrgTool('close_card', { card_id: cardId });
       } finally {
         // The sandbox cardholder is shared. Cleanup may close only cards this test created.
-        const cleaned = await cleanupTreasuryRailCards(cardholderId, createdCardIds, callOrgTool);
+        const cleaned = await cleanupTreasuryRailCards(cardholderId, cardsToClose, callOrgTool);
         if (cleaned > 0) record(`cleanup: closed ${cleaned} lingering open card(s)`);
       }
     }

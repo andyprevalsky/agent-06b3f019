@@ -638,3 +638,21 @@ Stripe refund. The original snapshot and skipped outcome remain in run
 `.context/benchmarks/1793302876-1547394-92658/` and
 `/var/tmp/rose-6741-agentcard.log`. No second mint or manual ledger clearing was
 used to obtain a pass. The eight earlier treasury obligations are separate.
+
+### October 26 sandbox recurrence under the standing exception
+
+Final integrated source 646ee1bab18145f519306376014282bcfadea99d produced
+three passed tasks and one warning SKIP in run
+33f845e4-8b57-4250-8fea-315d48a213e5, ending at 21:52:30.417Z.
+The skipped abandonment root was 6f79b389-9a82-41a9-9de8-751ccb4e72aa.
+Native evidence records its card CLOSED with balance0, purchase HELD, funding
+RECLAIMING and exact sandbox transfer consumed/transferred4396/released0.
+The $43.96 sandbox allocation remains unreleased; financial reconciliation is
+pending. This receipt does not prove a release or refund and is not PASS.
+
+The existing October 15 policy classified this known condition automatically;
+no second allocation or retry was created to seek a passing result. All four
+roots completed separate execution/provider cleanup, and the local owner
+receipt reached cleanup_verified. Physical cleanup does not settle the
+financial liability. Original native snapshots, warning, run bundle and owner
+receipt remain in .context/benchmarks/1793050320-4012092-89922.

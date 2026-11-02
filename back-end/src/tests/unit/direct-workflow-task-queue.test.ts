@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const source = readFileSync(
-  join(process.cwd(), 'src/domains/agents/agentLifecycleService.ts'),
+  join(process.cwd(), 'src/domains/agents/agentDirectStartService.ts'),
   'utf8'
 );
 const descendantSource = readFileSync(

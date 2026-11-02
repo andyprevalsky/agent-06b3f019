@@ -2070,6 +2070,42 @@ class Portable(unittest.TestCase):
                 env['CLOUDBENCH_PROVIDER_LIMITS_FILE'] = str(private(inputs/'provider-limits.json', limits))
             yield types.SimpleNamespace(root=root, args=args, env=env, marker=marker, state=state, inputs=inputs, fakebin=fakebin)
 
+    def test_public_check_samples_one_catalog_for_all_shard_placements(self):
+        requests = []
+        with self.public_check(warm_fixture(time.time()), requests, limits=wide_provider_limits()) as fx:
+            # One validated catalog snapshot must serve every shard, including
+            # on fast hosts where duplicate reads happen to fit the deadline.
+            real_git = next(str(Path(directory)/'git') for directory in os.get_exec_path()
+                            if os.access(Path(directory)/'git', os.X_OK))
+            reads = fx.inputs/'catalog-reads'
+            wrapper = fx.fakebin/'git'
+            wrapper.write_text('#!/bin/sh\ncase "$*" in\n'
+                               '  *:agents/benchmarks/tasks.json|*:agents/benchmarks/polar_tasks.json)\n'
+                               '    printf "%s\\n" "$*" >> "$O600_CATALOG_READS"\n'
+                               '    ;;\nesac\nexec ' + shlex.quote(real_git) + ' "$@"\n')
+            wrapper.chmod(0o700)
+            env = dict(fx.env, O600_CATALOG_READS=str(reads))
+            result = subprocess.run(fx.args + ['--infra-early-stop', 'disabled'], cwd='/', env=env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            value = json.loads(result.stdout)
+            self.assertEqual((value['status'], value['copies'], value['controllers']),
+                             ('CHECKED_NOT_LAUNCHED', 600, 20))
+            self.assertEqual([line.rsplit('/', 1)[-1] for line in reads.read_text().splitlines()],
+                             ['tasks.json', 'polar_tasks.json'])
+            tasks = json.loads((fx.inputs/'tasks').read_text())
+            plan = runpy.run_path(str(ROOT/'scripts/cloudbench-shard-coordinator.py'))['plan_shards'](
+                tasks, 3, 'auto', None)
+            expected = []
+            for item in plan['shards']:
+                simulate = RUNNER['shard_simulate_tasks'](fx.root, item)
+                expected.append(dict(index=item['index'], simulate_tasks=simulate,
+                                     **({} if simulate else RUNNER['FRESH_ONLY_PLACEMENT'])))
+            self.assertEqual(value['shard_placement'], expected)
+            self.assertEqual([r[0] for r in requests], ['GET', 'GET'])
+            self.assertFalse(fx.marker.exists())
+            self.assertEqual(list(fx.state.iterdir()), [])
+
     def test_public_check_is_path_independent_read_only_and_creates_no_state(self):
         now = time.time()
         fixture = warm_fixture(now)

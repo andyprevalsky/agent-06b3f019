@@ -10,6 +10,7 @@ import {
   pendingMintLedgerPath,
   readOpenPendingMints,
   recordPendingMint,
+  observePendingUnusedMint,
 } from './treasury-rails-pending-mints';
 
 type Row = Record<string, unknown>;
@@ -57,6 +58,71 @@ async function main(): Promise<void> {
   const ledgerPath = join(dir, 'nested', 'pending.jsonl');
   const ours = new Set(['holder-ours']);
   try {
+    const interruptedLedger = join(dir, 'interrupted.jsonl');
+    const interruptedMint = {
+      cardId: 'closed-owned-card',
+      transferId: 'exact-owned-transfer',
+      cardholderId: 'holder-ours',
+      mintCents: 1300,
+      mintedAt: MINTED_AT,
+    };
+    const primary = new Error('Invalid or expired organization token');
+    await assert.rejects(
+      () =>
+        observePendingUnusedMint(interruptedLedger, interruptedMint, async () => {
+          throw primary;
+        }),
+      (error: unknown) => error === primary
+    );
+    assert.deepEqual(
+      readOpenPendingMints(interruptedLedger),
+      [interruptedMint],
+      'an interrupted settlement must retain the exact known closed-card transfer'
+    );
+    await observePendingUnusedMint(interruptedLedger, interruptedMint, async () => ({
+      status: 'reclaimed',
+      releasedCents: 1299,
+      transferredCents: 1300,
+    }));
+    assert.deepEqual(
+      readOpenPendingMints(interruptedLedger),
+      [interruptedMint],
+      'a partial reclaim must remain pending'
+    );
+    await observePendingUnusedMint(interruptedLedger, interruptedMint, async () => ({
+      status: 'failed',
+      releasedCents: 1300,
+      transferredCents: 1300,
+    }));
+    assert.deepEqual(
+      readOpenPendingMints(interruptedLedger),
+      [interruptedMint],
+      'a failed transfer must not be mistaken for an observed full reclaim'
+    );
+    await assert.rejects(
+      () =>
+        observePendingUnusedMint(interruptedLedger, interruptedMint, async () => ({
+          status: 'reclaimed',
+          releasedCents: 1300,
+          transferredCents: 1301,
+        })),
+      /invalid pool debit/
+    );
+    assert.deepEqual(
+      readOpenPendingMints(interruptedLedger),
+      [interruptedMint],
+      'an invalid pool debit must fail before clearing pending custody'
+    );
+    await observePendingUnusedMint(interruptedLedger, interruptedMint, async () => ({
+      status: 'reclaimed',
+      releasedCents: 1300,
+      transferredCents: 1300,
+    }));
+    assert.deepEqual(
+      readOpenPendingMints(interruptedLedger),
+      [],
+      'only an observed full reclaim clears the pending transfer'
+    );
     assert.equal(
       pendingMintLedgerPath({ TREASURY_RAILS_PENDING_MINT_LEDGER: ledgerPath }),
       ledgerPath

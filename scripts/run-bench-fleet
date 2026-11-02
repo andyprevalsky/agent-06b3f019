@@ -9310,6 +9310,9 @@ fleet_native_stop_verify_guest() {  # <child-index> <state-dir> <deadline-SECOND
                     if [ "$send_status" -ne 2 ]; then
                         requests=$((requests + 1))
                         next_request=$((SECONDS + (1 << (requests - 1))))
+                        # A successful request still needs a bounded state read;
+                        # do not spend the final verification tick sleeping.
+                        [ "$send_status" -ne 0 ] || continue
                     fi
                 fi
                 ;;

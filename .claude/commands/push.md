@@ -98,6 +98,8 @@ cd mac-app && bash scripts/run-blackbox-tests.sh
 
 **ALL domains must pass — 0 failures.** Same rule as the backend blackbox: pre-existing is not an excuse, fix every failure.
 
+When invoked by `/deploy`, apply that workflow's exact qualified exceptions under `.claude/shared/deploy-failure-policy.md`; preserve native failures and never report exceptions as PASS. Standalone `/push` requirements are unchanged.
+
 ### 2k. Research lint + structural (skip if no research/ changes)
 
 Runs deno fmt/lint (base + strict overlay), structural invariants (file/function length), and ruff for Python:
@@ -113,7 +115,7 @@ cd research && bash scripts/lint-check.sh --fix
 cd research && bash scripts/lint-check.sh
 ```
 
-If any step fails, fix the issue and re-run from the top.
+If any step fails, fix the issue and re-run from the top. Qualified exceptions when invoked by `/deploy` follow `.claude/shared/deploy-failure-policy.md`; they do not change rerun requirements after a code fix.
 
 Stage and commit any auto-fix changes (prettier, eslint) before proceeding.
 

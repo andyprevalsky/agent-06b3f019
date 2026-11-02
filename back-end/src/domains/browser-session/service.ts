@@ -1,3 +1,5 @@
+import { buildBrowserSessionMetadata } from './service.metadata';
+export { buildBrowserSessionMetadata } from './service.metadata';
 import { initLegacySession } from './service.init-legacy';
 import { closeBrowserSession } from './service.close';
 import { resumeOwnedBrowserSession } from './service.control';
@@ -28,7 +30,6 @@ import { prepareWorldStateFork } from './service.world-fork';
 import { getAuthOptions } from '../../providers/authOptions';
 import * as repo from './repo';
 import { storedBrowserProvider } from '../../providers/browser/types';
-import { buildBrowserSessionMetadata } from './service.metadata';
 import {
   injectLocalStorage,
   SessionNoUserError,
@@ -51,7 +52,6 @@ export {
 export { injectLocalStorage, SessionNotFoundError, SessionNoUserError };
 export { InvalidSessionFilePathError } from './service.file-path';
 export { CdpInjectionError, SessionNoWsUrlError } from './types';
-export { buildBrowserSessionMetadata } from './service.metadata';
 
 // ---------------------------------------------------------------------------
 // Helpers

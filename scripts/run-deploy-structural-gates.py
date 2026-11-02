@@ -314,6 +314,11 @@ GATES = (
         ("python3", "-m", "unittest", "discover", "-s", "scripts/live_display", "-p", "test_*.py"),
     ),
     Gate("benchmark-scorecard", ("python3", "scripts/tests/cloudbench-scorecard.test.py")),
+    # Linux pidfd fixtures select a capable runtime or the offline controller image.
+    Gate(
+        "cloudbench-export-recovery",
+        ("bash", "scripts/tests/cloudbench-export-recovery.test.sh"),
+    ),
     Gate(
         "original600-portable-operator",
         ("python3", "scripts/tests/original600-portable-operator.test.py"), expected_seconds=134
@@ -422,10 +427,6 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-maintenance-env.test.py"),
     ),
     Gate(
-        "cloudbench-resume-controller-export",
-        ("python3", "scripts/tests/cloudbench-resume-controller-export.test.py"),
-    ),
-    Gate(
         "cloudbench-shard-coordinator",
         ("python3", "scripts/tests/cloudbench-shard-coordinator.test.py"),
     ),
@@ -468,6 +469,9 @@ GATES = (
     ),
     Gate(
         "deploy-review-cycle", ("python3", "scripts/tests/deploy-review-cycle.test.py")
+    ),
+    Gate(
+        "deploy-failure-policy", ("python3", "scripts/tests/deploy-failure-policy.test.py")
     ),
     Gate("deploy-stage", ("bash", "scripts/tests/run-deploy-stage.test.sh")),
     Gate("deploy-stage-wait", ("python3", "scripts/tests/deploy-stage-wait.test.py")),

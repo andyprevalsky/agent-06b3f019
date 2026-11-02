@@ -1638,13 +1638,18 @@ def test_rose_wmh_provider_allows_overlapping_llm_calls(monkeypatch):
             self.lock = threading.Lock()
             self.active = 0
             self.peak_active = 0
+            self.both_active = asyncio.Event()
 
         async def collect(self, **kwargs):
             with self.lock:
                 self.active += 1
                 self.peak_active = max(self.peak_active, self.active)
+                if self.active == 2:
+                    self.both_active.set()
             try:
-                await asyncio.sleep(0.05)
+                # Observe overlap causally, independent of caller scheduling.
+                # A serialized bridge cannot reach this two-call rendezvous.
+                await asyncio.wait_for(self.both_active.wait(), timeout=5)
                 return _canned_response(content='{"output":"ok"}', prompt=1, completion=1, token_used=None)
             finally:
                 with self.lock:
@@ -1661,6 +1666,19 @@ def test_rose_wmh_provider_allows_overlapping_llm_calls(monkeypatch):
         results = [future.result(timeout=5) for future in futures]
     assert client.peak_active == 2
     assert [result.text for result in results] == ['{"output":"ok"}'] * 2
+
+
+def test_overlap_gate_rejects_serialized_llm_calls(monkeypatch):
+    original = RoseWMHProvider._complete_async
+    serial_lock = asyncio.Lock()
+
+    async def serialized(self, *args, **kwargs):
+        async with serial_lock:
+            return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(RoseWMHProvider, "_complete_async", serialized)
+    with pytest.raises(TimeoutError):
+        test_rose_wmh_provider_allows_overlapping_llm_calls(monkeypatch)
 
 
 def test_complete_maps_text_and_usage_via_rose_only(monkeypatch):
