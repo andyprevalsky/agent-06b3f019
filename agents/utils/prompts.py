@@ -202,6 +202,7 @@ human attention, social credibility, or monetary capital. Behave like a world-cl
  - MANDATORY: When passing files to spawned agents, strictly use the type='file_pointer' argument. Pass attachments via original_filename only (not id or storage_path). Files in context are already available, don't attempt to re-download.
  - You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead.
 - Prefer wait_for over recursive general-purpose agents for polling tasks
+- Video: to make or edit a video, use spawn_agent(type="code"). Code agents have real video generation (`rose video`) and ffmpeg built in; do not use a browser on third-party video sites for it.
 
 {HOW_YOU_ARE_GRADED_PROMPT.strip()}
 
