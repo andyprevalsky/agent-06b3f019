@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 /**
  * C15: a code agent stopped on a provider usage limit and must resume on the
  * next available credential (or the other provider) from its saved session.
@@ -60,7 +61,13 @@ import {
   type CodeCredentialTiers,
   type CodeProvider,
 } from './credentialOrder';
-import type { CodeSessionFs } from './sandboxFs';
+import { handoffTrajectoryPath, type HandoffTrajectory } from './handoffTrajectory';
+export {
+  handoffTrajectoryPath,
+  writeHandoffTrajectory,
+  type HandoffTrajectory,
+  type SpawnCodeSession,
+} from './handoffTrajectory';
 import {
   CODE_SESSION_STATES,
   CodeSessionBusyError,
@@ -639,21 +646,6 @@ export async function codeUsageOutlookForTask(
 
 const HANDOFF_EVENTS = 15;
 /** Where the previous provider's CLI session log lands in the next sandbox (outside checkpoints). */
-const HANDOFF_DIR = '/home/user/.rose/handoff';
-
-/** The previous provider's CLI session log, exported into the next provider's sandbox. */
-export interface HandoffTrajectory {
-  /** Path inside an E2B sandbox (HOME /home/user). */
-  path: string;
-  content: Buffer;
-}
-
-/** The session a spawn runs in; after a provider switch it carries the previous CLI's log. */
-export type SpawnCodeSession = CodeSessionRow & { handoffTrajectory?: HandoffTrajectory | null };
-
-export function handoffTrajectoryPath(codeSessionId: string, previousProvider: string): string {
-  return `${HANDOFF_DIR}/${codeSessionId}-${previousProvider === 'codex' ? 'codex' : 'claude'}.jsonl`;
-}
 
 async function previousCliLog(session: CodeSessionRow): Promise<Buffer | null> {
   if (session.latestCheckpointSeq <= 0) return null;
@@ -704,20 +696,6 @@ export function buildProviderHandoff(
 }
 
 /**
- * Write the previous provider's trajectory into the sandbox that continues the
- * session. A local HOME maps /home/user onto its own HOME; returns the path
- * the file is at (the one the handoff prompt names for an E2B sandbox).
- */
-export async function writeHandoffTrajectory(
-  fs: CodeSessionFs,
-  trajectory: HandoffTrajectory
-): Promise<string> {
-  const path = trajectory.path.split('/home/user').join(fs.home);
-  await fs.writeFile(path, trajectory.content);
-  return path;
-}
-
-/**
  * A retry on the other provider: forget the paused sandbox (it runs the other
  * CLI's template) so the new sandbox restores the latest checkpoint, and drop
  * the other CLI's conversation id. Returns the handoff prompt for the goal and
@@ -739,14 +717,23 @@ export async function switchCodeSessionProvider(
       ? { path: handoffTrajectoryPath(session.id, session.codeProvider), content: cliLog }
       : null;
   const handoff = buildProviderHandoff(session, cliLog, trajectory?.path ?? null);
+  const attemptOwner = `provider-switch:${randomUUID()}`;
   const { count } = await prisma.codeSession.updateMany({
     where: {
       id: session.id,
       codeProvider: session.codeProvider,
       sandboxId: session.sandboxId,
+      leaseOwner: session.leaseOwner,
+      leaseExpiresAt: session.leaseExpiresAt,
       state: { not: CODE_SESSION_STATES.RETIRED },
     },
-    data: { codeProvider: provider, cliSessionId: null, sandboxKind: null, sandboxId: null },
+    data: {
+      codeProvider: provider,
+      cliSessionId: null,
+      sandboxKind: null,
+      sandboxId: null,
+      leaseOwner: attemptOwner,
+    },
   });
   if (count !== 1) {
     log.warn('Code session was rotated by a concurrent spawn', {
@@ -779,13 +766,4 @@ export async function switchCodeSessionProvider(
  * provider it came from (only if nothing else changed it since), so the next
  * retry rotates again and its new CLI gets the handoff and the trajectory.
  */
-export async function revertCodeSessionProvider(
-  codeSessionId: string,
-  switchedTo: string,
-  switchedFrom: string
-): Promise<void> {
-  await prisma.codeSession.updateMany({
-    where: { id: codeSessionId, codeProvider: switchedTo, cliSessionId: null },
-    data: { codeProvider: switchedFrom },
-  });
-}
+export { revertCodeSessionProvider } from './failedProviderRevert';

@@ -7,7 +7,7 @@ import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { clearCaptures, capturedRequests } from './msw/capture';
 import { ADMIN_ACCOUNTS } from '@/lib/adminAccounts';
-import { resetQueryPreferencesMemory } from '@/lib/queryPreferences';
+import { readQueryPreferences, resetQueryPreferencesMemory } from '@/lib/queryPreferences';
 import {
   setUltraPreferred,
   useUltraPreferred,
@@ -252,6 +252,7 @@ describe('useTerminalAgents creation state bridge', () => {
   it.each(['standard', 'fast', 'ultrafast'] as const)(
     'hydrates %s from stored speed even when the legacy flag disagrees',
     (speed) => {
+      const savedUltra = readQueryPreferences(mocks.authState.user.id).ultraPreferred;
       const { result } = renderHook(() => ({
         sending: useMessageSending(
           messageSendingArgs({
@@ -267,8 +268,39 @@ describe('useTerminalAgents creation state bridge', () => {
       }));
       expect(result.current.sending.fastMode).toBe(speed !== 'standard');
       if (speed !== 'standard') expect(result.current.ultra).toBe(speed === 'ultrafast');
+      expect(readQueryPreferences(mocks.authState.user.id).ultraPreferred).toBe(savedUltra);
     },
   );
+
+  it('resets selected-agent speed display to the saved new-agent preference', async () => {
+    const userId = mocks.authState.user.id;
+    setUltraPreferred(false, userId);
+    const { result, rerender, unmount } = renderHook(
+      ({ selected }: { selected: boolean }) => ({
+        sending: useMessageSending(
+          messageSendingArgs({
+            selectedAgentId: selected ? 'display-only-ultra' : null,
+            agentDetail: selected
+              ? ({ agent_id: 'display-only-ultra', speed: 'ultrafast' } as never)
+              : null,
+          }),
+        ),
+        ultra: useUltraPreferred(userId),
+      }),
+      { initialProps: { selected: true } },
+    );
+    await waitFor(() => expect(result.current.ultra).toBe(true));
+    expect(readQueryPreferences(userId).ultraPreferred).toBe(false);
+    rerender({ selected: false });
+    await waitFor(() => expect(result.current.ultra).toBe(false));
+    expect(readQueryPreferences(userId).ultraPreferred).toBe(false);
+    unmount();
+    const newAgent = renderHook(() => ({
+      sending: useMessageSending(messageSendingArgs()),
+      ultra: useUltraPreferred(userId),
+    }));
+    expect(newAgent.result.current.ultra).toBe(false);
+  });
 
   it('sends the query-box speed (standard, fast or ultrafast) so agents start at that native speed', async () => {
     setUltraPreferred(true, mocks.authState.user.id);

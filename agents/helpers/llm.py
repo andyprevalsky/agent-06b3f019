@@ -764,6 +764,7 @@ async def _flash_agent_auth_contexts(
     lineage_key: Optional[str],
     agent_id: Optional[str],
     demo_cache_affinity_key: Optional[str],
+    exclude_anthropic_family: bool = False,
 ) -> Tuple[Optional[ClaudeAuthContext], Optional[GptAuthContext]]:
     """Reuse a lease; otherwise try Terra then Opus, with broker-owned cooldowns."""
     seen_tokens = {context.token for context in (gpt, claude) if context is not None}
@@ -772,7 +773,8 @@ async def _flash_agent_auth_contexts(
         fetch_user_id: str, current: Optional[ComputeAuthContext] = None,
     ) -> Optional[ComputeAuthContext]:
         # Once on Claude, never cycle back to GPT within this call.
-        kinds = ("claude",) if isinstance(current, ClaudeAuthContext) else ("gpt", "claude")
+        kinds = (("gpt",) if exclude_anthropic_family else
+                 ("claude",) if isinstance(current, ClaudeAuthContext) else ("gpt", "claude"))
         for kind in kinds:
             result = await fetch_compute_token_activity(
                 fetch_user_id, lineage_key=lineage_key, agent_id=agent_id,
@@ -797,7 +799,7 @@ async def _flash_agent_auth_contexts(
             return await fetch_next(fetch_user_id, context)
         context.fetch_fresh = refresh if context.user_id and context.max_rotations > 0 else None
 
-    current = gpt or claude
+    current = gpt or (None if exclude_anthropic_family else claude)
     if current is not None:
         bind_rotation(current)
     elif user_id:
@@ -3121,6 +3123,7 @@ async def call_llm_structured_streaming(
                 lineage_key=compute_token_lineage_key,
                 agent_id=agent_id,
                 demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
+                exclude_anthropic_family=_exclude_anthropic_family,
             )
 
         def _native_visible_text() -> str:
@@ -4421,6 +4424,7 @@ async def call_llm(
                     lineage_key=compute_token_lineage_key,
                     agent_id=agent_id,
                     demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
+                    exclude_anthropic_family=_exclude_anthropic_family,
                 )
             try:
                 rose_response = await rose_client.collect(

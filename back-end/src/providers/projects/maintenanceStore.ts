@@ -9,8 +9,9 @@
  * row (`maintenanceRunId` + `maintenanceLeaseUntil`), claimed by one
  * conditional UPDATE, so replicas and retries cannot start two sandboxes for
  * one project. A crashed owner's lease expires and reconcileStaleRuns() turns
- * its run into FAILED. Scheduled and GitHub triggers carry a slot key; the
- * unique (projectId, slotKey) makes a duplicate trigger a no-op.
+ * its run into FAILED. Scheduled slots use unique (projectId, slotKey).
+ * GitHub watcher transitions compare the observed predecessor atomically with
+ * the lease claim; a revisited SHA gets a fresh run rather than a lifetime slot.
  *
  * 10k-agent behaviour: every operation touches one project's rows, or a
  * bounded (take ≤ 50) indexed batch from the cron tick; nothing is per agent.
@@ -59,6 +60,10 @@ export interface ClaimInput {
   now: Date;
   /** GitHub trigger: the head sha being built; recorded as the watched sha in the same tx. */
   watchedSha?: string;
+  /** Watcher transition: admit only if the observed predecessor is still current. */
+  previousWatchedSha?: string;
+  /** Monotonic poll token: reject observations superseded while GitHub was awaited. */
+  watchCheckedAt?: Date;
 }
 
 class Busy extends Error {}
@@ -82,6 +87,12 @@ export async function claimRun(input: ClaimInput): Promise<ClaimResult> {
       const leased = await tx.project.updateMany({
         where: {
           id: input.projectId,
+          ...(input.previousWatchedSha !== undefined
+            ? { maintenanceWatchedSha: input.previousWatchedSha }
+            : {}),
+          ...(input.watchCheckedAt !== undefined
+            ? { maintenanceWatchCheckedAt: input.watchCheckedAt }
+            : {}),
           OR: [{ maintenanceRunId: null }, { maintenanceLeaseUntil: { lt: input.now } }],
         },
         data: {
@@ -321,17 +332,33 @@ export async function findGithubPollDue(
   return rows.flatMap((row) => (row.repoUrl === null ? [] : [{ ...row, repoUrl: row.repoUrl }]));
 }
 
-export async function markWatchChecked(projectId: string, now: Date): Promise<void> {
-  await prisma.project.updateMany({
-    where: { id: projectId },
-    data: { maintenanceWatchCheckedAt: now },
-  });
+export async function markWatchChecked(projectId: string, now: Date): Promise<Date | null> {
+  // A millisecond tick remains distinct at Prisma's timestamp precision, even
+  // for simultaneous replicas or a caller clock that moves backwards.
+  const rows = await prisma.$queryRaw<{ maintenanceWatchCheckedAt: Date }[]>`
+    UPDATE "Project"
+    SET "maintenanceWatchCheckedAt" = GREATEST(
+      ${now}::timestamp,
+      COALESCE("maintenanceWatchCheckedAt" + interval '1 millisecond', ${now}::timestamp)
+    ), "updatedAt" = ${now}
+    WHERE "id" = ${projectId}
+    RETURNING "maintenanceWatchCheckedAt"
+  `;
+  return rows[0]?.maintenanceWatchCheckedAt ?? null;
 }
 
-/** First observation of a watched project: remember the head without building it. */
-export async function seedWatchedSha(projectId: string, sha: string): Promise<void> {
+/** First current observation of a watched project: remember the head without building it. */
+export async function seedWatchedSha(
+  projectId: string,
+  sha: string,
+  watchCheckedAt?: Date
+): Promise<void> {
   await prisma.project.updateMany({
-    where: { id: projectId, maintenanceWatchedSha: null },
+    where: {
+      id: projectId,
+      maintenanceWatchedSha: null,
+      ...(watchCheckedAt !== undefined ? { maintenanceWatchCheckedAt: watchCheckedAt } : {}),
+    },
     data: { maintenanceWatchedSha: sha },
   });
 }

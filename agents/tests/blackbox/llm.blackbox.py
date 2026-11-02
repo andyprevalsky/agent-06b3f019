@@ -10705,9 +10705,37 @@ async def test_structured_exclusion_counts_no_json_and_non_object_replies():
         assert result is not None and result.tool_calls[0].labels == ["typed"]
 
 
+async def test_flash_anthropic_exclusion_covers_initial_and_rotation_leases():
+    from helpers.llm import _flash_agent_auth_contexts
+    from providers.rose.types import ClaudeAuthContext, GptAuthContext
+
+    calls = []
+
+    async def broker(_user_id, **kwargs):
+        calls.append(kwargs["token_type"])
+        return None
+
+    kwargs = dict(user_id="fixture-user", lineage_key=None, agent_id="fixture-agent",
+                  demo_cache_affinity_key=None, exclude_anthropic_family=True)
+    with patch("helpers.llm.fetch_compute_token_activity", broker):
+        assert await _flash_agent_auth_contexts(None, None, **kwargs) == (None, None)
+        assert calls == ["gpt"]
+        calls.clear()
+        claude = ClaudeAuthContext("fixture-claude", "pool", "fixture-user")
+        assert await _flash_agent_auth_contexts(claude, None, **kwargs) == (None, None)
+        assert calls == ["gpt"]
+        calls.clear()
+        gpt = GptAuthContext("fixture-gpt", "pool", "fixture-user")
+        assert await _flash_agent_auth_contexts(None, gpt, **kwargs) == (None, gpt)
+        assert gpt.fetch_fresh is not None
+        assert await gpt.fetch_fresh("fixture-user") is None
+        assert calls == ["gpt"]
+
+
 async def run_all_tests():
     print("llm blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("flash_anthropic_exclusion_initial_and_rotation", test_flash_anthropic_exclusion_covers_initial_and_rotation_leases)
     await r.record_async("captured_desktop_display_native_json_array", test_captured_desktop_display_native_json_array_reaches_typed_action)
     await r.record_async(
         "structured_validation_exhausted_candidate_typed_error",

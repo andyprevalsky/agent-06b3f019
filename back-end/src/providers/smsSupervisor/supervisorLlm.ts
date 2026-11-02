@@ -135,6 +135,7 @@ export async function callSupervisorLlm(
       ? {
           subscription_leases: computeSubscriptionLeases({
             userId,
+            initial: computeToken,
             leaseOptions: { tokenType: benchmarkSupervisorTokenType() },
           }),
         }

@@ -261,7 +261,18 @@ async function runSdk(plan, { verifyOnly, missingOnly, receiptPath }) {
   await Promise.all(
     providers.map(async (provider) => {
       for (const record of receipt.entries.filter((entry) => entry.provider === provider)) {
-        if (!verifyOnly && missingOnly && (await sdk.Template.exists(record.name))) {
+        let exists = false;
+        if (!verifyOnly && missingOnly) {
+          try {
+            exists = await sdk.Template.exists(record.name);
+          } catch (error) {
+            Object.assign(record, { built: false, verified: false, problems: [errorText(error)] });
+            console.error(`exists check failed for ${record.name}: ${errorText(error)}`);
+            save();
+            continue;
+          }
+        }
+        if (exists) {
           record.built = 'existing';
           console.log(`exists, not rebuilt: ${record.name}`);
           save();
@@ -298,8 +309,14 @@ async function runSdk(plan, { verifyOnly, missingOnly, receiptPath }) {
     console.error('Not every size verified: do NOT set E2B_SANDBOX_TEMPLATES=grid.');
     return 1;
   }
+  const completeGrid = buildPlan().every((entry) =>
+    receipt.entries.some((record) => record.name === entry.name && record.verified === true)
+  );
   console.log(
-    `All ${receipt.entries.length} sizes verified. Set E2B_SANDBOX_TEMPLATES=grid on the backend.`
+    `All ${receipt.entries.length} selected sizes verified. ` +
+      (completeGrid
+        ? 'Set E2B_SANDBOX_TEMPLATES=grid on the backend.'
+        : 'Verify all configured providers and sizes before enabling the grid.')
   );
   return 0;
 }
@@ -346,7 +363,16 @@ function runCli(plan, execute) {
 
 async function main(argv) {
   const provider = option(argv, '--provider');
-  const plan = buildPlan().filter((entry) => provider === null || entry.provider === provider);
+  const config = loadConfig();
+  if (argv.includes('--provider') && !Object.hasOwn(config.providers, provider)) {
+    console.error(`--provider must be one of ${Object.keys(config.providers).join(', ')}`);
+    return 2;
+  }
+  const plan = buildPlan(config).filter((entry) => provider === null || entry.provider === provider);
+  if (plan.length === 0) {
+    console.error('No templates selected; refusing an empty build or verification.');
+    return 2;
+  }
   if (argv.includes('--json')) {
     console.log(JSON.stringify(plan, null, 2));
     return 0;

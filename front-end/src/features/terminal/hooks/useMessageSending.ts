@@ -36,7 +36,7 @@ import { getItem, removeItem } from '@/lib/storage';
 import {
   agentSpeedForLevel,
   speedLevelOf,
-  setUltraPreferred,
+  setDisplayedUltraPreferred,
   useUltraPreferred,
 } from '@/lib/agentSpeed';
 
@@ -145,7 +145,10 @@ export function useMessageSending({
     fastModeUserOverrideRef.current = false;
   }, [userId]);
 
+  useEffect(() => () => setDisplayedUltraPreferred(null, userId), [selectedAgentId, userId]);
+
   useEffect(() => {
+    setDisplayedUltraPreferred(null, userId);
     if (!userCanUseFastMode) {
       fastModeUserOverrideRef.current = false;
       setFastModeState(false);
@@ -171,7 +174,7 @@ export function useMessageSending({
         fastModeUserOverrideRef.current = false;
         setFastModeState(speed !== undefined ? speed !== 'standard' : legacy === true);
         if (speed === 'fast' || speed === 'ultrafast') {
-          setUltraPreferred(speed === 'ultrafast', userId);
+          setDisplayedUltraPreferred(speed === 'ultrafast', userId);
         }
         return;
       }

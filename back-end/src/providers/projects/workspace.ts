@@ -183,6 +183,10 @@ async function refreshSnapshotCheckout(ctx: RestoreContext): Promise<boolean> {
   const source = ws.cloneUrl ?? ws.project.repoUrl;
   report.checkout.source = 'snapshot';
   if (source) {
+    const origin = await git(ctx, `remote set-url origin ${shq(source)}`);
+    if (origin.exitCode !== 0) {
+      report.warnings.push('Snapshot checkout origin could not be refreshed');
+    }
     const refspec = `+refs/heads/${branch}:refs/remotes/origin/${branch}`;
     const fetched = await git(ctx, `fetch --quiet ${shq(source)} ${shq(refspec)}`, GIT_TIMEOUT_MS);
     if (fetched.exitCode === 0) {
@@ -389,7 +393,8 @@ async function writeStartup(ctx: RestoreContext, envPaths: string[]): Promise<vo
  */
 export async function restoreWorkspace(
   sessionId: string,
-  workspace: ProjectWorkspace
+  workspace: ProjectWorkspace,
+  options: { restoreLocalWork?: boolean } = {}
 ): Promise<ProjectRestoreReport> {
   const ex = workspaceExecutorFor(sessionId);
   if (!ex) throw new Error(`No workspace executor registered for session ${sessionId}`);
@@ -421,8 +426,10 @@ export async function restoreWorkspace(
   if (mk.exitCode !== 0) throw new Error(`Could not prepare ${paths.projectDir}`);
   const bundlePath = await writeBundle(ctx);
   if (await restoreCheckout(ctx, bundlePath)) {
-    await restoreLocalCommits(ctx, bundlePath);
-    await restoreUncommitted(ctx);
+    if (options.restoreLocalWork !== false) {
+      await restoreLocalCommits(ctx, bundlePath);
+      await restoreUncommitted(ctx);
+    }
   }
   const written = await writeProjectFiles(ctx);
   await restoreInternalLinks(ctx);

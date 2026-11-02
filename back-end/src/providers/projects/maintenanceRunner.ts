@@ -150,7 +150,11 @@ export async function executeMaintenanceRun(
     const ex = e2bWorkspaceExecutor(sandbox, deps.homeDir);
     registerWorkspaceExecutor(sessionId, ex);
     await noteMemory(ex, deps.homeDir, out);
-    const restore = await restoreWorkspace(sessionId, { ...workspace, startedFromSnapshot: false });
+    const restore = await restoreWorkspace(
+      sessionId,
+      { ...workspace, startedFromSnapshot: false },
+      { restoreLocalWork: false }
+    );
     if (restore.checkout.error) throw new RunFailure(restore.checkout.error);
     out.line(`workspace ${restore.checkout.source} @ ${restore.checkout.headSha ?? 'unknown'}`);
 
@@ -385,10 +389,20 @@ async function scrub(
     repoUrl !== null
       ? `git remote set-url origin ${shq(repoUrl)} && test "$(git config --get remote.origin.url)" = ${shq(repoUrl)}`
       : 'true';
-  const result = await ex.run(`${remove}rm -rf ${shq(paths.projectDir)} && ${restoreRemote}`, {
-    cwd: paths.repoDir,
-    timeoutMs: STEP_TIMEOUT_MS,
-  });
+  const removeLocalWork = [
+    "refs=$(git for-each-ref --format='%(refname)' refs/heads/rose-sync/) || exit 1",
+    'for ref in $refs; do git update-ref -d "$ref" || exit 1; done',
+    "stashes=$(git stash list --format='%gd %gs') || exit 1",
+    // Drop oldest first so lower stash indices stay stable; keep unrelated stashes.
+    `while IFS= read -r entry; do case "$entry" in *"rose-sync uncommitted ("*) git stash drop "${'$'}{entry%% *}" >/dev/null || exit 1 ;; esac; done < <(printf '%s\n' "$stashes" | tac)`,
+  ].join('; ');
+  const result = await ex.run(
+    `${removeLocalWork} && ${remove}rm -rf ${shq(paths.projectDir)} && ${restoreRemote}`,
+    {
+      cwd: paths.repoDir,
+      timeoutMs: STEP_TIMEOUT_MS,
+    }
+  );
   if (result.exitCode !== 0) {
     out.add(redact(result.stdout + result.stderr));
     throw new RunFailure('the sandbox could not be scrubbed of credentials; no snapshot taken');

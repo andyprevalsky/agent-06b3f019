@@ -242,7 +242,10 @@ test('onboarded workspace restores keys and runs dependency setup', async () => 
 // ── `rose agent-init --login-code` (Set up with your coding agent) ──
 const LOGIN_CODE = `rlc_${'a'.repeat(32)}`;
 const CREDENTIAL = `rose_cli_${'c'.repeat(43)}`;
-async function withLoginApi<T>(fn: (api: string, seen: () => string[]) => Promise<T>) {
+async function withLoginApi<T>(
+  fn: (api: string, seen: () => string[]) => Promise<T>,
+  options: { exchangeBody?: string } = {}
+) {
   const seen: string[] = [];
   const server = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
@@ -260,6 +263,10 @@ async function withLoginApi<T>(fn: (api: string, seen: () => string[]) => Promis
       if (code !== LOGIN_CODE) {
         res.statusCode = 401;
         res.end(JSON.stringify({ error: 'This login code is invalid, expired or already used.' }));
+        return;
+      }
+      if (options.exchangeBody !== undefined) {
+        res.end(options.exchangeBody);
         return;
       }
       res.end(
@@ -373,6 +380,69 @@ test('agent-init refuses a used code and never stores a credential inside the ch
     assert.equal(JSON.parse(status.stdout).stage, 'signed_out');
   });
 });
+test('agent-init rejects malformed saved logins without using their credential', async () => {
+  await withLoginApi(async (api, seen) => {
+    const dir = fixture('malformed-saved-login');
+    const future = new Date(Date.now() + 86_400_000).toISOString();
+    const records = [
+      { apiUrl: api, credential: CREDENTIAL },
+      { apiUrl: api, credential: CREDENTIAL, expiresAt: 'invalid-expiry' },
+      { credential: CREDENTIAL, expiresAt: future },
+    ];
+    for (const [index, record] of records.entries()) {
+      const configDir = join(root, `malformed-saved-${index}`);
+      mkdirSync(configDir, { mode: 0o700 });
+      writeFileSync(join(configDir, 'credentials.json'), JSON.stringify(record), { mode: 0o600 });
+      await assert.rejects(agentInit(dir, api, configDir), /Not signed in to Rose/);
+      const status = await agentInit(dir, api, configDir, 'status', '--json');
+      assert.equal(JSON.parse(status.stdout).stage, 'signed_out');
+      assert(!status.stdout.includes(CREDENTIAL), 'malformed credentials are never printed');
+    }
+    assert.deepEqual(seen(), [], 'malformed saved credentials never reach the API');
+  });
+});
+
+test('agent-init rejects malformed successful exchanges without saving credentials', async () => {
+  const future = new Date(Date.now() + 86_400_000).toISOString();
+  const bodies = [
+    'not-json',
+    '{}',
+    JSON.stringify({ credential: CREDENTIAL }),
+    JSON.stringify({ expiresAt: future }),
+    JSON.stringify({ credential: CREDENTIAL, expiresAt: 'invalid-expiry' }),
+  ];
+  for (const [index, exchangeBody] of bodies.entries()) {
+    await withLoginApi(
+      async (api, seen) => {
+        const dir = fixture(`malformed-exchange-${index}`);
+        const configDir = join(root, `malformed-exchange-config-${index}`);
+        const failure = await agentInit(dir, api, configDir, '--login-code', LOGIN_CODE).then(
+          () => assert.fail('malformed exchange must fail'),
+          (error: { stderr: string }) => error
+        );
+        assert.match(failure.stderr, /backend returned an unexpected response/);
+        assert(!failure.stderr.includes(CREDENTIAL), 'exchange failures never print credentials');
+        assert.throws(() => statSync(join(configDir, 'credentials.json')), /ENOENT/);
+        assert.deepEqual(seen(), ['POST /api/projects/cli-login-codes/exchange ']);
+      },
+      { exchangeBody }
+    );
+  }
+});
+
+test('agent-init rejects in-checkout config before any exchange request', async () => {
+  await withLoginApi(async (api, seen) => {
+    const dir = fixture('custody-before-exchange');
+    const configDir = join(dir, '.rose');
+    await assert.rejects(
+      agentInit(dir, api, configDir, '--login-code', LOGIN_CODE),
+      /inside the repository/
+    );
+    assert.deepEqual(seen(), [], 'a custody failure must not consume the one-time code');
+    assert.throws(() => statSync(join(configDir, 'credentials.json')), /ENOENT/);
+  });
+});
+
 test('the rose package exposes the bin the onboarding prompt tells agents to install', async () => {
   const pkgDir = resolve('../scripts/lib/rose-sync');
   const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'));

@@ -1,3 +1,4 @@
+import { prisma } from './database';
 /**
  * Persistent code-session sandbox acquisition for E2B Claude Code / Codex
  * sessions (see providers/codeSessions/lifecycle.ts for the full flow).
@@ -330,7 +331,7 @@ export class CodeSessionPauseUnconfirmedError extends Error {
 /** A persistent session's sandbox is paused (never killed) on a failed start. */
 export async function releaseSandboxAfterFailedStart(
   sandbox: Sandbox,
-  codeSession: CodeSessionRow | null
+  codeSession: SpawnCodeSession | null
 ): Promise<void> {
   if (codeSession === null) {
     await sandbox.kill();
@@ -345,7 +346,21 @@ export async function releaseSandboxAfterFailedStart(
     });
     throw new CodeSessionPauseUnconfirmedError(error);
   }
-  await markPaused(codeSession.id);
+  if (codeSession.retainFailedStartLease === true) {
+    // Keep this attempt's unique switch custody until the outer rollback finishes.
+    await prisma.codeSession.updateMany({
+      where: {
+        id: codeSession.id,
+        leaseOwner: codeSession.leaseOwner,
+        codeProvider: codeSession.codeProvider,
+        sandboxId: sandbox.sandboxId,
+        state: { not: 'RETIRED' },
+      },
+      data: { state: 'PAUSED', lastActiveAt: new Date() },
+    });
+  } else {
+    await markPaused(codeSession.id);
+  }
 }
 
 /**

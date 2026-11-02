@@ -28,7 +28,7 @@ import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { after, test } from 'node:test';
+import { after, afterEach, test } from 'node:test';
 import { Sandbox } from 'e2b';
 import {
   runMaintenanceTick,
@@ -47,10 +47,19 @@ import {
 } from '../../providers/projects/workspaceExecutor';
 import { e2bWorkspaceExecutor, restoreWorkspace } from '../../providers/projects/workspace';
 import { FakeE2b, tempRoot } from './project-maintenance-fake-e2b';
+import { registerMaintenanceReviewCases } from './project-maintenance-review.cases';
 
 const SECRET = `sync-fixture-secret-${randomBytes(8).toString('hex')}`;
 const root = tempRoot('project-maintenance-bb-');
 const userIds: string[] = [];
+
+// Completed fixtures must not remain due during another case's cron tick.
+afterEach(async () => {
+  await prisma.project.updateMany({
+    where: { userId: { in: userIds } },
+    data: { maintenanceNightly: false, maintenanceOnGithubChange: false },
+  });
+});
 
 after(async () => {
   await prisma.user.deleteMany({ where: { userId: { in: userIds } } });
@@ -58,7 +67,7 @@ after(async () => {
 });
 
 /** The sync script: installs only when package.json changed, prints the env secret. */
-const SYNC_SCRIPT = `set -euo pipefail
+export const SYNC_SCRIPT = `set -euo pipefail
 cd "$ROSE_PROJECT_DIR"
 git fetch --quiet origin "$ROSE_DEFAULT_BRANCH" && git checkout --quiet "$ROSE_DEFAULT_BRANCH" && git merge --ff-only --quiet "origin/$ROSE_DEFAULT_BRANCH"
 STAMP="$HOME/.cache/rose-maintenance"; mkdir -p "$STAMP"
@@ -69,7 +78,7 @@ fi
 . ./.env; echo "synced with token $FIXTURE_SECRET"
 `;
 
-function git(cwd: string, ...args: string[]): string {
+export function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], {
     cwd,
     encoding: 'utf8',
@@ -87,7 +96,7 @@ interface Fixture {
   pushCommit: (file: string, content: string) => string;
 }
 
-async function fixture(
+export async function fixture(
   name: string,
   overrides: { script?: string | null; timeoutS?: number; repo?: boolean } = {}
 ): Promise<Fixture> {
@@ -158,14 +167,17 @@ async function fixture(
   return { userId, projectId: project.id, remote, work, fake, deps, workspace, pushCommit };
 }
 
-async function runOnce(f: Fixture, mode: 'sync' | 'snapshot' = 'sync'): Promise<StartResult> {
+export async function runOnce(
+  f: Fixture,
+  mode: 'sync' | 'snapshot' = 'sync'
+): Promise<StartResult> {
   const result = await startMaintenance(f.projectId, { trigger: 'manual', mode }, f.deps);
   if (result.kind === 'started') await result.done;
   return result;
 }
 
-const projectRow = (id: string) => prisma.project.findUniqueOrThrow({ where: { id } });
-const lastRun = (projectId: string) =>
+export const projectRow = (id: string) => prisma.project.findUniqueOrThrow({ where: { id } });
+export const lastRun = (projectId: string) =>
   prisma.projectMaintenanceRun.findFirstOrThrow({
     where: { projectId },
     orderBy: { startedAt: 'desc' },
@@ -581,3 +593,5 @@ test('a session restored from the snapshot gets the branch head, fresh env files
     unregisterWorkspaceExecutor(sessionId);
   }
 });
+
+registerMaintenanceReviewCases({ fixture, runOnce, lastRun, projectRow, git, SYNC_SCRIPT });

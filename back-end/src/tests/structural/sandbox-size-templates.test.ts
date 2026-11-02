@@ -159,7 +159,10 @@ Template.build = async (template, name, options) => {
   built.set(name, options);
   return { name, alias: name, tags: ['default'], templateId: 'tpl-' + name, buildId: 'build-' + name };
 };
-Template.exists = async (name) => existing.has(name) || built.has(name);
+Template.exists = async (name) => {
+  if (process.env.FAKE_E2B_EXISTS_FAIL === name) throw new Error('controlled exists rejection');
+  return existing.has(name) || built.has(name);
+};
 const ok = (stdout) => ({ exitCode: 0, stdout, stderr: '' });
 export const Sandbox = {
   async create(name) {
@@ -341,6 +344,35 @@ check('--missing builds only the absent sizes and still verifies every size', ()
   }
   assert.strictEqual(run.receipt.allVerified, true);
   assert.match(run.stdout, /Set E2B_SANDBOX_TEMPLATES=grid/);
+});
+
+check('invalid or missing provider refuses an empty success', () => {
+  for (const args of [['--provider', 'typo', '--json'], ['--provider'], ['--provider', '--json']]) {
+    const run = spawnSync(process.execPath, [buildScript, ...args], { encoding: 'utf8' });
+    assert.strictEqual(run.status, 2, run.stdout + run.stderr);
+  }
+});
+
+check('an exists failure records only that size without rebuilding it', () => {
+  const failed = plan[0].name;
+  const run = runSdkBuild({ FAKE_E2B_EXISTS_FAIL: failed }, ['--missing']);
+  assert.strictEqual(run.status, 1);
+  assert.strictEqual(run.receipt.allVerified, false);
+  const record = run.receipt.entries.find((entry) => entry.name === failed);
+  assert.strictEqual(record?.built, false);
+  assert.strictEqual(record?.verified, false);
+  assert.match(record?.problems?.join(' ') ?? '', /controlled exists rejection/);
+  assert.strictEqual(run.events.filter((event) => event.name === failed).length, 0);
+  assert.strictEqual(run.receipt.entries.filter((entry) => entry.verified).length, plan.length - 1);
+  assert.strictEqual(run.events.filter((event) => event.type === 'kill').length, plan.length - 1);
+});
+
+check('a single-provider verification withholds the complete-grid go-ahead', () => {
+  const run = runSdkBuild({}, ['--provider', 'codex']);
+  assert.strictEqual(run.status, 0, run.stdout);
+  assert.strictEqual(run.receipt.allVerified, true);
+  assert.ok(run.receipt.entries.every((entry) => entry.provider === 'codex'));
+  assert.doesNotMatch(run.stdout, /Set E2B_SANDBOX_TEMPLATES=grid/);
 });
 
 console.log(`\nsandbox-size-templates: ${checks} checks passed`);

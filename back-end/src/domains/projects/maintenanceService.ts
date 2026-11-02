@@ -24,7 +24,6 @@ import {
 } from '../../providers/projects/maintenanceRunner';
 import {
   GITHUB_POLL_INTERVAL_MS,
-  githubSlotKey,
   nextNightlyRun,
   nightlySlotKey,
 } from '../../providers/projects/maintenanceSchedule';
@@ -155,6 +154,8 @@ interface StartOptions {
   mode: store.MaintenanceMode;
   slotKey?: string;
   watchedSha?: string;
+  previousWatchedSha?: string;
+  watchCheckedAt?: Date;
 }
 
 /**
@@ -190,6 +191,10 @@ export async function startMaintenance(
     mode: options.mode,
     ...(options.slotKey !== undefined ? { slotKey: options.slotKey } : {}),
     ...(options.watchedSha !== undefined ? { watchedSha: options.watchedSha } : {}),
+    ...(options.previousWatchedSha !== undefined
+      ? { previousWatchedSha: options.previousWatchedSha }
+      : {}),
+    ...(options.watchCheckedAt !== undefined ? { watchCheckedAt: options.watchCheckedAt } : {}),
     fromSnapshotId,
     leaseMs: maintenanceLeaseMs(project),
     now,
@@ -278,7 +283,7 @@ export interface TickSummary {
  * One cron tick (every few minutes, any replica): settle abandoned runs, start
  * today's nightly runs, and start a run for every watched project whose
  * default-branch head moved. Replicas racing here are harmless: the lease and
- * the slot key admit exactly one run.
+ * nightly slot / watched predecessor admit exactly one run.
  */
 export async function runMaintenanceTick(
   deps: MaintenanceServiceDeps = DEFAULT_MAINTENANCE_DEPS
@@ -306,17 +311,27 @@ export async function runMaintenanceTick(
   }
   for (const watched of await store.findGithubPollDue(now, GITHUB_POLL_INTERVAL_MS)) {
     summary.watching += 1;
+    // Mint before awaiting GitHub: a newer poll permanently supersedes this observation.
+    const watchCheckedAt = await store.markWatchChecked(watched.id, now);
+    if (watchCheckedAt === null) continue;
     const sha = await deps.headSha(watched);
-    await store.markWatchChecked(watched.id, now);
     if (sha === null) continue;
     if (watched.maintenanceWatchedSha === null) {
-      await store.seedWatchedSha(watched.id, sha);
+      await store.seedWatchedSha(watched.id, sha, watchCheckedAt);
       continue;
     }
     if (sha === watched.maintenanceWatchedSha) continue;
+    // Claim this observed transition, not the SHA for all time. The atomic
+    // predecessor and observation checks deduplicate ticks; the run gets its own ID.
     const started = await startMaintenance(
       watched.id,
-      { trigger: 'github', mode: 'sync', slotKey: githubSlotKey(sha), watchedSha: sha },
+      {
+        trigger: 'github',
+        mode: 'sync',
+        watchedSha: sha,
+        previousWatchedSha: watched.maintenanceWatchedSha,
+        watchCheckedAt,
+      },
       deps
     );
     if (started.kind === 'started') {

@@ -36,6 +36,7 @@ import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
   agentGuide,
+  assertLoginLocation,
   exchangeLoginCode,
   humanStatus,
   loadLogin,
@@ -367,6 +368,8 @@ async function agentInit(opts, dir, cli) {
     }
   };
   if (opts.loginCode !== undefined) {
+    const capture = captureFor();
+    assertLoginLocation({ checkout: capture?.root ?? dir });
     const base = apiBase(opts, null);
     const exchanged = await exchangeLoginCode(base, opts.loginCode);
     const login = {
@@ -378,7 +381,6 @@ async function agentInit(opts, dir, cli) {
       scope: exchanged.scope,
       savedAt: new Date().toISOString(),
     };
-    const capture = captureFor();
     const path = saveLogin(login, { checkout: capture?.root ?? dir });
     const guide = agentGuide({ login, capture, cli, path });
     print(

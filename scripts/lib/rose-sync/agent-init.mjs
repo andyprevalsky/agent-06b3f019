@@ -65,8 +65,8 @@ function isInside(child, parent) {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-/** Write the credential 0600 (directory 0700), never inside the checkout. */
-export function saveLogin(record, { env = process.env, checkout } = {}) {
+/** Validate custody before consuming a one-time login code or writing it. */
+export function assertLoginLocation({ env = process.env, checkout } = {}) {
   const path = credentialsPath(env);
   if (checkout && isInside(path, checkout)) {
     throw new Error(
@@ -74,6 +74,12 @@ export function saveLogin(record, { env = process.env, checkout } = {}) {
         "Set ROSE_CONFIG_DIR to a directory outside it.",
     );
   }
+  return path;
+}
+
+/** Write the credential 0600 (directory 0700), never inside the checkout. */
+export function saveLogin(record, options = {}) {
+  const path = assertLoginLocation(options);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
@@ -93,8 +99,10 @@ export function loadLogin(env = process.env, now = Date.now()) {
   } catch {
     return null;
   }
-  if (typeof record?.credential !== "string") return null;
-  if (Date.parse(record.expiresAt) <= now) return null;
+  if (typeof record?.credential !== "string" || record.credential.trim() === "") return null;
+  if (typeof record.apiUrl !== "string" || record.apiUrl.trim() === "") return null;
+  const expiresAt = typeof record.expiresAt === "string" ? Date.parse(record.expiresAt) : NaN;
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) return null;
   return record;
 }
 
@@ -126,6 +134,14 @@ export async function exchangeLoginCode(apiBase, code) {
     throw new Error(
       `Rose login failed: ${reason}. Ask the user to copy a fresh setup prompt from Rose ` +
         "(project settings → Set up with your coding agent) and run it again.",
+    );
+  }
+  if (
+    typeof data?.credential !== "string" || data.credential.trim() === "" ||
+    typeof data?.expiresAt !== "string" || !Number.isFinite(Date.parse(data.expiresAt))
+  ) {
+    throw new Error(
+      "Rose login failed: the backend returned an unexpected response. Ask the user to copy a fresh setup prompt from Rose.",
     );
   }
   return data;

@@ -149,7 +149,11 @@ export async function createWithCodeSession<
     const switched = await switchCodeSessionProvider(codeSession, params.codeProvider, (id) =>
       Sandbox.kill(id, { apiKey: process.env.E2B_API_KEY }).then(() => undefined)
     );
-    codeSession = { ...switched.session, handoffTrajectory: switched.trajectory };
+    codeSession = {
+      ...switched.session,
+      handoffTrajectory: switched.trajectory,
+      retainFailedStartLease: true,
+    };
     handoff = switched.handoff;
   }
   let session: T;
@@ -158,10 +162,24 @@ export async function createWithCodeSession<
   } catch (error) {
     // A start that failed after the switch hands the session back, so the
     // retry switches again and gets the handoff and trajectory once more.
-    if (codeSession !== null && switchedFrom !== null) {
-      await revertCodeSessionProvider(codeSession.id, params.codeProvider, switchedFrom);
+    if (
+      codeSession !== null &&
+      switchedFrom !== null &&
+      !(error instanceof CodeSessionPauseUnconfirmedError)
+    ) {
+      await revertCodeSessionProvider(
+        codeSession.id,
+        params.codeProvider,
+        switchedFrom,
+        codeSession.leaseOwner,
+        (id) => Sandbox.kill(id, { apiKey: process.env.E2B_API_KEY }).then(() => undefined)
+      );
     }
-    if (codeSession !== null && !(error instanceof CodeSessionPauseUnconfirmedError)) {
+    if (
+      codeSession !== null &&
+      switchedFrom === null &&
+      !(error instanceof CodeSessionPauseUnconfirmedError)
+    ) {
       await markPaused(codeSession.id);
     }
     throw error;

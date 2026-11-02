@@ -39,6 +39,24 @@ export const SPEED_LABELS: Record<SpeedLevel, string> = {
 
 let ultraPreferred = false;
 const listeners = new Set<() => void>();
+const displayedUltra = new Map<string, boolean>();
+let revision = 0;
+
+function notify(): void {
+  revision += 1;
+  for (const listener of listeners) listener();
+}
+
+/** Selected-agent display only; never writes an account preference. */
+export function setDisplayedUltraPreferred(value: boolean | null, userId?: string | null): void {
+  const key = userId ?? '';
+  if (value === null) {
+    if (displayedUltra.delete(key)) notify();
+  } else if (displayedUltra.get(key) !== value) {
+    displayedUltra.set(key, value);
+    notify();
+  }
+}
 
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
@@ -47,29 +65,32 @@ function subscribe(listener: () => void): () => void {
   };
 }
 
-function getSnapshot(): boolean {
-  return ultraPreferred;
+function getSnapshot(): number {
+  return revision;
 }
 
 export function setUltraPreferred(value: boolean, userId?: string | null): void {
+  if (displayedUltra.has(userId ?? '')) setDisplayedUltraPreferred(value, userId);
   if (userId) {
     writeQueryPreferences(userId, { ultraPreferred: value });
     return;
   }
   if (ultraPreferred === value) return;
   ultraPreferred = value;
-  for (const listener of listeners) listener();
+  notify();
 }
 
 /** Test-only: restore the session default (fast) between suites. */
 export function resetSpeedLevelSession(): void {
-  setUltraPreferred(false);
+  displayedUltra.clear();
+  ultraPreferred = false;
+  notify();
 }
 
 export function useUltraPreferred(userId?: string | null): boolean {
-  const session = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
   const [saved] = useQueryPreference(userId, 'ultraPreferred', false);
-  return userId ? (saved ?? false) : session;
+  return displayedUltra.get(userId ?? '') ?? (userId ? (saved ?? false) : ultraPreferred);
 }
 
 export function speedLevelOf(fastMode: boolean, ultra: boolean): SpeedLevel {

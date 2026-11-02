@@ -6,6 +6,7 @@ import { once } from 'node:events';
 import Kernel, { APIError } from '@onkernel/sdk';
 import { prisma } from '../../providers/database';
 import {
+  KernelProxyReuseTimeoutError,
   getOrCreateKernelProxy,
   kernelProxyCandidates,
   isKernelProxyAvailabilityError,
@@ -211,15 +212,67 @@ async function permission(): Promise<void> {
   process.stdout.write('PASS provider permission denial propagates without geo fallback\n');
 }
 
+async function reuseTimeout(): Promise<void> {
+  const failure = new KernelProxyReuseTimeoutError(
+    'Timed out waiting for Kernel proxy configuration reuse: fixture'
+  );
+  assert.equal(
+    isKernelProxyAvailabilityError(failure),
+    false,
+    'coordination timeout is not geo inventory'
+  );
+  assert.equal(
+    isKernelProxyAvailabilityError(new Error('location unavailable')),
+    true,
+    'real geo capacity must still relax'
+  );
+  const model = prisma.browserProviderProxy;
+  const find = model.findUnique;
+  let lookups = 0;
+  let relaxed = 0;
+  let creates = 0;
+  model.findUnique = (async () => {
+    lookups++;
+    throw failure;
+  }) as typeof find;
+  try {
+    await assert.rejects(
+      createSessionOnKernelProxyLadder(
+        {} as Kernel,
+        kernelProxyCandidates({ country: 'US', state: 'CA', city: 'San Francisco' }),
+        async () => {
+          creates++;
+          return 'unexpected';
+        },
+        {
+          onRelax: () => {
+            relaxed++;
+          },
+        }
+      ),
+      (error) => error === failure
+    );
+    assert.equal(lookups, 1, 'stop at the original geo key');
+    assert.equal(relaxed, 0, 'do not relax geo after database coordination timeout');
+    assert.equal(creates, 0, 'no browser allocation after failed coordination');
+  } finally {
+    model.findUnique = find;
+  }
+  process.stdout.write('PASS typed proxy reuse timeout propagates without geo relaxation\n');
+}
+
 async function main(): Promise<void> {
   if (process.argv.includes('--worker')) return worker();
   try {
-    if (process.argv.includes('--permission')) await permission();
-    else if (process.argv.includes('--concurrency')) await concurrency();
+    if (process.argv.includes('--permission')) {
+      await permission();
+      await reuseTimeout();
+    } else if (process.argv.includes('--concurrency')) await concurrency();
     else {
       await concurrency();
       await localRetry();
       await permission();
+      await reuseTimeout();
     }
   } finally {
     await prisma.$disconnect();

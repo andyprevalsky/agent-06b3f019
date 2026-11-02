@@ -283,7 +283,9 @@ async function resolveKernelProxy(
     if (resolved !== undefined) return resolved;
     await delay(Math.min(100, Math.max(0, deadline - Date.now())));
   }
-  throw new Error(`Timed out waiting for Kernel proxy configuration reuse: ${candidate.proxyKey}`);
+  throw new KernelProxyReuseTimeoutError(
+    `Timed out waiting for Kernel proxy configuration reuse: ${candidate.proxyKey}`
+  );
 }
 
 function resolvedProxy(
@@ -441,7 +443,10 @@ function isKernelProxyPermissionError(error: unknown): boolean {
   );
 }
 
+export class KernelProxyReuseTimeoutError extends Error {}
+
 export function isKernelProxyAvailabilityError(error: unknown): boolean {
+  if (error instanceof KernelProxyReuseTimeoutError) return false;
   if (isKernelProxyPermissionError(error)) return false;
   // SDK request timeouts (city proxy allocate / session create hung) are
   // transient location-capacity failures — fall back to a coarser geo key.
