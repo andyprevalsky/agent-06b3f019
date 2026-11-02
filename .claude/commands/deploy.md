@@ -3172,6 +3172,11 @@ python3 scripts/record_factory_event.py deploy production-finish semantic
 
 Inspect failed workflow Playwright artifacts and service logs, then apply the controlling failure policy. An evidenced provider outage or exhausted credits receives an external exception and no handoff. A NOT INTRODUCED defect receives a repair handoff and waiver. Fix INTRODUCED defects and rerun affected checks; UNKNOWN remains blocking. Preserve native failures and execution provenance. Proceed to Step 14 only after every requirement is verified or has an exact qualified exception.
 
+When triage requires one further execution of a terminal failed production run,
+rerun the same command with `--retry-failed-once "<justification>"`; the existing
+CLI retries only failed jobs once and refuses a second retry. A qualified SKIP
+does not trigger this retry.
+
 If no workflow-scoped token is available, `gh workflow run` returns HTTP 403
 `Resource not accessible by integration`. In that case, run the workflow's two
 steps locally against production with the same secrets from `back-end/.env`.
