@@ -535,6 +535,11 @@ async function testCrossProviderLadderLabelsSteelExitIpReads(): Promise<void> {
       ws_url: 'wss://steel/2',
     },
   ];
+  // A synthetic ladder must not consume operator waivers for live provider operations.
+  const inheritedOverrides = process.env.DEPLOY_GATE_OVERRIDES;
+  const inheritedEvidence = process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE;
+  delete process.env.DEPLOY_GATE_OVERRIDES;
+  delete process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE;
   const stages: unknown[] = [];
   const realFetch = globalThis.fetch;
   globalThis.fetch = async () =>
@@ -559,6 +564,11 @@ async function testCrossProviderLadderLabelsSteelExitIpReads(): Promise<void> {
     });
   } finally {
     globalThis.fetch = realFetch;
+    if (inheritedOverrides === undefined) delete process.env.DEPLOY_GATE_OVERRIDES;
+    else process.env.DEPLOY_GATE_OVERRIDES = inheritedOverrides;
+    if (inheritedEvidence === undefined)
+      delete process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE;
+    else process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE = inheritedEvidence;
   }
   assert.deepStrictEqual(
     stages,
@@ -568,6 +578,35 @@ async function testCrossProviderLadderLabelsSteelExitIpReads(): Promise<void> {
     ],
     'a Steel exit-IP failure must name the Steel session it read, not the evicted Kernel one'
   );
+}
+
+async function testMockLadderIsolatesAndRestoresLiveOutageEnvironment(): Promise<void> {
+  const inheritedOverrides = process.env.DEPLOY_GATE_OVERRIDES;
+  const inheritedEvidence = process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE;
+  const overrides =
+    'browser-provider:tilion-residential-live,browser-provider:steel-profile-persistence-live';
+  const evidence = '/fixture/live-outage-evidence-must-not-be-read.json';
+  process.env.DEPLOY_GATE_OVERRIDES = overrides;
+  process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE = evidence;
+  try {
+    await testCrossProviderLadderLabelsSteelExitIpReads();
+    assert.strictEqual(
+      process.env.DEPLOY_GATE_OVERRIDES,
+      overrides,
+      'restore every inherited override'
+    );
+    assert.strictEqual(
+      process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE,
+      evidence,
+      'restore evidence binding'
+    );
+  } finally {
+    if (inheritedOverrides === undefined) delete process.env.DEPLOY_GATE_OVERRIDES;
+    else process.env.DEPLOY_GATE_OVERRIDES = inheritedOverrides;
+    if (inheritedEvidence === undefined)
+      delete process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE;
+    else process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE = inheritedEvidence;
+  }
 }
 
 async function main(): Promise<void> {
@@ -581,6 +620,7 @@ async function main(): Promise<void> {
   testRotationRequestSchema();
   testSteelOutageDetector();
   await testCrossProviderLadderLabelsSteelExitIpReads();
+  await testMockLadderIsolatesAndRestoresLiveOutageEnvironment();
   process.stdout.write('PASS rotate_ip mobile candidates + escalation ladder\n');
 }
 
