@@ -106,11 +106,12 @@ adversarial review on the hunks the gate flagged for human approval only;
 never extend grounding to the rest of the diff. A `GROUNDED` verdict clears the Step 0p, 0b and 0c human
 gates: rerun the guard with its mandatory flag, record
 `<Guard> | Pass | golden-reference review GROUNDED <approval-id> @ <sha>, reviewer <agent-id>`
-in `TEST_REPORT`, list it in the PR body and continue. Resolve `NOT_GROUNDED`
-findings through repair and review, and consume existing explicit user
-authorization without asking for it again. Neither verdict is a blanket stop
-for the deploy: continue authorized independent work while resolving the exact
-requirement, without assuming authority for an unrelated operation.
+in `TEST_REPORT`, list it in the PR body and continue. `NOT_GROUNDED` and
+`HUMAN_REQUIRED` packets still go to the user per `approval-format.md`; they are
+not a blanket stop: continue authorized independent work while that exact
+requirement is resolved. An existing explicit user authorization for that exact
+action is the decision; do not ask again. Resolve findings through repair and
+review without assuming authority for an unrelated operation.
 
 ---
 
