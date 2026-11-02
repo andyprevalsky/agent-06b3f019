@@ -124,8 +124,9 @@ def standard_template() -> dict:
          "checks": ["format"]},
         {"name": "cloudbench-controller", "command": ["bash", "scripts/run-cloudbench-controller-gate"],
          "checks": ["cloudbench-controller"]},
-        {"name": "seed-memory-ratchet", "command": ["bash", "scripts/tests/seed-memory-ratchet.test.sh"],
-         "checks": ["seed-memory-ratchet"]},
+        {"name": "seed-memory-ratchet", "command": ["bash", "scripts/measure-seed-memory.sh",
+                                                   "5", "0", "0", "--enforce-budget"],
+         "cwd": "back-end", "checks": ["seed-memory-ratchet"]},
         {"name": "mac-app-coverage-blackbox", "command": ["npm", "run", "test:coverage"],
          "cwd": "mac-app", "platform": "darwin", "checks": ["mac-app-coverage-blackbox"]},
     ]

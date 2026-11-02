@@ -128,5 +128,12 @@ class Selection(unittest.TestCase):
         self.assertTrue(smoke['case_protocol'])
         self.assertEqual(str(p.ROOT/'scripts/deploy_test_cloud.py'),smoke['command'][1])
 
+    def test_standard_template_runs_actual_cold_seed_measurement(self):
+        gate = next(g for g in p.standard_template()['gates']
+                    if g['name'] == 'seed-memory-ratchet')
+        self.assertEqual(['bash','scripts/measure-seed-memory.sh','5','0','0',
+                          '--enforce-budget'],gate['command'])
+        self.assertEqual('back-end',gate['cwd'])
+
 
 if __name__=='__main__':unittest.main()
