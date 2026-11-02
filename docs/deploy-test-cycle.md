@@ -117,6 +117,11 @@ of its tests ran. A mixed skip/run gate must use this protocol.
    A failure in the final sweep returns to `/RCA`; changing code invalidates
    its evidence. Retain production source checks, review and approvals.
 
+Source binding uses the existing pipeline's output-ledger exclusion for
+`agents/benchmarks/history/`, so benchmark result append operations do not
+masquerade as runtime edits. All other tracked/untracked source, ignored runtime
+configuration and the worker commands remain bound and are rechecked.
+
 A focused JSON has `source` and a `gates` mapping, each value with argv `command`
 and `checks`. Never relax a test's assertions/timeouts to fit this cycle. Preserve
 failure histories across source changes, skipped outcomes in the final report,

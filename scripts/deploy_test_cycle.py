@@ -14,6 +14,7 @@ from fnmatch import fnmatchcase
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -73,6 +74,8 @@ def source(root: Path) -> dict:
     paths = git("ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")
     h = hashlib.sha256(sha.encode())
     for raw in sorted(set(paths) - {b""}):
+        if raw.startswith(b"agents/benchmarks/history/"):
+            continue  # Same output-ledger exclusion as run_deploy_pipeline.source_digest.
         path = root / os.fsdecode(raw)
         if not path.exists() and not path.is_symlink():
             data = b"DELETED"
@@ -96,6 +99,8 @@ def input_fingerprints(plan: dict, root: Path) -> dict:
                            cwd=root, check=True, capture_output=True).stdout.split(b"\0")
     files = {}
     for raw in set(paths) - {b""}:
+        if raw.startswith(b"agents/benchmarks/history/"):
+            continue
         path = root / os.fsdecode(raw)
         if path.is_symlink():
             content = os.fsencode(os.readlink(path))
@@ -161,6 +166,9 @@ def validate_plan(plan: dict) -> None:
             raise ValueError("env must map strings to strings")
         if gate.get("after"):
             raise ValueError("cross-gate after dependencies are not allowed; setup belongs inside its worker")
+        timeout = gate.get("timeout_seconds")
+        if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError("timeout_seconds must be a finite positive number")
     if not any(g.get("quick") for g in gates):
         raise ValueError("quick checks required")
 
@@ -313,7 +321,8 @@ def adjudicate(state: dict, report: dict) -> None:
     for failure in pending:
         entry = by_id[failure["id"]]
         if (entry.get("source") != failure["source"] or entry.get("check") != failure["check"]
-                or entry.get("command") != failure.get("command")):
+                or entry.get("command") != failure.get("command")
+                or entry.get("native_result") != failure["native_result"]):
             raise ValueError("RCA receipt has the wrong source or check")
         disposition = decision(entry)
         if disposition != "blocking" and not failure["complete"]:
@@ -452,6 +461,10 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
 
 def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     validate_plan(new)
+    if digest(old) != state["plan_digest"]:
+        raise ValueError("previous plan does not match the frozen selection")
+    if state.get("pending"):
+        raise ValueError("adjudicate pending occurrences before binding a changed source")
     if state["phase"] not in {"needs-focused-plan", "focused", "triage", "stale"}:
         raise ValueError("source refresh only at the repair boundary")
     if new["source"] != source(root):
@@ -568,7 +581,7 @@ def main(argv: list[str] | None = None) -> int:
             write(state_path, state)
             print(json.dumps({"phase": state["phase"], "ready": state["ready"],
                               "failures": len(state.get("pending", [])), "source": state["source"]}))
-            return 1 if args.action in {"run", "resume"} and state["phase"] in {"triage", "stale", "interrupted"} else 0
+            return 1 if args.action in {"run", "resume"} and not state["ready"] else 0
     except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
         print(f"DEPLOY_CYCLE BLOCKED: {error}", file=sys.stderr)
         return 2
