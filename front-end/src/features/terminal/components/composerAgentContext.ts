@@ -1,13 +1,13 @@
-import { createContext, useContext, useMemo, type RefObject } from 'react';
+import { createContext, useContext, useMemo, type MutableRefObject } from 'react';
 import type { AgentSlice } from '../types';
 
 // Persistent input DOM must not own a historical transcript through JSX props
 // or action closures. Its descendants read the current owner through this ref.
-export const ComposerAgentContext = createContext<RefObject<AgentSlice | null> | null>(null);
+export const ComposerAgentContext = createContext<MutableRefObject<AgentSlice | null> | null>(null);
 
 // Create the disposer outside the provider's render scope: that scope also
 // contains the transcript supplied to its per-commit synchronization effect.
-export function disposeComposerOwner(owner: RefObject<AgentSlice | null>) {
+export function disposeComposerOwner(owner: MutableRefObject<AgentSlice | null>) {
   return () => {
     owner.current = null;
   };
