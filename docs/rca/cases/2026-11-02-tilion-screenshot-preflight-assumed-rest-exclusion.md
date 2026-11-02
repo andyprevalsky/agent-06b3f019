@@ -17,6 +17,9 @@ tags:
   - screenshot
   - vendor-contract
 sources:
+  - PR #1662 occurrence c625a65da0e6429b8966142b607ff1bf
+  - commit e99c91f55b9444f01a90bd4e8efc18315faeb51b
+  - commit 6f3f53201faac3a3e70de099e7c211cee6770fad
   - PR #1580 release 6ff4bcae6d0da979e8c6feb24c011f2698935108
   - commit a3c4929f3bbd296766013a7545439b682015a6ef
   - agent thr_11a122c55dd54e1599d206740c56128b independent repair
@@ -82,6 +85,48 @@ the original event. The 4409 multiplexer archive case is a relative, not a
 recurrence: no Rose multiplexer participates here. Archive searches were
 `session_driven_by_client 4409 screenshot` and `Tilion REST CDP ownership contract`;
 read the regional-host multiplexer case and the RCA process feedback.
+
+### PR1662 occurrence c625a65da0e6429b8966142b607ff1bf
+
+A separate final backend-coverage-blackbox attempt at frozen e99c91f55
+(digest 2417622cb6e59d08562b56db51a3a8ce7e9b5effc0783dbbb41f63c980bc019e)
+failed the exact same assertion. Native browser-provider log SHA256
+9bdf73967275faae498bb87d463c90b2455b6fa4ae0ac649ea511a0d1acac9c4 line 642:
+`FAIL live Tilion provider parity: REST screenshot while CDP attached: HTTP 200`.
+Shard 2 recorded 118 passed, 1 failed, 0 not run. Shard 1, unit pass, and FPS
+probe passed. The aggregate remained UNVERIFIED; merged threshold checking and
+the following teardown suite were unexecuted. The failed vendor preamble also
+left its downstream backend parity assertions unexecuted.
+
+Source comparison to base 6f3f53201 shows no back-end or package manifest
+changes. The native owning file SHA256 is
+7659f3560e77bf051402e4f3381c089238d0a670ab257c050bde476f80c5c2d5 on prior
+repair base a3c4929f3, PR1662 base 6f3f53201, frozen e99c91f55, and integrated
+e62978dec. Reduced status-boundary replay failed both PR1662 base and head;
+its contract-positive control passed both. That synthetic control alone did
+not establish native attribution, as independent review correctly identified.
+
+One additional native direct run on the authorized RCA executor bypassed the
+new deploy wrappers and called the unchanged exported function. Recorded span
+20:39:38.775-20:39:46.974Z; native exit 1 at the exact same HTTP200 assertion.
+The screenshot request ID was 06dc6ef6c62c4619. Response: HTTP200, ok=true,
+beside_client=true, JPEG, https://example.com/. Primary CDP was connected before
+and after the response. The returned JPEG SHA256
+bf72779fb0dfaf0db2483ec478581d242fd93f98f4ba9168ac5b4ddd4b018f69 exactly matches
+the existing final native sample in this repair. Original finally disconnected
+and DELETE returned204; a separate read through tilionApi returned410/closed
+(request dbea925b885d4131). No other session was allocated and no full gate ran.
+
+Gate: NOT_INTRODUCED for PR1662 source attribution. Independent re-review
+accepted the native direct discriminator and verified the source comparisons.
+The current recurrence matches the existing stale-test contract repair in
+PR1663 at 99aff0a553b53af8f48464c3432577ea818e0ff9. The original 20:30 screenshot
+body and socket state remain uncaptured; do not retroactively invent them or
+claim provider outage/credits exhaustion. Existing raw V8 archives can feed the
+unchanged c8 --check-coverage command in a private merged directory, followed
+by the original teardown test, but neither proves the unexecuted backend parity.
+This appended case is a private integration draft; the parent/repair owner
+retains source and canonical archive ownership.
 
 ## Solution
 

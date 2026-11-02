@@ -391,6 +391,28 @@ class SkipDispositionTest(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.ReviewCycleError, "no review cycle is open"):
             self.skip(evidence(issue_comments=[CAP_COMMENT], check_runs=[RATE_LIMITED_CHECK]))
 
+    def test_usage_cap_skip_preserves_history_without_consuming_a_review_round(self) -> None:
+        self.skip(evidence(issue_comments=[CAP_COMMENT], check_runs=[RATE_LIMITED_CHECK]))
+        self.assertEqual("skipped", MODULE.require_mergeable(self.state_path, head=HEAD_C)["disposition"])
+        self.assertEqual({"number": 1, "kind": "initial", "replaces": None},
+                         MODULE.next_cycle(MODULE.read_state(self.state_path)["cycles"]))
+        next_head = "d" * 40
+        cycle = MODULE.start_cycle(self.state_path, head=next_head, kind="initial")
+        self.assertEqual(1, cycle["number"])
+        self.assertEqual(2, len(MODULE.read_state(self.state_path)["cycles"]))
+        self.assertEqual("skipped", MODULE.read_state(self.state_path)["cycles"][0]["disposition"])
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "still open"):
+            MODULE.require_mergeable(self.state_path, head=next_head)
+        second = MODULE.normalize_evidence(evidence(
+            issue_comments=[{**CAP_COMMENT, "body": CAP_COMMENT["body"].replace(HEAD_C, next_head)}],
+            check_runs=[{**RATE_LIMITED_CHECK, "head_sha": next_head}]), source="test")
+        MODULE.skip_cycle(self.state_path, head=next_head, pr="1656", reason="usage-cap",
+                          evidence=second, receipts_path=self.receipts)
+        self.assertEqual({"number": 1, "kind": "initial", "replaces": None},
+                         MODULE.next_cycle(MODULE.read_state(self.state_path)["cycles"]))
+        self.assertEqual(1, MODULE.start_cycle(self.state_path, head="e" * 40, kind="initial")["number"])
+        self.assertEqual(3, len(MODULE.read_state(self.state_path)["cycles"]))
+
 
 class OverrideDispositionTest(unittest.TestCase):
     """Standing three-round deferral: finding ids, replies and the target are required."""

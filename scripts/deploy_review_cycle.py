@@ -102,8 +102,9 @@ def review_cycles(entries: list[object]) -> list[dict[str, object]]:
 
 
 def budget_cycles(entries: list[object]) -> list[dict[str, object]]:
-    """Cycles that consumed a review: open ones and every result but ``unavailable``."""
-    return [cycle for cycle in review_cycles(entries) if cycle.get("result") != UNAVAILABLE]
+    """Open or delivered reviews; quota skips retain history without spending a round."""
+    return [cycle for cycle in review_cycles(entries)
+            if cycle.get("result") != UNAVAILABLE and cycle.get("disposition") != "skipped"]
 
 
 def next_cycle(entries: list[object]) -> dict[str, object]:
