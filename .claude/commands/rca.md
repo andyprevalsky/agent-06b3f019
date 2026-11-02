@@ -16,11 +16,17 @@ evidence identifying the compared revisions and the failure boundary:
 - `Gate: INTRODUCED` — the change introduced the failure.
 - `Gate: NOT_INTRODUCED` — evidence establishes the change did not introduce it.
 
+These labels describe causation, not completion or permission to drop the task.
+If fixing this issue or failed test is your assignment, you still own its fix,
+original acceptance-test pass and required completed deploy/scorecard under
+either gate. Do not waive or re-delegate the assigned failure as NOT_INTRODUCED.
+
 If the evidence cannot establish attribution, report the missing evidence and
 leave attribution unresolved; do not invent a gate. An unrelated filename or
 missing baseline does not establish `NOT_INTRODUCED`.
 
-For a test failure encountered by `/deploy`, return this diagnosis to the deploy
+For an additional failure outside the assigned repair encountered by `/deploy`,
+return this diagnosis to the deploy
 owner before starting a separate repair or deployment. This attribution phase
 takes precedence over the delegation and autonomous fix-and-deploy defaults
 below. The deploy owner applies `.claude/shared/deploy-failure-policy.md` to the
@@ -28,7 +34,8 @@ gate: own introduced repairs, hand off qualifying non-introduced repairs, and
 report evidenced external-provider outages or exhausted credits without any
 handoff. Unresolved attribution remains blocking.
 
-This gate determines ownership; it does not claim a completed repair or waive
+This gate informs routing of additional failures; it does not release an
+assigned repair, claim a completed repair or waive
 the causal proof required for a root-cause or fix claim. An independent repair
 agent receiving the handoff follows the full RCA workflow below.
 

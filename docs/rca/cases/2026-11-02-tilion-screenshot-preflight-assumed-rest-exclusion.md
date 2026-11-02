@@ -4,9 +4,9 @@ date: 2026-11-02
 title: Tilion screenshot preflight rejected a supported read beside the attached CDP client
 surface: back-end
 component: browser-provider.tilion-live.support.ts assertLiveTilionVendorContract
-classification: unresolved
-problem_class: observability-trace-capture-gap
-first_bad_boundary: Original screenshot HTTP 200 violated the unchanged 409 assertion before backend init; its missing body and post-response CDP state prevent retrospective attribution, while a captured local recurrence proves the current screenshot expectation is stale
+classification: test-bug
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: The native preflight required HTTP 409 for a documented supported screenshot beside the attached CDP client; captured-response replay and current native execution prove this stale assertion rejects valid same-target JPEG data
 symptoms:
   - "REST screenshot while CDP attached: HTTP 200"
   - "second CDP client closeCode 4409 followed by screenshot HTTP 200"
@@ -17,16 +17,15 @@ tags:
   - screenshot
   - vendor-contract
 sources:
+  - PR #1580 release 6ff4bcae6d0da979e8c6feb24c011f2698935108
   - PR #1662 occurrence c625a65da0e6429b8966142b607ff1bf
   - commit e99c91f55b9444f01a90bd4e8efc18315faeb51b
-  - commit 6f3f53201faac3a3e70de099e7c211cee6770fad
-  - PR #1580 release 6ff4bcae6d0da979e8c6feb24c011f2698935108
   - commit a3c4929f3bbd296766013a7545439b682015a6ef
   - agent thr_11a122c55dd54e1599d206740c56128b independent repair
   - agent thr_11a122c55dd54e1599d206740c56128b capture back-end/src/tests/fixtures/tilion-contract-observations.json
   - agent thr_11a122c55dd54e1599d206740c56128b capture back-end/src/tests/fixtures/tilion-attached-screenshot.json
 repro: back-end/src/tests/blackbox/browser-provider.tilion-contract.support.ts assertTilionCapturedScreenshotContract
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -69,8 +68,10 @@ attached. The snapshot hash and native response metadata are retained in
 fixture. These establish a **test bug for the current native behavior**: the
 assertion conflated exclusive CDP/drive ownership with exclusion of a supported
 read. They do not establish when the vendor changed or recover the original
-missing response. Therefore this original incident remains OPEN/classification
-unresolved, even though the stale expectation is repaired and verified.
+missing response. The current owned preflight defect is a verified test bug, repaired by PR1663.
+The original event's missing response and post-call socket state remain a
+historical attribution limit; they are not reconstructed or relabeled by the
+current proof.
 
 What: a supported screenshot is rejected. Where: the native screenshot
 assertion. Why: its 409-only condition contradicts the captured response and
@@ -86,47 +87,35 @@ recurrence: no Rose multiplexer participates here. Archive searches were
 `session_driven_by_client 4409 screenshot` and `Tilion REST CDP ownership contract`;
 read the regional-host multiplexer case and the RCA process feedback.
 
-### PR1662 occurrence c625a65da0e6429b8966142b607ff1bf
+### Later occurrence on PR1662 (2026-11-02)
 
-A separate final backend-coverage-blackbox attempt at frozen e99c91f55
-(digest 2417622cb6e59d08562b56db51a3a8ce7e9b5effc0783dbbb41f63c980bc019e)
-failed the exact same assertion. Native browser-provider log SHA256
-9bdf73967275faae498bb87d463c90b2455b6fa4ae0ac649ea511a0d1acac9c4 line 642:
-`FAIL live Tilion provider parity: REST screenshot while CDP attached: HTTP 200`.
-Shard 2 recorded 118 passed, 1 failed, 0 not run. Shard 1, unit pass, and FPS
-probe passed. The aggregate remained UNVERIFIED; merged threshold checking and
-the following teardown suite were unexecuted. The failed vendor preamble also
-left its downstream backend parity assertions unexecuted.
+The independent RCA owner supplied occurrence `c625a65da0e6429b8966142b607ff1bf`
+from frozen source `e99c91f55b9444f01a90bd4e8efc18315faeb51b` and base
+`6f3f53201faac3a3e70de099e7c211cee6770fad`. This repair owner fetched both
+commits and verified that the native fixture's SHA256 is
+`7659f3560e77bf051402e4f3381c089238d0a670ab257c050bde476f80c5c2d5` at both,
+identical to pinned main `a3c4929f3`. This is a recurrence of the existing stale
+preflight expectation, assigned to the existing repair rather than a new fix.
 
-Source comparison to base 6f3f53201 shows no back-end or package manifest
-changes. The native owning file SHA256 is
-7659f3560e77bf051402e4f3381c089238d0a670ab257c050bde476f80c5c2d5 on prior
-repair base a3c4929f3, PR1662 base 6f3f53201, frozen e99c91f55, and integrated
-e62978dec. Reduced status-boundary replay failed both PR1662 base and head;
-its contract-positive control passed both. That synthetic control alone did
-not establish native attribution, as independent review correctly identified.
+The supplied direct-native replay at 20:39:46Z bypassed deploy wrappers and
+failed the unchanged HTTP409 assertion: screenshot HTTP200, `ok=true`,
+`beside_client=true`, Example Domain URL, with primary CDP connected before and
+after the response. Its supplied image SHA256
+`bf72779fb0dfaf0db2483ec478581d242fd93f98f4ba9168ac5b4ddd4b018f69` equals
+this repair's final native screenshot. DELETE of its exact-owned session
+`sess_a651efc83eec4e1e8606467220b3639b` returned 204. This owner inspected the
+supplied metadata/digest, not an additional full raw screenshot. The supplied
+response and native-event receipts are retained in `later_occurrences` in the
+observations fixture.
 
-One additional native direct run on the authorized RCA executor bypassed the
-new deploy wrappers and called the unchanged exported function. Recorded span
-20:39:38.775-20:39:46.974Z; native exit 1 at the exact same HTTP200 assertion.
-The screenshot request ID was 06dc6ef6c62c4619. Response: HTTP200, ok=true,
-beside_client=true, JPEG, https://example.com/. Primary CDP was connected before
-and after the response. The returned JPEG SHA256
-bf72779fb0dfaf0db2483ec478581d242fd93f98f4ba9168ac5b4ddd4b018f69 exactly matches
-the existing final native sample in this repair. Original finally disconnected
-and DELETE returned204; a separate read through tilionApi returned410/closed
-(request dbea925b885d4131). No other session was allocated and no full gate ran.
-
-Gate: NOT_INTRODUCED for PR1662 source attribution. Independent re-review
-accepted the native direct discriminator and verified the source comparisons.
-The current recurrence matches the existing stale-test contract repair in
-PR1663 at 99aff0a553b53af8f48464c3432577ea818e0ff9. The original 20:30 screenshot
-body and socket state remain uncaptured; do not retroactively invent them or
-claim provider outage/credits exhaustion. Existing raw V8 archives can feed the
-unchanged c8 --check-coverage command in a private merged directory, followed
-by the original teardown test, but neither proves the unexecuted backend parity.
-This appended case is a private integration draft; the parent/repair owner
-retains source and canonical archive ownership.
+Gate: NOT_INTRODUCED for this unchanged native boundary. Preserve the PR1662
+aggregate as **UNVERIFIED**, native exit 1; its downstream parity/report/teardown
+are not certified by this receipt. The original 18:25 event's missing response,
+origin and post-call state remain unrecovered. The integration owner is carrying
+repair commit `99aff0a553b53af8f48464c3432577ea818e0ff9` into PR1662; this
+recurrence originally added evidence only. The user subsequently required this
+repair owner to complete its own full validation and deployment; that corrected
+acceptance contract is recorded below.
 
 ## Solution
 
@@ -205,9 +194,28 @@ attempt against a nonexistent database was a setup failure, not evidence of the
 reported bug; it is superseded by this configured run, not relabeled PASS.
 
 Full original backend coverage and other provider live cases are not reclassified
-by this narrow proof. The original incident remains open pending its missing
-native response/socket evidence or vendor-side request trace. The fix does not
-silently mark original failed parity PASS.
+by this narrow proof. The historical response/socket evidence or vendor-side trace remains missing.
+The original failed aggregate is retained as FAIL / UNVERIFIED. The current
+repair outcome is recorded separately below.
+
+### Replacement owner outcome verification (2026-11-02)
+
+The replacement owner retained reviewed commits `99aff0a55` and `26bb0013d`,
+merged current main `9152daa9` into the existing PR1663 branch at `79edd36b9`,
+and verified originating merge `6f3f53201` plus the controlling policy ancestry.
+No duplicate implementation, production adapter change, provider flag, assertion
+weakening, or timeout change was introduced.
+
+The same registered captured-response contract was personally re-executed with
+main's pre-repair native assertion and with the repaired assertion in isolated
+processes. Main exited 1 with `REST screenshot while CDP attached: HTTP 200`;
+the repair exited 0. The current direct native preflight also exited 0, enforcing
+the exact target/URL, decoded JPEG pixels, stable viewport, usable original CDP,
+second-client 4409, detached screenshot, and DELETE 204/204/410. All nine original
+negative controls exited 0. No live sessions were retained by those invocations.
+
+The first unchanged full invocation on 79edd36b9 exited 1: 237/239 domains passed, 353 unit files and isolated FPS passed. This preflight passed; downstream rotation and agent-tools WebGL failed. Coverage threshold merge and trailing teardown were not executed. Full original-command acceptance remains pending a new native pass; no earlier aggregate is reclassified.
+Deployment is in progress on PR1663; merge and production verification are not yet claimed.
 
 ## Human feedback
 
@@ -219,6 +227,57 @@ No unrelated quota, credential, paid top-up or Rose account-spawn changes were
 authorized. Preserve Freedom. Successful creation completes the original handoff;
 PR1580 does not wait for acknowledgement, status or completion here.
 
+The user corrected the earlier diagnosis/draft-only endpoint: this owner must
+make the original full invocation pass and finish its own `/deploy` through
+merge, production verification, exact resource cleanup, and a finished
+scorecard, without an acknowledgement prerequisite. Historical aggregates must
+retain their native outcomes. Preserve the existing PR and negative controls;
+new implementation delegates use Codex gpt-6.1-sol/high/standard.
+
 ## Reusable lesson
 
 Distinguish exclusive CDP drive ownership from supported read-only vendor operations, and retain response plus post-call owner state before assigning a contract mismatch's cause.
+
+## Retained PR1662 aggregate evidence
+
+### PR1662 occurrence c625a65da0e6429b8966142b607ff1bf
+
+A separate final backend-coverage-blackbox attempt at frozen e99c91f55
+(digest 2417622cb6e59d08562b56db51a3a8ce7e9b5effc0783dbbb41f63c980bc019e)
+failed the exact same assertion. Native browser-provider log SHA256
+9bdf73967275faae498bb87d463c90b2455b6fa4ae0ac649ea511a0d1acac9c4 line 642:
+`FAIL live Tilion provider parity: REST screenshot while CDP attached: HTTP 200`.
+Shard 2 recorded 118 passed, 1 failed, 0 not run. Shard 1, unit pass, and FPS
+probe passed. The aggregate remained UNVERIFIED; merged threshold checking and
+the following teardown suite were unexecuted. The failed vendor preamble also
+left its downstream backend parity assertions unexecuted.
+
+Source comparison to base 6f3f53201 shows no back-end or package manifest
+changes. The native owning file SHA256 is
+7659f3560e77bf051402e4f3381c089238d0a670ab257c050bde476f80c5c2d5 on prior
+repair base a3c4929f3, PR1662 base 6f3f53201, frozen e99c91f55, and integrated
+e62978dec. Reduced status-boundary replay failed both PR1662 base and head;
+its contract-positive control passed both. That synthetic control alone did
+not establish native attribution, as independent review correctly identified.
+
+One additional native direct run on the authorized RCA executor bypassed the
+new deploy wrappers and called the unchanged exported function. Recorded span
+20:39:38.775-20:39:46.974Z; native exit 1 at the exact same HTTP200 assertion.
+The screenshot request ID was 06dc6ef6c62c4619. Response: HTTP200, ok=true,
+beside_client=true, JPEG, https://example.com/. Primary CDP was connected before
+and after the response. The returned JPEG SHA256
+bf72779fb0dfaf0db2483ec478581d242fd93f98f4ba9168ac5b4ddd4b018f69 exactly matches
+the existing final native sample in this repair. Original finally disconnected
+and DELETE returned204; a separate read through tilionApi returned410/closed
+(request dbea925b885d4131). No other session was allocated and no full gate ran.
+
+Gate: NOT_INTRODUCED for PR1662 source attribution. Independent re-review
+accepted the native direct discriminator and verified the source comparisons.
+The current recurrence matches the existing stale-test contract repair in
+PR1663 at 99aff0a553b53af8f48464c3432577ea818e0ff9. The original 20:30 screenshot
+body and socket state remain uncaptured; do not retroactively invent them or
+claim provider outage/credits exhaustion. Existing raw V8 archives can feed the
+unchanged c8 --check-coverage command in a private merged directory, followed
+by the original teardown test, but neither proves the unexecuted backend parity.
+This appended case is a private integration draft; the parent/repair owner
+retains source and canonical archive ownership.

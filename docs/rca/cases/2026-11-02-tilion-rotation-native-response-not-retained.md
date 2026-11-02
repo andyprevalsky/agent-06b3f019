@@ -1,12 +1,12 @@
 ---
 id: 2026-11-02-tilion-rotation-native-response-not-retained
 date: 2026-11-02
-title: First live Tilion rotation returned a typed state-carry refusal after unproven freshness
+title: Tilion pooled-IP rotation acknowledgement was mistaken for no exit movement
 surface: back-end
 component: tilion-rotation
-classification: unresolved
-problem_class: observability-trace-capture-gap
-first_bad_boundary: Native rotate-ip normalized to rotated=true and freshAllocation=false; original response and IP evidence are missing so causality remains unproven
+classification: our-bug
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: tilionRotateInPlace and assembleRotationResponse required brand-new allocation even for an acknowledged same-session move to another pooled exit
 symptoms:
   - FAIL live Tilion provider parity
   - carried_state_required
@@ -16,13 +16,14 @@ tags:
   - browser
   - proxy-rotation
 sources:
+  - PR #1663
   - PR #1662
   - commit 7be0644bb164763af1526ead7b426e2d5e909f4a
   - commit 067495d51582f3946d5a5b980ccc8416b66dff02
   - commit 6f3f53201faac3a3e70de099e7c211cee6770fad
   - plan:/var/tmp/staged-deploy-implementation/.context/deploy-pipeline/rca/c66eb1133bd641edadd3d117273cdb2d.json
-repro: none-recorded
-status: open
+repro: back-end/src/tests/blackbox/browser-provider.tilion-contract.support.ts assertTilionRotationResponseContract
+status: fixed
 ---
 
 ## Problem
@@ -41,8 +42,7 @@ not execution of the teardown test.
 
 ## Diagnosis
 
-Attribution is UNKNOWN; neither a completed RCA nor provider-outage/credit
-exception is established. Original native log SHA256 is
+At the initial c66 investigation, attribution was UNKNOWN and no provider-outage/credit exception was established. Later captured-response evidence below establishes the owned rejection boundary; original raw fields remain unknown. Original native log SHA256 is
 d1603fba9aa450d30a74f9bedaea68213e50c1620771e57e969fcbf883886285;
 server SHA256 is 0be6990bd2028133cbbcf586ec2d0fff10a6f6c787e152f8b8356b4948d7812d.
 Task 25a6fd07-8fe1-5925-b6b8-551746d2a214 used native session
@@ -75,7 +75,46 @@ for rotate-ip; no speculative body flag is justified.
 
 ## Solution
 
-No source fix or verified fix exists. A private one-shot native probe is ready
+PR1663 repairs both acknowledgement boundaries. The low adapter requires
+`rotated=true`, an explicit boolean `fresh_allocation`, and the exact native
+session ID. It preserves false allocation provenance rather than claiming a
+brand-new allocation. The response assembler accepts either explicit boolean
+while preserving all before/after session, context, logical-owner, control-state
+and user checks. It reads the same browser without opening another CDP client
+or attempting a checkpoint restore. Refusals and malformed/unacknowledged
+responses still require worker-carried state for replacement; there is no new
+request flag, retry, timeout or provider allocation.
+
+API reference section 8 documents `fresh_allocation=false` as moving to another
+address from the pool. Its residential-always-true sentence is contradicted by
+controlled c774's actual false response plus changed IP and retained storage;
+this does not establish an outage. The original parity test still requires a
+changed IP, retained session and storage. The captured response distinguishes
+allocation provenance from movement; it does not reconstruct c66/024f bodies.
+
+Permanent regression controls cover true and pooled-false acknowledgements,
+missing/malformed proof, wrong/missing session, unacknowledged movement and all
+existing ownership/post-read drift checks. The new low-adapter test failed
+before repair with TilionUncarriedStateError and passed after repair. The same
+17-control response-assembly fixture failed before the assembler repair with
+"Logical browser restore requires validated transport" and passed afterward,
+with zero CDP connections and zero restores for pooled movement. The registered
+blackbox case reproduces that RED/GREEN through the real route/provider stack.
+Five consecutive complete provider unit executions passed after extraction.
+
+A fresh unchanged `bash scripts/run-blackbox-tests.sh browser-provider` passed
+natively in 225578ms. Its live parity kept the original browser while the exit
+changed from 134.215.178.110 to 24.18.178.179, then switched to Kernel mobile
+172.56.29.219 with the existing state/ownership assertions intact. This is a
+current repaired-source result, not a retrospective pass of either failed
+aggregate. The full original coverage invocation and deployment remain pending.
+Golden reference: not applicable (no approval-gated hunk). At 10k agents, this
+adds no query, socket, retry, allocation or retained state: it changes the
+acknowledgement predicate on the already-issued operation.
+
+### Historical investigation before the repair
+
+At this earlier handoff, no source fix or verified fix existed. A private one-shot native probe is ready
 for the parent's source-bound worker launch: it reuses the frozen parity setup
 on an isolated backend, records raw response/headers plus actual before/after
 IP and storage, and verifies exact-session cleanup. It makes one rotation
@@ -136,7 +175,7 @@ Retain native rotation response fields and same-session exit observations before
 After accepting the limited attribution, the parent explicitly assigned this
 thread independent repair ownership. Accepted and OPEN at
 https://boxes.dev/thread/thr_43792b37faf749c69821eb62a4695992 (HTTP 200 verified).
-Work remains limited to private proofs and a drafted exact fix; parent retains
+At that handoff work was limited to private proofs and a drafted exact fix; parent retained
 source integration and deployment. No assertion change or provider retry is
 authorized by this ownership record. The handoff is separate from the RCA
 attribution and does not turn either native failure into a pass.
@@ -155,11 +194,18 @@ Server SHA256 cdc0e9cae7f712ac92b91cf4110ec3544cddb5498109d01f1d575c819da63aa1;
 domain SHA256 16e3409e44f6ba9ddcf355551cc4a2514b33f9bdc71744bc7d71fbbc741c53a7.
 The case-aware producer records 243 complete case outcomes, one FAIL, with
 coverage thresholds, teardown, units and FPS all PASS and cleanup complete.
-These are successor receipts, not retroactive passes for c66. The existing
-repair remains OPEN: no freshness assertion was weakened. Source-bound
+These are successor receipts, not retroactive passes for c66. At that successor checkpoint the repair remained OPEN; no freshness assertion was weakened. Source-bound
 original request/result and full domain/server logs were read; new native
 raw body and pre/post IP are still absent. The c774 native proof and unchanged
 local adapter replay support the same limited NOT_INTRODUCED attribution;
 Worker A independently reviewed the new logs and source hashes and confirmed
 no objection to this limited source attribution. Native FAIL and repair OPEN
 remain unchanged.
+
+## Replacement implementation outcome
+
+The high/standard PR1663 owner integrated this evidence and owns the source fix,
+original full invocation and deployment. The old xhigh investigation owner
+performed read-only review of the complete low-adapter plus assembler patch,
+with no blocking objection. Its scope is review, not a competing implementation.
+Historical missing raw response/IP evidence remains explicitly unrecovered.

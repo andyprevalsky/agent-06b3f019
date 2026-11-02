@@ -129,7 +129,7 @@ export async function assembleRotationResponse<T>(
     result.provider !== 'tilion' ||
     result.previousProvider !== 'tilion' ||
     result.ipRotation?.rotated !== true ||
-    result.ipRotation.freshAllocation !== true
+    typeof result.ipRotation.freshAllocation !== 'boolean'
   )
     return restore();
   const assertBinding = async () => {

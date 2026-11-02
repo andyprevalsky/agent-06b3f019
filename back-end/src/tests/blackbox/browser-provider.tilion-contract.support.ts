@@ -1,5 +1,6 @@
 /** Captured native screenshot replay; all HTTP/CDP activity stays in this process or loopback. */
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -174,7 +175,23 @@ export async function assertTilionScreenshotRejectsInvalidOwnership(): Promise<v
   }
 }
 
+export async function assertTilionRotationResponseContract(): Promise<void> {
+  execFileSync(
+    process.execPath,
+    [
+      '--import',
+      'tsx',
+      path.join(__dirname, '../../../scripts/fixtures/tilion-inplace-response.fixture.cjs'),
+    ],
+    { stdio: 'inherit' }
+  );
+}
+
 export const tilionContractCases: Array<[string, () => Promise<void>]> = [
+  [
+    'Tilion pooled exit rotation preserves the original transport and rejects invalid proofs',
+    assertTilionRotationResponseContract,
+  ],
   [
     'Tilion captured screenshot preserves attached CDP ownership',
     assertTilionCapturedScreenshotContract,

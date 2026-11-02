@@ -583,5 +583,151 @@
       "not_run_domains": 0
     },
     "scope": "offline browser-provider domain plus separate native preflight; no full-release or cross-provider live parity claim"
-  }
+  },
+  "later_occurrences": [
+    {
+      "id": "c625a65da0e6429b8966142b607ff1bf",
+      "reported_by": "ph73v4njem66veedmj79xc7s7x8he5rf",
+      "pr": 1662,
+      "source": {
+        "head": "e99c91f55b9444f01a90bd4e8efc18315faeb51b",
+        "digest": "2417622cb6e59d08562b56db51a3a8ce7e9b5effc0783dbbb41f63c980bc019e"
+      },
+      "base": "6f3f53201faac3a3e70de099e7c211cee6770fad",
+      "owner_file_sha256": "7659f3560e77bf051402e4f3381c089238d0a670ab257c050bde476f80c5c2d5",
+      "owner_file_matches_pinned_main": true,
+      "native_aggregate_result": "UNVERIFIED",
+      "native_exit": 1,
+      "aggregate_complete": false,
+      "native_events": [
+        {
+          "at": "2026-11-02T20:39:38.775Z",
+          "event": "start",
+          "sourceSha256": "7659f3560e77bf051402e4f3381c089238d0a670ab257c050bde476f80c5c2d5"
+        },
+        {
+          "at": "2026-11-02T20:39:41.109Z",
+          "event": "tilion-response",
+          "method": "POST",
+          "path": "/v1/session",
+          "requestBody": "{\"idle_timeout\":120,\"ttl\":600}",
+          "status": 201,
+          "durationMs": 902.3680609999997,
+          "headers": {
+            "content-type": "application/json",
+            "content-length": "1152",
+            "x-request-id": "c8bcded5a5c44ae7"
+          },
+          "bodyBytes": 1152,
+          "bodySha256": "eb0914457ae4170bed7841ff51f83d9f87a8a2ae49a3493b9c9110f87d38ee5d",
+          "bodyKeys": [
+            "session_id",
+            "state",
+            "mode",
+            "verification",
+            "region",
+            "exit",
+            "owner",
+            "created_at",
+            "last_active",
+            "idle_timeout",
+            "ttl",
+            "expires_at",
+            "connect_url",
+            "connect_expires_in",
+            "playwright_url",
+            "persona",
+            "device",
+            "site_check",
+            "full_browser",
+            "geo_applied",
+            "geo_unsupported",
+            "replay_url",
+            "fast_input",
+            "ignored_fields",
+            "profile"
+          ],
+          "detailError": null,
+          "connectedBefore": [],
+          "connectedAfter": [],
+          "rawSaved": false
+        },
+        {
+          "at": "2026-11-02T20:39:41.397Z",
+          "event": "primary-cdp-connected"
+        },
+        {
+          "at": "2026-11-02T20:39:46.872Z",
+          "event": "tilion-response",
+          "method": "POST",
+          "path": "/v1/session/sess_a651efc83eec4e1e8606467220b3639b/screenshot",
+          "requestBody": "{}",
+          "status": 200,
+          "durationMs": 171.7802210000009,
+          "headers": {
+            "content-type": "application/json",
+            "content-length": "109192",
+            "x-request-id": "06dc6ef6c62c4619"
+          },
+          "bodyBytes": 109192,
+          "bodySha256": "ab77fdc240834970708f1947e798f976c2e3f8a8a6a65e274469e8ebe66a7f75",
+          "bodyKeys": [
+            "ok",
+            "session_id",
+            "format",
+            "full_page",
+            "image_base64",
+            "data_url",
+            "size_b64",
+            "tab_id",
+            "url",
+            "beside_client"
+          ],
+          "detailError": null,
+          "connectedBefore": [true],
+          "connectedAfter": [true],
+          "rawSaved": true
+        },
+        {
+          "at": "2026-11-02T20:39:46.973Z",
+          "event": "tilion-response",
+          "method": "DELETE",
+          "path": "/v1/session/sess_a651efc83eec4e1e8606467220b3639b",
+          "requestBody": null,
+          "status": 204,
+          "durationMs": 78.35837899999933,
+          "headers": {
+            "content-type": null,
+            "content-length": null,
+            "x-request-id": "f6ae566f08b2476d"
+          },
+          "bodyBytes": 0,
+          "bodySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bodyKeys": null,
+          "detailError": null,
+          "connectedBefore": [false],
+          "connectedAfter": [false],
+          "rawSaved": false
+        },
+        {
+          "at": "2026-11-02T20:39:46.974Z",
+          "event": "result",
+          "result": "FAIL",
+          "error": "Error: REST screenshot while CDP attached: HTTP 200 "
+        }
+      ],
+      "screenshot_summary": {
+        "ok": true,
+        "session_id": "sess_a651efc83eec4e1e8606467220b3639b",
+        "format": "jpeg",
+        "full_page": false,
+        "size_b64": 54464,
+        "tab_id": "AFCD6D6E40C2CD272F95F8BE61206E9F",
+        "url": "https://example.com/",
+        "beside_client": true,
+        "image_sha256": "bf72779fb0dfaf0db2483ec478581d242fd93f98f4ba9168ac5b4ddd4b018f69"
+      },
+      "proof_limit": "Sender supplied response metadata and digest; no new full raw response or JPEG decoded by this repair owner. Digest equals this repair final native capture. Aggregate remains UNVERIFIED; downstream parity and teardown are not certified."
+    }
+  ]
 }
