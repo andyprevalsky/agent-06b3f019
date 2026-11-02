@@ -62,7 +62,8 @@ def review_cycles(entries: list[object]) -> list[dict[str, object]]:
 
 
 def start_cycle(
-    path: Path, *, head: str, kind: str, reset: bool = False
+    path: Path, *, head: str, kind: str, reset: bool = False,
+    verification_approval: str | None = None,
 ) -> dict[str, object]:
     if not head:
         raise ReviewCycleError("review HEAD must not be empty")
@@ -95,10 +96,19 @@ def start_cycle(
         raise ReviewCycleError(
             f"review cycle {cycle_number} must be {expected_kind}, not {kind}"
         )
+    if verification_approval is not None:
+        if (
+            cycle_number != 3
+            or cycles[-1].get("result") != "clean"
+            or not verification_approval
+            or len(verification_approval) > 128
+            or any(not (c.isalnum() or c in "-_.:") for c in verification_approval)
+        ):
+            raise ReviewCycleError("verification approval needs cycle three after clean cycle two and an approval ID")
     if cycle_number == 3:
         previous = cycles[-1]
         assert isinstance(previous, dict)
-        if previous.get("result") != "findings":
+        if previous.get("result") != "findings" and verification_approval is None:
             raise ReviewCycleError(
                 "verification review is allowed only after cycle two found a valid issue"
             )
@@ -109,6 +119,8 @@ def start_cycle(
         "status": "open",
         "started_at": now(),
     }
+    if verification_approval is not None:
+        cycle["verification_approval"] = verification_approval
     entries.append(cycle)
     write_state(path, state)
     return cycle
@@ -265,6 +277,7 @@ def parse_args() -> argparse.Namespace:
     start.add_argument("--head", required=True)
     start.add_argument("--kind", choices=sorted(KINDS), required=True)
     start.add_argument("--reset", action="store_true")
+    start.add_argument("--verification-approval", help="Explicit user approval ID for final verification after a clean second cycle")
 
     finish = subparsers.add_parser("finish")
     finish.add_argument("--head", required=True)
@@ -287,7 +300,8 @@ def main() -> int:
     try:
         if args.command == "start":
             payload = start_cycle(
-                args.state, head=args.head, kind=args.kind, reset=args.reset
+                args.state, head=args.head, kind=args.kind, reset=args.reset,
+                verification_approval=args.verification_approval,
             )
         elif args.command == "finish":
             payload = finish_cycle(args.state, head=args.head, result=args.result)

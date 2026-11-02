@@ -2194,7 +2194,12 @@ python3 scripts/deploy_review_cycle.py finish --head "$REVIEW_HEAD" --result cle
 
 The normal budget is the initial review plus one batched incremental review. A
 third verification review is allowed only when the second review found a valid
-issue that required another code change. `deploy_review_cycle.py` hard-stops a
+issue that required another code change. A separately approved final-admission exception may use
+`start --kind verification --head "$REVIEW_HEAD" --verification-approval <approval-id>`
+after a clean second cycle when later required gate fixes changed the source.
+Record the explicit user approval ID and exact scope in TEST_REPORT and the PR.
+This preserves the old entries and the three-cycle cap; it only opens the final
+review and does not waive a review result or any other gate. `deploy_review_cycle.py` hard-stops a
 fourth cycle. If cycle three still has valid findings, record `deploy outcome
 blocked` and stop this deploy as **review-unstable**; never merge an unreviewed
 fix. Stabilize the branch as development work, then start a fresh `/deploy`.

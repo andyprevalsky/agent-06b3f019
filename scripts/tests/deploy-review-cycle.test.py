@@ -194,5 +194,51 @@ class SyncInheritanceTest(unittest.TestCase):
         self.assertEqual(cycle["number"], 2)
 
 
+class ApprovedFinalVerificationTest(unittest.TestCase):
+    setUp = ReviewCycleTest.setUp
+    tearDown = ReviewCycleTest.tearDown
+    complete = ReviewCycleTest.complete
+    def prepared(self):
+        self.complete("a" * 40, "initial", "clean", reset=True)
+        self.complete("b" * 40, "incremental", "clean")
+        return MODULE.read_state(self.state_path)["cycles"].copy()
+
+    def test_explicit_admission_preserves_history_and_does_not_finish_review(self):
+        old = self.prepared()
+        MODULE.start_cycle(self.state_path, head="c" * 40, kind="verification",
+                           verification_approval="PR1634-REVIEW-ADMISSION")
+        state = MODULE.read_state(self.state_path)
+        self.assertEqual(state["cycles"][:2], old)
+        self.assertEqual(state["cycles"][2]["verification_approval"], "PR1634-REVIEW-ADMISSION")
+        with self.assertRaises(MODULE.ReviewCycleError):
+            MODULE.require_mergeable(self.state_path, head="c" * 40)
+        with self.assertRaises(MODULE.ReviewCycleError):
+            MODULE.finish_cycle(self.state_path, head="d" * 40, result="clean")
+        MODULE.finish_cycle(self.state_path, head="c" * 40, result="clean")
+        MODULE.require_mergeable(self.state_path, head="c" * 40)
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "cap reached"):
+            MODULE.start_cycle(self.state_path, head="d" * 40, kind="verification",
+                               verification_approval="PR1634-REVIEW-ADMISSION")
+
+    def test_approval_is_not_a_findings_waiver(self):
+        self.prepared()
+        MODULE.start_cycle(self.state_path, head="c" * 40, kind="verification",
+                           verification_approval="PR1634-REVIEW-ADMISSION")
+        MODULE.finish_cycle(self.state_path, head="c" * 40, result="findings")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "not mergeable"):
+            MODULE.require_mergeable(self.state_path, head="c" * 40)
+
+    def test_approval_is_only_valid_at_the_exact_final_boundary(self):
+        with self.assertRaises(MODULE.ReviewCycleError):
+            MODULE.start_cycle(self.state_path, head="a" * 40, kind="initial", reset=True,
+                               verification_approval="PR1634-REVIEW-ADMISSION")
+        self.prepared()
+        for ref in ("", "approval with spaces", "a" * 129):
+            with self.assertRaises(MODULE.ReviewCycleError):
+                MODULE.start_cycle(self.state_path, head="c" * 40, kind="verification",
+                                   verification_approval=ref)
+        self.assertEqual(len(MODULE.read_state(self.state_path)["cycles"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
