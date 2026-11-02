@@ -155,9 +155,12 @@ design, UI and harness decision by whether it makes Rose a better RWLH.
 Deploy test-repair handoffs use the backend and commands in
 `.claude/shared/deploy-failure-policy.md`: currently boxes.dev, with Rose account
 commands feature-flagged off pending a separate migration.
-Only platform routing and the originating deploy's wait/monitoring obligations
-change for these handoffs; title, model, reasoning/effort and speed/service-tier
-requirements below remain in force.
+These handoffs require an actual failed test and its exact error/scope, are
+created only after the originating merge to main, and run an autonomous
+`/goal` through their own completed deploy. They always use high effort and
+normal speed (`--reasoning-effort high --speed standard` on boxes.dev),
+overriding the effort/speed inheritance and fallback below for these repair
+delegates only. Title, model and other delegation requirements remain in force.
 
 - Every agent-created thread title must start with the exact prefix `--ai--`; include it in creation instructions and have the child set and verify its title as soon as it starts, preserving the prefix on later renames.
 - Sub-agents must inherit the parent agent's model, reasoning/effort level, and

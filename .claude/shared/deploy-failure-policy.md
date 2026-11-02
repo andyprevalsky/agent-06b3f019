@@ -18,19 +18,29 @@ exception. Use its evidence-backed `Gate: INTRODUCED` or
 `Gate: NOT_INTRODUCED` response; do not classify independently of that diagnosis.
 An unresolved RCA attribution stays UNKNOWN and cannot receive a waiver.
 The attribution response does not require completing a separate repair first.
+Independent repair delegation requires an existing test or required test gate
+that actually ran and FAILED. Supply its exact command, test name, scope,
+verbatim emitted error, source revision and native failure evidence. A code
+observation, suspected secondary defect, skipped test or unexecuted check does
+not authorize a repair delegate. Do not invent a test after the observation
+to retroactively justify the delegation.
 
 - **INTRODUCED:** evidence links the failure to this deploying agent's changes,
   including its repairs or integration work. The deploy owner owns it; it
   blocks deployment and cannot receive a delegation waiver.
 - **NOT INTRODUCED:** evidence establishes that the failure was not introduced
   by those changes. Read relevant existing repair agents before editing a fix.
-  If matched, send the occurrence and evidence there; if uncertain, exchange
-  the suspected connection and distinguishing evidence with that agent.
-  Otherwise spawn a separate repair agent through the active backend below, with a clear title, evidence
-  and `/RCA` instructions. Successful evidence delivery or instructed agent
-  creation completes the handoff: no acknowledgement, status handshake or
-  repair completion is required. The recorded failure is then waived for this
-  deployment; continue immediately.
+  If uncertain about a match, exchange distinguishing evidence with the owner.
+  Before merge, retain the failed-test handoff packet in the existing deploy
+  report and continue toward merge with that exact failure qualified as pending
+  post-merge delegation. Do not create a repair delegate before the originating
+  PR has merged to main. After merge, deliver the full repair goal to the
+  matched owner or create a separate repair agent through the active backend
+  below. Successful post-merge goal delivery or instructed creation completes
+  the handoff: no acknowledgement, status handshake or repair completion is
+  required by the originating deploy. Record the actual repair link and waiver,
+  then continue immediately. Pending handoffs must be dispatched before the
+  originating deploy can report completion.
 - **UNKNOWN:** establish attribution before granting a delegation waiver.
   An unrelated filename, an unexplained timeout or a missing baseline is not
   evidence of NOT INTRODUCED.
@@ -41,6 +51,56 @@ identical errors can have different causes. Reconcile overlapping discoveries
 before duplicate repair edits. The repair agent follows `/RCA`; this policy
 does not prescribe its implementation strategy. Do not create a task board,
 ownership leases, acknowledgement protocol or mandatory status labels.
+
+## Post-merge autonomous repair goal
+
+Create repair delegates only after the originating PR is confirmed merged.
+Use a new devbox from current `origin/main`, and verify that it contains the
+originating merge before beginning the repair. Never fork the deploying
+agent's pre-merge branch or uncommitted workspace. Existing matched repair
+owners must also bring their work onto current main containing that merge.
+Production test failures discovered after merge can be dispatched immediately.
+
+Every repair delegate is unmonitored and must work fully autonomously; nobody
+will answer its questions. Start its built-in `/goal`, not just an ordinary
+diagnosis task, with this completion condition and the concrete failed-test
+packet filled in:
+
+```text
+/goal Fix <exact failed test> within <scope>, make the original failing
+command pass, and finish /deploy through merge, production verification,
+cleanup and a completed deploy scorecard.
+
+Failed test: <existing test name>
+Command: <exact executed command and relevant invocation settings>
+Scope: <affected behavior and boundaries to preserve>
+Exact error: <verbatim native test failure>
+Failure evidence: <accessible original log/artifacts>
+Failed source: <revision that produced the failure>
+Originating merge: <confirmed main merge revision>
+
+Read CLAUDE.md and follow /RCA. Work autonomously from current main;
+do not ask questions or depend on human replies. Resolve implementation
+choices using the existing instructions and evidence. Prove the assigned
+test passes, then carry the fix through /deploy to its completed scorecard.
+An OPEN diagnosis, observability report, draft PR or stopped investigation
+does not complete this goal. Do not waive or re-delegate the assigned test
+as a substitute for fixing it. Preserve test intent, assertions, timeouts
+and existing permissions; never fabricate success. Keep working until
+the goal is achieved, including ordinary review and production work.
+```
+
+Set native goal state when the harness provides goal tools; a quoted `/goal`
+line or promise to continue is not an active goal. Missing evidence is work
+to resolve, not an acceptable diagnosis-only final deliverable. The deploy
+owner does not monitor or wait for these independent repair goals.
+
+New repair delegates always use **high effort and normal speed**, overriding
+the parent's inherited effort/speed and any faster fallback. On boxes.dev,
+normal speed is `--speed standard`: pass `--reasoning-effort high --speed
+standard` explicitly. Never use fast or ultrafast for these delegates. Keep
+the parent's model/harness, verify supported options before launch, and do
+not silently substitute an unsupported effort or speed.
 
 ## External provider failure: no handoff
 
@@ -78,12 +138,15 @@ Use the boxes.dev read/delegation skills and these commands:
 dvb-onbox threads list --scope project --json
 dvb-onbox threads read --scope project --thread <thread-id> --turns 10 --json
 dvb-onbox threads send --thread <thread-id> --prompt-file evidence.md --idempotency-key <discovery-key> --json
-dvb-onbox threads start --target current-devbox --agent codex --muted --prompt-file handoff.md --idempotency-key <handoff-key> --json
+dvb-onbox threads options --agent codex --json
+dvb-onbox threads start --target new-devbox --agent codex --model <verified-parent-model> --reasoning-effort high --speed standard --muted --prompt-file handoff.md --idempotency-key <handoff-key> --json
 ```
 
 Follow returned pagination cursors with `--cursor`; read the actual work before
-matching. Use the deploy owner's harness and preserve the model, reasoning and
-speed requirements in `CLAUDE.md`. The new thread owns its repair; successful
+matching. Use the deploy owner's harness/model and this policy's explicit high
+effort/normal speed. Verify the child's effective settings after launch. Run
+the start command only after merge, with the complete `/goal` packet above.
+The new thread owns its repair through its own completed deploy; successful
 creation or evidence delivery is the handoff, without an acknowledgement or
 completion wait. Retain the returned permanent boxes.dev thread URL in the
 scorecard. Do not archive an outstanding independent repair just because its
@@ -109,8 +172,8 @@ examined. Follow a message's `more_command` for its remaining text. Titles
 help discovery but never establish a common cause. Account listing includes
 unfinished work even when its agent is idle.
 
-The handoff contains the failing command, expected/actual result, source
-revision, accessible evidence and `/RCA` instructions. Local-only files are
+The handoff contains the complete failed-test `/goal` packet above, including
+the exact error, scope and originating merge. Local-only files are
 not available to a new Rose agent: provide accessible evidence or attachments.
 Reuse the same request key and identical arguments after ambiguous delivery.
 Successful creation returns the independent agent ID and URL immediately.
@@ -144,6 +207,10 @@ delegation waivers and external-provider handoffs. The same `render` command
 reads the base scorecard from stdin and appends cumulative delegated rows and
 the external-provider alerts last. Its JSON also supplies the same rows to an
 HTML scorecard; renderers must preserve their placement and native results.
+
+Pre-merge pending packets are not completed handoffs: keep them in the existing
+deploy report until actual post-merge dispatch. Do not invent a repair link or
+record `Delegated / waived` in this helper before that dispatch succeeds.
 
 The delegating deploy can complete while those repairs and external-provider
 alerts remain outstanding. Its own introduced failures, unknown failures and
