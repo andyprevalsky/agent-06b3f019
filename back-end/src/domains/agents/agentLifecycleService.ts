@@ -134,6 +134,16 @@ export interface CreateAgentOptions {
   originDeviceHeader?: string;
 }
 
+function graphSpawnFields(options: CreateAgentOptions) {
+  return options.graphSpawn === undefined
+    ? {}
+    : {
+        title: options.graphSpawn.title,
+        folderId: options.graphSpawn.folderId,
+        graphSpawnHash: options.graphSpawn.requestHash,
+      };
+}
+
 /** Server-side create fields: the root repository and the Mac that started it. */
 async function serverCreateFields(
   body: CreateAgentBody,
@@ -224,13 +234,7 @@ export async function createAgent(
     ...(await serverCreateFields(body, userId, isSubAgent, options)),
     projectId,
     folderId,
-    ...(options.graphSpawn === undefined
-      ? {}
-      : {
-          title: options.graphSpawn.title,
-          folderId: options.graphSpawn.folderId,
-          graphSpawnHash: options.graphSpawn.requestHash,
-        }),
+    ...graphSpawnFields(options),
     taskPath,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;

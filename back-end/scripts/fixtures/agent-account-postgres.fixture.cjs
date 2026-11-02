@@ -138,8 +138,15 @@ async function main() {
     execFileSync('createdb', ['-h', '127.0.0.1', '-U', 'postgres', db], { env, timeout: 15000 });
     created = true;
     execFileSync(
-      resolve(root, 'node_modules/.bin/prisma'),
-      ['db', 'push', '--skip-generate', '--schema', resolve(root, 'prisma/schema.prisma')],
+      process.execPath,
+      [
+        require.resolve('prisma/build/index.js', { paths: [root] }),
+        'db',
+        'push',
+        '--skip-generate',
+        '--schema',
+        resolve(root, 'prisma/schema.prisma'),
+      ],
       { env, cwd: root, timeout: 90000, stdio: 'pipe' }
     );
     prisma = require(root + '/src/providers/database.ts').prisma;
