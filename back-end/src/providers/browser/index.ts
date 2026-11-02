@@ -72,8 +72,9 @@ export { selectedBrowserProvider, tilionEnabled, TilionApiKeyMissingError } from
  * session accepts ONE CDP socket: a second is accepted then closed with 4409
  * while the first is unaffected, and the same token reattaches after the first
  * disconnects. While a CDP client is attached, REST drive calls do not wait:
- * screenshot/act answer 409 `session_driven_by_client` and files/fetch 502
- * `ExternalControlBusy`; only /status keeps working. Backend paths therefore:
+ * act answers 409 `session_driven_by_client` and files/fetch 409/502; /status
+ * keeps working, and since 2026-11 a read-only screenshot is served beside the
+ * client (200, `beside_client: true`). Backend paths therefore:
  *
  *   initSession:   create (validation socket) → injectUserData (reuses it) → close it → worker attaches
  *   prepare-auth / inject-local-storage (JIT):  worker detaches → backend CDP → worker reattaches

@@ -169,10 +169,24 @@ export async function assertLiveTilionVendorContract(): Promise<void> {
       );
       assert(browser.isConnected(), 'first CDP client was dropped by the refused second client');
       assert((await page.title()) === 'Example Domain', 'first CDP client stopped working');
+      // Since 2026-11 Tilion serves a read-only screenshot beside an attached
+      // client; driving calls are still refused while it is attached.
       const shot = await tilionApi('POST', `/v1/session/${sessionId}/screenshot`, {});
+      const shotBody = shot.body as { beside_client?: unknown; size_b64?: unknown } | null;
       assert(
-        shot.status === 409 && detailSlug(shot.body) === 'session_driven_by_client',
-        `REST screenshot while CDP attached: HTTP ${shot.status} ${detailSlug(shot.body) ?? ''}`
+        shot.status === 200 &&
+          shotBody?.beside_client === true &&
+          typeof shotBody.size_b64 === 'number' &&
+          shotBody.size_b64 > 0,
+        `REST screenshot beside CDP client: HTTP ${shot.status} ${detailSlug(shot.body) ?? ''}`
+      );
+      const act = await tilionApi('POST', `/v1/session/${sessionId}/act`, {
+        action: 'scroll',
+        dy: 200,
+      });
+      assert(
+        act.status === 409 && detailSlug(act.body) === 'session_driven_by_client',
+        `REST act while CDP attached: HTTP ${act.status} ${detailSlug(act.body) ?? ''}`
       );
     });
     const detached = await tilionApi('POST', `/v1/session/${sessionId}/screenshot`, {
@@ -192,7 +206,7 @@ export async function assertLiveTilionVendorContract(): Promise<void> {
     if (!released) await releaseTilionRemoteSession(sessionId).catch(() => undefined);
   }
   console.log(
-    'PASS live Tilion vendor contract (4409, session_driven_by_client, DELETE 204/204/410)'
+    'PASS live Tilion vendor contract (4409, screenshot beside client, act session_driven_by_client, DELETE 204/204/410)'
   );
 }
 
