@@ -36193,6 +36193,98 @@ async def test_disconnected_playwright_handoff_liveness():
         await _exercise_disconnected_playwright_full_activity(mode)
 
 
+async def test_closed_page_waits_for_authoritative_focus_recovery():
+    """A detach/recovery handoff must finish before selecting its exact Page."""
+    from browser_use.browser.session_manager import SessionManager
+    from domains.spawn_browser_agent_v3 import handler
+
+    class QuietLogger:
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+
+    class Page:
+        def __init__(self, closed=False):
+            self.closed = closed
+            self.bring_to_front = AsyncMock()
+        def is_closed(self):
+            return self.closed
+
+    class Humanizer:
+        def __init__(self, **kwargs):
+            self.initialize_cursor = AsyncMock()
+        def set_cursor_observer(self, observer):
+            pass
+
+    for mode in ("recovered", "failed", "no_recovery", "missing_manager", "current_live",
+                 "cancelled", "session_replaced", "replacement_closed", "focus_changed"):
+        old, other, selected = Page(mode != "current_live"), Page(), Page()
+        context = SimpleNamespace(pages=[other, selected])
+        context.new_cdp_session = AsyncMock(side_effect=AssertionError("no foreign discovery"))
+        browser = SimpleNamespace(contexts=[context], is_connected=lambda: True)
+        session = SimpleNamespace(agent_focus_target_id=None, logger=QuietLogger())
+        manager = SessionManager(session)
+        session.session_manager = None if mode == "missing_manager" else manager
+        manager._get_session_for_target = lambda target: object() if target == "chosen" else None
+        manager._recovery_in_progress = mode not in ("no_recovery", "missing_manager", "current_live")
+        manager._recovery_complete_event = asyncio.Event()
+        service = SimpleNamespace(session=session)
+        cache = handler.TabFocusCache()
+        cache.target_ids[other], cache.target_ids[selected] = "other", "chosen"
+        entered = asyncio.Event()
+        real_ensure = manager.ensure_valid_focus
+        async def ensure():
+            entered.set()
+            return await real_ensure()
+        manager.ensure_valid_focus = ensure
+        old_humanizer = SimpleNamespace(close=AsyncMock())
+        call = asyncio.create_task(handler._rebind_browser_tab_runtime(
+            dom_service=service, dom_page=object(), playwright_browser=browser,
+            current_page=old, humanizer=old_humanizer, browser_recorder=None,
+            cursor_observer=None, humanizer_factory=Humanizer, focus_cache=cache,
+        ))
+        try:
+            if manager._recovery_in_progress:
+                # Baseline returns/raises without entering the authoritative wait.
+                for _ in range(10):
+                    if entered.is_set() or call.done():
+                        break
+                    await asyncio.sleep(0)
+                assert entered.is_set(), "closed-page rebind skipped active focus recovery"
+                assert not call.done()
+                if mode == "cancelled":
+                    call.cancel("original cancellation")
+                    with pytest.raises(asyncio.CancelledError, match="original cancellation"):
+                        await call
+                    assert not manager._recovery_complete_event.is_set()
+                    continue
+                if mode != "failed":
+                    session.agent_focus_target_id = "chosen"
+                if mode == "session_replaced":
+                    service.session = SimpleNamespace(agent_focus_target_id="chosen")
+                if mode == "replacement_closed":
+                    selected.closed = True
+                if mode == "focus_changed":
+                    async def changed():
+                        session.agent_focus_target_id = "other"
+                    selected.bring_to_front.side_effect = changed
+                manager._recovery_complete_event.set()
+            if mode in ("recovered", "current_live"):
+                result, _ = await call
+                assert result is (selected if mode == "recovered" else old)
+                assert selected.bring_to_front.await_count == (1 if mode == "recovered" else 0)
+                assert other.bring_to_front.await_count == 0
+            else:
+                with pytest.raises(RuntimeError, match="Playwright input page closed"):
+                    await call
+                old_humanizer.close.assert_not_awaited()
+            context.new_cdp_session.assert_not_awaited()
+        finally:
+            if not call.done():
+                call.cancel()
+            with contextlib.suppress(asyncio.CancelledError, RuntimeError):
+                await call
+
+
 async def test_playwright_focus_fallback_diagnostics():
     from structlog.testing import capture_logs
     from domains.spawn_browser_agent_v3 import handler
@@ -36327,6 +36419,7 @@ async def run_all_tests():
     )
 
     r = BlackboxResult()
+    await r.record_async("closed_page_waits_for_authoritative_focus_recovery", test_closed_page_waits_for_authoritative_focus_recovery)
     await r.record_async("playwright_focus_fallback_diagnostics", test_playwright_focus_fallback_diagnostics)
     r.record("playwright_focus_diagnostics_private_and_bounded", test_playwright_focus_diagnostics_private_and_bounded)
     await r.record_async("playwright_focus_diagnostics_preserve_failure_and_cancellation", test_playwright_focus_diagnostics_preserve_failure_and_cancellation)

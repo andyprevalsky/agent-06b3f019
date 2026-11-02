@@ -3107,6 +3107,26 @@ async def _synchronize_playwright_page_with_agent_focus(
     """
     session = getattr(dom_service, "session", None)
     focused_target_id = getattr(session, "agent_focus_target_id", None)
+    # A detach clears focus before SessionManager finishes its existing recovery.
+    # Do not publish the closed old Page while that authoritative handoff is pending.
+    if not focused_target_id and getattr(current_page, "is_closed", lambda: False)() is True:
+        manager = getattr(session, "session_manager", None)
+        ensure_focus = getattr(manager, "ensure_valid_focus", None)
+        if callable(ensure_focus):
+            focus_valid = await ensure_focus()
+            if getattr(dom_service, "session", None) is not session:
+                _record_playwright_focus_fallback(
+                    "focus_or_membership_changed", playwright_browser=playwright_browser,
+                    current_page=current_page, session=session,
+                )
+                return current_page
+            if focus_valid is not True:
+                _record_playwright_focus_fallback(
+                    "missing_focus", playwright_browser=playwright_browser,
+                    current_page=current_page, session=session,
+                )
+                return current_page
+            focused_target_id = getattr(session, "agent_focus_target_id", None)
     contexts = getattr(playwright_browser, "contexts", None) or []
     if not focused_target_id or not contexts:
         _record_playwright_focus_fallback(
