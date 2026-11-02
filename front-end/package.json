@@ -20,7 +20,16 @@
     "social:gen": "node scripts/generate-social-images.mjs",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
-    "postinstall": "playwright install chromium --with-deps 2>/dev/null || true"
+    "postinstall": "node scripts/patch-ui-lifecycle.mjs && (playwright install chromium --with-deps 2>/dev/null || true)",
+    "predev": "node scripts/patch-ui-lifecycle.mjs",
+    "prebuild": "node scripts/patch-ui-lifecycle.mjs",
+    "prebuild:dev": "node scripts/patch-ui-lifecycle.mjs",
+    "pretest": "node scripts/patch-ui-lifecycle.mjs",
+    "pretest:coverage": "node scripts/patch-ui-lifecycle.mjs",
+    "pretest:coverage:report": "node scripts/patch-ui-lifecycle.mjs",
+    "pretest:e2e": "node scripts/patch-ui-lifecycle.mjs",
+    "prestorybook": "node scripts/patch-ui-lifecycle.mjs",
+    "prebuild-storybook": "node scripts/patch-ui-lifecycle.mjs"
   },
   "dependencies": {
     "@amplitude/analytics-browser": "^2.31.3",

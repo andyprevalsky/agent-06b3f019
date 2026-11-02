@@ -24,39 +24,40 @@ import {
  * Uses a wrapped console.warn so domain callers stay clean of console.log.
  */
 export function logStartupMode(): void {
-  // eslint-disable-next-line no-console -- intentional single startup message
-  console.log(`[Frontend] Mode: ${IS_DEV ? 'DEVELOPMENT' : 'PRODUCTION'}`);
+  console.warn(`[Frontend] Mode: ${IS_DEV ? 'DEVELOPMENT' : 'PRODUCTION'}`);
 }
 
 /** Patches console.log/warn/error to forward logs to the backend in dev mode. */
 export function initDevLogging(): void {
   if (!IS_DEV) return;
 
-  // eslint-disable-next-line no-console -- capturing originals for dev log forwarding
-  const originalLog = console.log;
-  const originalWarn = console.warn;
-  const originalError = console.error;
-
-  // eslint-disable-next-line no-console -- patching console.log with forwarding wrapper
-  console.log = (...args) => {
-    originalLog(...args);
-    sendDevLog('log', args);
-  };
-  console.warn = (...args) => {
-    originalWarn(...args);
-    sendDevLog('warn', args);
-  };
-  console.error = (...args) => {
-    originalError(...args);
-    sendDevLog('error', args);
-  };
+  for (const level of ['log', 'warn', 'error'] as const) {
+    const original = Reflect.get(console, level) as (...args: unknown[]) => void;
+    Reflect.set(console, level, (...args: unknown[]) => {
+      original.apply(console, args);
+      sendDevLog(level, args);
+    });
+  }
 }
 
 /** Initializes Amplitude analytics with session replay. */
 export function initAmplitude(): void {
   analytics.addPlugin(sessionReplayPlugin({ sampleRate: SESSION_REPLAY_SAMPLE_RATE }));
   analytics.init(AMPLITUDE_API_KEY, {
-    autocapture: true,
+    autocapture: {
+      attribution: true,
+      fileDownloads: true,
+      formInteractions: true,
+      pageViews: true,
+      sessions: true,
+      pageUrlEnrichment: true,
+      networkTracking: true,
+      webVitals: true,
+      frustrationInteractions: true,
+      // SDK exposure maps retain removed elements on query-only navigation.
+      // Keep click/change capture and replay without retaining old trajectories.
+      elementInteractions: { viewportContentUpdated: { enabled: false } },
+    },
     transport: { type: 'fetch', enableKeepalive: true },
   });
 }

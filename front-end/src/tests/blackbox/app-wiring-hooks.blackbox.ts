@@ -153,7 +153,18 @@ describe('app-wiring/hooks', () => {
       expect(sessionReplayPlugin).toHaveBeenCalledWith({ sampleRate: 1 });
       expect(analytics.addPlugin).toHaveBeenCalled();
       expect(analytics.init).toHaveBeenCalledWith('test-amp-key', {
-        autocapture: true,
+        autocapture: {
+          attribution: true,
+          fileDownloads: true,
+          formInteractions: true,
+          pageViews: true,
+          sessions: true,
+          pageUrlEnrichment: true,
+          networkTracking: true,
+          webVitals: true,
+          frustrationInteractions: true,
+          elementInteractions: { viewportContentUpdated: { enabled: false } },
+        },
         transport: { type: 'fetch', enableKeepalive: true },
       });
     });

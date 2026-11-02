@@ -95,7 +95,7 @@ function createRealtimeHandlers(
   const setAgent = scopedSetter(deps.setAgent, active, current);
   const setIsChatMode = scopedSetter(deps.setIsChatMode, active, current);
   const { onInsert, onInsertDeferred } = createInsertHandlers(
-    deps,
+    { ...deps, signal: scope.signal },
     scope.agentId,
     active,
     receivedRef,
@@ -172,6 +172,7 @@ async function connectRealtime(
       isCancelled: () => !isScopeActive(deps, scope),
       isCurrentAgent: () => isAgentScopeCurrent(deps.selectedAgentIdRef, scope),
       leaseRef,
+      signal: scope.signal,
     },
     receivedRef.current.browserMessages,
   );
@@ -201,13 +202,16 @@ function startAgentSubscription(
   leaseRef: React.MutableRefObject<CompletionBackfillLease | null>,
   receivedRef: React.MutableRefObject<ReceivedInserts>,
 ): () => void {
+  const controller = new AbortController();
   const scope: AgentScope = {
     agentId: deps.selectedAgentId ?? '',
     cancelled: false,
     discardReported: false,
+    signal: controller.signal,
   };
   const cleanup = () => {
     scope.cancelled = true;
+    controller.abort();
     console.warn('AgentContext: cleanup running');
     cleanupSubscription(
       deps.isReconnectingRef,

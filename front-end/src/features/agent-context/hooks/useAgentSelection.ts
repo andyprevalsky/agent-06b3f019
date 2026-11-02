@@ -8,12 +8,11 @@ import type { AgentDetail, AgentDetailResponse, Message } from '@/lib/api';
 import { recordAgentScopeDiscard, recordAgentSelection } from '@/lib/agentScopeDiagnostics';
 
 import { fetchAgentDetail } from '../api';
-import { isChatCapableAgent } from './realtimeHandlers';
+import { isChatCapableAgent, resetStreamingBubbles } from './realtimeHandlers';
 import type {
   PendingAgentCreation,
   PendingAgentCreationInput,
   StreamingAttention,
-  StreamingBubble,
   StreamingPlan,
   StreamingTool,
 } from '../types';
@@ -35,12 +34,27 @@ interface SelectionOptions {
  *   [ANY SELECTION] -- select another id --> [LOADING] --> [SELECTED | EMPTY on failure]
  *
  * Every async transition is guarded by selectedAgentIdRef so stale fetches cannot
- * reconcile or roll back a newer selection.
+ * reconcile or roll back a newer selection. One cancellable detail read belongs
+ * to each selection; switching or unmounting aborts it. Its signal also fences
+ * A -> B -> A responses when the transport finishes despite cancellation.
  */
 
 export function useAgentSelection(state: AgentProviderState, options: SelectionOptions) {
   const stateRef = useRef(state);
   stateRef.current = state;
+  const detailRequestRef = useRef<{
+    agentId: string;
+    clearSelectionOnFailure: boolean;
+    controller: AbortController;
+    promise: Promise<boolean>;
+  } | null>(null);
+  useEffect(
+    () => () => {
+      detailRequestRef.current?.controller.abort();
+      detailRequestRef.current = null;
+    },
+    [],
+  );
   const {
     initialLoadDoneRef,
     pendingCreationRef,
@@ -96,30 +110,55 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
     ],
   );
   const loadAgentDetail = useCallback(
-    async (
+    (
       agentId: string,
       clearSelectionOnFailure: boolean,
       refreshesStagedAgent = false,
     ): Promise<boolean> => {
+      const pending = detailRequestRef.current;
+      if (
+        pending?.agentId === agentId &&
+        pending.clearSelectionOnFailure === clearSelectionOnFailure &&
+        !pending.controller.signal.aborted
+      ) {
+        return pending.promise;
+      }
+      pending?.controller.abort();
+      const controller = new AbortController();
+      const request = {
+        agentId,
+        clearSelectionOnFailure,
+        controller,
+        promise: Promise.resolve(false),
+      };
+      detailRequestRef.current = request;
       // A staged creation already shows its projection: refresh it in the
       // background instead of flipping the view to "loading agent details".
       const showsLoading = !refreshesStagedAgent;
-      try {
-        if (showsLoading) setIsLoadingAgent(true);
-        const data = await fetchAgentDetail(agentId);
-        if (!applyAgentDetail(agentId, data)) return false;
-        initialLoadDoneRef.current = agentId;
-        return true;
-      } catch (error) {
-        console.error('Failed to load agent:', error);
-        if (clearSelectionOnFailure && selectedAgentIdRef.current === agentId) {
-          selectedAgentIdRef.current = null;
-          prepareSelection(stateRef.current, null);
+      request.promise = (async () => {
+        try {
+          if (showsLoading) setIsLoadingAgent(true);
+          const data = await fetchAgentDetail(agentId, controller.signal);
+          if (controller.signal.aborted) return false;
+          if (!applyAgentDetail(agentId, data)) return false;
+          initialLoadDoneRef.current = agentId;
+          return true;
+        } catch (error) {
+          if (controller.signal.aborted) return false;
+          console.error('Failed to load agent:', error);
+          if (clearSelectionOnFailure && selectedAgentIdRef.current === agentId) {
+            selectedAgentIdRef.current = null;
+            prepareSelection(stateRef.current, null);
+          }
+          return false;
+        } finally {
+          if (detailRequestRef.current === request) {
+            detailRequestRef.current = null;
+            if (showsLoading && selectedAgentIdRef.current === agentId) setIsLoadingAgent(false);
+          }
         }
-        return false;
-      } finally {
-        if (showsLoading && selectedAgentIdRef.current === agentId) setIsLoadingAgent(false);
-      }
+      })();
+      return request.promise;
     },
     [initialLoadDoneRef, applyAgentDetail, selectedAgentIdRef, setIsLoadingAgent, stateRef],
   );
@@ -138,6 +177,8 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
 
   const setSelectedAgentId = useCallback(
     (id: string | null) => {
+      detailRequestRef.current?.controller.abort();
+      detailRequestRef.current = null;
       recordAgentSelection(state.selectedAgentIdRef.current, id);
       state.selectedAgentIdRef.current = id;
       if (state.pendingCreationRef.current?.agentId !== id) state.pendingCreationRef.current = null;
@@ -149,6 +190,8 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
 
   const stagePendingAgentCreation = useCallback(
     (input: PendingAgentCreationInput) => {
+      detailRequestRef.current?.controller.abort();
+      detailRequestRef.current = null;
       const projection = buildPendingCreation(input);
       recordAgentSelection(state.selectedAgentIdRef.current, input.agentId);
       state.selectedAgentIdRef.current = input.agentId;
@@ -297,12 +340,7 @@ function killConnections(
 function flushState(state: AgentProviderState) {
   state.setMessages([]);
   state.setInspectionContext(null);
-  state.setStreamingBubbles((previous: Map<string, StreamingBubble>) => {
-    for (const bubble of previous.values()) {
-      if (bubble.timeoutId) window.clearTimeout(bubble.timeoutId);
-    }
-    return new Map();
-  });
+  resetStreamingBubbles(state.setStreamingBubbles);
   state.setStreamingPlan(null as StreamingPlan | null);
   state.setStreamingAttention(null as StreamingAttention | null);
   state.setStreamingTools(new Map<string, StreamingTool>());

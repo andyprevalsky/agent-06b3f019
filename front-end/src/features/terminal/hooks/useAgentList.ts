@@ -16,6 +16,8 @@ import { reconcileAgent } from '@/lib/progressEstimate';
  * Session end (canSubmitGoals -> false) clears agents, resets hasLoadedAgents
  * and drops every in-flight result, so a later session never sees the previous
  * account's list or skips its own first-load spinner.
+ * Hidden -> suspend automatic polls; visible -> refresh without overlapping a read.
+ * Session end/unmount -> abort owned reads and discard their results.
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
@@ -32,27 +34,40 @@ export function useAgentList(canSubmitGoals: boolean) {
   const [isLoadingAgents, setIsLoadingAgents] = useState(false);
   const [hasLoadedAgents, setHasLoadedAgents] = useState(false);
   const latestLoad = useRef(0);
-  const activeLoads = useRef(0);
   const session = useRef(0);
+  const controllers = useRef(new Set<AbortController>());
+  useEffect(() => {
+    const pending = controllers.current;
+    return () => {
+      session.current += 1;
+      pending.forEach((controller) => controller.abort());
+      pending.clear();
+    };
+  }, []);
 
   const loadAgents = useCallback(async () => {
     const loadId = ++latestLoad.current;
     const loadSession = session.current;
-    activeLoads.current += 1;
+    const controller = new AbortController();
+    controllers.current.add(controller);
     setIsLoadingAgents(true);
     try {
-      const fetched = await fetchAgents();
+      const fetched = await fetchAgents(controller.signal);
       if (loadId === latestLoad.current && loadSession === session.current)
         setAgents((previous) => {
           const byId = new Map(previous.map((agent) => [agent.agent_id, agent]));
           return fetched.map((agent) => reconcileAgent(byId.get(agent.agent_id), agent));
         });
     } catch (_err: unknown) {
-      toast({ title: 'Error', description: 'Failed to load agents', variant: 'destructive' });
+      if (!controller.signal.aborted && loadSession === session.current) {
+        toast({ title: 'Error', description: 'Failed to load agents', variant: 'destructive' });
+      }
     } finally {
-      activeLoads.current -= 1;
-      setIsLoadingAgents(activeLoads.current > 0);
-      if (loadSession === session.current) setHasLoadedAgents(true);
+      controllers.current.delete(controller);
+      if (loadSession === session.current) {
+        setIsLoadingAgents(controllers.current.size > 0);
+        setHasLoadedAgents(true);
+      }
     }
   }, [toast]);
 
@@ -62,14 +77,24 @@ export function useAgentList(canSubmitGoals: boolean) {
       return;
     }
     session.current += 1;
+    controllers.current.forEach((controller) => controller.abort());
+    controllers.current.clear();
     setAgents([]);
+    setIsLoadingAgents(false);
     setHasLoadedAgents(false);
   }, [canSubmitGoals, loadAgents]);
 
   useEffect(() => {
     if (!canSubmitGoals) return;
-    const id = setInterval(() => void loadAgents(), AGENT_POLL_INTERVAL_MS);
-    return () => clearInterval(id);
+    const refreshVisible = () => {
+      if (!document.hidden && controllers.current.size === 0) void loadAgents();
+    };
+    const id = setInterval(refreshVisible, AGENT_POLL_INTERVAL_MS);
+    document.addEventListener('visibilitychange', refreshVisible);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', refreshVisible);
+    };
   }, [canSubmitGoals, loadAgents]);
 
   return { agents, setAgents, isLoadingAgents, hasLoadedAgents, loadAgents };
