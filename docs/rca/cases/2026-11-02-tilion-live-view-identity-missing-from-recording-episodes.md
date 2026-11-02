@@ -19,8 +19,10 @@ sources:
   - commit 6f3f53201faac3a3e70de099e7c211cee6770fad
   - commit a3c4929f3bbd296766013a7545439b682015a6ef
   - agent 100a9330-bc94-49e3-a28c-116f159c2eff
+  - PR #1668
+  - commit ee81230384c6e3507636a5be4793d753b9e59029
 repro: scripts/tests/publish_evidence_links_browser_validation.test.sh
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -102,9 +104,17 @@ rejects before media; candidate covers exactly rows78/80 and consumes both actua
 recorded successful pointer-probe results. Making either probe unavailable still
 rejects the same unmodified input. Original input SHA256 remains
 `e533d4bab2dc34f8ce5711d62d2cc18b78ec6b9a36581db48b21b235540d0ac8`.
-This is captured-state boundary proof, not a fresh media GET, published bundle,
-FE outcome, benchmark pass or deployment. Those outcomes remain pending, and the
-case remains open. No browser session was recreated, connected or released for
+That initial replay was captured-state boundary proof. The replacement owner
+then ran the exact original publisher invocation unchanged on integrated HEAD
+`ee81230384c6e3507636a5be4793d753b9e59029` with process-only
+`BENCHMARK_HUB_USER_ID=00000000-0000-4000-8000-000000000107`. It exited 0,
+recovered archived LLM content through the normal read path, uploaded the unchanged
+run bundle, and reported `verified in fresh browser (81 msgs)` on November 2, 2026.
+The raw input hash above is unchanged. Private output and manifest hashes are
+retained in the replacement owner receipt. This proves the assigned publisher
+outcome; it does not claim the underlying payment benchmark passed. Deployment
+verification remains pending in the replacement owner deploy run; the assigned
+publisher failure is now fixed with the real outcome proof above. No browser session was recreated, connected or released for
 this investigation; local fake-provider blackboxes use their own fixture browsers.
 
 At 10000 agents, parsing adds constant local work per examined row and no provider
@@ -120,7 +130,11 @@ operations, no paid/provider/financial calls, no filtered publication and no
 weakening of missing-media rejection. The parent required a strict native URL
 contract and independent review before draft PR. Review added negative controls
 for unknown explicit providers, conflicting task-only terminals and malformed
-explicit aliases. No merge or deployment is authorized.
+explicit aliases. That earlier draft-only endpoint was superseded by the corrected end-to-end
+acceptance contract: the replacement owner must make the exact publisher pass
+and complete deployment through merge, production verification and cleanup.
+The original account-context omission is corrected and is not a security bypass.
+Preserve financial/provider facts and all missing-media negatives.
 
 ## Reusable lesson
 
