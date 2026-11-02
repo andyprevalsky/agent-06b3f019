@@ -224,3 +224,15 @@ recorded artifacts. Hand-written or edited benchmark cards are non-compliant.
   measurements, original clocks or the existing sections.
 - Show only the latest three original experiments; retain complete history
   internally and use all verified launches for experiments/day.
+
+## Deploy-specific exceptions
+
+Every deploy scorecard follows `.claude/shared/deploy-failure-policy.md`.
+Keep a cumulative DELEGATED list of failure descriptions and repair-agent links;
+no attribution column or acknowledgement state. These repairs do not block
+the originating deploy. Preserve entries across refreshes and resume.
+At the very end, after the completion line and all other sections, show each
+unresolved **🚨🚨 EXTERNAL PROVIDER FAILURE — <provider>: <reason> — NEEDS FIXING**
+with affected checks and evidence. Outages and exhausted credits are
+non-blocking and create no repair agent. Waived or failed checks never become
+PASS; preserve original measurements and native outcomes.

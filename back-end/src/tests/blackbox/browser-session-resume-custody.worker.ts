@@ -1,5 +1,7 @@
 /** Independent process: production resume boundary; only native/CDP effects are fixtures. */
 import Module from 'node:module';
+import assert from 'node:assert/strict';
+import { mock } from 'node:test';
 const { createRequire } = Module;
 import path from 'node:path';
 const providerPath = path.resolve(__dirname, '../../providers/browser/browserUse.ts');
@@ -53,6 +55,9 @@ const browser = {
   ],
   close: async () => {},
 };
+// Cover both require() and import(): native/CDP effects are fixture-owned.
+const playwright = { chromium: { connectOverCDP: async () => browser } };
+mock.module('playwright', { namedExports: playwright });
 async function request(endpoint, init = {}) {
   const res = await fetch(api + endpoint, init);
   // Mirror the provider SDKs: an HTTP rejection carries its status.
@@ -114,7 +119,7 @@ Module._load = function (id, parent, isMain) {
       getFingerprintInjectionData: async () => null,
     };
   if ([providerPath, kernelPath].includes(parent?.filename)) {
-    if (id === 'playwright') return { chromium: { connectOverCDP: async () => browser } };
+    if (id === 'playwright') return playwright;
     if (id === '../steel/sessionConnection')
       return { connectValidatedBrowser: async () => browser };
     if (id === './context') return { getProviderProfile: async () => 'fixture-profile' };
@@ -136,6 +141,10 @@ Module._load = function (id, parent, isMain) {
 (async () => {
   if (process.env.CUSTODY_EXIT_BEFORE_ENTRY === '1') process.exit(23);
   try {
+    assert.ok(
+      (await import('playwright')).chromium === playwright.chromium,
+      'custody fixture must own Playwright ESM as well as CommonJS'
+    );
     if (process.env.CUSTODY_STALL === '1') {
       // Stay connected without returning so the parent's existing deadline owns cleanup.
       process.on('message', () => {});

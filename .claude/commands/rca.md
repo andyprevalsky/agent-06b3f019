@@ -6,6 +6,32 @@ description: "Root-cause a bug the RIGHT way: read the RCA methodology, then pro
 
 Use this whenever you are diagnosing ANY bug, flake, regression, or "why did X happen".
 
+## Test-failure attribution gate
+
+When a test fails, diagnose it with `/RCA` before deciding repair ownership.
+Compare the failure against the change under investigation, including repairs
+and integration changes, and return one of these exact lines with supporting
+evidence identifying the compared revisions and the failure boundary:
+
+- `Gate: INTRODUCED` — the change introduced the failure.
+- `Gate: NOT_INTRODUCED` — evidence establishes the change did not introduce it.
+
+If the evidence cannot establish attribution, report the missing evidence and
+leave attribution unresolved; do not invent a gate. An unrelated filename or
+missing baseline does not establish `NOT_INTRODUCED`.
+
+For a test failure encountered by `/deploy`, return this diagnosis to the deploy
+owner before starting a separate repair or deployment. This attribution phase
+takes precedence over the delegation and autonomous fix-and-deploy defaults
+below. The deploy owner applies `.claude/shared/deploy-failure-policy.md` to the
+gate: own introduced repairs, hand off qualifying non-introduced repairs, and
+report evidenced external-provider outages or exhausted credits without any
+handoff. Unresolved attribution remains blocking.
+
+This gate determines ownership; it does not claim a completed repair or waive
+the causal proof required for a root-cause or fix claim. An independent repair
+agent receiving the handoff follows the full RCA workflow below.
+
 ## boxes.dev delegation (mandatory)
 
 When running on boxes.dev (`BOXES_DEVBOX=1`), always assign at least one
@@ -38,6 +64,17 @@ approval request.
 diff inline** (unified diff or before→after with every added/removed line). A
 `path:line` link alone is incomplete — see the "MUST paste the exact diff
 inline" rule in `.claude/shared/approval-format.md`.
+
+## Independent deploy repair handoffs
+
+When invoked from a repair handed off under
+`.claude/shared/deploy-failure-policy.md`, own that repair and its `/RCA` proof.
+Its originating deploy already has a waiver and does not wait for your result.
+Coordinate publication with the repository's current release owner; do not
+start a competing deployment in its workspace. New occurrences should join
+existing work through evidence and discussion. The policy's external-provider
+exceptions create no repair handoff. Other user-authorized RCA work retains
+the default below.
 
 ## Autonomous fix-and-deploy default
 
@@ -302,6 +339,10 @@ actually shipped (add its PR/commit to `sources`), and record approval-time
 corrections in `## Human feedback`. Then reindex and validate again.
 
 ## Output
+
+For a test-failure diagnosis, lead with the attribution gate and its evidence
+as specified above. A deploy attribution response returns to its owner at that
+boundary; the repair-output requirements below apply when carrying out the fix.
 
 When the correct generalizable fix requires an approval-gated change, present
 the evidence, which archive searches you ran and whether this is a

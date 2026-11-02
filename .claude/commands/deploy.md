@@ -1,5 +1,6 @@
 ---
 description: "Push current branch, obtain a CodeRabbit review, merge, and wait for deploy to complete."
+rose-agent-spawn: false
 ---
 
 # Deploy
@@ -10,33 +11,25 @@ Push the current branch, create a PR, obtain a CodeRabbit review, merge, and wai
 
 **(pre-approved) A human PR reviewer is NOT mandatory** — never block merge waiting for a human GitHub review/approval; CodeRabbit (or the usage-exhaustion skip) is the only review gate.
 
-## Provider outages: report and retry every 10 minutes
+## Controlling failure policy
 
-When a provider outage blocks a deploy gate, promptly tell the user which
-provider and gate are affected, the observed failure, the official incident
-link when available, the deployment impact, and the next retry time in UTC.
-Distinguish confirmed attribution from a suspected cause supported by an
-incident and matching traces; a status-page incident alone does not prove causality.
+Read `.claude/shared/deploy-failure-policy.md` before handling a failure. It
+controls test tiers, provider checks (including review providers) and
+production checks in this command, overriding older all-green, retry, escalation and same-PR
+repair wording for those failures. Independent correctness/security review
+findings retain the existing Step 10 requirements; only comments about an
+exact recorded qualifying test/gate failure may reference its existing
+handoff. INTRODUCED and UNKNOWN test/gate failures remain blocking. A successful
+NOT INTRODUCED repair handoff waives that exact failure without waiting.
+External provider outages or exhausted credits are non-blocking, receive no
+handoff, and appear as alarming alerts at the very end of every scorecard.
+This workflow authorizes independent boxes.dev repair threads for those
+NOT INTRODUCED handoffs. Rose account commands remain default-off until the
+separate, explicitly authorized migration described in the linked policy.
 
-Keep the deploy active and retry the affected failed check every 10 minutes.
-Persist each attempt's start time and set its next retry due time to start +
-600 seconds. Before each retry, recheck provider status and report the result
-and next due time. Never overlap attempts: if execution or owned cleanup lasts
-past the due time, join it before starting the next retry. Keep healthy checks
-and independent diagnosis moving; do not rerun successful payment checks or
-other successful lanes merely because an unrelated provider is unavailable.
-
-Preserve every failed attempt, its original clocks, actual source identity,
-artifacts and cleanup evidence. An outage does not waive a gate or turn a
-failure into a pass. Continue this cadence until the affected gate passes, the
-user stops the work, or evidence identifies a different cause requiring the
-normal repair or credential/budget handling. Retain existing authorization,
-financial limits and bounded review cycles; review-provider usage exhaustion
-still follows Step 9a. A retryable outage alone is not a reason to end the turn
-with a terminal blocked handoff or ask the user for another approval.
-This outage path takes precedence over generic failure-handling directions;
-gate criteria, cleanup, credential, financial and review requirements remain
-mandatory.
+Diagnose every test/gate failure with `/RCA` before routing it. Its response
+must include an evidence-backed `Gate: INTRODUCED` or `Gate: NOT_INTRODUCED`.
+Unresolved attribution remains UNKNOWN and blocking.
 
 ## Canonical human-approval format
 
@@ -84,12 +77,13 @@ end and stays active for the user's reply. Only the user ends it early, with
 `/goal clear`; never clear or pause it yourself.
 
     /deploy of <branch> is finished: the PR is merged, every applicable
-    production lane is verified, and the scorecard ending in READY TO CLOSE
-    is posted. Stopping earlier is allowed only when the last message is one
+    production lane is verified or has an exact recorded qualified exception,
+    and the final scorecard is posted with READY TO CLOSE before any external
+    provider alerts. Stopping earlier is allowed only when the last message is one
     of /deploy's defined stops: a prompt, agent-behavior or
     trajectory-injection approval request (Steps 0p/0b/0c) that the
     golden-reference review did not clear; a credential or
-    billing escalation; a request for an explicit gate override; an approval
+    billing change requiring user action that is not a qualified external exception; a request for an explicit gate override; an approval
     for a destructive or irreversible action; or a deploy failure that cannot
     be fixed without the user.
 
@@ -97,7 +91,7 @@ end and stays active for the user's reply. Only the user ends it early, with
 
 # Phase 1: Test Loop
 
-**DEFAULT RULE: 100% of tests must pass before proceeding to Phase 2.** "Pre-existing failure", "not related to my changes", "performance issue", "local resource contention", and "flaky test" are not automatic excuses. If a test fails, fix it or stop and ask the user unless the user explicitly overrides that specific gate under the policy below.
+**DEFAULT RULE: every applicable check must pass or have an exact recorded exception under the controlling failure policy or an explicit user override.** Never classify an unexplained failure as unrelated or external. Preserve failed native results and unverified checks; exceptions are not PASS.
 
 ## Third-party credits or storage exhaustion: skip and warn
 
@@ -251,16 +245,16 @@ claim, validates credential links, and preserves its existing correctly labeled
 Postgres container. It refuses foreign resources. The script has no `--resume`
 option. Primary Conductor worktrees continue to use the check gate above.
 
-**You must fix ALL non-overridden failing tests, even if they are not caused by the changes in this branch.** The deploy flow defaults to keeping main green. If a test was already broken before your branch, that is now your responsibility to fix before merging unless the user explicitly overrides that exact gate. This includes infrastructure issues, flaky tests, timeout tuning, missing credentials, third-party integration problems, and anything else.
+Apply the controlling failure policy to every failure. Own INTRODUCED repairs, establish UNKNOWN attribution, hand off NOT INTRODUCED repairs, and report evidenced external outages/credit exhaustion without handing them off.
 
-Run all checks locally. If any step fails, fix the issue and re-run that step. If fixing required code changes, re-run the entire Test Loop from the top.
+Run all checks locally. If any step fails, fix the issue and re-run that step. If fixing required code changes, re-run the entire Test Loop from the top. Qualified exceptions under the controlling policy remain recorded; a waiver is not a code repair and does not require rerunning a failed aggregate solely to hide its original result.
 
 ## Test Report Tracking
 
 As you run each step in Phase 1, track the results in a `TEST_REPORT` variable. For each step, record:
 
 - The step name
-- Pass/fail status
+- Actual result and any exact delegated waiver, external-provider exception or user override
 - A brief summary of the output (e.g., "0 errors", "3 files formatted", "6/6 benchmarks passed")
 
 Build the report as a markdown table:
@@ -309,7 +303,7 @@ scope boundary. Before change detection or freezing gate inputs:
    raw research datasets or generated evidence as source.
 
 
-**`/deploy` ALWAYS ships the ENTIRE worktree — every change present relative to `origin/main`, no exceptions.** This includes work you did not author: changes made by a concurrent agent sharing this worktree, pre-existing uncommitted edits, and any feature intermixed with yours. Do NOT stop to ask "these changes aren't mine / weren't part of my task." Do NOT try to isolate, cherry-pick, or exclude a subset onto a clean branch. The unit of deploy is the worktree, and everything in it is yours to carry through the gates and ship. The only reason to halt is a gate failure you cannot fix or a credential/billing escalation — never change ownership or scope. (Whoever ran `/deploy` is asserting the whole worktree is ready; the gates are what prove it.) **"Credential/billing escalation" NEVER includes a code-review provider being out of credits/quota** — that case is pre-authorized to proceed without asking (Step 9a, "Review-provider usage exhaustion").
+**`/deploy` ALWAYS ships the ENTIRE worktree — every change present relative to `origin/main`, no exceptions.** This includes work you did not author: changes made by a concurrent agent sharing this worktree, pre-existing uncommitted edits, and any feature intermixed with yours. Do NOT stop to ask "these changes aren't mine / weren't part of my task." Do NOT try to isolate, cherry-pick, or exclude a subset onto a clean branch. The unit of deploy is the worktree, and everything in it is yours to carry through the gates and ship. Preserve intended deliverables; blocking conditions, repair ownership and external exceptions follow the controlling failure policy. (Whoever ran `/deploy` is asserting the whole worktree is ready; the gates are what prove it.) **"Credential/billing escalation" NEVER includes a code-review provider being out of credits/quota** — that case is pre-authorized to proceed without asking (Step 9a, "Review-provider usage exhaustion").
 
 If the branch is behind `origin/main`, sync first (commit the worktree, then
 `git merge origin/main`). Resolve conflicts keeping every feature, re-sync deps
@@ -849,7 +843,7 @@ cd back-end && bash ../scripts/run-deploy-stage eslint --reuse-passed -- \
 
 If there are remaining errors, fix them manually. Loop until the affected-file lint reports 0 errors.
 
-**CRITICAL: You must reach 0 errors across every affected file. "Pre-existing" or "this error was already on main" is NOT an excuse to skip it.** This includes `no-console`, `no-explicit-any`, `strict-boolean-expressions`, `max-lines`, and any other rule. Fix them all.
+**CRITICAL: preserve every affected-file lint result and apply the controlling failure policy.** INTRODUCED errors remain your responsibility; evidence-backed NOT INTRODUCED errors require a repair handoff before waiver. No silent suppression, assertion weakening or invented attribution.
 
 If any files were modified by this step, stage and commit them (can combine with Step 1's commit if both ran together).
 
@@ -860,7 +854,7 @@ cd back-end && bash ../scripts/run-deploy-stage typescript --reuse-passed -- \
   bash -c 'mkdir -p ../.context/tsbuildinfo && npx tsc --noEmit --incremental --tsBuildInfoFile ../.context/tsbuildinfo/back-end.tsbuildinfo'
 ```
 
-Catches type errors that ESLint misses (wrong argument types, missing properties, bad generics). Fix any errors before proceeding — pre-existing type errors in touched files are your responsibility.
+Catches type errors that ESLint misses (wrong argument types, missing properties, bad generics). Apply the controlling failure policy to errors, including existing errors in touched files.
 
 `--incremental` keeps a per-worktree `.tsbuildinfo` under `.context/` (never
 committed): tsc re-checks only files whose content hash changed plus their
@@ -929,7 +923,6 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-exact-session-multi-root.test.py`,
 `python3 scripts/tests/cloudbench-forensic-quiesced.test.py`,
 `python3 scripts/tests/cloudbench-controller-linux.test.py`,
-`python3 scripts/tests/factory-metadata.test.py`,
 `python3 scripts/tests/final-review-script-regressions.test.py`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/factory-metadata.test.py`,
@@ -942,6 +935,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py`,
 `python3 scripts/tests/cloudbench-static-service-observation.test.py`,
 `python3 scripts/tests/cloudbench-scorecard.test.py`,
+`bash scripts/tests/cloudbench-export-recovery.test.sh`,
 `python3 scripts/tests/original600-portable-operator.test.py`,
 `python3 scripts/tests/cloudbench-explicit-idle-admission.test.py`,
 `python3 scripts/tests/cloudbench-fixed-native-worker.test.py`,
@@ -950,7 +944,6 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-live-primary-return.test.py`,
 `python3 scripts/tests/cloudbench-primary-exact-shape-reuse.test.py`,
 `python3 scripts/tests/cloudbench-maintenance-env.test.py`,
-`python3 scripts/tests/cloudbench-resume-controller-export.test.py`,
 `python3 scripts/tests/cloudbench-shard-coordinator.test.py`,
 `python3 scripts/tests/cloudbench-controller-orphan-drain.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
@@ -958,6 +951,7 @@ their assertions or test counts:
 `python3 scripts/tests/claude-review-fallback-diagnose.test.py`,
 `python3 scripts/tests/read-graphide-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
+`python3 scripts/tests/deploy-failure-policy.test.py`,
 `bash scripts/tests/run-deploy-stage.test.sh`,
 `python3 scripts/tests/deploy-stage-wait.test.py`,
 `python3 scripts/tests/deploy-approval-batch.test.py`,
@@ -1226,7 +1220,7 @@ Commit any resulting changes (can combine with Step 1's commit).
 
 ## Step 4m-lint: Mac-app format:check + lint + type-check (skip if `$CHANGED_MAC_APP` is empty)
 
-Parallel verifier. Enforces the same 0-error bar as back-end Step 2b — "pre-existing" violations in the mac-app files you touched are your responsibility.
+Parallel verifier. Uses back-end Step 2b's controlling failure policy, with every actual violation and exception retained.
 
 ```bash
 cd mac-app && bash ../scripts/run-deploy-stage mac-static --reuse-passed -- bash -c 'npm run format:check && npm run lint && npm run type-check'
@@ -1314,13 +1308,14 @@ approval.
 After all parallel Group 3 branches finish, validate every external credential
 (E2B, Steel, Parallel.ai, Anthropic, OpenRouter, Supabase) with the focused test
 below. The deterministic Step 4a batch excludes this provider-dependent domain,
-so this runs exactly once and a provider outage can be retried without rerunning
-every instrumented back-end domain.
+so it runs separately from the instrumented back-end domains. Record an
+evidenced provider outage or exhausted credits as an external exception; do
+not wait or loop retries.
 
 Step 4p launches the exact `run-deploy-stage credential-health` command with
 `npx tsx src/tests/blackbox/integration-health.blackbox.ts`.
 
-**If any hard credential is rejected** the error message names the exact env var to refresh and the provider dashboard URL. Escalate to the user immediately and do not proceed to Step 5 unless the user explicitly overrides that credential gate. If overridden, record the rejection as `⚠️ Overridden`, use the narrow gate-specific harness override, and continue every other check. Do not change production auth behavior merely to make a rejected credential appear healthy.
+**If a credential is rejected**, the error message names the exact env var to refresh and the provider dashboard URL. Preserve that diagnostic and apply the controlling failure policy. Evidenced outages or exhausted credits are non-blocking external exceptions with no handoff. A rejection alone does not prove either; introduced or unknown configuration failures remain blocking, while evidenced NOT INTRODUCED defects receive a repair handoff. Do not change production authentication to make a rejected credential appear healthy.
 
 Anthropic/Claude is intentionally non-blocking in this gate: the probe should still run by default and report `WARN` on exhausted credits, rejected auth, or provider availability problems, but future deploys may proceed without human approval when only this provider fails. The optional `DEPLOY_GATE_OVERRIDES=credential-health:anthropic` path remains available when an operator wants an explicit audited skip instead of a live probe. Parallel.ai is also warn-only.
 
@@ -1333,8 +1328,8 @@ the `runtime-blackbox` finish boundary. Step 4p launches the exact
 
 This starts an isolated local backend and executes only the strict weekly
 admin-health case. Missing credentials fail closed; all six Amplitude funnel
-steps must be `ready` with real counts. A 429 blocks deploy, but its rerun
-repeats only this focused probe—not the complete coverage suite.
+steps must be `ready` with real counts for PASS. Apply the controlling policy
+to a 429 or other failure; a repair reruns only this focused probe.
 
 ## Step 4p: Concurrent focused live probes
 
@@ -1348,7 +1343,7 @@ runner's db push and trigger hooks:
 python3 scripts/run_deploy_live_probes.py
 ```
 
-All four stage records must pass before closing the `runtime-blackbox`
+All four stage records must pass or have exact qualified exceptions before closing the `runtime-blackbox`
 boundary.
 
 `run_deploy_pipeline.py plan --live-probes` emits this command as the
@@ -1564,7 +1559,7 @@ Do not wait for one lane before starting another. All applicable lanes must be
 green before merge. If any lane requires a code change, wait for the open review
 to finish, batch all fixes, restart the Test Loop from Step 0, and relaunch the
 applicable test lanes. Do not request another review until those lanes stabilize.
-The later automated review cycle (CodeRabbit or Claude fallback) covers every commit accumulated since the prior review — not a human PR reviewer.
+The later automated CodeRabbit review cycle covers every commit accumulated since the prior review — not a human PR reviewer.
 
 By Phase 2, the push and PR already exist. Treat Steps 7 and 8 as “verify
 already done” unless a failed test-loop iteration forced a restart.
@@ -1674,24 +1669,30 @@ At each poll, check:
 
 ### Pass criteria
 
-**ALL non-skipped Pre-Deploy smoke benchmarks must pass, with 0 failures.** The deploy-approved credential skip is a Claude Code benchmark whose preflight proves there are no synced Claude credentials and no pool token; the shared `ANTHROPIC_API_KEY` fallback is covered by the warn-only credential-health gate and does not satisfy this skippable smoke task. The standing AgentCard release-stall exception in Step 6a also applies when a selected payment canary encounters that exact state. These exceptions apply to future deploys without additional human approval. Claude Code task correctness remains hard-gated; only its repeatable prompt-cache telemetry floor is warn-only in `run-predeploy-local` and must be reported as a risk when it misses. On the local path, `run-predeploy-local` must exit 0 and every non-skipped task's FE link must show the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Other timeouts, stalls, wrong tool usage, backend crashes, or failures must be diagnosed and fixed.
+**All Pre-Deploy smoke benchmarks must pass or have exact recorded exceptions under the controlling failure policy.** The deploy-approved credential skip is a Claude Code benchmark whose preflight proves there are no synced Claude credentials and no pool token; the shared `ANTHROPIC_API_KEY` fallback is covered by the warn-only credential-health gate and does not satisfy this skippable smoke task. The standing AgentCard release-stall exception in Step 6a also applies when a selected payment canary encounters that exact state. These exceptions apply to future deploys without additional human approval. Claude Code task correctness remains hard-gated; only its repeatable prompt-cache telemetry floor is warn-only in `run-predeploy-local` and must be reported as a risk when it misses. On the local path, preserve `run-predeploy-local`'s actual exit and each task's outcome; a qualified exception does not require a synthetic zero exit. Every task reported as PASS must show on its FE link that the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Route other timeouts, stalls, wrong tool usage, backend crashes and failures by attribution under the controlling policy.
 
-**Diagnosis process — MUST be delegated to a `general-purpose` sub-agent.**
+**Smoke failure handling:** follow `.claude/shared/deploy-failure-policy.md`.
+Read existing repair claims before starting another investigation; send
+matching evidence, discuss uncertain matches, or spawn an independent repair
+through the policy's active backend for an evidence-backed NOT INTRODUCED failure. That handoff is
+non-blocking for this deploy. Do not create one repair per failed agent when
+several occurrences may share a cause, and do not spawn a repair for an
+external provider outage or exhausted credits.
 
-Don't try to diagnose smoke failures inline in your own context — the diagnostic
-output for a single failed agent is hundreds of KB across 3 log files, plus
-multiple span-tree dumps, and burns the main context fast. Delegate, and ship a
-fix that the main loop can verify.
+INTRODUCED failures remain owned and blocking. UNKNOWN attribution must be
+established before a delegation waiver. The owning investigator follows `/RCA`.
+Credential/authentication defects that are not evidenced outages or credit
+exhaustion follow normal attribution handling; do not work around auth errors
+in code. External outage/credit exceptions receive no handoff.
 
-**For each failed task, in a single message, spawn ONE `general-purpose` agent
-per failed `agent_id`** (run them concurrently — they're independent). Hand
-each agent the full failure context and tell it to do steps 1–4 end to end:
+**Existing smoke diagnosis checklist for the repair owner:**
 
-```
-Agent({
-  description: "Diagnose + fix <task-name> smoke failure",
-  subagent_type: "general-purpose",
-  prompt: """
+Use the original diagnostic instructions below where those run artifacts are
+available. A separate Rose agent needs accessible evidence or attachments;
+local paths are not a shared filesystem. These instructions do not change
+attribution or make the originating deploy wait for an independent repair.
+
+```text
 Smoke task <task-name> just failed in /deploy (LOCAL run). Agent ID: <agent_id>.
 Failure reason from benchmark runner: <reason string from results JSON>.
 
@@ -1731,25 +1732,16 @@ Steps 1–5 — do them all, do not stop early:
    in your final report.
 
 5. Verify the fix is sane: re-run any structural/blackbox/lint check that
-   covers the modified file(s). You do NOT re-run smoke — the parent loop
-   does that next.
+   covers the modified file(s). For deploy-owned repairs, the deploy owner
+   re-runs smoke next. Independent repair owners follow `/RCA` outcome proof;
+   their originating deploy does not wait for it.
 
 Final report (under 200 words):
 - Root cause (1 sentence)
 - Files modified + line ranges
 - Whether worker/backend needs restart for the fix to take effect
 - Any follow-up risks
-"""
-})
 ```
-
-When all spawned agents return, **the main loop** re-runs static checks for
-the fix, and re-runs the full local smoke group from the top. If the same task fails again with
-a NEW failure mode, spawn a fresh diagnostic agent — never assume a previous
-agent's fix was complete.
-
-**Do not** read >5 KB of log content inline before delegating. Grep for the
-exact agent_id, scan the result, then hand the agent_id off.
 
 **NOT allowed when fixing smoke tests:**
 
@@ -1757,14 +1749,19 @@ exact agent_id, scan the result, then hand the agent_id off.
 - Changing timeouts without explicit user permission — instead, diagnose which parts of the agent lifecycle and LLM requests are causing the most latency, and reduce them precisely in a generalizable way that won't create downstream issues
 - Skipping or disabling tests, except the standing AgentCard release-stall exception in Step 6a (sandbox AND production) and two deploy-approved provider-funding smoke skips: (1) the Claude Code credential-unavailable smoke skip described above, and (2) the Codex E2B smoke (`codex-code` blackbox `smoke -- Codex completes task in real E2B sandbox`) when **every** Codex credential path (ChatGPT OAuth + the funded OpenAI key) is out of credits/quota. The Codex skip is automatic and self-verifying: `codexSmokeCreditSkipReason` (in `back-end/src/tests/blackbox/codex-credit-skip.ts`) converts that specific out-of-funds terminal state into a loud `SKIP` (never a silent pass) so the gate is not blocked by an external funding state, while every other Codex failure mode — crash, timeout, wrong output, and bare OAuth/token revocation (a re-auth issue, not a funding issue) — still hard-fails. Do NOT reach for the coarse `BLACKBOX_TEST_SKIP_DOMAINS=codex-code` bypass for the funding case; the in-test skip keeps the rest of the codex-code domain strict.
 
-**Escalation is ONLY for:**
+Qualified handoff/provider exceptions under the controlling failure policy
+change deploy disposition only; they do not weaken the original task, its
+assertions, timeout controls or the repair owner's proof requirements.
 
-- Third-party providers returning error codes that indicate the account is out of credits/funds (e.g., "insufficient credits", "402", "quota exceeded") — EXCEPT (a) the Codex E2B smoke, which now auto-skips this funding state without human approval (see above); a Codex out-of-funds state no longer blocks the deploy gate, and (b) **the code-review providers (CodeRabbit / the Claude review fallback), which NEVER escalate for credits — see Step 9a, "Review-provider usage exhaustion"**. This escalation list is scoped to Step 6 smoke benchmarks and product-path providers; it does not govern the review gate.
-- Authentication/OAuth token errors (e.g., "401", "authentication failed", "credentials expired") — these require the user to re-authenticate or provide fresh tokens. Do NOT work around auth errors in code; escalate to the user to retrieve valid tokens.
-
-Everything else — crashes, timeouts, stalls, resource contention, infra issues — is your job to fix.
-
-If a benchmark fails due to infrastructure (local stack flake, or on the cloud alternate a fleet/Fly issue), fix the runner and re-run the full smoke group. On the local path all tasks must pass in one `run-predeploy-local` invocation; on the cloud alternate a sequential diagnostic run does not satisfy the concurrent gate.
+For deploy-owned repairs, the main loop re-runs static checks for the fix and
+the full local smoke group from the top. If the same task fails again with a
+new failure mode, inspect the new evidence and coordinate existing claims;
+do not assume the previous fix was complete or create a duplicate repair.
+If a benchmark fails due to infrastructure still owned by this deploy, fix
+the runner and re-run the full smoke group. On the local path all non-waived
+tasks must pass in one `run-predeploy-local` invocation; on the cloud alternate
+a sequential diagnostic run does not satisfy the concurrent gate. A delegated
+waiver preserves the original native result and does not cover unexecuted checks.
 
 ### Local cleanup
 
@@ -1905,7 +1902,7 @@ If Chromium is missing, install once: `cd front-end && npx playwright install ch
 
 ### Pass criteria
 
-**ALL semantic tests must pass — 0 failures.** Per CLAUDE.md rule #15: if a semantic test fails, you diagnose and fix the root cause. "Flaky selector", "realtime broadcast didn't arrive", "timeout" — none of those are excuses. Fix the underlying issue.
+**All semantic tests must pass or have exact recorded qualified exceptions.** Diagnose failures rather than dismissing them as flaky selectors, missing realtime broadcasts or timeouts. Apply the controlling failure policy to ownership; introduced or unknown failures remain blocking.
 
 ### On failure
 
@@ -1914,7 +1911,7 @@ If Chromium is missing, install once: `cd front-end && npx playwright install ch
 3. Fix the root cause in code.
 4. Restart services (Step 5) and re-run the failed semantic test.
 
-After all Group 4 lanes pass, run the mandatory Step 5 teardown. If any lane
+After all Group 4 lanes pass or have exact qualified exceptions, run the mandatory Step 5 teardown. If any lane
 fails, preserve the failed agent long enough to collect diagnostics, complete
 any payment lifecycle cleanup, then tear down before restarting the Test Loop.
 
@@ -2006,13 +2003,18 @@ bash scripts/run-deploy-stage --finish
 
 ---
 
+The checklist below retains the existing gate criteria. Its pass/no-skip
+requirements are subject only to exact exceptions under the controlling
+failure policy; required coverage, sampling, cleanup and test intent are
+unchanged. Do not drop remaining unexecuted checks.
+
 # ╔══════════════════════════════════════════════════════════════════════╗
 
 # ║ HARD GATE — PHASE 2 BLOCKED ║
 
 # ║ ║
 
-# ║ Do NOT enter Phase 2 unless ALL of the following are true: ║
+# ║ Phase 2 requires every item below or an exact qualified exception: ║
 
 # ║ ║
 
@@ -2068,13 +2070,13 @@ bash scripts/run-deploy-stage --finish
 
 # ║ ║
 
-# ║ If ANY test has ANY failure, you are BLOCKED. ║
+# ║ An unwaived INTRODUCED or UNKNOWN failure blocks deployment. ║
 
-# ║ Fix it or escalate to the user. Do NOT proceed. ║
+# ║ Apply the controlling failure policy; preserve native results. ║
 
 # ║ ║
 
-# ║ INVALID EXCUSES (do NOT use these to justify proceeding): ║
+# ║ These labels alone do not prove an exception or attribution: ║
 
 # ║ - "Pre-existing" / "not related to my changes" ║
 
@@ -2086,17 +2088,17 @@ bash scripts/run-deploy-stage --finish
 
 # ║ smoke, not just agents/) ║
 
-# ║ - "Expired tokens" (re-run seed script or escalate to user) ║
+# ║ - "Expired tokens" (classify from evidence; do not bypass auth) ║
 
-# ║ - "Temporal connectivity" (restart workers, fix it) ║
+# ║ - "Temporal connectivity" (classify and route under the policy) ║
 
-# ║ - "Agents timing out" (investigate and fix) ║
+# ║ - "Agents timing out" (investigate and establish attribution) ║
 
 # ║ ║
 
-# ║ Merging or creating a PR with known failures is a CRITICAL ║
+# ║ Never merge an unwaived blocking failure or invent a PASS. ║
 
-# ║ ERROR. The user has explicitly and repeatedly stated this. ║
+# ║ Qualified exceptions remain visible with their native outcomes. ║
 
 # ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -2239,7 +2241,9 @@ Inspect the newest CodeRabbit-authored content from all three endpoints. Treat C
 
 **The Claude fallback review is DISABLED (user, October 28, 2026).** Never add the `claude-review-fallback` label, never start `claude-code-review-fallback.yml`, and never wait on or repair it. Its `CLAUDE_CODE_OAUTH_TOKEN` secret has been revoked since 2026-07-24, so it only added wait time. The workflow file stays inert (label/manual dispatch only). If someone dispatches it manually, its `Diagnose Claude failure` step classifies a failure as `CREDENTIAL_INVALID` (401, revoked secret) or `USAGE_EXHAUSTED` (429); `is_error:true`, 1 turn, ~2s and `$0` alone are not exhaustion (RCA 2026-10-28). That diagnosis never re-enables the fallback in `/deploy`.
 
-When CodeRabbit is unavailable, make at most one zero-touch retry (`@coderabbitai full review` for a false-green). Only confirmed quota, spending-cap or review-limit exhaustion follows the clause below. A missing, failed, timed-out, service-error, false-green or file-limit review without substantive results remains blocked; never close it `clean` merely because the Claude fallback is disabled. Keep the same immutable cycle open while investigating and observing provider recovery; do not consume another cycle or repeatedly request reviews during a quota window.
+When CodeRabbit is unavailable, never close it `clean` merely because the Claude fallback is disabled.
+
+When CodeRabbit is unavailable, make at most one zero-touch retry (`@coderabbitai full review` for a false-green). Apply the controlling failure policy to the diagnosed result: evidenced outages or usage exhaustion are non-blocking external exceptions, with no repair handoff and no waiting for recovery. A missing, failed, timed-out, service-error, false-green or file-limit review alone does not establish an outage; unresolved attribution remains blocking. Preserve the exact reviewer result and exception evidence, never report an unavailable review as passed.
 
 ### Review-provider usage exhaustion: TANK THROUGH, never ask
 
@@ -2253,7 +2257,7 @@ When CodeRabbit is unavailable, make at most one zero-touch retry (`@coderabbita
 
 1. Record in `TEST_REPORT` the row `skip` prints:
    `Code Review | ⚠️ Skipped | reviewers usage-exhausted (CodeRabbit: '<quote>', issue comment <id> updated <ts> naming commit <sha9>; check run <id> <conclusion> '<title>'; Claude fallback disabled)`
-2. Close the open cycle as **clean** — the only result that satisfies `require-mergeable` —
+2. Close the open cycle as **clean for merge accounting only**, retaining the reviewer outcome as `unavailable / external exception` — the result that satisfies `require-mergeable` —
    through the versioned disposition, which requires the CodeRabbit comment naming
    `REVIEW_HEAD` with `Review limit reached`/`usage spending cap` (id + `updated_at`; the
    comment is mutable) plus a non-success CodeRabbit check run on `REVIEW_HEAD` (e.g.
@@ -2364,7 +2368,7 @@ fix. Stabilize the branch as development work, then start a fresh `/deploy`.
   skipped or only non-critical findings → no effect on the cycle result.
 - **CODE RABBIT USAGE-EXHAUSTED** (confirmed quota, spending cap or review-limit exhaustion) → close the cycle `--result clean`, record the
   `⚠️ Skipped` row, and keep going under Step 9a's existing usage-exhaustion exception.
-- **CODE RABBIT UNAVAILABLE WITHOUT USAGE EXHAUSTION** (service failure, missing/timed-out review or false-green) → keep the merge blocked and follow Step 9a's bounded retry and provider-recovery path. The disabled Claude fallback does not waive substantive review.
+- **CODE RABBIT UNAVAILABLE WITHOUT USAGE EXHAUSTION** (service failure, missing/timed-out review or false-green) → diagnose under Step 9a and the controlling failure policy. An evidenced provider outage receives the non-blocking external exception; an unexplained failure remains blocking. The disabled Claude fallback alone does not waive substantive review.
 - **REVIEW SKIPPED** (e.g., "Too many files!") → keep the current immutable
   HEAD blocked until a substantive review is obtained. Do not close it `clean`
   or push filter edits while the review cycle is open. CodeRabbit Free caps reviews at 150 files; the list below is
@@ -2438,10 +2442,17 @@ gh pr comment "$PR_NUMBER" --body '@coderabbitai review'
 
 **Fix ALL valid issues**, regardless of whether the code was modified in this PR. "Pre-existing" or "not my code" is NOT a valid reason to skip a real bug, security issue, or correctness problem. If CodeRabbit or Claude found it, and it's a real issue, fix it. Only skip true style nits (formatting, naming preferences, etc.) that have zero correctness impact.
 
+A comment about an exact test/gate failure already handed off and recorded
+under the controlling failure policy may reference that existing waiver and
+repair link instead of duplicating its fix. This exception does not waive an
+independent correctness/security finding merely because it is unrelated to
+this change.
+
 **Reply to every review comment** before proceeding. For each comment, reply with one of:
 
 - `[FIXED] <short solution description>` — if you fixed the issue
 - `[IGNORED] <reason>` — ONLY for pure style nits with zero correctness/security impact
+- `[DELEGATED] <failure description> — <repair-agent link>` — ONLY when the comment concerns the exact recorded qualifying NOT INTRODUCED test/gate failure already handed off under the controlling policy
 
 Use `gh api` to post replies:
 
@@ -2457,8 +2468,10 @@ gh api repos/{owner}/{repo}/issues/comments/<COMMENT_ID> -X PATCH -f body="<orig
 
 # Phase 3: Finalize
 
-Only enter this phase when the Test Loop is green and the exact current HEAD has
-a clean completed review. Enforce that invariant rather than trusting prose:
+Only enter this phase when every Test Loop requirement is verified or has an
+exact qualified exception, and the exact current HEAD has completed review
+accounting. An external review exception remains unavailable, never PASS.
+Enforce the ledger state rather than trusting prose:
 
 ```bash
 # Pipeline-driven gates: the green receipt must be bound to these exact bytes
@@ -2863,9 +2876,9 @@ sys.exit(1 if bad else 0)
 "
 ```
 
-If this exits non-zero, the deploy is **unhealthy even though it's live** — treat as a deploy failure: diagnose the error (most likely a schema/migration mismatch or missing env var — see the 2026-06-27 incident for the migration-vs-DB drift pattern), fix it, new PR, continue from Step 9. Do NOT proceed to Step 14 with errors in the prod log.
+If this exits non-zero, the deploy is **unhealthy even though it's live** — treat as a deploy failure: diagnose the error (most likely a schema/migration mismatch or missing env var — see the 2026-06-27 incident for the migration-vs-DB drift pattern), fix it, new PR, continue from Step 9. Do NOT proceed to Step 14 with errors in the prod log. Apply the controlling failure policy before treating the native failure as blocking: exact qualified exceptions remain failed/unverified, are not called healthy, and do not require the unrelated repair in this PR.
 
-After the endpoint checks and log scan are both green, close this lane:
+After the endpoint checks and log scan pass or have exact qualified exceptions, close this lane with their actual results retained:
 
 ```bash
 python3 scripts/record_factory_event.py deploy production-finish backend-probes
@@ -3023,8 +3036,8 @@ script removes its own fixtures on SIGTERM/SIGINT, but an interrupted run proves
 nothing and must be re-run.
 
 Retain the JSON output as the production migration report card. Any failed row,
-including fixture cleanup, blocks deploy completion and must be diagnosed and
-fixed before Step 13b.
+including fixture cleanup, requires attribution under the controlling failure
+policy before Step 13b. Introduced or unknown failures remain blocking.
 
 ## Step 13w: Cloud WMH refresh + SIM smoke (skip unless WMH paths changed)
 
@@ -3107,7 +3120,9 @@ python3 scripts/run_deploy_pipeline.py production-semantic --merged-sha "$DEPLOY
 python3 scripts/record_factory_event.py deploy production-finish semantic
 ```
 
-This is a hard deployment gate. If the workflow fails, the deployment is not complete: inspect its Playwright artifacts and service logs. For a provider outage, follow "Provider outages: report and retry every 10 minutes" above; once the prior attempt is terminal, rerun the same command with `--retry-failed-once "<justification>"` so only failed jobs are retried (`gh run rerun <id> --failed`, recorded in production.json; exactly one retry, a second is refused). Retain successful jobs under their original execution provenance and audit the retry's actual checkout SHA and results. For a code defect, fix the root cause in a new PR and repeat the deploy loop. Do not report success or proceed to Step 14 while this check is red.
+Inspect failed workflow Playwright artifacts and service logs, then apply the controlling failure policy. An evidenced provider outage or exhausted credits receives an external exception and no handoff. A NOT INTRODUCED defect receives a repair handoff and waiver. Fix INTRODUCED defects and rerun affected checks; UNKNOWN remains blocking. Preserve native failures and execution provenance. Proceed to Step 14 only after every requirement is verified or has an exact qualified exception.
+
+For a required same-source retry of a non-waived failure, wait until the prior attempt is terminal, then rerun the same command with `--retry-failed-once "<justification>"` (failed jobs only; exactly one retry; preserve successful jobs' execution provenance and audit the retry's checkout SHA). Qualified external exceptions do not require a retry.
 
 If no workflow-scoped token is available, `gh workflow run` returns HTTP 403
 `Resource not accessible by integration`. In that case, run the workflow's two
@@ -3236,7 +3251,7 @@ Lane marks:
 
 - `✅` means the lane ran and passed.
 - `❌` means failed.
-- `⚠️` is reserved for a required check that was skipped, with the reason.
+- `⚠️` marks a recorded skip, delegated waiver, provider exception or override; show its reason and never call it PASS.
 - Omit lanes that did not apply, except TEMPORAL, which is always shown.
 
 TEMPORAL reports Step 13–13ab:
@@ -3260,9 +3275,14 @@ change is and why it was not included:
 
 Ignore other workspaces' branches. Write `✖ none` if there is nothing.
 
-End with a `READY TO CLOSE` line: `✅` when nothing is left open; `⚠️` plus the
-open items when work remains outside the merge (unsettled prod state, unshipped
-rows, follow-ups); `❌` when the deploy is not complete.
+Show the cumulative **DELEGATED** list (failure description and repair-agent link only), retaining entries across refreshes and resumes. Delegated repairs do not block this deploy.
+
+After the `READY TO CLOSE` line, append all unresolved **🚨🚨 EXTERNAL PROVIDER FAILURE — <provider>: <reason> — NEEDS FIXING** alerts with affected checks and evidence. These are the very last scorecard section and are non-blocking.
+
+Use a `READY TO CLOSE` line: `✅` when this deploy's required work is complete, including qualified exceptions; `⚠️` plus the
+open items when required work remains (unsettled prod state or intended unshipped
+rows); independent delegated repairs and qualified external exceptions do not
+prevent READY TO CLOSE; `❌` when the deploy is not complete.
 
 ```text
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

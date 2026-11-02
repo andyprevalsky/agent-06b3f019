@@ -5,6 +5,7 @@ export async function cleanupTreasuryRailCards(
   createdCardIds: ReadonlySet<string>,
   callOrgTool: AgentCardOrgToolCaller
 ): Promise<number> {
+  if (createdCardIds.size === 0) return 0;
   const cards =
     (
       (await callOrgTool('list_cards', { cardholder_id: cardholderId, limit: 25 })) as {

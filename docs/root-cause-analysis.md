@@ -498,6 +498,8 @@ completeness, and index freshness on every deploy.
 
 1. **"Pre-existing, I'll skip it"** — "Pre-existing" is NEVER an acceptable diagnosis. Just because an error exists in code you didn't touch doesn't mean you aren't responsible for fixing it. This codebase is maintained by multiple agents working in parallel, each of which will naturally produce some amount of uncaught errors. If nobody owns the errors they encounter, the codebase degrades with every commit. You are the immune system — every bug you encounter and walk past is a bug that compounds. If you find it, you fix it. No exceptions.
 
+   **Deploy-only exception:** `.claude/shared/deploy-failure-policy.md` controls attribution, independent repair handoffs and external-provider exceptions. Preserve evidence; a deploy waiver does not close the repair or relax its causal-proof requirements. Outside `/deploy`, this anti-pattern is unchanged.
+
 2. **Defensive fallback** — Wrapping a broken call in try/catch with a default value. This hides the bug and makes it harder to find later. The system should fail loudly when something is wrong.
 
 3. **Symptom patch** — Fixing the downstream effect instead of the upstream cause. Example: reformatting a malformed string in the frontend instead of fixing the backend that produced it.

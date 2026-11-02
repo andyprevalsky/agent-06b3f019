@@ -1,3 +1,11 @@
+## Failure handling during deployment
+
+When these suites are run by `/deploy`, apply
+`.claude/shared/deploy-failure-policy.md` to failures. Required checks retain
+their actual outcomes; a qualified delegation waiver or external-provider
+exception is not a passing test. Standalone test and benchmark work retains its
+own acceptance criteria.
+
 # Testing
 
 Single source of truth for running tests. All commands run from the repo root.

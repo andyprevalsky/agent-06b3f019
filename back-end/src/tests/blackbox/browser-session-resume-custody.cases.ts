@@ -33,6 +33,8 @@ export async function runBrowserResumeCustodyCases() {
       'provider-ended',
       'incompatible',
       'incompatible-timeout',
+      'incompatible-delayed',
+      'incompatible-owner-timeout',
       'manual-follow',
       'stale-binding',
       'fresh-sequential',
@@ -41,12 +43,16 @@ export async function runBrowserResumeCustodyCases() {
       'logical-pause',
       'create-rejected',
     ]) {
+      const delayedIncompatible =
+        scenario === 'incompatible-delayed' || scenario === 'incompatible-owner-timeout';
       const concurrent = [
         'concurrent',
         'logical-empty',
         'fresh-concurrent',
         'incompatible',
         'incompatible-timeout',
+        'incompatible-delayed',
+        'incompatible-owner-timeout',
         'leader-exit',
         'leader-exit-stalled',
       ].includes(scenario);
@@ -220,7 +226,21 @@ export async function runBrowserResumeCustodyCases() {
             new URL('./browser-session-resume-custody.worker.ts', import.meta.url),
             [session.id],
             {
-              execArgv: ['--import', 'tsx'],
+              execArgv: [
+                '--experimental-test-module-mocks',
+                '--import',
+                'tsx',
+                // Force contender startup past the old one-second response window.
+                // The existing ten-second worker deadline remains unchanged.
+                ...(!fresh && delayedIncompatible
+                  ? [
+                      '--import',
+                      `data:text/javascript,await new Promise(r => setTimeout(r, ${
+                        scenario === 'incompatible-owner-timeout' ? 12000 : 1500
+                      }))`,
+                    ]
+                  : []),
+              ],
               stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
               env: {
                 ...process.env,
@@ -302,7 +322,43 @@ export async function runBrowserResumeCustodyCases() {
       };
       try {
         let results: Outcome[];
-        if (concurrent) {
+        if (delayedIncompatible) {
+          let firstSettled = false;
+          const first = run(true).finally(() => {
+            firstSettled = true;
+          });
+          // Use main's owned provider-entry/leader-settlement race, not a detached poll.
+          const contender = Promise.race([
+            providerEntry,
+            first.then(() => {
+              throw new Error('fixture leader completed without provider entry');
+            }),
+          ]).then(async () => {
+            try {
+              const second = await run();
+              assert.match(
+                second.error ?? '',
+                /Browser resume request is incompatible with the in-flight operation/
+              );
+              assert.equal(firstSettled, false, 'the create owner must still be blocked');
+              assert.equal(
+                (await prisma.toolSideEffect.findUniqueOrThrow({ where: { operationKey: key } }))
+                  .status,
+                'STARTED',
+                'the incompatible contender must observe active custody'
+              );
+              return second;
+            } finally {
+              releaseNative();
+            }
+          });
+          const combined = Promise.all([first, contender]);
+          if (scenario === 'incompatible-owner-timeout') {
+            await assert.rejects(combined, /^Error: fixture timeout:/);
+            continue;
+          }
+          results = await combined;
+        } else if (concurrent) {
           if (scenario === 'incompatible-timeout')
             process.stdout.write(
               `Custody timeout control ${JSON.stringify({ owner, contextId: context.id, sessionId: session.id })}\n`
@@ -405,7 +461,11 @@ export async function runBrowserResumeCustodyCases() {
           );
           assert.equal(creates, 2);
           assert.equal(hydrations, 2);
-        } else if (scenario === 'incompatible' || scenario === 'manual-follow') {
+        } else if (
+          scenario === 'incompatible' ||
+          delayedIncompatible ||
+          scenario === 'manual-follow'
+        ) {
           assert(results[0]!.ok, JSON.stringify({ provider, scenario, results }));
           assert(!results[1]!.ok);
           assert.equal(creates, 1);
@@ -452,6 +512,34 @@ export async function runBrowserResumeCustodyCases() {
         await prisma.toolSideEffect.deleteMany({ where: { operationKey: key } });
         await prisma.browserContext.delete({ where: { id: context.id } });
         await new Promise<void>((resolve) => server.close(() => resolve()));
+        if (scenario === 'incompatible-owner-timeout') {
+          assert.equal(children.size, 0, 'the timed-out operation must join both children');
+          assert.equal(server.listening, false, 'the timed-out operation must close its server');
+          assert.equal(
+            await prisma.toolSideEffect.count({ where: { operationKey: key } }),
+            0,
+            'the timed-out operation must remove its exact ledger row'
+          );
+          assert.equal(
+            await prisma.browserContext.count({ where: { id: context.id } }),
+            0,
+            'the timed-out operation must remove its exact context'
+          );
+          assert.equal(
+            await prisma.browserSession.count({ where: { id: session.id } }),
+            0,
+            'the timed-out operation must remove its exact session'
+          );
+          console.log(
+            JSON.stringify({
+              provider,
+              scenario,
+              expectedError: 'fixture timeout',
+              children: children.size,
+              rows: 0,
+            })
+          );
+        }
       }
     }
   }
