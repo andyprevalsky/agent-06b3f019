@@ -35,6 +35,7 @@ import {
   expectStatus,
   type Session,
 } from './projects-harness';
+import './projects-folders.cases';
 import { randomBytes } from 'crypto';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';

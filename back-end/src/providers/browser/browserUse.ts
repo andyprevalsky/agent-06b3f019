@@ -1,3 +1,4 @@
+export { getBrowserUseSessionHealth } from './browserUseHealth';
 export { browserUseProxyCountry } from './resumeRecovery';
 import * as resumeRecovery from './resumeRecovery';
 import { browserResumeScope } from '../steel/lifecycleClaim';
@@ -19,7 +20,6 @@ import {
   type BrowserProviderName,
   type BrowserProviderResumeSession,
   type BrowserProviderSession,
-  type BrowserSessionHealth,
   type BrowserFileInfo,
 } from './types';
 import { captureContextStorage } from './contextStorageCapture';
@@ -458,24 +458,6 @@ async function replaceSession(
 
 export const resumeBrowserUseSession = replaceSession;
 export const rotateBrowserUseSession = replaceSession;
-
-export async function getBrowserUseSessionHealth(sessionId: string): Promise<BrowserSessionHealth> {
-  const session = await request<resumeRecovery.BrowserUseSession>(
-    `/browsers/${encodeURIComponent(sessionId)}`
-  );
-  const expiresAt = new Date(session.timeoutAt).getTime();
-  const createdAt = new Date(session.startedAt).getTime();
-  return {
-    provider: 'browser-use',
-    sessionId,
-    status: session.status,
-    createdAt: session.startedAt,
-    expiresAt: session.timeoutAt,
-    timeoutMs: expiresAt - createdAt,
-    ttlMs: Math.max(0, expiresAt - Date.now()),
-    profileId: null,
-  };
-}
 
 /** Send the same browser-process keyboard chords offered by the Kernel route. */
 export async function pressBrowserUseKeys(sessionId: string, keys: string[]): Promise<void> {

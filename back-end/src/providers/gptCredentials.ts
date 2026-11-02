@@ -434,6 +434,20 @@ export async function markGptUserTokenRateLimited(
       ...(options?.integrationId ? { id: options.integrationId } : {}),
       ...(options?.accountId ? { accountId: options.accountId } : {}),
     };
+    // S33: an auth failure must name the credential that failed. Without an
+    // integration or account id it cannot tell a user's accounts apart, so it
+    // never expires more than one row (one bad token expired every healthy
+    // sibling subscription).
+    if (!options?.integrationId && !options?.accountId) {
+      const candidates = await prisma.integration.count({ where: scopedWhere });
+      if (candidates > 1) {
+        log.warn(`GPT user token auth failure for ${userId} names no credential; not expiring`, {
+          candidates,
+          failureReason: options?.failureReason,
+        });
+        return;
+      }
+    }
     const updated = await prisma.integration.updateMany({
       where: scopedWhere,
       data: {
@@ -484,6 +498,9 @@ export async function markGptUserTokenRateLimited(
         return;
       }
     }
+    // An integration-scoped failure without an account identity must not fall
+    // into the legacy user-wide branch, which would flag sibling accounts.
+    if (resolvedAccountId === '' && options?.integrationId) return;
     await markConnectionNeedsReconnectFromIntegrationFailure({
       userId,
       integrationName: 'gpt_code',

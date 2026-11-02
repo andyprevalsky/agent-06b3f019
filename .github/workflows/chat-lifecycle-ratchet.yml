@@ -1,4 +1,8 @@
 name: Production Semantic Frontend Gate
+# The run title names the exact source commit so a watcher can bind to this
+# run from `gh run view --json displayTitle` (inputs and job summaries are not
+# exposed there). Deployment-triggered runs name the deployment instead.
+run-name: "Production semantic gate ${{ github.event_name == 'workflow_dispatch' && format('source_sha={0}', inputs.source_sha || github.sha) || format('deployment={0}', github.event.deployment.id) }}"
 
 on:
   deployment_status:
@@ -12,6 +16,14 @@ on:
         description: Backend URL to verify
         required: false
         default: https://navi-j9a9.onrender.com
+      source_sha:
+        description: >-
+          Exact commit to check out for the semantic harness and the tested
+          source. It must already be on the default branch (verified before
+          checkout). Default: the head of the dispatched ref, which can be a
+          later commit than the one a deploy merged.
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -31,13 +43,52 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+
     steps:
+      - name: Verify source_sha is already on the default branch
+        if: inputs.source_sha != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          # The harness stays trusted: only a full commit SHA the default branch
+          # already contains may be checked out (compare status identical/behind).
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::source_sha must be a full 40-hex commit SHA, got '${SOURCE_SHA}'"; exit 1; }
+          status=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${DEFAULT_BRANCH}...${SOURCE_SHA}" --jq .status)
+          case "$status" in
+            identical|behind) echo "source_sha ${SOURCE_SHA} is on ${DEFAULT_BRANCH} (${status})" ;;
+            *) echo "::error::source_sha ${SOURCE_SHA} is ${status} relative to ${DEFAULT_BRANCH}; only commits already on the default branch may be verified"; exit 1 ;;
+          esac
+
       - name: Check out trusted semantic harness
         uses: actions/checkout@v4
         with:
           # Test the deployed URL without executing code from a preview branch
-          # that could otherwise read the authentication secrets below.
-          ref: ${{ github.event.repository.default_branch }}
+          # that could otherwise read the authentication secrets below:
+          # deployment events always check out the default branch. A dispatch
+          # checks out the exact merged commit (`source_sha`, verified above)
+          # or the dispatched ref's head, never a later default-branch commit.
+          ref: ${{ inputs.source_sha || (github.event_name == 'workflow_dispatch' && github.sha) || github.event.repository.default_branch }}
+          # Fetch trees only; skip ~3.1 GB of benchmark history, media and
+          # vendored sources a full checkout downloaded (~4 min per job).
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/agents/benchmarks/
+            /agents/benchmarks/tasks.json
+            !/front-end/public/
+            !/claude-code-src/
+
+      - name: Record effective source commit
+        id: source
+        run: |
+          sha=$(git rev-parse HEAD)
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          printf 'source_sha=%s\n' "${sha}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -83,7 +134,7 @@ jobs:
           retention-days: 14
 
   lifecycle:
-    name: Chat full-lifecycle latency ratchet
+    name: Chat full-lifecycle latency ratchet (${{ matrix.path }})
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.deployment_status.state == 'success' &&
@@ -91,12 +142,55 @@ jobs:
        github.event.deployment.production_environment == true)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # One chat path per runner: each path keeps one browser and one worker on
+    # its own host (no renderer contention), and the four paths run at once
+    # instead of back to back. Keep this list equal to CHAT_PATHS.
+    strategy:
+      fail-fast: false
+      matrix:
+        path: [direct_answer, web_search, agent_plan, agent_execute]
+
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
 
     steps:
+      - name: Verify source_sha is already on the default branch
+        if: inputs.source_sha != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::source_sha must be a full 40-hex commit SHA, got '${SOURCE_SHA}'"; exit 1; }
+          status=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${DEFAULT_BRANCH}...${SOURCE_SHA}" --jq .status)
+          case "$status" in
+            identical|behind) echo "source_sha ${SOURCE_SHA} is on ${DEFAULT_BRANCH} (${status})" ;;
+            *) echo "::error::source_sha ${SOURCE_SHA} is ${status} relative to ${DEFAULT_BRANCH}; only commits already on the default branch may be verified"; exit 1 ;;
+          esac
+
       - name: Check out trusted lifecycle harness
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          # Same trust rule as the semantic job: deployment events check out
+          # the default branch; a dispatch checks out the exact source commit.
+          ref: ${{ inputs.source_sha || (github.event_name == 'workflow_dispatch' && github.sha) || github.event.repository.default_branch }}
+          # Fetch trees only; skip ~3.1 GB of benchmark history, media and
+          # vendored sources a full checkout downloaded (~4 min per job).
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/agents/benchmarks/
+            /agents/benchmarks/tasks.json
+            !/front-end/public/
+            !/claude-code-src/
+
+      - name: Record effective source commit
+        id: source
+        run: |
+          sha=$(git rev-parse HEAD)
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          printf 'source_sha=%s\n' "${sha}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -124,6 +218,7 @@ jobs:
           BACKEND_URL: ${{ inputs.backend_url || 'https://navi-j9a9.onrender.com' }}
           FRONTEND_URL: ${{ inputs.frontend_url || github.event.deployment_status.environment_url || 'https://www.roselabs.ai' }}
           SEMANTIC_WORKERS: 1
+          CHAT_LIFECYCLE_PATH: ${{ matrix.path }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           TEST_API_KEY: ${{ secrets.BACKEND_API_KEY }}
@@ -133,7 +228,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: chat-lifecycle-${{ github.run_id }}
+          name: chat-lifecycle-${{ github.run_id }}-${{ matrix.path }}
           path: |
             front-end/playwright-report
             front-end/test-results

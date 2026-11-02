@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 
 import type { PrismaClient } from '@prisma/client';
 import type { LiveSample } from './chat-router-failover.live.support';
+import type { SearchRequest } from './chat-router-failover.network.support';
 
 const execFileAsync = promisify(execFile);
 const ROOT = resolve(__dirname, '../../../..');
@@ -45,22 +46,32 @@ export interface LiveSeededAgent {
 interface LiveEvidenceSampleSource {
   outcome: LiveSample['outcome'];
   network: {
-    routerRequests(provider: 'cerebras' | 'openrouter', model?: string): LiveSample['glm'];
+    decisionRounds(): LiveSample['rounds'];
+    searchRequests: readonly SearchRequest[];
     alerts: LiveSample['alerts'];
   };
   goal?: string;
 }
 
+/** What the network boundary did with the turn's web searches (chat-router-failover.network.support.ts). */
+const SEARCH_BOUNDARY =
+  'Parallel search POSTs were answered in-process with 200 {"results":[]}; ' +
+  'this probe tests routing failover, not search.';
+
 export function recordLiveEvidenceSample(
   capture: LiveEvidenceCapture | undefined,
-  { outcome, network, goal }: LiveEvidenceSampleSource,
-  glmModel: string
+  { outcome, network, goal }: LiveEvidenceSampleSource
 ): void {
   if (capture) {
+    const rounds = network.decisionRounds();
+    const outcomeRound = rounds.at(-1);
     capture.sample = {
       outcome,
-      attempts: network.routerRequests('cerebras').length,
-      glm: network.routerRequests('openrouter', glmModel),
+      attempts: outcomeRound?.attempts ?? 0,
+      glm: outcomeRound?.glm ?? [],
+      rounds,
+      searchRequests: network.searchRequests,
+      searchBoundary: SEARCH_BOUNDARY,
       alerts: network.alerts,
       goal,
     };

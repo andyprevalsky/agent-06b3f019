@@ -271,6 +271,8 @@ class BenchmarkRun:
                     # Prefer explicit BENCHMARK_ATTEMPT_SUITE (predeploy scripts)
                     # so worktree smoke cannot invalidate canary eligibility.
                     suite=os.environ.get("BENCHMARK_ATTEMPT_SUITE") or self.suite,
+                    run_id=self.run_id,
+                    outcome_class=("cleanup-failure" if r.cleanup_failure else "passed" if r.passed else "failed"),
                 )
             except Exception as e:
                 emit_history_diagnostic(f"⚠️  record_attempt failed for {r.name} (non-fatal): {e}")

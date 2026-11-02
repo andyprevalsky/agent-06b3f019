@@ -1,6 +1,7 @@
 /** HTTP helpers + wire schemas for the integration-accounts (sync progress) blackbox domain. */
 import { config } from 'dotenv';
 import { z } from 'zod';
+import { prisma } from '../../providers/database';
 config();
 
 export const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -146,4 +147,16 @@ export async function defaultAccountOf(
   provider: string
 ): Promise<Account | undefined> {
   return (await accountsOf(token, provider)).find((x) => x.accountId === 'default');
+}
+
+export function progressRow(userId: string, provider: string) {
+  return prisma.integrationSyncProgress.findUniqueOrThrow({
+    where: { userId_provider_accountId: { userId, provider, accountId: '' } },
+  });
+}
+
+export async function bar(session: Session, provider: string): Promise<Account> {
+  const account = await defaultAccountOf(session.token, provider);
+  assert(account !== undefined, `${provider}: its row is listed as one account`);
+  return account;
 }

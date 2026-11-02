@@ -245,6 +245,7 @@ def triggers_worker_deploy(path):
 
 for path in (
     "scripts/worker_pool_cutover.py",
+    "scripts/agents-image-context.sh",
     "scripts/worker_pool_runtime.py",
     "scripts/retained_agent_machine.py",
     "back-end/src/providers/workerDeploymentQueue.ts",

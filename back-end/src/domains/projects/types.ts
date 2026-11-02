@@ -68,7 +68,13 @@ export const updateProjectSchema = z
 /** PUT /api/projects — upsert by name (rose-sync / seeds). */
 export const upsertProjectSchema = createProjectSchema;
 
+export const projectFolderSchema = z.object({ name: projectNameSchema }).strict();
+
 export const projectIdSchema = z.string().uuid();
+
+export const projectFolderPositionSchema = z
+  .object({ beforeId: projectIdSchema.nullable() })
+  .strict();
 
 const variableNameSchema = z
   .string()

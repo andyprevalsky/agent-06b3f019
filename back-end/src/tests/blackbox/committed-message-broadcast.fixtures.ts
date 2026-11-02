@@ -21,3 +21,11 @@ export const decodeEncoded = (record: Record<string, unknown>) =>
     text: string;
     metadata: unknown;
   };
+/** An in-progress browser tool row (the ordinary committed message shape). */
+export const message = (id: string) => ({
+  id,
+  timestamp: new Date('2026-10-13T01:34:15.736Z'),
+  text: 'Opening browser',
+  role: 'TOOL',
+  metadata: { toolName: 'spawn_browser_agent', toolStatus: 'IN_PROGRESS', toolCallId: id },
+});

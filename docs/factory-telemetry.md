@@ -59,7 +59,11 @@ python3 scripts/factory_ledger.py publish
 ```
 
 Emit snapshots at assignment start/end and configuration changes. New stages
-read the refreshed file; snapshots do not rewrite older stages. Final reports
+read the refreshed file; snapshots do not rewrite older stages. `bash
+scripts/run-deploy-stage --start` and every `run_deploy_pipeline.py run` attempt
+re-stamp the selected snapshot's `observed_at` and `validation.source_sha` (with
+its evidence) from `git rev-parse HEAD` when the file lives inside that checkout;
+nothing else is rewritten, and an invalid snapshot refuses the run. Final reports
 must show recorded model/effort/tier (or UNKNOWN), usage scope and collection gaps.
 Do not claim the ledger alone collected these settings automatically.
 

@@ -127,6 +127,8 @@ export async function resumeExistingSubAgent(
     : existing.temporalWorkflowId;
   return {
     agent_id: existing.id,
+    project_id: existing.projectId,
+    folder_id: existing.folderId,
     progress: existing.progress,
     goal: existing.goal,
     model: existing.model,

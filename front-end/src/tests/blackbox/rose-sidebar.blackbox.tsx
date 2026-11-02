@@ -257,8 +257,13 @@ describe('Rose left bar (flag on)', () => {
     // the same top slot (label faded), so expanding never shifts the rows.
     const project = screen.getByTestId('rose-project-row-p-rose');
     expect(within(project).getByText('Rose').className).toContain('opacity-0');
-    expect(within(project).queryByRole('button')).toBeNull();
-    expect(within(screen.getByTestId('rose-home-project-row')).queryByRole('button')).toBeNull();
+    expect(within(project).getByRole('button', { name: 'Collapse Rose project' })).toBeVisible();
+    expect(within(project).getAllByRole('button')).toHaveLength(1);
+    expect(
+      within(screen.getByTestId('rose-home-project-row')).getByRole('button', {
+        name: 'Collapse Home project',
+      }),
+    ).toBeVisible();
     const newProject = screen.getByRole('button', { name: '+ New project' });
     expect(screen.getByTestId('rose-agent-groups').firstElementChild).toBe(newProject);
     expect(within(newProject).getByText('New project').className).toContain('opacity-0');
@@ -278,7 +283,7 @@ describe('Rose left bar (flag on)', () => {
     expect(bar.style.width).toBe('64px');
   });
 
-  it('+ on a project marks it pending: liquid-metal ring + shadow + glow, in both widths, until an agent is selected', async () => {
+  it('+ selects the next project without highlighting its icon in either sidebar width', async () => {
     const user = userEvent.setup();
     const onCreateAgentInProject = vi.fn();
     const user0 = signedInUser();
@@ -300,19 +305,10 @@ describe('Rose left bar (flag on)', () => {
     rerender(<AppSidebar {...props(null)} />);
     const row = screen.getByTestId('rose-project-row-p-rose');
     expect(row).toHaveAttribute('data-pending', 'true');
-    const ring = within(row).getByTestId('pending-project-ring');
-    // The integration icons' liquid-metal ring (shared helper) and light tile,
-    // with shadow; screen readers hear the pending state too.
-    expect(ring.getAttribute('style')).toContain('conic-gradient');
-    expect(ring.getAttribute('style')).toContain('rgb(245, 245, 245)');
-    expect(ring.className).toMatch(/shadow-\[/);
-    expect(row).toHaveTextContent('(new agents go here)');
-    // Only one project is pending.
-    expect(screen.getAllByTestId('pending-project-frame')).toHaveLength(1);
+    expect(within(row).queryByTestId('pending-project-ring')).toBeNull();
+    expect(screen.queryByTestId('pending-project-frame')).toBeNull();
     collapseBar();
-    expect(
-      within(screen.getByTestId('rose-project-row-p-rose')).getByTestId('pending-project-ring'),
-    ).toBeInTheDocument();
+    expect(screen.queryByTestId('pending-project-frame')).toBeNull();
 
     // Another project's + moves it.
     expandBar();
@@ -350,9 +346,7 @@ describe('Rose left bar (flag on)', () => {
     expect(screen.queryByTestId('pending-project-frame')).toBeNull();
     await user.click(createAgentButton('home'));
     expect(screen.getByTestId('rose-home-project-row')).toHaveAttribute('data-pending', 'true');
-    expect(
-      within(screen.getByTestId('rose-home-project-row')).getByTestId('pending-project-ring'),
-    ).toBeInTheDocument();
+    expect(screen.queryByTestId('pending-project-ring')).toBeNull();
   });
 
   it('collapsed icons use the gray Bot glyph plus only the supported status glyphs', async () => {

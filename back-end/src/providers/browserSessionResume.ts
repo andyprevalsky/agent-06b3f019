@@ -5,11 +5,7 @@ import {
   type SerializedPassword,
   type SerializedPasskey,
 } from './browser/resumeCredentials';
-export type {
-  UserSettings,
-  SerializedPassword,
-  SerializedPasskey,
-} from './browser/resumeCredentials';
+export type { UserSettings, SerializedPassword, SerializedPasskey };
 import {
   checkpointLogicalBrowser,
   loadLogicalBrowserCheckpoint,
@@ -24,6 +20,7 @@ import {
   withBrowserResumeLifecycle,
 } from './steel/lifecycleClaim';
 import { inspectResumeCandidate } from './browser/resumeRecovery';
+import { failedHydrationCleanup } from './browser/resumeLifecycle';
 import { withOwnedResumeTransport } from './browser/resumeTransport';
 /* c8 ignore start -- resumeBrowserSession requires Steel SDK */
 import { prisma } from './database';
@@ -258,6 +255,7 @@ export async function resumeBrowserSession(
     },
     resume,
     inspect: inspectResumeCandidate,
+    ...failedHydrationCleanup(taskId, getBrowserSessionHealth),
     follow: async () => {
       const current = await read();
       if (
@@ -303,6 +301,9 @@ async function assembleResumeResponse(
   dependencies: BrowserSessionResumeDependencies,
   carriedState?: TilionCarriedState
 ) {
+  // Tilion keeps the same browser and its worker-owned CDP connection.
+  if (result.profileSource === 'tilion_rotated_in_place')
+    return assembleResumeResponseWithTransport(taskId, result, dependencies, true);
   return withOwnedResumeTransport(result, async () => {
     const response = await assembleResumeResponseWithTransport(taskId, result, dependencies);
     await applyCarriedStateToReplacement(
@@ -378,15 +379,8 @@ async function assembleResumeResponseWithTransport(
           result.validationBrowser ? { browser: result.validationBrowser } : undefined
         );
       } catch (error) {
-        // `injectUserData` deliberately REJECTS on a state-injection timeout
-        // rather than resuming with partial state. `resumeSession` already
-        // created a fresh remote browser by this point, so letting the error
-        // propagate untouched leaks a paid session that nothing will ever
-        // close — the caller only sees the exception, never the session id.
-        // Close it (not pause: the resume failed, so there is no state worth
-        // preserving) before rethrowing.
-        // Durable resume custody must retain an ambiguous hydration outcome.
-        // Only the older non-custodied path can safely use eager cleanup here.
+        // The durable resume owner settles its failed candidate. Legacy resumes
+        // close directly instead of returning a partially injected browser.
         if (browserResumeScope()) throw error;
         await dependencies.closeSession(result.sessionId, false).catch((closeError) => {
           // Never let cleanup mask the original injection failure.

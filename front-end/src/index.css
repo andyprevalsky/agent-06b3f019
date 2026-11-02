@@ -1391,6 +1391,64 @@ html.rose-app-shell body {
   }
 }
 
+/* Mobile trajectory text reads 2px larger than desktop (phones only). Each
+ * Tailwind size used in the message list is bumped in place; prose-sm children
+ * size in em, so bumping the container carries through. */
+@media (max-width: 767px) {
+  .rose-trajectory .text-xs {
+    font-size: calc(0.75rem + 2px);
+    line-height: calc(1rem + 2px);
+  }
+  .rose-trajectory .text-sm,
+  .rose-trajectory .prose-sm {
+    font-size: calc(0.875rem + 2px);
+    line-height: calc(1.25rem + 2px);
+  }
+  .rose-trajectory .text-base {
+    font-size: calc(1rem + 2px);
+    line-height: calc(1.5rem + 2px);
+  }
+  .rose-trajectory .text-\[9px\] {
+    font-size: 11px;
+  }
+  .rose-trajectory .text-\[10px\] {
+    font-size: 12px;
+  }
+  .rose-trajectory .text-\[10\.5px\] {
+    font-size: 12.5px;
+  }
+  .rose-trajectory .text-\[11px\] {
+    font-size: 13px;
+  }
+  .rose-trajectory .text-\[11\.5px\] {
+    font-size: 13.5px;
+  }
+  .rose-trajectory .text-\[12px\] {
+    font-size: 14px;
+  }
+  .rose-trajectory .text-\[12\.5px\] {
+    font-size: 14.5px;
+  }
+  .rose-trajectory .text-\[13px\] {
+    font-size: 15px;
+  }
+  .rose-trajectory .text-\[13\.5px\] {
+    font-size: 15.5px;
+  }
+  .rose-trajectory .text-\[14px\] {
+    font-size: 16px;
+  }
+  .rose-trajectory .text-\[14\.5px\] {
+    font-size: 16.5px;
+  }
+  .rose-trajectory .text-\[15px\] {
+    font-size: 17px;
+  }
+  .rose-trajectory .text-\[17px\] {
+    font-size: 19px;
+  }
+}
+
 /* Grid background pattern for hero section */
 .grid-background {
   background-image:

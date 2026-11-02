@@ -53,6 +53,8 @@ export async function runBrowserSettledSteelResumeCases(): Promise<void> {
     sourceEnded: () => true,
     canFollow: async () => false,
     inspect: async (_provider, id) => (states.has(id) ? { id, status: states.get(id)! } : null),
+    release: async () => false,
+    ended: async () => false,
     follow: async () => {
       throw new Error('unexpected follow');
     },
@@ -197,8 +199,8 @@ export async function runBrowserSettledSteelResumeCases(): Promise<void> {
         'STARTED'
       );
     }
-    console.log(
-      'PASS settled Steel retry: real recreation, expired-owner recovery and four no-create controls'
+    process.stdout.write(
+      'PASS settled Steel retry: real recreation, expired-owner recovery and four no-create controls\n'
     );
   } finally {
     await prisma.toolSideEffect.deleteMany({
@@ -261,6 +263,8 @@ async function resumeWithFirstCreateFailure(firstFailure: Error): Promise<string
       reuseCompleted: true,
       sourceEnded: () => false,
       inspect: async () => null,
+      release: async () => false,
+      ended: async () => false,
     });
   } finally {
     await prisma.toolSideEffect.deleteMany({
@@ -316,6 +320,8 @@ export async function runBrowserResumeRetryAfterRejectedCreateCase(): Promise<vo
           sourceEnded: () => true,
           canFollow: async () => false,
           inspect: async () => ({ id: candidate, status: 'active' }),
+          release: async () => false,
+          ended: async () => false,
           follow: async () => {
             throw new Error('must not follow');
           },
@@ -342,7 +348,9 @@ export async function runBrowserResumeRetryAfterRejectedCreateCase(): Promise<vo
     } finally {
       await prisma.toolSideEffect.delete({ where: { operationKey } });
     }
-    console.log('PASS resume retries a definitely rejected provider create within one resume');
+    process.stdout.write(
+      'PASS resume retries a definitely rejected provider create within one resume\n'
+    );
   } finally {
     if (previousWorkspace === undefined) delete process.env.CONDUCTOR_WORKSPACE_NAME;
     else process.env.CONDUCTOR_WORKSPACE_NAME = previousWorkspace;

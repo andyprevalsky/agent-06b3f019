@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Awaitable, Callable, Optional, TypedDict
+from typing import Any, Awaitable, Callable, NotRequired, Optional, TypedDict
 
 # Type alias for execute_activity callable
 ExecuteActivityCallable = Callable[..., Awaitable[Any]]
@@ -15,6 +15,8 @@ class SearchResult(TypedDict):
     sources: list[str]
     query: str
     provider: str
+    _received_exa_results: NotRequired[list[dict[str, Any]]]
+    _excerpt_limit: NotRequired[int]
 
 
 class ProviderFailureKind(str, Enum):

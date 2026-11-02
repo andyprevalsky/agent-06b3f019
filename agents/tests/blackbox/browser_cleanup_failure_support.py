@@ -22,7 +22,7 @@ async def assert_browser_cleanup_failure_boundaries():
 
     class Client:
         def __init__(self, **kwargs):
-            assert kwargs == {"timeout": 10.0}
+            assert kwargs == {"timeout": 60.0}
 
         async def __aenter__(self):
             return self

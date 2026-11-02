@@ -6,6 +6,7 @@ import {
 } from '../../providers/e2b';
 import { checkGithubRepoAccess, ensureAgentTreeRepo } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
+import { codexSpeedFor } from '../../providers/codexSpeed';
 import {
   markGptApiKeyOnCooldown,
   markGptIntegrationRateLimited,
@@ -97,10 +98,9 @@ export async function createSession(params: CreateSessionParams) {
     normalizedRepoUrl = accessCheck.normalizedUrl!;
   }
 
-  const { agentFastMode } = await import('../../providers/demoCacheStore');
-  const fastMode = await agentFastMode(agent_id);
-  // Codex proxy is DEMO cache replay — independent of the Fast Mode button.
-  const fastModeCacheEnabled = fastMode.enabled;
+  // Codex never uses the DEMO / Fast Mode cache: the agent's speed only
+  // selects Codex's native service tier.
+  const codexSpeed = codexSpeedFor(await repo.findAgentSpeed(agent_id));
   const { session, fields } = await createWithCodeSession(
     {
       agentId: agent_id,
@@ -118,7 +118,7 @@ export async function createSession(params: CreateSessionParams) {
         attachments,
         normalizedRepoUrl,
         effectiveUserId,
-        fastModeCacheEnabled,
+        codexSpeed,
         {
           harnessMode: params.harness_mode,
           roseApiBaseUrl: params.rose_api_base_url,

@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from factory_detail import parse_event_detail
 from record_factory_event import factory_event_payload
 
 
@@ -221,6 +222,7 @@ def completed_record(
     status: str,
     *,
     run_terminal: bool,
+    detail: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     duration = finished.timestamp() - float(state["started_epoch"])
     if duration < 0:
@@ -243,13 +245,17 @@ def completed_record(
         state["step"],
         recorded_epoch=finished.timestamp(),
         metadata=metadata,
+        detail=detail,
     )
     record["record_id"] = record_id(record)
     return record
 
 
 def outcome_record(
-    state: dict[str, Any], finished: datetime, status: str
+    state: dict[str, Any],
+    finished: datetime,
+    status: str,
+    detail: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     metadata = event_metadata(state, status)
     record = factory_event_payload(
@@ -258,6 +264,7 @@ def outcome_record(
         status,
         recorded_epoch=finished.timestamp(),
         metadata=metadata,
+        detail=detail,
     )
     record["record_id"] = record_id(record)
     return record
@@ -307,7 +314,13 @@ def transition(args: argparse.Namespace) -> int:
         state["task_count"] = args.task_count
     history = resolve_history(args, state)
     boundary = parse_time(args.at)
-    record = completed_record(state, boundary, args.status, run_terminal=False)
+    record = completed_record(
+        state,
+        boundary,
+        args.status,
+        run_terminal=False,
+        detail=parse_event_detail(args.detail),
+    )
 
     next_args = argparse.Namespace(
         run_id=args.run_id,
@@ -340,15 +353,17 @@ def finish(args: argparse.Namespace) -> int:
     state = load_state(path, args.run_id, args.lane)
     history = resolve_history(args, state)
     finished = parse_time(args.at)
+    detail = parse_event_detail(args.detail)
     record = completed_record(
         state,
         finished,
         args.status,
         run_terminal=args.run_terminal,
+        detail=detail,
     )
     records = [record]
     if args.run_terminal:
-        records.append(outcome_record(state, finished, args.status))
+        records.append(outcome_record(state, finished, args.status, detail))
     append_records(history, records)
     remove_finished_state(path)
     print_events(records)
@@ -562,6 +577,16 @@ def add_lane_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_detail_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--detail",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="allowlisted step outcome detail, e.g. infra_failed=2 scheduled_total=600",
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -601,6 +626,7 @@ def parse_args() -> argparse.Namespace:
         "--status", choices=VALID_STATUSES, default="completed"
     )
     transition_parser.add_argument("--at", help="explicit ISO-8601 boundary timestamp")
+    add_detail_arg(transition_parser)
     add_storage_args(transition_parser)
     transition_parser.set_defaults(handler=transition)
 
@@ -613,6 +639,7 @@ def parse_args() -> argparse.Namespace:
         help="mark this lane closure as the terminal boundary for the run",
     )
     finish_parser.add_argument("--at", help="explicit ISO-8601 boundary timestamp")
+    add_detail_arg(finish_parser)
     add_storage_args(finish_parser)
     finish_parser.set_defaults(handler=finish)
 
