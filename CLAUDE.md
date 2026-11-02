@@ -133,6 +133,15 @@ JEV/backend/runtime additions. Changes arriving after the freeze must be
 integrated and the affected gates rerun before merge; never silently ship an
 older subset as the whole devbox.
 
+**Deployment continuity (user clarification, November 2, 2026):** A blocking
+result must be resolved autonomously before release verification; it does not
+authorize pausing for routine human intervention or ending `/deploy` early.
+Continue through the verified deployment and final scorecard. An owner label
+does not block independent preparation or validation on isolated resources:
+serialize only actual conflicting checkout, database, resource or production
+operations. Preserve genuine failures and unverified work in the report; never
+invent a pass to finish the scorecard. A user instruction to stop still wins.
+
 “Entire devbox” means its intended Rose source deliverables, not arbitrary files
 on the machine: keep credentials, ignored `.env` files, caches, dependencies,
 research data and generated evidence out of Git. Preserve Freedom. Use the
