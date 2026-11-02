@@ -458,6 +458,22 @@ class Boxes(unittest.TestCase):
         self.assertEqual([], self.calls_of('wait'))
         self.assertEqual('ph-worker', result['cleanup_owner']['worker_thread'])
 
+    def test_native_started_and_queued_send_wait_but_rejected_send_cannot_pass(self):
+        native = json.loads((ROOT / 'scripts/tests/fixtures/boxes-thread-send-receipt.json').read_text())
+        native.update(threadId='ph-worker', turnId='turn-1', messageId='peer_1')
+        for disposition in ('started', 'queued', 'rejected'):
+            with self.subTest(disposition=disposition):
+                self.configure(reply=self.reply(), send={'rc': 0, 'stdout': {**native, 'disposition': disposition}})
+                result = self.run_adapter()
+                if disposition == 'rejected':
+                    self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
+                    self.assertEqual([], self.calls_of('wait'))
+                else:
+                    self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
+                    self.assertEqual(1, len(self.calls_of('wait')))
+                __import__('shutil').rmtree(self.coordinator / '.context')
+                self.calls.unlink()
+
     def test_prose_only_reply_is_unverified(self):
         self.configure(reply='Ran the gate, everything looks fine: first PASS, second PASS.')
         result = self.run_adapter()
