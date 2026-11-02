@@ -82,3 +82,31 @@ are preserved. Independent review accepts exact patch
 `acd27481c3ad0389f6d8fb3295538299141a340f3c9c4f779647ae2c2cb06e5a`
 for capture only; canonical source is unchanged. Historical U2 remains OPEN.
 Evidence: plan:.context/unresolved-six-20261029/webgl-process/U2-REPORT.md.
+
+## PR1663 recurrence, 2026-11-02
+
+The unchanged full backend coverage invocation on 79edd36b9a0231f74cfd0b492f10c13b9008e686
+reported the original cube assertion `WebGL cube pixels: 0.00% red` (agent-tools
+23 PASS/1 FAIL). GLB and module pixel checks passed. The exact failed PNG was
+not retained, so this signature does not establish the historical cause or
+justify a speculative renderer change. Gate: NOT_INTRODUCED: the entire owning
+render fixture and runtime tree were unchanged from main9152.
+
+A high/standard subordinate investigation retained the original native failure,
+then tested actual context loss through the same pixel predicate: 0% red,
+1977-byte PNG SHA256 bb97576eb15708a54de22113d8e8bdd84a820103aeb3d509bda11008965ed0c2,
+with ready/wasm-ready and actual context-lost evidence. Healthy uninjected
+samples passed at about24% red with no lost context. ReadPixels warnings also
+occurred in healthy samples; stopping future animation frames after readiness
+still passed. These distinguish possible boundaries; none reconstructs the
+original failed frame or proves a rendering fix.
+
+PR1663 integrates the previously independently reviewed capture-only patch.
+It retains the exact already-measured failed PNG and hash/threshold receipt
+under the runner's private artifact directory before the unchanged assertion.
+All original predicates, names and 300/400ms waits remain. A registered real
+context-loss control verifies exact-byte retention and that failed rendering
+continues to fail the original pixel predicate; disabling retention makes that
+control fail. No context recovery, screenshot retry, new readiness wait or
+renderer setting is introduced. This is evidence custody, not a runtime repair.
+The original full command must still pass on its own native result.
