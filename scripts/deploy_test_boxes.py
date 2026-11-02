@@ -28,7 +28,8 @@ TRANSPORT = 'boxes-thread'
 CLI = 'dvb-onbox'
 MAX_PROMPT_BYTES = 32 * 1024  # `threads send --prompt-file` bound; the result side is bound by its sha256 only
 PERMISSION_CODES = ('disabled', 'denied')
-DELIVERED = {'delivered'}
+INLINE_FALLBACK_BYTES = 16 * 1024  # the worker inlines result.json only below this; attachments carry the rest
+ATTACHMENTS_ROOT = Path.home() / '.devbox/desktop-attachments'  # <root>/<box>/<recipient thread>/<name>--<hash16>.<ext>
 TERMINAL = {'completed', 'complete', 'done'}
 PENDING = {'running', 'active', 'pending', 'queued', 'timeout', 'timed_out', 'starting'}
 HEADER = 'DEPLOY_GATE_REQUEST'
@@ -64,17 +65,22 @@ def build_prompt(request, binding):
     remote = remote_directory(root, token)
     body = json.dumps(request, sort_keys=True, separators=(',', ':'))
     script = '\n'.join([
-        'set -u; umask 077',
-        f'cd {shlex.quote(root)} && mkdir -p {shlex.quote(remote)} && cd {shlex.quote(remote)}',
+        'set -eu; umask 077',
+        f'cd {shlex.quote(root)} && mkdir -p {shlex.quote(remote)} && cd {shlex.quote(remote)} '
+        '|| {{ echo "DEPLOY_GATE_WORKER_EXIT 3"; exit 3; }}'.replace('{{', '{').replace('}}', '}'),
         f'printf %s {shlex.quote(body)} > request.json',
         'echo "DEPLOY_GATE_WORKER_PGID $$"',
         f'DEPLOY_GATE_REQUEST="$PWD/request.json" DEPLOY_GATE_RESULT="$PWD/result.json" '
         f'DEPLOY_GATE_TOKEN={shlex.quote(token)} DEPLOY_LANE_SCOPED_REUSE=0 DEPLOY_CYCLE_FRESH=1 '
         f'{shlex.quote(binding["python"])} {shlex.quote(root + "/scripts/deploy_test_worker.py")} '
         f'--root {shlex.quote(root)} '
-        '> stdout.log 2> stderr.log; echo "DEPLOY_GATE_WORKER_EXIT $?"',
-        'echo "DEPLOY_GATE_RESULT_SHA256 $(sha256sum result.json | cut -d" " -f1)"',
-        f'echo {BEGIN}; cat result.json; echo {END}',
+        '> stdout.log 2> stderr.log && rc=0 || rc=$?; echo "DEPLOY_GATE_WORKER_EXIT $rc"',
+        'sum=$(sha256sum result.json | cut -d" " -f1); echo "DEPLOY_GATE_RESULT_SHA256 $sum"',
+        f'dvb-onbox threads message --to {shlex.quote(binding["coordinator_thread"])} '
+        '--attach "$PWD/result.json" --attach "$PWD/stderr.log" '
+        f'--message "DEPLOY_GATE_RESULT token={token} sha256=$sum exit=$rc" '
+        f'--idempotency-key {shlex.quote(token + "-result")} --json || true',
+        f'if [ "$(wc -c < result.json)" -le {INLINE_FALLBACK_BYTES} ]; then echo {BEGIN}; cat result.json; echo {END}; fi',
         f'echo {ERR_BEGIN}; cat stderr.log; echo {ERR_END}',
     ])
     return '\n'.join([
@@ -83,8 +89,7 @@ def build_prompt(request, binding):
         'Run the script below exactly once on this devbox, unchanged. Do not edit, retry, '
         'summarise, interpret or waive anything.',
         '```sh', script, '```',
-        'Final reply: the complete stdout of that script, verbatim, and attach result.json. '
-        'Nothing else.', ''])
+        'Final reply: the complete stdout of that script, verbatim. Nothing else.', ''])
 
 
 def _status(data):
@@ -116,6 +121,17 @@ def _envelope(stdout):
     if not isinstance(payload, dict) or payload.get('ok') is not True or not isinstance(payload.get('data'), dict):
         raise ValueError('CLI did not return an ok JSON envelope')
     return payload['data']
+
+
+def _send_envelope(stdout, binding):
+    """Control mutations return top-level receipts, unlike read/result APIs."""
+    payload = json.loads(stdout.decode())
+    if (not isinstance(payload, dict) or payload.get('ok') is not True
+            or payload.get('operation') != 'send'
+            or payload.get('threadId') != binding['worker_thread']
+            or payload.get('disposition') not in {'started', 'queued'}):
+        raise ValueError('CLI did not accept the send for the bound worker thread')
+    return payload
 
 
 def _same_host(data, binding):
@@ -163,9 +179,10 @@ def parse_reply(text):
         for key in (EXIT_LINE, SHA_LINE, PGID_LINE):
             if line.startswith(key + ' ') and key not in fields:
                 fields[key] = line[len(key) + 1:].strip()
-    if BEGIN not in lines or END not in lines or lines.index(BEGIN) >= lines.index(END):
-        raise ValueError('reply lacks the exact native result markers')
-    segment = '\n'.join(lines[lines.index(BEGIN) + 1:lines.index(END)])
+    if BEGIN in lines and END in lines and lines.index(BEGIN) < lines.index(END):
+        segment = '\n'.join(lines[lines.index(BEGIN) + 1:lines.index(END)])
+    else:
+        segment = None
     if ERR_BEGIN in lines and ERR_END in lines and lines.index(ERR_BEGIN) < lines.index(ERR_END):
         stderr = '\n'.join(lines[lines.index(ERR_BEGIN) + 1:lines.index(ERR_END)])
     else:
@@ -174,14 +191,10 @@ def parse_reply(text):
     if len(declared) != 64 or any(c not in '0123456789abcdef' for c in declared):
         raise ValueError('reply lacks the worker-computed result sha256')
     exact = None
-    for candidate in (segment, segment + '\n', segment.rstrip('\n') + '\n'):
+    for candidate in ([] if segment is None else (segment, segment + '\n', segment.rstrip('\n') + '\n')):
         if hashlib.sha256(candidate.encode()).hexdigest() == declared:
             exact = candidate
             break
-    if exact is None:
-        raise ValueError('inline result bytes do not hash to the worker-computed sha256')
-    if len(exact.encode()) > MAX_RECEIPT_BYTES:
-        raise ValueError('worker receipt exceeds transport limit')
     if EXIT_LINE not in fields or not fields[EXIT_LINE].isdigit():
         raise ValueError('reply lacks the native worker exit code')
     pgid = fields.get(PGID_LINE)
@@ -189,7 +202,31 @@ def parse_reply(text):
             int(pgid) if pgid and pgid.isdigit() else None)
 
 
-def collect_result(data, binding):
+def attachment_directories(binding):
+    root = Path(os.environ.get('DEPLOY_BOXES_ATTACHMENTS_ROOT') or ATTACHMENTS_ROOT)
+    return sorted(p for p in root.glob('*/' + binding['coordinator_thread']) if p.is_dir())
+
+
+def find_attachment(binding, declared, not_before):
+    """First delivered copy whose bytes hash to the worker-declared sha256; never trimmed or repaired."""
+    for directory in attachment_directories(binding):
+        # Native attachment delivery retains the stem, not the extension:
+        # result.json becomes result--<id>.json. Keep the former spelling as
+        # a compatibility input; the full content hash remains authoritative.
+        candidates = set(directory.glob('result--*.json')) | set(directory.glob('result.json--*.json'))
+        for path in sorted(candidates):
+            try:
+                if path.stat().st_mtime < not_before - 1 or path.stat().st_size > MAX_RECEIPT_BYTES:
+                    continue
+                data = path.read_bytes()
+            except OSError:
+                continue
+            if hashlib.sha256(data).hexdigest() == declared:
+                return path, data
+    return None, None
+
+
+def parse_terminal(data, binding):
     _same_host(data, binding)
     if _status(data) not in TERMINAL:
         raise ValueError('thread result is not terminal')
@@ -199,19 +236,27 @@ def collect_result(data, binding):
     text = output.get('text')
     if not isinstance(text, str):
         raise ValueError('thread result has no final text')
-    exact, native_exit, declared, stderr, pgid = parse_reply(text)
-    source = 'inline-markers'
-    for attachment in output.get('attachments') or []:
-        path = attachment.get('path') if isinstance(attachment, dict) else None
-        if isinstance(path, str) and Path(path).name == 'result.json' and Path(path).is_file():
-            if Path(path).stat().st_size > MAX_RECEIPT_BYTES:
-                raise ValueError('attached worker receipt exceeds transport limit')
-            data = Path(path).read_bytes()
-            if hashlib.sha256(data).hexdigest() != declared:
-                raise ValueError('attached result.json does not hash to the worker-computed sha256')
-            exact, source = data.decode(), 'attachment'
+    return parse_reply(text)
+
+
+def collect_result(data, binding, *, not_before, deadline_at, poll, directory):
+    inline, native_exit, declared, stderr, pgid = parse_terminal(data, binding)
+    while True:
+        path, raw = find_attachment(binding, declared, not_before)
+        if raw is not None:
+            exact, source = raw, 'attachment:' + str(path)
             break
-    document = json.loads(exact)
+        if inline is not None:
+            exact, source = inline.encode(), 'inline-markers'
+            break
+        if CANCEL.is_set() or time.time() >= deadline_at:
+            raise ValueError('attachment_missing')
+        time.sleep(poll)
+    if len(exact) > MAX_RECEIPT_BYTES:
+        raise ValueError('worker receipt exceeds transport limit')
+    copy = directory / 'native-result.json'
+    copy.write_bytes(exact)  # byte-exact copy before any validation
+    document = json.loads(exact.decode())
     if not isinstance(document, dict):
         raise ValueError('native result is not a JSON object')
     return document, native_exit, declared, stderr, pgid, source
@@ -234,7 +279,7 @@ def unverified(request, binding, state, reason, *, stderr=None, cleanup_owner=No
 def receipt(binding, state, native_sha, canonical_sha, native_exit, source=None):
     return {'transport': TRANSPORT, 'worker_thread': binding['worker_thread'],
             'worker_host': binding['worker_host'], 'worker_root': binding['worker_root'],
-            'remote_python': binding['python'],
+            'remote_python': binding['python'], 'coordinator_thread': binding['coordinator_thread'],
             'request_token': state['token'], 'idempotency_key': state['idempotency_key'],
             'message_id': state.get('message_id'), 'turn_id': state.get('turn_id'),
             'native_sha256': native_sha, 'canonical_sha256': canonical_sha, 'native_exit': native_exit,
@@ -302,13 +347,17 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
                 return unverified(request, binding, state, f'threads list exited {code}',
                                   stderr=err.decode(errors='replace'))
             resolve_host(_envelope(out), binding)
-        if state.get('turn_id') is None and state.get('sent_attempted_at') is not None:
-            # Indeterminate earlier send: adopt the existing turn, never start another attempt.
+        while state.get('turn_id') is None and state.get('sent_attempted_at') is not None:
+            # Indeterminate earlier send: only adopt the existing turn; never start another attempt.
             code, out, _ = _cli(['threads', 'read', '--thread', thread, '--turns', '100', '--json'],
                                 state, log, max(1, remaining()))
             if code == 0:
                 state['turn_id'] = _find_turn(_same_host(_envelope(out), binding), token)
                 write(state_path, state)
+            if state.get('turn_id') is None:
+                if CANCEL.is_set() or remaining() <= 0:
+                    return unverified(request, binding, state, 'send_indeterminate_unadopted', cleanup_owner=True)
+                time.sleep(min(poll, max(0, remaining())))
         if state.get('turn_id') is None:
             if state.get('sent_attempted_at') is None:
                 state['sent_attempted_at'] = time.time()
@@ -325,10 +374,7 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
                                     stderr=err.decode(errors='replace'))
                 result['transport_receipt']['cli_error'] = {'code': typed, 'text': text}
                 return result
-            payload = _envelope(out)
-            if _status(payload) not in DELIVERED:
-                return unverified(request, binding, state, f'threads send status {_status(payload)!r}',
-                                  stderr=err.decode(errors='replace'))
+            payload = _send_envelope(out, binding)
             state['message_id'] = payload.get('messageId') or payload.get('requestId')
             state['turn_id'] = _turn(payload)
             write(state_path, state)
@@ -363,7 +409,9 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
         if code != 0:
             return unverified(request, binding, state, f'threads result exited {code}',
                               stderr=err.decode(errors='replace'), cleanup_owner=True)
-        document, native_exit, native_sha, stderr, pgid, source = collect_result(_envelope(out), binding)
+        document, native_exit, native_sha, stderr, pgid, source = collect_result(
+            _envelope(out), binding, not_before=state['sent_attempted_at'] or 0,
+            deadline_at=state['deadline_at'], poll=poll, directory=directory)
         if stderr:
             with open(state['stderr_log'], 'a') as stream:
                 stream.write(stderr)
@@ -374,7 +422,8 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
         document['transport_receipt']['pgid'] = pgid
         return document
     except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
-        return unverified(request, binding, state, str(error), cleanup_owner=state.get('turn_id') is not None)
+        return unverified(request, binding, state, str(error),
+                          cleanup_owner=state.get('sent_attempted_at') is not None)
 
 
 def main():
@@ -384,13 +433,15 @@ def main():
     parser.add_argument('--host', required=True)
     parser.add_argument('--worker-root', required=True)
     parser.add_argument('--python', required=True, help='remote interpreter inside the worker root')
+    parser.add_argument('--coordinator-thread', required=True, help='this control thread; receives result.json attachments')
     parser.add_argument('--deadline-seconds', type=float)
     args = parser.parse_args()
     try:
         if args.deadline_seconds is None:
             raise ValueError('boxes-thread transport requires its existing gate deadline')
         binding = {'worker_thread': args.thread, 'worker_host': args.host,
-                   'worker_root': args.worker_root, 'python': args.python}
+                   'worker_root': args.worker_root, 'python': args.python,
+                   'coordinator_thread': args.coordinator_thread}
         result = execute(read(Path(os.environ['DEPLOY_GATE_REQUEST'])), args.root.resolve(), binding,
                          args.deadline_seconds)
         write(Path(os.environ['DEPLOY_GATE_RESULT']), result)

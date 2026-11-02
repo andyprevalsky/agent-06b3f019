@@ -82,7 +82,7 @@ def select(template: dict, changed: list[str], result: dict, binding: dict) -> d
             gate.update(worker=worker['id'], command=worker['command'], cwd=worker.get('cwd', str(ROOT)),
                         env={**gate.get('env', {}), **worker.get('env', {})})
             gate['worker_transport'] = worker.get('transport', 'explicit')
-            for key in ('worker_host', 'worker_root', 'worker_thread'):
+            for key in ('worker_host', 'worker_root', 'worker_thread', 'coordinator_thread'):
                 if key in worker:
                     gate[key] = worker[key]
             if worker.get('transport') == 'boxes-thread':

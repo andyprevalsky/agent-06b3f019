@@ -123,6 +123,20 @@ produces unverified evidence, not a completed test that can be waived. Each
 result carries the recipe digest, command, native exit, timings and log hash.
 Provisioning, authentication and native-resource teardown remain with the
 existing worker owner; this adapter allocates nothing.
+`transport: boxes-thread` binds a prepared, muted boxes.dev worker thread
+(`worker_thread` = its clientThreadId, `worker_host` = that thread's
+executionInstanceId from `dvb-onbox threads list --json`, absolute `worker_root`,
+`python` inside it, `coordinator_thread` = the control thread that receives
+attachments, and the gate deadline). `scripts/deploy_test_boxes.py` sends the
+exact `deploy_test_worker.py` invocation once (`threads send`, idempotency key =
+request token), persists its turn before and after the call so a restart adopts
+the same turn, and accepts only the byte-exact native `DEPLOY_GATE_RESULT`
+document whose sha256 the worker script itself declared: the attached
+`result.json` first, inline marker bytes only as a hash-matching fallback. Prose,
+summaries, a different devbox, token, root or recipe, CLI/permission errors,
+oversize prompts or the deadline leave every case UNVERIFIED with the remote
+cleanup owner recorded; this transport cannot express a waiver.
+
 Streamed transports must also bind `timeout_seconds` to the existing gate's
 outer deadline. Do not invent a shorter test budget or leave the transport
 unbounded.

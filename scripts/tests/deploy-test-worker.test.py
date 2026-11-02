@@ -368,12 +368,14 @@ class Boxes(unittest.TestCase):
         self.envelope = json.loads((ROOT / 'scripts/tests/fixtures/boxes-thread-result-envelope.json').read_text())
         self.host = self.envelope['data']['executionInstanceId']  # real platform-authored devbox id
         self.binding = {'worker_thread': 'ph-worker', 'worker_host': self.host, 'worker_root': str(self.root.resolve()),
-                        'python': str(self.root.resolve() / 'agents/venv/bin/python')}
+                        'python': str(self.root.resolve() / 'agents/venv/bin/python'), 'coordinator_thread': 'ph-control'}
+        self.attachments = Path(self.temp.name) / 'attachments' / 'rose-box' / 'ph-control'; self.attachments.mkdir(parents=True)
         bin_dir = Path(self.temp.name) / 'bin'; bin_dir.mkdir()
         cli = bin_dir / 'dvb-onbox'; cli.write_text(FAKE_CLI); cli.chmod(0o700)
         self.calls = Path(self.temp.name) / 'calls.jsonl'; self.config = Path(self.temp.name) / 'config.json'
         self.env = patch.dict(os.environ, {'PATH': f"{bin_dir}{os.pathsep}{os.environ['PATH']}", 'FAKE_DVB_CALLS': str(self.calls),
-                                           'FAKE_DVB_CONFIG': str(self.config), 'DEPLOY_BOXES_POLL_SECONDS': '0.01'})
+                                           'FAKE_DVB_CONFIG': str(self.config), 'DEPLOY_BOXES_POLL_SECONDS': '0.01',
+                                           'DEPLOY_BOXES_ATTACHMENTS_ROOT': str(self.attachments.parents[1])})
         self.env.start()
         native = worker.execute(self.request, self.root)  # the real native worker document
         self.native_bytes = json.dumps(native, indent=2, allow_nan=False) + '\n'
@@ -383,12 +385,16 @@ class Boxes(unittest.TestCase):
     def tearDown(self):
         self.env.stop(); cycle.CANCEL.clear(); self.temp.cleanup()
 
-    def reply(self, body=None, exit_code=0, sha=None):
+    def reply(self, body=None, exit_code=0, sha=None, inline=True):
         body = self.native_bytes if body is None else body
         sha = sha or __import__('hashlib').sha256(body.encode()).hexdigest()
+        block = f'DEPLOY_GATE_RESULT_JSON_BEGIN\n{body}DEPLOY_GATE_RESULT_JSON_END\n' if inline else ''
         return (f'DEPLOY_GATE_WORKER_PGID 4242\nDEPLOY_GATE_WORKER_EXIT {exit_code}\n'
-                f'DEPLOY_GATE_RESULT_SHA256 {sha}\nDEPLOY_GATE_RESULT_JSON_BEGIN\n{body}DEPLOY_GATE_RESULT_JSON_END\n'
+                f'DEPLOY_GATE_RESULT_SHA256 {sha}\n{block}'
                 'DEPLOY_GATE_STDERR_BEGIN\nworker diagnostic\nDEPLOY_GATE_STDERR_END\n')
+
+    def attach(self, body, name='result--0123456789abcdef.json'):
+        (self.attachments / name).write_text(body)  # what the platform drops for `threads message --attach`
 
     def wrap(self, data, host=None, status='completed', messages=None):
         # exact dvb-onbox --json envelope recorded from a real worker (fixtures/boxes-thread-result-envelope.json)
@@ -402,7 +408,7 @@ class Boxes(unittest.TestCase):
             'list': listed or {'rc': 0, 'stdout': {'schemaVersion': 1, 'ok': True, 'data': {'threads': [
                 {'clientThreadId': 'ph-worker', 'executionInstanceId': host or self.host, 'activeTurnId': None,
                  'status': 'idle', 'notificationsMuted': True, 'agent': 'claude'}]}}},
-            'send': send or {'rc': 0, 'stdout': self.wrap({'status': 'delivered', 'turnId': 'turn-1', 'requestId': 'peer_1'}, host)},
+            'send': send or {'rc': 0, 'stdout': {**json.loads((ROOT / 'scripts/tests/fixtures/boxes-thread-send-receipt.json').read_text()), 'threadId': self.binding['worker_thread'], 'turnId': 'turn-1', 'messageId': 'peer_1'}},
             'wait': wait or {'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'}, host)},
             'result': result or {'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1', 'output': {'text': reply}}, host)},
             'read': read or {'rc': 0, 'stdout': self.wrap({}, host, status='ready', messages=[])}})
@@ -415,6 +421,7 @@ class Boxes(unittest.TestCase):
         return self.boxes.execute(self.request, self.coordinator, self.binding, deadline)
 
     def test_happy_path_returns_the_exact_native_document_with_bindings(self):
+        self.configure(reply=self.reply(inline=False)); self.attach(self.native_bytes)
         result = self.run_adapter()
         self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
         receipt = result.pop('transport_receipt')
@@ -431,18 +438,32 @@ class Boxes(unittest.TestCase):
         prompt = Path(send[send.index('--prompt-file') + 1]).read_text()
         self.assertIn(f"{self.binding['python']} {self.root.resolve()}/scripts/deploy_test_worker.py --root {self.root.resolve()}", prompt)
         self.assertIn('DEPLOY_GATE_REQUEST="$PWD/request.json" DEPLOY_GATE_RESULT="$PWD/result.json"', prompt)
+        self.assertIn('dvb-onbox threads message --to ph-control --attach "$PWD/result.json" --attach "$PWD/stderr.log"', prompt)
+        self.assertIn("--idempotency-key tok-1-result", prompt)
+        self.assertTrue(receipt['result_source'].startswith('attachment:')); self.assertEqual('ph-control', receipt['coordinator_thread'])
+        self.assertEqual(self.native_bytes, (self.coordinator / '.context/deploy-boxes' / __import__('hashlib').sha256(b'tok-1').hexdigest() / 'native-result.json').read_text())
         self.assertLessEqual(len(prompt.encode()), self.boxes.MAX_PROMPT_BYTES)
         self.assertIn('worker diagnostic', Path(receipt['stderr_log']).read_text())
         # the coordinator's own validator accepts the relayed document with the adapter's exit
         from deploy_test_result import validate
         validate({**result, 'transport_receipt': receipt}, self.request, 0)
 
+    def test_native_send_receipt_must_name_the_bound_worker(self):
+        native = json.loads((ROOT / 'scripts/tests/fixtures/boxes-thread-send-receipt.json').read_text())
+        native['threadId'] = 'a-different-worker'
+        self.configure(reply=self.reply(), send={'rc': 0, 'stdout': native})
+        result = self.run_adapter()
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
+        self.assertIn('bound worker thread', result['reason'])
+        self.assertEqual([], self.calls_of('wait'))
+        self.assertEqual('ph-worker', result['cleanup_owner']['worker_thread'])
+
     def test_prose_only_reply_is_unverified(self):
         self.configure(reply='Ran the gate, everything looks fine: first PASS, second PASS.')
         result = self.run_adapter()
         self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
         self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
-        self.assertIn('markers', result['reason'])
+        self.assertRegex(result['reason'], 'sha256|markers')
 
     def test_wrong_token_root_or_host_is_unverified(self):
         wrong_token = self.native_bytes.replace('"tok-1"', '"tok-2"')
@@ -503,6 +524,13 @@ class Boxes(unittest.TestCase):
         result = self.run_adapter()
         self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
         self.assertEqual([], self.calls_of('send')); self.assertEqual('turn-7', result['transport_receipt']['turn_id'])
+        # an indeterminate send whose assignment cannot be found is never repeated: re-read until the deadline
+        state = cycle.read(directory / 'state.json'); state.update(turn_id=None, deadline_at=time.time() + 0.3)
+        cycle.write(directory / 'state.json', state)  # the ORIGINAL deadline governs, not a later argument
+        self.configure(reply=self.reply()); self.calls.unlink()
+        result = self.boxes.execute(self.request, self.coordinator, self.binding, 30)
+        self.assertEqual('send_indeterminate_unadopted', result['reason']); self.assertEqual([], self.calls_of('send'))
+        self.assertGreater(len(self.calls_of('read')), 1); self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
         # a changed prompt under the same token is never resent
         state = cycle.read(directory / 'state.json'); state['prompt_sha256'] = 'f' * 64; state['turn_id'] = None
         cycle.write(directory / 'state.json', state); self.calls.unlink()
@@ -515,7 +543,7 @@ class Boxes(unittest.TestCase):
         request = self.coordinator / 'request.json'; cycle.write(request, self.request)
         proc = subprocess.run([sys.executable, str(ROOT / 'scripts/deploy_test_boxes.py'), '--root', str(self.coordinator),
                                '--thread', 'ph-worker', '--host', self.host, '--worker-root', str(self.root.resolve()),
-                               '--python', self.binding['python']], capture_output=True, text=True,
+                               '--python', self.binding['python'], '--coordinator-thread', 'ph-control'], capture_output=True, text=True,
                               env={**os.environ, 'DEPLOY_GATE_REQUEST': str(request), 'DEPLOY_GATE_RESULT': str(self.coordinator / 'r.json')})
         self.assertEqual(2, proc.returncode); self.assertIn('DEPLOY_BOXES BLOCKED', proc.stderr)
         self.assertFalse(self.calls.exists()); self.assertFalse((self.coordinator / 'r.json').exists())
@@ -539,12 +567,12 @@ class Boxes(unittest.TestCase):
                                   ('hash-mismatch', {'rc': 0, 'stdout': self.wrap({'output': {'text': self.reply(sha='a' * 64)}})})):
             with self.subTest(label=label):
                 self.configure(reply=self.reply(), result=result_cfg)
-                result = self.run_adapter()
+                result = self.run_adapter(deadline=0.3)
                 self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
                 __import__('shutil').rmtree(self.coordinator / '.context')
         self.configure(reply=self.reply())
         with patch.object(self.boxes, 'MAX_RECEIPT_BYTES', 10):
-            result = self.run_adapter()
+            result = self.run_adapter(deadline=0.3)
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertIn('transport limit', result['reason'])
 
     def gate(self, name, thread, host, root, port, python=None):
@@ -552,9 +580,10 @@ class Boxes(unittest.TestCase):
         return {'name': name, 'worker': name + '-worker', 'checks': [name], 'case_protocol': True, 'result_transport': 'file',
                 'worker_recipe': {'cases': {name: {'command': ['true']}}}, 'timeout_seconds': 60, 'worker_transport': 'boxes-thread',
                 'worker_thread': thread, 'worker_host': host, 'worker_root': root, 'remote_python': python, 'cwd': str(ROOT),
+                'coordinator_thread': 'ph-control',
                 'env': {'CONDUCTOR_WORKSPACE_NAME': name, 'CONDUCTOR_PORT': str(port)},
                 'command': [sys.executable, str(ROOT / 'scripts/deploy_test_boxes.py'), '--thread', thread, '--host', host,
-                            '--worker-root', root, '--python', python, '--deadline-seconds', '60']}
+                            '--worker-root', root, '--python', python, '--coordinator-thread', 'ph-control', '--deadline-seconds', '60']}
 
     def plan(self, *gates):
         return {'source': self.request['source'], 'gates': [
@@ -566,7 +595,7 @@ class Boxes(unittest.TestCase):
         cycle.validate_plan(self.plan(good))
         from deploy_test_result import preserve_contract
         for field, value in (('worker_thread', 'ph-b'), ('worker_host', 'devbox-b'), ('worker_root', '/prepared/other'),
-                             ('remote_python', '/prepared/api/other/python'), ('timeout_seconds', 30)):
+                             ('remote_python', '/prepared/api/other/python'), ('coordinator_thread', 'ph-other'), ('timeout_seconds', 30)):
             with self.subTest(field=field):
                 swapped = {**good, field: value}
                 with self.assertRaisesRegex(ValueError, 'argv must bind|deadline|inside the worker root'):
@@ -594,13 +623,13 @@ class Boxes(unittest.TestCase):
     def test_inventory_without_thread_host_or_deadline_blocks_the_plan(self):
         from deploy_test_bindings import generate
         template = {'gates': [{'name': 'be', 'category': 'backend-coverage-blackbox', 'command': ['true'], 'checks': ['be']}]}
-        slot = {'id': 'be-worker', 'transport': 'boxes-thread', 'worker_thread': 'ph-a', 'worker_host': 'devbox-a',
+        slot = {'id': 'be-worker', 'transport': 'boxes-thread', 'worker_thread': 'ph-a', 'worker_host': 'devbox-a', 'coordinator_thread': 'ph-control',
                 'worker_root': '/prepared/be', 'timeout_seconds': 60, 'env': {'CONDUCTOR_WORKSPACE_NAME': 'be', 'CONDUCTOR_PORT': '12000'}}
         binding = generate(template, {'be': slot}, ROOT)['be']
         self.assertEqual(['--thread', 'ph-a', '--host', 'devbox-a', '--worker-root', '/prepared/be', '--python',
-                          '/prepared/be/agents/venv/bin/python', '--deadline-seconds', '60'], binding['command'][2:])
+                          '/prepared/be/agents/venv/bin/python', '--coordinator-thread', 'ph-control', '--deadline-seconds', '60'], binding['command'][2:])
         self.assertEqual(sys.executable, binding['command'][0]); self.assertEqual('file', binding['result_transport'])
-        for field in ('worker_thread', 'worker_host', 'timeout_seconds'):
+        for field in ('worker_thread', 'worker_host', 'coordinator_thread', 'timeout_seconds'):
             with self.subTest(missing=field):
                 with self.assertRaises(ValueError): generate(template, {'be': {k: v for k, v in slot.items() if k != field}}, ROOT)
         inventory = self.coordinator / 'inventory.json'; cycle.write(inventory, {'be': {k: v for k, v in slot.items() if k != 'worker_thread'}})
@@ -627,6 +656,47 @@ class Boxes(unittest.TestCase):
                 result = self.run_adapter()
                 self.assertEqual(expected, result['cases']['first'], result.get('reason'))
         self.assertIn('send bound', result['reason']); self.assertEqual(1, len(self.calls_of('send')))
+
+    def test_failed_cd_in_the_worker_script_exits_nonzero_and_is_unverified(self):
+        binding = {**self.binding, 'worker_root': str(self.root.resolve() / 'missing')}
+        prompt = self.boxes.build_prompt(self.request, binding)
+        script = prompt.split('```sh\n', 1)[1].split('\n```', 1)[0]
+        self.assertTrue(script.startswith('set -eu'))
+        proc = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
+        self.assertEqual(3, proc.returncode); self.assertIn('DEPLOY_GATE_WORKER_EXIT 3', proc.stdout)
+        self.assertEqual([], self.calls_of('message'))  # nothing was attached or sent after the failed cd
+        self.configure(reply=proc.stdout)
+        result = self.run_adapter(deadline=0.3)
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
+
+    def big_native(self, token):
+        self.request['token'] = token
+        self.request['worker_recipe']['cases']['first']['command'] = [sys.executable, '-c', "print('y' * 70000)"]
+        __import__('shutil').rmtree(self.root / '.context', ignore_errors=True)
+        self.native_bytes = json.dumps(worker.execute(self.request, self.root), indent=2, allow_nan=False) + '\n'
+        self.assertGreater(len(self.native_bytes.encode()), 64 * 1024)
+
+    def test_large_result_passes_via_attachment_or_hash_matching_inline_only(self):
+        self.big_native('tok-big')
+        self.configure(reply=self.reply(inline=False)); self.attach(self.native_bytes)
+        result = self.run_adapter()
+        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
+        self.assertTrue(result['transport_receipt']['result_source'].startswith('attachment:'))
+        __import__('shutil').rmtree(self.coordinator / '.context'); (self.attachments / 'result--0123456789abcdef.json').unlink()
+        self.configure(reply=self.reply(inline=True))  # inline-only large reply that hash-matches
+        result = self.run_adapter()
+        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
+        self.assertEqual('inline-markers', result['transport_receipt']['result_source'])
+
+    def test_wrong_hash_attachment_or_truncated_inline_without_attachment_is_unverified(self):
+        self.configure(reply=self.reply(inline=False)); self.attach(self.native_bytes.replace('"PASS"', '"FAIL"', 1))
+        result = self.run_adapter(deadline=0.3)
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual('attachment_missing', result['reason'])
+        __import__('shutil').rmtree(self.coordinator / '.context')
+        truncated = self.reply().replace('DEPLOY_GATE_RESULT_JSON_END\n', '')
+        self.configure(reply=truncated)
+        result = self.run_adapter(deadline=0.3)
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual('attachment_missing', result['reason'])
 
     def test_typed_permission_denial_is_unverified_with_exact_error_kept(self):
         denial = {'schemaVersion': 1, 'ok': False, 'error': {'code': 'thread_control_scope_denied',

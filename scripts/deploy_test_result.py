@@ -8,7 +8,7 @@ MAX_RECEIPT_BYTES = 64 * 1024 * 1024
 def preserve_contract(old, new):
     """A repair may add cases, but cannot replace the gate it must prove."""
     fields = ('category', 'quick', 'env', 'input_paths', 'timeout_seconds', 'case_protocol',
-              'command', 'cwd', 'worker', 'worker_root', 'worker_host', 'worker_thread', 'remote_python',
+              'command', 'cwd', 'worker', 'worker_root', 'worker_host', 'worker_thread', 'remote_python', 'coordinator_thread',
               'worker_transport', 'result_transport')
     if any(old.get(k) != new.get(k) for k in fields):
         raise ValueError('repair changed the full gate command or execution contract')

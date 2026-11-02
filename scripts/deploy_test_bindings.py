@@ -27,7 +27,7 @@ def generate(template, inventory, root):
         if mode == 'ssh':
             command = ['ssh', slot['worker_host'], shlex.join(command)]
         elif mode == 'boxes-thread':
-            for key in ('worker_thread', 'worker_host'):
+            for key in ('worker_thread', 'worker_host', 'coordinator_thread'):
                 if not isinstance(slot.get(key), str) or not slot[key]:
                     raise ValueError(f'boxes-thread inventory requires {key}')
             if timeout is None:
@@ -36,7 +36,7 @@ def generate(template, inventory, root):
             command = [sys.executable, str(root / 'scripts/deploy_test_boxes.py'), '--thread',
                        slot['worker_thread'], '--host', slot['worker_host'], '--worker-root', checkout,
                        '--python', slot.get('python', str(Path(checkout) / 'agents/venv/bin/python')),
-                       '--deadline-seconds', str(timeout)]
+                       '--coordinator-thread', slot['coordinator_thread'], '--deadline-seconds', str(timeout)]
         elif mode != 'local-isolated':
             raise ValueError('inventory must name an existing local-isolated, SSH or boxes-thread worker')
         if 'recipe' in slot:
