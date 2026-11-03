@@ -43,6 +43,8 @@ export function useMessageListProjection({
     roseDesktop && groupAgentMessages && !compressWork,
     currentAnimatingId,
     onAnimationComplete,
+    false,
+    agentExchangeGroups,
   );
   const workGroups = useTrajectoryWorkGroups(
     visibleMessages,

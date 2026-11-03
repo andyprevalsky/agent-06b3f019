@@ -1,6 +1,10 @@
 import { useLayoutEffect, useRef, type ReactNode } from 'react';
 import type { AgentSlice } from '../types';
-import { ComposerAgentContext, disposeComposerOwner } from './composerAgentContext';
+import {
+  ComposerAgentContext,
+  ComposerOwnerContext,
+  disposeComposerOwner,
+} from './composerAgentContext';
 
 export function ComposerAgentProvider({
   agents,
@@ -10,12 +14,15 @@ export function ComposerAgentProvider({
   children: ReactNode;
 }) {
   const current = useRef<AgentSlice | null>(agents);
-  current.current = agents;
   useLayoutEffect(() => {
     current.current = agents;
   });
   useLayoutEffect(() => {
     return disposeComposerOwner(current);
   }, [current]);
-  return <ComposerAgentContext.Provider value={current}>{children}</ComposerAgentContext.Provider>;
+  return (
+    <ComposerOwnerContext.Provider value={current}>
+      <ComposerAgentContext.Provider value={agents}>{children}</ComposerAgentContext.Provider>
+    </ComposerOwnerContext.Provider>
+  );
 }

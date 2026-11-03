@@ -46,11 +46,14 @@ function discoverInstalledPackages(packageNames, roots) {
   const found = new Map(packageNames.map((name) => [name, new Set()]));
   const pending = [];
   const visited = new Set();
-  const realDirectory = (directory) => {
+  const realDirectory = (directory, strict = true) => {
     try {
       const real = realpathSync(directory);
-      if (!contains(workspace, real))
-        throw new Error(`UI dependency directory is outside the workspace: ${directory}`);
+      if (!contains(workspace, real)) {
+        if (strict)
+          throw new Error(`UI dependency directory is outside the workspace: ${directory}`);
+        return null;
+      }
       return statSync(real).isDirectory() ? real : null;
     } catch (error) {
       if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null;
@@ -82,12 +85,12 @@ function discoverInstalledPackages(packageNames, roots) {
     }
     for (const entry of readdirSync(modules, { withFileTypes: true })) {
       if (entry.name.startsWith('.') || (!entry.isDirectory() && !entry.isSymbolicLink())) continue;
-      const directory = realDirectory(join(modules, entry.name));
+      const directory = realDirectory(join(modules, entry.name), false);
       if (!directory) continue;
       if (entry.name.startsWith('@')) {
         for (const child of readdirSync(directory, { withFileTypes: true })) {
           if (child.isDirectory() || child.isSymbolicLink()) {
-            const packageRoot = realDirectory(join(directory, child.name));
+            const packageRoot = realDirectory(join(directory, child.name), false);
             if (packageRoot) enqueue(join(packageRoot, 'node_modules'));
           }
         }
