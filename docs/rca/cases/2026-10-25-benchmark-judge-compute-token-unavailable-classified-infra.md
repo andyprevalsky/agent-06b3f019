@@ -114,3 +114,32 @@ verdict, provider reset or repair delegation is claimed. Original outer FAIL
 and inner SKIPPED remain retained, with unverified judge coverage. Exact
 provider usage history and the originating reset event were not reconstructed.
 The closure packet is SHA2569c677fbd2343a5cfe739f9cf8ae4da1a4936d29ca06a2cffe6ec2f8894b05a45.
+
+
+## November3 2c1 exact availability recurrence
+
+Occurrence65a38630079f40c385048ee3bd4e759a preserves mass artifact
+SHA256b20f55ef8be28c5fd1785e723042f169321566f2c577ec55cc798b982c598707,
+finished1793689407.4643824, source2c1acbc4ea40fbc9c8167ebb17c12df518bf32a9.
+Native SKIPPED remains normalizedFAIL: agent4ca07cb0 ran, but required
+T7 judge credential acquisition got local404 at06:49:09.273Z and
+delegated404 at06:49:09.546Z. The unchanged resolver requests GPT tokens.
+The06:51:06Z saved production aggregate records sole CONNECTED pooled GPT
+row cooling untilNov4 07:59:37Z, last updated02:08:49.785Z before the
+request; all other recorded rows EXPIRED. Gate NOT_INTRODUCED at this
+availability boundary vs actual merge-baseff36510b8f58f0c71c8f3ff9c6a23ff22ba64638
+→2c1acbc4ea40fbc9c8167ebb17c12df518bf32a9. Required judge coverage stays
+unverified; no judge/taskPASS, billing-credit exhaustion or exclusive
+provider-origin reset reason is claimed. The stored cooldown setter event
+was not reconstructed. Actual source404/200 controls prove resolver parity
+only; no live task retry occurred. Current capture correctly uses SKIP,
+so this is availability recurrence, not recurrence of old ERROR mapping.
+
+Current14otherchecksPASS independently. Native cleanup audit
+336211298e68091114bca12fac48db73ed41e0ccc9d29bcd8b93424e04e5a8bd verifies
+release; exact resources remain destroyed-provider-retained and retained
+Hub owner obligation persists. The independently reviewed report-v3 has SHA256
+2aab9c9b422d0fd2dcd3df55554b433905a88b11b099b68055d1a4d958060378;
+the parent confirmation binds the exact native receipt and current authority.
+No source/environment/provider
+mutation or assertion/budget change. Parent owns canonical disposition.

@@ -63,6 +63,70 @@ class Cycle(unittest.TestCase):
                 'source': failure['source'], 'description': 'real failure', 'evidence': 'RCA evidence',
                 'native_result': failure['native_result'], 'command': failure.get('command'), 'attribution': attribution, **fields}]}
 
+    def test_failed_gate_boundary_refresh_keeps_history_and_revalidates_new_source(self):
+        import contextlib, io
+        failure = self.failure()
+        c.adjudicate(self.state, self.report(failure))
+        c.focused_plan(self.state, self.plan, {'source': self.state['source'],
+            'gates': {'api': {'command': ['true'], 'checks': ['a']}}})
+        c.advance(self.state, [self.result(a='PASS')])
+        self.assertEqual('failed-gates', self.state['phase'])
+        history = copy.deepcopy({k: self.state[k] for k in ('attempts', 'failures', 'repair_gates', 'round')})
+        old_source = self.state['source']
+        (self.root / 'code').write_text('hourly sync changed source')
+        new = copy.deepcopy(self.plan); new['source'] = c.source(self.root)
+        old_path, new_path = self.root / '.context/old.json', self.root / '.context/new.json'
+        c.write(old_path, self.plan); c.write(new_path, new)
+        state_path = self.directory / 'cycle.json'; c.write(state_path, self.state)
+        saved = state_path.read_bytes()
+        argv = ['refresh', '--plan', str(new_path), '--input', str(old_path),
+                '--state-dir', str(self.directory), '--root', str(self.root)]
+        # A live coordinator's existing exclusive lease still forbids any refresh mutation.
+        with c.exclusive(self.directory), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(2, c.main(argv))
+        self.assertEqual(saved, state_path.read_bytes())
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(0, c.main(argv))
+        self.state = c.read(state_path)
+        self.assertEqual(('quick', False, 'needs-focused-plan'),
+                         (self.state['phase'], self.state['ready'], self.state['next_after_quick']))
+        self.assertEqual({}, self.state['focused'])
+        self.assertEqual(new['source'], self.state['source'])
+        self.assertNotEqual(old_source, self.state['source'])
+        self.assertEqual(history, {k: self.state[k] for k in history})
+        self.assertEqual(self.plan['gates'], self.state['plan']['gates'])
+        self.assertEqual(1, c.verify_saved(self.directory, self.root))
+        c.run_phase(new, self.state, self.directory, self.root)
+        self.assertEqual('needs-focused-plan', self.state['phase'])
+        c.focused_plan(self.state, new, {'source': self.state['source'],
+            'gates': {'api': {'command': ['true'], 'checks': ['a']}}})
+        for phase in ('focused', 'failed-gates', 'quick', 'final'):
+            self.assertEqual(phase, self.state['phase'])
+            if phase == 'failed-gates':
+                self.assertEqual(['a', 'b'], c.records(new, self.state)[0]['checks'])
+            c.run_phase(new, self.state, self.directory, self.root)
+        self.assertEqual(('ready', True), (self.state['phase'], self.state['ready']))
+        self.assertEqual({'api', 'ui'}, {r['gate'] for r in self.state['attempts'][-1]['results']})
+        self.assertEqual(history['failures'], self.state['failures'])
+        self.assertEqual('FAIL', self.state['failures'][0]['native_result'])
+        self.assertEqual('blocking', self.state['failures'][0]['disposition'])
+        for attempt in self.state['attempts'][len(history['attempts']):]:
+            self.assertTrue(all(r['source'] == new['source'] for r in attempt['results']))
+
+    def test_failed_gate_boundary_refresh_preserves_existing_refusals_atomically(self):
+        self.state.update(phase='failed-gates', repair_gates=['api'])
+        (self.root / 'code').write_text('hourly sync changed source')
+        new = copy.deepcopy(self.plan); new['source'] = c.source(self.root)
+        for invalid in ('pending', 'dropped-check', 'dropped-gate'):
+            with self.subTest(invalid=invalid):
+                state, plan = copy.deepcopy(self.state), copy.deepcopy(new)
+                if invalid == 'pending': state['pending'] = ['unadjudicated-occurrence']
+                elif invalid == 'dropped-check': plan['gates'][1]['checks'] = ['b']
+                else: plan['gates'] = [g for g in plan['gates'] if g['name'] != 'api']
+                original = copy.deepcopy(state)
+                with self.assertRaises(ValueError): c.refresh(state, self.plan, plan, self.root)
+                self.assertEqual(original, state)
+
     def test_clean_run_finishes_without_second_full_sweep(self):
         c.run_phase(self.plan, self.state, self.directory, self.root)
         self.assertEqual('initial', self.state['phase'])

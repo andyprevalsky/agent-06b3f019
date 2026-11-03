@@ -955,7 +955,7 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     validate_plan(new, root)
     if state.get("pending"):
         raise ValueError("adjudicate pending occurrences before binding a changed source")
-    if state["phase"] not in {"needs-focused-plan", "focused", "triage", "stale"}:
+    if state["phase"] not in {"needs-focused-plan", "focused", "failed-gates", "triage", "stale"}:
         raise ValueError("source refresh only at the repair boundary")
     if new["source"] != source(root):
         raise ValueError("new plan is not bound to current source")
