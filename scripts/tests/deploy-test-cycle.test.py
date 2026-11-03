@@ -63,6 +63,105 @@ class Cycle(unittest.TestCase):
                 'source': failure['source'], 'description': 'real failure', 'evidence': 'RCA evidence',
                 'native_result': failure['native_result'], 'command': failure.get('command'), 'attribution': attribution, **fields}]}
 
+    def triage_quick_fixture(self):
+        import contextlib, io
+        (self.root / 'back-end').mkdir()
+        (self.root / 'scripts').mkdir()
+        (self.root / 'scripts/check_deploy_static.py').write_text(
+            "from pathlib import Path\nimport sys\np=Path('.context/observed');p.parent.mkdir(exist_ok=True)\n"
+            "with p.open('a') as f:f.write(sys.argv[1]+'\\n')\n")
+        bins = self.root / '.context/bin'; bins.mkdir(parents=True)
+        for name in ('npm', 'npx'):
+            p = bins / name
+            p.write_text('#!' + sys.executable + '\nfrom pathlib import Path\nimport sys\n'
+                "p=Path('../.context/observed')\nwith p.open('a') as f:f.write(Path(sys.argv[0]).name+'\\n')\n"
+                "raise SystemExit(1 if Path('../.context/fail').exists() and Path(sys.argv[0]).name=='npm' else 0)\n")
+            p.chmod(0o700)
+        self.plan['gates'] = [g for g in self.plan['gates'] if not g.get('quick')] + [
+            dict(name=n, category=n, quick=True, checks=[n], cwd='.',
+                 command=[sys.executable, 'scripts/check_deploy_static.py', m])
+            for n, m in [('eslint', 'lint'), ('format', 'format')]] + [
+            dict(name='typescript', category='typescript', quick=True, checks=['typescript'], cwd='back-end',
+                 command=['bash', '-c', 'mkdir -p ../.context/tsbuildinfo && npx tsc --noEmit --incremental '
+                          '--tsBuildInfoFile ../.context/tsbuildinfo/back-end.tsbuildinfo']),
+            dict(name='backend-structural', category='backend-structural', quick=True,
+                 checks=['backend-structural'], cwd='back-end', command=['npm', 'run', 'test:structural'])]
+        self.plan['source'] = c.source(self.root)
+        self.state = c.initialize(self.plan, self.root); self.failure()
+        receipt = self.state['attempts'][-1]['results'][0]
+        receipt.update(complete=False, cleanup_owner=dict(request_token='old', worker_root='old-root',
+            native_cleanup_reference=dict(cleanup_complete=False)))
+        self.state['failures'][-1].update(native_result='UNVERIFIED', complete=False)
+        self.state['resource_warnings'] = [dict(original='preserve financial/runtime obligations')]
+        (self.root / 'code').write_text('new source requiring quick observation')
+        new = copy.deepcopy(self.plan); new['source'] = c.source(self.root)
+        plan = self.root / '.context/new-plan.json'; c.write(plan, new)
+        state = self.directory / 'cycle.json'; c.write(state, self.state)
+        argv = ['triage-quick', '--plan', str(plan), '--state-dir', str(self.directory), '--root', str(self.root)]
+        def call():
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return c.main(argv)
+        return new, plan, state, bins, call
+
+    def test_triage_quick_cli_preserves_pending_source_and_native_owner(self):
+        with patch.dict(os.environ, PATH=str(self.root / '.context/bin') + os.pathsep + os.environ['PATH']):
+            new, plan, path, bins, call = self.triage_quick_fixture()
+            before = c.read(path)
+            self.assertEqual(0, call())
+            after = c.read(path); observations = after['attempts'].pop()
+            self.assertEqual(before, after)
+            self.assertEqual(new['source'], observations['source'])
+            self.assertEqual({'eslint','format','typescript','backend-structural'},
+                             {r['gate'] for r in observations['results']})
+            self.assertTrue(all(r['executed'] and r['complete'] and r['native_exit'] == 0 for r in observations['results']))
+            self.assertEqual(['api'], c.retained_owners(after, ['api']))
+            self.assertEqual('triage', after['phase']); self.assertFalse(after['ready'])
+            self.assertEqual(4, len((self.root / '.context/observed').read_text().splitlines()))
+
+    def test_triage_quick_rejects_substitution_inventory_and_active_owner(self):
+        with patch.dict(os.environ, PATH=str(self.root / '.context/bin') + os.pathsep + os.environ['PATH']):
+            new, plan, path, bins, call = self.triage_quick_fixture(); original = path.read_bytes()
+            variants = []
+            for mode in ('command', 'category', 'drop'):
+                value = copy.deepcopy(new)
+                gate = next(g for g in value['gates'] if g['name'] == 'eslint')
+                if mode == 'command': gate['command'] = ['bash', '-c', 'echo unsafe']
+                elif mode == 'category': gate['category'] = 'smoke'
+                else: value['gates'] = [g for g in value['gates'] if g['name'] != 'api']
+                variants.append(value)
+            for value in variants:
+                c.write(plan, value); self.assertEqual(2, call()); self.assertEqual(original, path.read_bytes())
+            c.write(plan, new)
+            with c.exclusive(self.directory): self.assertEqual(2, call())
+            self.assertEqual(original, path.read_bytes())
+            orphan = self.directory / 'triage-quick/orphan'; orphan.mkdir(parents=True)
+            self.assertEqual(2, call()); self.assertEqual(original, path.read_bytes()); orphan.rmdir()
+            value = c.read(path); value['attempts'][-1]['results'].append(dict(gate='eslint', lingering_group=True))
+            c.write(path, value); owned = path.read_bytes()
+            self.assertEqual(2, call()); self.assertEqual(owned, path.read_bytes())
+            self.assertFalse((self.root / '.context/observed').exists())
+
+    def test_triage_quick_failure_and_changed_pending_do_not_commit(self):
+        with patch.dict(os.environ, PATH=str(self.root / '.context/bin') + os.pathsep + os.environ['PATH']):
+            new, plan, path, bins, call = self.triage_quick_fixture(); original = path.read_bytes()
+            (self.root / '.context/fail').touch()
+            self.assertEqual(2, call()); self.assertEqual(original, path.read_bytes())
+            summaries = list((self.directory / 'triage-quick').glob('*/summary.json'))
+            self.assertEqual(1, len(summaries)); self.assertEqual(4, len(c.read(summaries[0])['results']))
+            self.assertTrue(any(r['native_exit'] == 1 for r in c.read(summaries[0])['results']))
+            (self.root / '.context/fail').unlink()
+            execute = c.execute
+            def changed(gate, *args):
+                result = execute(gate, *args)
+                if gate['name'] == 'backend-structural':
+                    value = c.read(path); value['pending'].append('concurrent-change'); c.write(path, value)
+                return result
+            with patch.object(c, 'execute', side_effect=changed): self.assertEqual(2, call())
+            after = c.read(path)
+            self.assertEqual(['concurrent-change'], after['pending'][len(self.state['pending']):])
+            self.assertEqual(self.state['attempts'], after['attempts'])
+            self.assertEqual('triage', after['phase']); self.assertFalse(after['ready'])
+
     def test_failed_gate_boundary_refresh_keeps_history_and_revalidates_new_source(self):
         import contextlib, io
         failure = self.failure()

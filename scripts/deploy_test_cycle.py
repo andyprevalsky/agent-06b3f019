@@ -949,6 +949,83 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
         write(directory / "cycle.json", state)
 
 
+def triage_quick(plan: dict, state: dict, directory: Path, root: Path) -> None:
+    """Observe only the fixed quick recipes; keep unresolved triage on its original source."""
+    if (CANCEL.is_set() or state.get('phase') != 'triage' or not state.get('pending') or state.get('ready')
+            or 'live_failures' in state or state.get('resume_phase')):
+        raise ValueError('quick triage refresh requires quiescent unresolved triage')
+    old = state['plan']
+    if digest(old) != state['plan_digest'] or environment_digest() != state['environment']:
+        raise ValueError('original triage plan/environment changed')
+    validate_plan(plan, root)
+    if plan['source'] != source(root) or plan['source'] == state['source']:
+        raise ValueError('quick triage refresh requires exact changed source')
+    before, after = ({g['name']: g for g in p['gates']} for p in (old, plan))
+    if set(before) != set(after):
+        raise ValueError('quick refresh must preserve the full gate inventory')
+    for name, gate in before.items():
+        preserve_contract(gate, after[name])
+        if gate['checks'] != after[name]['checks']:
+            raise ValueError('quick refresh must preserve every original check')
+    names = {'eslint', 'format', 'typescript', 'backend-structural'}
+    quick = [g for g in plan['gates'] if g.get('quick')]
+    if {g['name'] for g in quick} != names or len(quick) != 4:
+        raise ValueError('only the four fixed non-live quick gates are allowed')
+    typescript = ['bash', '-c', 'mkdir -p ../.context/tsbuildinfo && npx tsc --noEmit --incremental '
+                  '--tsBuildInfoFile ../.context/tsbuildinfo/back-end.tsbuildinfo']
+    for gate in quick:
+        name, argv = gate['name'], gate['command']
+        expected = typescript if name == 'typescript' else ['npm', 'run', 'test:structural']
+        if name in {'eslint', 'format'}:
+            expected = [argv[0], 'scripts/check_deploy_static.py', 'lint' if name == 'eslint' else 'format']
+            if len(argv) == 5 and argv[3:] == ['--base', plan.get('base')]:
+                expected.extend(argv[3:])
+            if argv[0] not in {sys.executable, '/usr/bin/python3'}:
+                raise ValueError('quick static interpreter changed')
+        if (gate.get('category') != name or gate['checks'] != [name] or argv != expected
+                or gate.get('cwd', '.') != ('.' if name in {'eslint', 'format'} else 'back-end')
+                or gate.get('env', {}) or any(gate.get(k) for k in
+                    ('worker', 'worker_transport', 'worker_recipe', 'native_cloud', 'native_backend', 'case_protocol'))):
+            raise ValueError('quick recipe is not the fixed non-live command')
+    if retained_owners(state, names):
+        raise ValueError('quick gate still owns unreconciled cleanup')
+    # A killed coordinator may leave requests before any receipt or final summary exists.
+    for prior in (directory / 'triage-quick').glob('*'):
+        if not (prior / 'summary.json').is_file() or any(
+                not (p.parent / 'receipt.json').is_file() for p in prior.glob('attempts/*/quick/*/request.json')):
+            raise ValueError('prior quick observation is incomplete; owned work unknown')
+    # Failed observation artifacts never authorize another launch over an unknown quick owner.
+    for path in (directory / 'triage-quick').glob('*/attempts/*/quick/*/receipt.json'):
+        if receipt_owner(path.parent.name, bounded_read(path, 'prior quick observation')):
+            raise ValueError('prior quick observation still owns cleanup')
+    original = digest(state)
+    saved = (directory / 'cycle.json').read_bytes()
+    if json.loads(saved) != state:
+        raise ValueError('original triage changed before quick observation')
+    working = initialize(plan, root)
+    working['round'] = state['round'] + 1
+    observation = directory / 'triage-quick' / uuid.uuid4().hex
+    results = []
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(execute, gate, working, observation, root) for gate in quick]
+        for future in as_completed(futures):
+            results.append(future.result())
+    write(observation / 'summary.json', {'source': plan['source'], 'plan_digest': digest(plan),
+          'results': results, 'original_pending': state['pending'], 'credit': 'quick gates only'})
+    if (CANCEL.is_set() or source(root) != plan['source'] or environment_digest() != working['environment']
+            or input_fingerprints(plan, root) != working['input_fingerprints']
+            or digest(state) != original or (directory / 'cycle.json').read_bytes() != saved):
+        raise ValueError('quick observation changed source/environment or original triage')
+    if (len(results) != 4 or {r['gate'] for r in results} != names or any(
+            r.get('status') != 'PASS' or r.get('complete') is not True or r.get('executed') is not True
+            or r.get('source') != plan['source'] or r.get('lingering_group') or r.get('cleanup_owner')
+            or r.get('cancelled') or r.get('timed_out') or r.get('cases') != {r['gate']: 'PASS'} for r in results)):
+        raise ValueError('all four quick observations must complete; original triage retained')
+    state['attempts'].append({'phase': 'quick', 'source': plan['source'], 'results': results,
+                              'triage_refresh': True, 'plan_digest': digest(plan)})
+    # No source/plan/round/pending/owner rebinding and no advance() or readiness credit.
+
+
 def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     if digest(old) != state["plan_digest"]:
         raise ValueError("previous plan does not match the frozen selection")
@@ -1065,7 +1142,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "triage-quick", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile"])
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
     parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
     parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")
@@ -1103,6 +1180,9 @@ def main(argv: list[str] | None = None) -> int:
                 if args.input is None:
                     raise ValueError("--input focused command plan required")
                 focused_plan(state, plan, read(args.input))
+            elif args.action == "triage-quick":
+                with cancellation_handlers():
+                    triage_quick(plan, state, directory, args.root)
             elif args.action == "refresh":
                 if args.input is None:
                     raise ValueError("--input previous plan required")
