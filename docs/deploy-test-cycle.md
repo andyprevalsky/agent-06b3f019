@@ -149,6 +149,11 @@ document whose sha256 the worker script itself declared: the attached
 summaries, a different devbox, token, root or recipe, CLI/permission errors,
 oversize prompts or the deadline leave every case UNVERIFIED with the remote
 cleanup owner recorded; this transport cannot express a waiver.
+The public boxes.dev APIs currently expose agent-authored final text and
+unattested attachments, so this transport cannot grant execution credit even
+when those candidate bytes match. It retains the attempted owner and records
+`native-evidence-unavailable`. Use the existing `local-isolated` native process
+transport until an independently authenticated native reader is available.
 
 Streamed transports must also bind `timeout_seconds` to the existing gate's
 outer deadline. Do not invent a shorter test budget or leave the transport

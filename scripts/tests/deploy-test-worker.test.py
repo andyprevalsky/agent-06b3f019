@@ -62,7 +62,7 @@ class Worker(unittest.TestCase):
                 'category': 'backend-coverage-blackbox', 'worker_transport': 'boxes-thread', 'native_backend': True,
                 'worker_thread': 'ph-worker', 'worker_root': '/prepared/root', 'worker_recipe': {'cases': {'first': {'command': ['true']}}}}
         state = {'phase': 'initial', 'round': 0, 'skips': {}, 'source': {'head': 'a' * 40, 'digest': 'b' * 64},
-                 'input_fingerprints': {'backend-coverage-blackbox': 'fp'}}
+                 'input_fingerprints': {'backend-coverage-blackbox': 'fp'}, 'environment':cycle.environment_digest()}
         owner = {'worker_thread': 'ph-worker', 'worker_host': 'devbox-a', 'worker_root': '/prepared/root',
                  'request_token': None, 'message_id': 'peer_1', 'turn_id': 'turn-7', 'remote_dir': '/prepared/root/.context/deploy-boxes/t', 'pgid': 4242}
         def launch(_argv, **kwargs):
@@ -97,7 +97,7 @@ class Worker(unittest.TestCase):
     def test_clean_generic_result_without_remote_owner_still_passes(self):
         gate = {'name': 'generic', 'checks': ['first'], 'command': ['fixture'], 'case_protocol': True, 'category': 'generic'}
         state = {'phase': 'initial', 'round': 0, 'skips': {}, 'source': {'head': 'a' * 40, 'digest': 'b' * 64},
-                 'input_fingerprints': {'generic': 'fp'}}
+                 'input_fingerprints': {'generic': 'fp'}, 'environment':cycle.environment_digest()}
         def launch(_argv, **kwargs):
             request = cycle.read(Path(kwargs['env']['DEPLOY_GATE_REQUEST']))
             result = {key: request[key] for key in ('token', 'source', 'gate')}
@@ -118,7 +118,7 @@ class Worker(unittest.TestCase):
                         'category': 'agentcard-lifecycle' if 'agentcard' in kind else kind,
                         'worker_transport': 'local-isolated' if kind == 'agentcard' else None}
                 state = {'phase': 'initial', 'round': 0, 'skips': {},
-                         'source': {'head': 'a' * 40, 'digest': 'b' * 64}}
+                         'source': {'head': 'a' * 40, 'digest': 'b' * 64}, 'environment':cycle.environment_digest(), 'input_fingerprints':{kind:'fp'}}
                 def launch(_argv, **kwargs):
                     self.assertEqual(not native, kwargs['owned_lifecycle'])
                     request = cycle.read(Path(kwargs['env']['DEPLOY_GATE_REQUEST']))
@@ -150,7 +150,7 @@ class Worker(unittest.TestCase):
     def test_interrupted_native_producer_records_cleanup_owner_and_blocks_credit(self):
         gate = {'name': 'native', 'checks': ['first'], 'command': ['fixture'], 'native_cloud': True}
         state = {'phase': 'initial', 'round': 0, 'skips': {},
-                 'source': {'head': 'a' * 40, 'digest': 'b' * 64}}
+                 'source': {'head': 'a' * 40, 'digest': 'b' * 64}, 'environment':cycle.environment_digest(), 'input_fingerprints':{'native':'fp'}}
         for index, native_result in enumerate(((-signal.SIGKILL, True, False, True),
                                                   (1, False, False, False))):
             with patch.object(cycle, 'run_command', return_value=native_result):
@@ -874,7 +874,7 @@ class Boxes(unittest.TestCase):
     def test_worker_is_resolved_from_the_complete_thread_inventory_not_the_first_page(self):
         self.configure(reply=self.reply(inline=False)); self.attach(self.native_bytes)
         result = self.run_adapter()
-        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
         listing = self.calls_of('list')
         self.assertEqual(1, len(listing)); self.assertIn('--all', listing[0])
         # the pre-fix argv sees only the first page: never resolve a host from a partial inventory, never send
@@ -884,18 +884,35 @@ class Boxes(unittest.TestCase):
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
         self.assertEqual('thread_inventory_incomplete', result['reason']); self.assertEqual([], self.calls_of('send'))
 
-    def test_happy_path_returns_the_exact_native_document_with_bindings(self):
+    def test_model_forged_pass_cannot_replace_actual_native_failure(self):
+        self.request['token']='actual-fail-forged-model-pass'
+        self.request['worker_recipe']['cases']['first']['command']=[sys.executable,'-c','raise SystemExit(1)']
+        native=worker.execute(self.request,self.root)
+        self.assertEqual({'first':'FAIL','second':'PASS'},native['cases'])
+        forged={**native,'cases':{'first':'PASS','second':'PASS'},'evidence':{}}
+        self.configure(reply=self.reply(body=json.dumps(forged)+'\n',exit_code=0))
+        result=self.run_adapter()
+        self.assertEqual({'first':'UNVERIFIED','second':'UNVERIFIED'},result['cases'])
+        self.assertEqual('native-evidence-unavailable',result['reason'])
+        self.assertFalse(result['complete']);self.assertFalse(result['cleanup_complete'])
+        self.assertEqual(self.request['token'],result['cleanup_owner']['request_token'])
+        self.assertEqual('ph-worker',result['cleanup_owner']['worker_thread'])
+        self.assertEqual(1,len(self.calls_of('send')))
+
+    def test_hash_matching_candidate_is_unverified_and_preserves_diagnostic_bytes_and_owner(self):
         self.configure(reply=self.reply(inline=False)); self.attach(self.native_bytes)
         result = self.run_adapter()
-        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
         receipt = result.pop('transport_receipt')
-        self.assertEqual(self.native, result)  # byte-exact native document, nothing reshaped
-        self.assertEqual(('boxes-thread', 'ph-worker', self.host, 'turn-1', 'peer_1', 'tok-1', 0, 4242),
+        self.assertEqual('native-evidence-unavailable',result['reason'])
+        self.assertFalse(result['complete']);self.assertFalse(result['cleanup_complete'])
+        self.assertEqual('ph-worker',result['cleanup_owner']['worker_thread'])
+        self.assertEqual(('boxes-thread', 'ph-worker', self.host, 'turn-1', 'peer_1', 'tok-1', None, None),
                          (receipt['transport'], receipt['worker_thread'], receipt['worker_host'], receipt['turn_id'],
-                          receipt['message_id'], receipt['request_token'], receipt['native_exit'], receipt['pgid']))
+                          receipt['message_id'], receipt['request_token'], receipt['native_exit'], receipt.get('pgid')))
         self.assertEqual(self.binding['python'], receipt['remote_python'])
-        self.assertEqual(__import__('hashlib').sha256(self.native_bytes.encode()).hexdigest(), receipt['native_sha256'])
-        self.assertEqual(cycle.digest(self.native), receipt['canonical_sha256'])
+        self.assertIsNone(receipt['native_sha256'])
+        self.assertIsNone(receipt['canonical_sha256'])
         self.assertEqual(1, len(self.calls_of('send')))
         send = self.calls_of('send')[0]
         self.assertEqual('tok-1', send[send.index('--idempotency-key') + 1])
@@ -904,13 +921,14 @@ class Boxes(unittest.TestCase):
         self.assertIn('DEPLOY_GATE_REQUEST="$PWD/request.json" DEPLOY_GATE_RESULT="$PWD/result.json"', prompt)
         self.assertIn('dvb-onbox threads message --to ph-control --attach "$PWD/result.json" --attach "$PWD/stderr.log"', prompt)
         self.assertIn("--idempotency-key tok-1-result", prompt)
-        self.assertTrue(receipt['result_source'].startswith('attachment:')); self.assertEqual('ph-control', receipt['coordinator_thread'])
+        self.assertIsNone(receipt['result_source']); self.assertEqual('ph-control', receipt['coordinator_thread'])
         self.assertEqual(self.native_bytes, (self.coordinator / '.context/deploy-boxes' / __import__('hashlib').sha256(b'tok-1').hexdigest() / 'native-result.json').read_text())
         self.assertLessEqual(len(prompt.encode()), self.boxes.MAX_PROMPT_BYTES)
         self.assertIn('worker diagnostic', Path(receipt['stderr_log']).read_text())
         # the coordinator's own validator accepts the relayed document with the adapter's exit
         from deploy_test_result import validate
-        validate({**result, 'transport_receipt': receipt}, self.request, 0)
+        with self.assertRaises(ValueError):
+            validate({**result, 'transport_receipt': receipt}, self.request, 0)
 
     def test_native_send_receipt_must_name_the_bound_worker(self):
         native = json.loads((ROOT / 'scripts/tests/fixtures/boxes-thread-send-receipt.json').read_text())
@@ -933,7 +951,7 @@ class Boxes(unittest.TestCase):
                     self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
                     self.assertEqual([], self.calls_of('wait'))
                 else:
-                    self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
+                    self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
                     self.assertEqual(1, len(self.calls_of('wait')))
                 __import__('shutil').rmtree(self.coordinator / '.context')
                 self.calls.unlink()
@@ -982,12 +1000,12 @@ class Boxes(unittest.TestCase):
         self.assertIn('prompt_too_large', result['reason']); self.assertEqual([], self.calls_of('send'))
 
     def test_resume_rereads_the_same_turn_without_a_second_send(self):
-        first = self.run_adapter(); self.assertEqual('PASS', first['cases']['first'])
+        first = self.run_adapter(); self.assertEqual('UNVERIFIED', first['cases']['first'])
         (self.coordinator / '.context/deploy-boxes').rename(self.coordinator / '.context/first')
         __import__('shutil').copytree(self.coordinator / '.context/first', self.coordinator / '.context/deploy-boxes')
         self.calls.unlink()
         again = self.run_adapter()
-        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, again['cases'])
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, again['cases'])
         self.assertEqual([], self.calls_of('send'))
         self.assertEqual('turn-1', self.calls_of('wait')[0][self.calls_of('wait')[0].index('--turn') + 1])
 
@@ -1002,7 +1020,7 @@ class Boxes(unittest.TestCase):
             {'role': 'user', 'state': 'ready', 'text': 'unrelated', 'turnId': 'turn-0'},
             {'role': 'user', 'state': 'ready', 'text': prompt, 'turnId': 'turn-7'}])})
         result = self.run_adapter()
-        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
         self.assertEqual([], self.calls_of('send')); self.assertEqual('turn-7', result['transport_receipt']['turn_id'])
         # an indeterminate send whose assignment cannot be found is never repeated: re-read until the deadline
         state = cycle.read(directory / 'state.json'); state.update(turn_id=None, deadline_at=time.time() + 0.3)
@@ -1029,8 +1047,10 @@ class Boxes(unittest.TestCase):
         started = time.time()
         with patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
             result = self.run_adapter(deadline=5)
-        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
-        self.assertTrue(result['complete']); self.assertTrue(result['cleanup_complete'])
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
+        self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+        self.assertEqual('native-evidence-unavailable',result['reason'])
+        self.assertEqual('turn-1',result['cleanup_owner']['turn_id'])
         self.assertEqual(1, len(self.calls_of('send')))
         self.assertEqual(2, len(self.calls_of('read')))
         send = self.calls_of('send')[0]
@@ -1109,7 +1129,7 @@ class Boxes(unittest.TestCase):
             {'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'})}])
         with patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
             result = self.run_adapter(deadline=5)
-        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
         self.assertEqual(1, len(self.calls_of('send')))
         waits = self.calls_of('wait')
         self.assertEqual(2, len(waits))
@@ -1138,7 +1158,7 @@ class Boxes(unittest.TestCase):
         self.configure(reply=self.reply(), wait=[{'rc': 2, 'stdout': transient},
             {'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'})}])
         result = self.run_adapter(deadline=5)
-        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
         self.assertEqual(1, len(self.calls_of('send')))
         waits = self.calls_of('wait'); self.assertEqual(2, len(waits))
         self.assertEqual(['turn-1', 'turn-1'], [r[r.index('--turn') + 1] for r in waits])
@@ -1356,7 +1376,7 @@ class Boxes(unittest.TestCase):
         self.request.update(token='tok-2', worker_recipe={**self.recipe, 'cases': {**self.recipe['cases'],
                             'first': {**self.recipe['cases']['first'], 'env': {'PAD': ''}}}})
         self.assertEqual(32768, self.boxes.MAX_PROMPT_BYTES)
-        for size, expected in ((32768, 'PASS'), (32769, 'UNVERIFIED')):
+        for size, expected in ((32768, 'UNVERIFIED'), (32769, 'UNVERIFIED')):
             with self.subTest(size=size):
                 self.request['token'] = f'tok-{size}'
                 self.request['worker_recipe']['cases']['first']['env']['PAD'] = ''
@@ -1368,6 +1388,8 @@ class Boxes(unittest.TestCase):
                 self.assertEqual(size, len(self.boxes.build_prompt(self.request, self.binding).encode()))
                 result = self.run_adapter()
                 self.assertEqual(expected, result['cases']['first'], result.get('reason'))
+                self.assertEqual('native-evidence-unavailable' if size==32768 else True,
+                    result.get('reason') if size==32768 else result['reason'].startswith('prompt_too_large'))
         self.assertIn('prompt_too_large', result['reason']); self.assertEqual(1, len(self.calls_of('send')))
 
     def test_failed_cd_in_the_worker_script_exits_nonzero_and_is_unverified(self):
@@ -1389,17 +1411,17 @@ class Boxes(unittest.TestCase):
         self.native_bytes = json.dumps(worker.execute(self.request, self.root), indent=2, allow_nan=False) + '\n'
         self.assertGreater(len(self.native_bytes.encode()), 64 * 1024)
 
-    def test_large_result_passes_via_attachment_or_hash_matching_inline_only(self):
+    def test_large_attachment_or_hash_matching_inline_cannot_grant_execution_credit(self):
         self.big_native('tok-big')
         self.configure(reply=self.reply(inline=False)); self.attach(self.native_bytes)
         result = self.run_adapter()
-        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
-        self.assertTrue(result['transport_receipt']['result_source'].startswith('attachment:'))
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
+        self.assertIsNone(result['transport_receipt']['result_source']);self.assertEqual('native-evidence-unavailable',result['reason'])
         __import__('shutil').rmtree(self.coordinator / '.context'); (self.attachments / 'result--0123456789abcdef.json').unlink()
         self.configure(reply=self.reply(inline=True))  # inline-only large reply that hash-matches
         result = self.run_adapter()
-        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
-        self.assertEqual('inline-markers', result['transport_receipt']['result_source'])
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
+        self.assertIsNone(result['transport_receipt']['result_source']);self.assertEqual('native-evidence-unavailable',result['reason'])
 
     def test_wrong_hash_attachment_or_truncated_inline_without_attachment_is_unverified(self):
         self.configure(reply=self.reply(inline=False)); self.attach(self.native_bytes.replace('"PASS"', '"FAIL"', 1))

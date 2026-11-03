@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Staged adapter over an existing, prepared boxes.dev worker thread.
+"""Bootstrap/observe an existing prepared boxes.dev worker thread.
 
-One request sends one exact deploy_test_worker.py invocation to a prepared
-muted thread (`dvb-onbox threads send`, idempotency key = request token) and
-collects the byte-exact native DEPLOY_GATE_RESULT document from that same turn.
-The thread's model cannot summarise, waive or reshape a result: only bytes that
-hash to the worker's own sha256sum are parsed. Anything else is UNVERIFIED.
-This adapter never allocates devboxes, threads or services.
+The public thread APIs expose model final text and unattested attachments,
+not independently recorded native command output or process receipts.
+Hash matching preserves candidate bytes for diagnosis; it does not authenticate
+worker execution. Such candidates remain UNVERIFIED with their attempted
+remote owner retained. Use the existing local-isolated native transport for
+execution credit. This adapter never allocates devboxes or services.
 """
 import argparse
 from contextlib import suppress
@@ -550,12 +550,8 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
             with open(state['stderr_log'], 'a') as stream:
                 stream.write(stderr)
         validate_result(document, request, native_exit)
-        if document.get('worker_root') != binding['worker_root']:
-            raise ValueError('worker execution root differs from its isolation binding')
-        document['transport_receipt'] = receipt(binding, state, native_sha, digest(document), native_exit, source)
-        document['transport_receipt']['request'] = request_envelope(request, binding)[1]
-        document['transport_receipt']['pgid'] = pgid
-        return document
+        # The final text declares both hash and exit; neither authenticates native execution.
+        raise ValueError('native-evidence-unavailable')
     except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
         reason = str(error)
         if isinstance(error, subprocess.TimeoutExpired):
