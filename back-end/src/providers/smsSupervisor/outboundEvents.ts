@@ -605,7 +605,11 @@ export async function notifyCompletion(
   const result = await sendLifecycleSms(
     userId,
     phone,
-    { message, requiredLinks: finalAnswer === undefined ? [getAgentUrl(agent.id)] : [], preserveText: finalAnswer !== undefined },
+    {
+      message,
+      requiredLinks: finalAnswer === undefined ? [getAgentUrl(agent.id)] : [],
+      preserveText: finalAnswer !== undefined,
+    },
     {
       archiveRootAgentId: agent.id,
       archiveContext: { event_type: 'completion', user_id: userId },

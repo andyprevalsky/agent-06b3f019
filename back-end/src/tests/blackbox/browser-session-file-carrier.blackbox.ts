@@ -133,7 +133,8 @@ async function main(): Promise<void> {
   };
   // Main extracted I/O; exercise that actual module through both public paths.
   const sessionIo = load<Record<string, unknown>>(
-    'domains/browser-session/service.session-io.ts', serviceDependencies
+    'domains/browser-session/service.session-io.ts',
+    serviceDependencies
   );
   const service = load<Record<string, unknown>>('domains/browser-session/service.ts', {
     ...serviceDependencies,
@@ -142,8 +143,11 @@ async function main(): Promise<void> {
   assert.equal(service.downloadFile, sessionIo.downloadFile);
   await assert.rejects(
     (sessionIo.downloadFile as (session: string, file: string, user: string) => Promise<unknown>)(
-      'session', '/files/screenshot.png', 'foreign-user'
-    ), SessionNotFoundError
+      'session',
+      '/files/screenshot.png',
+      'foreign-user'
+    ),
+    SessionNotFoundError
   );
   const buildMetadata = service.buildBrowserSessionMetadata as (
     session: Record<string, unknown>,

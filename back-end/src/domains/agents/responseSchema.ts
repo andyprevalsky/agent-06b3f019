@@ -137,7 +137,9 @@ export const ResponseSchemaFieldSchema = z
   });
 
 // Response schema type (passed by parent agent for sub-agents)
-export const ResponseSchemaSchema = z.object({
-  fields: z.array(ResponseSchemaFieldSchema),
-  presentation: FinalPresentationSchema.nullable().optional(),
-}).superRefine(validateFinalPresentation);
+export const ResponseSchemaSchema = z
+  .object({
+    fields: z.array(ResponseSchemaFieldSchema),
+    presentation: FinalPresentationSchema.nullable().optional(),
+  })
+  .superRefine(validateFinalPresentation);

@@ -24,11 +24,21 @@
  * claude-code-src/src/utils/sideQuery.ts for the upstream pattern.
  */
 
+import { setTimeout as sleep } from 'node:timers/promises';
 import { z } from 'zod';
-import { FinalPresentationSchema, validateFinalPresentation, type FinalPresentation } from '../domains/agents/finalPresentation';
+import {
+  FinalPresentationSchema,
+  validateFinalPresentation,
+  type FinalPresentation,
+} from '../domains/agents/finalPresentation';
 import { prisma } from './database';
 import { createLogger } from './logger';
-import { boundsFromEntries, type FieldConstraints } from './responseSchemaBounds';
+import {
+  boundsFromEntries,
+  GeneratedBoundSchema,
+  validateFieldConstraints,
+  type FieldConstraints,
+} from './responseSchemaBounds';
 import { retryWithBackoff } from './retry';
 import { createStreamingCompletion, RoseAuthError, RoseInvalidRequest } from './rose';
 import { StructuredOutputAccumulator } from './rose/structuredOutput';
@@ -81,11 +91,6 @@ const FieldTypeSchema = z.enum([
   'list[session_file_pointer]',
 ]);
 
-const GeneratedBoundSchema = z.object({
-  kind: z.enum(['minItems', 'maxItems', 'minLength', 'maxLength']),
-  value: z.number().int().min(0),
-});
-
 const NestedSchemaFieldSchema = z
   .object({
     name: z.string().describe('Nested field name in snake_case'),
@@ -113,20 +118,6 @@ const NestedSchemaFieldSchema = z
       .transform((value) => value ?? true),
   })
   .superRefine((field, ctx) => validateFieldConstraints(field, ctx));
-
-function validateFieldConstraints(
-  field: { type: string; constraints?: z.infer<typeof GeneratedBoundSchema>[] },
-  ctx: z.RefinementCtx
-): void {
-  try {
-    boundsFromEntries(field.type, field.constraints);
-  } catch (error) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
 
 // Individual field definition. `required: false` means the agent may omit it.
 const SchemaFieldSchema = z
@@ -282,8 +273,23 @@ export const RESPONSE_SCHEMA_JSON_SCHEMA = {
     presentation: {
       anyOf: [
         { type: 'null' },
-        { type: 'object', additionalProperties: false, properties: { version: { const: 1 }, mode: { const: 'report' } }, required: ['version', 'mode'] },
-        { type: 'object', additionalProperties: false, properties: { version: { const: 1 }, mode: { const: 'value' }, field: { type: 'string' }, encoding: { enum: ['text', 'json'] } }, required: ['version', 'mode', 'field', 'encoding'] },
+        {
+          type: 'object',
+          additionalProperties: false,
+          properties: { version: { const: 1 }, mode: { const: 'report' } },
+          required: ['version', 'mode'],
+        },
+        {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            version: { const: 1 },
+            mode: { const: 'value' },
+            field: { type: 'string' },
+            encoding: { enum: ['text', 'json'] },
+          },
+          required: ['version', 'mode', 'field', 'encoding'],
+        },
       ],
     },
     reasoning: {
@@ -729,7 +735,10 @@ export async function generateResponseSchema(
       }));
 
       return {
-        schema: { fields: fieldsWithRequired, ...(result.parsed.presentation ? { presentation: result.parsed.presentation } : {}) },
+        schema: {
+          fields: fieldsWithRequired,
+          ...(result.parsed.presentation ? { presentation: result.parsed.presentation } : {}),
+        },
         tokensIn: result.tokensIn,
         tokensOut: result.tokensOut,
       };
@@ -755,13 +764,6 @@ export async function generateResponseSchema(
   throw lastError instanceof Error
     ? lastError
     : new Error('Unknown error generating response schema');
-}
-
-/**
- * Sleep helper for exponential backoff
- */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**

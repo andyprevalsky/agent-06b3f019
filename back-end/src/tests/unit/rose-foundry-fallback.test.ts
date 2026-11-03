@@ -36,8 +36,14 @@ function withSharedAuthority(providerFetch: typeof fetch): typeof fetch {
   return (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
     if (url.origin !== TEST_AUTHORITY) {
-      assert(['https://a-4989-resource.openai.azure.com', 'https://openrouter.ai', 'https://api.openai.com'].includes(url.origin),
-        `Unexpected fixture endpoint: ${url.origin}`);
+      assert(
+        [
+          'https://a-4989-resource.openai.azure.com',
+          'https://openrouter.ai',
+          'https://api.openai.com',
+        ].includes(url.origin),
+        `Unexpected fixture endpoint: ${url.origin}`
+      );
       return providerFetch(input, init);
     }
     assert.equal((init?.headers as Record<string, string>)['X-API-Key'], TEST_AUTHORITY_KEY);
@@ -48,12 +54,18 @@ function withSharedAuthority(providerFetch: typeof fetch): typeof fetch {
       const keys = (url.searchParams.get('keys') ?? '').split(',');
       assert(keys.length > 0 && keys.every((key) => key.includes(':gpt-6-sol')));
       return Response.json({
-        cooldowns: Object.fromEntries(keys.filter((key) => cooldowns[key]).map((key) => [key, cooldowns[key]])),
+        cooldowns: Object.fromEntries(
+          keys.filter((key) => cooldowns[key]).map((key) => [key, cooldowns[key]])
+        ),
       });
     }
     assert.equal(init?.method, 'POST');
     const body = JSON.parse(String(init?.body)) as {
-      type?: string; source?: string; region: string; deployment: string; retryAfterSeconds?: number;
+      type?: string;
+      source?: string;
+      region: string;
+      deployment: string;
+      retryAfterSeconds?: number;
     };
     assert.equal(body.region, 'a-4989-resource.openai.azure.com');
     const key = `${body.region}:${body.deployment}`;
@@ -79,10 +91,14 @@ function withSharedAuthority(providerFetch: typeof fetch): typeof fetch {
 async function main(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const originalEnv = Object.fromEntries(
-    [...FOUNDRY_REGION_ENV_NAMES, 'GPT_API_KEY', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY',
-      'COMPUTE_TOKEN_AUTHORITY_URL', 'COMPUTE_TOKEN_AUTHORITY_API_KEY'].map(
-      (key) => [key, process.env[key]]
-    )
+    [
+      ...FOUNDRY_REGION_ENV_NAMES,
+      'GPT_API_KEY',
+      'ANTHROPIC_API_KEY',
+      'OPENROUTER_API_KEY',
+      'COMPUTE_TOKEN_AUTHORITY_URL',
+      'COMPUTE_TOKEN_AUTHORITY_API_KEY',
+    ].map((key) => [key, process.env[key]])
   );
   // Region 1 only: a developer .env may configure AZURE_FOUNDRY_*_2.._9.
   for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
@@ -95,7 +111,10 @@ async function main(): Promise<void> {
   delete process.env.GPT_API_KEY;
   delete process.env.ANTHROPIC_API_KEY;
   const attempts: string[] = [];
-  globalThis.fetch = withSharedAuthority((async (input: string | URL | Request, init?: RequestInit) => {
+  globalThis.fetch = withSharedAuthority((async (
+    input: string | URL | Request,
+    init?: RequestInit
+  ) => {
     assert.equal(String(input), 'https://a-4989-resource.openai.azure.com/openai/v1/responses');
     assert.equal((init?.headers as Record<string, string>)['api-key'], 'test-key');
     assert.equal(init?.redirect, 'manual');
@@ -177,7 +196,10 @@ async function main(): Promise<void> {
       },
     ]) {
       let captured: Record<string, unknown> | undefined;
-      globalThis.fetch = withSharedAuthority((async (_input: string | URL | Request, init?: RequestInit) => {
+      globalThis.fetch = withSharedAuthority((async (
+        _input: string | URL | Request,
+        init?: RequestInit
+      ) => {
         captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return new Response(sse('ok'), { status: 200 });
       }) as typeof fetch);
@@ -232,7 +254,10 @@ async function main(): Promise<void> {
 
     process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol-reader-a,gpt-6-sol-reader-b';
     const readerAttempts: string[] = [];
-    globalThis.fetch = withSharedAuthority((async (_input: string | URL | Request, init?: RequestInit) => {
+    globalThis.fetch = withSharedAuthority((async (
+      _input: string | URL | Request,
+      init?: RequestInit
+    ) => {
       readerAttempts.push(String((JSON.parse(String(init?.body)) as { model: string }).model));
       if (readerAttempts.length === 1)
         return new Response(
@@ -259,7 +284,10 @@ async function main(): Promise<void> {
 
     process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol-partial-a,gpt-6-sol-partial-b';
     const partialAttempts: string[] = [];
-    globalThis.fetch = withSharedAuthority((async (_input: string | URL | Request, init?: RequestInit) => {
+    globalThis.fetch = withSharedAuthority((async (
+      _input: string | URL | Request,
+      init?: RequestInit
+    ) => {
       partialAttempts.push(String((JSON.parse(String(init?.body)) as { model: string }).model));
       let reads = 0;
       return new Response(
@@ -319,11 +347,13 @@ async function main(): Promise<void> {
       }, RosePaymentRequiredError);
       assert.equal(calls, 1, `${code}: no retry`);
     }
-    globalThis.fetch = withSharedAuthority((async () =>
-      new Response(
-        'event: error\ndata: {"type":"error","error":{"type":"insufficient_quota","code":"credit_balance_exhausted","message":"You have no credits remaining"}}\n\ndata: [DONE]\n\n',
-        { status: 200, headers: { 'content-type': 'text/event-stream' } }
-      )) as typeof fetch);
+    globalThis.fetch = withSharedAuthority(
+      (async () =>
+        new Response(
+          'event: error\ndata: {"type":"error","error":{"type":"insufficient_quota","code":"credit_balance_exhausted","message":"You have no credits remaining"}}\n\ndata: [DONE]\n\n',
+          { status: 200, headers: { 'content-type': 'text/event-stream' } }
+        )) as typeof fetch
+    );
     await assert.rejects(async () => {
       for await (const _ of openAiApiKeyComplete({
         poolSpec: POOL_REGISTRY['rose-1-ultra'],
@@ -335,11 +365,13 @@ async function main(): Promise<void> {
         void _;
       }
     }, RosePaymentRequiredError);
-    globalThis.fetch = withSharedAuthority((async () =>
-      new Response(JSON.stringify({ error: { code: 'rate_limit_exceeded' } }), {
-        status: 429,
-        headers: { 'retry-after': '60' },
-      })) as typeof fetch);
+    globalThis.fetch = withSharedAuthority(
+      (async () =>
+        new Response(JSON.stringify({ error: { code: 'rate_limit_exceeded' } }), {
+          status: 429,
+          headers: { 'retry-after': '60' },
+        })) as typeof fetch
+    );
     await assert.rejects(async () => {
       for await (const _ of openAiApiKeyComplete({
         poolSpec: POOL_REGISTRY['rose-1-ultra'],

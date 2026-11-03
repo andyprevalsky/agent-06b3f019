@@ -6,7 +6,11 @@ import { z } from 'zod';
 import { BACKGROUND_TASKS_MAX, backgroundTaskEntrySchema } from './typesAgentTree';
 import { ResponseSchemaSchema } from './responseSchema';
 
-export { NestedResponseSchemaFieldSchema, ResponseSchemaFieldSchema, ResponseSchemaSchema } from './responseSchema';
+export {
+  NestedResponseSchemaFieldSchema,
+  ResponseSchemaFieldSchema,
+  ResponseSchemaSchema,
+} from './responseSchema';
 
 export * from './typesAgentTree';
 export * from './typesAgentMessages';

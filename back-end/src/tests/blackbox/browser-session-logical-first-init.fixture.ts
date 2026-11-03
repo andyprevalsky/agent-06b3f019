@@ -81,7 +81,11 @@ async function main() {
   if (!joining) {
     await prisma.user.create({ data: { userId, isAnonymous: false } });
     await prisma.agent.createMany({
-      data: [agentId, resumedAgentId, neutralAgentId].map((id) => ({ id, userId, goal: 'logical first init' })),
+      data: [agentId, resumedAgentId, neutralAgentId].map((id) => ({
+        id,
+        userId,
+        goal: 'logical first init',
+      })),
     });
   }
   await mock.module('../../providers/browser/checkpoint', {
@@ -91,23 +95,22 @@ async function main() {
         throw new Error('fixture: cold path captures live native state');
       },
     },
-
   });
   await mock.module('../../providers/authOptions', {
     namedExports: {
       ...authOptions,
       getAuthOptions: async (_user: string, realm: string) => {
         authRequests.push(realm);
-        return ({
-        realm,
-        steel_session: null,
-        cookie_bundles: [],
-        passwords: [],
-        passkeys: [],
-        email_otp: { available: false, connected_emails: [], match_for_site_account: null },
-        readable_identifiers: [],
-        minted: null,
-      });
+        return {
+          realm,
+          steel_session: null,
+          cookie_bundles: [],
+          passwords: [],
+          passkeys: [],
+          email_otp: { available: false, connected_emails: [], match_for_site_account: null },
+          readable_identifiers: [],
+          minted: null,
+        };
       },
     },
   });
@@ -377,14 +380,24 @@ async function main() {
 
     // Credential preparation remains realm-only. Once navigation selects HTTPS,
     // the existing JIT path injects the real target without allocating again.
-    for (const target of ['about:blank', 'data:text/plain,hello', 'file:///tmp/example', 'javascript:alert(1)']) {
-      await assert.rejects(prepareSessionCredentials(blank.session_id, userId, target), /authentication realm/);
+    for (const target of [
+      'about:blank',
+      'data:text/plain,hello',
+      'file:///tmp/example',
+      'javascript:alert(1)',
+    ]) {
+      await assert.rejects(
+        prepareSessionCredentials(blank.session_id, userId, target),
+        /authentication realm/
+      );
     }
     const navigated = await prepareSessionCredentials(blank.session_id, userId, START_URL);
     assert.equal(navigated.auth_realm, 'example.test');
     assert.equal(navigated.cookies_injected, true);
     assert.equal(authRequests.length, authBefore + 1);
-    assert.deepEqual(injected.slice(injectionsBefore), [{ sessionId: blank.session_id, url: START_URL }]);
+    assert.deepEqual(injected.slice(injectionsBefore), [
+      { sessionId: blank.session_id, url: START_URL },
+    ]);
     assert.equal(created.length, 2, 'JIT credential preparation allocated another browser');
     assert.equal(closed.length, closesBefore);
 

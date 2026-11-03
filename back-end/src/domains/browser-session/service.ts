@@ -158,22 +158,32 @@ async function prepareInitialSessionCredentials(
   // Navigation prepares the real target realm through the existing JIT path.
   // Do not query, reserve or inject a site's credentials into an opaque page.
   return {
-    ...buildSessionCredentialPayload('', {
-      realm: '',
-      steel_session: null,
-      cookie_bundles: [],
-      passwords: [],
-      passkeys: [],
-      email_otp: { available: false, connected_emails: [], match_for_site_account: null },
-      readable_identifiers: [],
-      minted: null,
-    }, [], []),
+    ...buildSessionCredentialPayload(
+      '',
+      {
+        realm: '',
+        steel_session: null,
+        cookie_bundles: [],
+        passwords: [],
+        passkeys: [],
+        email_otp: { available: false, connected_emails: [], match_for_site_account: null },
+        readable_identifiers: [],
+        minted: null,
+      },
+      [],
+      []
+    ),
     auth_credential_ref: null,
     cookies_injected: false,
     cookies_count: 0,
     auth_source: 'none' as const,
     browser_state_injection: {
-      cookies: { injected: false, cookieCount: 0, authSource: 'none' as const, credentialRef: null },
+      cookies: {
+        injected: false,
+        cookieCount: 0,
+        authSource: 'none' as const,
+        credentialRef: null,
+      },
       fingerprint: { injected: false },
       indexedDB: { injected: false, originCount: 0 },
       localStorage: { injected: false, originCount: 0 },
