@@ -26,8 +26,6 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
-    from helpers.workflow_safe import context_logger
-    from helpers.wmh_activity_policy import wmh_activity_timeout_options
     from domains.agent_messaging.handler import kill_agent, send_message_to_agent
     from domains.spawn_agent.config import is_demo_cache_task, is_oai_demo_mass_agent_task
     from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore
@@ -90,6 +88,8 @@ with workflow.unsafe.imports_passed_through():
     )
     from helpers.wait_on_world_clock import _read_world_time_ms, _refresh_world_time_cursor
     from helpers.wait_wake import note_context_snapshot, wake_mark
+    from helpers.wmh_activity_policy import wmh_activity_timeout_options
+    from helpers.workflow_safe import context_logger
     from helpers.world_model_runtime import world_clock_activity
     from loop.context_utils import refresh_user_pause
     from loop.dag_executor import (
@@ -1302,6 +1302,14 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             self._cost_limit_wrapup_pending = runtime.get("cost_limit_wrapup_pending") is True
         if "cost_limit_wrapup_consumed" in runtime:
             self._cost_limit_wrapup_consumed = runtime.get("cost_limit_wrapup_consumed") is True
+        if (
+            self._resume_prior_status == "COST_LIMIT_REACHED"
+            and self._cost_limit_wrapup_pending
+            and not self._cost_limit_wrapup_consumed
+            and not self._user_pause_active
+            and not self._paused_by_parent
+        ):
+            self.is_paused = False
         self._restore_background_state(runtime.get("background_agents"))
         pending_tool_resumes = runtime.get("pending_tool_resumes")
         if isinstance(pending_tool_resumes, list):
@@ -1323,13 +1331,14 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         result: Any,
         paused_before: bool,
         cost_limit_before: bool,
+        pause_sequence_before: Optional[int] = None,
     ) -> None:
         """Allow one attempt_completion turn when browser costs newly trip the limit.
 
-        Only arms when THIS tool caused the cost-limit pause. User/parent pauses
-        that were already active before the tool ran stay intact.
+        Only arms for verified browser usage that newly crosses the limit.
+        Existing user/parent pauses and intervening pause signals stay intact.
         """
-        if tool_name != "spawn_browser_agent":
+        if tool_name not in {"spawn_browser_agent", "spawn_agent"}:
             return
         if not isinstance(result, dict):
             return
@@ -1339,10 +1348,14 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         }
         if not success:
             return
-        if not self._cost_limit_reached or not self.is_paused:
+        if not self._cost_limit_reached and (
+            self.parent_workflow_id is not None or self.subtree_cost_cents < self.price_limit_cents
+        ):
             return
         # Tool did not newly trip the limit — do not clear an unrelated pause.
         if cost_limit_before or paused_before or self._paused_by_parent:
+            return
+        if pause_sequence_before is not None and self._pause_signal_sequence != pause_sequence_before:
             return
         workflow.logger.warning(
             "💰 Successful spawn_browser_agent tripped the cost limit "
@@ -1351,6 +1364,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         )
         self.is_paused = False
         self._user_pause_active = False
+        self._cost_limit_reached = True
         self._cost_limit_wrapup_pending = True
         self._cost_limit_wrapup_consumed = False
 
@@ -3678,15 +3692,21 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         await self._check_parent_state()
         # Yield to event loop so Temporal processes any pending signals before we read is_paused
         await asyncio.sleep(0)
+        return self.is_paused
+
+    async def _check_paused_before_turn(self) -> bool:
+        """Consume browser wrap-up once per turn, never once per stream check."""
+        if await self._check_paused():
+            return True
         if self._cost_limit_wrapup_pending and self._cost_limit_reached and not self._is_finished:
             if not self._cost_limit_wrapup_consumed:
-                # First pause-check after arming wrap-up: allow one more turn.
+                # Admission belongs to the turn boundary, not stream polling.
                 self._cost_limit_wrapup_consumed = True
                 return False
             # Wrap-up turn used without completing — re-assert the cost pause.
-            self.is_paused = True
             self._cost_limit_wrapup_pending = False
-            return True
+            self._cost_limit_reached = False
+            await self._check_cost_limit()
         return self.is_paused
 
     async def _check_orphaned(self) -> bool:
@@ -3805,6 +3825,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     "context": list(self.context),
                 }
             run_agent_kwargs["get_requirement_revision"] = lambda: self._response_schema_revision
+            run_agent_kwargs["check_paused_before_turn"] = self._check_paused_before_turn
             run_agent_kwargs.setdefault("user_tools", declared_user_tools(self))
             # Read the latest known schema without waiting for async schema regeneration.
             run_agent_kwargs["get_jev_response_schema"] = lambda: self.output_schema
@@ -4363,6 +4384,25 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         role_alternation and causes the LLM to re-emit the same tool_calls
         (regression: smoke task `parallel-tool-calls`).
         """
+        if (
+            self._cost_limit_wrapup_pending
+            and self._cost_limit_reached
+            and tool_name not in {"attempt_completion", "attempt_completion_with_result"}
+        ):
+            self._cost_limit_wrapup_pending = False
+            self._cost_limit_reached = False
+            await self._check_cost_limit()
+            await self._handle_tool_event(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Cost limit reached",
+                    message="Cost limit reached",
+                    status=MessageStatus.ERROR,
+                ),
+                tool_call_id,
+                tool_name,
+            )
+            return {"error": True, "message": "Cost limit reached"}
         if tool_name == "attempt_completion":
             # Pending background agents do not block completion: the verifier
             # sees their status, and a finishing parent stops them.
@@ -4446,8 +4486,6 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                         )
 
             executor = TOOL_EXECUTORS[tool_name]
-            paused_before_tool = self.is_paused
-            cost_limit_before_tool = self._cost_limit_reached
             self._active_tool_calls[tool_call_id] = (tool_name, dict(tool_args))
 
             # Tools migrated to new signature: (execute_activity, tool_call, tool_call_id, agent_id, user_id)
@@ -4513,13 +4551,6 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     # Extract actual result for caller
                     result = result.get("result", result)
 
-                self._maybe_arm_cost_limit_wrapup_after_browser(
-                    tool_name=tool_name,
-                    result=result,
-                    paused_before=paused_before_tool,
-                    cost_limit_before=cost_limit_before_tool,
-                )
-
                 # Route rotation signals from the per-tool summarizer through
                 # _on_tokens so pool-token rotation kicks in on 401/429/stall
                 # the same way it would for the main LLM call.
@@ -4570,12 +4601,6 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     if original_usage:
                         await self._track_usage(original_usage, tool_name=tool_name)
                     result = executor_result.get("result", executor_result)
-                    self._maybe_arm_cost_limit_wrapup_after_browser(
-                        tool_name=tool_name,
-                        result=result,
-                        paused_before=paused_before_tool,
-                        cost_limit_before=cost_limit_before_tool,
-                    )
                     return {"success": True, "message": f"{tool_name} completed", "result": result}
                 # spawn_agent returns (last_status, summary) tuple
                 if isinstance(executor_result, tuple):
@@ -4938,7 +4963,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         await self._update_cost_and_signal_parent()
 
     async def _track_usage(
-        self, usage: Optional[Dict] = None, tool_name: Optional[str] = None, call_site: Optional[str] = None
+        self, usage: Optional[Dict] = None, tool_name: Optional[str] = None, call_site: Optional[str] = None,
+        browser_completed: bool = False,
     ) -> None:
         """
         Track usage from any activity result.
@@ -4957,6 +4983,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         """
         if not usage:
             return
+
+        paused_before = self.is_paused
+        cost_limit_before = self._cost_limit_reached
+        pause_sequence_before = self._pause_signal_sequence
 
         total_cost_cents = 0
         usage_items_for_db = []
@@ -5083,7 +5113,16 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             workflow.logger.info(f"💰 Total own_cost_cents: {self.own_cost_cents}c (+{total_cost_cents}c)")
 
             # Signal parent for hierarchical cost relay
-            await self._update_cost_and_signal_parent()
+            await self._update_cost_and_signal_parent(check_cost_limit=not browser_completed)
+            if browser_completed:
+                self._maybe_arm_cost_limit_wrapup_after_browser(
+                    tool_name=tool_name,
+                    result={"success": True},
+                    paused_before=paused_before,
+                    cost_limit_before=cost_limit_before,
+                    pause_sequence_before=pause_sequence_before,
+                )
+                await self._check_cost_limit()
 
         # Write to ToolUsage table (if tool_name provided). This intentionally
         # includes zero-cost direct-token LLM rows so cache/accounting diagnostics
@@ -5524,7 +5563,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         except Exception as e:
             workflow.logger.warning(f"Failed to save LLM usage to DB: {e}")
 
-    async def _update_cost_and_signal_parent(self, force: bool = False) -> None:
+    async def _update_cost_and_signal_parent(self, force: bool = False, check_cost_limit: bool = True) -> None:
         """Recalculate subtree cost/tokens and signal parent (or check limit if root).
 
         The DB persist + Processing status broadcast are debounced (coalesced to at
@@ -5532,7 +5571,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         causes the activity timeouts that stall the loop and the out-of-order
         broadcasts that flicker the FE cost. Pass force=True on terminal/cost-limit
         transitions to flush the final value immediately. Parent cost signal and the
-        root cost-limit check always run so aggregation/enforcement stay real-time.
+        root cost-limit check normally run immediately. Verified browser terminal
+        usage settles its existing completion allowance before publishing a stop.
         """
         # Recalculate subtree cost
         self.subtree_cost_cents = self.own_cost_cents + sum(self.children_cost_cents.values())
@@ -5557,7 +5597,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     )
                 except Exception as e:
                     workflow.logger.warning(f"Failed to signal parent cost update: {e}")
-        else:
+        elif check_cost_limit:
             # We are root - check cost limit
             await self._check_cost_limit()
 

@@ -7941,3 +7941,4 @@
 {"task": "chat-mode", "duration_seconds": 13.3, "cost_cents": 0.0, "timestamp": "2026-11-02T23:33:38.138952+00:00", "agent_id": "11cfc067-51b3-47c7-95bc-cbcb489c4587"}
 {"task": "spawn-sub-agents", "duration_seconds": 138.9, "cost_cents": 3.0, "timestamp": "2026-11-02T23:33:38.138952+00:00", "agent_id": "042fbad3-2b88-4443-9858-058e6671674f"}
 {"task": "browser-auth-account-locked", "duration_seconds": 200.8, "cost_cents": 0.0, "timestamp": "2026-11-02T23:33:38.138952+00:00", "agent_id": "a7a4c4e0-f8e0-40bf-8dc8-28e2404dc159"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 105.2, "cost_cents": 21.0, "timestamp": "2026-11-03T00:26:30.184280+00:00", "agent_id": "7a8fa49e-e1d2-4940-ac02-4e9a3d9fb7d2"}

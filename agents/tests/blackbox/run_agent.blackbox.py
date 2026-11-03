@@ -74,6 +74,7 @@ async def _run_single_iteration(
     response_model=None,
     on_tokens_override=None,
     check_paused_override=None,
+    check_paused_before_turn_override=None,
     check_aborted_override=None,
     gpt_token=None,
     gpt_account_id=None,
@@ -231,6 +232,7 @@ async def _run_single_iteration(
             goal_text=goal_text,
             on_tokens=on_tokens_override,
             check_paused=check_paused_override,
+            check_paused_before_turn=check_paused_before_turn_override,
             check_aborted=check_aborted_override,
             gpt_token=gpt_token,
             gpt_account_id=gpt_account_id,
@@ -313,6 +315,30 @@ async def test_terminal_abort_stops_before_any_llm_or_tool_work():
     assert checks == ["parent_state", "aborted"]
     assert posted == []
     assert executed == []
+
+
+async def test_browser_budget_wrapup_admits_one_complete_stream_and_normal_verification():
+    from workflows.agent_workflow import AgentWorkflow
+
+    wf = AgentWorkflow()
+    wf._cost_limit_reached = wf._cost_limit_wrapup_pending = True
+    with patch("loop.run_agent.activity.heartbeat"):
+        result, posted, executed = await _run_single_iteration(
+            [{"tool": "attempt_completion"}],
+            [("attempt_completion", "budget-complete", 1.0)],
+            max_iterations=2,
+            skip_verification=False,
+            response_schema={"fields": [{"name": "answer", "type": "str"}]},
+            llm_chunk_texts_sequence=["Returned browser evidence"],
+            check_paused_override=wf._check_paused,
+            check_paused_before_turn_override=wf._check_paused_before_turn,
+            verifier_structured_response={"answer": "Observed browser result"},
+        )
+    assert result["status"] == "completed", result
+    assert result["structured_response"] == {"answer": "Observed browser result"}
+    assert wf._cost_limit_wrapup_consumed
+    assert [call["tool_name"] for call in executed] == ["attempt_completion"]
+    assert any((row.get("metadata") or {}).get("toolStatus") == "FINISHED" for row in posted)
 
 
 async def test_out_of_credits_state_does_no_llm_or_tool_work():
@@ -4212,6 +4238,7 @@ async def run_all_tests():
 
     print("run-agent blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("browser_budget_wrapup_stream_and_verification", test_browser_budget_wrapup_admits_one_complete_stream_and_normal_verification)
     await r.record_async(
         "explore_terminal_handoff_refreshes_stale_pending_snapshot",
         test_explore_terminal_handoff_refreshes_stale_pending_snapshot,

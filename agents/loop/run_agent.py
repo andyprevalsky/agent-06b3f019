@@ -202,6 +202,7 @@ async def run_agent(
     is_inside_temporal_activity: bool = False,
     # Callbacks - abstract workflow vs activity differences
     check_paused: Optional[Callable[[], bool]] = None,
+    check_paused_before_turn: Optional[Callable[[], Awaitable[bool]]] = None,
     check_aborted: Optional[Callable[[], Awaitable[bool]]] = None,
     wait_for_messages: Optional[Callable[[], Awaitable[bool]]] = None,
     on_context_overflow: Optional[Callable[[List[Dict]], Awaitable[None]]] = None,
@@ -757,7 +758,8 @@ async def run_agent(
         # 1. Pull parent/pause state before incrementing the iteration. A parent
         # disappearance discovered by check_paused is terminal and must win over
         # the normal pause path so the child cannot make another LLM/tool call.
-        paused = bool(check_paused and await check_paused())
+        pause_check = check_paused_before_turn or check_paused
+        paused = bool(pause_check and await pause_check())
         if check_aborted and await check_aborted():
             _pending_llm_context.pop(agent_id, None)
             return {

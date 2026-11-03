@@ -12178,6 +12178,300 @@ async def test_workflow_execute_tool_legacy_spawn_agent_receives_phase():
         _restore_workflow(original)
 
 
+async def test_workflow_generic_browser_result_gets_existing_budget_wrapup():
+    """Generic browser dispatch retains the completed result across its usage charge."""
+    from unittest.mock import AsyncMock, patch
+
+    import workflows.agent_workflow as workflow_module
+    import domains.spawn_agent.handler as spawn_module
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-browser-budget"
+    wf.user_id = "user-browser-budget"
+    wf.current_phase = "EXECUTE"
+    wf.agent_source = "WEB"
+    wf.own_cost_cents = 119.0
+    wf.price_limit_cents = 120
+    wf._handle_tool_event = AsyncMock()
+
+    class CompletedBrowser:
+        async def execute_tool(self, workflow_instance, tool_call, tool_call_id):
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                status=MessageStatus.FINISHED,
+                message="Browser returned the observed result",
+                metadata={
+                    "action_type": "task_complete",
+                    "success": True,
+                    "structured_response": {"answer": "Observed result"},
+                },
+                data={"usage": {"service": [{"provider": "browser", "cost_cents": 2.0}]}},
+            )
+
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        with (
+            patch.object(spawn_module, "workflow", fake),
+            patch.object(spawn_module, "get_manager", return_value=CompletedBrowser()),
+            patch.object(
+                workflow_module,
+                "TOOL_EXECUTORS",
+                {**workflow_module.TOOL_EXECUTORS, "spawn_agent": spawn_module.spawn_agent},
+            ),
+        ):
+            result = await wf._execute_tool(
+                "spawn_agent",
+                {
+                    "type": "browser",
+                    "task_name": "observe",
+                    "goal": "Observe the page",
+                    "start_url": "https://example.com",
+                    "output_schema": {"fields": []},
+                },
+                "browser-call",
+            )
+        assert result == {"success": True, "message": "spawn_agent completed"}, result
+        assert wf.own_cost_cents == 121.0 and wf.subtree_cost_cents == 121.0
+        assert wf.price_limit_cents == 120, "completion must not raise the cap"
+        assert wf._cost_limit_wrapup_pending, "completed generic browser never reached the existing wrap-up lifecycle"
+        assert not await wf._check_paused(), "completed result cannot reach root completion"
+        terminal_cost_writes = [
+            args
+            for name, args in fake.activity_calls
+            if name == "update_agent_status" and args[1] == "COST_LIMIT_REACHED"
+        ]
+        assert not terminal_cost_writes, "pollers can observe a terminal budget status before wrap-up"
+        assert not await wf._check_paused_before_turn()
+        for _ in range(3):
+            assert not await wf._check_paused(), "stream checks consumed the one admitted turn"
+        wf.goal = "Observe the page"
+        wf.start_time = fake.now_value
+        wf.output_schema = {"fields": [{"name": "answer", "type": "str"}]}
+        await wf._mark_complete(context=[], structured_response={"answer": "Observed result"})
+        assert wf._is_finished
+        assert any(name == "mark_finished" for name, _ in fake.activity_calls)
+        assert wf.own_cost_cents == 121.0
+        assert not any(
+            name == "update_agent_status" and args[1] == "COST_LIMIT_REACHED" for name, args in fake.activity_calls
+        )
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_background_browser_budget_keeps_native_notification_and_result():
+    from unittest.mock import AsyncMock, patch
+    import workflows.background_agents as background_module
+    import workflows.agent_workflow as workflow_module
+    import domains.spawn_agent.handler as spawn_module
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    wf = _bare_workflow_instance()
+    wf.agent_id, wf.user_id, wf.agent_source = "background-budget", "user-budget", "WEB"
+    wf.own_cost_cents, wf.price_limit_cents = 119.0, 120
+    wf.current_phase = "EXECUTE"
+    args = {
+        "type": "browser",
+        "task_name": "observe",
+        "goal": "Observe",
+        "start_url": "https://example.com",
+        "output_schema": {"fields": [{"name": "answer", "type": "str", "required": True}]},
+    }
+    wf._background_tasks["browser-call"] = {
+        "agent_type": "browser",
+        "address": "/root/observe",
+        "path": "/root/observe",
+        "tool_args": args,
+    }
+    wf._notification_recipient = AsyncMock(return_value="/root")
+    wf._post_message = AsyncMock()
+
+    async def record_event(event, tool_call_id, tool_name):
+        wf._record_background_event(event, tool_call_id)
+
+    wf._handle_tool_event = record_event
+
+    class CompletedBrowser:
+        async def execute_tool(self, workflow_instance, tool_call, tool_call_id):
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                status=MessageStatus.FINISHED,
+                message="Observed",
+                metadata={
+                    "action_type": "task_complete",
+                    "success": True,
+                    "structured_response": {"answer": "Observed"},
+                },
+                data={"usage": {"service": [{"provider": "browser", "cost_cents": 2.0}]}},
+            )
+
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        with (
+            patch.object(background_module, "workflow", fake),
+            patch.object(spawn_module, "workflow", fake),
+            patch.object(spawn_module, "get_manager", return_value=CompletedBrowser()),
+            patch.dict(workflow_module.TOOL_EXECUTORS, {"spawn_agent": spawn_module.spawn_agent}),
+        ):
+            await wf._run_background_task("browser-call", 0)
+        assert wf._background_finished["browser-call"]["status"] == "completed", (
+            wf._background_finished,
+            fake.logger.records,
+        )
+        assert "browser-call" in wf._background_settled
+        assert wf._post_message.await_count == 1
+        notification = wf._post_message.call_args.args[0]
+        assert "Observed" in notification and "answer" in notification
+        assert wf._cost_limit_wrapup_pending and not wf.is_paused
+        assert not any(
+            name == "update_agent_status" and args[1] == "COST_LIMIT_REACHED" for name, args in fake.activity_calls
+        )
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_unverified_browser_and_other_usage_do_not_get_wrapup():
+    from unittest.mock import AsyncMock, patch
+    import workflows.agent_workflow as workflow_module
+    import domains.spawn_agent.handler as spawn_module
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    for kind, status, success in (
+        ("browser", MessageStatus.ERROR, False),
+        ("browser", MessageStatus.FINISHED, False),
+        ("explore", MessageStatus.FINISHED, True),
+    ):
+        wf = _bare_workflow_instance()
+        wf.agent_id, wf.user_id, wf.agent_source = "noncompletion", "user-budget", "WEB"
+        wf.current_phase = "EXECUTE"
+        wf.own_cost_cents, wf.price_limit_cents = 119.0, 120
+        wf._handle_tool_event = AsyncMock()
+
+        class TerminalManager:
+            async def execute_tool(self, workflow_instance, tool_call, tool_call_id):
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    status=status,
+                    metadata={"action_type": "task_complete", "success": success},
+                    data={"usage": {"service": [{"provider": "browser", "cost_cents": 2.0}]}},
+                )
+
+        fake = _FakeWorkflowModule()
+        original = _patch_workflow(fake)
+        try:
+            with (
+                patch.object(spawn_module, "workflow", fake),
+                patch.object(spawn_module, "get_manager", return_value=TerminalManager()),
+                patch.dict(workflow_module.TOOL_EXECUTORS, {"spawn_agent": spawn_module.spawn_agent}),
+            ):
+                result = await wf._execute_tool(
+                    "spawn_agent",
+                    {
+                        "type": kind,
+                        "task_name": "observe",
+                        "goal": "Observe",
+                        "start_url": "https://example.com",
+                        "output_schema": {"fields": []},
+                    },
+                    "terminal-call",
+                )
+            assert wf.own_cost_cents == 121.0, (kind, result)
+            assert wf.is_paused and wf._cost_limit_reached
+            assert not wf._cost_limit_wrapup_pending
+            assert any(
+                name == "update_agent_status" and args[1] == "COST_LIMIT_REACHED" for name, args in fake.activity_calls
+            )
+        finally:
+            _restore_workflow(original)
+
+
+async def test_workflow_browser_budget_wrapup_stops_after_one_turn_and_keeps_pauses():
+    for pause_kind in ("none", "user_before", "parent_before", "limited_before", "user_during"):
+        wf = _bare_workflow_instance()
+        wf.agent_id = "budget-control"
+        wf.user_id = "budget-user"
+        wf.agent_source = "WEB"
+        wf.own_cost_cents = 119.0
+        wf.price_limit_cents = 120
+        wf.is_paused = pause_kind in {"user_before", "parent_before", "limited_before"}
+        wf._user_pause_active = pause_kind == "user_before"
+        wf._paused_by_parent = pause_kind == "parent_before"
+        wf._cost_limit_reached = pause_kind == "limited_before"
+        fake = _FakeWorkflowModule()
+        original = _patch_workflow(fake)
+        execute_activity = fake.execute_activity
+        interrupted = False
+
+        async def activity_with_pause(fn, args=None, **kwargs):
+            nonlocal interrupted
+            if pause_kind == "user_during" and not interrupted:
+                interrupted = True
+                await wf.pause()
+            return await execute_activity(fn, args=args, **kwargs)
+
+        fake.execute_activity = activity_with_pause
+        try:
+            await wf._track_usage(
+                {"service": [{"provider": "browser", "cost_cents": 2.0}]},
+                tool_name="spawn_agent",
+                browser_completed=True,
+            )
+            assert wf.own_cost_cents == 121.0 and wf.price_limit_cents == 120
+            if pause_kind != "none":
+                assert not wf._cost_limit_wrapup_pending, pause_kind
+                assert wf.is_paused, pause_kind
+                if pause_kind.startswith("user"):
+                    assert wf._user_pause_active
+                continue
+            assert not await wf._check_paused_before_turn()
+            for _ in range(3):
+                assert not await wf._check_paused()
+            assert await wf._check_paused_before_turn(), "a second turn escaped the original cap"
+            assert wf._cost_limit_reached and not wf._cost_limit_wrapup_pending
+            stops = [
+                args
+                for name, args in fake.activity_calls
+                if name == "update_agent_status" and args[1] == "COST_LIMIT_REACHED"
+            ]
+            assert len(stops) == 1
+        finally:
+            _restore_workflow(original)
+
+
+async def test_workflow_browser_wrapup_cannot_start_productive_work_or_renew_after_restore():
+    from unittest.mock import AsyncMock, patch
+    import workflows.agent_workflow as workflow_module
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "budget-stop"
+    wf.user_id = "budget-user"
+    wf.agent_source = "WEB"
+    wf.own_cost_cents = wf.subtree_cost_cents = 121.0
+    wf.price_limit_cents = 120
+    wf._cost_limit_reached = wf._cost_limit_wrapup_pending = True
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    executor = AsyncMock()
+    try:
+        with patch.dict(workflow_module.TOOL_EXECUTORS, {"web_search": executor}):
+            result = await wf._execute_tool("web_search", {"query": "new work"}, "new-work")
+        assert result.get("error") is True
+        executor.assert_not_awaited()
+        assert wf.is_paused
+        for consumed in (False, True):
+            restored = _bare_workflow_instance()
+            state = _deployment_resume_fixture("COST_LIMIT_REACHED")
+            state["runtime_state"] = {"cost_limit_wrapup_pending": True, "cost_limit_wrapup_consumed": consumed}
+            restored._restore_deployment_state(state)
+            assert await restored._check_paused_before_turn() is consumed
+            if not consumed:
+                assert not await restored._check_paused()
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_execute_tool_handoff_includes_task_queue():
     """_execute_tool must pass the live queue through so run_agent can CAN now."""
     from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
@@ -13055,6 +13349,11 @@ async def test_workflow_post_message_does_not_throttle_tree_outside_demo():
 async def run_all_tests():
     print("workflow blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("wf_generic_browser_budget_wrapup", test_workflow_generic_browser_result_gets_existing_budget_wrapup)
+    await r.record_async("wf_background_browser_budget_notification", test_workflow_background_browser_budget_keeps_native_notification_and_result)
+    await r.record_async("wf_unverified_browser_budget_stop", test_workflow_unverified_browser_and_other_usage_do_not_get_wrapup)
+    await r.record_async("wf_browser_budget_wrapup_pause_controls", test_workflow_browser_budget_wrapup_stops_after_one_turn_and_keeps_pauses)
+    await r.record_async("wf_browser_budget_wrapup_work_and_restore", test_workflow_browser_wrapup_cannot_start_productive_work_or_renew_after_restore)
     await r.record_async("wf_retained_output_dispatch", test_workflow_retained_output_dispatch_and_error_pairing)
 
     await r.record_async(
