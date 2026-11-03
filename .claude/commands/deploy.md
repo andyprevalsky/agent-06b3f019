@@ -959,6 +959,7 @@ their assertions or test counts:
 `python3 scripts/tests/read-graphide-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
 `python3 scripts/tests/deploy-failure-policy.test.py`,
+`python3 scripts/tests/predeploy-receipts.test.py`,
 `bash scripts/tests/run-deploy-stage.test.sh`,
 `python3 scripts/tests/deploy-stage-wait.test.py`,
 `python3 scripts/tests/deploy-approval-batch.test.py`,

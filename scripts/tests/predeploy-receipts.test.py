@@ -30,6 +30,33 @@ def fixture():
     return summary, [bundle], [proof]
 
 
+
+def standing_fixture():
+    # Narrow native receipt fields captured from the immutable 2026-11-03 cohort.
+    # The complete unchanged producer bytes are replayed separately at the CLI.
+    s, b, _ = fixture()
+    claude_reason = 'Claude Code credentials unavailable: no synced Claude token and no available pool token'
+    judge_reason = ('Compute token pool exhausted or cooling down: Declared evaluator '
+                    't7-schema-task-complete execution failed: Codex compute token unavailable '
+                    'for agentic benchmark judge | Investigate: python agents/benchmarks/agent_latency.py '
+                    'c892af52-c6e1-4226-a861-443035ca4765 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>')
+    s['tasks'][-2:] = ['claude-code-agent', 'test-mass-agent-run-0']
+    proofs = []
+    for index, (reason, scope, code, provider, evidence) in enumerate([
+        (claude_reason, 'native_credential', 'standing_claude_credential_unavailable', 'Anthropic',
+         '.claude/commands/deploy.md Step 6 standing Claude credential-unavailable skip'),
+        (judge_reason, 'shared_compute_pool', 'standing_compute_token_unavailable', 'OpenAI shared compute-token pool',
+         'docs/rca/cases/2026-10-25-benchmark-judge-compute-token-unavailable-classified-infra.md Human feedback, commit 30f05795ad0af0e29973cc4f70f93d28b4a15066'),
+    ], 7):
+        name = s['tasks'][index]
+        b[0]['run']['tasks'][index] = dict(name=name, status='SKIPPED', benchmark_status='SKIPPED', passed=False, failure_reason=reason)
+        b[0]['card']['per_task'][index] = dict(name=name, status='skipped')
+        proofs.append(dict(run_id='original', task=name, receipt_sha256=b[0]['sha256'],
+                           receipt_reason=reason, resource_scope=scope, reason_code=code,
+                           provider=provider, exclusive_cause=True, evidence=evidence, confirmed_at=3))
+    return s, b, proofs
+
+
 def check(summary, bundles, proofs, explanation=None, observation=None):
     bindings=[{'run_id': b['run'].get('run_id'), 'plan_run_id': summary.get('run_id'),
                'planned_source_sha':summary.get('git_sha'), 'receipt_sha256': b['sha256'],
@@ -56,6 +83,76 @@ class ReceiptPolicy(unittest.TestCase):
         self.assertEqual(r['per_task'][-1]['original_status'], 'SKIPPED')
         self.assertEqual(r['warnings'][0]['provider'], 'Codex')
         self.assertEqual(data, original)
+
+    def test_native_seven_pass_two_standing_skips(self):
+        s, b, p = standing_fixture()
+        original = copy.deepcopy((s, b, p))
+        result = check(s, b, p)
+        self.assertEqual(result['status'], 'SKIPPED_WITH_WARNING')
+        self.assertEqual(result['counts'], {'passed': 7, 'skipped': 2, 'blocked': 0})
+        self.assertEqual([row['original_status'] for row in result['per_task'][-2:]], ['SKIPPED', 'SKIPPED'])
+        self.assertEqual([row['reason_code'] for row in result['warnings']], [proof['reason_code'] for proof in p])
+        self.assertTrue(all(row['exception_kind'] == 'standing_policy' for row in result['warnings']))
+        self.assertTrue(all(row['policy_source'] for row in result['warnings']))
+        self.assertEqual((s, b, p), original)
+
+    def test_standing_skip_requires_native_verdict_and_bound_review(self):
+        for index in range(2):
+            for mutation in ['no-proof', 'hash', 'reason', 'scope', 'code', 'provider', 'evidence',
+                             'exclusive', 'policy-source', 'time', 'source', 'native-status', 'evaluator', 'display',
+                             'passed', 'cleanup', 'plan-time', 'missing-task', 'generic-auth']:
+                with self.subTest(index=index, mutation=mutation):
+                    s, b, p = standing_fixture()
+                    task = b[0]['run']['tasks'][index + 7]
+                    proof = p[index]
+                    if mutation == 'no-proof': p.pop(index)
+                    if mutation == 'hash': proof['receipt_sha256'] = 'wrong'
+                    if mutation == 'reason': proof['receipt_reason'] = 'different'
+                    if mutation == 'scope': proof['resource_scope'] = 'third_party'
+                    if mutation == 'code': proof['reason_code'] = 'unknown'
+                    if mutation == 'provider': proof['provider'] = 'unknown'
+                    if mutation == 'evidence': proof['evidence'] = ''
+                    if mutation == 'policy-source': proof['evidence'] = 'unrelated reviewed evidence'
+                    if mutation == 'exclusive': proof['exclusive_cause'] = False
+                    if mutation == 'time': proof['confirmed_at'] = 1
+                    if mutation == 'source': b[0]['card']['source_sha'] = None
+                    if mutation == 'native-status': task['status'] = 'ERROR'
+                    if mutation == 'evaluator': task['benchmark_status'] = 'FAILED'
+                    if mutation == 'display': b[0]['card']['per_task'][index + 7]['status'] = 'failed'
+                    if mutation == 'passed': task['passed'] = True
+                    if mutation == 'cleanup': b[0]['cleanup_verified'] = False
+                    if mutation == 'plan-time': b[0]['run']['timestamp'] = '1970-01-01T00:00:05+00:00'
+                    if mutation == 'missing-task': s['tasks'].append('missing')
+                    if mutation == 'generic-auth':
+                        task['failure_reason'] = proof['receipt_reason'] = 'credentials rejected (404), cause unknown'
+                    self.assertEqual(check(s, b, p)['status'], 'BLOCKED')
+
+    def test_standing_claude_skip_requires_catalog_credential_contract(self):
+        s, b, p = standing_fixture()
+        b[0]['run']['tasks'][7]['name'] = s['tasks'][7] = 'chat-mode'
+        b[0]['card']['per_task'][7]['name'] = p[0]['task'] = 'chat-mode'
+        self.assertEqual(check(s, b, p)['status'], 'BLOCKED')
+
+    def test_standing_contract_matches_current_producer_literals(self):
+        import ast
+        producer = MODULE.parents[1] / 'agents/benchmarks/run_benchmark.py'
+        assignments = {}
+        for node in ast.parse(producer.read_text()).body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id in {
+                        'CLAUDE_CODE_CREDENTIAL_SKIP_REASON', 'COMPUTE_TOKEN_UNAVAILABLE_SKIP_REASON'
+                    }:
+                        assignments[target.id] = ast.literal_eval(node.value)
+        self.assertEqual(v.CLAUDE_CREDENTIAL_REASON, assignments['CLAUDE_CODE_CREDENTIAL_SKIP_REASON'])
+        self.assertEqual(v.COMPUTE_TOKEN_SKIP_PREFIX, assignments['COMPUTE_TOKEN_UNAVAILABLE_SKIP_REASON'])
+        for _, _, policy_source in v.STANDING_POLICIES.values():
+            self.assertTrue((MODULE.parents[1] / policy_source).is_file())
+
+    def test_standing_skip_does_not_explain_nonzero_resource_exit(self):
+        s, b, p = standing_fixture()
+        s['exit_code'] = 1
+        self.assertEqual(check(s, b, p)['status'], 'BLOCKED')
 
     def test_all_pass(self):
         s, b, p = fixture(); b[0]['run']['tasks'][-1].update(passed=True,status='COMPLETED');b[0]['card']['per_task'][-1]['status']='passed'
