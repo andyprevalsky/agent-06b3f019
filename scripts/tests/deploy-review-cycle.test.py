@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -548,6 +549,36 @@ class OverrideDispositionTest(unittest.TestCase):
                         review_comments=[dict(FINDING_COMMENT, pull_request_review_id=5747657344),
                                          DEFERRED_REPLY])
 
+    def test_fetch_all_check_attempts_preserves_earlier_publication_and_bounds_pagination(self) -> None:
+        data = self.publication_data()
+        latest = check_run(124509628999, HEAD_C, 'neutral', 'Review rate limited', '2026-10-31T10:20:00Z')
+        calls = []
+        def api(argv):
+            calls.append(argv[-1])
+            if 'filter=all' not in argv[-1]:
+                return {'check_runs':[latest], 'total_count':1}  # Real default latest behaviour.
+            page = int(argv[-1].rsplit('page=',1)[-1])
+            return {'check_runs':{1:[latest],2:data['check_runs'],3:[]}[page], 'total_count':2}
+        def pages(endpoint):
+            return data['reviews'] if endpoint.endswith('/reviews') else data['review_comments'] if '/pulls/' in endpoint else data['issue_comments']
+        with patch.object(MODULE,'_gh_json',side_effect=api), patch.object(MODULE,'_gh_pages',side_effect=pages), \
+             patch.object(MODULE,'GH_PAGE_SIZE',1):
+            captured = MODULE.fetch_evidence(pr='1662',head=HEAD_C,repo='acme/rose')
+        self.assertTrue(MODULE.substantive_reviews(captured['reviews'],HEAD_C,captured))
+        captured['issue_comments'] = [CAP_COMMENT]
+        before = self.state_path.read_bytes()
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, 'substantive CodeRabbit review exists'):
+            MODULE.skip_cycle(self.state_path, head=HEAD_C, pr='1662', reason='usage-cap',
+                              evidence=captured, receipts_path=self.receipts)
+        self.assertEqual(before, self.state_path.read_bytes())
+        self.assertTrue(all('filter=all&per_page=1&page=' in call for call in calls)); self.assertEqual(3,len(calls))
+        with patch.object(MODULE,'_gh_json',return_value={'check_runs':[RATE_LIMITED_CHECK]}), \
+             patch.object(MODULE,'GH_PAGE_SIZE',1), patch.object(MODULE,'GH_MAX_PAGES',2):
+            with self.assertRaisesRegex(MODULE.ReviewCycleError,'pagination'):
+                MODULE._gh_check_runs('acme/rose',HEAD_C)
+        with patch.object(MODULE,'_gh_json',return_value={'wrong':[]}):
+            with self.assertRaises(MODULE.ReviewCycleError):MODULE._gh_check_runs('acme/rose',HEAD_C)
+
     def test_publication_with_bound_finding_records_native_evidence(self) -> None:
         data = self.publication_data()
         self.assertIsNone(MODULE.SUBSTANTIVE_REVIEW.search(data["reviews"][0]["body"]))
@@ -724,7 +755,7 @@ printf '%s\\n' "$*" >> "{fixtures}/calls.log"
 case "$*" in
   "repo view --json nameWithOwner") echo '{{"nameWithOwner":"acme/rose"}}' ;;
   "api repos/acme/rose/issues/1656/comments?per_page=100&page=1") cat "{fixtures}/issue_comments.json" ;;
-  "api repos/acme/rose/commits/{HEAD_C}/check-runs?per_page=100") cat "{fixtures}/check_runs.json" ;;
+  "api repos/acme/rose/commits/{HEAD_C}/check-runs?filter=all&per_page=100&page=1") cat "{fixtures}/check_runs.json" ;;
   "api repos/acme/rose/pulls/1656/reviews?per_page=100&page=1") cat "{fixtures}/reviews.json" ;;
   "api repos/acme/rose/pulls/1656/comments?per_page=100&page=1") cat "{fixtures}/review_comments.json" ;;
   *) echo "unexpected gh call: $*" >&2; exit 1 ;;

@@ -389,6 +389,21 @@ def _gh_pages(endpoint: str) -> list[object]:
     return items
 
 
+def _gh_check_runs(slug: str, head: str) -> list[object]:
+    """Preserve prior attempts; never accept a silently truncated check inventory."""
+    runs: list[object] = []
+    for page in range(1, GH_MAX_PAGES + 1):
+        payload = _gh_json(["api", f"repos/{slug}/commits/{head}/check-runs"
+                            f"?filter=all&per_page={GH_PAGE_SIZE}&page={page}"])
+        batch = payload.get("check_runs") if isinstance(payload, dict) else None
+        if not isinstance(batch, list):
+            raise ReviewCycleError("check-runs returned an unexpected payload")
+        runs.extend(batch)
+        if len(batch) < GH_PAGE_SIZE:
+            return runs
+    raise ReviewCycleError("check-runs pagination exceeded the existing page bound")
+
+
 def fetch_evidence(*, pr: str, head: str, repo: str | None) -> dict[str, object]:
     """Capture the three CodeRabbit endpoints plus the check runs for HEAD via gh."""
     slug = repo
@@ -397,7 +412,7 @@ def fetch_evidence(*, pr: str, head: str, repo: str | None) -> dict[str, object]
         slug = str(payload.get("nameWithOwner") or "") if isinstance(payload, dict) else ""
         if not slug:
             raise ReviewCycleError("could not resolve OWNER/REPO; pass --repo")
-    check_runs = _gh_json(["api", f"repos/{slug}/commits/{head}/check-runs?per_page={GH_PAGE_SIZE}"])
+    check_runs = _gh_check_runs(slug, head)
     return normalize_evidence(
         {
             "issue_comments": _gh_pages(f"repos/{slug}/issues/{pr}/comments"),

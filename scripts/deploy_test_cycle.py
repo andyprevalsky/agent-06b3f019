@@ -339,7 +339,7 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
                "checks": active, "skips": {**case_skips, **qualified}, "phase": phase}
     if 'worker_recipe' in gate:
         request['worker_recipe'] = gate['worker_recipe']
-        request['worker_root'] = gate.get('worker_root', str((root / gate['cwd']).resolve()))
+        request['worker_root'] = gate.get('worker_root', str((root / gate.get('cwd', '.')).resolve()))
     write(folder / "request.json", request)
     result_path = folder / "result.json"
     env = {**os.environ, **gate.get("env", {}), "DEPLOY_GATE_REQUEST": str(folder / "request.json"),

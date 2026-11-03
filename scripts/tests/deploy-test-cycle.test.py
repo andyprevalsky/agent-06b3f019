@@ -323,6 +323,23 @@ class Cycle(unittest.TestCase):
                 with self.assertRaises(ValueError): c.refresh(state, self.plan, plan, self.root)
                 self.assertEqual(original, state)
 
+    def test_recipe_worker_root_does_not_eagerly_require_cwd(self):
+        script=("import json,os,hashlib;from pathlib import Path;"
+            "r=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text());"
+            "v={k:r[k] for k in ('token','source','gate')};"
+            "v.update(cases=dict.fromkeys(r['checks'],'PASS'),complete=True,cleanup_complete=True,reused=False,"
+            "worker_root=r['worker_root'],recipe_digest=hashlib.sha256(json.dumps(r['worker_recipe'],sort_keys=True,separators=(',',':')).encode()).hexdigest());"
+            "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(v))")
+        for index, explicit in enumerate((True,False)):
+            with self.subTest(explicit=explicit):
+                gate=dict(name='recipe-'+str(index),checks=['one'],command=[sys.executable,'-c',script],case_protocol=True,
+                    worker_recipe={'cases':{'one':{'command':['true']}}})
+                if explicit:gate['worker_root']='/private/prepared-worker'
+                result=c.execute(gate,self.state,self.directory,self.root)
+                request=c.read(Path(result['log']).parent/'request.json')
+                self.assertEqual(gate.get('worker_root',str(self.root.resolve())),request['worker_root'])
+                self.assertEqual({'one':'PASS'},result['cases']);self.assertTrue(result['complete'])
+
     def test_clean_run_finishes_without_second_full_sweep(self):
         c.run_phase(self.plan, self.state, self.directory, self.root)
         self.assertEqual('initial', self.state['phase'])

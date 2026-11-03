@@ -478,7 +478,7 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
                     denied = any(word in typed.lower() for word in PERMISSION_CODES)
                     result = unverified(request, binding, state,
                                         'transport_permission_denied' if denied else f'threads send exited {code}',
-                                        stderr=err.decode(errors='replace'))
+                                        stderr=err.decode(errors='replace'), cleanup_owner=True)
                     result['transport_receipt']['cli_error'] = {'code': typed, 'text': text}
                     return result
                 payload = _send_envelope(out, binding)

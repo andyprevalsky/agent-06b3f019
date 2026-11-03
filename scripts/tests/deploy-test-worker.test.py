@@ -1444,6 +1444,24 @@ class Boxes(unittest.TestCase):
                 self.assertEqual([.25], sleeps)
                 self.assertEqual(deadline, clock[0])
 
+    def test_every_nonzero_send_retains_exact_owner_without_resending(self):
+        for index, code in enumerate(('temporary_transport_error','thread_control_scope_denied')):
+            with self.subTest(code=code):
+                self.request['token']='failed-send-'+str(index)
+                error={'schemaVersion':1,'ok':False,'error':{'code':code,'message':'exact diagnostic'}}
+                self.configure(reply=self.reply(),send={'rc':2,'stdout':error,'stderr':'native send stderr'})
+                result=self.run_adapter()
+                self.assertFalse(result['complete']);self.assertFalse(result['cleanup_complete'])
+                owner=result['cleanup_owner']
+                self.assertEqual(self.request['token'],owner['request_token'])
+                self.assertEqual(self.binding['worker_thread'],owner['worker_thread'])
+                self.assertEqual(self.binding['worker_host'],owner['worker_host'])
+                self.assertEqual(self.binding['worker_root'],owner['worker_root'])
+                self.assertIsNone(owner['turn_id']);self.assertIsNone(owner['message_id'])
+                self.assertEqual(owner,cycle.receipt_owner('gate',{'cleanup_owner':owner}))
+                self.assertEqual(code,result['transport_receipt']['cli_error']['code'])
+        self.assertEqual(2,len(self.calls_of('send')));self.assertEqual([],self.calls_of('wait'))
+
     def test_typed_permission_denial_is_unverified_with_exact_error_kept(self):
         denial = {'schemaVersion': 1, 'ok': False, 'error': {'code': 'thread_control_scope_denied',
                   'message': 'request control-project-threads'}}
