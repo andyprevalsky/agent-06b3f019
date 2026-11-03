@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 
@@ -528,6 +529,84 @@ class OverrideDispositionTest(unittest.TestCase):
             self.override(dict(self.data, review_comments=[FINDING_COMMENT, DEFERRED_REPLY, second]), prior_rounds=1)
         fixed = review_comment(4431365301, HEAD_C, "[FIXED] in abc", user=USER, reply_to=4431365300)
         self.override(dict(self.data, review_comments=[FINDING_COMMENT, DEFERRED_REPLY, second, fixed]), prior_rounds=1)
+
+    def publication_data(self) -> dict:
+        # Native publication shape from PR1662 review5747657344; no private fixture dependency.
+        body = (
+            "<!-- coderabbit-ai-generated:v1 -->\n\n"
+            "<!-- This is an auto-generated comment by CodeRabbit for review status -->\n\n"
+            "<!-- coderabbit-ai-generated:v1 -->\n\n"
+            "<!-- This is an auto-generated comment by CodeRabbit for review status -->\n\n"
+            "<!-- coderabbit-review-publication v1 publication=0aedc319-5499-4a86-83f6-5afd88b33b92 "
+            "attempt=04a5db64-7a68-4876-a99c-b2e4455d322b batch=1/1 -->\n\n"
+            "<!-- autofix_checkbox_start -->\n"
+            '- [ ] <!-- {"checkboxId":"4b0d0e0a-96d7-4f10-b296-3a18ea78f0b9"} --> '
+            "Fix comments: Fix CodeRabbit comments on this PR\n<!-- autofix_checkbox_end -->"
+        )
+        return evidence(check_runs=[FINISHED_CHECK], reviews=[review(5747657344, HEAD_C, body)],
+                        review_comments=[dict(FINDING_COMMENT, pull_request_review_id=5747657344),
+                                         DEFERRED_REPLY])
+
+    def test_publication_with_bound_finding_records_native_evidence(self) -> None:
+        data = self.publication_data()
+        self.assertIsNone(MODULE.SUBSTANTIVE_REVIEW.search(data["reviews"][0]["body"]))
+        cycle = self.override(data, prior_rounds=1)
+        self.assertEqual((cycle["result"], cycle["disposition"]), ("clean", "overridden"))
+        self.assertEqual(cycle["evidence"]["review_id"], 5747657344)
+        self.assertIsNone(cycle["evidence"]["review_findings"])
+        native = cycle["evidence"]["review_publication"]
+        self.assertEqual(native["publication"], "0aedc319-5499-4a86-83f6-5afd88b33b92")
+        self.assertEqual(native["attempt"], "04a5db64-7a68-4876-a99c-b2e4455d322b")
+        self.assertEqual(native["batch"], "1/1")
+        self.assertEqual(native["inline_finding_ids"], [4431365241])
+        self.assertEqual(native["check_run_id"], FINISHED_CHECK["id"])
+        self.assertEqual(native["review_body_sha256"],
+                         MODULE.hashlib.sha256(data["reviews"][0]["body"].encode()).hexdigest())
+        self.assertEqual(json.loads(self.receipts.read_text())["evidence"], cycle["evidence"])
+        self.assertIn("Overridden", cycle["report_row"])
+
+    def test_publication_refusals_are_atomic(self) -> None:
+        valid = self.publication_data()
+        cases = {}
+        for name in ["marker-only", "green-only", "wrong-head", "wrong-review-id", "nonbot-review",
+                     "nonbot-finding", "reply-wrapper", "nonfinished", "failed-check", "wrong-check-head",
+                     "missing-check-head", "old-root", "incomplete-batch", "malformed-marker", "pending-review"]:
+            cases[name] = deepcopy(valid)
+        cases["marker-only"]["review_comments"] = [DEFERRED_REPLY]
+        cases["green-only"]["reviews"][0]["body"] = ""
+        cases["wrong-head"]["reviews"][0]["commit_id"] = HEAD_B
+        cases["wrong-review-id"]["review_comments"][0]["pull_request_review_id"] = 999
+        cases["nonbot-review"]["reviews"][0]["user"] = USER
+        cases["nonbot-finding"]["review_comments"][0]["user"] = USER
+        cases["reply-wrapper"]["review_comments"][0]["in_reply_to_id"] = 123
+        cases["nonfinished"]["check_runs"][0]["output"]["title"] = "Review skipped"
+        cases["failed-check"]["check_runs"][0]["conclusion"] = "failure"
+        cases["wrong-check-head"]["check_runs"][0]["head_sha"] = HEAD_B
+        cases["missing-check-head"]["check_runs"][0].pop("head_sha")
+        cases["old-root"]["review_comments"][0]["original_commit_id"] = HEAD_B
+        cases["incomplete-batch"]["reviews"][0]["body"] = (
+            valid["reviews"][0]["body"].replace("batch=1/1", "batch=1/2"))
+        cases["malformed-marker"]["reviews"][0]["body"] = (
+            valid["reviews"][0]["body"].replace("publication=0aed", "publication=invalid0aed"))
+        cases["pending-review"]["reviews"][0]["state"] = "PENDING"
+        before = self.state_path.read_bytes()
+        for name, data in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(MODULE.ReviewCycleError, "no substantive CodeRabbit review"):
+                    self.override(data, prior_rounds=1)
+                self.assertEqual(self.state_path.read_bytes(), before)
+                self.assertFalse(self.receipts.exists())
+
+    def test_publication_finding_refuses_usage_skip(self) -> None:
+        data = self.publication_data()
+        data["issue_comments"] = [CAP_COMMENT]
+        normalized = MODULE.normalize_evidence(data, source="test")
+        before = self.state_path.read_bytes()
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "substantive CodeRabbit review exists"):
+            MODULE.skip_cycle(self.state_path, head=HEAD_C, pr="1656", reason="usage-cap",
+                              evidence=normalized, receipts_path=self.receipts)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertFalse(self.receipts.exists())
 
     def test_override_needs_a_substantive_review_and_a_target(self) -> None:
         with self.assertRaisesRegex(MODULE.ReviewCycleError, "no substantive CodeRabbit review"):

@@ -39,9 +39,15 @@ REVIEW_BOT = "coderabbitai[bot]"
 # CodeRabbit wraps its replies to review-thread comments in empty-body
 # COMMENTED reviews on the same HEAD (PR 1656: reviews 5722158877/5722158908
 # carried its "The supplied code addresses this finding" replies). Only a body
-# with a verdict is a review; a review-by-HEAD count is not.
+# with a verdict is a legacy review; native publication bodies instead need
+# review-bound findings and a completed check. A review-by-HEAD count is not proof.
 SUBSTANTIVE_REVIEW = re.compile(
     r"actionable comments posted|lgtm|no actionable|approved|reviewed", re.IGNORECASE
+)
+PUBLICATION_REVIEW = re.compile(
+    r"<!-- coderabbit-review-publication v1 "
+    r"publication=(?P<publication>[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) "
+    r"attempt=(?P<attempt>[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) batch=1/1 -->"
 )
 FINDINGS_COUNT = re.compile(r"actionable comments posted:\s*(\d+)", re.IGNORECASE)
 # Only these words prove usage exhaustion; "Review rate limited" / "Action not
@@ -438,9 +444,46 @@ def coderabbit_reviews(reviews: list[dict[str, object]], head: str) -> list[dict
     return [review for review in reviews if _is_bot(review) and review.get("commit_id") == head]
 
 
-def substantive_reviews(reviews: list[dict[str, object]], head: str) -> list[dict[str, object]]:
-    """CodeRabbit reviews of HEAD with a verdict body; reply wrappers are not reviews."""
-    return [review for review in coderabbit_reviews(reviews, head) if SUBSTANTIVE_REVIEW.search(_body(review))]
+def publication_evidence(
+    review: dict[str, object], head: str, evidence: dict[str, object]
+) -> dict[str, object] | None:
+    """A native publication needs its own finding and a finished exact-HEAD check."""
+    markers = list(PUBLICATION_REVIEW.finditer(_body(review)))
+    review_id = review.get("id")
+    if (len(markers) != 1 or type(review_id) is not int or review_id <= 0
+            or not _is_bot(review) or review.get("commit_id") != head
+            or review.get("state") not in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}):
+        return None
+    comments, check_runs = evidence["review_comments"], evidence["check_runs"]
+    assert isinstance(comments, list) and isinstance(check_runs, list)
+    findings = [comment for comment in comments
+                if _is_bot(comment) and comment.get("in_reply_to_id") is None
+                and comment.get("pull_request_review_id") == review_id
+                and comment.get("commit_id") == head
+                and comment.get("original_commit_id", head) == head
+                and type(comment.get("id")) is int and comment["id"] > 0
+                and _body(comment).strip()]
+    runs = coderabbit_check_runs(check_runs, head)
+    check = runs[-1] if runs else {}
+    if (not findings or check.get("head_sha") != head or check.get("status") != "completed"
+            or check.get("conclusion") != "success" or _check_title(check) != "Finished"):
+        return None
+    return {
+        "recognition": "publication-with-review-bound-findings",
+        **markers[0].groupdict(), "batch": "1/1",
+        "inline_finding_ids": sorted({comment["id"] for comment in findings}),
+        "check_run_id": check.get("id"),
+        "review_body_sha256": hashlib.sha256(_body(review).encode()).hexdigest(),
+    }
+
+
+def substantive_reviews(
+    reviews: list[dict[str, object]], head: str, evidence: dict[str, object] | None = None
+) -> list[dict[str, object]]:
+    """Verdict bodies or evidenced native publications; reply wrappers are not reviews."""
+    return [review for review in coderabbit_reviews(reviews, head)
+            if SUBSTANTIVE_REVIEW.search(_body(review))
+            or (evidence is not None and publication_evidence(review, head, evidence))]
 
 
 def review_findings(review: dict[str, object]) -> int | None:
@@ -557,7 +600,7 @@ def skip_cycle(
     cycle = _open_cycle(state, head)
     reviews = evidence["reviews"]
     assert isinstance(reviews, list)
-    substantive = substantive_reviews(reviews, head)
+    substantive = substantive_reviews(reviews, head, evidence)
     if substantive:
         summary = ", ".join(
             f"{review.get('id')} ({review_findings(review) if review_findings(review) is not None else 'verdict'})"
@@ -662,7 +705,7 @@ def override_cycle(
         )
     reviews = evidence["reviews"]
     assert isinstance(reviews, list)
-    substantive = substantive_reviews(reviews, head)
+    substantive = substantive_reviews(reviews, head, evidence)
     if not substantive:
         raise ReviewCycleError(
             f"no substantive CodeRabbit review on {head[:12]} to override "
@@ -727,6 +770,9 @@ def override_cycle(
             "findings": recorded,
         },
     }
+    publication = publication_evidence(review, head, evidence)
+    if publication is not None and not SUBSTANTIVE_REVIEW.search(_body(review)):
+        fields["evidence"]["review_publication"] = publication
     return _close_with_disposition(
         path, receipts_path, state, cycle, pr=pr, disposition="overridden", report_row=report_row, fields=fields
     )
