@@ -386,6 +386,37 @@ class SkipDispositionTest(unittest.TestCase):
         self.assertEqual(receipts[0]["report_row"], row)
         self.assertEqual(receipts[0]["evidence"]["issue_comment_id"], 6541489860)
 
+    def test_quota_skip_preserves_history_without_consuming_a_delivered_review(self) -> None:
+        MODULE.start_cycle(self.state_path, head=HEAD_A, kind="initial", reset=True)
+        MODULE.finish_cycle(self.state_path, head=HEAD_A, result="clean")
+        MODULE.start_cycle(self.state_path, head=HEAD_C, kind="incremental")
+        self.skip(evidence(issue_comments=[CAP_COMMENT], check_runs=[RATE_LIMITED_CHECK]))
+        before = MODULE.read_state(self.state_path)["cycles"]
+        self.assertEqual(MODULE.next_cycle(before)["kind"], "incremental")
+        self.assertEqual(len(MODULE.budget_cycles(before)), 1)
+        next_head = "e" * 40
+        cycle = MODULE.start_cycle(self.state_path, head=next_head, kind="incremental")
+        self.assertEqual(cycle["number"], 2)
+        after = MODULE.read_state(self.state_path)["cycles"]
+        self.assertEqual(after[:-1], before, "the unavailable outcome and evidence must remain immutable")
+        self.assertEqual(after[1]["disposition"], "skipped")
+        with self.assertRaises(MODULE.ReviewCycleError):
+            MODULE.require_mergeable(self.state_path, head=next_head)
+        # The replacement still needs fresh exact-HEAD evidence; old quota evidence never passes it.
+        normalized = MODULE.normalize_evidence(evidence(issue_comments=[CAP_COMMENT], check_runs=[RATE_LIMITED_CHECK]), source="test")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "no CodeRabbit comment names"):
+            MODULE.skip_cycle(self.state_path, head=next_head, pr="1656", reason="usage-cap",
+                              evidence=normalized, receipts_path=self.receipts)
+
+    def test_quota_skip_does_not_authorize_three_round_finding_deferral(self) -> None:
+        self.skip(evidence(issue_comments=[CAP_COMMENT], check_runs=[RATE_LIMITED_CHECK]))
+        entries = MODULE.read_state(self.state_path)["cycles"]
+        self.assertEqual(len(MODULE.budget_cycles(entries)), 0)
+        self.assertEqual(MODULE.require_mergeable(self.state_path, head=HEAD_C)["disposition"], "skipped")
+        self.assertEqual(MODULE.next_cycle(entries)["kind"], "initial")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "exact HEAD"):
+            MODULE.start_cycle(self.state_path, head=HEAD_C, kind="initial")
+
     def test_skip_needs_an_open_cycle_on_that_head(self) -> None:
         MODULE.finish_cycle(self.state_path, head=HEAD_C, result="findings")
         with self.assertRaisesRegex(MODULE.ReviewCycleError, "no review cycle is open"):

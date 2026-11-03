@@ -2342,6 +2342,15 @@ When CodeRabbit is unavailable, make at most one zero-touch retry (`@coderabbita
    ```bash
    python3 scripts/deploy_review_cycle.py skip --head "$REVIEW_HEAD" --pr "$PR_NUMBER" --reason usage-cap
    ```
+   A confirmed quota skip delivered no substantive review and consumes no
+   delivered-review budget, although its result is clean for merge accounting.
+   Keep the skipped entry and its evidence unchanged. If a later stabilization
+   HEAD needs review, `next` retains that review position; the new HEAD still
+   needs its own substantive review or fresh exact-HEAD quota disposition.
+   Never re-request the same skipped HEAD, erase history, reset a running
+   deploy, increase the three-review cap, or count skips toward the standing
+   three-round finding-deferral authorization.
+
    **Never use `--result unavailable` for exhaustion.** `unavailable` is only for a cycle
    whose HEAD a gate fix superseded before any review arrived: it hard-fails
    `require-mergeable`, consumes no review budget, and the superseding HEAD re-`start`s

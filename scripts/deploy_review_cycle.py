@@ -102,9 +102,18 @@ def review_cycles(entries: list[object]) -> list[dict[str, object]]:
 
 
 def budget_cycles(entries: list[object]) -> list[dict[str, object]]:
-    """Open or delivered reviews; quota skips retain history without spending a round."""
+    """Count delivered-review budget without counting evidenced provider exhaustion.
+
+    A quota skip is clean only for merge accounting; skip_cycle has proved
+    that no substantive review happened. Keep its immutable entry and evidence,
+    but reserve the same review position for a later stabilized HEAD. The
+    exact-HEAD duplicate guard and every substantive-review cap still apply.
+    """
     return [cycle for cycle in review_cycles(entries)
-            if cycle.get("result") != UNAVAILABLE and cycle.get("disposition") != "skipped"]
+            if cycle.get("result") != UNAVAILABLE
+            and not (cycle.get("result") == "clean"
+                     and cycle.get("disposition") == "skipped"
+                     and cycle.get("skip_reason") == "usage-cap")]
 
 
 def next_cycle(entries: list[object]) -> dict[str, object]:
