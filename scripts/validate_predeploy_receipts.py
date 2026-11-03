@@ -17,6 +17,45 @@ from pathlib import Path
 RESOURCE_CODES = frozenset({"billing_credit_exhausted", "compute_quota_exhausted", "storage_capacity_exhausted"})
 
 
+# These are explicit standing decisions, separate from RESOURCE_CODES. A native
+# SKIPPED receipt does not establish billing, credential validity or pool cause.
+# Producer contracts: run_benchmark.py _is_permitted_claude_code_skip and
+# _is_permitted_compute_token_skip; the owning regression checks their literals.
+CLAUDE_CREDENTIAL_REASON = "Claude Code credentials unavailable: no synced Claude token and no available pool token"
+COMPUTE_TOKEN_SKIP_PREFIX = "Compute token pool exhausted or cooling down"
+STANDING_POLICIES = {
+    "standing_claude_credential_unavailable": (
+        "native_credential", "Anthropic", ".claude/commands/deploy.md",
+    ),
+    "standing_compute_token_unavailable": (
+        "shared_compute_pool", "OpenAI shared compute-token pool",
+        "docs/rca/cases/2026-10-25-benchmark-judge-compute-token-unavailable-classified-infra.md",
+    ),
+}
+
+
+def standing_skip_policy(proof, original, display, source, planned_source):
+    """Validate an explicitly reviewed standing skip, never infer its cause."""
+    policy = STANDING_POLICIES.get(proof.get("reason_code"))
+    if (policy is None or (proof.get("resource_scope"), proof.get("provider")) != policy[:2]
+            or policy[2] not in proof["evidence"]
+            or original.get("status") != "SKIPPED" or original.get("benchmark_status") != "SKIPPED"
+            or display.get("status") != "skipped" or source != planned_source):
+        return None
+    reason = original["failure_reason"]
+    if proof["reason_code"] == "standing_claude_credential_unavailable":
+        # Match the producer's catalog-scoped Claude preflight contract. A funded
+        # API key or an arbitrary authentication failure cannot satisfy it.
+        catalog = strict_json((Path(__file__).resolve().parents[1] / "agents/benchmarks/tasks.json").read_text())
+        if reason != CLAUDE_CREDENTIAL_REASON or not any(
+                task.get("name") == original["name"] and task.get("requires_claude_code") is True
+                for task in catalog):
+            return None
+    elif not reason.startswith(COMPUTE_TOKEN_SKIP_PREFIX + ": "):
+        return None
+    return policy[2]
+
+
 def strict_json(value):
     def reject_constant(constant):
         raise ValueError("non-finite JSON constant")
@@ -138,21 +177,27 @@ def _validate(summary, bundles, confirmations, bindings, wrapper_explanation=Non
             reason = original.get("failure_reason")
             if proof is not None:
                 used.add(key)
-            allowed = (proof is not None and original.get("passed") is False
-                       and status in {"SKIPPED", "FAILED", "ERROR", "INFRA_ERROR"}
-                       and display.get("status") in {"skipped", "failed", "error", "infra_error", "infra-error"}
+            bound_confirmation = (proof is not None and original.get("passed") is False
                        and proof.get("receipt_sha256") == bundle["sha256"]
                        and isinstance(reason, str) and bool(reason.strip())
                        and proof.get("receipt_reason") == reason
-                       and proof.get("resource_scope") == "third_party"
-                       and proof.get("reason_code") in RESOURCE_CODES
                        and proof.get("exclusive_cause") is True
                        and isinstance(proof.get("provider"), str) and bool(proof["provider"].strip())
                        and isinstance(proof.get("evidence"), str) and bool(proof["evidence"].strip())
                        and finite(proof.get("confirmed_at")) and proof["confirmed_at"] >= card.get("finished_at", float('inf')))
+            resource_allowed = (bound_confirmation
+                       and status in {"SKIPPED", "FAILED", "ERROR", "INFRA_ERROR"}
+                       and display.get("status") in {"skipped", "failed", "error", "infra_error", "infra-error"}
+                       and proof.get("resource_scope") == "third_party"
+                       and proof.get("reason_code") in RESOURCE_CODES)
+            policy_source = (standing_skip_policy(proof, original, display, source, source_sha)
+                             if bound_confirmation else None)
+            allowed = resource_allowed or policy_source is not None
             if allowed:
                 row["classification"] = "SKIPPED"
+                row["exception_kind"] = "resource_exhaustion" if resource_allowed else "standing_policy"
                 warnings.append({"test": name, "provider": proof["provider"], "reason": reason,
+                                 "exception_kind": row["exception_kind"], "policy_source": policy_source,
                                  "reason_code": proof["reason_code"], "finished_at": card["finished_at"],
                                  "confirmed_at": proof["confirmed_at"], "evidence": proof["evidence"],
                                  "source_sha": source, "original_status": status})
@@ -174,7 +219,11 @@ def _validate(summary, bundles, confirmations, bindings, wrapper_explanation=Non
             finished_epoch = datetime.fromisoformat(summary["finished_at"]).timestamp()
         except (TypeError, ValueError, KeyError, ArithmeticError, OSError):
             finished_epoch = float("inf")
-        explained = (bool(skipped) and not problems
+        # The existing wrapper proof covers resource-only exits. Standing skips
+        # cannot be relabelled as resource exhaustion to explain a nonzero exit.
+        resource_only = all(r.get("exception_kind") == "resource_exhaustion"
+                            for r in rows if r["classification"] == "SKIPPED")
+        explained = (bool(skipped) and resource_only and not problems
                      and proof.get("kind") == "task_result_exit"
                      and proof.get("plan_run_id") == summary.get("run_id")
                      and type(proof.get("exit_code")) is int and proof["exit_code"] == exit_code
