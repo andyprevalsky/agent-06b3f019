@@ -34597,6 +34597,9 @@ async def run_all_tests():
     )
 
     r = BlackboxResult()
+    from browser_navigation_cases import test_browser_user_navigation_history, test_browser_user_navigation_command_binding
+    await r.record_async("browser user navigation real history", test_browser_user_navigation_history)
+    await r.record_async("browser user navigation command binding", test_browser_user_navigation_command_binding)
     await r.record_async(
         "kernel replay stopped before browser session close",
         test_kernel_replay_is_stopped_before_the_browser_session_is_closed,

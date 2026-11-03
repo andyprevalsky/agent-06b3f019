@@ -20,6 +20,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import httpx
 import websockets
@@ -112,8 +113,13 @@ async def _chromium_endpoint(client, port: Optional[int], active_port_file: Opti
     for _ in range(100):
         try:
             current_port = port
+            expected_path = None
             if current_port is None:
-                current_port = int(active_port_file.read_text().splitlines()[0])
+                published = active_port_file.read_text().splitlines()
+                current_port = int(published[0])
+                expected_path = published[1].strip()
+                if not expected_path:
+                    raise ValueError("native debugger path is not published")
                 if not 0 < current_port < 65536:
                     raise ValueError("native debugging port is out of range")
             version = await client.get(f"http://127.0.0.1:{current_port}/json/version")
@@ -121,6 +127,8 @@ async def _chromium_endpoint(client, port: Optional[int], active_port_file: Opti
             payload = version.json()
             endpoint = payload.get("webSocketDebuggerUrl") if isinstance(payload, dict) else None
             if isinstance(endpoint, str) and endpoint.startswith(("ws://", "wss://")):
+                if expected_path is not None:
+                    assert urlsplit(endpoint).path == expected_path, "CDP endpoint belongs to another browser"
                 return endpoint
             last_observation = f"incomplete discovery: {str(payload)[:300]}"
         except (OSError, httpx.HTTPError, ValueError, IndexError) as error:
@@ -1671,6 +1679,42 @@ async def test_multiplexer_arms_webauthn_so_unarmed_popups_reject_instead_of_han
     assert unarmed == "pending", f"control: unarmed chooser hangs; outcome={unarmed!r}"
     armed = await _popup_webauthn_outcome(arm_webauthn=True)
     assert armed == "NotAllowedError", f"armed popup outcome={armed!r}"
+
+
+async def test_raw_chromium_keeps_its_endpoint_when_another_socket_claims_the_handoff():
+    """A real competing bind must not redirect the raw browser's CDP endpoint.
+
+    Coordinate the observed reservation/Popen race with a real bound socket;
+    Chromium, HTTP readiness and the CDP reply all remain native. With port 0,
+    the kernel chooses the browser's port while that competing socket is held.
+    """
+    original_popen = subprocess.Popen
+    launched = False
+    with socket.socket() as competing, tempfile.NamedTemporaryFile(
+        prefix="chromium-port-handoff-", suffix=".stderr", mode="w+b",
+        dir=os.environ.get("BLACKBOX_TEST_ARTIFACT_DIR"), delete=False,
+    ) as native_stderr:
+
+        def launch(args, *positional, **kwargs):
+            nonlocal launched
+            if isinstance(args, list) and "--headless=new" in args:
+                requested = next(arg for arg in args if arg.startswith("--remote-debugging-port="))
+                competing.bind(("127.0.0.1", int(requested.split("=", 1)[1])))
+                launched = True
+                kwargs["stderr"] = native_stderr
+            return original_popen(args, *positional, **kwargs)
+
+        with patch.object(subprocess, "Popen", new=launch):
+            async with _chromium(full=True) as (_playwright, _browser, endpoint):
+                assert launched, "the raw Chromium launch was not exercised"
+                address = urlsplit(endpoint)
+                assert address.hostname == "127.0.0.1", address.hostname
+                assert address.port != competing.getsockname()[1], "CDP used the competing socket's port"
+                async with websockets.connect(endpoint, max_size=None, proxy=None) as client:
+                    await client.send(json.dumps({"id": 1, "method": "Browser.getVersion"}))
+                    reply = json.loads(await asyncio.wait_for(client.recv(), timeout=5))
+                    assert reply.get("id") == 1 and "error" not in reply, reply
+                    assert reply["result"]["product"].startswith(("Chrome/", "HeadlessChrome/")), reply
 
 
 async def test_multiplexer_webauthn_arming_keeps_seeded_passkeys_working():
@@ -3850,6 +3894,10 @@ async def run_all_tests():
         ),
         ("multiplexer_webauthn_keeps_seeded_passkeys", test_multiplexer_webauthn_arming_keeps_seeded_passkeys_working),
         ("multiplexer_reapplies_detached_overrides", test_multiplexer_reapplies_overrides_when_their_holder_detaches),
+        (
+            "raw_chromium_port_handoff",
+            test_raw_chromium_keeps_its_endpoint_when_another_socket_claims_the_handoff,
+        ),
         ("tilion_live_view_token_redacted", test_tilion_live_view_token_is_redacted_before_persisting),
         ("document_images_count_as_rendered", test_document_images_count_as_rendered_through_the_worker_socket),
         ("pause_context_carries_provenance", test_pause_context_carries_downloads_and_image_provenance_without_secrets),
