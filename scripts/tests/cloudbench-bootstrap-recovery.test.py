@@ -1492,7 +1492,7 @@ class PreconfigStartupArchiveTests(PreconfigStartupArchiveFixture, unittest.Test
         self.capture()
         base = self.out / "failed-preconfig-runtime-archive"
         base.mkdir(mode=0o700)
-        receipt = base / "verified.json"
+        receipt = base / "consumed.json"
         commit = self.helper.get("commit_preconfig")
         if commit is None:
             self.verify()  # Prior component verifies, but cannot retain this proof across consumption.
@@ -1524,7 +1524,7 @@ class PreconfigStartupArchiveTests(PreconfigStartupArchiveFixture, unittest.Test
         self.capture()
         base = self.out / "failed-preconfig-runtime-archive"
         base.mkdir(mode=0o700)
-        receipt = base / "verified.json"
+        receipt = base / "consumed.json"
         commit = self.helper["commit_preconfig"]
         with self.assertRaises(ValueError):
             commit(self.registry, self.out, MACHINE, TOKEN, self.archive, None, None, receipt)
