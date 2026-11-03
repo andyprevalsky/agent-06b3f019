@@ -647,7 +647,9 @@ def receipt_owner(gate: str, receipt: dict):
         raise ValueError(f"{gate}: legacy adapter result identity mismatch (token/source/gate); owner unknown, refuse launch")
     owner = adapter.get("cleanup_owner")
     if owner is None:
-        return None  # the adapter recorded no owner at all: the only legacy "unowned" case
+        if adapter.get("cleanup_complete") is not True:
+            raise ValueError(f"{gate}: adapter cleanup state unknown; refuse launch")
+        return None  # no retained owner and cleanup is explicitly complete
     if not isinstance(owner, dict) or not all(isinstance(owner.get(k), str) and owner[k] for k in OWNER_IDENTITY):
         raise ValueError(f"{gate}: adapter cleanup owner identity incomplete; refuse launch")
     return owner
@@ -1086,7 +1088,7 @@ def main(argv: list[str] | None = None) -> int:
             elif args.action == "reconcile":
                 if args.proof is None:
                     raise ValueError("--proof cleanup proof required")
-                reconcile(state, args.occurrence, read(args.proof))
+                reconcile(state, args.occurrence, bounded_read(args.proof, "cleanup proof"))
             elif args.action == "complete":
                 # Post-merge completion (Step 12a / before the final scorecard): every packet dispatched and resolved.
                 blocked = pending_completion_block(state)

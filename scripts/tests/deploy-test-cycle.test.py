@@ -832,11 +832,23 @@ class Cycle(unittest.TestCase):
                      patch.object(c, 'execute') as launcher, self.assertRaisesRegex(ValueError, 'identity incomplete'):
                     c.run_phase(plan, partial, self.directory, self.root)
                 launcher.assert_not_called()
-        # an adapter result with no cleanup_owner key at all is the only legacy unowned case
+        # No owner is sufficient only with explicitly complete cleanup.
         unowned = copy.deepcopy(state); doc = json.loads(paths['adapter'].read_text()); doc.pop('cleanup_owner')
+        doc['cleanup_complete'] = True
         path = self.directory / 'unowned.json'; path.write_text(json.dumps(doc))
         unowned['attempts'][-1]['results'][0]['worker_result'] = str(path)
         self.assertEqual([], c.retained_owners(unowned, ['cloudbench-controller']))
+        for cleanup in (False, None, 1, 'true'):
+            with self.subTest(uncertain_cleanup=cleanup):
+                uncertain = copy.deepcopy(unowned); bad = dict(doc)
+                if cleanup is None:
+                    bad.pop('cleanup_complete')
+                else:
+                    bad['cleanup_complete'] = cleanup
+                path = self.directory / 'uncertain-cleanup.json'; path.write_text(json.dumps(bad))
+                uncertain['attempts'][-1]['results'][0]['worker_result'] = str(path)
+                with self.assertRaisesRegex(ValueError, 'cloudbench-controller: adapter cleanup state unknown'):
+                    c.retained_owners(uncertain, ['cloudbench-controller'])
 
     def test_actual_reconciliation_proof_unblocks_fresh_reexecution_without_credit(self):
         state, plan, gate, occurrence, paths, shas, proof = self.recon_state()
