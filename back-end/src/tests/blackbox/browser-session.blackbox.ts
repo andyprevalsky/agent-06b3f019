@@ -39,7 +39,10 @@ import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
 import { runBrowserColdImportCases } from './browser-session-cold-import.cases';
-import { testReproducibility_threeSequential } from './browser-session-route-invariants.cases';
+import {
+  testNavigationRouteGuards,
+  testReproducibility_threeSequential,
+} from './browser-session-route-invariants.cases';
 import { runBrowserInitDisconnectCases } from './browser-session-init-disconnect.cases';
 import { runBrowserPauseCheckpointCases } from './browser-session-pause-checkpoint.cases';
 import { runBrowserPrivateRestoreCases } from './browser-session-private-restore.cases';
@@ -625,6 +628,10 @@ async function runAll() {
       fn: testPrepareAuth_invalidBody,
     },
     { name: 'POST /browser-session/init -- missing start_url', fn: testInit_missingStartUrl },
+    {
+      name: 'POST navigation -- auth, invalid action, missing session',
+      fn: () => testNavigationRouteGuards(BASE_URL, apiKeyHeaders),
+    },
     // auth boundary — POST /close
     { name: 'POST /browser-session/close -- no auth -> 401', fn: testClose_noAuth },
     { name: 'POST /browser-session/close -- invalid body', fn: testClose_invalidBody },
@@ -712,7 +719,6 @@ async function runAll() {
   console.log('\n' + '='.repeat(50));
   console.log(`\nResults: ${passed} passed, ${failed} failed, ${results.length} total`);
   if (failed > 0) {
-    console.log('\nFAILURES:');
     results.filter((r) => !r.passed).forEach((r) => console.log(`   ${r.name}: ${r.error}`));
     process.exit(1);
   }
