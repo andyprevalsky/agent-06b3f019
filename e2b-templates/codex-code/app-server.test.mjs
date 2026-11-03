@@ -25,6 +25,17 @@ const source = readFileSync(
   new URL("./ws-server.mjs", import.meta.url),
   "utf8",
 );
+function listeningPort(logs) {
+  for (const line of logs.split("\n")) {
+    try {
+      const entry = JSON.parse(line);
+      if (entry.message === "Server listening") return entry.port;
+    } catch {
+      // A pipe chunk can end in the middle of a JSON log line.
+    }
+  }
+  return 0;
+}
 const block = source.slice(
   source.indexOf("class CodexAppServer {"),
   source.indexOf("function stageDirectAttachments("),
@@ -516,7 +527,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
 `,
   );
   chmodSync(fixturePath, 0o755);
-  const port = 43000 + Math.floor(Math.random() * 10000);
+  let port = 0;
   const child = spawn(
     process.execPath,
     [new URL("./ws-server.mjs", import.meta.url).pathname],
@@ -546,6 +557,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   try {
     for (let attempt = 0; attempt < 100; attempt++) {
       try {
+        port = listeningPort(logs);
         ws = new WebSocket(`ws://127.0.0.1:${port}`);
         sockets.push(ws);
         await new Promise((resolve, reject) => {
@@ -787,17 +799,6 @@ test("open-object schemas cannot be strict: no outputSchema, no written handoff"
   assert.equal(handoffFromFinalMessage("not json", HANDOFF_SCHEMA), null);
 });
 
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
-      server.close(() => resolve(port));
-    });
-  });
-}
-
 // Runs the real ws-server (app-server transport) over a fake Codex whose ChatGPT
 // OAuth turns fail with `oauthError` and whose Azure-provider turns succeed.
 // Returns the streamed events and the fake Codex's call journal.
@@ -847,8 +848,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
 `,
   );
   chmodSync(fixturePath, 0o755);
-  // A port the OS just handed out: a random pick can collide with a live listener.
-  const port = await freePort();
+  let port = 0;
   const child = spawn(
     process.execPath,
     [new URL("./ws-server.mjs", import.meta.url).pathname],
@@ -889,6 +889,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   try {
     for (let attempt = 0; attempt < 100; attempt++) {
       try {
+        port = listeningPort(logs);
         ws = new WebSocket(`ws://127.0.0.1:${port}?cursor=0`);
         // Replayed events can arrive with the upgrade; listen before awaiting open.
         ws.on("message", (d) => messages.push(JSON.parse(d)));
@@ -1244,6 +1245,72 @@ for (const [speed, expectedTier] of [
     );
   });
 }
+// Keep a real competing listener alive across the original native contract.
+// A random candidate (or a probe released before spawn) is not port ownership.
+test("native app-server contract owns its port while a candidate is occupied", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "rose-native-port-ownership-"));
+  let competitor;
+  let port;
+  for (let candidate = 43000; candidate < 43100; candidate++) {
+    const server = createServer((socket) => socket.destroy());
+    try {
+      await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(candidate, resolve);
+      });
+      competitor = server;
+      port = candidate;
+      break;
+    } catch (error) {
+      if (error.code !== "EADDRINUSE") throw error;
+    }
+  }
+  assert.ok(competitor, "must hold a real competing listener");
+  const preload = join(directory, "occupied-candidate.cjs");
+  writeFileSync(
+    preload,
+    `Math.random = () => ${(port - 43000 + 0.5) / 10000};\n`,
+  );
+  let child;
+  try {
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    child = spawn(
+      process.execPath,
+      [
+        "--require",
+        preload,
+        "--test",
+        "--test-name-pattern=^production default app-server supports authenticated attachments, steer and cursor replay$",
+        fileURLToPath(import.meta.url),
+      ],
+      { env, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const closed = new Promise((resolve) => child.once("close", resolve));
+    let output = "";
+    child.stdout.on("data", (data) => {
+      output += data;
+    });
+    child.stderr.on("data", (data) => {
+      output += data;
+    });
+    assert.equal(await closed, 0, output);
+    assert.match(output, /# pass 1/);
+    assert.doesNotMatch(output, /EADDRINUSE/);
+    assert.equal(
+      competitor.listening,
+      true,
+      "the foreign listener stays owned",
+    );
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null)
+      child.kill("SIGTERM");
+    await new Promise((resolve, reject) =>
+      competitor.close((error) => (error ? reject(error) : resolve())),
+    );
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 // S30 (2026-10-28): the query box's speed reaches Codex as its native service
 // tier. Fast → priority ("Fast"), Ultrafast → ultrafast, Normal → standard. The
