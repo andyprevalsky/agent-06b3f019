@@ -5,7 +5,9 @@ import json
 import math
 from pathlib import Path
 import re
+import runpy
 import shlex
+import subprocess
 import time
 
 KIND = 'native-cloud-cleanup-v1'
@@ -24,6 +26,129 @@ def fields(raw):
 
 def finite(value):
     return type(value) in (int, float) and math.isfinite(value)
+
+
+def recovered_roots(path, bench, bound):
+    """Replay the producer's sealed-tree, provider and terminal payment guards."""
+    native = runpy.run_path(str(Path(__file__).with_name('cloudbench-exact-session-cleanup.py')))
+    batch = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'agents/benchmarks/cloud_batch_cleanup.py'))
+    run = json.loads(bound(path))
+    tasks = run['tasks']
+    need(isinstance(tasks, list) and len(tasks) == 1 and tasks[0]['name'] == bench, 'recovered run inventory')
+    task = tasks[0]
+    root = task['agent_id']
+    need(isinstance(root, str) and native['SAFE_AGENT'].fullmatch(root)
+         and task.get('graded_root_creation_outcome') == 'allocated', 'recovered root identity')
+    owned = task['owned_roots']
+    need(isinstance(owned, list) and owned and len({r['root_agent_id'] for r in owned}) == len(owned)
+         and root in {r['root_agent_id'] for r in owned}, 'owned root closure')
+    for row in owned:
+        aid, logs = row['root_agent_id'], row['logs']
+        need(row.get('role') in {'fixture_first_run', 'graded'}
+             and row.get('creation') == {'source': 'create_agent_return', 'root_agent_id': aid}
+             and isinstance(logs, dict) and (row['role'] != 'graded' or aid == root)
+             and (aid != root or row['role'] == 'graded'), 'native root custody')
+        snapshot = logs.get('fixture_snapshot')
+        need(not isinstance(snapshot, dict) or (snapshot.get('agent') or {}).get('id') in {None, aid},
+             'root fixture custody')
+        need(isinstance(aid, str) and native['SAFE_AGENT'].fullmatch(aid)
+             and row['task_name'] == bench, 'owned root identity')
+        if aid == root:
+            need(all(logs[k] == task['logs'][k] for k in
+                     ('cloud_cleanup_evidence', 'cloud_provider_cleanup', 'cloud_payment_cleanup')), 'primary root evidence')
+        evidence, provider, payment = (logs[k] for k in
+                                       ('cloud_cleanup_evidence', 'cloud_provider_cleanup', 'cloud_payment_cleanup'))
+        need(evidence['root_agent_id'] == provider['root_agent_id'] == payment['root_agent_id'] == aid
+             and provider['root_deleted'] is True and provider['tree_sealed'] is True, 'root cleanup authority')
+        sessions = set()
+        for phase in ('before', 'after', 'final'):
+            snapshot = evidence[phase]
+            tree = snapshot['tree_agent_ids']
+            need(snapshot['root_exists'] is True and isinstance(tree, list) and aid in tree
+                 and len(set(tree)) == len(tree) and all(isinstance(x, str) and native['SAFE_AGENT'].fullmatch(x) for x in tree)
+                 and isinstance(snapshot['browser_sessions'], list), 'root database snapshot')
+            if phase != 'before':
+                need(snapshot['root_deleted'] is True and snapshot['unsealed_tree_agent_ids'] == [], 'root tree seal')
+            for session in snapshot['browser_sessions']:
+                need(session['agent_id'] in tree and session['provider'] in native['RELEASED_STATUSES']
+                     and isinstance(session['session_id'], str) and native['SAFE_SESSION'].fullmatch(session['session_id']),
+                     'root session ownership')
+                sessions.add((session['provider'], session['session_id']))
+        after, final = evidence['after'], evidence['final']
+        need(evidence['before']['root_user_id'] == after['root_user_id'] == final['root_user_id']
+             and isinstance(final['root_user_id'], str) and native['SAFE_AGENT'].fullmatch(final['root_user_id']),
+             'root database owner')
+        need({k: v for k, v in after.items() if k != 'purchase_cleanup'}
+             == {k: v for k, v in final.items() if k != 'purchase_cleanup'}, 'sealed tree drift')
+        receipts = provider['provider_receipts']
+        need(isinstance(receipts, list) and receipts == evidence['provider_receipts']
+             and [(r['provider'], r['session_id']) for r in receipts] == sorted(sessions), 'provider release coverage')
+        for row in receipts:
+            need(type(row['status']) is int and row['status'] in native['RELEASED_STATUSES'][row['provider']]
+                 and isinstance(row['response_sha256'], str) and re.fullmatch('[0-9a-f]{64}', row['response_sha256']),
+                 'provider release result')
+        snapshot = evidence['payment_snapshot']
+        need({k: v for k, v in snapshot.items() if k != 'purchase_cleanup'}
+             == {k: v for k, v in final.items() if k != 'purchase_cleanup'}, 'payment root snapshot drift')
+        need(snapshot['root_exists'] is True and snapshot['root_deleted'] is True
+             and snapshot['unsealed_tree_agent_ids'] == [] and snapshot['tree_agent_ids'] == final['tree_agent_ids']
+             and snapshot['root_user_id'] == final['root_user_id']
+             and payment['purchases'] == snapshot['purchase_cleanup'], 'terminal payment snapshot')
+        try:
+            pending = batch['pending_root_payments'](snapshot)
+        except RuntimeError as error:
+            raise ValueError('native cleanup: ' + str(error)) from error
+        need(not pending, 'pending native payment obligation')
+
+
+def recovered_runtime(fleet, owner_token, benches, rows, identities, bound, document):
+    """Consume the native guest ACK and its complete captured V2 stack evidence."""
+    need(len(benches) == 1 and set(identities) == {benches[0]['name']}, 'recovered task closure')
+    machines = set()
+    for index, bench in enumerate(benches):
+        name = bench['name']
+        need(isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9_-]+', name), 'recovered task name')
+        out = fleet / name
+        cid = bound(out / '.cid').decode().split()
+        need(len(cid) == 2 and cid[0] == 'clone' and re.fullmatch('[0-9a-f]+', cid[1]), 'recovered machine')
+        machine, token = cid[1], owner_token + '-' + str(index)
+        machines.add(machine)
+        need(bound(out / 'guest-shutdown.confirmed') == (fleet.name + '\n').encode(), 'native guest ACK')
+        owner = document(out / 'runtime-evidence.owner.json')
+        need(owner == {'version': 1, 'machine_id': machine, 'run_token': token}, 'runtime owner')
+        runtime = out / 'remote-logs/runtime-evidence'
+        manifest = document(runtime / 'manifest.json')
+        need(set(manifest) == {'version', 'machine_id', 'run_token', 'files'}
+             and manifest['version'] == 1 and manifest['machine_id'] == machine
+             and manifest['run_token'] == token, 'runtime manifest identity')
+        services = document(runtime / 'services.json')
+        count = services['env']['worker_processes']
+        need(services['status'] == 'stopped' and type(count) is int and 1 <= count <= 1024, 'stopped services')
+        cleanup_name = 'cloudbench-stack-cleanup-' + token + '.status'
+        expected = {'services.json', 'run.json', 'stack.log', cleanup_name, 'logs/backend.log',
+                    'logs/worker.log', *(f'logs/worker.{i}.log' for i in range(1, count))}
+        files = manifest['files']
+        need(isinstance(files, dict) and set(files) - {'wmh-serve-log.txt', 'guest-diagnostics.jsonl'} == expected,
+             'runtime file inventory')
+        need({str(p.relative_to(runtime)) for p in runtime.rglob('*') if p.is_file()}
+             == set(files) | {'manifest.json'}, 'captured runtime closure')
+        total = 0
+        for path, info in files.items():
+            need(set(info) == {'bytes', 'sha256'} and type(info['bytes']) is int and info['bytes'] >= 0,
+                 'runtime file metadata')
+            total += info['bytes']
+            need(total <= 512 * 1024 * 1024, 'runtime evidence size')
+            raw = bound(runtime / path)
+            need(len(raw) == info['bytes'] and hashlib.sha256(raw).hexdigest() == info['sha256'], 'runtime file seal')
+        status = fields(bound(runtime / cleanup_name))
+        identity = identities[name]
+        need(isinstance(identity, str) and re.fullmatch(r'linux:[0-9a-f-]{36}:[0-9]+', identity), 'native stack identity')
+        need(status.get('version') == '2' and status.get('state') == 'clean' and status.get('token') == token
+             and status.get('stack_native_identity') == identity and status.get('stack_birth')
+             and type(services.get('run_sh_pid')) is int and services['run_sh_pid'] > 1
+             and status.get('stack_pid') == str(services['run_sh_pid']), 'native V2 stack cleanup')
+        recovered_roots(runtime / 'run.json', name, bound)
+    need(machines == {row['machine_id'] for row in rows}, 'recovered resource coverage')
 
 
 def validate(receipt, owner, proof):
@@ -82,24 +207,91 @@ def validate(receipt, owner, proof):
     cli = runs.parent / 'cli.log'
     need(adapter.get('runner_log') == str(cli), 'adapter native root')
     cli_text = bound(cli).decode()
-    log = Path(proof['controller_log'])
-    need(log.parent == runs and log.name.startswith('detached-') and log.suffix == '.log', 'controller handle')
-    status = log.with_suffix('.status')
-    need(str(log) in cli_text and str(status) in cli_text, 'controller not in original CLI')
-    exit_code = int(bound(status).decode().strip())
-    need(type(adapter.get('native_exit')) is int and exit_code == adapter['native_exit'] and exit_code in (0, 1), 'terminal exit')
-    handles = []
-    for line in bound(log).decode(errors='replace').splitlines():
-        if str(root / 'scripts/run-bench') + ' monitor ' not in line:
-            continue
-        args = shlex.split(line.strip())
-        need(len(args) == 5 and args[:2] == [str(root / 'scripts/run-bench'), 'monitor']
-             and args[3:] == ['--controller-status', str(status)], 'native monitor binding')
-        handles.append(Path(args[2]))
-    need(handles, 'no native parent handle')
+    parents = {}
+    layout = proof.get('layout')
+    if layout == 'campaign-v1':
+        campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
+        need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
+             and reference.get('native_directory') == str(campaign)
+             and str(campaign) in cli_text, 'campaign root binding')
+        summary = document(campaign / 'summary.json')
+        checks, jobs = request['checks'], summary['jobs']
+        need(checks and len(set(checks)) == len(checks)
+             and summary['campaign_id'] == campaign.name and summary['runs'] == 1
+             and summary['retry_infra'] == 0 and summary['task_count'] == len(checks)
+             and summary['total_jobs'] == len(checks) == len(jobs)
+             and summary['status'] in {'passed', 'failed', 'cancelled'}, 'campaign inventory')
+        need(len({j['job_id'] for j in jobs}) == len(jobs)
+             and {j['task'] for j in jobs} == set(checks)
+             and all(j['run'] == 1 and j['attempt'] == 1 and j['attempts'] == []
+                     and j['status'] in {'passed', 'failed', 'cancelled'}
+                     and type(j['controller_exit_code']) is int
+                     and 0 <= j['controller_exit_code'] <= 255 for j in jobs), 'campaign terminal jobs')
+        from datetime import datetime
+        start, finish = (datetime.fromisoformat(summary[k]).timestamp() for k in ('started_at', 'finished_at'))
+        need(finite(start) and finite(finish) and adapter['started_at'] <= start <= finish
+             <= receipt['finished_at'] <= confirmed, 'campaign terminal clocks')
+        need(not any(summary.get(key) for key in
+                     ('shared_transport_cleanup_pending', 'cleanup_ticket_failure', 'shared_inventory_failed')),
+             'campaign shared cleanup pending')
+        cohorts = summary.get('startup_cohorts', [])
+        need(isinstance(cohorts, list) and all(isinstance(c, dict) for c in cohorts)
+             and not any(c.get('cleanup_budget_retirement_pending') for c in cohorts), 'campaign cohort retirement pending')
+        from deploy_test_cloud import campaign_published
+        native = runpy.run_path(str(Path(__file__).with_name('run-bench-campaign.py')))
+        publication = [campaign / 'hub-group.json', campaign / 'hub-group-publication-ack.private.json']
+        for path in publication:
+            document(path)
+        try:
+            published = campaign_published(summary, campaign, adapter['started_at'], native)
+        except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError) as error:
+            raise ValueError('native cleanup: campaign publication unavailable') from error
+        need(published, 'campaign publication or publisher cleanup')
+        for path in publication:
+            bound(path)
+        handles = []
+        for job in jobs:
+            need(re.fullmatch(r'r001-j[0-9]{4}', job['job_id']), 'campaign job id')
+            log = campaign / (job['job_id'] + '.log')
+            need(job['log'] == str(log), 'campaign job log binding')
+            one = []
+            for line in bound(log).decode(errors='replace').splitlines():
+                if str(root / 'scripts/run-bench') + ' monitor ' not in line:
+                    continue
+                args = shlex.split(line.strip())
+                need(len(args) == 3 and args[:2] == [str(root / 'scripts/run-bench'), 'monitor'], 'campaign monitor binding')
+                one.append(Path(args[2]))
+            need(one and one[0] not in parents and type(job.get('controller_pid')) is int
+                 and job['controller_pid'] > 1 and one[0].name.rsplit('-', 1)[-1] == str(job['controller_pid']),
+                 'campaign parent identity')
+            parents[one[0]] = {'checks': {job['task']}, 'exit': job['controller_exit_code']}
+            handles.extend(one)
+        need(len(handles) == len(set(handles)), 'duplicate campaign participant')
+    else:
+        need(layout is None, 'unsupported proof layout')
+        log = Path(proof['controller_log'])
+        need(log.parent == runs and log.name.startswith('detached-') and log.suffix == '.log', 'controller handle')
+        status = log.with_suffix('.status')
+        need(str(log) in cli_text and str(status) in cli_text, 'controller not in original CLI')
+        exit_code = int(bound(status).decode().strip())
+        need(type(adapter.get('native_exit')) is int and exit_code == adapter['native_exit'] and exit_code in (0, 1), 'terminal exit')
+        handles = []
+        for line in bound(log).decode(errors='replace').splitlines():
+            if str(root / 'scripts/run-bench') + ' monitor ' not in line:
+                continue
+            args = shlex.split(line.strip())
+            need(len(args) == 5 and args[:2] == [str(root / 'scripts/run-bench'), 'monitor']
+                 and args[3:] == ['--controller-status', str(status)], 'native monitor binding')
+            handles.append(Path(args[2]))
+        need(handles, 'no native parent handle')
+        participants = {p for p in runs.iterdir() if p.is_dir() and p.name != '_hub'}
+        need(set(handles) == participants and all(p.parent == runs and (p / '_batch').is_dir() for p in participants), 'participant closure')
+        parents[handles[0]] = {'checks': set(request['checks']), 'exit': exit_code}
     participants = {p for p in runs.iterdir() if p.is_dir() and p.name != '_hub'}
     need(set(handles) == participants and all(p.parent == runs and (p / '_batch').is_dir() for p in participants), 'participant closure')
-    retained, audit_seals = {}, {}
+    retained, audit_seals, recovered = {}, {}, {}
+    recovery = proof.get('recovered_runtime', {})
+    need(isinstance(recovery, dict) and (not recovery or layout == 'campaign-v1'), 'recovery scope')
     from cloudbench_execution_provenance import validate_provenance, validate_task_matrix_binding
     for fleet in sorted(participants):
         provenance = document(fleet / 'execution-provenance.json')
@@ -110,8 +302,8 @@ def validate(receipt, owner, proof):
         need(isinstance(benches, list) and len(benches) == len(matrix['tasks'])
              and len({b['name'] for b in benches}) == len(benches)
              and {b['name'] for b in benches} == {t['name'] for t in matrix['tasks']}, 'native inventory')
-        if fleet == handles[0]:
-            need({b['name'] for b in benches} == set(request['checks']), 'parent requested inventory')
+        if fleet in parents:
+            need({b['name'] for b in benches} == parents[fleet]['checks'], 'parent requested inventory')
         document(fleet / '_batch/run.json')  # Bind original outcomes without regrading them.
         life = document(fleet / '_batch/lifecycle.json')
         owner_token = life['fleet_owner_token']
@@ -119,7 +311,7 @@ def validate(receipt, owner, proof):
         need(type(life.get('version')) is int and life['version'] == 1 and life['run_id'] == fleet.name
              and life['workspace_root'] == str(root) and life['hub_publication_failed'] is False
              and type(life['controller_exit_code']) is int
-             and (life['controller_exit_code'] == exit_code if fleet == handles[0]
+             and (life['controller_exit_code'] == parents[fleet]['exit'] if fleet in parents
                   else life['controller_exit_code'] == 0 and life['status'] == 'verified')
              and life['status'] in {'verified', 'failed'}, 'native terminal lifecycle')
         audit = fleet / 'teardown-ownership'
@@ -127,7 +319,9 @@ def validate(receipt, owner, proof):
         binding = fields(bound(audit / 'source-audit'))
         seal = tree(audit)
         need(binding == {'path': str(canonical), 'sha256': seal}
-             and tree(canonical) == seal == life['audit_sha256'], 'native audit seal')
+             and tree(canonical) == seal
+             and (life['audit_sha256'] == seal or str(fleet) in recovery
+                  and life['audit_sha256'] == '' and life['status'] == 'failed'), 'native audit seal')
         meta = fields(bound(audit / 'meta'))
         need(meta.get('status') == 'provider-teardown-verified' and meta.get('version') == '1'
              and meta.get('fleet_owner_token') == owner_token and meta.get('run_id') == fleet.name
@@ -149,8 +343,18 @@ def validate(receipt, owner, proof):
             need(not path.exists() or path.is_dir() and not path.is_symlink() and not any(path.iterdir()),
                  'unsupported resource class')
         disposable = document(fleet / '_batch/disposable-cleanup.json')
-        need(disposable.get('schema') == 'disposable-cleanup-v1' and disposable.get('owner') == owner_token
-             and disposable.get('guest_cleanup_missing') is False and disposable.get('runtime_evidence_missing') is False, 'guest cleanup')
+        need(disposable.get('schema') == 'disposable-cleanup-v1' and disposable.get('owner') == owner_token, 'guest cleanup owner')
+        if str(fleet) in recovery:
+            need(fleet in parents and life['status'] == 'failed' and life['audit_sha256'] == ''
+                 and type(disposable.get('guest_cleanup_missing')) is bool
+                 and type(disposable.get('runtime_evidence_missing')) is bool
+                 and (disposable['guest_cleanup_missing'] or disposable['runtime_evidence_missing']), 'historical recovery facts')
+            recovered_runtime(fleet, owner_token, benches, rows, recovery[str(fleet)], bound, document)
+            recovered[str(fleet)] = {'original_lifecycle': life, 'original_disposable_cleanup': disposable,
+                                     'release_epoch': release, 'native_audit_sha256': seal, 'credit_granted': False}
+        else:
+            need(disposable.get('guest_cleanup_missing') is False
+                 and disposable.get('runtime_evidence_missing') is False, 'guest cleanup')
         need(meta['hub_disposition'] == 'retained-exact-owner-transfer-required', 'unsupported Hub disposition')
         hub = Path(meta['hub_owner_file'])
         need(hub.parent == runs / '_hub', 'Hub root')
@@ -164,11 +368,15 @@ def validate(receipt, owner, proof):
         retained[str(hub)] = {'path': str(hub), 'sha256': bindings[str(hub)], 'owner': hub_owner,
                              'disposition': meta['hub_disposition']}
         audit_seals[str(audit)] = seal
+    need(set(recovered) == set(recovery), 'recovered fleet closure')
     need(used == set(bindings), 'proof file closure')
-    return {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
+    result = {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
             'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
             'participants': sorted(map(str, participants)), 'native_audit_seals': audit_seals,
             'retained_services': [retained[k] for k in sorted(retained)], 'credit_granted': False}
+    if recovered:
+        result['recovered_release_evidence'] = recovered
+    return result
 
 
 def reconcile(state, occurrence_id, proof):

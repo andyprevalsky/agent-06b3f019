@@ -1111,6 +1111,313 @@ class Cycle(unittest.TestCase):
         hub.write_text(hub.read_text().replace('pid=1234', 'pid=9999'))
         self.assertEqual([occurrence['gate']], c.retained_owners(state, [occurrence['gate']]))
 
+    def campaign_recon_state(self):
+        import hashlib
+        import shutil
+        import time
+        from datetime import datetime, timezone
+        from cloudbench_execution_provenance import build_config, build_task_matrix
+        state, occurrence, paths, proof, hub = self.native_recon_state()
+        runs = hub.parent.parent
+        request_path = paths['receipt'].parent / 'request.json'
+        request = c.read(request_path)
+        names = [request['gate'], *['task-' + str(i) for i in range(2, 15)]]
+        template = runs / 'parent'
+        campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
+        campaign.mkdir(parents=True)
+        parents, jobs = [], []
+        for index, name in enumerate(names, 1):
+            fleet = runs / ('20261103-080440-' + str(310000 + index))
+            shutil.copytree(template, fleet)
+            token = f'{index + 10:032x}'
+            audit = fleet / 'teardown-ownership'
+            (audit / 'source-audit').unlink()
+            meta = (audit / 'meta').read_text().replace('run_id=parent', 'run_id=' + fleet.name)
+            meta = meta.replace('fleet_owner_token=' + '1' * 32, 'fleet_owner_token=' + token)
+            (audit / 'meta').write_text(meta)
+            h = hashlib.sha256()
+            for file in sorted(audit.rglob('*'), key=lambda q: str(q.relative_to(audit))):
+                if file.is_file():
+                    for value in (str(file.relative_to(audit)).encode(), file.read_bytes()):
+                        h.update(len(value).to_bytes(8, 'big')); h.update(value)
+            canonical = self.root / '.git/cloudbench-fleet-audits' / token
+            shutil.copytree(audit, canonical)
+            (audit / 'source-audit').write_text(f'path={canonical}\nsha256={h.hexdigest()}\n')
+            life = c.read(fleet / '_batch/lifecycle.json')
+            life.update(run_id=fleet.name, fleet_owner_token=token, audit_sha256=h.hexdigest())
+            c.write(fleet / '_batch/lifecycle.json', life)
+            disposable = c.read(fleet / '_batch/disposable-cleanup.json'); disposable['owner'] = token
+            c.write(fleet / '_batch/disposable-cleanup.json', disposable)
+            (fleet / '_batch/benches.json').write_text(json.dumps([dict(name=name, mode='REAL')]))
+            matrix = build_task_matrix([name + '=real'])
+            provenance = c.read(fleet / 'execution-provenance.json')
+            provenance['config'] = build_config('cloudbench-fleet-config-v1',
+                ['task_count=1', 'task_matrix_sha256=' + matrix['sha256']])
+            c.write(fleet / 'execution-task-matrix.json', matrix)
+            c.write(fleet / 'execution-provenance.json', provenance)
+            log = campaign / f'r001-j{index:04d}.log'
+            handles = [fleet] + ([runs / 'canary'] if index == 3 else [])
+            log.write_text(''.join(f'{self.root}/scripts/run-bench monitor {f}\n' for f in handles))
+            jobs.append(dict(job_id=log.stem, task=name, run=1, attempt=1, attempts=[],
+                status='failed' if index == 6 else 'cancelled', controller_exit_code=1,
+                controller_pid=310000 + index, log=str(log)))
+            parents.append(fleet)
+        shutil.rmtree(template)
+        for f in runs.glob('detached-*'): f.unlink()
+        summary = dict(campaign_id=campaign.name, runs=1, retry_infra=0, task_count=14,
+            total_jobs=14, concurrency=14, peak_concurrency=14, status='failed', jobs=jobs, wall_clock_seconds=1,
+            started_at=datetime.fromtimestamp(1793664472, timezone.utc).isoformat(),
+            finished_at=datetime.fromtimestamp(1793664473, timezone.utc).isoformat())
+        c.write(campaign / 'summary.json', summary)
+        import runpy
+        native = runpy.run_path(str(ROOT / 'scripts/run-bench-campaign.py'))
+        group = native['campaign_group_record'](summary)
+        c.write(campaign / 'hub-group.json', group)
+        c.write(campaign / 'hub-group-publication-ack.private.json', dict(pid=2147483000, token='d' * 32,
+            record_sha256=hashlib.sha256(json.dumps(group, sort_keys=True).encode()).hexdigest()))
+        cli = runs.parent / 'cli.log'; cli.write_text(f'Native campaign {campaign}\n')
+        request['checks'] = names; c.write(request_path, request)
+        receipt = state['attempts'][-1]['results'][0]
+        receipt['cases'] = dict.fromkeys(names, 'UNVERIFIED')
+        receipt['case_complete'] = dict.fromkeys(names, False)
+        adapter = c.read(paths['adapter']); adapter['cases'] = receipt['cases']; c.write(paths['adapter'], adapter)
+        reference = receipt['native_cleanup_reference']
+        reference.update(native_directory=str(campaign), result_sha256=c.sha_file(paths['adapter']))
+        receipt['cleanup_owner']['native_cleanup_reference'] = reference
+        c.write(paths['receipt'], receipt)
+        gate = next(g for g in state['plan']['gates'] if g['name'] == occurrence['gate']); gate['checks'] = names
+        proof.update(layout='campaign-v1', campaign=str(campaign), owner=copy.deepcopy(receipt['cleanup_owner']),
+            receipt_sha256=c.sha_file(paths['receipt']), worker_result_sha256=c.sha_file(paths['adapter']),
+            confirmed_at=time.time())
+        proof.pop('controller_log')
+        files = [hub, request_path, cli, *campaign.glob('*.json'), *campaign.glob('*.log')]
+        for fleet in [*parents, runs / 'canary']:
+            files.extend(p for p in fleet.rglob('*') if p.is_file())
+            token = c.read(fleet / '_batch/lifecycle.json')['fleet_owner_token']
+            files.extend(p for p in (self.root / '.git/cloudbench-fleet-audits' / token).rglob('*') if p.is_file())
+        proof['files'] = {str(p): c.sha_file(p) for p in files}
+        return state, occurrence, paths, proof, parents
+
+    def recovered_campaign_state(self):
+        import hashlib
+        import shutil
+        state, occurrence, paths, proof, parents = self.campaign_recon_state()
+        fleet = parents[1]
+        life_path = fleet / '_batch/lifecycle.json'
+        life = c.read(life_path); owner = life['fleet_owner_token']
+        life['audit_sha256'] = ''; c.write(life_path, life)
+        disposable_path = fleet / '_batch/disposable-cleanup.json'
+        disposable = c.read(disposable_path)
+        disposable.update(guest_cleanup_missing=True, runtime_evidence_missing=True)
+        c.write(disposable_path, disposable)
+        bench = json.loads((fleet / '_batch/benches.json').read_text())[0]['name']
+        out = fleet / bench; out.mkdir()
+        machine, token = '48e7553f5dd4e8', owner + '-0'
+        identity = 'linux:89e3de7f-53c5-4dc4-acdd-f64b80fd7bd2:44005'
+        (out / '.cid').write_text('clone ' + machine + '\n')
+        (out / 'guest-shutdown.confirmed').write_text(fleet.name + '\n')
+        c.write(out / 'runtime-evidence.owner.json', dict(version=1, machine_id=machine, run_token=token))
+        runtime = out / 'remote-logs/runtime-evidence'; (runtime / 'logs').mkdir(parents=True)
+        for name in ('run.json', 'stack.log', 'logs/backend.log', 'logs/worker.log'):
+            (runtime / name).write_text('{}\n')
+        root = 'f7a07bad-5a1c-4e4a-83e5-5da46b0f655f'
+        snapshot = dict(root_exists=True, root_deleted=False, root_user_id='1f85ff25-6e29-4c1b-8739-f917bd101a30',
+            tree_agent_ids=[root], unsealed_tree_agent_ids=[root], browser_sessions=[], purchase_cleanup=[])
+        final = {**snapshot, 'root_deleted': True, 'unsealed_tree_agent_ids': []}
+        logs = dict(cloud_cleanup_evidence=dict(root_agent_id=root, before=snapshot, after=final, final=final,
+                    payment_snapshot=final, provider_receipts=[], errors=[], warnings=[]),
+                    cloud_provider_cleanup=dict(root_agent_id=root, root_deleted=True, tree_sealed=True, provider_receipts=[]),
+                    cloud_payment_cleanup=dict(root_agent_id=root, purchases=[]))
+        c.write(runtime / 'run.json', dict(tasks=[dict(name=bench, agent_id=root,
+            graded_root_creation_outcome='allocated', logs=logs,
+            owned_roots=[dict(root_agent_id=root, task_name=bench, role='graded',
+                             creation=dict(source='create_agent_return', root_agent_id=root), logs=logs)])]))
+        c.write(runtime / 'services.json', dict(status='stopped', run_sh_pid=2560, env=dict(worker_processes=1)))
+        status = runtime / ('cloudbench-stack-cleanup-' + token + '.status')
+        status.write_text('version=2\ntoken=' + token + '\nstate=clean\nstack_pid=2560\n'
+                          'stack_birth=Tue Nov  3 08:23:40 2026\nstack_native_identity=' + identity + '\n')
+        c.write(runtime / 'manifest.json', dict(version=1, machine_id=machine, run_token=token,
+            files={str(p.relative_to(runtime)): dict(bytes=p.stat().st_size, sha256=c.sha_file(p))
+                   for p in runtime.rglob('*') if p.is_file()}))
+        audit = fleet / 'teardown-ownership'; (audit / 'source-audit').unlink()
+        (audit / 'owned-clones.ids').write_text(machine + '\n')
+        (audit / 'owned-clones.names').write_text('clone-j2\n')
+        (audit / 'fresh').mkdir(exist_ok=True)
+        (audit / 'fresh/clone-j2').write_text(''.join(f'{k}={v}\n' for k, v in dict(
+            fleet_owner_token=owner, run_id=fleet.name, app='fixture', source='fresh-clone',
+            disposition='destroyed-provider-retained', machine_id=machine, clone_name='clone-j2',
+            volume_id='vol_fixture').items()))
+        canonical = self.root / '.git/cloudbench-fleet-audits' / owner
+        shutil.rmtree(canonical); shutil.copytree(audit, canonical)
+        h = hashlib.sha256()
+        for path in sorted(audit.rglob('*'), key=lambda p: str(p.relative_to(audit))):
+            if path.is_file():
+                for raw in (str(path.relative_to(audit)).encode(), path.read_bytes()):
+                    h.update(len(raw).to_bytes(8, 'big')); h.update(raw)
+        (audit / 'source-audit').write_text(f'path={canonical}\nsha256={h.hexdigest()}\n')
+        proof['recovered_runtime'] = {str(fleet): {bench: identity}}
+        for path in [*fleet.rglob('*'), *canonical.rglob('*')]:
+            if path.is_file(): proof['files'][str(path)] = c.sha_file(path)
+        return state, occurrence, paths, proof, fleet, runtime
+
+    def test_campaign_recovered_v2_release_keeps_failed_missing_facts(self):
+        state, occurrence, paths, proof, fleet, runtime = self.recovered_campaign_state()
+        before = copy.deepcopy(state['attempts'])
+        originals = {p: p.read_bytes() for p in (fleet / '_batch').glob('*.json')}
+        c.reconcile(state, occurrence['id'], proof)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        release = entry['recovered_release_evidence'][str(fleet)]
+        self.assertEqual('', release['original_lifecycle']['audit_sha256'])
+        self.assertTrue(release['original_disposable_cleanup']['runtime_evidence_missing'])
+        self.assertFalse(release['credit_granted']); self.assertFalse(entry['credit_granted'])
+        self.assertEqual(before, state['attempts'])
+        self.assertEqual(originals, {p: p.read_bytes() for p in originals})
+        self.assertEqual([], c.retained_owners(state, [occurrence['gate']]))
+        (runtime / 'logs/worker.log').write_text('changed')
+        self.assertEqual([occurrence['gate']], c.retained_owners(state, [occurrence['gate']]))
+
+    def test_campaign_recovered_v2_identity_and_seal_refusals_are_atomic(self):
+        state, occurrence, paths, proof, fleet, runtime = self.recovered_campaign_state()
+        before = copy.deepcopy(state)
+        bad = copy.deepcopy(proof); bad['recovered_runtime'][str(fleet)] = {'task-2': 'linux:' + '0' * 36 + ':1'}
+        for variant in (bad, {**proof, 'source': {}}, {**proof, 'owner': {}}):
+            with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], variant)
+            self.assertEqual(before, state)
+        for path, raw in [(runtime / 'manifest.json', b'{}'),
+                          (fleet / 'teardown-ownership/source-audit', b'path=/wrong\nsha256=bad\n'),
+                          (fleet / 'task-2/guest-shutdown.confirmed', b'wrong\n'),
+                          (runtime / 'logs/worker.log', b'changed')]:
+            original = path.read_bytes(); path.write_bytes(raw)
+            variant = copy.deepcopy(proof); variant['files'][str(path)] = c.sha_file(path)
+            with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], variant)
+            self.assertEqual(before, state); path.write_bytes(original)
+        (runtime / 'unreported').write_text('extra')
+        with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual(before, state)
+
+    def test_campaign_shared_cleanup_and_publication_refusals_are_atomic(self):
+        state, occurrence, paths, proof, parents = self.campaign_recon_state()
+        before = copy.deepcopy(state)
+        campaign = Path(proof['campaign']); summary = campaign / 'summary.json'
+        original = summary.read_bytes()
+        for flag in ('shared_transport_cleanup_pending', 'cleanup_ticket_failure', 'shared_inventory_failed', 'startup_cohorts'):
+            value = c.read(summary)
+            value[flag] = [{'cleanup_budget_retirement_pending': True}] if flag == 'startup_cohorts' else True
+            c.write(summary, value)
+            variant = copy.deepcopy(proof); variant['files'][str(summary)] = c.sha_file(summary)
+            with self.subTest(flag=flag), self.assertRaisesRegex(ValueError, 'campaign .*pending'):
+                c.reconcile(state, occurrence['id'], variant)
+            self.assertEqual(before, state); summary.write_bytes(original)
+        ack = campaign / 'hub-group-publication-ack.private.json'; raw = ack.read_bytes()
+        ack.unlink()
+        variant = copy.deepcopy(proof); variant['files'].pop(str(ack))
+        with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], variant)
+        self.assertEqual(before, state); ack.write_bytes(raw)
+        value = json.loads(raw); value['record_sha256'] = '0' * 64; c.write(ack, value)
+        variant = copy.deepcopy(proof); variant['files'][str(ack)] = c.sha_file(ack)
+        with self.assertRaisesRegex(ValueError, 'campaign publication'):
+            c.reconcile(state, occurrence['id'], variant)
+        self.assertEqual(before, state); ack.write_bytes(raw)
+        with patch('deploy_test_cloud.subprocess.check_output', return_value='123 2147483000 S\n'):
+            with self.assertRaisesRegex(ValueError, 'publisher cleanup'):
+                c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual(before, state)
+
+    def test_campaign_recovered_root_provider_and_payment_refusals_are_atomic(self):
+        state, occurrence, paths, proof, fleet, runtime = self.recovered_campaign_state()
+        before = copy.deepcopy(state)
+        path, manifest = runtime / 'run.json', runtime / 'manifest.json'
+        original, original_manifest = path.read_bytes(), manifest.read_bytes()
+        variants = []
+        for mode in ('missing', 'unowned', 'custody_role', 'primary_fixture_role', 'missing_creation', 'custody_creation', 'missing_outcome', 'graded_mismatch',
+                     'unsealed', 'provider', 'provider_status', 'payment'):
+            value = json.loads(original); task = value['tasks'][0]
+            if mode == 'missing': task['logs'].pop('cloud_provider_cleanup')
+            elif mode == 'unowned': task['owned_roots'] = []
+            elif mode == 'custody_role': task['owned_roots'][0]['role'] = 'foreign'
+            elif mode == 'primary_fixture_role': task['owned_roots'][0]['role'] = 'fixture_first_run'
+            elif mode == 'missing_creation': task['owned_roots'][0].pop('creation')
+            elif mode == 'custody_creation': task['owned_roots'][0]['creation']['source'] = 'unconfirmed'
+            elif mode == 'missing_outcome': task.pop('graded_root_creation_outcome')
+            elif mode == 'graded_mismatch':
+                task['owned_roots'][0]['root_agent_id'] = '80c4dd2e-388a-45c4-9daf-ded6979266c8'
+                task['owned_roots'][0]['creation']['root_agent_id'] = task['owned_roots'][0]['root_agent_id']
+            else:
+                for logs in (task['logs'], task['owned_roots'][0]['logs']):
+                    evidence = logs['cloud_cleanup_evidence']
+                    if mode == 'unsealed': evidence['final']['unsealed_tree_agent_ids'] = [task['agent_id']]
+                    if mode in ('provider', 'provider_status'):
+                        for phase in ('before', 'after', 'final', 'payment_snapshot'):
+                            evidence[phase]['browser_sessions'] = [dict(agent_id=task['agent_id'], provider='tilion',
+                                                                         session_id='sess_fixture_12345')]
+                    if mode == 'provider_status':
+                        receipt = dict(provider='tilion', session_id='sess_fixture_12345', status=401, response_sha256='0' * 64)
+                        evidence['provider_receipts'] = [receipt]
+                        logs['cloud_provider_cleanup']['provider_receipts'] = [receipt]
+                    if mode == 'payment':
+                        purchase = dict(purchase_id='33a666aa-dd56-4a71-a014-9330397ffd61', agent_id=task['agent_id'],
+                            status='HELD', funding_status='RECLAIMING', total_cents=4396, card_id='card-fixture',
+                            stripe_payment_intent_id=None, provider_transfer_id='transfer', reclaim_provider_transfer_id=None)
+                        evidence['payment_snapshot']['purchase_cleanup'] = [purchase]
+                        logs['cloud_payment_cleanup']['purchases'] = [purchase]
+            variants.append((mode, value))
+        for mode, value in variants:
+            c.write(path, value); seal = json.loads(original_manifest)
+            seal['files']['run.json'] = dict(bytes=path.stat().st_size, sha256=c.sha_file(path)); c.write(manifest, seal)
+            variant = copy.deepcopy(proof)
+            for changed in (path, manifest): variant['files'][str(changed)] = c.sha_file(changed)
+            with self.subTest(mode=mode), self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], variant)
+            self.assertEqual(before, state)
+        path.write_bytes(original); manifest.write_bytes(original_manifest)
+
+    def test_campaign_cleanup_membership_preserves_all_native_unknowns(self):
+        state, occurrence, paths, proof, parents = self.campaign_recon_state()
+        original = copy.deepcopy(state['attempts'])
+        c.reconcile(state, occurrence['id'], proof)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertEqual(15, len(entry['participants']))
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual(original, state['attempts'])
+        self.assertEqual([], c.retained_owners(state, [occurrence['gate']]))
+        self.assertEqual('live-transfer-required', entry['retained_services'][0]['owner']['status'])
+        self.assertEqual({'UNVERIFIED'}, set(state['attempts'][-1]['results'][0]['cases'].values()))
+        receipt = state['attempts'][-1]['results'][0]
+        self.assertFalse(c._reconciled(state, receipt, {**proof['owner'], 'request_token': 'new'}))
+        receipt['token'] = 'new'
+        self.assertEqual([occurrence['gate']], c.retained_owners(state, [occurrence['gate']]))
+
+    def test_campaign_missing_cleanup_and_mutations_refuse_atomically(self):
+        state, occurrence, paths, proof, parents = self.campaign_recon_state()
+        before = copy.deepcopy(state)
+        for field, value in [('receipt_sha256', '0' * 64), ('worker_result_sha256', '0' * 64),
+                             ('request_token', 'wrong'), ('source', {}), ('campaign', '/wrong')]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                c.reconcile(state, occurrence['id'], {**proof, field: value})
+            self.assertEqual(before, state)
+        for path in [Path(proof['campaign']) / 'summary.json', parents[0] / '_batch/disposable-cleanup.json']:
+            raw = path.read_bytes(); doc = json.loads(raw)
+            if path.name == 'summary.json': doc['jobs'] = doc['jobs'][:-1]
+            else: doc['runtime_evidence_missing'] = True
+            c.write(path, doc)
+            variant = copy.deepcopy(proof); variant['files'][str(path)] = c.sha_file(path)
+            with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], variant)
+            self.assertEqual(before, state)
+            path.write_bytes(raw)
+        summary_path = Path(proof['campaign']) / 'summary.json'
+        raw = summary_path.read_bytes(); doc = json.loads(raw); doc['jobs'][0]['controller_pid'] += 1
+        c.write(summary_path, doc)
+        variant = copy.deepcopy(proof); variant['files'][str(summary_path)] = c.sha_file(summary_path)
+        with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], variant)
+        self.assertEqual(before, state); summary_path.write_bytes(raw)
+        log = Path(proof['campaign']) / 'r001-j0003.log'; raw = log.read_bytes()
+        log.write_bytes(b''.join(reversed(raw.splitlines(keepends=True))))
+        variant = copy.deepcopy(proof); variant['files'][str(log)] = c.sha_file(log)
+        with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], variant)
+        self.assertEqual(before, state); log.write_bytes(raw)
+        (parents[0].parent / 'unreported').mkdir()
+        with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual(before, state)
+
     def test_native_cloud_cleanup_proof_refusals_are_atomic(self):
         state, occurrence, paths, proof, hub = self.native_recon_state()
         before = copy.deepcopy(state)
