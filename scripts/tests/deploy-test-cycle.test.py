@@ -770,6 +770,72 @@ class Cycle(unittest.TestCase):
         proof.update(changes)
         return proof
 
+    def standing_claude_fixture(self):
+        import hashlib, runpy
+        template = runpy.run_path(str(ROOT / 'scripts/tests/predeploy-receipts.test.py'))
+        summary, bundles, confirmations = template['standing_fixture']()
+        bundle = bundles[0]; run, card = bundle['run'], bundle['card']
+        summary['tasks'] = ['claude-code-agent']; summary['git_sha'] = self.state['source']['head']
+        run['tasks'] = [run['tasks'][7]]; card['per_task'] = [card['per_task'][7]]
+        card['source_sha'] = summary['git_sha']; card['tasks'] = dict(total=1, completed=1, running=0, queued=0)
+        directory = self.root / '.context/original'; directory.mkdir(parents=True)
+        for name, value in [('run.json',run),('report-card.json',card),
+            ('local-benchmark-owner.json',dict(token='bench', run_id='original', state='cleanup_verified')),
+            ('local-stack-owner.json',dict(token='stack',run_id='original',pid=1234,native_identity='native',birth='birth'))]:
+            c.write(directory/name, value)
+        (directory/'benchmark-cleanup-bench.status').write_text('version=1\ntoken=bench\nstate=clean\n')
+        (directory/'local-stack-cleanup.status').write_text('version=2\nstate=clean\ntoken=stack\nstack_pid=1234\nstack_native_identity=native\nstack_birth=birth\n')
+        sha = c.sha_file(directory/'run.json'); confirmations = [confirmations[0]]; confirmations[0]['receipt_sha256'] = sha
+        bindings = [dict(run_id='original', plan_run_id='plan', receipt_sha256=sha,
+            card_sha256=c.sha_file(directory/'report-card.json'),planned_source_sha=summary['git_sha'])]
+        proof = dict(source=self.state['source'],gate='smoke',run_dir=str(directory))
+        for name,value in [('summary',summary),('confirmations',confirmations),('bindings',bindings)]:
+            path=self.root/'.context'/(name+'.json');c.write(path,value);proof[name]=str(path)
+        self.plan['gates'].append(dict(name='smoke',category='smoke',native_cloud=True,worker='native-cloud',
+            worker_transport='benchmark-cloud-cli',command=[sys.executable,str(self.root/'scripts/deploy_test_cloud.py')],
+            cwd=str(self.root),checks=['claude-code-agent'],case_protocol=True))
+        self.state = c.initialize(self.plan,self.root)
+        proof['files'] = {str(p):c.sha_file(p) for p in [*directory.iterdir(),*[Path(proof[k]) for k in ('summary','confirmations','bindings')]]}
+        return proof,directory
+
+    def test_prelaunch_native_claude_standing_skip_is_separate_and_hash_bound(self):
+        proof,directory = self.standing_claude_fixture(); original=copy.deepcopy(self.state)
+        import contextlib,io
+        proof_path=self.root/'.context/standing-proof.json';plan_path=self.root/'.context/plan.json'
+        c.write(proof_path,proof);c.write(plan_path,self.plan);c.write(self.directory/'cycle.json',self.state)
+        with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(0,c.main(['standing-skip','--proof',str(proof_path),'--plan',str(plan_path),
+                '--state-dir',str(self.directory),'--root',str(self.root)]))
+        self.state=c.read(self.directory/'cycle.json')
+        self.assertEqual(original['attempts'],self.state['attempts']);self.assertEqual(original['failures'],self.state['failures'])
+        self.assertFalse(self.state['ready']);self.assertEqual(['smoke/claude-code-agent'],list(self.state['skips']))
+        c.revalidate_standing_skips(self.state)
+        path=directory/'run.json';path.write_bytes(path.read_bytes()+b' ')
+        with self.assertRaises(ValueError):c.revalidate_standing_skips(self.state)
+        self.state.update(phase='ready',ready=True);c.write(self.directory/'cycle.json',self.state)
+        self.assertNotEqual(0,c.verify_saved(self.directory,self.root))
+
+    def test_prelaunch_native_claude_standing_skip_refuses_unclean_wrong_source_and_nonpolicy(self):
+        proof,directory=self.standing_claude_fixture();original=copy.deepcopy(self.state)
+        for mode in ('missing','source','dirty','auth-reason','nonclaude','incomplete'):
+            with self.subTest(mode=mode):
+                trial=copy.deepcopy(proof);saved={p:p.read_bytes() for p in directory.iterdir()}
+                try:
+                    if mode=='missing':trial['files'].pop(str(directory/'local-stack-owner.json'))
+                    elif mode=='source':trial['source']={**trial['source'],'head':'f'*40}
+                    elif mode=='dirty':(directory/'local-stack-cleanup.status').write_text('state=failed\n')
+                    else:
+                        run=c.read(directory/'run.json');row=run['tasks'][0]
+                        if mode=='auth-reason':row['failure_reason']='Authentication rejected HTTP403'
+                        elif mode=='nonclaude':row['name']='chat-mode'
+                        else:row['status']='ACTIVE';row['benchmark_status']='FAILED'
+                        c.write(directory/'run.json',run)
+                    trial['files']={p:c.sha_file(p) for p in trial['files']}
+                    with self.assertRaises(ValueError):c.standing_skip(self.state,trial,self.root)
+                    self.assertEqual(original,self.state)
+                finally:
+                    for path,raw in saved.items():path.write_bytes(raw)
+
     def test_confirmed_compute_token_skip_is_a_warning_not_a_pass(self):
         failure = self.resource_failure()
         c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED', resource_skip=self.confirmation()))

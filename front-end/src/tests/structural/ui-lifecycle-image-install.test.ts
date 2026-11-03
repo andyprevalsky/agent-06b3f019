@@ -30,7 +30,11 @@ describe('cloud image frontend install boundary', () => {
       installArgs('scripts/cloud-build.sh'),
     );
     expect(context.ignores('package-lock.json')).toBe(true);
-    for (const path of ['package.json', 'back-end/package-lock.json', 'front-end/package-lock.json']) {
+    for (const path of [
+      'package.json',
+      'back-end/package-lock.json',
+      'front-end/package-lock.json',
+    ]) {
       expect(context.ignores(path), path).toBe(false);
     }
   });

@@ -98,6 +98,19 @@ does not allocate outside the existing CLI or invent a cleanup receipt.
 If no appropriate worker is bound, planning refuses; it does not quietly
 serialize the suite locally.
 
+Before a cloud launch, a genuine local Claude credential SKIP can be admitted
+through `deploy_test_cycle.py standing-skip --proof <proof.json>` with the
+normal `--plan`, `--state-dir`, and `--root` arguments. This uses the existing
+`validate_predeploy_receipts.py` contract: exact frozen source, one native
+`claude-code-agent` run and report card, native benchmark/stack cleanup,
+confirmation and plan/run bindings, and hashes of every consumed file.
+The proof records `source`, `gate`, `summary`, `run_dir`, `confirmations`,
+`bindings`, and the `files` hash map. Generic authentication errors, missing
+artifacts, or an incomplete run do not qualify. The coordinator records a
+separate warning and excludes only that case; it revalidates the evidence
+before execution and final verification. The original cloud outcomes stay
+unchanged, and ordinary cloud/fleet credential enforcement stays strict.
+
 `scripts/deploy_test_worker.py` is the supplied case-aware executor for an
 already prepared isolated checkout. Use it directly with request/result paths,
 or `--stdio` over the existing worker transport. For example, a worker binding

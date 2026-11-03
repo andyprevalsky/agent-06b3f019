@@ -314,6 +314,7 @@ def records(plan: dict, state: dict) -> list[dict]:
 
 def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
     name, phase = gate["name"], state["phase"]
+    revalidate_standing_skips(state)
     token = uuid.uuid4().hex
     case_skips = {key.split("/", 1)[1]: value for key, value in state["skips"].items()
                   if key.startswith(name + "/") and value["source"] == state["source"]}
@@ -542,6 +543,80 @@ def sidecar_finished_at(failure: dict):
             or receipt.get("case_complete", {}).get(case) != failure.get("complete")):
         return None
     return receipt.get("finished_at")
+
+
+def standing_claude_bundle(proof: dict) -> dict:
+    """Replay the existing predeploy receipt contract; never manufacture a cloud occurrence."""
+    import validate_predeploy_receipts as policy
+    used = set()
+    def raw(path):
+        path = Path(path)
+        if (not path.is_absolute() or path.resolve() != path or path.is_symlink()
+                or not path.is_file() or path.stat().st_size > MAX_RECEIPT_BYTES):
+            raise ValueError('standing skip: invalid native evidence path')
+        value = path.read_bytes()
+        if proof['files'].get(str(path)) != hashlib.sha256(value).hexdigest():
+            raise ValueError('standing skip: native evidence hash changed')
+        used.add(str(path))
+        return value
+    def document(path):
+        return policy.strict_json(raw(path))
+    summary = document(proof['summary'])
+    directory = Path(proof['run_dir'])
+    run_raw, card_raw = raw(directory / 'run.json'), raw(directory / 'report-card.json')
+    run, card = policy.strict_json(run_raw), policy.strict_json(card_raw)
+    benchmark = document(directory / 'local-benchmark-owner.json')
+    document(directory / 'local-stack-owner.json')
+    raw(directory / ('benchmark-cleanup-' + benchmark['token'] + '.status'))
+    raw(directory / 'local-stack-cleanup.status')
+    confirmations, bindings = document(proof['confirmations']), document(proof['bindings'])
+    if (summary.get('tasks') != ['claude-code-agent'] or summary.get('git_sha') != proof['source']['head']
+            or summary.get('exit_code') != 0 or len(confirmations) != 1
+            or confirmations[0].get('reason_code') != 'standing_claude_credential_unavailable'):
+        raise ValueError('standing skip: only the exact native Claude standing policy is supported')
+    bundle = {'run': run, 'card': card, 'sha256': hashlib.sha256(run_raw).hexdigest(),
+              'card_sha256': hashlib.sha256(card_raw).hexdigest(), 'evidence': str(directory / 'run.json'),
+              'cleanup_verified': policy.verify_cleanup(directory)}
+    result = policy.validate(summary, [bundle], confirmations, bindings)
+    if (result['status'] != 'SKIPPED_WITH_WARNING' or result['counts'] != {'passed':0, 'skipped':1, 'blocked':0}
+            or len(result['warnings']) != 1 or result['warnings'][0].get('exception_kind') != 'standing_policy'
+            or used != set(proof['files'])):
+        raise ValueError('standing skip: native receipt/cleanup/source/catalog/confirmation refused')
+    # Re-read after the native validator, which consumes the cleanup owner records directly.
+    for path in tuple(used):
+        raw(path)
+    return result
+
+
+def standing_skip(state: dict, proof: dict, root: Path) -> None:
+    if (CANCEL.is_set() or state.get('phase') in {'interrupted','stale','ready'} or 'live_failures' in state
+            or state.get('resume_phase') or proof.get('source') != state['source']
+            or state['source'] != source(root) or state['environment'] != environment_digest()
+            or state['input_fingerprints'] != input_fingerprints(state['plan'], root)):
+        raise ValueError('standing skip requires quiescent exact frozen source/environment')
+    if state.get('plan_digest') != digest(state['plan']):
+        raise ValueError('standing skip frozen plan changed')
+    validate_plan(state['plan'], root)
+    gate = next((g for g in state['plan']['gates'] if g['name'] == proof.get('gate')), None)
+    if not gate or gate.get('native_cloud') is not True or 'claude-code-agent' not in gate['checks']:
+        raise ValueError('standing skip requires the selected native cloud Claude check')
+    key = gate['name'] + '/claude-code-agent'
+    if key in state['skips']:
+        raise ValueError('standing skip cannot overwrite an existing qualification')
+    result = standing_claude_bundle(proof)  # Atomic: every native input validates before state changes.
+    state['skips'][key] = {'source': state['source'], 'disposition': 'standing / warned',
+        'input_fingerprint': state['input_fingerprints'][gate['name']], 'standing_skip': copy.deepcopy(proof),
+        'rca': {'attribution':'NOT_INTRODUCED', 'description':result['warnings'][0]['reason'],
+                'evidence':str(Path(proof['run_dir']) / 'run.json'), 'policy_source':result['warnings'][0]['policy_source']}}
+
+
+def revalidate_standing_skips(state: dict) -> None:
+    for key, entry in state.get('skips', {}).items():
+        if 'standing_skip' in entry:
+            if (entry['source'] != state['source'] or entry.get('input_fingerprint')
+                    != state['input_fingerprints'].get(key.split('/',1)[0])):
+                raise ValueError('standing skip input/source binding changed')
+            standing_claude_bundle(entry['standing_skip'])
 
 
 def validate_resource_skip(entry: dict, failure: dict) -> None:
@@ -1280,6 +1355,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
                 or state["input_fingerprints"] != input_fingerprints(plan, root)
                 or (expect_head is not None and state["source"]["head"] != expect_head)):
             return 5  # Same stale-source result as the existing pipeline verifier.
+        revalidate_standing_skips(state)
         for gate in plan['gates']:
             if gate['name'] in state.get('carried_passes', {}) and not carried_pass(state, gate):
                 return 5
@@ -1293,7 +1369,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "triage-quick", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "triage-quick", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip"])
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
     parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
     parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")
@@ -1350,6 +1426,10 @@ def main(argv: list[str] | None = None) -> int:
                 resolve_post_merge(state, args.occurrence, args.repair_agent)
             elif args.action == "reexecute":
                 reexecute(state, args.occurrence)
+            elif args.action == "standing-skip":
+                if args.proof is None:
+                    raise ValueError('--proof native standing-skip input required')
+                standing_skip(state, bounded_read(args.proof, 'standing skip proof'), args.root)
             elif args.action == "reconcile":
                 if args.proof is None:
                     raise ValueError("--proof cleanup proof required")
