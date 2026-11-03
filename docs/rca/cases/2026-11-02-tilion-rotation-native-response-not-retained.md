@@ -107,7 +107,7 @@ natively in 225578ms. Its live parity kept the original browser while the exit
 changed from 134.215.178.110 to 24.18.178.179, then switched to Kernel mobile
 172.56.29.219 with the existing state/ownership assertions intact. This is a
 current repaired-source result, not a retrospective pass of either failed
-aggregate. The full original coverage invocation and deployment remain pending.
+aggregate. The subsequent full original coverage invocation and deployment passed as recorded in the verified shipped outcome below.
 Golden reference: not applicable (no approval-gated hunk). At 10k agents, this
 adds no query, socket, retry, allocation or retained state: it changes the
 acknowledgement predicate on the already-issued operation.
@@ -209,3 +209,29 @@ original full invocation and deployment. The old xhigh investigation owner
 performed read-only review of the complete low-adapter plus assembler patch,
 with no blocking objection. Its scope is review, not a competing implementation.
 Historical missing raw response/IP evidence remains explicitly unrecovered.
+
+### Verified shipped outcome, 2026-11-02
+
+PR1663 merged the strict native acknowledgement repair and assembler at
+72a8bd7bf7e3a92b5717d13d617c2954bf453fca. The adapter requires rotated=true,
+an explicit boolean allocation-provenance field and the exact session ID;
+false provenance stays false. The assembler retains all same-session/context,
+logical-owner, status, control/user and before/after binding guards. Seventeen
+permanent fixture controls include a pooled-false positive through the real
+route and malformed, unacknowledged and ownership negatives. No replacement,
+extra CDP attach, restore, retry, new request flag or timeout change was added.
+
+The unchanged full backend coverage invocation on 647ae11f86f0997c838cb0f1e72f795a2e36af33
+passed natively at 23:05:27Z: 239/239 domains, 353 unit files, FPS, configured
+coverage thresholds and trailing teardown. Its live parity preserved session
+and storage while observing exit IP 104.172.54.69 -> 73.239.99.160, then the
+existing Kernel mobile path 172.56.1.14. The native first rotation recorded
+rotated=true/freshAllocation=false. This proves actual movement separately
+from allocation provenance, without inferring the original missing raw fields.
+
+Render became LIVE on exact merge72a8bd7 at23:22:33Z; production probes passed
+15/15 and workflow41545037873 passed all five semantic jobs on that merge.
+See the screenshot contract case's completed outcome for source equivalence,
+qualified unrelated gate exceptions and exact-owned cleanup. Historical c66,
+024f and first79 native failures retain their original results and raw-body/IP
+limits. This docs-only archive publication does not claim a second rollout.
