@@ -7,7 +7,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from domains.message_person.repo import read_phone_message_activity
-from domains.spawn_browser_agent_v3.handler import _stable_browser_task_id
+from domains.spawn_browser_agent_v3.handler import _logical_browser_task_id
 from tools.base import EventType, MessageStatus, ToolEvent
 from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 
@@ -47,7 +47,7 @@ async def deliver_cloud_message(workflow_instance, *, queue_id, tool_call_id, re
     )
     if (receipt.get("success") is True and receipt.get("provider") == "phone_harness"
         and receipt.get("queue_id") == queue_id
-        and receipt.get("browser_task_id") == _stable_browser_task_id(workflow_instance.agent_id, child_id)
+        and receipt.get("browser_task_id") == _logical_browser_task_id(workflow_instance.agent_id)
         and receipt.get("status") == "sent"
         and isinstance(receipt.get("sent_at"), str) and receipt["sent_at"]):
         yield ToolEvent(type=EventType.POST_MESSAGE, message="", status=MessageStatus.FINISHED,

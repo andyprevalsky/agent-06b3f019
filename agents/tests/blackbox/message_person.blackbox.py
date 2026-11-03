@@ -1899,7 +1899,7 @@ async def test_queue_phone_transport_preserved_without_mac_polling():
 async def test_cloud_message_adapter_requires_backend_sent_receipt_and_stable_binding():
     from domains.message_person import cloud_phone
     from tools.base import ToolEvent, EventType, MessageStatus
-    from domains.spawn_browser_agent_v3.handler import _stable_browser_task_id
+    from domains.spawn_browser_agent_v3.handler import _logical_browser_task_id
     class Browser:
         def __init__(self):
             self.calls = []
@@ -1907,8 +1907,8 @@ async def test_cloud_message_adapter_requires_backend_sent_receipt_and_stable_bi
             self.calls.append((args, call_id))
             yield ToolEvent(type=EventType.POST_MESSAGE, message="Synthetic model claims sent", status=MessageStatus.FINISHED, metadata={"toolName": "spawn_browser_agent", "action_type": "task_complete", "success": True})
     browser = Browser()
-    backend = {"success": True, "provider": "phone_harness", "queue_id": "queue", "status": "unknown", "sent_at": None, "browser_task_id": _stable_browser_task_id("agent-1", "original:cloud-message")}
-    fake = _FakeWFModule(activity_results={"bind_phone_message_activity": {"success": True, "provider": "phone_harness", "queue_id": "queue", "status": "approved", "browser_task_id": _stable_browser_task_id("agent-1", "original:cloud-message")}, "read_phone_message_activity": lambda: dict(backend)})
+    backend = {"success": True, "provider": "phone_harness", "queue_id": "queue", "status": "unknown", "sent_at": None, "browser_task_id": _logical_browser_task_id("agent-1")}
+    fake = _FakeWFModule(activity_results={"bind_phone_message_activity": {"success": True, "provider": "phone_harness", "queue_id": "queue", "status": "approved", "browser_task_id": _logical_browser_task_id("agent-1")}, "read_phone_message_activity": lambda: dict(backend)})
     with patch.object(cloud_phone, "workflow", fake), patch.object(cloud_phone, "get_browser_manager", lambda: browser):
         for status in ("unknown", "sent"):
             backend["status"] = status
@@ -2019,7 +2019,7 @@ async def test_cloud_receipt_requires_explicit_success_and_exact_bound_task():
     from domains.message_person.repo import read_phone_message_activity
     from domains.message_person import cloud_phone
     from tools.base import EventType, MessageStatus, ToolEvent
-    from domains.spawn_browser_agent_v3.handler import _stable_browser_task_id
+    from domains.spawn_browser_agent_v3.handler import _logical_browser_task_id
     setup_mock_fn(lambda request: httpx.Response(200, json={"provider": "phone_harness", "status": "sent", "sent_at": "2026-10-19T00:00:00Z"}))
     try:
         result = await read_phone_message_activity("user", "agent", "queue")
