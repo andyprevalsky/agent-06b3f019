@@ -30,7 +30,7 @@ import {
   FinalPresentationSchema,
   validateFinalPresentation,
   type FinalPresentation,
-} from '../domains/agents/finalPresentation';
+} from './finalPresentation';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import {

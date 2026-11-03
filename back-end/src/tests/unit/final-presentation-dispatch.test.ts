@@ -20,7 +20,7 @@ let delivery: Record<string, unknown> = { success: true };
 let lastAnswer: unknown;
 const noop = () => {};
 const stubs: Record<string, unknown> = {
-  '../agents/finalPresentation': { completionAnswerText },
+  '../../providers/finalPresentation': { completionAnswerText },
   '../../providers/smsQueue': {},
   '../../providers/logger': { createLogger: () => ({ info: noop, warn: noop, error: noop }) },
   '../../providers/toolSideEffects': {

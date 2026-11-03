@@ -1,4 +1,4 @@
-import { completionAnswerText } from '../agents/finalPresentation';
+import { completionAnswerText } from '../../providers/finalPresentation';
 import { sendSms, getUserPhone } from '../../providers/smsQueue';
 import { createLogger } from '../../providers/logger';
 import {
