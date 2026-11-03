@@ -387,6 +387,7 @@ GATES = (
         ("bash", "scripts/tests/agent-surface-hash.test.sh"),
     ),
     Gate("factory-metadata", ("python3", "scripts/tests/factory-metadata.test.py")),
+    Gate("predeploy-receipts", ("python3", "scripts/tests/predeploy-receipts.test.py")),
     Gate("final-review-script-regressions", ("python3", "scripts/tests/final-review-script-regressions.test.py")),
     Gate("factory-review", ("python3", "scripts/tests/factory-review.test.py")),
     Gate("biz-review", ("python3", "scripts/biz_review.py", "self-test")),
