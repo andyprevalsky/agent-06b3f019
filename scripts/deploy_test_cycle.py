@@ -70,16 +70,39 @@ def exclusive(directory: Path):
         yield
 
 
+def index_gitlinks(root: Path) -> dict[bytes, bytes]:
+    """Read gitlink OIDs without descending into initialized submodule directories."""
+    output = subprocess.run(["git", "ls-files", "--stage", "-z"], cwd=root,
+                            check=True, capture_output=True).stdout
+    links, seen = {}, set()
+    for record in output.split(b"\0"):
+        if not record:
+            continue
+        metadata, path = record.split(b"\t", 1)
+        mode, oid, stage = metadata.split()
+        if stage != b"0" or path in seen:
+            raise ValueError("source identity requires an unambiguous merged index")
+        seen.add(path)
+        if mode == b"160000":
+            links[path] = oid
+    return links
+
+
 def source(root: Path) -> dict:
     def git(*args: str) -> bytes:
         return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True).stdout
     sha = git("rev-parse", "HEAD").decode().strip()
     # Include untracked/non-ignored files; state/logs must live in ignored .context.
     paths = git("ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")
+    links = index_gitlinks(root)
     h = hashlib.sha256(sha.encode())
     for raw in sorted(set(paths) - {b""}):
         if raw.startswith(b"agents/benchmarks/history/"):
             continue  # Same output-ledger exclusion as run_deploy_pipeline.source_digest.
+        if raw in links:
+            h.update(raw + b"\0GITLINK\0" + links[raw] + b"\0")
+            h.update(str(0o160000).encode())
+            continue
         path = root / os.fsdecode(raw)
         if not path.exists() and not path.is_symlink():
             data = b"DELETED"
@@ -107,18 +130,21 @@ def environment_digest() -> str:
 def input_fingerprints(plan: dict, root: Path) -> dict:
     paths = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                            cwd=root, check=True, capture_output=True).stdout.split(b"\0")
+    links = index_gitlinks(root)
     files = {}
     for raw in set(paths) - {b""}:
         if raw.startswith(b"agents/benchmarks/history/"):
             continue
         path = root / os.fsdecode(raw)
-        if path.is_symlink():
+        if raw in links:
+            content = b"GITLINK\0" + links[raw]
+        elif path.is_symlink():
             content = os.fsencode(os.readlink(path))
         elif path.exists():
             content = path.read_bytes()
         else:
             content = b"DELETED"
-        mode = source_mode(path) if path.exists() or path.is_symlink() else None
+        mode = 0o160000 if raw in links else source_mode(path) if path.exists() or path.is_symlink() else None
         files[os.fsdecode(raw)] = digest([hashlib.sha256(content).hexdigest(), mode])
     # Runtime configuration is an input even when Git ignores its secrets and
     # the gate narrows its source globs. Never let source selection hide it.
@@ -569,6 +595,174 @@ def adjudicate(state: dict, report: dict) -> None:
         state["ready"] = state["phase"] == "ready"
 
 
+def latest_receipts(state: dict) -> dict:
+    """Most recent recorded result per gate, in attempt order (source receipts stay immutable)."""
+    latest = {}
+    for attempt in state.get("attempts", []):
+        for result in attempt.get("results", []):
+            latest[result["gate"]] = result
+    return latest
+
+
+OWNER_IDENTITY = ("worker_thread", "worker_host", "worker_root", "turn_id")
+OWNER_FIELDS = OWNER_IDENTITY + ("request_token", "message_id", "remote_dir", "pgid")
+RECONCILE_EXCLUSIVE = ("repair_agent", "external_provider", "post_merge", "execute_unverified", "assigned_repair", "resource_skip")
+RESULT_BEGIN, RESULT_END = "DEPLOY_GATE_RESULT_JSON_BEGIN", "DEPLOY_GATE_RESULT_JSON_END"
+
+
+def sha_file(path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _finite(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def bounded_read(path, label: str) -> dict:
+    """Read a receipt/adapter/proof JSON object within MAX_RECEIPT_BYTES; anything else is a clear refusal."""
+    path = Path(path)
+    try:
+        if path.stat().st_size > MAX_RECEIPT_BYTES:
+            raise ValueError("exceeds the receipt transport limit")
+        return read(path)
+    except (OSError, ValueError) as error:
+        raise ValueError(f"{label}: {path} is missing, oversize or not a JSON object ({error})")
+
+
+def receipt_owner(gate: str, receipt: dict):
+    """Owner retained by a gate's latest receipt. New receipts carry it directly; a legacy incomplete
+    receipt without one is resolved from its recorded adapter result, identity-checked, failing closed."""
+    if receipt.get("lingering_group") or receipt.get("cleanup_owner"):
+        owner = receipt.get("cleanup_owner") or {}
+        return owner.get("worker_cleanup_owner") if isinstance(owner.get("worker_cleanup_owner"), dict) else (owner or {"lingering": True})
+    if receipt.get("complete") is not False or not receipt.get("worker_result"):
+        return None  # complete, or no adapter result was ever recorded: nothing to resolve
+    if not isinstance(receipt, dict):
+        raise ValueError(f"{gate}: recorded receipt is not an object; owner unknown, refuse launch")
+    try:
+        adapter = bounded_read(receipt["worker_result"], f"{gate}: legacy adapter result")
+    except ValueError as error:
+        raise ValueError(f"{error}; owner unknown, refuse launch")
+    if any(adapter.get(k) != receipt.get(k) for k in ("token", "source", "gate")):
+        raise ValueError(f"{gate}: legacy adapter result identity mismatch (token/source/gate); owner unknown, refuse launch")
+    owner = adapter.get("cleanup_owner")
+    if owner is None:
+        return None  # the adapter recorded no owner at all: the only legacy "unowned" case
+    if not isinstance(owner, dict) or not all(isinstance(owner.get(k), str) and owner[k] for k in OWNER_IDENTITY):
+        raise ValueError(f"{gate}: adapter cleanup owner identity incomplete; refuse launch")
+    return owner
+
+
+def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
+    """A reconciliation is valid only for the exact receipt bytes, token, adapter bytes and owner (re-hashed now)."""
+    log = receipt.get("log")
+    if not log or not isinstance(owner, dict):
+        return False
+    try:
+        entry = state.get("reconciled_owners", {}).get(sha_file(Path(log).parent / "receipt.json"))
+        return bool(entry) and entry.get("token") == receipt.get("token") and receipt.get("worker_result") \
+            and entry.get("worker_result_sha256") == sha_file(receipt["worker_result"]) \
+            and entry.get("owner") == {k: owner.get(k) for k in OWNER_FIELDS}
+    except OSError:
+        return False
+
+
+def retained_owners(state: dict, gates) -> list[str]:
+    latest = latest_receipts(state)
+    owned = []
+    for gate in gates:
+        receipt = latest.get(gate)
+        if not receipt:
+            continue
+        owner = receipt_owner(gate, receipt)
+        if owner and not _reconciled(state, receipt, owner):
+            owned.append(gate)
+    return sorted(owned)
+
+
+def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
+    """Typed, receipt-backed cleanup reconciliation for a boxes-thread owner: clears the owner for launch
+    purposes only. Original receipt, adapter result, cases and outcome stay immutable; no test credit."""
+    if not isinstance(proof, dict) or any(k in proof for k in RECONCILE_EXCLUSIVE):
+        raise ValueError("reconcile input is a cleanup proof only; waivers, links, packets and flags are refused")
+    required = ("receipt_sha256", "worker_result_sha256", "request_token", "owner", "platform_result", "native_audit",
+                "process", "confirmed_at", "observed_by")
+    if any(k not in proof for k in required) or not isinstance(proof.get("observed_by"), str) or not proof["observed_by"].strip():
+        raise ValueError("reconcile proof is missing a required field")
+    failure = next((f for f in state["failures"] if f["id"] == occurrence_id), None)
+    if failure is None:
+        raise ValueError("unknown occurrence")
+    gate, case = failure["gate"], failure["check"].split("/", 1)[1]
+    receipt = latest_receipts(state).get(gate)
+    if (not receipt or receipt.get("complete") is not False or receipt.get("cases", {}).get(case) != "UNVERIFIED"
+            or failure.get("native_result") != "UNVERIFIED" or failure.get("complete")):
+        raise ValueError(f"{gate}: occurrence is not the gate's latest incomplete UNVERIFIED receipt")
+    owner = receipt_owner(gate, receipt)
+    if not isinstance(owner, dict) or not all(isinstance(owner.get(k), str) and owner[k] for k in OWNER_IDENTITY):
+        raise ValueError(f"{gate}: no retained boxes-thread owner to reconcile (reconcile supports boxes-thread owners only)")
+    receipt_path = Path(receipt.get("log", "")).parent / "receipt.json"
+    adapter_path = Path(receipt.get("worker_result") or "")
+    try:
+        on_disk, adapter = bounded_read(receipt_path, "coordinator receipt"), bounded_read(adapter_path, "adapter result")
+        platform, audit, process = (bounded_read(proof[k]["path"], k) for k in ("platform_result", "native_audit", "process"))
+        receipt_sha, adapter_sha = sha_file(receipt_path), sha_file(adapter_path)
+        platform_sha, audit_sha, process_sha = (sha_file(proof[k]["path"]) for k in ("platform_result", "native_audit", "process"))
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        raise ValueError(f"reconcile proof file unreadable: {error}")
+    token = receipt.get("token")
+    if on_disk != receipt:
+        raise ValueError("on-disk coordinator receipt differs from the recorded receipt for this occurrence")
+    if (proof["receipt_sha256"] != receipt_sha or proof["worker_result_sha256"] != adapter_sha
+            or proof["request_token"] != token or adapter.get("token") != token
+            or adapter.get("source") != receipt.get("source") or adapter.get("gate") != gate):
+        raise ValueError("reconcile proof does not bind the exact receipt/adapter bytes and request token")
+    if (not isinstance(proof["owner"], dict) or {k: proof["owner"].get(k) for k in OWNER_FIELDS} != {k: owner.get(k) for k in OWNER_FIELDS}
+            or owner.get("request_token") != token):
+        raise ValueError("reconcile proof owner differs from the adapter cleanup owner (all fields, request token)")
+    if proof["platform_result"].get("sha256") != platform_sha or proof["native_audit"].get("sha256") != audit_sha \
+            or proof["process"].get("sha256") != process_sha:
+        raise ValueError("reconcile proof file hashes do not match the files on disk")
+    data = platform.get("data") if isinstance(platform.get("data"), dict) else {}
+    text = (data.get("output") or {}).get("text") if isinstance(data.get("output"), dict) else None
+    completed = data.get("completedAt")
+    if (platform.get("ok") is not True or data.get("status") != "completed" or data.get("executionInstanceId") != owner["worker_host"]
+            or data.get("turnId") != owner["turn_id"] or not _finite(completed) or not isinstance(text, str)):
+        raise ValueError("platform result is not a completed same-turn terminal result for the owner's host and turn")
+    lines = text.split("\n")
+    if (f"DEPLOY_GATE_RESULT_SHA256 {audit_sha}" not in lines or RESULT_BEGIN not in lines or RESULT_END not in lines
+            or lines.index(RESULT_BEGIN) >= lines.index(RESULT_END)):
+        raise ValueError("platform text does not carry the native audit sha marker and embedded result")
+    try:
+        embedded = json.loads("\n".join(lines[lines.index(RESULT_BEGIN) + 1:lines.index(RESULT_END)]))
+    except ValueError:
+        raise ValueError("embedded platform result is not valid JSON")
+    if embedded != audit:
+        raise ValueError("embedded platform result is not identical to the native audit object")
+    if (audit.get("token") != token or audit.get("source") != receipt.get("source") or audit.get("gate") != gate
+            or audit.get("worker_root") != owner["worker_root"] or audit.get("complete") is not True
+            or audit.get("cleanup_complete") is not True or not isinstance(audit.get("evidence"), dict)
+            or any(not isinstance(e, dict) or e.get("timed_out") is not False or e.get("cancelled") is not False
+                   or e.get("lingering_group") is not False for e in audit["evidence"].values())):
+        raise ValueError("native audit is not a clean, complete, cleanup-complete same-token result")
+    if (process.get("quiescent") is not True or process.get("orphaned_children") is not False or process.get("remaining") != []
+            or process.get("cancelled") is not False or process.get("timed_out") is not False or process.get("error") is not None):
+        raise ValueError("process sidecar does not prove a quiescent, fully reaped worker")
+    finished = receipt.get("finished_at")
+    if (not _finite(proof["confirmed_at"]) or not _finite(finished) or proof["confirmed_at"] < finished
+            or proof["confirmed_at"] < completed / 1000):
+        raise ValueError("confirmed_at must be finite and after both the receipt and the platform completion")
+    existing = [k for k, e in state.get("reconciled_owners", {}).items() if e.get("token") == token and k != receipt_sha]
+    if existing:
+        raise ValueError("a reconciliation for this token already binds a different receipt")
+    state.setdefault("reconciled_owners", {})[receipt_sha] = {
+        "occurrence": occurrence_id, "gate": gate, "token": token, "owner": {k: owner.get(k) for k in OWNER_FIELDS},
+        "worker_result_sha256": adapter_sha, "native_audit_sha256": audit_sha, "platform_turn_id": data["turnId"],
+        "proof": {"platform_result": {"path": proof["platform_result"]["path"], "sha256": platform_sha},
+                  "native_audit": {"path": proof["native_audit"]["path"], "sha256": audit_sha},
+                  "process": {"path": proof["process"]["path"], "sha256": process_sha}},
+        "confirmed_at": proof["confirmed_at"], "observed_by": proof["observed_by"], "credit_granted": False}
+
+
 def reexecute(state: dict, occurrence_id: str) -> None:
     """Observation loss only: an incomplete UNVERIFIED occurrence re-runs its bound gate unchanged.
 
@@ -585,6 +779,9 @@ def reexecute(state: dict, occurrence_id: str) -> None:
     if failure.get("native_result") != "UNVERIFIED" or failure.get("complete"):
         raise ValueError("only an incomplete UNVERIFIED occurrence (coordinator/observation loss) can be "
                          "re-executed; a completed or failed test needs /RCA attribution")
+    if retained_owners(state, [failure["gate"]]):
+        raise ValueError(f"{failure['gate']}: its source receipt still carries a remote/native cleanup owner; "
+                         "reconcile that owner before re-executing (finding 4450239861)")
     failure["disposition"] = "execution required"
     failure["reexecution"] = {"reason": "observation loss; re-executing unchanged gate", "at": time.time(),
                               "native_result": failure["native_result"]}
@@ -670,6 +867,11 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
             or input_fingerprints(plan, root) != state["input_fingerprints"]):
         raise ValueError("source/plan changed; refresh after RCA before running")
     selected = records(plan, state)
+    owned = retained_owners(state, [g["name"] for g in selected])
+    if owned:
+        # Universal launch guard: a gate whose latest receipt still owns remote/native cleanup is
+        # never relaunched on the same worker until that owner is reconciled (finding 4450239861).
+        raise ValueError("gates still own unreconciled cleanup; refuse launch: " + ", ".join(owned))
     state["round"] += 1
     state["live_failures"] = []
     results = []
@@ -827,7 +1029,8 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rca", "verify", "report", "resolve", "complete", "reexecute"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile"])
+    parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
     parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
     parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")
     parser.add_argument("--require-resolved", action="store_true",
@@ -880,6 +1083,10 @@ def main(argv: list[str] | None = None) -> int:
                 resolve_post_merge(state, args.occurrence, args.repair_agent)
             elif args.action == "reexecute":
                 reexecute(state, args.occurrence)
+            elif args.action == "reconcile":
+                if args.proof is None:
+                    raise ValueError("--proof cleanup proof required")
+                reconcile(state, args.occurrence, read(args.proof))
             elif args.action == "complete":
                 # Post-merge completion (Step 12a / before the final scorecard): every packet dispatched and resolved.
                 blocked = pending_completion_block(state)

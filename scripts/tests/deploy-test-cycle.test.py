@@ -706,6 +706,232 @@ class Cycle(unittest.TestCase):
                 self.assertEqual(before, self.state)
         self.assertEqual('triage', self.state['phase'])
 
+    def test_retained_remote_owner_blocks_reexecute_and_any_relaunch_of_that_gate(self):
+        # CodeRabbit 4450239861: an owned/timeout receipt must not be relaunched via triage -> reexecute -> focus -> run.
+        self.state['phase'] = 'initial'
+        owner = {'request_token': 'tok-prev', 'worker_cleanup_owner': {'worker_thread': 'ph-worker', 'worker_root': '/prepared/root',
+                 'turn_id': 'turn-7', 'pgid': 4242}}
+        owned = {**self.result(a='UNVERIFIED', b='PASS'), 'complete': False, 'case_complete': {'a': False, 'b': True},
+                 'lingering_group': True, 'cleanup_owner': owner, 'reason': 'worker reported a retained remote cleanup owner'}
+        c.advance(self.state, [owned, self.result('ui', c='PASS')])
+        occurrence = self.state['failures'][-1]
+        self.assertEqual(('triage', 'UNVERIFIED', False), (self.state['phase'], occurrence['native_result'], occurrence['complete']))
+        with self.assertRaisesRegex(ValueError, 'cleanup owner|reconcil'):
+            c.reexecute(self.state, occurrence['id'])
+        self.assertEqual('triage', self.state['phase'])
+        # even if the state is driven to a focused run of that gate, launch is refused before any dispatch
+        forced = copy.deepcopy(self.state)
+        forced.update(phase='focused', repair_gates=['api'], focused={'api': {'command': ['true'], 'checks': ['a']}})
+        forced.pop('pending', None)
+        with patch.object(c, 'execute') as launcher, self.assertRaisesRegex(ValueError, 'api'):
+            c.run_phase(self.plan, forced, self.directory, self.root)
+        launcher.assert_not_called()
+        self.assertEqual(0, forced['round'])
+        # a gate whose latest receipt is clean still launches (ui) once the owned gate is not selected
+        clean = copy.deepcopy(self.state)
+        clean.update(phase='focused', repair_gates=['ui'], focused={'ui': {'command': ['true'], 'checks': ['c']}})
+        clean.pop('pending', None)
+        with patch.object(c, 'execute', return_value={**self.result('ui', c='PASS'), 'gate': 'ui'}) as launcher:
+            c.run_phase(self.plan, clean, self.directory, self.root)
+        launcher.assert_called_once()
+
+    def recon_state(self):
+        """Self-contained synthetic producer shapes (coordinator receipt, boxes-thread adapter result with
+        transport_receipt + cleanup_owner, same-turn platform result, native audit, process sidecar, audit
+        record) with fake identities; every hash and marker is computed from the bytes written here."""
+        import hashlib
+        gate_name, token = 'cloudbench-controller', 'f' * 32
+        source = {'head': 'a' * 40, 'digest': 'b' * 64}
+        owner = {'worker_thread': 'ph-fake-worker', 'worker_host': 'fake-devbox-uuid', 'worker_root': '/fake/worker/root',
+                 'request_token': token, 'message_id': 'fake-message-id', 'turn_id': 'fake-turn-id',
+                 'remote_dir': f'/fake/worker/root/.context/deploy-boxes/{token}', 'pgid': None}
+        folder = self.directory / 'attempts/0/initial' / gate_name; folder.mkdir(parents=True, exist_ok=True)
+        paths = {k: folder / n for k, n in (('receipt', 'receipt.json'), ('adapter', 'result.json'), ('platform', 'platform.json'),
+                                             ('audit', 'native-audit.json'), ('process', 'process.json'), ('record', 'audit-record.json'))}
+        audit = {'token': token, 'source': source, 'gate': gate_name, 'cases': {gate_name: 'PASS'}, 'complete': True, 'reused': False,
+                 'evidence': {gate_name: {'status': 'PASS', 'native_exit': 0, 'command': ['bash', 'scripts/run-cloudbench-controller-gate'],
+                                          'started_at': 1793664491.1, 'finished_at': 1793665704.5, 'timed_out': False, 'cancelled': False,
+                                          'lingering_group': False, 'log': '/fake/worker/root/.context/x.log', 'sha256': 'e' * 64, 'tail': 'ok'}},
+                 'recipe_digest': 'd' * 64, 'cleanup_complete': True, 'worker_root': owner['worker_root']}
+        audit_text = json.dumps(audit, indent=2) + '\n'; paths['audit'].write_text(audit_text)
+        audit_sha = hashlib.sha256(audit_text.encode()).hexdigest()
+        platform = {'schemaVersion': 1, 'ok': True, 'data': {'completedAt': 1793665720934, 'executionInstanceId': owner['worker_host'],
+                    'failure': None, 'output': {'text': 'DEPLOY_GATE_WORKER_PGID 1\nDEPLOY_GATE_WORKER_EXIT 0\n'
+                    f'DEPLOY_GATE_RESULT_SHA256 {audit_sha}\nDEPLOY_GATE_RESULT_JSON_BEGIN\n{audit_text}DEPLOY_GATE_RESULT_JSON_END\n'},
+                    'status': 'completed', 'turnId': owner['turn_id']}}
+        c.write(paths['platform'], platform)
+        c.write(paths['process'], {'supervisor_pid': 1, 'child_pid': 2, 'native_exit': 0, 'cancelled': False, 'timed_out': False,
+                                   'quiescent': True, 'orphaned_children': False, 'reaped': [{'pid': 2, 'status': 0}], 'term_sent': [],
+                                   'kill_sent': [], 'remaining': [], 'error': None})
+        c.write(paths['adapter'], {'token': token, 'source': source, 'gate': gate_name, 'cases': {gate_name: 'UNVERIFIED'}, 'complete': False,
+                                   'cleanup_complete': False, 'reused': False, 'evidence': {}, 'reason': 'threads wait exited 2', 'worker_stderr': '',
+                                   'transport_receipt': {'transport': 'boxes-thread', **{k: owner[k] for k in ('worker_thread', 'worker_host', 'worker_root')},
+                                                         'request_token': token, 'idempotency_key': token, 'message_id': owner['message_id'],
+                                                         'turn_id': owner['turn_id'], 'native_sha256': None}, 'cleanup_owner': dict(owner)})
+        receipt = {'gate': gate_name, 'status': 'FAIL', 'cases': {gate_name: 'UNVERIFIED'}, 'native_exit': 1, 'executed': True, 'complete': False,
+                   'reason': 'worker result identity/inventory mismatch', 'timed_out': False, 'case_complete': {gate_name: False}, 'cancelled': False,
+                   'lingering_group': False, 'source': source, 'started_at': 1793664471.6, 'finished_at': 1793664913.25,
+                   'command': ['bash', 'scripts/run-cloudbench-controller-gate'], 'log': str(folder / 'output.log'),
+                   'stderr_log': str(folder / 'stderr.log'), 'token': token, 'lifecycle': 'owned', 'native_cleanup_reference': None,
+                   'worker_evidence': {}, 'worker_result': str(paths['adapter'])}
+        c.write(paths['receipt'], receipt)  # the producer writes the exact recorded receipt to disk
+        c.write(paths['record'], {'observed_at': 1793667622.4, 'original_outer_result': 'UNVERIFIED', 'original_complete': False,
+                                  'credit_granted': False, 'files': {'native-audit.json': {'sha256': audit_sha}}})
+        gate = {'name': gate_name, 'worker': 'cb-worker', 'checks': [gate_name], 'command': receipt['command'],
+                'case_protocol': True, 'worker_transport': 'boxes-thread', 'cwd': '.'}
+        plan = {**self.plan, 'gates': [*self.plan['gates'], gate]}
+        state = {**copy.deepcopy(self.state), 'plan': plan, 'plan_digest': c.digest(plan), 'phase': 'initial', 'source': source,
+                 'input_fingerprints': {**self.state['input_fingerprints'], gate_name: 'fp'}}
+        c.advance(state, [receipt])
+        occurrence = state['failures'][-1]
+        self.assertEqual(('triage', 'UNVERIFIED', False), (state['phase'], occurrence['native_result'], occurrence['complete']))
+        shas = {k: hashlib.sha256(v.read_bytes()).hexdigest() for k, v in paths.items()}
+        proof = {'receipt_sha256': shas['receipt'], 'worker_result_sha256': shas['adapter'], 'request_token': token, 'owner': dict(owner),
+                 'platform_result': {'path': str(paths['platform']), 'sha256': shas['platform']},
+                 'native_audit': {'path': str(paths['audit']), 'sha256': shas['audit']},
+                 'process': {'path': str(paths['process']), 'sha256': shas['process']},
+                 'confirmed_at': 1793667622.0, 'observed_by': 'ph-fake-coordinator'}
+        return state, plan, gate, occurrence, paths, shas, proof
+
+    def test_legacy_adapter_owner_is_detected_identity_checked_and_blocks_launch(self):
+        state, plan, gate, occurrence, paths, shas, proof = self.recon_state()
+        self.assertEqual(['cloudbench-controller'], c.retained_owners(state, ['cloudbench-controller']))
+        with self.assertRaisesRegex(ValueError, 'cleanup owner'):
+            c.reexecute(state, occurrence['id'])
+        forced = copy.deepcopy(state); forced.update(phase='focused', repair_gates=['cloudbench-controller'],
+                                                    focused={'cloudbench-controller': {'command': gate['command'], 'checks': ['cloudbench-controller']}})
+        forced.pop('pending', None)
+        with patch.object(c, 'source', return_value=state['source']), patch.object(c, 'input_fingerprints', return_value=state['input_fingerprints']), \
+             patch.object(c, 'environment_digest', return_value=state['environment']), \
+             patch.object(c, 'execute') as launcher, self.assertRaisesRegex(ValueError, 'cloudbench-controller'):
+            c.run_phase(plan, forced, self.directory, self.root)
+        launcher.assert_not_called(); self.assertEqual(0, forced['round'])
+        # identity mismatch or a missing adapter file is a loud error, never silent admission or ignoring
+        mismatched = copy.deepcopy(state); bad = self.directory / 'bad-adapter.json'
+        bad.write_text(json.dumps({**json.loads(paths['adapter'].read_text()), 'token': 'other-token'}))
+        mismatched['attempts'][-1]['results'][0]['worker_result'] = str(bad)
+        with self.assertRaisesRegex(ValueError, 'cloudbench-controller.*identity'):
+            c.retained_owners(mismatched, ['cloudbench-controller'])
+        missing = copy.deepcopy(state); missing['attempts'][-1]['results'][0]['worker_result'] = str(self.directory / 'nope.json')
+        with self.assertRaisesRegex(ValueError, 'cloudbench-controller'):
+            c.retained_owners(missing, ['cloudbench-controller'])
+        # a present-but-partial owner identity is never "unowned": loud error, zero launches
+        for missing_field in ('worker_thread', 'worker_host', 'worker_root', 'turn_id'):
+            with self.subTest(missing_field=missing_field):
+                partial = copy.deepcopy(state); doc = json.loads(paths['adapter'].read_text())
+                doc['cleanup_owner'] = {k: v for k, v in doc['cleanup_owner'].items() if k != missing_field}
+                path = self.directory / f'partial-{missing_field}.json'; path.write_text(json.dumps(doc))
+                partial['attempts'][-1]['results'][0]['worker_result'] = str(path)
+                with self.assertRaisesRegex(ValueError, 'cloudbench-controller: adapter cleanup owner identity incomplete'):
+                    c.retained_owners(partial, ['cloudbench-controller'])
+                partial.update(phase='focused', repair_gates=['cloudbench-controller'],
+                               focused={'cloudbench-controller': {'command': gate['command'], 'checks': ['cloudbench-controller']}})
+                partial.pop('pending', None)
+                with patch.object(c, 'source', return_value=state['source']), patch.object(c, 'input_fingerprints', return_value=state['input_fingerprints']), \
+                     patch.object(c, 'environment_digest', return_value=state['environment']), \
+                     patch.object(c, 'execute') as launcher, self.assertRaisesRegex(ValueError, 'identity incomplete'):
+                    c.run_phase(plan, partial, self.directory, self.root)
+                launcher.assert_not_called()
+        # an adapter result with no cleanup_owner key at all is the only legacy unowned case
+        unowned = copy.deepcopy(state); doc = json.loads(paths['adapter'].read_text()); doc.pop('cleanup_owner')
+        path = self.directory / 'unowned.json'; path.write_text(json.dumps(doc))
+        unowned['attempts'][-1]['results'][0]['worker_result'] = str(path)
+        self.assertEqual([], c.retained_owners(unowned, ['cloudbench-controller']))
+
+    def test_actual_reconciliation_proof_unblocks_fresh_reexecution_without_credit(self):
+        state, plan, gate, occurrence, paths, shas, proof = self.recon_state()
+        before_results = copy.deepcopy(state['attempts'])
+        c.reconcile(state, occurrence['id'], proof)
+        entry = state['reconciled_owners'][shas['receipt']]
+        self.assertEqual((occurrence['id'], 'cloudbench-controller', proof['request_token'], shas['adapter'], shas['audit'], proof['owner']['turn_id']),
+                         (entry['occurrence'], entry['gate'], entry['token'], entry['worker_result_sha256'], entry['native_audit_sha256'], entry['platform_turn_id']))
+        self.assertEqual([], c.retained_owners(state, ['cloudbench-controller']))
+        c.reexecute(state, occurrence['id'])
+        self.assertEqual('needs-focused-plan', state['phase'])
+        c.focused_plan(state, plan, {'source': state['source'], 'gates': {'cloudbench-controller': {'command': gate['command'], 'checks': ['cloudbench-controller']}}})
+        with patch.object(c, 'source', return_value=state['source']), patch.object(c, 'input_fingerprints', return_value=state['input_fingerprints']), \
+             patch.object(c, 'environment_digest', return_value=state['environment']), \
+             patch.object(c, 'execute', return_value={'gate': 'cloudbench-controller', 'status': 'PASS', 'cases': {'cloudbench-controller': 'PASS'},
+                                                      'complete': True, 'source': state['source'], 'command': gate['command'], 'log': 'x', 'native_exit': 0}) as launcher:
+            c.run_phase(plan, state, self.directory, self.root)
+        launcher.assert_called_once(); self.assertEqual(gate['command'], launcher.call_args.args[0]['command'])
+        import hashlib
+        self.assertEqual(shas, {k: hashlib.sha256(v.read_bytes()).hexdigest() for k, v in paths.items()})  # fixture files untouched
+        self.assertEqual(before_results, state['attempts'][:1])  # the original outcome is immutable
+        self.assertEqual('UNVERIFIED', state['attempts'][0]['results'][0]['cases']['cloudbench-controller'])
+        # a newer receipt with a fresh owner re-blocks despite the earlier reconciliation
+        state['attempts'].append({'phase': 'focused', 'results': [{'gate': 'cloudbench-controller', 'status': 'FAIL', 'complete': False,
+                                  'cases': {'cloudbench-controller': 'UNVERIFIED'}, 'token': 'tok-new', 'lingering_group': True,
+                                  'cleanup_owner': {'request_token': 'tok-new', 'worker_cleanup_owner': {'worker_thread': 'ph7dr8sexrfwqqprpv6m6m0byd8heees', 'turn_id': 'turn-new'}},
+                                  'source': state['source'], 'log': 'y'}]})
+        self.assertEqual(['cloudbench-controller'], c.retained_owners(state, ['cloudbench-controller']))
+
+    def test_reconciliation_refusals_are_atomic(self):
+        state, plan, gate, occurrence, paths, shas, proof = self.recon_state()
+        before = copy.deepcopy(state)
+        def altered(key, **changes):
+            doc = json.loads(paths[key].read_text()); doc.update(changes)
+            path = self.directory / f'altered-{key}.json'; path.write_text(json.dumps(doc)); return str(path)
+        variants = {
+            'wrong token': {**proof, 'request_token': 'other'},
+            'owner field': {**proof, 'owner': {**proof['owner'], 'turn_id': 'turn-x'}},
+            'receipt sha': {**proof, 'receipt_sha256': 'a' * 64},
+            'adapter sha': {**proof, 'worker_result_sha256': 'a' * 64},
+            'platform sha': {**proof, 'platform_result': {**proof['platform_result'], 'sha256': 'a' * 64}},
+            'audit sha': {**proof, 'native_audit': {**proof['native_audit'], 'sha256': 'a' * 64}},
+            'process sha': {**proof, 'process': {**proof['process'], 'sha256': 'a' * 64}},
+            'platform host': {**proof, 'platform_result': {'path': altered('platform', data={**json.loads(paths['platform'].read_text())['data'], 'executionInstanceId': 'other'}), 'sha256': None}},
+            'platform not completed': {**proof, 'platform_result': {'path': altered('platform', data={**json.loads(paths['platform'].read_text())['data'], 'status': 'running'}), 'sha256': None}},
+            'audit not clean': {**proof, 'native_audit': {'path': altered('audit', cleanup_complete=False), 'sha256': None}},
+            'process not quiescent': {**proof, 'process': {'path': altered('process', quiescent=False), 'sha256': None}},
+            'process remaining': {**proof, 'process': {'path': altered('process', remaining=[1]), 'sha256': None}},
+            'early confirmation': {**proof, 'confirmed_at': 1793664000.0},
+            'non-finite confirmation': {**proof, 'confirmed_at': float('inf')},
+            'missing observer': {**proof, 'observed_by': ''},
+            'missing field': {k: v for k, v in proof.items() if k != 'process'},
+            'missing proof file': {**proof, 'process': {'path': str(self.directory / 'nope.json'), 'sha256': shas['process']}},
+            'with link': {**proof, 'repair_agent': 'https://boxes.dev/thread/thr_x'},
+            'with resource flag': {**proof, 'resource_skip': {}},
+            'with assigned flag': {**proof, 'assigned_repair': True},
+            'wrong pgid': {**proof, 'owner': {**proof['owner'], 'pgid': 7}},
+            'wrong message_id': {**proof, 'owner': {**proof['owner'], 'message_id': 'other'}},
+            'wrong owner request_token': {**proof, 'owner': {**proof['owner'], 'request_token': 'other'}},
+            'modified embedded evidence': {**proof, 'platform_result': {'path': altered('platform', data={**json.loads(paths['platform'].read_text())['data'],
+                'output': {'text': json.loads(paths['platform'].read_text())['data']['output']['text'].replace('"tail": "ok"', '"tail": "edited"')}}), 'sha256': None}},
+        }
+        import hashlib
+        for label, variant in variants.items():
+            with self.subTest(variant=label):
+                for key in ('platform_result', 'native_audit', 'process'):
+                    if variant.get(key, {}).get('sha256') is None and isinstance(variant.get(key), dict):
+                        variant[key]['sha256'] = hashlib.sha256(Path(variant[key]['path']).read_bytes()).hexdigest()
+                with self.assertRaises(ValueError):
+                    c.reconcile(state, occurrence['id'], variant)
+                self.assertEqual(before, state)
+        with self.assertRaises(ValueError):  # unknown occurrence
+            c.reconcile(state, 'no-such-id', proof)
+        self.assertEqual(before, state)
+        # an unrelated same-token receipt on disk (different cases/identity) is refused; the recorded receipt is the binding
+        unrelated = copy.deepcopy(json.loads(paths['receipt'].read_text())); unrelated['cases'] = {'cloudbench-controller': 'FAIL'}
+        paths['receipt'].chmod(0o600); original_bytes = paths['receipt'].read_bytes(); c.write(paths['receipt'], unrelated)
+        import hashlib
+        with self.assertRaisesRegex(ValueError, 'differs from the recorded receipt|exact receipt'):
+            c.reconcile(state, occurrence['id'], {**proof, 'receipt_sha256': hashlib.sha256(paths['receipt'].read_bytes()).hexdigest()})
+        self.assertEqual(before, state); paths['receipt'].write_bytes(original_bytes)
+        # malformed (non-object) or oversize adapter JSON fails closed in the legacy path
+        for label, body in (('non-object', '[1, 2]'), ('oversize', '{"pad": "' + 'x' * (c.MAX_RECEIPT_BYTES + 1) + '"}')):
+            with self.subTest(legacy=label):
+                bad = self.directory / f'legacy-{label}.json'; bad.write_text(body)
+                broken = copy.deepcopy(state); broken['attempts'][-1]['results'][0]['worker_result'] = str(bad)
+                with self.assertRaisesRegex(ValueError, 'cloudbench-controller'):
+                    c.retained_owners(broken, ['cloudbench-controller'])
+                bad.unlink()
+        # a gate with no retained owner cannot be "reconciled"
+        plain = copy.deepcopy(self.state); failure = self.failure.__func__(self) if False else None
+        self.state['phase'] = 'initial'; c.advance(self.state, [self.result(a='FAIL', b='PASS')])
+        with self.assertRaisesRegex(ValueError, 'no retained owner|latest incomplete'):
+            c.reconcile(self.state, self.state['failures'][-1]['id'], proof)
+
     def test_quick_timeout_bound_is_120_seconds(self):
         with patch.object(c, 'run_command', return_value=(0, False, False, False)) as runner:
             c.execute(self.plan['gates'][0], self.state, self.directory, self.root)
@@ -847,6 +1073,38 @@ assert len(list(p.iterdir()))==2
     def test_environment_change_invalidates_run(self):
         with patch.dict(os.environ,{'TEST_NEW_AUTH_CONTEXT':'different'}):
             with self.assertRaises(ValueError): c.run_phase(self.plan,self.state,self.directory,self.root)
+
+    def test_initialized_gitlink_hashes_index_oid_without_descending(self):
+        module = self.root / 'module'; module.mkdir()
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(module), *args]).decode().strip()
+        git('init', '-q')
+        (module / 'file').write_text('first')
+        git('add', '.')
+        git('-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'first')
+        first = git('rev-parse', 'HEAD')
+        subprocess.run(['git', '-C', str(self.root), 'update-index', '--add', '--cacheinfo',
+                        '160000,' + first + ',module'], check=True)
+        source = c.source(self.root)
+        inputs = c.input_fingerprints(self.plan, self.root)
+        (module / 'file').write_text('second')
+        git('add', '.')
+        git('-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'second')
+        self.assertEqual(source, c.source(self.root))
+        self.assertEqual(inputs, c.input_fingerprints(self.plan, self.root))
+        subprocess.run(['git', '-C', str(self.root), 'update-index', '--cacheinfo',
+                        '160000,' + git('rev-parse', 'HEAD') + ',module'], check=True)
+        self.assertNotEqual(source, c.source(self.root))
+        self.assertNotEqual(inputs, c.input_fingerprints(self.plan, self.root))
+
+    def test_unmerged_index_refuses_both_fingerprint_functions(self):
+        oid = subprocess.check_output(['git', '-C', str(self.root), 'rev-parse', 'HEAD:code']).decode().strip()
+        subprocess.run(['git', '-C', str(self.root), 'update-index', '--index-info'], check=True,
+                       input=('0 ' + '0' * 40 + '\tcode\n100644 ' + oid + ' 2\tcode\n').encode())
+        for name, invoke in [('source', lambda: c.source(self.root)),
+                             ('inputs', lambda: c.input_fingerprints(self.plan, self.root))]:
+            with self.subTest(function=name), self.assertRaisesRegex(ValueError, 'unambiguous merged index'):
+                invoke()
 
     def test_benchmark_output_ledger_does_not_invalidate_source(self):
         history=self.root/'agents/benchmarks/history';history.mkdir(parents=True)
