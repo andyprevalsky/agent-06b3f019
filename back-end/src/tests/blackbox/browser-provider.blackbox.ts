@@ -1,12 +1,10 @@
 #!/usr/bin/env tsx
 
 import nodeAssert from 'node:assert/strict';
-import { assertKernelStaleCacheRecovery } from './browser-provider.kernel-stale-cache.support';
-import { assertLiveProxyReuseCustody } from './browser-provider.proxy-reuse-custody.support';
+import { kernelCustodyCases } from './browser-provider.kernel-custody-cases.support';
 import { tilionContractCases } from './browser-provider.tilion-contract.support';
 import { assertBrowserUseMissingHealth } from './browser-provider.browser-use-health.support';
 import { assertSteelProfileReplacementLifecycle } from './browser-provider.steel-profile-lifecycle.support';
-import { assertKernelProxyHealthFallback } from './browser-provider.kernel-health.support';
 import { createSessionWithContextUsingDependencies } from '../../providers/browser';
 import { computeGrantBrowserProvider } from '../../domains/compute-grants/config';
 import { selectedBrowserProvider } from '../../providers/browser/config';
@@ -64,18 +62,10 @@ process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
 
 const tests: Array<[string, () => void | Promise<void>]> = [
   ...tilionContractCases,
-  [
-    'Kernel stale cache refreshes exact geo and reuses existing provider proxies first',
-    assertKernelStaleCacheRecovery,
-  ],
-  ['Live proxy parity never allocates or deletes shared proxies', assertLiveProxyReuseCustody],
+  ...kernelCustodyCases,
   [
     'Browser Use missing health is terminal, while other failures remain errors',
     assertBrowserUseMissingHealth,
-  ],
-  [
-    'Kernel proxy health errors preserve bounded geo fallback and cache custody',
-    assertKernelProxyHealthFallback,
   ],
   [
     'Steel first-profile replacement preserves its full binding and the source on failure',
