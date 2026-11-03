@@ -269,6 +269,25 @@ class Cycle(unittest.TestCase):
                 'cases': cases, 'complete': True, 'source': self.state['source'],
                 'command': ['true'], 'log': 'original.log', 'native_exit': 1}
 
+    def test_refresh_unstarted_quick_preserves_history_and_refuses_active_state(self):
+        old = copy.deepcopy(self.plan)
+        original = copy.deepcopy(self.state)
+        (self.root / 'code').write_text('new repair before quick launch')
+        new = copy.deepcopy(old)
+        new['source'] = c.source(self.root)
+        for update in ({'live_failures': []}, {'running': True}, {'resume_phase': 'quick'}, {'pending': ['unresolved']}):
+            state = {**copy.deepcopy(original), **update}
+            before = copy.deepcopy(state)
+            with self.assertRaisesRegex(ValueError, 'repair boundary|adjudicate pending'):
+                c.refresh(state, old, new, self.root)
+            self.assertEqual(before, state)
+        c.refresh(self.state, old, new, self.root)
+        self.assertEqual(new['source'], self.state['source'])
+        self.assertEqual('quick', self.state['phase'])
+        self.assertFalse(self.state['ready'])
+        for key in ('attempts', 'failures', 'round'):
+            self.assertEqual(original[key], self.state[key])
+
     def failure(self):
         self.state['phase'] = 'initial'
         c.advance(self.state, [self.result(a='FAIL', b='PASS'), self.result('ui', c='PASS')])
