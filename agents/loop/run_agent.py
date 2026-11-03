@@ -758,8 +758,7 @@ async def run_agent(
         # 1. Pull parent/pause state before incrementing the iteration. A parent
         # disappearance discovered by check_paused is terminal and must win over
         # the normal pause path so the child cannot make another LLM/tool call.
-        pause_check = check_paused_before_turn or check_paused
-        paused = bool(pause_check and await pause_check())
+        paused = bool(check_paused and await check_paused())
         if check_aborted and await check_aborted():
             _pending_llm_context.pop(agent_id, None)
             return {
@@ -1130,6 +1129,11 @@ async def run_agent(
                     failures=compactor_failures,
                     limit=MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES,
                 )
+
+        # Admit a browser completion turn only after handoff and compaction
+        # boundaries. A continue-as-new before a model call must preserve it.
+        if check_paused_before_turn and await check_paused_before_turn():
+            continue
 
         # Schema and message preparation share the existing pre-acceptance
         # retry owner; no provider response or productive turn exists yet.

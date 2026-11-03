@@ -4385,13 +4385,17 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         (regression: smoke task `parallel-tool-calls`).
         """
         if (
-            self._cost_limit_wrapup_pending
+            (self._cost_limit_wrapup_pending or self._cost_limit_wrapup_consumed)
             and self._cost_limit_reached
             and tool_name not in {"attempt_completion", "attempt_completion_with_result"}
         ):
+            # Keep refusal latched across every call in a parallel batch, even
+            # after the first call closes the allowance and yields to persistence.
             self._cost_limit_wrapup_pending = False
-            self._cost_limit_reached = False
-            await self._check_cost_limit()
+            self._cost_limit_wrapup_consumed = True
+            if not self.is_paused:
+                self._cost_limit_reached = False
+                await self._check_cost_limit()
             await self._handle_tool_event(
                 ToolEvent(
                     type=EventType.POST_MESSAGE,
@@ -5112,17 +5116,18 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             self.own_cost_cents += total_cost_cents
             workflow.logger.info(f"💰 Total own_cost_cents: {self.own_cost_cents}c (+{total_cost_cents}c)")
 
-            # Signal parent for hierarchical cost relay
-            await self._update_cost_and_signal_parent(check_cost_limit=not browser_completed)
+            # Admit the verified terminal result before any persistence/signal
+            # await can admit another child cost update and publish a cost stop.
+            self.subtree_cost_cents = self.own_cost_cents + sum(self.children_cost_cents.values())
             if browser_completed:
                 self._maybe_arm_cost_limit_wrapup_after_browser(
                     tool_name=tool_name,
                     result={"success": True},
                     paused_before=paused_before,
-                    cost_limit_before=cost_limit_before,
+                    cost_limit_before=cost_limit_before or self._cost_limit_reached,
                     pause_sequence_before=pause_sequence_before,
                 )
-                await self._check_cost_limit()
+            await self._update_cost_and_signal_parent()
 
         # Write to ToolUsage table (if tool_name provided). This intentionally
         # includes zero-cost direct-token LLM rows so cache/accounting diagnostics
@@ -5563,7 +5568,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         except Exception as e:
             workflow.logger.warning(f"Failed to save LLM usage to DB: {e}")
 
-    async def _update_cost_and_signal_parent(self, force: bool = False, check_cost_limit: bool = True) -> None:
+    async def _update_cost_and_signal_parent(self, force: bool = False) -> None:
         """Recalculate subtree cost/tokens and signal parent (or check limit if root).
 
         The DB persist + Processing status broadcast are debounced (coalesced to at
@@ -5597,7 +5602,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     )
                 except Exception as e:
                     workflow.logger.warning(f"Failed to signal parent cost update: {e}")
-        elif check_cost_limit:
+        else:
             # We are root - check cost limit
             await self._check_cost_limit()
 

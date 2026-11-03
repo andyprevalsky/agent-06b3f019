@@ -114,15 +114,39 @@ resource, channel, subscription or database scan is added. At 10,000 agents,
 state and admission remain constant per workflow; ordinary idempotent usage
 writes and bounded status persistence retain their existing ownership.
 
-Golden references inspected: Hermes agent/turn_iteration_prep.py:354–418
-consumes one toolless grace call at iteration admission after checking user
-interrupt; OpenClaw packages/agent-core/src/agent-loop.ts:335–427 settles tool
-results before turn/stop decisions and rechecks abort; Claude Code
-src/QueryEngine.ts:972–1002 preserves actual usage and enforces its USD budget.
-Rose's already-existing verified completion allowance remains narrower than a
-new productive turn; normal root verification remains mandatory. Fresh
-adversarial review and full original invocation/deployment verification are
-pending; this case remains open until those outcome gates complete.
+Golden references inspected: Hermes agent/turn_finalizer.py:130–164 preserves
+an explicitly pending verified answer or requests a bounded iteration-budget
+summary; agent/chat_completion_helpers.py:2232–2266 discards summary tool calls.
+The separate turn_iteration_prep.py:408 fallback grace flag does not enforce a
+toolless finalizer and is not evidence for that claim. OpenClaw
+packages/agent-core/src/agent-loop.ts:299–348 settles tool results before stop
+and abort decisions. Prime prime-agent-runtime/src/rlm/factory.py:2340–2379
+checks its elapsed-time/child-admission budget before every admission. Claude
+Code src/QueryEngine.ts:972–1002 strictly enforces its USD budget with actual
+usage and grants no completion grace. Rose differs on monetary policy because
+it already has an explicit verified-browser completion allowance: this repair
+connects that existing policy to its generic accounting path, permits only
+normal completion/verification, and retains every charge. These are partial
+ordering/admission analogs, not claims that another harness grants this same
+USD exception.
+
+The first adversarial snapshot review rejected three concrete races. New
+registered controls reproduced a second/concurrent productive call escaping
+refusal, a pre-LLM generation handoff consuming the allowance, and a child cost
+signal publishing a terminal stop during awaited settlement. The stabilization
+keeps refusal latched across the whole batch, admits after handoff/compaction,
+and arms synchronously before persistence can yield. Additional controls cover
+compaction, a real continuation snapshot restored through normal completion,
+and an unrelated cost stop arriving during pricing, which must stay stopped.
+An explicit user pause during persistence still blocks admission and cannot
+consume the allowance. No original evaluator or assertion is relaxed.
+
+Fresh changed-snapshot adversarial review and full original invocation/
+deployment verification remain pending; this case stays open until those
+outcome gates complete. Interrupted source-superseded test attempts retain
+original cancellation/failed cleanup receipts and are not counted as passes;
+owner-scoped reconciliation and external resource verification are tracked
+separately from the final stable invocation.
 
 ## Human feedback
 

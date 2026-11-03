@@ -12260,6 +12260,70 @@ async def test_workflow_generic_browser_result_gets_existing_budget_wrapup():
         _restore_workflow(original)
 
 
+async def test_workflow_browser_usage_arms_before_child_cost_interleaving():
+    wf = _bare_workflow_instance()
+    wf.agent_id, wf.user_id, wf.agent_source = "settlement-race", "budget-user", "WEB"
+    wf.own_cost_cents, wf.price_limit_cents = 119.0, 120
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    persist = wf._persist_tree_cost
+    interleaved = False
+
+    async def persist_with_signal():
+        nonlocal interleaved
+        if not interleaved:
+            interleaved = True
+            await wf.child_cost_update({"child_agent_id": "already-running-child", "subtree_cost_cents": 0.5})
+        await persist()
+
+    wf._persist_tree_cost = persist_with_signal
+    try:
+        await wf._track_usage(
+            {"service": [{"provider": "browser", "cost_cents": 2.0}]},
+            tool_name="spawn_agent",
+            browser_completed=True,
+        )
+        assert interleaved
+        assert wf.own_cost_cents == 121.0 and wf.subtree_cost_cents == 121.5
+        assert wf._cost_limit_wrapup_pending and not wf.is_paused
+        assert not any(
+            name == "update_agent_status" and args[1] == "COST_LIMIT_REACHED" for name, args in fake.activity_calls
+        ), "child signal published terminal cost stop during verified browser settlement"
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_browser_pricing_cannot_reopen_an_intervening_cost_stop():
+    wf = _bare_workflow_instance()
+    wf.agent_id, wf.user_id, wf.agent_source = "pricing-race", "budget-user", "WEB"
+    wf.own_cost_cents, wf.price_limit_cents = 119.0, 120
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+
+    async def pricing_with_signal(model):
+        await wf.child_cost_update({"child_agent_id": "already-running-child", "subtree_cost_cents": 2.0})
+        return {"input_cents_per_1k": 2.0, "output_cents_per_1k": 0.0}
+
+    wf._get_model_pricing = pricing_with_signal
+    try:
+        await wf._track_usage(
+            {"llm": [{"model": "priced-browser-model", "provider": "browser", "tokens_in": 1000}]},
+            tool_name="spawn_agent",
+            browser_completed=True,
+        )
+        assert wf.own_cost_cents == 121.0 and wf.subtree_cost_cents == 123.0
+        assert wf.is_paused and wf._cost_limit_reached
+        assert not wf._cost_limit_wrapup_pending, "terminal usage reopened an unrelated cost stop"
+        stops = [
+            args
+            for name, args in fake.activity_calls
+            if name == "update_agent_status" and args[1] == "COST_LIMIT_REACHED"
+        ]
+        assert len(stops) == 1
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_background_browser_budget_keeps_native_notification_and_result():
     from unittest.mock import AsyncMock, patch
     import workflows.background_agents as background_module
@@ -12420,8 +12484,11 @@ async def test_workflow_browser_budget_wrapup_stops_after_one_turn_and_keeps_pau
             )
             assert wf.own_cost_cents == 121.0 and wf.price_limit_cents == 120
             if pause_kind != "none":
-                assert not wf._cost_limit_wrapup_pending, pause_kind
+                if pause_kind != "user_during":
+                    assert not wf._cost_limit_wrapup_pending, pause_kind
                 assert wf.is_paused, pause_kind
+                assert await wf._check_paused_before_turn(), "an explicit pause must block admission"
+                assert not wf._cost_limit_wrapup_consumed, "a paused turn cannot consume the allowance"
                 if pause_kind.startswith("user"):
                     assert wf._user_pause_active
                 continue
@@ -12456,8 +12523,12 @@ async def test_workflow_browser_wrapup_cannot_start_productive_work_or_renew_aft
     executor = AsyncMock()
     try:
         with patch.dict(workflow_module.TOOL_EXECUTORS, {"web_search": executor}):
-            result = await wf._execute_tool("web_search", {"query": "new work"}, "new-work")
-        assert result.get("error") is True
+            results = await asyncio.gather(
+                wf._execute_tool("web_search", {"query": "new work one"}, "new-work-one"),
+                wf._execute_tool("web_search", {"query": "new work two"}, "new-work-two"),
+            )
+            results.append(await wf._execute_tool("web_search", {"query": "new work three"}, "new-work-three"))
+        assert all(result.get("error") is True for result in results), results
         executor.assert_not_awaited()
         assert wf.is_paused
         for consumed in (False, True):
@@ -13351,6 +13422,8 @@ async def run_all_tests():
     r = BlackboxResult()
     await r.record_async("wf_generic_browser_budget_wrapup", test_workflow_generic_browser_result_gets_existing_budget_wrapup)
     await r.record_async("wf_background_browser_budget_notification", test_workflow_background_browser_budget_keeps_native_notification_and_result)
+    await r.record_async("browser_usage_child_cost_interleaving", test_workflow_browser_usage_arms_before_child_cost_interleaving)
+    await r.record_async("browser_pricing_preserves_intervening_cost_stop", test_workflow_browser_pricing_cannot_reopen_an_intervening_cost_stop)
     await r.record_async("wf_unverified_browser_budget_stop", test_workflow_unverified_browser_and_other_usage_do_not_get_wrapup)
     await r.record_async("wf_browser_budget_wrapup_pause_controls", test_workflow_browser_budget_wrapup_stops_after_one_turn_and_keeps_pauses)
     await r.record_async("wf_browser_budget_wrapup_work_and_restore", test_workflow_browser_wrapup_cannot_start_productive_work_or_renew_after_restore)
