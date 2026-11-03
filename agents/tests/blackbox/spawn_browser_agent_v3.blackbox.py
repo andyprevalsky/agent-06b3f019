@@ -26713,7 +26713,7 @@ async def test_native_navigation_policy_restriction_and_escape():
     await assert_navigation_admission_at_native_dispatch()
 
 
-async def test_credential_reload_failure_preserves_pending_ack_and_shared_recovery():
+async def test_credential_reload_failure_preserves_pending_ack_and_shared_recovery(active_case=None):
     """Execute the original activity's realm/reload block with only I/O faked."""
     import ast
     import asyncio
@@ -26754,13 +26754,43 @@ async def run(mode, pending='new.example', current_url='https://new.example/logi
         return {'credential_preparation_error': 'fixture'} if preparation_error else {'auth_realm': auth_realm}
     pending_credential_reload_realm = pending
     navigation_policy = NavigationPolicyBarrier('fixture-task')
+    if mode.startswith('active_'):
+        navigation_policy.deny('session', {'target_id':'denied', 'url':'https://denied.example/'})
+    authority_reads = 0
+    identity_reads = 0
+    identity_faulted = False
+    def fault(stage):
+        nonlocal identity_faulted
+        if mode.startswith('active_' + stage) and not identity_faulted:
+            identity_faulted = True
+            if mode.endswith('_cancel'): raise asyncio.CancelledError()
+            if mode.endswith('_sealed'): raise WorkflowGenerationSealed()
+            raise RuntimeError('native identity unavailable:' + stage)
+    async def prepare_optional_realm_credentials(**kwargs):
+        events.append(('optional_prepare', pending_credential_reload_realm))
+        return await kwargs['prepare_credentials'](kwargs['target_url'])
+    failed_credential_prep_realms = {}
+    _prepare_credentials_for_url_unquarantined = _prepare_credentials_for_url
+    async def discard(message):
+        events.append(('discard', navigation_policy.active))
+    action_batch = SimpleNamespace(discard=discard)
+    state_prefetch = SimpleNamespace(discard=lambda: None)
     def _policy_authority():
+        nonlocal authority_reads
+        authority_reads += 1
+        if authority_reads == 1: fault('before_prepare')
+        if authority_reads == 2: fault('after_prepare')
+        if authority_reads == 4: fault('after_reload')
         if mode in ('identity_unavailable', 'denial_identity_unavailable'):
             raise RuntimeError('native identity unavailable')
         return ('session', 'fixture-task', 'target', current_url, active_credential_binding, 0, 0)
     async def _recover_browser_step(reason, *, reload_page):
+        if mode.startswith('active_'):
+            assert not mode.endswith(('_cancel', '_sealed')), 'control signal entered recovery'
+            assert navigation_policy.active and pending_credential_reload_realm == 'new.example'
         events.append(('recover', pending_credential_reload_realm, reason, reload_page))
-        return mode != 'exhausted'
+        events.append(('barrier_during_recovery', navigation_policy.active))
+        return not mode.endswith('exhausted')
     class Event:
         def __await__(self):
             async def ready():
@@ -26779,7 +26809,12 @@ async def run(mode, pending='new.example', current_url='https://new.example/logi
     def dispatch(event):
         events.append(('dispatch', event.url, pending_credential_reload_realm))
         return Event()
-    dom_service = SimpleNamespace(session=SimpleNamespace(event_bus=SimpleNamespace(dispatch=dispatch)), get_parked_page_identity=lambda: {'url': current_url, 'target_id': 'target'})
+    def parked_identity():
+        nonlocal identity_reads
+        identity_reads += 1
+        if identity_reads == 2: fault('acknowledge')
+        return {'url': current_url, 'target_id': 'target'}
+    dom_service = SimpleNamespace(session=SimpleNamespace(event_bus=SimpleNamespace(dispatch=dispatch)), get_parked_page_identity=parked_identity)
     async def wait_for_navigation_ready(*args, **kwargs):
         nonlocal failures
         events.append(('ready_ack', pending_credential_reload_realm))
@@ -26803,6 +26838,24 @@ async def run(mode, pending='new.example', current_url='https://new.example/logi
            'WorkflowGenerationSealed': type('WorkflowGenerationSealed', (RuntimeError,), {})}
     exec(compile(code, str(source), 'exec'), env)
     run = env['run']
+    for stage in ((active_case,) if active_case else ('before_prepare', 'after_prepare', 'after_reload', 'acknowledge')):
+        mode = 'active_' + stage
+        events = await run(mode)
+        assert events[-1] == ('model', None), events
+        recoveries = [x for x in events if x[0] == 'recover']
+        assert len(recoveries) == 1 and recoveries[0][1] == 'new.example' and recoveries[0][3] is True, events
+        assert ('barrier_during_recovery', True) in events, events
+        assert events[-2] == ('discard', False), events
+        assert len([x for x in events if x[0] == 'dispatch']) == (2 if stage in ('after_reload', 'acknowledge') else 1), events
+        for suffix, error_type in (('_exhausted', RuntimeError), ('_cancel', asyncio.CancelledError), ('_sealed', env['WorkflowGenerationSealed'])):
+            try:
+                await run(mode + suffix)
+            except error_type as error:
+                if suffix == '_exhausted': assert str(error) == 'native identity unavailable:' + stage
+            else:
+                raise AssertionError('active barrier swallowed ' + mode + suffix)
+    if active_case:
+        return
     for mode in ('event_failure', 'readiness_failure', 'success', 'identity_unavailable', 'denial_identity_unavailable'):
         events = await run(mode)
         assert events[-1] == ('model', None), events

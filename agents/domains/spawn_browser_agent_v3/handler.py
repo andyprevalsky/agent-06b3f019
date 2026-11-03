@@ -10702,13 +10702,35 @@ async def _spawn_browser_agent_activity_v3_real(
             if navigation_policy.active:
                 reload_prepared_realm = False
                 if navigation_policy.permits_destination(current_url):
-                    preparation_authority = _policy_authority()
+                    try:
+                        preparation_authority = _policy_authority()
+                    except (asyncio.CancelledError, WorkflowGenerationSealed):
+                        raise
+                    except RuntimeError as identity_error:
+                        recovered = await _recover_browser_step(
+                            f"credential_preparation_identity_error:{type(identity_error).__name__}",
+                            reload_page=True,
+                        )
+                        if recovered:
+                            continue
+                        raise
                     prepared_realm = await prepare_optional_realm_credentials(
                         target_url=current_url, current_auth_realm="",
                         failed_realms=failed_credential_prep_realms,
                         prepare_credentials=_prepare_credentials_for_url_unquarantined,
                     )
-                    current_authority = _policy_authority()
+                    try:
+                        current_authority = _policy_authority()
+                    except (asyncio.CancelledError, WorkflowGenerationSealed):
+                        raise
+                    except RuntimeError as identity_error:
+                        recovered = await _recover_browser_step(
+                            f"credential_preparation_identity_error:{type(identity_error).__name__}",
+                            reload_page=True,
+                        )
+                        if recovered:
+                            continue
+                        raise
                     if (preparation_authority[:4] != current_authority[:4]
                             or preparation_authority[5:] != current_authority[5:]):
                         continue
@@ -10779,9 +10801,21 @@ async def _spawn_browser_agent_activity_v3_real(
                         continue
                     raise
                 if navigation_policy.active:
-                    if reload_authority is not None and reload_authority != _policy_authority():
-                        continue
-                    navigation_policy.acknowledge_other_document(dom_service.get_parked_page_identity())
+                    try:
+                        if reload_authority is not None and reload_authority != _policy_authority():
+                            continue
+                        acknowledgement_identity = dom_service.get_parked_page_identity()
+                    except (asyncio.CancelledError, WorkflowGenerationSealed):
+                        raise
+                    except RuntimeError as identity_error:
+                        recovered = await _recover_browser_step(
+                            f"credential_reload_identity_error:{type(identity_error).__name__}",
+                            reload_page=True,
+                        )
+                        if recovered:
+                            continue
+                        raise
+                    navigation_policy.acknowledge_other_document(acknowledgement_identity)
                     await action_batch.discard("Replan after new-document credential acknowledgement.")
                     state_prefetch.discard()
                 pending_credential_reload_realm = None
