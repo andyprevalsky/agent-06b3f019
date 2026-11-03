@@ -8393,6 +8393,7 @@ def _sync_compute_tokens(
     tolerate_gpt_code_unavailable: bool = False,
     tolerate_claude_code_unavailable: bool = False,
     required_token_types: tuple[str, ...] | None = None,
+    allow_missing_claude_for_non_claude_tasks: bool | None = None,
 ) -> bool:
     """Refresh the compute-token integrations (claude_code / gpt_code + pool)
     from the verified workspace DB into an isolated benchmark DB. When there is
@@ -8421,6 +8422,12 @@ def _sync_compute_tokens(
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
+    # None preserves existing launcher-scoped AgentCard fixture/default calls.
+    # Explicit run-level selection overrides ambient permission for strict tasks.
+    if allow_missing_claude_for_non_claude_tasks is not None:
+        env.pop("SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK", None)
+        if allow_missing_claude_for_non_claude_tasks is True:
+            env["SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK"] = "1"
     env.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
     env.pop("SEED_ALLOW_MISSING_CLAUDE_CODE", None)
     env.pop("SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL", None)
@@ -9235,6 +9242,10 @@ async def _refresh_local_compute_tokens_for_run(
         tolerate_gpt_code_unavailable=True,
         tolerate_claude_code_unavailable=tolerate_missing_claude,
         required_token_types=required_token_types,
+        allow_missing_claude_for_non_claude_tasks=(
+            bool(tasks) and not require_claude_code
+            and all(task.requires_claude_code is False for task in tasks)
+        ),
     ):
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
     if not has_anthropic_key_fallback:
