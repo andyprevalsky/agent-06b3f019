@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -47,6 +47,43 @@ afterEach(() =>
 );
 
 describe('UI lifecycle package repair', () => {
+  it('never repairs a dependency found above its explicit workspace boundary', () => {
+    const parent = workspace();
+    const root = join(parent, 'checkout');
+    mkdirSync(root);
+    const foreign = install(parent, '1.3.0');
+    expect(() => applyLifecyclePatches(radixPatches, [root])).toThrow('not installed');
+    expect(readFileSync(join(foreign, 'dist/index.js'), 'utf8')).toBe(pristine);
+  });
+
+  it('rejects an escaping dependency symlink before reading or repairing its source', () => {
+    const root = workspace();
+    const foreign = install(workspace(), '1.3.0');
+    const scope = join(root, 'node_modules/@radix-ui');
+    mkdirSync(scope, { recursive: true });
+    symlinkSync(foreign, join(scope, 'react-scroll-area'), 'dir');
+    expect(() => applyLifecyclePatches(radixPatches, [root])).toThrow('outside');
+    expect(readFileSync(join(foreign, 'dist/index.js'), 'utf8')).toBe(pristine);
+  });
+
+  it('repairs every nested installed copy, independently of the direct import lookup', () => {
+    const root = workspace();
+    const direct = install(root, '1.3.0');
+    const nested = install(join(root, 'node_modules/consumer'), '1.2.16');
+    expect(applyLifecyclePatches(radixPatches, [root])).toEqual({ checked: 4, changed: 4 });
+    for (const directory of [direct, nested])
+      expect(readFileSync(join(directory, 'dist/index.js'), 'utf8')).not.toBe(pristine);
+    expect(applyLifecyclePatches(radixPatches, [root])).toEqual({ checked: 4, changed: 0 });
+  });
+
+  it('prevalidates unsupported nested copies before changing a valid direct copy', () => {
+    const root = workspace();
+    const direct = install(root, '1.3.0');
+    install(join(root, 'node_modules/consumer'), '9.0.0');
+    expect(() => applyLifecyclePatches(radixPatches, [root])).toThrow('Unsupported Radix');
+    expect(readFileSync(join(direct, 'dist/index.js'), 'utf8')).toBe(pristine);
+  });
+
   it.each(['1.2.16', '1.3.0'])(
     'validates and idempotently repairs both %s entry points',
     (version) => {

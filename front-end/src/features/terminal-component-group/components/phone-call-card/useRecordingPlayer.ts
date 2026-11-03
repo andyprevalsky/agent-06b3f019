@@ -54,7 +54,8 @@ export function useRecordingPlayer(src: string | null): RecordingPlayerState {
       audio.removeEventListener('ended', handleEnded);
       audio.pause();
       // React may already have assigned the next source to this same element.
-      if (audio.getAttribute('src') === src) {
+      const current = audio.getAttribute('src');
+      if (current === src || !current) {
         audio.removeAttribute('src');
         audio.load();
       }

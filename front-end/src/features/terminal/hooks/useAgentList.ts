@@ -24,7 +24,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 
 import { useToast } from '@/hooks/use-toast';
 
-import { AGENT_POLL_INTERVAL_MS } from '../config';
+import { AGENT_LOAD_TIMEOUT_MS, AGENT_POLL_INTERVAL_MS } from '../config';
 import { fetchAgents } from '../api';
 import type { Agent } from '../types';
 
@@ -50,10 +50,24 @@ export function useAgentList(canSubmitGoals: boolean) {
     const loadSession = session.current;
     const controller = new AbortController();
     controllers.current.add(controller);
+    const deadline = setTimeout(() => controller.abort(), AGENT_LOAD_TIMEOUT_MS);
+    const finish = () => {
+      clearTimeout(deadline);
+      controllers.current.delete(controller);
+      if (loadSession === session.current) {
+        setIsLoadingAgents(controllers.current.size > 0);
+        setHasLoadedAgents(true);
+      }
+    };
+    controller.signal.addEventListener('abort', finish, { once: true });
     setIsLoadingAgents(true);
     try {
       const fetched = await fetchAgents(controller.signal);
-      if (loadId === latestLoad.current && loadSession === session.current)
+      if (
+        !controller.signal.aborted &&
+        loadId === latestLoad.current &&
+        loadSession === session.current
+      )
         setAgents((previous) => {
           const byId = new Map(previous.map((agent) => [agent.agent_id, agent]));
           return fetched.map((agent) => reconcileAgent(byId.get(agent.agent_id), agent));
@@ -63,11 +77,8 @@ export function useAgentList(canSubmitGoals: boolean) {
         toast({ title: 'Error', description: 'Failed to load agents', variant: 'destructive' });
       }
     } finally {
-      controllers.current.delete(controller);
-      if (loadSession === session.current) {
-        setIsLoadingAgents(controllers.current.size > 0);
-        setHasLoadedAgents(true);
-      }
+      controller.signal.removeEventListener('abort', finish);
+      finish();
     }
   }, [toast]);
 

@@ -17,6 +17,7 @@ import type {
   StreamingTool,
 } from '../types';
 import type { AgentProviderState } from './useAgentProviderState';
+import { agentSelectionControls, type AgentSelectionControls } from './agentSelectionControls';
 
 interface SelectionOptions {
   canLoadAgent: boolean;
@@ -39,7 +40,10 @@ interface SelectionOptions {
  * A -> B -> A responses when the transport finishes despite cancellation.
  */
 
-export function useAgentSelection(state: AgentProviderState, options: SelectionOptions) {
+export function useAgentSelection(source: AgentProviderState, options: SelectionOptions) {
+  const state = agentSelectionControls(source);
+  const { selectedAgentId } = source;
+  const hasAgent = !!source.agent;
   const stateRef = useRef(state);
   stateRef.current = state;
   const detailRequestRef = useRef<{
@@ -164,16 +168,10 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
   );
 
   useEffect(() => {
-    if (state.selectedAgentId && options.canLoadAgent && !state.agent) {
-      void loadAgentDetail(state.selectedAgentId, options.hasFullAccess);
+    if (selectedAgentId && options.canLoadAgent && !hasAgent) {
+      void loadAgentDetail(selectedAgentId, options.hasFullAccess);
     }
-  }, [
-    loadAgentDetail,
-    options.canLoadAgent,
-    options.hasFullAccess,
-    state.agent,
-    state.selectedAgentId,
-  ]);
+  }, [loadAgentDetail, options.canLoadAgent, options.hasFullAccess, hasAgent, selectedAgentId]);
 
   const setSelectedAgentId = useCallback(
     (id: string | null) => {
@@ -304,7 +302,7 @@ function mergeCanonicalMessages(
   return [...canonical, ...realtimeOnly];
 }
 
-function prepareSelection(state: AgentProviderState, id: string | null) {
+function prepareSelection(state: AgentSelectionControls, id: string | null) {
   syncUrlParam(id);
   killConnections(state.channelRef, state.reconnectTimeoutRef, state.isReconnectingRef);
   flushState(state);
@@ -337,7 +335,7 @@ function killConnections(
   isReconnectingRef.current = false;
 }
 
-function flushState(state: AgentProviderState) {
+function flushState(state: AgentSelectionControls) {
   state.setMessages([]);
   state.setInspectionContext(null);
   resetStreamingBubbles(state.setStreamingBubbles);

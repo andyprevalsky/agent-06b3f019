@@ -15,7 +15,7 @@
  * State:
  *   - words: WordItem[]   (flat, in-order list of words + whitespace + metadata)
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useReducedMotion } from 'framer-motion';
@@ -55,11 +55,13 @@ export function FadeInMarkdown({
     markdown,
     words: [],
   });
-  const owner = useRef({ markdown, generation: 0 });
-  if (owner.current.markdown !== markdown) {
-    owner.current = { markdown, generation: owner.current.generation + 1 };
-  }
-  const generation = owner.current.generation;
+  const owner = useRef<{ markdown: string; extracted: typeof extracted } | null>(null);
+  useLayoutEffect(() => {
+    owner.current = { markdown, extracted };
+    return () => {
+      owner.current = null;
+    };
+  }, [markdown, extracted]);
   const words = extracted.markdown === markdown ? extracted.words : [];
 
   useEffect(() => {
@@ -85,7 +87,8 @@ export function FadeInMarkdown({
   const lastWordItem = findLastWord(words);
   const animate = !!shouldAnimate && !reduce;
   const handleLastWordComplete = (): void => {
-    if (owner.current.generation === generation) onComplete?.();
+    if (owner.current?.markdown === markdown && owner.current.extracted === extracted)
+      onComplete?.();
   };
 
   return (

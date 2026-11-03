@@ -1,8 +1,14 @@
 /** Detached phone players and replaced live sockets must release their resources. */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, renderHook, screen } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { useRecordingPlayer } from '@/features/terminal-component-group/components/phone-call-card/useRecordingPlayer';
 import { useLiveAudio } from '@/features/terminal-component-group/components/phone-call-card/useLiveAudio';
+import { RecordingPlayer } from '@/features/terminal-component-group/components/phone-call-card/RecordingPlayer';
+
+const fetchRecording = vi.hoisted(() => vi.fn());
+vi.mock('@/features/terminal-component-group/hooks', () => ({
+  fetchPhoneCallRecording: fetchRecording,
+}));
 
 export function Player({ src }: { src: string | null }) {
   const player = useRecordingPlayer(src);
@@ -66,6 +72,7 @@ describe('phone audio lifecycle', () => {
   });
 
   it('resets playback state on source replacement without unloading the new source', () => {
+    const load = vi.spyOn(HTMLMediaElement.prototype, 'load');
     const { container, rerender } = render(<Player src="blob:first" />);
     const audio = container.querySelector('audio')!;
     Object.defineProperty(audio, 'duration', { configurable: true, value: 100 });
@@ -78,6 +85,60 @@ describe('phone audio lifecycle', () => {
     expect(screen.getByText('Play')).toBeInTheDocument();
     expect(screen.getByRole('status').textContent).toBe('0/0');
     expect(audio.getAttribute('src')).toBe('blob:second');
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it('unloads the decoded recording when React removes the source before cleanup', () => {
+    const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause');
+    const load = vi.spyOn(HTMLMediaElement.prototype, 'load');
+    const { container, rerender } = render(<Player src="blob:recording" />);
+    const audio = container.querySelector('audio')!;
+    fireEvent.click(screen.getByText('Play'));
+    rerender(<Player src={null} />);
+    expect(container.querySelector('audio')).toBe(audio);
+    expect(audio.hasAttribute('src')).toBe(false);
+    expect(pause).toHaveBeenCalledTimes(1);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Play')).toBeInTheDocument();
+    expect(screen.getByRole('status').textContent).toBe('0/0');
+  });
+
+  it('releases the actual recording component audio while the next call is loading', async () => {
+    const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause');
+    const load = vi.spyOn(HTMLMediaElement.prototype, 'load');
+    const createUrl = vi.fn(() => 'blob:loaded-call');
+    const revokeUrl = vi.fn();
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    URL.createObjectURL = createUrl;
+    URL.revokeObjectURL = revokeUrl;
+    let release!: (blob: Blob) => void;
+    fetchRecording
+      .mockResolvedValueOnce(new Blob(['recording'], { type: 'audio/wav' }))
+      .mockImplementationOnce(() => new Promise<Blob>((resolve) => (release = resolve)));
+    const { container, rerender, unmount } = render(
+      <RecordingPlayer agentId="agent" callId="first" />,
+    );
+    try {
+      await waitFor(() => expect(container.querySelector('audio')).not.toBeNull());
+      const audio = container.querySelector('audio')!;
+      fireEvent.click(screen.getByRole('button'));
+      rerender(<RecordingPlayer agentId="agent" callId="second" />);
+      expect(screen.getByText('Loading recording…')).toBeInTheDocument();
+      expect(container.querySelector('audio')).toBeNull();
+      expect(audio.hasAttribute('src')).toBe(false);
+      expect(pause).toHaveBeenCalledTimes(1);
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(revokeUrl).toHaveBeenCalledWith('blob:loaded-call');
+      unmount();
+      await act(async () => release(new Blob(['late recording'])));
+      expect(createUrl).toHaveBeenCalledTimes(1);
+    } finally {
+      unmount();
+      URL.createObjectURL = originalCreate;
+      URL.revokeObjectURL = originalRevoke;
+      fetchRecording.mockReset();
+    }
   });
 
   it('closes a partially initialized live socket when AudioContext construction fails', () => {

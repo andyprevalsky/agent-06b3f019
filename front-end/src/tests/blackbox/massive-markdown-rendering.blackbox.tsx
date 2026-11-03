@@ -1,4 +1,5 @@
-import { render } from '@testing-library/react';
+import { act, render } from '@testing-library/react';
+import { Suspense, startTransition, useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MarkdownText } from '@/features/terminal-component-group/components/MarkdownText';
 
@@ -23,6 +24,45 @@ beforeEach(() => {
 });
 
 describe('large markdown output', () => {
+  it('keeps committed animation completion valid after a suspended replacement render is discarded', () => {
+    const onComplete = vi.fn();
+    let update: (value: string) => void = () => {};
+    const pending = new Promise<void>(() => {});
+    function SuspendReplacement({ text }: { text: string }) {
+      if (text === 'Replacement output') throw pending;
+      return null;
+    }
+    function Harness() {
+      const [text, setText] = useState('Committed output');
+      update = setText;
+      return (
+        <Suspense fallback={<p>Waiting</p>}>
+          <MarkdownText text={text} shouldAnimate onComplete={onComplete} />
+          <SuspendReplacement text={text} />
+        </Suspense>
+      );
+    }
+    const { container, unmount } = render(<Harness />);
+    const committedComplete = callbacks.at(-1)!;
+    act(() => startTransition(() => update('Replacement output')));
+    expect(container.querySelector('p')).toHaveTextContent('Committed output');
+    expect(container.textContent).not.toContain('Waiting');
+    committedComplete();
+    expect(onComplete).toHaveBeenCalledOnce();
+    unmount();
+  });
+
+  it('retires animation completion when its owner unmounts', () => {
+    const onComplete = vi.fn();
+    const { unmount } = render(
+      <MarkdownText text="Retired output" shouldAnimate onComplete={onComplete} />,
+    );
+    const complete = callbacks.at(-1)!;
+    unmount();
+    complete();
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
   it('preserves a 2MB fenced tool output as one code block with all content', () => {
     const code = 'const value = "example.com output";\n'.repeat(60_000);
     const { container, unmount } = render(<MarkdownText text={`\`\`\`js\n${code}\`\`\``} />);
