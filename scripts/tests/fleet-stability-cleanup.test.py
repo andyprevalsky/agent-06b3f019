@@ -192,9 +192,9 @@ class FleetFailureCleanup(unittest.TestCase):
         metadata = {"command": command, "timeout_seconds": timeout_seconds, "status": "starting"}
         metadata_path.write_text(json.dumps(metadata))
         with log_path.open("w") as log:
-            process = subprocess.Popen(
+            launch = subprocess.Popen if native_schedule is None else native_schedule.launch
+            process = launch(
                 command, cwd=self.root, env=self.env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
-                preexec_fn=native_schedule.trace_me if native_schedule is not None else None,
             )
             primary_error = None
             try:
@@ -226,6 +226,130 @@ class FleetFailureCleanup(unittest.TestCase):
                         raise
                     primary_error.add_note(f"Fixture metadata capture failed: {metadata_error!r}")
         return subprocess.CompletedProcess(command, result, log_path.read_text(), "")
+
+    def finish_native_error_control(self, process):
+        # A failing before-code poll may have cached a ptrace stop as exit.
+        # Reap only this newly created child using native terminal statuses.
+        try:
+            waited, status = os.waitpid(process.pid, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if waited and (os.WIFEXITED(status) or os.WIFSIGNALED(status)):
+            process.returncode = os.waitstatus_to_exitcode(status)
+            return
+        try:
+            os.kill(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                waited, status = os.waitpid(process.pid, os.WNOHANG)
+            except ChildProcessError:
+                return
+            if waited:
+                if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+                    process.returncode = os.waitstatus_to_exitcode(status)
+                    return
+                if os.WIFSTOPPED(status):
+                    try:
+                        NATIVE_COMPLETION["ptrace"](7, process.pid, 0, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            time.sleep(.001)
+        self.fail("native error-control root did not reach a terminal reap")
+
+    def native_error_control(self, *, during_metadata):
+        ready = self.root / "native-child-ready.json"
+        script = r"""
+import json, pathlib, runpy, subprocess, sys, time
+identity = runpy.run_path(sys.argv[1])
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'], start_new_session=True)
+ready = pathlib.Path(sys.argv[2]); pending = ready.with_suffix('.tmp')
+pending.write_text(json.dumps({'pid': child.pid, 'identity': identity['current_identity'](child.pid)})); pending.replace(ready)
+while True: time.sleep(1)
+"""
+        command = [sys.executable, "-c", script, str(ROOT / "scripts/process-identity.py"), str(ready)]
+        schedule = NATIVE_COMPLETION["CompletionReadSchedule"]()
+        native_globals = schedule.wait.__func__.__globals__
+        real_ptrace = native_globals["ptrace"]
+        real_popen = subprocess.Popen
+        real_write = Path.write_text
+        fault = OSError("injected native metadata failure" if during_metadata else "injected scheduler failure")
+        created = []
+        foreign = real_popen([sys.executable, "-c", "import time; time.sleep(600)"])
+
+        def launch(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            if kwargs.get("preexec_fn") is not None:
+                created.append(process)
+            return process
+
+        def write_metadata(path, value, *args, **kwargs):
+            if during_metadata and path == self.root / "command.json" and json.loads(value)["status"] == "running":
+                raise fault
+            return real_write(path, value, *args, **kwargs)
+
+        def native_operation(request, pid, address=0, data=0):
+            if not during_metadata and ready.exists():
+                if request == 24:
+                    raise fault
+                if request == 17:
+                    raise OSError("injected detach failure")
+            return real_ptrace(request, pid, address, data)
+
+        try:
+            with (
+                patch.object(subprocess, "Popen", side_effect=launch),
+                patch.object(Path, "write_text", write_metadata),
+                patch.dict(native_globals, {"ptrace": native_operation}),
+                self.assertRaises(OSError) as raised,
+            ):
+                self.run_completion_proof(command, native_schedule=schedule)
+            self.assertEqual(len(created), 1, "scheduler traced more than its exact root")
+            self.assertIs(raised.exception, fault, "trace cleanup replaced the initiating exception")
+            self.assertIsNotNone(created[0].returncode, "native root has no observed terminal status")
+            with self.assertRaises(ChildProcessError, msg="native root was not actually reaped"):
+                os.waitpid(created[0].pid, os.WNOHANG)
+            if not during_metadata:
+                self.assertTrue(ready.exists(), "scheduler failure did not reach a real detached child")
+                child = json.loads(ready.read_text())
+                observed = subprocess.run(["ps", "-p", str(child["pid"]), "-o", "stat="], capture_output=True, text=True)
+                self.assertTrue(not observed.stdout.strip() or observed.stdout.strip().startswith("Z"),
+                                "native scheduler failure left its detached child alive")
+            self.assertIsNone(foreign.poll(), "native trace cleanup signalled an unrelated control")
+        finally:
+            for process in created:
+                self.finish_native_error_control(process)
+            if ready.exists():
+                child = json.loads(ready.read_text())
+                FIXTURE_PROCESS["load_process_identity"]().main([
+                    "process-identity.py", "--expect", child["identity"], "--signal", "KILL", str(child["pid"]),
+                ])
+            foreign.terminate()
+            foreign.wait(timeout=2)
+
+    @unittest.skipUnless(NATIVE_COMPLETION["SUPPORTED"], "native syscall schedule requires Linux x86_64")
+    def test_native_metadata_failure_reaps_stopped_root(self):
+        self.native_error_control(during_metadata=True)
+
+    @unittest.skipUnless(NATIVE_COMPLETION["SUPPORTED"], "native syscall schedule requires Linux x86_64")
+    def test_native_scheduler_failure_reaps_root_and_detached_child(self):
+        self.native_error_control(during_metadata=False)
+
+    @unittest.skipUnless(NATIVE_COMPLETION["SUPPORTED"], "native syscall schedule requires Linux x86_64")
+    def test_native_initial_terminal_status_is_retained(self):
+        schedule = NATIVE_COMPLETION["CompletionReadSchedule"]()
+        process = schedule.launch([sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True)
+        try:
+            os.kill(process.pid, signal.SIGKILL)
+            time.sleep(.02)
+            self.assertEqual(schedule.wait(process, 2), -signal.SIGKILL)
+            self.assertEqual(process.poll(), -signal.SIGKILL)
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(process.pid, os.WNOHANG)
+        finally:
+            self.finish_native_error_control(process)
 
     def test_timeout_reaps_detached_child_and_retains_output(self):
         identity = FIXTURE_PROCESS["load_process_identity"]()
@@ -468,9 +592,9 @@ exec "$FIXTURE_REAL_TEE" "$@"
             "300",
         ]
         with (self.root / "output.log").open("w") as log:
-            process = subprocess.Popen(
+            launch = subprocess.Popen if native_schedule is None else native_schedule.launch
+            process = launch(
                 command, cwd=self.root, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
-                preexec_fn=native_schedule.trace_me if native_schedule is not None else None,
             )
             try:
                 if cancel:

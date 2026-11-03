@@ -443,6 +443,22 @@ read byte; there is no shared lock, fleet-wide scan or agent-count fan-in at
 10,000 agents. Golden reference: not applicable (ordinary Bash infrastructure
 framing; no approval-gated agent behavior, prompt, schema or timeout hunk).
 
+Independent adversarial review also found an ownership gap in the new test-only
+scheduler: an exec-stop consumed by ordinary `Popen.poll` could look terminal,
+and a fallible pre-wait metadata write or detach error could abandon the traced
+root or replace the initiating exception. Two permanent native controls failed
+on that helper (two failures, 1.010 seconds): an actually unreaped root and a
+replaced scheduler exception. The revised helper binds terminal-only poll/wait
+before returning the new child, retains tracing through exact-owned teardown,
+and records only real terminal wait statuses. It also caches an initial
+terminal observation; the error-control finalizer checks actual child wait
+ownership before any signal. No timeout or normal proof semantics changed.
+The same two controls plus an initial-terminal control passed (three tests,
+1.065 seconds). The complete owning suite passed all 33 tests in 35.014 seconds;
+all 27 original test names and assertion expressions remain identical. The six
+native controls are repeated unchanged for the final snapshot. These controls
+cover new fixture support, not a claim that the historical frame is known.
+
 The native regression remains inside `fleet-stability-cleanup.test.py`, already
 called by the unchanged `fleet-infra-stability-proof.test.sh`, unchanged
 `descend-command.test.sh`, and the complete canonical structural registry.
