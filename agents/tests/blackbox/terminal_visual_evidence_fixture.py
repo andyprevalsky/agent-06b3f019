@@ -31,8 +31,13 @@ async def test_terminal_capture_reaches_polar():
     spec.loader.exec_module(m)
     image = original_image()
     saved = []
+    class Multiplexer:
+        async def disconnect_confirmed(self, disconnect):
+            await disconnect()
+            return True
     class DOM(m._FakeDomService):
         single_cdp_client = True
+        cdp_multiplexer = Multiplexer()
         async def capture_viewport_png(self):
             return image
         def get_parked_page_identity(self):
@@ -63,7 +68,7 @@ async def test_terminal_capture_reaches_polar():
 
 
 async def export(history, dom, **kwargs):
-    from domains.spawn_browser_agent_v3.visual_evidence import persist_terminal_visual_evidence
+    from domains.spawn_browser_agent_v3.service_visual_evidence import persist_terminal_visual_evidence
     saved = []
     async def save(**row):
         saved.append(row)

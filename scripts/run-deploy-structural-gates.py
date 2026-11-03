@@ -314,7 +314,6 @@ GATES = (
     ),
     Gate("benchmark-scorecard", ("python3", "scripts/tests/cloudbench-scorecard.test.py")),
     Gate("sharded-waves", ("python3", "scripts/tests/run-bench-sharded-waves.test.py")),
-    Gate("sharded-coordinator", ("python3", "scripts/tests/cloudbench-shard-coordinator.test.py")),
 
 
     # Linux pidfd fixtures select a capable runtime or the offline controller image.

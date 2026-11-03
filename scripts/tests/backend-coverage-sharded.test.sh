@@ -337,9 +337,9 @@ records
 BACKEND_COVERAGE_SHARD_DURATIONS=/explicit/summary.json bash "$RUNNER" 2 >"$TMP/out5c" 2>&1 || fail "explicit durations run failed"
 grep -q '^durations=/explicit/summary.json$' "$TMP/rec/shard-1.env" || fail "explicit durations file must win"
 
-# 6. The real shard planner packs by simulated shard wall: with one recorded
-#    250 s domain every blackbox domain is still planned exactly once and the
-#    heavy domain's shard takes fewer siblings than the other shard.
+# 6. The real shard planner includes every actual domain exactly once. Test
+#    balancing on a fixed domain set: a changing mix of serial and parallel
+#    real suites can balance wall time without balancing their domain counts.
 PLAN="$ROOT_DIR/back-end/scripts/coverage-shard-plan.mjs"
 (cd "$ROOT_DIR/back-end" && node "$PLAN" 1/2 "$LEDGER" >"$TMP/p1" && node "$PLAN" 2/2 "$LEDGER" >"$TMP/p2" &&
   node "$PLAN" 1/2 >"$TMP/q1" && node "$PLAN" 2/2 >"$TMP/q2") || fail "shard planner failed"
@@ -351,9 +351,25 @@ node -e '
   const planned = [...p1, ...p2].sort();
   if (JSON.stringify(all) !== JSON.stringify(planned)) { console.error("planned set differs"); process.exit(1); }
   if (new Set(planned).size !== planned.length) { console.error("a domain was planned twice"); process.exit(2); }
-  const [heavy, light] = p1.includes("code-preview") ? [p1, p2] : [p2, p1];
-  if (heavy.length >= light.length) { console.error("heavy shard not relieved", heavy.length, light.length); process.exit(3); }
 ' "$TMP/p1" "$TMP/p2" "$TMP/q1" "$TMP/q2" || fail "wall-aware shard plan is wrong"
+
+mkdir -p "$TMP/planner/scripts" "$TMP/planner/src/tests/blackbox"
+cp "$PLAN" "$TMP/planner/scripts/coverage-shard-plan.mjs"
+cp "$ROOT_DIR/back-end/src/tests/blackbox/run.ts" "$TMP/planner/src/tests/blackbox/run.ts"
+touch "$TMP/planner/src/tests/blackbox/code-preview.blackbox.ts"
+for domain in {1..50}; do
+  touch "$TMP/planner/src/tests/blackbox/fixture-$domain.blackbox.ts"
+done
+node "$TMP/planner/scripts/coverage-shard-plan.mjs" 1/2 "$LEDGER" >"$TMP/fixed-p1"
+node "$TMP/planner/scripts/coverage-shard-plan.mjs" 2/2 "$LEDGER" >"$TMP/fixed-p2"
+node -e '
+  const fs = require("fs");
+  const [p1, p2] = process.argv.slice(1).map((p) => fs.readFileSync(p, "utf8").trim().split(","));
+  const planned = [...p1, ...p2];
+  if (planned.length !== 51 || new Set(planned).size !== 51) process.exit(1);
+  const [heavy, light] = p1.includes("code-preview") ? [p1, p2] : [p2, p1];
+  if (heavy.length >= light.length) { console.error("heavy shard not relieved", heavy.length, light.length); process.exit(2); }
+' "$TMP/fixed-p1" "$TMP/fixed-p2" || fail "fixed wall-aware shard plan is wrong"
 
 # 10. The real unit runner's selection: the coordinator excludes exactly the
 #     fps probe from the concurrent pass and selects only it for the serial

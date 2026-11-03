@@ -816,6 +816,15 @@ each isolated worktree immediately before its worker starts; a controller sync
 does not substitute for workers on a different base SHA. Triage workers only
 read evidence and need no checkpoint of their own.
 
+For each existing isolated deploy-unit worktree, hydrate its dependencies,
+credentials and owned database before running deploy gates:
+
+```bash
+bash scripts/prepare-deploy-worktree.sh \
+  --worktree "$DEPLOY_WORKTREE" \
+  --source "$(git rev-parse --show-toplevel)"
+```
+
 Before syncing a dirty controller workspace, persist `state.json` and preserve
 all in-progress work reversibly. Never discard it to make the merge succeed.
 Resolve conflicts by retaining current main behavior and integrating the descent
@@ -1251,6 +1260,10 @@ When user approval is required, only the main chat delivers harness/eval approva
 queue position as **X of N**, priority, affected-run numerator/denominator,
 unique task count and overlaps, followed by the exact inline diff and canonical
 approval evidence. Do not turn queue rank or a worker's review into approval.
+
+Deliver any required approval in the main thread using `.claude/shared/approval-format.md`
+and its seven sections. List each member's actual evidence separately; label a
+causally proven fix that still awaits its outcome rerun `Causal proof; outcome pending`.
 
 Infra and External Blocker remain in the same ranked cluster queue; keep
 their repair/observability states in the same durable cluster ledger.

@@ -300,8 +300,8 @@ require_text "$DEPLOY" "golden-reference review GROUNDED <approval-id>" \
   "/deploy guards must record a GROUNDED review instead of stopping"
 require_text "$RCA" "Golden-reference adversarial review" \
   "/rca must review approval-gated fixes before stopping"
-require_text "$DESCEND" "Fix approved (golden review)" \
-  "/descend must let a GROUNDED review clear the harness-fix decision"
+require_text "$DESCEND" 'when an independent cross-reference review returns `GROUNDED` for the exact' \
+  "/descend must require exact-snapshot grounding before applying protected fixes"
 require_text "$ROOT_DIR/CLAUDE.md" "Golden-reference review precedes every approval request" \
   "CLAUDE.md must state the golden-reference review rule"
 require_text "$FORMAT" "Never invent a failing test." \

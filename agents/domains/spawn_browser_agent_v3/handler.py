@@ -12357,7 +12357,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             )
 
                     if completion_ready:
-                        from domains.spawn_browser_agent_v3.visual_evidence import persist_terminal_visual_evidence
+                        from domains.spawn_browser_agent_v3.service_visual_evidence import persist_terminal_visual_evidence
 
                         visual_evidence = await persist_terminal_visual_evidence(
                             action_history=action_history, dom_service=dom_service,
@@ -14252,8 +14252,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
                         activity_identity = None
                         if (getattr(workflow_instance, "_browser_execution_task_id", None) == tool_call_id
-                                and write_lock_resume_state is None
-                                and workflow.patched("browser-budget-finalizer-v1")):
+                                and write_lock_resume_state is None):
                             activity_identity = str(workflow.uuid4())
                             budget_ticket = register_finalizer(
                                 workflow_instance, task_id=known_task_id, tool_id=tool_call_id,
