@@ -82,8 +82,8 @@ function signIn() {
 }
 
 function makeAgent(overrides: Partial<AgentDetail> = {}): AgentDetail {
-  // Keep menu fixtures recent so the intentional old-agent section does not hide them.
-  const recentTimestamp = new Date().toISOString();
+  // Keep fixtures recent on the sidebar clock, including mocked test dates.
+  const recentTimestamp = new Date(Date.now()).toISOString();
   return {
     agent_id: 'agent-1',
     goal: 'Get me 10 candidates to interview',
@@ -241,6 +241,36 @@ describe('Rose mobile header in the installed PWA', () => {
 });
 
 describe('Agents drawer in the installed PWA', () => {
+  it.each(['2040-01-01T12:00:00Z', '2099-07-01T12:00:00Z'])(
+    'keeps fresh fixtures visible at %s while hiding agents older than four days',
+    async (now) => {
+      const epoch = Date.parse(now);
+      vi.spyOn(Date, 'now').mockReturnValue(epoch);
+      signIn();
+      const fourDays = 4 * 24 * 60 * 60 * 1000;
+      const agents = [
+        makeAgent({ agent_id: 'fresh' }),
+        makeAgent({
+          agent_id: 'boundary',
+          updated_at: new Date(epoch - fourDays).toISOString(),
+        }),
+        makeAgent({
+          agent_id: 'old',
+          updated_at: new Date(epoch - fourDays - 1).toISOString(),
+        }),
+      ] as Agent[];
+      const user = userEvent.setup();
+      renderHeader({ agents });
+      await user.click(screen.getByRole('button', { name: 'Open menu' }));
+      const drawer = within(await screen.findByRole('dialog'));
+      expect(await drawer.findByTestId('rose-agent-row-fresh')).toBeInTheDocument();
+      expect(drawer.getByTestId('rose-agent-row-boundary')).toBeInTheDocument();
+      expect(drawer.queryByTestId('rose-agent-row-old')).toBeNull();
+      await user.click(drawer.getByRole('button', { name: 'View 1 old agent' }));
+      expect(drawer.getByTestId('rose-agent-row-old')).toBeInTheDocument();
+    },
+  );
+
   it('keeps the Logout row above the home indicator', async () => {
     const user = userEvent.setup();
     renderHeader();
