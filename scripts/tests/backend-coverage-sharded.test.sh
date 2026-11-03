@@ -339,7 +339,11 @@ grep -q '^durations=/explicit/summary.json$' "$TMP/rec/shard-1.env" || fail "exp
 
 # 6. The real shard planner packs by simulated shard wall: with one recorded
 #    250 s domain every blackbox domain is still planned exactly once and the
-#    heavy domain's shard takes fewer siblings than the other shard.
+#    two shards' simulated walls (serial late-exclusive sum + pool makespan,
+#    the planner's own model) differ by at most one unrecorded domain (30 s).
+#    A name round-robin split leaves the 250 s domain's shard ~220 s heavier.
+#    Sibling counts are not the property: which shard takes the serial
+#    late-exclusive domains shifts with the domain count.
 PLAN="$ROOT_DIR/back-end/scripts/coverage-shard-plan.mjs"
 (cd "$ROOT_DIR/back-end" && node "$PLAN" 1/2 "$LEDGER" >"$TMP/p1" && node "$PLAN" 2/2 "$LEDGER" >"$TMP/p2" &&
   node "$PLAN" 1/2 >"$TMP/q1" && node "$PLAN" 2/2 >"$TMP/q2") || fail "shard planner failed"
@@ -351,9 +355,22 @@ node -e '
   const planned = [...p1, ...p2].sort();
   if (JSON.stringify(all) !== JSON.stringify(planned)) { console.error("planned set differs"); process.exit(1); }
   if (new Set(planned).size !== planned.length) { console.error("a domain was planned twice"); process.exit(2); }
-  const [heavy, light] = p1.includes("code-preview") ? [p1, p2] : [p2, p1];
-  if (heavy.length >= light.length) { console.error("heavy shard not relieved", heavy.length, light.length); process.exit(3); }
-' "$TMP/p1" "$TMP/p2" "$TMP/q1" "$TMP/q2" || fail "wall-aware shard plan is wrong"
+  const ledger = JSON.parse(fs.readFileSync(process.argv[5], "utf8"));
+  const recorded = new Map((ledger.results ?? []).map((r) => [r.domain, r.duration]));
+  const weight = (d) => recorded.get(d) ?? 30000;
+  const run = fs.readFileSync(process.argv[6], "utf8");
+  const exclusive = new Set([...(/lateExclusiveDomainNames = new Set\(\[([\s\S]*?)\]\)/.exec(run)?.[1] ?? "").matchAll(/\x27([^\x27]+)\x27/g)].map((m) => m[1]));
+  const statics = new Map([...(/domainWeights = new Map<string, number>\(\[([\s\S]*?)\]\)/.exec(run)?.[1] ?? "").matchAll(/\[\x27([^\x27]+)\x27,\s*(\d+)\]/g)].map((m) => [m[1], Number(m[2])]));
+  const wall = (members) => {
+    const serial = members.filter((d) => exclusive.has(d)).reduce((sum, d) => sum + weight(d), 0);
+    const lanes = [0, 0, 0, 0];
+    const pool = members.filter((d) => !exclusive.has(d)).sort((a, b) => (statics.get(b) ?? 0) - (statics.get(a) ?? 0) || a.localeCompare(b));
+    for (const d of pool) { let t = 0; for (let i = 1; i < lanes.length; i++) if (lanes[i] < lanes[t]) t = i; lanes[t] += weight(d); }
+    return serial + Math.max(...lanes);
+  };
+  const [w1, w2] = [wall(p1), wall(p2)];
+  if (Math.abs(w1 - w2) > 30000) { console.error("shard walls unbalanced", w1, w2); process.exit(3); }
+' "$TMP/p1" "$TMP/p2" "$TMP/q1" "$TMP/q2" "$LEDGER" "$ROOT_DIR/back-end/src/tests/blackbox/run.ts" || fail "wall-aware shard plan is wrong"
 
 # 10. The real unit runner's selection: the coordinator excludes exactly the
 #     fps probe from the concurrent pass and selects only it for the serial
