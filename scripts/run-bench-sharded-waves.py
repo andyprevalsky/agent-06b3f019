@@ -108,6 +108,7 @@ class Batch:
         self.directory.mkdir(mode=0o700)
         self.child = None
         self.stop = None
+        self.stop_forwarded = False
         self.record = dict(
             schema=SCHEMA, mode='check' if args.check else 'run', created_at=time.time(),
             tasks=tasks, runs=args.runs, concurrency=args.concurrency, scheduled_total=self.scheduled_total,
@@ -131,12 +132,16 @@ class Batch:
         save(self.directory / 'batch.json', self.record)
 
     def request_stop(self, number, _frame):
-        first = self.stop is None
         self.stop = self.stop or signal.Signals(number).name
-        if first and self.child is not None and self.child.poll() is None:
-            # One TERM to the exact owned operator; its own traps clean up. Repeated signals
-            # never re-signal it (a second TERM can strand cleanup).
-            self.child.send_signal(signal.SIGTERM)
+        self.forward_stop()
+
+    def forward_stop(self):
+        if self.stop and self.child is not None and not self.stop_forwarded:
+            # Claim forwarding before polling/sending: another signal must not
+            # re-signal the exact operator while its own traps clean up.
+            self.stop_forwarded = True
+            if self.child.poll() is None:
+                self.child.send_signal(signal.SIGTERM)
 
     def operator_call(self, wave, mode):
         argv = [*self.operator, *self.operator_args, '--tasks', wave['manifest'],
@@ -145,8 +150,12 @@ class Batch:
             argv.append('--run')
         log = self.directory / ('wave-%02d-%s.log' % (wave['index'], mode))
         with open(log, 'w') as stream:
+            self.stop_forwarded = False
             self.child = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                           text=True, start_new_session=True)
+            # A stop can arrive while Popen is creating the isolated child,
+            # before the assignment above makes it visible to the handler.
+            self.forward_stop()
             output = []
             for line in self.child.stdout:
                 sys.stdout.write(line)

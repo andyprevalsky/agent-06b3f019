@@ -6576,8 +6576,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 if current != presentation_snapshot:
                     raise CompletionSupersededError("Final presentation was superseded by newer user requirements")
             except Exception:
-                # No final answer or terminal DB write has occurred. Preserve
-                # real feedback for the normal schema/verification retry owner.
+                # Preserve any already-written output as history and reset
+                # the latch for the normal schema/verification retry owner.
                 self._is_finished = False
                 raise
 
@@ -6824,6 +6824,14 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
+
+            # Feedback may arrive during the durable terminal write. Reopen
+            # the status before re-verifying instead of publishing its old verdict.
+            try:
+                require_current_final_presentation()
+            except CompletionSupersededError:
+                await self._update_tree_state(status="ACTIVE")
+                raise
 
             # Broadcast COMPLETED status with structured output to tree
             # (output_schema is already cached from startup and included in all broadcasts)

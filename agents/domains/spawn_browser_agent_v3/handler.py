@@ -143,7 +143,7 @@ from .config import (
 from .credential_runtime import build_realm_credential_state, unknown_realm_credential_state
 from .navigation_policy import (
     NavigationPolicyBarrier, NavigationFailureBarrier, NativeNavigationFailure,
-    is_native_navigation_policy_denial, native_navigation_failure, restore_navigation_barrier, url_digest,
+    is_native_navigation_policy_denial, native_navigation_failure, restore_navigation_barrier, url_digest, web_destination,
 )
 from .download_persist import BrowserDownloadPersister
 from .recording import (
@@ -10742,9 +10742,14 @@ async def _spawn_browser_agent_activity_v3_real(
                 reload_authority = None
                 reload_identity = None
                 try:
-                    if navigation_policy.active:
+                    try:
                         reload_authority = _policy_authority()
                         reload_identity = dom_service.get_parked_page_identity()
+                    except (asyncio.CancelledError, WorkflowGenerationSealed):
+                        raise
+                    except RuntimeError:
+                        if navigation_policy.active:
+                            raise
                     reload_event = dom_service.session.event_bus.dispatch(
                         NavigateToUrlEvent(url=current_url, wait_until="commit")
                     )
@@ -10765,6 +10770,10 @@ async def _spawn_browser_agent_activity_v3_real(
                             current_authority = _policy_authority()
                             if reload_identity is None:
                                 reload_identity = dom_service.get_parked_page_identity()
+                            if not web_destination(reload_identity.get("url")):
+                                raise RuntimeError("Native reload failure has no web document identity")
+                        except (asyncio.CancelledError, WorkflowGenerationSealed):
+                            raise
                         except RuntimeError:
                             # Without native identity, the existing recovery owner
                             # must handle the failure instead of binding a barrier.
@@ -12406,11 +12415,21 @@ async def _spawn_browser_agent_activity_v3_real(
                     if completion_ready:
                         from domains.spawn_browser_agent_v3.service_visual_evidence import persist_terminal_visual_evidence
 
-                        visual_evidence = await persist_terminal_visual_evidence(
-                            action_history=action_history, dom_service=dom_service,
-                            session_id=session_id, task_id=task_id, agent_id=agent_id,
-                            redact=_redact_activity_value,
-                        )
+                        try:
+                            visual_evidence = await persist_terminal_visual_evidence(
+                                action_history=action_history, dom_service=dom_service,
+                                session_id=session_id, task_id=task_id, agent_id=agent_id,
+                                redact=_redact_activity_value,
+                            )
+                        except (asyncio.CancelledError, BrowserSessionCloseError, BrowserInstructionUnavailableError, WorkflowGenerationSealed):
+                            raise
+                        except Exception as evidence_error:
+                            logger.warning(
+                                "[BrowserAgent] Failed to persist terminal visual evidence",
+                                agent_id=agent_id,
+                                error=extract_error_message(evidence_error),
+                            )
+                            visual_evidence = {"status": "failed"}
                         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
                         if dom_service is not None:
                             await _disconnect_browser(dom_service)

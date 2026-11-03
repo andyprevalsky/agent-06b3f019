@@ -10981,6 +10981,57 @@ async def test_completion_caller_routes_late_revision_and_invalid_presentation()
             _restore_workflow(original)
 
 
+async def test_completion_feedback_during_mark_finished_continues_current_requirement():
+    from unittest.mock import AsyncMock
+    class Continued(BaseException): pass
+    for child in (False, True):
+        for accepted in (False, True):
+            wf = _bare_workflow_instance()
+            wf.agent_id, wf.user_id, wf.goal, wf.model = 'terminal-feedback', 'user', 'Only the day', 'rose-1-flash'
+            wf.max_iterations, wf.context_gates = 25, {}
+            wf.parent_workflow_id = 'parent' if child else None
+            wf.output_schema = {'fields': [{'name': 'day', 'type': 'int', 'required': True}],
+                                'presentation': {'version': 1, 'mode': 'value', 'field': 'day', 'encoding': 'text'}}
+            wf._start_response_schema_refresh = lambda: None
+            wf._wake_background_waiters = lambda: None
+            wf._note_wait_wake = lambda *args: None
+            wf._flush_pending_messages = AsyncMock()
+            fake = _FakeWorkflowModule()
+            execute = fake.execute_activity
+            async def inject(fn, args=None, **kwargs):
+                result = await execute(fn, args=args, **kwargs)
+                if getattr(fn, '__name__', '') == 'mark_finished':
+                    await wf.receive_user_response('Instead give the month')
+                    if accepted:
+                        wf._response_schema_accepted_revision = wf._response_schema_revision
+                return result
+            fake.execute_activity = inject
+            continuations = []
+            def continue_as_new(**kwargs):
+                continuations.append(kwargs)
+                raise Continued()
+            fake.continue_as_new = continue_as_new
+            original = _patch_workflow(fake)
+            try:
+                try:
+                    await wf._finish_verified_completion([], {'day': 4})
+                except Continued:
+                    pass
+                else:
+                    raise AssertionError('feedback during terminal write was completed without re-verification')
+                assert not wf._is_finished and wf._response_schema_revision == 1
+                assert 'Instead give the month' in wf._response_schema_feedback
+                assert len(continuations) == 1 and continuations[0]['args'][11] == 'execute_continued'
+                assert continuations[0]['args'][16]['runtime_state']['response_schema_revision'] == 1
+                statuses = [args[3]['status'] for name, args in fake.activity_calls
+                            if name == 'update_agent_tree_state' and 'status' in args[3]]
+                assert statuses and statuses[-1] == 'ACTIVE' and 'COMPLETED' not in statuses, statuses
+                assert not any(name == 'notify_sms_event_activity' for name, _ in fake.activity_calls)
+                assert not any(call[1] == 'child_completed' for call in fake.signal_calls)
+            finally:
+                _restore_workflow(original)
+
+
 async def test_completion_routing_preserves_unrelated_failures():
     from unittest.mock import AsyncMock
     for error in (RuntimeError("publication transport failed"), ValueError("unrelated validation"), asyncio.CancelledError()):
@@ -14083,6 +14134,7 @@ async def run_all_tests():
     await r.record_async("workflow_final_value_presentation", test_workflow_final_value_presentation)
     r.record("browser_execution_restore_rejects_malformed_values", test_browser_execution_restore_rejects_malformed_values)
     await r.record_async("completion_caller_routes_late_revision_and_invalid_presentation", test_completion_caller_routes_late_revision_and_invalid_presentation)
+    await r.record_async("completion_feedback_during_mark_finished_continues_current_requirement", test_completion_feedback_during_mark_finished_continues_current_requirement)
     await r.record_async("completion_routing_preserves_unrelated_failures", test_completion_routing_preserves_unrelated_failures)
     await r.record_async("budget_stop_is_not_user_pause_and_cascades_cause", test_budget_stop_is_not_user_pause_and_cascades_cause)
     await r.record_async("workflow_final_value_rejects_stale_or_invalid", test_workflow_final_value_rejects_stale_or_invalid)

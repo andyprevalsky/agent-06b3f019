@@ -6,7 +6,8 @@ call and writes the admission result.json and native-release-audit.json the real
 operator writes, so no provider, Machine or credential is touched.
 """
 from pathlib import Path
-import json, os, subprocess, sys, tempfile, unittest
+import json, os, subprocess, sys, tempfile, unittest, runpy, signal
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 DRIVER = ROOT / 'scripts/run-bench-sharded-waves.py'
@@ -204,6 +205,36 @@ class Waves(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertTrue(calls)
         self.assertTrue(all(c['session'] != c['parent_session'] for c in calls), calls)
+
+    def test_stop_during_popen_is_forwarded_once_after_child_assignment(self):
+        module = runpy.run_path(str(DRIVER))
+        runner = object.__new__(module['Batch'])
+        runner.directory = self.root
+        runner.operator = ['fake-operator']
+        runner.operator_args = []
+        runner.scheduled_total = 210
+        runner.record = {'infra_confirmed': 0}
+        runner.child = None
+        runner.stop = None
+        runner.stop_forwarded = False
+        signals = []
+        class Child:
+            stdout = []
+            def poll(self): return None
+            def send_signal(self, number): signals.append(number)
+            def wait(self): return 130
+        child = Child()
+        def launch(*args, **kwargs):
+            self.assertTrue(kwargs['start_new_session'])
+            runner.request_stop(signal.SIGINT, None)
+            runner.request_stop(signal.SIGTERM, None)
+            self.assertEqual(signals, [])
+            return child
+        with mock.patch.object(module['subprocess'], 'Popen', side_effect=launch):
+            self.assertEqual(runner.operator_call({'manifest': 'tasks.json', 'index': 0}, 'run'), (130, ''))
+        self.assertEqual(signals, [signal.SIGTERM])
+        self.assertEqual(runner.stop, 'SIGINT')
+        self.assertIsNone(runner.child)
 
     def test_fails_closed_on_invalid_shape_or_driver_owned_options(self):
         for kwargs, message in [(dict(concurrency=2), 'repetitions <= --concurrency'),
