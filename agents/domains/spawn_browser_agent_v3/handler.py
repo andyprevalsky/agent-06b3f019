@@ -14827,6 +14827,11 @@ async def spawn_browser_agent(workflow_instance: Any, tool_call: Dict[str, Any],
                 event.data["usage"],
                 tool_name="spawn_browser_agent",
                 call_site="browser_agent",
+                browser_completed=(
+                    event.status == MessageStatus.FINISHED
+                    and (event.metadata or {}).get("action_type") == "task_complete"
+                    and (event.metadata or {}).get("success") is True
+                ),
             )
 
     return last_status
