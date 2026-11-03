@@ -444,6 +444,16 @@ def coderabbit_reviews(reviews: list[dict[str, object]], head: str) -> list[dict
     return [review for review in reviews if _is_bot(review) and review.get("commit_id") == head]
 
 
+def _publication_time(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
 def publication_evidence(
     review: dict[str, object], head: str, evidence: dict[str, object]
 ) -> dict[str, object] | None:
@@ -463,10 +473,19 @@ def publication_evidence(
                 and comment.get("original_commit_id", head) == head
                 and type(comment.get("id")) is int and comment["id"] > 0
                 and _body(comment).strip()]
-    runs = coderabbit_check_runs(check_runs, head)
-    check = runs[-1] if runs else {}
-    if (not findings or check.get("head_sha") != head or check.get("status") != "completed"
-            or check.get("conclusion") != "success" or _check_title(check) != "Finished"):
+    published = _publication_time(review.get("submitted_at"))
+    check = None
+    # Later usage-exhausted attempts cannot erase an already completed publication.
+    # The marker UUID is not a native check-run ID; bind its submission to the run interval.
+    for run in reversed(coderabbit_check_runs(check_runs, head)):
+        started, completed = (_publication_time(run.get(key)) for key in ("started_at", "completed_at"))
+        if (run.get("head_sha") == head and run.get("status") == "completed"
+                and run.get("conclusion") == "success" and _check_title(run) == "Finished"
+                and published is not None and started is not None and completed is not None
+                and started <= published <= completed):
+            check = run
+            break
+    if not findings or check is None:
         return None
     return {
         "recognition": "publication-with-review-bound-findings",

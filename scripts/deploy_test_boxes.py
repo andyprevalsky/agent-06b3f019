@@ -327,7 +327,7 @@ def collect_result(data, binding, *, not_before, deadline_at, poll, directory):
             break
         if CANCEL.is_set() or time.time() >= deadline_at:
             raise ValueError('attachment_missing')
-        time.sleep(poll)
+        time.sleep(min(poll, max(0, deadline_at - time.time())))
     if len(exact) > MAX_RECEIPT_BYTES:
         raise ValueError('worker receipt exceeds transport limit')
     copy = directory / 'native-result.json'

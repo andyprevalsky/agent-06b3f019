@@ -543,7 +543,8 @@ class OverrideDispositionTest(unittest.TestCase):
             '- [ ] <!-- {"checkboxId":"4b0d0e0a-96d7-4f10-b296-3a18ea78f0b9"} --> '
             "Fix comments: Fix CodeRabbit comments on this PR\n<!-- autofix_checkbox_end -->"
         )
-        return evidence(check_runs=[FINISHED_CHECK], reviews=[review(5747657344, HEAD_C, body)],
+        return evidence(check_runs=[dict(FINISHED_CHECK, started_at="2026-10-31T10:15:00Z")],
+                        reviews=[review(5747657344, HEAD_C, body)],
                         review_comments=[dict(FINDING_COMMENT, pull_request_review_id=5747657344),
                                          DEFERRED_REPLY])
 
@@ -564,6 +565,52 @@ class OverrideDispositionTest(unittest.TestCase):
                          MODULE.hashlib.sha256(data["reviews"][0]["body"].encode()).hexdigest())
         self.assertEqual(json.loads(self.receipts.read_text())["evidence"], cycle["evidence"])
         self.assertIn("Overridden", cycle["report_row"])
+
+    def test_earlier_publication_survives_later_same_head_exhaustion(self) -> None:
+        data = self.publication_data()
+        exhausted = check_run(124509628999, HEAD_C, "neutral", "Review rate limited", "2026-10-31T10:20:00Z")
+        data["check_runs"].append(exhausted)
+        data["issue_comments"] = [CAP_COMMENT]
+        before = self.state_path.read_bytes()
+        normalized = MODULE.normalize_evidence(data, source="test")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "substantive CodeRabbit review exists"):
+            MODULE.skip_cycle(self.state_path, head=HEAD_C, pr="1656", reason="usage-cap",
+                              evidence=normalized, receipts_path=self.receipts)
+        self.assertEqual(before, self.state_path.read_bytes())
+        self.assertFalse(self.receipts.exists())
+        cycle = self.override(data, prior_rounds=1)
+        publication = cycle["evidence"]["review_publication"]
+        self.assertEqual(FINISHED_CHECK["id"], publication["check_run_id"])
+        self.assertEqual(MODULE.hashlib.sha256(data["reviews"][0]["body"].encode()).hexdigest(),
+                         publication["review_body_sha256"])
+        self.assertEqual("overridden", cycle["disposition"])
+        self.assertEqual(exhausted["id"], cycle["evidence"]["check_run_id"])
+
+    def test_publication_requires_finished_attempt_containing_submission(self) -> None:
+        valid = self.publication_data()
+        before = self.state_path.read_bytes()
+        for submitted in [None, "not-a-date", "2026-10-31T10:15:31", "2026-10-31T10:14:59Z",
+                          "2026-10-31T10:15:37Z"]:
+            self.state_path.write_bytes(before); self.receipts.unlink(missing_ok=True)
+            data = deepcopy(valid); data["reviews"][0]["submitted_at"] = submitted
+            with self.subTest(submitted=submitted):
+                with self.assertRaisesRegex(MODULE.ReviewCycleError, "no substantive CodeRabbit review"):
+                    self.override(data, prior_rounds=1)
+                self.assertEqual(before, self.state_path.read_bytes())
+                self.assertFalse(self.receipts.exists())
+        for field, value in [("started_at", None), ("completed_at", "invalid"),
+                             ("started_at", "2026-10-31T10:16:00Z")]:
+            self.state_path.write_bytes(before); self.receipts.unlink(missing_ok=True)
+            data = deepcopy(valid); data["check_runs"][0][field] = value
+            with self.subTest(field=field, value=value):
+                with self.assertRaisesRegex(MODULE.ReviewCycleError, "no substantive CodeRabbit review"):
+                    self.override(data, prior_rounds=1)
+                self.assertEqual(before, self.state_path.read_bytes())
+                self.assertFalse(self.receipts.exists())
+        # Legacy substantive bodies remain independent of the publication-only time binding.
+        legacy = MODULE.normalize_evidence(evidence(reviews=[FINDINGS_REVIEW],
+            check_runs=[RATE_LIMITED_CHECK]), source="test")
+        self.assertEqual([FINDINGS_REVIEW], MODULE.substantive_reviews(legacy["reviews"], HEAD_C, legacy))
 
     def test_publication_refusals_are_atomic(self) -> None:
         valid = self.publication_data()

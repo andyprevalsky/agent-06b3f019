@@ -1375,6 +1375,39 @@ class Boxes(unittest.TestCase):
         result = self.run_adapter(deadline=0.3)
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual('attachment_missing', result['reason'])
 
+    def test_attachment_poll_obeys_deadline_and_keeps_boundary_delivery_first(self):
+        data = self.wrap({'output': {'text': self.reply(inline=False)}})['data']
+        deadline = 1000.25
+        for delivered in (False, True):
+            with self.subTest(delivered=delivered):
+                clock = [1000.0]
+                sleeps = []
+                directory = self.coordinator / ('delivered' if delivered else 'missing')
+                directory.mkdir()
+                def sleep(seconds):
+                    sleeps.append(seconds)
+                    clock[0] += seconds
+                    if delivered:
+                        self.attach(self.native_bytes)
+                # Control only the clock: parse the real terminal envelope, search
+                # real attachment files, and preserve the byte-exact native copy.
+                with patch.object(self.boxes, 'time') as timer:
+                    timer.time.side_effect = lambda: clock[0]
+                    timer.sleep.side_effect = sleep
+                    if delivered:
+                        result = self.boxes.collect_result(data, self.binding, not_before=0,
+                            deadline_at=deadline, poll=60, directory=directory)
+                        self.assertEqual(self.native, result[0])
+                        self.assertTrue(result[-1].startswith('attachment:'))
+                        self.assertEqual(self.native_bytes.encode(), (directory / 'native-result.json').read_bytes())
+                    else:
+                        with self.assertRaisesRegex(ValueError, '^attachment_missing$'):
+                            self.boxes.collect_result(data, self.binding, not_before=0,
+                                deadline_at=deadline, poll=60, directory=directory)
+                        self.assertFalse((directory / 'native-result.json').exists())
+                self.assertEqual([.25], sleeps)
+                self.assertEqual(deadline, clock[0])
+
     def test_typed_permission_denial_is_unverified_with_exact_error_kept(self):
         denial = {'schemaVersion': 1, 'ok': False, 'error': {'code': 'thread_control_scope_denied',
                   'message': 'request control-project-threads'}}
