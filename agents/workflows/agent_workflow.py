@@ -1306,6 +1306,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             self._resume_prior_status == "COST_LIMIT_REACHED"
             and self._cost_limit_wrapup_pending
             and not self._cost_limit_wrapup_consumed
+            and self._has_credits
             and not self._user_pause_active
             and not self._paused_by_parent
         ):
@@ -1353,9 +1354,13 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         ):
             return
         # Tool did not newly trip the limit — do not clear an unrelated pause.
-        if cost_limit_before or paused_before or self._paused_by_parent:
+        if cost_limit_before or paused_before or self._paused_by_parent or not self._has_credits:
             return
-        if pause_sequence_before is not None and self._pause_signal_sequence != pause_sequence_before:
+        # Terminal accounting arms before a budget pause. Any pause that is
+        # present now belongs to an independent control and must stay paused.
+        if pause_sequence_before is not None and (
+            self.is_paused or self._pause_signal_sequence != pause_sequence_before
+        ):
             return
         workflow.logger.warning(
             "💰 Successful spawn_browser_agent tripped the cost limit "
@@ -4399,13 +4404,14 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             and self._cost_limit_reached
             and tool_name not in {"attempt_completion", "attempt_completion_with_result"}
         ):
-            # Keep refusal latched across every call in a parallel batch, even
-            # after the first call closes the allowance and yields to persistence.
-            self._cost_limit_wrapup_pending = False
-            self._cost_limit_wrapup_consumed = True
-            if not self.is_paused:
-                self._cost_limit_reached = False
-                await self._check_cost_limit()
+            # Every productive call is refused, including an older turn that
+            # was already in flight when browser accounting armed the allowance.
+            # Only an admitted wrap-up turn can spend that future allowance.
+            if self._cost_limit_wrapup_consumed:
+                self._cost_limit_wrapup_pending = False
+                if not self.is_paused:
+                    self._cost_limit_reached = False
+                    await self._check_cost_limit()
             await self._handle_tool_event(
                 ToolEvent(
                     type=EventType.POST_MESSAGE,
@@ -5128,8 +5134,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
 
             # Admit the verified terminal result before any persistence/signal
             # await can admit another child cost update and publish a cost stop.
-            self.subtree_cost_cents = self.own_cost_cents + sum(self.children_cost_cents.values())
             if browser_completed:
+                self.subtree_cost_cents = self.own_cost_cents + sum(self.children_cost_cents.values())
                 self._maybe_arm_cost_limit_wrapup_after_browser(
                     tool_name=tool_name,
                     result={"success": True},

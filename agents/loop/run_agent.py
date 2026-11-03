@@ -1134,6 +1134,7 @@ async def run_agent(
         # Admit a browser completion turn only after handoff and compaction
         # boundaries. A continue-as-new before a model call must preserve it.
         if check_paused_before_turn and await check_paused_before_turn():
+            iteration -= 1
             continue
 
         # Schema and message preparation share the existing pre-acceptance

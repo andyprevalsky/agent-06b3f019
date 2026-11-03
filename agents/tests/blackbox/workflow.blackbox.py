@@ -12324,6 +12324,91 @@ async def test_workflow_browser_pricing_cannot_reopen_an_intervening_cost_stop()
         _restore_workflow(original)
 
 
+async def test_workflow_inflight_refusal_preserves_unadmitted_browser_wrapup():
+    from unittest.mock import AsyncMock, patch
+    import workflows.agent_workflow as workflow_module
+
+    wf = _bare_workflow_instance()
+    wf.agent_id, wf.user_id, wf.agent_source = "inflight-wrapup", "budget-user", "WEB"
+    wf.own_cost_cents = wf.subtree_cost_cents = 121.0
+    wf.price_limit_cents = 120
+    wf._cost_limit_reached = wf._cost_limit_wrapup_pending = True
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    executor = AsyncMock()
+    try:
+        with patch.dict(workflow_module.TOOL_EXECUTORS, {"web_search": executor}):
+            results = await asyncio.gather(
+                wf._execute_tool("web_search", {"query": "old turn one"}, "inflight-one"),
+                wf._execute_tool("web_search", {"query": "old turn two"}, "inflight-two"),
+            )
+        assert all(result.get("error") is True for result in results)
+        executor.assert_not_awaited()
+        assert wf._cost_limit_wrapup_pending, "old in-flight work consumed the future completion allowance"
+        assert not wf._cost_limit_wrapup_consumed and not wf.is_paused
+        assert not any(
+            name == "update_agent_status" and args[1] == "COST_LIMIT_REACHED" for name, args in fake.activity_calls
+        )
+        assert not await wf._check_paused_before_turn()
+        assert wf._cost_limit_wrapup_consumed
+        wf.goal = "Report the returned browser result"
+        wf.start_time = fake.now_value
+        wf.output_schema = {"fields": [{"name": "answer", "type": "str"}]}
+        await wf._mark_complete(context=[], structured_response={"answer": "Observed result"})
+        assert wf._is_finished
+        assert any(name == "mark_finished" for name, _ in fake.activity_calls)
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_browser_pricing_preserves_intervening_credit_pause(credit_restored=False):
+    wf = _bare_workflow_instance()
+    wf.agent_id, wf.user_id, wf.agent_source = "credit-pause-wrapup", "budget-user", "WEB"
+    wf.own_cost_cents, wf.price_limit_cents = 119.0, 120
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["check_user_usage"] = {"has_credits": False, "tier": "paid"}
+    original = _patch_workflow(fake)
+
+    async def pricing_after_credit_check(model):
+        await wf._check_credits()
+        if credit_restored:
+            fake.activity_returns["check_user_usage"] = {"has_credits": True, "tier": "paid"}
+            await wf._check_credits()
+        return {"input_cents_per_1k": 2.0, "output_cents_per_1k": 0.0}
+
+    wf._get_model_pricing = pricing_after_credit_check
+    try:
+        await wf._track_usage(
+            {"llm": [{"model": "priced-browser-model", "provider": "browser", "tokens_in": 1000}]},
+            tool_name="spawn_agent",
+            browser_completed=True,
+        )
+        assert wf.own_cost_cents == 121.0 and wf._has_credits is credit_restored
+        assert wf.is_paused and not wf._cost_limit_wrapup_pending, "terminal browser accounting bypassed a credit pause"
+        assert await wf._check_paused_before_turn()
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_browser_wrapup_restore_preserves_cached_credit_pause():
+    wf = _bare_workflow_instance()
+    state = _deployment_resume_fixture("COST_LIMIT_REACHED")
+    state["runtime_state"] = {
+        "cost_limit_wrapup_pending": True,
+        "cost_limit_wrapup_consumed": False,
+        "has_credits": False,
+    }
+    wf._restore_deployment_state(state)
+    assert not wf._has_credits
+    assert wf.is_paused, "restoring an unused completion allowance bypassed cached credit pause"
+    assert await wf._check_paused_before_turn()
+    assert not wf._cost_limit_wrapup_consumed
+
+
+async def test_workflow_browser_pricing_preserves_credit_pause_after_refresh():
+    await test_workflow_browser_pricing_preserves_intervening_credit_pause(credit_restored=True)
+
+
 async def test_workflow_background_browser_budget_keeps_native_notification_and_result():
     from unittest.mock import AsyncMock, patch
     import workflows.background_agents as background_module
@@ -12522,6 +12607,8 @@ async def test_workflow_browser_wrapup_cannot_start_productive_work_or_renew_aft
     original = _patch_workflow(fake)
     executor = AsyncMock()
     try:
+        assert not await wf._check_paused_before_turn()
+        assert wf._cost_limit_wrapup_consumed
         with patch.dict(workflow_module.TOOL_EXECUTORS, {"web_search": executor}):
             results = await asyncio.gather(
                 wf._execute_tool("web_search", {"query": "new work one"}, "new-work-one"),
@@ -13424,6 +13511,10 @@ async def run_all_tests():
     await r.record_async("wf_background_browser_budget_notification", test_workflow_background_browser_budget_keeps_native_notification_and_result)
     await r.record_async("browser_usage_child_cost_interleaving", test_workflow_browser_usage_arms_before_child_cost_interleaving)
     await r.record_async("browser_pricing_preserves_intervening_cost_stop", test_workflow_browser_pricing_cannot_reopen_an_intervening_cost_stop)
+    await r.record_async("inflight_refusal_preserves_unadmitted_browser_wrapup", test_workflow_inflight_refusal_preserves_unadmitted_browser_wrapup)
+    await r.record_async("browser_pricing_preserves_intervening_credit_pause", test_workflow_browser_pricing_preserves_intervening_credit_pause)
+    await r.record_async("browser_pricing_preserves_pause_after_credit_refresh", test_workflow_browser_pricing_preserves_credit_pause_after_refresh)
+    await r.record_async("browser_wrapup_restore_preserves_cached_credit_pause", test_workflow_browser_wrapup_restore_preserves_cached_credit_pause)
     await r.record_async("wf_unverified_browser_budget_stop", test_workflow_unverified_browser_and_other_usage_do_not_get_wrapup)
     await r.record_async("wf_browser_budget_wrapup_pause_controls", test_workflow_browser_budget_wrapup_stops_after_one_turn_and_keeps_pauses)
     await r.record_async("wf_browser_budget_wrapup_work_and_restore", test_workflow_browser_wrapup_cannot_start_productive_work_or_renew_after_restore)

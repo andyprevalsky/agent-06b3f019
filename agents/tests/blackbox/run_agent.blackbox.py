@@ -496,6 +496,28 @@ async def test_browser_budget_accepted_response_failure_does_not_refund_allowanc
     refund.assert_not_called()
 
 
+async def test_browser_budget_precall_pause_does_not_spend_iteration():
+    admission_checks = 0
+    llm_calls = []
+
+    async def admit_after_pause():
+        nonlocal admission_checks
+        admission_checks += 1
+        return admission_checks == 1
+
+    result, _, executed = await _run_single_iteration(
+        [{"tool": "attempt_completion"}],
+        [("attempt_completion", "after-precall-pause", 1.0)],
+        max_iterations=1,
+        check_paused_override=AsyncMock(return_value=False),
+        check_paused_before_turn_override=admit_after_pause,
+        llm_auth_calls=llm_calls,
+    )
+    assert result["status"] == "completed", result
+    assert len(llm_calls) == 1 and admission_checks == 2
+    assert [call["tool_name"] for call in executed] == ["attempt_completion"]
+
+
 async def test_out_of_credits_state_does_no_llm_or_tool_work():
     """A deployment-restored credit pause remains cold until an explicit resume."""
     from loop import run_agent as run_agent_module
@@ -4398,6 +4420,7 @@ async def run_all_tests():
     await r.record_async("browser_budget_compaction_preserves_unused_allowance", test_browser_budget_compaction_before_llm_preserves_unused_allowance)
     await r.record_async("browser_budget_preparation_retry_preserves_allowance", test_browser_budget_preparation_retry_does_not_spend_unused_allowance)
     await r.record_async("browser_budget_accepted_failure_keeps_allowance_consumed", test_browser_budget_accepted_response_failure_does_not_refund_allowance)
+    await r.record_async("browser_budget_precall_pause_keeps_iteration", test_browser_budget_precall_pause_does_not_spend_iteration)
     await r.record_async(
         "explore_terminal_handoff_refreshes_stale_pending_snapshot",
         test_explore_terminal_handoff_refreshes_stale_pending_snapshot,

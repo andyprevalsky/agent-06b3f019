@@ -24,7 +24,7 @@ sources:
   - commit 9e25b6e006b9fd7f3f2d64b24f2d44a81772ece0
   - commit e2df81cd537521134d115fedfca41e54c17a0b31
 repro: agents/tests/blackbox/workflow.blackbox.py::test_workflow_generic_browser_result_gets_existing_budget_wrapup
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -146,12 +146,39 @@ pending allowance, never an accepted response and never a real pause. The
 accepted-response bookkeeping failure control proves no refund occurs after
 acceptance. No original evaluator or assertion is relaxed.
 
-Fresh changed-snapshot adversarial review and full original invocation/
-deployment verification remain pending; this case stays open until those
-outcome gates complete. Interrupted source-superseded test attempts retain
-original cancellation/failed cleanup receipts and are not counted as passes;
-owner-scoped reconciliation and external resource verification are tracked
-separately from the final stable invocation.
+The stabilized lifecycle passed all 17 owning regression controls five
+consecutive times. The actual subsequent review identified two further
+boundaries: an older in-flight productive call could consume the future
+allowance, and a pre-call pause could consume a normal loop iteration. Their
+identical failing controls now pass: all productive calls remain refused, but
+only an admitted completion turn can consume the allowance; pre-call pauses
+refund the iteration. Three additional controls reproduce and preserve a
+financial pause during pricing, after a later credit refresh, and during
+continuation restore. These use the existing credit-check activity with fake
+returns, without changing any real account or provider state.
+
+On stable source 3a263f667, the original Kernel predeploy invocation exited 0;
+Webdecoy completed in 151.0 seconds at reported 53c, within unchanged120c/420s.
+Its native root is 71db6f5a-5e56-42e5-a35a-ae1bfa445c01. The two smoke batches
+recorded 8 PASS and 2 SKIP, not ten passes: Claude credentials were unavailable
+and the mass judge had no selectable Codex compute token. The earlier
+below-cap baseline is still not a reproduction of the historical budget
+crossing. Exact final-source release gates and production source verification
+are recorded by the deploy owner; neither the case's fixed lifecycle status
+nor scoped review approval substitutes for those release gates.
+
+The stable3a full agents blackbox gate separately recorded123/124 domains
+passing and a browser-tilion Chromium readiness failure before attachment:
+`AssertionError: /json/version on 127.0.0.1:41131 -> {}`. Its cause and source
+attribution remain UNKNOWN; it is not waived or converted to a pass. Independent
+tails passed214 demo-cache and176 unit tests, with85% coverage against80%.
+Interrupted source-superseded attempts retain original cancellation/failed
+benchmark cleanup receipts. Exact owned Kernel sessions were independently
+verified deleted after native recovery; native final stack/benchmark cleanup
+was clean. Persistent E2B sessions were paused by their existing close policy,
+not claimed deleted. Sandbox payment cleanup recorded CLEARED4396c, a closed
+zero-balance card, and livemode=false payment/transfer facts. No historical
+unsealed receipt is rewritten by these later observations.
 
 ## Human feedback
 
