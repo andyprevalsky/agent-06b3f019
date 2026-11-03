@@ -12,7 +12,7 @@ hand-edit the HTML or invent sections. Run `python3 scripts/biz_review.py
 self-test` first; it covers layout, masking, proration and every cost module.
 
 Card order: Delivery → Tasks (completion KPI, user-initiated KPI with per-user
-bars, expandable "All tasks" list, Andy’s weekly prompt-history graph) → Compute costs (total + top 3 groups, then
+bars, expandable "All tasks" list) → Compute costs (total + top 3 groups, then
 one expandable row per group) → Major updates → Minor updates (expandable
 clusters). No latency, error rates, risk/warning sections, `warming` or
 placeholder values.
@@ -41,15 +41,6 @@ It prints `.context/biz-review/<stamp>/data.json`:
   runs or chat — never a separate category. Completion rate = COMPLETED ÷ agent
   runs; chat-only questions show as "Answered". Titles have phone numbers and
   emails masked.
-- **Andy’s prompt history** — calendar weeks Monday–Sunday in `America/Los_Angeles`,
-  through the collection timestamp (last bar marked partial). Counts retained,
-  nonempty USER inputs in Andy’s real root conversations, including follow-ups;
-  excludes benchmark/simulated roots, generated child goals, workflow messages,
-  A2A, schema/compaction rows, and empty attachment rows. Explicit request IDs
-  are deduplicated; identical text with distinct IDs remains separate. Counts
-  are aggregate-only. Deleted messages and unmarked legacy internal rows cannot
-  be reconstructed reliably: always retain the chart’s scope note, never call
-  this a complete lifetime total. An unavailable collection is not zero usage.
 - **Compute costs**, every row from the provider, never prod-DB recorded spend
   (cloud benchmark stacks use their own DBs, so recorded spend misses most usage):
 
@@ -77,19 +68,6 @@ Known gaps and how to close them (ask once, then reuse):
   Azure Foundry is intentionally excluded.
 - Record any figure the user reads off a dashboard before rendering:
   `python3 scripts/biz_review.py set-cost --dir <run-dir> --name <row name> --usd <n> --detail "<dates · models>"`.
-
-The normal collection includes prompt history. To refresh only this read-only
-aggregate (without contacting billing providers), run:
-
-```bash
-python3 scripts/biz_review_prompts.py --out .context/biz-review/prompts.json
-```
-
-For a separate checkout, `--env-file /absolute/path/to/back-end/.env` selects the
-authoritative configuration without copying secrets. The collector explicitly
-uses `BEGIN READ ONLY`, a 25-second statement timeout, and returns only weekly
-aggregates. Its SQL fixture test uses temporary tables and must use a local DB:
-`TEST_DATABASE_URL=<local-test-connection> python3 scripts/tests/biz-review-prompt-history.test.py`.
 
 ## 2. Write the narrative
 
