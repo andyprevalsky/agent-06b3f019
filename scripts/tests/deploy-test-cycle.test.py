@@ -1767,6 +1767,77 @@ class Cycle(unittest.TestCase):
         proof['files'][str(packet)] = c.sha_file(packet)
         return state, occurrence, paths, proof, gate, packet
 
+    def test_failed_infra_canary_is_execution_only_and_requires_positive_release(self):
+        import hashlib
+        import shutil
+        state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
+        runs = Path(proof['campaign']).parent.parent / 'runs'
+        fleet = runs / '20261103-080441-2147483001'
+        life_path = fleet / '_batch/lifecycle.json'
+        life = c.read(life_path)
+        life.update(status='failed', controller_exit_code=143)
+        audit = fleet / 'teardown-ownership'
+        (audit / 'source-audit').unlink()
+        (audit / 'owned-clones.ids').write_text('')
+        (audit / 'owned-clones.names').write_text('')
+        shutil.rmtree(audit / 'fresh')
+        canonical = self.root / '.git/cloudbench-fleet-audits' / life['fleet_owner_token']
+        shutil.rmtree(canonical); shutil.copytree(audit, canonical)
+        digest = hashlib.sha256()
+        for path in sorted(audit.rglob('*'), key=lambda p: str(p.relative_to(audit))):
+            if path.is_file():
+                for raw in (str(path.relative_to(audit)).encode(), path.read_bytes()):
+                    digest.update(len(raw).to_bytes(8, 'big')); digest.update(raw)
+        life['audit_sha256'] = digest.hexdigest(); c.write(life_path, life)
+        (audit / 'source-audit').write_text(f'path={canonical}\nsha256={digest.hexdigest()}\n')
+        names = [b['name'] for b in json.loads((fleet / '_batch/benches.json').read_text())]
+        c.write(fleet / '_batch/run.json', dict(run_id=fleet.name, controller_exit_code=143,
+            status='failed', tasks=[dict(name=n, status='INFRA_ERROR', passed=False,
+                lifecycle_stage='released', failure_reason='no current run artifact produced') for n in names]))
+        for name in ('execution-provenance.json', 'execution-task-matrix.json'): (fleet / name).unlink()
+        log = Path(proof['campaign']) / 'r001-j0003.log'
+        text = log.read_text().replace(f'{self.root}/scripts/run-bench monitor {fleet}',
+            f"ref    : {state['source']['head']}  (committed source)\n"
+            'mode: --infra-probe (strict barrier, no LLM / run_benchmark)\n'
+            f'{self.root}/scripts/run-bench monitor {fleet}\n'
+            f"owner: {life['fleet_owner_token']}; private controller diagnostics stay in this run directory.")
+        log.write_text(text)
+        proof['execution_quiescence'].pop('machine1')
+        def bind():
+            proof['files'] = {p: c.sha_file(p) for p in proof['files'] if Path(p).is_file()}
+        bind()
+        original = copy.deepcopy(state)
+        c.reconcile(state, failure['id'], proof)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+        self.assertEqual(original['attempts'], state['attempts'])
+        self.assertEqual(15, len(entry['participants']))
+        mutations = [
+            (life_path, lambda v: dict(v, audit_sha256='0' * 64)),
+            (canonical / 'meta', lambda v: v.replace('status=provider-teardown-verified', 'status=pending')),
+            (log, lambda v: v.replace(state['source']['head'], 'f' * 40)),
+            (log, lambda v: v.replace(life['fleet_owner_token'], 'e' * 32)),
+            (log, lambda v: v.replace('mode: --infra-probe', 'mode: task')),
+        ]
+        for path, mutate in mutations:
+            with self.subTest(path=path):
+                raw = path.read_bytes()
+                if path == life_path: c.write(path, mutate(c.read(path)))
+                else: path.write_text(mutate(path.read_text()))
+                bind(); candidate = copy.deepcopy(original)
+                with self.assertRaises(ValueError): c.reconcile(candidate, failure['id'], proof)
+                self.assertEqual(original, candidate)
+                path.write_bytes(raw); bind()
+        import deploy_test_native_cleanup as native
+        actual_ps = native.subprocess.check_output
+        def live(args, **kwargs):
+            if args[:2] == ['ps', '-ax']: return '2147483001 2147483001 S\n'
+            return actual_ps(args, **kwargs)
+        with patch.object(native.subprocess, 'check_output', side_effect=live), self.assertRaises(ValueError):
+            c.reconcile(copy.deepcopy(original), failure['id'], proof)
+        ordinary = copy.deepcopy(proof); ordinary.pop('purpose')
+        with self.assertRaises(ValueError): c.reconcile(copy.deepcopy(original), failure['id'], ordinary)
+
     def test_isolated_native_validation_preserves_original_debt_and_requires_new_full_request(self):
         state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
         before = copy.deepcopy(state['attempts'])

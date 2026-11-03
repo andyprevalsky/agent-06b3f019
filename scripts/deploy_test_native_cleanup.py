@@ -237,6 +237,48 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
     return {r['machine_id']: r['volume_id'] for r in rows}
 
 
+def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree):
+    """A linked infra-probe may fail before producing execution provenance, never task credit."""
+    need(link and link['ref'] == receipt['source']['head']
+         and link['owner'] == life['fleet_owner_token'], 'failed canary source/owner linkage')
+    owner = life['fleet_owner_token']
+    local, canonical = fleet / 'teardown-ownership', root / '.git/cloudbench-fleet-audits' / owner
+    seal = tree(local)
+    need(tree(canonical) == seal and life['audit_sha256'] == seal
+         and fields(bound(local / 'source-audit')) == {'path': str(canonical), 'sha256': seal}, 'canary audit seal')
+    meta = fields(bound(canonical / 'meta'))
+    need(meta.get('status') == 'provider-teardown-verified' and meta.get('version') == '1'
+         and meta.get('fleet_owner_token') == owner and meta.get('run_id') == fleet.name
+         and meta.get('workspace_root') == str(root), 'canary provider release')
+    epoch = float(bound(canonical / 'provider-teardown-verified.epoch'))
+    need(finite(epoch) and receipt['started_at'] <= epoch <= proof['confirmed_at'], 'canary release clock')
+    registry = root / '.git/cloudbench-fleet-ownership' / owner
+    need(not registry.exists() and not registry.is_symlink(), 'canary registry retained')
+    ids = bound(canonical / 'owned-clones.ids').decode().splitlines()
+    names = bound(canonical / 'owned-clones.names').decode().splitlines()
+    rows = [fields(bound(p)) for p in (canonical / 'fresh').iterdir()] if (canonical / 'fresh').exists() else []
+    need(len(ids) == len(set(ids)) == len(rows) and set(ids) == {r['machine_id'] for r in rows}
+         and len(names) == len(set(names)) == len(rows) and set(names) == {r['clone_name'] for r in rows}, 'canary resource closure')
+    need(all(r.get('fleet_owner_token') == owner and r.get('run_id') == fleet.name
+             and r.get('app') == meta['app'] and r.get('source') == 'fresh-clone'
+             and r.get('disposition') == 'destroyed-provider-retained' for r in rows), 'canary resource not retired')
+    for name in ('pool', 'pool-handoffs', 'volume-migrations'):
+        path = canonical / name
+        need(not path.exists() or path.is_dir() and not path.is_symlink() and not any(path.iterdir()), 'canary resource class')
+    disposable = json.loads(bound(fleet / '_batch/disposable-cleanup.json'))
+    need(disposable.get('schema') == 'disposable-cleanup-v1' and disposable.get('owner') == owner
+         and disposable.get('guest_cleanup_missing') is False and disposable.get('runtime_evidence_missing') is False,
+         'canary native cleanup unverified')
+    tasks = run.get('tasks')
+    need(run.get('run_id') == fleet.name and run.get('controller_exit_code') == life['controller_exit_code']
+         and run.get('status') == 'failed' and isinstance(tasks, list) and len(tasks) == len(benches)
+         and {t['name'] for t in tasks} == {b['name'] for b in benches}
+         and all(t.get('status') == 'INFRA_ERROR' and t.get('passed') is False and not t.get('agent_id')
+                 and not t.get('owned_roots') and t.get('lifecycle_stage') == 'released'
+                 and t.get('failure_reason') == 'no current run artifact produced' for t in tasks), 'canary pre-task projection')
+    return not rows  # Missing provenance is supported only before ANY native guest allocation.
+
+
 def validate(receipt, owner, proof):
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
     need(proof.get('kind') == KIND and proof.get('owner') == owner, 'full original owner mismatch')
@@ -293,7 +335,7 @@ def validate(receipt, owner, proof):
     cli = runs.parent / 'cli.log'
     need(adapter.get('runner_log') == str(cli), 'adapter native root')
     cli_text = bound(cli).decode()
-    parents = {}
+    parents, canary_links = {}, {}
     layout = proof.get('layout')
     if layout == 'campaign-v1':
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
@@ -341,11 +383,23 @@ def validate(receipt, owner, proof):
             log = campaign / (job['job_id'] + '.log')
             need(job['log'] == str(log), 'campaign job log binding')
             one = []
-            for line in bound(log).decode(errors='replace').splitlines():
+            lines = bound(log).decode(errors='replace').splitlines()
+            ref, infra = None, False
+            for index, line in enumerate(lines):
+                match = re.fullmatch(r'ref\s*:\s*([0-9a-f]{40})(?:\s+.*)?', line.strip())
+                if match:
+                    ref = match[1]
+                if line.strip() == 'mode: --infra-probe (strict barrier, no LLM / run_benchmark)':
+                    infra = True
                 if str(root / 'scripts/run-bench') + ' monitor ' not in line:
                     continue
                 args = shlex.split(line.strip())
                 need(len(args) == 3 and args[:2] == [str(root / 'scripts/run-bench'), 'monitor'], 'campaign monitor binding')
+                if one and infra:
+                    owner_line = lines[index + 1].strip() if index + 1 < len(lines) else ''
+                    match = re.fullmatch(r'owner: ([0-9a-f]{32}); private controller diagnostics stay in this run directory\.', owner_line)
+                    canary_links[Path(args[2])] = {'parent': one[0], 'ref': ref, 'owner': match[1] if match else None}
+                    infra = False
                 one.append(Path(args[2]))
             need(one and one[0] not in parents and type(job.get('controller_pid')) is int
                  and job['controller_pid'] > 1 and one[0].name.rsplit('-', 1)[-1] == str(job['controller_pid']),
@@ -382,26 +436,36 @@ def validate(receipt, owner, proof):
     need(isinstance(recovery, dict) and (not recovery or layout == 'campaign-v1'), 'recovery scope')
     from cloudbench_execution_provenance import validate_provenance, validate_task_matrix_binding
     for fleet in sorted(participants):
-        provenance = document(fleet / 'execution-provenance.json')
-        matrix = document(fleet / 'execution-task-matrix.json')
-        need(not validate_provenance(provenance) and not validate_task_matrix_binding(provenance, matrix)
-             and provenance['base_sha'] == receipt['source']['head'] and provenance['workspace_patch_sha256'] == 'none', 'execution source')
         benches = json.loads(bound(fleet / '_batch/benches.json'))
-        need(isinstance(benches, list) and len(benches) == len(matrix['tasks'])
-             and len({b['name'] for b in benches}) == len(benches)
-             and {b['name'] for b in benches} == {t['name'] for t in matrix['tasks']}, 'native inventory')
+        need(isinstance(benches, list) and benches and len({b['name'] for b in benches}) == len(benches), 'native inventory')
         if fleet in parents:
             need({b['name'] for b in benches} == parents[fleet]['checks'], 'parent requested inventory')
-        document(fleet / '_batch/run.json')  # Bind original outcomes without regrading them.
+        run = document(fleet / '_batch/run.json')  # Bind original outcomes without regrading them.
         life = document(fleet / '_batch/lifecycle.json')
         owner_token = life['fleet_owner_token']
         need(isinstance(owner_token, str) and re.fullmatch('[0-9a-f]{32}', owner_token), 'fleet owner')
+        failed_canary = isolated and fleet not in parents and life.get('status') == 'failed'
         need(type(life.get('version')) is int and life['version'] == 1 and life['run_id'] == fleet.name
              and life['workspace_root'] == str(root) and life['hub_publication_failed'] is False
              and type(life['controller_exit_code']) is int
              and (life['controller_exit_code'] == parents[fleet]['exit'] if fleet in parents
+                  else 1 <= life['controller_exit_code'] <= 255 if failed_canary
                   else life['controller_exit_code'] == 0 and life['status'] == 'verified')
              and life['status'] in {'verified', 'failed'}, 'native terminal lifecycle')
+        zero_allocation = False
+        if failed_canary:
+            link = canary_links.get(fleet)
+            need(link and link['parent'] in parents, 'failed canary parent link')
+            zero_allocation = isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree)
+        provenance_path, matrix_path = fleet / 'execution-provenance.json', fleet / 'execution-task-matrix.json'
+        if failed_canary and zero_allocation and not provenance_path.exists() and not matrix_path.exists():
+            pass  # Positive linked infra-probe + sealed zero-resource release above; absence alone proves nothing.
+        else:
+            provenance, matrix = document(provenance_path), document(matrix_path)
+            need(not validate_provenance(provenance) and not validate_task_matrix_binding(provenance, matrix)
+                 and provenance['base_sha'] == receipt['source']['head'] and provenance['workspace_patch_sha256'] == 'none', 'execution source')
+            need(len(benches) == len(matrix['tasks'])
+                 and {b['name'] for b in benches} == {t['name'] for t in matrix['tasks']}, 'native inventory')
         if isolated:
             excluded.update(isolated_execution(fleet, life, root, receipt, proof, bound, document, tree))
             continue
