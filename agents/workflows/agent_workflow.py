@@ -1306,6 +1306,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             self._resume_prior_status == "COST_LIMIT_REACHED"
             and self._cost_limit_wrapup_pending
             and not self._cost_limit_wrapup_consumed
+            and runtime.get("cost_limit_wrapup_paused") is False
             and self._has_credits
             and not self._user_pause_active
             and not self._paused_by_parent
@@ -1442,6 +1443,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             **({"user_tools": dict(self.user_tools)} if getattr(self, "user_tools_pinned", False) else {}),
             "runtime_state": {
                 "last_message_check": self._serialized_datetime(self.last_message_check),
+                "cost_limit_wrapup_paused": self._cost_limit_wrapup_pending and self.is_paused,
                 "paused_by_parent": self._paused_by_parent,
                 "pause_signal_sequence": self._pause_signal_sequence,
                 "user_pause_active": self._user_pause_active,

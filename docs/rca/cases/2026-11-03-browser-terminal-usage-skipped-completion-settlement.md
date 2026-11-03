@@ -146,7 +146,7 @@ pending allowance, never an accepted response and never a real pause. The
 accepted-response bookkeeping failure control proves no refund occurs after
 acceptance. No original evaluator or assertion is relaxed.
 
-The stabilized lifecycle passed all 17 owning regression controls five
+The stabilized lifecycle passed all 19 owning regression controls five
 consecutive times. The actual subsequent review identified two further
 boundaries: an older in-flight productive call could consume the future
 allowance, and a pre-call pause could consume a normal loop iteration. Their
@@ -156,6 +156,18 @@ refund the iteration. Three additional controls reproduce and preserve a
 financial pause during pricing, after a later credit refresh, and during
 continuation restore. These use the existing credit-check activity with fake
 returns, without changing any real account or provider state.
+
+A composed follow-up proved that an already-armed allowance, followed by an
+actual financial pause and a later successful credit refresh, could serialize
+as COST_LIMIT_REACHED and silently unpause on continuation restore. The existing
+runtime snapshot now records whether the pending allowance was paused. Restore
+requires explicit boolean false before releasing that budget pause; missing or
+malformed provenance stays paused. Pending and consumed allowance state survives,
+and only an actual resume releases the independent financial pause. The same
+native-helper sequence now passes through JSON serialization, restore, blocked
+admission, explicit resume and one legitimate admission. The existing complete
+runtime round-trip and actual handoff-to-normal-completion controls are retained.
+This is a serialized fact of the existing allowance, not another pause owner.
 
 On stable source 3a263f667, the original Kernel predeploy invocation exited 0;
 Webdecoy completed in 151.0 seconds at reported 53c, within unchanged120c/420s.

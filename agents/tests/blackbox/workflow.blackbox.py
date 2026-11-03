@@ -12409,6 +12409,58 @@ async def test_workflow_browser_pricing_preserves_credit_pause_after_refresh():
     await test_workflow_browser_pricing_preserves_intervening_credit_pause(credit_restored=True)
 
 
+async def test_workflow_armed_browser_wrapup_keeps_refreshed_credit_pause_across_continuation():
+    import json
+
+    wf = _bare_workflow_instance()
+    wf.agent_id, wf.user_id, wf.agent_source = "armed-credit-continuation", "budget-user", "WEB"
+    wf.own_cost_cents, wf.price_limit_cents = 119.0, 120
+    wf.max_iterations = 500
+    wf.context_gates = {}
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._track_usage(
+            {"service": [{"provider": "browser", "cost_cents": 2.0}]},
+            tool_name="spawn_agent",
+            browser_completed=True,
+        )
+        assert wf._cost_limit_wrapup_pending and not wf._cost_limit_wrapup_consumed and not wf.is_paused
+        fake.activity_returns["check_user_usage"] = {"has_credits": False, "tier": "paid"}
+        await wf._check_credits()
+        fake.activity_returns["check_user_usage"] = {"has_credits": True, "tier": "paid"}
+        await wf._check_credits()
+        assert wf._has_credits and wf.is_paused and wf._cost_limit_wrapup_pending
+        state = json.loads(json.dumps(wf._continuation_resume_state(wf.context)))
+        restored = _bare_workflow_instance()
+        restored._restore_deployment_state(state)
+        assert restored._has_credits and restored._cost_limit_wrapup_pending
+        assert restored.is_paused, "continuation restore cleared a financial pause after credit refresh"
+        assert await restored._check_paused_before_turn()
+        assert not restored._cost_limit_wrapup_consumed
+        await restored.resume()
+        assert not await restored._check_paused_before_turn()
+        assert restored._cost_limit_wrapup_consumed
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_browser_wrapup_restore_requires_unpaused_continuation_provenance():
+    for value in (None, True, "false", 0):
+        state = _deployment_resume_fixture("COST_LIMIT_REACHED")
+        state["runtime_state"] = {
+            "cost_limit_wrapup_pending": True,
+            "cost_limit_wrapup_consumed": False,
+            "has_credits": True,
+        }
+        if value is not None:
+            state["runtime_state"]["cost_limit_wrapup_paused"] = value
+        restored = _bare_workflow_instance()
+        restored._restore_deployment_state(state)
+        assert restored.is_paused, "missing or invalid pause provenance authorized completion admission"
+        assert not restored._cost_limit_wrapup_consumed
+
+
 async def test_workflow_background_browser_budget_keeps_native_notification_and_result():
     from unittest.mock import AsyncMock, patch
     import workflows.background_agents as background_module
@@ -12621,7 +12673,11 @@ async def test_workflow_browser_wrapup_cannot_start_productive_work_or_renew_aft
         for consumed in (False, True):
             restored = _bare_workflow_instance()
             state = _deployment_resume_fixture("COST_LIMIT_REACHED")
-            state["runtime_state"] = {"cost_limit_wrapup_pending": True, "cost_limit_wrapup_consumed": consumed}
+            state["runtime_state"] = {
+                "cost_limit_wrapup_pending": True,
+                "cost_limit_wrapup_consumed": consumed,
+                "cost_limit_wrapup_paused": False,
+            }
             restored._restore_deployment_state(state)
             assert await restored._check_paused_before_turn() is consumed
             if not consumed:
@@ -13515,6 +13571,8 @@ async def run_all_tests():
     await r.record_async("browser_pricing_preserves_intervening_credit_pause", test_workflow_browser_pricing_preserves_intervening_credit_pause)
     await r.record_async("browser_pricing_preserves_pause_after_credit_refresh", test_workflow_browser_pricing_preserves_credit_pause_after_refresh)
     await r.record_async("browser_wrapup_restore_preserves_cached_credit_pause", test_workflow_browser_wrapup_restore_preserves_cached_credit_pause)
+    await r.record_async("armed_wrapup_keeps_refreshed_credit_pause_through_continuation", test_workflow_armed_browser_wrapup_keeps_refreshed_credit_pause_across_continuation)
+    await r.record_async("browser_wrapup_restore_requires_unpaused_provenance", test_workflow_browser_wrapup_restore_requires_unpaused_continuation_provenance)
     await r.record_async("wf_unverified_browser_budget_stop", test_workflow_unverified_browser_and_other_usage_do_not_get_wrapup)
     await r.record_async("wf_browser_budget_wrapup_pause_controls", test_workflow_browser_budget_wrapup_stops_after_one_turn_and_keeps_pauses)
     await r.record_async("wf_browser_budget_wrapup_work_and_restore", test_workflow_browser_wrapup_cannot_start_productive_work_or_renew_after_restore)
