@@ -123,10 +123,38 @@ This later verification adds that result without rewriting the review receipt.
 
 This case's fixed status describes the local fixture repair, not a deployment.
 PR1580's original failures and held-clock diagnostics retain their native
-outcomes. No new deploy, merge, cutover or live-iPhone verification was performed.
+outcomes. At that original capture, no new deploy, merge, cutover or live-iPhone verification had been performed.
 Golden reference: not applicable (no approval-gated hunk).
 10k-agent behavior: production code is byte-for-byte unchanged; no requests,
 subscriptions, per-agent timers or runtime cost are added.
+
+## November 3 replacement verification
+
+After integrating main containing PR1580 and PR1674, the exact original command
+`cd front-end && npm run test:coverage -- --maxWorkers=4 --coverage.reportOnFailure`
+passed 4,056/4,056 cases in 251 files, exit 0, from 03:53:44 to 03:57:50 UTC
+(246.2s process). Coverage was 85.44% statements, 79.40% branches, 86.16%
+functions and 87.79% lines, with unchanged thresholds. The complete frontend
+tree was b0fcbc89f409ab09c923996a270ba68c8ef8db0c. All 16 original bodies remained
+byte-identical; only RCA prose changed during that invocation.
+
+The historical raw 10e3a40 source packet could not be recovered from the
+archived originating devbox. A **new current-clock reproduction**, never
+presented as the historical log, ran that same full command on the complete
+frontend archive of 10e3a40b6fce16259634bb74c38b4be9ba3a0949. From
+04:08:02.592510 to 04:13:32.074592 UTC it failed exactly the four assigned cases
+with the original missing-row error; the other 4,043 cases passed. Process
+wall time was 329.482s, exit 1. Package manifests matched the current source.
+A separate current-source control restored only the October 27 producer in an
+18-case archive: the identical focused command failed six (original four plus
+two new future controls), then passed all 18 after restoring the repair.
+These new receipts retain their own clocks and do not rewrite earlier evidence.
+
+The replacement native turn ended at 04:33:46.043 UTC with a provider capacity
+error. Its successor kept gpt-6.1-sol/high and the accepted standard launch;
+effective speed remains independently unexposed. That interruption is not a
+test result. Deployment and cleanup outcomes are recorded separately in the
+finished deploy scorecard and source/production receipts.
 
 ## Human feedback
 
