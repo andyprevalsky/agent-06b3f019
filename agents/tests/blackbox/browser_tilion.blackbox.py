@@ -114,9 +114,14 @@ async def _chromium(full: bool = False):
     client the single-client provider never has.
     """
     async with async_playwright() as playwright:
-        with socket.socket() as reservation:
-            reservation.bind(("127.0.0.1", 0))
-            port = reservation.getsockname()[1]
+        # A released reservation does not transfer ownership to Chromium.
+        # Let the raw browser bind an ephemeral port and publish its own address.
+        port = 0
+        debugger_path = None
+        if not full:
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
         process = None
         browser = None
         if full:
@@ -140,12 +145,24 @@ async def _chromium(full: bool = False):
             payload: Dict[str, Any] = {}
             async with httpx.AsyncClient(trust_env=False) as client:
                 for _ in range(100):
-                    with contextlib.suppress(httpx.HTTPError):
-                        version = await client.get(f"http://127.0.0.1:{port}/json/version")
-                        payload = version.json()
-                        break
+                    if full and port == 0:
+                        # Publication can be missing or partial during startup.
+                        # Discovery and the real HTTP probe share this one budget.
+                        with contextlib.suppress(FileNotFoundError, ValueError):
+                            with open(os.path.join(profile, "DevToolsActivePort"), encoding="ascii") as active:
+                                published_port = int(active.readline())
+                                published_path = active.readline().strip()
+                            if 0 < published_port < 65536 and published_path:
+                                port, debugger_path = published_port, published_path
+                    if port:
+                        with contextlib.suppress(httpx.HTTPError):
+                            version = await client.get(f"http://127.0.0.1:{port}/json/version")
+                            payload = version.json()
+                            break
                     await asyncio.sleep(0.1)
             assert "webSocketDebuggerUrl" in payload, f"/json/version on 127.0.0.1:{port} -> {str(payload)[:300]}"
+            if full:
+                assert urlsplit(payload["webSocketDebuggerUrl"]).path == debugger_path, "CDP endpoint belongs to another browser"
             yield playwright, browser, payload["webSocketDebuggerUrl"]
         finally:
             if browser is not None:
