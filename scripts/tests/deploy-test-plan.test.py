@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 import copy
+import json
+import os
+import subprocess
+from types import SimpleNamespace
 from pathlib import Path
 import sys
 import tempfile
@@ -137,6 +141,49 @@ class Selection(unittest.TestCase):
         self.assertEqual(['bash','scripts/measure-seed-memory.sh','5','0','0',
                           '--enforce-budget'],gate['command'])
         self.assertEqual('back-end',gate['cwd'])
+
+
+    def test_custom_planner_base_reaches_both_real_static_checks(self):
+        import check_deploy_static as quick
+        import select_affected_tests as selector
+        root = Path(self.workers.name) / 'base-fixture'; root.mkdir()
+        def git(*args):
+            return subprocess.run(['git', *args], cwd=root, check=True, capture_output=True, text=True).stdout
+        git('init', '-q')
+        (root / '.gitignore').write_text('**/node_modules/\n')
+        source = root / 'back-end/src/a.ts'; source.parent.mkdir(parents=True); source.write_text('before')
+        git('add', '.'); git('-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-qm', 'base')
+        git('branch', 'review-base'); source.write_text('after')
+        git('add', '.'); git('-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-qm', 'head')
+        git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        tools = root / 'node_modules/.bin'; tools.mkdir(parents=True)
+        for name in ('prettier', 'node'):
+            tool = tools / name; tool.write_text('#!' + sys.executable + '\nraise SystemExit(7)\n'); tool.chmod(0o700)
+        template = copy.deepcopy(self.template)
+        for gate in template['gates']:
+            if gate['category'] in ('eslint', 'format'):
+                gate['command'] = [sys.executable, 'scripts/check_deploy_static.py',
+                                   'lint' if gate['category'] == 'eslint' else 'format']
+        folder = Path(self.workers.name)
+        tpl, bindings, output = (folder / name for name in ('template.json', 'workers.json', 'plan.json'))
+        tpl.write_text(json.dumps(template)); bindings.write_text(json.dumps(self.bindings))
+        selected = SimpleNamespace(all_lanes=False, reasons=[], selected={'backend-unit': {'one'}})
+        with patch.object(p, 'ROOT', root), patch.object(selector, 'ROOT', root), \
+                patch.object(quick, 'ROOT', root), patch.object(p, 'Selector') as factory, \
+                patch.dict(os.environ, {'DEPLOY_BASE_REF': 'origin/main',
+                                       'PATH': str(tools) + os.pathsep + os.environ['PATH']}):
+            factory.return_value.select.return_value = selected
+            with patch.object(sys, 'argv', ['plan', '--base', 'review-base', '--template', str(tpl),
+                                           '--workers', str(bindings), '--output', str(output)]):
+                self.assertEqual(0, p.main())
+            plan = json.loads(output.read_text())
+            for gate in plan['gates']:
+                if gate['category'] in ('eslint', 'format'):
+                    with patch.object(sys, 'argv', gate['command'][1:]):
+                        self.assertEqual(7, quick.main(), gate['category'])
+                    self.assertEqual(['--base', 'review-base'], gate['command'][-2:])
+            self.assertEqual('review-base', plan['base'])
+            self.assertEqual(['back-end/src/a.ts'], plan['changed_files'])
 
 
 if __name__=='__main__':unittest.main()

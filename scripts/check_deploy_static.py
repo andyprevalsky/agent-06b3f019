@@ -2,7 +2,7 @@
 """Read-only affected formatting/lint checks; never installs tools or edits source."""
 import argparse
 from pathlib import Path
-import os
+import json
 import subprocess
 import sys
 
@@ -12,11 +12,39 @@ ROOT = Path(__file__).resolve().parents[1]
 EXTENSIONS = {'.ts', '.tsx'}  # Preserve /deploy's existing formatting scope.
 
 
+def package_prettier_changed(path: str, base: str) -> bool:
+    revision = subprocess.check_output(['git', 'merge-base', base, 'HEAD'], cwd=ROOT, text=True).strip()
+    previous = subprocess.run(['git', 'show', f'{revision}:{path}'], cwd=ROOT,
+                              capture_output=True, text=True)
+    before = json.loads(previous.stdout) if previous.returncode == 0 else {}
+    current = ROOT / path
+    after = json.loads(current.read_text()) if current.is_file() else {}
+    return before.get('prettier') != after.get('prettier')
+
+
+def format_files(changed: list[str], base: str) -> list[str]:
+    files = {path for path in changed if (ROOT / path).is_file() and Path(path).suffix in EXTENSIONS}
+    scopes = set()
+    for path in changed:
+        name = Path(path).name
+        if (name in {'.prettierrc', '.prettierignore'} or name.startswith(('.prettierrc.', 'prettier.config.'))
+                or name == '.editorconfig'
+                or (name == 'package.json' and package_prettier_changed(path, base))):
+            scopes.add(str(Path(path).parent))
+    for scope in sorted(scopes):
+        output = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others',
+                                          '--exclude-standard', '--', scope], cwd=ROOT)
+        files.update(path for raw in output.split(b'\0') if raw
+                     for path in [raw.decode()] if Path(path).suffix in EXTENSIONS and (ROOT / path).is_file())
+    return sorted(files)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('kind', choices=['format', 'lint'])
+    parser.add_argument('--base', default='origin/main')
     args = parser.parse_args()
-    changed = changed_files(os.environ.get('DEPLOY_BASE_REF', 'origin/main'), None)
+    changed = changed_files(args.base, None)
     if args.kind == 'lint':
         backend = ROOT / 'back-end'
         files = [path.removeprefix('back-end/') for path in changed
@@ -30,8 +58,7 @@ def main() -> int:
             print('LINT: no affected backend sources')
             return 0
         return subprocess.run(['node', 'scripts/lint-affected.mjs', *sorted(files)], cwd=backend).returncode
-    files = [path for path in changed
-             if (ROOT / path).is_file() and Path(path).suffix in EXTENSIONS]
+    files = format_files(changed, args.base)
     if not files:
         print('FORMAT: no changed supported files')
         return 0

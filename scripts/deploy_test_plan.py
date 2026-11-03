@@ -42,11 +42,19 @@ PATHS = {
 }
 
 
-def select(template: dict, changed: list[str], result: dict, binding: dict) -> dict:
+def select(template: dict, changed: list[str], result: dict, binding: dict, base: str = 'origin/main') -> dict:
     gates, omitted = [], []
     for recipe in template['gates']:
         gate = dict(recipe)
         category = gate.get('category', gate['name'])
+        if category in {'eslint', 'format'} and any(
+                Path(arg).name == 'check_deploy_static.py' for arg in gate['command']):
+            command = list(gate['command'])
+            if '--base' in command:
+                command[command.index('--base') + 1] = base
+            else:
+                command.extend(['--base', base])
+            gate['command'] = command
         quick = category in QUICK
         if gate.get("platform") and gate["platform"] != sys.platform and gate["name"] not in binding:
             omitted.append({"gate": gate["name"], "reason": "platform not available; not a test pass"})
@@ -100,7 +108,7 @@ def select(template: dict, changed: list[str], result: dict, binding: dict) -> d
                 gate.update(worker_recipe=worker['recipe'], case_protocol=True,
                             result_transport=worker.get('result_transport', 'file'))
         gates.append(gate)
-    planned = {'version': 1, 'source': source(ROOT), 'changed_files': changed,
+    planned = {'version': 1, 'base': base, 'source': source(ROOT), 'changed_files': changed,
                'selection': result, 'gates': gates, 'omitted': omitted,
                'policy': 'quick-parallel / selected-parallel / RCA / focus / failed-gates / final'}
     validate_plan(planned)
@@ -161,7 +169,7 @@ def main() -> int:
     template = json.loads(args.template.read_text()) if args.template else standard_template()
     bindings = (generate_bindings(template, json.loads(args.inventory.read_text()), ROOT)
                 if args.inventory else json.loads(args.workers.read_text()))
-    plan = select(template, changed, result, bindings)
+    plan = select(template, changed, result, bindings, base=args.base)
     write(args.output, plan)
     print(json.dumps({'selected': [g['name'] for g in plan['gates']], 'omitted': plan['omitted']}))
     return 0

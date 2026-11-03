@@ -417,6 +417,90 @@ class Cycle(unittest.TestCase):
         self.assertTrue(self.state['ready'])
         self.assertEqual({'a': 'PASS', 'b': 'PASS'}, next(r for r in self.state['attempts'][-1]['results'] if r['gate'] == 'api')['cases'])
 
+    def test_reexecuted_gate_is_not_lost_when_the_remaining_triage_is_waived(self):
+        # CodeRabbit 4449029650: initial phase yields A (api/a UNVERIFIED, observation loss) and B (ui/c FAIL).
+        self.state['phase'] = 'initial'
+        lost = {**self.result(a='UNVERIFIED', b='PASS'), 'complete': False,
+                'case_complete': {'a': False, 'b': True}, 'reason': 'coordinator lost the outer exit'}
+        c.advance(self.state, [lost, self.result('ui', c='FAIL')])
+        a = next(f for f in self.state['failures'] if f['check'] == 'api/a')
+        b = next(f for f in self.state['failures'] if f['check'] == 'ui/c')
+        c.reexecute(self.state, a['id'])
+        self.assertEqual(('triage', [b['id']]), (self.state['phase'], self.state['pending']))
+        # the remaining occurrence is waived by delegation: the re-executed gate must still run
+        c.adjudicate(self.state, self.report(b, attribution='NOT_INTRODUCED',
+                                             repair_agent='https://boxes.dev/thread/thr_repair_b'))
+        self.assertEqual('needs-focused-plan', self.state['phase'])
+        self.assertFalse(self.state['ready'])
+        self.assertIn('api', self.state['repair_gates'])
+        c.focused_plan(self.state, self.plan, {'source': self.state['source'], 'gates': {
+            'api': {'command': self.plan['gates'][1]['command'], 'checks': ['a']}}})
+        self.assertEqual('focused', self.state['phase'])
+        self.assertEqual(['api'], [g['name'] for g in c.records(self.plan, self.state)])
+
+    def test_per_triage_routing_is_cleared_so_a_stale_entry_cannot_route_a_later_triage(self):
+        # path 1: triage completed by adjudicate after a reexecute -> tracking cleared
+        self.state['phase'] = 'initial'
+        lost = {**self.result(a='UNVERIFIED', b='PASS'), 'complete': False, 'case_complete': {'a': False, 'b': True}}
+        c.advance(self.state, [lost, self.result('ui', c='FAIL')])
+        a = next(f for f in self.state['failures'] if f['check'] == 'api/a')
+        b = next(f for f in self.state['failures'] if f['check'] == 'ui/c')
+        c.reexecute(self.state, a['id'])
+        self.assertEqual(['api'], self.state['triage_repair_gates'])
+        c.adjudicate(self.state, self.report(b, attribution='NOT_INTRODUCED', repair_agent='https://boxes.dev/thread/thr_b'))
+        self.assertNotIn('triage_repair_gates', self.state)
+        # path 2: triage completed by reexecute itself (last pending) -> tracking cleared
+        other = copy.deepcopy(self.state); other.update(phase='initial', repair_gates=[])
+        c.advance(other, [{**self.result(a='UNVERIFIED', b='PASS'), 'complete': False}])
+        c.reexecute(other, other['failures'][-1]['id'])
+        self.assertEqual('needs-focused-plan', other['phase']); self.assertNotIn('triage_repair_gates', other)
+        # a later waiver-only triage is not routed by the earlier round: no repair, prior phase decides
+        later = copy.deepcopy(self.state); later.update(phase='final', repair_gates=[])
+        c.advance(later, [self.result('ui', c='FAIL')])
+        c.adjudicate(later, self.report(later['failures'][-1], attribution='NOT_INTRODUCED',
+                                        repair_agent='https://boxes.dev/thread/thr_later'))
+        self.assertEqual(('ready', []), (later['phase'], later['repair_gates']))
+
+    def assigned(self, failure, **changes):
+        fields = {'attribution': 'NOT_INTRODUCED', 'assigned_repair': True,
+                  'assigned_reason': 'root owns the assigned cloud image prerequisite; compatible image build in progress',
+                  'assigned_evidence': '.context/deploy-cloud/95262bce/cli.log', **changes}
+        return self.report(failure, **fields)
+
+    def test_assigned_repair_routes_an_owned_not_introduced_failure_without_waiver(self):
+        failure = self.failure()
+        c.adjudicate(self.state, self.assigned(failure))
+        self.assertEqual('needs-focused-plan', self.state['phase']); self.assertFalse(self.state['ready'])
+        kept = next(f for f in self.state['failures'] if f['id'] == failure['id'])
+        self.assertEqual(('blocking', 'NOT_INTRODUCED', 'FAIL'), (kept['disposition'], kept['rca']['attribution'], kept['native_result']))
+        self.assertEqual(['api'], self.state['repair_gates']); self.assertEqual({}, self.state['skips'])
+        c.focused_plan(self.state, self.plan, {'source': self.state['source'], 'gates': {
+            'api': {'command': self.plan['gates'][1]['command'], 'checks': ['a']}}})
+        self.assertEqual(['api'], [g['name'] for g in c.records(self.plan, self.state)])
+
+    def test_assigned_repair_refusals_leave_the_state_unchanged(self):
+        failure = self.failure()
+        before = copy.deepcopy(self.state)
+        packet = {"test": "api::a", "command": ["true"], "scope": "api/a", "error": "boom",
+                  "source": self.state["source"]["head"], "evidence": ["original.log"]}
+        variants = {
+            'missing reason': self.assigned(failure, assigned_reason=''),
+            'missing evidence': self.assigned(failure, assigned_evidence=None),
+            'with link': self.assigned(failure, repair_agent='https://boxes.dev/thread/thr_x'),
+            'with provider': self.assigned(failure, external_provider={'name': 'p', 'reason': 'outage'}),
+            'with post-merge': self.assigned(failure, post_merge=packet),
+            'with execute': self.assigned(failure, execute_unverified=True),
+            'unknown attribution': self.assigned(failure, attribution='UNKNOWN'),
+            'introduced attribution': self.assigned(failure, attribution='INTRODUCED'),
+            'non-boolean flag': self.assigned(failure, assigned_repair='yes'),
+        }
+        for label, report in variants.items():
+            with self.subTest(variant=label):
+                with self.assertRaises(ValueError):
+                    c.adjudicate(self.state, report)
+                self.assertEqual(before, self.state)
+        self.assertEqual('triage', self.state['phase'])
+
     def test_quick_timeout_bound_is_120_seconds(self):
         with patch.object(c, 'run_command', return_value=(0, False, False, False)) as runner:
             c.execute(self.plan['gates'][0], self.state, self.directory, self.root)

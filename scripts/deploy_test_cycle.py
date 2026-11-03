@@ -380,6 +380,30 @@ def advance(state: dict, results: list[dict], failures: list[dict] | None = None
         state.update(phase="ready", ready=True)
 
 
+ASSIGNED_EXCLUSIVE = ("repair_agent", "external_provider", "post_merge", "execute_unverified")
+
+
+def validate_assigned_repair(entry: dict, disposition: str) -> None:
+    """Owned assignment: NOT_INTRODUCED is attribution only; the root keeps the repair and re-runs the gate.
+
+    The occurrence stays blocking (no skip, no waiver, no attribution change) and cannot be combined
+    with a repair link, provider waiver, post-merge packet or execution recovery.
+    """
+    if entry.get("assigned_repair") is not True:
+        raise ValueError("assigned_repair must be the explicit boolean true")
+    if entry.get("attribution") not in {"NOT_INTRODUCED", "NOT INTRODUCED"}:
+        raise ValueError("assigned_repair retains a NOT_INTRODUCED attribution only; introduced and unknown "
+                         "occurrences use the normal blocking path")
+    if any(entry.get(k) for k in ASSIGNED_EXCLUSIVE):
+        raise ValueError("assigned_repair cannot be combined with a repair link, provider waiver, "
+                         "post-merge packet or execution recovery")
+    for key in ("assigned_reason", "assigned_evidence"):
+        if not isinstance(entry.get(key), str) or not entry[key].strip():
+            raise ValueError("assigned_repair requires the owned-assignment reason and an evidence reference")
+    if disposition != "blocking":
+        raise ValueError("assigned_repair applies to a blocking occurrence only")
+
+
 def adjudicate(state: dict, report: dict) -> None:
     from deploy_failure_report import decision
     if state["phase"] != "triage":
@@ -397,6 +421,8 @@ def adjudicate(state: dict, report: dict) -> None:
                 or entry.get("native_result") != failure["native_result"]):
             raise ValueError("RCA receipt has the wrong source or check")
         disposition = decision(entry)
+        if entry.get("assigned_repair") is not None:
+            validate_assigned_repair(entry, disposition)
         if disposition == "execution required":
             if failure["complete"]:
                 raise ValueError("execution recovery requires an incomplete occurrence")
@@ -404,7 +430,8 @@ def adjudicate(state: dict, report: dict) -> None:
             raise ValueError("unverified/incomplete execution cannot be waived as a completed case")
         decisions.append((failure, entry, disposition))
     # Atomic transition: UNKNOWN leaves every occurrence open, never drops peers.
-    if any(d == "blocking" and e.get("attribution") != "INTRODUCED" for _, e, d in decisions):
+    if any(d == "blocking" and e.get("attribution") != "INTRODUCED" and e.get("assigned_repair") is not True
+           for _, e, d in decisions):
         raise ValueError("UNKNOWN or unhanded-off failure still blocks; finish /RCA attribution")
     repair = set()
     for failure, entry, disposition in decisions:
@@ -423,6 +450,9 @@ def adjudicate(state: dict, report: dict) -> None:
                     "id": failure["id"], "check": failure["check"], "gate": failure["gate"],
                     "native_result": failure["native_result"], "packet": entry["post_merge"]})
     state.pop("pending")
+    # Gates routed by `reexecute` during THIS triage are repair work for the same round; the
+    # accumulated repair_gates ledger carries stale credit from earlier rounds and is not the signal.
+    repair |= set(state.pop("triage_repair_gates", []))
     if repair:
         state["repair_gates"] = sorted(set(state["repair_gates"]) | repair)
         state["phase"] = "needs-focused-plan"
@@ -461,8 +491,10 @@ def reexecute(state: dict, occurrence_id: str) -> None:
                               "native_result": failure["native_result"]}
     state["pending"] = [i for i in state["pending"] if i != occurrence_id]
     state["repair_gates"] = sorted(set(state["repair_gates"]) | {failure["gate"]})
+    state["triage_repair_gates"] = sorted(set(state.get("triage_repair_gates", [])) | {failure["gate"]})
     if not state["pending"]:
         state.pop("pending")
+        state.pop("triage_repair_gates")  # this triage is complete; the gate is already in repair_gates
         state["phase"] = "needs-focused-plan"
 
 
