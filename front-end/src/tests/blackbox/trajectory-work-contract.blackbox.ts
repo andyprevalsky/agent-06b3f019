@@ -20,6 +20,21 @@ const final = msg(
   { text: 'Done' },
 );
 describe('ordered work projection boundaries', () => {
+  it('projects 200,000 persisted rows without overflowing the argument stack or losing history', () => {
+    const row = msg({ toolName: 'read_file' }, { timestamp: '2026-10-21T12:00:00.000Z' });
+    const messages = Array.from({ length: 200_000 }, () => row);
+    const projected = withLiveTrajectory(
+      messages,
+      [],
+      true,
+      Date.parse(row.timestamp) + 1,
+      'ACTIVE',
+    );
+    expect(projected).toHaveLength(messages.length + 1);
+    expect(projected[0]).toBe(row);
+    expect(projected[messages.length - 1]).toBe(row);
+    expect(projected.at(-1)?.message_id).toBe('streaming:thinking');
+  });
   it('never deduplicates distinct exchange identities by equal text', () => {
     const groups = groupTrajectoryWork([comm('one'), comm('two')], 'COMPLETED');
     expect([...groups.groupsByLeadId.values()][0].activities).toHaveLength(2);

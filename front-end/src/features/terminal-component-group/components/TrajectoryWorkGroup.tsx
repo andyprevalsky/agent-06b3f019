@@ -21,7 +21,7 @@
  *   activities append while it stays open. The live elapsed clock is a leaf
  *   (BatchElapsed), so its 100 ms tick never re-renders the history rows.
  */
-import { useId, useState, type ReactNode } from 'react';
+import { useId, useMemo, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight, Lightbulb, MessagesSquare } from 'lucide-react';
 import { getToolIcon } from '@/lib/toolIcons';
 import { useAnimatedCounter } from '@/hooks/useAnimatedCounter';
@@ -56,8 +56,12 @@ function PersistedThinking({ message, label }: { message: Message; label: string
 /** The folded rows' kinds and tool identity, matching the stock row's data-* attributes. */
 function toolIdentity(group: Group) {
   const statuses = new Set<string>();
+  const kinds = new Set<string>();
+  let comms = 0;
   let startPhase: 'plan' | 'execute' | undefined;
-  for (const { message } of group.activities) {
+  for (const { message, kind } of group.activities) {
+    kinds.add(kind);
+    if (kind === 'comms') comms++;
     const tool = message.metadata?.toolName;
     if (typeof tool !== 'string') continue;
     const status = message.metadata?.toolStatus;
@@ -65,8 +69,7 @@ function toolIdentity(group: Group) {
     const phase = message.metadata?.startPhase;
     if (tool === 'cloud_agent' && (phase === 'plan' || phase === 'execute')) startPhase = phase;
   }
-  const kinds = [...new Set(group.activities.map((activity) => activity.kind))].join(' ');
-  return { statuses: [...statuses].join(' '), startPhase, kinds };
+  return { statuses: [...statuses].join(' '), startPhase, kinds: [...kinds].join(' '), comms };
 }
 export function TrajectoryWorkGroup({
   group,
@@ -84,7 +87,8 @@ export function TrajectoryWorkGroup({
   const running = group.status === 'running';
   const historyId = useId();
   const latest = group.activities.at(-1)!;
-  const comms = group.activities.filter((activity) => activity.kind === 'comms').length;
+  const tools = useMemo(() => toolIdentity(group), [group]);
+  const comms = tools.comms;
   const toolName = String(latest.message.metadata?.toolName ?? '');
   const Icon =
     latest.kind === 'comms'
@@ -97,7 +101,6 @@ export function TrajectoryWorkGroup({
   const label = running ? latest.label : workLabel(group);
   const thinking = running && latest.kind === 'thinking';
   const liveThinking = thinking && indicator;
-  const tools = toolIdentity(group);
   return (
     <div
       data-testid="trajectory-work-group"

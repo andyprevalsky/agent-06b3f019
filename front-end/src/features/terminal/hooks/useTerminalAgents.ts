@@ -203,13 +203,18 @@ function buildAuthModalHandlers(modals: ReturnType<typeof useTerminalModals>) {
 }
 
 /** New-agent entry points; each makes the next goal create a fresh agent. */
-function buildNewAgentHandlers(a: BuildArgs) {
+function buildNewAgentHandlers({
+  cleanupAgentState,
+  resetAnimationState,
+  setCurrentView,
+  messaging: { setNewAgentProjectId, setNewAgentFolderId },
+}: BuildArgs) {
   const openNewAgent = (projectId: string | null, folderId: string | null = null) => {
-    a.cleanupAgentState();
-    a.resetAnimationState();
-    a.setCurrentView('agents');
-    a.messaging.setNewAgentProjectId(projectId);
-    a.messaging.setNewAgentFolderId(folderId);
+    cleanupAgentState();
+    resetAnimationState();
+    setCurrentView('agents');
+    setNewAgentProjectId(projectId);
+    setNewAgentFolderId(folderId);
   };
   return {
     /** New Super Agent: the next goal creates a Home agent. */

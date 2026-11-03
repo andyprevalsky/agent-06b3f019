@@ -66,51 +66,26 @@ export function formatValue(value: unknown, fieldType?: OutputSchemaField['type'
   return String(value);
 }
 
-/** Get all leaf nodes (no children) reachable from the given start node. */
-export function getLeafNodes(
-  startNode: TreeNode,
+/** Summarize the forest in display preorder without recursive or argument-stack limits. */
+export function summarizeTree(
+  roots: TreeNode[],
   getChildren: (parentId: string) => TreeNode[],
-): TreeNode[] {
-  const children = getChildren(startNode.agentId);
-  if (children.length === 0) {
-    return [startNode];
-  }
-  return children.flatMap((child) => getLeafNodes(child, getChildren));
-}
-
-/**
- * Get all intermediary (non-leaf) descendants below the start node.
- * Does NOT include the start node itself.
- */
-export function getIntermediaryNodes(
-  startNode: TreeNode,
-  getChildren: (parentId: string) => TreeNode[],
-): TreeNode[] {
-  const children = getChildren(startNode.agentId);
-  if (children.length === 0) {
-    return [];
-  }
-  const intermediaries: TreeNode[] = [];
-  for (const child of children) {
-    const grandchildren = getChildren(child.agentId);
-    if (grandchildren.length > 0) {
-      intermediaries.push(child);
-      intermediaries.push(...getIntermediaryNodes(child, getChildren));
+): { leafNodes: TreeNode[]; intermediaryNodes: TreeNode[]; maxDepth: number } {
+  const leafNodes: TreeNode[] = [];
+  const intermediaryNodes: TreeNode[] = [];
+  const pending = roots.map((node) => ({ node, depth: 1 })).reverse();
+  let maxDepth = 0;
+  while (pending.length) {
+    const { node, depth } = pending.pop()!;
+    maxDepth = Math.max(maxDepth, depth);
+    const children = getChildren(node.agentId);
+    if (children.length === 0) leafNodes.push(node);
+    else intermediaryNodes.push(node);
+    for (let index = children.length - 1; index >= 0; index--) {
+      pending.push({ node: children[index], depth: depth + 1 });
     }
   }
-  return intermediaries;
-}
-
-/** Calculate tree depth (number of levels) from the given start node. */
-export function getTreeDepth(
-  startNode: TreeNode,
-  getChildren: (parentId: string) => TreeNode[],
-): number {
-  const children = getChildren(startNode.agentId);
-  if (children.length === 0) {
-    return 1;
-  }
-  return 1 + Math.max(...children.map((child) => getTreeDepth(child, getChildren)));
+  return { leafNodes, intermediaryNodes, maxDepth };
 }
 
 // Extended_Pictographic covers the full pictographic-emoji block; we pair it
