@@ -889,6 +889,45 @@ class Boxes(unittest.TestCase):
         self.assertEqual(1, len(self.calls_of('send')))
         self.assertEqual([], self.calls_of('result'))
 
+    def test_retryable_control_unavailable_reobserves_same_turn_without_resending(self):
+        transient = {'schemaVersion': 1, 'ok': False,
+                     'errorCode': 'delegated_thread_control_unavailable', 'retryable': True}
+        self.configure(reply=self.reply(), wait=[{'rc': 2, 'stdout': transient},
+            {'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'})}])
+        result = self.run_adapter(deadline=5)
+        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
+        self.assertEqual(1, len(self.calls_of('send')))
+        waits = self.calls_of('wait'); self.assertEqual(2, len(waits))
+        self.assertEqual(['turn-1', 'turn-1'], [r[r.index('--turn') + 1] for r in waits])
+        self.assertEqual('turn-1', result['transport_receipt']['turn_id'])
+
+    def test_control_unavailable_retry_requires_exact_typed_retryable_error(self):
+        for changes in ({'retryable': False}, {'retryable': 'true'},
+                        {'errorCode': 'permission_denied'}, {'ok': True}):
+            with self.subTest(changes=changes):
+                self.request['token'] = 'tok-' + str(len(self.calls_of('send')) + 1)
+                transient = {'schemaVersion': 1, 'ok': False,
+                             'errorCode': 'delegated_thread_control_unavailable', 'retryable': True, **changes}
+                self.configure(reply=self.reply(), wait={'rc': 2, 'stdout': transient})
+                before = len(self.calls_of('wait'))
+                result = self.run_adapter(deadline=5)
+                self.assertEqual('threads wait exited 2', result['reason'])
+                self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+                self.assertEqual(1, len(self.calls_of('wait')) - before)
+                self.assertEqual('turn-1', result['cleanup_owner']['turn_id'])
+
+    def test_retryable_control_unavailable_stays_inside_original_deadline(self):
+        transient = {'schemaVersion': 1, 'ok': False,
+                     'errorCode': 'delegated_thread_control_unavailable', 'retryable': True}
+        self.configure(reply=self.reply(), wait={'rc': 2, 'stdout': transient})
+        started = time.monotonic(); result = self.run_adapter(deadline=.8)
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertIn('original deadline', result['reason'])
+        self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+        self.assertEqual('turn-1', result['cleanup_owner']['turn_id'])
+        self.assertEqual(1, len(self.calls_of('send')))
+        self.assertEqual([], self.calls_of('result'))
+
     def test_native_wait_cli_error_is_unverified_without_retry_or_resend(self):
         self.configure(reply=self.reply(), wait={'rc': 2, 'stderr': 'native wait failed'})
         result = self.run_adapter(deadline=5)

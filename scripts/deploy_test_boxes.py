@@ -498,6 +498,18 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
             if status in TERMINAL:
                 break
             if code != 0:
+                try:
+                    error = json.loads(out)
+                except (ValueError, TypeError):
+                    error = None
+                if (isinstance(error, dict) and error.get('ok') is False
+                        and error.get('retryable') is True
+                        and error.get('errorCode') == 'delegated_thread_control_unavailable'):
+                    # A typed read outage is not a terminal worker result. Reobserve the
+                    # same saved turn within the original deadline, never send again.
+                    log.write(b'native turn control temporarily unavailable; reobserving the same turn\n')
+                    time.sleep(min(poll, max(0, remaining())))
+                    continue
                 return unverified(request, binding, state, f'threads wait exited {code}',
                                   stderr=err.decode(errors='replace'), cleanup_owner=True)
             if status in PENDING or status is None:

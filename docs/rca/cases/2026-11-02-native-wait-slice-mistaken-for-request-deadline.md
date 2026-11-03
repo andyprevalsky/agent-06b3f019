@@ -49,7 +49,7 @@ operation, duplicate worker send, benchmark retry or deadline reset was used.
 
 ## Solution
 
-Reviewed candidate only, awaiting parent integration and full gate execution.
+The reviewed slice/deadline fix is integrated at 93d2fbc224ff8b78e5b78ad0ad0eccd3ccd2d34c.
 Catch TimeoutExpired only around threads wait. If the same original absolute
 budget remains and cancellation is absent, re-observe the saved turn without
 another send. Global expiry or cancellation retains cleanup_owner and remains
@@ -85,3 +85,38 @@ Preserve the original turn, source, deadlines, native evidence and cleanup owner
 
 Distinguish a bounded observation slice from the original task deadline and
 include termination/reaping in the same advertised CLI budget.
+
+## November 3 typed control-plane recurrence
+
+Request f118e520352e45e88e3017c209776c62 on source
+93d2fbc224ff8b78e5b78ad0ad0eccd3ccd2d34c retained turn
+01a19ebb-e74b-7ba1-b1f6-c6c4c98b4911. One native wait exited 2 with
+`ok: false`, `errorCode: delegated_thread_control_unavailable` and the literal
+boolean `retryable: true`. The original request deadline had not elapsed.
+The adapter's deliberate generic nonzero-exit refusal ended observation
+UNVERIFIED while the original worker continued. The platform occurrence was
+reported as event 90fa4d46a84d47d5be95d87abf45b4b1; its internal cause remains
+unidentified. A later read of that same turn succeeded, and the original
+controller worker completed all twelve suites with native exit 0. That native
+result is audit evidence only: the lost outer observation is not backfilled
+as PASS. Canonical observation-loss re-execution is still required.
+
+The narrow transport repair retries only a parsed dictionary carrying all
+three exact fields: `ok is False`, `retryable is True` and that error code.
+It re-observes the saved turn at the existing poll cadence inside the original
+deadline. It neither sends again nor retries the worker task. Malformed,
+generic, permission and non-retryable errors still end UNVERIFIED immediately
+with the cleanup owner. Repeated typed errors still expire at the original
+deadline; cancellation is checked before each observation.
+
+Two causal controls fail against unchanged 93d2; the patched Boxes cohort
+passes 30/30, including exact same-turn/one-send assertions, refusal variants
+and the persistent-error deadline control. Independent review found no
+blocker. Patch SHA256 is
+79939dab581fd896491f7d41b1986cea08d79ab8a2e3224655e443e1fc7ada58.
+The private before/after proof is retained under
+/var/tmp/pr1662-retryable-wait-93 and the original outer receipt under
+.context/deploy-pipeline-successor/attempts/9/focused/cloudbench-controller.
+The transport repair remains awaiting terminal-boundary source integration
+and a fresh qualified outer execution; no provider or benchmark assertion,
+timeout, concurrency or task command changes.

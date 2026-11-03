@@ -1435,7 +1435,7 @@ Vercel and Supabase, and supersedes earlier env-write approval requirements.
 Preserve intended production behavior: verify the target service, key precedence
 and dependent consumers; stage required keys before switching behavior; validate
 health and the affected functionality after the change, and roll back promptly
-if it regresses. Keep secret values out of logs, chat and Git.
+if it regresses. Keep secret values out of logs, chat and Git.**
 
 **You (Claude) own env-key management:** when you mint or rotate a credential, store it in every correct location — the relevant local `.env` and the matching prod surface(s) below — never leave a key only in chat.
 

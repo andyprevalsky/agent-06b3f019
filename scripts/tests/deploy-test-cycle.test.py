@@ -478,6 +478,206 @@ class Cycle(unittest.TestCase):
             'api': {'command': self.plan['gates'][1]['command'], 'checks': ['a']}}})
         self.assertEqual(['api'], [g['name'] for g in c.records(self.plan, self.state)])
 
+    def test_assigned_repair_routes_a_diagnosed_unknown_failure_without_relabel(self):
+        failure = self.failure()
+        c.adjudicate(self.state, self.assigned(failure, attribution='UNKNOWN'))
+        self.assertEqual('needs-focused-plan', self.state['phase']); self.assertFalse(self.state['ready'])
+        kept = next(f for f in self.state['failures'] if f['id'] == failure['id'])
+        self.assertEqual(('blocking', 'UNKNOWN', 'FAIL'), (kept['disposition'], kept['rca']['attribution'], kept['native_result']))
+        self.assertEqual(['api'], self.state['repair_gates']); self.assertEqual({}, self.state['skips'])
+        c.focused_plan(self.state, self.plan, {'source': self.state['source'], 'gates': {
+            'api': {'command': self.plan['gates'][1]['command'], 'checks': ['a']}}})
+        self.assertEqual(['api'], [g['name'] for g in c.records(self.plan, self.state)])
+
+    def skipped_row(self, sha='c' * 64, reason='Compute token pool exhausted or cooling down', status='SKIPPED', passed=False):
+        return {'native_task': {'name': 'a', 'status': status, 'benchmark_status': status, 'passed': passed,
+                                'failure_reason': reason, 'agent_id': 'agent-1'}, 'path': 'native/a/cloudbench-run.json', 'sha256': sha}
+
+    def resource_failure(self, **row):
+        self.state['phase'] = 'initial'
+        skipped = {**self.result(a='FAIL', b='PASS'), 'finished_at': 1000.0,
+                   'worker_evidence': {'a': self.skipped_row(**row)}}
+        c.advance(self.state, [skipped, self.result('ui', c='PASS')])
+        return next(f for f in self.state['failures'] if f['check'] == 'api/a')
+
+    def confirmation(self, **changes):
+        proof = {'receipt_sha256': 'c' * 64, 'receipt_reason': 'Compute token pool exhausted or cooling down',
+                 'resource_scope': 'third_party', 'reason_code': 'compute_quota_exhausted', 'exclusive_cause': True,
+                 'provider': 'openai-compute-tokens', 'evidence': 'native/a/cloudbench-run.json#failure_reason',
+                 'confirmed_at': 1001.0}
+        proof.update(changes)
+        return proof
+
+    def test_confirmed_compute_token_skip_is_a_warning_not_a_pass(self):
+        failure = self.resource_failure()
+        c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED', resource_skip=self.confirmation()))
+        self.assertEqual('ready', self.state['phase']); self.assertTrue(self.state['ready'])
+        kept = next(f for f in self.state['failures'] if f['id'] == failure['id'])
+        self.assertEqual(('SKIPPED_WITH_WARNING', 'FAIL', 'SKIPPED'),
+                         (kept['disposition'], kept['native_result'], kept['worker_evidence']['native_task']['benchmark_status']))
+        self.assertEqual({}, self.state['skips'])  # no pass credit
+        warning = self.state['resource_warnings'][0]
+        self.assertEqual((failure['id'], 'api/a', 'c' * 64, self.state['source']), (warning['id'], warning['check'], warning['receipt_sha256'], warning['source']))
+        plan = self.directory / 'plan.json'; c.write(plan, self.plan); c.write(self.directory / 'cycle.json', self.state)
+        self.assertEqual(0, c.verify_saved(self.directory, self.root))
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, c.main(['report', '--plan', str(plan), '--state-dir', str(self.directory), '--root', str(self.root)]))
+        text = (self.directory / 'report.md').read_text()
+        self.assertIn('Resource warnings: 1', text); self.assertIn('RESOURCE WARNINGS', text)
+        self.assertIn('- api/a — openai-compute-tokens: Compute token pool exhausted or cooling down [compute_quota_exhausted]'
+                      ' · Evidence: native/a/cloudbench-run.json#failure_reason · Confirmed at: 1001.0 · Receipt: ' + 'c' * 64, text)
+        self.assertNotIn('PASS', text.split('RESOURCE WARNINGS', 1)[1])
+
+    def test_resource_skip_refusals_are_atomic(self):
+        failure = self.resource_failure()
+        before = copy.deepcopy(self.state)
+        good = self.confirmation()
+        variants = {
+            'mismatched sha': self.confirmation(receipt_sha256='d' * 64),
+            'mismatched reason': self.confirmation(receipt_reason='Compute token pool exhausted'),
+            'missing provider': self.confirmation(provider=''),
+            'missing confirmed_at': {k: v for k, v in good.items() if k != 'confirmed_at'},
+            'early confirmation': self.confirmation(confirmed_at=999.0),
+            'wrong reason_code': self.confirmation(reason_code='billing_credit_exhausted'),
+            'not exclusive': self.confirmation(exclusive_cause=False),
+        }
+        for label, proof in variants.items():
+            with self.subTest(variant=label):
+                with self.assertRaises(ValueError):
+                    c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED', resource_skip=proof))
+                self.assertEqual(before, self.state)
+        for label, extra in (('with link', {'repair_agent': 'https://boxes.dev/thread/thr_x'}),
+                             ('with provider waiver', {'external_provider': {'name': 'p', 'reason': 'credits exhausted'}}),
+                             ('with assigned_repair', {'assigned_repair': True, 'assigned_reason': 'r', 'assigned_evidence': 'e'}),
+                             ('with execute', {'execute_unverified': True}),
+                             ('with post-merge', {'post_merge': {'test': 't', 'command': ['x'], 'scope': 's', 'error': 'e', 'source': 's', 'evidence': ['v']}})):
+            with self.subTest(variant=label):
+                with self.assertRaises(ValueError):
+                    c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED', resource_skip=good, **extra))
+                self.assertEqual(before, self.state)
+        # an actual assertion FAIL (native FAILED row) or an unverified occurrence can never be qualified
+        for row in ({'status': 'FAILED', 'reason': 'AssertionError: boom'}, {'passed': True, 'status': 'PASSED'}):
+            with self.subTest(row=row):
+                other = copy.deepcopy(before)
+                other['failures'][0]['worker_evidence'] = {'a': self.skipped_row(**row)} if row.get('status') != 'PASSED' else {'a': self.skipped_row(**row)}
+                failing = other['failures'][0]
+                proof = self.confirmation(receipt_reason=failing['worker_evidence']['a']['native_task']['failure_reason'])
+                with self.assertRaises(ValueError):
+                    c.adjudicate(other, self.report(failing, attribution='NOT_INTRODUCED', resource_skip=proof))
+        unverified = copy.deepcopy(before); unverified['failures'][0].update(native_result='UNVERIFIED', complete=False)
+        with self.assertRaises(ValueError):
+            c.adjudicate(unverified, self.report(unverified['failures'][0], attribution='NOT_INTRODUCED', resource_skip=good))
+
+    def test_mixed_batch_with_a_real_failure_still_blocks(self):
+        self.state['phase'] = 'initial'
+        skipped = {**self.result(a='FAIL', b='PASS'), 'finished_at': 1000.0, 'worker_evidence': {'a': self.skipped_row()}}
+        c.advance(self.state, [skipped, self.result('ui', c='FAIL')])
+        skip_f = next(f for f in self.state['failures'] if f['check'] == 'api/a')
+        real_f = next(f for f in self.state['failures'] if f['check'] == 'ui/c')
+        report = {'failures': [*self.report(skip_f, attribution='NOT_INTRODUCED', resource_skip=self.confirmation())['failures'],
+                               *self.report(real_f, attribution='INTRODUCED')['failures']]}
+        c.adjudicate(self.state, report)
+        self.assertEqual('needs-focused-plan', self.state['phase']); self.assertFalse(self.state['ready'])
+        self.assertEqual(['ui'], self.state['repair_gates']); self.assertEqual(1, len(self.state['resource_warnings']))
+
+    def test_resource_warning_needs_renewed_confirmation_after_changed_inputs(self):
+        failure = self.resource_failure()
+        c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED', resource_skip=self.confirmation()))
+        self.state['phase'] = 'stale'
+        (self.root / 'code').write_text('changed inputs')
+        new = {**self.plan, 'source': c.source(self.root)}
+        c.refresh(self.state, self.plan, new, self.root)
+        self.assertEqual([], self.state['resource_warnings'])
+        superseded = self.state['superseded_resource_warnings'][0]
+        self.assertEqual((failure['id'], 'c' * 64, failure['source']), (superseded['id'], superseded['receipt_sha256'], superseded['source']))
+        self.assertFalse(any(f['native_result'].startswith('prior') for f in self.state['failures']))
+        kept = next(f for f in self.state['failures'] if f['id'] == failure['id'])
+        self.assertEqual(('FAIL', 'SKIPPED'), (kept['native_result'], kept['worker_evidence']['native_task']['benchmark_status']))
+
+    def smoke_plan(self):
+        plan = copy.deepcopy(self.plan)
+        plan['gates'].append({'name': 'smoke', 'worker': 'smoke-worker', 'checks': ['mass', 'mail'], 'case_protocol': True, 'input_paths': ['code'],
+                              'command': ['true'], 'worker_transport': 'local-isolated', 'cwd': str(Path(self.workers.name) / 'smoke'),
+                              'env': {'CONDUCTOR_WORKSPACE_NAME': 'smoke', 'CONDUCTOR_PORT': '36000'}})
+        (Path(self.workers.name) / 'smoke').mkdir(exist_ok=True)
+        return plan
+
+    def qualified_smoke_state(self, plan):
+        state = c.initialize(plan, self.root); state['phase'] = 'initial'
+        skipped = {**self.result('smoke', mass='FAIL', mail='FAIL'), 'finished_at': 1000.0,
+                   'worker_evidence': {'mass': self.skipped_row()}}
+        c.advance(state, [skipped])
+        mass = next(f for f in state['failures'] if f['check'] == 'smoke/mass')
+        mail = next(f for f in state['failures'] if f['check'] == 'smoke/mail')
+        report = {'failures': [*self.report(mass, attribution='NOT_INTRODUCED', resource_skip=self.confirmation())['failures'],
+                               *self.report(mail, attribution='INTRODUCED')['failures']]}
+        c.adjudicate(state, report)
+        self.assertEqual(('needs-focused-plan', ['smoke']), (state['phase'], state['repair_gates']))
+        return state
+
+    def test_qualified_resource_skip_is_excluded_from_the_next_request_but_kept_in_the_record(self):
+        plan = self.smoke_plan(); state = self.qualified_smoke_state(plan)
+        gate = next(g for g in plan['gates'] if g['name'] == 'smoke')
+        state['phase'] = 'failed-gates'  # the full rerun of the repaired gate
+        with patch.object(c, 'run_command', return_value=(0, False, False, False)) as runner:
+            result = c.execute(gate, state, self.directory, self.root)
+        request = c.read(Path(runner.call_args.kwargs['env']['DEPLOY_GATE_REQUEST']))
+        self.assertEqual(['mail'], request['checks'])  # no mass invocation
+        self.assertEqual('SKIPPED_WITH_WARNING', request['skips']['mass']['disposition'])
+        self.assertEqual('c' * 64, request['skips']['mass']['receipt_sha256'])
+        self.assertEqual('SKIP', result['cases']['mass']); self.assertIn('mail', result['cases'])
+        self.assertEqual('c' * 64, result['resource_skips']['mass']['receipt_sha256'])
+        mass = next(f for f in state['failures'] if f['check'] == 'smoke/mass')
+        self.assertEqual(('FAIL', 'SKIPPED'), (mass['native_result'], mass['worker_evidence']['native_task']['benchmark_status']))
+        # same inputs on a new head: the warning rebinds its active source, keeps the native one, and still excludes
+        original_source = state['source']
+        state['phase'] = 'stale'; (self.root / 'other').write_text('unrelated')
+        same = {**plan, 'source': c.source(self.root)}
+        c.refresh(state, plan, same, self.root)
+        warning = state['resource_warnings'][0]
+        self.assertEqual((same['source'], original_source), (warning['source'], warning['original_source']))
+        self.assertNotEqual(same['source'], original_source)
+        state.update(phase='failed-gates', round=state['round'] + 1)
+        with patch.object(c, 'run_command', return_value=(0, False, False, False)) as runner:
+            c.execute(gate, state, self.directory, self.root)
+        self.assertEqual(['mail'], c.read(Path(runner.call_args.kwargs['env']['DEPLOY_GATE_REQUEST']))['checks'])
+        # a changed input fingerprint removes the warning: mass is requested again until re-confirmed
+        state['phase'] = 'stale'; (self.root / 'code').write_text('changed inputs')
+        new = {**same, 'source': c.source(self.root)}
+        c.refresh(state, same, new, self.root)
+        self.assertEqual([], state['resource_warnings'])
+        self.assertEqual(original_source, state['superseded_resource_warnings'][0]['original_source'])
+        state.update(phase='failed-gates', round=state['round'] + 1)
+        with patch.object(c, 'run_command', return_value=(0, False, False, False)) as runner:
+            c.execute(gate, state, self.directory, self.root)
+        self.assertEqual(['mass', 'mail'], c.read(Path(runner.call_args.kwargs['env']['DEPLOY_GATE_REQUEST']))['checks'])
+
+    def test_missing_finished_at_falls_back_only_to_a_matching_sidecar_receipt(self):
+        failure = self.resource_failure()
+        del failure['finished_at']  # an occurrence recorded before finished_at existed
+        folder = self.directory / 'attempts/9/focused/api'; folder.mkdir(parents=True)
+        failure['worker_result'] = str(folder / 'result.json')
+        sidecar = {'gate': 'api', 'status': 'FAIL', 'cases': {'a': 'FAIL', 'b': 'PASS'}, 'executed': True, 'complete': True,
+                   'case_complete': {'a': True, 'b': True}, 'source': self.state['source'], 'finished_at': 1793667148.9725}
+        before = copy.deepcopy(self.state)
+        with self.assertRaises(ValueError):  # no sidecar -> refused
+            c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED', resource_skip=self.confirmation(confirmed_at=1793667149.0)))
+        self.assertEqual(before, self.state)
+        for label, bad in (('source', {'source': {'head': 'x' * 40, 'digest': 'y' * 64}}), ('gate', {'gate': 'ui'}),
+                           ('case', {'cases': {'z': 'FAIL'}, 'case_complete': {'z': True}}), ('result', {'cases': {'a': 'PASS', 'b': 'PASS'}})):
+            with self.subTest(mismatch=label):
+                c.write(folder / 'receipt.json', {**sidecar, **bad})
+                with self.assertRaises(ValueError):
+                    c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED', resource_skip=self.confirmation(confirmed_at=1793667149.0)))
+                self.assertEqual(before, self.state)
+        c.write(folder / 'receipt.json', sidecar)
+        with self.assertRaises(ValueError):  # the real terminal timestamp is the bound: an earlier confirmation is refused
+            c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED', resource_skip=self.confirmation(confirmed_at=1001.0)))
+        c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED', resource_skip=self.confirmation(confirmed_at=1793667149.0)))
+        self.assertEqual('SKIPPED_WITH_WARNING', next(f for f in self.state['failures'] if f['id'] == failure['id'])['disposition'])
+        self.assertNotIn('finished_at', next(f for f in self.state['failures'] if f['id'] == failure['id']))  # record not backfilled
+
     def test_assigned_repair_refusals_leave_the_state_unchanged(self):
         failure = self.failure()
         before = copy.deepcopy(self.state)
@@ -490,7 +690,12 @@ class Cycle(unittest.TestCase):
             'with provider': self.assigned(failure, external_provider={'name': 'p', 'reason': 'outage'}),
             'with post-merge': self.assigned(failure, post_merge=packet),
             'with execute': self.assigned(failure, execute_unverified=True),
-            'unknown attribution': self.assigned(failure, attribution='UNKNOWN'),
+            'unknown missing reason': self.assigned(failure, attribution='UNKNOWN', assigned_reason=''),
+            'unknown missing evidence': self.assigned(failure, attribution='UNKNOWN', assigned_evidence=None),
+            'unknown with link': self.assigned(failure, attribution='UNKNOWN', repair_agent='https://boxes.dev/thread/thr_x'),
+            'unknown with provider': self.assigned(failure, attribution='UNKNOWN', external_provider={'name': 'p', 'reason': 'outage'}),
+            'unknown with post-merge': self.assigned(failure, attribution='UNKNOWN', post_merge=packet),
+            'unknown with execute': self.assigned(failure, attribution='UNKNOWN', execute_unverified=True),
             'introduced attribution': self.assigned(failure, attribution='INTRODUCED'),
             'non-boolean flag': self.assigned(failure, assigned_repair='yes'),
         }

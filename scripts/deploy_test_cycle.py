@@ -235,19 +235,25 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
     token = uuid.uuid4().hex
     case_skips = {key.split("/", 1)[1]: value for key, value in state["skips"].items()
                   if key.startswith(name + "/") and value["source"] == state["source"]}
-    active = [c for c in gate["checks"] if c not in case_skips]
+    # Qualified third-party resource skips bound to the CURRENT source and gate inputs are not
+    # resubmitted; they stay in the request/cases record as SKIP with their evidence (no pass credit).
+    qualified = {w["check"].split("/", 1)[1]: {"disposition": RESOURCE_SKIP, **w}
+                 for w in state.get("resource_warnings", [])
+                 if w["gate"] == name and w["source"] == state["source"]
+                 and w.get("input_fingerprint") == state["input_fingerprints"].get(name)}
+    active = [c for c in gate["checks"] if c not in case_skips and c not in qualified]
     if not active:
         return {"gate": name, "status": "SKIP", "cases": {c: "SKIP" for c in gate["checks"]},
-                "native_exit": None, "executed": False, "source": state["source"]}
+                "native_exit": None, "executed": False, "source": state["source"], "resource_skips": qualified}
     # A worker must explicitly consume the case inventory, including exclusions.
     # Without a case-aware worker mixed skip/run would either rerun skipped tests
     # or silently omit checks, so reject it before launch.
-    if case_skips and not gate.get("case_protocol"):
+    if (case_skips or qualified) and not gate.get("case_protocol"):
         raise ValueError(f"{name}: mixed skips require the worker's case protocol")
     folder = directory / "attempts" / str(state["round"]) / phase / name
     folder.mkdir(parents=True, exist_ok=False)
     request = {"token": token, "source": state["source"], "gate": name,
-               "checks": active, "skips": case_skips, "phase": phase}
+               "checks": active, "skips": {**case_skips, **qualified}, "phase": phase}
     if 'worker_recipe' in gate:
         request['worker_recipe'] = gate['worker_recipe']
         request['worker_root'] = gate.get('worker_root', str((root / gate['cwd']).resolve()))
@@ -277,7 +283,7 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
         except OSError as error:
             output.write(str(error).encode())
             code = 127
-    cases = {c: "SKIP" for c in case_skips}
+    cases = {c: "SKIP" for c in [*case_skips, *qualified]}
     valid = False
     complete = False
     reason = None
@@ -337,6 +343,7 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
         result['cleanup_owner'] = {'request_token': token, 'worker_root': str(root / gate.get('cwd', '.')),
                                    'native_cleanup_reference': native_cleanup_reference}
     result['worker_evidence'] = worker_evidence
+    result['resource_skips'] = qualified
     result['worker_result'] = str(result_path) if result_path.exists() else None
     write(folder / "receipt.json", result)
     return result
@@ -354,7 +361,8 @@ def failed_cases(state: dict, results: list[dict]) -> list[dict]:
                                "complete": result.get("case_complete", {}).get(check, result.get("complete", False)), "phase": phase,
                                "evidence": result.get("log"), "command": result.get("command"),
                                "worker_result": result.get('worker_result'),
-                               "worker_evidence": result.get('worker_evidence', {}).get(check)})
+                               "worker_evidence": result.get('worker_evidence', {}).get(check),
+                               "finished_at": result.get("finished_at")})
     return failed
 
 
@@ -384,16 +392,18 @@ ASSIGNED_EXCLUSIVE = ("repair_agent", "external_provider", "post_merge", "execut
 
 
 def validate_assigned_repair(entry: dict, disposition: str) -> None:
-    """Owned assignment: NOT_INTRODUCED is attribution only; the root keeps the repair and re-runs the gate.
+    """Owned assignment: NOT_INTRODUCED or a diagnosed UNKNOWN is attribution only; the root keeps the
+    repair and re-runs the bound gate.
 
-    The occurrence stays blocking (no skip, no waiver, no attribution change) and cannot be combined
-    with a repair link, provider waiver, post-merge packet or execution recovery.
+    The occurrence stays blocking (no skip, no waiver, no credit, no attribution relabel) and cannot be
+    combined with a repair link, provider waiver, post-merge packet or execution recovery. An introduced
+    defect keeps its normal blocking route; an unassigned UNKNOWN still blocks at the atomic check.
     """
     if entry.get("assigned_repair") is not True:
         raise ValueError("assigned_repair must be the explicit boolean true")
-    if entry.get("attribution") not in {"NOT_INTRODUCED", "NOT INTRODUCED"}:
-        raise ValueError("assigned_repair retains a NOT_INTRODUCED attribution only; introduced and unknown "
-                         "occurrences use the normal blocking path")
+    if entry.get("attribution") not in {"NOT_INTRODUCED", "NOT INTRODUCED", "UNKNOWN"}:
+        raise ValueError("assigned_repair retains a NOT_INTRODUCED or UNKNOWN attribution; an introduced "
+                         "defect uses the normal blocking path")
     if any(entry.get(k) for k in ASSIGNED_EXCLUSIVE):
         raise ValueError("assigned_repair cannot be combined with a repair link, provider waiver, "
                          "post-merge packet or execution recovery")
@@ -402,6 +412,69 @@ def validate_assigned_repair(entry: dict, disposition: str) -> None:
             raise ValueError("assigned_repair requires the owned-assignment reason and an evidence reference")
     if disposition != "blocking":
         raise ValueError("assigned_repair applies to a blocking occurrence only")
+
+
+RESOURCE_SKIP = "SKIPPED_WITH_WARNING"
+RESOURCE_EXCLUSIVE = ("repair_agent", "external_provider", "post_merge", "execute_unverified", "assigned_repair")
+
+
+def sidecar_finished_at(failure: dict):
+    """Read-only fallback for occurrences recorded before finished_at existed: the coordinator
+    receipt beside the worker result must match the failure exactly; otherwise there is no bound."""
+    worker_result = failure.get("worker_result")
+    if not isinstance(worker_result, str) or not worker_result:
+        return None
+    sidecar = Path(worker_result).parent / "receipt.json"
+    try:
+        receipt = read(sidecar)
+    except (OSError, ValueError):
+        return None
+    case = failure["check"].split("/", 1)[1]
+    if (receipt.get("source") != failure.get("source") or receipt.get("gate") != failure.get("gate")
+            or receipt.get("executed") is not True or not isinstance(receipt.get("cases"), dict)
+            or receipt["cases"].get(case) != failure.get("native_result")
+            or receipt.get("case_complete", {}).get(case) != failure.get("complete")):
+        return None
+    return receipt.get("finished_at")
+
+
+def validate_resource_skip(entry: dict, failure: dict) -> None:
+    """Third-party compute-token exhaustion: the native SKIPPED row stays FAIL in the record and is
+    projected as a warning, never a pass. The confirmation must bind the exact row the same way
+    scripts/validate_predeploy_receipts.py does (its receipt predicate, lines 141-152), restricted to
+    reason_code compute_quota_exhausted for now.
+    """
+    from validate_predeploy_receipts import RESOURCE_CODES, finite
+    proof = entry.get("resource_skip")
+    if not isinstance(proof, dict):
+        raise ValueError("resource_skip must be the typed resource confirmation object")
+    if any(entry.get(k) for k in RESOURCE_EXCLUSIVE):
+        raise ValueError("resource_skip cannot be combined with a repair link, provider waiver, post-merge packet, "
+                         "execution recovery or assigned repair")
+    if entry.get("attribution") not in {"NOT_INTRODUCED", "NOT INTRODUCED"}:
+        raise ValueError("a resource skip is NOT_INTRODUCED attribution only")
+    evidence = failure.get("worker_evidence") if isinstance(failure.get("worker_evidence"), dict) else {}
+    row = evidence.get("native_task") if isinstance(evidence.get("native_task"), dict) else {}
+    if (failure.get("native_result") != "FAIL" or not failure.get("complete") or row.get("passed") is not False
+            or row.get("benchmark_status") != "SKIPPED" or row.get("status") != "SKIPPED"):
+        raise ValueError("only a complete, natively SKIPPED compute-token row can be qualified; assertion failures "
+                         "and unverified occurrences stay blocking")
+    reason, sha = row.get("failure_reason"), evidence.get("sha256")
+    finished = failure.get("finished_at")
+    if finished is None:
+        finished = sidecar_finished_at(failure)
+    allowed = (isinstance(sha, str) and bool(sha) and proof.get("receipt_sha256") == sha
+               and isinstance(reason, str) and bool(reason.strip()) and proof.get("receipt_reason") == reason
+               and proof.get("resource_scope") == "third_party"
+               and proof.get("reason_code") in RESOURCE_CODES and proof.get("reason_code") == "compute_quota_exhausted"
+               and proof.get("exclusive_cause") is True
+               and isinstance(proof.get("provider"), str) and bool(proof["provider"].strip())
+               and isinstance(proof.get("evidence"), str) and bool(proof["evidence"].strip())
+               and finite(proof.get("confirmed_at")) and finite(finished) and proof["confirmed_at"] >= finished)
+    if not allowed:
+        raise ValueError("resource confirmation does not bind the exact native SKIPPED row "
+                         "(receipt sha, exact reason, third_party compute_quota_exhausted, exclusive cause, "
+                         "provider, evidence, confirmed_at after the row finished)")
 
 
 def adjudicate(state: dict, report: dict) -> None:
@@ -423,6 +496,9 @@ def adjudicate(state: dict, report: dict) -> None:
         disposition = decision(entry)
         if entry.get("assigned_repair") is not None:
             validate_assigned_repair(entry, disposition)
+        if entry.get("resource_skip") is not None:
+            validate_resource_skip(entry, failure)
+            disposition = RESOURCE_SKIP
         if disposition == "execution required":
             if failure["complete"]:
                 raise ValueError("execution recovery requires an incomplete occurrence")
@@ -439,6 +515,14 @@ def adjudicate(state: dict, report: dict) -> None:
         failure["disposition"] = disposition
         if disposition in {"blocking", "execution required"}:
             repair.add(failure["gate"])
+        elif disposition == RESOURCE_SKIP:
+            # Keep the outer FAIL and native SKIPPED row as warning evidence, with no pass credit.
+            # Only this source/input-bound qualification excludes the case from a later request.
+            state.setdefault("resource_warnings", []).append({
+                "id": failure["id"], "check": failure["check"], "gate": failure["gate"],
+                "native_result": failure["native_result"], "native_row": failure["worker_evidence"]["native_task"],
+                "receipt_sha256": entry["resource_skip"]["receipt_sha256"], "confirmation": entry["resource_skip"],
+                "source": state["source"], "input_fingerprint": state["input_fingerprints"][failure["gate"]]})
         else:
             state["skips"][failure["check"]] = {"source": state["source"], "rca": entry,
                                                    "disposition": disposition,
@@ -652,6 +736,19 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
                             "complete": True, "phase": "refresh", "prior_waiver": skip})
     state["superseded_skips"] = [*state.get("superseded_skips", []), *state["skips"].values()]
     state["skips"] = carry
+    kept_warnings, stale_warnings = [], []
+    for warning in state.get("resource_warnings", []):
+        if warning.get("input_fingerprint") == fingerprints.get(warning["gate"]):
+            # Same inputs on a new head: the exclusion follows the active source; the native
+            # SKIPPED row keeps its immutable original binding.
+            kept_warnings.append({**warning, "original_source": warning.get("original_source", warning["source"]),
+                                  "source": new["source"]})
+        else:  # the original native SKIPPED row keeps its source; a new sweep needs a renewed confirmation
+            stale_warnings.append({**warning, "superseded": "changed inputs; renewed confirmation required"})
+    if stale_warnings:
+        state["superseded_resource_warnings"] = [*state.get("superseded_resource_warnings", []), *stale_warnings]
+    if "resource_warnings" in state or stale_warnings:
+        state["resource_warnings"] = kept_warnings
     if superseded_pending:
         done = {p["id"] for p in superseded_pending}
         state["superseded_pending_post_merge"] = [*state.get("superseded_pending_post_merge", []), *superseded_pending]
@@ -788,16 +885,26 @@ def main(argv: list[str] | None = None) -> int:
                             for f in state["failures"] if "rca" in f]
                 header = (f"Deploy validation: {state['phase']}\nSource: {state['source']['head']}\n"
                           f"Pending RCA: {len(state.get('pending', []))}\n"
-                          f"Pending post-merge: {len(state.get('pending_post_merge', []))}\n")
+                          f"Pending post-merge: {len(state.get('pending_post_merge', []))}\n"
+                          f"Resource warnings: {len(state.get('resource_warnings', []))}\n")
                 # The header is not a scorecard: pass none so BLOCKING failures render (finding 4447557591).
                 text = header + render({"failures": failures})
+                warnings = state.get("resource_warnings", [])
+                if warnings:
+                    text += "\nRESOURCE WARNINGS (third-party resource skipped with warning; no pass credit)\n"
+                    for w in warnings:
+                        proof = w["confirmation"]
+                        text += (f"- {w['check']} — {proof['provider']}: {proof['receipt_reason']} [{proof['reason_code']}]"
+                                 f" · Evidence: {proof['evidence']} · Confirmed at: {proof['confirmed_at']}"
+                                 f" · Receipt: {w['receipt_sha256']} · Native: {w['native_result']}\n")
                 (directory / "report.md").write_text(text)
                 print(text, end="")
                 return 0
             write(state_path, state)
             print(json.dumps({"phase": state["phase"], "ready": state["ready"],
                               "failures": len(state.get("pending", [])), "source": state["source"],
-                              "pending_post_merge": len(state.get("pending_post_merge", []))}))
+                              "pending_post_merge": len(state.get("pending_post_merge", [])),
+                              "resource_warnings": len(state.get("resource_warnings", []))}))
             return 1 if args.action in {"run", "resume"} and not state["ready"] else 0
     except (ImportError, ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
         print(f"DEPLOY_CYCLE BLOCKED: {error}", file=sys.stderr)
