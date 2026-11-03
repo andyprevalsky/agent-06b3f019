@@ -67,7 +67,13 @@ ownership leases, acknowledgement protocol or mandatory status labels.
 ## Post-merge autonomous repair goal
 
 Create repair delegates only after the originating PR is confirmed merged.
-Use a new devbox from current `origin/main`, and verify that it contains the
+The repair agent, its active `/goal` and its deployment coordinator MUST run
+on a different devbox from the originating deploy, automatically filed in
+that project's **Bugs** folder. Use `--target new-devbox`, never
+`--target current-devbox` or another thread on the originating box. A local
+coordinator that forwards work to a remote worker does not satisfy this rule:
+the independent repair must continue when the originating box is closed.
+Use current `origin/main` on the new devbox, and verify that it contains the
 originating merge before beginning the repair. Never fork the deploying
 agent's pre-merge branch or uncommitted workspace. Existing matched repair
 owners must also bring their work onto current main containing that merge.
@@ -90,9 +96,14 @@ Exact error: <verbatim native test failure>
 Failure evidence: <accessible original log/artifacts>
 Failed source: <revision that produced the failure>
 Originating merge: <confirmed main merge revision>
+Originating devbox: <deploy owner's devbox ID; this repair must run elsewhere>
 
 Read CLAUDE.md and follow /RCA. Work autonomously from current main;
-do not ask questions or depend on human replies. Resolve implementation
+before repair work, verify this is a different devbox and its project-folder
+membership is Bugs using the boxes-devbox-folders skill. Keep this /goal and
+all deployment coordination here; never depend on the originating box staying
+open. Retain every needed artifact here or in accessible durable storage.
+Do not ask questions or depend on human replies. Resolve implementation
 choices using the existing instructions and evidence. Prove the assigned
 test passes, then carry the fix through /deploy to its completed scorecard.
 An OPEN diagnosis, observability report, draft PR or stopped investigation
@@ -151,8 +162,21 @@ dvb-onbox threads list --scope project --json
 dvb-onbox threads read --scope project --thread <thread-id> --turns 10 --json
 dvb-onbox threads send --thread <thread-id> --prompt-file evidence.md --idempotency-key <discovery-key> --json
 dvb-onbox threads options --agent codex --json
+dvb-onbox devboxes folders list --json
 dvb-onbox threads start --target new-devbox --agent codex --model <verified-parent-model> --reasoning-effort high --speed standard --muted --prompt-file handoff.md --idempotency-key <handoff-key> --json
+dvb-onbox devboxes folders get --devbox <returned-devbox-id> --json
+dvb-onbox devboxes folders move --devbox <returned-devbox-id> --folder <Bugs-folder-id-from-list> --expected-revision <membership.folderRevision-from-get> --idempotency-key <placement-key> --json
+dvb-onbox devboxes folders get --devbox <returned-devbox-id> --json
 ```
+
+Resolve the existing **Bugs** folder from the current project listing; the Rose
+account folder ID below is not a boxes.dev folder ID. Place the newly created
+devbox immediately and verify the final membership. Record its devbox ID and
+folder receipt beside the repair link. If only the child can move its devbox,
+it must use the same list/get/move/get sequence with `--devbox current` before
+repair work. Re-read membership after a revision conflict. An unavailable
+placement command is a named handoff blocker, never permission to fall back
+to the originating box or silently leave the repair unfiled.
 
 Follow returned pagination cursors with `--cursor`; read the actual work before
 matching. Use the deploy owner's harness/model and this policy's explicit high
