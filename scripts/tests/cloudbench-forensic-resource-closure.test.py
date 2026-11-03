@@ -313,6 +313,32 @@ class Forensic(OLD['ArchivedStop']):
         self.assertTrue(any(x['label']=='Physical resources terminal (as of)' for x in exp['lifecycle']))
         self.assertEqual((self.admission/'native-release-audit.json').read_bytes(),self.original_bytes)
 
+    def test_reporting_nested_respawn_export_preserves_custody(self):
+        nested=self.admission/'shard-00/attempt-2/run'
+        nested.parent.mkdir()
+        shutil.move(str(self.admission/'shard-00/run'),nested)
+        (self.admission/'coordination.json').write_text(json.dumps(dict(controllers=1,shards={'0':{'out':str(nested)}})))
+        receipt=self.closure_receipt();api,_=self.exact_api()
+        F['reconcile'](self.admission,receipt,api)
+        report=runpy.run_path(str(ROOT/'scripts/cloudbench-resource-closure-report.py'))
+        self.assertIsNotNone(report['load'](self.admission,self.original))
+        # A journal path outside the admission cannot supply an export.
+        (self.admission/'coordination.json').write_text(json.dumps(dict(controllers=1,shards={'0':{'out':str(self.run)}})))
+        self.assertIsNone(report['load'](self.admission,self.original))
+
+    def test_reporting_absent_resource_does_not_decode_non_json_body(self):
+        receipt=self.closure_receipt();api,_=self.exact_api();original=api.api
+        def call(method,path,timeout,observer=None):
+            def observe(verb,target,status,body):
+                observer(verb,target,status,b'<html>not found</html>' if status==404 else body)
+            return original(method,path,timeout,observe if observer else None)
+        api.api=call
+        F['reconcile'](self.admission,receipt,api)
+        report=runpy.run_path(str(ROOT/'scripts/cloudbench-resource-closure-report.py'))
+        value=report['load'](self.admission,self.original)
+        self.assertIsNotNone(value)
+        self.assertTrue(value['all_resources_absent'])
+
     def test_reporting_missing_tampered_foreign_partial_future_proofs_keep_original_action(self):
         exp,issues=self.reporting_card()
         self.assertFalse(exp.get('physical_closure_asof'))
@@ -637,6 +663,6 @@ class Forensic(OLD['ArchivedStop']):
 # Select only this extension's controls rather than inherited stop controls.
 if __name__=='__main__':
     import sys
-    names=sys.argv[1:] or ('test_runtime_capture_present_keeps_original_fact_through_full_consumer','test_runtime_capture_present_canonical_cli_remains_get_only','test_runtime_capture_fact_requires_strict_boolean_and_exact_plan','test_true_runtime_capture_fact_keeps_legacy_plan_shape','test_retained_canonical_cli_stays_get_only_and_preserves_late_deadline','test_retained_missing_guest_ack_only_observes_current_physical_state','test_retained_observation_requires_original_terminal_delete_and_matching_failure_facts','test_reporting_omitted_changed_writer_authority_terminal_inventory_refuse','test_reporting_asof_closure_removes_only_obsolete_recovery_action','test_reporting_missing_tampered_foreign_partial_future_proofs_keep_original_action','test_actual_destroyed_machine_shape_preserves_terminal_not_absent','test_destroyed_machine_wrong_incarnation_no_delete_and_live_refuse_with_private_wire','test_exact_absence_reconciles_without_rewriting_failed_original','test_live_unknown_and_wrong_binding_refuse','test_forged_receipt_and_incomplete_cohort_refuse','test_canonical_cli_producer_and_consumer_use_loopback_only','test_fullscope_soft_deleted_workspace_is_terminal_not_absent','test_fullscope_live_other_owner_hidden_from_list_refuses','test_fullscope_incomplete_export_unjoined_writer_and_timeout_refuse','test_existing_original_epoch_is_not_replaced_with_none','test_late_publication_deadline_removes_only_uncommitted_projection','test_selected_soft_terminal_uses_same_predicate_without_absence_credit','test_alarm_at_atomic_publication_link_rolls_back_exact_inode')
+    names=sys.argv[1:] or ('test_reporting_nested_respawn_export_preserves_custody','test_reporting_absent_resource_does_not_decode_non_json_body','test_runtime_capture_present_keeps_original_fact_through_full_consumer','test_runtime_capture_present_canonical_cli_remains_get_only','test_runtime_capture_fact_requires_strict_boolean_and_exact_plan','test_true_runtime_capture_fact_keeps_legacy_plan_shape','test_retained_canonical_cli_stays_get_only_and_preserves_late_deadline','test_retained_missing_guest_ack_only_observes_current_physical_state','test_retained_observation_requires_original_terminal_delete_and_matching_failure_facts','test_reporting_omitted_changed_writer_authority_terminal_inventory_refuse','test_reporting_asof_closure_removes_only_obsolete_recovery_action','test_reporting_missing_tampered_foreign_partial_future_proofs_keep_original_action','test_actual_destroyed_machine_shape_preserves_terminal_not_absent','test_destroyed_machine_wrong_incarnation_no_delete_and_live_refuse_with_private_wire','test_exact_absence_reconciles_without_rewriting_failed_original','test_live_unknown_and_wrong_binding_refuse','test_forged_receipt_and_incomplete_cohort_refuse','test_canonical_cli_producer_and_consumer_use_loopback_only','test_fullscope_soft_deleted_workspace_is_terminal_not_absent','test_fullscope_live_other_owner_hidden_from_list_refuses','test_fullscope_incomplete_export_unjoined_writer_and_timeout_refuse','test_existing_original_epoch_is_not_replaced_with_none','test_late_publication_deadline_removes_only_uncommitted_projection','test_selected_soft_terminal_uses_same_predicate_without_absence_credit','test_alarm_at_atomic_publication_link_rolls_back_exact_inode')
     suite=unittest.TestSuite(Forensic(name) for name in names)
     raise SystemExit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())

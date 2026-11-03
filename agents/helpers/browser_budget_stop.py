@@ -142,7 +142,7 @@ async def finish_budget_stop(owner: Any, ticket: dict | None, result: dict) -> N
             and result.get("status") == "max_iterations"):
         # Called after the manager's result event has been consumed, before join
         # can release the native-entry coroutine to dispatch more work.
-        await owner.pause()
+        await owner.pause("budget")
 
 
 def forget_finalizer(owner: Any, ticket: dict | None) -> None:

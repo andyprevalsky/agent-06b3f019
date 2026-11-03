@@ -818,6 +818,14 @@ OVERFLOW_DEFER_MAX_HISTORY_EVENTS = 30_000
 OVERFLOW_DEFER_MAX_HISTORY_BYTES = 30 * 1024 * 1024
 
 
+class CompletionSupersededError(RuntimeError):
+    """A verified result lost its requirement revision before publication finished."""
+
+
+class FinalPresentationError(ValueError):
+    """Accepted final-presentation policy cannot encode the verified output."""
+
+
 @workflow.defn
 class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContextMixin):
     """
@@ -1310,10 +1318,21 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         if "cost_limit_wrapup_consumed" in runtime:
             self._cost_limit_wrapup_consumed = runtime.get("cost_limit_wrapup_consumed") is True
         self._browser_execution_mode = runtime.get("browser_execution_mode", self._browser_execution_mode) is True
-        self._browser_execution_task_id = runtime.get("browser_execution_task_id")
-        self._browser_execution_contract = runtime.get("browser_execution_contract")
-        self._browser_execution_requirement_keys = runtime.get("browser_execution_requirement_keys", [])
-        self._browser_execution_pending_input_ids = runtime.get("browser_execution_pending_input_ids", [])
+        task_id = runtime.get("browser_execution_task_id")
+        self._browser_execution_task_id = task_id if isinstance(task_id, str) else None
+        contract = runtime.get("browser_execution_contract")
+        self._browser_execution_contract = contract if isinstance(contract, str) else None
+        requirement_keys = runtime.get("browser_execution_requirement_keys")
+        self._browser_execution_requirement_keys = (
+            requirement_keys if isinstance(requirement_keys, list) and all(
+                isinstance(key, list) and all(isinstance(part, str) for part in key)
+                for key in requirement_keys
+            ) else []
+        )
+        pending_ids = runtime.get("browser_execution_pending_input_ids")
+        self._browser_execution_pending_input_ids = (
+            pending_ids if isinstance(pending_ids, list) and all(isinstance(value, str) for value in pending_ids) else []
+        )
 
 
         if (
@@ -2915,11 +2934,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                                 workflow.logger.info(
                                     f"✓ Post-DAG verifier passed (score={post_dag_result['score']}) — marking complete"
                                 )
-                                await self._mark_complete(
+                                return await self._finish_verified_completion(
                                     execute_context,
                                     post_dag_result.get("structured_response"),
                                 )
-                                return {"status": "completed", "goal": goal}
                         if post_dag_result and post_dag_result.get("verifier_error"):
                             message = post_dag_result.get("reasoning") or "Post-DAG verifier failed"
                             workflow.logger.warning(f"[DAG] Post-DAG attempt_completion errored: {message}")
@@ -3025,9 +3043,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 await self._flush_pending_messages()
                 workflow.continue_as_new(args=self._continuation_args(self.context, start_phase="execute_continued"))
                 return execute_result
-            self._require_current_response_schema_acceptance()
-            await self._mark_complete(execute_result.get("context", []), execute_result.get("structured_response"))
-            return {"status": "completed", "goal": self.goal}
+            return await self._finish_verified_completion(
+                execute_result.get("context", []), execute_result.get("structured_response")
+            )
 
         return await self._handle_incomplete(execute_result, "EXECUTE")
 
@@ -6068,11 +6086,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 # Fast Mode replay hit the step cap after the verifier already
                 # accepted the cached work (100% / trajectory-end). Mark
                 # COMPLETED so the parent for_each does not ERROR the child.
-                await self._mark_complete(
+                return await self._finish_verified_completion(
                     result.get("context", []),
                     result.get("partial_structured_response") or result.get("structured_response"),
                 )
-                return {"status": "completed", "goal": self.goal}
             await self._mark_failed(
                 context=result.get("context", []),
                 reason="max_iterations",
@@ -6478,6 +6495,28 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             )
         return outputs
 
+    async def _finish_verified_completion(self, context: List[Dict], structured_response: Optional[Dict]) -> Dict:
+        """Route only completion validation failures through existing lifecycle owners."""
+        try:
+            await self._mark_complete(context, structured_response)
+        except CompletionSupersededError:
+            await self._flush_pending_messages()
+            workflow.continue_as_new(args=self._continuation_args(self.context, start_phase="execute_continued"))
+        except FinalPresentationError as error:
+            await self._mark_failed(
+                context=context, reason="error", message=f"Invalid final presentation: {error}",
+                partial_structured_response=structured_response,
+            )
+            return {"status": "failed", "reason": "error", "goal": self.goal}
+        return {"status": "completed", "goal": self.goal}
+
+    def _render_completion_answer(self, structured_response: Optional[Dict]) -> Optional[str]:
+        try:
+            return render_final_answer(self.output_schema, structured_response)
+        except ValueError as error:
+            self._is_finished = False
+            raise FinalPresentationError(str(error)) from error
+
     async def _mark_complete(self, context: List[Dict], structured_response: Optional[Dict] = None) -> None:
         """Mark task complete and signal parent.
 
@@ -6496,9 +6535,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         verified_revision = (self._response_schema_revision, self._response_schema_accepted_revision)
         def require_verified_revision():
             try:
+                if (self._response_schema_accepted_revision < self._response_schema_revision
+                        or verified_revision != (self._response_schema_revision, self._response_schema_accepted_revision)):
+                    raise CompletionSupersededError("Completion verification was superseded by newer user requirements")
                 self._require_current_response_schema_acceptance()
-                if verified_revision != (self._response_schema_revision, self._response_schema_accepted_revision):
-                    raise RuntimeError("Completion verification was superseded by newer user requirements")
             except Exception:
                 self._is_finished = False
                 raise
@@ -6516,7 +6556,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         require_verified_revision()
         final_answer = None
         if not self.parent_workflow_id and isinstance(self.output_schema, dict) and self.output_schema.get("presentation"):
-            final_answer = render_final_answer(self.output_schema, structured_response)
+            final_answer = self._render_completion_answer(structured_response)
         presentation_snapshot = (
             self._response_schema_revision,
             self._response_schema_accepted_revision,
@@ -6534,7 +6574,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     _json.dumps(self.output_schema, sort_keys=True, separators=(",", ":")),
                 )
                 if current != presentation_snapshot:
-                    raise RuntimeError("Final presentation was superseded by newer user requirements")
+                    raise CompletionSupersededError("Final presentation was superseded by newer user requirements")
             except Exception:
                 # No final answer or terminal DB write has occurred. Preserve
                 # real feedback for the normal schema/verification retry owner.
@@ -6726,7 +6766,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             if final_answer is not None:
                 # Revalidate after coalescing/materialization; no changed value may
                 # be published under the earlier accepted presentation.
-                final_answer = render_final_answer(self.output_schema, structured_response)
+                final_answer = self._render_completion_answer(structured_response)
                 summary = final_answer
             require_current_final_presentation()
             await self._post_message(

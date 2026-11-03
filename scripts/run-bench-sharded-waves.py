@@ -145,7 +145,8 @@ class Batch:
             argv.append('--run')
         log = self.directory / ('wave-%02d-%s.log' % (wave['index'], mode))
         with open(log, 'w') as stream:
-            self.child = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            self.child = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                          text=True, start_new_session=True)
             output = []
             for line in self.child.stdout:
                 sys.stdout.write(line)
@@ -217,6 +218,8 @@ class Batch:
         if wave['missing_jobs'] != 0 or wave['shards_without_summary']:
             return 'wave %d incomplete: %s missing jobs, shards without summary %s' % (
                 wave['index'], wave['missing_jobs'], wave['shards_without_summary'])
+        if code != 0:
+            return 'wave %d operator failed (exit %d)' % (wave['index'], code)
         if self.stop:
             return 'operator ' + self.stop
         return None

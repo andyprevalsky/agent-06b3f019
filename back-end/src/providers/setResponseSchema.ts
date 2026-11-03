@@ -285,7 +285,7 @@ export const RESPONSE_SCHEMA_JSON_SCHEMA = {
           properties: {
             version: { const: 1 },
             mode: { const: 'value' },
-            field: { type: 'string' },
+            field: { type: 'string', minLength: 1 },
             encoding: { enum: ['text', 'json'] },
           },
           required: ['version', 'mode', 'field', 'encoding'],
@@ -367,7 +367,7 @@ export const RESPONSE_SCHEMA_JSON_SCHEMA = {
       },
     },
   },
-  required: ['reasoning', 'fields'],
+  required: ['reasoning', 'fields', 'presentation'],
   additionalProperties: false,
 };
 

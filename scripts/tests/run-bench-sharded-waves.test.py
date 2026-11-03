@@ -26,7 +26,8 @@ mode = 'run' if '--run' in argv else 'check'
 with calls.open('a') as stream:
     stream.write(json.dumps(dict(mode=mode, tasks=tasks, scheduled_total=int(value('--scheduled-total')),
                                  prior_infra=int(value('--prior-infra')), task_timeout=value('--task-timeout'),
-                                 source_ref=value('--source-ref'))) + '\n')
+                                 source_ref=value('--source-ref'), session=os.getsid(0),
+                                 parent_session=os.getsid(os.getppid()))) + '\n')
 index = sum(1 for line in calls.read_text().splitlines() if json.loads(line)['mode'] == mode) - 1
 step = plan[index] if index < len(plan) else {}
 if mode == 'check':
@@ -190,6 +191,19 @@ class Waves(unittest.TestCase):
         self.assertEqual([c['mode'] for c in calls], ['check'])
         self.assertEqual(batch['waves'][0]['state'], 'CHECK_REFUSED')
         self.assertEqual(batch['unlaunched_copies'], 210)
+
+    def test_operator_failure_stops_after_release_without_launching_another_wave(self):
+        done, batch, calls = self.run_driver(TASKS70, plan=[dict(rc=7)])
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual([c['mode'] for c in calls], ['check', 'run'])
+        self.assertEqual(batch['waves'][0]['exit_code'], 7)
+        self.assertEqual([w['state'] for w in batch['waves']][1:], ['NOT_LAUNCHED'] * 3)
+
+    def test_operator_session_is_separate_from_terminal_signal_group(self):
+        done, _, calls = self.run_driver(TASKS70, check=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(calls)
+        self.assertTrue(all(c['session'] != c['parent_session'] for c in calls), calls)
 
     def test_fails_closed_on_invalid_shape_or_driver_owned_options(self):
         for kwargs, message in [(dict(concurrency=2), 'repetitions <= --concurrency'),

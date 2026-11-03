@@ -205,6 +205,8 @@ def app_metadata(value: object, app: str) -> dict:
         raise Refusal('app metadata identity invalid')
     organization = value.get('organization')
     network = value.get('network')
+    if network is None:
+        network = ''
     if (not isinstance(organization, dict) or not isinstance(organization.get('slug'), str)
             or not organization['slug'] or not isinstance(network, str)):
         raise Refusal('app metadata identity invalid')

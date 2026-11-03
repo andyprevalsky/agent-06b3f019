@@ -4203,7 +4203,7 @@ async def _execute_goto(
         # internally. Only its deliberately non-sensitive summary may enter
         # action history or the model-visible tool result.
         result["credentials_prepared"] = credential_summary
-        result["auth_realm"] = str(credential_summary.get("auth_realm") or target_auth_realm)
+        result["auth_realm"] = str(credential_summary.get("auth_realm") or auth_realm_from_url(url))
     await action_history.record_action(
         dom_service=dom_service,
         action="goto",

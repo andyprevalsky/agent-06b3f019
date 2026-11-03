@@ -69,6 +69,17 @@ class LocalClosure(unittest.TestCase):
             with self.subTest(field=field):
                 with self.assertRaises(ValueError):self.M['observe'](self.registry,self.source,self.api(lambda p,v:dict(v,**{field:value}) if p.startswith('/machines/') else v),self.out)
                 self.assertEqual(list(self.out.glob('local-forensic-observation-*')),[])
+    def test_large_observation_verifies_without_relaxing_other_reads(self):
+        self.machine['config']['padding']='x'*850000
+        digest=hashlib.sha256(json.dumps([self.mid,self.machine['instance_id'],self.machine['config']],sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        replacement=self.fence.parent/digest
+        self.fence.rename(replacement);self.fence=replacement
+        self.write(self.fence/'intent.json',dict(operation='destroy',machine=self.machine))
+        receipt=self.M['observe'](self.registry,self.source,self.api(),self.out)
+        self.assertGreater(receipt.stat().st_size,1048576)
+        self.assertEqual(self.M['verify'](receipt)['status'],'HISTORICAL_NATIVE_OWNERSHIP_PHYSICALLY_TERMINAL')
+        with self.assertRaises(ValueError):self.M['read'](receipt)
+
     def test_missing_forged_incomplete_and_nonboolean_custody_refuse(self):
         paths=[self.fence/'ack.json',self.audit/'by-machine-id'/self.mid,self.cleanup]
         for path in paths:

@@ -260,6 +260,30 @@ cloudbench_collect_remaining_runtime_evidence
             self.module['commit_preconfig'](self.registry,self.old,OLD,OWNER+'-0',self.base/'originals.tar.gz',self.base/'before.json',self.base/'after.json',self.base/'consumed.json')
         self.assertFalse((self.base/'consumed.json').exists())
         self.assertTrue((self.old/'runtime-evidence.pending').exists())
+    def test_noncanonical_receipt_name_refuses_before_commit(self):
+        archive=self.base/'originals.tar.gz'
+        before=self.base/'before.json';after=self.base/'after.json'
+        self.module['capture_preconfig'](self.registry,self.old,OLD,OWNER+'-0',archive)
+        self.write(before,json.dumps(self.native));self.write(after,json.dumps(self.native))
+        alternate=self.base/'alternate.json'
+        with self.assertRaises(ValueError):
+            self.module['commit_preconfig'](self.registry,self.old,OLD,OWNER+'-0',archive,before,after,alternate)
+        self.assertFalse(alternate.exists())
+
+    def test_noncanonical_receipt_name_refuses_before_consume(self):
+        archive=self.base/'originals.tar.gz'
+        before=self.base/'before.json';after=self.base/'after.json'
+        self.module['capture_preconfig'](self.registry,self.old,OLD,OWNER+'-0',archive)
+        self.write(before,json.dumps(self.native));self.write(after,json.dumps(self.native))
+        canonical=self.base/'consumed.json'
+        self.module['commit_preconfig'](self.registry,self.old,OLD,OWNER+'-0',archive,before,after,canonical)
+        alternate=self.base/'alternate.json'
+        alternate.write_bytes(canonical.read_bytes())
+        with self.assertRaises(ValueError):
+            self.module['consume_replaced_preconfig'](self.registry,self.old,OLD,OWNER+'-0',alternate)
+        self.assertTrue((self.old/'runtime-evidence.pending').exists())
+        self.assertFalse((self.registry/'replaced-preconfig-phase.json').exists())
+
 
     def test_changed_audit_and_traversal_refuse(self):
         marker=self.task/'boot-config-host-replaced';before=marker.read_bytes();marker.write_text('../'+OLD)

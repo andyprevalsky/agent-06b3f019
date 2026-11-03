@@ -1898,6 +1898,50 @@ if(finishAgeLabel(9000,8200)!=='T-UNRECORDED')throw Error('future finish');
         self.assertTrue(text.stdout.startswith("🧪 EXPERIMENT #1"), text.stdout[:200])
 
 
+class WaveReleaseEvidence(unittest.TestCase):
+    def load(self, proofs):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            waves, subs = [], []
+            for index, proof in enumerate(proofs):
+                admission = directory / f"admission-{index}"
+                write(admission / "coordination.json", {})
+                waves.append({"index": index, "state": "RELEASED", "copies": 1,
+                              "admission_dir": str(admission), "tasks": [f"task-{index}"]})
+                sub = CARD["empty_experiment"]("sharded", admission)
+                sub.update(proof, source_ref="a" * 40)
+                sub["rows"] = [{"job_id": f"job-{index}", "status": "failed", "task_status": "FAILED",
+                                "infra_failure": False, "released": False, "lifecycle": False}]
+                sub["lifecycle"] = [{"state": "warn", "label": "Guests released", "detail": "missing historical release"}]
+                subs.append(sub)
+            write(directory / "batch.json", {"scheduled_total": len(waves), "tasks": ["task"],
+                  "runs": len(waves), "waves": waves})
+            with mock.patch.dict(CARD["load_waves"].__globals__,
+                                 {"load_sharded": mock.Mock(side_effect=subs)}):
+                return CARD["load_waves"](directory)
+
+    def test_every_launched_wave_must_have_native_release_audit(self):
+        complete = self.load([{"native_audit": True}, {"native_audit": True}])
+        self.assertTrue(complete.get("native_audit"))
+        self.assertFalse(any(i["text"].startswith("Release unverified") for i in CARD["_issues"](complete)))
+        incomplete = self.load([{"native_audit": True}, {}])
+        self.assertFalse(incomplete.get("native_audit"))
+        self.assertTrue(any(i["text"].startswith("Release unverified") for i in CARD["_issues"](incomplete)))
+
+    def test_physical_closure_preserves_original_wave_observations_only_when_complete(self):
+        first = {"observed_at": T0, "subjects": 1, "all_resources_absent": True}
+        second = {"observed_at": T0 + 20, "subjects": 1, "all_resources_absent": False}
+        complete = self.load([{"physical_closure_asof": first}, {"physical_closure_asof": second}])
+        self.assertEqual([w["evidence"] for w in complete["physical_closure_asof"]["waves"]], [first, second])
+        self.assertEqual(complete["physical_closure_asof"]["observed_at"], T0)
+        incomplete = self.load([{"physical_closure_asof": first}, {}])
+        self.assertFalse(incomplete.get("physical_closure_asof"))
+
+    def test_wave_prefix_does_not_duplicate_the_release_warning(self):
+        exp = self.load([{}, {}])
+        self.assertFalse(any("Wave 1: Guests released" in i["text"] for i in CARD["_issues"](exp)))
+
+
 class NativeReleaseAuditOwnership(unittest.TestCase):
     """2026-10-19 polar70: three retained guests stayed started while the audit said released.
 

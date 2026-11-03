@@ -1091,12 +1091,13 @@ def load_waves(run_dir: Path, deep: bool = True) -> dict:
     exp["scheduled_total"] = batch.get("scheduled_total")
     exp["tasks"], exp["runs"] = len(batch.get("tasks") or []) or None, batch.get("runs")
     exp["triggered_at"] = batch.get("created_at")
-    refs, unlaunched = set(), []
+    refs, unlaunched, wave_proofs = set(), [], []
     for wave in batch.get("waves") or []:
         index, state = wave.get("index"), wave.get("state")
         admission = Path(wave["admission_dir"]) if wave.get("admission_dir") else None
         if admission is not None and (admission / "coordination.json").exists():
             sub = load_sharded(admission, deep, raw=True)
+            wave_proofs.append((index, sub))
             exp["rows"] += sub["rows"]
             refs.add(sub.get("source_ref"))
             for item in sub["lifecycle"]:
@@ -1104,12 +1105,19 @@ def load_waves(run_dir: Path, deep: bool = True) -> dict:
             if exp.get("released_at") is None:
                 exp["released_at"] = sub.get("released_at")
         elif state in ("LAUNCHED", "JOINED", "RELEASED", "FAILED_NO_RESULT"):
+            wave_proofs.append((index, {}))
             lifecycle_item(exp, "fail" if state == "FAILED_NO_RESULT" else "pending", f"Wave {index + 1}",
                            f"{state}: no admission record yet")
         else:
             unlaunched.append(wave)
             exp["rows"] += [{"status": "queued", "task_status": None, "infra_failure": None, "attempts": 0,
                              "terminal_attempts": 0, "infra_attempts": 0, "synthetic": True}] * (wave.get("copies") or 0)
+    exp["native_audit"] = bool(wave_proofs) and all(sub.get("native_audit") for _, sub in wave_proofs)
+    if wave_proofs and all(sub.get("physical_closure_asof") for _, sub in wave_proofs):
+        exp["physical_closure_asof"] = {
+            "observed_at": min(sub["physical_closure_asof"]["observed_at"] for _, sub in wave_proofs),
+            "waves": [{"index": index, "evidence": sub["physical_closure_asof"]} for index, sub in wave_proofs],
+        }
     exp["source_ref"] = next(iter(refs)) if len(refs - {None}) == 1 and None not in refs else None
     exp["rows_source"] = "batch.json waves (wave result.json / exports)"
     waves = batch.get("waves") or []
@@ -1507,7 +1515,7 @@ def _issues(exp: dict) -> list[dict]:
         if item["state"] == "fail" and item.get("issue", True):
             out.append({"severity": "red", "text": f"{item['label']}: {item['detail']}.", "owner": "parent",
                         "action": "exact-owner recovery through the printed CLI"})
-        elif item["state"] == "warn" and item.get("issue", True) and not item["label"].startswith("Guests released"):
+        elif item["state"] == "warn" and item.get("issue", True) and not re.sub(r"^Wave \d+: ", "", item["label"]).startswith("Guests released"):
             out.append({"severity": "amber", "text": f"{item['label']}: {item['detail']}.", "owner": "parent",
                         "action": "reconcile from the recorded receipts before the next launch"})
     return out

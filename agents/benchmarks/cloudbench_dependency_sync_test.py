@@ -1104,6 +1104,37 @@ def test_does_not_persist_python_fingerprint_when_relocation_fails(
     assert not (repo / "agents/venv/.cloudbench-deps-fingerprint").exists()
 
 
+@pytest.mark.parametrize('case', ['disposable', 'cold-pool', 'warm-pool', 'reuse-only', 'pool-with-disposable-flag', 'snapshot', 'snapshot-primary', 'bad-receipt'])
+def test_fresh_image_preflight_only_checks_fresh_primary_consumers(tmp_path: Path, case: str) -> None:
+    function = _extract_fleet_function(fleet_source_text(), 'fresh_image_deps_preflight() {')
+    pool = tmp_path / 'pool.ids'
+    if case in {'cold-pool', 'warm-pool', 'reuse-only', 'pool-with-disposable-flag'}:
+        pool.write_text('exact-pool-member\n')
+    calls = tmp_path / 'calls'
+    result = subprocess.run(['bash', '-c', f'''set -u
+FRESH_VOLUMES={0 if case == 'snapshot' else 1}
+DISPOSABLE_LIFECYCLE={0 if case in {'cold-pool', 'warm-pool', 'reuse-only'} else 1}
+POOL_COLD_BOOTSTRAP={1 if case == 'cold-pool' else 0}
+POOL_REUSE_ONLY={1 if case == 'reuse-only' else 0}
+POOL_IDS_FILE={shlex.quote(str(pool))}
+ROOT_DIR={shlex.quote(str(tmp_path))}
+BENCHES=(fixture)
+CLOUDBENCH_PYTHON_MANIFESTS=(agents/requirements.txt)
+WARM_ID=exact-donor
+primary_clone_storage_mode() {{ printf '%s' {'snapshot' if case == 'snapshot-primary' else 'fresh'}; }}
+cloudbench_node_dependency_fingerprint() {{ printf node; }}
+cloudbench_manifest_fingerprint() {{ printf python; }}
+campaign_inventory_capture() {{ printf -v "$1" '%s' '[]'; }}
+fleet_admission_machines_json() {{ return 99; }}
+cloudbench_verify_image_dependency_receipt() {{ cat >/dev/null; printf '%s\n' "$*" >> {shlex.quote(str(calls))}; return {1 if case == 'bad-receipt' else 0}; }}
+{function}
+fresh_image_deps_preflight
+'''], text=True, capture_output=True, timeout=10)
+    required = case in {'disposable', 'cold-pool', 'bad-receipt'}
+    assert calls.exists() == required, result.stdout + result.stderr
+    assert (result.returncode == 0) == (case != 'bad-receipt'), result.stdout + result.stderr
+
+
 def test_rejects_branch_whose_manifests_do_not_match_donor_image(tmp_path: Path) -> None:
     donor = tmp_path / "donor"
     repo = tmp_path / "repo"

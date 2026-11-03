@@ -89,7 +89,9 @@ def verified_projection(admission, path, audit, finished_after=None):
     need(len(exports)==projection['verified_exports'])
     required=set()
     for export in exports:
-        need(export.parent.parent.parent==admission and export.name=='export')
+        need(export.resolve(strict=True)==export and export.is_relative_to(admission)
+             and len(export.relative_to(admission).parts)>=3
+             and export.parent.name=='run' and export.name=='export')
         for name in ('terminal.json','cleanup-call.intent.json','authority.private.json'):
             required.add(str(export.parent/name))
         for name in ('disposable-export.verified.json','manifest.json','launch.json','originals.tar.gz',
@@ -123,10 +125,10 @@ def verified_projection(admission, path, audit, finished_after=None):
     for row in terminal:
         subject=row['subject'];need(re.fullmatch('/(machines/[0-9a-f]{14}|volumes/vol_[a-z0-9]+)',subject))
         need(typed['_terminal'](row['wire'],proofs[subject.lstrip('/')])==row)
-        value=wire(row['wire'],subject)
         if row['wire']['status']==404:
             need(row['disposition']=='ABSENT')
         else:
+            value=wire(row['wire'],subject)
             state='destroyed' if subject.startswith('/machines/') else None
             need(row['wire']['status']==200 and row['disposition']=='PROVIDER_TERMINAL_RETAINED'
                  and value['id']==subject.rsplit('/',1)[1]

@@ -50,7 +50,10 @@ async def exercise_finalizer_handoff(namespace, fixture_path, mode="budget"):
     fixture=ns[node.name]
     now=datetime.now(timezone.utc)
     info=SimpleNamespace(workflow_id='wf',run_id='run',first_execution_run_id='first')
-    async def pause():owner.is_paused=True;events.append('pause')
+    async def pause(cause="user"):
+     owner.is_paused=True
+     owner._user_pause_active = cause == "user"
+     events.append('pause')
     owner=SimpleNamespace(agent_id='agent-1',user_id='user-1',is_paused=False,write_lock_enabled=True,system_name='Rose',_browser_execution_task_id='tool-1',_background_tasks={'tool-1':{}},_response_schema_revision=1,_background_handles={},pause=pause)
     class Handle:
      def done(self):return task.done()
@@ -113,6 +116,7 @@ async def exercise_finalizer_handoff(namespace, fixture_path, mode="budget"):
       if mode == 'budget':
        assert 'verifier-done' in events and 'cancel' not in events, events
        assert owner.is_paused
+       assert owner._user_pause_active is False, "budget stop became a user pause"
        assert events.index('credentials') < events.index('pause'), events
        assert events.index('cleanup') < events.index('pause'), events
        final=next(e for e in reversed(results) if (e.metadata or {}).get('structured_response'))

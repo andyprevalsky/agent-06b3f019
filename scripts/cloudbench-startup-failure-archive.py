@@ -456,7 +456,7 @@ def archived_preconfig_identity(files, registry, output, machine, token):
 def commit_preconfig(registry, output, machine, token, archive_path, native_before, native_after, receipt_path):
     """Fsync proof BEFORE the fleet consumer may change pending or its ledger."""
     receipt_path = Path(receipt_path)
-    if (receipt_path.parent != Path(output) / "failed-preconfig-runtime-archive"
+    if (receipt_path != Path(output) / "failed-preconfig-runtime-archive/consumed.json"
             or receipt_path.parent.resolve(strict=True) != receipt_path.parent
             or receipt_path.parent.stat().st_uid != Path(output).stat().st_uid
             or receipt_path.parent.stat().st_mode & 0o077):
@@ -614,6 +614,8 @@ def replaced_preconfig_members(registry, *, verified=False):
 
 
 def consume_replaced_preconfig(registry, output, machine, token, receipt):
+    if Path(receipt) != Path(output) / "failed-preconfig-runtime-archive/consumed.json":
+        raise ValueError("pre-config consumption receipt is outside exact output")
     members = replaced_preconfig_members(registry)
     if not any(row[1:] == (machine, token, str(output)) for row in members):
         raise ValueError("replaced pre-config consumption is outside exact members")

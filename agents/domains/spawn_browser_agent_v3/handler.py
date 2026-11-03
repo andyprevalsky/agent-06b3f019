@@ -10717,9 +10717,12 @@ async def _spawn_browser_agent_activity_v3_real(
                 from browser_use.browser.events import NavigateToUrlEvent
 
                 pending_credential_reload_realm = observed_auth_realm
-                reload_authority = _policy_authority()
-                reload_identity = dom_service.get_parked_page_identity()
+                reload_authority = None
+                reload_identity = None
                 try:
+                    if navigation_policy.active:
+                        reload_authority = _policy_authority()
+                        reload_identity = dom_service.get_parked_page_identity()
                     reload_event = dom_service.session.event_bus.dispatch(
                         NavigateToUrlEvent(url=current_url, wait_until="commit")
                     )
@@ -10736,28 +10739,38 @@ async def _spawn_browser_agent_activity_v3_real(
                     raise
                 except Exception as reload_error:
                     if is_native_navigation_policy_denial(reload_error) or isinstance(reload_error, NativeNavigationFailure):
-                        current_authority = _policy_authority()
-                        if reload_authority[:3] != current_authority[:3] or reload_authority[4:] != current_authority[4:]:
+                        try:
+                            current_authority = _policy_authority()
+                            if reload_identity is None:
+                                reload_identity = dom_service.get_parked_page_identity()
+                        except RuntimeError:
+                            # Without native identity, the existing recovery owner
+                            # must handle the failure instead of binding a barrier.
+                            pass
+                        else:
+                            if reload_authority is not None and (
+                                reload_authority[:3] != current_authority[:3] or reload_authority[4:] != current_authority[4:]
+                            ):
+                                continue
+                            barrier_type = (NavigationFailureBarrier if isinstance(reload_error, NativeNavigationFailure)
+                                            else NavigationPolicyBarrier)
+                            navigation_policy = barrier_type(task_id or "", navigation_policy.checkpoint())
+                            navigation_policy.deny(session_id, reload_identity)
+                            _activate_realm_credentials(unknown_realm_credential_state(observed_auth_realm), {})
+                            await action_batch.discard(navigation_policy.discard_message)
+                            state_prefetch.discard()
+                            policy_result = {"success": False, "error": navigation_policy.feedback,
+                                             "code": navigation_policy.result_code}
+                            await action_history.record_action(dom_service=dom_service, action="credential_reload",
+                                                              thinking="", result=policy_result)
+                            _append_browser_turn_messages(browser_turn_messages,
+                                unified_action={"action": "credential_reload", "params": {}},
+                                result=policy_result, tool_call_id=str(uuid_module.uuid4()))
+                            await _save_browser_action_message(agent_id=agent_id, task_id=task_id,
+                                title=navigation_policy.title, message=navigation_policy.feedback,
+                                status=MessageStatus.FINISHED, browser_url=browser_url,
+                                action_type="credential_reload", tool_call_id=str(uuid_module.uuid4()))
                             continue
-                        barrier_type = (NavigationFailureBarrier if isinstance(reload_error, NativeNavigationFailure)
-                                        else NavigationPolicyBarrier)
-                        navigation_policy = barrier_type(task_id or "", navigation_policy.checkpoint())
-                        navigation_policy.deny(session_id, reload_identity)
-                        _activate_realm_credentials(unknown_realm_credential_state(observed_auth_realm), {})
-                        await action_batch.discard(navigation_policy.discard_message)
-                        state_prefetch.discard()
-                        policy_result = {"success": False, "error": navigation_policy.feedback,
-                                         "code": navigation_policy.result_code}
-                        await action_history.record_action(dom_service=dom_service, action="credential_reload",
-                                                          thinking="", result=policy_result)
-                        _append_browser_turn_messages(browser_turn_messages,
-                            unified_action={"action": "credential_reload", "params": {}},
-                            result=policy_result, tool_call_id=str(uuid_module.uuid4()))
-                        await _save_browser_action_message(agent_id=agent_id, task_id=task_id,
-                            title=navigation_policy.title, message=navigation_policy.feedback,
-                            status=MessageStatus.FINISHED, browser_url=browser_url,
-                            action_type="credential_reload", tool_call_id=str(uuid_module.uuid4()))
-                        continue
                     recovered = await _recover_browser_step(
                         f"credential_reload_error:{type(reload_error).__name__}",
                         reload_page=True,
@@ -10766,7 +10779,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         continue
                     raise
                 if navigation_policy.active:
-                    if reload_authority != _policy_authority():
+                    if reload_authority is not None and reload_authority != _policy_authority():
                         continue
                     navigation_policy.acknowledge_other_document(dom_service.get_parked_page_identity())
                     await action_batch.discard("Replan after new-document credential acknowledgement.")
@@ -14292,7 +14305,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 or finalizer_stop_requested(workflow_instance, budget_ticket)) and not activity_handle.done():
                             if (finalizer_stop_requested(workflow_instance, budget_ticket)
                                     and not tool_stop_requested(workflow_instance, tool_call_id)):
-                                await workflow_instance.pause()
+                                await workflow_instance.pause("budget")
                             logger.info("\U0001f534 Cancelling browser agent due to pause")
                             user_pause_requested = bool(getattr(workflow_instance, "_user_pause_active", False))
                             activity_handle.cancel()

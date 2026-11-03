@@ -30,12 +30,12 @@ def physical(path, directory=False):
     return path
 
 
-def read(path):
+def read(path, maximum=1048576):
     path=physical(path)
     fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
     try:
         before=os.fstat(fd)
-        need(stat.S_ISREG(before.st_mode) and before.st_nlink==1 and before.st_size<=1048576,'unsafe local custody file')
+        need(stat.S_ISREG(before.st_mode) and before.st_nlink==1 and before.st_size<=maximum,'unsafe local custody file')
         data=os.read(fd,before.st_size+1)
         after=os.fstat(fd);current=path.lstat()
         identity=lambda st:(st.st_dev,st.st_ino,st.st_size,st.st_mtime_ns,st.st_ctime_ns)
@@ -153,7 +153,7 @@ def observe(registry, source, api, output):
 
 
 def verify(receipt):
-    receipt=physical(receipt);need(not receipt.stat().st_mode & 0o077,'private observation required');encoded=read(receipt);value=json.loads(encoded)
+    receipt=physical(receipt);need(not receipt.stat().st_mode & 0o077,'private observation required');encoded=read(receipt,64*1048576);value=json.loads(encoded)
     need(receipt.name=='local-forensic-observation-'+F['sha'](encoded)+'.json' and value.get('schema')==SCHEMA,'receipt identity differs')
     plan=value['plan']
     with custody(Path(plan['registry'])):

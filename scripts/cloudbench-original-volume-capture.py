@@ -168,6 +168,13 @@ def configured_data_mount(data: Path, machine: str) -> dict:
         raise GuestRefusal("configured capture requires the distinct mounted original /data") from error
 
 
+def linux_device_id(device: int) -> str:
+    """Decode the Linux guest's dev_t, independent of the operator's platform."""
+    major = ((device >> 8) & 0xfff) | ((device >> 32) & 0xfffff000)
+    minor = (device & 0xff) | ((device >> 12) & 0xffffff00)
+    return f"{major}:{minor}"
+
+
 def validate_configured_data_mount(value: object, machine: str) -> None:
     if (not isinstance(value, dict) or set(value) != {
             "schema", "machine_id", "path", "device", "inode", "root_device", "mount_device"}
@@ -175,7 +182,7 @@ def validate_configured_data_mount(value: object, machine: str) -> None:
             or value.get("machine_id") != machine or value.get("path") != DATA_PATH
             or any(type(value.get(key)) is not int or value[key] < 0 for key in ("device", "inode", "root_device"))
             or value["inode"] == 0 or value["device"] == value["root_device"]
-            or value.get("mount_device") != f'{os.major(value["device"])}:{os.minor(value["device"])}'):
+            or value.get("mount_device") != linux_device_id(value["device"])):
         raise ValueError("configured original data mount attestation differs")
 
 

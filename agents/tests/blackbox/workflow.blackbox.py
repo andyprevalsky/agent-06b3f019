@@ -10895,6 +10895,134 @@ async def test_workflow_final_value_presentation():
         _restore_workflow(original)
 
 
+def test_browser_execution_restore_rejects_malformed_values():
+    valid = {"browser_execution_mode": True, "browser_execution_task_id": "task",
+             "browser_execution_contract": "contract",
+             "browser_execution_requirement_keys": [["message", "id"]],
+             "browser_execution_pending_input_ids": ["id"]}
+    fields = {"browser_execution_task_id": None, "browser_execution_contract": None,
+              "browser_execution_requirement_keys": [], "browser_execution_pending_input_ids": []}
+    for name, fallback in fields.items():
+        for malformed in (12, {}, [12], [["message", 12]], None):
+            if name.endswith("task_id") or name.endswith("contract"):
+                if malformed is None:
+                    continue
+            wf = _bare_workflow_instance()
+            wf._restore_deployment_state({"version": 1, "kind": "deployment", "runtime_state": {**valid, name: malformed}})
+            assert getattr(wf, "_" + name) == fallback, (name, malformed)
+    wf = _bare_workflow_instance()
+    wf._restore_deployment_state({"version": 1, "kind": "deployment", "runtime_state": valid})
+    assert wf._browser_execution_requirement_keys == valid["browser_execution_requirement_keys"]
+    assert wf._browser_execution_pending_input_ids == ["id"]
+
+
+async def test_completion_caller_routes_late_revision_and_invalid_presentation():
+    """Actual completion admission continues on late input and fails invalid values."""
+    from unittest.mock import AsyncMock, patch
+
+    class Continued(BaseException):
+        pass
+
+    for mode, path in ([(mode, path) for mode in ("late_revision", "invalid_value") for path in ("execute", "fast_cap")]
+                       + [("unaccepted_entry", path) for path in ("execute", "direct")]):
+        wf = _bare_workflow_instance()
+        wf.agent_id, wf.user_id, wf.goal, wf.model = "completion-route", "user", "Only the day", "rose-1-flash"
+        wf.max_iterations = 25
+        wf.context_gates = {}
+        wf.fast_mode_cache_enabled = path == "fast_cap"
+        if mode == "unaccepted_entry":
+            wf._response_schema_revision = 1
+            wf._response_schema_accepted_revision = 0
+            wf._response_schema_refresh_failure_reason = "schema refresh unavailable"
+        wf.output_schema = {"fields": [{"name": "day", "type": "int", "required": True}],
+                            "presentation": {"version": 1, "mode": "value", "field": "day", "encoding": "text"}}
+        wf._track_tokens_and_cost = AsyncMock()
+        wf._await_deferred_startup = AsyncMock()
+        wf._drain_fast_mode_explores = AsyncMock()
+        wf._prepare_response_schema_continuation = AsyncMock()
+        wf._flush_pending_messages = AsyncMock()
+        failed = AsyncMock(wraps=wf._mark_failed)
+        wf._mark_failed = failed
+        async def load(**kwargs):
+            if mode == "late_revision":
+                wf._response_schema_revision += 1
+                wf._response_schema_accepted_revision = wf._response_schema_revision
+        wf._load_output_schema = load
+        fake = _FakeWorkflowModule()
+        continuations = []
+        def continue_as_new(**kwargs):
+            continuations.append(kwargs)
+            raise Continued()
+        fake.continue_as_new = continue_as_new
+        original = _patch_workflow(fake)
+        try:
+            try:
+                payload = {"status": "completed" if path == "execute" else "max_iterations", "context": [],
+                           "structured_response": {} if mode == "invalid_value" else {"day": 4},
+                           "verifier_progress": 1.0}
+                with patch("workflows.agent_workflow.is_oai_demo_mass_agent_task", return_value=True):
+                    result = (await wf._finish_execute_result(payload) if path == "execute"
+                              else await wf._finish_verified_completion([], payload["structured_response"]) if path == "direct"
+                              else await wf._handle_incomplete(payload, "EXECUTE"))
+            except Continued:
+                assert mode in ("late_revision", "unaccepted_entry")
+            else:
+                assert mode == "invalid_value" and result["status"] == "failed", result
+            assert bool(continuations) is (mode in ("late_revision", "unaccepted_entry"))
+            if continuations:
+                args = continuations[0]["args"]
+                assert args[11] == "execute_continued"
+                assert args[16]["runtime_state"]["response_schema_revision"] == 1
+            assert failed.await_count == (mode == "invalid_value")
+            if mode == "invalid_value":
+                assert any(name == "update_agent_status" and args[1] == "FAILED" for name, args in fake.activity_calls)
+            assert not any(name == "mark_finished" for name, args in fake.activity_calls)
+        finally:
+            _restore_workflow(original)
+
+
+async def test_completion_routing_preserves_unrelated_failures():
+    from unittest.mock import AsyncMock
+    for error in (RuntimeError("publication transport failed"), ValueError("unrelated validation"), asyncio.CancelledError()):
+        wf = _bare_workflow_instance()
+        wf._mark_complete = AsyncMock(side_effect=error)
+        wf._mark_failed = AsyncMock()
+        wf._track_tokens_and_cost = AsyncMock()
+        wf._await_deferred_startup = AsyncMock()
+        wf._drain_fast_mode_explores = AsyncMock()
+        wf._prepare_response_schema_continuation = AsyncMock()
+        try:
+            await wf._finish_execute_result({"status": "completed", "context": []})
+        except BaseException as actual:
+            assert actual is error
+        else:
+            raise AssertionError("unrelated completion exception was swallowed")
+        wf._mark_failed.assert_not_awaited()
+
+
+async def test_budget_stop_is_not_user_pause_and_cascades_cause():
+    from helpers.browser_budget_stop import finish_budget_stop
+    from unittest.mock import AsyncMock
+    wf = _bare_workflow_instance()
+    wf._update_tree_state = AsyncMock()
+    wf._get_pending_child_workflow_ids = lambda: ["child"]
+    ticket = {"tool_id": "tool"}
+    wf._browser_finalizers = {"tool": {"ticket": ticket, "accepted": True}}
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await finish_budget_stop(wf, ticket, {"status": "max_iterations"})
+        assert wf.is_paused and not wf._user_pause_active
+        assert fake.signal_calls == [("child", "pause", "budget")], fake.signal_calls
+        child = _bare_workflow_instance()
+        child._update_tree_state = AsyncMock()
+        child._get_pending_child_workflow_ids = lambda: []
+        await child.pause(fake.signal_calls[0][2])
+        assert child.is_paused and not child._user_pause_active
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_final_value_rejects_stale_or_invalid():
     for kind in ("stale", "missing", "cancel"):
         wf = _bare_workflow_instance()
@@ -13953,6 +14081,10 @@ async def run_all_tests():
     r.record("final_presentation_contract", test_final_presentation_contract)
     r.record("workflow_final_presentation_resume", test_workflow_final_presentation_resume)
     await r.record_async("workflow_final_value_presentation", test_workflow_final_value_presentation)
+    r.record("browser_execution_restore_rejects_malformed_values", test_browser_execution_restore_rejects_malformed_values)
+    await r.record_async("completion_caller_routes_late_revision_and_invalid_presentation", test_completion_caller_routes_late_revision_and_invalid_presentation)
+    await r.record_async("completion_routing_preserves_unrelated_failures", test_completion_routing_preserves_unrelated_failures)
+    await r.record_async("budget_stop_is_not_user_pause_and_cascades_cause", test_budget_stop_is_not_user_pause_and_cascades_cause)
     await r.record_async("workflow_final_value_rejects_stale_or_invalid", test_workflow_final_value_rejects_stale_or_invalid)
     await r.record_async("workflow_final_value_late_feedback", test_workflow_final_value_late_feedback)
     await r.record_async("workflow_final_value_late_schema_matrix", test_workflow_final_value_late_schema_matrix)

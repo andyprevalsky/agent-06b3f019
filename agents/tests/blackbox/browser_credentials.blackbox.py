@@ -248,6 +248,36 @@ def test_steel_cdp_key_is_materialized_only_at_connection_boundary() -> None:
             os.environ["STEEL_API_KEY"] = previous
 
 
+async def test_goto_credential_summary_realm_fallback() -> None:
+    """Partial credential summaries use the URL realm but retain explicit realms."""
+    import asyncio
+    from domains.spawn_browser_agent_v3.service_actions import _execute_goto
+
+    class Event:
+        def __await__(self):
+            return asyncio.sleep(0).__await__()
+
+        async def event_result(self, **kwargs):
+            return None
+
+    for supplied, expected in ((None, "example.com"), ("", "example.com"), ("account.example.com", "account.example.com")):
+        summary = {"cookie_count": 1}
+        if supplied is not None:
+            summary["auth_realm"] = supplied
+        history = SimpleNamespace(record_action=AsyncMock())
+        result = await _execute_goto(
+            session=SimpleNamespace(event_bus=SimpleNamespace(dispatch=lambda event: Event())),
+            dom_service=SimpleNamespace(), action_history=history,
+            params={"url": "https://example.com/account"}, thinking="",
+            session_id="session", config=None, current_auth_realm="other.example",
+            prepare_credentials_for_url=AsyncMock(return_value=summary),
+            wait_for_navigation=AsyncMock(),
+        )
+        assert result["success"] is True
+        assert result["auth_realm"] == expected, result
+        assert history.record_action.await_args.kwargs["result"] == result
+
+
 async def test_cross_realm_goto_prepares_complete_credentials_before_navigation() -> None:
     from domains.spawn_browser_agent_v3.service_actions import _execute_goto
 
@@ -1651,6 +1681,7 @@ async def test_ceremony_capable_actions_arm_the_live_target_before_running() -> 
 async def run_all_tests():
     print("browser-credentials blackbox tests:")
     runner = BlackboxResult()
+    await runner.record_async("goto_credential_summary_realm_fallback", test_goto_credential_summary_realm_fallback)
     await runner.record_async("exact_neutral_inventory_has_no_auth_material_or_prompt", test_exact_neutral_inventory_has_no_auth_material_or_prompt)
     await runner.record_async("neutral_hydration_rejects_missing_context_and_nonempty_inventory", test_neutral_hydration_rejects_missing_context_and_nonempty_inventory)
     runner.record(

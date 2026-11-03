@@ -38,7 +38,7 @@ class ConfiguredOldCapture(unittest.TestCase):
         self.state=dict(id=OLD,name='cloudbench-'+OLD,state='stopped',instance_id='instance0',config=copy.deepcopy(self.config))
         self.volume=dict(id='vol_'+OLD,state='created',attached_machine_id=OLD)
         self.mount=dict(schema='cloudbench-configured-data-mount-v1',machine_id=OLD,path='/data',
-            device=os.makedev(8,1),root_device=os.makedev(0,1),inode=256,mount_device='8:1')
+            device=0x801,root_device=1,inode=256,mount_device='8:1')
         self.calls=[];self.originals={};self.after_guest=None;self.fail_restore=False
         outer=self
         class FakeFly:
@@ -144,6 +144,15 @@ class ConfiguredOldCapture(unittest.TestCase):
             rc=self.h['guest_collect'](['--data',str(data),'--proc',str(proc),'--run-token',OWNER+'-0',
                 '--output',str(out),'--configured-old-member','--machine-id',OLD])
         self.assertEqual(rc,3)
+    def test_linux_mount_device_validation_is_independent_of_operator_os(self):
+        # Exercise Linux dev_t's high major/minor bits as well as the low bits.
+        mount={**self.mount,'device':0x123456789abc,'mount_device':'6298:591751100'}
+        with patch.object(os,'major',side_effect=AssertionError('operator major must not be used')), \
+             patch.object(os,'minor',side_effect=AssertionError('operator minor must not be used')):
+            self.h['validate_configured_data_mount'](mount,OLD)
+            with self.assertRaises(ValueError):
+                self.h['validate_configured_data_mount']({**mount,'mount_device':'8:1'},OLD)
+
     def test_mount_primitive_is_reused_and_device_is_checked(self):
         original=self.h['original_file_contract'];calls=[]
         def contract():

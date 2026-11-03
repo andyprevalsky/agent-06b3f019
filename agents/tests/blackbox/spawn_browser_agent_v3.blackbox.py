@@ -26755,6 +26755,8 @@ async def run(mode, pending='new.example', current_url='https://new.example/logi
     pending_credential_reload_realm = pending
     navigation_policy = NavigationPolicyBarrier('fixture-task')
     def _policy_authority():
+        if mode in ('identity_unavailable', 'denial_identity_unavailable'):
+            raise RuntimeError('native identity unavailable')
         return ('session', 'fixture-task', 'target', current_url, active_credential_binding, 0, 0)
     async def _recover_browser_step(reason, *, reload_page):
         events.append(('recover', pending_credential_reload_realm, reason, reload_page))
@@ -26768,6 +26770,9 @@ async def run(mode, pending='new.example', current_url='https://new.example/logi
         async def event_result(self, **kwargs):
             nonlocal failures
             events.append(('event_ack', pending_credential_reload_realm))
+            if mode == 'denial_identity_unavailable' and failures == 0:
+                failures += 1
+                raise RuntimeError({'code': -32000, 'message': 'navigation to a non-public address is blocked'})
             if mode in ('event_failure', 'exhausted') and failures == 0:
                 failures += 1
                 raise RuntimeError('Page.navigate() timed out after 300.0s (60001ms)')
@@ -26798,14 +26803,15 @@ async def run(mode, pending='new.example', current_url='https://new.example/logi
            'WorkflowGenerationSealed': type('WorkflowGenerationSealed', (RuntimeError,), {})}
     exec(compile(code, str(source), 'exec'), env)
     run = env['run']
-    for mode in ('event_failure', 'readiness_failure', 'success'):
+    for mode in ('event_failure', 'readiness_failure', 'success', 'identity_unavailable', 'denial_identity_unavailable'):
         events = await run(mode)
         assert events[-1] == ('model', None), events
         recoveries = [x for x in events if x[0] == 'recover']
-        assert len(recoveries) == (mode != 'success'), events
+        expected_recoveries = mode not in ('success', 'identity_unavailable')
+        assert len(recoveries) == expected_recoveries, events
         assert all(x[1] == 'new.example' and x[3] is True for x in recoveries), events
         assert all(x[1] == 'new.example' for x in events if x[0] in ('event_ack','ready_ack')), events
-        assert len([x for x in events if x[0] == 'dispatch']) == (1 if mode == 'success' else 2), events
+        assert len([x for x in events if x[0] == 'dispatch']) == (2 if expected_recoveries else 1), events
     try:
         await run('exhausted')
     except RuntimeError as exc:
