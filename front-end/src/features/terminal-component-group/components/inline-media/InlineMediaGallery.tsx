@@ -26,6 +26,7 @@ import { useState } from 'react';
 import { Maximize2 } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
+import { useMediaElementResource } from '@/hooks/useMediaElementResource';
 import type { FilePointer } from '../../hooks';
 import { DocumentPreviewDrawer } from '../DocumentPreviewDrawer';
 import { DEFAULT_MEDIA_ASPECT, inlineMediaKind, metadataAspectRatio } from './inlineMedia.utils';
@@ -159,9 +160,11 @@ function InlineImage({ file, url, onOpen, onAspect }: InlineMediaElementProps) {
 }
 
 function InlineVideo({ file, url, onOpen, onAspect }: InlineMediaElementProps) {
+  const { setMediaRef } = useMediaElementResource<HTMLVideoElement>();
   return (
     <>
       <video
+        ref={setMediaRef}
         src={url}
         aria-label={file.original_filename}
         data-testid="inline-media-video"

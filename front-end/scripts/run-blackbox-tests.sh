@@ -18,6 +18,9 @@ if [[ "${1:-}" == "--list" ]]; then
   exit 0
 fi
 
+# Direct runner bypasses npm pretest; verify required dependency cleanup first.
+node scripts/patch-ui-lifecycle.mjs
+
 # Generate run ID and artifact directory
 RUN_ID="$(date +%Y%m%d_%H%M%S)_$$"
 ARTIFACT_DIR=".context/test-runs/$RUN_ID"
