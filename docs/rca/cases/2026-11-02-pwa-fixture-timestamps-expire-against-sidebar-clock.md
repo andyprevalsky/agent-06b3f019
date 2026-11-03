@@ -153,8 +153,9 @@ These new receipts retain their own clocks and do not rewrite earlier evidence.
 The replacement native turn ended at 04:33:46.043 UTC with a provider capacity
 error. Its successor kept gpt-6.1-sol/high and the accepted standard launch;
 effective speed remains independently unexposed. That interruption is not a
-test result. Deployment and cleanup outcomes are recorded separately in the
-finished deploy scorecard and source/production receipts.
+test result. Deployment, production verification and cleanup remain pending at this capture.
+Their terminal outcomes will be recorded separately in the deploy scorecard and
+source/production receipts when available.
 
 ## Human feedback
 
