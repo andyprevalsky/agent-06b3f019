@@ -74,6 +74,8 @@ def admission(tmp_path, fault='', storage='fresh', simulate=False, namespace='or
 source {shlex.quote(str(HELPER))}
 ROOT_DIR=fixture
 FRESH_VOLUMES={int(storage == 'fresh')}
+DISPOSABLE_LIFECYCLE=1
+POOL_IDS_FILE={shlex.quote(str(tmp_path / 'unused-pool.ids'))}
 BENCHES=(fixture)
 CATALOG_MODES=(real)
 WARM_ID={source_id}
