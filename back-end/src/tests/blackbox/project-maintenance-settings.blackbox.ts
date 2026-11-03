@@ -25,7 +25,10 @@ import {
   publishSnapshot,
 } from '../../providers/projects/maintenanceStore';
 
+import { registerMaintenanceSchedulingCases } from './project-maintenance-scheduling.cases';
+
 const userIds: string[] = [];
+registerMaintenanceSchedulingCases(userIds);
 
 after(async () => {
   await prisma.user.deleteMany({ where: { userId: { in: userIds } } });
@@ -55,7 +58,12 @@ test('settings round-trip, validation and owner scoping over HTTP', async () => 
   const updated = await api(owner, `/api/projects/${id}`, {
     method: 'PUT',
     body: {
-      maintenance: { script: 'echo hi', timeoutS: 480, nightly: true, onGithubChange: true },
+      maintenance: {
+        script: 'echo hi',
+        timeoutS: 480,
+        nightly: true,
+        onGithubChange: true,
+      },
     },
   });
   expectStatus(updated, 200, 'update');
@@ -89,7 +97,11 @@ test('settings round-trip, validation and owner scoping over HTTP', async () => 
 
   const state = await api(owner, `/api/projects/${id}/maintenance`);
   expectStatus(state, 200, 'maintenance state');
-  const view = state.data as { runs: unknown[]; snapshot: unknown; running: boolean };
+  const view = state.data as {
+    runs: unknown[];
+    snapshot: unknown;
+    running: boolean;
+  };
   assert(view.runs.length === 0 && view.snapshot === null && view.running === false, 'empty state');
   // Run now is refused before any sandbox: no repository, then no script.
   const noRepo = await api(owner, `/api/projects/${id}/maintenance/runs`, {
@@ -127,7 +139,10 @@ test('settings round-trip, validation and owner scoping over HTTP', async () => 
     'foreign project state'
   );
   expectStatus(
-    await api(stranger, `/api/projects/${id}/maintenance/runs`, { method: 'POST', body: {} }),
+    await api(stranger, `/api/projects/${id}/maintenance/runs`, {
+      method: 'POST',
+      body: {},
+    }),
     404,
     'foreign Run now'
   );
@@ -165,7 +180,10 @@ test('repository changes invalidate snapshot use while retaining cleanup custody
   });
   const replacement = { repoUrl: 'https://github.com/fixture/new' };
   expectStatus(
-    await api(owner, `/api/projects/${id}`, { method: 'PUT', body: replacement }),
+    await api(owner, `/api/projects/${id}`, {
+      method: 'PUT',
+      body: replacement,
+    }),
     409,
     'active run retains repository custody'
   );
@@ -187,7 +205,10 @@ test('repository changes invalidate snapshot use while retaining cleanup custody
     data: { maintenanceRunId: null, maintenanceLeaseUntil: null },
   });
   expectStatus(
-    await api(owner, `/api/projects/${id}`, { method: 'PUT', body: replacement }),
+    await api(owner, `/api/projects/${id}`, {
+      method: 'PUT',
+      body: replacement,
+    }),
     200,
     'change repo'
   );
@@ -212,7 +233,10 @@ test('repository changes invalidate snapshot use while retaining cleanup custody
     data: {
       projectId: id,
       revision: 1,
-      manifest: { version: 1, git: { remoteUrl: 'https://github.com/fixture/old' } },
+      manifest: {
+        version: 1,
+        git: { remoteUrl: 'https://github.com/fixture/old' },
+      },
       encryptedGitBundle: 'must-not-decrypt',
       encryptedUncommittedPatch: 'must-not-decrypt',
       gitBundleFingerprint: 'a'.repeat(64),
@@ -244,8 +268,11 @@ test('repository changes invalidate snapshot use while retaining cleanup custody
     'post-settings stale sync cannot publish files or snapshot'
   );
   assert(
-    (await prisma.projectSyncSnapshot.findUniqueOrThrow({ where: { projectId: id } }))
-      .encryptedGitBundle === 'must-not-decrypt',
+    (
+      await prisma.projectSyncSnapshot.findUniqueOrThrow({
+        where: { projectId: id },
+      })
+    ).encryptedGitBundle === 'must-not-decrypt',
     'rejected stale sync preserves stored ciphertext'
   );
   const key = await api(owner, '/api/projects/sync-key');
@@ -278,8 +305,11 @@ test('repository changes invalidate snapshot use while retaining cleanup custody
     'stale synced checkout is quarantined before decryption'
   );
   assert(
-    (await prisma.projectSyncSnapshot.findUniqueOrThrow({ where: { projectId: id } }))
-      .encryptedGitBundle === 'must-not-decrypt',
+    (
+      await prisma.projectSyncSnapshot.findUniqueOrThrow({
+        where: { projectId: id },
+      })
+    ).encryptedGitBundle === 'must-not-decrypt',
     'encrypted user data remains stored'
   );
 

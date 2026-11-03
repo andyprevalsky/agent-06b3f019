@@ -24,6 +24,10 @@ export const MAINTENANCE_LOG_LIMIT = 16 * 1024;
 export const MAINTENANCE_RUN_HISTORY = 30;
 export const MAINTENANCE_BATCH = 50;
 
+// JavaScript trim whitespace, shared by scheduled eligibility queries.
+const SCRIPT_WHITESPACE =
+  '\u0009\u000a\u000b\u000c\u000d \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff';
+
 export type MaintenanceTrigger = 'manual' | 'snapshot' | 'nightly' | 'github';
 export type MaintenanceMode = 'sync' | 'snapshot';
 export type MaintenanceStatus = 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'TIMED_OUT';
@@ -104,6 +108,20 @@ export async function claimRun(input: ClaimInput): Promise<ClaimResult> {
         },
       });
       if (leased.count !== 1) throw new Busy();
+      // The winning project-row CAS fences every predecessor before its rows
+      // become terminal. A losing claim rolls back without touching them.
+      await tx.projectMaintenanceRun.updateMany({
+        where: {
+          projectId: input.projectId,
+          status: 'RUNNING',
+          id: { not: created.id },
+        },
+        data: {
+          status: 'FAILED',
+          finishedAt: input.now,
+          error: 'abandoned: the lease expired and a newer run took over',
+        },
+      });
       return created;
     });
     return { kind: 'claimed', run };
@@ -133,7 +151,10 @@ export async function extendLease(
 }
 
 export async function recordSandbox(runId: string, sandboxId: string): Promise<void> {
-  await prisma.projectMaintenanceRun.updateMany({ where: { id: runId }, data: { sandboxId } });
+  await prisma.projectMaintenanceRun.updateMany({
+    where: { id: runId },
+    data: { sandboxId },
+  });
 }
 
 export interface PublishInput {
@@ -193,6 +214,11 @@ export interface FinishInput {
 /** Terminal row + lease release (the release only when the lease is still this run's). */
 export async function finishRun(input: FinishInput): Promise<void> {
   await runTransactionWithRetry(async (tx) => {
+    // Match claimRun's Project -> Run lock order; both writes remain atomic.
+    await tx.project.updateMany({
+      where: { id: input.projectId, maintenanceRunId: input.runId },
+      data: { maintenanceRunId: null, maintenanceLeaseUntil: null },
+    });
     await tx.projectMaintenanceRun.updateMany({
       where: { id: input.runId, status: 'RUNNING' },
       data: {
@@ -205,10 +231,6 @@ export async function finishRun(input: FinishInput): Promise<void> {
         error: input.error ?? null,
         logTail: (input.logTail ?? '').slice(-MAINTENANCE_LOG_LIMIT) || null,
       },
-    });
-    await tx.project.updateMany({
-      where: { id: input.projectId, maintenanceRunId: input.runId },
-      data: { maintenanceRunId: null, maintenanceLeaseUntil: null },
     });
   });
   await pruneRuns(input.projectId);
@@ -224,7 +246,10 @@ export async function pruneRuns(projectId: string): Promise<void> {
   });
   if (old.length > 0) {
     await prisma.projectMaintenanceRun.deleteMany({
-      where: { id: { in: old.map((row) => row.id) }, status: { not: 'RUNNING' } },
+      where: {
+        id: { in: old.map((row) => row.id) },
+        status: { not: 'RUNNING' },
+      },
     });
   }
 }
@@ -235,14 +260,19 @@ export async function pruneRuns(projectId: string): Promise<void> {
  */
 export async function reconcileStaleRuns(now: Date): Promise<number> {
   const stale = await prisma.project.findMany({
-    where: { maintenanceRunId: { not: null }, maintenanceLeaseUntil: { lt: now } },
+    where: {
+      maintenanceRunId: { not: null },
+      maintenanceLeaseUntil: { lt: now },
+    },
     select: { id: true, maintenanceRunId: true },
     take: MAINTENANCE_BATCH,
   });
   for (const project of stale) {
     const runId = project.maintenanceRunId;
     if (runId === null) continue;
-    const run = await prisma.projectMaintenanceRun.findUnique({ where: { id: runId } });
+    const run = await prisma.projectMaintenanceRun.findUnique({
+      where: { id: runId },
+    });
     await finishRun({
       runId,
       projectId: project.id,
@@ -268,7 +298,9 @@ export async function findRun(
   projectId: string,
   runId: string
 ): Promise<MaintenanceRunRecord | null> {
-  return prisma.projectMaintenanceRun.findFirst({ where: { id: runId, projectId } });
+  return prisma.projectMaintenanceRun.findFirst({
+    where: { id: runId, projectId },
+  });
 }
 
 /** The most recent finished run's status: a failed run makes the next one start clean. */
@@ -284,17 +316,19 @@ export async function lastFinishedStatus(projectId: string): Promise<string | nu
 /** Projects with the nightly schedule on that have no run for today's slot yet. */
 export async function findNightlyDue(now: Date): Promise<string[]> {
   const slot = nightlySlotKey(now);
-  const rows = await prisma.project.findMany({
-    where: {
-      maintenanceNightly: true,
-      repoUrl: { not: null },
-      maintenanceScript: { not: '' },
-      maintenanceRuns: { none: { slotKey: slot } },
-    },
-    select: { id: true },
-    orderBy: { updatedAt: 'asc' },
-    take: MAINTENANCE_BATCH,
-  });
+  // Match JavaScript trim's whitespace set before LIMIT, including legacy
+  // whitespace-only records. Never rewrite scripts or scan an unbounded batch.
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT p."id" FROM "Project" p
+    WHERE p."maintenanceNightly" = true AND p."repoUrl" IS NOT NULL
+      AND btrim(p."maintenanceScript", ${SCRIPT_WHITESPACE}) <> ''
+      AND NOT EXISTS (
+        SELECT 1 FROM "ProjectMaintenanceRun" r
+        WHERE r."projectId" = p."id" AND r."slotKey" = ${slot}
+      )
+    ORDER BY p."updatedAt" ASC, p."id" ASC
+    LIMIT ${MAINTENANCE_BATCH}
+  `;
   return rows.map((row) => row.id);
 }
 
@@ -311,26 +345,16 @@ export async function findGithubPollDue(
   now: Date,
   minIntervalMs: number
 ): Promise<WatchedProject[]> {
-  const rows = await prisma.project.findMany({
-    where: {
-      maintenanceOnGithubChange: true,
-      repoUrl: { not: null },
-      maintenanceScript: { not: '' },
-      OR: [
-        { maintenanceWatchCheckedAt: null },
-        { maintenanceWatchCheckedAt: { lt: new Date(now.getTime() - minIntervalMs) } },
-      ],
-    },
-    select: {
-      id: true,
-      userId: true,
-      repoUrl: true,
-      defaultBranch: true,
-      maintenanceWatchedSha: true,
-    },
-    orderBy: { maintenanceWatchCheckedAt: { sort: 'asc', nulls: 'first' } },
-    take: MAINTENANCE_BATCH,
-  });
+  const cutoff = new Date(now.getTime() - minIntervalMs);
+  const rows = await prisma.$queryRaw<WatchedProject[]>`
+    SELECT p."id", p."userId", p."repoUrl", p."defaultBranch", p."maintenanceWatchedSha"
+    FROM "Project" p
+    WHERE p."maintenanceOnGithubChange" = true AND p."repoUrl" IS NOT NULL
+      AND btrim(p."maintenanceScript", ${SCRIPT_WHITESPACE}) <> ''
+      AND (p."maintenanceWatchCheckedAt" IS NULL OR p."maintenanceWatchCheckedAt" < ${cutoff})
+    ORDER BY p."maintenanceWatchCheckedAt" ASC NULLS FIRST, p."id" ASC
+    LIMIT ${MAINTENANCE_BATCH}
+  `;
   return rows.flatMap((row) => (row.repoUrl === null ? [] : [{ ...row, repoUrl: row.repoUrl }]));
 }
 
@@ -342,7 +366,7 @@ export async function markWatchChecked(projectId: string, now: Date): Promise<Da
     SET "maintenanceWatchCheckedAt" = GREATEST(
       ${now}::timestamp,
       COALESCE("maintenanceWatchCheckedAt" + interval '1 millisecond', ${now}::timestamp)
-    ), "updatedAt" = ${now}
+    )
     WHERE "id" = ${projectId}
     RETURNING "maintenanceWatchCheckedAt"
   `;

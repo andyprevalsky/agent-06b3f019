@@ -216,7 +216,14 @@ function settingsData(body: UpdateProjectBody) {
 function maintenanceData(maintenance: UpdateProjectBody['maintenance']) {
   if (maintenance === undefined) return {};
   return {
-    ...(maintenance.script !== undefined ? { maintenanceScript: maintenance.script ?? '' } : {}),
+    ...(maintenance.script !== undefined
+      ? {
+          maintenanceScript:
+            maintenance.script !== null && maintenance.script.trim() !== ''
+              ? maintenance.script
+              : '',
+        }
+      : {}),
     ...(maintenance.timeoutS !== undefined ? { maintenanceTimeoutS: maintenance.timeoutS } : {}),
     ...(maintenance.nightly !== undefined ? { maintenanceNightly: maintenance.nightly } : {}),
     ...(maintenance.onGithubChange !== undefined
