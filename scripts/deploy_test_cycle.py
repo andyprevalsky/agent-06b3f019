@@ -8,6 +8,7 @@ checkout/services; the coordinator never removes host safeguards or grants skips
 from __future__ import annotations
 
 import argparse
+import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from fnmatch import fnmatchcase
@@ -233,6 +234,61 @@ def initialize(plan: dict, root: Path) -> dict:
             "input_fingerprints": input_fingerprints(plan, root)}
 
 
+def full_pass_binding(state: dict, gate: dict) -> dict | None:
+    """Only the latest immutable, executed FULL native PASS is eligible."""
+    latest = latest_receipts(state).get(gate['name'])
+    if not latest or gate.get('quick'):
+        return None
+    receipt = latest
+    attempt = next((a for a in reversed(state.get('attempts', [])) if any(r is receipt for r in a.get('results', []))), {})
+    if (attempt.get('phase') not in {'initial', 'focused', 'failed-gates', 'final'} or attempt.get('stale') or attempt.get('interrupted')
+            or receipt.get('status') != 'PASS' or receipt.get('complete') is not True
+            or receipt.get('executed') is not True or type(receipt.get('native_exit')) is not int
+            or receipt['native_exit'] != 0 or receipt.get('timed_out') or receipt.get('cancelled')
+            or receipt.get('lingering_group') or receipt.get('cleanup_owner')
+            or receipt.get('cases') != dict.fromkeys(gate['checks'], 'PASS')
+            or receipt.get('command') != gate['command']
+            or receipt.get('execution_binding') != {'input_fingerprint': state['input_fingerprints'].get(gate['name']),
+                'contract_digest': digest(gate), 'environment': state['environment']}):
+        return None
+    try:
+        path = Path(receipt['log']).parent / 'receipt.json'
+        if bounded_read(path, 'carried native receipt') != receipt or receipt_owner(gate['name'], receipt):
+            return None
+        request_path = path.parent / 'request.json'
+        request = bounded_read(request_path, 'carried gate request')
+        if (any(request.get(k) != receipt.get(k) for k in ('token', 'source', 'gate'))
+                or request.get('checks') != gate['checks'] or request.get('skips')
+                or request.get('worker_recipe') != gate.get('worker_recipe')):
+            return None
+        worker = receipt.get('worker_result')
+        if worker:
+            value = bounded_read(worker, 'carried worker result')
+            checks, complete = validate_result(value, request, receipt['native_exit'], invalid_process=False)
+            if not complete or checks != receipt['cases']:
+                return None
+        return {'receipt': str(path), 'receipt_sha256': sha_file(path), 'request_sha256': sha_file(request_path),
+                'worker_result_sha256': sha_file(worker) if worker else None,
+                'native_source': receipt['source'], 'token': receipt['token']}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def carried_pass(state: dict, gate: dict) -> bool:
+    entry = state.get('carried_passes', {}).get(gate['name'])
+    if not entry:
+        return False
+    return (entry.get('validated_source') == state['source']
+            and entry.get('input_fingerprint') == state['input_fingerprints'].get(gate['name'])
+            and entry.get('contract_digest') == digest(gate)
+            and full_pass_binding(state, gate) == entry.get('native_binding'))
+
+
+def reusable_full_pass(state: dict, gate: dict) -> bool:
+    return carried_pass(state, gate) or bool(full_pass_binding(state, gate)
+        and latest_receipts(state)[gate['name']].get('source') == state['source'])
+
+
 def records(plan: dict, state: dict) -> list[dict]:
     phase = state["phase"]
     gates = plan["gates"]
@@ -250,9 +306,9 @@ def records(plan: dict, state: dict) -> list[dict]:
             selected.append(focused)
         return selected
     if phase == "failed-gates":
-        return [g for g in gates if g["name"] in state["repair_gates"]]
+        return [g for g in gates if g["name"] in state["repair_gates"] and not reusable_full_pass(state, g)]
     if phase in {"initial", "final"}:
-        return [g for g in gates if not g.get("quick")]
+        return [g for g in gates if not g.get("quick") and not reusable_full_pass(state, g)]
     raise ValueError(f"phase {phase} is not executable")
 
 
@@ -288,6 +344,10 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
     env = {**os.environ, **gate.get("env", {}), "DEPLOY_GATE_REQUEST": str(folder / "request.json"),
            "DEPLOY_GATE_RESULT": str(result_path), "DEPLOY_GATE_TOKEN": token,
            "DEPLOY_LANE_SCOPED_REUSE": "0", "DEPLOY_CYCLE_FRESH": "1"}
+    admission = isolated_request(state, gate, request, root, env)
+    if admission:
+        request['isolated_validation'] = admission
+        write(folder / 'request.json', request)
     started = time.time()
     timeout = gate.get("timeout_seconds", 120 if gate.get("quick") else None)  # declared wins; 120 s is the quick default
     timed_out = cancelled = lingering = False
@@ -375,6 +435,9 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
               "source": state["source"], "started_at": started, "finished_at": time.time(),
               "command": gate["command"], "log": str(folder / "output.log"),
               "stderr_log": str(folder / 'stderr.log'), "token": token}
+    result['execution_binding'] = {'input_fingerprint': state['input_fingerprints'].get(name),
+                                   'contract_digest': digest(gate), 'environment': state['environment']}
+    result['isolated_validation'] = admission
     result['lifecycle'] = lifecycle
     result['native_cleanup_reference'] = native_cleanup_reference
     if worker_cleanup_owner is not None:
@@ -409,6 +472,8 @@ def failed_cases(state: dict, results: list[dict]) -> list[dict]:
 
 def advance(state: dict, results: list[dict], failures: list[dict] | None = None) -> None:
     phase = state["phase"]
+    for result in results:
+        state.get('carried_passes', {}).pop(result['gate'], None)
     state["attempts"].append({"phase": phase, "source": state["source"], "results": results})
     failed = failed_cases(state, results) if failures is None else failures
     if failed:
@@ -672,9 +737,48 @@ def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
         return False
 
 
+def isolated_admissions(state: dict, gate: str):
+    from deploy_test_native_cleanup import still_bound
+    entries = [e for e in state.get('reconciled_owners', {}).values()
+               if e.get('purpose') == 'isolated-validation' and e.get('gate') == gate]
+    for entry in entries:
+        receipts = [r for a in state.get('attempts', []) for r in a.get('results', [])
+                    if r.get('gate') == gate and r.get('token') == entry.get('token')]
+        if len(receipts) != 1 or not still_bound(entry, receipts[0], receipt_owner(gate, receipts[0])):
+            raise ValueError(f'{gate}: original isolated-validation obligation changed; refuse launch/completion')
+    return entries
+
+
+def isolated_request(state: dict, gate: dict, request: dict, root: Path, env: dict) -> list[dict]:
+    entries = isolated_admissions(state, gate['name'])
+    if not entries:
+        return []
+    from deploy_test_native_cleanup import need
+    need(gate.get('native_cloud') is True and len(gate['command']) == 2
+         and Path(gate['command'][1]) == root / 'scripts/deploy_test_cloud.py'
+         and (root / gate.get('cwd', '.')).resolve() == root.resolve()
+         and not env.get('CLOUDBENCH_ARCHIVED_REUSE_REQUEST'), 'fresh native adapter required')
+    requested = request['checks'] + list(request['skips'])
+    need(len(set(requested)) == len(requested) and set(requested) == set(gate['checks']), 'full next inventory')
+    new_root = root / '.context/deploy-cloud' / hashlib.sha256(request['token'].encode()).hexdigest()
+    need(not new_root.exists() and not new_root.is_symlink(), 'new request root already exists')
+    bindings = []
+    for entry in entries:
+        old = bounded_read(Path(entry['proof']['owner']['native_cleanup_reference']['result']).parent / 'request.json', 'old request')
+        need(entry['validation_source'] == request['source'] and request['token'] != entry['token']
+             and set(old['checks']) | set(old.get('skips', {})) == set(gate['checks']), 'next source/inventory binding')
+        bindings.append({'original_receipt_sha256': entry['proof']['receipt_sha256'],
+                         'original_request_token': entry['token'], 'new_request_token': request['token'],
+                         'source': request['source'], 'new_native_root': str(new_root),
+                         'excluded_resources': entry['excluded_resources'], 'credit_granted': False})
+    return bindings
+
+
 def retained_owners(state: dict, gates) -> list[str]:
     latest = latest_receipts(state)
     owned = []
+    for name in gates:
+        isolated_admissions(state, name)
     for gate in gates:
         receipt = latest.get(gate)
         if not receipt:
@@ -903,6 +1007,18 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
             or input_fingerprints(plan, root) != state["input_fingerprints"]):
         raise ValueError("source/plan changed; refresh after RCA before running")
     selected = records(plan, state)
+    if state['phase'] in {'initial', 'failed-gates', 'final'}:
+        selected_names = {g['name'] for g in selected}
+        for gate in plan['gates']:
+            if gate['name'] in selected_names or gate.get('quick') or carried_pass(state, gate):
+                continue
+            binding = full_pass_binding(state, gate)
+            if binding and binding['native_source'] == state['source']:
+                entry = {'native_binding': binding, 'from_source': state['source'],
+                         'validated_source': state['source'], 'input_fingerprint': state['input_fingerprints'][gate['name']],
+                         'contract_digest': digest(gate), 'basis': 'same-source identical FULL execution reused'}
+                state.setdefault('carried_passes', {})[gate['name']] = entry
+                state.setdefault('pass_carryover_history', []).append({gate['name']: copy.deepcopy(entry)})
     owned = retained_owners(state, [g["name"] for g in selected])
     if owned:
         # Universal launch guard: a gate whose latest receipt still owns remote/native cleanup is
@@ -1032,7 +1148,7 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     validate_plan(new, root)
     if state.get("pending"):
         raise ValueError("adjudicate pending occurrences before binding a changed source")
-    if state["phase"] not in {"needs-focused-plan", "focused", "failed-gates", "triage", "stale"}:
+    if state["phase"] not in {"ready", "needs-focused-plan", "focused", "failed-gates", "triage", "stale"}:
         raise ValueError("source refresh only at the repair boundary")
     if new["source"] != source(root):
         raise ValueError("new plan is not bound to current source")
@@ -1048,6 +1164,18 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     if (new["source"] == state["source"] and digest(new) == state["plan_digest"]
             and fingerprints == state["input_fingerprints"]):
         raise ValueError("refresh requires actual changed source or plan")
+    # No scope is inferred: absent input_paths means '*' and any source-file change reruns that gate.
+    # History-only/tree-identical syncs work for the current broad production plan; declared scopes may be selective.
+    carried = {}
+    if state['environment'] == environment_digest():
+        for name, gate in old_gates.items():
+            binding = full_pass_binding(state, gate)
+            if (binding and (binding['native_source'] == state['source'] or carried_pass(state, gate))
+                    and digest(gate) == digest(new_gates[name])
+                    and state['input_fingerprints'].get(name) == fingerprints.get(name)):
+                carried[name] = {'native_binding': binding, 'from_source': state['source'],
+                    'validated_source': new['source'], 'input_fingerprint': fingerprints[name],
+                    'contract_digest': digest(new_gates[name]), 'basis': 'identical gate inputs and full execution contract'}
     carry, revisit, superseded_pending = {}, [], []
     for key, skip in state["skips"].items():
         gate = key.split("/", 1)[0]
@@ -1087,6 +1215,10 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     if revisit:
         state["pending"] = list(dict.fromkeys([*state.get("pending", []), *[f["id"] for f in revisit]]))
         state["failure_phase"] = "refresh"
+    state['carried_passes'] = carried
+    if carried:
+        state.setdefault('pass_carryover_history', []).append(copy.deepcopy(carried))
+    state['repair_gates'] = [name for name in state['repair_gates'] if name not in carried]
     state.update(plan=new, source=new["source"], plan_digest=digest(new), ready=False, focused={},
                  input_fingerprints=fingerprints, environment=environment_digest(),
                  phase="quick", next_after_quick="triage" if state.get("pending") else
@@ -1112,6 +1244,19 @@ def resolve_post_merge(state: dict, occurrence_id: str, repair_agent: str) -> No
 
 
 def pending_completion_block(state: dict) -> str | None:
+    try:
+        for gate in {e['gate'] for e in state.get('reconciled_owners', {}).values()
+                     if e.get('purpose') == 'isolated-validation'}:
+            isolated_admissions(state, gate)
+            latest = latest_receipts(state).get(gate, {})
+            full = next(g for g in state['plan']['gates'] if g['name'] == gate)
+            if (set(latest.get('cases', {})) != set(full['checks'])
+                    or latest.get('source') != state['source'] and not carried_pass(state, full)
+                    or latest.get('complete') is not True
+                    or receipt_owner(gate, latest)):
+                return 'isolated validation still requires complete current-source full coverage; original obligations preserved'
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        return str(error)
     pending = state.get("pending_post_merge") or []
     if pending:
         return (f"{len(pending)} pending post-merge packet(s) block completion; "
@@ -1135,6 +1280,12 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
                 or state["input_fingerprints"] != input_fingerprints(plan, root)
                 or (expect_head is not None and state["source"]["head"] != expect_head)):
             return 5  # Same stale-source result as the existing pipeline verifier.
+        for gate in plan['gates']:
+            if gate['name'] in state.get('carried_passes', {}) and not carried_pass(state, gate):
+                return 5
+        for gate in {e['gate'] for e in state.get('reconciled_owners', {}).values()
+                     if e.get('purpose') == 'isolated-validation'}:
+            isolated_admissions(state, gate)
         return 0
     except (OSError, ValueError, KeyError, TypeError):
         return 2

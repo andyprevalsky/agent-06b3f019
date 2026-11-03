@@ -256,6 +256,16 @@ checks on a new source while unresolved triage remains bound to its original
 source; it neither clears triage nor grants full-gate or release credit. Do not
 describe a successful quick observation as a resumed or completed full cycle.
 The final coverage and `verify` must still account for the actual merged source.
+The staged runner retains a full PASS only when its original request, receipt,
+worker result, complete gate contract, environment and input fingerprint still
+match. It records the new validation source separately and rechecks those
+artifacts before merge. An identical full run already completed in a repair
+phase can also satisfy final coverage; a narrowed focused run cannot.
+
+A gate without declared `input_paths` conservatively depends on all source
+files. Such a gate can carry through a history-only or tree-identical sync,
+but an ordinary source change still requires a rerun. Legacy receipts missing
+the execution bindings also rerun. Never invent a narrow scope to obtain reuse.
 Do not invalidate all passing tests just because a conflict-free sync changed
 HEAD: compare each gate's actual inputs, preserve valid receipts, and execute
 only affected or unknown gates. A clean Git merge is not a test-dependency proof.

@@ -162,6 +162,101 @@ class Cycle(unittest.TestCase):
             self.assertEqual(self.state['attempts'], after['attempts'])
             self.assertEqual('triage', after['phase']); self.assertFalse(after['ready'])
 
+    def carryover_ready_fixture(self, scoped=False):
+        if scoped:
+            for path in ('backend.txt', 'frontend.txt'):
+                (self.root / path).write_text('original')
+            self.plan['gates'][1]['input_paths'] = ['backend.txt']
+            self.plan['gates'][2]['input_paths'] = ['frontend.txt']
+            self.plan['source'] = c.source(self.root)
+            self.state = c.initialize(self.plan, self.root)
+        c.run_phase(self.plan, self.state, self.directory, self.root)
+        c.run_phase(self.plan, self.state, self.directory, self.root)
+        self.assertTrue(self.state['ready'])
+        return copy.deepcopy(self.plan), copy.deepcopy(self.state['attempts'])
+
+    def test_history_only_sync_preserves_full_pass_native_source_and_revalidates_files(self):
+        old, native = self.carryover_ready_fixture()
+        native_paths = [Path(r['log']).parent / 'receipt.json' for r in native[-1]['results']]
+        original = {str(p): p.read_bytes() for p in native_paths}
+        for index in range(2):
+            subprocess.run(['git', '-c', 'user.name=test', '-c', 'user.email=test@example.com',
+                            'commit', '--allow-empty', '-qm', 'history-only sync'], cwd=self.root, check=True)
+            new = copy.deepcopy(old); new['source'] = c.source(self.root)
+            c.refresh(self.state, old, new, self.root)
+            self.assertEqual({'api', 'ui'}, set(self.state['carried_passes']))
+            c.run_phase(new, self.state, self.directory, self.root)
+            self.assertEqual('final', self.state['phase'])
+            self.assertEqual([], c.records(new, self.state))
+            c.run_phase(new, self.state, self.directory, self.root)
+            self.assertEqual(0, c.verify_saved(self.directory, self.root))
+            old = new
+        self.assertEqual(2, len(self.state['pass_carryover_history']))
+        self.assertEqual(native, self.state['attempts'][:len(native)])
+        self.assertEqual(original, {str(p): p.read_bytes() for p in native_paths})
+        native_paths[0].write_bytes(native_paths[0].read_bytes()+b' ')
+        self.assertEqual(5, c.verify_saved(self.directory, self.root))
+
+    def test_scoped_change_preserves_only_unaffected_full_gate_and_never_newer_failure(self):
+        old, native = self.carryover_ready_fixture(scoped=True)
+        (self.root / 'backend.txt').write_text('actual backend change')
+        new = copy.deepcopy(old); new['source'] = c.source(self.root)
+        c.refresh(self.state, old, new, self.root)
+        self.assertEqual({'ui'}, set(self.state['carried_passes']))
+        self.state['phase'] = 'final'
+        self.assertEqual(['api'], [g['name'] for g in c.records(new, self.state)])
+        # A new failure/retained owner always supersedes the old native PASS.
+        self.state['attempts'].append(dict(phase='final', results=[dict(gate='ui', status='FAIL',
+            complete=False, cases={'c':'UNVERIFIED'}, cleanup_owner={'request_token':'new-owner'}, lingering_group=True)]))
+        self.assertEqual({'api','ui'}, {g['name'] for g in c.records(new, self.state)})
+        self.assertEqual(['ui'], c.retained_owners(self.state, ['ui']))
+        self.assertEqual(native, self.state['attempts'][:len(native)])
+
+    def test_unknown_default_scope_reruns_both_gates_after_any_source_change(self):
+        old, native = self.carryover_ready_fixture()
+        (self.root / 'code').write_text('unknown ownership of this change')
+        new = copy.deepcopy(old); new['source'] = c.source(self.root)
+        c.refresh(self.state, old, new, self.root)
+        self.assertEqual({}, self.state['carried_passes'])
+        self.state['phase'] = 'final'
+        self.assertEqual({'api','ui'}, {g['name'] for g in c.records(new, self.state)})
+
+    def test_same_source_full_pass_skips_duplicate_final_but_focused_subset_never_does(self):
+        old, native = self.carryover_ready_fixture()
+        self.state.update(phase='final', ready=False)
+        self.assertEqual([], c.records(old, self.state))
+        # An exact FULL focused recipe is eligible; a genuine narrowed case set is not.
+        self.state['attempts'][-1]['phase'] = 'focused'
+        self.assertEqual([], c.records(old, self.state))
+        api = next(r for r in self.state['attempts'][-1]['results'] if r['gate']=='api')
+        saved = copy.deepcopy(api['cases']); api['cases'] = {'a':'PASS'}
+        self.assertEqual(['api'], [g['name'] for g in c.records(old, self.state)])
+        api['cases'] = saved
+        self.state['attempts'][-1]['phase'] = 'final'
+        api['execution_binding']['contract_digest'] = 'changed recipe'
+        self.assertEqual(['api'], [g['name'] for g in c.records(old, self.state)])
+
+    def test_same_source_reuse_pins_native_receipt_and_request_for_final_verification(self):
+        script = ("import json,os;from pathlib import Path;"
+            "r=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text());"
+            "v={k:r[k] for k in ('token','source','gate')};"
+            "v.update(cases=dict.fromkeys(r['checks'],'PASS'),complete=True,cleanup_complete=True,reused=False);"
+            "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(v))")
+        self.plan['gates'][1].update(command=[sys.executable, '-c', script], case_protocol=True)
+        self.state = c.initialize(self.plan, self.root)
+        old, native = self.carryover_ready_fixture()
+        self.state.update(phase='final', ready=False)
+        c.run_phase(old, self.state, self.directory, self.root)
+        self.assertEqual(0, c.verify_saved(self.directory, self.root))
+        receipt = c.latest_receipts(self.state)['api']
+        for path in [Path(receipt['log']).parent/'receipt.json', Path(receipt['log']).parent/'request.json',
+                     Path(receipt['worker_result'])]:
+            with self.subTest(path=path):
+                original = path.read_bytes(); path.write_bytes(original+b' ')
+                self.assertEqual(5, c.verify_saved(self.directory, self.root))
+                path.write_bytes(original)
+        self.assertEqual(0, c.verify_saved(self.directory, self.root))
+
     def test_failed_gate_boundary_refresh_keeps_history_and_revalidates_new_source(self):
         import contextlib, io
         failure = self.failure()
@@ -205,7 +300,9 @@ class Cycle(unittest.TestCase):
                 self.assertEqual(['a', 'b'], c.records(new, self.state)[0]['checks'])
             c.run_phase(new, self.state, self.directory, self.root)
         self.assertEqual(('ready', True), (self.state['phase'], self.state['ready']))
-        self.assertEqual({'api', 'ui'}, {r['gate'] for r in self.state['attempts'][-1]['results']})
+        self.assertEqual({'ui'}, {r['gate'] for r in self.state['attempts'][-1]['results']})
+        self.assertEqual({'a':'PASS', 'b':'PASS'}, c.latest_receipts(self.state)['api']['cases'])
+        self.assertTrue(c.full_pass_binding(self.state, new['gates'][1]))
         self.assertEqual(history['failures'], self.state['failures'])
         self.assertEqual('FAIL', self.state['failures'][0]['native_result'])
         self.assertEqual('blocking', self.state['failures'][0]['disposition'])
@@ -578,7 +675,9 @@ class Cycle(unittest.TestCase):
             self.assertEqual(expected, self.state['phase'])
             c.run_phase(self.plan, self.state, self.directory, self.root)
         self.assertTrue(self.state['ready'])
-        self.assertEqual({'a': 'PASS', 'b': 'PASS'}, next(r for r in self.state['attempts'][-1]['results'] if r['gate'] == 'api')['cases'])
+        self.assertEqual({'a':'PASS', 'b':'PASS'}, c.latest_receipts(self.state)['api']['cases'])
+        self.assertTrue(c.full_pass_binding(self.state, gate))
+        self.assertNotIn('api', {r['gate'] for r in self.state['attempts'][-1]['results']})
 
     def test_reexecuted_gate_is_not_lost_when_the_remaining_triage_is_waived(self):
         # CodeRabbit 4449029650: initial phase yields A (api/a UNVERIFIED, observation loss) and B (ui/c FAIL).
@@ -1296,6 +1395,140 @@ class Cycle(unittest.TestCase):
             files.extend(p for p in (self.root / '.git/cloudbench-fleet-audits' / token).rglob('*') if p.is_file())
         proof['files'] = {str(p): c.sha_file(p) for p in files}
         return state, occurrence, paths, proof, parents
+
+    def isolated_campaign_state(self):
+        import time
+        state, occurrence, paths, proof, parents = self.campaign_recon_state()
+        gate = next(g for g in state['plan']['gates'] if g['name'] == occurrence['gate'])
+        gate.update(command=[sys.executable, str(self.root / 'scripts/deploy_test_cloud.py')], cwd='.')
+        proof.update(purpose='isolated-validation', validation_source=dict(head='c' * 40, digest='d' * 64),
+                     execution_quiescence={})
+        # The original failed task and retained archive remain immutable; only execution admission differs.
+        fleet = parents[0]
+        life = c.read(fleet / '_batch/lifecycle.json')
+        owner = life['fleet_owner_token']
+        audit = self.root / '.git/cloudbench-fleet-audits' / owner
+        meta = (audit / 'meta').read_text().replace('status=provider-teardown-verified', 'status=incomplete')
+        (audit / 'meta').write_text(meta)
+        (audit / 'fresh').mkdir(exist_ok=True)
+        (audit / 'fresh/old').write_text('fleet_owner_token=' + owner + '\nrun_id=' + fleet.name
+            + '\napp=fixture\nsource=fresh-clone\nmachine_id=old-machine\nvolume_id=old-volume\ndisposition=owned\n')
+        registry = self.root / '.git/cloudbench-fleet-ownership' / owner
+        registry.mkdir(parents=True)
+        (registry / 'meta').write_text(meta + 'cleanup_policy=reap\n')
+        (registry / 'runtime-evidence-unconfirmed').write_text('original archive debt\n')
+        # Canary has a native provider-retired row; bind a real-shaped exact pair observation.
+        runs = fleet.parent
+        canary = runs / 'canary'
+        replacement = runs / '20261103-080441-2147483001'
+        # Rename only this synthetic canary and update its canonical native identity records/log handle.
+        canary.rename(replacement)
+        for base in [replacement, self.root / '.git/cloudbench-fleet-audits' / ('2' * 32)]:
+            for file in base.rglob('*'):
+                if file.is_file(): file.write_text(file.read_text().replace('run_id=canary', 'run_id=' + replacement.name))
+        life2 = c.read(replacement / '_batch/lifecycle.json'); life2['run_id'] = replacement.name
+        c.write(replacement / '_batch/lifecycle.json', life2)
+        for log in Path(proof['campaign']).glob('*.log'):
+            log.write_text(log.read_text().replace(str(canary), str(replacement)))
+        observations = []
+        for machine, volume, token in [('old-machine', 'old-volume', owner + '-0'), ('machine1', 'vol_fixture', '2' * 32 + '-0')]:
+            for kind, mid in [('machine', machine), ('volume', volume)]:
+                metadata = dict(id=mid, state='destroyed' if kind == 'machine' else 'pending_destroy')
+                if kind == 'machine': metadata['source_binding'] = dict(REF=state['source']['head'], CLOUDBENCH_RUN_TOKEN=token)
+                else: metadata['attached_machine_id'] = None
+                observations.append(dict(kind=kind, id=mid, expected_machine=machine, expected_volume=volume,
+                    method='GET', no_retry=True, http_status=200, response_sha256='e' * 64, metadata=metadata))
+        packet = self.root / '.context/provider-pairs.json'
+        c.write(packet, dict(endpoint_origin='https://api.machines.dev', app='fixture', rows=observations))
+        proof['execution_quiescence'] = {m: dict(provider_pair=str(packet)) for m in ('old-machine', 'machine1')}
+        proof['files'] = {str(f): c.sha_file(f) for base in [runs, Path(proof['campaign']),
+            self.root / '.git/cloudbench-fleet-audits', self.root / '.git/cloudbench-fleet-ownership']
+            for f in base.rglob('*') if f.is_file()}
+        proof['files'][str(paths['receipt'].parent / 'request.json')] = c.sha_file(paths['receipt'].parent / 'request.json')
+        proof['files'][str(runs.parent / 'cli.log')] = c.sha_file(runs.parent / 'cli.log')
+        proof['files'][str(packet)] = c.sha_file(packet)
+        return state, occurrence, paths, proof, gate, packet
+
+    def test_isolated_native_validation_preserves_original_debt_and_requires_new_full_request(self):
+        state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
+        before = copy.deepcopy(state['attempts'])
+        self.assertEqual([gate['name']], c.retained_owners(state, [gate['name']]))
+        c.reconcile(state, failure['id'], proof)
+        self.assertEqual([], c.retained_owners(state, [gate['name']]))
+        self.assertEqual(before, state['attempts'])
+        state['source'] = proof['validation_source']
+        request = dict(token='new-isolated-token', source=state['source'], checks=gate['checks'], skips={})
+        self.assertEqual('new-isolated-token', c.isolated_request(state, gate, request, self.root, {})[0]['new_request_token'])
+        self.assertIn('full coverage', c.pending_completion_block(state))
+        entry = copy.deepcopy(state['reconciled_owners'])
+        state['attempts'].append(dict(results=[dict(gate=gate['name'], source=state['source'], status='PASS',
+            complete=True, cases=dict.fromkeys(gate['checks'], 'PASS'))]))
+        self.assertIsNone(c.pending_completion_block(state))
+        self.assertEqual(entry, state['reconciled_owners'])  # New PASS/source refresh never deletes old debt.
+        self.assertFalse(next(iter(entry.values()))['cleanup_complete'])
+        self.assertFalse(next(iter(entry.values()))['credit_granted'])
+        packet.write_text(packet.read_text() + ' ')
+        with self.assertRaisesRegex(ValueError, 'obligation changed'):
+            c.retained_owners(state, [gate['name']])
+        self.assertIsNotNone(c.pending_completion_block(state))
+
+    def test_isolated_native_validation_requires_current_os_payload_authority(self):
+        state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
+        fleet = next(p for p in Path(proof['campaign']).parent.parent.joinpath('runs').iterdir()
+                     if p.is_dir() and p.name.endswith('310001'))
+        life = c.read(fleet / '_batch/lifecycle.json')
+        payloads = {}
+        for key in ('run', 'backend', 'services'):
+            path = self.root / '.context' / (key + '.body'); path.write_text(key)
+            payloads[key] = str(path); proof['files'][str(path)] = c.sha_file(path)
+        from datetime import datetime, timezone
+        value = dict(kind='exact-original-current-os-read-only', result='QUIESCED_CURRENT_OS', identity_guards_pass=True,
+            observed_at=datetime.now(timezone.utc).isoformat(),
+            machine_id='old-machine', guest_run_token=life['fleet_owner_token']+'-0', source=state['source']['head'],
+            driver_current_alive=False, socket_scan_readable=True, remote_effective_uid=0,
+            kernel_exclusion_flag=0x00200000, unreadable_live_userland_errno_counts={},
+            **dict.fromkeys(('original_service_pid_present_count', 'original_pid_identity_unproven_or_reused_count',
+                'scoped_execution_process_count','owned_listening_port_count','unreadable_proc_count','financial_calls','mutations'), 0),
+            **{k+'_sha256':c.sha_file(v) for k,v in payloads.items()})
+        observed = self.root / '.context/current-os.json'
+        data = dict(status='TERMINAL', native_exit=0, guard_identity_status='PASS',
+                    protected_original_inputs_unchanged=True, native_result=value)
+        c.write(observed, data)
+        import time
+        proof['confirmed_at'] = time.time()
+        proof['execution_quiescence']['old-machine'] = dict(current_os=str(observed), **payloads)
+        proof['files'][str(observed)] = c.sha_file(observed)
+        c.reconcile(state, failure['id'], proof)
+        for changed in [dict(value, unreadable_proc_count=1), dict(value, unreadable_proc_count=False),
+                        {k:v for k,v in value.items() if k != 'observed_at'},
+                        dict(value, observed_at='invalid'), dict(value, observed_at='2100-01-01T00:00:00+00:00'),
+                        dict(value, observed_at='2000-01-01T00:00:00+00:00')]:
+            with self.subTest(changed=changed):
+                data['native_result'] = changed; c.write(observed, data)
+                proof['files'][str(observed)] = c.sha_file(observed)
+                before = copy.deepcopy(state)
+                with self.assertRaises(ValueError):
+                    c.reconcile(state, failure['id'], proof)
+                self.assertEqual(before, state)
+
+    def test_isolated_native_validation_refuses_active_or_reused_or_narrowed_resources_atomically(self):
+        state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
+        original = copy.deepcopy(state)
+        data = c.read(packet); data['rows'][0]['metadata']['state'] = 'started'; c.write(packet, data)
+        proof['files'][str(packet)] = c.sha_file(packet)
+        with self.assertRaisesRegex(ValueError, 'not provider terminal'):
+            c.reconcile(state, failure['id'], proof)
+        self.assertEqual(original, state)
+        data['rows'][0]['metadata']['state'] = 'destroyed'; c.write(packet, data)
+        proof['files'][str(packet)] = c.sha_file(packet)
+        c.reconcile(state, failure['id'], proof)
+        state['source'] = proof['validation_source']
+        request = dict(token='new', source=state['source'], checks=gate['checks'], skips={})
+        for env, changed in [({'CLOUDBENCH_ARCHIVED_REUSE_REQUEST':'old'}, request),
+                             ({}, dict(request, checks=gate['checks'][:-1])),
+                             ({}, dict(request, source=dict(head='e'*40, digest='f'*64)))]:
+            with self.subTest(env=env, changed=changed), self.assertRaises(ValueError):
+                c.isolated_request(state, gate, changed, self.root, env)
 
     def recovered_campaign_state(self):
         import hashlib

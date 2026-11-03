@@ -151,6 +151,92 @@ def recovered_runtime(fleet, owner_token, benches, rows, identities, bound, docu
     need(machines == {row['machine_id'] for row in rows}, 'recovered resource coverage')
 
 
+def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree):
+    """Execution admission only; quarantined archives, finances and resources remain owned."""
+    owner = life['fleet_owner_token']
+    audit = root / '.git/cloudbench-fleet-audits' / owner
+    meta = fields(bound(audit / 'meta'))
+    need(meta.get('fleet_owner_token') == owner and meta.get('run_id') == fleet.name
+         and meta.get('workspace_root') == str(root), 'isolated audit identity')
+    tree(audit)
+    registry = root / '.git/cloudbench-fleet-ownership' / owner
+    if registry.exists():
+        registered = fields(bound(registry / 'meta'))
+        need(all(registered.get(k) == meta.get(k) for k in ('fleet_owner_token', 'run_id', 'workspace_root', 'app'))
+             and registered.get('cleanup_policy') in {'reap', 'retain'}
+             and any((registry / k).is_file() for k in
+                     ('runtime-evidence-unconfirmed', 'guest-cleanup-unconfirmed', 'cold-handoff-outgoing')),
+             'old resources must remain natively quarantined')
+        tree(registry)
+    else:
+        need(meta.get('status') == 'provider-teardown-verified', 'unowned unreleased fleet')
+    processes = subprocess.check_output(['ps', '-ax', '-o', 'pid=,pgid=,stat='], text=True)
+    pid = int(fleet.name.rsplit('-', 1)[-1])
+    need(pid > 1 and not any(int(r.split()[0]) == pid or int(r.split()[1]) == pid
+                            for r in processes.splitlines() if not r.split()[2].startswith('Z')),
+         'old controller still active')
+    rows = [fields(bound(p)) for p in (audit / 'fresh').iterdir()] if (audit / 'fresh').exists() else []
+    need(len({r['machine_id'] for r in rows}) == len(rows), 'duplicate old machine')
+    observations = proof['execution_quiescence']
+    for row in rows:
+        machine, token = row['machine_id'], owner + '-0'
+        need(row.get('fleet_owner_token') == owner and row.get('run_id') == fleet.name
+             and row.get('source') == 'fresh-clone' and row.get('app') == meta['app'], 'old resource custody')
+        evidence = observations[machine]
+        if evidence == {'sealed_native_release': True}:
+            need(not registry.exists() and meta.get('status') == 'provider-teardown-verified'
+                 and row.get('disposition') == 'destroyed-provider-retained', 'native release not sealed')
+            local = fleet / 'teardown-ownership'
+            seal = tree(local)
+            need(tree(audit) == seal and fields(bound(local / 'source-audit'))
+                 == {'path': str(audit), 'sha256': seal}, 'native release seal')
+            release = float(bound(audit / 'provider-teardown-verified.epoch'))
+            need(finite(release) and receipt['started_at'] <= release <= proof['confirmed_at'], 'native release clock')
+        elif 'provider_pair' in evidence:
+            packet = document(evidence['provider_pair'])
+            need(packet.get('endpoint_origin') == 'https://api.machines.dev' and packet.get('app') == meta['app'],
+                 'provider observation origin')
+            pair = [r for r in packet['rows'] if r.get('expected_machine') == machine]
+            need(len(pair) == 2 and {r['kind'] for r in pair} == {'machine', 'volume'}, 'provider pair closure')
+            for observed in pair:
+                need(observed['method'] == 'GET' and observed['http_status'] == 200 and observed['no_retry'] is True
+                     and observed['expected_volume'] == row['volume_id']
+                     and re.fullmatch('[0-9a-f]{64}', observed['response_sha256']), 'provider response identity')
+                value = observed['metadata']
+                if observed['kind'] == 'machine':
+                    need(observed['id'] == value['id'] == machine and value['state'] == 'destroyed'
+                         and value['source_binding'] == {'REF': receipt['source']['head'], 'CLOUDBENCH_RUN_TOKEN': token},
+                         'old execution not provider terminal')
+                else:
+                    need(observed['id'] == value['id'] == row['volume_id']
+                         and value['state'] in {'pending_destroy', 'destroyed'} and value['attached_machine_id'] is None,
+                         'old volume remains attached')
+        else:
+            observed = document(evidence['current_os'])
+            value = observed['native_result']
+            from datetime import datetime
+            observed_at = datetime.fromisoformat(value['observed_at']).timestamp()
+            need(finite(observed_at) and receipt['finished_at'] <= observed_at <= proof['confirmed_at'], 'OS observation clock')
+            need(observed.get('status') == 'TERMINAL' and observed.get('native_exit') == 0
+                 and observed.get('guard_identity_status') == 'PASS'
+                 and observed.get('protected_original_inputs_unchanged') is True
+                 and value.get('kind') == 'exact-original-current-os-read-only'
+                 and value.get('result') == 'QUIESCED_CURRENT_OS' and value.get('identity_guards_pass') is True
+                 and value.get('machine_id') == machine and value.get('guest_run_token') == token
+                 and value.get('source') == receipt['source']['head']
+                 and value.get('driver_current_alive') is False and value.get('socket_scan_readable') is True
+                 and value.get('remote_effective_uid') == 0 and value.get('kernel_exclusion_flag') == 0x00200000
+                 and value.get('unreadable_live_userland_errno_counts') == {}
+                 and all(type(value.get(k)) is int and value[k] == 0 for k in ('original_service_pid_present_count',
+                     'original_pid_identity_unproven_or_reused_count', 'scoped_execution_process_count',
+                     'owned_listening_port_count', 'unreadable_proc_count', 'financial_calls', 'mutations')),
+                 'current original execution quiescence unproven')
+            for key in ('run', 'backend', 'services'):
+                need(hashlib.sha256(bound(evidence[key])).hexdigest() == value[key + '_sha256'], 'OS payload binding')
+        need(registry.exists() or row.get('disposition') == 'destroyed-provider-retained', 'resource not excluded')
+    return {r['machine_id']: r['volume_id'] for r in rows}
+
+
 def validate(receipt, owner, proof):
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
     need(proof.get('kind') == KIND and proof.get('owner') == owner, 'full original owner mismatch')
@@ -289,7 +375,9 @@ def validate(receipt, owner, proof):
         parents[handles[0]] = {'checks': set(request['checks']), 'exit': exit_code}
     participants = {p for p in runs.iterdir() if p.is_dir() and p.name != '_hub'}
     need(set(handles) == participants and all(p.parent == runs and (p / '_batch').is_dir() for p in participants), 'participant closure')
-    retained, audit_seals, recovered = {}, {}, {}
+    isolated = proof.get('purpose') == 'isolated-validation'
+    need(proof.get('purpose') in {None, 'isolated-validation'} and (not isolated or layout == 'campaign-v1'), 'proof purpose')
+    retained, audit_seals, recovered, excluded = {}, {}, {}, {}
     recovery = proof.get('recovered_runtime', {})
     need(isinstance(recovery, dict) and (not recovery or layout == 'campaign-v1'), 'recovery scope')
     from cloudbench_execution_provenance import validate_provenance, validate_task_matrix_binding
@@ -314,6 +402,9 @@ def validate(receipt, owner, proof):
              and (life['controller_exit_code'] == parents[fleet]['exit'] if fleet in parents
                   else life['controller_exit_code'] == 0 and life['status'] == 'verified')
              and life['status'] in {'verified', 'failed'}, 'native terminal lifecycle')
+        if isolated:
+            excluded.update(isolated_execution(fleet, life, root, receipt, proof, bound, document, tree))
+            continue
         audit = fleet / 'teardown-ownership'
         canonical = root / '.git/cloudbench-fleet-audits' / owner_token
         binding = fields(bound(audit / 'source-audit'))
@@ -368,12 +459,30 @@ def validate(receipt, owner, proof):
         retained[str(hub)] = {'path': str(hub), 'sha256': bindings[str(hub)], 'owner': hub_owner,
                              'disposition': meta['hub_disposition']}
         audit_seals[str(audit)] = seal
-    need(set(recovered) == set(recovery), 'recovered fleet closure')
+    need(isolated or set(recovered) == set(recovery), 'recovered fleet closure')
+    if isolated:
+        need(set(proof['execution_quiescence']) == set(excluded), 'execution observation closure')
+        for path in bindings:
+            hub = Path(path)
+            if hub.parent == runs / '_hub' and hub.name.endswith('.owner'):
+                value = fields(bound(hub))
+                need(value.get('runs_root') == str(runs) and value.get('repo_root') == str(root)
+                     and value.get('pid') == value.get('pgid') and value.get('pid_start')
+                     and value.get('owner_token') and value.get('argv_sha256'), 'retained service custody')
+                retained[str(hub)] = {'path': str(hub), 'sha256': bindings[str(hub)], 'owner': value,
+                                      'disposition': 'retained-exact-owner-transfer-required'}
+        need(retained, 'retained service evidence missing')
+        for path in bindings:
+            bound(path)  # Retain and re-hash ALL original debt evidence, including retained Hub owners.
     need(used == set(bindings), 'proof file closure')
     result = {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
             'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
             'participants': sorted(map(str, participants)), 'native_audit_seals': audit_seals,
             'retained_services': [retained[k] for k in sorted(retained)], 'credit_granted': False}
+    if isolated:
+        need(isinstance(proof.get('validation_source'), dict) and set(proof['validation_source']) == {'head', 'digest'}, 'next source')
+        result.update(purpose='isolated-validation', validation_source=proof['validation_source'], excluded_resources=excluded,
+                      obligations_preserved=True, cleanup_complete=False)
     if recovered:
         result['recovered_release_evidence'] = recovered
     return result
@@ -386,6 +495,11 @@ def reconcile(state, occurrence_id, proof):
         gate = failure['gate']
         need(any(g['name'] == gate and g.get('native_cloud') is True for g in state['plan']['gates']), 'native_cloud gate required')
         receipt = latest_receipts(state)[gate]
+        if proof.get('purpose') == 'isolated-validation':
+            candidates = [r for a in state.get('attempts', []) for r in a.get('results', [])
+                          if r.get('gate') == gate and r.get('token') == proof.get('request_token')]
+            need(len(candidates) == 1, 'ambiguous historical receipt')
+            receipt = candidates[0]
         case = failure['check'].split('/', 1)[1]
         need(failure.get('native_result') == 'UNVERIFIED' and not failure.get('complete')
              and receipt.get('complete') is False and receipt['cases'].get(case) == 'UNVERIFIED', 'latest incomplete occurrence required')
