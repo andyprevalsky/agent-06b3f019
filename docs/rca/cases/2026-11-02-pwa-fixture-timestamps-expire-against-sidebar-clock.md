@@ -111,7 +111,7 @@ The two new regressions passed five consecutive runs with identical test bytes
 (10/10 case executions). All 16 original test bodies were also compared by
 TypeScript AST extraction and remained byte-for-byte identical.
 
-Final current-main verification: `cd front-end && npm run test:coverage`
+Historical verification on base `a3c4929f3` plus the repair: `cd front-end && npm run test:coverage`
 returned 0, including TypeScript checking and all configured coverage thresholds,
 with 4,043 tests passing across 249 files,
 from 2026-11-02T18:44:56.298972Z to 18:49:00.516250Z (244.21s process wall time).
@@ -132,7 +132,11 @@ subscriptions, per-agent timers or runtime cost are added.
 
 The user requested an independent NOT_INTRODUCED repair on its own devbox and
 branch, preserving original outcomes/clocks/bounds and all mobile/release
-requirements. PR1580 proceeds independently and does not wait for this work.
+requirements. PR1580 proceeds independently and does not wait for this work. The corrected
+replacement contract requires preserving PR1664, integrating main containing
+PR1580 and PR1674, passing the original four-worker coverage invocation, and
+completing this repair's own deploy through production verification and cleanup.
+The earlier draft-only endpoint is superseded.
 Do not change the originating devbox, start a competing release/cutover, enable
 Rose account-agent flags, alter Freedom, hide failures with skips, or change
 the real four-day old-agent behavior. The origin report corrected an initial
