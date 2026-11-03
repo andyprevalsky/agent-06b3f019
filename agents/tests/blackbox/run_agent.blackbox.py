@@ -74,6 +74,10 @@ async def _run_single_iteration(
     response_model=None,
     on_tokens_override=None,
     check_paused_override=None,
+    check_paused_before_turn_override=None,
+    on_unaccepted_turn_retry_override=None,
+    check_generation_handoff_override=None,
+    on_context_overflow_override=None,
     check_aborted_override=None,
     gpt_token=None,
     gpt_account_id=None,
@@ -231,6 +235,10 @@ async def _run_single_iteration(
             goal_text=goal_text,
             on_tokens=on_tokens_override,
             check_paused=check_paused_override,
+            check_paused_before_turn=check_paused_before_turn_override,
+            on_unaccepted_turn_retry=on_unaccepted_turn_retry_override,
+            check_generation_handoff=check_generation_handoff_override,
+            on_context_overflow=on_context_overflow_override,
             check_aborted=check_aborted_override,
             gpt_token=gpt_token,
             gpt_account_id=gpt_account_id,
@@ -313,6 +321,201 @@ async def test_terminal_abort_stops_before_any_llm_or_tool_work():
     assert checks == ["parent_state", "aborted"]
     assert posted == []
     assert executed == []
+
+
+async def test_browser_budget_wrapup_admits_one_complete_stream_and_normal_verification():
+    from workflows.agent_workflow import AgentWorkflow
+
+    wf = AgentWorkflow()
+    wf._cost_limit_reached = wf._cost_limit_wrapup_pending = True
+    with patch("loop.run_agent.activity.heartbeat"):
+        result, posted, executed = await _run_single_iteration(
+            [{"tool": "attempt_completion"}],
+            [("attempt_completion", "budget-complete", 1.0)],
+            max_iterations=2,
+            skip_verification=False,
+            response_schema={"fields": [{"name": "answer", "type": "str"}]},
+            llm_chunk_texts_sequence=["Returned browser evidence"],
+            check_paused_override=wf._check_paused,
+            check_paused_before_turn_override=wf._check_paused_before_turn,
+            verifier_structured_response={"answer": "Observed browser result"},
+        )
+    assert result["status"] == "completed", result
+    assert result["structured_response"] == {"answer": "Observed browser result"}
+    assert wf._cost_limit_wrapup_consumed
+    assert [call["tool_name"] for call in executed] == ["attempt_completion"]
+    assert any((row.get("metadata") or {}).get("toolStatus") == "FINISHED" for row in posted)
+
+
+async def test_browser_budget_handoff_before_llm_preserves_unused_allowance():
+    from workflows.agent_workflow import AgentWorkflow
+
+    wf = AgentWorkflow()
+    wf._cost_limit_reached = wf._cost_limit_wrapup_pending = True
+    wf.max_iterations = None
+    wf.context_gates = {}
+    handoff = AsyncMock(return_value="next-generation")
+    result, posted, executed = await _run_single_iteration(
+        [{"tool": "attempt_completion"}],
+        [("attempt_completion", "unused-before-handoff", 1.0)],
+        check_paused_override=wf._check_paused,
+        check_paused_before_turn_override=wf._check_paused_before_turn,
+        check_generation_handoff_override=handoff,
+    )
+    assert result["status"] == "generation_handoff", result
+    assert not posted and not executed
+    assert not wf._cost_limit_wrapup_consumed, "handoff spent an allowance without a model call"
+    state = wf._continuation_resume_state(result["context"])
+    restored = AgentWorkflow()
+    restored._restore_deployment_state(state)
+    with patch("loop.run_agent.activity.heartbeat"):
+        completed, _, resumed_tools = await _run_single_iteration(
+            [{"tool": "attempt_completion"}],
+            [("attempt_completion", "after-handoff", 1.0)],
+            max_iterations=2,
+            skip_verification=False,
+            check_paused_override=restored._check_paused,
+            check_paused_before_turn_override=restored._check_paused_before_turn,
+            verifier_structured_response={"answer": "Observed browser result"},
+        )
+    assert completed["status"] == "completed", completed
+    assert restored._cost_limit_wrapup_consumed
+    assert [call["tool_name"] for call in resumed_tools] == ["attempt_completion"]
+
+
+async def test_browser_budget_compaction_before_llm_preserves_unused_allowance():
+    from workflows.agent_workflow import AgentWorkflow
+
+    class ContinuedAsNew(BaseException):
+        pass
+
+    wf = AgentWorkflow()
+    wf._cost_limit_reached = wf._cost_limit_wrapup_pending = True
+
+    async def continue_after_compaction(context):
+        raise ContinuedAsNew()
+
+    with (
+        patch("loop.run_agent._estimate_tokens", side_effect=[200000, 10]),
+        patch(
+            "loop.run_agent._compress_context",
+            new=AsyncMock(return_value=([{"role": "USER", "text": "summary"}], True)),
+        ),
+    ):
+        try:
+            await _run_single_iteration(
+                [{"tool": "attempt_completion"}],
+                [("attempt_completion", "unused-before-compaction", 1.0)],
+                check_paused_override=wf._check_paused,
+                check_paused_before_turn_override=wf._check_paused_before_turn,
+                on_context_overflow_override=continue_after_compaction,
+            )
+        except ContinuedAsNew:
+            pass
+        else:
+            raise AssertionError("fixture did not reach continue-as-new boundary")
+    assert not wf._cost_limit_wrapup_consumed, "compaction spent an allowance without a model call"
+    assert not await wf._check_paused_before_turn()
+    assert wf._cost_limit_wrapup_consumed
+
+
+async def test_browser_budget_preparation_retry_does_not_spend_unused_allowance():
+    from workflows.agent_workflow import AgentWorkflow
+    import loop.run_agent as run_agent_module
+
+    wf = AgentWorkflow()
+    wf._cost_limit_reached = wf._cost_limit_wrapup_pending = True
+    schema_attempts = 0
+    llm_calls = []
+
+    async def current_schema():
+        nonlocal schema_attempts
+        schema_attempts += 1
+        if schema_attempts == 1:
+            raise RuntimeError("transient schema lookup failure")
+        return {"fields": [{"name": "answer", "type": "str"}]}
+
+    async def stop_at_original_cap():
+        wf._cost_limit_reached = wf.is_paused = True
+
+    wf._check_cost_limit = stop_at_original_cap
+    with (
+        patch("loop.run_agent.activity.heartbeat"),
+        patch.object(run_agent_module, "PAUSED_WAIT_FLOOR_SECONDS", 0.0),
+        patch.object(run_agent_module, "MAX_CONSECUTIVE_PAUSED_ITERATIONS", 1),
+    ):
+        result, _, executed = await _run_single_iteration(
+            [{"tool": "attempt_completion"}],
+            [("attempt_completion", "after-preparation-retry", 1.0)],
+            max_iterations=2,
+            skip_verification=False,
+            llm_auth_calls=llm_calls,
+            get_response_schema_override=current_schema,
+            on_unaccepted_turn_retry_override=wf._refund_unaccepted_browser_wrapup_turn,
+            check_paused_override=wf._check_paused,
+            check_paused_before_turn_override=wf._check_paused_before_turn,
+            verifier_structured_response={"answer": "Observed browser result"},
+        )
+    assert result["status"] == "completed", result
+    assert schema_attempts >= 2
+    assert len(llm_calls) == 1
+    assert wf._cost_limit_wrapup_consumed
+    assert [call["tool_name"] for call in executed] == ["attempt_completion"]
+
+
+async def test_browser_budget_accepted_response_failure_does_not_refund_allowance():
+    from workflows.agent_workflow import AgentWorkflow
+    import loop.run_agent as run_agent_module
+
+    wf = AgentWorkflow()
+    wf._cost_limit_reached = wf._cost_limit_wrapup_pending = True
+    refund = MagicMock(wraps=wf._refund_unaccepted_browser_wrapup_turn)
+
+    async def stop_at_original_cap():
+        wf._cost_limit_reached = wf.is_paused = True
+
+    wf._check_cost_limit = stop_at_original_cap
+    with (
+        patch("loop.run_agent.activity.heartbeat"),
+        patch.object(_DummyToolCall, "model_dump", side_effect=RuntimeError("post-response normalization unavailable")),
+        patch.object(run_agent_module, "PAUSED_WAIT_FLOOR_SECONDS", 0.0),
+        patch.object(run_agent_module, "MAX_CONSECUTIVE_PAUSED_ITERATIONS", 1),
+    ):
+        result, _, executed = await _run_single_iteration(
+            [{"tool": "attempt_completion"}],
+            [("attempt_completion", "accepted-before-bookkeeping-failure", 1.0)],
+            max_iterations=5,
+            skip_verification=False,
+            on_unaccepted_turn_retry_override=refund,
+            check_paused_override=wf._check_paused,
+            check_paused_before_turn_override=wf._check_paused_before_turn,
+        )
+    assert result["status"] == "paused", result
+    assert wf._cost_limit_wrapup_consumed
+    assert not executed
+    refund.assert_not_called()
+
+
+async def test_browser_budget_precall_pause_does_not_spend_iteration():
+    admission_checks = 0
+    llm_calls = []
+
+    async def admit_after_pause():
+        nonlocal admission_checks
+        admission_checks += 1
+        return admission_checks == 1
+
+    result, _, executed = await _run_single_iteration(
+        [{"tool": "attempt_completion"}],
+        [("attempt_completion", "after-precall-pause", 1.0)],
+        max_iterations=1,
+        check_paused_override=AsyncMock(return_value=False),
+        check_paused_before_turn_override=admit_after_pause,
+        llm_auth_calls=llm_calls,
+    )
+    assert result["status"] == "completed", result
+    assert len(llm_calls) == 1 and admission_checks == 2
+    assert [call["tool_name"] for call in executed] == ["attempt_completion"]
 
 
 async def test_out_of_credits_state_does_no_llm_or_tool_work():
@@ -4212,6 +4415,12 @@ async def run_all_tests():
 
     print("run-agent blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("browser_budget_wrapup_stream_and_verification", test_browser_budget_wrapup_admits_one_complete_stream_and_normal_verification)
+    await r.record_async("browser_budget_handoff_preserves_unused_allowance", test_browser_budget_handoff_before_llm_preserves_unused_allowance)
+    await r.record_async("browser_budget_compaction_preserves_unused_allowance", test_browser_budget_compaction_before_llm_preserves_unused_allowance)
+    await r.record_async("browser_budget_preparation_retry_preserves_allowance", test_browser_budget_preparation_retry_does_not_spend_unused_allowance)
+    await r.record_async("browser_budget_accepted_failure_keeps_allowance_consumed", test_browser_budget_accepted_response_failure_does_not_refund_allowance)
+    await r.record_async("browser_budget_precall_pause_keeps_iteration", test_browser_budget_precall_pause_does_not_spend_iteration)
     await r.record_async(
         "explore_terminal_handoff_refreshes_stale_pending_snapshot",
         test_explore_terminal_handoff_refreshes_stale_pending_snapshot,

@@ -16407,6 +16407,18 @@ async def test_dom_service_disconnect_stops_browser_session_without_killing_remo
     assert dom.selector_map == {}
 
 
+async def test_dom_service_indicator_completion_racing_disconnect():
+    from browser_indicator_shutdown_cases import check_indicator_completion_racing_disconnect
+
+    await check_indicator_completion_racing_disconnect()
+
+
+async def test_dom_service_real_remote_indicator_shutdown():
+    from browser_indicator_shutdown_cases import check_real_remote_indicator_shutdown
+
+    await check_real_remote_indicator_shutdown()
+
+
 def test_browser_downloads_path_for_provider_kernel_vs_steel():
     """Kernel CDP downloads must land in /tmp/downloads (listed by session_files)."""
     from browser_tools.dom_service import (
@@ -34560,6 +34572,9 @@ async def run_all_tests():
     )
 
     r = BlackboxResult()
+    from browser_navigation_cases import test_browser_user_navigation_history, test_browser_user_navigation_command_binding
+    await r.record_async("browser user navigation real history", test_browser_user_navigation_history)
+    await r.record_async("browser user navigation command binding", test_browser_user_navigation_command_binding)
     await r.record_async(
         "kernel replay stopped before browser session close",
         test_kernel_replay_is_stopped_before_the_browser_session_is_closed,
@@ -36007,6 +36022,14 @@ async def run_all_tests():
     await r.record_async(
         "dom_service_disconnect_stops_session",
         test_dom_service_disconnect_stops_browser_session_without_killing_remote_browser,
+    )
+    await r.record_async(
+        "dom_service_indicator_completion_racing_disconnect",
+        test_dom_service_indicator_completion_racing_disconnect,
+    )
+    await r.record_async(
+        "dom_service_real_remote_indicator_shutdown",
+        test_dom_service_real_remote_indicator_shutdown,
     )
     r.record(
         "browser_downloads_path_for_provider",

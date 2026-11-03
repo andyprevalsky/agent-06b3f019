@@ -3017,10 +3017,15 @@ def test_native_autofill_control_fixture_matches_current_backend_dto():
     assert view["lastOperation"]["errorCode"] is None
 
 
-async def _native_autofill_record_read(history, chosen, receipt):
+async def _native_autofill_record_read(history, chosen, receipt, *, turn_messages=None, model_result=None):
     import copy
     from types import SimpleNamespace
-    await history.record_action(SimpleNamespace(), action=chosen["action"], thinking=chosen.get("thinking"), params=copy.deepcopy(chosen.get("params")), result={"success": True, "operation": copy.deepcopy(receipt)})
+    from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages, _browser_action_tool_call_id
+    result = {"success": True, "operation": copy.deepcopy(receipt)}
+    await history.record_action(SimpleNamespace(), action=chosen["action"], thinking=chosen.get("thinking"), params=copy.deepcopy(chosen.get("params")), result=result)
+    if turn_messages is not None:
+        _append_browser_turn_messages(turn_messages, unified_action=chosen, result=result,
+                                      tool_call_id=_browser_action_tool_call_id(model_result or {}))
 
 
 _NATIVE_AUTOFILL_CONTROL_TASK = "Continue my authorized Apple Account sign-in. Use my already available matching saved credential if possible; ask me for the protected step only when needed."
@@ -3247,7 +3252,8 @@ async def test_native_autofill_control_history_matches_real_serializer():
     chosen = {"action": "phone", "thinking": None, "params": {"mode": "operation", "operation": "screen.text", "args": {}}}
     receipt = {"id": "read-1", "cursor": 1, "operation": "screen.text", "status": "SUCCEEDED", "result": [{"text": "Synthetic"}]}
     history = ActionHistory()
-    await _native_autofill_record_read(history, chosen, receipt)
+    turn_messages = []
+    await _native_autofill_record_read(history, chosen, receipt, turn_messages=turn_messages, model_result={"tool_call_id": "read-tool-1"})
     actual = ActionHistory()
     from types import SimpleNamespace
     await actual.record_action(SimpleNamespace(), action="phone", thinking=None, params=chosen["params"], result={"success": True, "operation": copy.deepcopy(receipt)})
@@ -3256,6 +3262,10 @@ async def test_native_autofill_control_history_matches_real_serializer():
     assert history.get_entries()[0]["result"]["operation"]["id"] == "read-1", "Prior receipt mutated with current observation"
     rendered = _format_action_history(history.get_entries())
     assert "Step 1: phone" in rendered and "Step None" not in rendered
+    assert turn_messages[0]["tool_calls"][0]["id"] == turn_messages[1]["tool_call_id"] == "read-tool-1"
+    assert json.loads(turn_messages[0]["tool_calls"][0]["function"]["arguments"]) == chosen["params"]
+    assert json.loads(turn_messages[1]["content"])["operation"] == history.get_entries()[0]["result"]["operation"]
+    assert json.loads(turn_messages[1]["content"])["operation"]["id"] == "read-1"
 
 
 async def test_native_autofill_real_model_synthetic_controls():

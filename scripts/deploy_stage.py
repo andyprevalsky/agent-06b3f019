@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
-import importlib
+import importlib.util
 import json
 import math
 import os
@@ -18,9 +18,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
 
-# Resolve the sibling module however this file is loaded (script, import, or by path).
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-factory_metadata = importlib.import_module("factory_metadata")
+# File-spec callers do not add this script's directory to module search paths.
+_METADATA_PATH = Path(__file__).resolve().with_name("factory_metadata.py")
+_METADATA_SPEC = importlib.util.spec_from_file_location(
+    "rose_factory_metadata", _METADATA_PATH
+)
+if _METADATA_SPEC is None or _METADATA_SPEC.loader is None:
+    raise ImportError(f"could not load factory metadata module: {_METADATA_PATH}")
+_METADATA_MODULE = importlib.util.module_from_spec(_METADATA_SPEC)
+_METADATA_SPEC.loader.exec_module(_METADATA_MODULE)
+factory_metadata = _METADATA_MODULE
 load_metadata = factory_metadata.load_metadata
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -185,6 +192,12 @@ def start_lifecycle(
         pointer = current_path.with_name(f".{current_path.name}.{os.getpid()}.tmp")
         pointer.write_text(f"{run_id}\n")
         pointer.replace(current_path)
+        # Stage admission ends before review/merge/production. Their factory
+        # events still belong to this deployment until its outcome is emitted.
+        factory_pointer = run_root / "factory-current"
+        pointer = factory_pointer.with_name(f".{factory_pointer.name}.{os.getpid()}.tmp")
+        pointer.write_text(f"{run_id}\n")
+        pointer.replace(factory_pointer)
     return refresh
 
 

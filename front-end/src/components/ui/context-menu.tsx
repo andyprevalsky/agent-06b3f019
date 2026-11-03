@@ -24,12 +24,17 @@ const OPENING_RELEASE_SLOP_PX = 4;
 let openingPress: { x: number; y: number } | null = null;
 
 function armOpeningPress(clientX: number, clientY: number) {
-  openingPress = { x: clientX, y: clientY };
+  const press = { x: clientX, y: clientY };
+  openingPress = press;
   // Capture runs before React's root listener; clear only after items saw it.
-  window.addEventListener('pointerup', () => window.setTimeout(() => (openingPress = null)), {
-    once: true,
-    capture: true,
-  });
+  window.addEventListener(
+    'pointerup',
+    () =>
+      window.setTimeout(() => {
+        if (openingPress === press) openingPress = null;
+      }),
+    { once: true, capture: true },
+  );
 }
 
 function isOpeningRelease(event: React.PointerEvent) {

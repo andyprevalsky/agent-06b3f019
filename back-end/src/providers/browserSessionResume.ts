@@ -13,6 +13,7 @@ import {
 } from './browser/checkpoint';
 import { isConfirmedBrowserEnd, recordEndedLogicalBrowser } from './browser/sessionPersist';
 import { BROWSER_SESSION_MIN_REMAINING_MS } from './steel/sessionLifetime';
+import { connectValidatedBrowser } from './steel/sessionConnection';
 import { assertBrowserInitializationReady } from './browser/initialization';
 import {
   browserResumeScope,
@@ -20,8 +21,8 @@ import {
   withBrowserResumeLifecycle,
 } from './steel/lifecycleClaim';
 import { inspectResumeCandidate } from './browser/resumeRecovery';
+import { withAcknowledgedResumeTransport } from './browser/resumeTransport';
 import { failedHydrationCleanup } from './browser/resumeLifecycle';
-import { withOwnedResumeTransport } from './browser/resumeTransport';
 /* c8 ignore start -- resumeBrowserSession requires Steel SDK */
 import { prisma } from './database';
 import { DEFAULT_GEOLOCATION } from './geoip';
@@ -55,7 +56,7 @@ import {
   withTilionSwitchCarry,
 } from './browserSwitchCarry';
 import { storedBrowserProvider } from './browser/types';
-import { browserProviderEnabled, browserUseEnabled } from './browser/config';
+import { browserUseEnabled } from './browser/config';
 import {
   findPasswords,
   findUserSettings,
@@ -78,37 +79,17 @@ import {
 
 const log = createLogger('BrowserSessionResume');
 
-/** Provider operations behind resume/rotate_ip, injectable for persistence tests. */
-export interface BrowserSessionResumeDependencies {
-  resumeSession: typeof resumeSession;
-  rotateProxy: typeof rotateProxy;
-  injectUserData: typeof injectUserData;
-  closeSession: typeof closeSession;
-  getBrowserCaptchaTelemetry: typeof getBrowserCaptchaTelemetry;
-  /** Writes worker-carried state into a non-Tilion replacement (defaults to the real restore). */
-  restoreCarriedState?: typeof restoreTilionBrowserState;
-  /** Whether a Tilion session is still running (defaults to Tilion /status). */
-  tilionSessionLive?: (sessionId: string) => Promise<boolean>;
-}
-
-/**
- * Worker-captured browser state (cookies, localStorage, IndexedDB; Playwright
- * storageState shape). Tilion admits one CDP client, so the backend never
- * harvests a live Tilion session itself: the worker's capture is the state a
- * Tilion replacement carries.
- */
-export interface BrowserStateCarry {
-  carriedState?: TilionCarriedState;
-}
-
-/** Provider options for a replacement; a non-literal so providers ignoring the carry still type-check. */
-function replacementOptions(carry: BrowserStateCarry) {
-  const options: { keepValidationConnection: true; carriedState?: TilionCarriedState } = {
-    keepValidationConnection: true,
-  };
-  if (carry.carriedState !== undefined) options.carriedState = carry.carriedState;
-  return options;
-}
+import {
+  retryAcknowledgedHydration,
+  assembleRotationResponse,
+  reserveRotation,
+  replacementOptions,
+  tilionRotationAvailable,
+  withTimeout,
+  type BrowserSessionResumeDependencies,
+  type BrowserStateCarry,
+} from './browser/resumeOps';
+export type { BrowserSessionResumeDependencies, BrowserStateCarry } from './browser/resumeOps';
 
 const defaultResumeDependencies: BrowserSessionResumeDependencies = {
   resumeSession,
@@ -117,28 +98,6 @@ const defaultResumeDependencies: BrowserSessionResumeDependencies = {
   closeSession,
   getBrowserCaptchaTelemetry,
 };
-
-/** Tilion kill switch: off means no rotation step ever lands on a new Tilion session. */
-function tilionRotationAvailable(): boolean {
-  return browserProviderEnabled('BROWSER_AGENT_TILION_ENABLED', true);
-}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  let timeout: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error('CAPTCHA telemetry request timed out')),
-          timeoutMs
-        );
-      }),
-    ]);
-  } finally {
-    if (timeout) clearTimeout(timeout);
-  }
-}
 
 type InjectionResult = Awaited<ReturnType<typeof injectUserData>>;
 
@@ -239,6 +198,18 @@ export async function resumeBrowserSession(
     return resume();
   return withBrowserResumeLifecycle(taskId, {
     readBinding: read,
+    retryHydration:
+      initial.logicalOwnerKey && options.carriedState === undefined
+        ? (nativeId, targets) =>
+            retryAcknowledgedHydration(
+              read,
+              nativeId,
+              targets,
+              connectValidatedBrowser,
+              (result, targets) =>
+                assembleResumeResponse(taskId, result, dependencies, undefined, targets)
+            )
+        : undefined,
     compatibility: options.forceFreshProfile ? 'fresh' : 'default',
     reuseCompleted: !options.forceFreshProfile,
     sourceEnded: () => sourceEnded,
@@ -299,28 +270,40 @@ async function assembleResumeResponse(
   taskId: string,
   result: RecreatedSession,
   dependencies: BrowserSessionResumeDependencies,
-  carriedState?: TilionCarriedState
+  carriedState?: TilionCarriedState,
+  recoveryTargets?: Array<{ targetId: string; urlHash: string }>
 ) {
-  // Tilion keeps the same browser and its worker-owned CDP connection.
-  if (result.profileSource === 'tilion_rotated_in_place')
-    return assembleResumeResponseWithTransport(taskId, result, dependencies, true);
-  return withOwnedResumeTransport(result, async () => {
-    const response = await assembleResumeResponseWithTransport(taskId, result, dependencies);
-    await applyCarriedStateToReplacement(
-      taskId,
-      result,
-      dependencies.restoreCarriedState ?? restoreTilionBrowserState,
-      carriedState
-    );
-    return response;
-  });
+  return withAcknowledgedResumeTransport(
+    result,
+    async () => {
+      const response = await assembleResumeResponseWithTransport(
+        taskId,
+        result,
+        dependencies,
+        false,
+        recoveryTargets
+      );
+      await applyCarriedStateToReplacement(
+        taskId,
+        result,
+        dependencies.restoreCarriedState ?? restoreTilionBrowserState,
+        carriedState
+      );
+      return response;
+    },
+    () => {
+      // The retry receipt binds the encrypted checkpoint, not newer worker-carried state.
+      if (carriedState === undefined) browserResumeScope()?.hydrationTransportClosed();
+    }
+  );
 }
 
 async function assembleResumeResponseWithTransport(
   taskId: string,
   result: RecreatedSession,
   dependencies: BrowserSessionResumeDependencies,
-  readOnly = false
+  readOnly = false,
+  recoveryTargets?: Array<{ targetId: string; urlHash: string }>
 ) {
   const session = await prisma.browserSession.findUnique({
     where: { id: taskId },
@@ -355,13 +338,14 @@ async function assembleResumeResponseWithTransport(
     }
     await browserResumeScope()?.beforeHydration(result.sessionId);
   }
-  // An in-place exit rotation keeps the same browser (the worker holds its only CDP socket), so
-  // there is no replacement to restore the checkpoint into and no transport to validate.
-  const sameBrowser = result.ipRotation !== undefined;
-  if (!readOnly && session?.logicalOwnerKey && !sameBrowser) {
+  if (!readOnly && session?.logicalOwnerKey) {
     if (!result.validationBrowser)
       throw new Error('Logical browser restore requires validated transport');
-    await restoreLogicalBrowserCheckpoint(taskId, result.validationBrowser);
+    await restoreLogicalBrowserCheckpoint(taskId, result.validationBrowser, {
+      targets: recoveryTargets,
+      assertOwned: recoveryTargets ? browserResumeScope()?.assertHydrationOwned : undefined,
+      prepared: browserResumeScope()?.recordHydrationTargets,
+    });
   }
   if (session?.context.userId !== undefined) {
     if (
@@ -418,7 +402,7 @@ async function assembleResumeResponseWithTransport(
     throw new Error('Resumed browser ended before readiness');
 
   if (!readOnly) await browserResumeScope()?.assertOwned();
-  if (!readOnly && session?.logicalOwnerKey && !sameBrowser && !browserResumeScope()) {
+  if (!readOnly && session?.logicalOwnerKey && !browserResumeScope()) {
     const ready = await prisma.browserSession.updateMany({
       where: { id: taskId, sessionId: result.sessionId, status: 'PAUSED' },
       data: { status: 'ACTIVE' },
@@ -483,24 +467,7 @@ export async function rotateBrowserProxy(
   // reserved. User calls also constrain the write to their BrowserContext; an
   // ownership mismatch deliberately looks the same as a missing task.
   const ownerUserId = userId ?? null;
-  const reserved = await prisma.$queryRaw<Array<{ proxyRotationCount: number; provider: string }>>`
-    UPDATE "BrowserSession"
-       SET "proxyRotationCount" = "proxyRotationCount" + 1,
-           "currentUrl" = COALESCE(${currentUrl ?? null}::text, "currentUrl")
-     WHERE "id" = ${taskId}
-       AND "proxyRotationCount" < ${ROTATION_CAP}
-       AND (
-         ${ownerUserId}::text IS NULL
-         OR EXISTS (
-           SELECT 1
-             FROM "BrowserContext"
-            WHERE "BrowserContext"."id" = "BrowserSession"."contextId"
-              AND "BrowserContext"."userId" = ${ownerUserId}
-         )
-       )
-    RETURNING "proxyRotationCount", "provider"
-  `;
-
+  const reserved = await reserveRotation(taskId, ownerUserId, currentUrl, ROTATION_CAP);
   const rotationsUsed = reserved[0]?.proxyRotationCount;
   if (rotationsUsed === undefined) {
     const session = await prisma.browserSession.findFirst({
@@ -623,11 +590,13 @@ export async function rotateBrowserProxy(
     });
     throw error;
   }
-  const response = await assembleResumeResponse(
+  const response = await assembleRotationResponse(
     taskId,
     result,
-    dependencies,
-    effectiveCarry.carriedState
+    reserved[0]!,
+    userId,
+    () => assembleResumeResponse(taskId, result, dependencies, effectiveCarry.carriedState),
+    () => assembleResumeResponseWithTransport(taskId, result, dependencies, true)
   );
   // The paused snapshot belonged to the replaced Tilion session; it is consumed.
   if (carryFromPausedState) await clearPausedState({ taskId });

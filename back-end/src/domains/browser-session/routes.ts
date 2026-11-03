@@ -42,6 +42,7 @@ import { registerBrowserInitRoute } from './routes.init';
 import { registerBrowserCredentialRoutes } from './routes.credentials';
 import { registerBrowserDataRoutes, respondToTilionRefusal } from './routes.files';
 import { registerBrowserRotationRoute } from './routes.rotation';
+import { registerBrowserNavigationRoutes } from './routes.navigation';
 import { registerBrowserControlRoutes } from './routes.control';
 import { registerBrowserResumeRoute } from './routes.resume';
 import { registerBrowserChallengeRecoveryRoutes } from './routes.challenge-recovery';
@@ -312,6 +313,7 @@ registerBrowserDataRoutes(router);
 registerBrowserChallengeRecoveryRoutes(router);
 registerBrowserRotationRoute(router);
 registerBrowserControlRoutes(router);
+registerBrowserNavigationRoutes(router);
 registerBrowserResumeRoute(router);
 registerBrowserCredentialRoutes(router);
 
