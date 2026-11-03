@@ -1782,7 +1782,22 @@ class RoseClient:
                         token_error in ("auth_error", "rate_limit") or is_flash_agent_call(pool, call_site)
                     ) and direct_auth.max_rotations > 0
                 can_rotate = within_budget and direct_auth.fetch_fresh is not None and remaining() > 0
-                fresh = await direct_auth.fetch_fresh(direct_auth.user_id) if can_rotate else None
+                fresh = None
+                if can_rotate:
+                    try:
+                        fresh = await direct_auth.fetch_fresh(direct_auth.user_id)
+                    except Exception as fetch_error:
+                        # Acquisition is best-effort; keep the original token
+                        # failure and continue to the remaining fallback routes.
+                        # Do not log exception text: backend errors can contain
+                        # credential-bearing request URLs or response bodies.
+                        logger.warning(
+                            "rose.complete.direct_auth.fetch_fresh_failed",
+                            request_id=rid,
+                            agent_id=agent_id,
+                            call_site=call_site,
+                            error_type=type(fetch_error).__name__,
+                        )
                 if (fresh is None or fresh.token in tried_tokens) and is_flash_agent_call(pool, call_site):
                     if (
                         not _exclude_anthropic_family

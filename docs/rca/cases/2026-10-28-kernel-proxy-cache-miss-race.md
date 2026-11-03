@@ -101,3 +101,11 @@ remaining issues and including them in PR #1634.
 A unique cache row only chooses a winner after external effects have happened.
 Coordinate cache misses before provisioning, and keep authorization failures
 separate from geographic inventory failures.
+
+## November 3 recurrence: wait for the complete valid holder
+
+Final review5748355636 finding4451807261 showed the45-second waiter could reject while a valid holder was still within its existing10-second list plus45-second create plus5-second transaction overhead. The coordination wait is now derived from the unchanged60-second transaction and2-second acquisition budgets. A final cache read observes a commit landing at the wait boundary; it cannot allocate a new proxy. The global one-connection fill cap, same-key coalescing, provider request windows and typed non-relaxable timeout remain intact.
+
+The same actual-module dependency-fake test failed before and passed after. Two independently loaded modules model separate workers: a55-second and full60-second holder each produce one remote allocation reused by four waiters. Boundary commit succeeds; absent cache stays a typed timeout. This is deterministic mechanism proof, not live provider or PostgreSQL scheduling evidence. Exact registered helper and receipts: `nov3-final-review-fixes/backend/manifest.json`. Integrated owners are recorded below when complete.
+
+Integrated verification: admin-health, code-sessions, cli-login and repo-onboarding all passed in the same four-domain command (artifact1793691277-2805897-17819). Existing six-process Kernel local-DB unit passed with one shared remote allocation. Backend typecheck and scoped lint passed. Full new deployment gates and production verification remain pending.

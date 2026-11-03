@@ -153,16 +153,23 @@ function projectLine(login) {
     : "This login can set up any of your Rose projects.";
 }
 
+function shellWord(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
+}
+
 function suggestedName(capture) {
-  return JSON.stringify(capture?.root ? basename(capture.root) : "<name>");
+  return capture?.root
+    ? shellWord(basename(capture.root))
+    : JSON.stringify("<name>");
 }
 
 function projectFlag(login, capture) {
-  return `--project ${login.project ? login.project.id : suggestedName(capture)}`;
+  return `--project ${login.project ? shellWord(login.project.id) : suggestedName(capture)}`;
 }
 
 /** The step-by-step instructions the coding agent follows (printed after login). */
 export function agentGuide({ login, capture, cli = "rose", path }) {
+  cli = shellWord(cli);
   const flag = projectFlag(login, capture);
   const remote = capture?.manifest?.git?.remoteUrl ?? "no git remote";
   const step2 = login.project
@@ -226,6 +233,7 @@ export function agentGuide({ login, capture, cli = "rose", path }) {
 
 /** Remote state for `agent-init status`: which stage the setup is in and what to do next. */
 export async function setupStatus({ call, login, capture, projectName, cli }) {
+  cli = shellWord(cli);
   const checkout = capture
     ? {
         root: capture.root,
@@ -253,7 +261,7 @@ export async function setupStatus({ call, login, capture, projectName, cli }) {
       checkout,
       next: wanted
         ? "The bound project no longer exists; ask the user for a fresh setup prompt."
-        : `Confirm the project name with the user, then (after approval) run: ${cli} push --project ${JSON.stringify(projectName)}`,
+        : `Confirm the project name with the user, then (after approval) run: ${cli} push --project ${shellWord(projectName)}`,
     };
   }
   const { envFiles } = await call(
@@ -272,7 +280,7 @@ export async function setupStatus({ call, login, capture, projectName, cli }) {
       ? "Setup is complete. Tell the user the project is ready in Rose."
       : stage === "env_incomplete"
         ? `Upload the missing files after the user approves: ${missing.join(", ")}`
-        : `List the env files for the user, get approval, then run: ${cli} push --project ${project.id}`;
+        : `List the env files for the user, get approval, then run: ${cli} push --project ${shellWord(project.id)}`;
   return {
     stage,
     login: { project: login.project, expiresAt: login.expiresAt },

@@ -5,10 +5,79 @@ import { Sandbox } from 'e2b';
 import { prisma } from '../../providers/database';
 import { releaseSandboxAfterFailedStart } from '../../providers/e2bCodeSessionSandbox';
 import { registerFailedProviderRollbackCases } from './code-sessions-failed-provider-rollback.cases';
+import { CodeAgentCredentialError } from '../../providers/claudeCodeSandboxAuth';
 import { createWithCodeSession } from '../../providers/codeSessions/spawn';
 
 export function registerFailedStartPauseCases(userId: string, agentId: string) {
   registerFailedProviderRollbackCases();
+  for (const switched of [true, false]) {
+    test(`original start error survives ${switched ? 'rollback kill' : 'pause write'} failure`, async (t) => {
+      const seed = await prisma.codeSession.create({
+        data: {
+          userId,
+          rootAgentId: agentId,
+          ownerAgentId: agentId,
+          repoKey: '',
+          codeProvider: switched ? 'claude' : 'codex',
+          state: 'PAUSED',
+        },
+      });
+      const original = new CodeAgentCredentialError(
+        'Cannot start code session',
+        'fixture credentials'
+      );
+      const cleanupError = new Error('fixture cleanup rejected');
+      const sandboxId = `failed-revert-${randomUUID()}`;
+      const originalUpdate = prisma.codeSession.updateMany;
+      const update = originalUpdate.bind(prisma.codeSession);
+      let failingPause = false;
+      prisma.codeSession.updateMany = (async (...args: Parameters<typeof update>) => {
+        if (failingPause) throw cleanupError;
+        return update(...args);
+      }) as typeof originalUpdate;
+      t.mock.method(Sandbox, 'kill', async () => {
+        throw cleanupError;
+      });
+      try {
+        await assert.rejects(
+          createWithCodeSession(
+            {
+              userId,
+              agentId,
+              repoUrl: null,
+              codeProvider: 'codex',
+              codeSessionId: seed.id,
+            },
+            async (session) => {
+              assert(session);
+              if (switched) {
+                await update({
+                  where: { id: seed.id },
+                  data: {
+                    state: 'ACTIVE',
+                    sandboxId,
+                    sandboxKind: 'e2b',
+                  },
+                });
+              } else failingPause = true;
+              throw original;
+            }
+          ),
+          (error: unknown) => error === original
+        );
+        const held = await prisma.codeSession.findUniqueOrThrow({ where: { id: seed.id } });
+        assert.equal(held.codeProvider, 'codex');
+        if (switched) {
+          assert.equal(held.sandboxId, sandboxId);
+          assert.match(held.leaseOwner ?? '', /^provider-revert:/);
+        } else assert.notEqual(held.leaseOwner, null);
+      } finally {
+        prisma.codeSession.updateMany = originalUpdate;
+        failingPause = false;
+        await prisma.codeSession.delete({ where: { id: seed.id } });
+      }
+    });
+  }
   test('confirmed switched native pause retains custody through outer rollback', async (t) => {
     const seed = await prisma.codeSession.create({
       data: {

@@ -72,3 +72,11 @@ Cover every actual ledger model identity with explicit API-equivalent rate tests
 ## Integrated verification
 
 The same normal three-domain owner command failed on the original runtime and passed after the repair: admin-health9/9, maintenance-settings7/7 and maintenance15/15. The API-equivalent regression is part of the normal admin-health suite. See `nov3-review-fixes/owning-results.json` for exact artifacts. Full release gates remain required.
+
+## November 3 recurrence: explicit Luna Foundry identity
+
+Final review5748355636 finding4451807258 exposed the sibling missing key `gpt-6-luna-foundry`. The actual cost calculation reported input0 instead of0.10 for one million tokens. The explicit key now uses standard short-context API-equivalent input0.10/output0.50/read0.01/write0.125. Microsoft publishes input/output/read; write is the shared documented API-equivalent convention, not verified regional invoice pricing. Unknown Foundry identities remain unpriced and the zero-LLM-cost scenario is unchanged.
+
+The same actual-module test failed before and passed after. The permanent existing admin-health case covers all four buckets. Exact private before/after receipts and source hash are in `nov3-final-review-fixes/backend/manifest.json`. Integrated owner validation is recorded below when complete.
+
+Integrated verification: admin-health, code-sessions, cli-login and repo-onboarding all passed in the same four-domain command (artifact1793691277-2805897-17819). Existing six-process Kernel local-DB unit passed with one shared remote allocation. Backend typecheck and scoped lint passed. Full new deployment gates and production verification remain pending.

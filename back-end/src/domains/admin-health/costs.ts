@@ -123,6 +123,10 @@ const MODEL_RATES: Record<string, ModelRates> = {
   // Keep its identity explicit rather than rewriting arbitrary Foundry ids.
   // https://devblogs.microsoft.com/foundry/whats-new-in-microsoft-foundry-september-2026/
   'gpt-6.1-sol-foundry': { ...openAi(2, 10, 1.25), cacheReadMultiplier: 0.05 },
+  // Global Standard short-context API equivalent, not regional invoice pricing.
+  // https://devblogs.microsoft.com/foundry/whats-new-in-microsoft-foundry-september-2026/
+  // Cache writes use the model's documented 1.25x API-equivalent convention.
+  'gpt-6-luna-foundry': openAi(0.1, 0.5, 1.25),
   // Standard API-equivalent Terra rates (30-minute cache writes), not actual
   // speed/long-context/retention-adjusted charges. Published by both routes:
   // https://developers.openai.com/api/docs/models/gpt-6.1-terra

@@ -332,7 +332,7 @@ test('agent-init exchanges the code, saves it 0600 outside the repo and prints t
     assert.match(result.stdout, /names only/);
     assert.match(result.stdout, /Wait for\s+an explicit yes/);
     assert.match(result.stdout, /Fixture" only/);
-    assert.match(result.stdout, /push --project 11111111-2222-4333-8444-555555555555/);
+    assert.match(result.stdout, /push --project '11111111-2222-4333-8444-555555555555'/);
     assert.deepEqual(seen(), ['POST /api/projects/cli-login-codes/exchange ']);
 
     const again = await agentInit(dir, api, configDir);

@@ -143,3 +143,7 @@ Keyword-only orchestration contracts need a permanent call-site/signature test.
 Testing the callee in isolation cannot catch a stale keyword in a large live
 handler, and that drift converts a correctly detected recovery condition into a
 runtime-only crash.
+
+## November 3 signature-drift recurrence in the Foundry test consumer
+
+Review5748355636 finding4451807236 identified another removed-keyword consumer: foundry_shared_cooldown_fixture passed provider_fast_mode=True to foundry_complete. The fixture now passes speed="fast" and the registered regression executes its actual main, real completion/parser and service-tier builder through the existing mock transport. Before TypeError; after exact priority tier and expected served response. Full Rose domain289/289 passes. This does not change production model or speed defaults. Detailed original/intermediate diagnostics and private proof are retained in nov3-final-review-fixes/python-cli/frozen-v2-a1feecd8.

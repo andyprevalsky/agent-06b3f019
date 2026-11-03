@@ -364,7 +364,7 @@ test('real CLI: agent-init stores the credential 0600 outside the repo; push use
   assert(!login.stdout.includes(secret), 'stdout never shows env values');
   assert(login.stdout.includes('FIXTURE_TOKEN') === false, 'guide does not dump variables');
   assert(/APPROVAL: ask before uploading secrets/.test(login.stdout), 'approval step printed');
-  assert(login.stdout.includes(`push --project ${project.id}`), 'push targets the bound project');
+  assert(login.stdout.includes(`push --project '${project.id}'`), 'push targets the bound project');
 
   const push = spawnSync(process.execPath, [ROSE_SYNC, 'push', '--dir', repo, '--json'], {
     env,
@@ -459,4 +459,12 @@ test('rate limit: distributed failures retain per-client denial without blocking
     alerts.every((line) => !line.includes('distributed-')),
     'the warning carries counters, never client keys'
   );
+});
+
+test('agent setup commands preserve literal project and executable shell words', async () => {
+  const casesPath = join(__dirname, 'cli-login-quoting.cases.mjs');
+  const { verifyAgentInitShellWords } = await import(casesPath);
+  const modulePath = join(REPO_ROOT, 'scripts/lib/rose-sync/agent-init.mjs');
+  await verifyAgentInitShellWords(modulePath, false);
+  await verifyAgentInitShellWords(modulePath, true);
 });

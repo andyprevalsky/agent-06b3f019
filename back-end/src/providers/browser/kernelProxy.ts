@@ -231,7 +231,11 @@ export function selectReusableKernelProxy(
 }
 
 const inFlightProxyConfigs = new Map<string, Promise<ResolvedKernelProxy>>();
-const PROXY_REUSE_WAIT_MS = KERNEL_CREATE_REQUEST_OPTIONS.timeout;
+const PROXY_FILL_TRANSACTION_MS = 10_000 + KERNEL_CREATE_REQUEST_OPTIONS.timeout + 5_000;
+const PROXY_FILL_ACQUIRE_MS = 2_000;
+// A valid list+create+commit can outlive the create request alone. Wait for the
+// existing holder's whole bounded transaction, including pool acquisition.
+const PROXY_REUSE_WAIT_MS = PROXY_FILL_ACQUIRE_MS + PROXY_FILL_TRANSACTION_MS;
 
 export async function getOrCreateKernelProxy(
   client: Kernel,
@@ -278,11 +282,17 @@ async function resolveKernelProxy(
         if (cached !== null) return resolvedProxy(candidate, cached);
         return provisionKernelProxy(client, candidate, tx.browserProviderProxy);
       },
-      { maxWait: 2_000, timeout: 10_000 + KERNEL_CREATE_REQUEST_OPTIONS.timeout + 5_000 }
+      { maxWait: PROXY_FILL_ACQUIRE_MS, timeout: PROXY_FILL_TRANSACTION_MS }
     );
     if (resolved !== undefined) return resolved;
     await delay(Math.min(100, Math.max(0, deadline - Date.now())));
   }
+  // The holder may commit exactly as the final sleep reaches the deadline.
+  // Observe that completed fill once more; do not allocate after the deadline.
+  const committed = await prisma.browserProviderProxy.findUnique({
+    where: { provider_proxyKey: { provider: 'kernel', proxyKey: candidate.proxyKey } },
+  });
+  if (committed !== null) return resolvedProxy(candidate, committed);
   throw new KernelProxyReuseTimeoutError(
     `Timed out waiting for Kernel proxy configuration reuse: ${candidate.proxyKey}`
   );

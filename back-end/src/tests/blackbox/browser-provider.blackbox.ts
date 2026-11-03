@@ -6,7 +6,7 @@ import nodeAssert from 'node:assert/strict';
 import { tilionContractCases } from './browser-provider.tilion-contract.support';
 import { assertBrowserUseMissingHealth } from './browser-provider.browser-use-health.support';
 import { assertSteelProfileReplacementLifecycle } from './browser-provider.steel-profile-lifecycle.support';
-import { assertKernelProxyHealthFallback } from './browser-provider.kernel-health.support';
+import { kernelCoordinationCases } from './browser-provider.kernel-coordination.cases';
 import { createSessionWithContextUsingDependencies } from '../../providers/browser';
 import { computeGrantBrowserProvider } from '../../domains/compute-grants/config';
 import { selectedBrowserProvider } from '../../providers/browser/config';
@@ -69,10 +69,7 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     'Browser Use missing health is terminal, while other failures remain errors',
     assertBrowserUseMissingHealth,
   ],
-  [
-    'Kernel proxy health errors preserve bounded geo fallback and cache custody',
-    assertKernelProxyHealthFallback,
-  ],
+  ...kernelCoordinationCases,
   [
     'Steel first-profile replacement preserves its full binding and the source on failure',
     assertSteelProfileReplacementLifecycle,

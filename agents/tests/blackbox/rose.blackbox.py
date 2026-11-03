@@ -12629,6 +12629,14 @@ async def test_waterfall_logs_structured_exclusion_reason_separately_from_cut_of
 async def run_all_tests():
     print("rose blackbox tests:")
     r = BlackboxResult()
+    from rose_final_review_cases import (
+        test_fetch_fresh_failure_falls_back_and_cancel_propagates,
+        test_foundry_fixture_uses_current_speed_contract,
+        test_rotation_success_budget_and_cancel_controls,
+    )
+    await r.record_async("fetch_fresh_error_fallback_cancel", test_fetch_fresh_failure_falls_back_and_cancel_propagates)
+    await r.record_async("foundry_shared_fixture_speed_contract", test_foundry_fixture_uses_current_speed_contract)
+    await r.record_async("fetch_fresh_success_budget_cancel", test_rotation_success_budget_and_cancel_controls)
     await r.record_async("ultra_foundry_pinned_production_model", test_ultra_foundry_pinned_production_model)
     await r.record_async("rose_local_loopback_no_fallback", test_rose_local_loopback_and_no_fallback)
     await r.record_async(

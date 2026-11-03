@@ -173,14 +173,26 @@ export async function createWithCodeSession<
         switchedFrom,
         codeSession.leaseOwner,
         (id) => Sandbox.kill(id, { apiKey: process.env.E2B_API_KEY }).then(() => undefined)
-      );
+      ).catch((cleanupError: unknown) => {
+        log.error('Provider switch rollback failed; retaining the original start error', {
+          codeSessionId: codeSession?.id,
+          startError: error instanceof Error ? error.message : String(error),
+          cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        });
+      });
     }
     if (
       codeSession !== null &&
       switchedFrom === null &&
       !(error instanceof CodeSessionPauseUnconfirmedError)
     ) {
-      await markPaused(codeSession.id);
+      await markPaused(codeSession.id).catch((cleanupError: unknown) => {
+        log.error('Failed-start pause failed; retaining the original start error', {
+          codeSessionId: codeSession?.id,
+          startError: error instanceof Error ? error.message : String(error),
+          cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        });
+      });
     }
     throw error;
   }
