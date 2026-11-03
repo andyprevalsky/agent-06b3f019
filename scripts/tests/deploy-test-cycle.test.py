@@ -228,6 +228,12 @@ class Cycle(unittest.TestCase):
         result = c.execute(cloud, self.state, self.directory, self.root, local_failure=failed)
         self.assertEqual('PASS', result['status']); self.assertTrue(result['executed'])
         self.assertFalse(result['cancelled']); self.assertFalse(c.CANCEL.is_set())
+        # Preparation/receipt bookkeeping consumes the same deadline too, without a late child launch.
+        delayed = dict(second, name='delayed', checks=['delayed'], timeout_seconds=.04)
+        with patch.object(c, 'revalidate_standing_skips', side_effect=lambda _: time.sleep(.08)), \
+                patch.object(c, 'run_command') as launch:
+            late = c.execute(delayed, self.state, self.directory, self.root)
+        self.assertFalse(late['executed']); self.assertTrue(late['timed_out']); launch.assert_not_called()
 
     def test_lingering_native_supervisor_blocks_queued_local(self):
         import time

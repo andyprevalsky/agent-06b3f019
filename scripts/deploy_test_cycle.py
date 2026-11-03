@@ -325,7 +325,7 @@ def run_with_local_slot(gate: dict, root: Path, admission: dict, *, operation=No
     deadline = None if timeout is None else queued + timeout
     lock_path = root / '.context/native-worker-admission.lock'
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    admission.update(lock=str(lock_path), original_budget_seconds=timeout, started=False)
+    admission.update(lock=str(lock_path), original_budget_seconds=timeout, deadline_monotonic=deadline, started=False)
     with lock_path.open('a') as lock:
         while True:
             remaining = None if deadline is None else deadline - time.monotonic()
@@ -421,6 +421,11 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     host_admission = {} if host_admission is None else host_admission
     with (folder / "output.log").open("wb") as output, (folder / 'stderr.log').open('wb') as stderr:
         try:
+            if host_admission.get('deadline_monotonic') is not None:
+                host_timeout = host_admission['deadline_monotonic'] - time.monotonic()
+                if host_timeout <= 0:
+                    host_admission.update(started=False, timed_out=True,
+                                          reason='existing deadline exhausted before local worker launch')
             if host_admission.get('started') is False:
                 code, timed_out, cancelled, lingering = (None, host_admission.get('timed_out', False),
                                                        host_admission.get('cancelled', False), False)
