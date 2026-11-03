@@ -23,6 +23,8 @@ sources:
   - PR #1299
   - fleet run capability-stability-20260911135448-5408
   - fleet run 20260911-065448-5845
+  - commit cf8bc97262fb069b615bbdd17e18dfb206649b33 (November 3 repair baseline)
+  - commit fb4fef6ac50a29afd06520d398f6b9c725925313 (retained November 3 failure)
 repro: scripts/tests/fleet-stability-cleanup.test.py
 status: open
 ---
@@ -375,3 +377,83 @@ an explicit failed-retained receipt. A workload exit, evidence publication
 failure, or signal is not resource teardown. Tests must observe the external
 resource ledger and process boundary before final status; merely asserting
 that a cleanup callback exists would miss this failure.
+
+### November 3 native delimiter-timeout completion recurrence
+
+The retained full structural invocation at `fb4fef6ac50a29afd06520d398f6b9c725925313`
+failed its existing optional-artifact fixture after canonical body success,
+verified cleanup and `controller.exit` bytes `30 0a`. Its parent emitted
+`proof supervisor exited without a terminal status`. The original packet is
+retained privately on the independent repair devbox with SHA256
+`9f7b450c34002cde4f0855296fd7cf17ac3507477f887134c65dc2675e67f060`.
+Historical anonymous-pipe bytes and read-return values were not captured;
+that occurrence's exact protocol trigger remains **UNKNOWN**. Neither an
+unchanged focused pass nor an assumed absent/empty file identifies it.
+The inherited `Gate: NOT_INTRODUCED` compares `9e25b6e006b9fd7f3f2d64b24f2d44a81772ece0`
+to the failed source and establishes introduction only; the assigned repair
+remained owned through validation and deployment.
+
+Archive searches used the literal terminal-status error and `controller
+completion anonymous pipe read`. This is an uncovered sibling of the earlier
+completion-reader repair, separate from optional artifact setup/tee coupling.
+The critical path is body EXIT publication -> anonymous pipe -> timed Bash
+read -> frame validation -> EOF -> pipeline wait -> supervisor exit.
+
+A native Linux x86_64 syscall scheduler demonstrated the remaining defect.
+It traces only a newly launched fixture root, never forked children or an
+existing process. After the kernel returns the real newline byte, it leaves
+the root descheduled for 0.15 seconds. The original `read -n 4 -t .1`
+then returns 142 with only the digits: it consumed and stripped the delimiter
+before its deadline expired. The parser inferred delimiters from return zero,
+so the next EOF rejected those digits as incomplete. No pipe byte, read return
+or producer status is synthesized. A no-hold control passes. This proves a
+native reachable defect at the owning boundary; it does not reconstruct the
+historical schedule.
+
+The permanent existing-suite command is `python3
+scripts/tests/fleet-stability-cleanup.test.py
+FleetFailureCleanup.test_native_delimiter_control_preserves_optional_artifact_success
+FleetFailureCleanup.test_native_delimiter_timeout_preserves_optional_artifact_success
+FleetFailureCleanup.test_native_delimiter_timeout_preserves_original_failure`.
+Before production edits, the control passed and the two delayed cases failed
+(three tests, 3.334 seconds): success zero became one, and original failure
+137 became one. The same command and test assertions passed after the repair
+(three tests, 3.185 seconds). Private logs are `permanent-native-before.log`
+and `permanent-native-after.log` under `.context/fleet-completion-repair/`.
+The success case uses the unchanged existing fake fleet and an unavailable
+optional artifact directory; it checks canonical success, verified cleanup
+and body zero. The failure case preserves the original exact-owner recovery,
+no-next-slice, zero-acceptance and unrelated-owner assertions. These are native
+Bash controls, not live-provider outcome evidence. The native syscall schedule
+is explicitly Linux x86_64; inability to trace an owned child there fails,
+while other platforms retain every existing portable control.
+
+The repair unifies framing on actual wire bytes: bounded `read -N 1` retains
+newline even when the native read returns 142. The parser examines that byte
+independently of the read status and clears its destination before each read.
+It retains the original 0.1-second wake interval, three-digit/range limit,
+single-frame contract, malformed/duplicate/unterminated rejection, EOF drain,
+cancellation forwarding and actual pipeline wait. It never infers success
+from an optional file, a summary or a successful logger. The earlier test shim
+consumed only a digit and left newline unread, so it did not cover this case.
+Deleting delimiter inference reduces competing state; deleting the completion
+pipe would restore the documented unwritable-status-file liveness defect.
+Memory stays constant per proof, with at most three retained digits and one
+read byte; there is no shared lock, fleet-wide scan or agent-count fan-in at
+10,000 agents. Golden reference: not applicable (ordinary Bash infrastructure
+framing; no approval-gated agent behavior, prompt, schema or timeout hunk).
+
+The native regression remains inside `fleet-stability-cleanup.test.py`, already
+called by the unchanged `fleet-infra-stability-proof.test.sh`, unchanged
+`descend-command.test.sh`, and the complete canonical structural registry.
+The original full command remains `python3 scripts/run-deploy-structural-gates.py
+--max-workers 5`, with `TMPDIR=/var/tmp` and the managed venv. A fresh pre-repair
+full invocation on current main passed all 85 gates; that supporting control is
+not a repair claim. Final full-command and deployment receipts are retained in
+the repair's private deploy report. Original catalogs, assertions, task bounds
+and timeouts are preserved. The historical trigger remains UNKNOWN even when
+the demonstrated completion defect and final acceptance gates pass.
+
+Human feedback for this recurrence: preserve original bytes/hashes and the exact
+full command; keep historical pipe/read causality UNKNOWN; do not waive or
+re-delegate the assigned failure; complete the independent repair's deployment.
