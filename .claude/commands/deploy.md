@@ -84,9 +84,12 @@ the staged runner requests `/RCA` on the first failure of every round.
 - Only actual blocking FAILs enter the focused repair loop: preserve the failing
   tests/assertions/timeouts, fix the underlying cause, rerun failing tests plus
   affected regressions, then run the full failed gates in parallel. When those
-  pass, run quick checks and all selected gates once on the final frozen source,
-  with no pass-cache substitution for that final sweep. A clean initial sweep
-  already counts as the final sweep and is not duplicated.
+  pass, run quick checks and account for all selected gates on the final frozen
+  source. After a code repair, run the required final sweep. A sync alone must
+  not invalidate an unchanged gate: retain its original passing receipt when
+  verified input/contract equivalence proves it still applies, and rerun affected
+  or unknown gates. Report carried results with their original source and proof,
+  never as newly executed tests. A clean initial sweep is not duplicated.
 - Qualified SKIPs do not initiate any rerun. Keep original native failures and
   waiver evidence; they remain SKIP/warnings, never PASS. Mixed aggregates must
   account for every constituent check; unexecuted work still needs execution.
@@ -96,6 +99,62 @@ the staged runner requests `/RCA` on the first failure of every round.
   deployment ready because a focused subset passed. `deploy_test_cycle.py verify`
   must pass on the exact current source/plan before the existing merge gates.
 
+
+## Sync without restarting the whole deploy
+
+An hourly `/sync` must not become a global stop or reset the deploy's original
+clock, selected coverage, failure history or cleanup obligations.
+
+1. Fetch and inspect main while independent work continues. Identify changed
+   source and dependency inputs and the checkout/database/resources they affect.
+2. Merge and install dependencies only at a safe boundary for those resources.
+   Never replace source, packages or a database under their active consumers.
+   A worker using an isolated checkout and database may finish its frozen run.
+   `setup-db.sh` waits only for consumers of its target database; unrelated gates
+   do not wait for that reset.
+3. Record the merged source and replan without dropping the original selected
+   gates or checks. Preserve completed and running receipts with their original
+   source. A changed HEAD alone is not evidence that every test input changed.
+   Use exact-input or lane-scoped reuse only where the chosen runner implements
+   and verifies it; report reuse as reuse, not a fresh run. A conflict-free merge
+   does not by itself prove equivalence, and a changed HEAD does not by itself
+   disprove it. Compare each gate's source/dependency/configuration inputs.
+   Final verification must account for every selected check on the merged
+   source through actual execution or a verified unchanged-input receipt.
+4. Carry qualified skip evidence forward when its relevant inputs are unchanged.
+   When they changed, re-establish that exception's applicability rather than
+   automatically rerunning a known skipped operation. Never clear native failures,
+   pending work or retained-resource obligations as part of a sync.
+5. Continue every supported independent lane while resolving a conflicting one.
+   If a runner cannot admit an otherwise isolated lane, identify that specific
+   tooling limitation; do not invent a successful receipt or relax cleanup.
+   `--follow-source` explicitly supersedes and cancels an old attempt. It is not
+   the default way to perform an hourly sync through healthy long-running work.
+
+See `.claude/commands/sync.md` for the merge and database steps and
+`docs/deploy-test-cycle.md` for the staged runner's supported transitions.
+
+## Check permitted skips before launching or diagnosing a gate
+
+Read the relevant exception alongside the selected test, before launch and again
+at its first failure. A recognized exception must not enter a repair/retry loop
+as an ordinary blocking failure. These are conditional rules, not permission to
+omit the test or to turn unexecuted assertions into PASS.
+
+| Test or failure | Existing eligibility and required evidence | Continue with |
+| --- | --- | --- |
+| AgentCard lifecycle or selected payment canary | Step 6a's exact closed-card, zero-balance, HELD/RECLAIMING purchase and same-card consumed transfer with `releasedCents=0`, in the expected mode; use the native lifecycle predicate and preserve the other assertions. | Loud warning/SKIP for that settlement stall; retain unreleased funds/refund debt. Do not keep reclaiming, mint a replacement card or ask again. Other lifecycle, read, cancellation and cleanup failures still fail. |
+| Claude Code smoke credential preflight | Step 6: native preflight proves no synced eligible Claude credentials and no pool token. An API fallback is not that evidence. | Exact credential SKIP, with the unexecuted coverage visible. Task correctness failures remain blocking. |
+| Benchmark judge compute quota | A complete native SKIPPED row plus the existing typed, exact-receipt confirmation of third-party compute-quota exhaustion. A missing credential or unexplained token failure alone is insufficient. | The existing qualified resource warning; retain the native failure and unexecuted judge coverage, without another doomed run. |
+| Third-party provider outage or exhausted credits | `.claude/shared/deploy-failure-policy.md`: actual provider evidence and exact affected failure; unknown failures, authentication rejection and our configuration bugs do not qualify. | Preserve the native result and record the permitted external exception; no retry loop or repair handoff for that outage/credit condition. |
+| CodeRabbit quota exhaustion | Step 9a: current-head, current-attempt explicit quota/spending-cap evidence. A skipped review, bare 429 or absent review is insufficient. | Record the existing review-exhaustion disposition; never skip an actual delivered review's findings. |
+| Platform-unavailable Mac checks on Linux | Standing Linux platform exclusion; record the selected check and unavailable platform. | Explicit unverified omission, never PASS; applicable checks on supported platforms remain required. |
+
+Record the native outcome, exact qualifying evidence, skipped assertions and any
+remaining resource or financial debt in the same gate report. For a mixed result,
+qualify only the matching component: a payment warning does not close an unrelated
+cancelled task, missing artifact or unverified cleanup. Consult the source sections
+above for the controlling predicates; this table introduces no new exception.
 
 ## Canonical human-approval format
 
@@ -375,10 +434,13 @@ scope boundary. Before change detection or freezing gate inputs:
 
 **`/deploy` ALWAYS ships the ENTIRE worktree — every change present relative to `origin/main`, no exceptions.** This includes work you did not author: changes made by a concurrent agent sharing this worktree, pre-existing uncommitted edits, and any feature intermixed with yours. Do NOT stop to ask "these changes aren't mine / weren't part of my task." Do NOT try to isolate, cherry-pick, or exclude a subset onto a clean branch. The unit of deploy is the worktree, and everything in it is yours to carry through the gates and ship. Preserve intended deliverables; blocking conditions, repair ownership and external exceptions follow the controlling failure policy. (Whoever ran `/deploy` is asserting the whole worktree is ready; the gates are what prove it.) **"Credential/billing escalation" NEVER includes a code-review provider being out of credits/quota** — that case is pre-authorized to proceed without asking (Step 9a, "Review-provider usage exhaustion").
 
-If the branch is behind `origin/main`, sync first (commit the worktree, then
-`git merge origin/main`). Resolve conflicts keeping every feature, re-sync deps
-(`npm install` + `npx prisma generate`; `pip install -r requirements.txt`), and
-re-run the gates on the merged tree — then proceed. Step 0 derives the latest
+If the branch is behind `origin/main`, sync at the safe resource boundary above
+(commit the worktree, then `git merge origin/main`). Resolve conflicts keeping
+every feature, refresh dependencies whose inputs changed (`npm install` +
+`npx prisma generate` for changed JS inputs; the pinned Python installation for
+changed Python inputs), and validate the merged tree with the supported reuse
+rules and required final verification. Do not reinstall unchanged dependencies
+or restart unrelated running gates solely because main advanced. Step 0 derives the latest
 main-sync delta from merge history so shared type changes introduced by either
 this merge or an earlier `/sync` remain lint seeds.
 

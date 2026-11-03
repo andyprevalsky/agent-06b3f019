@@ -513,6 +513,42 @@ class Cloud(unittest.TestCase):
         self.assertEqual('1',launch.call_args.kwargs['env']['CLOUDBENCH_SKIP_LOCAL_PATCH'])
         self.assertTrue(result['complete'])
 
+    def test_cloud_launch_records_selected_standing_skip_eligibility_before_dispatch(self):
+        names=['browser-auth-guest-purchase','claude-only','ordinary']
+        self.request.update(checks=names,skips={'excluded-payment':{'disposition':'unchanged'}})
+        catalog=self.root/'agents/benchmarks/tasks.json'
+        catalog.parent.mkdir(parents=True)
+        cycle.write(catalog,[
+            {'name':names[0],'tags':['agentcard-lifecycle-sandbox'],
+             'expected_payment_lifecycle':{'orgTransfer':{'livemode':False}}},
+            {'name':names[1],'tags':[],'requires_claude_code':True},
+            {'name':names[2],'tags':[]},
+            {'name':'excluded-payment','tags':['agentcard-lifecycle-sandbox'],
+             'expected_payment_lifecycle':{'orgTransfer':{'livemode':False}}},
+        ])
+        messages=io.StringIO()
+        def launch(argv, **kwargs):
+            # Guidance must be durable in the exact native runner log BEFORE dispatch.
+            kwargs['output'].flush()
+            text=(kwargs['cwd']/'.context/deploy-cloud'/hashlib.sha256(self.request['token'].encode()).hexdigest()/'cli.log').read_text()
+            self.assertIn('Standing skip eligibility',text)
+            self.assertIn('_agentcard_release_skip_lifecycle',text)
+            self.assertIn('_check_claude_code_credentials',text)
+            self.assertNotIn('excluded-payment',text)
+            self.assertNotIn('ordinary:',text)
+            return 0,False,False,False
+        import hashlib
+        with patch.object(self.cloud,'source',return_value=self.request['source']), \
+             patch.object(self.cloud,'run_command',side_effect=launch) as dispatched, \
+             patch.object(self.cloud,'collect_campaign',return_value=(dict.fromkeys(names,'PASS'),{},True,'native-run')), \
+             contextlib.redirect_stderr(messages):
+            result=self.cloud.execute(self.request,self.root)
+        self.assertIn('not a SKIP verdict',messages.getvalue())
+        self.assertIn('All other assertions and owned-resource cleanup remain required',messages.getvalue())
+        self.assertEqual(names,dispatched.call_args.args[0][2:5])
+        self.assertEqual(dict.fromkeys(names,'PASS'),result['cases'])
+        self.assertTrue(result['complete'])
+
 
 class CloudCampaign(unittest.TestCase):
     def setUp(self):

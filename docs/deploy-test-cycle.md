@@ -170,6 +170,13 @@ of its tests ran. A mixed skip/run gate must use this protocol.
 
 ## Execution and repair
 
+Before launching a selected gate or turning its first failure into repair work,
+read `.claude/commands/deploy.md` → **Check permitted skips before launching or
+diagnosing a gate**. The selected task's exception is part of its execution
+instructions, not a fact to discover after repeated retries. Preserve the native
+outcome and evidence; qualifying one symptom never waives unrelated assertions,
+an incomplete result or cleanup.
+
 1. `deploy_test_cycle.py init --plan ... --state-dir ...` binds the complete plan
    and source. Use an ignored `.context/` directory; evidence is not source.
 2. `run` launches the quick checks concurrently, then the selected worker set.
@@ -204,7 +211,10 @@ of its tests ran. A mixed skip/run gate must use this protocol.
 6. `run` the focused commands concurrently. Any failure returns to `/RCA`.
    When they pass, `run` the complete failed gates concurrently, including every
    originally selected case in those gates. Then repeat quick checks and `run`
-   **all originally selected gates once** on the final frozen source.
+   **all originally selected gates** on the final frozen source. For a sync-only
+   change, a verified unchanged-input passing receipt may carry forward with
+   its original source and equivalence proof; execute affected or unknown gates.
+   Never turn a failed, incomplete or unverified result into a carried pass.
 7. `verify` (or the existing `run_deploy_pipeline.py verify` pointed at this cycle
    directory with `--require-staged`) exits0 only for a ready cycle with exact current source and plan.
    A failure in the final sweep returns to `/RCA`; changing code invalidates
@@ -231,6 +241,27 @@ idempotency key; ambiguous submission is preserved and must be reconciled with
 the service, not sent again. A source refresh must re-establish exception
 applicability to the new source; that is a metadata/evidence decision, not an
 automatic rerun of an already qualified skipped case.
+
+### Sync while validation is active
+
+Follow `.claude/commands/sync.md` at the boundary of the checkout and database
+actually being changed. Healthy isolated workers may finish on their frozen
+source. Retain those receipts and all original failures; never reset the cycle
+to make the merged source look clean. Refresh only changed dependency inputs.
+
+This staged runner does not inherit every reuse option of the legacy pipeline.
+Use its supported `refresh` transition only when that transition's pending-work
+and ownership checks pass. `triage-quick` can run the four fixed non-live quick
+checks on a new source while unresolved triage remains bound to its original
+source; it neither clears triage nor grants full-gate or release credit. Do not
+describe a successful quick observation as a resumed or completed full cycle.
+The final coverage and `verify` must still account for the actual merged source.
+Do not invalidate all passing tests just because a conflict-free sync changed
+HEAD: compare each gate's actual inputs, preserve valid receipts, and execute
+only affected or unknown gates. A clean Git merge is not a test-dependency proof.
+If pending execution ownership prevents another isolated lane from starting,
+report that exact unsupported transition and continue supported independent work;
+do not infer live execution from an owner label or infer cleanup from a dead PID.
 
 The coordinator handles TERM/INT by stopping only the process groups it started
 and recording `interrupted`, never PASS or a provider waiver. Use `resume` only

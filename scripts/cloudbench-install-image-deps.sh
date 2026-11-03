@@ -172,7 +172,7 @@ install_javascript() {
     npm config set fetch-retry-mintimeout 20000
     npm config set fetch-retry-maxtimeout 120000
     npm config set fetch-timeout 600000
-    npm install --no-audit --no-fund
+    npm install --include=dev --legacy-peer-deps --no-audit --no-fund
     check_frontend_dependencies repair
     (cd back-end && npx prisma generate)
 }

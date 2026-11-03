@@ -199,8 +199,19 @@ def execute(request, root):
            'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1'}
     scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']
     argv = ['bash', 'scripts/run-bench', *checks, *scheduling, '--ref', request['source']['head']]
+    catalog = root / 'agents/benchmarks/tasks.json'
+    guidance = ''
+    if catalog.is_file():
+        selector = runpy.run_path(str(Path(__file__).resolve().parents[1]
+                                     / 'agents/benchmarks/select_predeploy_benches.py'))
+        guidance = selector['format_skip_eligibility'](
+            selector['standing_skip_eligibility'](selector['load_tasks'](catalog), checks))
     started = time.time()
     with cancellation_handlers(), (directory / 'cli.log').open('wb') as log:
+        if guidance:
+            print(guidance, file=sys.stderr, flush=True)
+            log.write((guidance + '\n').encode())
+            log.flush()
         code, timed_out, cancelled, lingering = run_command(argv, cwd=root, env=env, output=log, timeout=None)
     reason = None
     try:
