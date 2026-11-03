@@ -7943,6 +7943,14 @@
 {"task": "spawn-sub-agents", "duration_seconds": 142.4, "cost_cents": 6.0, "timestamp": "2026-11-02T22:47:44.995959+00:00", "agent_id": "f9de9677-6944-4e29-90dd-cc0dd58fd446"}
 {"task": "chat-mode", "duration_seconds": 14.0, "cost_cents": 0.0, "timestamp": "2026-11-02T22:47:44.995959+00:00", "agent_id": "526a57ce-a5d1-45ef-b5a5-a0ea9150a226"}
 {"task": "background-agent-message-smoke", "duration_seconds": 54.7, "cost_cents": 0.0, "timestamp": "2026-11-02T22:47:44.995959+00:00", "agent_id": "e2883f3c-2b62-4901-b28d-cae265edb77b"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 200.8, "cost_cents": 41.0, "timestamp": "2026-11-02T23:05:18.409656+00:00", "agent_id": "18a5876d-dcc5-4d2c-be70-d104dc7af9bd"}
+{"task": "parallel-tool-calls", "duration_seconds": 83.7, "cost_cents": 6.0, "timestamp": "2026-11-02T23:05:18.409656+00:00", "agent_id": "312049db-f993-4cf0-b9e5-c37b4aefb11f"}
+{"task": "agent-payment-new-user-journey", "duration_seconds": 162.2, "cost_cents": 1.0, "timestamp": "2026-11-02T23:05:18.409656+00:00", "agent_id": "502e98e5-f419-4003-943f-5e5f236139d8"}
+{"task": "browser-auth-saved-password-retry", "duration_seconds": 169.7, "cost_cents": 3.0, "timestamp": "2026-11-02T23:05:18.409656+00:00", "agent_id": "08933a7d-8a8a-450d-ad4a-d46f1f31145b"}
+{"task": "browser-smoke", "duration_seconds": 114.5, "cost_cents": 0.0, "timestamp": "2026-11-02T23:05:18.409656+00:00", "agent_id": "0ceb5b0f-b3ef-4ea8-a089-9a2ce16f7235"}
+{"task": "spawn-sub-agents", "duration_seconds": 116.5, "cost_cents": 3.0, "timestamp": "2026-11-02T23:05:18.409656+00:00", "agent_id": "3e319584-9e19-403d-8036-59c45b35621e"}
+{"task": "chat-mode", "duration_seconds": 13.4, "cost_cents": 0.0, "timestamp": "2026-11-02T23:05:18.409656+00:00", "agent_id": "5198614e-fb05-40eb-8010-ed40ddffd826"}
+{"task": "background-agent-message-smoke", "duration_seconds": 145.1, "cost_cents": 4.0, "timestamp": "2026-11-02T23:05:18.409656+00:00", "agent_id": "b7e998bb-ae1b-4747-a42b-65b20c69b9b0"}
 {"task": "parallel-tool-calls", "duration_seconds": 148.3, "cost_cents": 15.0, "timestamp": "2026-11-02T23:33:38.138952+00:00", "agent_id": "cec49855-1e53-4893-823b-0b8e41aee09e"}
 {"task": "agent-payment-new-user-journey", "duration_seconds": 156.0, "cost_cents": 1.0, "timestamp": "2026-11-02T23:33:38.138952+00:00", "agent_id": "858dfa48-5a42-4cc5-85ab-1d227bee9f2a"}
 {"task": "browser-smoke", "duration_seconds": 99.2, "cost_cents": 1.0, "timestamp": "2026-11-02T23:33:38.138952+00:00", "agent_id": "ec253757-d803-49df-88c1-6c67a7135a8d"}
