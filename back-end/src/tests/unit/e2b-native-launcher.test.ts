@@ -180,7 +180,7 @@ async function exercise(modulePath: string, provider: string) {
         [],
         undefined,
         'owner',
-        false,
+        'standard',
         undefined,
         foreignSession
       ),
@@ -190,7 +190,7 @@ async function exercise(modulePath: string, provider: string) {
   assert.equal(launches.length, 0, 'foreign session rejected before launch');
   if (provider === 'claude')
     await runtime.createClaudeCodeSession('agent', 'fixture task', [], undefined, 'owner', false);
-  else await runtime.createCodexCodeSession('agent', 'fixture task', [], undefined, 'owner', false);
+  else await runtime.createCodexCodeSession('agent', 'fixture task', [], undefined, 'owner', 'standard');
   checkLaunch(provider);
 }
 async function mutationProof() {

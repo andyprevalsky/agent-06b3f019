@@ -8,6 +8,8 @@ WHEN COMMUNICATING TO THE USER, BE CONCISE, LET THE USER ASK FOR MORE CONTEXT IF
 
 Every new user message is additional acceptance criteria for the active task unless it explicitly replaces or cancels an earlier requirement. Maintain one current validation set, record corrections and superseded criteria, and carry all remaining requirements forward. The final step is to validate the implemented result against that latest combined set; report any unmet or unverified criterion explicitly before claiming completion. Earlier passing checks do not cover later changes automatically.
 
+Failure attribution does not release an assigned repair. If your task or `/goal` is to fix a specific issue or failed test, `Gate: NOT_INTRODUCED` only says your changes did not cause it; you still own the fix, its required validation and the completed deploy/scorecard required by your assignment. Never use that classification to waive or re-delegate the assigned failure. The delegation exceptions in `.claude/shared/deploy-failure-policy.md` apply only to additional failures outside that assignment.
+
 Keep the user-facing conversation coherent. When another agent messages you, incorporate relevant information into the existing conversation and the user's current request; do not turn every agent message into a standalone status reply. Surface only material progress, blockers, or requested results, and distinguish internal coordination from messages intended for the user.
 
 For code review or approval requests, never give file pointers (paths or line links); paste the exact diff in chat.
@@ -152,6 +154,20 @@ design, UI and harness decision by whether it makes Rose a better RWLH.
 
 ## Sub-agent delegation
 
+Deploy test-repair handoffs use the backend and commands in
+`.claude/shared/deploy-failure-policy.md`: currently boxes.dev, with Rose account
+commands feature-flagged off pending a separate migration.
+These handoffs require an actual failed test and its exact error/scope, are
+created only after the originating merge to main, and run an autonomous
+`/goal` through their own completed deploy. The repair goal and its deploy
+coordinator must run on a different devbox, automatically placed in the
+project's Bugs folder; never leave a repair coordinator on the originating
+box. Follow the linked policy's folder commands and verify placement.
+They always use high effort and
+normal speed (`--reasoning-effort high --speed standard` on boxes.dev),
+overriding the effort/speed inheritance and fallback below for these repair
+delegates only. Title, model and other delegation requirements remain in force.
+
 - Every agent-created thread title must start with the exact prefix `--ai--`; include it in creation instructions and have the child set and verify its title as soon as it starts, preserving the prefix on later renames.
 - Sub-agents must inherit the parent agent's model, reasoning/effort level, and
   speed/service-tier settings. Do not silently substitute a lower-effort model
@@ -186,6 +202,11 @@ design, UI and harness decision by whether it makes Rose a better RWLH.
   intelligently, preserving both sides' intent rather than blindly picking one.
 
 ### Mandatory experiment iteration loop
+
+During `/deploy`, `.claude/shared/deploy-failure-policy.md` controls failure
+attribution, repair handoffs and external-provider exceptions instead of this
+loop's conflicting ownership/wait requirements. Outside deploy, the loop is
+unchanged.
 
 1. Run the requested experiment on its recorded source and monitor its actual
    outcomes. Freeze `scheduled_total` from the original run manifest. Stop the
@@ -890,7 +911,7 @@ When adding a benchmark to `tasks.json`, auto-attach it to this algorithm:
 
 **Every completed run is recorded — pass or fail, local or prod.** `BenchmarkRun.save()` writes the full run record (message transcripts + logs) to `runs/*.json`, appends every attempt to the attempts ledger, and full LLM trajectories land in `.llm-dumps/<agent_id>/` (always-on locally; prod goes to ClickHouse).
 
-**A branch deploy commits only its most recent runs to benchmark history (standing user rule, October 22, 2026).** Fix-and-rerun iterations leave superseded attempts in `agents/benchmarks/history/*.jsonl`; failures of code that never merged must not land on main. Before committing ledger rows from a branch, run `python3 scripts/benchmark-history-latest-only.py --base origin/main --write`. It keeps each task's most recent branch run (its latest attempt plus concurrent copies that overlap it), even when that run failed, and drops earlier attempts with their duration and span rows. Rows already on main are never touched. `--check` must pass before the ledger commit. Full run records in `runs/*.json` remain local evidence. Main/daily runs stay append-only. Regression: `scripts/tests/benchmark-history-latest-only.test.py` (deploy structural gates).
+**A branch deploy commits only its most recent runs to benchmark history (standing user rule, October 22, 2026).** Fix-and-rerun iterations leave superseded attempts in `agents/benchmarks/history/*.jsonl`; failures of code that never merged must not land on main. Before committing ledger rows from a branch, run `python3 scripts/benchmark-history-latest-only.py --base origin/main --write` (add `--apply-parked` when a deploy's local smoke lane ran: `run-predeploy-local` parks its rows under `.context/deploy-ledger-park/` inside a deploy so the tracked ledgers stay unchanged while the other gates fingerprint the worktree, and `--apply-parked` replays them first). It keeps each task's most recent branch run (its latest attempt plus concurrent copies that overlap it), even when that run failed, and drops earlier attempts with their duration and span rows. Rows already on main are never touched. `--check` must pass before the ledger commit. Full run records in `runs/*.json` remain local evidence. Main/daily runs stay append-only. Regression: `scripts/tests/benchmark-history-latest-only.test.py` (deploy structural gates).
 
 **⛔ Never rename an existing task `name`.** The name is the primary key across all history stores; a rename orphans pass history and latency baselines:
 
@@ -1055,6 +1076,11 @@ Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md
 
 ## Critical Rules
 
+When a rule below is applied during `/deploy`, the controlling ownership and
+exception policy is `.claude/shared/deploy-failure-policy.md`. A qualified
+handoff or external-provider exception satisfies deploy accounting without
+claiming that the failed check passed or that its repair is complete.
+
 IF YOU KEEP RUNNING INTO DEPLOY ISSUES AND YOUR ORIGINAL GOAL WAS RELATIVELY SIMPLE, CONSIDER REFACTORING YOUR APPROACH SO IT IS SIMPLER, LESS COMPLEX, AND TOUCHES LESS EXISTING FUNCTIONALITY.
 
 IF YOU KEEP RUNNING INTO DEPLOY ISSUES AND YOUR ORIGINAL GOAL WAS RELATIVELY SIMPLE, CONSIDER REFACTORING YOUR APPROACH SO IT IS SIMPLER, LESS COMPLEX, AND TOUCHES LESS EXISTING FUNCTIONALITY.
@@ -1063,7 +1089,11 @@ IF YOU KEEP RUNNING INTO DEPLOY ISSUES AND YOUR ORIGINAL GOAL WAS RELATIVELY SIM
 
 1. **Every async task needs an operational owner.** That owner checks output growth, exact process liveness, exit and owned cleanup on rule 19's cadence, and reports actionable failures immediately. Delegation does not remove monitoring responsibility. Once that handoff is verified, the parent follows the experiment loop: coordinate useful independent work, otherwise sleep interruptibly and check workers every 15 minutes. Do not duplicate the worker's polling or pause workers while the parent waits.
 
+   **Deploy-only exception:** independent repair handoffs under `.claude/shared/deploy-failure-policy.md` do not require acknowledgement, repair completion or continued parent monitoring before the originating deploy proceeds. Ordinary dependent-task monitoring is unchanged.
+
 1b. **Every trajectory must leave the system more reliable than it found it.** When you hit friction in a part of the codebase or tooling you're using — a broken teardown that leaks resources, a script that orphans child processes on kill, a missing retry on a transient error, a footgun that nearly clobbered a shared resource, a flaky gate — do NOT just work around it for yourself. FIX the underlying issue so no future agent (or human) hits it again, then verify the fix. The cost of a workaround is paid once by you; the cost of the unfixed defect is paid by every future run. This is not scope creep — it is the job (see rule 24). If a fix is genuinely too large to land now, at minimum capture it durably (a memory, a tracked issue, a `TODO` with full context) so it is not silently re-encountered. "It worked for me this time" is not done; "future runs can't hit this" is.
+
+   **Deploy-only exception:** apply `.claude/shared/deploy-failure-policy.md` to repair ownership and qualified waivers. This exception does not change the rule outside `/deploy`.
 
    **CLI reproducibility (standing user instruction, October 17, 2026):** Persist every fix in the versioned command, setup/preflight, and instructions. A fresh agent with the documented prerequisites must be able to reproduce the result using the CLI alone, without this conversation, private scripts, uncommitted changes, or remembered shell/environment patches. Test the documented invocation and keep a regression in its owning suite. Required external credentials, permissions, and human setup must be explicit, with actionable failures rather than hidden workarounds.
 
@@ -1072,6 +1102,8 @@ IF YOU KEEP RUNNING INTO DEPLOY ISSUES AND YOUR ORIGINAL GOAL WAS RELATIVELY SIM
 1. **Bias toward execution — each pause to check for user approval has an extremely high cost.**
 
 0a. **Be a TANK: don't ask, iterate until prod actually works.** When a task is "make X work in prod" (get a gate green, ship a fix, prove a flow end-to-end), OWN it end-to-end without pausing to ask permission for each step — the user has standing authorization to keep going until the real-world outcome is achieved (gate green, agent verified live, purchase completed). **RCA every issue you hit along the way and FIX it, even when the issue is not directly your task** — a stale CI secret, a flaky harness, a broken teardown, a mis-scoped token, someone else's never-green gate. Scope increase is expected, not a reason to stop (see rules 1b and 24). Before assuming an issue is yours to fix from scratch, **check whether another branch already has the fix in flight** (`git log --all`, open PRs) — if so, wait for it or cherry-pick rather than duplicating. Keep a tight iterate loop: reproduce → diagnose from evidence (logs, not guesses) → fix root cause → re-run the real gate → repeat until it is genuinely green. "It probably works now" is not done; a green prod gate (or a verified live run) is done. Only stop to ask when an action is genuinely irreversible/destructive or spends real money beyond what was authorized.
+
+   **Deploy-only exception:** apply `.claude/shared/deploy-failure-policy.md` to repair ownership and qualified waivers. This exception does not change the rule outside `/deploy`.
 
 0b. **Resume after user unblocks.** When you get unblocked by user help, always check back in to continue the task you were unblocked from, which is often a /goal or goal to finish a process.
 
@@ -1116,6 +1148,8 @@ IF YOU KEEP RUNNING INTO DEPLOY ISSUES AND YOUR ORIGINAL GOAL WAS RELATIVELY SIM
 
 6. **Follow RCA methodology for every bug** - Invoke `/RCA` (or read `docs/root-cause-analysis.md`) and follow the steps exactly. Never skip the evidence-gathering step (Step 0), never fix a symptom without tracing the critical path, never rationalize a failure as "pre-existing". **HARD GATE: never report a root cause without a LOCAL REPRO you ran and watched fail, plus a fix that makes that same repro pass. A theory ("probably load/a race/a 404") is not a deliverable — reproduce it or classify it as an open observability gap. For a benchmark failure, proxy tests do not prove the outcome: the exact unchanged task must also fail locally on the buggy revision and pass locally on the fixed revision via `scripts/run-bench --local <task>`.**
 
+   Evidence-backed deploy attribution and handoff follow `.claude/shared/deploy-failure-policy.md`; a waiver is not a claim that the bug is fixed. RCA proof requirements are unchanged.
+
    For an RCA delegated by `/descend`, follow that command's staged parent-owned
    approval and default cloud outcome-proof contract. A local causal fail/pass
    pair permits a concrete candidate packet labelled Causal proof; outcome
@@ -1139,7 +1173,7 @@ IF YOU KEEP RUNNING INTO DEPLOY ISSUES AND YOUR ORIGINAL GOAL WAS RELATIVELY SIM
 
 12. **Short timeouts, check logs** - Never set bash timeouts longer than 5 minutes; use short timeouts and check task output periodically to ensure long-running tasks complete smoothly.
 
-13. **Do NOT over-truncate** - Never aggressively truncate content, especially important context flows. Truncate SPARINGLY and only when necessary to fit content inside a frontend component (e.g., chip/bubble UI with limited space). When in doubt, keep the full content.
+13. **Do NOT over-truncate** - Never aggressively truncate content, especially important context flows. Truncate SPARINGLY and only when necessary to fit content inside a frontend component (e.g., chip/bubble UI with limited space). When in doubt, keep the full content. Bounded agent-list/history previews are allowed when truncation is explicit and pagination or addressed segments recover the remaining content.
 
 14. **Sync Conductor workspace name on branch change** - Whenever you switch or create a branch, update the Conductor workspace display name to match — **but only if it's not locked**:
 
@@ -1158,6 +1192,8 @@ sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
 15. **Plans must have automated verification** - Every plan's verification section must describe automated tests, not manual steps. Designing those tests and their validation criteria is the main bulk of the plan, not a short appendix. If no existing test route covers the change, create one. If you need API keys, configs, or other resources to test, ask for them in the plan. The goal: once a plan is approved, bring the feature all the way through to PR merged into main using `/deploy`.
 
 16. **ALL test failures must be fixed — no exceptions** - Never rationalize test failures as "pre-existing", "not related to my changes", or "infrastructure issues." This applies to EVERY test tier: Prettier, ESLint, TypeScript, structural tests, coverage, blackbox tests, AND smoke benchmarks. If a test fails, you MUST fix it before proceeding. Do NOT skip, do NOT rationalize, do NOT merge with known failures. If smoke benchmarks fail due to expired tokens, fix the tokens. If they fail due to Temporal issues, fix Temporal. If they fail due to slow LLM responses, investigate and fix timeouts. "Infrastructure issue" is a diagnosis, not an excuse to skip. The local DB (Docker Postgres) must be running for blackbox tests — `run-blackbox-tests.sh` auto-detects the container via `CONDUCTOR_PORT`/`CONDUCTOR_WORKSPACE_NAME`. If the container isn't running, start it: `docker start victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}`.
+
+   **Deploy-only exception:** apply `.claude/shared/deploy-failure-policy.md` to repair ownership and qualified waivers. This exception does not change the rule outside `/deploy`.
 
 17. **Bug diagnosis guidelines** - When diagnosing issues found while running any tests, follow `docs/root-cause-analysis.md` exactly. Gather evidence first, trace the critical path, classify the failure, and complete Step 5's hypothesis fields (including the generalizable Problem class) before writing any fix.
 
@@ -1178,6 +1214,8 @@ sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
 23. **New user data providers** - When integrating a new user data provider, first model it as a normalized, grep-searchable document source with explicit sync state, source metadata, snapshot revision semantics, prod-path tests, and a prod-data benchmark before adding bespoke provider behavior.
 
 24. **Clean up tech debt as you discover it — scope increase is expected** - When a file under edit has pre-existing lint errors, type errors, test failures, dead code, or other debt, fix it in the same PR. Do NOT rationalize "pre-existing" or "out of scope" to leave it. Scope increase beyond the narrow task is not only allowed but anticipated — bundle the cleanup with the change that exposed it. **Any error surfaced by a failing test, lint, typecheck, coverage check, or other gate is automatically in scope — even in files you did not touch.** If the deploy pipeline (or any required check) reports the error, fix it; do not skip it as "not my file" or "not my change."
+
+   **Deploy-only exception:** apply `.claude/shared/deploy-failure-policy.md` to repair ownership and qualified waivers. This exception does not change the rule outside `/deploy`.
 
 25. **No benchmark reward hacking** - Never change benchmark task definitions, prompts, expected tools, pass criteria, load sizes, timeouts, concurrency limits, or production behavior just to make a benchmark pass. Do not raise a benchmark/tool timeout as a workaround for a timeout failure. First prove why it timed out with diagnostics: resource contention, memory growth, blocked external tool/session, retry loop, verifier/schema issue, slow database/API calls, or an unintended parameter/config change. Then reduce the underlying resource use, remove the stall, or fix the broken flow. Get explicit approval before changing any benchmark definition or timeout. General reliability rule: any Temporal activity wrapper that calls an LLM must allow at least 60 seconds; sub-60-second verifier/LLM activity timeouts are product bugs, not benchmark tuning.
 

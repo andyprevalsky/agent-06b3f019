@@ -19,6 +19,8 @@ export { buildUserMessageSignalValue } from './agentMessageSignal';
 import * as repo from './repo';
 import { withActiveBrowserSessionShareLock } from './repoBrowserTargetedMessages';
 import { readTaskInboxMessages } from './agentToAgentService';
+import { buildUserMessageSignalValue } from './agentMessageSignal';
+export { buildUserMessageSignalValue } from './agentMessageSignal';
 import { broadcastChatReactivation } from './agentMessageReactivation';
 
 /**

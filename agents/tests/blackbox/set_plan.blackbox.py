@@ -2,7 +2,10 @@
 
 import asyncio
 import json
+import sys
+from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 from _test_utils import (
@@ -70,7 +73,7 @@ def test_validate_dependencies_preds_not_list():
     """Predecessors must be a list."""
     from tools.set_plan import validate_dependencies
 
-    err = validate_dependencies(["A", "B"], {"1": "0"})  # type: ignore[dict-item]
+    err = validate_dependencies(["A", "B"], {"1": "0"})
     assert err is not None and "list" in err.lower()
 
 
@@ -407,6 +410,119 @@ def test_planner_tools_description_lists_only_assignable_tools():
 
 
 # ── build_planner_messages ──────────────────────────────────────────────
+
+
+def _completed_explore_context():
+    fixture = Path(__file__).parent / "fixtures" / "planner" / "completed-explore.json"
+    return json.loads(fixture.read_text())
+
+
+def test_build_planner_messages_retains_completed_explore_result():
+    """Replay careers_scan: its real result must replace the earlier progress chip."""
+    from domains.set_plan.service import build_planner_messages
+
+    context = _completed_explore_context()
+    late_progress = deepcopy(context[-2])
+    late_progress["message_id"] = "late-progress"
+    late_progress["timestamp"] = "2026-10-26T17:33:35.000Z"
+    context.append(late_progress)
+    original = deepcopy(context)
+    completed = context[-2]
+    call_id = completed["metadata"]["toolCallId"]
+    messages, _ = build_planner_messages(context)
+    results = [message for message in messages if message.get("tool_call_id") == call_id]
+
+    assert len(results) == 1
+    expected = f"{completed['metadata']['title']}: {completed['text']}"
+    assert results[0]["content"] == expected, (
+        "Planner discarded the completed careers-scan result in favor of IN_PROGRESS"
+    )
+    assert context == original, "Planner projection mutated persisted research history"
+
+
+def test_build_planner_messages_uses_latest_visible_terminal_result():
+    """Stale terminals and excluded child/UI rows cannot replace the actual outcome."""
+    from domains.set_plan.service import build_planner_messages
+
+    for status in ("FINISHED", "ERROR"):
+        context = _completed_explore_context()
+        latest = deepcopy(context[-1])
+        latest["message_id"] = "latest-parent-result"
+        latest["timestamp"] = "2026-10-26T17:33:35.000Z"
+        latest["text"] = f"Latest parent-visible {status} outcome"
+        latest["metadata"]["toolStatus"] = status
+        context.append(latest)
+        for marker in ({"excludeFromModel": True}, {"subAgentId": "child-internal"}):
+            hidden = deepcopy(latest)
+            hidden["message_id"] = f"hidden-{next(iter(marker))}"
+            hidden["timestamp"] = "2026-10-26T17:33:36.000Z"
+            hidden["text"] = "This hidden lifecycle row is not the tool outcome"
+            hidden["metadata"].update(marker)
+            context.append(hidden)
+
+        messages, _ = build_planner_messages(context)
+        results = [
+            message for message in messages if message.get("tool_call_id") == latest["metadata"]["toolCallId"]
+        ]
+        assert len(results) == 1
+        assert results[0]["content"] == f"{latest['metadata']['title']}: {latest['text']}"
+        assert "hidden lifecycle" not in json.dumps(messages)
+
+
+def test_build_planner_messages_does_not_turn_pending_work_into_a_result():
+    """An unfinished explore supplies neither a result nor an invented completion."""
+    from domains.set_plan.service import build_planner_messages
+
+    context = _completed_explore_context()[:-1]
+    messages, _ = build_planner_messages(context)
+    assert not any(message.get("role") == "tool" for message in messages)
+    assert "Exploring:" not in json.dumps(messages)
+    assert not any(message.get("tool_calls") for message in messages)
+
+
+def test_build_planner_messages_pending_history_has_linear_pairing_work():
+    """Doubling pending history must not quadruple local context-pairing work."""
+    from domains.set_plan.service import build_planner_messages
+
+    def measured_work(count):
+        context = [{"role": "USER", "text": "Research independent tasks"}]
+        for index in range(count):
+            call_id = f"pending-{index}"
+            context.extend(
+                [
+                    {
+                        "role": "ASSISTANT",
+                        "text": "",
+                        "metadata": {"tool_calls": [{"tool": "spawn_agent", "tool_call_id": call_id}]},
+                    },
+                    {
+                        "role": "TOOL",
+                        "text": "Exploring",
+                        "metadata": {"toolCallId": call_id, "toolStatus": "IN_PROGRESS"},
+                    },
+                ]
+            )
+        steps = 0
+
+        def trace(frame, event, arg):
+            nonlocal steps
+            if event == "line" and frame.f_globals.get("__name__") == "helpers.llm":
+                steps += 1
+            return trace
+
+        previous_trace = sys.gettrace()
+        try:
+            sys.settrace(trace)
+            messages, _ = build_planner_messages(context)
+        finally:
+            sys.settrace(previous_trace)
+        assert not any(message.get("role") == "tool" or message.get("tool_calls") for message in messages)
+        return steps
+
+    smaller = measured_work(128)
+    larger = measured_work(256)
+    assert smaller > 0
+    assert larger <= 3 * smaller, f"Pending pairing grew superlinearly: {smaller} -> {larger} steps"
 
 
 def test_build_planner_messages_basic():
@@ -1132,6 +1248,10 @@ async def run_all_tests():
     r.record("planner_tools_description", test_get_planner_tools_description_non_empty)
     r.record("planner_tools_description_assignable_only", test_planner_tools_description_lists_only_assignable_tools)
     # build_planner_messages
+    r.record("build_planner_messages_completed_explore", test_build_planner_messages_retains_completed_explore_result)
+    r.record("build_planner_messages_latest_terminal", test_build_planner_messages_uses_latest_visible_terminal_result)
+    r.record("build_planner_messages_pending_work", test_build_planner_messages_does_not_turn_pending_work_into_a_result)
+    r.record("build_planner_messages_linear_pending", test_build_planner_messages_pending_history_has_linear_pairing_work)
     r.record("build_planner_messages_basic", test_build_planner_messages_basic)
     r.record(
         "build_planner_messages_agent_rows_assistant",

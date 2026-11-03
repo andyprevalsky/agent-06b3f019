@@ -763,5 +763,41 @@ class ReviewWaitTest(unittest.TestCase):
         self.assertGreaterEqual(len(calls), 2)
 
 
+
+class ReplyWrapperReviewTest(unittest.TestCase):
+    """The waiter reads only the CodeRabbit check on the exact HEAD, never a review count.
+
+    On PR 1656 (2026-10-31) CodeRabbit answered two ``[FIXED]`` thread replies
+    with empty-body COMMENTED reviews of the new HEAD while its check was
+    "Review rate limited"; a hand-rolled guard that counted reviews-by-HEAD
+    treated them as a delivered review. Reviews are not an input here, so
+    adding them to the payload must not end the wait; only the check does.
+    """
+
+    def test_reply_wrapper_reviews_never_end_the_wait(self) -> None:
+        head = "da2dbd8b14e25c77dcd5d3b0df3fb42e27e7d9ea"
+        wrappers = [
+            {"id": 5722158877, "user": {"login": "coderabbitai[bot]"}, "state": "COMMENTED",
+             "commit_id": head, "submitted_at": "2026-10-31T09:25:39Z", "body": ""},
+            {"id": 5722158908, "user": {"login": "coderabbitai[bot]"}, "state": "COMMENTED",
+             "commit_id": head, "submitted_at": "2026-10-31T09:25:40Z", "body": ""},
+        ]
+        pending = {"headRefOid": head, "reviews": wrappers, "statusCheckRollup": [
+            {"__typename": "CheckRun", "name": "CodeRabbit", "status": "IN_PROGRESS",
+             "conclusion": None, "startedAt": "2026-10-31T10:11:01Z"}]}
+        finished = {"headRefOid": head, "reviews": wrappers, "statusCheckRollup": [
+            {"__typename": "CheckRun", "name": "CodeRabbit", "status": "COMPLETED",
+             "conclusion": "SUCCESS", "title": "Finished", "startedAt": "2026-10-31T10:11:01Z"}]}
+        payloads = iter([pending, pending, pending, finished])
+        polls: list[float] = []
+        status = MODULE.wait_for_review(
+            pr="1656", expected_head=head, repo=None, timeout_seconds=600, poll_seconds=5,
+            loader=lambda _pr, _repo: next(payloads), sleeper=polls.append,
+            triggered_at=MODULE.parse_github_time("2026-10-31T10:10:02Z"),
+        )
+        self.assertEqual(len(polls), 3, "wrapper reviews must not shortcut the check wait")
+        self.assertEqual((status.state, status.successful), ("SUCCESS", True))
+        self.assertIsNone(MODULE.coderabbit_entry({"statusCheckRollup": [], "reviews": wrappers}))
+
 if __name__ == "__main__":
     unittest.main()

@@ -14,16 +14,16 @@
  */
 
 import type { BrowserSessionBindingPayload } from './realtime-types';
+import { createTaskSnapshotStore } from './taskSnapshotStore';
 
 export type BrowserSessionBinding = Omit<BrowserSessionBindingPayload, 'agentId'>;
 
-const bindings = new Map<string, BrowserSessionBinding>();
-const listeners = new Map<string, Set<() => void>>();
+const bindings = createTaskSnapshotStore<BrowserSessionBinding>(
+  (current, next) => current.asOf <= next.asOf,
+);
 
 export function publishBrowserSessionBinding(binding: BrowserSessionBinding): void {
-  const current = bindings.get(binding.taskId);
-  if (current !== undefined && current.asOf > binding.asOf) return;
-  bindings.set(binding.taskId, {
+  bindings.publish(binding.taskId, {
     taskId: binding.taskId,
     sessionId: binding.sessionId,
     debugUrl: binding.debugUrl,
@@ -31,29 +31,17 @@ export function publishBrowserSessionBinding(binding: BrowserSessionBinding): vo
     live: binding.live,
     asOf: binding.asOf,
   });
-  listeners.get(binding.taskId)?.forEach((listener) => listener());
 }
 
 export function getBrowserSessionBinding(taskId: string): BrowserSessionBinding | null {
-  return bindings.get(taskId) ?? null;
+  return bindings.get(taskId);
 }
 
 export function subscribeBrowserSessionBinding(taskId: string, listener: () => void): () => void {
-  let taskListeners = listeners.get(taskId);
-  if (taskListeners === undefined) {
-    taskListeners = new Set();
-    listeners.set(taskId, taskListeners);
-  }
-  taskListeners.add(listener);
-  return () => {
-    taskListeners.delete(listener);
-    if (taskListeners.size === 0) listeners.delete(taskId);
-  };
+  return bindings.subscribe(taskId, listener);
 }
 
 /** Test isolation: forget every binding (listeners stay attached). */
 export function clearBrowserSessionBindings(): void {
-  const taskIds = [...bindings.keys()];
   bindings.clear();
-  taskIds.forEach((taskId) => listeners.get(taskId)?.forEach((listener) => listener()));
 }

@@ -3,6 +3,8 @@
  *
  * Handles auto-scrolling, tab visibility reconnection,
  * and browser-panel-aware scroll suppression.
+ * Scroll check: newest row for each task -> active: hold / all complete: follow.
+ * Walk newest to oldest once so completed long histories cost O(messages).
  */
 
 import { useEffect, useRef, useCallback } from 'react';
@@ -20,26 +22,32 @@ export function useTerminalMessages(
 
   // Handle tab visibility changes — reconnect when visible
   useEffect(() => {
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    const cancelReconnect = () => {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
+    };
+    const scheduleReconnect = (delay: number) => {
+      cancelReconnect();
+      if (document.hidden || !selectedAgentId) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = undefined;
+        if (!document.hidden) forceResubscribe();
+      }, delay);
+    };
     const handleVisibilityChange = () => {
-      if (!document.hidden && selectedAgentId) {
-        setTimeout(() => {
-          if (selectedAgentId) forceResubscribe();
-        }, 1000);
-      }
+      scheduleReconnect(1000);
     };
 
     const handleFocus = () => {
-      if (selectedAgentId) {
-        setTimeout(() => {
-          if (selectedAgentId) forceResubscribe();
-        }, 500);
-      }
+      scheduleReconnect(500);
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('focus', handleFocus);
 
     return () => {
+      cancelReconnect();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleFocus);
     };
@@ -53,25 +61,24 @@ export function useTerminalMessages(
     const isBrowserAction = lastMessage?.metadata?.browser_url;
     if (isBrowserAction) return;
 
-    const hasActiveBrowser = messages.some((msg) => {
-      const taskId = msg.metadata?.task_id;
-      if (!taskId) return false;
-      const taskMessages = messages.filter((m) => m.metadata?.task_id === taskId);
-      const lastTaskMessage = taskMessages[taskMessages.length - 1];
-      return lastTaskMessage?.metadata?.action_type !== 'task_complete';
-    });
-
-    if (hasActiveBrowser) return;
+    const seenTasks = new Set<string>();
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const metadata = messages[index].metadata;
+      const taskId = metadata?.task_id;
+      if (!taskId || seenTasks.has(taskId)) continue;
+      if (metadata.action_type !== 'task_complete') return;
+      seenTasks.add(taskId);
+    }
 
     const scrollContainer = messagesEndRef.current.closest('[data-radix-scroll-area-viewport]');
     if (!scrollContainer) return;
 
     if (isInitialLoadRef.current) {
-      requestAnimationFrame(() => {
+      const frame = requestAnimationFrame(() => {
         scrollContainer.scrollTop = scrollContainer.scrollHeight;
         isInitialLoadRef.current = false;
       });
-      return;
+      return () => cancelAnimationFrame(frame);
     }
 
     const distanceFromBottom =

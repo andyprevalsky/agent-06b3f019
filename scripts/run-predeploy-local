@@ -172,6 +172,27 @@ PREDEPLOY_RUN_ID="${PREDEPLOY_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-$$}"
 ARTIFACT_DIR="$RUN_ROOT/$PREDEPLOY_RUN_ID"
 RUNNER_LOG="$ARTIFACT_DIR/runner.log"
 SUMMARY_PATH="$ARTIFACT_DIR/summary.json"
+# Inside a deploy (an isolated deploy worktree, ROSE_DEPLOY_WORKTREE=1, or the
+# explicit PREDEPLOY_PARK_LEDGERS=1) the benchmark ledger rows this run records
+# are parked under .context instead of being appended to the tracked
+# agents/benchmarks/history/*.jsonl files: a tracked-ledger write while smoke
+# runs changes this lane's own --reuse-passed fingerprint ("deploy inputs
+# changed while smoke ran") and the exact-worktree fingerprint of every lane
+# admitted after it. The rows themselves are unchanged (same writers, same
+# bytes); `python3 scripts/benchmark-history-latest-only.py --apply-parked
+# <park dir> --write` replays them into the tracked ledgers when the deploy
+# publishes its history. Reads (timeout derivation, the canary history gate)
+# keep the tracked ledgers. An explicit BENCHMARK_HISTORY_PARK_DIR is honoured
+# as-is, and the printed publish command names the directory actually used so
+# a custom park is never left behind by the default replay.
+if [ -n "${BENCHMARK_HISTORY_PARK_DIR:-}" ] \
+    || [ "${ROSE_DEPLOY_WORKTREE:-0}" = "1" ] \
+    || [ "${PREDEPLOY_PARK_LEDGERS:-0}" = "1" ]; then
+    BENCHMARK_HISTORY_PARK_DIR="${BENCHMARK_HISTORY_PARK_DIR:-$ROOT_DIR/.context/deploy-ledger-park}"
+    mkdir -p "$BENCHMARK_HISTORY_PARK_DIR"
+    export BENCHMARK_HISTORY_PARK_DIR
+    echo "📦 Benchmark ledger rows are parked in $BENCHMARK_HISTORY_PARK_DIR; publish them with: python3 scripts/benchmark-history-latest-only.py --base origin/main --apply-parked \"$BENCHMARK_HISTORY_PARK_DIR\" --write"
+fi
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STARTED_EPOCH="$(python3 -c 'import time; print(time.time())')"
 GIT_SHA="$(git rev-parse HEAD)"

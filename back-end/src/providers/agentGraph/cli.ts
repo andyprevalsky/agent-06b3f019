@@ -13,8 +13,10 @@
  *   (any call, token near expiry)    → POST $ROSE_AGENTS_URL/token → ~/.rose/agents-token
  */
 
+import { AGENT_ACCOUNT_CLI_SCRIPT } from './cliAccount';
+
 export const AGENT_GRAPH_CLI_NAME = 'rose-agents';
-export const AGENT_GRAPH_CLI_VERSION = '3';
+export const AGENT_GRAPH_CLI_VERSION = '4';
 
 export const AGENT_GRAPH_CLI_SCRIPT = `#!/usr/bin/env node
 'use strict';
@@ -27,7 +29,11 @@ const path = require('path');
 const USAGE = [
   'usage:',
   '  rose-agents list [--json]',
+  '  rose-agents list --scope account [--project ID] [--folder ID] [--limit N] [--cursor CURSOR] [--json]',
+  '  rose-agents read <agent_id> [--limit N] [--cursor CURSOR] [--message ID --offset N] [--json]',
+  '  rose-agents spawn --project ID --folder ID --title TEXT --goal-file FILE --instruction-file FILE --id KEY [--json]',
   '  rose-agents send <agent_id> <message...|->  [--id <idempotency-key>] [--json]',
+  '  rose-agents send <agent_id> <message...|-> --scope account [--id KEY] [--json]',
   '  rose-agents grep <regex> [--agent <agent_id>] [--role USER|ASSISTANT|TOOL] [--limit N] [-i] [--json]',
 ].join('\\n');
 
@@ -54,7 +60,7 @@ function parse(argv) {
 // The session token is short-lived; a refreshed one is kept here (0600). The
 // newer of it and the env token wins: a resumed session starts with a freshly
 // minted env token, which must beat a refreshed copy an earlier task left.
-const TOKEN_FILE = path.join(os.homedir(), '.rose', 'agents-token');
+const TOKEN_FILE = process.env.ROSE_AGENTS_TOKEN_FILE || path.join(os.homedir(), '.rose', 'agents-token');
 const REFRESH_WINDOW_S = 30 * 60;
 
 function storedToken() {
@@ -83,8 +89,25 @@ async function request(base, method, route, token, body) {
     method,
     headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
+    ...(route.startsWith('/account/') ? { signal: AbortSignal.timeout(30000) } : {}),
   });
-  return { response, text: await response.text() };
+  if (!route.startsWith('/account/')) return { response, text: await response.text() };
+  const reader = response.body?.getReader();
+  if (!reader) return { response, text: '' };
+  const parts = []; let bytes = 0;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      bytes += part.value.byteLength;
+      if (bytes > 65536) {
+        await reader.cancel();
+        throw new Error('Account response exceeds 65536 bytes; request a smaller page');
+      }
+      parts.push(Buffer.from(part.value));
+    }
+  } finally { reader.releaseLock(); }
+  return { response, text: Buffer.concat(parts).toString('utf8') };
 }
 
 async function freshToken(base) {
@@ -139,8 +162,12 @@ function printAgents(data) {
   }
 }
 
+${AGENT_ACCOUNT_CLI_SCRIPT}
+
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
+  if (command === '--help' || command === 'help') { process.stdout.write(USAGE + '\\n'); return; }
+  if (await accountCommand(command, rest)) return;
   const { positional, flags } = parse(rest);
   if (command === 'list') {
     const data = await call('GET', '/agents');

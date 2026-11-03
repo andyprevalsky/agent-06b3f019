@@ -325,6 +325,15 @@ def _owned_shutdown_timeout() -> int:
     return seconds
 
 
+def _own_process_start_ticks() -> str:
+    """This process's kernel start time (/proc stat field 22); empty off Linux."""
+    try:
+        stat = Path(f"/proc/{os.getpid()}/stat").read_text()
+        return stat.rsplit(") ", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return ""
+
+
 def _record_stack_cleanup_owner(stack: ServiceStack, process: subprocess.Popen, token: str) -> None:
     native_identity = _process_identity_tools()["current_identity"](process.pid)
     birth = subprocess.run(
@@ -1933,6 +1942,14 @@ def start_services(
         # pinned off here for the non-isolated path).
         env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0"
 
+    if stack.isolated:
+        # The stack runs in its own session, so no signal to this controller's
+        # group reaches it. A wrapper's grace-period SIGKILL of this process
+        # would otherwise orphan it; run.sh shuts down once this exact process
+        # (pid + start time) is gone.
+        env["RUN_SH_OWNER_PID"] = str(os.getpid())
+        env["RUN_SH_OWNER_START"] = _own_process_start_ticks()
+
     try:
         with open(stack.service_log, "w") as service_log:
             process = subprocess.Popen(
@@ -3071,6 +3088,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     result_paths: list[Path] = []
     benchmark_owner = LocalBenchmarkOwner(stack)
     if stack.isolated:
+        # Every child started from here on (run.sh, run_benchmark.py, tunnels,
+        # the dashboard) inherits the run id, so the deploy pipeline's
+        # owner-run classification sees a carrier for a custom run id too (a
+        # generated id already embeds this controller's pid). A runtime
+        # environment write never reaches this process's own /proc environ;
+        # the controller itself is recognised by its ``--run-id`` argument.
+        os.environ["BENCHMARK_RUN_ID"] = stack.run_id
         benchmark_owner.record("not_started")
     previous_isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES")
     # Isolated stacks and --use-existing local stacks both key browser-provider

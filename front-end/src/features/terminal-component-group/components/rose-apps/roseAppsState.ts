@@ -68,7 +68,11 @@ export interface RoseAppsValue {
   openAgent: (agentId: string) => void;
   /** Sign out (Settings panel); undefined when the host has no session. */
   onLogout?: () => void;
-  onCreateAgentInProject?: (project: import('@/lib/api/projects').Project) => void;
+  onCreateAgentInProject?: (
+    project: import('@/lib/api/projects').Project,
+    folderId?: string | null,
+  ) => void;
+  newAgentFolderId?: string | null;
   setSlot: (el: HTMLElement | null) => void;
   setDrawerWidth: (width: number) => void;
   setIsResizing: (resizing: boolean) => void;

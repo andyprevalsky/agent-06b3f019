@@ -85,7 +85,7 @@ import { releaseAllConnectSessions } from './domains/compute-grants/connectSessi
 import { releaseAllRecoveryProbeSessions } from './providers/browser/challengeRecoveryLaneSearch';
 import { createCloudMinter } from './domains/compute-grants/minter';
 import { computeGrantCdpProvider } from './domains/compute-grants/browserProvider';
-import { anthropicProxyRouter, codexProxyRouter } from './domains/demo-cache/routes.proxy';
+import { anthropicProxyRouter } from './domains/demo-cache/routes.proxy';
 import { prisma } from './providers/database';
 import { createDeepHealthHandler } from './providers/deepHealth';
 import { alertError } from './providers/errorAlert';
@@ -553,7 +553,6 @@ app.use('/api/world-models', worldModelsRouter); // WMH-compatible simulation ru
 // Anthropic tee-proxy for the code agent. Mounted OUTSIDE /api so the injected
 // ANTHROPIC_BASE_URL = <backend>/anthropic-proxy/<goalHash> resolves to /v1/messages.
 app.use('/anthropic-proxy', anthropicProxyRouter);
-app.use('/codex-proxy', codexProxyRouter);
 
 // Catch-all authenticated route (must be AFTER x402 routes)
 app.use('/api', authenticate, formatRouter);

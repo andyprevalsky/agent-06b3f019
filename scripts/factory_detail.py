@@ -333,7 +333,7 @@ def attempt_detail(run_dir: Path, stage: str, source: dict[str, Any]) -> dict[st
     """Attempt number in this run, and why it was rerun when it is a retry."""
     prior = [
         row for row in _load_rows(run_dir / "stages.jsonl")
-        if row.get("stage") == stage and row.get("status") != "reused"
+        if row.get("stage") == stage and row.get("status") not in ("reused", "reused-scoped")
     ]
     out: dict[str, Any] = {"attempt": len(prior) + 1}
     if not prior:

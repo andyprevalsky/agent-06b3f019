@@ -40,10 +40,14 @@ def _reset_pointer(*, flip_after: int = 1, locked: str | None = None) -> None:
     _pointer["fetches"] = 0
     _pointer["flip_after"] = flip_after
     _pointer["locked"] = locked
+    _pointer.pop("read_release", None)
 
 
 @activity.defn(name="fetch_agent_queue_pointer")
 async def mock_fetch_agent_queue_pointer() -> dict[str, Any]:
+    release = _pointer.get("read_release")
+    if isinstance(release, asyncio.Event):
+        await release.wait()
     _pointer["fetches"] = int(_pointer["fetches"]) + 1
     locked = _pointer["locked"]
     if isinstance(locked, str) and locked:
@@ -241,9 +245,17 @@ async def test_idle_park_reads_no_pointer_for_minutes_then_hands_off_on_signal()
             await env.sleep(timedelta(minutes=19))
             assert _pointer["fetches"] == 0, f"idle park polled the pointer: {_pointer['fetches']} reads in 19 minutes"
             _pointer["locked"] = NEW_QUEUE
-            await handle.signal(GENERATION_HANDOFF_SIGNAL, NEW_QUEUE)
-            # A duplicate broadcast (second sweep / retried CLI) is a no-op.
-            await handle.signal(GENERATION_HANDOFF_SIGNAL, NEW_QUEUE)
+            read_release = asyncio.Event()
+            _pointer["read_release"] = read_release
+            try:
+                await handle.signal(GENERATION_HANDOFF_SIGNAL, NEW_QUEUE)
+                # A duplicate broadcast (second sweep / retried CLI) is a no-op.
+                # Keep this fixture running until both broadcasts are server-acknowledged.
+                await handle.signal(GENERATION_HANDOFF_SIGNAL, NEW_QUEUE)
+                assert _pointer["fetches"] == 0, "pointer read escaped the signal acknowledgement barrier"
+            finally:
+                read_release.set()
+                _pointer.pop("read_release", None)
             result = await handle.result()
     _assert_handoff_chip(result, "wait_seconds")
     elapsed = timedelta(seconds=result["handoff_after_seconds"])

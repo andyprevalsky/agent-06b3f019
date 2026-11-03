@@ -130,7 +130,6 @@ async function launch(
           CODEX_AUTH_JSON: '{}',
           OPENAI_API_KEY: '',
           CODE_SESSION_TURN_TOKEN: 'turn-token',
-          CODEX_FAST_MODE_PROXY_URL: '',
         };
   // No `...process.env`: the CLI env must come from the session env alone.
   const server = spawn(

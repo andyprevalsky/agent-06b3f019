@@ -5,6 +5,7 @@ export interface AgentScope {
   agentId: string;
   cancelled: boolean;
   discardReported: boolean;
+  signal?: AbortSignal;
 }
 
 /** Pure ownership predicate suitable for React state updater functions. */

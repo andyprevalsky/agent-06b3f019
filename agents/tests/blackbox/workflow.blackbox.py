@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import traceback
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -532,6 +533,9 @@ CUTOVER_USAGE: Dict[str, List[Dict[str, Any]]] = {}
 CUTOVER_APPROVAL_REQUESTS: Dict[str, List[str]] = {}
 CUTOVER_BROWSER: Dict[str, Dict[str, Any]] = {}  # agent_id -> scenario + recorded calls
 CUTOVER_CODE: Dict[str, Dict[str, Any]] = {}  # agent_id -> scenario + recorded code-agent calls
+CUTOVER_COMPLETION_REQUESTED: Dict[str, bool] = {}
+CUTOVER_RESPONSE_SCHEMAS: Dict[str, Dict[str, Any]] = {}
+CUTOVER_GENERATED_SCHEMAS: Dict[str, Dict[str, Any]] = {}
 
 
 # agent_id -> number of poll_new_messages calls that succeed before every later
@@ -668,6 +672,8 @@ async def mock_release_compute_token_lineage_activity(lineage_key: str) -> bool:
 
 @activity.defn(name="fetch_agent_config")
 async def mock_fetch_agent_config(agent_id: str) -> Dict:
+    if agent_id in CUTOVER_RESPONSE_SCHEMAS:
+        return {"context_gates": {}, "response_schema": CUTOVER_GENERATED_SCHEMAS.get(agent_id), "write_lock_enabled": True}
     return {"context_gates": {}, "response_schema": None, "write_lock_enabled": True}
 
 
@@ -904,6 +910,10 @@ async def mock_call_llm_activity(
         CUTOVER_LLM_QUEUES.setdefault(activity_agent_id, []).append(activity.info().task_queue)
         script = CUTOVER_LLM_SCRIPTS[activity_agent_id]
         tool_calls = script.pop(0) if script else [{"tool": "attempt_completion"}]
+        if activity_agent_id in CUTOVER_RESPONSE_SCHEMAS and any(
+            call.get("tool") == "attempt_completion" for call in tool_calls
+        ):
+            CUTOVER_COMPLETION_REQUESTED[activity_agent_id] = True
         return {
             "response": "",
             "tool_calls": tool_calls,
@@ -975,9 +985,15 @@ async def mock_check_progress(
         CUTOVER_VERIFIER_CONTEXTS[agent_id].append(list(context))
     if agent_id in VERIFIER_SCHEMA_CAPTURE:
         VERIFIER_SCHEMA_CAPTURE[agent_id].append(response_schema)
+    # These scripted cutover scenarios require the new generation to make
+    # its own completion request after the delegated tool resumes.
+    completion_requested = (
+        agent_id not in CUTOVER_RESPONSE_SCHEMAS
+        or CUTOVER_COMPLETION_REQUESTED.get(agent_id, False)
+    )
     return {
-        "score": 1.0,
-        "reasoning": "Complete",
+        "score": 1.0 if completion_requested else 0.0,
+        "reasoning": "Complete" if completion_requested else "Awaiting the scripted completion request",
         "structured_response": None,
         # C6: usage must always be returned so callers (post-DAG verifier,
         # main-loop verifier) can route the cost through _on_tokens.
@@ -1070,6 +1086,12 @@ async def mock_set_response_schema_activity(
     *args: Any,
     **kwargs: Any,
 ) -> Optional[Dict[str, Any]]:
+    if agent_id in CUTOVER_RESPONSE_SCHEMAS:
+        SCHEMA_GENERATION_CAPTURE[agent_id].append(list(user_messages))
+        schema = CUTOVER_RESPONSE_SCHEMAS[agent_id]
+        if kwargs.get("persist", args[0] if args else True):
+            CUTOVER_GENERATED_SCHEMAS[agent_id] = schema
+        return {"schema": schema, "usage": {}}
     if agent_id in SCHEMA_GENERATION_CAPTURE:
         SCHEMA_GENERATION_CAPTURE[agent_id].append(list(user_messages))
         return {"schema": WOKEN_SCHEMA, "usage": {}}
@@ -1083,6 +1105,8 @@ async def mock_resolve_agent_address_activity(agent_id: str, address: str, user_
 
 @activity.defn(name="persist_response_schema_activity")
 async def mock_persist_response_schema_activity(agent_id: str, schema: Dict[str, Any]) -> None:
+    if agent_id in CUTOVER_RESPONSE_SCHEMAS:
+        CUTOVER_GENERATED_SCHEMAS[agent_id] = schema
     return None
 
 
@@ -1386,6 +1410,44 @@ with workflow.unsafe.imports_passed_through():
 from helpers.workflow_sandbox import production_workflow_runner
 
 _WORKFLOW_RUNNER = production_workflow_runner()
+
+
+def test_workflow_sandbox_import_does_not_initialize_activity_package():
+    """Replay imports preserve the pure policy without initializing activities."""
+    import sys
+    from datetime import timedelta
+
+    from helpers.wmh_activity_policy import wmh_activity_timeout_options
+
+    initialized = []
+    policies = []
+    previous = sys.getprofile()
+
+    def observe(frame, event, _arg):
+        filename = frame.f_code.co_filename.replace("\\", "/")
+        if frame.f_code.co_name != "<module>":
+            return
+        if event == "call" and filename.endswith("/helpers/__init__.py"):
+            initialized.append(filename)
+        if event == "return" and filename.endswith("/workflows/agent_workflow.py"):
+            policies.append(frame.f_globals["wmh_activity_timeout_options"])
+
+    sys.setprofile(observe)
+    try:
+        _WORKFLOW_RUNNER.prepare_workflow(workflow._Definition.must_from_class(AgentWorkflow))
+    finally:
+        sys.setprofile(previous)
+    assert len(policies) == 1, "Expected the actual replay workflow module to execute once"
+    timeout = timedelta(seconds=7)
+    for mode in ("real", "simulate", "shadow", "unknown"):
+        actual = policies[0](mode, timeout)
+        expected = wmh_activity_timeout_options(mode, timeout)
+        assert actual == expected, f"Replay changed the WMH deadline policy for {mode}"
+        actual.clear()
+        assert policies[0](mode, timeout) == expected, "Policy results must not share mutable state"
+    assert not initialized, "Workflow replay initialized activity helpers before their import boundary"
+    assert policies[0] is wmh_activity_timeout_options, "Replay must retain the immutable policy export"
+
 
 # Default workflow args matching AgentWorkflow.run() signature
 DEFAULT_WF_ARGS: list = [
@@ -1999,6 +2061,7 @@ async def _run_all_workflow_tests() -> List[tuple]:
                 ]
                 SCHEMA_GENERATION_CAPTURE[woken_id] = []
                 VERIFIER_SCHEMA_CAPTURE[woken_id] = []
+                CUTOVER_LLM_SCRIPTS[woken_id] = [[{"tool": "attempt_completion", "result": "All done"}]]
                 WORKFLOW_ENV_ACTIVITY_COUNTS.pop(woken_id, None)
                 handle = await env.client.start_workflow(
                     AgentWorkflow.run,
@@ -2025,6 +2088,14 @@ async def _run_all_workflow_tests() -> List[tuple]:
                     await asyncio.sleep(0.5)
                 judged = VERIFIER_SCHEMA_CAPTURE[woken_id]
                 assert judged, "woken sub-agent never reached its verifier"
+                assert any(
+                    row.get("role") == "ASSISTANT"
+                    and any(
+                        call.get("tool") == "attempt_completion"
+                        for call in (row.get("metadata") or {}).get("tool_calls", [])
+                    )
+                    for row in CUTOVER_MESSAGES[woken_id]
+                ), "woken sub-agent reached fallback verification without dispatching its completion tool"
                 # The scripted completion must reach the verifier directly;
                 # exhausting the loop also verifies and would be a false pass.
                 llm_calls = WORKFLOW_ENV_ACTIVITY_COUNTS.get(woken_id, {}).get("call_llm_activity", 0)
@@ -2040,7 +2111,13 @@ async def _run_all_workflow_tests() -> List[tuple]:
             except Exception as e:
                 results.append((name, e))
             finally:
-                for capture in (CUTOVER_MESSAGES, SCHEMA_GENERATION_CAPTURE, VERIFIER_SCHEMA_CAPTURE):
+                for capture in (
+                    CUTOVER_MESSAGES,
+                    SCHEMA_GENERATION_CAPTURE,
+                    VERIFIER_SCHEMA_CAPTURE,
+                    CUTOVER_LLM_SCRIPTS,
+                    CUTOVER_LLM_QUEUES,
+                ):
                     capture.pop(WOKEN_SUBAGENT_ID, None)
 
     return results
@@ -2071,6 +2148,7 @@ def _opt_in_cutover_agent(
     CUTOVER_POINTER[workflow_id] = CUTOVER_OLD_QUEUE
     CUTOVER_POINTER_FETCHES[workflow_id] = []
     CUTOVER_MESSAGES[agent_id] = []
+    CUTOVER_COMPLETION_REQUESTED[agent_id] = False
     CUTOVER_LLM_QUEUES[agent_id] = []
     CUTOVER_VERIFIER_CONTEXTS[agent_id] = []
     CUTOVER_SMS[agent_id] = []
@@ -2093,8 +2171,13 @@ def _opt_in_cutover_agent(
             }
         ]
     ]
+    CUTOVER_RESPONSE_SCHEMAS[agent_id] = CUTOVER_LLM_SCRIPTS[agent_id][0][0]["output_schema"]
+    SCHEMA_GENERATION_CAPTURE[agent_id] = []
+    VERIFIER_SCHEMA_CAPTURE[agent_id] = []
 
 
+# The root's schema generator returns the same declared output contract as
+# its sole delegated task. Other workflow fixtures retain their no-schema path.
 async def _start_cutover_workflow(client, agent_id: str, workflow_id: str):
     return await client.start_workflow(
         AgentWorkflow.run,
@@ -2126,6 +2209,11 @@ def _assert_browser_resumed_on_new_generation(agent_id: str) -> tuple:
     assert list(inspect.signature(mock_spawn_browser_agent_activity_v3).parameters) == list(
         inspect.signature(spawn_browser_agent_activity_v3).parameters
     ), "mock_spawn_browser_agent_activity_v3 must mirror the real activity signature"
+    assert SCHEMA_GENERATION_CAPTURE[agent_id] == [["Order the item on shop.example.com"]]
+    assert CUTOVER_GENERATED_SCHEMAS[agent_id] == CUTOVER_RESPONSE_SCHEMAS[agent_id]
+    assert VERIFIER_SCHEMA_CAPTURE[agent_id] and all(
+        schema == CUTOVER_RESPONSE_SCHEMAS[agent_id] for schema in VERIFIER_SCHEMA_CAPTURE[agent_id]
+    ), "the continued verifier must retain the generated native schema"
     calls = CUTOVER_BROWSER[agent_id]["calls"]
     assert len(calls) == 2, f"expected one interrupted + one resumed browser activity, got {len(calls)}"
     first, second = calls
@@ -2180,6 +2268,247 @@ def _assert_single_browser_chip_completed(agent_id: str, tool_call_id: str) -> N
         and "SHOP-4242" in (row.get("text") or "")
         for row in verifier_contexts[-1]
     ), "the continued generation's context must contain the resumed browser result"
+
+
+def _clear_cutover_test_state(agent_id: str, workflow_id: str) -> None:
+    for capture in (
+        CUTOVER_MESSAGES, CUTOVER_LLM_SCRIPTS, CUTOVER_LLM_QUEUES,
+        CUTOVER_VERIFIER_CONTEXTS, CUTOVER_SMS, CUTOVER_USAGE,
+        CUTOVER_APPROVAL_REQUESTS, CUTOVER_BROWSER, CUTOVER_CODE,
+        CUTOVER_RESPONSE_SCHEMAS, CUTOVER_GENERATED_SCHEMAS, CUTOVER_COMPLETION_REQUESTED,
+        SCHEMA_GENERATION_CAPTURE, VERIFIER_SCHEMA_CAPTURE,
+    ):
+        capture.pop(agent_id, None)
+    CUTOVER_POINTER.pop(workflow_id, None)
+    CUTOVER_POINTER_FETCHES.pop(workflow_id, None)
+
+
+async def _capture_cutover_failure(client, handle, name: str, agent_id: str, error: Exception) -> None:
+    """Optional bounded evidence; five seconds bounds RPC work, not local I/O."""
+    directory = os.environ.get("ROSE_CUTOVER_FAILURE_DIR")
+    if not directory:
+        return
+    observed_at = datetime.now(timezone.utc).isoformat()
+    observed_monotonic = asyncio.get_running_loop().time()
+    stage = "prepare"
+    try:
+        from collections import deque
+        from datetime import timedelta
+        from pathlib import Path
+        import tempfile
+        import math
+        from temporalio.client import WorkflowHistoryEventFilterType
+
+        losses = {}
+        nodes = 0
+
+        def bounded_text(value):
+            prefix = value[:1024].encode("utf-8")[:1024].decode("utf-8", "ignore")
+            if len(prefix) != len(value):
+                losses["strings_truncated"] = losses.get("strings_truncated", 0) + 1
+            return prefix
+
+        def project(value, depth=0):
+            nonlocal nodes
+            nodes += 1
+            if nodes > 2048 or depth > 5:
+                losses["projection_budget_drops"] = losses.get("projection_budget_drops", 0) + 1
+                return {"omitted": "projection_budget"}
+            if value is None or isinstance(value, bool):
+                return value
+            if isinstance(value, float):
+                if math.isfinite(value):
+                    return value
+                losses["non_finite_floats"] = losses.get("non_finite_floats", 0) + 1
+                return {"omitted": "non_finite_float"}
+            if isinstance(value, int):
+                return value if value.bit_length() <= 64 else {"omitted": "large_integer"}
+            if isinstance(value, str):
+                return bounded_text(value)
+            if isinstance(value, dict):
+                result = {}
+                for index, (key, child) in enumerate(value.items()):
+                    if index == 32:
+                        break
+                    if isinstance(key, str):
+                        bounded_key = key[:128].encode("utf-8")[:128].decode("utf-8", "ignore")
+                        if bounded_key != key:
+                            losses["keys_truncated"] = losses.get("keys_truncated", 0) + 1
+                        if bounded_key in result:
+                            losses["key_collisions_dropped"] = losses.get("key_collisions_dropped", 0) + 1
+                            continue
+                        result[bounded_key] = project(child, depth + 1)
+                    else:
+                        losses["non_string_keys_dropped"] = losses.get("non_string_keys_dropped", 0) + 1
+                if len(value) > 32:
+                    losses["collection_items_dropped"] = losses.get("collection_items_dropped", 0) + len(value) - 32
+                return result
+            if isinstance(value, (list, tuple)):
+                if len(value) > 32:
+                    losses["collection_items_dropped"] = losses.get("collection_items_dropped", 0) + len(value) - 32
+                return [project(child, depth + 1) for child in value[-32:]]
+            return {"unrepresented_type": type(value).__name__[:128]}
+
+        def write_once(path, receipt, cap):
+            raw = json.dumps(receipt, ensure_ascii=True, allow_nan=False).encode("utf-8")
+            if len(raw) > cap and isinstance(receipt.get("events"), list) and receipt["events"]:
+                # Trim only the remote event prefix; preserve the newest tail and pending state.
+                receipt = {**receipt, "losses": dict(receipt.get("losses", {}))}
+                original_events = receipt["events"]
+                previous_dropped = receipt.get("events_dropped", 0)
+                low, high = 1, len(original_events)
+                while low < high:
+                    middle = (low + high) // 2
+                    receipt["events"] = original_events[middle:]
+                    receipt["events_dropped"] = previous_dropped + middle
+                    receipt["history_complete"] = False
+                    receipt["losses"]["byte_cap_events_trimmed"] = middle
+                    trial = json.dumps(receipt, ensure_ascii=True, allow_nan=False).encode("utf-8")
+                    if len(trial) <= cap:
+                        high = middle
+                    else:
+                        low = middle + 1
+                receipt["events"] = original_events[low:]
+                receipt["events_dropped"] = previous_dropped + low
+                receipt["history_complete"] = False
+                receipt["losses"]["byte_cap_events_trimmed"] = low
+                raw = json.dumps(receipt, ensure_ascii=True, allow_nan=False).encode("utf-8")
+            if len(raw) > cap:
+                raw = json.dumps({
+                    "capture_gap": "byte_cap", "projected_bytes": len(raw), "byte_cap": cap,
+                    "name": bounded_text(name), "failure_observed_at": observed_at,
+                    "failure_observed_monotonic": observed_monotonic,
+                    "native_outcome": "failed", "error_type": type(error).__name__[:128],
+                    "losses": dict(losses), "details_omitted": True,
+                    "remote_summary": {key: receipt[key] for key in (
+                        "workflow_id", "run_id", "status", "history_length", "events_scanned",
+                        "events_dropped", "missing_tail", "history_complete", "history_scan_complete",
+                        "capture_gap", "close_events", "pending_activities", "pending_activities_dropped", "pending_workflow_task",
+                    ) if key in receipt},
+                }).encode("utf-8")
+            if len(raw) > cap:
+                raw = b'{"capture_gap":"metadata_byte_cap","details_omitted":true}'
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(raw)
+
+        root = Path(directory)
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        owned = Path(tempfile.mkdtemp(prefix="cutover-", dir=root))
+        # mkdtemp creates a unique directory with mode 0700.
+        trace, walked, cursor = deque(maxlen=32), 0, error.__traceback__
+        while cursor is not None and walked < 128:
+            trace.append({"file": project(cursor.tb_frame.f_code.co_filename),
+                          "function": project(cursor.tb_frame.f_code.co_name), "line": cursor.tb_lineno})
+            walked += 1
+            cursor = cursor.tb_next
+        state = project({
+            "declared_schema": CUTOVER_RESPONSE_SCHEMAS.get(agent_id),
+            "persisted_schema": CUTOVER_GENERATED_SCHEMAS.get(agent_id),
+            "schema_generation": SCHEMA_GENERATION_CAPTURE.get(agent_id),
+            "verifier_schemas": VERIFIER_SCHEMA_CAPTURE.get(agent_id),
+            "completion_requested": CUTOVER_COMPLETION_REQUESTED.get(agent_id),
+            "remaining_script": CUTOVER_LLM_SCRIPTS.get(agent_id),
+            "llm_queues": CUTOVER_LLM_QUEUES.get(agent_id),
+            "browser": CUTOVER_BROWSER.get(agent_id), "code": CUTOVER_CODE.get(agent_id),
+            "messages": CUTOVER_MESSAGES.get(agent_id),
+            "verifier_contexts": (CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or [])[-1:],
+            "verifier_context_count": len(CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or []),
+            "verifier_contexts_dropped": max(0, len(CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or []) - 1),
+            "usage": CUTOVER_USAGE.get(agent_id), "sms": CUTOVER_SMS.get(agent_id),
+        })
+        initial = {"name": bounded_text(name), "agent_id": bounded_text(agent_id), "native_outcome": "failed",
+                   "workflow_id": bounded_text(getattr(handle, "id", "")),
+                   "requested_run_id": bounded_text(getattr(handle, "run_id", None) or ""),
+                   "first_execution_run_id": bounded_text(getattr(handle, "first_execution_run_id", None) or ""),
+                   "failure_observed_at": observed_at, "failure_observed_monotonic": observed_monotonic,
+                   "error_type": type(error).__name__[:128], "error_args": project(error.args),
+                   "traceback": list(trace), "traceback_frames_dropped": max(0, walked - 32),
+                   "traceback_tail_unknown": cursor is not None, "state": state, "losses": dict(losses)}
+        # New primitives only; write ONCE before any await. Later state cannot overwrite it.
+        stage = "initial_write"
+        write_once(owned / "failure.json", initial, 65536)
+        remote = {"rpc_budget_seconds": 5, "rpc_started_at": datetime.now(timezone.utc).isoformat(),
+                  "failure_observed_at": observed_at, "history_complete": False, "missing_tail": True}
+        rpc_started_monotonic = asyncio.get_running_loop().time()
+        events, scanned = deque(maxlen=256), 0
+
+        def timestamp(value):
+            return value.ToJsonString()[:64] if hasattr(value, "ToJsonString") else None
+
+        def event_metadata(event):
+            row = {"event_id": event.event_id, "event_type": int(event.event_type),
+                   "timestamp": timestamp(event.event_time)}
+            attribute = event.WhichOneof("attributes")
+            row["event_type_name"] = attribute
+            if attribute:
+                value = getattr(event, attribute)
+                for key in ("activity_id", "scheduled_event_id", "started_event_id", "timer_id", "new_execution_run_id"):
+                    field = getattr(value, key, None)
+                    if field is not None:
+                        row[key] = bounded_text(field) if isinstance(field, str) else field
+                for key in ("activity_type", "task_queue"):
+                    field = getattr(value, key, None)
+                    if field is not None:
+                        row[key] = bounded_text(field.name)
+            return row
+
+        async def observe():
+            nonlocal scanned
+            if handle is None:
+                remote["capture_gap"] = "no_handle"
+                return
+            remote["rpc_phase"] = "describe"
+            description = await handle.describe(rpc_timeout=timedelta(seconds=5))
+            remote.update({"workflow_id": bounded_text(description.id), "run_id": bounded_text(description.run_id),
+                           "status": int(description.status), "history_length": description.history_length})
+            if description.id != handle.id or not isinstance(description.run_id, str) or not description.run_id:
+                remote["capture_gap"] = "unresolved_execution_identity"
+                return
+            raw = description.raw_description
+            pending = raw.pending_activities
+            remote["pending_activities"] = [{"activity_id": bounded_text(item.activity_id),
+                "activity_type": bounded_text(item.activity_type.name), "state": int(item.state)} for item in pending[:16]]
+            remote["pending_activities_dropped"] = max(0, len(pending) - 16)
+            task = raw.pending_workflow_task
+            remote["pending_workflow_task"] = {"present": raw.HasField("pending_workflow_task"),
+                "state": int(task.state), "attempt": task.attempt,
+                "scheduled_time": timestamp(task.scheduled_time), "started_time": timestamp(task.started_time)}
+            pinned = client.get_workflow_handle(description.id, run_id=description.run_id)
+            remote["rpc_phase"] = "close_event"
+            close = await pinned.fetch_history(event_filter_type=WorkflowHistoryEventFilterType.CLOSE_EVENT,
+                                               rpc_timeout=timedelta(seconds=5))
+            remote["close_events"] = [event_metadata(event) for event in close.events[:4]]
+            remote["close_events_dropped"] = max(0, len(close.events) - 4)
+            remote["rpc_phase"] = "history"
+            async for event in pinned.fetch_history_events(page_size=64, wait_new_event=False,
+                                                          rpc_timeout=timedelta(seconds=5)):
+                events.append(event_metadata(event))
+                scanned += 1
+                if scanned == 1024:
+                    remote["capture_gap"] = "history_scan_cap"
+                    break
+            else:
+                remote["history_scan_complete"] = True
+                remote["history_complete"] = scanned <= 256
+                remote["missing_tail"] = False
+                remote["rpc_phase"] = "done"
+
+        try:
+            await asyncio.wait_for(observe(), timeout=5)
+        except (Exception, asyncio.CancelledError) as capture_error:
+            remote["capture_gap"] = type(capture_error).__name__[:128]
+        remote.update({"rpc_finished_at": datetime.now(timezone.utc).isoformat(),
+                       "rpc_elapsed_seconds": asyncio.get_running_loop().time() - rpc_started_monotonic,
+                       "events_scanned": scanned, "events_dropped": max(0, scanned - len(events)),
+                       "events": list(events), "losses": dict(losses)})
+        stage = "remote_write"
+        write_once(owned / "remote.json", remote, 32768)
+    except (Exception, asyncio.CancelledError) as capture_error:
+        try:
+            os.write(2, ("cutover_capture_gap:" + stage + ":" + type(capture_error).__name__[:128] + "\n").encode())
+        except Exception:
+            pass
 
 
 async def _run_parked_tool_cutover_tests() -> List[tuple]:
@@ -2246,9 +2575,12 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 )
                 results.append((name, None))
             except Exception as e:
+                await _capture_cutover_failure(env.client, handle, name, agent_id, e)
                 if handle is not None:
                     await _cancel_workflow(handle)
                 results.append((name, e))
+            finally:
+                _clear_cutover_test_state(agent_id, workflow_id)
 
             name = "wf_cutover_parked_write_approval_rewaits_same_request_on_new_generation"
             agent_id = "agent-cutover-approval"
@@ -2322,9 +2654,12 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 _assert_single_browser_chip_completed(agent_id, first["tool_call_id"])
                 results.append((name, None))
             except Exception as e:
+                await _capture_cutover_failure(env.client, handle, name, agent_id, e)
                 if handle is not None:
                     await _cancel_workflow(handle)
                 results.append((name, e))
+            finally:
+                _clear_cutover_test_state(agent_id, workflow_id)
 
             name = "wf_cutover_drained_code_agent_reattaches_same_sandbox_on_new_generation"
             agent_id = "agent-cutover-code"
@@ -2341,9 +2676,12 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 _assert_code_agent_reattached_on_new_generation(agent_id)
                 results.append((name, None))
             except Exception as e:
+                await _capture_cutover_failure(env.client, handle, name, agent_id, e)
                 if handle is not None:
                     await _cancel_workflow(handle)
                 results.append((name, e))
+            finally:
+                _clear_cutover_test_state(agent_id, workflow_id)
 
             name = "wf_cutover_background_browser_resumes_in_background_and_notifies_once"
             agent_id = "agent-cutover-background"
@@ -2405,9 +2743,12 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 assert not completion_rejections, "the agent waited instead of completing early"
                 results.append((name, None))
             except Exception as e:
+                await _capture_cutover_failure(env.client, handle, name, agent_id, e)
                 if handle is not None:
                     await _cancel_workflow(handle)
                 results.append((name, e))
+            finally:
+                _clear_cutover_test_state(agent_id, workflow_id)
 
     return results
 
@@ -2427,6 +2768,11 @@ def _assert_code_mock_mirrors_activity() -> None:
 def _assert_code_agent_reattached_on_new_generation(agent_id: str) -> None:
     from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE
 
+    assert SCHEMA_GENERATION_CAPTURE[agent_id] == [["Order the item on shop.example.com"]]
+    assert CUTOVER_GENERATED_SCHEMAS[agent_id] == CUTOVER_RESPONSE_SCHEMAS[agent_id]
+    assert VERIFIER_SCHEMA_CAPTURE[agent_id] and all(
+        schema == CUTOVER_RESPONSE_SCHEMAS[agent_id] for schema in VERIFIER_SCHEMA_CAPTURE[agent_id]
+    ), "the continued verifier must retain the generated native schema"
     calls = CUTOVER_CODE[agent_id]["calls"]
     assert len(calls) == 2, f"expected one drained + one reattached code-agent activity, got {calls}"
     first, second = calls
@@ -11832,6 +12178,514 @@ async def test_workflow_execute_tool_legacy_spawn_agent_receives_phase():
         _restore_workflow(original)
 
 
+async def test_workflow_generic_browser_result_gets_existing_budget_wrapup():
+    """Generic browser dispatch retains the completed result across its usage charge."""
+    from unittest.mock import AsyncMock, patch
+
+    import workflows.agent_workflow as workflow_module
+    import domains.spawn_agent.handler as spawn_module
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-browser-budget"
+    wf.user_id = "user-browser-budget"
+    wf.current_phase = "EXECUTE"
+    wf.agent_source = "WEB"
+    wf.own_cost_cents = 119.0
+    wf.price_limit_cents = 120
+    wf._handle_tool_event = AsyncMock()
+
+    class CompletedBrowser:
+        async def execute_tool(self, workflow_instance, tool_call, tool_call_id):
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                status=MessageStatus.FINISHED,
+                message="Browser returned the observed result",
+                metadata={
+                    "action_type": "task_complete",
+                    "success": True,
+                    "structured_response": {"answer": "Observed result"},
+                },
+                data={"usage": {"service": [{"provider": "browser", "cost_cents": 2.0}]}},
+            )
+
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        with (
+            patch.object(spawn_module, "workflow", fake),
+            patch.object(spawn_module, "get_manager", return_value=CompletedBrowser()),
+            patch.object(
+                workflow_module,
+                "TOOL_EXECUTORS",
+                {**workflow_module.TOOL_EXECUTORS, "spawn_agent": spawn_module.spawn_agent},
+            ),
+        ):
+            result = await wf._execute_tool(
+                "spawn_agent",
+                {
+                    "type": "browser",
+                    "task_name": "observe",
+                    "goal": "Observe the page",
+                    "start_url": "https://example.com",
+                    "output_schema": {"fields": []},
+                },
+                "browser-call",
+            )
+        assert result == {"success": True, "message": "spawn_agent completed"}, result
+        assert wf.own_cost_cents == 121.0 and wf.subtree_cost_cents == 121.0
+        assert wf.price_limit_cents == 120, "completion must not raise the cap"
+        assert wf._cost_limit_wrapup_pending, "completed generic browser never reached the existing wrap-up lifecycle"
+        assert not await wf._check_paused(), "completed result cannot reach root completion"
+        terminal_cost_writes = [
+            args
+            for name, args in fake.activity_calls
+            if name == "update_agent_status" and args[1] == "COST_LIMIT_REACHED"
+        ]
+        assert not terminal_cost_writes, "pollers can observe a terminal budget status before wrap-up"
+        assert not await wf._check_paused_before_turn()
+        for _ in range(3):
+            assert not await wf._check_paused(), "stream checks consumed the one admitted turn"
+        wf.goal = "Observe the page"
+        wf.start_time = fake.now_value
+        wf.output_schema = {"fields": [{"name": "answer", "type": "str"}]}
+        await wf._mark_complete(context=[], structured_response={"answer": "Observed result"})
+        assert wf._is_finished
+        assert any(name == "mark_finished" for name, _ in fake.activity_calls)
+        assert wf.own_cost_cents == 121.0
+        assert not any(
+            name == "update_agent_status" and args[1] == "COST_LIMIT_REACHED" for name, args in fake.activity_calls
+        )
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_browser_usage_arms_before_child_cost_interleaving():
+    wf = _bare_workflow_instance()
+    wf.agent_id, wf.user_id, wf.agent_source = "settlement-race", "budget-user", "WEB"
+    wf.own_cost_cents, wf.price_limit_cents = 119.0, 120
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    persist = wf._persist_tree_cost
+    interleaved = False
+
+    async def persist_with_signal():
+        nonlocal interleaved
+        if not interleaved:
+            interleaved = True
+            await wf.child_cost_update({"child_agent_id": "already-running-child", "subtree_cost_cents": 0.5})
+        await persist()
+
+    wf._persist_tree_cost = persist_with_signal
+    try:
+        await wf._track_usage(
+            {"service": [{"provider": "browser", "cost_cents": 2.0}]},
+            tool_name="spawn_agent",
+            browser_completed=True,
+        )
+        assert interleaved
+        assert wf.own_cost_cents == 121.0 and wf.subtree_cost_cents == 121.5
+        assert wf._cost_limit_wrapup_pending and not wf.is_paused
+        assert not any(
+            name == "update_agent_status" and args[1] == "COST_LIMIT_REACHED" for name, args in fake.activity_calls
+        ), "child signal published terminal cost stop during verified browser settlement"
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_browser_pricing_cannot_reopen_an_intervening_cost_stop():
+    wf = _bare_workflow_instance()
+    wf.agent_id, wf.user_id, wf.agent_source = "pricing-race", "budget-user", "WEB"
+    wf.own_cost_cents, wf.price_limit_cents = 119.0, 120
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+
+    async def pricing_with_signal(model):
+        await wf.child_cost_update({"child_agent_id": "already-running-child", "subtree_cost_cents": 2.0})
+        return {"input_cents_per_1k": 2.0, "output_cents_per_1k": 0.0}
+
+    wf._get_model_pricing = pricing_with_signal
+    try:
+        await wf._track_usage(
+            {"llm": [{"model": "priced-browser-model", "provider": "browser", "tokens_in": 1000}]},
+            tool_name="spawn_agent",
+            browser_completed=True,
+        )
+        assert wf.own_cost_cents == 121.0 and wf.subtree_cost_cents == 123.0
+        assert wf.is_paused and wf._cost_limit_reached
+        assert not wf._cost_limit_wrapup_pending, "terminal usage reopened an unrelated cost stop"
+        stops = [
+            args
+            for name, args in fake.activity_calls
+            if name == "update_agent_status" and args[1] == "COST_LIMIT_REACHED"
+        ]
+        assert len(stops) == 1
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_inflight_refusal_preserves_unadmitted_browser_wrapup():
+    from unittest.mock import AsyncMock, patch
+    import workflows.agent_workflow as workflow_module
+
+    wf = _bare_workflow_instance()
+    wf.agent_id, wf.user_id, wf.agent_source = "inflight-wrapup", "budget-user", "WEB"
+    wf.own_cost_cents = wf.subtree_cost_cents = 121.0
+    wf.price_limit_cents = 120
+    wf._cost_limit_reached = wf._cost_limit_wrapup_pending = True
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    executor = AsyncMock()
+    try:
+        with patch.dict(workflow_module.TOOL_EXECUTORS, {"web_search": executor}):
+            results = await asyncio.gather(
+                wf._execute_tool("web_search", {"query": "old turn one"}, "inflight-one"),
+                wf._execute_tool("web_search", {"query": "old turn two"}, "inflight-two"),
+            )
+        assert all(result.get("error") is True for result in results)
+        executor.assert_not_awaited()
+        assert wf._cost_limit_wrapup_pending, "old in-flight work consumed the future completion allowance"
+        assert not wf._cost_limit_wrapup_consumed and not wf.is_paused
+        assert not any(
+            name == "update_agent_status" and args[1] == "COST_LIMIT_REACHED" for name, args in fake.activity_calls
+        )
+        assert not await wf._check_paused_before_turn()
+        assert wf._cost_limit_wrapup_consumed
+        wf.goal = "Report the returned browser result"
+        wf.start_time = fake.now_value
+        wf.output_schema = {"fields": [{"name": "answer", "type": "str"}]}
+        await wf._mark_complete(context=[], structured_response={"answer": "Observed result"})
+        assert wf._is_finished
+        assert any(name == "mark_finished" for name, _ in fake.activity_calls)
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_browser_pricing_preserves_intervening_credit_pause(credit_restored=False):
+    wf = _bare_workflow_instance()
+    wf.agent_id, wf.user_id, wf.agent_source = "credit-pause-wrapup", "budget-user", "WEB"
+    wf.own_cost_cents, wf.price_limit_cents = 119.0, 120
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["check_user_usage"] = {"has_credits": False, "tier": "paid"}
+    original = _patch_workflow(fake)
+
+    async def pricing_after_credit_check(model):
+        await wf._check_credits()
+        if credit_restored:
+            fake.activity_returns["check_user_usage"] = {"has_credits": True, "tier": "paid"}
+            await wf._check_credits()
+        return {"input_cents_per_1k": 2.0, "output_cents_per_1k": 0.0}
+
+    wf._get_model_pricing = pricing_after_credit_check
+    try:
+        await wf._track_usage(
+            {"llm": [{"model": "priced-browser-model", "provider": "browser", "tokens_in": 1000}]},
+            tool_name="spawn_agent",
+            browser_completed=True,
+        )
+        assert wf.own_cost_cents == 121.0 and wf._has_credits is credit_restored
+        assert wf.is_paused and not wf._cost_limit_wrapup_pending, "terminal browser accounting bypassed a credit pause"
+        assert await wf._check_paused_before_turn()
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_browser_wrapup_restore_preserves_cached_credit_pause():
+    wf = _bare_workflow_instance()
+    state = _deployment_resume_fixture("COST_LIMIT_REACHED")
+    state["runtime_state"] = {
+        "cost_limit_wrapup_pending": True,
+        "cost_limit_wrapup_consumed": False,
+        "has_credits": False,
+    }
+    wf._restore_deployment_state(state)
+    assert not wf._has_credits
+    assert wf.is_paused, "restoring an unused completion allowance bypassed cached credit pause"
+    assert await wf._check_paused_before_turn()
+    assert not wf._cost_limit_wrapup_consumed
+
+
+async def test_workflow_browser_pricing_preserves_credit_pause_after_refresh():
+    await test_workflow_browser_pricing_preserves_intervening_credit_pause(credit_restored=True)
+
+
+async def test_workflow_armed_browser_wrapup_keeps_refreshed_credit_pause_across_continuation():
+    import json
+
+    wf = _bare_workflow_instance()
+    wf.agent_id, wf.user_id, wf.agent_source = "armed-credit-continuation", "budget-user", "WEB"
+    wf.own_cost_cents, wf.price_limit_cents = 119.0, 120
+    wf.max_iterations = 500
+    wf.context_gates = {}
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._track_usage(
+            {"service": [{"provider": "browser", "cost_cents": 2.0}]},
+            tool_name="spawn_agent",
+            browser_completed=True,
+        )
+        assert wf._cost_limit_wrapup_pending and not wf._cost_limit_wrapup_consumed and not wf.is_paused
+        fake.activity_returns["check_user_usage"] = {"has_credits": False, "tier": "paid"}
+        await wf._check_credits()
+        fake.activity_returns["check_user_usage"] = {"has_credits": True, "tier": "paid"}
+        await wf._check_credits()
+        assert wf._has_credits and wf.is_paused and wf._cost_limit_wrapup_pending
+        state = json.loads(json.dumps(wf._continuation_resume_state(wf.context)))
+        restored = _bare_workflow_instance()
+        restored._restore_deployment_state(state)
+        assert restored._has_credits and restored._cost_limit_wrapup_pending
+        assert restored.is_paused, "continuation restore cleared a financial pause after credit refresh"
+        assert await restored._check_paused_before_turn()
+        assert not restored._cost_limit_wrapup_consumed
+        await restored.resume()
+        assert not await restored._check_paused_before_turn()
+        assert restored._cost_limit_wrapup_consumed
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_browser_wrapup_restore_requires_unpaused_continuation_provenance():
+    for value in (None, True, "false", 0):
+        state = _deployment_resume_fixture("COST_LIMIT_REACHED")
+        state["runtime_state"] = {
+            "cost_limit_wrapup_pending": True,
+            "cost_limit_wrapup_consumed": False,
+            "has_credits": True,
+        }
+        if value is not None:
+            state["runtime_state"]["cost_limit_wrapup_paused"] = value
+        restored = _bare_workflow_instance()
+        restored._restore_deployment_state(state)
+        assert restored.is_paused, "missing or invalid pause provenance authorized completion admission"
+        assert not restored._cost_limit_wrapup_consumed
+
+
+async def test_workflow_background_browser_budget_keeps_native_notification_and_result():
+    from unittest.mock import AsyncMock, patch
+    import workflows.background_agents as background_module
+    import workflows.agent_workflow as workflow_module
+    import domains.spawn_agent.handler as spawn_module
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    wf = _bare_workflow_instance()
+    wf.agent_id, wf.user_id, wf.agent_source = "background-budget", "user-budget", "WEB"
+    wf.own_cost_cents, wf.price_limit_cents = 119.0, 120
+    wf.current_phase = "EXECUTE"
+    args = {
+        "type": "browser",
+        "task_name": "observe",
+        "goal": "Observe",
+        "start_url": "https://example.com",
+        "output_schema": {"fields": [{"name": "answer", "type": "str", "required": True}]},
+    }
+    wf._background_tasks["browser-call"] = {
+        "agent_type": "browser",
+        "address": "/root/observe",
+        "path": "/root/observe",
+        "tool_args": args,
+    }
+    wf._notification_recipient = AsyncMock(return_value="/root")
+    wf._post_message = AsyncMock()
+
+    async def record_event(event, tool_call_id, tool_name):
+        wf._record_background_event(event, tool_call_id)
+
+    wf._handle_tool_event = record_event
+
+    class CompletedBrowser:
+        async def execute_tool(self, workflow_instance, tool_call, tool_call_id):
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                status=MessageStatus.FINISHED,
+                message="Observed",
+                metadata={
+                    "action_type": "task_complete",
+                    "success": True,
+                    "structured_response": {"answer": "Observed"},
+                },
+                data={"usage": {"service": [{"provider": "browser", "cost_cents": 2.0}]}},
+            )
+
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        with (
+            patch.object(background_module, "workflow", fake),
+            patch.object(spawn_module, "workflow", fake),
+            patch.object(spawn_module, "get_manager", return_value=CompletedBrowser()),
+            patch.dict(workflow_module.TOOL_EXECUTORS, {"spawn_agent": spawn_module.spawn_agent}),
+        ):
+            await wf._run_background_task("browser-call", 0)
+        assert wf._background_finished["browser-call"]["status"] == "completed", (
+            wf._background_finished,
+            fake.logger.records,
+        )
+        assert "browser-call" in wf._background_settled
+        assert wf._post_message.await_count == 1
+        notification = wf._post_message.call_args.args[0]
+        assert "Observed" in notification and "answer" in notification
+        assert wf._cost_limit_wrapup_pending and not wf.is_paused
+        assert not any(
+            name == "update_agent_status" and args[1] == "COST_LIMIT_REACHED" for name, args in fake.activity_calls
+        )
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_unverified_browser_and_other_usage_do_not_get_wrapup():
+    from unittest.mock import AsyncMock, patch
+    import workflows.agent_workflow as workflow_module
+    import domains.spawn_agent.handler as spawn_module
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    for kind, status, success in (
+        ("browser", MessageStatus.ERROR, False),
+        ("browser", MessageStatus.FINISHED, False),
+        ("explore", MessageStatus.FINISHED, True),
+    ):
+        wf = _bare_workflow_instance()
+        wf.agent_id, wf.user_id, wf.agent_source = "noncompletion", "user-budget", "WEB"
+        wf.current_phase = "EXECUTE"
+        wf.own_cost_cents, wf.price_limit_cents = 119.0, 120
+        wf._handle_tool_event = AsyncMock()
+
+        class TerminalManager:
+            async def execute_tool(self, workflow_instance, tool_call, tool_call_id):
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    status=status,
+                    metadata={"action_type": "task_complete", "success": success},
+                    data={"usage": {"service": [{"provider": "browser", "cost_cents": 2.0}]}},
+                )
+
+        fake = _FakeWorkflowModule()
+        original = _patch_workflow(fake)
+        try:
+            with (
+                patch.object(spawn_module, "workflow", fake),
+                patch.object(spawn_module, "get_manager", return_value=TerminalManager()),
+                patch.dict(workflow_module.TOOL_EXECUTORS, {"spawn_agent": spawn_module.spawn_agent}),
+            ):
+                result = await wf._execute_tool(
+                    "spawn_agent",
+                    {
+                        "type": kind,
+                        "task_name": "observe",
+                        "goal": "Observe",
+                        "start_url": "https://example.com",
+                        "output_schema": {"fields": []},
+                    },
+                    "terminal-call",
+                )
+            assert wf.own_cost_cents == 121.0, (kind, result)
+            assert wf.is_paused and wf._cost_limit_reached
+            assert not wf._cost_limit_wrapup_pending
+            assert any(
+                name == "update_agent_status" and args[1] == "COST_LIMIT_REACHED" for name, args in fake.activity_calls
+            )
+        finally:
+            _restore_workflow(original)
+
+
+async def test_workflow_browser_budget_wrapup_stops_after_one_turn_and_keeps_pauses():
+    for pause_kind in ("none", "user_before", "parent_before", "limited_before", "user_during"):
+        wf = _bare_workflow_instance()
+        wf.agent_id = "budget-control"
+        wf.user_id = "budget-user"
+        wf.agent_source = "WEB"
+        wf.own_cost_cents = 119.0
+        wf.price_limit_cents = 120
+        wf.is_paused = pause_kind in {"user_before", "parent_before", "limited_before"}
+        wf._user_pause_active = pause_kind == "user_before"
+        wf._paused_by_parent = pause_kind == "parent_before"
+        wf._cost_limit_reached = pause_kind == "limited_before"
+        fake = _FakeWorkflowModule()
+        original = _patch_workflow(fake)
+        execute_activity = fake.execute_activity
+        interrupted = False
+
+        async def activity_with_pause(fn, args=None, **kwargs):
+            nonlocal interrupted
+            if pause_kind == "user_during" and not interrupted:
+                interrupted = True
+                await wf.pause()
+            return await execute_activity(fn, args=args, **kwargs)
+
+        fake.execute_activity = activity_with_pause
+        try:
+            await wf._track_usage(
+                {"service": [{"provider": "browser", "cost_cents": 2.0}]},
+                tool_name="spawn_agent",
+                browser_completed=True,
+            )
+            assert wf.own_cost_cents == 121.0 and wf.price_limit_cents == 120
+            if pause_kind != "none":
+                if pause_kind != "user_during":
+                    assert not wf._cost_limit_wrapup_pending, pause_kind
+                assert wf.is_paused, pause_kind
+                assert await wf._check_paused_before_turn(), "an explicit pause must block admission"
+                assert not wf._cost_limit_wrapup_consumed, "a paused turn cannot consume the allowance"
+                if pause_kind.startswith("user"):
+                    assert wf._user_pause_active
+                continue
+            assert not await wf._check_paused_before_turn()
+            for _ in range(3):
+                assert not await wf._check_paused()
+            assert await wf._check_paused_before_turn(), "a second turn escaped the original cap"
+            assert wf._cost_limit_reached and not wf._cost_limit_wrapup_pending
+            stops = [
+                args
+                for name, args in fake.activity_calls
+                if name == "update_agent_status" and args[1] == "COST_LIMIT_REACHED"
+            ]
+            assert len(stops) == 1
+        finally:
+            _restore_workflow(original)
+
+
+async def test_workflow_browser_wrapup_cannot_start_productive_work_or_renew_after_restore():
+    from unittest.mock import AsyncMock, patch
+    import workflows.agent_workflow as workflow_module
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "budget-stop"
+    wf.user_id = "budget-user"
+    wf.agent_source = "WEB"
+    wf.own_cost_cents = wf.subtree_cost_cents = 121.0
+    wf.price_limit_cents = 120
+    wf._cost_limit_reached = wf._cost_limit_wrapup_pending = True
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    executor = AsyncMock()
+    try:
+        assert not await wf._check_paused_before_turn()
+        assert wf._cost_limit_wrapup_consumed
+        with patch.dict(workflow_module.TOOL_EXECUTORS, {"web_search": executor}):
+            results = await asyncio.gather(
+                wf._execute_tool("web_search", {"query": "new work one"}, "new-work-one"),
+                wf._execute_tool("web_search", {"query": "new work two"}, "new-work-two"),
+            )
+            results.append(await wf._execute_tool("web_search", {"query": "new work three"}, "new-work-three"))
+        assert all(result.get("error") is True for result in results), results
+        executor.assert_not_awaited()
+        assert wf.is_paused
+        for consumed in (False, True):
+            restored = _bare_workflow_instance()
+            state = _deployment_resume_fixture("COST_LIMIT_REACHED")
+            state["runtime_state"] = {
+                "cost_limit_wrapup_pending": True,
+                "cost_limit_wrapup_consumed": consumed,
+                "cost_limit_wrapup_paused": False,
+            }
+            restored._restore_deployment_state(state)
+            assert await restored._check_paused_before_turn() is consumed
+            if not consumed:
+                assert not await restored._check_paused()
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_execute_tool_handoff_includes_task_queue():
     """_execute_tool must pass the live queue through so run_agent can CAN now."""
     from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
@@ -12709,6 +13563,19 @@ async def test_workflow_post_message_does_not_throttle_tree_outside_demo():
 async def run_all_tests():
     print("workflow blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("wf_generic_browser_budget_wrapup", test_workflow_generic_browser_result_gets_existing_budget_wrapup)
+    await r.record_async("wf_background_browser_budget_notification", test_workflow_background_browser_budget_keeps_native_notification_and_result)
+    await r.record_async("browser_usage_child_cost_interleaving", test_workflow_browser_usage_arms_before_child_cost_interleaving)
+    await r.record_async("browser_pricing_preserves_intervening_cost_stop", test_workflow_browser_pricing_cannot_reopen_an_intervening_cost_stop)
+    await r.record_async("inflight_refusal_preserves_unadmitted_browser_wrapup", test_workflow_inflight_refusal_preserves_unadmitted_browser_wrapup)
+    await r.record_async("browser_pricing_preserves_intervening_credit_pause", test_workflow_browser_pricing_preserves_intervening_credit_pause)
+    await r.record_async("browser_pricing_preserves_pause_after_credit_refresh", test_workflow_browser_pricing_preserves_credit_pause_after_refresh)
+    await r.record_async("browser_wrapup_restore_preserves_cached_credit_pause", test_workflow_browser_wrapup_restore_preserves_cached_credit_pause)
+    await r.record_async("armed_wrapup_keeps_refreshed_credit_pause_through_continuation", test_workflow_armed_browser_wrapup_keeps_refreshed_credit_pause_across_continuation)
+    await r.record_async("browser_wrapup_restore_requires_unpaused_provenance", test_workflow_browser_wrapup_restore_requires_unpaused_continuation_provenance)
+    await r.record_async("wf_unverified_browser_budget_stop", test_workflow_unverified_browser_and_other_usage_do_not_get_wrapup)
+    await r.record_async("wf_browser_budget_wrapup_pause_controls", test_workflow_browser_budget_wrapup_stops_after_one_turn_and_keeps_pauses)
+    await r.record_async("wf_browser_budget_wrapup_work_and_restore", test_workflow_browser_wrapup_cannot_start_productive_work_or_renew_after_restore)
     await r.record_async("wf_retained_output_dispatch", test_workflow_retained_output_dispatch_and_error_pairing)
 
     await r.record_async(
@@ -13518,6 +14385,11 @@ async def run_all_tests():
     await r.record_async(
         "wf_fast_mode_post_message_nonblocking",
         test_workflow_fast_mode_post_message_does_not_block_loop,
+    )
+
+    r.record(
+        "wf_sandbox_import_avoids_activity_initialization",
+        test_workflow_sandbox_import_does_not_initialize_activity_package,
     )
 
     # Temporal workflow tests (all run inside one shared environment)

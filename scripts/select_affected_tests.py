@@ -262,73 +262,268 @@ def package_root(rel: str) -> str:
 
 _PROCESS_MATCH = re.compile(r"\b(?:pkill|pgrep|killall)\b|\bps\b[^\n]*\|\s*grep\b")
 
+# TypeScript/JavaScript comment stripping is a small tokenizer rather than a
+# regex over the raw text: comments, strings, template literals (with nested
+# `${...}` expressions), regex literals and code are distinguished so that a
+# path named only in a comment never becomes an edge while a path in a string
+# literal, template or regex is always kept. Every uncertain state (an
+# unterminated string, template, expression or block comment at EOF) returns
+# the raw source: over-selecting is acceptable, erasing a dependency is not.
+#
+# Regex-vs-division after `/` is decided from the previous token. A regex
+# misread as division is the dangerous direction (its escaped slashes can form
+# `//` and drop the rest of the line), a division misread as a regex only
+# swallows code up to the next `/` on the line without removing anything, so
+# the ambiguous `)` and `}` prefer regex while `]`, identifiers, numbers and
+# `++`/`--` (where a regex cannot legally start) mean division. Known
+# residual: a division after `)`/`}` followed on the SAME physical line by two
+# `/`-bearing string literals can hide a path in the second one; a regex after
+# `)`/`}` is refused when its candidate span contains a backtick (that is a
+# division reaching into a template literal, `(a) / 2 + \`x/${b}\``; read as a
+# regex it would swallow the template opener and flip template state for every
+# later line, erasing a `//` inside a later template as a comment); a regex after
+# `]`/identifier/number (invalid syntax anyway) can drop the rest of its line.
+# Strings end at the newline and templates fall back to raw, so damage never
+# crosses a line. A repo-wide scan (2026-10-31, 3,583 TS/JS files) found 3
+# lines where the `)` policy changes the stripped output, all of the form
+# `Math.round(x) / 100, // note`: the trailing comment text is retained
+# (over-inclusion), nothing executable is dropped.
+_TS_TOKEN_RE = re.compile(
+    r"""
+    (?P<line>//[^\n]*)
+  | (?P<block>/\*[\s\S]*?\*/)
+  | (?P<block_open>/\*)
+  | (?P<string>'(?:[^'\\\n]|\\[\s\S])*'|"(?:[^"\\\n]|\\[\s\S])*")
+  | (?P<unterminated>['"])
+  | (?P<tick>`)
+  | (?P<slash>/)
+  | (?P<rbrace>\})
+  | (?P<plain>[^'"`/}]+)
+    """,
+    re.X,
+)
+_TS_TEMPLATE_BODY_RE = re.compile(r"(?:[^`\\$]|\\[\s\S]|\$(?!\{))*")
+_TS_REGEX_RE = re.compile(r"/(?:[^/\\\n\[]|\\[^\n]|\[(?:[^\]\\\n]|\\[^\n])*\])+/[A-Za-z]*")
+_TS_TAIL_RE = re.compile(r"([A-Za-z_$][\w$]*|\d[\w.]*|\+\+|--|\S)\s*$")
+# After one of these a `/` starts a regex literal; after a value it divides.
+_TS_REGEX_KEYWORDS = frozenset(
+    "return typeof case do else in instanceof new delete void throw yield await of".split()
+)
+
+
+def _ts_regex_allowed(last_kind: str, last_text: str) -> bool:
+    if last_kind == "value":
+        return False
+    if last_kind != "plain":
+        return True
+    tail = _TS_TAIL_RE.search(last_text[-96:].rstrip()[-48:])
+    if tail is None:
+        return True
+    token = tail.group(1)
+    if token in _TS_REGEX_KEYWORDS:
+        return True
+    if token[0].isalnum() or token[0] in "_$" or token in {"]", "++", "--"}:
+        return False
+    return True  # includes `)`: `if (ok) /re/.test(s)` must survive
+
+
+def _ts_regex_ambiguous(last_kind: str, last_text: str) -> bool:
+    """The previous token ends with `)` or `}`: a `/` after it may be either a
+    regex literal (``if (ok) /re/.test(s)``) or a division (``(a) / 2``)."""
+    if last_kind == "op":
+        return last_text == "}"
+    if last_kind != "plain":
+        return False
+    tail = _TS_TAIL_RE.search(last_text[-96:].rstrip()[-48:])
+    return tail is not None and tail.group(1) == ")"
+
 
 def _strip_ts_comments(source: str) -> str:
-    """Scan strings/templates before removing comments; preserve line boundaries."""
-    # Template interpolation can nest JavaScript/templates. Uncertain syntax
-    # must overselect, never erase a dependency edge.
-    if "`" in source:
-        return source
+    """Remove comments from TS/JS source, preserving every line boundary.
+
+    Returns the raw source whenever the tokenizer ends in an uncertain state.
+    """
     out: list[str] = []
-    quote: str | None = None
-    index = 0
-    while index < len(source):
-        char = source[index]
-        pair = source[index:index + 2]
-        if quote is not None:
-            out.append(char)
-            index += 1
-            if char == "\\" and index < len(source):
-                out.append(source[index])
-                index += 1
-            elif char == quote:
-                quote = None
-        elif char in ("'", '"', "`"):
-            quote = char
-            out.append(char)
-            index += 1
-        elif pair == "/*":
-            end = source.find("*/", index + 2)
-            if end < 0:
-                # Incomplete input is uncertain: retain it rather than lose edges.
-                out.append(source[index:])
-                break
-            out.append(" " + "\n" * source[index:end + 2].count("\n"))
-            index = end + 2
-        elif pair == "//":
-            end = source.find("\n", index + 2)
-            if end < 0:
-                break
-            out.append("\n")
-            index = end + 1
-        elif char == "/":
-            # Regex-vs-division is context sensitive; preserve ambiguous input.
+    pos = 0
+    length = len(source)
+    last_kind = "start"  # start | plain | value | op
+    last_text = ""
+    in_template = False
+    expression_depths: list[int] = []  # brace depth of each open `${`
+    while pos < length:
+        if in_template:
+            body = _TS_TEMPLATE_BODY_RE.match(source, pos)
+            end = body.end()
+            out.append(source[pos:end])
+            pos = end
+            if pos >= length:
+                return source  # unterminated template literal
+            if source[pos] == "`":
+                out.append("`")
+                pos += 1
+                in_template = False
+                last_kind, last_text = "value", "`"
+            else:
+                out.append("${")
+                pos += 2
+                in_template = False
+                expression_depths.append(0)
+                last_kind, last_text = "op", "${"
+            continue
+        match = _TS_TOKEN_RE.match(source, pos)
+        if match is None:
             return source
-        else:
-            out.append(char)
-            index += 1
+        kind = match.lastgroup
+        text = match.group()
+        pos = match.end()
+        if kind == "line":
+            continue
+        if kind == "block":
+            out.append(" " + "\n" * text.count("\n"))
+            continue
+        if kind in ("block_open", "unterminated"):
+            return source
+        if kind == "tick":
+            out.append("`")
+            in_template = True
+            continue
+        if kind == "rbrace":
+            if expression_depths:
+                if expression_depths[-1] == 0:
+                    expression_depths.pop()
+                    out.append("}")
+                    in_template = True
+                    continue
+                expression_depths[-1] -= 1
+            out.append("}")
+            last_kind, last_text = "op", "}"
+            continue
+        if kind == "slash":
+            if _ts_regex_allowed(last_kind, last_text):
+                regex = _TS_REGEX_RE.match(source, match.start())
+                # After the ambiguous `)`/`}` a candidate holding a backtick is
+                # a division whose span reached a template literal: fall
+                # through to division rather than swallow the template opener.
+                if regex is not None and ("`" not in regex.group() or not _ts_regex_ambiguous(last_kind, last_text)):
+                    out.append(regex.group())
+                    pos = regex.end()
+                    last_kind, last_text = "value", regex.group()
+                    continue
+            out.append("/")
+            last_kind, last_text = "op", "/"
+            continue
+        if kind == "string":
+            out.append(text)
+            last_kind, last_text = "value", text
+            continue
+        # plain: identifiers, numbers, operators, brackets and whitespace
+        if expression_depths:
+            expression_depths[-1] += text.count("{")
+        out.append(text)
+        if text.strip():
+            last_kind, last_text = "plain", text
+    if in_template or expression_depths:
+        return source
     return "".join(out)
 
 
-def strip_comments(rel: str, source: str) -> str:
+# Python: comments and bare string statements (docstrings) document, they do
+# not execute. Strings that are part of an expression stay (a `python -c`
+# source or a mock target names a real dependency). Brackets are counted so a
+# string that starts a physical line inside a call is still an argument.
+_PY_TOKEN_RE = re.compile(
+    r"""
+    (?P<string>'''(?:[^\\]|\\[\s\S])*?'''|\"\"\"(?:[^\\]|\\[\s\S])*?\"\"\"
+             |'(?:[^'\\\n]|\\[\s\S])*'|"(?:[^"\\\n]|\\[\s\S])*")
+  | (?P<unterminated>['"])
+  | (?P<comment>\#[^\n]*)
+  | (?P<backslash>\\[\s\S]?)
+  | (?P<plain>[^'"#\\]+)
+    """,
+    re.X,
+)
+_PY_STRING_PREFIX_RE = re.compile(r"^[rRbBuUfF]{0,2}$")
+_PY_STATEMENT_END_RE = re.compile(r"[ \t]*(?:#|\r?\n|;|$)")
+
+
+def _blank(text: str) -> str:
+    return re.sub(r"[^\n]", " ", text)
+
+
+def _mask_python(source: str) -> str:
+    """Blank comments and bare string statements; keep line boundaries.
+
+    Returns the raw source when the scan ends in an uncertain state.
+    """
+    out: list[str] = []
+    pos = 0
+    length = len(source)
+    depth = 0
+    if source.startswith("#!"):
+        end = source.find("\n")
+        end = length if end < 0 else end
+        out.append(source[:end])
+        pos = end
+    while pos < length:
+        match = _PY_TOKEN_RE.match(source, pos)
+        if match is None:
+            return source
+        kind = match.lastgroup
+        text = match.group()
+        start = match.start()
+        pos = match.end()
+        if kind == "unterminated":
+            return source
+        if kind == "comment":
+            out.append(_blank(text))
+            continue
+        if kind == "plain":
+            depth += text.count("(") + text.count("[") + text.count("{")
+            depth -= text.count(")") + text.count("]") + text.count("}")
+            out.append(text)
+            continue
+        if kind == "backslash":
+            out.append(text)
+            continue
+        # string
+        bare = False
+        if depth <= 0:
+            line_start = source.rfind("\n", 0, start) + 1
+            before = source[line_start:start]
+            # A trailing backslash on the previous physical line continues
+            # the statement onto this one (`x = \` newline `"..."`).
+            continued = source[max(line_start - 3, 0):max(line_start - 1, 0)].rstrip("\r").endswith("\\")
+            if _PY_STRING_PREFIX_RE.match(before.strip()) and not continued:
+                bare = bool(_PY_STATEMENT_END_RE.match(source, pos))
+        out.append(_blank(text) if bare else text)
+    return "".join(out)
+
+
+def strip_comments(rel: str, source: str, masked: str | None = None) -> str:
     """Drop comments (and process-pattern lines) before path scanning.
 
     A path named in a comment documents a relationship but executes nothing;
     following it transitively leaked whole packages into unrelated lanes.
+    ``masked`` lets a caller pass an already comment-free Python text.
     """
-    ts = PurePosixPath(rel).suffix in TS_EXT
+    suffix = PurePosixPath(rel).suffix
+    ts = suffix in TS_EXT
+    tokenized = ts or suffix == ".py"
     if ts:
-        # Templates and JSX need a full parser; conservative over-selection is
-        # preferable to erasing dependencies from an ambiguous source file.
-        if "`" in source or PurePosixPath(rel).suffix in {".tsx", ".jsx"}:
-            return source
-        source = _strip_ts_comments(source)
+        # JSX text cannot be told from code without a full parser; keep those
+        # files raw (over-selection) rather than risk erasing a dependency.
+        if suffix not in {".tsx", ".jsx"}:
+            source = _strip_ts_comments(source)
+    elif suffix == ".py":
+        source = masked if masked is not None else _mask_python(source)
+    if tokenized and _PROCESS_MATCH.search(source) is None:
+        return source
     marker = "//" if ts else "#"
     kept = []
     for line in source.splitlines():
         if _PROCESS_MATCH.search(line):
             continue
-        if ts:
+        if tokenized:
             kept.append(line)
             continue
         stripped = line.lstrip()
@@ -373,6 +568,8 @@ class Graph:
         self.deps: dict[str, set[str]] = defaultdict(set)  # node -> nodes it depends on (transitive)
         self.data_deps: dict[str, set[str]] = defaultdict(set)  # node -> files whose bytes it reads
         self.text: dict[str, str] = {}
+        self._stripped: dict[str, str] = {}
+        self._masked_python: dict[str, str] = {}
 
     def add(self, src: str, dst: str) -> None:
         # Product code never depends on test files; a product comment naming
@@ -387,6 +584,19 @@ class Graph:
             except OSError:
                 self.text[rel] = ""
         return self.text[rel]
+
+    def stripped(self, rel: str) -> str:
+        """Comment-free text for path scanning (one tokenizer pass per file)."""
+        if rel not in self._stripped:
+            masked = self.masked_python(rel) if PurePosixPath(rel).suffix == ".py" else None
+            self._stripped[rel] = strip_comments(rel, self.read(rel), masked)
+        return self._stripped[rel]
+
+    def masked_python(self, rel: str) -> str:
+        """Python text with comments and docstrings blanked for import scanning."""
+        if rel not in self._masked_python:
+            self._masked_python[rel] = _mask_python(self.read(rel))
+        return self._masked_python[rel]
 
     # -- python
     def _py_roots(self, rel: str) -> list[str]:
@@ -422,7 +632,9 @@ class Graph:
     def python_edges(self, rel: str) -> None:
         # Regex, not ast: ~20x faster and also sees imports inside strings
         # passed to exec/subprocess `python -c`, which only over-includes.
-        source = self.read(rel)
+        # Comments and docstrings are blanked first: an example `from x import y`
+        # in documentation executes nothing and must not create an edge.
+        source = self.masked_python(rel)
         roots = self._py_roots(rel)
         pkg_dir = PurePosixPath(rel).parent
         for match in PY_FROM_RE.finditer(source):
@@ -487,7 +699,7 @@ class Graph:
     # -- path references in text (subprocess, fs reads, bash invocations)
     def scanner_edges(self, rel: str) -> None:
         """A test that lists directories reads its whole package (data edge)."""
-        if is_test_file(rel) and DIR_WALK_RE.search(strip_comments(rel, self.read(rel))):
+        if is_test_file(rel) and DIR_WALK_RE.search(self.stripped(rel)):
             top = rel.split("/", 1)[0]
             self.add_data(rel, f"dir:{top}")
 
@@ -499,7 +711,7 @@ class Graph:
         compared (readFileSync, a deployment file list) depends only on that
         file's own bytes (data edge: affected iff the target itself changed).
         """
-        source = URL_RE.sub(" ", strip_comments(rel, self.read(rel)))
+        source = URL_RE.sub(" ", self.stripped(rel))
         here = str(PurePosixPath(rel).parent)
         pkg = package_root(rel)
         allow_dirs = is_test_support(rel)

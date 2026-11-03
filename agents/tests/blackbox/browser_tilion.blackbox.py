@@ -19,6 +19,7 @@ import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import httpx
 import websockets
@@ -103,16 +104,32 @@ class FakeTilionGateway:
             await self._server.wait_closed()
 
 
-async def _chromium_version(client: httpx.AsyncClient, port: int) -> Dict[str, Any]:
+async def _chromium_version(
+    client: httpx.AsyncClient, port: int, *, profile: Optional[str] = None
+) -> Dict[str, Any]:
     """The local endpoint is ready only when it advertises its CDP socket."""
     payload: Any = {}
+    debugger_path = None
     for _ in range(100):
+        if profile is not None and port == 0:
+            # Native port publication and semantic CDP readiness share one budget.
+            with contextlib.suppress(FileNotFoundError, ValueError):
+                with open(os.path.join(profile, "DevToolsActivePort"), encoding="ascii") as active:
+                    published_port = int(active.readline())
+                    published_path = active.readline().strip()
+                if 0 < published_port < 65536 and published_path:
+                    port, debugger_path = published_port, published_path
+        if not port:
+            await asyncio.sleep(0.1)
+            continue
         try:
             version = await client.get(f"http://127.0.0.1:{port}/json/version")
             version.raise_for_status()
             payload = version.json()
             endpoint = payload.get("webSocketDebuggerUrl") if isinstance(payload, dict) else None
             if isinstance(endpoint, str) and endpoint.startswith(("ws://", "wss://")):
+                if profile is not None:
+                    assert urlsplit(endpoint).path == debugger_path, "CDP endpoint belongs to another browser"
                 return payload
         except (httpx.HTTPError, ValueError):
             pass
@@ -165,9 +182,13 @@ async def _chromium(full: bool = False):
     client the single-client provider never has.
     """
     async with async_playwright() as playwright:
-        with socket.socket() as reservation:
-            reservation.bind(("127.0.0.1", 0))
-            port = reservation.getsockname()[1]
+        # A released reservation does not transfer ownership to Chromium.
+        # Let the raw browser bind an ephemeral port and publish its own address.
+        port = 0
+        if not full:
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
         process = None
         browser = None
         if full:
@@ -189,7 +210,7 @@ async def _chromium(full: bool = False):
             browser = await playwright.chromium.launch(headless=True, args=[f"--remote-debugging-port={port}"])
         try:
             async with httpx.AsyncClient(trust_env=False) as client:
-                payload = await _chromium_version(client, port)
+                payload = await _chromium_version(client, port, profile=profile if full else None)
             yield playwright, browser, payload["webSocketDebuggerUrl"]
         finally:
             if browser is not None:
@@ -359,6 +380,86 @@ async def test_tilion_cdp_url_detection_and_redaction():
             assert multiplexer is not None and multiplexer._upstream_url == url
         finally:
             await multiplexer.close()
+
+
+
+async def test_tilion_live_view_native_session_identity():
+    from domains.spawn_browser_agent_v3.cdp_urls import tilion_live_view_session_id
+
+    session = "sess_" + "a1" * 16
+    suffix = f"/v1/session/{session}/live-view"
+    with patch.dict(os.environ, {"TILION_BASE_URL": "https://custom-gateway.example:8443"}):
+        for host in ("back.tilion.dev", "east.back.tilion.dev", "OREGON.BACK.TILION.DEV",
+                     "custom-gateway.example:8443", "sub.custom-gateway.example:8443"):
+            for query in ("", "?token=REDACTED", "?token=rotated&extra=1"):
+                assert tilion_live_view_session_id("https://" + host + suffix + query) == session
+        for url in ("https://evilback.tilion.dev" + suffix,
+                    "https://back.tilion.dev.evil.example" + suffix,
+                    "https://back.tilion.dev@evil.example" + suffix,
+                    "https://user@back.tilion.dev" + suffix,
+                    "https://custom-gateway.example.evil.example:8443" + suffix,
+                    "http://back.tilion.dev" + suffix,
+                    "wss://back.tilion.dev" + suffix,
+                    "https://back.tilion.dev:8443" + suffix,
+                    "https://back.tilion.dev:invalid" + suffix,
+                    "https://[invalid" + suffix,
+                    "https://back.tilion.dev" + suffix + "/",
+                    "https://back.tilion.dev" + suffix + "#fragment",
+                    "https://back.tilion.dev" + suffix.replace("live-view", "cdp"),
+                    "https://back.tilion.dev" + suffix.replace(session, "sess_short"),
+                    "https://back.tilion.dev" + suffix.replace("sess_", "%73ess_"),
+                    "https://back.tilion.dev" + suffix.replace("sess_", "sess_%2f"),
+                    "https://back.tilion.dev" + suffix + "\n"):
+            assert tilion_live_view_session_id(url) is None, url
+
+
+async def test_tilion_regional_worker_attach_uses_one_upstream_socket():
+    """The canonical API returns regional CDP hosts; both worker clients still share one socket."""
+    import browser_tools.cdp_multiplexer as mux_module
+
+    original_url = FakeTilionGateway.cdp_url.fget
+    original_connect = mux_module._default_upstream_connect
+    loopback_urls = {}
+
+    def regional_url(gateway):
+        url = f"wss://oregon.back.tilion.dev/v1/session/{TILION_SESSION}/cdp?token={TILION_TOKEN}"
+        loopback_urls[url] = original_url(gateway)
+        return url
+
+    async def connect_owned_fixture(url):
+        # Keep the real regional URL at the classifier boundary. Only the fake
+        # provider transport maps it to its exact owned loopback listener.
+        assert url in loopback_urls, "unexpected upstream authority reached the fixture"
+        return await original_connect(loopback_urls[url])
+
+    with (
+        patch.object(FakeTilionGateway, "cdp_url", property(regional_url)),
+        patch.object(mux_module, "_default_upstream_connect", connect_owned_fixture),
+        patch.dict(globals(), {
+            "_tilion_env": lambda _gateway: patch.dict(
+                os.environ, {"TILION_BASE_URL": "https://back.tilion.dev"}
+            )
+        }),
+    ):
+        await test_tilion_worker_attach_uses_one_upstream_socket()
+
+
+async def test_tilion_regional_authorities_and_url_privacy():
+    from domains.spawn_browser_agent_v3.cdp_urls import is_tilion_cdp_url
+    from utils.url_redaction import redact_url_secrets
+
+    suffix = f"/v1/session/{TILION_SESSION}/cdp?token={TILION_TOKEN}&apiKey=private&jwt=private"
+    with patch.dict(os.environ, {"TILION_BASE_URL": "https://custom-gateway.example:8443"}):
+        for host in ("back.tilion.dev", "oregon.back.tilion.dev", "OREGON.BACK.TILION.DEV", "custom-gateway.example:8443", "sub.custom-gateway.example"):
+            url = "wss://" + host + suffix
+            assert is_tilion_cdp_url(url), host
+            safe = redact_url_secrets(url)
+            assert TILION_TOKEN not in safe and "private" not in safe, host
+            assert "token=REDACTED" in safe and "apiKey=REDACTED" in safe and "jwt=REDACTED" in safe
+        for host in ("back.tilion.dev.evil.example", "oregon.back.tilion.dev.evil.example", "evilback.tilion.dev", "back.tilion.dev@evil.example", "sub.custom-gateway.example.evil.example"):
+            assert not is_tilion_cdp_url("wss://" + host + suffix), host
+        assert not is_tilion_cdp_url("https://oregon.back.tilion.dev" + suffix)
+        assert not is_tilion_cdp_url("wss://oregon.back.tilion.dev/v1/session/x/playwright")
 
 
 async def test_tilion_regional_hosts_use_the_single_client_multiplexer():
@@ -1487,6 +1588,42 @@ async def test_multiplexer_arms_webauthn_so_unarmed_popups_reject_instead_of_han
     assert unarmed == "pending", f"control: unarmed chooser hangs; observed {unarmed!r}"
     armed = await _popup_webauthn_outcome(arm_webauthn=True)
     assert armed == "NotAllowedError", f"armed popup WebAuthn outcome: {armed!r}"
+
+
+async def test_raw_chromium_keeps_its_endpoint_when_another_socket_claims_the_handoff():
+    """A real competing bind must not redirect the raw browser's CDP endpoint.
+
+    Coordinate the observed reservation/Popen race with a real bound socket;
+    Chromium, HTTP readiness and the CDP reply all remain native. With port 0,
+    the kernel chooses the browser's port while that competing socket is held.
+    """
+    original_popen = subprocess.Popen
+    launched = False
+    with socket.socket() as competing, tempfile.NamedTemporaryFile(
+        prefix="chromium-port-handoff-", suffix=".stderr", mode="w+b",
+        dir=os.environ.get("BLACKBOX_TEST_ARTIFACT_DIR"), delete=False,
+    ) as native_stderr:
+
+        def launch(args, *positional, **kwargs):
+            nonlocal launched
+            if isinstance(args, list) and "--headless=new" in args:
+                requested = next(arg for arg in args if arg.startswith("--remote-debugging-port="))
+                competing.bind(("127.0.0.1", int(requested.split("=", 1)[1])))
+                launched = True
+                kwargs["stderr"] = native_stderr
+            return original_popen(args, *positional, **kwargs)
+
+        with patch.object(subprocess, "Popen", new=launch):
+            async with _chromium(full=True) as (_playwright, _browser, endpoint):
+                assert launched, "the raw Chromium launch was not exercised"
+                address = urlsplit(endpoint)
+                assert address.hostname == "127.0.0.1", address.hostname
+                assert address.port != competing.getsockname()[1], "CDP used the competing socket's port"
+                async with websockets.connect(endpoint, max_size=None, proxy=None) as client:
+                    await client.send(json.dumps({"id": 1, "method": "Browser.getVersion"}))
+                    reply = json.loads(await asyncio.wait_for(client.recv(), timeout=5))
+                    assert reply.get("id") == 1 and "error" not in reply, reply
+                    assert reply["result"]["product"].startswith(("Chrome/", "HeadlessChrome/")), reply
 
 
 async def test_multiplexer_webauthn_arming_keeps_seeded_passkeys_working():
@@ -2934,7 +3071,19 @@ async def test_recovery_storage_capture_carries_cookies_when_challenge_frames_ar
 
     from domains.spawn_browser_agent_v3.handler import _capture_rotation_storage_state
 
-    busy = "setTimeout(() => { const end = Date.now() + 60000; while (Date.now() < end) {} }, 300);"
+    busy_started = asyncio.Event()
+
+    async def busy_entry(request):
+        busy_started.set()
+        return web.Response()
+
+    busy = (
+        "window.startBusyRenderer = () => {"
+        "navigator.sendBeacon('/busy-entered' + location.pathname);"
+        "const end = Date.now() + 60000; while (Date.now() < end) {} };"
+        "window.addEventListener('message', (event) => {"
+        "if (event.data === 'start-busy') window.startBusyRenderer(); });"
+    )
 
     async def page(request):
         if request.path == "/turnstile":
@@ -2949,6 +3098,7 @@ async def test_recovery_storage_capture_carries_cookies_when_challenge_frames_ar
 
     app = web.Application()
     app.router.add_get("/{tail:.*}", page)
+    app.router.add_post("/busy-entered/{target}", busy_entry)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -2962,6 +3112,16 @@ async def test_recovery_storage_capture_carries_cookies_when_challenge_frames_ar
             tab = pw_browser.contexts[0].pages[0]
             await tab.goto(f"http://127.0.0.1:{port}/challenge", wait_until="domcontentloaded")
             await tab.wait_for_function("document.title === 'busy'", timeout=10_000)
+            await tab.frames[1].wait_for_function(
+                "typeof window.startBusyRenderer === 'function'", timeout=10_000
+            )
+            # Arm both ready frames. A shared renderer serializes their loops,
+            # so observe its first blocking entry outside the renderer.
+            await tab.evaluate("""setTimeout(() => {
+                window.frames[0].postMessage('start-busy', '*');
+                window.startBusyRenderer();
+            }, 0)""")
+            await asyncio.wait_for(busy_started.wait(), 10)
             await asyncio.sleep(1)
             started = time.monotonic()
             state = await asyncio.wait_for(_capture_rotation_storage_state(tab), 20)
@@ -3120,15 +3280,23 @@ async def test_classifier_reads_are_bounded_on_a_busy_renderer():
 
     from domains.spawn_browser_agent_v3 import challenge_llm_classifier, handler
 
+    busy_started = asyncio.Event()
+
+    async def busy_entry(_request):
+        busy_started.set()
+        return web.Response()
+
     async def page(_request):
         return web.Response(
             content_type="text/html",
             text="<title>Just a moment...</title><script>document.title = 'busy';"
-            "setTimeout(() => { const end = Date.now() + 60000; while (Date.now() < end) {} }, 300);</script>",
+            "window.startBusyRenderer = () => { navigator.sendBeacon('/busy-entered');"
+            "const end = Date.now() + 60000; while (Date.now() < end) {} };</script>",
         )
 
     app = web.Application()
     app.router.add_get("/{tail:.*}", page)
+    app.router.add_post("/busy-entered", busy_entry)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -3140,6 +3308,9 @@ async def test_classifier_reads_are_bounded_on_a_busy_renderer():
             tab = pw_browser.contexts[0].pages[0]
             await tab.goto(f"http://127.0.0.1:{port}/api/menu", wait_until="domcontentloaded")
             await tab.wait_for_function("document.title === 'busy'", timeout=10_000)
+            # Confirm readiness before arming the block; observe entry outside the renderer.
+            await tab.evaluate("setTimeout(() => window.startBusyRenderer(), 0)")
+            await asyncio.wait_for(busy_started.wait(), 10)
             await asyncio.sleep(1)
 
             with patch.object(challenge_llm_classifier, "CHALLENGE_CONTEXT_READ_SECONDS", 1.5):
@@ -3336,12 +3507,244 @@ async def test_click_coordinates_follow_an_element_the_page_re_rendered():
         assert gateway.rejected_4409 == 0
 
 
+async def test_tilion_pause_releases_socket_before_backend_checkpoint():
+    """Native worker close helper hands Tilion's one socket to checkpoint capture."""
+    import ast
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from pathlib import Path
+    from types import SimpleNamespace
+    from aiohttp import web
+    from domains.spawn_browser_agent_v3.repo import BrowserSessionCloseError, close_browser_session
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+    from domains.spawn_browser_agent_v3.config import BROWSER_DISCONNECT_TIMEOUT_SECONDS
+
+    source = ast.parse((Path(__file__).resolve().parents[2] / "domains/spawn_browser_agent_v3/handler.py").read_text())
+    names = {"_await_bounded_browser_cleanup", "_capture_browser_passkey_usage", "_disconnect_browser"}
+    definitions = [node for node in source.body if isinstance(node, ast.AsyncFunctionDef) and node.name in names]
+    helper = next(node for node in ast.walk(source) if isinstance(node, ast.AsyncFunctionDef) and node.name == "_close_browser_with_cleanup_receipt")
+    factory = ast.parse("def factory():\n    cleanup_failure = None\n    dom_service = initial_dom_service\n").body[0]
+    factory.body.append(helper)
+    factory.body.extend(ast.parse('async def pause():\n    await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url, require_complete_passkeys=True)\n    if cleanup_failure is not None:\n        raise BrowserSessionCloseError(session_id, True, cleanup_failure.get("http_status"))\nreturn pause').body)
+
+    for failure in (None, "disconnect_error", "disconnect_hung", "passkey_error", "recorder_error", "recorder_hung"):
+        events, requests, pending = [], [], set()
+        release_marks = asyncio.Event()
+        async with _chromium() as (playwright, _browser, endpoint):
+            async with FakeTilionGateway(endpoint) as gateway:
+                from browser_tools.dom_service import DOMService
+                from domains.spawn_browser_agent_v3.cdp_urls import open_browser_cdp_connection
+                with _tilion_env(gateway), tempfile.TemporaryDirectory(prefix="tilion-pause-recording-") as artifacts, patch.dict(os.environ, {"BROWSER_AGENT_RECORDINGS_DIR": artifacts}):
+                    local_url, mux = await open_browser_cdp_connection(gateway.cdp_url, label="pause-checkpoint")
+                    service = DOMService(cdp_url=local_url, cdp_multiplexer=mux)
+                    pw_browser = None
+                    recorder = None
+                    server = None
+                    backend_done = asyncio.Event()
+                    async def checkpoint(request):
+                        task = asyncio.current_task()
+                        pending.add(task)
+                        requests.append(await request.json())
+                        events.append("backend_checkpoint")
+                        attached = None
+                        try:
+                            while gateway.active:
+                                async with websockets.connect(gateway.cdp_url, proxy=None) as blocked:
+                                    with contextlib.suppress(websockets.ConnectionClosed):
+                                        await blocked.recv()
+                                    assert blocked.close_code == 4409
+                                await asyncio.sleep(0.01)
+                            attached = await playwright.chromium.connect_over_cdp(gateway.cdp_url)
+                            storage = await attached.contexts[0].storage_state()
+                            assert any(cookie["name"] == "pause-proof" for cookie in storage["cookies"])
+                            events.append("backend_checkpoint_complete")
+                            return web.json_response({"world_state": {}})
+                        finally:
+                            if attached:
+                                await attached.close()
+                            pending.discard(task)
+                            backend_done.set()
+                    app = web.Application(); app.router.add_post("/api/browser-session/close", checkpoint)
+                    server = web.AppRunner(app); await server.setup()
+                    site = web.TCPSite(server, "127.0.0.1", 0); await site.start()
+                    port = site._server.sockets[0].getsockname()[1]
+                    try:
+                        await service.connect()
+                        pw_browser = await playwright.chromium.connect_over_cdp(local_url)
+                        page = pw_browser.contexts[0].pages[0]
+                        await page.goto("data:text/html,<title>pause-proof</title>")
+                        await pw_browser.contexts[0].add_cookies([{"name":"pause-proof", "value":"retained", "url":"https://fixture.test/"}])
+                        recorder = BrowserAgentRecorder(page=page, agent_id="pause-fixture", task_id="pause-fixture", session_id=TILION_SESSION, browser_url="https://fixture.test/", session_metadata={"provider":"tilion"})
+                        await recorder.start()
+                        if failure == "recorder_hung":
+                            async def stuck_mark():
+                                try:
+                                    await release_marks.wait()
+                                except asyncio.CancelledError:
+                                    await release_marks.wait()
+                            mark = asyncio.create_task(stuck_mark())
+                            recorder._mark_tasks.add(mark)
+                            mark.add_done_callback(recorder._mark_tasks.discard)
+                        original_recording_close = recorder.close
+                        async def recording_close(**options):
+                            assert gateway.active == 1, "recording must finish before socket handoff"
+                            events.append("recording_attempted")
+                            if failure == "recorder_error":
+                                raise OSError("fixture optional recording failure")
+                            result = await original_recording_close(**options)
+                            assert result is not None and result.exists()
+                            events.append("recording_captured")
+                            return result
+                        recorder.close = recording_close
+                        async def passkeys(**_options):
+                            assert await page.title() == "pause-proof"
+                            events.append("passkeys_captured")
+                            if failure == "passkey_error":
+                                raise RuntimeError("fixture passkey read failure")
+                        real_disconnect = service.disconnect
+                        async def disconnect():
+                            await real_disconnect()
+                            events.append("socket_released")
+                        service.disconnect = disconnect
+                        upstream = mux._upstream
+                        original_upstream_close = upstream.close
+                        original_upstream_wait_closed = upstream.wait_closed
+                        if failure in ("disconnect_error", "disconnect_hung"):
+                            async def rejected_upstream_close(*_args, **_kwargs):
+                                if failure == "disconnect_hung":
+                                    await asyncio.Event().wait()
+                                raise RuntimeError("fixture upstream close failure")
+                            async def rejected_upstream_wait_closed():
+                                if failure == "disconnect_hung":
+                                    await asyncio.Event().wait()
+                                raise RuntimeError("fixture upstream closure unconfirmed")
+                            if failure == "disconnect_error":
+                                upstream.close = rejected_upstream_close
+                            upstream.wait_closed = rejected_upstream_wait_closed
+                        namespace = {
+                            "asyncio":asyncio,"contextlib":contextlib,"Dict":dict,"Any":object,"BrowserSessionCloseError":BrowserSessionCloseError,"WorkflowGenerationSealed":WorkflowGenerationSealed,
+                            "close_browser_session":close_browser_session,"_stop_kernel_replay_before_session_close":lambda _rec: asyncio.sleep(0),
+                            "browser_recorder":recorder,"config":SimpleNamespace(backend=SimpleNamespace(api_url=f"http://127.0.0.1:{port}",api_key="")),
+                            "session_id":TILION_SESSION,"current_url":"https://fixture.test/","credential_signin_realms":set(),"task_id":"pause-fixture",
+                            "world_state_receipt_summary":lambda _receipt:[],"logger":SimpleNamespace(info=lambda *a,**k:None,warning=lambda *a,**k:None),
+                            "record_passkey_usage_once":passkeys,"initial_dom_service":service,
+                            "_tilion_leave_session":lambda: events.append("usage_banked"),
+                            "BROWSER_DISCONNECT_TIMEOUT_SECONDS":BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+                            "_EXPIRED_OPTIONAL_CDP_TASK_NAME":"fixture-cdp-cleanup","_background_browser_cleanup_tasks":set(),
+                            "extract_error_message":str,
+                        }
+                        exec(compile(ast.fix_missing_locations(ast.Module(body=[*definitions,factory],type_ignores=[])),"native-close-helper","exec"),namespace)
+                        pause = namespace["factory"]()
+                        if failure in (None, "recorder_error", "recorder_hung"):
+                            pause_started = time.monotonic()
+                            await pause()
+                            assert time.monotonic() - pause_started < BROWSER_DISCONNECT_TIMEOUT_SECONDS + 5
+                            if failure is None:
+                                assert events.index("passkeys_captured") < events.index("recording_captured") < events.index("socket_released") < events.index("backend_checkpoint")
+                            else:
+                                assert events.index("passkeys_captured") < events.index("recording_attempted") < events.index("socket_released") < events.index("backend_checkpoint")
+                            assert events[-1] == "backend_checkpoint_complete"
+                            assert events.count("usage_banked") == 1
+                            assert events.index("socket_released") < events.index("usage_banked") < events.index("backend_checkpoint")
+                            assert requests == [{"session_id":TILION_SESSION,"pause":True,"current_url":"https://fixture.test/"}]
+                        else:
+                            try:
+                                await pause()
+                            except BrowserSessionCloseError:
+                                pass
+                            else:
+                                raise AssertionError("failed local capture/release must reject the pause")
+                            assert not requests, "unconfirmed local release issued backend pause"
+                            assert "usage_banked" not in events, "unconfirmed release must retain unbanked live custody"
+                        assert "passkeys_captured" in events
+                        if failure in ("disconnect_error","disconnect_hung"):
+                            assert "recording_captured" in events
+                    finally:
+                        release_marks.set()
+                        if "upstream" in locals():
+                            upstream.close = original_upstream_close
+                            upstream.wait_closed = original_upstream_wait_closed
+                            await upstream.close()
+                        if recorder is not None:
+                            recorder.close = original_recording_close
+                        await _stop_dom_service(service)
+                        if mux is not None:
+                            await mux.close()
+                        if pw_browser is not None:
+                            with contextlib.suppress(Exception): await pw_browser.close()
+                        if pending:
+                            await asyncio.wait_for(backend_done.wait(), 10)
+                        if server is not None:
+                            await server.cleanup()
+                        if recorder is not None:
+                            await recorder.abort_local(settle_timeout=2)
+                            recorder.cleanup_local_artifacts(force=True)
+                    assert gateway.active == 0, "native test left an upstream client"
+
+
+async def test_tilion_checkpoint_waits_for_pending_dial_and_real_close():
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer, CdpMultiplexerUpstreamClosed
+
+    dial_started, release_dial = asyncio.Event(), asyncio.Event()
+    close_started, wait_started, acknowledge = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    calls = []
+    class Wire:
+        closed = False
+        async def recv(self):
+            await asyncio.Event().wait()
+        async def close(self):
+            close_started.set()
+        async def wait_closed(self):
+            wait_started.set()
+            await acknowledge.wait()
+            self.closed = True
+        async def __aiter__(self):
+            await asyncio.Event().wait()
+            yield ""
+    wire = Wire()
+    async def connect(_url):
+        calls.append(_url)
+        dial_started.set()
+        await release_dial.wait()
+        return wire
+    mux = SingleCdpConnectionMultiplexer("ws://127.0.0.1/fixture", upstream_connect=connect)
+    opening = asyncio.create_task(mux._ensure_upstream())
+    await dial_started.wait()
+    closing = asyncio.create_task(mux.disconnect_confirmed(mux.close))
+    await asyncio.sleep(0)
+    queued = asyncio.create_task(mux._ensure_upstream())
+    try:
+        release_dial.set()
+        await opening
+        await asyncio.wait_for(wait_started.wait(), 1)
+        assert not closing.done() and not wire.closed, "pending dial was falsely acknowledged before transport closure"
+        acknowledge.set()
+        await closing
+        assert wire.closed and len(calls) == 1
+        try:
+            await queued
+        except CdpMultiplexerUpstreamClosed:
+            pass
+        else:
+            raise AssertionError("queued redial escaped the checkpoint close fence")
+    finally:
+        release_dial.set()
+        acknowledge.set()
+        await asyncio.gather(opening, closing, queued, return_exceptions=True)
+        await mux.close()
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
         ("chromium_fixture_waits_for_cdp", test_chromium_fixture_waits_for_semantic_cdp_readiness),
+        ("tilion_checkpoint_waits_for_pending_dial_and_real_close", test_tilion_checkpoint_waits_for_pending_dial_and_real_close),
+        ("checkpoint_recorder_close_bounds_and_control_signals", test_checkpoint_recorder_close_bounds_and_control_signals),
+        ("tilion_pause_releases_socket_before_backend_checkpoint", test_tilion_pause_releases_socket_before_backend_checkpoint),
         ("fake_gateway_rejects_second_direct_client", test_fake_gateway_rejects_second_direct_client),
         ("tilion_worker_attach_uses_one_upstream_socket", test_tilion_worker_attach_uses_one_upstream_socket),
+        ("tilion_regional_worker_attach_uses_one_upstream_socket", test_tilion_regional_worker_attach_uses_one_upstream_socket),
+        ("tilion_regional_authorities_and_url_privacy", test_tilion_regional_authorities_and_url_privacy),
+        ("tilion_live_view_native_session_identity", test_tilion_live_view_native_session_identity),
         ("multiplexer_releases_and_reattaches", test_multiplexer_releases_upstream_when_clients_leave_and_reattaches),
         ("multiplexer_propagates_provider_close_code", test_multiplexer_propagates_provider_close_code),
         ("tilion_cdp_url_detection_and_redaction", test_tilion_cdp_url_detection_and_redaction),
@@ -3395,6 +3798,10 @@ async def run_all_tests():
         ),
         ("multiplexer_webauthn_keeps_seeded_passkeys", test_multiplexer_webauthn_arming_keeps_seeded_passkeys_working),
         ("multiplexer_reapplies_detached_overrides", test_multiplexer_reapplies_overrides_when_their_holder_detaches),
+        (
+            "raw_chromium_port_handoff",
+            test_raw_chromium_keeps_its_endpoint_when_another_socket_claims_the_handoff,
+        ),
         ("tilion_live_view_token_redacted", test_tilion_live_view_token_is_redacted_before_persisting),
         ("document_images_count_as_rendered", test_document_images_count_as_rendered_through_the_worker_socket),
         ("pause_context_carries_provenance", test_pause_context_carries_downloads_and_image_provenance_without_secrets),
@@ -3419,3 +3826,123 @@ async def run_all_tests():
     ]:
         await result.record_async(name, test)
     return result.all_passed
+
+
+async def test_checkpoint_recorder_close_bounds_and_control_signals():
+    """Actual close helper keeps optional recording separate from custody proof."""
+    import ast
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from domains.spawn_browser_agent_v3.repo import BrowserSessionCloseError
+    from domains.spawn_browser_agent_v3.config import BROWSER_DISCONNECT_TIMEOUT_SECONDS
+
+    tree = ast.parse((Path(__file__).resolve().parents[2] / "domains/spawn_browser_agent_v3/handler.py").read_text())
+    names = {"_await_bounded_browser_cleanup"}
+    definitions = [n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name in names]
+    helper = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_close_browser_with_cleanup_receipt")
+    factory = ast.parse("def factory():\n    cleanup_failure = None\n    dom_service = initial_dom\n").body[0]
+    factory.body.append(helper)
+    factory.body.extend(ast.parse("return _close_browser_with_cleanup_receipt, lambda: dom_service, lambda: cleanup_failure").body)
+    failures = []
+    for mode in ("ok", "error", "hung", "cancel", "sealed", "caller_cancel", "false", "missing", "mock", "truthy"):
+        events, retained = [], set()
+        release = asyncio.Event()
+        started = asyncio.Event()
+
+        async def record(**options):
+            assert options == {"include_steel_media": False, "archive_artifacts": False}
+            events.append("record")
+            started.set()
+            if mode == "error":
+                raise OSError("recording failed")
+            if mode == "cancel":
+                raise asyncio.CancelledError()
+            if mode == "sealed":
+                raise WorkflowGenerationSealed("closed generation")
+            if mode in {"hung", "caller_cancel"}:
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    events.append("record_cancelled")
+                    await release.wait()
+
+        async def detach(*args):
+            events.append("detach")
+            return True
+
+        async def confirmed(callback):
+            return await callback()
+
+        async def capture(callback):
+            events.append("passkeys")
+            return True
+
+        async def stop(recorder):
+            events.append("replay")
+
+        async def close(*args, **kwargs):
+            events.append("checkpoint")
+
+        service = SimpleNamespace(disconnect=detach, cdp_multiplexer=SimpleNamespace(disconnect_confirmed=confirmed))
+        if mode != "missing":
+            service.single_cdp_client = False if mode == "false" else MagicMock() if mode == "mock" else 1 if mode == "truthy" else True
+
+        # Exercise the real production budget argument with a deterministic
+        # wait boundary; no wall-clock or production timeout is changed.
+        async def wait(tasks, timeout):
+            assert timeout == BROWSER_DISCONNECT_TIMEOUT_SECONDS
+            if mode == "hung" and not started.is_set():
+                await started.wait()
+                return set(), set(tasks)
+            return await asyncio.wait(tasks, timeout=timeout)
+
+        loop_api = SimpleNamespace(**{n: getattr(asyncio, n) for n in ("create_task", "CancelledError", "Task")}, wait=wait)
+        namespace = dict(asyncio=loop_api, contextlib=contextlib, Any=Any, Dict=Dict,
+            WorkflowGenerationSealed=WorkflowGenerationSealed, BrowserSessionCloseError=BrowserSessionCloseError,
+            initial_dom=service, session_id="owned", task_id="task", config=None,
+            browser_recorder=SimpleNamespace(close=record), credential_signin_realms=set(),
+            _capture_browser_passkey_usage=capture, record_passkey_usage_once=None,
+            _stop_kernel_replay_before_session_close=stop, _disconnect_browser=detach,
+            _tilion_leave_session=lambda: events.append("bank"), close_browser_session=close,
+            world_state_receipt_summary=lambda receipt: [], extract_error_message=str,
+            logger=SimpleNamespace(warning=lambda *a, **k: None, info=lambda *a, **k: None),
+            BROWSER_DISCONNECT_TIMEOUT_SECONDS=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+            _background_browser_cleanup_tasks=retained, _EXPIRED_OPTIONAL_CDP_TASK_NAME="review-owned-cleanup")
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[*definitions, factory], type_ignores=[])), "checkpoint-recorder-contract", "exec"), namespace)
+        call, current, receipt = namespace["factory"]()
+        runner = asyncio.create_task(call("owned", pause=True, require_complete_passkeys=True))
+        try:
+            if mode == "caller_cancel":
+                await started.wait()
+                runner.cancel()
+            expected = asyncio.CancelledError if mode in {"cancel", "caller_cancel"} else WorkflowGenerationSealed if mode == "sealed" else None
+            try:
+                await asyncio.wait_for(asyncio.shield(runner), timeout=0.5)
+            except BaseException as error:
+                if expected is None or not isinstance(error, expected):
+                    raise AssertionError((mode, type(error).__name__, events)) from error
+            else:
+                assert expected is None, (mode, "control signal swallowed", events)
+            if expected:
+                assert "detach" not in events and "checkpoint" not in events and "bank" not in events, (mode, events)
+                assert current() is service and receipt() is not None
+            else:
+                assert current() is None and receipt() is None
+                assert events.count("bank") == 1
+                assert events.index("detach") < events.index("bank") < events.index("checkpoint")
+                if mode in {"false", "missing", "mock", "truthy"}:
+                    assert "record" not in events and events.index("detach") < events.index("replay")
+                else:
+                    assert events.index("record") < events.index("detach")
+        except Exception as error:
+            failures.append((mode, str(error)))
+        finally:
+            release.set()
+            if not runner.done():
+                runner.cancel()
+            await asyncio.gather(runner, *retained, return_exceptions=True)
+            await asyncio.sleep(0)
+            assert not retained, (mode, "owned task leaked")
+    assert not failures, failures

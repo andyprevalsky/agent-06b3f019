@@ -12,7 +12,7 @@ symptoms:
   - "RoseAllFailed: All 2 waterfall models failed for pool rose-1-ultra"
   - "tool_use ids were found without tool_result blocks"
   - "tool_result_pairing.repaired original_count=12 repaired_count=12 (completion_summary)"
-  - agent finishes its work but call_site=completion_summary produces no summary
+  - agent finishes its work but call_site=completion_summary produces no summary; planner is redoing work already done in the previous explores
 tags:
   - completion-summary
   - tool-result
@@ -21,6 +21,7 @@ tags:
   - rose-waterfall
   - blackbox-false-green
 sources:
+  - agent 6731984c-4b1b-4f4a-9786-65b2f7bbc511 (2026-10-26 planner consumer recurrence)
   - agent 5cce9d33-72bb-4d85-9dee-70c6b1482507 (descend-full69-20261023 r004-j0055, recurrence 2026-10-23, 59/70 copies)
   - agent 1d7e1fb9-2604-45c6-906e-b6da1f12d4b7 (smoke task browser-biometrics-webdecoy)
   - agent 2a94f607-86e6-486d-aaf0-eca9d669f0af (smoke task browser-smoke, same 400, task still passed)
@@ -349,3 +350,167 @@ rows are converted without dedup. Neither prior diagnosis was adopted.
 When two converters feed the same providers from the same context, the provider
 contract has to be enforced once in code both call — a guard that exists in only
 one converter is a guard the other will violate.
+
+
+## 2026-10-26 recurrence — planner progress displaced completed Explore output
+
+Agent `6731984c-4b1b-4f4a-9786-65b2f7bbc511` was asked:
+`Get me 10 candidates to interview for positions for roselabs.ai/careers`.
+Its careers explore completed at 17:33:34.254 UTC with the three open roles,
+requirements, locations and source URLs. Root's next reasoning call received
+that inventory and said the careers investigation was complete. The dedicated
+planner then scheduled the same inventory as task 0, blocking all four candidate
+sourcing partitions on it. Execution fetched the careers index and all three
+job pages again; the repeated inventory completed at 17:34:46 UTC.
+
+Critical path: Explore FINISHED event -> persisted parent TOOL rows -> workflow
+context -> `domains/set_plan/service.py::build_planner_messages` -> planner
+activity -> generated DAG -> repeated exploration. DB rows and the root model
+request preserve the completed output. First bad boundary is the planner's
+third context converter, which the earlier two-converter repair did not cover.
+This is a recurrence of the inconsistent-converter contract, not the original
+completion-summary HTTP 400 symptom.
+
+Captured planner request `f251ecb9a3b7` (span `619d82f17637`, request `cef9a51d`)
+contains only the 211-character progress stub for call `7dde3cdd1`, although
+its 3,297-character FINISHED body exists in persisted message
+`1c6ac19c-eed8-41b0-b640-4f0dbb139f80`. Main-loop request `f0e9ef349689` includes
+the complete result. The planner used gpt-6-sol-gpt, direct GPT auth,
+temperature 0.2, max_tokens 16384, reasoning max, deadline 220s, round trip
+22.763s. No model-capability conclusion is made: evidence was lost before
+inference. Full immutable requests/config/output and raw DB prefix are retained
+under `.context/rca-6731984c/`; the permanent fixture retains the actual user,
+assistant declaration, progress and FINISHED row bodies and identities.
+
+`build_planner_messages` serialized IN_PROGRESS and FINISHED as equivalent
+native tool results, discarding status. `_ensure_tool_result_pairing` correctly
+kept the first serialized result per call ID, thereby keeping progress and
+dropping the actual output. Changing pairing to blindly keep the last body
+would still lose results when a delayed progress event arrives afterward.
+The deepest proven owned cause is separate model-context converters bypassing
+the existing lifecycle selection contract. Siblings include lost ERROR results,
+older terminal revisions winning, and invisible child/UI rows displacing real
+results. Broader architectural redesign is unnecessary: the existing shared
+selection helpers already express the required invariant. A prompt-level
+instruction against repeated work would leave this deterministic loss intact.
+
+Repair: reuse `collapse_duplicate_tool_results(drop_rows_never_sent_to_model(context))`
+in the planner before formatting, then skip IN_PROGRESS rows before native
+pair repair. Remove its duplicate filtering. Keep planner-specific compaction,
+legacy status-less result behavior, goal extraction and inter-agent roles.
+This restores actual tool evidence without synthetic turns, new instructions,
+keyword classifiers, schema changes or model changes. At 10,000 agents it adds
+linear work over each agent's own bounded history, with no I/O, cross-agent
+queries, shared locks, global state or fan-in.
+
+Golden references opened for this recurrence:
+- `claude-code-src/src/utils/messages.ts:2057` filters progress before API
+  normalization and keeps pairing separate.
+- `openclaw/packages/agent-core/src/agent.ts:689` ignores execution updates for
+  transcript state and appends final messages on message_end.
+- `hermes-agent/agent/tool_executor.py:1141` appends the completed tool message
+  before emitting completion callbacks.
+- `codex/codex-rs/core/src/tools/parallel.rs:77` awaits actual output before
+  constructing the response; `tools/context.rs:157` binds output to call ID.
+The repair converges on separating progress from actual model-visible output.
+
+Permanent reproduction, unchanged on both sides:
+`cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py set-plan`.
+Before: three new assertions failed in 0.6s; specifically the careers output was
+replaced by the progress stub, latest terminal output was lost, and pending-only
+work was falsely serialized as a result. After: all 47 checks passed in 0.6s.
+The owning `set_plan.blackbox.py` registers the captured reproduction, late
+progress, latest FINISHED/ERROR, newer excluded/internal rows, input immutability
+and pending-only controls. The normal blackbox runner discovers the domain;
+`/deploy` Step 4g invokes `agents/scripts/run-coverage.sh`, which executes every
+domain through `run_coverage_blackbox_parallel.py`.
+
+Searches after runtime capture:
+- `set_plan explore completed role inventory`
+- `planner repeats already done research planning exploration`
+- `build_planner_messages subagent result missing context`
+- `planner IN_PROGRESS FINISHED first result pairing`
+Narrow grep found the shared helper and this case; its Solution and Human
+feedback were read before selecting the repair.
+
+Independent investigator ph7f2w6krwf2kf7vvw594vf8bx8h12xb confirmed the captured
+boundary and seven adversarial controls. Its design review preceded the fix;
+snapshot review and deployment receipts are recorded separately before shipping.
+The original full sourcing task has not been rerun; local causal proof does not
+claim an end-to-end task outcome. Status-less legacy TOOL rows remain outside
+this observed progress/terminal failure class and retain existing behavior.
+Human feedback for this recurrence: none recorded beyond the reported symptom.
+
+
+Live planner replay follow-through: the original saved input again generated
+seven tasks beginning with a new careers scan. Replacing only that tool result
+with the captured completed inventory generated five tasks: three independent
+role-specific candidate searches, synthesis and display, with no careers scan.
+Both served gpt-6-sol-gpt through the same local Rose direct-GPT path with
+unchanged generation settings (temperature0.2/max16384/effortmax). The corrected
+replay explicitly forwards original deadline220/TTFT120/idle120; the initial
+original-input replay used client-default deadline590/TTFT90, so these are not
+claimed to be exact timeout-parity trials. Recorded round trips were46.2s and
+33.769s respectively; no latency or statistical model-capability claim is made.
+The deterministic owning-boundary reproduction proves the missing-data defect;
+these live calls support its behavioral consequence, not completion of the
+original candidate-sourcing task. Local replay JSON/logs are retained under
+`.context/rca-6731984c/`. Rendered original evidence is published to R2 after
+loading the canonical backend environment. Native-agent FE remains the normal
+production agent link: the benchmark publisher refuses without a Hub run_id,
+and no benchmark identity was invented for this real user task.
+
+
+Adversarial scaling correction: the first reviewer rejected snapshot a9a4c87
+because skipping progress exposed quadratic late-result suffix searches for
+many pending declarations. Registered set-plan scaling reproduction failed
+before the correction with46031->157519 Python line events at128->256 pending
+calls. Shared `_ensure_tool_result_pairing` now builds per-call sorted result
+positions once and uses the existing causal window boundary to find the first
+eligible later result with bisect. No result ordering, orphan policy, duplicate
+selection, synthetic placeholder or source mutation changes. The same scaling
+assertion passes, all48 set-plan checks pass0.6s, and all253 llm checks pass10s.
+The new llm control also preserves a valid late result when an earlier orphan
+shares its call ID, retaining idempotence. Codex
+`codex-rs/core/src/context_manager/normalize.rs:22` independently indexes output
+IDs before validating call/output presence; Rose retains its documented policy
+of removing orphan declarations rather than synthesizing aborted outputs.
+
+Exact-timeout replay supersedes the initial baseline caveat above: a second
+original-input replay explicitly used deadline220/TTFT120/idle120, matching the
+corrected replay, and again produced7 tasks starting with careers inventory.
+Its round trip was37.758s; corrected input produced5 tasks beginning directly
+with role-specific sourcing. The generation config, provider path, system,
+response schema and other messages were held constant. This is behavioral
+support alongside deterministic data-loss proof, not a statistical rate or
+model-capability comparison.
+
+During deploy verification119/121 instrumented blackbox domains passed. The
+benchmark domain's two exact-owned process controls failed before this machine
+had lsof; installing that documented host dependency made both unchanged
+controls pass1.194s/1.258s. The structural runner itself refused without lsof,
+so its existing preflight was effective. A separate WMH overlap observer raced
+on a50ms sleep; the investigator's causal rendezvous repair preserves the
+original peak==2 assertion, rejects an intentionally serialized bridge, passes
+five repeated controls and the full owning domain (383 nested pytest cases).
+These supporting gate repairs do not change the planner diagnosis.
+
+
+Final golden-reference review: `RCA-6731984C-CONTEXT-V2` is GROUNDED by fresh
+reviewer `ph7e5h6hs2drx1499gezzcx0ms8h0e97` at snapshot
+`3d6056640bf7fc006b42b0b99f4a4889508efb2f5fd2965bfdd9dc85f6e2c59a`.
+The reviewer independently verified all five source/test/fixture hashes, all
+thirteen scoped hunks, the captured prefix, unchanged fail/pass assertions,
+exact-timeout behavioral replay and indexed pairing scaling. V1's rejection is
+preserved; V2 clears only these exact runtime-context changes. No human approval
+was requested or inferred; deployment and original task completion remain
+separate outcomes. Full review artifacts are retained locally with the RCA.
+
+The reference catalog added Kimi Code during deployment. An additional check
+of commit `8dabf4a10eaec7302344ba3060b7b3c69a5a76dc` found
+`kimi-code/packages/agent-core-v2/src/agent/loop/machine/engine.ts:449`
+separates `tool.update` from `tool.done`, while
+`kimi-code/packages/agent-core-v2/src/agent/contextMemory/loopEventFold.ts:193`
+appends only a result matching a
+pending call ID. This supports the same progress/result separation. It was
+checked after the original design and does not replace the frozen V2 review.

@@ -14,6 +14,10 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 HISTORY_DIR = os.path.join(os.path.dirname(__file__), "history")
 HISTORY_FILE = os.path.join(HISTORY_DIR, "span_durations.jsonl")
+# Same contract as timeout_history.PARK_DIR_ENV: a deploy's smoke lane parks
+# new span rows under .context (one unsegmented file; the publish step replays
+# them through the normal segmented append). Reads keep the tracked ledgers.
+PARK_DIR_ENV = "BENCHMARK_HISTORY_PARK_DIR"
 # Leave headroom below GitHub's 100 MiB blob ceiling. The original ledger remains
 # immutable once it reaches this size and new rows roll into dated segments.
 MAX_HISTORY_FILE_BYTES = 90 * 1024 * 1024
@@ -48,6 +52,11 @@ def _history_paths(history_file: Optional[str] = None) -> List[str]:
     return [HISTORY_FILE, *segments]
 
 
+def _parked_history_file() -> Optional[str]:
+    park = os.environ.get(PARK_DIR_ENV, "").strip()
+    return os.path.join(park, os.path.basename(HISTORY_FILE)) if park else None
+
+
 def _writer_key() -> str:
     """Slug of the checkout's branch, or "" when detached or outside git."""
     try:
@@ -64,7 +73,7 @@ def _writer_key() -> str:
 
 
 def _append_history_path(history_file: Optional[str] = None, required_bytes: int = 0) -> str:
-    configured = history_file or os.environ.get("SPAN_HISTORY_FILE")
+    configured = history_file or os.environ.get("SPAN_HISTORY_FILE") or _parked_history_file()
     if configured:
         return configured
 
@@ -119,7 +128,7 @@ def _record_span_observations_unlocked(
     if parent := os.path.dirname(path):
         os.makedirs(parent, exist_ok=True)
     written = 0
-    configured = history_file or os.environ.get("SPAN_HISTORY_FILE")
+    configured = history_file or os.environ.get("SPAN_HISTORY_FILE") or _parked_history_file()
     try:
         current_size = os.path.getsize(path)
     except OSError:
@@ -161,7 +170,7 @@ def record_span_observations(
     history_file: Optional[str] = None,
 ) -> int:
     """Append observations under one file lock so concurrent batches cannot overfill a segment."""
-    lock_path = history_file or os.environ.get("SPAN_HISTORY_FILE") or HISTORY_FILE
+    lock_path = history_file or os.environ.get("SPAN_HISTORY_FILE") or _parked_history_file() or HISTORY_FILE
     try:
         if parent := os.path.dirname(lock_path):
             os.makedirs(parent, exist_ok=True)

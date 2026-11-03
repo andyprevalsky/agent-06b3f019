@@ -9,6 +9,8 @@ export async function findExistingAgentsByIds(agentIds: string[], userId: string
     where: { id: { in: agentIds }, userId },
     select: {
       id: true,
+      projectId: true,
+      folderId: true,
       status: true,
       statusMessage: true,
       progress: true,

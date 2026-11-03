@@ -2306,6 +2306,7 @@ async def test_fetch_compute_token_activity_passes_lineage_params():
         "accountId": "acct-1",
         "source": "pool",
         "poolTokenId": "pool-1",
+        "integrationId": "pool-1",
         "lineageKey": "agent:a-1",
         "fastCacheAffinityKey": "affinity-1",
     }
@@ -9882,6 +9883,28 @@ def test_ensure_tool_result_pairing_pulls_late_result_forward():
     assert sum(1 for m in fixed if m.get("tool_call_id") == call_id) == 1
 
 
+def test_ensure_tool_result_pairing_ignores_results_before_their_declaration():
+    """An earlier orphan must not hide the first real result after a later call."""
+    from helpers.llm import _ensure_tool_result_pairing
+
+    messages = [
+        {"role": "tool", "tool_call_id": "reused", "content": "earlier orphan"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "reused", "type": "function", "function": {"name": "spawn_agent"}}],
+        },
+        {"role": "assistant", "content": "intervening turn"},
+        {"role": "tool", "tool_call_id": "reused", "content": "first real result"},
+        {"role": "tool", "tool_call_id": "reused", "content": "duplicate result"},
+    ]
+    repaired = _ensure_tool_result_pairing(messages)
+    assert repaired[0]["role"] == "assistant"
+    assert repaired[1] == messages[3]
+    assert [message["content"] for message in repaired if message["role"] == "tool"] == ["first real result"]
+    assert _ensure_tool_result_pairing(repaired) == repaired
+
+
 def test_ensure_tool_result_pairing_strips_orphan_tool_result():
     """tool message with tool_call_id not declared by any preceding assistant is dropped."""
     from helpers.llm import _ensure_tool_result_pairing
@@ -10072,11 +10095,16 @@ async def test_structured_validation_retries_exclude_only_repeated_known_candida
 
 
 async def test_structured_validation_exhausted_candidate_preserves_typed_error():
-    """A lone eligible native model may fail schema twice, without losing the typed contract."""
+    """A lone eligible native model may fail schema twice, without losing the typed contract.
+
+    rose-1-oss now carries a rescuer (qwen/qwen3.8-27b); it is excluded here so
+    kimi-k3 stays the lone eligible candidate this case is about.
+    """
     import httpx
     from typing import Literal
     from pydantic import BaseModel, Field
     from helpers.llm import call_llm_structured_streaming, LLMStructuredOutputError
+    from providers.rose.truncation import model_key
     from utils.tool_schemas import create_agent_action_model
 
     class TypedTool(BaseModel):
@@ -10137,6 +10165,7 @@ async def test_structured_validation_exhausted_candidate_preserves_typed_error()
                 call_site="test_exhausted_structured_candidate",
                 skip_cache_write=True,
                 _exclude_anthropic_family=True,
+                _skip_models=frozenset({model_key("qwen/qwen3.8-27b")}),
             )
         except Exception as error:
             failure = error
@@ -10145,6 +10174,93 @@ async def test_structured_validation_exhausted_candidate_preserves_typed_error()
     assert isinstance(failure, LLMStructuredOutputError), (
         f"Exhausted structured validation lost its typed error: {type(failure).__name__}: {failure}"
     )
+
+
+async def test_structured_validation_second_oss_candidate_rescues_after_two_invalid_replies():
+    """Two unparseable kimi-k3 replies send the third attempt to the pool's qwen rescuer, which serves.
+
+    Before rose-1-oss had a second waterfall model, the exclusion after two
+    invalid replies left no candidate and the pinned biometrics benchmark died
+    with RoseAllFailed while Azure Foundry answered deployment_disabled.
+    """
+    import httpx
+    from typing import Literal
+    from pydantic import BaseModel, Field
+    from helpers.llm import call_llm_structured_streaming, LLMStructuredOutputError
+    from utils.tool_schemas import create_agent_action_model
+
+    class TypedTool(BaseModel):
+        tool: Literal["typed_lookup"]
+        labels: list[str] = Field(min_length=1)
+
+    response_model = create_agent_action_model(["typed_lookup"], tool_registry={"typed_lookup": TypedTool})
+    requests = []
+
+    def handler(request):
+        if request.url.host != "openrouter.ai":
+            raise AssertionError(f"Unexpected route outside the existing OSS pool: {request.url.host}")
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) <= 2:
+            assert body["model"] == "moonshotai/kimi-k3"
+            valid = False
+        else:
+            assert body["model"] == "qwen/qwen3.8-27b"
+            valid = True
+        events = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": f"invalid-{len(requests)}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "typed_lookup",
+                                        "arguments": json.dumps({"labels": ["typed"]} if valid else {"labels": '["invalid-string-array"]'}),
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+        ]
+        return httpx.Response(
+            200,
+            text="\n".join("data: " + json.dumps(event) for event in events) + "\ndata: [DONE]\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    setup_mock_fn(handler)
+    failure = None
+    result = None
+    with patch.dict(
+        os.environ, {"CEREBRAS_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "AZURE_FOUNDRY_API_KEY": ""}
+    ):
+        try:
+            result, _, _ = await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "Return typed labels from the existing OSS pool."}],
+                model="rose-labs/rose-1-oss",
+                temperature=1,
+                max_tokens=128,
+                response_model=response_model,
+                on_chunk=AsyncMock(),
+                call_site="test_second_oss_candidate_rescues",
+                skip_cache_write=True,
+                _exclude_anthropic_family=True,
+            )
+        except Exception as error:
+            failure = error
+    assert failure is None, f"the qwen rescuer should have served: {type(failure).__name__}: {failure}"
+    assert [body["model"] for body in requests] == ["moonshotai/kimi-k3", "moonshotai/kimi-k3", "qwen/qwen3.8-27b"], (
+        f"expected two kimi attempts then the rescuer: {[body['model'] for body in requests]}"
+    )
+    assert result is not None and result.tool_calls[0].labels == ["typed"]
 
 
 # ---------------------------------------------------------------------------
@@ -10379,6 +10495,238 @@ def test_verifier_keeps_a_childs_whole_final_answer():
     assert all(f"Announced 2026-0{i}-12" in evidence for i in range(1, 9))
 
 
+
+def test_structured_retry_feedback_narrows_to_model_level_branch_error():
+    """A model-level validator error on the matching union branch must lead the retry feedback.
+
+    Deploy 12 (agent 8099ad68): kimi-k3 answered the biometrics task with a
+    browser spawn_agent call that omitted output_schema. Pydantic reported 22
+    errors across all ten tool branches, and the retry feedback opened with
+    ``ReadToolOutputTool.tool: Input should be 'read_tool_output'`` — union noise
+    — while the one actionable line sat third of five with "17 more" dropped.
+    The matching branch's error loc is three parts long
+    (``tool_calls.0.function-after[check_spawn_agent_constraints(), SpawnAgentTool]``)
+    and ``_selected_tool_errors`` skipped it as a non-branch entry.
+    """
+    from pydantic import ValidationError
+    from utils.error_utils import extract_error_message
+    from utils.tool_schemas import create_agent_action_model
+
+    action_model = create_agent_action_model(
+        [
+            "read_tool_output",
+            "spawn_agent",
+            "wait_for",
+            "send_message_to_user_execute_phase",
+            "display",
+            "call_phone_number",
+            "message_person",
+            "send_message_to_agent",
+            "kill_agent",
+            "attempt_completion",
+        ]
+    )
+    # The dumped kimi-k3 arguments (1793477143807-03b5c497ce59-execute_loop.json), schema omitted.
+    emitted = {
+        "tool": "spawn_agent",
+        "type": "browser",
+        "task_name": "fcaptcha_demo",
+        "goal": "Go to https://webdecoy.com/product/fcaptcha-demo/ and interact like a normal user.",
+        "start_url": "https://webdecoy.com/product/fcaptcha-demo/",
+        "run_in_background": False,
+        "depth": "medium",
+    }
+    try:
+        action_model.model_validate({"response": "", "tool_calls": [emitted]})
+    except ValidationError as error:
+        summary = extract_error_message(error)
+    else:
+        raise AssertionError("a browser spawn without output_schema must not validate")
+
+    expected_lead = (
+        "1 validation error(s): tool_calls.0.function-after[check_spawn_agent_constraints(), SpawnAgentTool]: "
+        "Value error, output_schema is required when type='browser'."
+    )
+    assert summary.startswith(expected_lead), f"actionable branch error must lead the feedback: {summary!r}"
+    for noise in ("ReadToolOutputTool", "WaitForTool", "more"):
+        assert noise not in summary, f"union noise {noise!r} must not reach the retry feedback: {summary!r}"
+
+
+async def test_structured_exclusion_carries_into_next_activity_attempt():
+    """A model excluded after two invalid replies stays excluded for the turn's next attempt.
+
+    Deploy 12 (agent 8099ad68, rose-1-oss): each of the three outer
+    ``run_agent.structured_output_retry`` attempts re-tried kimi-k3 twice before
+    reaching qwen, so six of nine calls went to the model that had already
+    failed the same context twice. The activity now reports the excluded set in
+    ``ApplicationError.details`` and accepts it back as ``skip_models`` so the
+    agent loop's next attempt starts on the next candidate.
+    """
+    import httpx
+    from helpers.llm import call_llm_activity
+    from providers.rose.truncation import model_key
+    from temporalio.exceptions import ApplicationError
+
+    requests = []
+
+    def handler(request):
+        if request.url.host != "openrouter.ai":
+            raise AssertionError(f"Unexpected route outside the existing OSS pool: {request.url.host}")
+        body = json.loads(request.content)
+        requests.append(body["model"])
+        events = [
+            {
+                "model": body["model"],
+                "actual_model": body["model"],
+                "choices": [
+                    {
+                        "delta": {
+                            "content": json.dumps(
+                                {
+                                    "response": "Sending the message now.",
+                                    "tool_calls": [{"tool": "send_message_to_agent", "intent": "hello"}],
+                                }
+                            )
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+            {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+        ]
+        return httpx.Response(
+            200,
+            text="\n".join("data: " + json.dumps(event) for event in events) + "\ndata: [DONE]\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    setup_mock_fn(handler)
+
+    async def attempt(skip_models):
+        try:
+            await call_llm_activity(
+                messages_or_agent_id=[{"role": "user", "content": "Message the agent from the OSS pool."}],
+                model="rose-labs/rose-1-oss",
+                tool_names=["message_person"],
+                reasoning_max_tokens=0,
+                call_site="test_structured_exclusion_carry_over",
+                **({"skip_models": skip_models} if skip_models is not None else {}),
+            )
+        except ApplicationError as error:
+            return error
+        raise AssertionError("an invalid structured reply on every candidate must surface a typed error")
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch.dict(
+            os.environ,
+            {"CEREBRAS_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "AZURE_FOUNDRY_API_KEY": ""},
+        ),
+    ):
+        first = await attempt(None)
+        assert first.type == "LLMStructuredOutputError" and first.non_retryable is True
+        assert requests == ["moonshotai/kimi-k3", "moonshotai/kimi-k3", "qwen/qwen3.8-27b"], requests
+        excluded = [detail for detail in first.details if isinstance(detail, dict) and "excluded_models" in detail]
+        assert excluded and excluded[0]["excluded_models"] == [model_key("moonshotai/kimi-k3")], (
+            f"the activity must report the excluded candidate: details={list(first.details)!r}"
+        )
+
+        requests.clear()
+        second = await attempt(excluded[0]["excluded_models"])
+
+    assert second.type == "LLMStructuredOutputError"
+    assert requests == ["qwen/qwen3.8-27b", "qwen/qwen3.8-27b"], (
+        f"the next attempt must not re-select the excluded candidate: {requests}"
+    )
+    excluded_after = [d for d in second.details if isinstance(d, dict) and "excluded_models" in d][0]["excluded_models"]
+    assert excluded_after == sorted({model_key("moonshotai/kimi-k3"), model_key("qwen/qwen3.8-27b")})
+
+
+
+async def test_structured_exclusion_counts_no_json_and_non_object_replies():
+    """Reasoning-only and non-object JSON replies count toward excluding the candidate.
+
+    CodeRabbit on PR #1660: the failed-model bookkeeping only recognised
+    ``json.JSONDecodeError`` / ``ValidationError``. A model answering with
+    reasoning but no JSON (``No JSON content received``) or with a JSON array
+    raised a plain ``ValueError`` / ``AttributeError`` instead, so two such
+    replies never excluded it and the third regeneration went back to the same
+    model instead of the pool's next candidate.
+    """
+    import httpx
+    from typing import Literal
+    from pydantic import BaseModel, Field
+    from helpers.llm import call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+
+    class TypedTool(BaseModel):
+        tool: Literal["typed_lookup"]
+        labels: list[str] = Field(min_length=1)
+
+    response_model = create_agent_action_model(["typed_lookup"], tool_registry={"typed_lookup": TypedTool})
+    shapes = {
+        "reasoning_without_json": {"reasoning": "I will look the labels up now."},
+        "json_array": {"content": json.dumps(["typed"])},
+    }
+
+    for shape_name, invalid_delta in shapes.items():
+        requests = []
+
+        def handler(request, invalid_delta=invalid_delta, requests=requests):
+            if request.url.host != "openrouter.ai":
+                raise AssertionError(f"Unexpected route outside the existing OSS pool: {request.url.host}")
+            body = json.loads(request.content)
+            requests.append(body["model"])
+            if body["model"] == "moonshotai/kimi-k3":
+                delta = invalid_delta
+            else:
+                delta = {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": f"valid-{len(requests)}",
+                            "type": "function",
+                            "function": {"name": "typed_lookup", "arguments": json.dumps({"labels": ["typed"]})},
+                        }
+                    ]
+                }
+            events = [
+                {"choices": [{"delta": delta, "finish_reason": "tool_calls" if "tool_calls" in delta else "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+            return httpx.Response(
+                200,
+                text="\n".join("data: " + json.dumps(event) for event in events) + "\ndata: [DONE]\n",
+                headers={"content-type": "text/event-stream"},
+            )
+
+        setup_mock_fn(handler)
+        failure = None
+        result = None
+        with patch.dict(
+            os.environ, {"CEREBRAS_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "AZURE_FOUNDRY_API_KEY": ""}
+        ):
+            try:
+                result, _, _ = await call_llm_structured_streaming(
+                    messages=[{"role": "user", "content": f"Return typed labels ({shape_name})."}],
+                    model="rose-labs/rose-1-oss",
+                    temperature=1,
+                    max_tokens=128,
+                    response_model=response_model,
+                    on_chunk=AsyncMock(),
+                    call_site=f"test_exclusion_{shape_name}",
+                    skip_cache_write=True,
+                    _exclude_anthropic_family=True,
+                )
+            except Exception as error:
+                failure = error
+        assert requests == ["moonshotai/kimi-k3", "moonshotai/kimi-k3", "qwen/qwen3.8-27b"], (
+            f"{shape_name}: two invalid replies must exclude the model and route the third attempt onward: {requests}"
+        )
+        assert failure is None, f"{shape_name}: the rescuer should have served: {type(failure).__name__}: {failure}"
+        assert result is not None and result.tool_calls[0].labels == ["typed"]
+
+
 async def run_all_tests():
     print("llm blackbox tests:")
     r = BlackboxResult()
@@ -10388,8 +10736,24 @@ async def run_all_tests():
         test_structured_validation_exhausted_candidate_preserves_typed_error,
     )
     await r.record_async(
+        "structured_validation_second_oss_candidate_rescues",
+        test_structured_validation_second_oss_candidate_rescues_after_two_invalid_replies,
+    )
+    await r.record_async(
         "structured_validation_candidate_eligibility",
         test_structured_validation_retries_exclude_only_repeated_known_candidate,
+    )
+    r.record(
+        "structured_retry_feedback_narrows_to_branch_error",
+        test_structured_retry_feedback_narrows_to_model_level_branch_error,
+    )
+    await r.record_async(
+        "structured_exclusion_carries_into_next_activity_attempt",
+        test_structured_exclusion_carries_into_next_activity_attempt,
+    )
+    await r.record_async(
+        "structured_exclusion_counts_no_json_and_non_object_replies",
+        test_structured_exclusion_counts_no_json_and_non_object_replies,
     )
     r.record("legacy_cached_spawn_names_are_stable_and_scoped", test_legacy_cached_spawn_names_are_stable_and_scoped)
     await r.record_async("tool_output_preview_readback", test_tool_output_preview_and_readback_at_model_boundary)
@@ -11056,6 +11420,10 @@ async def run_all_tests():
     r.record(
         "ensure_tool_result_pairing_strips_orphan_tool_result",
         test_ensure_tool_result_pairing_strips_orphan_tool_result,
+    )
+    r.record(
+        "ensure_tool_result_pairing_ignores_earlier_orphan",
+        test_ensure_tool_result_pairing_ignores_results_before_their_declaration,
     )
     r.record(
         "ensure_tool_result_pairing_dedupes_cross_message_ids",

@@ -438,6 +438,7 @@ class StructuralGateRunnerTests(unittest.TestCase):
                     patch.object(module.os, "cpu_count", return_value=14),
                     patch.object(module, "GATES", gates),
                     patch.object(module, "FAILURE_STATE", root / "failures.json"),
+                    patch.object(module, "DURATIONS_STATE", root / "durations.json"),
                     patch.object(sys, "argv", [str(RUNNER)]),
                     patch.object(module.subprocess, "Popen", side_effect=launch),
                     patch.object(module.time, "sleep", side_effect=observe_admission),
@@ -452,13 +453,16 @@ class StructuralGateRunnerTests(unittest.TestCase):
             self.assertEqual(result, 1, "a real gate failure must remain fatal")
             with (
                 patch.object(module, "run_gates", return_value=0) as run,
+                patch.object(module, "DURATIONS_STATE", root / "unrecorded-durations.json"),
                 patch.object(sys, "argv", [str(RUNNER), "--max-workers", "3"]),
             ):
                 self.assertEqual(module.main(), 0)
+                # Without recorded durations the plan is the registry itself.
                 run.assert_called_once_with(
-                    module.GATES,
+                    list(module.GATES),
                     max_workers=3,
                     failure_state=module.ROOT / module.FAILURE_STATE,
+                    durations_state=module.ROOT / module.DURATIONS_STATE,
                 )
 
     def test_gates_start_under_the_documented_umask_not_the_invokers(self) -> None:
@@ -636,7 +640,7 @@ class LinuxGateStorageRetentionTests(unittest.TestCase):
     they are component coverage, never proof that the public route may allocate.
     """
 
-    def _run(self, retain="0", size="", outcome="0", export="0", bad_collector=False, workspace="", volume_fault="", command=None, keep_tmp="0", admitted=True, disposable=False, gate_path=None):
+    def _run(self, retain="0", size="", outcome="0", export="0", bad_collector=False, workspace="", volume_fault="", command=None, keep_tmp="0", admitted=True, disposable=False, gate_path=None, proc_fault=""):
         temporary = tempfile.TemporaryDirectory(prefix="gate-storage-retention-")
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -648,6 +652,19 @@ class LinuxGateStorageRetentionTests(unittest.TestCase):
 import json,os,sys
 from pathlib import Path
 args=sys.argv[1:]
+# The wrapper models an unrelated host sibling, outside the fake guest.
+if (args[:2]==['machine','run'] and os.environ.get('GATE_TEST_PROC_FAULT')=='foreign-unreadable'
+        and os.environ.get('GATE_TEST_PROC_WRAPPED')!='1'):
+    import subprocess
+    foreign=subprocess.Popen([sys.executable,'-c',
+        "import ctypes,sys; assert ctypes.CDLL(None).prctl(4,0)==0; print('ready',flush=True); sys.stdin.read()"],
+        stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+    try:
+        assert foreign.stdout.readline().strip()=='ready'
+        env=dict(os.environ,GATE_TEST_PROC_WRAPPED='1')
+        raise SystemExit(subprocess.run([sys.executable,__file__,*args],env=env).returncode)
+    finally:
+        foreign.stdin.close();foreign.wait(timeout=10);foreign.stdout.close()
 with Path(os.environ['GATE_TEST_CALLS']).open('a') as out: out.write(json.dumps(args)+'\n')
 if args[:2]==['volumes','create']:
     fault=os.environ.get('GATE_TEST_VOLUME_FAULT','')
@@ -699,14 +716,20 @@ elif args[:2]==['machine','run']:
         original_iter=Path.iterdir
         def bounded_proc(path):
             if str(path)!='/proc': return original_iter(path)
-            selected=[]
-            for process in original_iter(path):
+            # Only this fake guest and its descendants inhabit the fake VM.
+            # The caller shell and its siblings are host-side processes.
+            pending=[os.getpid()];selected=set()
+            while pending:
+                pid=pending.pop()
+                if pid in selected: continue
+                selected.add(pid)
+                process=Path('/proc')/str(pid)
                 try:
-                    if process.name.isdecimal() and process.stat().st_uid==os.getuid():
-                        status=Path(str(process)+'/stat').read_text();fields=status[status.rfind(')')+2:].split()
-                        if int(process.name) in (os.getpid(),os.getppid()) or int(fields[1])==os.getppid(): selected.append(process)
-                except (FileNotFoundError, ProcessLookupError): continue  # exited mid-scan
-            return iter(selected)
+                    tasks=list(original_iter(process/'task'))
+                    for task in tasks:
+                        pending.extend(int(child) for child in (task/'children').read_text().split())
+                except FileNotFoundError: continue  # collector still observes any live task
+            return iter(Path('/proc')/str(pid) for pid in sorted(selected))
         Path.iterdir=bounded_proc
         subject={'__name__':'fake_native_collector','__file__':str(helper)}
         exec(compile(helper.read_bytes(),str(helper),'exec'),subject)
@@ -715,8 +738,19 @@ elif args[:2]==['machine','run']:
         subject['launch'](Namespace(repo=repo,record=remote/'launch.json',driver_pid=os.getpid(),caller=Path(files['/tmp/controller-host-caller.json']),ref='a'*40,image='fixture/immutable@sha256:'+'b'*64))
         if os.environ.get('GATE_TEST_VOLUME_FAULT')=='exchanged-owner': (repo/'.context/controller-workspace-volume/ownership.json').write_text('{}')
         if os.environ.get('GATE_TEST_VOLUME_FAULT')=='missing-owner': (repo/'.context/controller-workspace-volume/ownership.json').unlink()
-        rc=subject['export'](Namespace(record=remote/'launch.json',archive=remote/'originals.tar.gz',manifest=remote/'manifest.json',pending=remote/'pending.json'))
-        if rc: raise SystemExit(rc)
+        observer=None
+        try:
+            if os.environ.get('GATE_TEST_PROC_FAULT')=='owned-unreadable':
+                import subprocess
+                observer=subprocess.Popen([sys.executable,'-c',
+                    "import ctypes,sys; assert ctypes.CDLL(None).prctl(4,0)==0; print('ready',flush=True); sys.stdin.read()"],
+                    stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+                assert observer.stdout.readline().strip()=='ready'
+            rc=subject['export'](Namespace(record=remote/'launch.json',archive=remote/'originals.tar.gz',manifest=remote/'manifest.json',pending=remote/'pending.json'))
+            if rc: raise SystemExit(rc)
+        finally:
+            if observer is not None:
+                observer.stdin.close();observer.wait(timeout=10);observer.stdout.close()
     print('Machine ID: abcdef12345678')
 elif args[0]=='logs':
     outcome=os.environ['GATE_TEST_OUTCOME']
@@ -758,6 +792,7 @@ else: print('origin/fixture')
                "CLOUDBENCH_GATE_RETAIN_HOST":retain, "CLOUDBENCH_GATE_ROOTFS_SIZE_GB":size,
                "CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE":keep_tmp,
                "GATE_TEST_CALLS":str(calls), "GATE_TEST_OUTCOME":outcome,
+               "GATE_TEST_PROC_FAULT":proc_fault,
                "CLOUDBENCH_GATE_EXPORT_HOST":export,"CLOUDBENCH_GATE_EXPORT_DIR":str(root/"custody"),
                "GATE_TEST_EXPORT":export,"GATE_TEST_REMOTE":str(root/"remote"),
                "GATE_TEST_BAD_COLLECTOR":"1" if bad_collector else "0",
@@ -1087,6 +1122,21 @@ else: print('origin/fixture')
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(calls, [])
 
+    def test_fake_export_ignores_foreign_unreadable_host_sibling(self):
+        result,calls=self._run(retain="1",export="1",proc_fault="foreign-unreadable")
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertIn("GATE_EXPORT_VERIFIED",result.stdout)
+        self.assertFalse(any(row[:2]==["machine","destroy"] for row in calls))
+        self.assertEqual(sum(row[:3]==["ssh","sftp","get"] for row in calls),3)
+
+    def test_fake_export_refuses_unreadable_owned_guest_child(self):
+        result,calls=self._run(retain="1",export="1",proc_fault="owned-unreadable")
+        self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertIn("cannot observe controller writer ownership",result.stdout+result.stderr)
+        self.assertNotIn("GATE_EXPORT_VERIFIED",result.stdout)
+        self.assertFalse(any(row[:2]==["machine","destroy"] for row in calls))
+        self.assertFalse(any(row[:3]==["ssh","sftp","get"] for row in calls))
+
     def test_invalid_opt_in_values_refuse_before_native_launch(self):
         for retain,size in (("invalid","80"),("1","80gb"),("1","0"),("1","-1"),("1","80;false")):
             with self.subTest(retain=retain,size=size):
@@ -1143,6 +1193,105 @@ class LinuxGateExportIdleBoundTests(unittest.TestCase):
             self.assertNotIn("while :; do sleep 60; done", self._guest_tail(timeout_s))
 
 
+# Fixture harness for scripts/cloudbench-controller-export.py: bound /proc
+# enumeration to the fake host's native process namespace (the harness, the
+# unittest process and its other children). Birth ticks, cwd and fd
+# observations remain the real kernel values; the production guest collector
+# is root and observes every host UID. Definitions only; the activation below
+# patches Path.iterdir and runs the helper's main().
+CONTROLLER_EXPORT_HARNESS_NAMESPACE = """from pathlib import Path
+import os,sys,traceback
+original=Path.iterdir
+def namespace(path, original=original, getpid=os.getpid, getppid=os.getppid, getuid=os.getuid):
+    if str(path)!='/proc':
+        return original(path)
+    selected=[]
+    for process in original(path):
+        if not process.name.isdecimal(): continue
+        try:
+            if process.stat().st_uid!=getuid(): continue
+            status=(process/'stat').read_text()
+        except OSError:
+            # A foreign process that exited or changed credentials between the
+            # listing and the read (ENOENT/ESRCH/EACCES, routine on a loaded
+            # box) is not part of the fake host; only FileNotFoundError was
+            # tolerated before and anything else became a bare exit 75.
+            continue
+        fields=status[status.rfind(')')+2:].split()
+        if int(process.name) in (getpid(),getppid()) or int(fields[1])==getppid(): selected.append(process)
+    return iter(selected)
+"""
+CONTROLLER_EXPORT_HARNESS_RUN = """Path.iterdir=namespace
+helper=Path(sys.argv[1]);sys.argv=sys.argv[1:]
+subject={'__name__':'fake_native_host','__file__':str(helper)}
+exec(compile(helper.read_bytes(),str(helper),'exec'),subject)
+subject['record_temp_roots']=lambda repo,common:[str(repo.parent/'owned-temp-state')]
+subject['EXPORT_WRITER_DRAIN_SECONDS']=2  # these writers persist; keep the bounded drain short
+try: raise SystemExit(subject['main']())
+except (OSError,ValueError,KeyError):
+    # Same exit as the helper's __main__, but with the whole traceback: a
+    # structural-runner flake was a bare exit 75 with empty stderr (2026-10-30).
+    traceback.print_exc()
+    raise SystemExit(75)
+"""
+CONTROLLER_EXPORT_HARNESS = CONTROLLER_EXPORT_HARNESS_NAMESPACE + CONTROLLER_EXPORT_HARNESS_RUN
+
+
+class LinuxControllerExportHarnessTests(unittest.TestCase):
+    """The fixture harness itself: a flake inside it must be diagnosable and a
+    foreign process racing the /proc scan must not become a failure."""
+
+    def _namespace(self):
+        scope: dict = {}
+        exec(CONTROLLER_EXPORT_HARNESS_NAMESPACE, scope)  # definitions only; Path.iterdir untouched
+        self.assertIs(Path.iterdir, scope["original"])
+        return scope["namespace"]
+
+    @staticmethod
+    def _entry(name, uid=1000, ppid=50, stat_error=None, read_error=None):
+        class Entry:
+            def stat(self):
+                if stat_error: raise stat_error
+                return type("Stat", (), {"st_uid": uid})()
+            def __truediv__(self, child):
+                def read_text():
+                    if read_error: raise read_error
+                    return f"{name} (fixture) S {ppid} 1 1 0 -1\n"
+                return type("Leaf", (), {"read_text": staticmethod(read_text)})()
+        entry = Entry(); entry.name = name
+        return entry
+
+    def test_namespace_keeps_own_processes_and_skips_vanished_or_unreadable_foreign_ones(self):
+        namespace = self._namespace()
+        entries = [
+            self._entry("100"),                                   # the harness itself
+            self._entry("50", ppid=1),                            # the unittest process (parent)
+            self._entry("200"),                                   # a sibling child of the parent
+            self._entry("300", ppid=1),                           # foreign same-uid process
+            self._entry("400", stat_error=ProcessLookupError(3, "No such process")),
+            self._entry("401", stat_error=FileNotFoundError(2, "No such file")),
+            self._entry("500", read_error=PermissionError(13, "Permission denied")),
+            self._entry("600", uid=0),                            # another uid
+            self._entry("self"),                                  # /proc/self
+        ]
+        selected = list(namespace(Path("/proc"), original=lambda path: iter(entries),
+                                  getpid=lambda: 100, getppid=lambda: 50, getuid=lambda: 1000))
+        self.assertEqual([entry.name for entry in selected], ["100", "50", "200"])
+        other = Path(tempfile.gettempdir())
+        self.assertEqual(sorted(str(p) for p in namespace(other, original=lambda path: iter([other / "x"]))),
+                         [str(other / "x")], "non-/proc listings pass through")
+
+    def test_harness_reports_the_helper_exception_before_exit_75(self):
+        with tempfile.TemporaryDirectory(prefix="controller-export-harness-") as temporary:
+            helper = Path(temporary) / "fake-helper.py"
+            helper.write_text("def main():\n    raise ValueError('fixture boom')\n")
+            result = subprocess.run([sys.executable, "-c", CONTROLLER_EXPORT_HARNESS, str(helper), "export"],
+                                    text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 75)
+        self.assertIn("ValueError: fixture boom", result.stderr)
+        self.assertIn("fake-helper.py", result.stderr, "the traceback names the failing file")
+
+
 class LinuxControllerExportTests(unittest.TestCase):
     def _fixture(self):
         temporary = tempfile.TemporaryDirectory(prefix="controller-original-export-")
@@ -1169,33 +1318,7 @@ class LinuxControllerExportTests(unittest.TestCase):
         return root,repo,helper,record,reserve
 
     def _call(self, helper, *args, expected=0):
-        # Bound /proc enumeration to the fake host's native process namespace.
-        # Birth ticks, cwd and fd observations remain the real kernel values;
-        # the production guest collector is root and observes every host UID.
-        harness = """from pathlib import Path
-import os,sys
-original=Path.iterdir
-def namespace(path):
-    if str(path)=='/proc':
-        selected=[]
-        for process in original(path):
-            try:
-                if process.name.isdecimal() and process.stat().st_uid==os.getuid():
-                    status=Path(str(process)+'/stat').read_text();fields=status[status.rfind(')')+2:].split()
-                    if int(process.name) in (os.getpid(),os.getppid()) or int(fields[1])==os.getppid(): selected.append(process)
-            except FileNotFoundError: continue
-        return iter(selected)
-    return original(path)
-Path.iterdir=namespace
-helper=Path(sys.argv[1]);sys.argv=sys.argv[1:]
-subject={'__name__':'fake_native_host','__file__':str(helper)}
-exec(compile(helper.read_bytes(),str(helper),'exec'),subject)
-subject['record_temp_roots']=lambda repo,common:[str(repo.parent/'owned-temp-state')]
-subject['EXPORT_WRITER_DRAIN_SECONDS']=2  # these writers persist; keep the bounded drain short
-try: raise SystemExit(subject['main']())
-except (OSError,ValueError,KeyError): raise SystemExit(75)
-"""
-        result=subprocess.run([sys.executable,"-c",harness,str(helper),*[str(a) for a in args]],text=True,capture_output=True,timeout=30)
+        result=subprocess.run([sys.executable,"-c",CONTROLLER_EXPORT_HARNESS,str(helper),*[str(a) for a in args]],text=True,capture_output=True,timeout=30)
         self.assertEqual(result.returncode,expected,result.stderr)
         return result
 
@@ -1303,6 +1426,28 @@ class StructuralGateSchedulingTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             self.assertEqual(shard.select(items), (items, []))
 
+    def test_failed_or_timed_out_gates_are_not_recorded_as_costs(self) -> None:
+        """A failure or a 600 s timeout is not a duration observation: recording
+        it would triple the next deadline for the same hung gate and let a fast
+        failure distort longest-first ordering. The previous value survives."""
+        module = _load_runner("deploy_runner_duration_costs")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "durations.json"
+            path.write_text(json.dumps({"schema_version": 1, "gates": {"timed": {"seconds": 12.5, "shards": 1}}}))
+            ok = module.Job(module.Gate("ok", ("true",)), 0)
+            failed = module.Job(module.Gate("failed", ("false",)), 0)
+            timed = module.Job(module.Gate("timed", ("sleep", "1")), 0)
+            sharded = module.Gate("sharded", ("true",), shards=2)
+            shard_jobs = [module.Job(sharded, 1), module.Job(sharded, 2)]
+            results = {"ok": (0, 1.5, ""), "failed": (1, 0.2, ""), "timed": (124, 600.0, ""),
+                       "sharded[1/2]": (0, 3.0, ""), "sharded[2/2]": (1, 4.0, "")}
+            module.record_durations(path, [ok, failed, timed, *shard_jobs], results)
+            recorded = module.load_durations(path)
+        self.assertEqual(recorded.get("ok"), 1.5)
+        self.assertNotIn("failed", recorded)
+        self.assertEqual(recorded.get("timed"), 12.5, "a timed-out gate must keep its previous cost")
+        self.assertNotIn("sharded", recorded, "one failed shard poisons the gate's observation")
+
     def test_registered_shards_expand_with_their_environment(self) -> None:
         module = _load_runner("deploy_runner_shards")
         sharded = [gate for gate in module.GATES if gate.shards > 1]
@@ -1323,6 +1468,64 @@ class StructuralGateSchedulingTests(unittest.TestCase):
             self.assertNotIn(module.SHARD_ENV, unsharded.environment())
         expected = [job.expected_seconds for job in jobs]
         self.assertEqual(expected, sorted(expected, reverse=True), "longest first")
+
+    def test_plan_gates_uses_recorded_durations_and_splits_long_shardable_gates(self) -> None:
+        module = _load_runner("deploy_runner_plan")
+        gates = (
+            module.Gate("split", ("true",), expected_seconds=10, shards=2),
+            module.Gate("whole", ("true",)),
+            module.Gate("tiny", ("true",), expected_seconds=5),
+        )
+        # Cold start: no record -> the registry plan, unchanged.
+        self.assertEqual(module.plan_gates(gates, {}, 4), list(gates))
+        recorded = {"split": 2000.0, "whole": 900.0, "tiny": 1.0}
+        planned = module.plan_gates(gates, recorded, 4)
+        by_name = {gate.name: gate for gate in planned}
+        # budget = 2901 / 4 = 725.25 s; 70% threshold = 507.7 s -> 2000 s needs 4 shards.
+        self.assertEqual(by_name["split"].shards, 4)
+        self.assertEqual(by_name["split"].expected_seconds, 2000.0)
+        self.assertEqual(by_name["whole"].shards, 1, "a suite without DEPLOY_GATE_SHARD support never splits")
+        self.assertEqual(by_name["whole"].expected_seconds, 900.0)
+        self.assertEqual(by_name["tiny"].expected_seconds, 1.0)
+        self.assertEqual([g.name for g in planned], ["split", "whole", "tiny"], "gate set and order unchanged")
+        jobs = module.expand_jobs(planned)
+        self.assertEqual([job.label for job in jobs][:2], ["whole", "split[1/4]"], "longest job first")
+        self.assertEqual(sum(1 for job in jobs if job.gate.name == "split"), 4)
+        self.assertEqual(jobs[0].timeout_seconds, 2700.0, "timeouts follow recorded cost, never below the default")
+        # The registry count is the floor and MAX_AUTO_SHARDS the ceiling.
+        self.assertEqual(module.plan_gates(gates, {"split": 1.0}, 4)[0].shards, 2)
+        self.assertEqual(module.plan_gates(gates, {"split": 10**6}, 100)[0].shards, module.MAX_AUTO_SHARDS)
+        with self.assertRaises(ValueError):
+            module.plan_gates(gates, recorded, 0)
+
+    def test_run_gates_records_per_gate_durations_for_the_next_plan(self) -> None:
+        module = _load_runner("deploy_runner_durations")
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-durations-") as temporary:
+            ledger = Path(temporary) / "durations.json"
+            gates = (
+                module.Gate("sharded", ("bash", "-c", "sleep 0.2"), expected_seconds=1, shards=2),
+                module.Gate("single", ("bash", "-c", "sleep 0.1")),
+            )
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(module.run_gates(gates, max_workers=3, durations_state=ledger), 0)
+            recorded = module.load_durations(ledger)
+            self.assertEqual(set(recorded), {"sharded", "single"})
+            self.assertGreaterEqual(recorded["sharded"], 0.4, "a sharded gate records the sum of its shards")
+            self.assertGreaterEqual(recorded["single"], 0.1)
+            payload = json.loads(ledger.read_text())
+            self.assertEqual(payload["gates"]["sharded"]["shards"], 2)
+            self.assertIn("sharded[1/2]", payload["jobs"])
+            planned = module.plan_gates(gates, recorded, 3)
+            self.assertEqual(planned[0].expected_seconds, recorded["sharded"])
+            # Gates absent from a later run keep their record instead of vanishing.
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                module.run_gates(
+                    (module.Gate("single", ("bash", "-c", "sleep 0.1")),), max_workers=1, durations_state=ledger
+                )
+            self.assertEqual(set(module.load_durations(ledger)), {"sharded", "single"})
+            self.assertEqual(module.load_durations(Path(temporary) / "missing.json"), {})
+            (Path(temporary) / "broken.json").write_text("{not json")
+            self.assertEqual(module.load_durations(Path(temporary) / "broken.json"), {})
 
     def test_sharded_gate_runs_every_shard_through_the_runner(self) -> None:
         module = _load_runner("deploy_runner_shard_run")

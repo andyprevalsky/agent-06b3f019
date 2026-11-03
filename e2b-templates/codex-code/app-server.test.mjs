@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import { createServer } from "node:net";
 const require = createRequire(
   new URL("../../back-end/package.json", import.meta.url),
 );
@@ -24,6 +25,17 @@ const source = readFileSync(
   new URL("./ws-server.mjs", import.meta.url),
   "utf8",
 );
+function listeningPort(logs) {
+  for (const line of logs.split("\n")) {
+    try {
+      const entry = JSON.parse(line);
+      if (entry.message === "Server listening") return entry.port;
+    } catch {
+      // A pipe chunk can end in the middle of a JSON log line.
+    }
+  }
+  return 0;
+}
 const block = source.slice(
   source.indexOf("class CodexAppServer {"),
   source.indexOf("function stageDirectAttachments("),
@@ -38,9 +50,10 @@ const {
   strictOutputSchema,
   handoffFromFinalMessage,
   handoffSchemaFromGoal,
+  azureSpeed,
 } = vm.runInNewContext(
   block +
-    "\n({ Native: CodexAppServer, strictOutputSchema, handoffFromFinalMessage, handoffSchemaFromGoal })",
+    "\n({ Native: CodexAppServer, strictOutputSchema, handoffFromFinalMessage, handoffSchemaFromGoal, azureSpeed })",
   sandbox,
 );
 function fixture(options = {}) {
@@ -418,7 +431,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
 `,
   );
   chmodSync(fixturePath, 0o755);
-  const port = 43000 + Math.floor(Math.random() * 10000);
+  let port = 0;
   const child = spawn(
     process.execPath,
     [new URL("./ws-server.mjs", import.meta.url).pathname],
@@ -435,7 +448,6 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         PORT: String(port),
         GITHUB_REPO_URL: "",
         ROSE_PROJECT_WORKDIR: "",
-        CODEX_FAST_MODE_PROXY_URL: "",
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -449,6 +461,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   try {
     for (let attempt = 0; attempt < 100; attempt++) {
       try {
+        port = listeningPort(logs);
         ws = new WebSocket(`ws://127.0.0.1:${port}`);
         sockets.push(ws);
         await new Promise((resolve, reject) => {
@@ -727,7 +740,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
 `,
   );
   chmodSync(fixturePath, 0o755);
-  const port = 43000 + Math.floor(Math.random() * 10000);
+  let port = 0;
   const child = spawn(
     process.execPath,
     [new URL("./ws-server.mjs", import.meta.url).pathname],
@@ -747,7 +760,6 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         PORT: String(port),
         GITHUB_REPO_URL: "",
         ROSE_PROJECT_WORKDIR: "",
-        CODEX_FAST_MODE_PROXY_URL: "",
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -761,6 +773,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   try {
     for (let attempt = 0; attempt < 100; attempt++) {
       try {
+        port = listeningPort(logs);
         ws = new WebSocket(`ws://127.0.0.1:${port}?cursor=0`);
         // Replayed events can arrive with the upgrade; listen before awaiting open.
         ws.on("message", (d) => messages.push(JSON.parse(d)));
@@ -807,7 +820,11 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     const fallback = seen.find((e) => e.type === "auth_fallback");
     assert.equal(fallback?.to, "openai_api_key");
     assert.equal(fallback?.funded_provider, "azure");
-    assert.equal(fallback?.provider, "codex", "the envelope provider stays codex for the worker");
+    assert.equal(
+      fallback?.provider,
+      "codex",
+      "the envelope provider stays codex for the worker",
+    );
     assert.equal(fallback?.reason, "usage_limit_reached");
     const calls = readFileSync(journal, "utf8")
       .trim()
@@ -902,5 +919,188 @@ require('node:module').syncBuiltinESMExports();
     );
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// Keep a real competing listener alive across the original native contract.
+// A random candidate (or a probe released before spawn) is not port ownership.
+test("native app-server contract owns its port while a candidate is occupied", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "rose-native-port-ownership-"));
+  let competitor;
+  let port;
+  for (let candidate = 43000; candidate < 43100; candidate++) {
+    const server = createServer((socket) => socket.destroy());
+    try {
+      await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(candidate, resolve);
+      });
+      competitor = server;
+      port = candidate;
+      break;
+    } catch (error) {
+      if (error.code !== "EADDRINUSE") throw error;
+    }
+  }
+  assert.ok(competitor, "must hold a real competing listener");
+  const preload = join(directory, "occupied-candidate.cjs");
+  writeFileSync(
+    preload,
+    `Math.random = () => ${(port - 43000 + 0.5) / 10000};\n`,
+  );
+  let child;
+  try {
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    child = spawn(
+      process.execPath,
+      [
+        "--require",
+        preload,
+        "--test",
+        "--test-name-pattern=^production default app-server supports authenticated attachments, steer and cursor replay$",
+        fileURLToPath(import.meta.url),
+      ],
+      { env, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const closed = new Promise((resolve) => child.once("close", resolve));
+    let output = "";
+    child.stdout.on("data", (data) => {
+      output += data;
+    });
+    child.stderr.on("data", (data) => {
+      output += data;
+    });
+    assert.equal(await closed, 0, output);
+    assert.match(output, /# pass 1/);
+    assert.doesNotMatch(output, /EADDRINUSE/);
+    assert.equal(
+      competitor.listening,
+      true,
+      "the foreign listener stays owned",
+    );
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null)
+      child.kill("SIGTERM");
+    await new Promise((resolve, reject) =>
+      competitor.close((error) => (error ? reject(error) : resolve())),
+    );
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// S30 (2026-10-28): the query box's speed reaches Codex as its native service
+// tier. Fast → priority ("Fast"), Ultrafast → ultrafast, Normal → standard. A
+// model without ultrafast runs Ultrafast on the catalog model that offers it.
+const SPEED_CATALOG = [
+  {
+    id: "gpt-5.6-terra",
+    model: "gpt-5.6-terra",
+    supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
+    serviceTiers: [{ id: "priority" }],
+  },
+  {
+    id: "gpt-6.1-sol",
+    model: "gpt-6.1-sol",
+    isDefault: true,
+    supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
+    serviceTiers: [{ id: "priority" }, { id: "ultrafast" }],
+  },
+];
+test("the requested query-box speed starts Codex on its native service tier", async () => {
+  const cases = [
+    { speed: "standard", model: "gpt-5.6-terra", tier: null },
+    { speed: "priority", model: "gpt-5.6-terra", tier: "priority" },
+    { speed: "ultrafast", model: "gpt-6.1-sol", tier: "ultrafast" },
+  ];
+  for (const expected of cases) {
+    const { native, calls } = fixture({
+      settings: { model: "gpt-5.6-terra", effort: null, speed: expected.speed },
+      models: SPEED_CATALOG,
+    });
+    await native.initialize(null, "hello");
+    const startup = calls.find((c) => c.method === "thread/start");
+    assert.equal(
+      startup.params.model,
+      expected.model,
+      `${expected.speed}: model`,
+    );
+    assert.equal(
+      startup.params.serviceTier,
+      expected.tier,
+      `${expected.speed}: tier`,
+    );
+    const turn = calls.find((c) => c.method === "turn/start");
+    assert.equal(
+      turn.params.serviceTier,
+      expected.tier,
+      `${expected.speed}: first turn tier`,
+    );
+  }
+});
+test("an unavailable requested tier degrades to the next slower tier, never faster", async () => {
+  const onlyPriority = SPEED_CATALOG.slice(0, 1).map((m) => ({
+    ...m,
+    isDefault: true,
+  }));
+  const ultra = fixture({
+    settings: { model: "gpt-5.6-terra", effort: null, speed: "ultrafast" },
+    models: onlyPriority,
+  });
+  await ultra.native.initialize(null, "hello");
+  assert.equal(
+    ultra.calls.find((c) => c.method === "thread/start").params.serviceTier,
+    "priority",
+  );
+  const noTiers = fixture({
+    settings: { model: "model", effort: null, speed: "priority" },
+    models: [{ id: "model", model: "model", serviceTiers: [] }],
+  });
+  await noTiers.native.initialize(null, "hello");
+  assert.equal(
+    noTiers.calls.find((c) => c.method === "thread/start").params.serviceTier,
+    null,
+  );
+});
+test("a funded Azure session keeps its deployment: ultrafast runs as priority, never a model switch", async () => {
+  assert.equal(azureSpeed("standard"), "standard");
+  assert.equal(azureSpeed("priority"), "priority");
+  assert.equal(azureSpeed("ultrafast"), "priority");
+  assert.equal(azureSpeed(null), "priority");
+  const azureCatalog = [
+    {
+      id: "azure-terra",
+      model: "azure-terra",
+      supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
+      serviceTiers: [{ id: "priority" }],
+    },
+    ...SPEED_CATALOG.slice(1),
+  ];
+  const { native, calls } = fixture({
+    settings: {
+      model: "azure-terra",
+      effort: null,
+      speed: azureSpeed("ultrafast"),
+    },
+    models: azureCatalog,
+  });
+  await native.initialize(null, "hello");
+  const startup = calls.find((c) => c.method === "thread/start");
+  assert.equal(startup.params.model, "azure-terra");
+  assert.equal(startup.params.serviceTier, "priority");
+});
+test("Codex never routes through a Rose proxy or the demo cache", () => {
+  for (const forbidden of [
+    "chatgpt_base_url",
+    "CODEX_FAST_MODE_PROXY_URL",
+    "model_providers.fastmode",
+    "codex-proxy",
+    "fast_cache_proxy",
+  ]) {
+    assert.equal(
+      source.includes(forbidden),
+      false,
+      `ws-server must not contain ${forbidden}: Codex talks to its provider directly`,
+    );
   }
 });

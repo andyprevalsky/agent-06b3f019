@@ -28,7 +28,7 @@ import ssl
 import time
 import uuid
 from contextlib import aclosing
-from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional, Type, cast
+from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Mapping, Optional, Type, cast
 
 import structlog
 from pydantic import BaseModel
@@ -977,6 +977,7 @@ class RoseClient:
         browser_use: bool = False,
         _exclude_anthropic_family: bool = False,
         _skip_models: FrozenSet[str] = frozenset(),
+        _skip_reasons: Optional[Mapping[str, str]] = None,
     ) -> AsyncIterator[StreamChunk]:
         """Run a full Rose completion, yielding normalized StreamChunks.
 
@@ -2133,6 +2134,7 @@ class RoseClient:
                 cache_namespace=cache_namespace,
                 skip_cache_write=skip_cache_write,
                 skip_models=_skip_models,
+                skip_reasons=_skip_reasons,
                 browser_use=browser_use,
                 stream_guard=_guarded,
             ):
