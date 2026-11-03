@@ -1772,7 +1772,8 @@ class Backend(unittest.TestCase):
                                'native_backend': True, 'case_protocol': True, 'command': ['adapter']},
                               *[{'name': n, 'category': n, 'command': ['true'], 'checks': [n]} for n in ('format', 'eslint', 'typescript', 'backend-structural')]]}
         binding = {'backend-coverage-blackbox': {**slot, 'command': ['adapter'], 'cwd': str(self.root)}}
-        selection = {'all': True, 'reasons': ['x'], 'lanes': {}}
+        selection = {'all': True, 'reasons': ['x'],
+                     'lanes': {lane: [] for lanes in p.GRAPH_LANES.values() for lane in lanes}}
         with patch.object(p, 'source', return_value=self.request['source']), self.assertRaisesRegex(ValueError, 'single-case aggregate recipe'):
             p.select(template, ['back-end/src/a.ts'], selection, binding)
         from deploy_test_bindings import generate
