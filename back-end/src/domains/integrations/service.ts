@@ -32,14 +32,20 @@ import {
   releaseComputeTokenLineage,
 } from '../../providers/computeCredentials';
 import {
+  getFoundryDeploymentCooldowns,
+  markFoundryDeploymentCooldown,
+  markFoundryDeploymentServed,
+} from '../../providers/foundryDeploymentCooldown';
+import {
   fetchGptCodeAccessToken,
   fetchGptPoolToken,
   markGptPoolTokenRateLimited,
   markGptUserTokenRateLimited,
 } from '../../providers/gptCredentials';
-import { getValidAccessToken } from '../../services/integrations/gmailSync';
+import { getValidAccessToken, gmailMailboxAccess } from '../../services/integrations/gmailSync';
 import { fetchGmailMessagesSince } from '../../services/integrations/gmailParser';
-import { fetchPrimitiveMessagesSince, primitiveDomain } from '../../providers/primitive';
+import { fetchPrimitiveMessagesSince } from '../../providers/primitive';
+import { findReadableInboxes } from '../../providers/authOptionsStore';
 import { archiveJson } from '../../providers/traceArchive';
 import {
   clearConnectionNeedsReconnectFromIntegrationRecovery,
@@ -52,6 +58,7 @@ import {
   deleteLanternIntegration,
   LanternCredentialError,
 } from './service.lantern';
+import { settleLinkedInSync } from './service.linkedinSync';
 export { LanternCredentialError } from './service.lantern';
 
 const log = createLogger('Integrations');
@@ -179,9 +186,12 @@ export async function getIntegrations(userId: string) {
 
   log.info('Fetching integrations', { userId, domainsCached: hasCachedDomains });
 
-  const integrations = withDerivedConnectedEmails(await repo.findIntegrationsByUser(userId)).map(
-    redactLanternIntegration
-  );
+  const integrations = (
+    await settleLinkedInSync(
+      userId,
+      withDerivedConnectedEmails(await repo.findIntegrationsByUser(userId))
+    )
+  ).map(redactLanternIntegration);
   log.info('Integrations query done', { durationMs: Date.now() - queryStart });
 
   const authenticatedDomains = await repo.getAuthenticatedDomains(userId);
@@ -246,31 +256,10 @@ export async function deleteIntegration(userId: string, name: string) {
 
 /* c8 ignore start -- fetchEmailsSince and sendEmail require real Gmail OAuth credentials and gmailSync/gmailParser services */
 export async function fetchEmailsSince(userId: string, since: Date, limit: number) {
-  const integrations = await repo.findGmailIntegrationsWithCredentials(userId);
-  const allCredentials = integrations
-    .flatMap((i) => i.emailCredentials)
-    .filter(
-      (c) =>
-        c.refreshToken !== null &&
-        c.refreshToken !== undefined &&
-        c.refreshToken !== '' &&
-        c.accessToken !== null &&
-        c.accessToken !== undefined &&
-        c.accessToken !== ''
-    );
-  // A connected inbox on our own mail domain is read through the mail provider
-  // that hosts it, not through Gmail: it has no Google token to read with.
-  const ownDomain = `@${primitiveDomain().toLowerCase()}`;
-  const ownDomainInboxes = allCredentials
-    .map((credential) => credential.email?.toLowerCase() ?? '')
-    .filter((email) => email.endsWith(ownDomain));
-  const gmailCredentials = allCredentials.filter(
-    (credential) => !(credential.email?.toLowerCase() ?? '').endsWith(ownDomain)
-  );
-  const mintedInboxEmails = [
-    ...new Set([...(await repo.findMintedAccountEmails(userId)), ...ownDomainInboxes]),
-  ];
-  if (allCredentials.length === 0 && mintedInboxEmails.length === 0) {
+  const { gmailCredentials, primitiveInboxEmails: mintedInboxEmails } =
+    await findReadableInboxes(userId);
+  if (gmailCredentials.length === 0 && mintedInboxEmails.length === 0) {
+    const integrations = await repo.findGmailIntegrationsWithCredentials(userId);
     if (integrations.length === 0) throw new GmailNotConnectedError();
     throw new GmailCredentialsNotFoundError();
   }
@@ -287,7 +276,12 @@ export async function fetchEmailsSince(userId: string, since: Date, limit: numbe
           });
           return [];
         }
-        const emails = await fetchGmailMessagesSince(accessToken, since, perAccountLimit);
+        // Share the mailbox's quota budget with any sync running on it.
+        const emails = await fetchGmailMessagesSince(
+          gmailMailboxAccess(credential, accessToken),
+          since,
+          perAccountLimit
+        );
         return emails.map((email) => ({
           ...email,
           credentialId: credential.id,
@@ -731,6 +725,7 @@ export async function getComputeCodeToken(
     accountId: result.accountId,
     source: result.source,
     poolTokenId: result.poolTokenId,
+    integrationId: result.integrationId,
     lineageKey: result.lineageKey,
     fastCacheAffinityKey: lineage?.fastCacheAffinityKey,
   };
@@ -745,6 +740,7 @@ export async function markTokenRateLimited(
     userId?: string;
     rateLimitedUntil?: string;
     failureReason?: string;
+    integrationId?: string;
   }
 ) {
   if (source === 'pool') {
@@ -770,6 +766,7 @@ export async function markTokenRateLimited(
     await markUserTokenRateLimited(params.userId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
+      integrationId: params.integrationId,
     });
     return {
       ok: true,
@@ -790,7 +787,11 @@ export async function markComputeTokenRateLimited(
     rateLimitedUntil?: string;
     failureReason?: string;
     credentialId?: string;
+    integrationId?: string;
     model?: string;
+    region?: string;
+    deployment?: string;
+    retryAfterSeconds?: number;
   }
 ) {
   if (type === 'claude') {
@@ -818,10 +819,21 @@ export async function markComputeTokenRateLimited(
     await markGptApiKeyOnCooldown(params.failureReason ?? 'out_of_credits');
     return { ok: true, type, rateLimitedUntil: null };
   }
+  if (type === 'foundry') {
+    // One shared cooldown per Azure (region, deployment) for every worker.
+    const state = await markFoundryDeploymentCooldown(
+      params.region ?? '',
+      params.deployment ?? '',
+      params.retryAfterSeconds
+    );
+    return { ok: true, type, ...state };
+  }
   throw new Error(
-    'Invalid type. Must be "claude", "gpt", "anthropic", "cerebras", or "gpt_api_key".'
+    'Invalid type. Must be "claude", "gpt", "anthropic", "cerebras", "foundry", or "gpt_api_key".'
   );
 }
+
+export { getFoundryDeploymentCooldowns, markFoundryDeploymentServed };
 
 export async function getGptApiKeyCooldown() {
   return {
@@ -852,6 +864,7 @@ export async function markGptTokenRateLimited(
     userId?: string;
     rateLimitedUntil?: string;
     failureReason?: string;
+    integrationId?: string;
   }
 ) {
   if (source === 'pool') {
@@ -877,6 +890,7 @@ export async function markGptTokenRateLimited(
     await markGptUserTokenRateLimited(params.userId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
+      integrationId: params.integrationId,
     });
     return {
       ok: true,

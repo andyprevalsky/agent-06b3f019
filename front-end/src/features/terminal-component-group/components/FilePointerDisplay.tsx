@@ -2,7 +2,10 @@
  * FilePointerDisplay — summary/output file control; optional inline mini-preview.
  *
  * STATE MACHINE:
- * [MOUNT] --> (showMiniPreview ? [LOADING_PREVIEW] --> [PREVIEW_READY|PREVIEW_ERROR] : [CHIP])
+ * [MOUNT] --Rose Desktop + image/video--> [INLINE MEDIA] (InlineMediaGallery; no chip,
+ *                                          no click needed; tap opens the drawer)
+ * [MOUNT] --otherwise (stock: every file)--> (showMiniPreview ? [LOADING_PREVIEW] -->
+ *                                          [PREVIEW_READY|PREVIEW_ERROR] : [CHIP])
  * [any] --click--> opens DocumentPreviewDrawer (RIGHT Sheet)
  *
  * Mini-previews are for CompletionSummaryCard only. Elsewhere this stays a compact chip.
@@ -11,6 +14,7 @@
 
 import { useState } from 'react';
 import { Eye, FileIcon } from 'lucide-react';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
 import { type FilePointer } from '../hooks';
 import { formatFileSize } from './claudeCodeChip.utils';
@@ -18,6 +22,8 @@ import { DocumentMiniPreview } from './DocumentMiniPreview';
 import { DocumentPreviewDrawer } from './DocumentPreviewDrawer';
 import { documentTypeLabel } from './documentPreview.utils';
 import { useDocumentPreview } from './useDocumentPreview';
+import { InlineMediaGallery } from './inline-media/InlineMediaGallery';
+import { isInlineMedia } from './inline-media/inlineMedia.utils';
 
 export function FilePointerDisplay({
   file,
@@ -26,6 +32,18 @@ export function FilePointerDisplay({
   file: FilePointer;
   /** Inline mini-preview — used in completion summary cards only. */
   showMiniPreview?: boolean;
+}) {
+  const roseDesktop = useRoseDesktop();
+  if (roseDesktop && isInlineMedia(file)) return <InlineMediaGallery files={[file]} />;
+  return <FilePointerChip file={file} showMiniPreview={showMiniPreview} />;
+}
+
+function FilePointerChip({
+  file,
+  showMiniPreview,
+}: {
+  file: FilePointer;
+  showMiniPreview: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const typeLabel = documentTypeLabel(file);

@@ -284,7 +284,7 @@ async def test_phone_transport_captures_metadata_only_and_preserves_wire():
     import httpx
     import helpers.httpx_capture as hc
     canary='CANARY-PHONE-INPUT-OBSERVATION'
-    from providers.fast_cache.browser_http import should_cache
+    from providers.demo_cache.browser_http import should_cache
     for private_url in ('https://backend.test/api/iphone', 'https://backend.test/api/iphone/leases/private/frame'):
         assert not should_cache('GET', 'fetch', private_url), 'phone bodies must not become replay fixtures'
     paths=('/api/iphone','/api/iphone/','/api/iphone/capability','/api/iphone/interactions/'+canary,
@@ -423,7 +423,7 @@ async def test_phone_mixed_case_never_enters_browser_cache():
     """Neither cache read, write, key construction nor logging may see secrets."""
     from unittest.mock import AsyncMock, patch
 
-    from providers.fast_cache import browser_http
+    from providers.demo_cache import browser_http
 
     canary = "Unregistered-Cache-Secret-CaSe-6a"
     paths = ("/API/IPHONE", f"/Api/Iphone/leases/{canary}/operations", "/aPi/iPhOnE/frame")

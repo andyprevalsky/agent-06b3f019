@@ -1,7 +1,12 @@
 /** Request helpers shared by the page routers. */
 
 import type { Request, Response } from 'express';
-import { AUTH_TEST_SITE_BASE_PATH, CART_COOKIE_NAME, SESSION_COOKIE_NAME } from './config';
+import {
+  APP_APPROVAL_COOKIE_NAME,
+  AUTH_TEST_SITE_BASE_PATH,
+  CART_COOKIE_NAME,
+  SESSION_COOKIE_NAME,
+} from './config';
 import { siteUrl } from './service';
 import { resolveSession } from './serviceSignIn';
 import type { NextPage } from './servicePages';
@@ -56,6 +61,18 @@ function setCookie(res: Response, site: AuthTestSite, name: string, token: strin
 
 export function setSessionCookie(res: Response, site: AuthTestSite, token: string | null): void {
   setCookie(res, site, SESSION_COOKIE_NAME, token);
+}
+
+export function appApprovalToken(req: Request): string | null {
+  return cookieValue(req, APP_APPROVAL_COOKIE_NAME);
+}
+
+export function setAppApprovalCookie(
+  res: Response,
+  site: AuthTestSite,
+  token: string | null
+): void {
+  setCookie(res, site, APP_APPROVAL_COOKIE_NAME, token);
 }
 
 export function cartToken(req: Request): string | null {

@@ -118,7 +118,7 @@ export default function TaskCostSection({ data }: { data: AdminHealthData }) {
         </p>
         <h2 className="text-lg font-semibold">Cost per Root Agent Run Over Time</h2>
         <p className="mb-4 mt-1 text-xs leading-5 text-muted-foreground">
-          Service costs remain in all three scenarios. Fast-cache LLM replays have zero inference
+          Service costs remain in all three scenarios. DEMO-cache LLM replays have zero inference
           cost. Current sample: {data.summary.costPerTask.sampleSize.toLocaleString()} real root
           runs. Chat/setup-only sessions and simulated runs are excluded; real-model benchmark runs
           are included.

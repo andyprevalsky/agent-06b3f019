@@ -1,0 +1,53 @@
+{
+  "timestamp_utc": "2026-10-13T01:39:55.679462+00:00",
+  "task_branch": "sms-supervisor-native-tools",
+  "pull_request": 1473,
+  "runtime_source_checkpoint": "fc05a4b0484330effc3013419fc1e76d16a76601",
+  "test_path": "back-end/src/tests/blackbox/rose-native-schema.blackbox.ts",
+  "test_sha256": "4790a1cdf34305f05e5fb49a50b41d87a4a28e1bdc4c46a0d80d124576f9b423",
+  "owning_gate": "backend coverage blackbox filesystem discovery; run.ts rose-native-schema",
+  "executions": [
+    {
+      "source": "current",
+      "command": [
+        "node",
+        "--import",
+        "tsx",
+        "src/tests/blackbox/run.ts",
+        "rose-native-schema"
+      ],
+      "exit_code": 1,
+      "seconds": 0.4504428209984326
+    },
+    {
+      "source": "scratch",
+      "command": [
+        "node",
+        "--import",
+        "tsx",
+        ".context/tamy-resumed/native-schema-review/owning-blackbox.ts"
+      ],
+      "exit_code": 0,
+      "seconds": 0.3477358650015958
+    }
+  ],
+  "pre_fix_failure": "reply_to_agent attention_request_id/reject null alternatives removed and required fields dropped",
+  "post_fix_result": "same assertions pass against scratch candidate; includes nine real supervisor schemas, strict true/false/absent, explicit tools and actual mocked Responses/Anthropic-waterfall request construction",
+  "static_checks": {
+    "eslint": "PASS",
+    "typescript_no_emit": "PASS",
+    "prettier": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "candidate_patch_sha256": "f46f31cd2eadb5ee03b53e0d493a316d393f339a4b3e51b46f52cf0d6ed8b55d",
+  "runtime_patch_applied": false,
+  "approval_pending": "native-schema-1473",
+  "production_or_live_result": null,
+  "fetched_main": "d2632c7c53cefa3d8421a1aa1701e8448179a1c8",
+  "incoming_main_changed_approval_targets": false,
+  "notes": [
+    "New owning check is deliberately red on the preserved buggy runtime; merge remains gated.",
+    "Existing completed deploy stage passes certify their recorded integrated source only.",
+    "Incoming main updates are fetched but not merged yet; repeat applicable gates after final integration."
+  ]
+}

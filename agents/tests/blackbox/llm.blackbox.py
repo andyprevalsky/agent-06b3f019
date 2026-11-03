@@ -3,7 +3,7 @@
 import asyncio
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -19,6 +19,131 @@ from _test_utils import (
 
 # rose-fast hits Cerebras first when this is set; auth-path tests use ultra.
 os.environ.pop("CEREBRAS_API_KEY", None)
+
+
+def test_legacy_cached_spawn_names_are_stable_and_scoped():
+    from helpers.llm import _repair_legacy_cached_spawn_names
+    from helpers.agent_addressing import task_name_error
+
+    payload = {"tool_calls": [
+        {"tool": "spawn_agent", "goal": "Analyze one creator", "tool_call_id": "call-a"},
+        {"tool": "spawn_agent", "goal": "Analyze one creator", "tool_call_id": "call-b"},
+        {"tool": "spawn_agent", "goal": "Keep existing", "task_name": "existing_child"},
+    ]}
+    assert _repair_legacy_cached_spawn_names(
+        payload, from_fast_cache=True, cache_sequence_id="turn-1"
+    ) == 2
+    names = [call["task_name"] for call in payload["tool_calls"]]
+    assert len(set(names)) == 3
+    assert all(task_name_error(name) is None for name in names)
+    assert names[2] == "existing_child"
+    assert _repair_legacy_cached_spawn_names(
+        payload, from_fast_cache=True, cache_sequence_id="turn-1"
+    ) == 0
+
+    live = {"tool_calls": [{"tool": "spawn_agent", "goal": "Live child"}]}
+    assert _repair_legacy_cached_spawn_names(
+        live, from_fast_cache=False, cache_sequence_id="turn-1"
+    ) == 0
+    assert "task_name" not in live["tool_calls"][0]
+async def test_tool_output_preview_and_readback_at_model_boundary():
+    """Main builder retains complete text, structured output and attachment labels."""
+    import copy
+    import re
+    from helpers.llm import build_llm_messages
+    from _test_utils import retained_tool_output_fixture
+
+    tail = "EXACT_TAIL_SENTINEL"
+    raw = "body " * 30000 + tail
+    context = [
+        {"role": "ASSISTANT", "text": "", "metadata": {"tool_calls": [
+            {"tool": "grep", "tool_call_id": "tc-1", "pattern": "x"}]}},
+        {"role": "TOOL", "text": raw, "metadata": {
+            "toolCallId": "tc-1", "toolName": "grep", "toolStatus": "ERROR", "error": True,
+            "structured_response": {"success": False, "error": True, "body": raw}}},
+    ]
+    original = copy.deepcopy(context)
+    with retained_tool_output_fixture() as stored:
+        messages = await build_llm_messages(context, "SYSTEM" * 30000, user_id="u", agent_id="a")
+        assert messages[0]["content"] == "SYSTEM" * 30000
+        preview = next(m for m in messages if m["role"] == "tool")
+        assert len(preview["content"]) <= 100000
+        assert tail not in preview["content"]
+        output_id = re.search(r'output_id="([a-f0-9]{32})"', preview["content"])[1]
+        from tools.read_tool_output import read_tool_output_activity
+        page = await read_tool_output_activity("u", "a", "", {"output_id": output_id, "query": tail})
+        assert page["success"] and tail in page["content"]
+        assert page == await read_tool_output_activity("u", "a", "", {"output_id": output_id, "query": tail})
+        for owner in [("other", "a"), ("u", "other")]:
+            try:
+                await read_tool_output_activity(*owner, "", {"output_id": output_id})
+            except (ValueError, KeyError):
+                pass
+            else:
+                raise AssertionError("Cross-owner read succeeded")
+        assert stored
+        # Binary attachment metadata remains attached and is retained in full.
+        attached = copy.deepcopy(context)
+        attached[1]["file_pointer"] = {
+            "id": "binary-1", "storage_path": "u/blob.bin", "original_filename": "blob.bin",
+            "mime_type": "application/octet-stream", "size_bytes": 4096,
+            "created_at": "2024-01-01T00:00:00Z"}
+        attached_messages = await build_llm_messages(attached, "system", user_id="u", agent_id="a")
+        attached_preview = next(m["content"] for m in attached_messages if m["role"] == "tool")
+        assert "blob.bin" in attached_preview
+        attached_id = re.search(r'output_id="([a-f0-9]{32})"', attached_preview)[1]
+        attachment_page = await read_tool_output_activity("u", "a", "", {"output_id": attached_id, "query": "blob.bin"})
+        assert "blob.bin" in attachment_page["content"]
+        assert attached[1]["file_pointer"]["storage_path"] == "u/blob.bin"
+        # A persistence failure never claims a readable preview: the request
+        # keeps a bounded, explicitly stated cut and the original context.
+        failed_context = copy.deepcopy(context)
+        failed_context[1]["text"] += " new uncached content"
+        failed_canonical = copy.deepcopy(failed_context)
+        with patch("helpers.attachments.upload_to_storage", side_effect=OSError("storage failed")):
+            failed_messages = await build_llm_messages(failed_context, "system", user_id="u", agent_id="a")
+        failed_preview = next(m["content"] for m in failed_messages if m["role"] == "tool")
+        assert len(failed_preview) <= 100000 and tail not in failed_preview
+        assert "[Retained tool output:" not in failed_preview, "A lost tail was reported as a successful preview"
+        assert "retained readback unavailable after a storage failure" in failed_preview
+        assert failed_context == failed_canonical
+        small = copy.deepcopy(context)
+        small[1]["text"] = "short result"
+        small[1]["metadata"].pop("structured_response")
+        small_messages = await build_llm_messages(small, "system", user_id="u", agent_id="a")
+        assert "short result" == next(m["content"] for m in small_messages if m["role"] == "tool")
+        read_context = [
+            {"role": "ASSISTANT", "text": "", "metadata": {"tool_calls": [
+                {"tool": "read_tool_output", "tool_call_id": "read-1", "output_id": output_id}]}},
+            {"role": "TOOL", "text": json.dumps(page), "metadata": {
+                "toolCallId": "read-1", "toolName": "read_tool_output", "toolStatus": "FINISHED"}},
+        ]
+        read_messages = await build_llm_messages(read_context, "system", user_id="u", agent_id="a")
+        assert tail in next(m["content"] for m in read_messages if m["role"] == "tool")
+    assert context == original, "Canonical evaluator/archive context must remain unchanged"
+
+
+async def test_repeated_main_tool_projection_reuses_artifact():
+    """Parent's real-builder probe: same context, same bytes and one upload."""
+    import copy
+    import re
+    from _test_utils import retained_tool_output_fixture
+    from helpers.llm import build_llm_messages
+    from tools.read_tool_output import read_tool_output_activity
+
+    context = [{"role": "TOOL", "text": "x" * 150000 + "TAIL", "metadata": {
+        "toolName": "web_search", "toolCallId": "same-call", "toolStatus": "FINISHED"}}]
+    original = copy.deepcopy(context)
+    with retained_tool_output_fixture() as objects:
+        first = await build_llm_messages(context, "System", user_id="repeat-user", agent_id="repeat-agent")
+        bytes_before = dict(objects)
+        second = await build_llm_messages(context, "System", user_id="repeat-user", agent_id="repeat-agent")
+        assert first == second, "Repeated unchanged model projection changes the handle/messages"
+        assert len(objects) == 1 and objects == bytes_before, "Repeated projection uploads duplicate artifacts"
+        output_id = re.search(r'output_id="([a-f0-9]{32})"', str(first))[1]
+        page = await read_tool_output_activity("repeat-user", "repeat-agent", "", {"output_id": output_id, "query": "TAIL"})
+        assert page["content"] == "TAIL"
+    assert context == original
 
 
 def test_prepare_schema_for_openai():
@@ -86,27 +211,65 @@ async def test_schema_generation_preserves_field_contract_metadata():
     from providers.rose.types import RoseResponse
     from utils.tool_schemas import ResponseSchemaConfig
 
-    legacy_schema = {"fields": [
-        {"name": "signed_in_account", "type": "str", "required": True, "nullable": False,
-         "description": "Authenticated account used for calendar access.", "minLength": 1},
-        {"name": "events", "type": "list[object]", "required": True, "nullable": False,
-         "description": "Verified calendar events, including an empty day.", "minItems": 0, "maxItems": 40,
-         "properties": [
-             {"name": "title", "type": "str", "required": True, "nullable": False,
-              "description": "Full calendar title.", "minLength": 1, "maxLength": 120},
-             {"name": "notes", "type": "str", "required": True, "nullable": True, "description": "Calendar notes when present."},
-         ]},
-        {"name": "confirmation_message", "type": "str", "required": True, "nullable": True, "description": ""},
-    ]}
-    output = {"signed_in_account": "shared-calendar-user", "events": [{"title": "Calendar event", "notes": None}], "confirmation_message": None}
+    legacy_schema = {
+        "fields": [
+            {
+                "name": "signed_in_account",
+                "type": "str",
+                "required": True,
+                "nullable": False,
+                "description": "Authenticated account used for calendar access.",
+                "minLength": 1,
+            },
+            {
+                "name": "events",
+                "type": "list[object]",
+                "required": True,
+                "nullable": False,
+                "description": "Verified calendar events, including an empty day.",
+                "minItems": 0,
+                "maxItems": 40,
+                "properties": [
+                    {
+                        "name": "title",
+                        "type": "str",
+                        "required": True,
+                        "nullable": False,
+                        "description": "Full calendar title.",
+                        "minLength": 1,
+                        "maxLength": 120,
+                    },
+                    {
+                        "name": "notes",
+                        "type": "str",
+                        "required": True,
+                        "nullable": True,
+                        "description": "Calendar notes when present.",
+                    },
+                ],
+            },
+            {"name": "confirmation_message", "type": "str", "required": True, "nullable": True, "description": ""},
+        ]
+    }
+    output = {
+        "signed_in_account": "shared-calendar-user",
+        "events": [{"title": "Calendar event", "notes": None}],
+        "confirmation_message": None,
+    }
     canonical_schema = ResponseSchemaConfig.model_validate(legacy_schema).model_dump()
     for original_schema in (legacy_schema, canonical_schema):
-        response = RoseResponse(content=json.dumps({"reasoning": "The required calendar outputs are unchanged.", **original_schema}))
+        response = RoseResponse(
+            content=json.dumps({"reasoning": "The required calendar outputs are unchanged.", **original_schema})
+        )
         with patch("helpers.llm.RoseClient.collect", AsyncMock(return_value=response)):
-            generated, _, _ = await _generate_response_schema_with_rose("List calendar events using shared access", agent_id="schema-metadata")
+            generated, _, _ = await _generate_response_schema_with_rose(
+                "List calendar events using shared access", agent_id="schema-metadata"
+            )
         assert generated == original_schema, "typed schema generation dropped field contract metadata"
         assert _structured_response_satisfies_schema(output, original_schema)
-        assert _structured_response_satisfies_schema(output, generated), "schema parsing removed nullable output support"
+        assert _structured_response_satisfies_schema(output, generated), (
+            "schema parsing removed nullable output support"
+        )
 
 
 async def test_schema_generation_preserves_peer_compute_usage():
@@ -115,13 +278,22 @@ async def test_schema_generation_preserves_peer_compute_usage():
     from providers.rose.types import RoseResponse
 
     usage = {
-        "prompt_tokens": 50, "completion_tokens": 10, "actual_model": "schema-model",
-        "cache_read_input_tokens": 30, "cache_creation_input_tokens": 20,
-        "cache_sequence_id": "schema-sequence", "from_fast_cache": True,
+        "prompt_tokens": 50,
+        "completion_tokens": 10,
+        "actual_model": "schema-model",
+        "cache_read_input_tokens": 30,
+        "cache_creation_input_tokens": 20,
+        "cache_sequence_id": "schema-sequence",
+        "from_fast_cache": True,
     }
-    response = RoseResponse(content=json.dumps({"reasoning": "Report the account.", "fields": [{"name": "account", "type": "str"}]}), usage=usage)
+    response = RoseResponse(
+        content=json.dumps({"reasoning": "Report the account.", "fields": [{"name": "account", "type": "str"}]}),
+        usage=usage,
+    )
     with patch("helpers.llm.RoseClient.collect", AsyncMock(return_value=response)):
-        schema, _, actual_usage = await _generate_response_schema_with_rose("Report the account", agent_id="schema-usage")
+        schema, _, actual_usage = await _generate_response_schema_with_rose(
+            "Report the account", agent_id="schema-usage"
+        )
     assert schema == {"fields": [{"name": "account", "type": "str", "required": True}]}
     assert actual_usage == {**usage, "total_tokens": 60}
 
@@ -200,6 +372,44 @@ def test_optional_output_keys_can_be_omitted_but_present_values_are_typed():
         raise AssertionError("generated schema must retain one required signal")
     except ValidationError:
         pass
+
+
+def test_verifier_output_breaking_schema_bounds_is_a_rejection_not_a_failure():
+    """Evidence for only 2 of minItems=3 drafts: the verifier's reply is feedback (score < 1), never a raise."""
+    from pydantic import ValidationError
+    from helpers.llm import _build_verifier_response_model, _validate_verifier_response
+
+    schema = {
+        "fields": [
+            {
+                "name": "drafts",
+                "type": "list[object]",
+                "minItems": 3,
+                "properties": [{"name": "investor", "type": "str"}],
+            }
+        ]
+    }
+    model = _build_verifier_response_model(schema)
+    reply = {
+        "output": {"drafts": [{"investor": "A"}, {"investor": "B"}]},
+        "reasoning": "Two drafts are grounded; the third drafter failed.",
+        "score": 1.0,
+    }
+    parsed = _validate_verifier_response(model, reply)
+    assert parsed["score"] == 0.5 and "output" not in parsed, parsed
+    assert parsed["reasoning"].startswith("Two drafts are grounded; the third drafter failed.")
+    assert "output.drafts: List should have at least 3 items" in parsed["reasoning"], parsed["reasoning"]
+    assert not parsed["reasoning"].startswith("Progress check failed")
+    low = _validate_verifier_response(model, {**reply, "score": 0.0})
+    assert low["score"] == 0.0
+    ok = _validate_verifier_response(model, {**reply, "output": {"drafts": reply["output"]["drafts"] * 2}})
+    assert ok["score"] == 1.0 and len(ok["output"]["drafts"]) == 4
+    for broken in ({**reply, "score": "high"}, {"output": reply["output"], "score": 1.0}):
+        try:
+            _validate_verifier_response(model, broken)
+            raise AssertionError("an invalid verdict (score / reasoning) must still raise")
+        except ValidationError:
+            pass
 
 
 def test_verifier_enforces_size_bounds_and_nullable_nested_fields():
@@ -823,6 +1033,86 @@ def _anthropic_tool_block_ids(messages):
     return tool_use_ids, tool_result_ids
 
 
+async def test_completion_summary_carries_attachments_to_claude():
+    """completion_summary must send attachment rows' content, not empty text (descend R4).
+
+    agent-display-revenue-chart's attached CSV reached completion_summary as two
+    empty user rows; Claude 400'd ("text content blocks must be non-empty").
+    Andy 2026-10-24: "File attachments should work and ok filter empty".
+    """
+    import base64
+
+    import helpers.llm as llm_mod
+    from helpers import summarize
+    from providers.rose import get_pool
+    from providers.rose.claude_auth import build_anthropic_body
+
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    )
+    csv = b"order_id,status,amount_usd\nA1,completed,10.00\n"
+    files = {"img-1": png, "csv-1": csv}
+
+    def pointer(file_id, name, mime, size):
+        return {
+            "id": file_id,
+            "storage_path": f"user/{name}",
+            "original_filename": name,
+            "mime_type": mime,
+            "size_bytes": size,
+            "created_at": "2026-10-23T23:15:00Z",
+        }
+
+    context = [
+        {"id": "m1", "role": "USER", "text": "Chart revenue from the attached files.",
+         "timestamp": "2026-10-23T23:15:00Z", "metadata": {}},
+        {"id": "m2", "role": "USER", "text": "", "timestamp": "2026-10-23T23:15:01Z", "metadata": {},
+         "file_pointer": pointer("img-1", "logo.png", "image/png", len(png))},
+        {"id": "m3", "role": "USER", "text": "", "timestamp": "2026-10-23T23:15:02Z", "metadata": {},
+         "file_pointer": pointer("csv-1", "orders.csv", "text/csv", len(csv))},
+        {"id": "m4", "role": "USER", "text": "", "timestamp": "2026-10-23T23:15:03Z", "metadata": {}},
+        {"id": "m5", "role": "ASSISTANT", "text": "Charted completed-order revenue.",
+         "timestamp": "2026-10-23T23:16:00Z", "metadata": {}},
+    ]
+    captured = []
+
+    async def fake_llm(messages, **kwargs):
+        captured.append(messages)
+        return {"content": "Charted revenue.", "usage": {}}
+
+    async def fake_download(fp, cache=None):
+        return files[fp.id], {}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch.object(llm_mod.activity, "in_activity", return_value=True),
+        patch.object(llm_mod, "call_llm", fake_llm),
+        patch.object(llm_mod, "get_file_from_pointer", fake_download),
+    ):
+        await summarize.generate_completion_summary(context=context, goal="Chart revenue", model="m")
+
+    assert len(captured) == 1
+    body = build_anthropic_body(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=captured[0],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=1024,
+        skip_cache_write=True,
+    )
+    blocks = []
+    for message in body["messages"]:
+        content = message["content"]
+        blocks.extend(content if isinstance(content, list) else [{"type": "text", "text": content}])
+    images = [block for block in blocks if block.get("type") == "image"]
+    png_source = {"type": "base64", "media_type": "image/png", "data": base64.b64encode(png).decode()}
+    assert images == [{"type": "image", "source": png_source}], blocks
+    text = "\n".join(block["text"] for block in blocks if block.get("type") == "text")
+    assert "A1,completed,10.00" in text and "orders.csv" in text and "logo.png" in text, text
+    assert all(block["text"].strip() for block in blocks if block.get("type") == "text"), blocks
+
+
 def test_convert_context_to_messages_one_tool_result_per_tool_use():
     """Two terminal TOOL rows sharing a toolCallId must yield ONE tool_result.
 
@@ -936,6 +1226,62 @@ def test_convert_context_to_messages_strips_orphan_tool_use():
     assert tool_use_ids == [], f"orphan tool_use must be stripped, got {tool_use_ids}"
     assert tool_result_ids == [], f"no synthetic tool_result allowed, got {tool_result_ids}"
     assert not any(m.get("tool_call_id") == call_id for m in messages)
+
+
+def test_completion_summary_context_pairs_verifier_result_with_attempt_completion():
+    """The verifier's FINISHED row is the attempt_completion call's tool result.
+
+    Captured descend-full69 r004-j0055 (2026-10-23): every completed root's
+    completion_summary logged tool_result_pairing.repaired (12 -> 12 messages).
+    run_agent posts the verifier verdict as the attempt_completion terminal row
+    (toolCallId = the declared call, verifierMessage=True). The summary converter
+    turned it into assistant text, so the declared tool_use had no result and the
+    pairing guard stripped it. build_llm_messages pairs the same row as a tool
+    result; both converters must agree and the guard must not fire.
+    """
+    from helpers.llm import convert_context_to_messages
+
+    call_id = "2539f237-6bf4-4196-b2e9-d366b787051c"
+    context = [
+        {"role": "USER", "text": "Did my coding agent's tool report success?", "timestamp": "2026-10-23T23:15:58.472Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2026-10-23T23:16:16.917Z",
+            "metadata": {"tool_calls": [{"tool": "attempt_completion", "tool_call_id": call_id}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "Running verifier to check completion...",
+            "timestamp": "2026-10-23T23:16:16.993Z",
+            "metadata": {"toolCallId": call_id, "toolName": "attempt_completion", "toolStatus": "IN_PROGRESS"},
+        },
+        {
+            "role": "TOOL",
+            "text": "The explore agent's FINAL_ANSWER cites tool_status FAILED.",
+            "timestamp": "2026-10-23T23:16:19.200Z",
+            "metadata": {
+                "toolCallId": call_id,
+                "toolName": "attempt_completion",
+                "toolStatus": "FINISHED",
+                "title": "\u2696\ufe0f Progress: 100%",
+                "verifierMessage": True,
+            },
+        },
+    ]
+
+    with patch("helpers.llm.logger") as mock_logger:
+        messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
+
+    repaired = [c for c in mock_logger.warning.call_args_list if c.args and c.args[0] == "tool_result_pairing.repaired"]
+    assert repaired == [], f"persisted order must already be paired, guard fired: {repaired}"
+    tool_use_ids, tool_result_ids = _anthropic_tool_block_ids(messages)
+    assert tool_use_ids == [call_id], f"attempt_completion tool_use was dropped: {tool_use_ids}"
+    assert [rid for rid, _ in tool_result_ids] == [call_id]
+    result = next(m for m in messages if m.get("tool_call_id") == call_id)
+    assert result["role"] == "tool"
+    assert "tool_status FAILED" in result["content"]
+    assert "Progress: 100%" in result["content"]
 
 
 def test_convert_context_to_messages_subagent_row_cannot_win_the_dedup():
@@ -1960,6 +2306,7 @@ async def test_fetch_compute_token_activity_passes_lineage_params():
         "accountId": "acct-1",
         "source": "pool",
         "poolTokenId": "pool-1",
+        "integrationId": "pool-1",
         "lineageKey": "agent:a-1",
         "fastCacheAffinityKey": "affinity-1",
     }
@@ -1976,7 +2323,7 @@ async def test_fetch_compute_token_activity_passes_lineage_params():
             lineage_key="agent:a-1",
             agent_id="a-1",
             root_agent_id="root-1",
-            fast_cache_affinity_key="affinity-1",
+            demo_cache_affinity_key="affinity-1",
         )
     assert result == payload
     assert len(requests) == 1
@@ -2350,11 +2697,11 @@ async def test_set_response_schema_activity_replaces_cached_task_output_title():
         patch("temporalio.activity.heartbeat"),
         patch("temporalio.activity.info", return_value=activity_info),
         patch(
-            "providers.fast_cache.client.resolve_agent_fast_mode",
+            "providers.demo_cache.client.resolve_agent_fast_mode",
             AsyncMock(return_value=(True, "goal", False, "agent-cached-title", "goal", True)),
         ),
         patch(
-            "providers.fast_cache.client.cache_get_first",
+            "providers.demo_cache.client.cache_get_first",
             AsyncMock(
                 return_value=(
                     {"schema": schema, "title": "Task Output", "usage": {}},
@@ -2422,10 +2769,10 @@ async def test_set_response_schema_activity_dual_reads_lite_pool_alias():
         patch("temporalio.activity.heartbeat"),
         patch("temporalio.activity.info", return_value=activity_info),
         patch(
-            "providers.fast_cache.client.resolve_agent_fast_mode",
+            "providers.demo_cache.client.resolve_agent_fast_mode",
             AsyncMock(return_value=(True, "goal", False, "agent-lite-alias", "goal", True)),
         ),
-        patch("providers.fast_cache.client.cache_get_first", AsyncMock(side_effect=_cache_get_first)),
+        patch("providers.demo_cache.client.cache_get_first", AsyncMock(side_effect=_cache_get_first)),
         patch("helpers.llm.RoseClient") as rose_client,
     ):
         from helpers.llm import set_response_schema_activity
@@ -2489,12 +2836,12 @@ async def test_set_response_schema_activity_cache_lookup_error_falls_through_to_
         patch("temporalio.activity.heartbeat"),
         patch("temporalio.activity.info", return_value=activity_info),
         patch(
-            "providers.fast_cache.client.resolve_agent_fast_mode",
+            "providers.demo_cache.client.resolve_agent_fast_mode",
             AsyncMock(return_value=(True, "goal", False, "agent-cache-fail", "goal", True)),
         ),
         patch(
-            "providers.fast_cache.client.cache_get_first",
-            AsyncMock(side_effect=RuntimeError("fast-cache get-first failed: backend down")),
+            "providers.demo_cache.client.cache_get_first",
+            AsyncMock(side_effect=RuntimeError("demo-cache get-first failed: backend down")),
         ),
         patch("helpers.llm.RoseClient", FakeRoseClient),
     ):
@@ -2534,19 +2881,36 @@ async def test_schema_refresh_reuses_native_activity_retry_after_initial_generat
                 failures_left -= 1
                 raise httpx.ReadTimeout("schema provider timed out")
             return SimpleNamespace(
-                content=json.dumps({"reasoning": "Return the account actually used.", "title": "Calendar events",
-                                    "fields": [{"name": "signed_in_account", "type": "str", "required": True,
-                                                "description": "Andy account" if refresh else "Tamara account"}]}),
-                tool_calls=[], usage={"prompt_tokens": 10, "completion_tokens": 4},
+                content=json.dumps(
+                    {
+                        "reasoning": "Return the account actually used.",
+                        "title": "Calendar events",
+                        "fields": [
+                            {
+                                "name": "signed_in_account",
+                                "type": "str",
+                                "required": True,
+                                "description": "Andy account" if refresh else "Tamara account",
+                            }
+                        ],
+                    }
+                ),
+                tool_calls=[],
+                usage={"prompt_tokens": 10, "completion_tokens": 4},
             )
 
     resolve = AsyncMock(return_value=(False, "", False, "", "", False))
     config = SimpleNamespace(backend=SimpleNamespace(api_url="https://schema-fixture.test", api_key="fixture-key"))
     try:
-        with patch("helpers.llm.load_config", return_value=config), patch("helpers.llm.RoseClient", SchemaClient), \
-             patch("providers.fast_cache.client.resolve_agent_fast_mode", resolve), patch("temporalio.activity.heartbeat"):
+        with (
+            patch("helpers.llm.load_config", return_value=config),
+            patch("helpers.llm.RoseClient", SchemaClient),
+            patch("providers.demo_cache.client.resolve_agent_fast_mode", resolve),
+            patch("temporalio.activity.heartbeat"),
+        ):
             initial = await call_temporal_activity_from_activity(
-                set_response_schema_activity, args=["schema-retry", ["Read calendar events"], None, False, True],
+                set_response_schema_activity,
+                args=["schema-retry", ["Read calendar events"], None, False, True],
                 start_to_close_timeout=timedelta(seconds=90),
                 retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(milliseconds=1)),
             )
@@ -2557,10 +2921,14 @@ async def test_schema_refresh_reuses_native_activity_retry_after_initial_generat
                 retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(milliseconds=1)),
             )
         assert initial["schema"]["fields"][0]["description"] == "Tamara account"
-        assert refreshed is not None, "generation failure was swallowed as an activity success, bypassing native retries"
+        assert refreshed is not None, (
+            "generation failure was swallowed as an activity success, bypassing native retries"
+        )
         assert refreshed["schema"]["fields"][0]["description"] == "Andy account"
         assert len(calls) == 5 and resolve.await_count == 3, "refresh did not reuse the existing activity retry owner"
-        assert all(correction in call["messages"][1]["content"] for call in calls[1:]), "retry lost authored message bytes"
+        assert all(correction in call["messages"][1]["content"] for call in calls[1:]), (
+            "retry lost authored message bytes"
+        )
         saves = [request for request in get_captured_requests() if request["method"] == "PATCH"]
         assert len(saves) == 1, "unaccepted refresh candidates were persisted by generation"
     finally:
@@ -2584,12 +2952,19 @@ async def test_schema_generation_exhaustion_propagates_through_native_retry_budg
             raise failure
 
     config = SimpleNamespace(backend=SimpleNamespace(api_url="https://schema-fixture.test", api_key="fixture-key"))
-    with patch("helpers.llm.load_config", return_value=config), patch("helpers.llm.RoseClient", SchemaClient), \
-         patch("providers.fast_cache.client.resolve_agent_fast_mode", AsyncMock(return_value=(False, "", False, "", "", False))), \
-         patch("temporalio.activity.heartbeat"):
+    with (
+        patch("helpers.llm.load_config", return_value=config),
+        patch("helpers.llm.RoseClient", SchemaClient),
+        patch(
+            "providers.demo_cache.client.resolve_agent_fast_mode",
+            AsyncMock(return_value=(False, "", False, "", "", False)),
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
         try:
             await call_temporal_activity_from_activity(
-                set_response_schema_activity, args=["schema-retry-exhausted", ["Read calendar events"], None, False, False, False],
+                set_response_schema_activity,
+                args=["schema-retry-exhausted", ["Read calendar events"], None, False, False, False],
                 start_to_close_timeout=timedelta(seconds=90),
                 retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(milliseconds=1)),
             )
@@ -2606,8 +2981,12 @@ async def test_schema_generation_does_not_retry_or_swallow_lifecycle_stops():
     from helpers.generation_handoff import GenerationHandoffRequested
     from helpers.llm import set_response_schema_activity
 
-    for failure in (asyncio.CancelledError(), CancelledError("cancelled"),
-                    WorkflowGenerationSealed("generation replaced"), GenerationHandoffRequested("new-queue")):
+    for failure in (
+        asyncio.CancelledError(),
+        CancelledError("cancelled"),
+        WorkflowGenerationSealed("generation replaced"),
+        GenerationHandoffRequested("new-queue"),
+    ):
         calls = []
 
         class SchemaClient:
@@ -2616,9 +2995,15 @@ async def test_schema_generation_does_not_retry_or_swallow_lifecycle_stops():
                 raise failure
 
         config = SimpleNamespace(backend=SimpleNamespace(api_url="https://schema-fixture.test", api_key="fixture-key"))
-        with patch("helpers.llm.load_config", return_value=config), patch("helpers.llm.RoseClient", SchemaClient), \
-             patch("providers.fast_cache.client.resolve_agent_fast_mode", AsyncMock(return_value=(False, "", False, "", "", False))), \
-             patch("temporalio.activity.heartbeat"):
+        with (
+            patch("helpers.llm.load_config", return_value=config),
+            patch("helpers.llm.RoseClient", SchemaClient),
+            patch(
+                "providers.demo_cache.client.resolve_agent_fast_mode",
+                AsyncMock(return_value=(False, "", False, "", "", False)),
+            ),
+            patch("temporalio.activity.heartbeat"),
+        ):
             try:
                 await set_response_schema_activity("schema-control-stop", ["Read calendar events"], persist=False)
             except BaseException as error:
@@ -3335,6 +3720,25 @@ async def test_build_llm_messages_attachment_large_falls_back_to_metadata():
     assert "f.png" in user["content"]
 
 
+async def test_build_llm_messages_inlined_image_has_one_label():
+    """The retained TOOL suffix must use the image's actual inline label."""
+    from helpers.attachments import FilePointer, build_attachment_metadata_text
+    from helpers.llm import build_llm_messages
+
+    fp_data = {
+        "id": "f-inline", "storage_path": "u/inline.png", "original_filename": "inline.png",
+        "mime_type": "image/png", "size_bytes": 100, "created_at": "2024-01-01T00:00:00Z",
+    }
+    inline_label = build_attachment_metadata_text(FilePointer.from_dict(fp_data), inlined=True)
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,YQ=="}}
+    context = [{"role": "TOOL", "text": "image result", "file_pointer": fp_data}]
+    with patch("helpers.llm.resolve_message_attachments", new=AsyncMock(return_value=([image], [inline_label]))):
+        messages = await build_llm_messages(context, "sys")
+    tool_text = str(next(msg for msg in messages if msg["role"] == "user")["content"])
+    assert tool_text.count("Shown inline above") == 1
+    assert "Not inlined for the parent LLM" not in tool_text
+
+
 async def test_build_llm_messages_skips_empty_file_output_assistant():
     """Empty ASSISTANT rows with only a file_pointer (browser screenshots /
     sub-agent output files posted via AssistantEvent) must be skipped, otherwise
@@ -3770,7 +4174,7 @@ async def test_structured_escalation_keeps_anthropic_exclusion():
     async def on_chunk(_text: str, _tokens: int):
         pass
 
-    with patch("providers.fast_cache.rose_cache.cached_complete", new=fake_cached_complete):
+    with patch("providers.demo_cache.rose_cache.cached_complete", new=fake_cached_complete):
         response, _usage, _detected = await call_llm_structured_streaming(
             messages=[{"role": "user", "content": "finish this"}],
             model="rose-labs/rose-1-flash",
@@ -3790,12 +4194,12 @@ async def test_structured_escalation_keeps_anthropic_exclusion():
 async def test_structured_deferred_cache_key_matches_excluded_read():
     """A rerouted response must be stored under the same excluded-policy key it read."""
     from helpers.llm import call_llm_structured_streaming
-    from providers.fast_cache.context import FastCacheContext, reset_context, set_context
-    from providers.fast_cache.rose_cache import request_key_material
+    from providers.demo_cache.context import DemoCacheContext, reset_context, set_context
+    from providers.demo_cache.rose_cache import request_key_material
     from providers.rose.types import StreamChunk
     from utils.tool_schemas import create_agent_action_model
 
-    ctx = FastCacheContext(enabled=True, goal="excluded-policy-key-parity")
+    ctx = DemoCacheContext(enabled=True, goal="excluded-policy-key-parity")
     captured = []
 
     async def fake_cached_complete(*_args, **kwargs):
@@ -3812,8 +4216,8 @@ async def test_structured_deferred_cache_key_matches_excluded_read():
     cache_set = AsyncMock(return_value=True)
     try:
         with (
-            patch("providers.fast_cache.rose_cache.cached_complete", new=fake_cached_complete),
-            patch("helpers.llm.fast_cache_client.cache_set", new=cache_set),
+            patch("providers.demo_cache.rose_cache.cached_complete", new=fake_cached_complete),
+            patch("helpers.llm.demo_cache_client.cache_set", new=cache_set),
         ):
             await call_llm_structured_streaming(
                 messages=[{"role": "user", "content": "same request"}],
@@ -3949,7 +4353,7 @@ async def _call_llm_structured_streaming_replays_invalid_native_tool_use_case():
         )
         yield StreamChunk(kind="done", data={})
 
-    import providers.fast_cache.rose_cache as rose_cache_module
+    import providers.demo_cache.rose_cache as rose_cache_module
 
     original = rose_cache_module.cached_complete
     rose_cache_module.cached_complete = fake_cached_complete
@@ -4215,7 +4619,7 @@ async def test_call_llm_verifier_bounds_provider_stream_time():
 
     with (
         patch("temporalio.activity.heartbeat"),
-        patch("providers.fast_cache.rose_cache.cached_complete", fake_cached_complete),
+        patch("providers.demo_cache.rose_cache.cached_complete", fake_cached_complete),
     ):
         result, _usage = await _call_llm_verifier(
             messages=[{"role": "user", "content": "x"}],
@@ -4454,8 +4858,118 @@ async def test_check_progress_below_threshold_returns_partial_structured_respons
     assert result["structured_response"] == {"summary": "x"}
 
 
+async def test_call_llm_verifier_required_output_keys_bind_only_completion_verdicts():
+    """Required output keys gate a completion verdict, not a partial one.
+
+    The verifier rubric defines 0.5 and 0.0 as verdicts in which a required
+    field is not grounded, and forbids inventing it. When an optional field
+    turns OpenAI strict mode off, the provider no longer forces every key, so
+    such a verdict omits the field (agent 9698df4f, 2026-10-20). That verdict
+    is valid. A 1.0 verdict that omits a required key is not, and present
+    values keep their declared types at every score.
+    """
+    from config import load_config
+    from helpers.llm import _call_llm_verifier
+    from providers.rose.schema import build_openai_response_format
+    from providers.rose.types import StreamChunk
+
+    schema = {
+        "fields": [
+            {"name": "game_file", "type": "str", "required": True},
+            {"name": "view_name", "type": "str", "required": False},
+            {"name": "description", "type": "str", "required": True},
+            {
+                "name": "selected",
+                "type": "object",
+                "required": False,
+                "properties": [
+                    {"name": "title", "type": "str"},
+                    {"name": "price_usd", "type": "float"},
+                ],
+            },
+        ]
+    }
+    replies: list[dict] = []
+    request_formats: list[dict] = []
+
+    class OneVerdictRose:
+        async def complete(self, **kwargs):
+            request_formats.append(build_openai_response_format(kwargs["response_model"])["json_schema"])
+            yield StreamChunk(kind="metadata", data={"actual_model": "gpt-6-sol-gpt", "pool_name": "gpt-token"})
+            yield StreamChunk(kind="content", data={"text": json.dumps(replies[-1])})
+            yield StreamChunk(kind="usage", data={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+            yield StreamChunk(kind="done", data={})
+
+    async def judge(verdict: dict) -> dict:
+        replies.append(verdict)
+        with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", OneVerdictRose):
+            parsed, _usage = await _call_llm_verifier(
+                messages=[{"role": "user", "content": "Goal: make a game"}],
+                model="rose-labs/rose-1-ultra",
+                config=load_config(),
+                response_schema=schema,
+            )
+        return parsed
+
+    partial = await judge(
+        {
+            "output": {"game_file": "/home/user/output/game.html", "view_name": "game"},
+            "reasoning": "The description of the controls is not grounded in any tool result.",
+            "score": 0.5,
+        }
+    )
+    assert partial["score"] == 0.5
+    assert partial["output"] == {"game_file": "/home/user/output/game.html", "view_name": "game"}
+    assert partial["reasoning"].startswith("The description of the controls")
+
+    nested_partial = await judge(
+        {
+            "output": {"game_file": "/home/user/output/game.html", "selected": {"title": "Neon"}},
+            "reasoning": "The price is not shown.",
+            "score": 0.5,
+        }
+    )
+    assert nested_partial["output"]["selected"] == {"title": "Neon"}
+    assert "description" not in nested_partial["output"]
+
+    rejected = (
+        # A completion verdict must contain every required key at every level.
+        {"output": {"game_file": "/home/user/output/game.html"}, "reasoning": "done", "score": 1.0},
+        {
+            "output": {
+                "game_file": "/home/user/output/game.html",
+                "description": "Dodge and collect.",
+                "selected": {"title": "Neon"},
+            },
+            "reasoning": "done",
+            "score": 1.0,
+        },
+        # Partial verdicts still type-check the values they do report.
+        {"output": {"game_file": "/home/user/output/game.html", "description": None}, "reasoning": "r", "score": 0.5},
+        {"output": {"game_file": 7}, "reasoning": "r", "score": 0.0},
+    )
+    for verdict in rejected:
+        # An output that breaks the schema is a rejection with feedback, never an
+        # accepted completion (_validate_verifier_response).
+        parsed = await judge(verdict)
+        assert parsed["score"] <= 0.5 and "output" not in parsed, (verdict, parsed)
+        assert "does not meet the required output schema" in parsed["reasoning"], parsed["reasoning"]
+
+    complete = await judge(
+        {
+            "output": {"game_file": "/home/user/output/game.html", "description": "Dodge and collect."},
+            "reasoning": "done",
+            "score": 1.0,
+        }
+    )
+    assert complete["output"] == {"game_file": "/home/user/output/game.html", "description": "Dodge and collect."}
+    # Every request carried the same provider-facing contract.
+    assert all(fmt == request_formats[0] for fmt in request_formats)
+    assert request_formats[0]["schema"]["properties"]["output"]["required"] == ["game_file", "description"]
+
+
 def test_filter_context_for_execute_verifier_uses_execute_boundary():
-    """Execute verifier context excludes plan/research rows before the execute boundary."""
+    """Execute verifier context keeps the goal but excludes plan/research rows before the execute boundary."""
     from helpers.llm import _filter_context_for_execute_verifier
 
     context = [
@@ -4494,7 +5008,7 @@ def test_filter_context_for_execute_verifier_uses_execute_boundary():
 
     filtered = _filter_context_for_execute_verifier(context)
     text = "\n".join(m.get("text", "") for m in filtered)
-    assert "original research goal" not in text
+    assert "original research goal" in text
     assert "Tokyo plan-phase explore result" not in text
     assert "plan created" not in text
     assert "Beginning execute" not in text
@@ -4545,9 +5059,69 @@ async def test_check_progress_execute_filters_plan_context_before_llm():
     assert result["score"] == 0.5
     rendered = json.dumps(captured_messages)
     assert "execute result" in rendered
-    assert "original goal" not in rendered
+    assert "original goal" in rendered
     assert "plan explore result" not in rendered
     assert "set_plan" not in rendered
+
+
+async def test_check_progress_execute_verifier_keeps_original_goal():
+    """The execute verifier extracts the final output against the user's goal.
+
+    Regression for explore-agent-mid-run-message (4cf417f1, 1469eaed): a
+    start_phase=execute root's goal row has no phase while every execute row is
+    tagged EXECUTE, so the execute filter dropped the goal. The extraction then
+    saw only the follow-up ("also say who led the round") and wrote two-sentence
+    summaries although the goal asked for a one-sentence summary.
+    """
+    from helpers.llm import check_progress
+
+    captured_messages = []
+
+    async def fake_call_llm_verifier(messages, *_args, **_kwargs):
+        captured_messages.extend(messages)
+        return {"score": 1.0, "reasoning": "complete"}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    goal = "Compile 8 funding rounds. For each round give a one-sentence summary and a source URL."
+    context = [
+        {"role": "USER", "text": goal, "timestamp": "2026-10-20T01:16:11Z"},
+        {
+            "role": "USER",
+            "text": "<environment>\nYou are /root, the root agent.\n</environment>",
+            "timestamp": "2026-10-20T01:16:16Z",
+        },
+        {
+            "role": "TOOL",
+            "text": "Started explore agent in background. Address: /root/funding_research.",
+            "timestamp": "2026-10-20T01:16:23Z",
+            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED", "phase": "EXECUTE"},
+        },
+        {
+            "role": "USER",
+            "text": 'One more thing: in each round\'s summary, also say who led the round, as "Led by <investor>".',
+            "timestamp": "2026-10-20T01:16:27Z",
+        },
+        {
+            "role": "TOOL",
+            "text": "Message Type: FINAL_ANSWER\nPayload:\n1) Cognition raised $2B. Led by a16z.",
+            "timestamp": "2026-10-20T01:17:09Z",
+            "metadata": {"toolName": "agent_notification", "phase": "EXECUTE"},
+        },
+    ]
+
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm._call_llm_verifier", fake_call_llm_verifier):
+        await check_progress(
+            context=context,
+            verifier_system_prompt="VERIFY",
+            model="rose",
+            call_site="verifier_execute",
+            response_schema={"fields": [{"name": "rounds", "type": "list[object]", "required": True}]},
+        )
+
+    rendered = json.dumps(captured_messages)
+    assert goal in rendered, "execute verifier must see the original user goal"
+    assert "Led by <investor>" in rendered
+    assert "FINAL_ANSWER" in rendered
+    assert rendered.index("one-sentence summary") < rendered.index("Led by <investor>")
 
 
 def _soft_complete_bench_goal() -> str:
@@ -4558,10 +5132,10 @@ def _soft_complete_bench_goal() -> str:
     return next(t["prompt"] for t in tasks if t["name"] == "test-mass-agent-run-0")
 
 
-async def test_check_progress_propagates_resolved_fast_cache_tree_context():
+async def test_check_progress_propagates_resolved_demo_cache_tree_context():
     """Verifier activities retain the tree root goal and provider speed mode."""
     from helpers.llm import check_progress
-    from providers.fast_cache.context import current_context, set_context
+    from providers.demo_cache.context import current_context, set_context
 
     child_goal = "Select exactly 20 creators"
     root_goal = _soft_complete_bench_goal()
@@ -4586,7 +5160,7 @@ async def test_check_progress_propagates_resolved_fast_cache_tree_context():
             patch("temporalio.activity.heartbeat"),
             patch("helpers.llm._call_llm_verifier", fake_call_llm_verifier),
             patch(
-                "providers.fast_cache.client.resolve_agent_fast_mode",
+                "providers.demo_cache.client.resolve_agent_fast_mode",
                 AsyncMock(return_value=(True, child_goal, True, "root-agent", root_goal, False)),
             ),
         ):
@@ -4606,10 +5180,10 @@ async def test_check_progress_propagates_resolved_fast_cache_tree_context():
     assert seen_contexts == [(child_goal, root_goal, False)]
 
 
-async def test_check_progress_disables_fast_cache_read_after_verifier_parse_failure():
+async def test_check_progress_disables_demo_cache_read_after_verifier_parse_failure():
     """Verifier retries should not replay the same invalid cached response repeatedly."""
     from helpers.llm import check_progress
-    from providers.fast_cache.context import current_context, set_context
+    from providers.demo_cache.context import current_context, set_context
 
     seen_contexts = []
 
@@ -4653,7 +5227,7 @@ async def test_check_progress_disables_fast_cache_read_after_verifier_parse_fail
 async def test_check_progress_soft_passes_cached_fast_mode_reject():
     """Cached verifier rejects under Fast Mode soft-pass so soft-complete execute loops exit."""
     from helpers.llm import check_progress
-    from providers.fast_cache.context import set_context
+    from providers.demo_cache.context import set_context
 
     async def fake_call_llm_verifier(*_args, **_kwargs):
         return (
@@ -4688,9 +5262,69 @@ async def test_check_progress_soft_passes_cached_fast_mode_reject():
         set_context(None)
 
     assert result["score"] == 1.0
-    assert "Fast Mode cache trajectory ended" in result["reasoning"]
+    assert result["reasoning"] == "No grounded tool-result evidence was provided."
     assert (result.get("usage") or {}).get("from_fast_cache") is True
     assert (result.get("usage") or {}).get("actual_model") == "fast-mode-soft-complete"
+
+
+async def test_check_progress_soft_pass_shows_replayed_verdict_not_ablation_copy():
+    """descend-full69 MA: a DEMO soft-pass verdict is a visible transcript row.
+
+    Every first-level GP in test-mass-agent-run-0 replays a recorded 0.5
+    verifier verdict and soft-passes. The visible "Progress: 100%" row shows
+    the recorded reasoning byte for byte; only code-generated stand-ins (no
+    recorded verdict, exhausted trajectory) use the fixed neutral constants.
+    """
+    from helpers.llm import check_progress
+    from providers.demo_cache.context import set_context
+    from providers.demo_cache.rose_cache import (
+        SOFT_COMPLETE_RESULT,
+        SOFT_PASS_VERIFIER_REASONING,
+        soft_complete_on_miss,
+    )
+
+    recorded = "The spawned-agent tool result is a dense, well-sourced research report on Dr. Gabrielle Lyon."
+
+    async def replayed_reject(*_args, **_kwargs):
+        return (
+            {"score": 0.5, "reasoning": recorded},
+            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "from_fast_cache": True},
+        )
+
+    async def unparseable(*_args, **_kwargs):
+        raise json.JSONDecodeError("bad cached verifier payload", "", 0)
+
+    results = []
+    for verifier in (replayed_reject, unparseable):
+        try:
+            with (
+                patch("temporalio.activity.heartbeat"),
+                patch("helpers.llm._call_llm_verifier", verifier),
+            ):
+                results.append(
+                    await check_progress(
+                        context=[{"role": "USER", "text": "finish the task", "timestamp": "2024-01-01T00:00:00Z"}],
+                        verifier_system_prompt="VERIFY",
+                        model="rose",
+                        call_site="verifier_execute",
+                        fast_mode_cache_enabled=True,
+                        fast_mode_goal=_soft_complete_bench_goal(),
+                        fast_mode_step=0,
+                    )
+                )
+        finally:
+            set_context(None)
+
+    assert [r["score"] for r in results] == [1.0, 1.0]
+    assert results[0]["reasoning"] == recorded
+    assert results[0]["message"] == f"{recorded}\n\nScore: 1.0"
+    assert results[1]["reasoning"] == SOFT_PASS_VERIFIER_REASONING
+    assert json.loads(soft_complete_on_miss("verifier_execute")["content"])["reasoning"] == (
+        SOFT_PASS_VERIFIER_REASONING
+    )
+    for site in ("execute_loop", "plan_loop"):
+        (call,) = soft_complete_on_miss(site)["tool_calls"]
+        assert json.loads(call["arguments"]) == {"result": SOFT_COMPLETE_RESULT}
 
 
 async def test_check_progress_fences_the_entire_verifier_retry_loop():
@@ -4724,10 +5358,10 @@ async def test_check_progress_fences_the_entire_verifier_retry_loop():
     assert calls == 1
 
 
-async def test_check_progress_browser_success_uses_fast_cache_write_only():
+async def test_check_progress_browser_success_uses_demo_cache_write_only():
     """Live browser evidence must not be overwritten by a stale verifier cache replay."""
     from helpers.llm import check_progress
-    from providers.fast_cache.context import current_context, set_context
+    from providers.demo_cache.context import current_context, set_context
 
     seen_contexts = []
 
@@ -5169,6 +5803,235 @@ async def test_check_progress_accepts_completed_browser_task_structured_response
     assert result["usage"]["actual_model"] == "structured_response"
 
 
+async def test_simulated_planner_sees_its_world_date_not_the_wall_clock():
+    """A simulated agent plans at its world's pinned date (the WMH clock), not today's date."""
+    import httpx
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_planner_llm_activity
+
+    plan_json = json.dumps(
+        {
+            "title": "Plan",
+            "tasks": [{"task_idx": "0", "goal": "g", "tool_name": "spawn_explore_agent", "depends_on": []}],
+            "join": "all",
+        }
+    )
+    body = _anthropic_sse_body(text=plan_json, input_tokens=10, output_tokens=5)
+    systems = []
+
+    def handler(req):
+        if "api.anthropic.com" in str(req.url):
+            systems.append("\n".join(block["text"] for block in json.loads(req.content.decode())["system"]))
+            return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    world = int(datetime(2026, 9, 28, 14, tzinfo=timezone.utc).timestamp() * 1000)
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.world_model_runtime.world_time_ms", AsyncMock(return_value=world)) as clock,
+    ):
+        await call_planner_llm_activity(
+            messages=[{"role": "user", "content": "raise money"}],
+            model="rose",
+            tools_description="web_search: search the web",
+            user_context="",
+            claude_max_token="ct-planner-123",
+            agent_id="agent-simulated",
+            claude_token_user_id="planner-user",
+        )
+    clock.assert_awaited_once_with("agent-simulated")
+    assert systems and "Current UTC date: 2026-09-28." in systems[0]
+
+
+async def test_simulated_planner_date_is_the_agents_world_time_cursor():
+    """The planner's date and the agent's cursor are the same world-clock reading, never the wall clock."""
+    import importlib
+    import os
+    import types
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    import httpx
+
+    from benchmarks.wmh_world_clock import WorldClock
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_planner_llm_activity
+    from helpers.wait_on_world_clock import _refresh_world_time_cursor
+    from helpers.world_model_runtime import world_clock_activity
+
+    hour = 3_600_000
+    pinned = int(datetime(2026, 9, 28, 14, tzinfo=timezone.utc).timestamp() * 1000)
+    clock = WorldClock(start_ms=pinned)
+    clock.register("root")
+    clock.commit("root", started_ms=pinned, elapsed_ms=72 * hour)
+    clock.register("child", parent="root")
+    clock.commit("child", started_ms=clock.action_time("child"), elapsed_ms=12 * hour)  # world: 2026-10-02T02:00Z
+    plan_json = json.dumps(
+        {
+            "title": "Plan",
+            "tasks": [{"task_idx": "0", "goal": "g", "tool_name": "spawn_explore_agent", "depends_on": []}],
+            "join": "all",
+        }
+    )
+    body = _anthropic_sse_body(text=plan_json, input_tokens=10, output_tokens=5)
+    systems = []
+
+    def handler(req):
+        if "api.anthropic.com" in str(req.url):
+            systems.append("\n".join(block["text"] for block in json.loads(req.content.decode())["system"]))
+            return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
+        if req.url.path == "/world_models/rose-archive/scopes/root/clock":
+            return httpx.Response(200, json=clock.snapshot())
+        return httpx.Response(404, json={"detail": "Unknown world scope"})
+
+    set_mock_handler(handler)
+
+    async def execute_activity(fn, **kw):
+        return await fn(*kw["args"])
+
+    wall = datetime(2026, 10, 18, 9, tzinfo=timezone.utc)
+    shared = importlib.import_module(_refresh_world_time_cursor.__module__)
+    wf = types.SimpleNamespace(
+        world_model_mode="simulate", agent_id="child", simulated_clock_offset_seconds=0, simulated_world_time_ms=pinned
+    )
+    with (
+        patch.dict(os.environ, {"WMH_BASE_URL": "https://wmh.example.test", "WMH_MODEL_NAME": "rose-archive"}),
+        patch(
+            "providers.demo_cache.client.resolve_agent_fast_mode",
+            AsyncMock(return_value=(False, None, False, "root", None, False)),
+        ),
+        patch.object(
+            shared,
+            "workflow",
+            types.SimpleNamespace(
+                execute_activity=execute_activity, now=lambda: wall, logger=types.SimpleNamespace(error=lambda *a: None)
+            ),
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        assert world_clock_activity is shared.world_clock_activity
+        cursor = await _refresh_world_time_cursor(wf)
+        await call_planner_llm_activity(
+            messages=[{"role": "user", "content": "raise money"}],
+            model="rose",
+            tools_description="web_search: search the web",
+            user_context="",
+            claude_max_token="ct-planner-123",
+            agent_id="child",
+            claude_token_user_id="planner-user",
+        )
+    assert cursor == wf.simulated_world_time_ms == clock.time_of("child") == pinned + 84 * hour
+    cursor_date = datetime.fromtimestamp(cursor / 1000, timezone.utc).date().isoformat()
+    assert cursor_date == "2026-10-02"
+    assert systems and f"Current UTC date: {cursor_date}." in systems[0]
+
+
+async def test_simulated_planner_keeps_its_last_world_time_when_the_clock_reads_nothing():
+    """Mid-run, a world clock read of None keeps the agent's cursor date; without a cursor prod is unchanged."""
+    import httpx
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_planner_llm_activity
+
+    plan_json = json.dumps(
+        {
+            "title": "Plan",
+            "tasks": [{"task_idx": "0", "goal": "g", "tool_name": "spawn_explore_agent", "depends_on": []}],
+            "join": "all",
+        }
+    )
+    body = _anthropic_sse_body(text=plan_json, input_tokens=10, output_tokens=5)
+    systems = []
+
+    def handler(req):
+        if "api.anthropic.com" in str(req.url):
+            systems.append("\n".join(block["text"] for block in json.loads(req.content.decode())["system"]))
+            return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    cursor = int(datetime(2026, 10, 3, 5, tzinfo=timezone.utc).timestamp() * 1000)
+    warnings = []
+    for world_cursor in (cursor, None):
+        kwargs = {} if world_cursor is None else {"world_time_cursor_ms": world_cursor}
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.world_model_runtime.world_time_ms", AsyncMock(return_value=None)),
+            patch("helpers.llm.logger.warning", side_effect=lambda *a, **kw: warnings.append(a)),
+        ):
+            await call_planner_llm_activity(
+                messages=[{"role": "user", "content": "raise money"}],
+                model="rose",
+                tools_description="web_search: search the web",
+                user_context="",
+                claude_max_token="ct-planner-123",
+                agent_id="agent-simulated",
+                claude_token_user_id="planner-user",
+                **kwargs,
+            )
+    assert len(systems) == 2
+    assert "Current UTC date: 2026-10-03." in systems[0], "a simulated planner must not fall back to the real date"
+    assert any("world-time cursor" in str(args[0]) for args in warnings)
+    today = datetime.now(timezone.utc).date().isoformat()
+    assert f"Current UTC date: {today}." in systems[1], "without a cursor (prod) the real date is unchanged"
+
+
+async def test_planner_world_clock_failure_stops_liveness_and_never_uses_wall_clock():
+    """An unreadable or unrepresentable world clock fails the planner and stops its heartbeat."""
+    import httpx
+
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_planner_llm_activity
+    from helpers.world_model_runtime import WorldClockUnavailable
+
+    llm_requests = []
+
+    def handler(req):
+        if "api.anthropic.com" in str(req.url):
+            llm_requests.append(req)
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+
+    def liveness_tasks():
+        return [
+            task
+            for task in asyncio.all_tasks()
+            if getattr(task.get_coro(), "__qualname__", "").endswith("_planner_liveness_heartbeat")
+        ]
+
+    for clock, expected in (
+        (AsyncMock(side_effect=WorldClockUnavailable("World clock unavailable")), WorldClockUnavailable),
+        (AsyncMock(return_value=10**20), (OverflowError, ValueError, OSError)),
+    ):
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.world_model_runtime.world_time_ms", clock),
+        ):
+            try:
+                await call_planner_llm_activity(
+                    messages=[{"role": "user", "content": "raise money"}],
+                    model="rose",
+                    tools_description="web_search: search the web",
+                    user_context="",
+                    claude_max_token="ct-planner-123",
+                    agent_id="agent-simulated",
+                    claude_token_user_id="planner-user",
+                )
+                raise AssertionError("a failed world clock must fail the planner")
+            except expected:
+                pass
+        await asyncio.sleep(0)
+        assert not [task for task in liveness_tasks() if not task.done()], "planner heartbeat outlived the activity"
+    assert llm_requests == [], "the planner must not prompt with the wall-clock date"
+
+
 async def test_call_planner_llm_activity_happy_path():
     """call_planner_llm_activity builds system prompt, streams a plan, returns result+usage."""
     import httpx
@@ -5323,7 +6186,7 @@ async def test_call_llm_activity_marks_structured_contract_failures_non_retryabl
                             "response": "Sending the message now.",
                             "tool_calls": [
                                 {
-                                    "tool": "send_message",
+                                    "tool": "send_message_to_agent",
                                     "person_id": "+19729777432",
                                     "channel": "imessage",
                                     "from_email": None,
@@ -5661,7 +6524,7 @@ async def test_call_llm_activity_ignores_pending_context_left_by_an_evicted_work
     """
     from helpers import llm as llm_mod
     from loop import run_agent as run_mod
-    from providers.fast_cache.rose_cache import _prior_explore_spawn_tool_call_ids
+    from providers.demo_cache.rose_cache import _prior_explore_spawn_tool_call_ids
 
     agent_id = "agent-evicted-pending-ctx"
     worker_w_slots = llm_mod._pending_llm_context  # the process the turn-4 activity lands on
@@ -5671,6 +6534,9 @@ async def test_call_llm_activity_ignores_pending_context_left_by_an_evicted_work
     turn4_canonical_context: list = []
 
     async def mock_execute_activity(fn, args=None, **_kwargs):
+        from tools.read_tool_output import preview_tool_output_activity
+        if fn is preview_tool_output_activity:
+            return await fn(*(args or []))
         if fn is not llm_mod.call_llm_activity:
             return {}
         scheduled.append(list(args or []))
@@ -6007,22 +6873,43 @@ def test_build_verifier_context_messages_preserves_model_exclusions():
 
     actual = [
         {"role": "USER", "text": "Use Andy's account instead", "timestamp": "2026-10-15T17:00:00Z"},
-        {"role": "TOOL", "text": "actual browser evidence", "timestamp": "2026-10-15T17:00:01Z",
-         "metadata": {"toolName": "browser", "toolStatus": "FINISHED"}},
+        {
+            "role": "TOOL",
+            "text": "actual browser evidence",
+            "timestamp": "2026-10-15T17:00:01Z",
+            "metadata": {"toolName": "browser", "toolStatus": "FINISHED"},
+        },
     ]
     hidden = [
-        {"role": "TOOL", "text": "schema route timed out", "timestamp": "2026-10-15T17:00:02Z",
-         "metadata": {"toolCallId": "actual-completion", "toolName": "attempt_completion",
-                      "toolStatus": "ERROR", "error": True, "excludeFromModel": True}},
-        {"role": "ASSISTANT", "text": "UI-only reasoning", "timestamp": "2026-10-15T17:00:03Z",
-         "metadata": {"plannedToolName": "reasoning", "excludeFromModel": True}},
+        {
+            "role": "TOOL",
+            "text": "schema route timed out",
+            "timestamp": "2026-10-15T17:00:02Z",
+            "metadata": {
+                "toolCallId": "actual-completion",
+                "toolName": "attempt_completion",
+                "toolStatus": "ERROR",
+                "error": True,
+                "excludeFromModel": True,
+            },
+        },
+        {
+            "role": "ASSISTANT",
+            "text": "UI-only reasoning",
+            "timestamp": "2026-10-15T17:00:03Z",
+            "metadata": {"plannedToolName": "reasoning", "excludeFromModel": True},
+        },
     ]
     context = deepcopy(actual + hidden)
-    assert build_verifier_context_messages(context, "existing verifier") == build_verifier_context_messages(actual, "existing verifier")
+    assert build_verifier_context_messages(context, "existing verifier") == build_verifier_context_messages(
+        actual, "existing verifier"
+    )
     assert context == actual + hidden, "projection must retain the durable rows for UI/audit"
     visible_error = deepcopy(hidden[0])
     visible_error["metadata"]["excludeFromModel"] = False
-    assert "schema route timed out" in str(build_verifier_context_messages(actual + [visible_error], "existing verifier"))
+    assert "schema route timed out" in str(
+        build_verifier_context_messages(actual + [visible_error], "existing verifier")
+    )
 
 
 def test_build_verifier_context_messages_screenshot_emits_multimodal():
@@ -7178,7 +8065,7 @@ async def _call_llm_structured_streaming_replayed_native_tool_call_without_json_
 
     # helpers.llm imports cached_complete lazily inside the function, so patch
     # the source module — the lazy import resolves this attribute at call time.
-    import providers.fast_cache.rose_cache as rose_cache_module
+    import providers.demo_cache.rose_cache as rose_cache_module
 
     original_cached_complete = rose_cache_module.cached_complete
     rose_cache_module.cached_complete = fake_cached_complete
@@ -8182,8 +9069,8 @@ async def test_call_llm_structured_streaming_json_parse_failure_raises():
 
 async def test_july_gp_execute_caps_distinct_explores_then_completes():
     """Cached GP replay emits at most three distinct explores, then its completion."""
-    from providers.fast_cache.context import FastCacheContext
-    from providers.fast_cache import rose_cache
+    from providers.demo_cache.context import DemoCacheContext
+    from providers.demo_cache import rose_cache
 
     goal = (
         "You are analyzing ONE creator for Andy Prevalsky, a technology founder "
@@ -8250,7 +9137,7 @@ async def test_july_gp_execute_caps_distinct_explores_then_completes():
         patch.object(rose_cache.cache_client, "cache_get_position_fallback", by_position),
     ):
         for base_step in range(1, 4):
-            ctx = FastCacheContext(enabled=True, goal=goal, base_step=base_step)
+            ctx = DemoCacheContext(enabled=True, goal=goal, base_step=base_step)
             stored, _ = await rose_cache.lookup_llm_cache(ctx, "execute_loop", {"messages": messages})
             if stored is None:
                 break
@@ -8299,14 +9186,14 @@ async def test_july_gp_execute_caps_distinct_explores_then_completes():
     ]
 
 
-async def test_call_llm_structured_streaming_fast_cache_writes_only_after_validation():
+async def test_call_llm_structured_streaming_demo_cache_writes_only_after_validation():
     """Structured LLM responses are cached only after AgentAction validation succeeds."""
     import httpx
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import call_llm_structured_streaming
-    from providers.fast_cache import client as fast_cache_client
-    from providers.fast_cache.context import FastCacheContext, reset_context, set_context
-    from providers.fast_cache import rose_cache
+    from providers.demo_cache import client as demo_cache_client
+    from providers.demo_cache.context import DemoCacheContext, reset_context, set_context
+    from providers.demo_cache import rose_cache
     from utils.tool_schemas import create_agent_action_model
 
     store = {}
@@ -8321,14 +9208,14 @@ async def test_call_llm_structured_streaming_fast_cache_writes_only_after_valida
         store[key] = value
         return True
 
-    original_client_get = fast_cache_client.cache_get
-    original_client_set = fast_cache_client.cache_set
+    original_client_get = demo_cache_client.cache_get
+    original_client_set = demo_cache_client.cache_set
     original_rose_get = rose_cache.cache_client.cache_get
     original_rose_set = rose_cache.cache_client.cache_set
-    token = set_context(FastCacheContext(enabled=True, goal="structured cache validation"))
+    token = set_context(DemoCacheContext(enabled=True, goal="structured cache validation"))
     try:
-        fast_cache_client.cache_get = cache_get
-        fast_cache_client.cache_set = cache_set
+        demo_cache_client.cache_get = cache_get
+        demo_cache_client.cache_set = cache_set
         rose_cache.cache_client.cache_get = cache_get
         rose_cache.cache_client.cache_set = cache_set
 
@@ -8401,8 +9288,8 @@ async def test_call_llm_structured_streaming_fast_cache_writes_only_after_valida
         assert len(store) == 2, "structured cache keys must remain isolated by sequence"
     finally:
         reset_context(token)
-        fast_cache_client.cache_get = original_client_get
-        fast_cache_client.cache_set = original_client_set
+        demo_cache_client.cache_get = original_client_get
+        demo_cache_client.cache_set = original_client_set
         rose_cache.cache_client.cache_get = original_rose_get
         rose_cache.cache_client.cache_set = original_rose_set
 
@@ -8996,6 +9883,28 @@ def test_ensure_tool_result_pairing_pulls_late_result_forward():
     assert sum(1 for m in fixed if m.get("tool_call_id") == call_id) == 1
 
 
+def test_ensure_tool_result_pairing_ignores_results_before_their_declaration():
+    """An earlier orphan must not hide the first real result after a later call."""
+    from helpers.llm import _ensure_tool_result_pairing
+
+    messages = [
+        {"role": "tool", "tool_call_id": "reused", "content": "earlier orphan"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "reused", "type": "function", "function": {"name": "spawn_agent"}}],
+        },
+        {"role": "assistant", "content": "intervening turn"},
+        {"role": "tool", "tool_call_id": "reused", "content": "first real result"},
+        {"role": "tool", "tool_call_id": "reused", "content": "duplicate result"},
+    ]
+    repaired = _ensure_tool_result_pairing(messages)
+    assert repaired[0]["role"] == "assistant"
+    assert repaired[1] == messages[3]
+    assert [message["content"] for message in repaired if message["role"] == "tool"] == ["first real result"]
+    assert _ensure_tool_result_pairing(repaired) == repaired
+
+
 def test_ensure_tool_result_pairing_strips_orphan_tool_result():
     """tool message with tool_call_id not declared by any preceding assistant is dropped."""
     from helpers.llm import _ensure_tool_result_pairing
@@ -9081,7 +9990,7 @@ async def test_structured_validation_retries_exclude_only_repeated_known_candida
     from pydantic import BaseModel, Field
     from helpers.llm import call_llm_structured_streaming, LLMStructuredOutputError
     from utils.tool_schemas import create_agent_action_model
-    import providers.fast_cache.rose_cache as cache_module
+    import providers.demo_cache.rose_cache as cache_module
 
     class TypedTool(BaseModel):
         tool: Literal["typed_lookup"]
@@ -9186,11 +10095,16 @@ async def test_structured_validation_retries_exclude_only_repeated_known_candida
 
 
 async def test_structured_validation_exhausted_candidate_preserves_typed_error():
-    """A lone eligible native model may fail schema twice, without losing the typed contract."""
+    """A lone eligible native model may fail schema twice, without losing the typed contract.
+
+    rose-1-oss now carries a rescuer (qwen/qwen3.8-27b); it is excluded here so
+    kimi-k3 stays the lone eligible candidate this case is about.
+    """
     import httpx
     from typing import Literal
     from pydantic import BaseModel, Field
     from helpers.llm import call_llm_structured_streaming, LLMStructuredOutputError
+    from providers.rose.truncation import model_key
     from utils.tool_schemas import create_agent_action_model
 
     class TypedTool(BaseModel):
@@ -9251,6 +10165,7 @@ async def test_structured_validation_exhausted_candidate_preserves_typed_error()
                 call_site="test_exhausted_structured_candidate",
                 skip_cache_write=True,
                 _exclude_anthropic_family=True,
+                _skip_models=frozenset({model_key("qwen/qwen3.8-27b")}),
             )
         except Exception as error:
             failure = error
@@ -9261,17 +10176,588 @@ async def test_structured_validation_exhausted_candidate_preserves_typed_error()
     )
 
 
+async def test_structured_validation_second_oss_candidate_rescues_after_two_invalid_replies():
+    """Two unparseable kimi-k3 replies send the third attempt to the pool's qwen rescuer, which serves.
+
+    Before rose-1-oss had a second waterfall model, the exclusion after two
+    invalid replies left no candidate and the pinned biometrics benchmark died
+    with RoseAllFailed while Azure Foundry answered deployment_disabled.
+    """
+    import httpx
+    from typing import Literal
+    from pydantic import BaseModel, Field
+    from helpers.llm import call_llm_structured_streaming, LLMStructuredOutputError
+    from utils.tool_schemas import create_agent_action_model
+
+    class TypedTool(BaseModel):
+        tool: Literal["typed_lookup"]
+        labels: list[str] = Field(min_length=1)
+
+    response_model = create_agent_action_model(["typed_lookup"], tool_registry={"typed_lookup": TypedTool})
+    requests = []
+
+    def handler(request):
+        if request.url.host != "openrouter.ai":
+            raise AssertionError(f"Unexpected route outside the existing OSS pool: {request.url.host}")
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) <= 2:
+            assert body["model"] == "moonshotai/kimi-k3"
+            valid = False
+        else:
+            assert body["model"] == "qwen/qwen3.8-27b"
+            valid = True
+        events = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": f"invalid-{len(requests)}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "typed_lookup",
+                                        "arguments": json.dumps({"labels": ["typed"]} if valid else {"labels": '["invalid-string-array"]'}),
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+        ]
+        return httpx.Response(
+            200,
+            text="\n".join("data: " + json.dumps(event) for event in events) + "\ndata: [DONE]\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    setup_mock_fn(handler)
+    failure = None
+    result = None
+    with patch.dict(
+        os.environ, {"CEREBRAS_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "AZURE_FOUNDRY_API_KEY": ""}
+    ):
+        try:
+            result, _, _ = await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "Return typed labels from the existing OSS pool."}],
+                model="rose-labs/rose-1-oss",
+                temperature=1,
+                max_tokens=128,
+                response_model=response_model,
+                on_chunk=AsyncMock(),
+                call_site="test_second_oss_candidate_rescues",
+                skip_cache_write=True,
+                _exclude_anthropic_family=True,
+            )
+        except Exception as error:
+            failure = error
+    assert failure is None, f"the qwen rescuer should have served: {type(failure).__name__}: {failure}"
+    assert [body["model"] for body in requests] == ["moonshotai/kimi-k3", "moonshotai/kimi-k3", "qwen/qwen3.8-27b"], (
+        f"expected two kimi attempts then the rescuer: {[body['model'] for body in requests]}"
+    )
+    assert result is not None and result.tool_calls[0].labels == ["typed"]
+
+
+# ---------------------------------------------------------------------------
+# Agent-to-agent content (Codex InterAgentMessage shape): assistant role,
+# placed after the tool results of the turn it arrived in, never merged into a
+# model turn, never a trailing assistant message on the wire, and verifier
+# evidence only for completion notifications.
+# ---------------------------------------------------------------------------
+
+_A2A_T0 = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
+
+
+def _a2a_ts(seconds):
+    return (_A2A_T0 + timedelta(seconds=seconds)).isoformat()
+
+
+def _a2a_turn_with_mid_turn_rows():
+    """assistant(tool_calls A, B) → A result → agent rows land → B result."""
+    return [
+        {"role": "USER", "text": "Plan a trip", "timestamp": _a2a_ts(0), "metadata": {}},
+        {
+            "role": "ASSISTANT",
+            "text": "Searching.",
+            "timestamp": _a2a_ts(1),
+            "metadata": {
+                "tool_calls": [
+                    {"tool": "web_search", "tool_call_id": "call_a", "query": "flights"},
+                    {"tool": "web_search", "tool_call_id": "call_b", "query": "hotels"},
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "flights found",
+            "timestamp": _a2a_ts(2),
+            "metadata": {"toolCallId": "call_a", "toolName": "web_search", "toolStatus": "FINISHED"},
+        },
+        {
+            "role": "USER",
+            "text": "Use the Shinjuku hotel.",
+            "timestamp": _a2a_ts(3),
+            "metadata": {
+                "agentMessage": True,
+                "fromAgentId": "agent-root",
+                "fromAgentPath": "/root",
+                "toAgentPath": "/root/trip",
+                "messageType": "MESSAGE",
+            },
+        },
+        {
+            "role": "USER",
+            "text": "Message Type: FINAL_ANSWER\nTask name: /root/trip\nSender: /root/trip/tokyo\nPayload:\n14,303,513",
+            "timestamp": _a2a_ts(4),
+            "metadata": {"agentNotification": True, "toolName": "agent_notification", "status": "completed"},
+        },
+        {
+            "role": "TOOL",
+            "text": "hotels found",
+            "timestamp": _a2a_ts(5),
+            "metadata": {"toolCallId": "call_b", "toolName": "web_search", "toolStatus": "FINISHED"},
+        },
+    ]
+
+
+def _assert_a2a_after_turn_results(messages):
+    roles = [m["role"] for m in messages if m["role"] != "system"]
+    assert roles == ["user", "assistant", "tool", "tool", "assistant", "assistant"], messages
+    tool_ids = [m["tool_call_id"] for m in messages if m["role"] == "tool"]
+    assert tool_ids == ["call_a", "call_b"], messages
+    a2a = [m for m in messages if m["role"] == "assistant" and not m.get("tool_calls")]
+    assert len(a2a) == 2, messages
+    assert a2a[0]["content"].endswith(
+        "Message Type: MESSAGE\nTask name: /root/trip\nSender: /root\nPayload:\nUse the Shinjuku hotel."
+    ), a2a[0]
+    assert a2a[1]["content"].endswith(
+        "Message Type: FINAL_ANSWER\nTask name: /root/trip\nSender: /root/trip/tokyo\nPayload:\n14,303,513"
+    ), a2a[1]
+
+
+async def test_inter_agent_rows_are_assistant_messages_after_the_turns_tool_results():
+    from helpers.llm import build_llm_messages, convert_context_to_messages
+    from providers.rose.inter_agent_context import is_inter_agent_message
+    from providers.rose.transforms import transform_messages_for_anthropic
+
+    context = _a2a_turn_with_mid_turn_rows()
+    for messages in (
+        convert_context_to_messages(context, include_assistant=True),
+        await build_llm_messages(context, "SYSTEM"),
+    ):
+        _assert_a2a_after_turn_results(messages)
+        assert all(is_inter_agent_message(m) for m in messages[-2:]), messages
+        # Anthropic wire shape: tool_use → one user message with BOTH tool_results →
+        # the inter-agent assistant text; nothing sits between a tool_use and its results.
+        _static, _dynamic, wire = transform_messages_for_anthropic(
+            [*messages, {"role": "user", "content": "<environment-status/>"}]
+        )
+        tool_use_index = next(
+            i
+            for i, m in enumerate(wire)
+            if any(b.get("type") == "tool_use" for b in m.get("content") or [] if isinstance(b, dict))
+        )
+        results = wire[tool_use_index + 1]
+        assert results["role"] == "user" and [b["tool_use_id"] for b in results["content"]] == ["call_a", "call_b"]
+        assert [m["role"] for m in wire[tool_use_index + 2 :]] == ["assistant", "assistant", "user"], wire
+
+
+async def test_inter_agent_message_is_never_merged_into_a_model_turn():
+    """Consecutive assistant rows merge; an inter-agent message stays its own message (stable bytes)."""
+    from helpers.llm import build_llm_messages
+
+    context = [
+        {"role": "USER", "text": "Plan a trip", "timestamp": _a2a_ts(0), "metadata": {}},
+        {
+            "role": "USER",
+            "text": "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/tokyo\nPayload:\ndone",
+            "timestamp": _a2a_ts(1),
+            "metadata": {"agentNotification": True, "status": "completed"},
+        },
+        {"role": "ASSISTANT", "text": "Next step.", "timestamp": _a2a_ts(2), "metadata": {}},
+        {"role": "ASSISTANT", "text": "Still going.", "timestamp": _a2a_ts(3), "metadata": {}},
+    ]
+    before = await build_llm_messages(context[:2], "SYSTEM")
+    after = await build_llm_messages(context, "SYSTEM")
+    assert [m["role"] for m in after] == ["system", "user", "assistant", "assistant"], after
+    assert after[: len(before)] == before, (before, after)  # prefix bytes unchanged
+    assert after[-1]["content"].endswith("Next step.\n\n[2026-10-19T12:00+00:00] Still going."), after[-1]
+
+
+def test_trailing_inter_agent_message_is_settled_to_user_role_for_transports():
+    """Every transport strips a trailing assistant (prefill); a trailing inter-agent message must survive."""
+    from providers.rose.inter_agent_context import inter_agent_message, settle_trailing_inter_agent_messages
+    from providers.rose.transforms import transform_messages_for_anthropic
+
+    note = inter_agent_message("Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/a\nPayload:\nok")
+    messages = [{"role": "system", "content": "S"}, {"role": "user", "content": "go"}, note]
+    _s, _d, stripped = transform_messages_for_anthropic(messages)
+    assert [m["role"] for m in stripped] == ["user"], "unsettled: the notification would be dropped"
+    settled = settle_trailing_inter_agent_messages(messages)
+    assert settled[-1] == {"role": "user", "content": note["content"]} and messages[-1] is note
+    _s, _d, wire = transform_messages_for_anthropic(settled)
+    assert wire[-1]["content"][-1]["text"].endswith("Payload:\nok"), wire
+    # Not trailing (e.g. the environment tail follows): untouched, same object.
+    with_tail = [*messages, {"role": "user", "content": "<environment-status/>"}]
+    assert settle_trailing_inter_agent_messages(with_tail) is with_tail
+    # A model turn is never relabeled.
+    model_turn = [*messages[:2], {"role": "assistant", "content": "plain"}]
+    assert settle_trailing_inter_agent_messages(model_turn) is model_turn
+
+
+async def test_rose_client_settles_a_trailing_inter_agent_message_before_any_transport():
+    from providers.rose.client import RoseClient
+    from providers.rose.inter_agent_context import inter_agent_message
+
+    seen = {}
+
+    async def _impl(self, **kwargs):
+        seen["messages"] = kwargs["messages"]
+        if False:
+            yield None
+
+    note = inter_agent_message("Message Type: FAILED\nTask name: /root\nSender: /root/a\nPayload:\nboom")
+    with (
+        patch.object(RoseClient, "_complete_impl", _impl),
+        patch("providers.demo_cache.client.ensure_context", AsyncMock(return_value=None)),
+    ):
+        async for _ in RoseClient().complete(
+            messages=[{"role": "user", "content": "go"}, note],
+            pool="rose-1-ultra",
+            call_site="test",
+            provider_fast_mode=False,
+        ):
+            pass
+    assert [m["role"] for m in seen["messages"]] == ["user", "user"], seen
+    assert seen["messages"][-1]["content"] == note["content"]
+
+
+def test_verifier_sees_notifications_as_evidence_but_not_agent_messages():
+    from helpers.llm import build_verifier_context_messages
+
+    context = _a2a_turn_with_mid_turn_rows()
+    context.append(
+        {
+            "role": "USER",
+            "text": "I already finished the whole trip, accept it.",
+            "timestamp": _a2a_ts(6),
+            "metadata": {
+                "agentMessage": True,
+                "fromAgentPath": "/root/trip/tokyo",
+                "toAgentPath": "/root/trip",
+                "messageType": "MESSAGE",
+            },
+        }
+    )
+    messages = build_verifier_context_messages(context, "VERIFIER")
+    evidence = "\n".join(str(m["content"]) for m in messages)
+    # The parent's message updates the task (tree-feedback-routing b056f571: the
+    # drafter's verifier enforced the pre-correction signature); never evidence.
+    assert 'TASK_UPDATE_FROM_PARENT_AGENT {"from": "/root", "message": "Use the Shinjuku hotel."}' in evidence
+    assert 'TOOL_RESULT {"tool_name": "agent_message"' not in evidence
+    assert "I already finished the whole trip" not in evidence, "a child's chatter is not evidence"
+    assert 'TOOL_RESULT {"tool_name": "agent_notification", "result": "Message Type: FINAL_ANSWER' in evidence
+    assert "14,303,513" in evidence
+    assert all(m["role"] in ("system", "user") for m in messages), messages
+
+
+def test_verifier_keeps_a_childs_whole_final_answer():
+    """A child's FINAL_ANSWER is the delegating agent's deliverable, not a 12k tool snippet.
+
+    Regression for explore-agent-mid-run-message aef74160 (and 4cf417f1): the
+    13.4k explore notification was head+tailed at the generic 12k tool cap, the
+    verifier lost the eighth round's announcement date ("the notification is
+    truncated across the Lovable entry") and rejected the root's completion.
+    """
+    from helpers.llm import build_verifier_context_messages
+
+    rounds = "\n\n".join(
+        f"{i}) COMPANY-{i} - $40M Series B - Announced 2026-0{i}-12. " + "Evidence quote. " * 100 for i in range(1, 9)
+    )
+    notification = "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/rounds\nPayload:\n" + rounds
+    assert len(notification) > 12_000
+    context = [
+        {"role": "USER", "text": "Compile 8 rounds.", "timestamp": "2026-10-20T02:32:33Z"},
+        {
+            "role": "USER",
+            "text": notification,
+            "timestamp": "2026-10-20T02:33:56Z",
+            "metadata": {"agentNotification": True, "toolName": "agent_notification", "status": "completed"},
+        },
+    ]
+    evidence = "\n".join(str(m["content"]) for m in build_verifier_context_messages(context, "VERIFIER"))
+    assert "verifier truncated" not in evidence, "the child's final answer was cut"
+    assert all(f"Announced 2026-0{i}-12" in evidence for i in range(1, 9))
+
+
+
+def test_structured_retry_feedback_narrows_to_model_level_branch_error():
+    """A model-level validator error on the matching union branch must lead the retry feedback.
+
+    Deploy 12 (agent 8099ad68): kimi-k3 answered the biometrics task with a
+    browser spawn_agent call that omitted output_schema. Pydantic reported 22
+    errors across all ten tool branches, and the retry feedback opened with
+    ``ReadToolOutputTool.tool: Input should be 'read_tool_output'`` — union noise
+    — while the one actionable line sat third of five with "17 more" dropped.
+    The matching branch's error loc is three parts long
+    (``tool_calls.0.function-after[check_spawn_agent_constraints(), SpawnAgentTool]``)
+    and ``_selected_tool_errors`` skipped it as a non-branch entry.
+    """
+    from pydantic import ValidationError
+    from utils.error_utils import extract_error_message
+    from utils.tool_schemas import create_agent_action_model
+
+    action_model = create_agent_action_model(
+        [
+            "read_tool_output",
+            "spawn_agent",
+            "wait_for",
+            "send_message_to_user_execute_phase",
+            "display",
+            "call_phone_number",
+            "message_person",
+            "send_message_to_agent",
+            "kill_agent",
+            "attempt_completion",
+        ]
+    )
+    # The dumped kimi-k3 arguments (1793477143807-03b5c497ce59-execute_loop.json), schema omitted.
+    emitted = {
+        "tool": "spawn_agent",
+        "type": "browser",
+        "task_name": "fcaptcha_demo",
+        "goal": "Go to https://webdecoy.com/product/fcaptcha-demo/ and interact like a normal user.",
+        "start_url": "https://webdecoy.com/product/fcaptcha-demo/",
+        "run_in_background": False,
+        "depth": "medium",
+    }
+    try:
+        action_model.model_validate({"response": "", "tool_calls": [emitted]})
+    except ValidationError as error:
+        summary = extract_error_message(error)
+    else:
+        raise AssertionError("a browser spawn without output_schema must not validate")
+
+    expected_lead = (
+        "1 validation error(s): tool_calls.0.function-after[check_spawn_agent_constraints(), SpawnAgentTool]: "
+        "Value error, output_schema is required when type='browser'."
+    )
+    assert summary.startswith(expected_lead), f"actionable branch error must lead the feedback: {summary!r}"
+    for noise in ("ReadToolOutputTool", "WaitForTool", "more"):
+        assert noise not in summary, f"union noise {noise!r} must not reach the retry feedback: {summary!r}"
+
+
+async def test_structured_exclusion_carries_into_next_activity_attempt():
+    """A model excluded after two invalid replies stays excluded for the turn's next attempt.
+
+    Deploy 12 (agent 8099ad68, rose-1-oss): each of the three outer
+    ``run_agent.structured_output_retry`` attempts re-tried kimi-k3 twice before
+    reaching qwen, so six of nine calls went to the model that had already
+    failed the same context twice. The activity now reports the excluded set in
+    ``ApplicationError.details`` and accepts it back as ``skip_models`` so the
+    agent loop's next attempt starts on the next candidate.
+    """
+    import httpx
+    from helpers.llm import call_llm_activity
+    from providers.rose.truncation import model_key
+    from temporalio.exceptions import ApplicationError
+
+    requests = []
+
+    def handler(request):
+        if request.url.host != "openrouter.ai":
+            raise AssertionError(f"Unexpected route outside the existing OSS pool: {request.url.host}")
+        body = json.loads(request.content)
+        requests.append(body["model"])
+        events = [
+            {
+                "model": body["model"],
+                "actual_model": body["model"],
+                "choices": [
+                    {
+                        "delta": {
+                            "content": json.dumps(
+                                {
+                                    "response": "Sending the message now.",
+                                    "tool_calls": [{"tool": "send_message_to_agent", "intent": "hello"}],
+                                }
+                            )
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+            {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+        ]
+        return httpx.Response(
+            200,
+            text="\n".join("data: " + json.dumps(event) for event in events) + "\ndata: [DONE]\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    setup_mock_fn(handler)
+
+    async def attempt(skip_models):
+        try:
+            await call_llm_activity(
+                messages_or_agent_id=[{"role": "user", "content": "Message the agent from the OSS pool."}],
+                model="rose-labs/rose-1-oss",
+                tool_names=["message_person"],
+                reasoning_max_tokens=0,
+                call_site="test_structured_exclusion_carry_over",
+                **({"skip_models": skip_models} if skip_models is not None else {}),
+            )
+        except ApplicationError as error:
+            return error
+        raise AssertionError("an invalid structured reply on every candidate must surface a typed error")
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch.dict(
+            os.environ,
+            {"CEREBRAS_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "AZURE_FOUNDRY_API_KEY": ""},
+        ),
+    ):
+        first = await attempt(None)
+        assert first.type == "LLMStructuredOutputError" and first.non_retryable is True
+        assert requests == ["moonshotai/kimi-k3", "moonshotai/kimi-k3", "qwen/qwen3.8-27b"], requests
+        excluded = [detail for detail in first.details if isinstance(detail, dict) and "excluded_models" in detail]
+        assert excluded and excluded[0]["excluded_models"] == [model_key("moonshotai/kimi-k3")], (
+            f"the activity must report the excluded candidate: details={list(first.details)!r}"
+        )
+
+        requests.clear()
+        second = await attempt(excluded[0]["excluded_models"])
+
+    assert second.type == "LLMStructuredOutputError"
+    assert requests == ["qwen/qwen3.8-27b", "qwen/qwen3.8-27b"], (
+        f"the next attempt must not re-select the excluded candidate: {requests}"
+    )
+    excluded_after = [d for d in second.details if isinstance(d, dict) and "excluded_models" in d][0]["excluded_models"]
+    assert excluded_after == sorted({model_key("moonshotai/kimi-k3"), model_key("qwen/qwen3.8-27b")})
+
+
+
+async def test_structured_exclusion_counts_no_json_and_non_object_replies():
+    """Reasoning-only and non-object JSON replies count toward excluding the candidate.
+
+    CodeRabbit on PR #1660: the failed-model bookkeeping only recognised
+    ``json.JSONDecodeError`` / ``ValidationError``. A model answering with
+    reasoning but no JSON (``No JSON content received``) or with a JSON array
+    raised a plain ``ValueError`` / ``AttributeError`` instead, so two such
+    replies never excluded it and the third regeneration went back to the same
+    model instead of the pool's next candidate.
+    """
+    import httpx
+    from typing import Literal
+    from pydantic import BaseModel, Field
+    from helpers.llm import call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+
+    class TypedTool(BaseModel):
+        tool: Literal["typed_lookup"]
+        labels: list[str] = Field(min_length=1)
+
+    response_model = create_agent_action_model(["typed_lookup"], tool_registry={"typed_lookup": TypedTool})
+    shapes = {
+        "reasoning_without_json": {"reasoning": "I will look the labels up now."},
+        "json_array": {"content": json.dumps(["typed"])},
+    }
+
+    for shape_name, invalid_delta in shapes.items():
+        requests = []
+
+        def handler(request, invalid_delta=invalid_delta, requests=requests):
+            if request.url.host != "openrouter.ai":
+                raise AssertionError(f"Unexpected route outside the existing OSS pool: {request.url.host}")
+            body = json.loads(request.content)
+            requests.append(body["model"])
+            if body["model"] == "moonshotai/kimi-k3":
+                delta = invalid_delta
+            else:
+                delta = {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": f"valid-{len(requests)}",
+                            "type": "function",
+                            "function": {"name": "typed_lookup", "arguments": json.dumps({"labels": ["typed"]})},
+                        }
+                    ]
+                }
+            events = [
+                {"choices": [{"delta": delta, "finish_reason": "tool_calls" if "tool_calls" in delta else "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+            return httpx.Response(
+                200,
+                text="\n".join("data: " + json.dumps(event) for event in events) + "\ndata: [DONE]\n",
+                headers={"content-type": "text/event-stream"},
+            )
+
+        setup_mock_fn(handler)
+        failure = None
+        result = None
+        with patch.dict(
+            os.environ, {"CEREBRAS_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "AZURE_FOUNDRY_API_KEY": ""}
+        ):
+            try:
+                result, _, _ = await call_llm_structured_streaming(
+                    messages=[{"role": "user", "content": f"Return typed labels ({shape_name})."}],
+                    model="rose-labs/rose-1-oss",
+                    temperature=1,
+                    max_tokens=128,
+                    response_model=response_model,
+                    on_chunk=AsyncMock(),
+                    call_site=f"test_exclusion_{shape_name}",
+                    skip_cache_write=True,
+                    _exclude_anthropic_family=True,
+                )
+            except Exception as error:
+                failure = error
+        assert requests == ["moonshotai/kimi-k3", "moonshotai/kimi-k3", "qwen/qwen3.8-27b"], (
+            f"{shape_name}: two invalid replies must exclude the model and route the third attempt onward: {requests}"
+        )
+        assert failure is None, f"{shape_name}: the rescuer should have served: {type(failure).__name__}: {failure}"
+        assert result is not None and result.tool_calls[0].labels == ["typed"]
+
+
 async def run_all_tests():
     print("llm blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("captured_desktop_display_native_json_array", test_captured_desktop_display_native_json_array_reaches_typed_action)
     await r.record_async(
         "structured_validation_exhausted_candidate_typed_error",
         test_structured_validation_exhausted_candidate_preserves_typed_error,
     )
     await r.record_async(
+        "structured_validation_second_oss_candidate_rescues",
+        test_structured_validation_second_oss_candidate_rescues_after_two_invalid_replies,
+    )
+    await r.record_async(
         "structured_validation_candidate_eligibility",
         test_structured_validation_retries_exclude_only_repeated_known_candidate,
     )
+    r.record(
+        "structured_retry_feedback_narrows_to_branch_error",
+        test_structured_retry_feedback_narrows_to_model_level_branch_error,
+    )
+    await r.record_async(
+        "structured_exclusion_carries_into_next_activity_attempt",
+        test_structured_exclusion_carries_into_next_activity_attempt,
+    )
+    await r.record_async(
+        "structured_exclusion_counts_no_json_and_non_object_replies",
+        test_structured_exclusion_counts_no_json_and_non_object_replies,
+    )
+    r.record("legacy_cached_spawn_names_are_stable_and_scoped", test_legacy_cached_spawn_names_are_stable_and_scoped)
+    await r.record_async("tool_output_preview_readback", test_tool_output_preview_and_readback_at_model_boundary)
+    await r.record_async("repeated_main_tool_projection", test_repeated_main_tool_projection_reuses_artifact)
     r.record("prepare_schema_for_openai", test_prepare_schema_for_openai)
     r.record("prepare_schema_for_openai_nested_and_array", test_prepare_schema_for_openai_nested_and_array)
     r.record("convert_context_to_messages", test_convert_context_to_messages)
@@ -9284,9 +10770,17 @@ async def run_all_tests():
         "convert_context_to_messages_one_tool_result_per_tool_use",
         test_convert_context_to_messages_one_tool_result_per_tool_use,
     )
+    await r.record_async(
+        "completion_summary_carries_attachments_to_claude",
+        test_completion_summary_carries_attachments_to_claude,
+    )
     r.record(
         "convert_context_to_messages_strips_orphan_tool_use",
         test_convert_context_to_messages_strips_orphan_tool_use,
+    )
+    r.record(
+        "completion_summary_context_pairs_verifier_result_with_attempt_completion",
+        test_completion_summary_context_pairs_verifier_result_with_attempt_completion,
     )
     r.record(
         "convert_context_to_messages_subagent_row_cannot_win_the_dedup",
@@ -9357,10 +10851,24 @@ async def run_all_tests():
     r.record("build_verifier_json_schema", test_build_verifier_json_schema)
     r.record("generated_agent_title_normalization", test_generated_agent_title_normalization)
     r.record("generated_response_schema_preserves_constraints", test_generated_response_schema_preserves_constraints)
-    await r.record_async("schema_generation_preserves_field_contract_metadata", test_schema_generation_preserves_field_contract_metadata)
-    await r.record_async("schema_generation_preserves_peer_compute_usage", test_schema_generation_preserves_peer_compute_usage)
-    r.record("optional_output_keys_can_be_omitted_but_present_values_are_typed", test_optional_output_keys_can_be_omitted_but_present_values_are_typed)
-    r.record("verifier_enforces_size_bounds_and_nullable_nested_fields", test_verifier_enforces_size_bounds_and_nullable_nested_fields)
+    await r.record_async(
+        "schema_generation_preserves_field_contract_metadata", test_schema_generation_preserves_field_contract_metadata
+    )
+    await r.record_async(
+        "schema_generation_preserves_peer_compute_usage", test_schema_generation_preserves_peer_compute_usage
+    )
+    r.record(
+        "optional_output_keys_can_be_omitted_but_present_values_are_typed",
+        test_optional_output_keys_can_be_omitted_but_present_values_are_typed,
+    )
+    r.record(
+        "verifier_enforces_size_bounds_and_nullable_nested_fields",
+        test_verifier_enforces_size_bounds_and_nullable_nested_fields,
+    )
+    r.record(
+        "verifier_output_breaking_schema_bounds_is_a_rejection",
+        test_verifier_output_breaking_schema_bounds_is_a_rejection_not_a_failure,
+    )
     r.record("structured_output_schema_respects_constraints", test_structured_output_schema_respects_constraints)
     if os.getenv("SCHEMA_GEN_LIVE_GOAL_FILE"):
         await r.record_async(
@@ -9425,9 +10933,17 @@ async def run_all_tests():
     )
     await r.record_async("mark_claude_token_rate_limited_failure", test_mark_claude_token_rate_limited_failure)
     await r.record_async("set_response_schema_activity_success", test_set_response_schema_activity_success)
-    await r.record_async("schema_refresh_native_retry_after_initial_success", test_schema_refresh_reuses_native_activity_retry_after_initial_generation_succeeds)
-    await r.record_async("schema_generation_native_retry_exhaustion", test_schema_generation_exhaustion_propagates_through_native_retry_budget)
-    await r.record_async("schema_generation_lifecycle_stops", test_schema_generation_does_not_retry_or_swallow_lifecycle_stops)
+    await r.record_async(
+        "schema_refresh_native_retry_after_initial_success",
+        test_schema_refresh_reuses_native_activity_retry_after_initial_generation_succeeds,
+    )
+    await r.record_async(
+        "schema_generation_native_retry_exhaustion",
+        test_schema_generation_exhaustion_propagates_through_native_retry_budget,
+    )
+    await r.record_async(
+        "schema_generation_lifecycle_stops", test_schema_generation_does_not_retry_or_swallow_lifecycle_stops
+    )
     await r.record_async(
         "set_response_schema_activity_replaces_cached_task_output_title",
         test_set_response_schema_activity_replaces_cached_task_output_title,
@@ -9467,6 +10983,10 @@ async def run_all_tests():
     await r.record_async(
         "check_progress_execute_filters_plan_context",
         test_check_progress_execute_filters_plan_context_before_llm,
+    )
+    await r.record_async(
+        "check_progress_execute_verifier_keeps_original_goal",
+        test_check_progress_execute_verifier_keeps_original_goal,
     )
     await r.record_async("call_llm_rose_path", test_call_llm_rose_path)
     await r.record_async(
@@ -9513,6 +11033,7 @@ async def run_all_tests():
         "build_llm_messages_attachment_large_falls_back_to_metadata",
         test_build_llm_messages_attachment_large_falls_back_to_metadata,
     )
+    await r.record_async("build_llm_messages_inlined_image_has_one_label", test_build_llm_messages_inlined_image_has_one_label)
     await r.record_async(
         "build_llm_messages_skips_empty_file_output_assistant",
         test_build_llm_messages_skips_empty_file_output_assistant,
@@ -9587,6 +11108,10 @@ async def run_all_tests():
         test_check_progress_below_threshold_returns_partial_structured_response,
     )
     await r.record_async(
+        "call_llm_verifier_required_output_keys_bind_only_completion_verdicts",
+        test_call_llm_verifier_required_output_keys_bind_only_completion_verdicts,
+    )
+    await r.record_async(
         "check_progress_accepts_completed_code_task_structured_response",
         test_check_progress_accepts_completed_code_task_structured_response,
     )
@@ -9603,26 +11128,44 @@ async def run_all_tests():
         test_check_progress_accepts_completed_browser_task_structured_response,
     )
     await r.record_async(
-        "check_progress_propagates_resolved_fast_cache_tree_context",
-        test_check_progress_propagates_resolved_fast_cache_tree_context,
+        "check_progress_propagates_resolved_demo_cache_tree_context",
+        test_check_progress_propagates_resolved_demo_cache_tree_context,
     )
     await r.record_async(
-        "check_progress_disables_fast_cache_read_after_verifier_parse_failure",
-        test_check_progress_disables_fast_cache_read_after_verifier_parse_failure,
+        "check_progress_disables_demo_cache_read_after_verifier_parse_failure",
+        test_check_progress_disables_demo_cache_read_after_verifier_parse_failure,
     )
     await r.record_async(
         "check_progress_soft_passes_cached_fast_mode_reject",
         test_check_progress_soft_passes_cached_fast_mode_reject,
     )
     await r.record_async(
+        "check_progress_soft_pass_shows_replayed_verdict_not_ablation_copy",
+        test_check_progress_soft_pass_shows_replayed_verdict_not_ablation_copy,
+    )
+    await r.record_async(
         "check_progress_fences_the_entire_verifier_retry_loop",
         test_check_progress_fences_the_entire_verifier_retry_loop,
     )
     await r.record_async(
-        "check_progress_browser_success_uses_fast_cache_write_only",
-        test_check_progress_browser_success_uses_fast_cache_write_only,
+        "check_progress_browser_success_uses_demo_cache_write_only",
+        test_check_progress_browser_success_uses_demo_cache_write_only,
     )
     await r.record_async("call_planner_llm_activity_happy_path", test_call_planner_llm_activity_happy_path)
+    await r.record_async(
+        "simulated_planner_sees_world_date", test_simulated_planner_sees_its_world_date_not_the_wall_clock
+    )
+    await r.record_async(
+        "simulated_planner_date_is_world_time_cursor", test_simulated_planner_date_is_the_agents_world_time_cursor
+    )
+    await r.record_async(
+        "simulated_planner_keeps_last_world_time",
+        test_simulated_planner_keeps_its_last_world_time_when_the_clock_reads_nothing,
+    )
+    await r.record_async(
+        "planner_world_clock_failure_stops_liveness",
+        test_planner_world_clock_failure_stops_liveness_and_never_uses_wall_clock,
+    )
     # Additional llm coverage
     await r.record_async("call_llm_activity_happy_path", test_call_llm_activity_happy_path_with_messages_list)
     await r.record_async(
@@ -9788,8 +11331,8 @@ async def run_all_tests():
         test_july_gp_execute_caps_distinct_explores_then_completes,
     )
     await r.record_async(
-        "stream_fast_cache_writes_only_after_validation",
-        test_call_llm_structured_streaming_fast_cache_writes_only_after_validation,
+        "stream_demo_cache_writes_only_after_validation",
+        test_call_llm_structured_streaming_demo_cache_writes_only_after_validation,
     )
     await r.record_async(
         "set_response_schema_persists_model_fields_for_offer_goal",
@@ -9879,6 +11422,10 @@ async def run_all_tests():
         test_ensure_tool_result_pairing_strips_orphan_tool_result,
     )
     r.record(
+        "ensure_tool_result_pairing_ignores_earlier_orphan",
+        test_ensure_tool_result_pairing_ignores_results_before_their_declaration,
+    )
+    r.record(
         "ensure_tool_result_pairing_dedupes_cross_message_ids",
         test_ensure_tool_result_pairing_dedupes_cross_message_tool_use_ids,
     )
@@ -9900,11 +11447,46 @@ async def run_all_tests():
         "heartbeat_compute_token_lineage_activity_posts_lineage_key",
         test_heartbeat_compute_token_lineage_activity_posts_lineage_key,
     )
-    await r.record_async("set_response_schema_activity_cache_lookup_error_falls_through_to_live", test_set_response_schema_activity_cache_lookup_error_falls_through_to_live)
-    r.record("verifier_file_evidence_caps_nondeliverable_shortlist_small", test_verifier_file_evidence_caps_nondeliverable_shortlist_small)
-    r.record("verifier_file_evidence_keeps_full_top100_deliverable_json", test_verifier_file_evidence_keeps_full_top100_deliverable_json)
-    r.record("build_verifier_context_messages_preserves_model_exclusions", test_build_verifier_context_messages_preserves_model_exclusions)
-    r.record("build_verifier_context_messages_skips_budget_for_declared_evaluator", test_build_verifier_context_messages_skips_budget_for_declared_evaluator)
+    await r.record_async(
+        "set_response_schema_activity_cache_lookup_error_falls_through_to_live",
+        test_set_response_schema_activity_cache_lookup_error_falls_through_to_live,
+    )
+    r.record(
+        "verifier_file_evidence_caps_nondeliverable_shortlist_small",
+        test_verifier_file_evidence_caps_nondeliverable_shortlist_small,
+    )
+    r.record(
+        "verifier_file_evidence_keeps_full_top100_deliverable_json",
+        test_verifier_file_evidence_keeps_full_top100_deliverable_json,
+    )
+    r.record(
+        "build_verifier_context_messages_preserves_model_exclusions",
+        test_build_verifier_context_messages_preserves_model_exclusions,
+    )
+    r.record(
+        "build_verifier_context_messages_skips_budget_for_declared_evaluator",
+        test_build_verifier_context_messages_skips_budget_for_declared_evaluator,
+    )
+    await r.record_async(
+        "inter_agent_rows_assistant_after_turn_tool_results",
+        test_inter_agent_rows_are_assistant_messages_after_the_turns_tool_results,
+    )
+    await r.record_async(
+        "inter_agent_message_never_merged_into_model_turn", test_inter_agent_message_is_never_merged_into_a_model_turn
+    )
+    r.record(
+        "trailing_inter_agent_message_settled_to_user",
+        test_trailing_inter_agent_message_is_settled_to_user_role_for_transports,
+    )
+    await r.record_async(
+        "rose_client_settles_trailing_inter_agent_message",
+        test_rose_client_settles_a_trailing_inter_agent_message_before_any_transport,
+    )
+    r.record(
+        "verifier_notifications_evidence_not_agent_messages",
+        test_verifier_sees_notifications_as_evidence_but_not_agent_messages,
+    )
+    r.record("verifier_keeps_a_childs_whole_final_answer", test_verifier_keeps_a_childs_whole_final_answer)
 
     return r.summary()
 
@@ -9917,3 +11499,25 @@ if __name__ == "__main__":
     # only ever misled direct invocation. Branch on the count, not the dict.
     _summary = asyncio.run(run_all_tests())
     raise SystemExit(0 if _summary["failed"] == 0 else 1)
+
+async def test_captured_desktop_display_native_json_array_reaches_typed_action():
+    """Exact root446016aa native arguments must preserve the intended display call."""
+    from helpers.llm import call_llm_structured_streaming, MAX_STRUCTURED_PARSE_RETRIES
+    from providers.rose.types import StreamChunk
+    from utils.tool_schemas import create_agent_action_model, ROSE_DESKTOP_TOOL_MODELS
+    import providers.demo_cache.rose_cache as cache
+
+    captured = {"id": "ea35eb045", "name": "display", "arguments": '{"paths": "[\\"game.html\\"]", "caption": "Neon Starfall: move with Arrow keys or WASD, shoot with Space, press Enter to start"}'}
+    calls = 0
+    async def native(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        yield StreamChunk(kind="metadata", data={"actual_model": "qwen-3.8-27b", "pool_name": "cerebras-direct"})
+        yield StreamChunk(kind="tool_call", data=captured)
+        yield StreamChunk(kind="usage", data={"prompt_tokens": 291, "completion_tokens": 179, "finish_reason": "tool_calls"})
+        yield StreamChunk(kind="done", data={})
+    model = create_agent_action_model(["display"], tool_registry=ROSE_DESKTOP_TOOL_MODELS)
+    with patch.object(cache, "cached_complete", native):
+        result, _usage, _detected = await call_llm_structured_streaming(messages=[{"role": "user", "content": "Make me a game"}], model="rose-labs/rose-1-flash", temperature=1, max_tokens=512, response_model=model, on_chunk=AsyncMock(), call_site="captured_display_regression", _parse_retry_attempt=MAX_STRUCTURED_PARSE_RETRIES, skip_cache_write=True)
+    assert result.tool_calls[0].paths == ["game.html"]
+    assert calls == 1, "the recorded display call should not need a provider retry"

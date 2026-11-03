@@ -41,12 +41,12 @@ fi
 require_text "Exactly two planned user-input gates." "/descend must define two planned user gates"
 require_text 'Every failed task gets its own read-only triage card' "/descend must triage every failure before clustering"
 require_text 'every cluster — a singleton included — enters its own `/RCA` cycle' "/descend must enter RCA once per cluster before benchmark rerunning"
-require_text 'No failed task may be rerun until a cluster RCA with causal proof covers it' "/descend must not rerun a failure that no RCA covers"
-require_text 'run the unchanged owning-boundary repro red then green' "/descend must require causal fail/pass proof before a benchmark rerun"
+require_text 'pending proof is not a global scheduling gate' "/descend must permit unchanged next slices during repairs"
+require_text 'Require the unchanged owning-boundary repro red then green' "/descend must require causal fail/pass proof before a benchmark rerun"
 require_text 'That exact rerun supplies `/RCA`' "/descend must make the post-approval rerun supply benchmark outcome proof"
-require_text "rank the clusters" "/descend must rank clusters after the first infra-clean RCA set"
+require_text "Rank ready clusters incrementally" "/descend must rank ready clusters without a global RCA barrier"
 require_text "member-task count, largest first" "/descend must ask about the cluster that flips the most tasks first"
-require_text "Andy sees a lower-ranked cluster only if" "/descend must show a lower-ranked cluster only when higher ones are busy"
+require_text "lower-ranked ready cluster is not held behind" "/descend must deliver ready approvals without waiting for unrelated clusters"
 require_text "not a prod deploy" "/descend must apply approved fixes on a local snapshot, not a prod deploy"
 require_text "keeps its position" "/descend must keep a cluster's rank when its outcome-proof rerun fails"
 require_text "Re-rank only when membership changes" "/descend must keep the ask order stable between clusterings"
@@ -100,7 +100,7 @@ else
 fi
 require_text "HARNESS_FIX_DECISION" "/descend must stop for harness-fix approval"
 require_text "DEPLOY_ADMIN_APPROVAL" "/descend must stop for required deploy approval"
-require_text "every HARNESS failure has complete causal RCA proof" "/descend must require causal RCA proof before stopping for approval"
+require_text "that cluster has complete causal RCA proof" "/descend must require each approval cluster to have its own causal proof"
 require_text "Causal proof; outcome pending" "/descend must distinguish causal RCA proof from exact benchmark outcome proof"
 require_text "Never enter HARNESS_FIX_DECISION with an open observability gap." "/descend must keep investigating open observability gaps instead of stopping"  # pragma: allowlist secret
 require_text '## `/sync` checkpoints' "/descend must define durable sync checkpoints"
@@ -111,22 +111,19 @@ require_text 'before preparing each isolated deploy-unit worktree' "/descend mus
 require_text "pause only" "deploy approval must not freeze independent RCA work"
 require_text "Prepare a clean" "/descend must use a fix-only isolated deploy worktree"
 require_text 'bash scripts/prepare-deploy-worktree.sh' "/descend must provision isolated deploy worktrees before /deploy"
-require_text "Bench run:" "/descend header must show benchmark timing"
-require_text 'Overall slice: **<passed_original>/<total_original> passed**' "/descend header must report progress against the complete original slice"
-require_text 'Latest run: **<passed_run>/<total_run> passed**' "/descend header must label subset-run results separately"
+require_text "Bench run times come from producer artifacts" "/descend must show producer benchmark times"
+require_text 'Overall slice: <passed_original>/<total_original> passed' "/descend header must report progress against the complete original slice"
+require_text 'Latest run: <passed_run>/<total_run> passed' "/descend header must label subset-run results separately"
 require_text 'Never put the latest subset denominator in the Overall slice field.' "/descend must not present a subset as the full slice"
 require_text 'original resolved slice name, exact task list, and total task count;' "/descend state must preserve the original slice denominator"
 require_text 'latest executed subset and its exact task list;' "/descend state must distinguish the latest rerun subset"
 require_text 'cumulative latest accepted status for every original task;' "/descend state must track overall progress task by task"
-require_text "Rows with ⏳ Deploy approval first" "deploy approvals must sort first"
-require_text "Rows with ✅ Deployed #<PR> last" "deployed rows must sort last"
 require_text "**INFRA:**" "/descend must classify infrastructure failures"
 require_text "**HARNESS:**" "/descend must classify trustworthy benchmark failures as harness"
-require_text "| ID | Kind | Class | Tasks | Issue (≤100 chars) | RCA | Fix | Test | Approval | Real rerun | Deploy |" "/descend must use a cluster-oriented lifecycle table with a pinned issue class and member count"
-require_text "Browser agent failed to start because proxy generation returned HTTP 400" "/descend issue rows must state the concrete observed failure"
-require_text "The issue is <root cause at the first-bad boundary>" "fix approval must explain the RCA"
-require_text "where we measured <measurement>" "fix approval must report the repro measurement"
-require_text "The unchanged local repro now" "fix approval must report post-fix proof"
+require_text "Every row records ID, kind, issue class, exact member names/count" "/descend must preserve the cluster lifecycle in durable state"
+require_text "core claim identifies the issue class and proven first-bad boundary" "fix approval must explain the RCA"
+require_text "State the wrong observed value, expected value" "fix approval must report the repro measurement"
+require_text "identical repro now passing" "fix approval must report post-fix proof"
 require_text "Approve: <row ID> approve" "fix approval must end with clear decision syntax"
 require_text "agents/benchmarks/history/descend_steps.jsonl" "/descend must write step timings to tracked history"
 require_text "scripts/descend_step_log.py start" "/descend must start its first timed step"
@@ -142,29 +139,27 @@ require_text '`scripts/factory_review.py` consumes' "/descend timing history mus
 RESPONSE_CONTRACT=$(sed -n '/^## Response contract/,$p' "$DESCEND_COMMAND")
 STOP_ONE_CONTRACT=$(sed -n '/^## Stop 1 — HARNESS_FIX_DECISION/,/^## Rerun and parallel deploy/p' "$DESCEND_COMMAND")
 SYNC_CONTRACT=$(sed -n '/^## `\/sync` checkpoints/,/^## State machine/p' "$DESCEND_COMMAND")
-INFRA_LOOP=$(sed -n '/^The infra loop is strict:/,/^Do not stop for Andy/p' "$DESCEND_COMMAND")
+INFRA_LOOP=$(sed -n '/^The root scheduling loop is:/,/^Do not stop for Andy/p' "$DESCEND_COMMAND")
 HARNESS_RCA=$(sed -n '/^## HARNESS RCA/,/^## Stop 1/p' "$DESCEND_COMMAND")
 grep -Fq 'each distinct `/RCA` invocation' <<<"$SYNC_CONTRACT" || fail "sync checkpoints must run before each distinct RCA"
 grep -Fq 'run /sync immediately before each distinct /RCA' <<<"$INFRA_LOOP" || fail "infra RCA loop must sync before every RCA"
 grep -Fq 'Run `/sync` immediately before every distinct `/RCA`' <<<"$HARNESS_RCA" || fail "harness RCA loop must sync before every RCA"
 grep -Fq 'or an honest open observability gap' <<<"$STOP_ONE_CONTRACT" && fail "open observability gaps must not qualify for the harness-fix decision stop"  # pragma: allowlist secret
 grep -Fq '~~~text' <<<"$RESPONSE_CONTRACT" && fail "response examples must not use ~~~ code blocks (approvals use the canonical text block)"
-RESPONSE_PROSE=$(python3 - "$RESPONSE_CONTRACT" <<'PY'
-import sys
-outside = []
-in_text = False
-for line in sys.argv[1].splitlines():
-    if not in_text and line.strip() == "```text":
-        in_text = True
-    elif in_text and line.strip() == "```":
-        in_text = False
-    elif not in_text:
-        outside.append(line)
-assert not in_text, "response text examples must have balanced fences"
-print("\n".join(outside))
-PY
-)
-grep -Fq '━' <<<"$RESPONSE_PROSE" && fail "response header must not use an ASCII banner outside approved text blocks"
+require_text '.claude/shared/benchmark-report-format.txt' "/descend must use the shared benchmark scorecard"
+require_text '20 * infra_failed_jobs >= scheduled_total' "/descend must immediately stop at >=5% infra"
+require_text 'Exactly 5% disqualifies' "/descend must stop at the equality boundary"
+require_text 'All human requests are delivered by the main thread' "/descend must centralize human approvals"
+require_text 'Capture recovered tool/model errors' "/descend must triage errors even on passing tasks"
+require_text 'Workers never open their own human approval request' "/descend workers must return approval packets to main"
+require_text 'Do not stop for Andy to fix infra' "/descend must repair infra autonomously"
+require_text 'total requested task × repetition instance count' "/descend must set parallel repetition width explicitly"
+require_text 'Freeze that selection across ordinary descent epochs' "/descend must retain fixed first-N selections"
+if grep -Fq 'Every /descend response uses real rendered Markdown' "$DESCEND_COMMAND" \
+  || grep -Fq 'Only after an infra-clean run.' "$DESCEND_COMMAND" \
+  || grep -Fq 'while the latest run contains any INFRA result:' "$DESCEND_COMMAND"; then
+  fail "/descend retained the obsolete response format or global zero-infra gate"
+fi
 grep -Fq '| Andy decision |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin must not be separate columns"
 grep -Fq '| Admin approval |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin must not be separate columns"
 grep -Fq '| Benchmark |' <<<"$RESPONSE_CONTRACT" && fail "real rerun must replace the ambiguous Benchmark column"
@@ -294,6 +289,73 @@ PY
 SH
 wide_names=()
 while IFS= read -r name; do wide_names+=("$name"); done <"$tmp/wide-names"
+# Fifty simultaneous copies exceed one controller's copy bound. With an option
+# the sharded operator refuses (--autoscale-max), auto routing keeps the whole
+# slice as one ordinary fleet and names the option in one warning.
+: >"$tmp/wide-capture"
+RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/wide-fleet" \
+RUN_BENCH_WIDE_CAPTURE="$tmp/wide-capture" \
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
+  "$RUN_BENCH" "${wide_names[@]}" --timeout 300 --autoscale-max 2 --strict-barrier --foreground \
+  >"$tmp/wide-fallback.out" 2>&1 || { cat "$tmp/wide-fallback.out" >&2; echo "FAIL: wide fallback route failed" >&2; exit 1; }
+[ "$(grep -c -- "--autoscale-max is not a sharded operator option; using the ordinary fleet path" "$tmp/wide-fallback.out")" -eq 1 ] ||
+  { cat "$tmp/wide-fallback.out" >&2; echo "FAIL: fallback must print exactly one warning naming the option" >&2; exit 1; }
+! grep -Fq "sharded controller operator:" "$tmp/wide-fallback.out" ||
+  { echo "FAIL: a refused option still entered the sharded operator" >&2; exit 1; }
+python3 - "$tmp/wide-names" "$tmp/wide-capture" <<'PY'
+import json
+import sys
+from pathlib import Path
+names = Path(sys.argv[1]).read_text().splitlines()
+calls = [json.loads(line) for line in Path(sys.argv[2]).read_text().splitlines()]
+assert len(calls) == 1, calls
+assert calls[0]["args"] == names + ["--timeout", "300", "--autoscale-max", "2", "--strict-barrier", "--foreground"]
+PY
+# RUN_BENCH_SHARDED_ROUTE=always keeps the strict sharded refusal: nothing starts.
+: >"$tmp/wide-capture"
+wide_status=0
+RUN_BENCH_SHARDED_ROUTE=always \
+RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/wide-fleet" \
+RUN_BENCH_WIDE_CAPTURE="$tmp/wide-capture" \
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
+  "$RUN_BENCH" "${wide_names[@]}" --timeout 300 --autoscale-max 2 --strict-barrier --foreground \
+  >"$tmp/wide-sharded.out" 2>&1 || wide_status=$?
+[ "$wide_status" -eq 2 ] || { cat "$tmp/wide-sharded.out" >&2; echo "FAIL: strict sharded route exit $wide_status" >&2; exit 1; }
+grep -Fq "sharded controller operator: 50 simultaneous copies exceed one controller's" "$tmp/wide-sharded.out"
+grep -Fq -- "--autoscale-max is not a sharded operator option" "$tmp/wide-sharded.out"
+[ ! -s "$tmp/wide-capture" ] || { echo "FAIL: refused sharded route started an ordinary fleet" >&2; exit 1; }
+# A plain wide run with only operator options (70 copies, --timeout) still
+# routes to the sharded operator. The operator interpreter is a recorder, so
+# nothing can reach a provider even if every local check passes.
+python3 - "$ROOT_DIR" "$tmp/wide70-names" <<'PY'
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+from cloudbench_catalog import load_unified_catalog
+names = [task["name"] for task in load_unified_catalog(root / "agents/benchmarks/tasks.json")
+         if task.get("status", "ready") == "ready" and not task.get("production_only")][:70]
+assert len(names) == len(set(names)) == 70
+Path(sys.argv[2]).write_text("\n".join(names) + "\n")
+PY
+wide70_names=()
+while IFS= read -r name; do wide70_names+=("$name"); done <"$tmp/wide70-names"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$RUN_BENCH_WIDE_CAPTURE.operator"\n' >"$tmp/operator-recorder"
+chmod +x "$tmp/operator-recorder"
+: >"$tmp/wide-capture"
+RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST="$tmp/operator-recorder" \
+RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/wide-fleet" \
+RUN_BENCH_WIDE_CAPTURE="$tmp/wide-capture" \
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
+  "$RUN_BENCH" "${wide70_names[@]}" --timeout 300 >"$tmp/wide70.out" 2>&1 || true
+grep -Fq "sharded controller operator: 70 simultaneous copies exceed one controller's" "$tmp/wide70.out" ||
+  { cat "$tmp/wide70.out" >&2; echo "FAIL: a plain 70-copy run did not route to the sharded operator" >&2; exit 1; }
+! grep -Fq "using the ordinary fleet path" "$tmp/wide70.out" ||
+  { echo "FAIL: operator-only options must not fall back" >&2; exit 1; }
+[ ! -s "$tmp/wide-capture" ] || { echo "FAIL: a sharded route started an ordinary fleet" >&2; exit 1; }
+: >"$tmp/wide-capture"
+# The explicit ordinary fleet path keeps the whole wide slice in one fleet.
+RUN_BENCH_SHARDED_ROUTE=never \
 RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/wide-fleet" \
 RUN_BENCH_WIDE_CAPTURE="$tmp/wide-capture" \
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
@@ -322,21 +384,32 @@ root = temporary / "production-routing"
 (root / "scripts").mkdir(parents=True)
 (root / "agents/benchmarks").mkdir(parents=True)
 (root / "agents/venv/bin").mkdir(parents=True)
-for name in ("run-bench", "cloudbench_catalog.py", "cloudbench-production-only-tasks.py"):
-    shutil.copyfile(source / "scripts" / name, root / "scripts" / name)
 (root / ".claude/shared").mkdir(parents=True)
-shutil.copyfile(source / ".claude/shared/benchmark-report-format.txt", root / ".claude/shared/benchmark-report-format.txt")
+shutil.copyfile(
+    source / ".claude/shared/benchmark-report-format.txt",
+    root / ".claude/shared/benchmark-report-format.txt",
+)
+for name in ("run-bench", "cloudbench_catalog.py", "cloudbench-production-only-tasks.py",
+             "cloudbench-shard-coordinator.py", "cloudbench-timeout-policy.py"):
+    shutil.copyfile(source / "scripts" / name, root / "scripts" / name)
+# run-bench resolves every launch's timeout from the catalog's caps and floors.
+for name in ("__init__.py", "benchmark_tasks.py", "fixtures.py", "live_fixtures.py",
+             "polar_catalog.py", "timeout_history.py"):
+    shutil.copyfile(source / "agents/benchmarks" / name, root / "agents/benchmarks" / name)
 (root / "agents/benchmarks/tasks.json").write_text(json.dumps([
-    {"name": "production-route", "status": "ready", "production_only": True}
+    {"name": "production-route", "status": "ready", "production_only": True, "timeout_seconds": 600}
 ]))
 (root / "agents/benchmarks/polar_tasks.json").write_text(json.dumps([
-    {"name": "polar-routing-control", "status": "ready", "bench": "polar-bench"}
+    {"name": "polar-routing-control", "status": "ready", "bench": "polar-bench", "timeout_seconds": 0}
 ]))
 interpreter = root / "agents/venv/bin/python"
 interpreter.write_text("""#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
-if args[1].endswith(('cloudbench_catalog.py', 'cloudbench-production-only-tasks.py')):
+if args[1].endswith(('cloudbench_catalog.py', 'cloudbench-production-only-tasks.py')) or (
+    args[0] == '-c' and args[-1].endswith('/scripts/cloudbench-shard-coordinator.py')
+) or args[0].endswith('/scripts/cloudbench-timeout-policy.py'):
+    # Catalog, production classifier, timeout policy and the sharded copy-bound read are real.
     os.execv(os.environ['ROUTING_REAL_PYTHON'], [os.environ['ROUTING_REAL_PYTHON'], *args])
 assert args[1] == 'benchmarks/run_benchmark.py', args
 with open(os.environ['ROUTING_CAPTURE'], 'a') as stream:
@@ -379,13 +452,13 @@ PY
 mkdir -p "$tmp/catalog"
 cat >"$tmp/catalog/tasks.json" <<'JSON'
 [
-  {"name":"slice-smoke","status":"ready","tags":["smoke"]},
-  {"name":"slice-daily","status":"ready","bench":"pipeline-e2e"}
+  {"name":"slice-smoke","status":"ready","tags":["smoke"],"timeout_seconds":300},
+  {"name":"slice-daily","status":"ready","bench":"pipeline-e2e","timeout_seconds":600}
 ]
 JSON
 cat >"$tmp/catalog/polar_tasks.json" <<'JSON'
 [
-  {"name":"slice-polar","status":"ready","group":"polar-bench","tags":["polar-bench"]}
+  {"name":"slice-polar","status":"ready","group":"polar-bench","tags":["polar-bench"],"timeout_seconds":0}
 ]
 JSON
 RUN_BENCH_CATALOG_UNDER_TEST="$tmp/catalog/tasks.json" \
@@ -473,7 +546,6 @@ PY
 
 # CAMPAIGN_LIFECYCLE_REGRESSIONS_BEGIN
 python3 - "$ROOT_DIR" <<'PY'
-import argparse
 import importlib.util
 import json
 import os
@@ -504,6 +576,21 @@ case "$1" in
     touch "$RUN_BENCH_CAMPAIGN_ROOT/child-ready"
     # The campaign signals the whole group. If TERM reaches this sleep before
     # the shell, errexit must not end the shell ahead of its own TERM trap.
+    while :; do sleep 0.1 || true; done
+    ;;
+  draining)
+    # Mirrors run-bench-fleet: TERM announces itself and exits through an EXIT
+    # cleanup that ignores further signals, spends its full guest
+    # acknowledgement window and only then releases the exact guest.
+    release() {
+      trap '' HUP INT TERM
+      touch "$RUN_BENCH_CAMPAIGN_ROOT/cleanup-started"
+      sleep $(( ${CLOUDBENCH_CHILD_TERM_SECONDS:-30} + 2 ))
+      touch "$RUN_BENCH_CAMPAIGN_ROOT/guest-released"
+    }
+    trap release EXIT
+    trap 'echo "controller received TERM"; exit 143' TERM
+    touch "$RUN_BENCH_CAMPAIGN_ROOT/child-ready"
     while :; do sleep 0.1 || true; done
     ;;
   passed|queued) exit 0 ;;
@@ -566,7 +653,42 @@ esac
                 process.send_signal(signal.SIGTERM)
                 process.communicate(timeout=35)
 
-    def test_stop_runs_one_bounded_teardown_before_delayed_reap(self):
+    def test_cancel_joins_controller_cleanup_past_former_kill_deadline(self):
+        # 2026-10-18 diag100: the campaign SIGKILLed every cancelled fleet 30 s
+        # after its group TERM. Fleets whose guests had accepted the stop were
+        # still inside their own CLOUDBENCH_CHILD_TERM_SECONDS acknowledgement
+        # window, so no native stop or release ran and 17 guests stayed started.
+        environment = {**self.environment, "CLOUDBENCH_CHILD_TERM_SECONDS": "30"}
+        process = subprocess.Popen(
+            self.command("draining"), env=environment,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while not (self.root / "child-ready").exists():
+                self.assertIsNone(process.poll(), "campaign exited before its child was ready")
+                self.assertLess(time.monotonic(), deadline, "child never became ready")
+                time.sleep(0.02)
+            process.send_signal(signal.SIGTERM)
+            output, _ = process.communicate(timeout=120)
+            self.assertEqual(process.returncode, 143, output)
+            self.assertTrue((self.root / "cleanup-started").exists(), output)
+            job = self.summary()["jobs"][0]
+            self.assertTrue(
+                (self.root / "guest-released").exists(),
+                f"campaign ended the controller (exit {job['controller_exit_code']}) "
+                "before its owned EXIT cleanup released the guest",
+            )
+            self.assertEqual(job["status"], "cancelled")
+            self.assertEqual(job["controller_exit_code"], 143)
+            log = Path(job["log"]).read_text()
+            self.assertIn("controller received TERM", log)
+        finally:
+            if process.poll() is None:
+                process.send_signal(signal.SIGTERM)
+                process.communicate(timeout=120)
+
+    def test_stop_signals_once_and_joins_delayed_controller_cleanup(self):
         spec = importlib.util.spec_from_file_location("campaign_lifecycle", campaign_script)
         campaign = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(campaign)
@@ -575,42 +697,43 @@ esac
         clock = 0
         signals = []
 
-        class DelayedReapProcess:
+        class DelayedCleanupProcess:
             pid = 777
 
             def __init__(self, *_args, **_kwargs):
                 nonlocal child
                 child = self
-                self.killed = False
-                self.polls_after_kill = 0
+                self.terminated = False
+                self.polls_after_term = 0
                 handlers[signal.SIGTERM](signal.SIGTERM, None)
 
             def poll(self):
-                if not self.killed:
+                if not self.terminated:
                     return None
-                self.polls_after_kill += 1
-                return None if self.polls_after_kill == 1 else -signal.SIGKILL
+                self.polls_after_term += 1
+                # Its owned EXIT cleanup outlives several 31 s clock steps.
+                return None if self.polls_after_term < 5 else 143
 
         def killpg(pid, signum):
             self.assertEqual(pid, child.pid)
             signals.append(signum)
-            if signum == signal.SIGKILL:
-                child.killed = True
+            if signum == signal.SIGTERM:
+                child.terminated = True
 
         def monotonic():
             nonlocal clock
             clock += 31
             return clock
 
-        args = argparse.Namespace(
-            root=self.root, runs=1, concurrency=1, task=["waiting"], forward_arg=[],
-            retry_infra=0, e2e_timeout=None, e2e_started_at=None,
-        )
+        argv = [
+            str(campaign_script), "--root", str(self.root),
+            "--runs", "1", "--concurrency", "1", "--task", "waiting",
+        ]
         with (
             patch.dict(os.environ, self.environment),
-            patch.object(campaign, "parse_args", return_value=args),
+            patch.object(campaign.sys, "argv", argv),
             patch.object(campaign, "publish_campaign_group", return_value=None),
-            patch.object(campaign.subprocess, "Popen", DelayedReapProcess),
+            patch.object(campaign.subprocess, "Popen", DelayedCleanupProcess),
             patch.object(campaign.signal, "signal", side_effect=lambda signum, handler: handlers.update({signum: handler})),
             patch.object(campaign.os, "killpg", side_effect=killpg),
             patch.object(campaign.time, "monotonic", side_effect=monotonic),
@@ -618,9 +741,11 @@ esac
             patch.object(campaign, "terminate_owned_children", wraps=campaign.terminate_owned_children) as teardown,
         ):
             self.assertEqual(campaign.main(), 143)
-        self.assertEqual(teardown.call_count, 1, "stop repeated its full shutdown window")
-        self.assertEqual(signals, [signal.SIGTERM, signal.SIGKILL])
-        self.assertEqual(self.summary()["jobs"][0]["status"], "cancelled")
+        self.assertEqual(teardown.call_count, 1, "stop repeated its cancellation signal")
+        self.assertEqual(signals, [signal.SIGTERM], "a controller's owned cleanup must never be SIGKILLed")
+        job = self.summary()["jobs"][0]
+        self.assertEqual(job["status"], "cancelled")
+        self.assertEqual(job["controller_exit_code"], 143)
 
 
 unittest.main()

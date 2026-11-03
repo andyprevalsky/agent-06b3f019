@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { nonLocalDatabaseReason } from '../src/utils/localDatabaseUrl';
+import { createIsolatedDatabase, ISOLATED_DATABASE_FILES } from './unit-test-database-isolation';
 
 type UnitResult = {
   durationMs: number;
@@ -172,8 +173,12 @@ function assertLocalDatabaseUrl(resolved: Record<string, string> | undefined): v
   process.exit(2);
 }
 
+// `--list` prints the selected files (after BACKEND_UNIT_TEST_FILES,
+// BACKEND_UNIT_EXCLUDE_FILES and BACKEND_UNIT_SHARD) without running anything,
+// so the sharded coverage coordinator's selection is testable without a database.
+const LIST_ONLY = process.argv.includes('--list');
 const localDatabaseEnv = resolveLocalDatabaseEnv();
-assertLocalDatabaseUrl(localDatabaseEnv);
+if (!LIST_ONLY) assertLocalDatabaseUrl(localDatabaseEnv);
 
 async function findTests(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -187,8 +192,55 @@ async function findTests(directory: string): Promise<string[]> {
   return nested.flat().sort();
 }
 
+/**
+ * Optional selection for sharded coverage (BACKEND_UNIT_SHARD=i/N, every file
+ * in exactly one shard), failed-only reruns (BACKEND_UNIT_TEST_FILES, a comma
+ * list of paths relative to src/tests/unit) and the sharded coordinator's
+ * concurrent unit pass (BACKEND_UNIT_EXCLUDE_FILES, same form: the
+ * host-load-dependent fps probe is excluded there and run alone afterwards).
+ * Unknown files fail loudly on both lists.
+ */
+function parseFileList(name: string, all: string[]): string[] {
+  const entries = (process.env[name] ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (entries.length === 0) return [];
+  const known = new Map(all.map((file) => [relative(unitDir, file), file]));
+  const unknown = entries.filter((entry) => !known.has(entry));
+  if (unknown.length > 0) {
+    console.error(`Unknown ${name} entries: ${unknown.join(', ')}`);
+    process.exit(2);
+  }
+  return entries.map((entry) => known.get(entry)!);
+}
+
+function selectTests(all: string[]): string[] {
+  let selected = all;
+  const only = parseFileList('BACKEND_UNIT_TEST_FILES', all);
+  if (only.length > 0) selected = only;
+  const excluded = new Set(parseFileList('BACKEND_UNIT_EXCLUDE_FILES', all));
+  if (excluded.size > 0) selected = selected.filter((file) => !excluded.has(file));
+  const shard = process.env.BACKEND_UNIT_SHARD?.trim();
+  if (shard) {
+    const match = /^([1-9][0-9]*)\/([1-9][0-9]*)$/.exec(shard);
+    if (!match || Number(match[1]) > Number(match[2])) {
+      console.error('BACKEND_UNIT_SHARD must be <index>/<count>.');
+      process.exit(2);
+    }
+    const index = Number(match[1]) - 1;
+    const count = Number(match[2]);
+    selected = selected.filter((_, position) => position % count === index);
+  }
+  return selected;
+}
+
 async function main(): Promise<void> {
-  const tests = await findTests(unitDir);
+  const tests = selectTests(await findTests(unitDir));
+  if (LIST_ONLY) {
+    for (const file of tests) console.log(relative(unitDir, file));
+    return;
+  }
   const serialFirst = tests.filter((file) => SERIAL_FIRST_FILES.has(basename(file)));
   const parallelTests = tests.filter((file) => !SERIAL_FIRST_FILES.has(basename(file)));
   const concurrency = Math.min(requestedConcurrency, parallelTests.length || 1);
@@ -214,10 +266,18 @@ async function main(): Promise<void> {
   async function runTest(file: string): Promise<UnitResult> {
     const startedAt = performance.now();
     const chunks: Buffer[] = [];
+    // Files that drive the database-wide advisory lock get a private database.
+    const privateDatabase =
+      localDatabaseEnv !== undefined && ISOLATED_DATABASE_FILES.has(basename(file))
+        ? createIsolatedDatabase(localDatabaseEnv.DATABASE_URL)
+        : undefined;
     // Preserve one isolated process per file without npm/tsx wrapper processes.
     const childEnv = {
       ...process.env,
       ...localDatabaseEnv,
+      ...(privateDatabase === undefined
+        ? {}
+        : { DATABASE_URL: privateDatabase.url, DIRECT_URL: privateDatabase.url }),
     };
     if (SERIAL_FIRST_FILES.has(basename(file))) {
       delete childEnv.NODE_V8_COVERAGE;
@@ -247,6 +307,7 @@ async function main(): Promise<void> {
       });
     });
     activeChildren.delete(child);
+    privateDatabase?.drop();
 
     const result = {
       durationMs: Math.round(performance.now() - startedAt),
@@ -280,6 +341,21 @@ async function main(): Promise<void> {
   if (interrupted) process.exit(130);
 
   const failures = results.filter((result) => result.exitCode !== 0);
+  const resultsFile = process.env.BACKEND_UNIT_RESULTS_FILE;
+  if (resultsFile) {
+    await mkdir(dirname(resultsFile), { recursive: true });
+    await writeFile(
+      resultsFile,
+      JSON.stringify(
+        {
+          total: results.length,
+          failed: failures.map((failure) => relative(unitDir, failure.file)).sort(),
+        },
+        null,
+        2
+      )
+    );
+  }
   if (failures.length > 0) {
     console.error(`\n${failures.length}/${results.length} unit test file(s) failed.`);
     for (const failure of failures) {

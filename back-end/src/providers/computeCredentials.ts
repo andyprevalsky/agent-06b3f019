@@ -4,6 +4,11 @@ import {
   markPoolTokenRateLimited,
   markUserTokenRateLimited,
 } from './claudeCredentials';
+import {
+  claudeEnvelopeExpiredAt,
+  isUsableClaudePoolEnvelope,
+  parseClaudeEnvelope,
+} from './claudeOauthEnvelope';
 import { markGptPoolTokenRateLimited, markGptUserTokenRateLimited } from './gptCredentials';
 import { createLogger } from './logger';
 export {
@@ -24,6 +29,8 @@ export interface ComputeCodeCredentialResult {
   source: 'user' | 'pool';
   userId: string;
   poolTokenId?: string;
+  /** The exact Integration row served; failure reports name it (S33). */
+  integrationId?: string;
   lineageKey?: string;
 }
 
@@ -46,7 +53,7 @@ type RequiredLineageLease = Required<
 >;
 
 const LINEAGE_LEASE_TTL_MS = 5 * 60 * 1000;
-const GPT_LINEAGE_CAPACITY = 16;
+export const GPT_LINEAGE_CAPACITY = 16;
 const CLAUDE_LINEAGE_CAPACITY = 12;
 
 function capacityForType(type: ComputeCodeCredentialType): number {
@@ -63,7 +70,7 @@ function liveLeaseCutoff(now: Date): Date {
   return new Date(now.getTime() - LINEAGE_LEASE_TTL_MS);
 }
 
-function normalizeFastCacheAffinityKey(key: string | undefined): string | null {
+function normalizeDemoCacheAffinityKey(key: string | undefined): string | null {
   const trimmed = key?.trim() ?? '';
   return trimmed === '' ? null : trimmed;
 }
@@ -83,38 +90,22 @@ function decryptIntegrationCredentials(integration: IntegrationRow, decryptionKe
   return decryptCredentialEnvelope(encryptedCredentials, decryptionKey);
 }
 
-function parseClaudeAccessToken(credentialsJson: string): string | null {
-  try {
-    const parsed = JSON.parse(credentialsJson) as Record<string, unknown>;
-    const oauth = parsed.claudeAiOauth as Record<string, unknown> | undefined;
-    const accessToken = typeof oauth?.accessToken === 'string' ? oauth.accessToken : '';
-    return accessToken.length > 0 ? accessToken : null;
-  } catch {
-    return null;
-  }
-}
-
-function hasUsableClaudePoolEnvelope(credentialsJson: string): boolean {
-  try {
-    const parsed = JSON.parse(credentialsJson) as Record<string, unknown>;
-    const oauth = parsed.claudeAiOauth as Record<string, unknown> | undefined;
-    const accessToken = typeof oauth?.accessToken === 'string' ? oauth.accessToken : '';
-    const refreshToken = typeof oauth?.refreshToken === 'string' ? oauth.refreshToken : '';
-    const expiresAt = typeof oauth?.expiresAt === 'number' ? oauth.expiresAt : 0;
-    const scopes = Array.isArray(oauth?.scopes) ? oauth.scopes : [];
-    // Legacy browser OAuth envelopes can refresh. New cloud-minted Claude
-    // setup-tokens deliberately cannot: they are year-long inference grants and
-    // carry an empty refreshToken. Rejecting every empty refresh token silently
-    // made those healthy, explicitly-pooled accounts invisible to the pool.
-    const refreshable = refreshToken.length > 0;
-    const liveSetupToken =
-      refreshToken === '' &&
-      expiresAt > Date.now() &&
-      scopes.some((scope) => scope === 'user:inference');
-    return accessToken.startsWith('sk-ant-oat') && (refreshable || liveSetupToken);
-  } catch {
-    return false;
-  }
+/** Retire exactly this row: EXPIRED + needs-reconnect, never its sibling accounts. */
+async function retireExpiredClaudeIntegration(
+  integration: IntegrationRow,
+  source: 'user' | 'pool',
+  expiresAt: number
+): Promise<void> {
+  log.warn('Skipping Claude credential past its own expiresAt', {
+    integrationId: integration.id,
+    userId: integration.userId,
+    source,
+    expiredAt: new Date(expiresAt).toISOString(),
+  });
+  await markUserTokenRateLimited(integration.userId, {
+    failureReason: 'auth_error',
+    integrationId: integration.id,
+  });
 }
 
 function parseGptEnvelope(credentialsJson: string) {
@@ -127,8 +118,8 @@ function parseGptEnvelope(credentialsJson: string) {
     // grants intentionally omit the refresh lineage, while legacy synced
     // auth.json envelopes still include it. Requiring refresh_token here made a
     // healthy access-only grant invisible even though this path never uses it.
-    // The Codex CLI sandbox reader remains strict in gptCredentials.ts because
-    // that surface receives and persists the complete auth.json envelope.
+    // The Codex CLI sandbox reader in gptCredentials.ts likewise serves the
+    // access token only and strips any refresh token before it leaves the server.
     if (accessToken.length === 0) return null;
     const accountId = typeof tokens?.account_id === 'string' ? tokens.account_id : undefined;
     return { accessToken, accountId };
@@ -154,15 +145,21 @@ async function rowToCredential(
   if (!decrypted) return null;
 
   if (type === 'claude') {
-    if (source === 'pool' && !hasUsableClaudePoolEnvelope(decrypted)) return null;
-    const accessToken = parseClaudeAccessToken(decrypted);
-    if (!accessToken) return null;
+    const envelope = parseClaudeEnvelope(decrypted);
+    if (!envelope) return null;
+    const expired = claudeEnvelopeExpiredAt(envelope, Date.now());
+    if (expired !== null) {
+      await retireExpiredClaudeIntegration(integration, source, expired);
+      return null;
+    }
+    if (source === 'pool' && !isUsableClaudePoolEnvelope(envelope)) return null;
     return {
       type,
-      accessToken,
+      accessToken: envelope.accessToken,
       source,
       userId: integration.userId,
       poolTokenId: source === 'pool' ? integration.id : undefined,
+      integrationId: integration.id,
     };
   }
 
@@ -175,6 +172,7 @@ async function rowToCredential(
     source,
     userId: integration.userId,
     poolTokenId: source === 'pool' ? integration.id : undefined,
+    integrationId: integration.id,
   };
 }
 
@@ -357,7 +355,7 @@ async function selectFirstUsableWithLineage(
   return null;
 }
 
-async function readFastCacheAffinity(
+async function readDemoCacheAffinity(
   affinityKey: string | null
 ): Promise<ComputeCodeCredentialType | null> {
   if (affinityKey === null) return null;
@@ -366,7 +364,7 @@ async function readFastCacheAffinity(
   return null;
 }
 
-async function persistOrReadFastCacheAffinity(
+async function persistOrReadDemoCacheAffinity(
   affinityKey: string | null,
   userId: string,
   tokenType: ComputeCodeCredentialType
@@ -378,9 +376,9 @@ async function persistOrReadFastCacheAffinity(
       skipDuplicates: true,
     });
   } catch (error) {
-    log.error('Unexpected error persisting fast-cache affinity', { affinityKey, error });
+    log.error('Unexpected error persisting demo-cache affinity', { affinityKey, error });
   }
-  const existing = await readFastCacheAffinity(affinityKey);
+  const existing = await readDemoCacheAffinity(affinityKey);
   return existing ?? tokenType;
 }
 
@@ -429,9 +427,9 @@ export async function fetchComputeTokenForUser(
   userId: string,
   options?: { forcePool?: boolean; excludePoolTokenIds?: string[] } & ComputeLeaseOptions
 ): Promise<ComputeCodeCredentialResult | null> {
-  const fastCacheAffinityKey = normalizeFastCacheAffinityKey(options?.fastCacheAffinityKey);
+  const fastCacheAffinityKey = normalizeDemoCacheAffinityKey(options?.fastCacheAffinityKey);
   const requestedTokenType = options?.tokenType ?? null;
-  const pinnedTokenType = requestedTokenType ?? (await readFastCacheAffinity(fastCacheAffinityKey));
+  const pinnedTokenType = requestedTokenType ?? (await readDemoCacheAffinity(fastCacheAffinityKey));
   const lineage =
     options?.lineageKey && options.lineageKey.trim() !== ''
       ? {
@@ -471,7 +469,7 @@ export async function fetchComputeTokenForUser(
       );
       if (userToken) {
         if (requestedTokenType !== null) return userToken;
-        const affinityType = await persistOrReadFastCacheAffinity(
+        const affinityType = await persistOrReadDemoCacheAffinity(
           fastCacheAffinityKey,
           userId,
           userToken.type
@@ -506,7 +504,7 @@ export async function fetchComputeTokenForUser(
     );
     if (!poolToken) return null;
     if (requestedTokenType !== null) return poolToken;
-    const affinityType = await persistOrReadFastCacheAffinity(
+    const affinityType = await persistOrReadDemoCacheAffinity(
       fastCacheAffinityKey,
       userId,
       poolToken.type

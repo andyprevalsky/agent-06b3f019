@@ -7,6 +7,8 @@ workflow sandbox where lazy imports trigger threading.Lock errors.
 from __future__ import annotations
 
 import asyncio
+import json
+import uuid as uuid_module
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -32,7 +34,7 @@ from domains.spawn_agent.config import (
     should_skip_oai_demo_browser_spawn,
 )
 from domains.spawn_agent.service import (
-    _resolve_explore_attachments_activity,
+    EXPLORE_FALLBACK_PAYLOAD_BUDGET,
     build_for_each_goal,
     coerce_for_each_items,
     compile_explore_grep_evidence,
@@ -49,15 +51,21 @@ from helpers.generation_handoff import (
     GenerationHandoffRequested,
 )
 from helpers.source_connect_gates import raise_source_connect_gates
+from helpers.tool_interrupts import tool_stop_requested
 from helpers.tracing import span
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
+from helpers.wait_on_world_clock import hold_on_children, release_children
+from helpers.wmh_activity_policy import wmh_activity_timeout_options
+from helpers.world_model_runtime import world_model_specialized_agent_activity
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from tools.grep import fetch_local_data_summary
+from tools.read_tool_output import preview_tool_output_activity
 from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 from tools.spawn_claude_code_agent import get_manager as get_code_manager
 from tools.spawn_sub_agents import get_manager as get_sub_agent_manager
 from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
 from utils.oai_demo_july import apply_oai_demo_july_for_each
+from utils.simulated_clock import simulated_timestamp_ms
 from utils.tool_call_ids import spawn_group_id
 
 _FAST_MODE_USER_COPY = (
@@ -68,6 +76,141 @@ _FAST_MODE_USER_COPY = (
     "from_fast_cache",
 )
 _EXPLORE_NO_EVIDENCE = "Explore stopped before completion with no tool evidence."
+
+_WORLD_MODEL_SPECIALIZED_AGENT_TOOLS = {
+    "explore": "spawn_explore_agent",
+    "browser": "spawn_browser_agent",
+    "code": "spawn_claude_code_agent",
+}
+
+# Retained as the ordinary activity budget; simulate uses owner cancellation
+# instead of a per-attempt deadline at this WMH boundary.
+_WORLD_MODEL_SPECIALIZED_ACTIVITY_TIMEOUT = timedelta(minutes=12)
+
+
+_FILE_POINTER_SHAPE_KEYS = {
+    "storage_path",
+    "original_filename",
+    "mime_type",
+    "size_bytes",
+    "created_at",
+}
+
+
+def _normalize_simulated_file_pointer_ids(value: Any) -> tuple[Any, bool]:
+    """Give WMH-produced FilePointers stable API-valid UUID identifiers.
+
+    A simulated Code/Browser result can legitimately describe a generated file,
+    but model-authored identifiers such as ``fp_report_123`` are not valid for
+    the message API's FilePointer schema.  Normalize only complete FilePointer-
+    shaped objects at the simulation boundary; real subagent results remain
+    untouched.  JSON strings are walked as well because WMH may place the
+    terminal observation inside a string-valued ``content`` field.
+    """
+
+    if isinstance(value, dict):
+        normalized: Dict[str, Any] = {}
+        changed = False
+        for key, item in value.items():
+            normalized_item, item_changed = _normalize_simulated_file_pointer_ids(item)
+            normalized[key] = normalized_item
+            changed = changed or item_changed
+
+        if _FILE_POINTER_SHAPE_KEYS.issubset(normalized):
+            raw_id = str(normalized.get("id") or "").strip()
+            try:
+                uuid_module.UUID(raw_id)
+            except (TypeError, ValueError, AttributeError):
+                identity = json.dumps(
+                    {key: normalized.get(key) for key in sorted(_FILE_POINTER_SHAPE_KEYS)},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                )
+                normalized["id"] = str(
+                    uuid_module.uuid5(
+                        uuid_module.NAMESPACE_URL,
+                        f"rose-wmh-file-pointer:{identity}",
+                    )
+                )
+                changed = True
+        return normalized, changed
+
+    if isinstance(value, list):
+        normalized_items = []
+        changed = False
+        for item in value:
+            normalized_item, item_changed = _normalize_simulated_file_pointer_ids(item)
+            normalized_items.append(normalized_item)
+            changed = changed or item_changed
+        return normalized_items, changed
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith(("{", "[")) and stripped.endswith(("}", "]")):
+            try:
+                decoded = json.loads(stripped)
+            except (TypeError, ValueError):
+                return value, False
+            normalized, changed = _normalize_simulated_file_pointer_ids(decoded)
+            if changed:
+                return json.dumps(
+                    normalized,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                ), True
+        return value, False
+
+    return value, False
+
+
+def _normalize_world_model_result_text(text: str) -> str:
+    normalized, changed = _normalize_simulated_file_pointer_ids(text)
+    if changed and isinstance(normalized, str):
+        return normalized
+    # Real Code-agent summaries can embed a JSON Structured Response after
+    # human-readable prose. Normalize that object before a parent agent copies
+    # its FilePointers into the message API (which requires UUID ids).
+    marker = "Structured Response:"
+    marker_at = text.find(marker)
+    if marker_at < 0:
+        return text
+    json_start = text.find("{", marker_at + len(marker))
+    if json_start < 0:
+        return text
+    try:
+        embedded, consumed = json.JSONDecoder().raw_decode(text[json_start:])
+    except json.JSONDecodeError:
+        return text
+    normalized_embedded, embedded_changed = _normalize_simulated_file_pointer_ids(embedded)
+    if not embedded_changed:
+        return text
+    encoded = json.dumps(normalized_embedded, ensure_ascii=False, separators=(",", ":"))
+    return text[:json_start] + encoded + text[json_start + consumed :]
+
+
+def _world_model_specialized_result_text(result: Dict[str, Any]) -> str:
+    """Return the terminal simulated subagent result shown to the parent/UI."""
+
+    # WMH's generic response shape carries both the decoded ``output`` field
+    # and its raw JSON envelope in ``message``. Prefer the decoded value so the
+    # parent agent receives the actual terminal observation, not wrapper JSON.
+    for key in ("output", "message", "content", "summary", "final_response"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return _normalize_world_model_result_text(value.strip())
+    nested = result.get("result")
+    if isinstance(nested, str) and nested.strip():
+        return _normalize_world_model_result_text(nested.strip())
+    if nested is not None:
+        return _normalize_world_model_result_text(json.dumps(nested, ensure_ascii=False, sort_keys=True, default=str))
+    observation = result.get("world_model_observation")
+    if observation is not None:
+        return _normalize_world_model_result_text(
+            json.dumps(observation, ensure_ascii=False, sort_keys=True, default=str)
+        )
+    return "The simulated subagent completed without a textual result."
 
 
 def user_facing_explore_result(text: Any) -> str:
@@ -108,6 +251,7 @@ def _explore_chip_text(result: Dict[str, Any]) -> str:
         compile_explore_wrap_up(
             result.get("result") or result.get("final_response") or result.get("summary") or "",
             result.get("tool_call_results") or [],
+            budget=None,
         )
     )
 
@@ -122,9 +266,7 @@ _EXPLORE_SYNTHESIS_CHECKPOINT = (
 
 
 def _source_linked_explore_text(text: str) -> bool:
-    return len(text.strip()) >= 200 and any(
-        marker in text for marker in ("https://", "http://", "@ref:", "grep:")
-    )
+    return len(text.strip()) >= 200 and any(marker in text for marker in ("https://", "http://", "@ref:", "grep:"))
 
 
 def _grounded_explore_text(text: str, tool_results: List[str]) -> bool:
@@ -141,9 +283,8 @@ def _has_prior_grounded_explore_batch(context: Any, current_tool_call_id: str) -
         if not isinstance(message, dict) or str(message.get("role") or "").upper() != "TOOL":
             continue
         metadata = message.get("metadata") or {}
-        if (
-            metadata.get("toolName") == "spawn_agent"
-            and _EXPLORE_SYNTHESIS_CHECKPOINT in str(message.get("text") or "")
+        if metadata.get("toolName") == "spawn_agent" and _EXPLORE_SYNTHESIS_CHECKPOINT in str(
+            message.get("text") or ""
         ):
             return False  # Persist the one-time choice through continue-as-new.
         if (
@@ -175,9 +316,7 @@ def _has_prior_grounded_explore_batch(context: Any, current_tool_call_id: str) -
     return False
 
 
-def _explore_result_after_activity_failure(
-    exc: BaseException, *, user_paused: bool
-) -> tuple[Dict[str, Any], bool]:
+def _explore_result_after_activity_failure(exc: BaseException, *, user_paused: bool) -> tuple[Dict[str, Any], bool]:
     """Map an explore activity failure to (result, was_cancelled).
 
     Timeout / wait-budget cancel with heartbeat evidence FINISHES so the
@@ -195,6 +334,9 @@ def _explore_result_after_activity_failure(
         return {
             "status": "completed",
             "result": recovered_text,
+            "evidence_fallback": bool(recovered.get("evidence_fallback")) or not bool(
+                recovered.get("result") or recovered.get("final_response") or recovered.get("summary")
+            ),
             "tool_call_results": recovered.get("tool_call_results") or [],
             "accumulated_usage": recovered.get("accumulated_usage") or [],
             "llm_iteration_usage": recovered.get("llm_iteration_usage") or [],
@@ -445,20 +587,28 @@ async def _recover_oai_demo_for_each_timeout(
         return None
     if child_agent_id in results:
         return results.get(child_agent_id)
-    while child_agent_id not in workflow_instance.child_results:
-        if await _reconcile_for_each_child_result(workflow_instance, child_agent_id):
-            break
-        try:
-            await wait_condition_or_generation_handoff(
-                lambda cid=child_agent_id: cid in workflow_instance.child_results,
-                workflow_instance,
-                timeout=timedelta(seconds=30),
-                workflow_mod=workflow,
-            )
-        except GenerationHandoffRequested:
-            raise
-        except (asyncio.TimeoutError, TimeoutError):
-            continue
+    # Simulate mode: blocked awaiting this child, the parent holds on its children.
+    hold_id = f"for_each_recovery:{child_agent_id}"
+    try:
+        await hold_on_children(workflow_instance, hold_id)
+        while child_agent_id not in workflow_instance.child_results:
+            if await _reconcile_for_each_child_result(workflow_instance, child_agent_id):
+                break
+            try:
+                await wait_condition_or_generation_handoff(
+                    lambda cid=child_agent_id: cid in workflow_instance.child_results,
+                    workflow_instance,
+                    timeout=timedelta(seconds=30),
+                    workflow_mod=workflow,
+                )
+            except GenerationHandoffRequested:
+                raise
+            except (asyncio.TimeoutError, TimeoutError):
+                continue
+    except BaseException:  # includes cancellation and GenerationHandoffRequested
+        await release_children(workflow_instance, hold_id, [])
+        raise
+    await release_children(workflow_instance, hold_id, [child_agent_id])
     return workflow_instance.child_results.get(child_agent_id)
 
 
@@ -489,6 +639,12 @@ def _oai_demo_first_level_gp_count(workflow_instance) -> int:
             seen_tool_calls.add(tool_call_id)
         count += 1
     return count
+
+
+def _inbox_address(workflow_instance: Any, tool_call_id: str) -> str:
+    """Inbox id of this spawn's current run (workflows/background_agents.py)."""
+    resolver = getattr(workflow_instance, "_background_inbox_address", None)
+    return resolver(tool_call_id) if callable(resolver) else tool_call_id
 
 
 class SpawnAgentManager(ToolManager):
@@ -609,6 +765,18 @@ class SpawnAgentManager(ToolManager):
         goal = tool_call.get("goal", "")
         ui_goal = display_goal or goal
         task_id = task_id or str(workflow.uuid4())
+        if getattr(workflow_instance, "world_model_mode", "real") == "simulate":
+            async for event in self._spawn_world_model_specialized(
+                workflow_instance,
+                tool_call,
+                tool_call_id,
+                agent_type="explore",
+                task_id=task_id,
+                display_goal=ui_goal,
+                capture_tool_results=capture_tool_results,
+            ):
+                yield event
+            return
         # One classification for depth and the activity's cache identity.
         # Re-resolving inside the activity from the child goal or Fast Mode
         # root disagrees (truncated explore goals, resolver failures).
@@ -660,8 +828,10 @@ class SpawnAgentManager(ToolManager):
                     local_data_summary = ""
                     workflow_instance._cached_local_data_summary = ""
 
-            # Resolve requested attachments from workflow context
+            # Keep pointers across Temporal; attachment bytes are resolved by the
+            # explore activity with the rest of its model context.
             attachment_texts: List[str] = []
+            attachment_pointers: List[Dict[str, Any]] = []
             requested_attachments = tool_call.get("attachments")
             if isinstance(requested_attachments, str):
                 requested_attachments = [requested_attachments]
@@ -681,25 +851,18 @@ class SpawnAgentManager(ToolManager):
                         )
 
                 if matched_pointers:
-                    _, metadata_texts = await workflow.execute_activity(
-                        _resolve_explore_attachments_activity,
-                        args=[
-                            [
-                                {
-                                    "id": fp.id,
-                                    "storage_path": fp.storage_path,
-                                    "original_filename": fp.original_filename,
-                                    "mime_type": fp.mime_type,
-                                    "size_bytes": fp.size_bytes,
-                                    "created_at": fp.created_at,
-                                }
-                                for fp in matched_pointers
-                            ]
-                        ],
-                        start_to_close_timeout=SUB_ACTIVITY_TIMEOUT,
-                        retry_policy=RetryPolicy(maximum_attempts=SUB_ACTIVITY_MAX_ATTEMPTS),
-                    )
-                    attachment_texts = metadata_texts
+                    pointer_dicts = [
+                        {
+                            "id": fp.id,
+                            "storage_path": fp.storage_path,
+                            "original_filename": fp.original_filename,
+                            "mime_type": fp.mime_type,
+                            "size_bytes": fp.size_bytes,
+                            "created_at": fp.created_at,
+                        }
+                        for fp in matched_pointers
+                    ]
+                    attachment_pointers = pointer_dicts
 
             # Explore is a bounded research worker with its own model-tier
             # contract. Inheriting the parent's Ultra tier multiplies cost for
@@ -750,7 +913,13 @@ class SpawnAgentManager(ToolManager):
                 world_model_mode,
                 local_data_summary,
                 oai_demo,
+                # Agent-to-agent inbox address: this spawning tool call's id
+                # (``<id>.run<n>`` for a woken background task's later run).
+                _inbox_address(workflow_instance, tool_call_id),
+                # list_agents names this task <owner path>/<task_name>.
+                tool_call.get("task_name"),
             ]
+            activity_args.append(attachment_pointers)
             activity_handle = workflow.start_activity(
                 spawn_explore_agent_activity,
                 args=activity_args,
@@ -779,7 +948,7 @@ class SpawnAgentManager(ToolManager):
                 try:
                     # cutover-class: activity-bound
                     await workflow.wait_condition(
-                        lambda: activity_handle.done() or workflow_instance.is_paused,
+                        lambda: activity_handle.done() or tool_stop_requested(workflow_instance, tool_call_id),
                         timeout=parent_wait,
                     )
                 except TimeoutError:
@@ -801,8 +970,9 @@ class SpawnAgentManager(ToolManager):
                                 "Explore activity still running after cancel grace; wrapping up",
                                 goal=goal[:100],
                             )
-                if workflow_instance.is_paused and not activity_handle.done():
-                    logger.info("Cancelling explore agent due to pause", goal=goal[:100])
+                if tool_stop_requested(workflow_instance, tool_call_id) and not activity_handle.done():
+                    # Pause, or a kill_agent of this agent (helpers/tool_interrupts.py).
+                    logger.info("Cancelling explore agent due to pause or interrupt", goal=goal[:100])
                     activity_handle.cancel()
                     was_cancelled = True
 
@@ -846,6 +1016,7 @@ class SpawnAgentManager(ToolManager):
                     result = {
                         "status": "completed",
                         "result": recovered_text,
+                        "evidence_fallback": True,
                         "tool_call_results": persisted_results,
                         "accumulated_usage": [],
                         "llm_iteration_usage": [],
@@ -864,6 +1035,9 @@ class SpawnAgentManager(ToolManager):
 
             explore_result = _explore_chip_text(result)
             explore_tool_call_results = result.get("tool_call_results") or []
+            evidence_fallback = bool(result.get("evidence_fallback")) or not bool(
+                result.get("result") or result.get("final_response") or result.get("summary")
+            )
             accumulated_usage = result.get("accumulated_usage", [])
             llm_iteration_usage = result.get("llm_iteration_usage", [])
             # Data sources the explore tried to grep but whose connector isn't
@@ -883,10 +1057,28 @@ class SpawnAgentManager(ToolManager):
             # Fast Mode may soft-complete a malformed cached LLM turn only
             # when prior tool calls produced evidence to pass to the parent.
             if explore_failed and fast_mode:
-                cached_evidence = compile_explore_wrap_up("", explore_tool_call_results)
+                cached_evidence = compile_explore_wrap_up("", explore_tool_call_results, budget=None)
                 if cached_evidence and explore_error_reason != _EXPLORE_NO_EVIDENCE:
                     explore_result = cached_evidence
                     explore_failed = False
+                    evidence_fallback = True
+
+            if evidence_fallback and explore_result:
+                if explore_failed and explore_error_reason:
+                    explore_result = f"{explore_error_reason}\n\n{explore_result}"
+                if len(explore_result) > EXPLORE_FALLBACK_PAYLOAD_BUDGET:
+                    # Timeout/heartbeat recovery still has complete raw evidence
+                    # here. Retain it before the normal parent ToolEvent is cut.
+                    readback = await workflow.execute_activity(
+                        preview_tool_output_activity,
+                        args=[workflow_instance.user_id, workflow_instance.agent_id, "", explore_result, 512],
+                        start_to_close_timeout=SUB_ACTIVITY_TIMEOUT,
+                        retry_policy=RetryPolicy(maximum_attempts=SUB_ACTIVITY_MAX_ATTEMPTS),
+                    )
+                    presentation = compile_explore_wrap_up(
+                        "", [explore_result], budget=EXPLORE_FALLBACK_PAYLOAD_BUDGET - len(readback) - 2,
+                    )
+                    explore_result = f"{presentation}\n\n{readback}"
 
             # Hand raw tool-call traces to any caller that asked for them
             # (wait_for's condition-judge). Keeping this out of the persisted
@@ -920,18 +1112,19 @@ class SpawnAgentManager(ToolManager):
             # User-visible message is the explore result (including any
             # not-connected notice). Only genuine explore failures swap in
             # error_reason / ERROR status.
-            event_message = explore_error_reason if explore_failed and explore_error_reason else explore_result
-            grep_evidence = compile_explore_grep_evidence(explore_tool_call_results)
+            event_message = explore_error_reason if explore_failed and explore_error_reason and not (evidence_fallback and explore_result) else explore_result
+            # Fallback already contains this evidence (and its full readback);
+            # appending another hard-cut copy would exceed its presentation cap.
+            grep_evidence = "" if evidence_fallback else compile_explore_grep_evidence(explore_tool_call_results)
             if not explore_failed and grep_evidence and grep_evidence not in explore_result:
                 event_message = f"{event_message}\n\nOriginal grep results:\n{grep_evidence}"
             if (
                 not oai_demo
                 and not explore_failed
+                and not evidence_fallback
                 and _grounded_explore_text(explore_result, explore_tool_call_results)
                 and not getattr(workflow_instance, "_explore_synthesis_checkpoint_sent", False)
-                and _has_prior_grounded_explore_batch(
-                    getattr(workflow_instance, "context", None), tool_call_id
-                )
+                and _has_prior_grounded_explore_batch(getattr(workflow_instance, "context", None), tool_call_id)
             ):
                 # One advisory after a grounded follow-up round. It must not
                 # replace evidence or prevent another necessary targeted search.
@@ -967,14 +1160,29 @@ class SpawnAgentManager(ToolManager):
         tool_call_id: str,
     ) -> AsyncGenerator[ToolEvent, None]:
         """Delegate to existing SpawnBrowserAgentManagerV3."""
+        if getattr(workflow_instance, "world_model_mode", "real") == "simulate":
+            async for event in self._spawn_world_model_specialized(
+                workflow_instance,
+                tool_call,
+                tool_call_id,
+                agent_type="browser",
+            ):
+                yield event
+            return
         browser_tool_call = {
             "tool": "spawn_browser_agent",
             "start_url": tool_call.get("start_url"),
             "goal": tool_call.get("goal"),
             "output_schema": tool_call.get("output_schema"),
+            # Agent-to-agent inbox address: this spawning tool call's id
+            # (``<id>.run<n>`` for a woken background task's later run).
+            "inbox_address": _inbox_address(workflow_instance, tool_call_id),
         }
         if tool_call.get("attachments"):
             browser_tool_call["attachments"] = tool_call["attachments"]
+        if isinstance(tool_call.get("_resume_paused_conversation"), dict):
+            # Set only by a continue_conversation resume (workflows/background_agents.py).
+            browser_tool_call["_resume_paused_conversation"] = tool_call["_resume_paused_conversation"]
 
         manager = get_browser_manager()
         async for event in manager.execute_tool(workflow_instance, browser_tool_call, tool_call_id):
@@ -987,6 +1195,15 @@ class SpawnAgentManager(ToolManager):
         tool_call_id: str,
     ) -> AsyncGenerator[ToolEvent, None]:
         """Delegate to existing SpawnClaudeCodeAgentManager."""
+        if getattr(workflow_instance, "world_model_mode", "real") == "simulate":
+            async for event in self._spawn_world_model_specialized(
+                workflow_instance,
+                tool_call,
+                tool_call_id,
+                agent_type="code",
+            ):
+                yield event
+            return
         code_tool_call = {
             "tool": "spawn_claude_code_agent",
             "goal": tool_call.get("goal"),
@@ -996,10 +1213,145 @@ class SpawnAgentManager(ToolManager):
             code_tool_call["attachments"] = tool_call["attachments"]
         if tool_call.get("github_repo_link"):
             code_tool_call["github_repo_link"] = tool_call["github_repo_link"]
+        if tool_call.get("code_session_id"):
+            code_tool_call["code_session_id"] = tool_call["code_session_id"]
+        if tool_call.get("target"):
+            code_tool_call["target"] = tool_call["target"]
+        if tool_call.get("_fresh_conversation") is True:
+            # Set only by a continue_conversation=false resume (workflows/background_agents.py).
+            code_tool_call["_fresh_conversation"] = True
 
         manager = get_code_manager()
         async for event in manager.execute_tool(workflow_instance, code_tool_call, tool_call_id):
             yield event
+
+    async def _spawn_world_model_specialized(
+        self,
+        workflow_instance,
+        tool_call: Dict[str, Any],
+        tool_call_id: str,
+        *,
+        agent_type: str,
+        task_id: Optional[str] = None,
+        display_goal: Optional[str] = None,
+        capture_tool_results: Optional[List[str]] = None,
+    ) -> AsyncGenerator[ToolEvent, None]:
+        """Mock an explore, browser, or code subagent with one terminal WMH transition.
+
+        This runs in the unified spawn boundary before a real specialized-agent
+        activity is created. General-purpose agent loops remain real in
+        simulator mode.
+        """
+
+        boundary_tool = _WORLD_MODEL_SPECIALIZED_AGENT_TOOLS[agent_type]
+        goal = str(tool_call.get("goal") or "")
+        ui_goal = str(display_goal or goal)
+        task_id = task_id or str(workflow.uuid4())
+        progress_title = {
+            "explore": "Exploring",
+            "browser": "Browser agent",
+            "code": "Code agent",
+        }[agent_type]
+        terminal_title = {
+            "explore": ui_goal[:EXPLORE_GOAL_DISPLAY_LEN],
+            "browser": "Browser automation complete",
+            "code": "Code agent complete",
+        }[agent_type]
+        base_metadata: Dict[str, Any] = {
+            "agentType": agent_type,
+            "taskId": task_id,
+            "fullGoal": ui_goal,
+            "world_model_simulated": True,
+            "world_model_boundary": boundary_tool,
+        }
+        if agent_type == "code":
+            base_metadata.update(
+                toolName=boundary_tool,
+                task_id=task_id,
+                code_provider="claude",
+            )
+
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title=progress_title,
+            message=ui_goal[:EXPLORE_GOAL_DISPLAY_LEN],
+            status=MessageStatus.IN_PROGRESS,
+            metadata=base_metadata,
+        )
+
+        simulated_args = {
+            key: value for key, value in tool_call.items() if key not in {"tool", "_phase", "_spawn_group_id"}
+        }
+        simulated_args.setdefault(
+            "root_goal",
+            str(
+                getattr(workflow_instance, "demo_cache_root_goal", None) or getattr(workflow_instance, "goal", "") or ""
+            ),
+        )
+
+        try:
+            result = await workflow.execute_activity(
+                world_model_specialized_agent_activity,
+                args=[
+                    "simulate",
+                    str(getattr(workflow_instance, "agent_id", "") or ""),
+                    boundary_tool,
+                    simulated_args,
+                    tool_call_id,
+                    simulated_timestamp_ms(workflow_instance, workflow.now()),
+                    str(
+                        getattr(workflow_instance, "root_agent_id", None)
+                        or getattr(workflow_instance, "agent_id", "")
+                        or ""
+                    ),
+                ],
+                **wmh_activity_timeout_options("simulate", _WORLD_MODEL_SPECIALIZED_ACTIVITY_TIMEOUT),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            result_text = _world_model_specialized_result_text(result)
+            if capture_tool_results is not None:
+                capture_tool_results.append(f"[{boundary_tool}] {result_text}")
+            failed = bool(result.get("error") or result.get("success") is False)
+            status_text = str(result.get("status") or "").strip().lower()
+            failed = failed or status_text in {"error", "failed", "cancelled"}
+            terminal_metadata = dict(base_metadata)
+            if agent_type == "code":
+                terminal_metadata.update(action_type="task_complete", success=not failed)
+                terminal_title = "Task Incomplete" if failed else "✓ Task Completed"
+            for key in (
+                "world_model_session_id",
+                "world_model_name",
+                "predicted_latency_ms",
+                "simulated_elapsed_ms",
+                "world_model_timestamp_ms",
+            ):
+                if result.get(key) is not None:
+                    terminal_metadata[key] = result[key]
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=terminal_title,
+                message=result_text,
+                status=MessageStatus.ERROR if failed else MessageStatus.FINISHED,
+                data={
+                    "result": result_text,
+                    "world_model_simulated": True,
+                },
+                metadata=terminal_metadata,
+            )
+        except BaseException as exc:
+            if isinstance(exc, (GeneratorExit, asyncio.CancelledError)):
+                raise
+            terminal_metadata = dict(base_metadata)
+            if agent_type == "code":
+                terminal_metadata.update(action_type="task_complete", success=False)
+                terminal_title = "Task Incomplete"
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=terminal_title,
+                message=str(exc) or type(exc).__name__,
+                status=MessageStatus.ERROR,
+                metadata=terminal_metadata,
+            )
 
     async def _spawn_sub_agent(
         self,
@@ -1010,12 +1362,15 @@ class SpawnAgentManager(ToolManager):
         parent_attachments: Dict[str, Any] | None = None,
     ) -> AsyncGenerator[ToolEvent, None]:
         """Delegate to existing SpawnSubAgentManager."""
+        start_phase = resolve_start_phase(tool_call)
         sub_agent_config = {
             "goal": tool_call.get("goal"),
             "output_schema": tool_call.get("output_schema"),
-            "start_phase": resolve_start_phase(tool_call),
+            "start_phase": start_phase,
             "attachments": tool_call.get("attachments"),
         }
+        if tool_call.get("task_name"):
+            sub_agent_config["task_name"] = tool_call["task_name"]
         group_id = spawn_group_id(tool_call_id, tool_call.get("_spawn_group_id"))
         if group_id:
             sub_agent_config["_spawn_group_id"] = group_id
@@ -1093,13 +1448,17 @@ class SpawnAgentManager(ToolManager):
 
         # Build per-item agent_cfgs (shape used by spawn_sub_agent_activity).
         agent_cfgs: List[Dict[str, Any]] = []
-        for item in items:
+        task_name = tool_call.get("task_name")
+        for item_index, item in enumerate(items):
             cfg: Dict[str, Any] = {
                 "goal": build_for_each_goal(base_goal, item),
                 "output_schema": output_schema,
                 "attachments": attachments,
                 "start_phase": start_phase,
             }
+            if task_name:
+                # for_each children are addressed <spawner path>/<task_name>_<i>.
+                cfg["task_name"] = f"{task_name}_{item_index}"
             if context_gates:
                 cfg["context_gates"] = context_gates
             agent_cfgs.append(cfg)

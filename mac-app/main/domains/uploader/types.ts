@@ -15,6 +15,7 @@ export type {
   IMessageUploadContact,
   IMessageUploadMessage,
   IMessageUploadPayload,
+  MessagingUploadOptions,
   UploadResult,
 } from '../../../shared/types/ipc';
 

@@ -1,0 +1,691 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --text: #0b0b0b;
+    --text-2: #52514e;
+    --muted: #6b6a66;
+    --card: #ffffff;
+    --card-edge: #e6e4df;
+    --rail: #efeeea;
+    --chip: #f3f2ee;
+    --accent: #2a78d6;
+    --changed: #2a78d6;
+    --up: #0b7a3e;
+    --down: #b3261e;
+    --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4;
+    --shadow: 0 1px 2px rgba(20, 20, 18, .06), 0 4px 14px rgba(20, 20, 18, .05);
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--text);
+  }
+  :root[data-theme="dark"] {
+    --text: #ffffff;
+    --text-2: #c3c2b7;
+    --muted: #a19f97;
+    --card: #222221;
+    --card-edge: #34342f;
+    --rail: #2d2d2a;
+    --chip: #2d2d2a;
+    --accent: #6da7ec;
+    --changed: #6da7ec;
+    --up: #5fd08d;
+    --down: #ff8a80;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 6px 18px rgba(0, 0, 0, .25);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 14px; background: transparent; }
+  main { max-width: 760px; margin: 0 auto; }
+  .lede { margin: 0 0 12px; color: var(--text-2); }
+  .toolbar {
+    display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center;
+    position: sticky; top: 0; z-index: 3; padding: 8px 0 10px;
+    background: linear-gradient(var(--card), var(--card)) padding-box;
+    background: transparent;
+  }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px;
+    border-radius: 999px; background: var(--chip); color: var(--text-2); font-size: 12.5px;
+  }
+  .pill strong { color: var(--text); font-variant-numeric: tabular-nums; }
+  .spacer { flex: 1; }
+  button { font: inherit; color: inherit; }
+  .ghost {
+    border: 1px solid var(--card-edge); background: var(--card); border-radius: 8px;
+    padding: 5px 11px; cursor: pointer; font-size: 12.5px; color: var(--text-2);
+  }
+  .ghost:hover { color: var(--text); border-color: var(--text-2); }
+  .ghost[disabled] { opacity: .45; cursor: default; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 12px; }
+  .tab {
+    border: 1px solid var(--card-edge); background: var(--card); border-radius: 999px; padding: 6px 12px;
+    cursor: pointer; font-size: 13px; color: var(--text-2); display: inline-flex; align-items: center; gap: 6px;
+  }
+  .tab[aria-selected="true"] { background: var(--text); color: var(--card); border-color: var(--text); }
+  .tab .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--changed); display: none; }
+  .tab.has-changes .dot { display: inline-block; }
+  .tab[aria-selected="true"] .dot { background: var(--card); }
+  .grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+  .grid .card { margin: 0; }
+  .grid[hidden], .reset-card[hidden] { display: none; }
+  @media (min-width: 640px) { .grid { grid-template-columns: 1fr 1fr; } .grid .card .title { min-height: 2.6em; } }
+  .stage { margin: 18px 0 8px; font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .card {
+    background: var(--card); border: 1px solid var(--card-edge); border-radius: 14px;
+    box-shadow: var(--shadow); padding: 14px 14px 10px; margin-bottom: 12px;
+    transition: border-color .15s;
+  }
+  .card.changed { border-color: color-mix(in srgb, var(--changed) 60%, var(--card-edge)); }
+  .head { display: flex; gap: 10px; align-items: flex-start; }
+  .letter {
+    flex: none; width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center;
+    background: var(--chip); color: var(--text); font-weight: 700; font-size: 13px;
+  }
+  .title { font-weight: 650; font-size: 15px; line-height: 1.3; }
+  .meta { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 3px; color: var(--muted); font-size: 12.5px; }
+  .tag { padding: 0 7px; border-radius: 6px; background: var(--chip); color: var(--text-2); font-size: 11.5px; line-height: 19px; }
+  .tag.sourced, .tag.measured { color: var(--up); }
+  .tag.weak, .tag.nodata { color: var(--down); }
+  .basis { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .reset-card { margin-left: auto; flex: none; }
+  .bar { display: flex; gap: 2px; height: 10px; margin: 12px 0 6px; border-radius: 5px; overflow: hidden; background: var(--rail); }
+  .seg { height: 100%; transition: flex-basis .18s ease; min-width: 0; }
+  .rows { margin-top: 4px; }
+  .row {
+    display: grid; grid-template-columns: 10px minmax(0, 1fr) auto auto; gap: 10px; align-items: center;
+    padding: 7px 0; border-top: 1px solid var(--rail);
+  }
+  .row:first-child { border-top: 0; }
+  .sw { width: 10px; height: 10px; border-radius: 3px; }
+  .label { color: var(--text); min-width: 0; }
+  .val { display: inline-flex; align-items: baseline; justify-content: flex-end; gap: 6px; font-variant-numeric: tabular-nums; min-width: 92px; }
+  .val .num { font-weight: 650; font-size: 15px; min-width: 42px; text-align: right; }
+  .val .delta { font-size: 11.5px; color: var(--muted); }
+  .val .delta.up { color: var(--up); }
+  .val .delta.down { color: var(--down); }
+  .steps { display: inline-flex; border: 1px solid var(--card-edge); border-radius: 10px; overflow: hidden; }
+  .step {
+    width: 36px; height: 34px; border: 0; background: var(--card); cursor: pointer; font-size: 18px; line-height: 1;
+    color: var(--text); touch-action: manipulation; user-select: none;
+  }
+  .step + .step { border-left: 1px solid var(--card-edge); }
+  .step:hover:not([disabled]) { background: var(--chip); }
+  .step:active:not([disabled]) { background: color-mix(in srgb, var(--accent) 18%, var(--card)); }
+  .step[disabled] { color: var(--muted); opacity: .4; cursor: default; }
+  .sum { color: var(--muted); font-size: 12px; text-align: right; margin-top: 2px; }
+  .export { margin-top: 18px; }
+  .export textarea {
+    width: 100%; min-height: 150px; resize: vertical; border-radius: 12px; padding: 12px;
+    border: 1px solid var(--card-edge); background: var(--card); color: var(--text);
+    font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .export-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .export-head h3 { margin: 0; font-size: 14px; }
+  .note { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+  .tip {
+    position: fixed; pointer-events: none; z-index: 10; padding: 6px 9px; border-radius: 8px;
+    background: var(--text); color: var(--card); font-size: 12px; opacity: 0; transition: opacity .1s;
+    max-width: 240px;
+  }
+  @media (max-width: 420px) {
+    body { padding: 10px; }
+    .card { padding: 12px 11px 8px; }
+    .step { width: 34px; height: 34px; }
+    .val { min-width: 62px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <p class="lede">Tap <b>−</b> or <b>+</b> to move an outcome by one percentage point. The other outcomes absorb the change in proportion to their current shares, so every action always sums to 100%. Hold a button to repeat.</p>
+  <div class="toolbar">
+    <span class="pill">Changed actions <strong id="changed-count">0</strong></span>
+    <span class="spacer"></span>
+    <button class="ghost" id="reset-all" type="button" disabled>Reset all</button>
+  </div>
+  <div class="tabs" role="tablist" aria-label="Funnel stage" id="tabs"></div>
+  <div id="stages"></div>
+  <section class="export" aria-labelledby="export-title">
+    <div class="export-head">
+      <h3 id="export-title">Your distributions</h3>
+      <span class="spacer"></span>
+      <button class="ghost" id="toggle-scope" type="button" aria-pressed="false">Show all</button>
+      <button class="ghost" id="copy" type="button">Copy</button>
+    </div>
+    <textarea id="out" readonly aria-label="Edited distributions to paste back"></textarea>
+    <p class="note" id="copy-note" aria-live="polite">Copy this text and paste it into the chat. It lists only the actions you changed, one outcome per line.</p>
+  </section>
+</main>
+<div class="tip" id="tip" role="tooltip"></div>
+<script>
+const ACTIONS = [
+ {
+  "stage": "Find and reach investors",
+  "id": "A",
+  "name": "Browser: find how a fund accepts pitches",
+  "time": "1-3 minutes",
+  "src": "measured",
+  "basis": "Spot check of 15 seed funds (2026-10-11); Gompers et al. 2016",
+  "outcomes": [
+   [
+    "Pitch or intake form found",
+    30.0
+   ],
+   [
+    "Public pitch email address only",
+    25.0
+   ],
+   [
+    "Warm introductions only policy",
+    10.0
+   ],
+   [
+    "Only a general contact page or LinkedIn",
+    30.0
+   ],
+   [
+    "Site error or blocked",
+    5.0
+   ]
+  ]
+ },
+ {
+  "stage": "Find and reach investors",
+  "id": "B",
+  "name": "Browser: submit pitch through intake form",
+  "time": "3-10 minutes",
+  "src": "nodata",
+  "basis": "No published data found; not inserted until measured",
+  "outcomes": [
+   [
+    "Submitted with confirmation",
+    65
+   ],
+   [
+    "Submitted, no confirmation",
+    15
+   ],
+   [
+    "Needs deck, login or extra fields",
+    12
+   ],
+   [
+    "Broken form or captcha",
+    8
+   ]
+  ]
+ },
+ {
+  "stage": "Find and reach investors",
+  "id": "C",
+  "name": "Send email",
+  "time": "seconds; bounces and auto-replies within minutes",
+  "src": "sourced",
+  "basis": "Validity 2025; ZoomInfo 2023",
+  "outcomes": [
+   [
+    "Delivered",
+    95.0
+   ],
+   [
+    "Bounced",
+    2.0
+   ],
+   [
+    "Out-of-office auto-reply",
+    3.0
+   ]
+  ]
+ },
+ {
+  "stage": "Find and reach investors",
+  "id": "E",
+  "name": "Ask a contact for an intro (iMessage)",
+  "time": "hours to 2 days; intro 2-7 days",
+  "src": "nodata",
+  "basis": "No credible data found; not inserted until measured",
+  "outcomes": [
+   [
+    "Makes the intro",
+    35
+   ],
+   [
+    "Agrees, needs a nudge",
+    20
+   ],
+   [
+    "Declines or doesn't know them",
+    25
+   ],
+   [
+    "No response",
+    20
+   ]
+  ]
+ },
+ {
+  "stage": "Investor responses",
+  "id": "D",
+  "name": "Cold pitch → investor response",
+  "time": "1-14 days",
+  "src": "sourced",
+  "basis": "Gornall & Strebulaev, 80k VC emails",
+  "outcomes": [
+   [
+    "No reply",
+    93.5
+   ],
+   [
+    "Interested reply, open to talking",
+    4.3
+   ],
+   [
+    "Other reply (pass or request)",
+    2.2
+   ]
+  ]
+ },
+ {
+  "stage": "Investor responses",
+  "id": "F",
+  "name": "Warm intro → investor response",
+  "time": "1-7 days",
+  "src": "weak",
+  "basis": "Yeh 2024 heuristic; Gompers et al. 2016",
+  "outcomes": [
+   [
+    "Books a first meeting",
+    60.0
+   ],
+   [
+    "Wants the deck first",
+    15.0
+   ],
+   [
+    "Pass",
+    15.0
+   ],
+   [
+    "No response",
+    10.0
+   ]
+  ]
+ },
+ {
+  "stage": "Investor responses",
+  "id": "G",
+  "name": "Schedule the first meeting",
+  "time": "3-10 days lead time, median about 5",
+  "src": "partly",
+  "basis": "Zeeg 2025-26; meetergo 2026 (vendor data)",
+  "outcomes": [
+   [
+    "Booked and held",
+    80.0
+   ],
+   [
+    "Rescheduled",
+    10.0
+   ],
+   [
+    "Cancelled or goes silent",
+    10.0
+   ]
+  ]
+ },
+ {
+  "stage": "Meetings and diligence",
+  "id": "H",
+  "name": "First meeting",
+  "time": "same day",
+  "src": "sourced",
+  "basis": "Gompers et al. NBER 2016",
+  "outcomes": [
+   [
+    "Pass",
+    60.0
+   ],
+   [
+    "Partner or second meeting",
+    32.0
+   ],
+   [
+    "Follow-up questions only",
+    5.0
+   ],
+   [
+    "Small-check verbal commitment",
+    3.0
+   ]
+  ]
+ },
+ {
+  "stage": "Meetings and diligence",
+  "id": "I",
+  "name": "Partner meeting (fund that can lead)",
+  "time": "1-2 weeks",
+  "src": "sourced",
+  "basis": "Gompers et al. NBER 2016",
+  "outcomes": [
+   [
+    "Due diligence",
+    42.0
+   ],
+   [
+    "Pass",
+    48.0
+   ],
+   [
+    "Term sheet directly",
+    3.0
+   ],
+   [
+    "Stalls",
+    7.0
+   ]
+  ]
+ },
+ {
+  "stage": "Meetings and diligence",
+  "id": "J",
+  "name": "Due diligence",
+  "time": "2-4 weeks",
+  "src": "sourced",
+  "basis": "Gompers et al. 2016; Carta 2025",
+  "outcomes": [
+   [
+    "Term sheet (lead about 60% of the round)",
+    33.0
+   ],
+   [
+    "Pass",
+    52.0
+   ],
+   [
+    "Stalls",
+    15.0
+   ]
+  ]
+ },
+ {
+  "stage": "Meetings and diligence",
+  "id": "K",
+  "name": "Follower meeting (after a lead commits)",
+  "time": "1-2 weeks",
+  "src": "weak",
+  "basis": "DocSend 2023 (inference)",
+  "outcomes": [
+   [
+    "Commits",
+    25.0
+   ],
+   [
+    "Pass",
+    45.0
+   ],
+   [
+    "Follow-up",
+    30.0
+   ]
+  ]
+ },
+ {
+  "stage": "Close the round",
+  "id": "T",
+  "name": "Term sheet → closed investment",
+  "time": "8-12 weeks after the first meeting",
+  "src": "sourced",
+  "basis": "Gompers et al. 2016; DocSend 2024",
+  "outcomes": [
+   [
+    "Closes",
+    65.0
+   ],
+   [
+    "Falls through",
+    35.0
+   ]
+  ]
+ },
+ {
+  "stage": "Close the round",
+  "id": "L",
+  "name": "SAFE sent for signature",
+  "time": "median under 1 day; delays 3-14 days",
+  "src": "partly",
+  "basis": "DocuSign FY2025; Carta 2025",
+  "outcomes": [
+   [
+    "Signed",
+    80.0
+   ],
+   [
+    "Negotiates side terms",
+    8.0
+   ],
+   [
+    "Delays",
+    12.0
+   ]
+  ]
+ },
+ {
+  "stage": "Close the round",
+  "id": "M",
+  "name": "Wire after a signed SAFE",
+  "time": "angels 1-3 days; funds 1-2 weeks (capital calls about 10 business days)",
+  "src": "partly",
+  "basis": "FRB Services; Amplify Partners; Reed Smith (ILPA)",
+  "outcomes": [
+   [
+    "Received in full",
+    85.0
+   ],
+   [
+    "Pending",
+    13.0
+   ],
+   [
+    "Wrong amount or partial",
+    2.0
+   ]
+  ]
+ }
+];
+const TAGS = { sourced: "Sourced", measured: "Measured", partly: "Partly sourced", weak: "Weak source", nodata: "No data: not inserted" };
+const COLORS = ["var(--s1)", "var(--s2)", "var(--s3)", "var(--s4)", "var(--s5)"];
+const EPS = 1e-9;
+const state = ACTIONS.map(a => a.outcomes.map(o => o[1]));
+const defaults = ACTIONS.map(a => a.outcomes.map(o => o[1]));
+const els = [];
+
+const fmt = v => {
+  const r = Math.round(v * 10) / 10;
+  return (Math.abs(r - Math.round(r)) < EPS ? Math.round(r).toString() : r.toFixed(1)) + "%";
+};
+const fmtNum = v => {
+  const r = Math.round(v * 10) / 10;
+  return Math.abs(r - Math.round(r)) < EPS ? Math.round(r).toString() : r.toFixed(1);
+};
+
+// Move one outcome by `step` points; the others absorb it in proportion to their shares.
+function adjust(ai, oi, step) {
+  const p = state[ai];
+  const others = p.map((_, i) => i).filter(i => i !== oi);
+  const rest = others.reduce((s, i) => s + p[i], 0);
+  let d = step > 0 ? Math.min(step, 100 - p[oi]) : -Math.min(-step, p[oi]);
+  if (Math.abs(d) < EPS) return false;
+  if (d > 0 && rest < EPS) return false;
+  p[oi] += d;
+  if (rest > EPS) {
+    for (const i of others) p[i] -= d * (p[i] / rest);
+  } else {
+    for (const i of others) p[i] -= d / others.length;
+  }
+  // Clean float drift so each action sums to exactly 100.
+  for (let i = 0; i < p.length; i++) p[i] = Math.max(0, Math.round(p[i] * 1e6) / 1e6);
+  const total = p.reduce((s, v) => s + v, 0);
+  const fix = 100 - total;
+  const k = p.indexOf(Math.max(...p));
+  p[k] = Math.round((p[k] + fix) * 1e6) / 1e6;
+  return true;
+}
+
+const isChanged = ai => state[ai].some((v, i) => Math.abs(v - defaults[ai][i]) > 1e-6);
+
+function render(ai) {
+  const e = els[ai], p = state[ai];
+  p.forEach((v, i) => {
+    e.segs[i].style.flex = `0 0 calc(${v}% - ${2 * (p.length - 1) / p.length}px)`;
+    e.segs[i].style.display = v < 0.05 ? "none" : "";
+    e.nums[i].textContent = fmt(v);
+    const d = v - defaults[ai][i];
+    const dr = Math.round(d * 10) / 10;
+    e.deltas[i].textContent = Math.abs(dr) < 0.05 ? "" : (dr > 0 ? "+" : "−") + fmtNum(Math.abs(dr)) + " pt";
+    e.deltas[i].className = "delta" + (dr > 0.04 ? " up" : dr < -0.04 ? " down" : "");
+    e.minus[i].disabled = v <= EPS;
+    const rest = 100 - v;
+    e.plus[i].disabled = v >= 100 - EPS || rest <= EPS;
+    e.minus[i].setAttribute("aria-label", `Decrease ${ACTIONS[ai].outcomes[i][0]}, now ${fmt(v)}`);
+    e.plus[i].setAttribute("aria-label", `Increase ${ACTIONS[ai].outcomes[i][0]}, now ${fmt(v)}`);
+  });
+  const changed = isChanged(ai);
+  e.card.classList.toggle("changed", changed);
+  e.reset.hidden = !changed;
+}
+
+let showAll = false;
+function renderExport() {
+  const changed = ACTIONS.map((_, i) => i).filter(isChanged);
+  document.getElementById("changed-count").textContent = changed.length;
+  STAGES.forEach(s => tabs[s].classList.toggle("has-changes", changed.some(ai => ACTIONS[ai].stage === s)));
+  document.getElementById("reset-all").disabled = changed.length === 0;
+  const list = showAll ? ACTIONS.map((_, i) => i) : changed;
+  const out = document.getElementById("out");
+  if (!list.length) {
+    out.value = "No changes yet: all defaults OK.";
+    return;
+  }
+  out.value = list.map(ai => {
+    const a = ACTIONS[ai];
+    const lines = a.outcomes.map((o, i) => `  ${o[0]}: ${fmt(state[ai][i])}`);
+    return `${a.id}. ${a.name}\n${lines.join("\n")}`;
+  }).join("\n\n");
+}
+
+function update(ai) { render(ai); renderExport(); }
+
+// Press-and-hold repeats after a short delay.
+function holdable(btn, fn) {
+  let t1 = null, t2 = null;
+  const stop = () => { clearTimeout(t1); clearInterval(t2); t1 = t2 = null; };
+  btn.addEventListener("pointerdown", ev => {
+    if (btn.disabled || ev.button > 0) return;
+    ev.preventDefault();
+    btn.focus();
+    fn();
+    t1 = setTimeout(() => { t2 = setInterval(() => { if (btn.disabled) stop(); else fn(); }, 70); }, 380);
+  });
+  ["pointerup", "pointerleave", "pointercancel"].forEach(n => btn.addEventListener(n, stop));
+  btn.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); fn(); } });
+}
+
+const tip = document.getElementById("tip");
+function showTip(ev, text) {
+  tip.textContent = text; tip.style.opacity = 1;
+  const x = Math.min(ev.clientX + 12, window.innerWidth - tip.offsetWidth - 8);
+  tip.style.left = x + "px"; tip.style.top = (ev.clientY + 14) + "px";
+}
+
+const root = document.getElementById("stages");
+const tabsEl = document.getElementById("tabs");
+const STAGES = [...new Set(ACTIONS.map(a => a.stage))];
+const panels = {}, tabs = {};
+STAGES.forEach((stage, si) => {
+  const tab = document.createElement("button");
+  tab.className = "tab"; tab.type = "button"; tab.setAttribute("role", "tab");
+  tab.id = `tab-${si}`; tab.setAttribute("aria-controls", `panel-${si}`);
+  tab.innerHTML = `<span class="dot" aria-hidden="true"></span>${stage}`;
+  tab.addEventListener("click", () => selectStage(stage));
+  tabsEl.appendChild(tab); tabs[stage] = tab;
+  const panel = document.createElement("div");
+  panel.className = "grid"; panel.id = `panel-${si}`; panel.setAttribute("role", "tabpanel");
+  panel.setAttribute("aria-labelledby", tab.id);
+  root.appendChild(panel); panels[stage] = panel;
+});
+function selectStage(stage) {
+  STAGES.forEach(s => {
+    tabs[s].setAttribute("aria-selected", String(s === stage));
+    panels[s].hidden = s !== stage;
+  });
+}
+ACTIONS.forEach((a, ai) => {
+  const card = document.createElement("section");
+  card.className = "card"; card.setAttribute("aria-labelledby", `t-${a.id}`);
+  card.innerHTML = `
+    <div class="head">
+      <div class="letter" aria-hidden="true">${a.id}</div>
+      <div>
+        <div class="title" id="t-${a.id}">${a.name}</div>
+        <div class="meta"><span>Typical time: ${a.time}</span><span class="tag ${a.src}">${TAGS[a.src]}</span></div><div class="basis">${a.basis}</div>
+      </div>
+      <button class="ghost reset-card" type="button" hidden>Reset</button>
+    </div>
+    <div class="bar" role="img" aria-label="Distribution of outcomes for ${a.name}"></div>
+    <div class="rows"></div>`;
+  const bar = card.querySelector(".bar"), rows = card.querySelector(".rows");
+  const e = { card, segs: [], nums: [], deltas: [], minus: [], plus: [], reset: card.querySelector(".reset-card") };
+  a.outcomes.forEach(([label], oi) => {
+    const seg = document.createElement("div");
+    seg.className = "seg"; seg.style.background = COLORS[oi];
+    seg.addEventListener("pointermove", ev => showTip(ev, `${label}: ${fmt(state[ai][oi])}`));
+    seg.addEventListener("pointerleave", () => { tip.style.opacity = 0; });
+    bar.appendChild(seg); e.segs.push(seg);
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = `
+      <span class="sw" style="background:${COLORS[oi]}" aria-hidden="true"></span>
+      <span class="label">${label}</span>
+      <span class="val"><span class="delta"></span><output class="num" aria-live="polite"></output></span>
+      <span class="steps"><button class="step" type="button">−</button><button class="step" type="button">+</button></span>`;
+    const [minus, plus] = row.querySelectorAll(".step");
+    holdable(minus, () => { if (adjust(ai, oi, -1)) update(ai); });
+    holdable(plus, () => { if (adjust(ai, oi, +1)) update(ai); });
+    e.nums.push(row.querySelector(".num")); e.deltas.push(row.querySelector(".delta"));
+    e.minus.push(minus); e.plus.push(plus);
+    rows.appendChild(row);
+  });
+  e.reset.addEventListener("click", () => { state[ai] = defaults[ai].slice(); update(ai); });
+  panels[a.stage].appendChild(card);
+  els.push(e);
+  render(ai);
+});
+
+document.getElementById("reset-all").addEventListener("click", () => {
+  ACTIONS.forEach((_, ai) => { state[ai] = defaults[ai].slice(); render(ai); });
+  renderExport();
+});
+document.getElementById("toggle-scope").addEventListener("click", ev => {
+  showAll = !showAll;
+  ev.currentTarget.textContent = showAll ? "Show changes" : "Show all";
+  ev.currentTarget.setAttribute("aria-pressed", String(showAll));
+  renderExport();
+});
+document.getElementById("copy").addEventListener("click", async () => {
+  const out = document.getElementById("out"), note = document.getElementById("copy-note");
+  out.focus(); out.select();
+  let ok = false;
+  try { await navigator.clipboard.writeText(out.value); ok = true; } catch (_) {
+    try { ok = document.execCommand("copy"); } catch (_) { ok = false; }
+  }
+  note.textContent = ok ? "Copied. Paste it into the chat." : "Selected. Press Ctrl+C (or ⌘C) to copy, then paste it into the chat.";
+});
+selectStage(STAGES[0]);
+renderExport();
+</script>
+</body>
+</html>

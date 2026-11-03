@@ -25,6 +25,11 @@ import {
 } from './profileBinding';
 import { MAX_SESSION_RETRIES, sleepBeforeSteelRetry } from './sessionRetry';
 import { steelSessionTimeoutMs } from './sessionLifetime';
+import {
+  withSteelLifecycleClaim,
+  type SteelNativeEffect,
+  type SteelLifecycleMutation,
+} from './lifecycleClaim';
 import { announceBrowserSessionBinding } from '../browser/sessionBindingAnnounce';
 import {
   newOwnedSteelSessionId,
@@ -241,7 +246,7 @@ export async function createSessionWithContext(
           height: 891, // 800 + 91 for browser chrome → 800 viewport
         },
       })) as SteelSessionResult;
-      registerInFlightSteelSession(session.id);
+      await registerInFlightSteelSession(session.id);
 
       if (
         options?.requiredSteelProfileId !== undefined &&
@@ -366,7 +371,7 @@ export async function createSessionWithContext(
       });
       // The row now protects the session from the reaper; the in-flight entry
       // would otherwise shield an orphan whose cleanup skipped the release.
-      unregisterInFlightSteelSession(session.id);
+      await unregisterInFlightSteelSession(session.id);
 
       log.info(`✓ Created Steel session: ${session.id}`);
       log.info(`  Context (DB): ${dbContextId}`);
@@ -439,12 +444,69 @@ export async function closeSession(
   pause: boolean = false,
   currentUrl?: string
 ): Promise<void> {
+  if (sessionId.startsWith('local-')) {
+    return closeSessionWithinClaim(sessionId, pause, currentUrl);
+  }
+  const session = await prisma.browserSession.findUnique({
+    where: { sessionId },
+    select: { id: true, providerProfileId: true, providerProfilePersist: true },
+  });
+  if (session === null) throw new Error(`Browser session not found: ${sessionId}`);
+  await withSteelLifecycleClaim(session.id, async (assertTask, runTaskNative, mutateTask) => {
+    const current = await prisma.browserSession.findUnique({
+      where: { id: session.id },
+      select: { sessionId: true },
+    });
+    if (current?.sessionId !== sessionId) {
+      throw new Error(`Browser session changed before closing task ${session.id}`);
+    }
+    const close = (
+      assertProfile?: () => Promise<void>,
+      runProfileNative?: SteelNativeEffect,
+      mutateProfile?: SteelLifecycleMutation
+    ) =>
+      closeSessionWithinClaim(
+        sessionId,
+        pause,
+        currentUrl,
+        async () => {
+          await assertTask();
+          await assertProfile?.();
+        },
+        async (id, effect, callback) =>
+          runTaskNative(id, effect, () =>
+            runProfileNative ? runProfileNative(id, effect, callback) : callback()
+          ),
+        (callback) =>
+          mutateTask((transaction) =>
+            mutateProfile ? mutateProfile(callback, transaction) : callback(transaction)
+          )
+      );
+    if (session.providerProfileId && session.providerProfilePersist) {
+      await withSteelLifecycleClaim(`profile:${session.providerProfileId}`, close);
+    } else {
+      await close();
+    }
+  });
+}
+
+async function closeSessionWithinClaim(
+  sessionId: string,
+  pause: boolean,
+  currentUrl?: string,
+  assertOwned?: () => Promise<void>,
+  runOwnedNative?: SteelNativeEffect,
+  mutateLifecycle?: SteelLifecycleMutation
+): Promise<void> {
   log.info(`${pause ? 'Pausing' : 'Closing'} Steel session ${sessionId}...`);
 
   let releaseError: unknown = null;
   try {
     // Release the Steel session
-    await releaseSteelRemoteSession(sessionId);
+    await assertOwned?.();
+    await (runOwnedNative
+      ? runOwnedNative(sessionId, 'release', () => releaseSteelRemoteSession(sessionId))
+      : releaseSteelRemoteSession(sessionId));
   } catch (error) {
     releaseError = error;
     log.error('Failed to close session in Steel', {
@@ -452,18 +514,38 @@ export async function closeSession(
     });
   }
 
+  let releaseConfirmed = releaseError === null;
+  let confirmedActive = false;
+  if (releaseError !== null && !sessionId.startsWith('local-')) {
+    const observed = await steel.sessions.retrieve(sessionId).catch(() => null);
+    if (observed?.id === sessionId) {
+      releaseConfirmed = observed.status === 'released';
+      confirmedActive = observed.status === 'live';
+    }
+  }
+
   // Update DB
   log.info(`📝 Updating DB with currentUrl: ${currentUrl || 'NONE'}`);
-  await prisma.browserSession.update({
-    where: { sessionId },
-    data: {
-      // ERROR means remote release is still owed. Terminal-agent reconciliation
-      // will retry it; CLOSED must only mean billing is known to have stopped.
-      status: releaseError === null ? (pause ? 'PAUSED' : 'CLOSED') : pause ? 'ACTIVE' : 'ERROR',
-      closedAt: releaseError === null && !pause ? new Date() : null,
-      currentUrl: currentUrl || undefined,
-    },
-  });
+  await assertOwned?.();
+  const mutate: SteelLifecycleMutation = mutateLifecycle ?? (async (callback) => callback(prisma));
+  await mutate((transaction) =>
+    transaction.browserSession.update({
+      where: { sessionId },
+      data: {
+        // ERROR means remote release is still owed. Terminal-agent reconciliation
+        // will retry it; CLOSED must only mean billing is known to have stopped.
+        status: releaseConfirmed
+          ? pause
+            ? 'PAUSED'
+            : 'CLOSED'
+          : pause && confirmedActive
+            ? 'ACTIVE'
+            : 'ERROR',
+        closedAt: releaseConfirmed && !pause ? new Date() : null,
+        currentUrl: currentUrl || undefined,
+      },
+    })
+  );
   await announceBrowserSessionBinding({ sessionId });
 
   if (releaseError !== null) throw releaseError;
@@ -482,7 +564,7 @@ export async function releaseSteelRemoteSession(sessionId: string): Promise<void
   // Treating their synthetic IDs as remote turns a successful local close into
   // a permanent retry obligation.
   if (sessionId.startsWith('local-')) return;
-  unregisterInFlightSteelSession(sessionId);
+  await unregisterInFlightSteelSession(sessionId);
   await retryWithBackoff(
     async () => {
       try {

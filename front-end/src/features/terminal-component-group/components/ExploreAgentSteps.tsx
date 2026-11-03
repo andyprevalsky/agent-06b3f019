@@ -5,6 +5,8 @@ import { userFacingMessageText } from '@/lib/userFacingMessage';
 import { TOOL_ICONS } from '@/lib/toolIcons';
 
 import type { ExploreStep } from '../types';
+import { AgentTreeListing } from './agent-rows/AgentTreeListing';
+import { buildAgentListing } from './agent-rows/agentTreeListingModel';
 
 function isThinkingStep(step: ExploreStep): boolean {
   return (
@@ -31,7 +33,9 @@ function StepRow({
 }) {
   const thinking = isThinkingStep(step);
   const visibleMessage = userFacingMessageText(step.message || '');
-  const hasContent = !!visibleMessage.trim();
+  // list_agents inside an explore agent renders the same structured tree.
+  const listing = step.toolName === 'list_agents' ? buildAgentListing(step.agentTree) : null;
+  const hasContent = Boolean(listing) || !!visibleMessage.trim();
   const StepIcon = getStepIcon(step);
   if (thinking) {
     return (
@@ -63,7 +67,15 @@ function StepRow({
         )}
         <span className="min-w-0 flex-1 truncate">{step.title}</span>
       </div>
-      {isStepExpanded && hasContent && (
+      {isStepExpanded && listing && (
+        <div
+          className="ml-4 mt-0.5 mb-1 max-h-[240px] min-w-0 overflow-y-auto overflow-x-hidden border-l border-border/30 pl-2"
+          data-testid="explore-step-agent-tree"
+        >
+          <AgentTreeListing listing={listing} />
+        </div>
+      )}
+      {isStepExpanded && !listing && hasContent && (
         <div className="ml-4 mt-0.5 mb-1 text-[11px] text-muted-foreground/50 whitespace-pre-wrap break-words max-h-[150px] overflow-y-auto border-l border-border/30 pl-2">
           {visibleMessage}
         </div>

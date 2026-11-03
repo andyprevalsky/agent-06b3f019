@@ -6,112 +6,22 @@
  *   GET  /api/benchmarks/runs          → uploaded run index
  *   GET  /api/benchmarks/run-requests  → dispatch queue
  *   POST /api/benchmarks/run-requests  → dispatch (captured + asserted)
- *   POST /api/benchmarks/run-requests  → dispatch (captured + asserted)
  *   GET  /api/benchmarks/runs/:id/agents/:aid → transcript + tree
  *
  * Covers: render with stats + flag icons, tag/group filtering, select-all on
  * the FILTERED set, dispatch POST body, run rows with open-agent → in-app
- * transcript render (root + tree node swap).
+ * transcript render (root + tree node swap). Run-name derivation lives in
+ * benchmarks-run-name.blackbox.ts.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { renderWithProviders } from './test-wrapper';
 import { BenchmarksView } from '@/features/benchmarks';
-import { deriveRunName } from '@/features/benchmarks/runName';
 import type { HubRun } from '@/lib/api/benchmarksHub';
+import { CATALOG } from './benchmarks-hub.fixtures';
 
 // Authenticated session for getAuthHeaders()
 const SESSION = { access_token: 'test-token', user: { id: 'admin-1' } };
-
-const CATALOG = {
-  tasks: [
-    {
-      name: 'chat-mode',
-      title: 'Chat Mode',
-      description: 'basic chat',
-      prompt: 'say hi',
-      status: null,
-      bench: 'pipeline-e2e',
-      group: 'pre-deploy',
-      tags: ['smoke', 'chat'],
-      timeout_seconds: 240,
-      price_limit_cents: 100,
-      expected_tools: [],
-      min_agent_count: null,
-      is_chat_mode: true,
-      world_model_mode: null,
-      updated_at: '2026-07-10T00:00:00Z',
-      updated_by: null,
-      stats: {
-        attempts: 10,
-        passes: 9,
-        pass_rate: 0.9,
-        p50_duration_seconds: 42,
-        p95_duration_seconds: 90,
-        last_attempt_at: '2026-07-10T00:00:00Z',
-        last_status: 'passed',
-        last_fast_mode: true,
-      },
-    },
-    {
-      name: 'sim-task',
-      title: 'Sim Task',
-      description: 'simulated env',
-      prompt: 'simulate',
-      status: 'ready',
-      bench: 'rose-bench',
-      group: 'rose-bench',
-      tags: ['research'],
-      timeout_seconds: 600,
-      price_limit_cents: 200,
-      expected_tools: ['spawn_agent'],
-      min_agent_count: 1,
-      is_chat_mode: false,
-      world_model_mode: 'simulate',
-      updated_at: '2026-07-10T00:00:00Z',
-      updated_by: null,
-      stats: null,
-    },
-    {
-      name: 'broken-task',
-      title: 'Broken Task',
-      description: 'missing fixtures',
-      prompt: 'x',
-      status: 'incomplete',
-      bench: 'rose-bench',
-      group: 'incomplete',
-      tags: ['research'],
-      timeout_seconds: null,
-      price_limit_cents: null,
-      expected_tools: [],
-      min_agent_count: null,
-      is_chat_mode: false,
-      world_model_mode: null,
-      updated_at: '2026-07-10T00:00:00Z',
-      updated_by: null,
-      stats: null,
-    },
-    {
-      name: 'polar-bu-001',
-      title: 'Polar BU 001',
-      description: 'polar-bench slice task',
-      prompt: 'browse',
-      status: 'ready',
-      bench: 'rose-bench',
-      group: 'polar-bench',
-      tags: ['polar-bench', 'browser'],
-      timeout_seconds: 900,
-      price_limit_cents: 1000,
-      expected_tools: ['spawn_browser_agent'],
-      min_agent_count: null,
-      is_chat_mode: false,
-      world_model_mode: null,
-      updated_at: '2026-07-10T00:00:00Z',
-      updated_by: null,
-      stats: null,
-    },
-  ],
-};
 
 const RUNS = {
   runs: [
@@ -327,11 +237,33 @@ describe('BenchmarksView (in-app hub)', () => {
     const chatRow = screen.getByTestId('task-row-chat-mode');
     expect(within(chatRow).getByText('90% pass')).toBeInTheDocument();
     expect(within(chatRow).getByText(/p50 42s/)).toBeInTheDocument();
-    // fast-mode Zap on chat-mode (last run used fast cache)
+    // fast-mode Zap on chat-mode (last run used DEMO cache)
     expect(within(chatRow).getByTestId('flag-fast')).toBeInTheDocument();
     // sim Sparkles on the simulated task
     const simRow = screen.getByTestId('task-row-sim-task');
     expect(within(simRow).getByTestId('flag-sim')).toBeInTheDocument();
+  });
+
+  it('exposes Process Bench as an independent family filter', async () => {
+    const processTask = {
+      ...CATALOG.tasks[0],
+      name: 'process-example',
+      title: 'Process Bench — Example',
+      group: 'process-bench',
+      tags: ['process'],
+    };
+    CATALOG.tasks.push(processTask);
+    try {
+      renderWithProviders(<BenchmarksView />);
+      await waitFor(() =>
+        expect(screen.getByTestId('task-row-process-example')).toBeInTheDocument(),
+      );
+      fireEvent.click(screen.getByTestId('group-process-bench'));
+      expect(screen.getByTestId('task-row-process-example')).toBeInTheDocument();
+      expect(screen.queryByTestId('task-row-chat-mode')).not.toBeInTheDocument();
+    } finally {
+      CATALOG.tasks.pop();
+    }
   });
 
   it('filters by group and by tag', async () => {
@@ -615,59 +547,5 @@ describe('BenchmarksView edge states', () => {
     fireEvent.click(screen.getByTestId('run-selected'));
     await waitFor(() => expect(screen.getByTestId('dispatch-error')).toBeInTheDocument());
     expect(screen.getByTestId('dispatch-error').textContent).toContain('dispatch exploded');
-  });
-});
-
-describe('deriveRunName (semantic run label)', () => {
-  const mkRun = (over: Partial<HubRun>): HubRun => ({
-    run_id: '20260719-131303-17378',
-    timestamp: '2026-07-19T20:13:03Z',
-    suite: 'cloud-fleet',
-    source: 'cloud-fleet',
-    live: false,
-    uploaded_at: '2026-07-19T20:40:00Z',
-    tasks: [],
-    ...over,
-  });
-  const task = (name: string): HubRun['tasks'][number] => ({
-    name,
-    passed: null,
-    status: 'queued',
-    agent_id: null,
-    duration_seconds: null,
-    cost_cents: null,
-    world_model_mode: null,
-    fast_mode: false,
-    tree_agent_count: null,
-    failure_reason: null,
-  });
-
-  it('prefers an explicit bundle name over derivation', () => {
-    expect(deriveRunName(mkRun({ name: 'ecommerce slice', tasks: [task('a'), task('b')] }))).toBe(
-      'ecommerce slice',
-    );
-  });
-
-  it('uses the single task name for a one-task run', () => {
-    expect(deriveRunName(mkRun({ tasks: [task('browser-amazon-return')] }))).toBe(
-      'browser-amazon-return',
-    );
-  });
-
-  it('joins up to three distinct task names', () => {
-    expect(deriveRunName(mkRun({ tasks: [task('a'), task('b'), task('c')] }))).toBe('a, b, c');
-  });
-
-  it('summarizes longer slices as "first, second +N more" and dedupes', () => {
-    const tasks = [task('a'), task('b'), task('a'), task('c'), task('d')]; // 4 distinct
-    expect(deriveRunName(mkRun({ tasks }))).toBe('a, b +2 more');
-  });
-
-  it('falls back to suite/source when there are no tasks', () => {
-    expect(deriveRunName(mkRun({ tasks: [] }))).toBe('cloud-fleet');
-    expect(deriveRunName(mkRun({ tasks: [], suite: null, source: 'manual-run' }))).toBe(
-      'manual-run',
-    );
-    expect(deriveRunName(mkRun({ tasks: [], suite: null, source: null }))).toBe('run');
   });
 });

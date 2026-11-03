@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 import importlib.util
+import argparse
+import json
+import os
+import tempfile
 import sys
 import unittest
 from pathlib import Path
@@ -20,6 +24,35 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ReviewWaitTest(unittest.TestCase):
+    def test_failed_wait_records_a_complete_review_window(self) -> None:
+        # Match the CLI's script import path when calling main in-process.
+        self.addCleanup(setattr, sys, "path", sys.path[:])
+        sys.path.insert(0, str(ROOT / "scripts"))
+        args = argparse.Namespace(pr="123", head="a" * 40, repo="acme/rose", timeout=600, poll=5)
+        triggered = MODULE.parse_github_time("2026-10-01T23:54:31Z")
+        for error, trigger, fails_during_trigger, reason in (
+            (TimeoutError("review timed out"), triggered, False, "timeout"),
+            (MODULE.ReviewWaitError("PR HEAD changed"), None, False, "error"),
+            (MODULE.ReviewWaitError("trigger unavailable"), None, True, "error"),
+        ):
+            with self.subTest(error=str(error)), tempfile.TemporaryDirectory() as directory:
+                ledger = Path(directory) / "events.jsonl"
+                with patch.object(MODULE, "parse_args", return_value=args), \
+                     patch.object(MODULE, "latest_review_trigger_at", return_value=trigger,
+                                  side_effect=error if fails_during_trigger else None), \
+                     patch.object(MODULE, "wait_for_review", side_effect=error), \
+                     patch.dict(os.environ, {"FACTORY_EVENT_LOG": str(ledger)}):
+                    code = MODULE.main()
+                self.assertEqual(code, 2)
+                self.assertTrue(ledger.exists(), "failed review wait lost both timing events")
+                rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+                self.assertEqual([row["event"] for row in rows], ["review-request", "review-arrival"])
+                self.assertEqual(rows[0]["detail"]["reason"], "manual-trigger" if trigger else "waiter-start")
+                self.assertEqual(rows[1]["detail"]["reason"], reason)
+                self.assertGreaterEqual(rows[1]["recorded_epoch"], rows[0]["recorded_epoch"])
+                if trigger:
+                    self.assertEqual(rows[0]["recorded_epoch"], trigger.timestamp())
+
     def test_legacy_success_needs_no_started_at(self) -> None:
         head = "a" * 40
         payload = {
@@ -729,6 +762,42 @@ class ReviewWaitTest(unittest.TestCase):
         self.assertEqual(payload["statusCheckRollup"][0]["context"], "CodeRabbit")
         self.assertGreaterEqual(len(calls), 2)
 
+
+
+class ReplyWrapperReviewTest(unittest.TestCase):
+    """The waiter reads only the CodeRabbit check on the exact HEAD, never a review count.
+
+    On PR 1656 (2026-10-31) CodeRabbit answered two ``[FIXED]`` thread replies
+    with empty-body COMMENTED reviews of the new HEAD while its check was
+    "Review rate limited"; a hand-rolled guard that counted reviews-by-HEAD
+    treated them as a delivered review. Reviews are not an input here, so
+    adding them to the payload must not end the wait; only the check does.
+    """
+
+    def test_reply_wrapper_reviews_never_end_the_wait(self) -> None:
+        head = "da2dbd8b14e25c77dcd5d3b0df3fb42e27e7d9ea"
+        wrappers = [
+            {"id": 5722158877, "user": {"login": "coderabbitai[bot]"}, "state": "COMMENTED",
+             "commit_id": head, "submitted_at": "2026-10-31T09:25:39Z", "body": ""},
+            {"id": 5722158908, "user": {"login": "coderabbitai[bot]"}, "state": "COMMENTED",
+             "commit_id": head, "submitted_at": "2026-10-31T09:25:40Z", "body": ""},
+        ]
+        pending = {"headRefOid": head, "reviews": wrappers, "statusCheckRollup": [
+            {"__typename": "CheckRun", "name": "CodeRabbit", "status": "IN_PROGRESS",
+             "conclusion": None, "startedAt": "2026-10-31T10:11:01Z"}]}
+        finished = {"headRefOid": head, "reviews": wrappers, "statusCheckRollup": [
+            {"__typename": "CheckRun", "name": "CodeRabbit", "status": "COMPLETED",
+             "conclusion": "SUCCESS", "title": "Finished", "startedAt": "2026-10-31T10:11:01Z"}]}
+        payloads = iter([pending, pending, pending, finished])
+        polls: list[float] = []
+        status = MODULE.wait_for_review(
+            pr="1656", expected_head=head, repo=None, timeout_seconds=600, poll_seconds=5,
+            loader=lambda _pr, _repo: next(payloads), sleeper=polls.append,
+            triggered_at=MODULE.parse_github_time("2026-10-31T10:10:02Z"),
+        )
+        self.assertEqual(len(polls), 3, "wrapper reviews must not shortcut the check wait")
+        self.assertEqual((status.state, status.successful), ("SUCCESS", True))
+        self.assertIsNone(MODULE.coderabbit_entry({"statusCheckRollup": [], "reviews": wrappers}))
 
 if __name__ == "__main__":
     unittest.main()

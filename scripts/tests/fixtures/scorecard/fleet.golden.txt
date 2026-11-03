@@ -1,0 +1,25 @@
+🧪 EXPERIMENT #1 · ✅ COMPLETE
+alpha +1 · 2 scheduled · cloud · src 126b82622
+Triggered Oct 18, 12:28:52 PM PDT
+24.0 experiments/day · 1 launch / 0.04 d · warming 1h00m
+Since last benchmark ended: 44m00s (alpha +1)
+QUEUED 0 · IN_PROGRESS 0 · COMPLETED 2/2
+PASS 1 · HARNESS FAILURE 0 · INFRA FAILURE 0
+AGENT FAILURE 1
+Pass rate 50.0% (1/2 scored)
+Infra attempts 0/2
+Stop at 1/2 unique infra-failed jobs (5%)
+     1 AGENT FAIL: Timeout after 480s (wall-clock backstop=480s)
+Cost $0.50 metered (2/2) · infra/wmh_grounding UNMETERED
+Cache agent demo-cache avg 80% (2/2) · LLM latency UNMEASURED
+Lifecycle
+  ✅ Owned resources released · lifecycle.json verified
+  ✅ Final Hub publication
+  ✅ Controller exited · exit 1
+LAST 3 EXPERIMENTS
+  #1 ✅ COMPLETE alpha +1 · Oct 18, 12:28:52 PM PDT → 12:44:52 PM PDT · PASS 1/2 · INFRA 0/2
+ACTIVE SUB-AGENTS / PARENT
+  No active agents
+ISSUES / NEXT ACTION
+  • No open issues recorded.
+✅ COMPLETE

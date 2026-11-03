@@ -1,0 +1,32 @@
+[
+  {
+    "iteration": 1,
+    "source_sha256": "f4f37226b8a4bcb351e8a4a62d01a7269f8f43e76f173dfa588f12a6a44bcbe4",
+    "captured_inputs": 75,
+    "logical_input_equal": true,
+    "system_equal": true,
+    "response_cache_key_equal": true,
+    "real_wire_marker_max": 2,
+    "model_effort_output_budget_unchanged": true
+  },
+  {
+    "iteration": 2,
+    "source_sha256": "9cb7804354512c2224340f97e6247a4b7ce7e834c50188c66414148835660375",
+    "captured_inputs": 75,
+    "logical_input_equal": true,
+    "system_equal": true,
+    "response_cache_key_equal": true,
+    "real_wire_marker_max": 4,
+    "model_effort_output_budget_unchanged": true
+  },
+  {
+    "iteration": 3,
+    "source_sha256": "424415aafecb49a16ea4ca03bece17928f5dbc2b86df6e79bcbabe84613d8adc",
+    "captured_inputs": 75,
+    "logical_input_equal": true,
+    "system_equal": true,
+    "response_cache_key_equal": true,
+    "real_wire_marker_max": 4,
+    "model_effort_output_budget_unchanged": true
+  }
+]

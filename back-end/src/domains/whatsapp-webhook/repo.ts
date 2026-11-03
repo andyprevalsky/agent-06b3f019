@@ -7,24 +7,14 @@
  * itself is shared per-user via the smsSupervisor session store.
  */
 
-import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 
 /**
- * Find-or-create a User for an inbound WhatsApp number.
- *
- * An inbound WhatsApp message is proof of possession of the number (Meta
- * verified the sender), so a first-time texter is provisioned immediately with
- * a generated `userId` — no OTP, no signup wall — exactly like the SMS path.
+ * Find-or-create the User for an inbound number: the message proves possession
+ * of the number, so a first-time texter is provisioned immediately (no OTP, no
+ * signup wall). Concurrent first messages resolve to one account.
  */
-export async function provisionUserByPhone(phone: string) {
-  const existing = await prisma.user.findFirst({ where: { phone } });
-  if (existing) return { user: existing, created: false };
-  const user = await prisma.user.create({
-    data: { userId: randomUUID(), phone, isAnonymous: false },
-  });
-  return { user, created: true };
-}
+export { provisionUserByPhone } from '../../providers/phoneAccountProvisioning';
 
 /** Read the current inbound seq for a user (null if no session yet). */
 export async function getInboundSeq(userId: string): Promise<number | null> {

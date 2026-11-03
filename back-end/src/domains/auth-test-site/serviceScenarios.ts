@@ -20,8 +20,8 @@ import { phoneSmsPlan } from './servicePhoneSmsPlan';
  *   2 logins, freshest stale     password form                       failed_login_not_reoffered
  *   2 working logins             password form                       named_account
  *   1 working login              shop; session ends at order         session_expires_at_checkout
- *   none (minted has account)    emailed code ok / never / expired   minted_otp / code_never_arrives / expired_code
- *   none (minted has account)    texted code / emailed link          minted_sms_otp / magic_link
+ *   minted passwordless login    emailed code ok / never / expired   minted_otp / code_never_arrives / expired_code
+ *   minted passwordless login    texted code / emailed link          minted_sms_otp / magic_link
  *   none (user's inbox account)  emailed code to the user's inbox    email_otp
  *   none                         sign-up ok / duplicate              signup / signup_already_registered
  *   none                         shop: guest ok / account required   guest_purchase / signup_purchase / signup_fails_purchase
@@ -58,6 +58,8 @@ export interface ScenarioPlan {
   ladder: Omit<SavedLoginLadder, 'served'> | null;
   /** offered: auth options list the minted identity; account: it also already has a site account. */
   minted: MintedUse;
+  /** Identifier a minted sign-in recorded as a passwordless saved login (null offers Minted). */
+  mintedLogin: string | null;
   savedSession: { email: string; state: 'valid' | 'expired' } | null;
   passkeyEmail: string | null;
   expectedSignInEmail: string | null;
@@ -139,6 +141,7 @@ function plan(overrides: Partial<ScenarioPlan>): ScenarioPlan {
     savedPasswords: [],
     ladder: null,
     minted: 'none',
+    mintedLogin: null,
     savedSession: null,
     passkeyEmail: null,
     expectedSignInEmail: null,
@@ -212,8 +215,12 @@ function allFailPlan(ctx: PlanContext): ScenarioPlan {
 }
 
 /** One member account whose saved password works, plus whatever else the scenario saves. */
-function workingLoginPlan(ctx: PlanContext, overrides: Partial<ScenarioPlan>): ScenarioPlan {
-  const [email] = savedLoginEmails(ctx.holderName, ctx.siteId);
+function workingLoginPlan(
+  ctx: PlanContext,
+  overrides: Partial<ScenarioPlan>,
+  accountEmail?: string
+): ScenarioPlan {
+  const email = accountEmail ?? savedLoginEmails(ctx.holderName, ctx.siteId)[0];
   const password = randomPassword();
   const member = account(ctx, email, password);
   return plan({
@@ -237,25 +244,16 @@ function passkeyPlan(ctx: PlanContext, passkey: 'accept' | 'reject'): ScenarioPl
   return { ...base, passkeyEmail: base.accounts[0].email };
 }
 
+/** Rose still believes the minted identity has no account here, so Minted is offered. */
+const STALE = { minted: 'account', mintedLogin: null } as const;
+
+/** A minted sign-in records what it typed: the phone on a text-only site, else the email. */
 function mintedAccountPlan(ctx: PlanContext, behavior: Partial<SiteBehavior>): ScenarioPlan {
   const member = account(ctx, ctx.mintedEmail ?? '', null, { phone: ctx.mintedPhone });
   return plan({
     behavior: { ...BASE_BEHAVIOR, ...behavior },
     accounts: [member],
-    minted: 'account',
-    expectedSignInEmail: member.email,
-    expectedMemberNumber: member.memberNumber,
-  });
-}
-
-/** An account the agent made earlier under its own inbox; the password was saved, the site wants a code too. */
-function passwordEmail2faPlan(ctx: PlanContext): ScenarioPlan {
-  const password = randomPassword();
-  const member = account(ctx, ctx.mintedEmail ?? '', password);
-  return plan({
-    behavior: { ...BASE_BEHAVIOR, secondFactor: 'email_code' },
-    accounts: [member],
-    savedPasswords: [{ username: member.email, password, lastUsedDaysAgo: 1 }],
+    mintedLogin: behavior.smsSignIn === 'code' ? ctx.mintedPhone : member.email,
     expectedSignInEmail: member.email,
     expectedMemberNumber: member.memberNumber,
   });
@@ -327,7 +325,16 @@ const PLANNERS: Record<AuthTestSiteScenario, (ctx: PlanContext) => ScenarioPlan>
   stale_session: (ctx) => sessionPlan(ctx, 'expired'),
   passkey: (ctx) => passkeyPlan(ctx, 'accept'),
   passkey_rejected: (ctx) => passkeyPlan(ctx, 'reject'),
-  password_email_2fa: passwordEmail2faPlan,
+  password_email_2fa: (ctx) =>
+    workingLoginPlan(
+      ctx,
+      { behavior: { ...BASE_BEHAVIOR, secondFactor: 'email_code' } },
+      ctx.mintedEmail ?? ''
+    ),
+  password_app_approval: (ctx) =>
+    workingLoginPlan(ctx, {
+      behavior: { ...BASE_BEHAVIOR, emailSignIn: 'off', secondFactor: 'app_approval' },
+    }),
   account_locked: accountLockedPlan,
   // The account exists but cannot be reached: its only way in is a code that never comes.
   code_never_arrives: (ctx) => ({
@@ -342,7 +349,7 @@ const PLANNERS: Record<AuthTestSiteScenario, (ctx: PlanContext) => ScenarioPlan>
   magic_link: (ctx) => mintedAccountPlan(ctx, { emailSignIn: 'link' }),
   email_otp: emailOtpPlan,
   signup: () => openSitePlan({ signUp: 'open' }),
-  signup_already_registered: (ctx) => mintedAccountPlan(ctx, { signUp: 'open' }),
+  signup_already_registered: (ctx) => ({ ...mintedAccountPlan(ctx, { signUp: 'open' }), ...STALE }),
   guest_purchase: () => openSitePlan(GUEST_SHOP),
   // Guests can buy, but only an account gets the lower price.
   member_discount_purchase: () => openSitePlan(MEMBER_PRICE_SHOP),

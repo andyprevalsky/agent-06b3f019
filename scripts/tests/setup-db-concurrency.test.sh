@@ -129,6 +129,8 @@ cat > "$TMP/fake-repo/back-end/scripts/apply-local-workflow-ddl.sh" <<'STUB'
 #!/usr/bin/env bash
 exit 0
 STUB
+cp "$TMP/fake-repo/back-end/scripts/apply-local-workflow-ddl.sh" \
+  "$TMP/fake-repo/back-end/scripts/normalize-local-user-phones.sh"
 cat > "$TMP/fake-repo/scripts/benchmark-seed-cache" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "/tmp/fake-seed.dump"
@@ -137,6 +139,7 @@ touch "$TMP/fake-repo/back-end/prisma-schema-placeholder"
 mkdir -p "$TMP/fake-repo/back-end/prisma"
 touch "$TMP/fake-repo/back-end/prisma/schema.prisma"
 chmod +x "$TMP/bin"/* "$TMP/fake-repo/back-end/scripts/apply-local-workflow-ddl.sh" \
+  "$TMP/fake-repo/back-end/scripts/normalize-local-user-phones.sh" \
   "$TMP/fake-repo/scripts/benchmark-seed-cache"
 
 # A failed Mac container must never redirect a destructive setup to shared PG.
@@ -565,3 +568,133 @@ if grep -Eq 'RM_CONTAINER|CREATE_CONTAINER|SYSTEM_PG|RESET|PUSH|SEED_START' "$EV
   fail "case 11: collision changed a database: $(cat "$EVENTS")"
 fi
 echo "PASS: setup-db.sh preserves the workspace DB and shared system PG on a port collision"
+
+# Case 12: system Postgres is one server shared by every workspace on the host.
+# RCA 2026-10-19: a sub-agent ran `ROSE_USE_SYSTEM_PG=true CONDUCTOR_PORT=3720
+# CONDUCTOR_WORKSPACE_NAME=<unique> bash scripts/setup-db.sh` on a Linux devbox;
+# setup-db.sh hard-coded `localhost:5432/victoria`, so its DROP SCHEMA + seed
+# wiped every other stack's rows. A named workspace must reset only its own
+# database (victoria_stack_<workspace>, distinct from the victoria_<workspace>
+# test-fixture database). Only the single-tenant cloud identity recorded in
+# .cloud-env (same name AND port), an unset workspace, or an explicit
+# ROSE_SYSTEM_PG_DB_NAME may reset the shared `victoria`.
+SYS="$TMP/system-pg"
+mkdir -p "$SYS/bin"
+SYS_EVENTS="$SYS/events.log"
+cat > "$SYS/bin/pg_isready" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+# Record every database a psql/createdb call targets and whether it is the
+# destructive reset. No real server is ever contacted.
+cat > "$SYS/bin/psql" <<STUB
+#!/usr/bin/env bash
+db=""; prev=""; reset=0
+for arg in "\$@"; do
+  [ "\$prev" = "-d" ] && db="\$arg"
+  case "\$arg" in *"DROP SCHEMA"*) reset=1 ;; esac
+  prev="\$arg"
+done
+if [ "\$reset" = 1 ]; then
+  printf 'RESET %s\n' "\$db" >> "$SYS_EVENTS"
+else
+  printf 'PSQL %s\n' "\$db" >> "$SYS_EVENTS"
+fi
+exit 0
+STUB
+cat > "$SYS/bin/createdb" <<STUB
+#!/usr/bin/env bash
+printf 'CREATEDB %s\n' "\${@: -1}" >> "$SYS_EVENTS"
+exit 0
+STUB
+cat > "$SYS/bin/docker" <<STUB
+#!/usr/bin/env bash
+printf 'DOCKER %s\n' "\$*" >> "$SYS_EVENTS"
+exit 1
+STUB
+cat > "$SYS/bin/npx" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *"prisma db push"*) printf 'PUSH %s\n' "\${DATABASE_URL##*/}" >> "$SYS_EVENTS" ;;
+  *seed-local.ts*) printf 'SEED %s\n' "\${DATABASE_URL##*/}" >> "$SYS_EVENTS" ;;
+esac
+exit 0
+STUB
+chmod +x "$SYS/bin"/*
+
+make_system_repo() { # make_system_repo <dir>
+  mkdir -p "$1/back-end/scripts" "$1/back-end/prisma"
+  cp -R "$TMP/fake-repo/scripts" "$1/scripts"
+  cp "$TMP/fake-repo/back-end/scripts/apply-local-workflow-ddl.sh" \
+    "$TMP/fake-repo/back-end/scripts/normalize-local-user-phones.sh" "$1/back-end/scripts/"
+  touch "$1/back-end/prisma/schema.prisma"
+  cat > "$1/scripts/benchmark-seed-cache" <<STUB
+#!/usr/bin/env bash
+printf 'SEED_CACHE %s\n' "\${6:-victoria}" >> "$SYS_EVENTS"
+printf '%s\n' /tmp/fake-seed.dump
+STUB
+  chmod +x "$1/scripts/benchmark-seed-cache"
+}
+
+run_system_setup_db() { # run_system_setup_db <repo> <port> <workspace> [env...]
+  local repo="$1" port="$2" ws="$3"
+  shift 3
+  : > "$SYS_EVENTS"
+  (
+    cd "$repo"
+    # An isolated deploy worktree exports its own identity and name trust;
+    # inheriting them would let the passed name beat the repo's .cloud-env.
+    env -u ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME -u ROSE_DEPLOY_WORKTREE \
+      -u ROSE_DEPLOY_WORKTREE_PATH -u ROSE_DEPLOY_SOURCE_WORKSPACE \
+      PATH="$SYS/bin:$PATH" CONDUCTOR_PORT="$port" CONDUCTOR_WORKSPACE_NAME="$ws" \
+      CONDUCTOR_WORKSPACE_PATH="$repo" ROSE_USE_SYSTEM_PG=true \
+      ROSE_WORKSPACE_DB_LOCK_DIR="$SYS/locks" "$@" \
+      bash "$repo/scripts/setup-db.sh"
+  ) > "$SYS/last.out" 2>&1 || fail "case 12: setup-db.sh failed for $ws:$port
+$(cat "$SYS/last.out")"
+}
+
+expect_system_db() { # expect_system_db <label> <database>
+  local label="$1" db="$2" kind
+  for kind in RESET PUSH SEED SEED_CACHE; do
+    grep -qx "$kind $db" "$SYS_EVENTS" || fail "case 12 ($label): $kind did not target $db:
+$(cat "$SYS_EVENTS")"
+  done
+  if grep -Ev " $db\$| postgres\$" "$SYS_EVENTS" | grep -q .; then
+    fail "case 12 ($label): setup-db.sh touched a database other than $db:
+$(cat "$SYS_EVENTS")"
+  fi
+}
+
+make_system_repo "$SYS/ws-alpha"
+run_system_setup_db "$SYS/ws-alpha" 3720 ws-alpha
+expect_system_db "named workspace" victoria_stack_ws_alpha
+grep -qx 'CREATEDB victoria_stack_ws_alpha' "$SYS_EVENTS" \
+  || fail "case 12: a missing per-workspace database was not created"
+
+run_system_setup_db "$SYS/ws-alpha" 3720 ws-alpha ROSE_SYSTEM_PG_DB_NAME=victoria
+expect_system_db "explicit shared opt-in" victoria
+
+# The cloud VM's own identity keeps the database cloud-init seeds.
+make_system_repo "$SYS/cloud"
+(
+  cd "$SYS/cloud"
+  bash -c ". scripts/lib/workspace-env.sh; write_cloud_env .cloud-env 3001 cloud-feedbeef '$SYS/cloud' \"\$(cloud_env_boot_id)\""
+)
+run_system_setup_db "$SYS/cloud" 3001 cloud-feedbeef
+expect_system_db "cloud primary" victoria
+# A second stack on that VM inherits the .cloud-env name (the file wins over an
+# untrusted CONDUCTOR_WORKSPACE_NAME) but runs on its own port range.
+run_system_setup_db "$SYS/cloud" 3720 some-unique-subagent
+expect_system_db "second stack on a cloud VM" victoria_stack_cloud_feedbeef_p3720
+
+if ROSE_SYSTEM_PG_DB_NAME='victoria; DROP DATABASE postgres' \
+    bash -c ". '$ROOT_DIR/scripts/lib/workspace-env.sh'; workspace_system_pg_db_name ." >/dev/null 2>&1; then
+  fail "case 12: an unsafe ROSE_SYSTEM_PG_DB_NAME was accepted"
+fi
+# run.sh's non-benchmark system-Postgres stack must resolve the same database
+# setup-db.sh seeded, not the shared `victoria`.
+awk '/System Postgres fallback \(no Docker\)/,/DEMO cache is intentionally shared/' \
+    "$ROOT_DIR/scripts/run.sh" | grep -q 'LOCAL_DB_NAME="$(workspace_system_pg_db_name ' \
+  || fail "case 12: run.sh's system-Postgres stack does not use workspace_system_pg_db_name"
+echo "PASS: system-Postgres setup-db.sh resets only the workspace's own database"

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>smoke dashboard</title>
+<style>
+  body { margin: 0; font: 14px/1.4 system-ui, sans-serif; }
+  .card { padding: 18px; border-radius: 12px; background: rgb(30, 58, 138); color: #fff; }
+</style>
+</head>
+<body>
+<div class="card" id="card">Dashboard slot (smoke fixture)</div>
+<script>
+  // Static on purpose: the smoke measures the preview host, not this view.
+  parent.postMessage({ type: 'rose:ready' }, '*');
+  parent.postMessage({ type: 'rose:resize', height: document.documentElement.scrollHeight }, '*');
+</script>
+</body>
+</html>

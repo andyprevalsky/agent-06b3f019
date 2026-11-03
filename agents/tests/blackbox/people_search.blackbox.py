@@ -292,7 +292,7 @@ async def test_exact_profile_identity_and_nested_attributes():
 
 async def test_fast_mode_never_contacts_lantern():
     _setup()
-    with patch("providers.fast_cache.client.soft_complete_allowed_for_agent", return_value=True):
+    with patch("providers.demo_cache.client.soft_complete_allowed_for_agent", return_value=True):
         result = await _run(fast_mode_cache_enabled=True, fast_mode_goal="cached goal", agent_id="agent-1")
     assert result["providers_attempted"] == []
     assert result["_fast_cache_hit"] is True
@@ -776,7 +776,7 @@ async def test_invalid_explicit_broker_rejects_before_any_auth_http():
 
 async def test_configured_broker_fast_mode_still_uses_zero_http():
     wire = _install_broker_transport()
-    with patch("providers.fast_cache.client.soft_complete_allowed_for_agent", return_value=True):
+    with patch("providers.demo_cache.client.soft_complete_allowed_for_agent", return_value=True):
         result = await _run_with_broker_env(
             "https://credential-broker.example.test",
             token="stale-direct-token",

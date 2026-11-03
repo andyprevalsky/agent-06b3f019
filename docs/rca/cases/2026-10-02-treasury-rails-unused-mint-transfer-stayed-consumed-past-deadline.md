@@ -220,6 +220,17 @@ A test that waits on a shared third-party ledger needs to log the provider's
 own record of the object it waits on. A summary of a few fields cannot tell a
 slow provider from a concurrent consumer.
 
+
+## Retained sandbox liability and one-run overdue acknowledgement — 2026-10-15
+
+The first fresh backend coverage gate on b5475e5be1f98e48e709298c0afcd2ea2e550ce7 failed treasury-rails while272unitfiles and198/199 blackbox domains passed. No new card was minted by that run: the gate stopped at the earlier-mint admission check. Exact local append-only ledger provenance links card_5d774c38cd66074889db0840 and transfer owt_d01a446802e08aa22f2dd904 to this task's earlier a5aaa8fc3b50bbb3b8a2bd024315fb0dbc5ca027 backend-verification run1792014135-1122715-26840. Mint1300c was created2026-10-14T21:48:05.589Z. That original native log retained21 settle observations ending21:52:14.396Z with the exact sandbox transfer consumed and released_cents0, then recorded it pending under the existing24h rule. This is positive prior custody, not authority inferred from an arbitrary missing row.
+
+At2026-10-15T22:01:07.931Z, the unchanged current checker returned overdue, "not listed (could be consumed)", provider row null. Current exact transfer state is UNKNOWN; absence does not prove consumed, reclaimed or financial loss. The existing provider list contract has no offset/cursor or exact transfer detail exposed in the repository. A read-only call through the actual org runtime at22:07:01.938Z verified sandbox mode and exact owned get_card: CLOSED, balanceCents0. No mint/close/recover or foreign asset mutation was performed during this read-only investigation.
+
+checkPendingUnusedMints automatically appended resolved with verdict OVERDUE and detail "not listed (could be consumed)". That is acknowledgement of the failed check, NOT repayment. No manual ledger write, deletion, reset or skip flag was applied. The permanent treasury-rails-pending-mints domain passed on this source and explicitly asserts that overdue verdicts fail one run and disappear from later open checks while foreign-credential entries stay untouched. Therefore a later ordinary TestLoop follows the existing admission contract; it is not a code repair, consumed-release exception, financial waiver or proof the1300sandbox cents returned. Preserve both ledger events, original failed gate and the1300c unverified sandbox return exposure in the deployment report. No real-dollar loss is asserted. Case remains open and production rollout remains independently gated.
+
+Evidence: deployment preview `.context/final-b547/treasury-custody-proof.json`, `treasury-native-owned-card.json`, and failed coverage archive `.context/test-runs/backend-coverage-failed-20261015-220330-298660/`. The original owned receipt remains `/home/boxes/rose-backend-verification/back-end/coverage/blackbox-run/treasury-rails.log`. Archive searches used "earlier mint still not listed reclaim deadline" and "treasury rails pending mints consumed card"; the existing consumed-stall case is a historical relative/continuation, while the current projection has an explicit observation gap and is not misreported as a newly proven consumed stall.
+
 ## October 16 overdue observation during reusable cutover qualification
 
 The backend coverage run on
@@ -238,3 +249,74 @@ was edited to remove the failure. A separate earlier mint,
 `card_d3f0c6a6b4aaaebc920d8e8b`, was still pending within its original deadline.
 Later test runs must retain these financial limitations even when the one-time
 overdue assertion no longer repeats. No provider or treasury policy changed.
+
+
+## October 17 exact owned sandbox transfer overdue — retained failure
+
+Fresh backend coverage on source 2a798afc5f2d3147e27af5ea488baa5d600cc48d returned EXIT1: 298 unit files passed; 199 of 200 blackbox domains passed. Treasury failed before minting a new card. The exact earlier transfer remained consumed with released_cents=0, amount 1300 sandbox cents and captured livemode=false at the 24.4-hour check. A different 13.1-hour entry remained waiting. The successful aggregate $37.21 pre-sweep does not credit this transfer.
+
+Positive custody is the retained bb7c462a92445b6595c9e5b5544b665c42c90f0f coverage log: the exact card was minted for $13, closed successfully, observed consumed after 24 settlement attempts, then recorded pending. Its canonical coverage receipt returned 0 with unchanged source. The later c9c08 log is an observation, not the original mint. The checker, pending-ledger owner and settlement predicate are byte-identical between bb7 and 2a.
+
+The operator-directed 24-hour deadline uses the transfer's provider created_at (2026-10-16T21:37:03.223Z), not journal recordedAt (21:41:16.801Z), card expiry or a provider SLA. No retained historical HTTP Date proves historical clock accuracy; no clock-cause attribution or deadline waiver follows. Existing human feedback permitting about a day remains binding.
+
+Nine offline controls exercised the unchanged captured-row predicate and actual pending-check caller against a temporary ledger: overdue failure, waiting, provider-time basis, exact reclaim, partial reclaim, foreign identity, foreign organization, unrelated pool credit and truncated-page uncertainty. The shared ledger was never edited. Setup import/formatter failures were retained separately from the successful offline owner reproduction.
+
+One authorized read-only canonical get_card completed in one HTTP 200 attempt. Exact card and recorded owner matched; status was CLOSED and balance_cents was 0. The getter omitted livemode, so current mode is UNKNOWN; historical transfer mode was false. Its expiry field was 10/28, a printed card expiry, not a reclamation deadline. The response Date was October 17 22:11:11 GMT; that current edge observation does not establish historical clock behavior. No close, recover, mint, purchase or financial mutation occurred. Closed/zero balance does not prove the transfer returned.
+
+The existing ledger owner automatically acknowledged the overdue failed observation before the outer assertion. This is intentional one-run failure acknowledgement, NOT repayment. Shared-ledger SHA256 remained 00fe6102dafbd4350bc7105f404144d64bbbe83a2e622364a7c258f6c76145f9 before and after investigation. The 1300 sandbox cents remain an unverified return exposure; no real-dollar loss is asserted. No checker or policy fix is justified. A later ordinary TestLoop PASS cannot establish financial recovery or erase this failed gate.
+
+Private evidence: `.context/auth-deploy/repair-next-primary/treasury-rails-2a798-rca/` contains hash-bound final-checkpoint.json, the redacted failure window, nine-control offline proof (28f398946d5af2ca80c7fa0f38d9598a06a222aa7b7b2ccdd9ad8423712f3452), one-read intent and safe projection (f2b098f8e8549cc24c984643ef3a6ecb229023e650f5a36ea84fb192563f9310). No raw journal, payment credentials or full card response was copied into this archive. Two exact-source searches and this case's Solution/Human feedback were read before choosing recurrence rather than a duplicate case.
+
+
+## October 27 overdue sandbox observation — acknowledgement is not repayment
+
+Combined coverage on `62cf2b1d2cddd627736beb7dbad0ce3094af5d2a` failed
+before a new treasury mint. The local pending journal identifies
+`card_8f528f7a78972d4c9fc1d499`, transfer `owt_67c15bc4e75ae8d1c53f4155`,
+and 1300 sandbox cents, minted October 26 at 19:57:28.600 UTC. The October 27
+20:35 check found no matching provider transfer and reported it overdue at
+24.6 hours. Its current state is UNKNOWN; missing rows prove neither
+consumption, recovery nor financial loss.
+
+The unchanged journal owner automatically appended its normal overdue
+acknowledgement at 20:35:11.489 UTC before the failed assertion. No agent
+edited the journal, set a skip flag, or changed the deadline. The existing
+contract deliberately reports an overdue entry once, so a subsequent ordinary
+TestLoop independently required by the SDK repair follows that contract.
+It does not establish a refund, financial cleanup or a repaired provider.
+Retain the failed gate and the 1300 sandbox-cent unverified-return exposure.
+
+The earlier aggregate backend run passed treasury, but its original
+card-specific mint/CLOSED/settlement payload was not recovered. The journal
+provides recorded identity, not a newly observed close. No provider mutation
+or read was performed during this reconciliation. Private evidence is under
+`.context/deploy-fresh-20261027/batch8-treasury/`; the failed native artifact is
+`.context/test-runs/backend-coverage-failed-20261027-203940-1417183/`.
+
+
+## October 28 one-run overdue notification on an earlier sandbox mint
+
+On unchanged source `48ccad7bb3e56a889d9294e46f57448991d3145a`, the
+backend recovery command passed Kernel parity and all 326 unit files but
+reported treasury-rails as its sole failing domain (233 siblings passed).
+The exact pending journal entry binds card `card_74d6c21643a4620b9a4b6a91`
+and transfer `owt_6dff8c4ea0096d0983af3f6a`, 1300 sandbox cents, minted
+October 27 at 01:25:26.163 UTC. At October 28 01:33:14.912 UTC, the normal
+checker found no matching transfer row after 24.1 hours, appended its ordinary
+resolved/overdue acknowledgement, and then reported the failed check.
+
+This is the existing deliberate one-run reporting contract described above;
+no checker, deadline, credential scope, journal entry or skip flag was changed.
+The return remains UNKNOWN, not repaid, refunded or proven consumed. This
+1300 sandbox-cent exposure is separate from the October 27 1300-cent entry and
+from the payment-abandonment 4396-cent warning. Neither a later normal gate
+PASS nor a journal `resolved` event establishes financial recovery.
+
+The original failed native artifact is
+`.context/test-runs/backend-coverage-failed-20261028-013814-2220742/`.
+Exact event projections and the source-contract review are preserved under
+`.context/deploy-fresh-20261027/batch11-treasury/`. No new provider request was
+made during reconciliation; original card-specific closure evidence was not
+newly recovered. The existing 24-hour rule and one-run acknowledgement remain
+in force. The pipeline's next ordinary canonical coverage attempt preserves
+this original failure and the unrecovered sandbox liability.

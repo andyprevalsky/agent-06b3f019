@@ -181,3 +181,73 @@ This supersedes the incomplete first-batch stop above. It remains a LOCAL draft:
 normal parent review/gates, migration approval/application and any separately
 authorized production acceptance remain outstanding. No production DB writes,
 provider calls, paid benchmarks, commits, pushes or deployment occurred here.
+
+## October 17: stale hermetic fixtures after Stripe provenance enforcement
+
+The normal agents coverage run at `c9ff323c3633` exposed six benchmark blackbox
+callbacks whose positive fixtures omitted the native hold mode or linked-refund
+PaymentIntent mode required by `e1cce5103`. Three controls also treated the
+retained mixed-mode allocation above as a valid live release-stall example.
+The runtime correctly rejected those inputs. This is related test-fixture
+drift, not evidence that the original allocation acquired live provenance.
+
+The same registered callbacks failed on the original test setup and passed with
+explicitly synthetic live response fixtures. The historical JSON remains
+byte-identical and now supplies a fail-closed control. Independent corruption
+controls start with an otherwise valid fixture and reject missing, false,
+numeric and string hold modes. Existing financial, cancellation, deadline,
+foreign-ownership and native-retirement assertions remain unchanged.
+
+The same coverage run exposed a separate fixture lifecycle mismatch: the fleet
+publication control executed the complete publisher heredoc after `201226d3c`
+made its owner loop persistent. Publication succeeded, but the subprocess could
+never finish within its unchanged 30-second guard. The control now invokes the
+actual `aggregate_tick` once and retains its publication, deduplication,
+failure, teardown and release assertions. Production loop behavior is unchanged.
+
+Paired owning evidence records seven failures before and seven passes after,
+plus 16 neighboring controls passing. All 5,652 original assertions remain;
+one historical rejection assertion was added. The private causal packet is
+`c12-benchmark-fixture-rca-local1745`, manifest SHA256
+`6bc3bb41093f511ccd345e8344f0d5c698dd79d9aa08a7998e7d19a1c812f0c6`.
+These are hermetic fixture proofs. Full deploy coverage requalification remains
+required; no live financial result, refund, release or fundraiser success is
+established by this repair.
+
+## October 17: remaining Hub fixtures entered the persistent owner loop
+
+Two additional `hub_upload_test.py` consumers still executed the complete
+aggregator heredoc after `201226d3c`. The stable timestamp control hung in its
+`aggregate` parameter, and the six-parameter terminal-startup control used the
+same unbounded entry. Actual C12 structural evidence identified the former
+callback and its Bash/Python descendants; ROOT preserved the interrupted gate
+as a failure. A successful publication did not terminate this owner loop.
+
+Both fixtures now invoke the real `aggregate_tick`
+once, retaining the full production function and imports. It does not change
+the controller's persistent loop. Both fixture subprocess callers now use
+owned sessions and the existing `FIXTURE_HOST_GUARD_SECONDS`, joining their
+created process group on interruption. All 106 original assertions across
+29 test functions and every parameter decorator have identical ASTs. The
+50-task fleet, phases, clocks, outcomes and publication assertions remain.
+
+With real fixture loopback HTTP and external networking denied, separate safe
+outer guards observed the aggregate parameter and the terminal-startup
+function hang. Each new local process tree was retired; no guest process was
+signalled by the worker. The candidate passed all three timestamp producer
+parameters, all six terminal-startup parameters and the complete 37-test
+`hub_upload_test.py` file. The neighboring finite fleet-publication callback
+also passed. This is test-fixture lifecycle proof, not production publication,
+provider acceptance, a completed deploy or a newly qualified source revision.
+
+Full callback commands, source hashes, original assertion parity, local guard
+limits and retained harness diagnostics are in the private
+`rca-c12-hub-aggregate-fixture-01a136f6` packet. ROOT owns source application and
+normal full-gate requalification; the original C12 interruption remains FAIL.
+
+Independent review also identified an exited direct leader retaining an owned child
+with open pipes. A new registered real-subprocess regression reproduced the old
+cleanup hang under a four-second outer guard. The correction kills the
+exact owned group even after leader exit and bounds drain with the existing
+30-second fixture constant; the same regression and complete 37-test file pass.
+The canonical 600-second fixture guard and production loop remain unchanged.

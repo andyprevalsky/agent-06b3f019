@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+import { verifyWorkerDeploymentNativePollers } from '../src/providers/workerDeploymentPollers';
 /** Serialized durable worker deploys. Native actions belong only to the owned child. */
 import { readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -7,6 +8,8 @@ import {
   abortWorkerDeployment,
   abortPreparedWorkerDeployment,
   assertWorkerDeploymentOwned,
+  assertWorkerDeploymentMachineMutable,
+  readWorkerDeploymentRetainedRouteMismatch,
   claimWorkerDeployment,
   enqueueWorkerDeployment,
   readWorkerDeployment,
@@ -256,6 +259,27 @@ async function main(): Promise<void> {
           required('--owner-id')
         )
       );
+      break;
+    case 'verify-native-pollers':
+      emit(
+        await verifyWorkerDeploymentNativePollers(
+          required('--job-id'),
+          required('--owner-id'),
+          input()
+        )
+      );
+      break;
+    case 'assert-mutable':
+      emit(
+        await assertWorkerDeploymentMachineMutable(
+          required('--job-id'),
+          required('--machine-id'),
+          required('--owner-id')
+        )
+      );
+      break;
+    case 'retained-status':
+      emit(await readWorkerDeploymentRetainedRouteMismatch(required('--job-id')));
       break;
     case 'assert':
       emit(await assertWorkerDeploymentOwned(required('--job-id'), required('--owner-id')));

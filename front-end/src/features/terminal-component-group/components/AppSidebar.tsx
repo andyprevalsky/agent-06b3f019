@@ -1,6 +1,10 @@
 /**
  * STATE MACHINE: AppSidebar
  *
+ * FLAG SWITCH: useRoseDesktop() true  → RoseSidebar (rose-sidebar/RoseSidebar.tsx:
+ *              hover-expanding 64→236px bar, agents grouped by project)
+ *              useRoseDesktop() false → the stock sidebar below, unchanged.
+ *
  * WIDTH STATE (owned by useSidebarWidth, persisted to localStorage):
  * [EXPANDED 220-480px] --drag right edge--> [EXPANDED, new width]
  *          |  ^                                   |
@@ -29,7 +33,10 @@
 
 import { useCallback, useMemo, useState, type CSSProperties } from 'react';
 import type { User } from '@supabase/supabase-js';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
+import RoseSidebar from './rose-sidebar/RoseSidebar';
+import type { RoseSidebarActions } from './rose-sidebar/useRoseAgentMenuActions';
 import {
   SidebarArchivedButton,
   SidebarCreateAgentButton,
@@ -47,7 +54,7 @@ import { SIDEBAR_WIDTH_COLLAPSED } from '../config';
 import type { Agent } from '../hooks';
 import type { SidebarDripStyles, SidebarView } from '../types';
 
-interface AppSidebarProps {
+export interface AppSidebarProps {
   currentView: SidebarView;
   onViewChange: (view: SidebarView) => void;
   showBrowse?: boolean;
@@ -75,6 +82,8 @@ interface AppSidebarProps {
   backgroundColors?: number;
   borderColor?: number;
   shadowIntensity?: number;
+  /** Rose Desktop only: agent/project actions whose backends are not wired yet. */
+  roseActions?: RoseSidebarActions;
 }
 
 function buildSidebarStyle({
@@ -123,6 +132,18 @@ function useSidebarStyle(params: {
   );
 }
 
+function sidebarSurfaceProps(isDragging: boolean) {
+  return {
+    className: cn(
+      'group/sidebar fixed top-0 left-0 z-[50] hidden h-full flex-col border-r border-gray-200/60 md:flex',
+      'bg-white/95',
+      'ease-out shadow-xl',
+      // Animating width while dragging fights the pointer and feels laggy.
+      isDragging ? '' : 'transition-all duration-300',
+    ),
+  };
+}
+
 /** Everything pinned below the agent list: the archive entry point, then nav. */
 function SidebarFooter({
   isCollapsed,
@@ -164,6 +185,16 @@ function useCollapsingViewChange(onViewChange: (view: SidebarView) => void, coll
   );
 }
 
+/** Nav items whose view change collapses the rail for full-width views. */
+function useCollapsingSidebarNavItems(
+  setWidth: (width: number) => void,
+  params: Parameters<typeof useSidebarNavItems>[0],
+) {
+  const collapse = useCallback(() => setWidth(SIDEBAR_WIDTH_COLLAPSED), [setWidth]);
+  const handleViewChange = useCollapsingViewChange(params.onViewChange, collapse);
+  return useSidebarNavItems({ ...params, onViewChange: handleViewChange });
+}
+
 /**
  * Owns the row mutations + the archive dialog, so AppSidebar itself stays a
  * layout shell. Bumps `archiveRefreshToken` on every mutation because the
@@ -197,6 +228,17 @@ function useSidebarAgentActions({
   return { handlers, renameDialog, archiveRefreshToken };
 }
 
+/** The search-derived half of SidebarAgentList's props. */
+function searchListProps(search: ReturnType<typeof useSidebarSearch>, query: string) {
+  return {
+    agents: search.agents,
+    query,
+    contentMatchAgentIds: search.contentMatchAgentIds,
+    isSearching: search.isSearching,
+    searchError: search.searchError,
+  };
+}
+
 function useSidebarLocalState(agents: Agent[]) {
   const [isArchiveOpen, setIsArchiveOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -204,7 +246,12 @@ function useSidebarLocalState(agents: Agent[]) {
   return { isArchiveOpen, setIsArchiveOpen, searchQuery, setSearchQuery, search };
 }
 
-export default function AppSidebar({
+export default function AppSidebar(props: AppSidebarProps) {
+  const roseDesktop = useRoseDesktop();
+  return roseDesktop ? <RoseSidebar {...props} /> : <StockAppSidebar {...props} />;
+}
+
+function StockAppSidebar({
   currentView,
   onViewChange,
   showBrowse = false,
@@ -230,9 +277,6 @@ export default function AppSidebar({
   const { isArchiveOpen, setIsArchiveOpen, searchQuery, setSearchQuery, search } =
     useSidebarLocalState(agents);
 
-  const collapse = useCallback(() => setWidth(SIDEBAR_WIDTH_COLLAPSED), [setWidth]);
-  const handleViewChange = useCollapsingViewChange(onViewChange, collapse);
-
   const { handlers, renameDialog, archiveRefreshToken } = useSidebarAgentActions({
     onRefreshAgents,
     onRefreshAttention,
@@ -240,9 +284,9 @@ export default function AppSidebar({
     onSelectAgent,
   });
 
-  const navItems = useSidebarNavItems({
+  const navItems = useCollapsingSidebarNavItems(setWidth, {
     currentView,
-    onViewChange: handleViewChange,
+    onViewChange,
     onSelectAgent,
     showBrowse,
     showBenchmarks,
@@ -250,31 +294,19 @@ export default function AppSidebar({
   });
   const style = useSidebarStyle({ width, blur, backgroundColors, borderColor, dripStyles });
   const listProps = {
-    agents: search.agents,
+    ...searchListProps(search, searchQuery),
     isLoadingAgents,
     selectedAgentId,
     onSelectAgent,
     isCollapsed,
     attentionAgentIds,
-    query: searchQuery,
-    contentMatchAgentIds: search.contentMatchAgentIds,
-    isSearching: search.isSearching,
-    searchError: search.searchError,
     ...handlers,
   };
   const footerProps = { isCollapsed, navItems, user, onLogout, onLoginClick };
   const archiveProps = { onSelectAgent, handlers, refreshToken: archiveRefreshToken };
 
   return (
-    <aside
-      className={cn(
-        'group/sidebar fixed top-0 left-0 z-[50] hidden h-full flex-col border-r border-gray-200/60 bg-white/95 md:flex',
-        'ease-out shadow-xl',
-        // Animating width while dragging fights the pointer and feels laggy.
-        isDragging ? '' : 'transition-all duration-300',
-      )}
-      style={style}
-    >
+    <aside {...sidebarSurfaceProps(isDragging)} style={style}>
       <SidebarResizeHandle isDragging={isDragging} onPointerDown={startDrag} />
       <SidebarCreateAgentButton isCollapsed={isCollapsed} onCreateAgent={onCreateAgent} />
       <SidebarSearch isCollapsed={isCollapsed} value={searchQuery} onChange={setSearchQuery} />

@@ -1,6 +1,16 @@
 #!/bin/bash
 set -eo pipefail
 
+for arg in "$@"; do
+    case "$arg" in
+        --help|-h)
+            printf '%s\n' 'Usage: bash scripts/run.sh [--benchmark]' \
+                'Start the configured local stack; --benchmark enables benchmark mode.'
+            exit 0
+            ;;
+    esac
+done
+
 # Parse flags
 BENCHMARK_MODE=false
 for arg in "$@"; do
@@ -62,6 +72,21 @@ BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
 # Rose Agent Card instead of minting a real AgentCard. The isolated `run-bench`
 # path already exports BENCHMARK_ISOLATED_RUN; re-exporting here is idempotent.
 export BENCHMARK_MODE BENCHMARK_ISOLATED_RUN
+
+# People credential authority.
+# Local isolated and cloud benchmark stacks give the worker their own backend,
+# whose seeded database never holds a rotating Lantern grant. Point the worker
+# at the central broker, as production workers are, unless a broker or bearer
+# is configured explicitly.
+if $BENCHMARK_MODE; then
+    _people_broker="$(cloudbench_people_credential_broker_default "$SCRIPT_DIR/../agents/.env")"
+    if [ -n "$_people_broker" ]; then
+        export PEOPLE_CREDENTIAL_BROKER_URL="$_people_broker"
+        echo "🔑 People credentials: central broker $_people_broker"
+    fi
+    unset _people_broker
+fi
+# End people credential authority.
 
 # mac-app is Electron + requires nvm/Node 20.10.0; only runs on macOS.
 IS_MAC=false
@@ -210,16 +235,25 @@ docker_available_for_cold_seed() {
 }
 
 # Check cwd first because many service command lines are just "node" or
-# "python3" and do not include the worktree path.
+# "python3" and do not include the worktree path. When the cwd is unreadable
+# (lsof missing or denied), the command path still decides; both checks stop at
+# nested worktrees.
+process_cwd_in_this_worktree() {
+    local pid=$1
+    local cwd physical_worktree
+    cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
+    # macOS reports /var as /private/var in lsof, while $PWD keeps the logical
+    # path used to start the process. Compare both spellings before reaping it.
+    physical_worktree=$(pwd -P)
+    run_path_in_worktree "$cwd" "$PWD" || run_path_in_worktree "$cwd" "$physical_worktree"
+}
+
 process_belongs_to_this_worktree() {
     local pid=$1
-    local cwd cmd
-    cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
-    if [ "$cwd" = "$PWD" ] || [[ "$cwd" == "$PWD"/* ]]; then
-        return 0
-    fi
+    local cmd
+    process_cwd_in_this_worktree "$pid" && return 0
     cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
-    echo "$cmd" | grep -Fq "$PWD"
+    run_cmd_mentions_worktree "$cmd" "$PWD"
 }
 
 # Check if a port requires moving this workspace to a different range.
@@ -299,6 +333,55 @@ resolve_frontend_dist_dir() {
         dist_key="shared_${frontend_port}"
     fi
     printf '%s/.context/frontend-builds/%s\n' "${workspace_root%/}" "$dist_key"
+}
+
+# A benchmark controller (agents/benchmarks/local.py) starts an isolated stack in
+# its own session and stops it on exit. A SIGKILL of the controller (a wrapper's
+# grace timer) skips that, so the stack watches its owner: RUN_SH_OWNER_PID plus
+# RUN_SH_OWNER_START (/proc start time) guard against PID reuse.
+stack_owner_process_gone() {
+    local pid="${RUN_SH_OWNER_PID:-}" expected="${RUN_SH_OWNER_START:-}" stat fields
+    [ -n "$pid" ] || return 1
+    if [ -r "/proc/$pid/stat" ]; then
+        stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 0
+        fields="${stat##*) }"
+        # A killed but not yet reaped owner (zombie) is gone.
+        [ "${fields%% *}" = Z ] && return 0
+        [ -n "$expected" ] || return 1
+        [ "$(printf '%s\n' "$fields" | awk '{print $20}')" = "$expected" ] && return 1
+        return 0
+    fi
+    kill -0 "$pid" 2>/dev/null && return 1
+    return 0
+}
+
+# Runs from the moment the service cleanup trap exists (service start, builds,
+# tunnels and steady state): TERM this script through its normal teardown once
+# the owner is gone. Bootstrap before that point is checked once at install.
+start_stack_owner_watch() {
+    [ -n "${RUN_SH_OWNER_PID:-}" ] || return 0
+    local stack_pid=$$
+    (
+        trap - EXIT HUP INT TERM
+        while kill -0 "$stack_pid" 2>/dev/null; do
+            if stack_owner_process_gone; then
+                echo ""
+                echo "⚠️  Stack owner PID $RUN_SH_OWNER_PID exited without stopping this stack — shutting down all services."
+                kill -TERM "$stack_pid" 2>/dev/null
+                exit 0
+            fi
+            sleep 1
+        done
+    ) &
+    STACK_OWNER_WATCH_PID=$!
+}
+
+# Teardown waits for its child jobs; the watcher must not be one of them.
+stop_stack_owner_watch() {
+    [ -n "${STACK_OWNER_WATCH_PID:-}" ] || return 0
+    kill "$STACK_OWNER_WATCH_PID" 2>/dev/null || true
+    wait "$STACK_OWNER_WATCH_PID" 2>/dev/null || true
+    STACK_OWNER_WATCH_PID=""
 }
 
 if [ "${RUN_SH_SOURCE_ONLY:-false}" = "true" ]; then
@@ -409,7 +492,17 @@ fi
 export NODE_ENV="${NODE_ENV:-development}"
 export TEMPORAL_TASK_QUEUE
 TEMPORAL_TASK_QUEUE="$(resolve_temporal_task_queue "$CONDUCTOR_WORKSPACE_NAME")"
-echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT wmh=$WMH_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE worker_processes=${WORKER_PROCESSES:-8} workflow_max_slots=${MAX_CONCURRENT_WORKFLOWS:-50} workflow_pollers=${MAX_CONCURRENT_WORKFLOW_TASK_POLLERS:-8} nonsticky_to_sticky=${NONSTICKY_TO_STICKY_POLL_RATIO:-0.5} activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
+# Dev and benchmark stacks run in the benchmark Temporal namespace, never in
+# production's: a stack's private queue is orphaned when the stack stops, and
+# its Running workflows would share production's action/Visibility budgets.
+# The backend and worker both refuse a non-production queue in production's
+# namespace (temporalNamespaceIsolation.ts, temporal_connection.py).
+if ! STACK_TEMPORAL_EXPORTS="$(stack_bench_temporal_exports agents/.env)"; then
+    exit 1
+fi
+eval "$STACK_TEMPORAL_EXPORTS"
+unset STACK_TEMPORAL_EXPORTS
+echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT wmh=$WMH_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE temporal_namespace=${TEMPORAL_NAMESPACE:-dotenv} benchmark_mode=$BENCHMARK_MODE worker_processes=${WORKER_PROCESSES:-8} workflow_max_slots=${MAX_CONCURRENT_WORKFLOWS:-50} workflow_pollers=${MAX_CONCURRENT_WORKFLOW_TASK_POLLERS:-8} nonsticky_to_sticky=${NONSTICKY_TO_STICKY_POLL_RATIO:-0.5} activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
 
 run_kill_stale_same_task_queue_workers "$PWD" "$TEMPORAL_TASK_QUEUE" "$BACKEND_API_URL" "$$"
 
@@ -432,19 +525,6 @@ is_current_process_family() {
         [ "$pid" = "$$" ] && return 0
         pid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ') || return 1
     done
-    return 1
-}
-
-process_cwd_in_this_worktree() {
-    local pid=$1
-    local cwd physical_worktree
-    cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
-    # macOS reports /var as /private/var in lsof, while $PWD keeps the logical
-    # path used to start the process. Compare both spellings before reaping it.
-    physical_worktree=$(pwd -P)
-    case "$cwd" in
-        "$PWD"|"$PWD"/*|"$physical_worktree"|"$physical_worktree"/*) return 0 ;;
-    esac
     return 1
 }
 
@@ -489,22 +569,101 @@ process_age_seconds() {
     }'
 }
 
+# Startup grace for an isolated stack that has not published services.json.
+# Fall back to the default on any non-integer override. An arithmetic error
+# would return "not owned" and let cleanup kill a just-started run before it
+# publishes services.json — fail toward preserving the stack. Bound before ANY
+# numeric use: a leading-zero value ("0000000008") is invalid octal to $(( )),
+# and a value near the integer ceiling overflows `grace + 59`. Cap at 5 digits
+# (~27h), far above any real bootstrap.
+benchmark_startup_grace_seconds() {
+    local grace="${BENCHMARK_STARTUP_GRACE_SECONDS:-90}"
+    if [[ ! "$grace" =~ ^(0|[1-9][0-9]{0,4})$ ]]; then
+        grace=90
+    fi
+    printf '%s\n' "$grace"
+}
+
+# An isolated run that has not published services.json is still starting when
+# its owner (local.py's local-stack-owner.json: the stack pid and its `ps
+# lstart` birth) is the same live process, or when the run directory is younger
+# than the startup grace (the owner record is written just after launch).
+isolated_run_still_starting() {  # <run-dir>
+    local run_dir="$1" owner pid birth grace grace_min
+    owner="$(OWNER="$run_dir/local-stack-owner.json" python3 - <<'PYEOF'
+import json, os, sys
+
+try:
+    with open(os.environ["OWNER"]) as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
+if not isinstance(data, dict):
+    sys.exit(1)
+pid, birth = data.get("pid"), data.get("birth")
+if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 and isinstance(birth, str) and birth.strip():
+    print(f"{pid} {birth.strip()}")
+PYEOF
+)" || owner=""
+    if [ -n "$owner" ]; then
+        pid="${owner%% *}"
+        birth="${owner#* }"
+        if [ "$(ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')" = "$birth" ]; then
+            return 0
+        fi
+    fi
+    grace="$(benchmark_startup_grace_seconds)"
+    grace_min=$(( (grace + 59) / 60 ))
+    [ -n "$(find "$run_dir" -maxdepth 0 -type d -mmin "-$grace_min" 2>/dev/null)" ]
+}
+
+# An isolated run's manifest is live only while its status is starting/running
+# AND its run_sh_pid is still a live run.sh. Once run.sh is gone nothing owns
+# the listed services: kill-services.sh (the EXIT sweep) reaps them, so the
+# startup sweep must not shield the leftovers of a SIGKILLed run.sh forever.
+# One predicate for both sweeps (kill-services.sh load_live_isolated_runs). A
+# malformed manifest is a NON-match, never a reason to preserve a stale pid.
+isolated_manifest_is_live() {  # <manifest>
+    MANIFEST="$1" python3 - <<'PYEOF'
+import json, os, subprocess, sys
+
+try:
+    with open(os.environ["MANIFEST"]) as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
+if not isinstance(data, dict):
+    sys.exit(1)
+if str(data.get("status", "")).strip().lower() not in {"starting", "running"}:
+    sys.exit(1)
+pid = data.get("run_sh_pid")
+if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+    sys.exit(1)
+command = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                         capture_output=True, text=True, check=False).stdout
+sys.exit(0 if "run.sh" in command else 1)
+PYEOF
+}
+
 pid_belongs_to_active_isolated_benchmark() {
     local pid=$1
+    # Live manifests, decided once per candidate: status and a live run.sh.
+    local manifest live_manifests=()
+    for manifest in "$PWD"/.context/benchmarks/*/services.json; do
+        [ -f "$manifest" ] || continue
+        isolated_manifest_is_live "$manifest" && live_manifests+=("$manifest")
+    done
     # Walk the ancestry: manifests record root/service PIDs, but kill_stale_tree
     # recurses into descendants. A child of an ACTIVE isolated run must be just
     # as protected as its root, or the recursive pass kills the live stack.
     local probe="$pid" hops=0
     while [ -n "$probe" ] && [ "$probe" != "0" ] && [ "$probe" != "1" ] && [ "$hops" -lt 12 ]; do
-        local manifest
-        for manifest in "$PWD"/.context/benchmarks/*/services.json; do
-            [ -f "$manifest" ] || continue
+        for manifest in ${live_manifests[@]+"${live_manifests[@]}"}; do
             PID="$probe" MANIFEST="$manifest" python3 - <<'PYEOF' && return 0
 import json, os, sys
 
-# Only `starting` and `running` are live; run.sh emits nothing else that means
-# "in flight". A malformed manifest is a NON-match, never a reason to preserve
-# a stale pid — and it must not raise outside the parse guard.
+# The manifest is already known live; a parse failure here is still a
+# NON-match and must not raise outside the parse guard.
 try:
     with open(os.environ["MANIFEST"]) as handle:
         data = json.load(handle)
@@ -538,24 +697,34 @@ PYEOF
         hops=$((hops + 1))
     done
 
+    # Run identity: local.py launches every isolated stack with
+    # BENCHMARK_RUN_ID, which all its services, tunnels and reparented
+    # (ppid 1) children inherit. Manifest PIDs and ancestry miss a detached
+    # child, so a non-isolated sweep killed a bootstrapping isolated stack
+    # (2026-10-12). Protect any process whose run is still starting/running,
+    # or has not published services.json yet.
+    local run_id run_dir
+    run_id="$(run_process_env_value "$pid" BENCHMARK_RUN_ID)"
+    if [[ "$run_id" =~ ^[A-Za-z0-9._-]+$ ]] && [ "$run_id" != "." ] && [ "$run_id" != ".." ]; then
+        run_dir="$PWD/.context/benchmarks/$run_id"
+        if [ -d "$run_dir" ]; then
+            if [ ! -f "$run_dir/services.json" ]; then
+                # Not published yet. Only an in-flight bootstrap is protected:
+                # a stack that died before publishing must not shield its
+                # leftover children for as long as the run directory exists.
+                isolated_run_still_starting "$run_dir" && return 0
+            else
+                isolated_manifest_is_live "$run_dir/services.json" && return 0
+            fi
+        fi
+    fi
+
     # Publication race: the isolated runner execs run.sh BEFORE it writes
     # services.json, so a just-started stack has no manifest to match yet.
     # Treat very young processes as owned rather than racing them to SIGTERM.
     local age grace
     age=$(process_age_seconds "$pid")
-    # Fall back to the default on any non-integer override. An arithmetic error
-    # here would return "not owned" and let cleanup kill a just-started run
-    # before it publishes services.json — fail toward preserving the stack.
-    grace="${BENCHMARK_STARTUP_GRACE_SECONDS:-90}"
-    # Bound before ANY numeric use. An all-digits string still breaks this
-    # function two ways: a leading-zero value ("0000000008") is invalid octal to
-    # the $(( )) below, and a value near the integer ceiling overflows
-    # `grace + 59`. Either one disables the young-process guard that stops
-    # cleanup from killing a benchmark which has not yet published
-    # services.json. Cap at 5 digits (~27h), far above any real bootstrap.
-    if [[ ! "$grace" =~ ^(0|[1-9][0-9]{0,4})$ ]]; then
-        grace=90
-    fi
+    grace="$(benchmark_startup_grace_seconds)"
     [ -n "$age" ] && [ "$age" -lt "$grace" ] || return 1
 
     # Young alone is not enough. An unqualified age check ALSO preserves a
@@ -587,7 +756,7 @@ kill_stale_same_worktree_benchmark_stack() {
 
         local cmd
         cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
-        if echo "$cmd" | grep -q "$PWD" || process_cwd_in_this_worktree "$pid"; then
+        if run_cmd_mentions_worktree "$cmd" "$PWD" || process_cwd_in_this_worktree "$pid"; then
             if pid_belongs_to_active_isolated_benchmark "$pid"; then
                 echo "⏭️  Leaving ACTIVE isolated benchmark process alone (PID $pid)"
                 continue
@@ -665,6 +834,16 @@ if $IS_CLOUD; then
     if [ "$BENCHMARK_ISOLATED_RUN" != "true" ]; then
         for pattern in "${RUN_CLOUD_SERVICE_KILL_PATTERNS[@]}"; do
             for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+                [ "$pid" = "$$" ] && continue
+                is_current_process_family "$pid" && continue
+                # `.cloud-env` marks the canonical checkout, but agent
+                # worktrees nest inside it (.claude/worktrees/<n>) and run
+                # their own stacks; a box-wide pattern kill murdered them.
+                # A cwd lsof cannot read falls back to the command path, so a
+                # stale worker is not left holding this stack's ports.
+                if ! process_belongs_to_this_worktree "$pid"; then
+                    continue
+                fi
                 if pid_belongs_to_active_isolated_benchmark "$pid"; then
                     echo "⏭️  Preserving ACTIVE isolated benchmark $pattern (PID $pid)"
                     continue
@@ -906,6 +1085,10 @@ else
     if [ "$BENCHMARK_ISOLATED_RUN" = "true" ] && [ -n "${BENCHMARK_RUN_ID:-}" ]; then
         SAFE_BENCHMARK_RUN_ID=$(printf '%s' "$BENCHMARK_RUN_ID" | tr -c '[:alnum:]' '_')
         LOCAL_DB_NAME="victoria_bench_${SAFE_BENCHMARK_RUN_ID}"
+    else
+        # One server serves every workspace on this host; never default a named
+        # workspace onto the shared `victoria` (same resolver as setup-db.sh).
+        LOCAL_DB_NAME="$(workspace_system_pg_db_name "$SCRIPT_DIR/..")" || exit 1
     fi
     LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$SYSTEM_PG_PORT/$LOCAL_DB_NAME"
 
@@ -946,17 +1129,33 @@ else
     fi
 fi
 
-# Fast Mode cache is intentionally shared across local/dev/prod so recorded runs
+# DEMO cache is intentionally shared across local/dev/prod so recorded runs
 # survive local DB resets. Capture the prod DB URL from back-end/.env before this
 # script overwrites DATABASE_URL with the local app database below.
 #
-# FAST_MODE_CACHE_USE_LOCAL=1 routes the fast-cache at the isolated LOCAL DB
+# FAST_MODE_CACHE_USE_LOCAL=1 routes the demo-cache at the isolated LOCAL DB
 # instead of the shared prod Supabase pooler. The shared pooler has a fixed
 # connection ceiling; when many local stacks (or a cloud fleet) run at once it
-# saturates, and the boot-time "Ensuring Fast Mode cache schema" step fails with
+# saturates, and the boot-time "Ensuring DEMO cache schema" step fails with
 # EMAXCONN / pool-timeout — blocking the stack from ever starting. For a smoke
 # gate that only needs a working runtime (not prod cache sharing), point the
 # cache at the local DB so startup can't be held hostage by pooler contention.
+# DEMO_CACHE_* is the current spelling of these variables. The legacy
+# FAST_MODE_CACHE_* / FAST_CACHE_DB_POOL names are still honoured and win while
+# present (even empty), so existing environments behave exactly as before.
+for _demo_cache_pair in \
+    DEMO_CACHE_DATABASE_URL:FAST_MODE_CACHE_DATABASE_URL \
+    DEMO_CACHE_USE_LOCAL:FAST_MODE_CACHE_USE_LOCAL \
+    DEMO_CACHE_DISABLE_WRITE_THROUGH:FAST_MODE_CACHE_DISABLE_WRITE_THROUGH \
+    DEMO_CACHE_RECORD_DEMO:FAST_MODE_CACHE_RECORD_DEMO \
+    DEMO_CACHE_DB_POOL:FAST_CACHE_DB_POOL; do
+    _demo_cache_new="${_demo_cache_pair%%:*}"
+    _demo_cache_legacy="${_demo_cache_pair#*:}"
+    if [ -z "${!_demo_cache_legacy+x}" ] && [ -n "${!_demo_cache_new+x}" ]; then
+        export "$_demo_cache_legacy=${!_demo_cache_new}"
+    fi
+done
+unset _demo_cache_pair _demo_cache_new _demo_cache_legacy
 if [ "${FAST_MODE_CACHE_USE_LOCAL:-}" = "1" ] && [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]; then
     # Fail closed: without a real LOCAL_DB_URL, exporting an empty value would let
     # the block below silently re-derive the prod pooler URL — defeating the whole
@@ -966,7 +1165,7 @@ if [ "${FAST_MODE_CACHE_USE_LOCAL:-}" = "1" ] && [ -z "${FAST_MODE_CACHE_DATABAS
         exit 1
     fi
     export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"
-    echo "🧠 FAST_MODE_CACHE_USE_LOCAL=1 — routing Fast Mode cache at the isolated local DB (decoupled from the shared prod pooler)"
+    echo "🧠 FAST_MODE_CACHE_USE_LOCAL=1 — routing DEMO cache at the isolated local DB (decoupled from the shared prod pooler)"
 fi
 if [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ] && [ -f "back-end/.env" ]; then
     PROD_CACHE_DATABASE_URL=$(python3 - <<'PY'
@@ -991,12 +1190,12 @@ PY
     fi
 fi
 if [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]; then
-    echo "❌ FAST_MODE_CACHE_DATABASE_URL is required; Fast Mode cache must route to the prod cache table."
+    echo "❌ FAST_MODE_CACHE_DATABASE_URL is required; DEMO cache must route to the prod cache table."
     echo "   Set it explicitly or keep the prod DATABASE_URL in back-end/.env so scripts/run.sh can derive it before local DB override."
     exit 1
 fi
-apply_fast_cache_pool_default
-echo "🧠 Ensuring Fast Mode cache schema..."
+apply_demo_cache_pool_default
+echo "🧠 Ensuring DEMO cache schema..."
 # This ensure connects to FAST_MODE_CACHE_DATABASE_URL — the SHARED prod pooler by
 # default (see above). When a cloud fleet boots concurrently (plus any neighbor
 # fleet on the same app), the pooler briefly saturates and this single query dies
@@ -1101,7 +1300,9 @@ fi
 # it — the old `[ ! -s ]` guard skipped the download whenever ANY dump existed, so
 # a hash-mismatched snapshot dump cold-synced every clone and starved the barrier.
 _SEED_DECISION="$(seed_cache_decision "$_SEED_DUMP" "$_SCHEMA_HASH" "$_SEED_CACHE_ENABLED" "$_SEED_CACHE_TOKEN")"
-if [ "$_SEED_DECISION" = "consult-remote" ]; then
+# 1 when this boot downloaded the dump; 0 when a matching local copy was reused.
+_SEED_PULLED_THIS_BOOT=0
+pull_canonical_seed_dump() {
     # Drop any stale local dump so a clean cache object lands in its place.
     rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
     echo "🔎 Checking shared seed-dump cache ($_SEED_CACHE_TOKEN)..."
@@ -1109,16 +1310,24 @@ if [ "$_SEED_DECISION" = "consult-remote" ]; then
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
         printf '%s' "$_SEED_CACHE_TOKEN" > "${_SEED_DUMP}.cachetoken"
         _SEED_DECISION="restore-local"
+        _SEED_PULLED_THIS_BOOT=1
         echo "   ✅ pulled cached seed dump ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}')) — restoring instead of cold-syncing"
-    else
-        rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
-        echo "   ℹ️ canonical base fixture is unavailable for this schema/revision"
+        return 0
     fi
+    rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
+    _SEED_DECISION="consult-remote"
+    echo "   ℹ️ canonical base fixture is unavailable for this schema/revision"
+    return 1
+}
+if [ "$_SEED_DECISION" = "consult-remote" ]; then
+    pull_canonical_seed_dump || true
 fi
 if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ] && [ "$_SEED_DECISION" != "restore-local" ]; then
     fail_required_seed_dump "Benchmarks require the canonical base fixture; refusing a slow production cold-sync substitute."
 fi
-if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ]; then
+_SEED_RESTORE_ATTEMPT=0
+while [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ]; do
+    _SEED_RESTORE_ATTEMPT=$((_SEED_RESTORE_ATTEMPT + 1))
     echo "🗜️  Restoring seeded DB from persistent dump ($_SEED_DUMP) — skipping schema push + seed..."
     _SEED_RESTORE_CONTAINER=""
     if ! $USE_SYSTEM_PG; then
@@ -1134,11 +1343,18 @@ if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SE
         if [[ "$_SEED_CACHE_TOKEN" == *victoria-prod-sync-v1-whatsapp-v2* ]] && \
            ! PGPASSWORD=postgres bash scripts/validate-canonical-seed-dump.sh \
                 "$LOCAL_DB_NAME" localhost "$LOCAL_DB_ACTUAL_PORT" postgres; then
-            echo "   ⚠️ restored dump failed canonical WhatsApp content check — invalidating"
+            echo "   ⚠️ restored dump failed canonical content check (WhatsApp history + archived agent trajectories) — invalidating"
             rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
             DB_RESTORED=false
+            # A copy reused from a persistent volume can predate a corrective
+            # republication of the same key. Fetch the shared object once
+            # before failing closed; a freshly pulled failure is final.
+            if [ "$_SEED_PULLED_THIS_BOOT" = 0 ] && [ "$_SEED_CACHE_ENABLED" = 1 ]; then
+                echo "   🔁 local copy was reused from an earlier boot — re-pulling the shared canonical object once"
+                pull_canonical_seed_dump && continue
+            fi
             if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]; then
-                fail_required_seed_dump "Required canonical base fixture restored but lacked reviewed WhatsApp history; refusing to continue on a poisoned substitute."
+                fail_required_seed_dump "Required canonical base fixture restored but lacked reviewed WhatsApp history or archived agent trajectories; refusing to continue on a poisoned substitute."
             fi
         else
             DB_RESTORED=true
@@ -1154,7 +1370,8 @@ if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SE
             fail_required_seed_dump "Required canonical base fixture could not be restored; refusing a slow production cold-sync substitute."
         fi
     fi
-fi
+    break
+done
 release_seed_lock_if_held
 # END BENCHMARK_SEED_CONSUMER_CRITICAL_SECTION
 
@@ -1167,11 +1384,11 @@ if $DB_RESTORED; then
     echo "🔎 Ensuring agent-network grep indexes (post-restore)..."
     (cd back-end && npx tsx scripts/ensure-agent-network-grep-indexes.ts)
     # Restoring a base image resets the schema to exactly what the dump holds, so
-    # anything ensured BEFORE the restore (the Fast Mode cache table above) is
+    # anything ensured BEFORE the restore (the DEMO cache table above) is
     # gone unless that dump happened to contain it. Re-ensure idempotently so a
     # dump published before the table existed cannot leave the cache broken.
     if [ "${FAST_MODE_CACHE_USE_LOCAL:-}" = "1" ]; then
-        echo "🧠 Re-ensuring Fast Mode cache schema (post-restore)..."
+        echo "🧠 Re-ensuring DEMO cache schema (post-restore)..."
         if ! ensure_fast_mode_cache_schema bash -c \
             'cd back-end && npx tsx scripts/ensure-fast-mode-cache-schema.ts'; then
             exit 1
@@ -1181,7 +1398,12 @@ else
 
 # Sync Prisma schema to local DB (idempotent, dev-only)
 echo "🐘 Syncing Prisma schema..."
-(cd back-end && npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
+# A long-lived local DB can hold two seeded copies of a later-merged account;
+# give the shared phone to one row so push can keep the unique User.phone index.
+(cd back-end && bash scripts/normalize-local-user-phones.sh "$LOCAL_DB_URL" >/dev/null)
+(cd back-end && bash scripts/backfill-local-message-record-owner.sh "$LOCAL_DB_URL" >/dev/null)
+(cd back-end && PRISMA_CLI_DATABASE_URL="$DIRECT_URL" npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
+(cd back-end && bash scripts/apply-local-message-record-trgm-index.sh "$LOCAL_DB_URL" >/dev/null)
 echo "🔎 Ensuring agent-network grep indexes..."
 (cd back-end && npx tsx scripts/ensure-agent-network-grep-indexes.ts)
 
@@ -1273,7 +1495,7 @@ if [ -n "$_SEED_DUMP" ]; then
             if [[ "$_SEED_CACHE_TOKEN" == *victoria-prod-sync-v1-whatsapp-v2* ]] && \
                ! PGPASSWORD=postgres bash scripts/validate-canonical-seed-dump.sh \
                     "$LOCAL_DB_NAME" localhost "$LOCAL_DB_ACTUAL_PORT" postgres; then
-                echo "   ❌ refusing to publish: DB failed canonical WhatsApp content check"
+                echo "   ❌ refusing to publish: DB failed canonical content check (WhatsApp history + archived agent trajectories)"
             elif (cd back-end && npx tsx scripts/seed-dump-cache.ts put "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") >/dev/null 2>&1; then
                 printf '%s' "$_SEED_CACHE_TOKEN" > "${_SEED_DUMP}.cachetoken"
                 echo "   ☁️ published seed dump to shared cache ($_SEED_CACHE_TOKEN)"
@@ -1325,6 +1547,10 @@ if [ ! -f agents/venv/bin/activate ] \
     (cd agents && source venv/bin/activate && pip install -r requirements.txt)
     echo "🐍 Agents venv ready"
 fi
+
+# Python checkout fixtures and Node UI tests may require different browser revisions.
+echo "📦 Ensuring Playwright browser assets..."
+agents/venv/bin/python "$SCRIPT_DIR/ensure-playwright-browsers.py" --root "$PWD" || exit 1
 
 # Pre-flight: handle processes on our ports from this worktree.
 # Cloud instances already handled above (aggressive cleanup). This block
@@ -2287,6 +2513,19 @@ should_serve_world_model() {
     return 0
 }
 
+# Pre-export the WMH target for a benchmark stack BEFORE any service forks.
+# The agents workers start before start_world_model_harness finishes building
+# and serving (it runs after the "agents" service), and their WMH adapter
+# (agents/helpers/world_model_runtime.py:from_env) reads WMH_MODEL_NAME /
+# WMH_BASE_URL from the worker's process env at the FIRST simulated boundary.
+# Exporting only after /healthz (below) left every simulate worker without a
+# model name → "WMH simulation requires WMH_BASE_URL and WMH_MODEL_NAME".
+# The manifest still publishes the WMH only once it is confirmed healthy.
+if $BENCHMARK_MODE && should_serve_world_model; then
+    export WMH_MODEL_NAME
+    export WMH_BASE_URL="${WMH_BASE_URL:-http://localhost:$WMH_PORT}"
+fi
+
 start_world_model_harness() {
     should_serve_world_model || return 0
 
@@ -2358,13 +2597,16 @@ start_world_model_harness() {
     # longer than 30 seconds before Uvicorn binds. Keep waiting while the owned
     # process is alive, with a bounded budget aligned to WMH inference startup.
     local health_timeout_default=180
-    local health_timeout_max=600
+    # The native WMH loads its full store before binding (measured ~620 s on
+    # 8 vCPUs for the 318k-observation model); the legacy server binds quickly.
+    local health_timeout_max=1800
+    [ "${WMH_ENGINE:-}" = experiential ] && health_timeout_default=1200
     local health_timeout="${WMH_HEALTH_TIMEOUT_SECONDS:-$health_timeout_default}"
     local health_timeout_max_digits=${#health_timeout_max}
     if ! [[ "$health_timeout" =~ ^[1-9][0-9]*$ ]] || \
         (( ${#health_timeout} > health_timeout_max_digits )) || \
         (( health_timeout > health_timeout_max )); then
-        echo "⚠️  Invalid WMH_HEALTH_TIMEOUT_SECONDS=$health_timeout; using 180s."
+        echo "⚠️  Invalid WMH_HEALTH_TIMEOUT_SECONDS=$health_timeout; using ${health_timeout_default}s."
         health_timeout=$health_timeout_default
     fi
     local ready=false
@@ -2403,22 +2645,45 @@ start_world_model_harness() {
 
 kill_tree() {
     local pid=$1
+    local child
     for child in $(pgrep -P "$pid" 2>/dev/null); do
         kill_tree "$child"
     done
     kill "$pid" 2>/dev/null || true
 }
 
-# SIGTERM the tree, wait briefly, then SIGKILL any survivors
+# All descendants of a pid (depth-first), snapshotted BEFORE any signal is
+# sent: once a parent dies its children reparent to init and `pgrep -P` can no
+# longer find them, which is exactly how a SIGTERM-surviving grandchild leaks.
+descendant_pids() {
+    local pid=$1
+    # `child` MUST be local: the recursion below reuses the loop variable, and a
+    # global one is clobbered by the inner loop before the outer echo runs.
+    local child
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        descendant_pids "$child"
+        echo "$child"
+    done
+}
+
+# SIGTERM the tree, wait briefly, then SIGKILL any survivors — at EVERY depth.
+# Previously only the tracked pid and its direct children were force-killed,
+# so the agents worker (`bash -c` → run_local_worker.sh → python worker.py)
+# outlived an isolated benchmark teardown whenever worker.py hung after its
+# graceful shutdown (observed 2026-09-08: worker logged "Worker stopped" and
+# stayed alive, polling a dead per-run Temporal queue). Isolated runs skip the
+# broad kill-services.sh sweep, so this tree kill is their only reaper.
 kill_tree_hard() {
     local pid=$1
+    local survivors
+    survivors="$(descendant_pids "$pid") $pid"
     kill_tree "$pid"
     sleep 1
-    # Kill any survivors that ignored SIGTERM
-    for child in $(pgrep -P "$pid" 2>/dev/null); do
-        kill -9 "$child" 2>/dev/null || true
+    for victim in $survivors; do
+        if kill -0 "$victim" 2>/dev/null; then
+            kill -9 "$victim" 2>/dev/null || true
+        fi
     done
-    kill -9 "$pid" 2>/dev/null || true
 }
 
 # Each isolated benchmark run bundles its own ~220MB frontend keyed by run id and
@@ -2438,6 +2703,8 @@ remove_isolated_frontend_build() {
 cleanup() {
     if $SHUTTING_DOWN; then return; fi
     SHUTTING_DOWN=true
+    run_ignore_repeated_teardown_signals
+    stop_stack_owner_watch
     local cleanup_failed=false
     echo "🛑 Stopping all services... (triggered by: $(caller 0 2>/dev/null || echo 'EXIT trap'), DB_OWNED_BY_US=$DB_OWNED_BY_US)"
     if ! run_publish_stack_cleanup_status pending; then
@@ -2495,6 +2762,8 @@ cleanup() {
     run_publish_stack_cleanup_status clean
 }
 trap 'release_seed_lock_if_held; cleanup' EXIT
+run_install_teardown_signal_traps
+start_stack_owner_watch
 
 # Wrapper: run a service and write its exit code to a temp file on failure
 FAIL_DIR=$(mktemp -d)
@@ -2533,6 +2802,7 @@ if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
 else
     start_public_tunnel
 fi
+export_sandbox_backend_base_url
 # Fast-mode proxy routes sandbox code-agent (claude-code / codex) LLM calls
 # through the local proxy for cache capture. Locally this pins those calls to a
 # priority tier that can have 0 credits (e.g. Opus 4.8), which fails the
@@ -2548,16 +2818,15 @@ fi
 # of a dead loopback tee (cache capture requires a publicly reachable URL).
 if [ "${DISABLE_FAST_MODE_PROXY:-}" = "1" ]; then
     export FAST_MODE_ANTHROPIC_PROXY_URL=""
-    export FAST_MODE_CODEX_PROXY_URL=""
     echo "⚡ DISABLE_FAST_MODE_PROXY=1 — fast-mode proxy off; sandbox code agents use the direct claudeAuth path"
 elif [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ] || [[ "${PUBLIC_BASE_URL:-}" == http://localhost:* ]] || [[ "${PUBLIC_BASE_URL:-}" == http://127.* ]]; then
     export FAST_MODE_ANTHROPIC_PROXY_URL=""
-    export FAST_MODE_CODEX_PROXY_URL=""
     echo "⚡ Fast-mode proxy off — PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-unset} is not E2B-reachable; sandbox code agents use direct Anthropic OAuth"
 else
     export FAST_MODE_ANTHROPIC_PROXY_URL="$PUBLIC_BASE_URL/anthropic-proxy"
-    export FAST_MODE_CODEX_PROXY_URL="$PUBLIC_BASE_URL/codex-proxy"
 fi
+# Codex never routes through a Rose proxy (S30): no FAST_MODE_CODEX_PROXY_URL.
+unset FAST_MODE_CODEX_PROXY_URL
 export BACKEND_LOG_FILE="${BACKEND_LOG_FILE:-$PWD/back-end/backend-logs.log}"
 export FRONTEND_LOG_FILE="${FRONTEND_LOG_FILE:-$PWD/front-end/frontend-logs.log}"
 export NAVI_WORKER_LOG_FILE="${NAVI_WORKER_LOG_FILE:-$PWD/agents/navi-worker-log.txt}"
@@ -2758,7 +3027,7 @@ if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
     (cd front-end && rm -f "$FRONTEND_LOG_FILE" && \
         NODE_OPTIONS="$FRONTEND_BUILD_NODE_OPTIONS" VITE_BACKEND_SAME_ORIGIN=true \
         VITE_ENABLE_REACT_GRAB=false VITE_REALTIME_PRIVATE=false \
-        npx vite build --outDir "$FRONTEND_DIST_DIR" --emptyOutDir > "$FRONTEND_LOG_FILE" 2>&1)
+        ROSE_E2E_FIXTURES=true npx vite build --outDir "$FRONTEND_DIST_DIR" --emptyOutDir > "$FRONTEND_LOG_FILE" 2>&1)
 fi
 launch_backend_service
 

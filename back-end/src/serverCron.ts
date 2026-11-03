@@ -19,12 +19,16 @@ import {
 import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaidTransactions';
 import { runGmailSyncJob } from './services/integrations/gmailSync';
 import { runGoogleDataPurgeJob } from './services/integrations/googleDataPurge';
+import { runMessagingUploadJobs } from './domains/integrations/uploadService.messagingJobs';
 import { reconcileWorkflowLiveness } from './providers/workflowLivenessReconciler';
+import { runStuckAgentBugReports } from './domains/agents/stuckAgentBugReportService';
 import { cleanupTerminalAgentWorkflowZombies } from './providers/workflowTerminalCleanup';
 import { runTerminalAgentBrowserReleaseReconcileWithLease } from './providers/agentCleanup';
 import { runTraceArchiveFinalizationRetries } from './providers/traceArchiveFinalizationRetry';
 import { runSteelSessionReaperWithLease } from './providers/steel/sessionReaper';
 import { recoverConfiguredWorkerProcesses } from './providers/workerProcessRecovery';
+import { runProductionSchemaDriftCheck } from './providers/schemaDrift/cron';
+import { alertError } from './providers/errorAlert';
 
 function scheduleWorkerProcessRecovery(isProduction: boolean): void {
   if (!isProduction) return;
@@ -167,6 +171,84 @@ function scheduleWorkflowLivenessReconcile(isProduction: boolean): void {
   setInterval(run, 60_000).unref?.();
 }
 
+/** Hourly: real prod agent runs not COMPLETED 24h after start get one Report Bug /rca. */
+function scheduleStuckAgentBugReports(isProduction: boolean): void {
+  const cronLog = createLogger('Cron');
+  if (!isProduction || process.env.DISABLE_STUCK_AGENT_BUG_REPORTS === '1') {
+    cronLog.info('Stuck-agent bug reports disabled', {
+      reason: !isProduction ? 'non-production' : 'DISABLE_STUCK_AGENT_BUG_REPORTS',
+    });
+    return;
+  }
+  let running = false;
+  const run = () => {
+    if (running) {
+      cronLog.info('Stuck-agent bug reports already running; skipping overlapping tick');
+      return;
+    }
+    running = true;
+    runStuckAgentBugReports()
+      .then((summary) => {
+        // Logged every tick so a quiet hour still proves the job ran.
+        cronLog.info('Stuck-agent bug reports summary', { ...summary });
+      })
+      .catch((error) => {
+        cronLog.error('Stuck-agent bug reports failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        running = false;
+      });
+  };
+  run();
+  cron.schedule('23 * * * *', run);
+  cronLog.info('Stuck-agent bug reports scheduled (hourly)');
+}
+
+/**
+ * Hourly: read-only catalog check that applied migrations' RLS, policies (name
+ * and definition) and indexes still exist, and that no public table is
+ * anon/authenticated-readable with RLS off. A stray db push left prod RLS off
+ * for 18 days (2026-10-08) because nothing checked between deploys.
+ */
+function scheduleSchemaDriftCheck(isProduction: boolean): void {
+  const cronLog = createLogger('Cron');
+  if (!isProduction || process.env.DISABLE_SCHEMA_DRIFT_CHECK === '1') {
+    cronLog.info('Schema drift check disabled', {
+      reason: !isProduction ? 'non-production' : 'DISABLE_SCHEMA_DRIFT_CHECK',
+    });
+    return;
+  }
+  let running = false;
+  const run = () => {
+    if (running) return;
+    running = true;
+    runProductionSchemaDriftCheck()
+      .then((result) => {
+        // Logged every tick so a quiet hour still proves the check ran.
+        cronLog.info('Schema drift check summary', {
+          acquired: result.acquired,
+          ...(result.acquired ? { checked: result.checked, problems: result.problems.length } : {}),
+        });
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        cronLog.error('Schema drift check failed', { error: message });
+        // A check that cannot run is as silent as no check; say so in #errors.
+        alertError({
+          source: 'schema_drift',
+          message: `Schema drift check failed to run: ${message}`,
+        });
+      })
+      .finally(() => {
+        running = false;
+      });
+  };
+  cron.schedule('41 * * * *', run);
+  cronLog.info('Schema drift check scheduled (hourly)');
+}
+
 function scheduleTemporalWorkflowCleanup(isProduction: boolean): void {
   const cronLog = createLogger('Cron');
   if (!isProduction || process.env.DISABLE_TEMPORAL_WORKFLOW_CLEANUP === '1') {
@@ -209,6 +291,9 @@ function scheduleTemporalWorkflowCleanup(isProduction: boolean): void {
   cronLog.info('Temporal workflow cleanup scheduled (every minute)');
 }
 
+/** Matches the Gmail crash-recovery window; one run should never take longer. */
+const CRON_RUN_STALE_MS = 60 * 60 * 1000;
+
 function scheduleGmailSync(): void {
   if (process.env.DISABLE_GMAIL_SYNC === '1') {
     createLogger('Cron').info('Gmail sync disabled by DISABLE_GMAIL_SYNC');
@@ -216,13 +301,28 @@ function scheduleGmailSync(): void {
   }
   // Start Gmail sync cron job (every 5 minutes, plus immediate run on startup)
   const cronLog = createLogger('Cron');
+  // Each integration is claimed atomically (claimGmailIntegrationForSync), so
+  // instances can share the work; this only stops one process stacking ticks.
+  // A run that hangs past the stale window no longer blocks later ticks.
+  let runningSince: number | null = null;
   const runSync = () => {
+    if (runningSince !== null && Date.now() - runningSince < CRON_RUN_STALE_MS) {
+      cronLog.info('Gmail sync already running; skipping overlapping tick');
+      return;
+    }
+    if (runningSince !== null)
+      cronLog.warn('Gmail sync previous run exceeded the stale window; starting anyway');
+    runningSince = Date.now();
     cronLog.info('Running Gmail sync job...');
-    runGmailSyncJob().catch((err) => {
-      cronLog.error('Gmail sync job error', {
-        error: err instanceof Error ? err.message : String(err),
+    runGmailSyncJob()
+      .catch((err) => {
+        cronLog.error('Gmail sync job error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        runningSince = null;
       });
-    });
   };
   runSync();
   cron.schedule('*/5 * * * *', runSync);
@@ -253,19 +353,54 @@ function scheduleGoogleDataPurge(): void {
   cron.schedule('* * * * *', run);
 }
 
+/** Drain durable messaging upload parts, recovering any lost to a restart or crash. */
+function scheduleMessagingUploadJobs(): void {
+  if (process.env.DISABLE_MESSAGING_UPLOAD_JOBS === '1') {
+    createLogger('Cron').info('Messaging upload jobs disabled by DISABLE_MESSAGING_UPLOAD_JOBS');
+    return;
+  }
+  const cronLog = createLogger('Cron');
+  const run = () => {
+    runMessagingUploadJobs().catch((error: unknown) => {
+      cronLog.error('Messaging upload jobs failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  };
+  run();
+  cron.schedule('* * * * *', run);
+}
+
 function schedulePlaidSync(): void {
   if (process.env.DISABLE_PLAID_SYNC === '1') {
     createLogger('Cron').info('Plaid sync disabled by DISABLE_PLAID_SYNC');
     return;
   }
   const cronLog = createLogger('Cron');
+  // Each item sync holds a cross-instance lease (claimPlaidItemSync); this only
+  // stops one process stacking ticks.
+  // A run that hangs past the stale window no longer blocks later ticks.
+  let runningSince: number | null = null;
   const runPlaidSync = () => {
+    if (runningSince !== null && Date.now() - runningSince < CRON_RUN_STALE_MS) {
+      cronLog.info('Plaid transaction sync already running; skipping overlapping tick');
+      return;
+    }
+    if (runningSince !== null)
+      cronLog.warn(
+        'Plaid transaction sync previous run exceeded the stale window; starting anyway'
+      );
+    runningSince = Date.now();
     cronLog.info('Running Plaid transaction sync job...');
-    runPlaidTransactionSyncJob().catch((err) => {
-      cronLog.error('Plaid transaction sync job error', {
-        error: err instanceof Error ? err.message : String(err),
+    runPlaidTransactionSyncJob()
+      .catch((err) => {
+        cronLog.error('Plaid transaction sync job error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        runningSince = null;
       });
-    });
   };
   cron.schedule('*/5 * * * *', runPlaidSync);
   cronLog.info('Plaid transaction sync scheduled (every 5 minutes)');
@@ -446,10 +581,13 @@ export function registerCronJobs(isProduction: boolean): void {
   scheduleTraceArchiveFinalizationRetries(isProduction);
   scheduleTemporalWorkflowCleanup(isProduction);
   scheduleWorkflowLivenessReconcile(isProduction);
+  scheduleStuckAgentBugReports(isProduction);
+  scheduleSchemaDriftCheck(isProduction);
   scheduleTerminalBrowserReleaseReconcile(isProduction);
   scheduleSteelSessionReaper();
   scheduleGmailSync();
   scheduleGoogleDataPurge();
+  scheduleMessagingUploadJobs();
   schedulePlaidSync();
   schedulePurchaseHoldReconcile();
   scheduleAgentCardOrgWalletMonitor();

@@ -13,7 +13,13 @@
  *
  * State:
  * - isOpen: boolean (popover open state)
+ * - the popover keeps ui/popover's ROSE_LAYER.popover z: it opens from the
+ *   floating query box (ROSE_LAYER.composer) and must cover the
+ *   agents-running header attached to that box
  * - trigger is icon-only; text remains in title/aria-label for accessibility
+ * - variant 'pinned' (Rose Desktop: pinned top-left inside the query box) =
+ *   the same chip with the light border fixed to rgb(222,222,227), so it
+ *   looks identical in light and dark mode (no dark: variants, no theme vars)
  */
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -134,14 +140,22 @@ function ToolRow({ tool }: { tool: RoseTool }) {
   );
 }
 
-export default function RoseToolSetChip() {
+const CHIP_CLASS =
+  'inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-[#fff6fc] bg-gradient-to-br from-[#FE7503]/5 via-[#E062CC]/5 to-[#7A6BEC]/5 text-[#E062CC] hover:from-[#FE7503]/10 hover:via-[#E062CC]/10 hover:to-[#7A6BEC]/10 transition-colors';
+
+/** Same chip with the light `--border` (hsl(240 8% 88%)) fixed, so dark mode cannot restyle it. */
+const PINNED_CHIP_CLASS =
+  'inline-flex h-7 w-7 items-center justify-center rounded-md border border-[rgb(222,222,227)] bg-[#fff6fc] bg-gradient-to-br from-[#FE7503]/5 via-[#E062CC]/5 to-[#7A6BEC]/5 text-[#E062CC] hover:from-[#FE7503]/10 hover:via-[#E062CC]/10 hover:to-[#7A6BEC]/10 transition-colors';
+
+export default function RoseToolSetChip({ variant = 'chip' }: { variant?: 'chip' | 'pinned' }) {
   const [isOpen, setIsOpen] = useState(false);
 
   return (
     <Popover open={isOpen} onOpenChange={setIsOpen}>
       <PopoverTrigger asChild>
         <button
-          className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-gradient-to-br from-[#FE7503]/5 via-[#E062CC]/5 to-[#7A6BEC]/5 text-[#E062CC] hover:from-[#FE7503]/10 hover:via-[#E062CC]/10 hover:to-[#7A6BEC]/10 transition-colors"
+          className={variant === 'pinned' ? PINNED_CHIP_CLASS : CHIP_CLASS}
+          data-testid={variant === 'pinned' ? 'pinned-toolset-chip' : undefined}
           title="View Rose system tools"
           aria-label="View Rose system tools"
           onMouseEnter={() => setIsOpen(true)}
@@ -151,7 +165,7 @@ export default function RoseToolSetChip() {
         </button>
       </PopoverTrigger>
       <PopoverContent
-        className="w-[min(400px,calc(100vw-32px))] max-h-[500px] overflow-y-auto p-4 z-50"
+        className="w-[min(400px,calc(100vw-32px))] max-h-[500px] overflow-y-auto p-4"
         align="start"
         onMouseEnter={() => setIsOpen(true)}
         onMouseLeave={() => setIsOpen(false)}

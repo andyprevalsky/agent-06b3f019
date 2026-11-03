@@ -201,21 +201,70 @@ async function fenceLatestTerminal(
   });
 }
 
+/**
+ * A background spawn's tool call keeps ONE model-visible result: its
+ * `runInBackground` "started" row. Every later row under the same toolCallId
+ * (the executor's progress / result rows, written by the workflow or by an
+ * activity, and deployment finalizers) is UI-only, so it is stamped
+ * `excludeFromModel` here, under the call's lifecycle lock (the started row is
+ * always committed before the executor starts). See
+ * agents/workflows/background_agents.py.
+ */
+function withBackgroundExecutionStamp(
+  params: CreateMessageParams,
+  candidates: Message[]
+): CreateMessageParams {
+  const metadata = params.metadata;
+  if (metadata?.runInBackground === true) return params;
+  const backgroundSpawn = candidates.some(
+    (candidate) => messageMetadata(candidate)?.runInBackground === true
+  );
+  if (!backgroundSpawn) return params;
+  // A woken task's later run: its workflow rows carry `backgroundRun`; rows its
+  // activity writes under the same id join that run (FE chip/dock per run).
+  const run =
+    typeof metadata?.backgroundRun === 'number' ? undefined : latestBackgroundRun(candidates);
+  if (metadata?.excludeFromModel === true && run === undefined) return params;
+  return {
+    ...params,
+    metadata: {
+      ...metadata,
+      excludeFromModel: true,
+      ...(run !== undefined ? { backgroundRun: run } : {}),
+    },
+  };
+}
+
+function latestBackgroundRun(candidates: Message[]): number | undefined {
+  let run: number | undefined;
+  for (const candidate of candidates) {
+    const value = messageMetadata(candidate)?.backgroundRun;
+    if (typeof value === 'number' && value > 1 && (run === undefined || value > run)) run = value;
+  }
+  return run;
+}
+
 export async function persistLockedToolLifecycleMessage(
   tx: Prisma.TransactionClient,
-  params: CreateMessageParams,
+  incomingParams: CreateMessageParams,
   identity: { toolCallId: string; workflowGeneration: string }
-): Promise<{ message: Message; created: boolean; accepted: boolean }> {
-  await lockAgentWorkflowGenerationShared(tx, params.agentId);
-  await lockToolCallLifecycle(tx, params.agentId, identity.workflowGeneration, identity.toolCallId);
+): Promise<{ message: Message; created: boolean; accepted: boolean; updated?: boolean }> {
+  await lockAgentWorkflowGenerationShared(tx, incomingParams.agentId);
+  await lockToolCallLifecycle(
+    tx,
+    incomingParams.agentId,
+    identity.workflowGeneration,
+    identity.toolCallId
+  );
   const allCandidates = await tx.message.findMany({
     where: {
-      agentId: params.agentId,
+      agentId: incomingParams.agentId,
       role: 'TOOL',
       metadata: { path: ['toolCallId'], equals: identity.toolCallId },
     },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
+  const params = withBackgroundExecutionStamp(incomingParams, allCandidates);
   const candidates = allCandidates.filter(
     (candidate) => messageWorkflowGeneration(candidate) === identity.workflowGeneration
   );
@@ -240,6 +289,80 @@ export async function persistLockedToolLifecycleMessage(
       return { message: latestTerminal, created: false, accepted: !staleWorkerWrite };
     }
   }
+  // Only the workflow which observed the user's pause may annotate the result.
+  // Reuse the lifecycle lock: cancellation and a final activity write can race.
+  const parentTerminalWrite =
+    !params.metadata?.subAgentId &&
+    params.metadata?.excludeFromModel !== true &&
+    isTerminalToolStatus(params.metadata?.toolStatus);
+  const pausedResult = candidates.find((candidate) => {
+    const pause = messageMetadata(candidate)?.userPause as Record<string, unknown> | undefined;
+    return pause?.reason === 'user' && typeof pause.recordedAt === 'string';
+  });
+  if (pausedResult !== undefined && parentTerminalWrite) {
+    return { message: pausedResult, created: false, accepted: !staleWorkerWrite };
+  }
+  if (
+    !staleWorkerWrite &&
+    parentTerminalWrite &&
+    params.enforceCurrentWorkflowGeneration === true &&
+    params.metadata?.toolName === 'spawn_browser_agent' &&
+    params.metadata?.userPauseRequested === true
+  ) {
+    const visibleCandidates = candidates
+      .slice()
+      .reverse()
+      .filter((candidate) => {
+        const meta = messageMetadata(candidate);
+        return !meta?.subAgentId && meta?.excludeFromModel !== true;
+      });
+    const previous =
+      visibleCandidates.find((candidate) =>
+        isTerminalToolStatus(messageMetadata(candidate)?.toolStatus)
+      ) ??
+      visibleCandidates.find((candidate) =>
+        isInProgressToolStatus(messageMetadata(candidate)?.toolStatus)
+      );
+    const metadata = { ...(previous ? messageMetadata(previous) : params.metadata) };
+    delete metadata.userPauseRequested;
+    const recordedAt = new Date().toISOString();
+    metadata.userPause = { reason: 'user', recordedAt };
+    if (!previous || !isTerminalToolStatus(metadata.toolStatus)) {
+      metadata.toolStatus = 'FINISHED';
+      metadata.action_type = 'task_complete';
+    }
+    if (params.metadata.browser_cleanup !== undefined) {
+      metadata.userPause = {
+        ...(metadata.userPause as object),
+        browserCleanup: params.metadata.browser_cleanup,
+      };
+      // Preserve an earlier cleanup failure as well as the pause observation.
+      if (metadata.browser_cleanup === undefined)
+        metadata.browser_cleanup = params.metadata.browser_cleanup;
+    }
+    const originalText = previous?.text ?? '';
+    const text = originalText
+      ? `${originalText}\n\n[User paused the browser agent.]`
+      : 'User paused the browser agent.';
+    if (previous) {
+      const message = await tx.message.update({
+        where: { id: previous.id },
+        data: { text, metadata: metadata as Prisma.InputJsonValue },
+      });
+      return { message, created: false, updated: true, accepted: true };
+    }
+    const message = await tx.message.create({
+      data: {
+        agentId: params.agentId,
+        workflowGeneration: identity.workflowGeneration,
+        role: 'TOOL',
+        text,
+        metadata: metadata as Prisma.InputJsonValue,
+        timestamp: new Date(recordedAt),
+      },
+    });
+    return { message, created: true, accepted: true };
+  }
   if (effectiveParams.skipDuplicateToolCheck !== true) {
     const duplicate = matchingToolMessage(candidates, effectiveParams);
     if (duplicate !== null) {
@@ -263,6 +386,6 @@ export async function persistLockedToolLifecycleMessage(
 export async function persistToolLifecycleMessage(
   params: CreateMessageParams,
   identity: { toolCallId: string; workflowGeneration: string }
-): Promise<{ message: Message; created: boolean; accepted: boolean }> {
+): Promise<{ message: Message; created: boolean; accepted: boolean; updated?: boolean }> {
   return runTransactionWithRetry((tx) => persistLockedToolLifecycleMessage(tx, params, identity));
 }

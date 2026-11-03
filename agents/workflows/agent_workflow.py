@@ -18,7 +18,7 @@ import structlog
 import structlog.contextvars
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import ActivityError, FailureError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 # Import pass-through for workflow context:
@@ -26,13 +26,16 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
-    from domains.param_populator.config import PARAM_POPULATOR_MODEL
+    from helpers.workflow_safe import context_logger
+    from helpers.wmh_activity_policy import wmh_activity_timeout_options
+    from domains.agent_messaging.handler import kill_agent, send_message_to_agent
     from domains.spawn_agent.config import is_demo_cache_task, is_oai_demo_mass_agent_task
     from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore
         drain_fast_mode_explores,
         spawn_agent,
     )
     from domains.spawn_agent.oai_demo_report_files import materialize_oai_demo_report_files_activity
+    from domains.user_tools.handler import declared_user_tools, pin_user_tools, run_user_tool
     from domains.wait_for.service import pending_timestamp_wait_to_resume
     from helpers import (
         check_user_usage,
@@ -47,10 +50,11 @@ with workflow.unsafe.imports_passed_through():
         mark_finished,
         poll_new_messages,
         post_agent_message,
-        resolve_fast_cache_goal_activity,
-        unpack_fast_cache_goal_resolution,
+        resolve_fast_cache_context_activity,
         update_agent_status,
     )
+    from helpers.agent_addressing import background_tree_entries, with_legacy_spawn_task_name
+    from helpers.background_agents import CHILD_WORKFLOW_AGENT_TYPES, is_agent_authored_user_metadata
     from helpers.completion_summary_contract import (
         is_ablated_completion_summary,
         is_raw_tool_envelope,
@@ -79,7 +83,15 @@ with workflow.unsafe.imports_passed_through():
     from helpers.query_parent_state import query_parent_state_activity
     from helpers.save_tool_usage import save_tool_usage
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
-    from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
+    from helpers.wait_condition_or_handoff import (
+        GENERATION_HANDOFF_SIGNAL,
+        note_generation_handoff,
+        wait_condition_or_generation_handoff,
+    )
+    from helpers.wait_on_world_clock import _read_world_time_ms, _refresh_world_time_cursor
+    from helpers.wait_wake import note_context_snapshot, wake_mark
+    from helpers.world_model_runtime import world_clock_activity
+    from loop.context_utils import refresh_user_pause
     from loop.dag_executor import (
         TaskDAG,
         execute_dag,
@@ -88,17 +100,20 @@ with workflow.unsafe.imports_passed_through():
         plan_superseded_by_new_user_instruction,
     )
     from loop.run_agent import (
+        _is_requirement_agent_row,
         _real_user_requirement_keys,
+        _requirement_keys,
         _run_verifier,
         _verifier_superseded_by_user_feedback,
         run_agent,
     )
-    from providers.fast_cache.google_oauth_demo_fixture import matches_demo_goal, normalize_completion_notice
+    from providers.demo_cache.google_oauth_demo_fixture import matches_demo_goal, normalize_completion_notice
     from providers.rose.pricing import get_model_pricing as get_in_process_model_pricing
     from tools.attempt_completion import attempt_completion
     from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent
     from tools.call_phone_number import call_phone_number
     from tools.call_phone_number import get_manager as get_call_phone_manager
+    from tools.display import display
     from tools.gate import (
         GateRejectedError,
         build_subscription_gate,
@@ -106,12 +121,13 @@ with workflow.unsafe.imports_passed_through():
         raise_gate_direct,
     )
     from tools.google_oauth_demo import google_oauth_demo
-
-    # Tool executors (map tool name → workflow helper)
     from tools.grep import grep
     from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
     from tools.prompts import TOOL_PROMPTS
+
+    # Tool executors (map tool name → workflow helper)
+    from tools.read_tool_output import read_tool_output_for_workflow
     from tools.request_user_approval import (
         UserRejectedError,
         request_user_approval_direct,
@@ -132,8 +148,28 @@ with workflow.unsafe.imports_passed_through():
         build_verifier_prompt,
     )
     from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
+    from utils.user_tool_models import is_user_tool_name
+    from workflows.agent_control import AgentControlMixin
+    from workflows.background_agents import BackgroundAgentsMixin
+    from workflows.environment_context import EnvironmentContextMixin
 
-logger = structlog.get_logger()
+logger = context_logger()
+
+# Loop-critical control-plane read (poll_new_messages), modelled on Claude
+# Code's session-transcript ingress client: 20 s per request
+# (claude-code-src/src/services/api/sessionIngress.ts:428), 10 attempts
+# (:25), 500 ms base delay (:26) doubling to an 8 s cap (:178). Worst case is
+# about 10 x 20 s + 47.5 s of backoff, enough to ride out a saturated-worker
+# burst (RCA P9: 30 s x 3 gave up after ~94 s) before the run() wrapper ends
+# the agent FAILED with the real error. Permanent 4xx responses are raised
+# non-retryable by the activity itself.
+CONTROL_PLANE_POLL_TIMEOUT = timedelta(seconds=20)
+CONTROL_PLANE_POLL_RETRY = RetryPolicy(
+    initial_interval=timedelta(milliseconds=500),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=8),
+    maximum_attempts=10,
+)
 
 # Consecutive transient parent-state read failures (while paused-by-parent) after
 # which a child treats its parent as gone and aborts. Backstop for when the parent
@@ -160,6 +196,19 @@ CLOUD_AGENT_IN_PROGRESS_TITLES = {
     STARTING_REASONING_TITLE,
 }
 FAST_MODE_WRITE_THROUGH_USER_IDS = {"1f85ff25-6e29-4c1b-8739-f917bd101a30"}
+# Simulate mode: the runner creates the world session before the root starts.
+# Registration retries a missing world briefly, then the agent fails closed.
+WORLD_CLOCK_REGISTER_ATTEMPTS = 3
+WORLD_CLOCK_REGISTER_RETRY_SECONDS = 2
+# Simulate mode: a failed post-tool cursor read is retried with a short backoff
+# before the next simulated-time consumer, so a transient WMH blip cannot leave
+# the agent on the time from before its last action.
+WORLD_CLOCK_REFRESH_ATTEMPTS = 3
+WORLD_CLOCK_REFRESH_RETRY_SECONDS = 5
+WORLD_CLOCK_UNAVAILABLE_MESSAGE = (
+    "Simulated world clock unavailable: no WMH world session acknowledged this agent, "
+    "so it cannot start on the world's time. Create the world session before starting the agent."
+)
 # Reserved responses emitted by auth completion and gate-resolution providers.
 ATTENTION_CONTROL_RESPONSES = frozenset(
     {REJECTION_SENTINEL, "__AUTH_ASSISTANCE_COMPLETED__", "RESOLVED", "SOURCE_CONNECTED", "SUBSCRIPTION_ACTIVE"}
@@ -169,7 +218,7 @@ ATTENTION_CONTROL_RESPONSES = frozenset(
 def _resolve_usage_model(actual_model: Optional[str], requested_model: str) -> str:
     """Return durable provider provenance for usage accounting.
 
-    Legacy Fast Mode cache entries serialize the literal ``unknown`` when the
+    Legacy DEMO cache entries serialize the literal ``unknown`` when the
     original transport model was not stored. Treating that sentinel as a model
     creates an unactionable ``unclassified`` bucket in benchmark artifacts.
     The requested pool alias is still known and encodes the credential path, so
@@ -179,7 +228,7 @@ def _resolve_usage_model(actual_model: Optional[str], requested_model: str) -> s
     return requested_model if not candidate or candidate == "unknown" else candidate
 
 
-def _fast_cache_compute_affinity_key(user_id: str, goal: str) -> str:
+def _demo_cache_compute_affinity_key(user_id: str, goal: str) -> str:
     material = _json.dumps(
         {"version": 1, "user_id": user_id, "goal": goal},
         sort_keys=True,
@@ -194,11 +243,13 @@ def _fast_cache_compute_affinity_key(user_id: str, goal: str) -> str:
 
 # Tool name → executor function mapping
 TOOL_EXECUTORS = {
+    "read_tool_output": read_tool_output_for_workflow,
     "google_workspace_run": google_oauth_demo,
     "spawn_agent": spawn_agent,  # Unified: browser/code/general_purpose/explore
     "wait_for": wait_for,
     "send_message_to_user": send_message_to_user,
     "send_message_to_user_execute_phase": send_message_to_user,  # Same handler, forces is_question=False
+    "display": display,
     "web_search": web_search,
     "web_fetch": web_fetch,
     "message_person": message_person,
@@ -207,6 +258,8 @@ TOOL_EXECUTORS = {
     "request_user_signup": request_user_signup,
     "call_phone_number": call_phone_number,
     "grep": grep,
+    "send_message_to_agent": send_message_to_agent,
+    "kill_agent": kill_agent,
 }
 
 # Tools requiring user approval before execution
@@ -315,9 +368,7 @@ def _message_body(message: Dict[str, Any]) -> str:
     if text:
         return text
     metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-    return str(
-        metadata.get("result") or metadata.get("content") or metadata.get("message") or ""
-    ).strip()
+    return str(metadata.get("result") or metadata.get("content") or metadata.get("message") or "").strip()
 
 
 def _is_plumbing_tool_text(text: str) -> bool:
@@ -353,19 +404,12 @@ def last_real_completion_text(
         if (
             str(message.get("role") or "").upper() == "ASSISTANT"
             and len(text) >= 200
-            and (
-                metadata.get("plannedToolName") == "reasoning"
-                or metadata.get("dagTaskIndex") is not None
-            )
+            and (metadata.get("plannedToolName") == "reasoning" or metadata.get("dagTaskIndex") is not None)
         ):
             return text
     if isinstance(structured_response, dict):
         for value in structured_response.values():
-            if (
-                isinstance(value, str)
-                and len(value.strip()) >= 200
-                and not is_ablated_completion_summary(value)
-            ):
+            if isinstance(value, str) and len(value.strip()) >= 200 and not is_ablated_completion_summary(value):
                 return value.strip()
     return ""
 
@@ -388,18 +432,14 @@ def strip_fast_mode_card_narration(text: str) -> str:
     """Drop Fast Mode lead-in sentences; keep extracted report text.
 
     July Fast Mode sometimes prefixes a valid Extracted Output block with
-    ``Fast Mode cache trajectory ended...``. T7 forbids that substring even
+    ``DEMO cache trajectory ended...``. T7 forbids that substring even
     when the rest of the card is a real 200+ character summary.
     """
     raw = str(text or "").strip()
     if not raw or not completion_card_has_fast_mode_markers(raw):
         return raw
     parts = re.split(r"(?<=[.!?])\s+", raw)
-    kept = [
-        part.strip()
-        for part in parts
-        if part.strip() and not completion_card_has_fast_mode_markers(part)
-    ]
+    kept = [part.strip() for part in parts if part.strip() and not completion_card_has_fast_mode_markers(part)]
     return " ".join(kept).strip()
 
 
@@ -477,9 +517,7 @@ def card_summary_from_evidence(
             for value in structured_response.values()
             if isinstance(value, str) and value.strip() and not is_ablated_completion_summary(value)
         ]
-        brief = strip_fast_mode_card_narration(
-            brief_card_summary(" ".join(parts), min_chars=min_chars)
-        )
+        brief = strip_fast_mode_card_narration(brief_card_summary(" ".join(parts), min_chars=min_chars))
         if brief and len(brief) >= min_chars:
             return brief
     return ""
@@ -531,12 +569,61 @@ def _section_matches_field(title: str, field_name: str) -> bool:
     return False
 
 
+def _schema_field_types(schema: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    return {
+        str(field.get("name")): str(field.get("type") or "")
+        for field in (schema or {}).get("fields") or []
+        if isinstance(field, dict) and field.get("name")
+    }
+
+
+def _may_fill(current: Dict[str, Any], name: str, value: Any, field_type: str) -> bool:
+    """Whether a transcript-derived value may fill ``name``.
+
+    An absent key is filled as before (a demo root's report text is materialized
+    into files later). A key the verifier returned empty ([] / "") was judged
+    ungrounded; only a value of the field's own type may replace it.
+    """
+    if value in (None, "", [], {}):
+        return False
+    if name not in current or current[name] is None:
+        return True
+    return current[name] in ("", [], {}) and _fits_field_type(value, field_type)
+
+
+def _fits_field_type(value: Any, field_type: str) -> bool:
+    """True when a transcript-derived value has the field's declared response_schema type."""
+    if not field_type:
+        return True  # untyped legacy schema field
+    if field_type == "str":
+        return isinstance(value, str)
+    if field_type == "int":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if field_type == "float":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if field_type == "bool":
+        return isinstance(value, bool)
+    if field_type in ("object", "file_pointer"):
+        return isinstance(value, dict)
+    if field_type.startswith("list["):
+        if not isinstance(value, list):
+            return False
+        item_type = field_type[len("list[") : -1]
+        return all(_fits_field_type(item, item_type) for item in value)
+    return True
+
+
 def _fill_from_row_and_sections(
     merged: Dict[str, Any],
     names: List[str],
     context: List[Dict[str, Any]],
+    types: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     empty = (None, "", [], {})
+    types = types or {}
+
+    def fits(name: str, value: Any) -> bool:
+        return _may_fill(merged, name, value, types.get(name, ""))
 
     def missing() -> List[str]:
         return [name for name in names if name not in merged or merged[name] in empty]
@@ -548,10 +635,15 @@ def _fill_from_row_and_sections(
             for raw_key, value in obj.items():
                 target = _ROW_ITEM_TO_SCHEMA.get(str(raw_key))
                 if target and target in names and merged.get(target) in empty + (None,):
-                    if value not in empty:
+                    if value not in empty and fits(target, value):
                         merged[target] = value
             for name in names:
-                if name in obj and obj[name] not in empty and merged.get(name) in empty + (None,):
+                if (
+                    name in obj
+                    and obj[name] not in empty
+                    and merged.get(name) in empty + (None,)
+                    and fits(name, obj[name])
+                ):
                     merged[name] = obj[name]
             items = obj.get("items")
             if (
@@ -587,7 +679,7 @@ def _fill_from_row_and_sections(
             if title in used_titles:
                 continue
             for name in missing():
-                if not _section_matches_field(title, name):
+                if not _section_matches_field(title, name) or not fits(name, body):
                     continue
                 merged[name] = body
                 used_titles.add(title)
@@ -624,6 +716,8 @@ def coalesce_structured_response(
         empty = (None, "", [], {})
         return [name for name in names if name not in current or current[name] in empty]
 
+    field_types = _schema_field_types(schema)
+
     if not _missing(merged):
         return merged
     for message in reversed(context or []):
@@ -637,7 +731,7 @@ def coalesce_structured_response(
         if not extracted:
             continue
         for key, value in extracted.items():
-            if key not in merged or merged[key] in (None, "", [], {}):
+            if _may_fill(merged, key, value, field_types.get(key, "")):
                 merged[key] = value
         if not _missing(merged):
             break
@@ -658,7 +752,7 @@ def structured_response_from_evidence(
         if isinstance(field, dict) and field.get("name")
     ]
     if names:
-        merged = _fill_from_row_and_sections(merged, names, context)
+        merged = _fill_from_row_and_sections(merged, names, context, _schema_field_types(schema))
     return merged or structured_response
 
 
@@ -681,11 +775,7 @@ def _structured_from_payload(payload: Any, names: List[str]) -> Dict[str, Any]:
         return {}
     found = {name: nested[name] for name in names if name in nested and nested[name] not in (None, "", [], {})}
     items = nested.get("items") if "items" in nested else obj.get("items")
-    if (
-        "top_creators_analysis" in names
-        and "top_creators_analysis" not in found
-        and isinstance(items, list)
-    ):
+    if "top_creators_analysis" in names and "top_creators_analysis" not in found and isinstance(items, list):
         analyses = []
         for item in items:
             if not isinstance(item, dict):
@@ -717,8 +807,17 @@ def _canonical_pending_approval_resume(pending_approval: Any) -> Optional[Dict[s
     return None
 
 
+# Bounded wait for in-flight background tasks to park/finish before continue_as_new
+# (browser step + worker pointer cache TTL fit well inside it).
+CONTINUATION_BACKGROUND_SETTLE_SECONDS = 180.0
+# Context overflow defers continue_as_new while background activities run, up to
+# these history bounds (Temporal hard limits: 51,200 events / 50 MB).
+OVERFLOW_DEFER_MAX_HISTORY_EVENTS = 30_000
+OVERFLOW_DEFER_MAX_HISTORY_BYTES = 30 * 1024 * 1024
+
+
 @workflow.defn
-class AgentWorkflow:
+class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContextMixin):
     """
     Main workflow for autonomous agent task execution.
 
@@ -728,23 +827,39 @@ class AgentWorkflow:
     """
 
     def __init__(self):
+        # Live queue pushed by the cutover owner (generation_handoff_available);
+        # handoff-aware parks wake on a seq bump and confirm via the pointer.
+        self._generation_handoff_hint: Optional[str] = None
+        self._generation_handoff_hint_seq: int = 0
+        # Workflow time of this run's last park-side pointer read (safety re-check clock).
+        self._generation_handoff_checked_at: Optional[float] = None
         self.agent_id: Optional[str] = None
         self.user_id: Optional[str] = None
         self.goal: Optional[str] = None
-        # Fast Mode cache namespace goal — the persisted Agent-row goal, which may
+        # DEMO cache namespace goal — the persisted Agent-row goal, which may
         # differ from the workflow-input goal (chat escalation passes an LLM-refined
         # goal that varies run to run). All cache keying threads this, never self.goal.
-        self.fast_cache_goal: Optional[str] = None
+        self.demo_cache_goal: Optional[str] = None
         # Tree-root goal for DEMO inheritance. Child cache keys stay on
-        # fast_cache_goal; wait_for / spawn gates read this when the child's
+        # demo_cache_goal; wait_for / spawn gates read this when the child's
         # own spawn goal is not the catalog prefix.
         self.root_goal: Optional[str] = None
+        self._browser_activity_cleanup_unknown: bool = False
         self.fast_mode_cache_enabled: bool = False
         self.memory_enabled: bool = False
+        # User-authored tools pinned once per run (domains/user_tools); carried
+        # across continue_as_new so a mid-run publish never changes the toolset.
+        self.user_tools: Dict[str, Any] = {}
+        self.user_tools_pinned: bool = False
         # Fast Mode button — LLM provider speed only (Anthropic speed / OpenAI priority).
         # Independent of DEMO cache replay (self.fast_mode_cache_enabled).
         self.provider_fast_mode: bool = True
         self.world_model_mode: str = "real"
+        # Simulate-mode logical clock: seconds of wall-clock wait that wait_for /
+        # wait_seconds skipped (utils/simulated_clock.py). Always 0 in real mode.
+        self.simulated_clock_offset_seconds: int = 0
+        # Simulate mode: this agent's time on its world's shared clock (epoch ms).
+        self.simulated_world_time_ms: Optional[int] = None
         self.model: str = "anthropic/claude-sonnet-4.6"
         self.reasoning_max_tokens: int = 256
         self.verifier: Optional[Dict] = None
@@ -757,6 +872,7 @@ class AgentWorkflow:
         self.is_paused: bool = False
         # Authentication can pause itself while waiting for the user's reply.
         self._pause_signal_sequence: int = 0
+        self._user_pause_active: bool = False  # Explicit PAUSE signal, not budget/auth waits.
         self._paused_by_parent: bool = False  # Track if pause was inherited from parent
         # Orphan detection: every child must stop once Temporal confirms that its
         # parent chain is gone. Otherwise an active child can keep spending after a
@@ -782,6 +898,12 @@ class AgentWorkflow:
         self._response_schema_pending_signals: Dict[str, int] = {}
         self._response_schema_baseline_initialized = False
         self._response_schema_revision: int = 0
+        # The startup agent-config read failed, so output_schema is unknown
+        # (not known-absent) until a later read succeeds.
+        self._agent_config_unavailable: bool = False
+        # Getter reloads back off across turns while the read keeps failing.
+        self._agent_config_retry_count: int = 0
+        self._agent_config_retry_at: Optional[datetime] = None
         self._response_schema_applied_revision: int = 0
         self._response_schema_accepted_revision: int = 0
         self._response_schema_initialized: bool = False
@@ -875,7 +997,7 @@ class AgentWorkflow:
         self.gpt_code_token_source: Optional[str] = None
         self.gpt_code_token_pool_id: Optional[str] = None
         self.compute_token_lineage_key: Optional[str] = None
-        self.compute_token_fast_cache_affinity_key: Optional[str] = None
+        self.compute_token_demo_cache_affinity_key: Optional[str] = None
         self.compute_token_fetched_at: Optional[datetime] = None  # For 5-min TTL refresh
 
         # Model pricing (fetched at workflow start for cost calculation)
@@ -891,6 +1013,7 @@ class AgentWorkflow:
         # Agent source (WEB, MAC_APP, SMS) — cached at startup for SMS notification gating
         self.agent_source: str = "WEB"
         self._deployment_resume: bool = False
+        self._world_clock_events: set[str] = set()
         self._resume_prior_status: str = "ACTIVE"
         self._resume_status_message: Optional[str] = None
         self._resume_progress: float = 0.0
@@ -905,6 +1028,10 @@ class AgentWorkflow:
         self._active_tool_calls: Dict[str, Tuple[str, Dict[str, Any]]] = {}
         self._pending_tool_resumes: List[Dict[str, Any]] = []
         self._tool_resume_hints: Dict[str, Dict[str, Any]] = {}
+        # Background spawn_agent tasks (workflows/background_agents.py).
+        self._init_background_state()
+        # kill_agent state (workflows/agent_control.py).
+        self._init_agent_control_state()
 
     @staticmethod
     def _serialized_datetime(value: Optional[datetime]) -> Optional[str]:
@@ -949,6 +1076,10 @@ class AgentWorkflow:
         prior_status_message = state.get("prior_status_message")
         self._resume_status_message = prior_status_message if isinstance(prior_status_message, str) else None
         self._resume_progress = float(_number("progress"))
+        # A simulated agent keeps reading world time after continue-as-new.
+        self.simulated_clock_offset_seconds = int(_number("simulated_clock_offset_seconds"))
+        world_cursor = state.get("simulated_world_time_ms")
+        self.simulated_world_time_ms = world_cursor if type(world_cursor) is int else None
         self.token_count = int(_number("token_count"))
         self.tokens_in = int(_number("tokens_in"))
         self.tokens_out = int(_number("tokens_out"))
@@ -984,10 +1115,14 @@ class AgentWorkflow:
             }
         if isinstance(state.get("memory_enabled"), bool):
             self.memory_enabled = state["memory_enabled"]
+        if isinstance(state.get("user_tools"), dict):
+            self.user_tools = dict(state["user_tools"])
+            self.user_tools_pinned = True
         self._cost_limit_reached = self._resume_prior_status == "COST_LIMIT_REACHED"
         if self._resume_prior_status == "OUT_OF_CREDITS":
             self._has_credits = False
         self.is_paused = self._resume_prior_status in {"PAUSED", "COST_LIMIT_REACHED", "OUT_OF_CREDITS"}
+        self._user_pause_active = False
 
         runtime = state.get("runtime_state")
         if not isinstance(runtime, dict):
@@ -996,10 +1131,16 @@ class AgentWorkflow:
         self._deployment_validation = runtime.get("deployment_validation") is True
         self.last_message_check = self._restored_datetime(runtime.get("last_message_check"))
         self._paused_by_parent = runtime.get("paused_by_parent") is True
+        self._user_pause_active = self.is_paused and runtime.get("user_pause_active") is True
         pause_sequence = runtime.get("pause_signal_sequence")
         if type(pause_sequence) is int and pause_sequence >= 0:
             self._pause_signal_sequence = pause_sequence
         self._orphaned = runtime.get("orphaned") is True
+        # kill_agent's killer survives continue_as_new (abort reason + parent report).
+        kill_request = runtime.get("kill_request")
+        self._kill_request = dict(kill_request) if isinstance(kill_request, dict) else None
+        abort_info = runtime.get("abort_info")
+        self._abort_info = dict(abort_info) if isinstance(abort_info, dict) else None
         self._parent_query_failures_while_paused = int(runtime.get("parent_query_failures", 0))
         self._has_new_messages = runtime.get("has_new_messages") is True
         self._last_signal_response = (
@@ -1007,9 +1148,7 @@ class AgentWorkflow:
         )
         if isinstance(runtime.get("signal_responses"), dict):
             self._signal_responses = dict(runtime["signal_responses"])
-        self._pending_approval_resume = _canonical_pending_approval_resume(
-            runtime.get("pending_approval_resume")
-        )
+        self._pending_approval_resume = _canonical_pending_approval_resume(runtime.get("pending_approval_resume"))
         if isinstance(runtime.get("response_schema_feedback"), list):
             source_rows = runtime.get("response_schema_feedback_sources")
             self._response_schema_feedback = []
@@ -1020,7 +1159,9 @@ class AgentWorkflow:
                 source = source_rows[index] if isinstance(source_rows, list) and index < len(source_rows) else None
                 self._response_schema_feedback.append(value)
                 self._response_schema_feedback_sources.append(
-                    tuple(source) if isinstance(source, list) and source and all(isinstance(part, str) for part in source) else None
+                    tuple(source)
+                    if isinstance(source, list) and source and all(isinstance(part, str) for part in source)
+                    else None
                 )
         self._response_schema_revision = int(runtime.get("response_schema_revision", 0))
         self._response_schema_applied_revision = int(runtime.get("response_schema_applied_revision", 0))
@@ -1054,30 +1195,35 @@ class AgentWorkflow:
         )
         if isinstance(runtime.get("response_schema_feedback_rows"), list):
             self._response_schema_feedback_rows = {
-                tuple(value) for value in runtime["response_schema_feedback_rows"]
+                tuple(value)
+                for value in runtime["response_schema_feedback_rows"]
                 if isinstance(value, list) and all(isinstance(part, str) for part in value)
             }
         if isinstance(runtime.get("response_schema_task_base"), str):
             self._response_schema_task_base = runtime["response_schema_task_base"]
         if isinstance(runtime.get("response_schema_task_baseline_rows"), list):
             self._response_schema_task_baseline_rows = {
-                tuple(value) for value in runtime["response_schema_task_baseline_rows"]
+                tuple(value)
+                for value in runtime["response_schema_task_baseline_rows"]
                 if isinstance(value, list) and all(isinstance(part, str) for part in value)
             }
         if isinstance(runtime.get("response_schema_attention_events"), dict):
             self._response_schema_attention_events = {
-                key: value for key, value in runtime["response_schema_attention_events"].items()
+                key: value
+                for key, value in runtime["response_schema_attention_events"].items()
                 if isinstance(key, str) and isinstance(value, str)
             }
         if isinstance(runtime.get("response_schema_pending_signals"), dict):
             self._response_schema_pending_signals = {
-                key: value for key, value in runtime["response_schema_pending_signals"].items()
+                key: value
+                for key, value in runtime["response_schema_pending_signals"].items()
                 if isinstance(key, str) and isinstance(value, int) and value > 0
             }
         self._response_schema_baseline_initialized = runtime.get("response_schema_baseline_initialized") is True
         self._has_credits = runtime.get("has_credits", self._has_credits) is True
         self._last_credit_check = int(runtime.get("last_credit_check", 0))
         self.write_lock_enabled = runtime.get("write_lock_enabled", True) is True
+        self._browser_activity_cleanup_unknown = runtime.get("browser_activity_cleanup_unknown") is True
         self._signup_completed = runtime.get("signup_completed") is True
         self._signup_dismissed = runtime.get("signup_dismissed") is True
         if isinstance(runtime.get("context"), list):
@@ -1128,18 +1274,20 @@ class AgentWorkflow:
         self._last_parent_state_query_at = self._restored_datetime(runtime.get("last_parent_state_query_at"))
         last_parent_state = runtime.get("last_parent_state")
         self._last_parent_state = dict(last_parent_state) if isinstance(last_parent_state, dict) else {}
-        for field_name in (
-            "compute_token_lineage_key",
-            "compute_token_fast_cache_affinity_key",
-            "actual_model",
-            "system_name",
-            "custom_system_prompt",
-            "agent_source",
-            "user_context_section",
-            "fast_cache_goal",
-            "root_goal",
+        # Runtime keys are persisted across continuation runs, so the DEMO cache
+        # fields keep their original stored names (fast_cache_*).
+        for runtime_key, field_name in (
+            ("compute_token_lineage_key", "compute_token_lineage_key"),
+            ("compute_token_fast_cache_affinity_key", "compute_token_demo_cache_affinity_key"),
+            ("actual_model", "actual_model"),
+            ("system_name", "system_name"),
+            ("custom_system_prompt", "custom_system_prompt"),
+            ("agent_source", "agent_source"),
+            ("user_context_section", "user_context_section"),
+            ("fast_cache_goal", "demo_cache_goal"),
+            ("root_goal", "root_goal"),
         ):
-            value = runtime.get(field_name)
+            value = runtime.get(runtime_key)
             if isinstance(value, str):
                 setattr(self, field_name, value)
         if isinstance(runtime.get("model_pricing_cache"), dict):
@@ -1154,10 +1302,12 @@ class AgentWorkflow:
             self._cost_limit_wrapup_pending = runtime.get("cost_limit_wrapup_pending") is True
         if "cost_limit_wrapup_consumed" in runtime:
             self._cost_limit_wrapup_consumed = runtime.get("cost_limit_wrapup_consumed") is True
+        self._restore_background_state(runtime.get("background_agents"))
         pending_tool_resumes = runtime.get("pending_tool_resumes")
         if isinstance(pending_tool_resumes, list):
+            # A spawn_agent parked by a generation before task_name gets a stable one.
             self._pending_tool_resumes = [
-                record
+                with_legacy_spawn_task_name(record)
                 for record in pending_tool_resumes
                 if isinstance(record, dict)
                 and isinstance(record.get("tool_name"), str)
@@ -1200,6 +1350,7 @@ class AgentWorkflow:
             "allowing one wrap-up turn for attempt_completion"
         )
         self.is_paused = False
+        self._user_pause_active = False
         self._cost_limit_wrapup_pending = True
         self._cost_limit_wrapup_consumed = False
 
@@ -1221,6 +1372,7 @@ class AgentWorkflow:
         elif status == "ACTIVE":
             self._resume_prior_status = "ACTIVE"
             self.is_paused = False
+            self._user_pause_active = False
             self._cost_limit_reached = False
             self._has_credits = True
         price_limit = agent_config.get("price_limit_cents")
@@ -1249,6 +1401,8 @@ class AgentWorkflow:
             "prior_status": prior_status,
             "prior_status_message": self._resume_status_message,
             "progress": self._resume_progress,
+            "simulated_clock_offset_seconds": self.simulated_clock_offset_seconds,
+            "simulated_world_time_ms": self.simulated_world_time_ms,
             "token_count": self.token_count,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
@@ -1266,28 +1420,33 @@ class AgentWorkflow:
             "max_iterations": self.max_iterations,
             "context_gates": dict(self.context_gates),
             "memory_enabled": bool(getattr(self, "memory_enabled", False)),
+            **({"user_tools": dict(self.user_tools)} if getattr(self, "user_tools_pinned", False) else {}),
             "runtime_state": {
                 "last_message_check": self._serialized_datetime(self.last_message_check),
                 "paused_by_parent": self._paused_by_parent,
                 "pause_signal_sequence": self._pause_signal_sequence,
+                "user_pause_active": self._user_pause_active,
                 "orphaned": self._orphaned,
+                "kill_request": dict(self._kill_request) if self._kill_request is not None else None,
+                "abort_info": dict(self._abort_info) if self._abort_info is not None else None,
                 "parent_query_failures": self._parent_query_failures_while_paused,
                 "has_new_messages": self._has_new_messages,
                 "last_signal_response": self._last_signal_response,
                 "signal_responses": dict(self._signal_responses),
-                "pending_approval_resume": _canonical_pending_approval_resume(
-                    self._pending_approval_resume
-                ),
+                "pending_approval_resume": _canonical_pending_approval_resume(self._pending_approval_resume),
                 "response_schema_feedback": list(self._response_schema_feedback),
                 "response_schema_feedback_sources": [
                     list(self._response_schema_feedback_sources[index])
-                    if index < len(self._response_schema_feedback_sources) and self._response_schema_feedback_sources[index] is not None
+                    if index < len(self._response_schema_feedback_sources)
+                    and self._response_schema_feedback_sources[index] is not None
                     else None
                     for index in range(len(self._response_schema_feedback))
                 ],
                 "response_schema_feedback_rows": [list(key) for key in sorted(self._response_schema_feedback_rows)],
                 "response_schema_task_base": self._response_schema_task_base,
-                "response_schema_task_baseline_rows": [list(key) for key in sorted(self._response_schema_task_baseline_rows)],
+                "response_schema_task_baseline_rows": [
+                    list(key) for key in sorted(self._response_schema_task_baseline_rows)
+                ],
                 "response_schema_attention_events": dict(self._response_schema_attention_events),
                 "response_schema_pending_signals": dict(self._response_schema_pending_signals),
                 "response_schema_baseline_initialized": self._response_schema_baseline_initialized,
@@ -1301,6 +1460,8 @@ class AgentWorkflow:
                 "has_credits": self._has_credits,
                 "last_credit_check": self._last_credit_check,
                 "write_lock_enabled": self.write_lock_enabled,
+                **({"browser_activity_cleanup_unknown": True}
+                   if self._browser_activity_cleanup_unknown else {}),
                 "signup_completed": self._signup_completed,
                 "signup_dismissed": self._signup_dismissed,
                 "context": list(context or self.context),
@@ -1321,7 +1482,7 @@ class AgentWorkflow:
                 "last_parent_state_query_at": self._serialized_datetime(self._last_parent_state_query_at),
                 "last_parent_state": dict(self._last_parent_state),
                 "compute_token_lineage_key": self.compute_token_lineage_key,
-                "compute_token_fast_cache_affinity_key": (self.compute_token_fast_cache_affinity_key),
+                "compute_token_fast_cache_affinity_key": (self.compute_token_demo_cache_affinity_key),
                 "input_cents_per_1k": self.input_cents_per_1k,
                 "output_cents_per_1k": self.output_cents_per_1k,
                 "model_pricing_cache": dict(self.model_pricing_cache),
@@ -1330,11 +1491,12 @@ class AgentWorkflow:
                 "custom_system_prompt": self.custom_system_prompt,
                 "agent_source": self.agent_source,
                 "user_context_section": getattr(self, "user_context_section", ""),
-                "fast_cache_goal": self.fast_cache_goal,
+                "fast_cache_goal": self.demo_cache_goal,
                 "root_goal": self.root_goal,
                 "cost_limit_wrapup_pending": self._cost_limit_wrapup_pending,
                 "cost_limit_wrapup_consumed": self._cost_limit_wrapup_consumed,
                 "pending_tool_resumes": list(self._pending_tool_resumes),
+                "background_agents": self._background_state_snapshot(),
             },
         }
 
@@ -1380,7 +1542,7 @@ class AgentWorkflow:
         """Keep iteration/cache history across replacement and continuation runs."""
         values = {
             "iteration_offset": self.iteration_offset,
-            "fast_cache_position_offset": self.iteration_offset,
+            "demo_cache_position_offset": self.iteration_offset,
         }
         if self.max_iterations is not None:
             values["max_iterations"] = self.max_iterations
@@ -1390,11 +1552,23 @@ class AgentWorkflow:
     # SIGNALS
     # =========================================================================
 
+    @workflow.signal(name=GENERATION_HANDOFF_SIGNAL)
+    def generation_handoff_available(self, task_queue: str) -> None:
+        """Cutover owner: the live pointer moved to ``task_queue``; idle parks re-check now.
+
+        Idempotent per queue. The pointer read stays authoritative (continuation
+        admission happens there), so a stale or spoofed hint cannot move us.
+        """
+        if note_generation_handoff(self, task_queue):
+            workflow.logger.info(f"Generation handoff signalled: live={task_queue}")
+
     @workflow.signal
-    async def pause(self):
-        """Pause workflow execution."""
+    async def pause(self, cause: str = "user"):
+        """Pause with producer-supplied cause; omitted cause preserves legacy user controls."""
         workflow.logger.info("🔴 Received PAUSE signal")
         self._pause_signal_sequence = getattr(self, "_pause_signal_sequence", 0) + 1
+        self._user_pause_active = cause == "user" or (self.is_paused and self._user_pause_active)
+        episode_cause = "user" if self._user_pause_active else cause
         self.is_paused = True
         await self._update_tree_state(status="PAUSED")
 
@@ -1402,7 +1576,13 @@ class AgentWorkflow:
         for child_wf_id in self._get_pending_child_workflow_ids():
             try:
                 handle = workflow.get_external_workflow_handle(child_wf_id)
-                await handle.signal("pause")
+                # A user pause keeps the legacy zero-argument signal: a child on a
+                # draining older generation defines `pause(self)` and would fail its
+                # workflow task on every retry if given a cause.
+                if episode_cause == "user":
+                    await handle.signal("pause")
+                else:
+                    await handle.signal("pause", episode_cause)
             except Exception as e:
                 workflow.logger.warning(f"Failed to cascade pause to child: {e}")
 
@@ -1428,6 +1608,7 @@ class AgentWorkflow:
             self._has_credits = True
         workflow.logger.info("🟢 Received RESUME signal")
         self.is_paused = False
+        self._user_pause_active = False
         self._paused_by_parent = False
         await self._update_tree_state(status="ACTIVE")
 
@@ -1443,6 +1624,7 @@ class AgentWorkflow:
     async def receive_user_response(self, response: str):
         """Receive user response - sets flag and stores response for approval checks."""
         workflow.logger.info(f"💬 Received user response (length={len(response)})")
+        self._wake_background_waiters()
         # Try to parse as JSON with request_id (from attention request endpoints)
         try:
             data = _json.loads(response)
@@ -1467,6 +1649,29 @@ class AgentWorkflow:
         self._last_signal_response = response
         self._has_new_messages = True
         self._record_response_schema_feedback(response)
+        # A real user message ends every in-tool wait (wait_for, idle turn wait).
+        self._note_wait_wake("user_message")
+
+    @workflow.signal
+    async def receive_agent_message(self, data: dict):
+        """Another agent in this tree stored a message for us ({message_id}).
+
+        Only wakes the loop: the row is polled like any other, never counts as
+        user feedback, and never lifts a pause.
+        """
+        if isinstance(data, dict) and data.get("wake_task_id"):
+            # Another agent messaged one of our finished explore/browser/code tasks:
+            # start its next run (the row is task-addressed, so our loop is not woken).
+            await self._wake_background_task_from_signal(data)
+            return
+        if self._accept_agent_message_signal(data):
+            workflow.logger.info(f"📨 Received agent message {str((data or {}).get('message_id'))[:36]}")
+
+    @workflow.signal
+    async def kill(self, data: dict):
+        """kill_agent: kill this agent and its subtree ({by_agent_id}), or one own
+        background task ({task_id})."""
+        await self._accept_kill_signal(data)
 
     @staticmethod
     def _response_schema_attention_event_id(message: Dict) -> Optional[str]:
@@ -1477,23 +1682,28 @@ class AgentWorkflow:
         return None
 
     def _record_response_schema_feedback(
-        self, response: Any, *, request_id: Optional[str] = None, authored: bool = False,
+        self,
+        response: Any,
+        *,
+        request_id: Optional[str] = None,
+        authored: bool = False,
     ) -> None:
         """Queue one authored event, independently of its signal/row delivery order."""
         if not isinstance(response, str):
             return
         normalized = response.strip()
-        if not normalized or (not authored and (
-            normalized in ATTENTION_CONTROL_RESPONSES
-            or normalized.casefold() in {"approve", "approved"}
-        )):
+        if not normalized or (
+            not authored
+            and (normalized in ATTENTION_CONTROL_RESPONSES or normalized.casefold() in {"approve", "approved"})
+        ):
             return
         if request_id is not None:
             if request_id in self._response_schema_attention_events:
                 return
             self._response_schema_attention_events[request_id] = response
         self._append_response_schema_feedback(
-            response, ("attention_response", request_id) if request_id is not None else None,
+            response,
+            ("attention_response", request_id) if request_id is not None else None,
         )
         text = response.strip()
         if text:
@@ -1515,13 +1725,19 @@ class AgentWorkflow:
 
     def _establish_response_schema_task_boundary(self, messages: List[Dict]) -> None:
         """A fresh task consumes the observed USER prefix, not future source IDs."""
-        latest_index = next((index for index in range(len(messages) - 1, -1, -1)
-                             if latest_real_user_instruction([messages[index]]) is not None), None)
+        latest_index = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if latest_real_user_instruction([messages[index]]) is not None
+            ),
+            None,
+        )
         if latest_index is None:
             return
         self._response_schema_task_base = messages[latest_index]["text"]
-        for message in messages[:latest_index + 1]:
-            keys = _real_user_requirement_keys([message])
+        for message in messages[: latest_index + 1]:
+            keys = _requirement_keys([message])
             self._response_schema_task_baseline_rows.update(keys)
             self._response_schema_feedback_rows.update(keys)
             event_id = self._response_schema_attention_event_id(message)
@@ -1534,11 +1750,11 @@ class AgentWorkflow:
         if not self._response_schema_baseline_initialized:
             first_user = next((message for message in messages if _real_user_requirement_keys([message])), None)
             if first_user is not None:
-                if first_user.get("text") in (self.goal, self.fast_cache_goal):
+                if first_user.get("text") in (self.goal, self.demo_cache_goal):
                     self._response_schema_feedback_rows.update(_real_user_requirement_keys([first_user]))
                 self._response_schema_baseline_initialized = True
         for message in messages:
-            keys = _real_user_requirement_keys([message])
+            keys = _requirement_keys([message])
             if not keys or not isinstance(message.get("text"), str):
                 continue
             event_id = self._response_schema_attention_event_id(message)
@@ -1556,15 +1772,19 @@ class AgentWorkflow:
             self._response_schema_pending_signals[text] -= 1
             if self._response_schema_pending_signals[text] == 0:
                 del self._response_schema_pending_signals[text]
+
     def _admit_durable_response_schema_feedback(self) -> None:
-        """Queue real USER rows once, including rows polled before their signal."""
+        """Queue requirement rows once (real USER rows and ancestor task updates), including rows polled before their signal."""
         self._bind_response_schema_feedback_rows(self.context)
         for message in self.context:
-            keys = _real_user_requirement_keys([message])
+            keys = _requirement_keys([message])
             text = message.get("text")
             event_id = self._response_schema_attention_event_id(message)
-            if not keys or not (keys - self._response_schema_feedback_rows) or not isinstance(text, str) or (
-                event_id is None and text.strip() in ATTENTION_CONTROL_RESPONSES
+            if (
+                not keys
+                or not (keys - self._response_schema_feedback_rows)
+                or not isinstance(text, str)
+                or (event_id is None and text.strip() in ATTENTION_CONTROL_RESPONSES)
             ):
                 continue
             self._response_schema_feedback_rows.update(keys)
@@ -1594,9 +1814,14 @@ class AgentWorkflow:
         try:
             await self._poll_messages(last_checked)
         except ActivityError as error:
-            if any(error_chain_has_type(error, kind) for kind in (
-                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-            )):
+            if any(
+                error_chain_has_type(error, kind)
+                for kind in (
+                    "CancelledError",
+                    "WorkflowGenerationSealed",
+                    "GenerationHandoffRequested",
+                )
+            ):
                 raise
             workflow.logger.warning(f"Rejection feedback poll failed; retaining received input: {error}")
         self._admit_durable_response_schema_feedback()
@@ -1642,7 +1867,17 @@ class AgentWorkflow:
     async def child_completed(self, data: dict):
         """Receive completion signal from child agent (success or failure)."""
         child_agent_id = data.get("child_agent_id", "")
+        if self._is_finished:
+            # Late signal from a child stopped when this agent finished: the
+            # parent is done, so nothing is posted or aggregated.
+            self.pending_children.discard(child_agent_id)
+            workflow.logger.info(f"Ignoring child_completed from {child_agent_id[:8]} after finish")
+            return
         result = data.get("result", {})
+        # A child woken by an agent message reports again: append a notification,
+        # never rewrite its original spawn result (workflows/agent_control.py).
+        if await self._on_rewoken_child_completed(child_agent_id, result if isinstance(result, dict) else {}):
+            return
         child_status = result.get("status", "completed")
 
         child_tool_id = self.child_tool_ids.get(child_agent_id)
@@ -1718,6 +1953,13 @@ class AgentWorkflow:
         self.child_results[child_agent_id] = result
 
         self.pending_children.discard(child_agent_id)
+        # wait_for(agents=[...]) listing this child ends now.
+        self._note_wait_wake(
+            "child_completed", agent_id=child_agent_id, status="failed" if child_failed else "completed"
+        )
+        # A background general_purpose/for_each carried across a continuation
+        # has no live task: this signal posts its notification.
+        await self._on_background_child_completed(child_agent_id)
 
     @workflow.signal
     async def signup_completed(self):
@@ -1746,6 +1988,20 @@ class AgentWorkflow:
 
         # Recalculate our subtree and propagate upward
         await self._update_cost_and_signal_parent()
+
+    @workflow.signal
+    async def parent_finished(self, data: Optional[Dict[str, Any]] = None):
+        """Parent finished while this agent ran in its background: stop as orphaned.
+
+        A killed parent says so ({killed_by, killed_parent}): this agent fails with
+        "Killed by K (parent P was killed)".
+        """
+        data = data if isinstance(data, dict) else {}
+        killed_by = data.get("killed_by") if isinstance(data.get("killed_by"), str) else None
+        message = (
+            f"Killed by {killed_by} (parent {data.get('killed_parent') or 'agent'} was killed)" if killed_by else None
+        )
+        self._abort_run(message, killed_by=killed_by)
 
     @workflow.signal
     async def cost_limit_reached(self):
@@ -1779,6 +2035,7 @@ class AgentWorkflow:
         self.price_limit_cents = new_limit
         self._cost_limit_reached = False
         self.is_paused = False
+        self._user_pause_active = False
         self._paused_by_parent = False
         await self._update_tree_state(status="ACTIVE")
 
@@ -1817,6 +2074,67 @@ class AgentWorkflow:
         world_model_mode: str = "real",  # Per-agent provider/environment execution mode
         memory_enabled: bool = False,  # Planner memory: get_memories fork from the finalized-run history
     ) -> Dict:
+        """Execute agent task; an escaping activity failure ends the agent FAILED."""
+        try:
+            return await self._run_phases(
+                agent_id,
+                user_id,
+                goal,
+                model,
+                reasoning_max_tokens,
+                verifier,
+                context,
+                parent_workflow_id,
+                parent_agent_id,
+                depth,
+                bus_id,
+                start_phase,
+                max_iterations,
+                price_limit_cents,
+                context_gates,
+                fast_mode_cache_enabled,
+                resume_state,
+                world_model_mode,
+                memory_enabled,
+            )
+        except FailureError as e:
+            # Only Temporal failures (ActivityError, ApplicationError, ...) end the
+            # execution; other exceptions fail just the workflow task, which
+            # Temporal retries without a terminal status. An escaping activity
+            # failure (e.g. poll_new_messages timing out on a saturated worker)
+            # would otherwise close the execution with the agent row still ACTIVE,
+            # and the parent would wait on it indefinitely. End it FAILED instead.
+            if self._is_finished or any(
+                error_chain_has_type(e, kind)
+                for kind in ("CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested")
+            ):
+                raise
+            message = f"Execution stopped by an unrecoverable error: {extract_error_message(e)}"
+            await self._mark_failed(context=self.context, reason="workflow_error", message=message)
+            return {"status": "failed", "reason": "workflow_error", "goal": goal}
+
+    async def _run_phases(
+        self,
+        agent_id: str,
+        user_id: str,
+        goal: str,
+        model: str,
+        reasoning_max_tokens: int,
+        verifier: Dict,
+        context: Optional[List[Dict]] = None,
+        parent_workflow_id: Optional[str] = None,
+        parent_agent_id: Optional[str] = None,
+        depth: int = 0,
+        bus_id: Optional[str] = None,
+        start_phase: str = "plan",  # "plan" runs PLAN→EXECUTE, "execute" skips PLAN
+        max_iterations: Optional[int] = None,  # Step limit for execute phase (sub-agents use 25)
+        price_limit_cents: int = 100,  # Price limit in cents (default $1.00)
+        context_gates: Optional[Dict[str, bool]] = None,  # Control which user context sections to include
+        fast_mode_cache_enabled: bool = False,  # Temporal arg: Fast Mode *button* (LLM speed)
+        resume_state: Optional[Dict] = None,  # Deployment or continue-as-new durable runtime state
+        world_model_mode: str = "real",  # Per-agent provider/environment execution mode
+        memory_enabled: bool = False,  # Planner memory: get_memories fork from the finalized-run history
+    ) -> Dict:
         """Execute agent task: optionally PLAN phase → EXECUTE phase."""
         # Bind agent_id to structlog context so ALL downstream structlog calls
         # (tools, helpers, activities) automatically include agent_id in JSON output
@@ -1828,7 +2146,8 @@ class AgentWorkflow:
         self.root_agent_id = root_agent_id
         self.user_id = user_id
         self.goal = goal
-        self.fast_cache_goal = goal  # Overridden by the persisted row goal below
+        self.demo_cache_goal = goal  # Overridden by the persisted row goal below
+        self.demo_cache_root_goal = goal
         self.model = model
         self.current_phase = "PLAN"
         self.reasoning_max_tokens = reasoning_max_tokens
@@ -1839,7 +2158,7 @@ class AgentWorkflow:
         self.bus_id = bus_id
         self.context_gates = context_gates or {}  # Empty dict = all gates open (default)
         # Arg is the Fast Mode button (LLM provider speed). Cache replay is
-        # DEMO-prompt only and ignores the button. Catalog DEMO / fast_cache:on
+        # DEMO-prompt only and ignores the button. Catalog DEMO / demo_cache:on
         # goals (incl. small fleet-concurrency probes) share the same gate via
         # is_demo_cache_task; mass-agent-only spawn rules stay on
         # is_oai_demo_mass_agent_task.
@@ -1847,21 +2166,23 @@ class AgentWorkflow:
         self.fast_mode_cache_enabled = is_demo_cache_task(self)
         self.world_model_mode = world_model_mode if world_model_mode in {"simulate", "shadow"} else "real"
         self.memory_enabled = bool(memory_enabled)
+        self.simulated_clock_offset_seconds = 0
+        self.simulated_world_time_ms = None
         self.max_iterations = max_iterations
         self.price_limit_cents = price_limit_cents  # Use passed value instead of hardcoded default
         self.compute_token_lineage_key = f"agent:{agent_id}"
-        self.compute_token_fast_cache_affinity_key = (
-            _fast_cache_compute_affinity_key(user_id, goal) if self.fast_mode_cache_enabled else None
+        self.compute_token_demo_cache_affinity_key = (
+            _demo_cache_compute_affinity_key(user_id, goal) if self.fast_mode_cache_enabled else None
         )
         self._restore_deployment_state(resume_state)
-        # continue_as_new / deployment resume may restore fast_cache_goal from
+        # continue_as_new / deployment resume may restore demo_cache_goal from
         # runtime_state. Recompute the DEMO cache gate from the restored goals
         # so a non-demo input goal cannot leave cache replay disabled when the
         # durable goal is demo (the persisted-goal resolver below no-ops when
         # the restored goal already matches).
         self.fast_mode_cache_enabled = is_demo_cache_task(self)
-        self.compute_token_fast_cache_affinity_key = (
-            _fast_cache_compute_affinity_key(user_id, self.fast_cache_goal or goal)
+        self.compute_token_demo_cache_affinity_key = (
+            _demo_cache_compute_affinity_key(user_id, self.demo_cache_goal or goal)
             if self.fast_mode_cache_enabled
             else None
         )
@@ -1927,7 +2248,10 @@ class AgentWorkflow:
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
 
         if not self._deployment_resume:
+            await self._register_on_world_clock()
             await self._advance_cloud_agent_lifecycle(PREPARING_CLOUD_AGENT_TITLE, "IN_PROGRESS")
+        else:
+            await self._recover_world_time_cursor()
 
         # Post an early heartbeat so external monitors (FE tree, benchmark
         # stall detector) see the agent is alive while init activities run.
@@ -2016,43 +2340,34 @@ class AgentWorkflow:
         # DB-row goal once and thread it into all cache keying (the DAG path
         # already resolves it via ensure_position_context; this aligns the
         # explicitly-threaded plan/execute/verifier/summary paths with it).
-        if (
-            self.provider_fast_mode
-            or self.fast_mode_cache_enabled
-            or self.parent_workflow_id
-            or user_id in FAST_MODE_WRITE_THROUGH_USER_IDS
-        ):
-            try:
-                persisted_goal, resolved_root_goal = unpack_fast_cache_goal_resolution(
-                    await workflow.execute_activity(
-                        resolve_fast_cache_goal_activity,
-                        args=[agent_id],
-                        start_to_close_timeout=timedelta(seconds=30),
-                        retry_policy=RetryPolicy(maximum_attempts=2),
-                    )
-                )
-                if resolved_root_goal:
-                    self.root_goal = resolved_root_goal
-                if persisted_goal and persisted_goal != self.fast_cache_goal:
+        try:
+            cache_context = await workflow.execute_activity(
+                resolve_fast_cache_context_activity,
+                args=[agent_id],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            persisted_goal = cache_context.get("goal") if isinstance(cache_context, dict) else None
+            root_goal = cache_context.get("root_goal") if isinstance(cache_context, dict) else None
+            if persisted_goal:
+                if persisted_goal != self.demo_cache_goal:
                     workflow.logger.info(
                         "Fast Mode cache goal resolved from agent row (differs from workflow input goal)"
                     )
-                    self.fast_cache_goal = persisted_goal
-                if persisted_goal or resolved_root_goal:
-                    # Recompute DEMO cache gate after durable child + root goals
-                    # are known. Leftover GPs inherit demo wait_for from root_goal.
-                    self.fast_mode_cache_enabled = is_demo_cache_task(self)
-                    # Compute-token cache affinity pins by the child's goal —
-                    # keep it on the same stable namespace, not the root's.
-                    self.compute_token_fast_cache_affinity_key = (
-                        _fast_cache_compute_affinity_key(
-                            user_id, self.fast_cache_goal or persisted_goal or self.goal
-                        )
-                        if self.fast_mode_cache_enabled
-                        else None
-                    )
-            except Exception as e:
-                workflow.logger.warning(f"Failed to resolve Fast Mode cache goal, using workflow input goal: {e}")
+                self.demo_cache_goal = persisted_goal
+            if root_goal:
+                self.demo_cache_root_goal = root_goal
+                self.root_goal = root_goal
+            if isinstance(cache_context, dict) and cache_context.get("resolved", isinstance(persisted_goal, str)):
+                self.fast_mode_cache_enabled = bool(cache_context.get("enabled"))
+                self.provider_fast_mode = bool(cache_context.get("provider_fast_mode", self.provider_fast_mode))
+            self.compute_token_demo_cache_affinity_key = (
+                _demo_cache_compute_affinity_key(user_id, self.demo_cache_goal)
+                if self.fast_mode_cache_enabled
+                else None
+            )
+        except Exception as e:
+            workflow.logger.warning(f"Failed to resolve Fast Mode cache context, using workflow input goal: {e}")
 
         # Helper: gate is open unless explicitly False
         def _gate_open(name: str) -> bool:
@@ -2069,7 +2384,9 @@ class AgentWorkflow:
                 self._deferred_startup_sms_handle = workflow.start_activity(
                     notify_sms_event_activity,
                     args=notification_args,
-                    start_to_close_timeout=timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS),
+                    **wmh_activity_timeout_options(
+                        self.world_model_mode, timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS)
+                    ),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
                 workflow.logger.info("Started agent_started SMS notification (deferred await)")
@@ -2128,6 +2445,7 @@ class AgentWorkflow:
                 )
             except Exception as e:
                 workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
+                self._agent_config_unavailable = True
                 return {}
 
         (
@@ -2188,6 +2506,12 @@ class AgentWorkflow:
         # startup generation establishes the initial contract; later genuine user
         # feedback refreshes the accepted native schema asynchronously.
         is_sub_agent = bool(parent_workflow_id or parent_agent_id or fetched_parent_agent_id)
+        # Pin the user's published tools once (root, real world only; restored on continue_as_new).
+        await pin_user_tools(
+            self,
+            is_root=not is_sub_agent and self.depth == 0 and self.world_model_mode == "real",
+            wf_api=workflow,
+        )
         startup_execute_context: Optional[List[Dict[str, Any]]] = None
         # Chat re-escalation after a terminal run starts a new workflow with
         # plan|execute and no resume_state. continue_as_new / deploy resume
@@ -2199,8 +2523,8 @@ class AgentWorkflow:
             startup_execute_context = await workflow.execute_activity(
                 poll_new_messages,
                 args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             startup_execute_context = filter_internal_subagent_messages(startup_execute_context)
             prior_run_superseded = plan_superseded_by_new_user_instruction(startup_execute_context)
@@ -2212,12 +2536,7 @@ class AgentWorkflow:
                 # win a race, then regenerate from the latest USER below.
                 response_schema = None
                 self.output_schema = None
-        if (
-            response_schema is None
-            and self.goal
-            and not is_sub_agent
-            and not prior_run_superseded
-        ):
+        if response_schema is None and self.goal and not is_sub_agent and not prior_run_superseded:
             try:
                 generated = await workflow.execute_activity(
                     set_response_schema_activity,
@@ -2227,7 +2546,7 @@ class AgentWorkflow:
                         # this text, so the stable goal keeps it cacheable (and
                         # matches the TS-side setResponseSchema, which reads the
                         # Agent row).
-                        [self.fast_cache_goal],
+                        [self.demo_cache_goal],
                         self._active_compute_token_payload(),
                         self.fast_mode_cache_enabled,
                         True,
@@ -2243,9 +2562,14 @@ class AgentWorkflow:
                         f"{len(self.output_schema.get('fields', []))} field(s)"
                     )
             except Exception as e:
-                if any(error_chain_has_type(e, kind) for kind in (
-                    "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-                )):
+                if any(
+                    error_chain_has_type(e, kind)
+                    for kind in (
+                        "CancelledError",
+                        "WorkflowGenerationSealed",
+                        "GenerationHandoffRequested",
+                    )
+                ):
                     raise
                 workflow.logger.warning(f"Failed to generate response_schema at startup: {e}")
         elif response_schema is None and is_sub_agent:
@@ -2277,21 +2601,28 @@ class AgentWorkflow:
         if self.parent_workflow_id:
             await self._check_parent_state()
             if self._orphaned:
+                abort_reason, abort_message = self._abort_reason()
                 await self._mark_failed(
-                    context=context or [],
-                    reason="orphaned",
-                    message="Parent agent ended; orphaned sub-agent stopped.",
+                    context=context or [], reason=abort_reason, message=abort_message, verifier_reasoning=abort_message
                 )
-                return {"status": "failed", "reason": "orphaned", "goal": self.goal}
+                return {"status": "failed", "reason": abort_reason, "goal": self.goal}
+
+        if self._world_clock_missing():
+            # Simulate mode never starts or plans on the real date: the runner
+            # creates the WMH world session before starting the root.
+            await self._mark_failed(
+                context=context or [],
+                reason="world_clock_unavailable",
+                message=WORLD_CLOCK_UNAVAILABLE_MESSAGE,
+            )
+            return {"status": "failed", "reason": "world_clock_unavailable", "goal": self.goal}
 
         # =====================================================================
         # Tool lists from centralized source of truth
         # =====================================================================
         plan_tools = PLAN_PHASE_TOOLS
         execute_tools = (
-            ["google_workspace_run", "attempt_completion"]
-            if matches_demo_goal(self.goal)
-            else EXECUTE_PHASE_TOOLS
+            ["google_workspace_run", "attempt_completion"] if matches_demo_goal(self.goal) else EXECUTE_PHASE_TOOLS
         )
 
         # Determine whether to skip PLAN phase and/or DAG. ``execute_dag_resume``
@@ -2359,7 +2690,7 @@ class AgentWorkflow:
                 check_generation_handoff=self._check_generation_handoff,
                 post_message=self._post_message,
                 poll_messages=self._poll_messages,
-                execute_tool=self._execute_tool,
+                execute_tool=self._execute_interruptible_tool,
                 update_tree_state=self._update_tree_state,
                 get_children_tokens=self._get_children_tokens,
                 on_tokens=self._on_tokens,  # Real-time cost tracking and limit checking
@@ -2379,13 +2710,15 @@ class AgentWorkflow:
                 get_gpt_token_source=self._active_gpt_source,
                 get_gpt_token_pool_id=self._active_gpt_pool_id,
                 compute_token_lineage_key=self.compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key=self.compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key=self.compute_token_demo_cache_affinity_key,
                 fast_mode_cache_enabled=self.fast_mode_cache_enabled,
-                goal_text=self.fast_cache_goal,
+                goal_text=self.demo_cache_goal,
             )
 
             await self._track_tokens_and_cost(plan_result)
-            if plan_result["status"] == "completed" and _verifier_superseded_by_user_feedback(plan_result, self.context, requirement_revision=self._response_schema_revision):
+            if plan_result["status"] == "completed" and _verifier_superseded_by_user_feedback(
+                plan_result, self.context, requirement_revision=self._response_schema_revision
+            ):
                 await self._prepare_response_schema_continuation()
                 await self._flush_pending_messages()
                 workflow.continue_as_new(args=self._continuation_args(self.context, start_phase="plan"))
@@ -2417,8 +2750,8 @@ class AgentWorkflow:
             execute_context = await workflow.execute_activity(
                 poll_new_messages,
                 args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             execute_context = filter_internal_subagent_messages(execute_context)
 
@@ -2456,28 +2789,32 @@ class AgentWorkflow:
 
                     execute_system_prompt = await self.build_system_prompt()
 
-                    dag_result = await execute_dag(
-                        dag=dag,
-                        agent_id=agent_id,
-                        user_id=user_id,
-                        model=model,
-                        context=execute_context,
-                        execute_activity=workflow.execute_activity,
-                        post_message=self._post_message,
-                        execute_tool=self._execute_tool,
-                        handle_tool_event_fn=self._handle_tool_event,
-                        poll_messages=self._poll_messages,
-                        claude_token=self._active_claude_token(),
-                        claude_token_source=self._active_claude_source(),
-                        claude_token_pool_id=self._active_claude_pool_id(),
-                        gpt_token=self._active_gpt_token(),
-                        gpt_account_id=self._active_gpt_account_id(),
-                        gpt_token_source=self._active_gpt_source(),
-                        gpt_token_pool_id=self._active_gpt_pool_id(),
-                        on_tokens=self._on_tokens,
-                        system_prompt_text=execute_system_prompt,
-                        tool_names=execute_tools,
-                    )
+                    # Planned spawns start in the background (like LLM spawns);
+                    # a user / agent message mid-DAG hands back to run_agent.
+                    with self._planned_dag_background() as dag_hooks:
+                        dag_result = await execute_dag(
+                            dag=dag,
+                            agent_id=agent_id,
+                            user_id=user_id,
+                            model=model,
+                            context=execute_context,
+                            execute_activity=workflow.execute_activity,
+                            post_message=self._post_message,
+                            execute_tool=self._execute_tool,
+                            handle_tool_event_fn=self._handle_tool_event,
+                            poll_messages=self._poll_messages,
+                            claude_token=self._active_claude_token(),
+                            claude_token_source=self._active_claude_source(),
+                            claude_token_pool_id=self._active_claude_pool_id(),
+                            gpt_token=self._active_gpt_token(),
+                            gpt_account_id=self._active_gpt_account_id(),
+                            gpt_token_source=self._active_gpt_source(),
+                            gpt_token_pool_id=self._active_gpt_pool_id(),
+                            on_tokens=self._on_tokens,
+                            system_prompt_text=execute_system_prompt,
+                            tool_names=execute_tools,
+                            interrupts=dag_hooks,
+                        )
 
                     # A completed DAG hands off to normal completion. A failed or
                     # stalled DAG recovers via run_agent (the LLM loop), the same
@@ -2502,7 +2839,11 @@ class AgentWorkflow:
                             user_id=user_id,
                             model=model,
                         )
-                        if post_dag_result and post_dag_result.get("score", 0.0) >= 1.0 and not post_dag_result.get("superseded_by_user_feedback"):
+                        if (
+                            post_dag_result
+                            and post_dag_result.get("score", 0.0) >= 1.0
+                            and not post_dag_result.get("superseded_by_user_feedback")
+                        ):
                             completion_revision = self._response_schema_revision
                             await self._await_deferred_startup()
                             await self._drain_fast_mode_explores()
@@ -2511,7 +2852,9 @@ class AgentWorkflow:
                                 completion_revision == self._response_schema_revision
                                 and self._response_schema_accepted_revision >= self._response_schema_revision
                                 and not _verifier_superseded_by_user_feedback(
-                                    post_dag_result, self.context, requirement_revision=self._response_schema_revision,
+                                    post_dag_result,
+                                    self.context,
+                                    requirement_revision=self._response_schema_revision,
                                 )
                             ):
                                 workflow.logger.info(
@@ -2581,7 +2924,7 @@ class AgentWorkflow:
             check_generation_handoff=self._check_generation_handoff,
             post_message=self._post_message,
             poll_messages=self._poll_messages,
-            execute_tool=self._execute_tool,
+            execute_tool=self._execute_interruptible_tool,
             update_tree_state=self._update_tree_state,
             get_children_tokens=self._get_children_tokens,
             on_tokens=self._on_tokens,  # Real-time cost tracking and limit checking
@@ -2601,9 +2944,9 @@ class AgentWorkflow:
             get_gpt_token_source=self._active_gpt_source,
             get_gpt_token_pool_id=self._active_gpt_pool_id,
             compute_token_lineage_key=self.compute_token_lineage_key,
-            compute_token_fast_cache_affinity_key=self.compute_token_fast_cache_affinity_key,
+            compute_token_demo_cache_affinity_key=self.compute_token_demo_cache_affinity_key,
             fast_mode_cache_enabled=self.fast_mode_cache_enabled,
-            goal_text=self.fast_cache_goal,
+            goal_text=self.demo_cache_goal,
             **self._iteration_resume_kwargs(),
         )
 
@@ -2616,11 +2959,10 @@ class AgentWorkflow:
             await self._await_deferred_startup()
             await self._drain_fast_mode_explores()
             await self._prepare_response_schema_continuation()
-            if (
-                completion_revision != self._response_schema_revision
-                or _verifier_superseded_by_user_feedback(
-                    execute_result, self.context, requirement_revision=self._response_schema_revision,
-                )
+            if completion_revision != self._response_schema_revision or _verifier_superseded_by_user_feedback(
+                execute_result,
+                self.context,
+                requirement_revision=self._response_schema_revision,
             ):
                 await self._flush_pending_messages()
                 workflow.continue_as_new(args=self._continuation_args(self.context, start_phase="execute_continued"))
@@ -2666,8 +3008,8 @@ class AgentWorkflow:
             context = await workflow.execute_activity(
                 poll_new_messages,
                 args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             context = filter_internal_subagent_messages(context)
 
@@ -2693,12 +3035,13 @@ class AgentWorkflow:
                 gpt_token_pool_id=self._active_gpt_pool_id(),
                 gpt_token_user_id=user_id,
                 compute_token_lineage_key=self.compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key=self.compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key=self.compute_token_demo_cache_affinity_key,
                 is_plan_loop=False,
                 tool_call_id=tool_call_id,
                 fast_mode_cache_enabled=self.fast_mode_cache_enabled,
-                fast_mode_goal=self.fast_cache_goal,
+                fast_mode_goal=self.demo_cache_goal,
                 fast_mode_step=0,
+                interrupts=self._dag_hooks(),
             )
 
             # Route verifier cost through _on_tokens so this LLM call doesn't
@@ -2727,12 +3070,19 @@ class AgentWorkflow:
                 except Exception as e:
                     workflow.logger.warning(f"[DAG] _on_tokens failed for post-DAG verifier: {e}")
 
-            _verifier_superseded_by_user_feedback(result, self.context, requirement_revision=self._response_schema_revision)
+            _verifier_superseded_by_user_feedback(
+                result, self.context, requirement_revision=self._response_schema_revision
+            )
             return result
         except Exception as e:
-            if any(error_chain_has_type(e, kind) for kind in (
-                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-            )):
+            if any(
+                error_chain_has_type(e, kind)
+                for kind in (
+                    "CancelledError",
+                    "WorkflowGenerationSealed",
+                    "GenerationHandoffRequested",
+                )
+            ):
                 raise
             if self._response_schema_accepted_revision < self._response_schema_revision:
                 workflow.logger.warning(f"Post-DAG schema prerequisite remains retryable: {extract_error_message(e)}")
@@ -2752,8 +3102,8 @@ class AgentWorkflow:
             context = await workflow.execute_activity(
                 poll_new_messages,
                 args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             return {
                 "score": 0.0,
@@ -2776,6 +3126,41 @@ class AgentWorkflow:
 
         return generate
 
+    async def _load_output_schema(self, *, poll_until_present: bool, max_attempts: int = 5) -> None:
+        """Read output_schema from the agent row while it is missing.
+
+        ``poll_until_present`` keeps polling a successful read that returns no
+        schema yet (async schema generation at completion); otherwise the first
+        successful read is final: no schema then means the task has none.
+        """
+        attempt = 0
+        while self.output_schema is None and attempt < max_attempts:
+            attempt += 1
+            try:
+                agent_config = await workflow.execute_activity(
+                    fetch_agent_config,
+                    args=[self.agent_id],
+                    start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to fetch output_schema (attempt {attempt}): {e}")
+                if attempt < max_attempts:
+                    await asyncio.sleep(1)
+                continue
+            self._agent_config_unavailable = False
+            self._agent_config_retry_count = 0
+            self._agent_config_retry_at = None
+            self.output_schema = agent_config.get("response_schema")
+            workflow.logger.info(
+                f"Fetched output_schema attempt {attempt}/{max_attempts}: {self.output_schema is not None}"
+            )
+            if self.output_schema is not None or not poll_until_present:
+                return
+            if attempt < max_attempts:
+                workflow.logger.info("Schema not ready, waiting 1s...")
+                await asyncio.sleep(1)
+
     def _make_response_schema_getter(self):
         """Create a getter that returns the current output_schema.
 
@@ -2786,9 +3171,30 @@ class AgentWorkflow:
         async def get_schema() -> Optional[Dict]:
             await self._wait_for_response_schema_refresh()
             self._require_current_response_schema_acceptance()
+            if self.output_schema is None and self._agent_config_unavailable:
+                await self._reload_output_schema_with_backoff()
             return self.output_schema
 
         return get_schema
+
+    async def _reload_output_schema_with_backoff(self) -> None:
+        """One config read per turn; failures back off exponentially across turns.
+
+        The getter runs every main-loop turn, so retries must not stack inside a
+        turn. Delay 1 s doubling to a 60 s cap plus up to 25% jitter (claude-code
+        withRetry.ts getRetryDelay; codex async-utils backoff.rs) spreads a
+        correlated backend outage. workflow.now()/random() keep it deterministic.
+        """
+        now = workflow.now()
+        if self._agent_config_retry_at is not None and now < self._agent_config_retry_at:
+            return
+        await self._load_output_schema(poll_until_present=False, max_attempts=1)
+        if not self._agent_config_unavailable:
+            return
+        self._agent_config_retry_count += 1
+        base = min(2.0 ** (self._agent_config_retry_count - 1), 60.0)
+        delay = base + workflow.random().random() * 0.25 * base
+        self._agent_config_retry_at = now + timedelta(seconds=delay)
 
     def _require_current_response_schema_acceptance(self) -> None:
         """Do not certify a processed failure as acceptance of new requirements."""
@@ -2801,7 +3207,7 @@ class AgentWorkflow:
     async def _response_schema_user_messages(self) -> List[str]:
         """Return durable, ordered user requirements for schema generation."""
         messages: List[str] = []
-        goal = self._response_schema_task_base or (self.fast_cache_goal or self.goal or "").strip()
+        goal = self._response_schema_task_base or (self.demo_cache_goal or self.goal or "").strip()
         if goal:
             messages.append(goal)
         if isinstance(self.output_schema, dict) and self.output_schema.get("fields"):
@@ -2817,13 +3223,18 @@ class AgentWorkflow:
             persisted_messages = await workflow.execute_activity(
                 poll_new_messages,
                 args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
         except Exception as e:
-            if any(error_chain_has_type(e, kind) for kind in (
-                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-            )):
+            if any(
+                error_chain_has_type(e, kind)
+                for kind in (
+                    "CancelledError",
+                    "WorkflowGenerationSealed",
+                    "GenerationHandoffRequested",
+                )
+            ):
                 raise
             workflow.logger.warning(f"Failed to reload durable feedback for response_schema refresh: {e}")
             persisted_messages = []
@@ -2836,15 +3247,23 @@ class AgentWorkflow:
         for message in requirements:
             if (message.get("role") or "").upper() != "USER":
                 continue
-            if (message.get("metadata") or {}).get("hidden"):
+            if (message.get("metadata") or {}).get("hidden") or (message.get("metadata") or {}).get(
+                "excludeFromModel"
+            ):
+                # Hidden from this agent's model (e.g. a message addressed to one browser task).
+                continue
+            # A task update from an ancestor agent changes requirements like a user correction.
+            if is_agent_authored_user_metadata(message.get("metadata")) and not _is_requirement_agent_row(message):
                 continue
             text = message.get("text")
             if not isinstance(text, str) or not text.strip():
                 continue
             message_id = message.get("message_id") or message.get("id")
             event_id = self._response_schema_attention_event_id(message)
-            key = ("attention_response", event_id) if event_id is not None else (
-                ("id", str(message_id)) if message_id else ("legacy", str(message.get("timestamp") or ""), text)
+            key = (
+                ("attention_response", event_id)
+                if event_id is not None
+                else (("id", str(message_id)) if message_id else ("legacy", str(message.get("timestamp") or ""), text))
             )
             if key in self._response_schema_task_baseline_rows:
                 continue
@@ -2853,7 +3272,12 @@ class AgentWorkflow:
             seen_rows.add(key)
             # The initial goal is already the first requirement. A later real
             # USER row can repeat it intentionally to restore the original task.
-            is_initial_goal = self._response_schema_task_base is None and event_id is None and text.strip() == goal and (first_user_row or (key[0] == "legacy" and not key[1]))
+            is_initial_goal = (
+                self._response_schema_task_base is None
+                and event_id is None
+                and text.strip() == goal
+                and (first_user_row or (key[0] == "legacy" and not key[1]))
+            )
             first_user_row = False
             if is_initial_goal:
                 continue
@@ -2863,7 +3287,11 @@ class AgentWorkflow:
         # Plain signals may precede their durable poll. Match occurrences rather
         # than unique text so A -> B -> A keeps the user's final correction.
         for index, feedback in enumerate(self._response_schema_feedback):
-            source = self._response_schema_feedback_sources[index] if index < len(self._response_schema_feedback_sources) else None
+            source = (
+                self._response_schema_feedback_sources[index]
+                if index < len(self._response_schema_feedback_sources)
+                else None
+            )
             if source is not None and source in self._response_schema_task_baseline_rows:
                 continue
             text = feedback
@@ -2915,15 +3343,26 @@ class AgentWorkflow:
                     try:
                         generated = await workflow.start_activity(
                             set_response_schema_activity,
-                            args=[self.agent_id, user_messages, self._active_compute_token_payload(),
-                                  self.fast_mode_cache_enabled, False, False],
+                            args=[
+                                self.agent_id,
+                                user_messages,
+                                self._active_compute_token_payload(),
+                                self.fast_mode_cache_enabled,
+                                False,
+                                False,
+                            ],
                             start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                             retry_policy=RetryPolicy(maximum_attempts=3),
                         )
                     except Exception as error:
-                        if any(error_chain_has_type(error, kind) for kind in (
-                            "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-                        )):
+                        if any(
+                            error_chain_has_type(error, kind)
+                            for kind in (
+                                "CancelledError",
+                                "WorkflowGenerationSealed",
+                                "GenerationHandoffRequested",
+                            )
+                        ):
                             raise
                         if target_revision < self._response_schema_revision:
                             self._response_schema_applied_revision = target_revision
@@ -2936,7 +3375,8 @@ class AgentWorkflow:
                     schema = generated.get("schema") if isinstance(generated, dict) else None
                     if not (isinstance(schema, dict) and schema.get("fields")):
                         self._record_response_schema_refresh_failure(
-                            target_revision, ValueError("schema generation returned no fields"),
+                            target_revision,
+                            ValueError("schema generation returned no fields"),
                         )
                         return
                     if schema != self.output_schema:
@@ -2952,9 +3392,14 @@ class AgentWorkflow:
                         retry_policy=RetryPolicy(maximum_attempts=3),
                     )
                 except Exception as error:
-                    if any(error_chain_has_type(error, kind) for kind in (
-                        "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-                    )):
+                    if any(
+                        error_chain_has_type(error, kind)
+                        for kind in (
+                            "CancelledError",
+                            "WorkflowGenerationSealed",
+                            "GenerationHandoffRequested",
+                        )
+                    ):
                         raise
                     self._record_response_schema_refresh_failure(target_revision, error)
                     return
@@ -3002,11 +3447,18 @@ class AgentWorkflow:
         try:
             await self._wait_for_response_schema_refresh()
         except Exception as error:
-            if any(error_chain_has_type(error, kind) for kind in (
-                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-            )):
+            if any(
+                error_chain_has_type(error, kind)
+                for kind in (
+                    "CancelledError",
+                    "WorkflowGenerationSealed",
+                    "GenerationHandoffRequested",
+                )
+            ):
                 raise
-            workflow.logger.warning(f"Schema refresh remains pending across continuation: {extract_error_message(error)}")
+            workflow.logger.warning(
+                f"Schema refresh remains pending across continuation: {extract_error_message(error)}"
+            )
 
     async def _regenerate_output_schema_for_new_instruction(self, context: List[Dict[str, Any]]) -> None:
         """Replace a completed-run schema with one generated from the latest USER.
@@ -3039,9 +3491,14 @@ class AgentWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
         except Exception as e:
-            if any(error_chain_has_type(e, kind) for kind in (
-                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-            )):
+            if any(
+                error_chain_has_type(e, kind)
+                for kind in (
+                    "CancelledError",
+                    "WorkflowGenerationSealed",
+                    "GenerationHandoffRequested",
+                )
+            ):
                 raise
             self._record_response_schema_refresh_failure(target_revision, e)
             return
@@ -3050,7 +3507,9 @@ class AgentWorkflow:
             return
         schema = generated.get("schema") if isinstance(generated, dict) else None
         if not (isinstance(schema, dict) and schema.get("fields")):
-            self._record_response_schema_refresh_failure(target_revision, ValueError("schema generation returned no fields"))
+            self._record_response_schema_refresh_failure(
+                target_revision, ValueError("schema generation returned no fields")
+            )
             return
         if schema != self.output_schema:
             self.output_schema = schema
@@ -3069,9 +3528,14 @@ class AgentWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
         except Exception as e:
-            if any(error_chain_has_type(e, kind) for kind in (
-                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-            )):
+            if any(
+                error_chain_has_type(e, kind)
+                for kind in (
+                    "CancelledError",
+                    "WorkflowGenerationSealed",
+                    "GenerationHandoffRequested",
+                )
+            ):
                 raise
             self._record_response_schema_refresh_failure(target_revision, e)
             return
@@ -3135,22 +3599,86 @@ class AgentWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
 
+        in_flight = self._in_flight_background_ids()
+        if in_flight and not self._continuation_history_pressure():
+            # continue_as_new would abandon these activities and relaunch them from
+            # scratch. Keep this run on the compressed context instead (run_agent
+            # uses it in-run when this hook returns); the next overflow, once they
+            # have finished, continues as new.
+            workflow.logger.info(
+                f"[background] context overflow: deferring continue_as_new while {len(in_flight)} "
+                f"background task(s) run: {in_flight}"
+            )
+            # Same starting state a continued run would have: later
+            # continue_as_new(self.context) paths must not carry the old history.
+            self.context = list(compressed_context)
+            return
+        if in_flight:
+            await self._settle_background_tasks_for_continuation(
+                "context overflow (history limit)", CONTINUATION_BACKGROUND_SETTLE_SECONDS
+            )
+
         # The canonical continuation contract also carries mutable counters,
         # credentials, and signal state so compaction cannot reset billing/limits.
         await self._drain_fast_mode_explores()
         await self._flush_pending_messages()
         workflow.continue_as_new(args=self._continuation_args(compressed_context))
 
+    def _in_flight_background_ids(self) -> List[str]:
+        """Activity-backed background tasks whose executor is still running in this run.
+
+        general_purpose/for_each children are durable workflows that report through
+        ``child_completed`` across continue_as_new, so they never hold a continuation.
+        """
+        return [
+            bg_id
+            for bg_id, handle in getattr(self, "_background_handles", {}).items()
+            if not handle.done()
+            and (self._background_tasks.get(bg_id) or {}).get("agent_type") not in CHILD_WORKFLOW_AGENT_TYPES
+        ]
+
+    async def _settle_background_tasks_for_continuation(self, reason: str, bound_seconds: float) -> List[str]:
+        """Before continue_as_new: let in-flight background tasks park or finish (bounded).
+
+        Generation handoff: browser/code activities see GENERATION_SUPERSEDED at
+        their next step boundary and park with resume state; explore cannot park
+        mid-run and finishes. Returns the ids still running at the bound — those
+        keep the old behaviour (relaunched from scratch by the next run), logged.
+        """
+        pending = self._in_flight_background_ids()
+        if not pending:
+            return []
+        workflow.logger.info(
+            f"[background] {reason}: waiting up to {bound_seconds:.0f}s for {len(pending)} in-flight "
+            f"background task(s) to park or finish before continue_as_new: {pending}"
+        )
+        with contextlib.suppress(asyncio.TimeoutError, TemporalTimeoutError):
+            # cutover-class: bounded — explicit settle bound, then continue_as_new regardless
+            await workflow.wait_condition(
+                lambda: not self._in_flight_background_ids(), timeout=timedelta(seconds=bound_seconds)
+            )
+        left = self._in_flight_background_ids()
+        if left:
+            workflow.logger.warning(
+                f"[background] {reason}: {len(left)} background task(s) did not park within "
+                f"{bound_seconds:.0f}s and will restart in the next run: {left}"
+            )
+        return left
+
+    def _continuation_history_pressure(self) -> bool:
+        """True when this run's history is too large to keep deferring continue_as_new."""
+        info = workflow.info()
+        return (
+            info.get_current_history_length() >= OVERFLOW_DEFER_MAX_HISTORY_EVENTS
+            or info.get_current_history_size() >= OVERFLOW_DEFER_MAX_HISTORY_BYTES
+        )
+
     async def _check_paused(self) -> bool:
         """Check if paused, querying parent state first (non-root only)."""
         await self._check_parent_state()
         # Yield to event loop so Temporal processes any pending signals before we read is_paused
         await asyncio.sleep(0)
-        if (
-            self._cost_limit_wrapup_pending
-            and self._cost_limit_reached
-            and not self._is_finished
-        ):
+        if self._cost_limit_wrapup_pending and self._cost_limit_reached and not self._is_finished:
             if not self._cost_limit_wrapup_consumed:
                 # First pause-check after arming wrap-up: allow one more turn.
                 self._cost_limit_wrapup_consumed = True
@@ -3167,7 +3695,6 @@ class AgentWorkflow:
         preceding _check_paused. The loop then returns status='aborted' instead of
         waiting forever on a parent that will never resume it."""
         return self._orphaned
-
 
     async def _check_generation_handoff(self) -> Optional[str]:
         """Return live task queue when this execution should hand off generations.
@@ -3190,6 +3717,10 @@ class AgentWorkflow:
         if should_handoff_to_generation(current_queue, live_queue):
             workflow.logger.info(f"Generation handoff required: current={current_queue} live={live_queue}")
             return live_queue
+        if live_queue:
+            # Confirmed on the live generation: drop a stale hint (e.g. a rollback)
+            # so parks return to safety-slice re-checks instead of 30s polling.
+            self._generation_handoff_hint = None
         return None
 
     def _park_pending_tool(self, tool_call_id: str, resume: Dict[str, Any]) -> bool:
@@ -3199,6 +3730,12 @@ class AgentWorkflow:
         ``helpers.generation_handoff.park_pending_tool``). Returns False when
         the tool must instead close its chip with DEPLOY_INTERRUPTED.
         """
+        if tool_call_id in self._background_tasks:
+            # Background records already travel in the continuation snapshot;
+            # keep the hint so the next generation relaunches it in the background.
+            self._background_tasks[tool_call_id]["resume"] = dict(resume)
+            workflow.logger.info(f"Parked background task {tool_call_id} for generation handoff")
+            return True
         if not self._tool_parking_enabled:
             return False
         active = self._active_tool_calls.get(tool_call_id)
@@ -3216,6 +3753,8 @@ class AgentWorkflow:
 
     def _take_tool_resume(self, tool_call_id: str) -> Optional[Dict[str, Any]]:
         """Return (once) the resume payload a previous generation parked for this call."""
+        if tool_call_id in self._background_resume_hints:
+            return self._background_resume_hints.pop(tool_call_id)
         return self._tool_resume_hints.pop(tool_call_id, None)
 
     async def _resume_pending_tools(self) -> Optional[str]:
@@ -3266,9 +3805,21 @@ class AgentWorkflow:
                     "context": list(self.context),
                 }
             run_agent_kwargs["get_requirement_revision"] = lambda: self._response_schema_revision
+            run_agent_kwargs.setdefault("user_tools", declared_user_tools(self))
+            # Read the latest known schema without waiting for async schema regeneration.
+            run_agent_kwargs["get_jev_response_schema"] = lambda: self.output_schema
+            run_agent_kwargs["jev_goal"] = self.goal
+            run_agent_kwargs["jev_agent_kind"] = "normal_child" if self.parent_agent_id else "normal_root"
+            run_agent_kwargs["get_pending_background_status"] = self._pending_background_status_text
+            run_agent_kwargs["verifier_interrupts"] = self._dag_hooks()
+            run_agent_kwargs["sync_environment_context"] = self._sync_environment_context
+            run_agent_kwargs["get_environment_tail"] = self._environment_tail_seed
+            self._relaunch_background_tasks()
+            self._background_spawns_enabled = True
             return await run_agent(**run_agent_kwargs)
         finally:
             self._tool_parking_enabled = False
+            self._background_spawns_enabled = False
 
     async def _wait_for_unpause_or_handoff(self) -> Optional[str]:
         """Block until unpaused, re-checking generation handoff every 30s.
@@ -3414,7 +3965,7 @@ class AgentWorkflow:
                     self.compute_token_lineage_key,
                     self.agent_id,
                     self.agent_id,
-                    self.compute_token_fast_cache_affinity_key,
+                    self.compute_token_demo_cache_affinity_key,
                     token_type,
                 ],
                 start_to_close_timeout=timedelta(seconds=20),
@@ -3448,9 +3999,7 @@ class AgentWorkflow:
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
             except Exception as release_error:
-                workflow.logger.warning(
-                    f"Failed to release compute token lineage during rotation: {release_error}"
-                )
+                workflow.logger.warning(f"Failed to release compute token lineage during rotation: {release_error}")
         self._clear_compute_token()
         await self._refresh_compute_token(user_id, force=True, token_type=rotate_token_type)
 
@@ -3486,7 +4035,7 @@ class AgentWorkflow:
                 "lineageKey": self.compute_token_lineage_key,
                 "agentId": self.agent_id,
                 "rootAgentId": self.agent_id,
-                "fastCacheAffinityKey": self.compute_token_fast_cache_affinity_key,
+                "fastCacheAffinityKey": self.compute_token_demo_cache_affinity_key,
             }
         if self.compute_token_provider == "gpt" and self.gpt_code_token:
             return {
@@ -3499,7 +4048,7 @@ class AgentWorkflow:
                 "lineageKey": self.compute_token_lineage_key,
                 "agentId": self.agent_id,
                 "rootAgentId": self.agent_id,
-                "fastCacheAffinityKey": self.compute_token_fast_cache_affinity_key,
+                "fastCacheAffinityKey": self.compute_token_demo_cache_affinity_key,
             }
         return None
 
@@ -3532,17 +4081,17 @@ class AgentWorkflow:
         update_tree: bool = True,
     ) -> None:
         """Post message to database."""
+        if role == "TOOL" and isinstance(metadata, dict):
+            # e.g. a background general_purpose / for_each child's progress and
+            # completion rows under its spawn's id: FE-only, like the executor's.
+            metadata = self._background_row_metadata(metadata.get("toolCallId"), metadata)
         try:
             # Fast Mode replay is CPU/DB local. Awaiting every post_message
             # activity under 50-way fan-out was the 900s leftover-ACTIVE
             # bottleneck: each July GP step blocked on a 30s write. Start the
             # write and keep looping; flush before terminal status so the
             # transcript is durable when COMPLETED lands.
-            if (
-                self.fast_mode_cache_enabled
-                and not self._is_finished
-                and is_oai_demo_mass_agent_task(self)
-            ):
+            if self.fast_mode_cache_enabled and not self._is_finished and is_oai_demo_mass_agent_task(self):
                 handle = workflow.start_activity(
                     post_agent_message,
                     args=[self.agent_id, text, role, metadata],
@@ -3577,8 +4126,8 @@ class AgentWorkflow:
         messages = await workflow.execute_activity(
             poll_new_messages,
             args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-            start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=RetryPolicy(maximum_attempts=3),
+            start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+            retry_policy=CONTROL_PLANE_POLL_RETRY,
         )
 
         terminal_tool_call_ids = set()
@@ -3710,13 +4259,17 @@ class AgentWorkflow:
         Args:
             last_checked: The timestamp to poll from (managed by run_agent, not workflow state)
         """
+        # Wake events after this mark are unseen by the LLM turn this poll feeds:
+        # a wait that turn issues ends on them at once (helpers/wait_wake.py).
+        snapshot_mark = wake_mark(self)
         try:
             messages = await workflow.execute_activity(
                 poll_new_messages,
                 args=[self.agent_id, last_checked],  # Use run_agent's timestamp, not self.last_message_check
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
+            note_context_snapshot(self, snapshot_mark)
 
             # Update workflow context for tools that check it. Return the raw
             # poll result so run_agent can still advance last_checked past
@@ -3747,6 +4300,7 @@ class AgentWorkflow:
                     message_id = msg.get("message_id") or msg.get("id")
                     if message_id:
                         if message_id in seen_message_ids:
+                            refresh_user_pause(self.context, msg)
                             continue
                         seen_message_ids.add(message_id)
                     else:
@@ -3764,6 +4318,42 @@ class AgentWorkflow:
             raise
 
     async def _execute_tool(self, tool_name: str, tool_args: Dict, tool_call_id: str) -> Dict:
+        """Execute a tool, then (simulate mode) re-read this agent's world-time cursor.
+
+        A simulated action advances the agent on its world clock by the WMH's
+        predicted duration, and a call that delivered a child's result has
+        moved this agent to that child's finish, so the next "now" it sees is
+        the world's.
+        Outside a WMH world no cursor exists and nothing extra runs.
+        """
+        result = await self._execute_tool_once(tool_name, tool_args, tool_call_id)
+        await self._refresh_world_time_cursor_after_tool()
+        return result
+
+    async def _refresh_world_time_cursor_after_tool(self) -> None:
+        """Simulate mode: re-read the cursor after a tool, retrying a failed read with a bounded backoff.
+
+        Without a cursor (outside a WMH world) nothing runs. When every attempt
+        fails the agent keeps its last acknowledged world time, which never
+        moves backwards, and the failure is logged as an error.
+        """
+        for attempt in range(WORLD_CLOCK_REFRESH_ATTEMPTS):
+            if (
+                type(getattr(self, "simulated_world_time_ms", None)) is not int
+                or getattr(self, "world_model_mode", "real") != "simulate"
+            ):
+                return
+            if attempt:
+                # cutover-class: bounded — at most two 5s pauses after a failed simulated-clock read
+                await workflow.sleep(timedelta(seconds=WORLD_CLOCK_REFRESH_RETRY_SECONDS))
+            if await _refresh_world_time_cursor(self) is not None:
+                return
+        workflow.logger.error(
+            f"[world_clock] Agent {self.agent_id} could not refresh its world time after a tool; "
+            "keeping its last acknowledged world time"
+        )
+
+    async def _execute_tool_once(self, tool_name: str, tool_args: Dict, tool_call_id: str) -> Dict:
         """Execute a tool - supports both new and legacy signatures during migration.
 
         Every error return path MUST first emit a paired TOOL event via
@@ -3774,9 +4364,15 @@ class AgentWorkflow:
         (regression: smoke task `parallel-tool-calls`).
         """
         if tool_name == "attempt_completion":
+            # Pending background agents do not block completion: the verifier
+            # sees their status, and a finishing parent stops them.
             # Leftover-safe: Fast Mode waits for explore like live, so this
             # is a no-op unless something still tracked a handle.
             await self._drain_fast_mode_explores()
+        if is_user_tool_name(tool_name):
+            # Pinned user-authored tool: runs its own activity and posts its own
+            # FINISHED/ERROR TOOL message (never raises).
+            return await run_user_tool(self, tool_name, tool_args, tool_call_id, wf_api=workflow)
         if tool_name not in TOOL_EXECUTORS:
             error_msg = f"Unknown tool: {tool_name}"
             await self._handle_tool_event(
@@ -3810,6 +4406,11 @@ class AgentWorkflow:
                     tool_name,
                 )
                 return {"error": True, "message": error_msg}
+
+        if self._spawn_runs_in_background(tool_name, tool_args):
+            return await self._start_background_spawn(tool_args, tool_call_id)
+        if tool_name == "spawn_agent":
+            tool_args = {key: value for key, value in tool_args.items() if key != "run_in_background"}
 
         # Track tool as in-use with human-readable display string
         tool_display = format_tool_display(tool_name, tool_args)
@@ -3876,13 +4477,14 @@ class AgentWorkflow:
                     self.fast_mode_cache_enabled or fast_mode_write_through
                 ):
                     extra_executor_kwargs["fast_mode_cache_enabled"] = self.fast_mode_cache_enabled
-                    extra_executor_kwargs["fast_mode_goal"] = self.fast_cache_goal
+                    extra_executor_kwargs["fast_mode_goal"] = self.demo_cache_goal
                     extra_executor_kwargs["fast_mode_cache_write_enabled"] = (
                         self.fast_mode_cache_enabled or fast_mode_write_through
                     )
                 if tool_name == "web_fetch":
                     extra_executor_kwargs.update(
                         {
+                            "compute_token_lineage_key": self.compute_token_lineage_key,
                             "claude_token": self._active_claude_token(),
                             "claude_token_source": self._active_claude_source(),
                             "claude_token_pool_id": self._active_claude_pool_id(),
@@ -4092,7 +4694,7 @@ class AgentWorkflow:
             call_llm_activity,
             args=[
                 self.agent_id,
-                PARAM_POPULATOR_MODEL,
+                self.model,
                 self._current_tools,
                 256,
                 self.agent_id,
@@ -4114,10 +4716,10 @@ class AgentWorkflow:
                 self._active_gpt_pool_id(),
                 self.user_id,
                 self.compute_token_lineage_key,
-                self.compute_token_fast_cache_affinity_key,
+                self.compute_token_demo_cache_affinity_key,
                 self.user_id,
                 self.fast_mode_cache_enabled,
-                self.fast_cache_goal,
+                self.demo_cache_goal,
                 None,
                 True,
                 True,
@@ -4178,7 +4780,11 @@ class AgentWorkflow:
             metadata = dict(event.metadata or {})
             if phase:
                 metadata.setdefault("phase", phase)
-            event.metadata = metadata
+            # A background spawn's executor rows are FE-only (its "started" row is
+            # the model's result for this id): workflows/background_agents.py.
+            event.metadata = self._background_row_metadata(tool_call_id, metadata)
+        self._record_background_event(event, tool_call_id)
+        self._note_environment_activity(event, tool_call_id)
 
         # handle_tool_event imported at module level within imports_passed_through
         await handle_tool_event(
@@ -4577,11 +5183,14 @@ class AgentWorkflow:
         # Parent confirmed gone (terminated / not found). Every child is now
         # orphaned, including an active or independently-paused child: continuing
         # would spend resources for a root that can no longer consume its result.
-        if state.get("parent_missing"):
+        # A finished parent (still queryable after close) is gone the same way;
+        # this backs up the parent_finished signal for a child it raced.
+        if state.get("parent_missing") or state.get("is_finished") is True:
             if not self._orphaned:
                 workflow.logger.warning("Parent workflow gone — orphaned child aborting")
                 self._orphaned = True
                 self.is_paused = False
+                self._user_pause_active = False
                 self._paused_by_parent = False
             self._parent_query_failures_while_paused = 0
             return
@@ -4599,6 +5208,7 @@ class AgentWorkflow:
                     )
                     self._orphaned = True
                     self.is_paused = False
+                    self._user_pause_active = False
                     self._paused_by_parent = False
             return
 
@@ -4618,15 +5228,19 @@ class AgentWorkflow:
         elif parent_paused:
             if not self.is_paused:
                 workflow.logger.warning("Parent is paused — inheriting state")
+                self._user_pause_active = state.get("user_pause_active") is True
                 self.is_paused = True
                 self._paused_by_parent = True
                 await self._update_tree_state(status="PAUSED")
+            elif self._paused_by_parent:
+                self._user_pause_active = state.get("user_pause_active") is True
         else:
             # Parent is running — unpause if we were paused by parent
             if self._paused_by_parent:
                 workflow.logger.info("Parent resumed — clearing inherited pause")
                 self._cost_limit_reached = False
                 self.is_paused = False
+                self._user_pause_active = False
                 self._paused_by_parent = False
                 await self._update_tree_state(status="ACTIVE")
 
@@ -4697,9 +5311,15 @@ class AgentWorkflow:
                 (token_used_type == "claude" and actual_model.endswith("-claude"))
                 or (token_used_type == "gpt" and actual_model.endswith("-gpt"))
             ):
-                if self._remember_compute_token(compute_token_used):
+                # Usage carries only the lease identity, never the credential.
+                # When RoseClient rotated to another lease inside the call,
+                # re-read the lineage-bound lease from the backend. Without a
+                # rotation the call used a credential this workflow supplied,
+                # so the cached token stays as it is.
+                if self.user_id and (claude_token_rotated or gpt_token_rotated):
+                    await self._refresh_compute_token(self.user_id, force=True, token_type=token_used_type)
                     workflow.logger.info(
-                        f"🔑 Workflow cached compute token updated from successful call "
+                        f"🔑 Workflow cached compute token re-read after in-call rotation "
                         f"(type={self.compute_token_provider}, source={compute_token_used.get('source')})"
                     )
 
@@ -4835,8 +5455,7 @@ class AgentWorkflow:
                 output_rate = actual_pricing["output_cents_per_1k"]
                 if input_rate == 0 and output_rate == 0:
                     workflow.logger.info(
-                        f"💰 $0 user charge: actual_model={actual_model}, "
-                        f"in={tokens_in_delta}, out={tokens_out_delta}"
+                        f"💰 $0 user charge: actual_model={actual_model}, in={tokens_in_delta}, out={tokens_out_delta}"
                     )
 
         # Calculate cost with provider-specific cache discounts
@@ -4869,7 +5488,7 @@ class AgentWorkflow:
                     f"in={tokens_in_delta}, out={tokens_out_delta}{cache_info})"
                 )
 
-        # Token aggregation is independent of price. Direct-token and fast-cache
+        # Token aggregation is independent of price. Direct-token and demo-cache
         # calls must still update the child subtree reported to the parent.
         await self._update_cost_and_signal_parent()
 
@@ -5069,7 +5688,9 @@ class AgentWorkflow:
                     await workflow.execute_activity(
                         notify_sms_event_activity,
                         args=notification_args,
-                        start_to_close_timeout=timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS),
+                        **wmh_activity_timeout_options(
+                            self.world_model_mode, timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS)
+                        ),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
                     workflow.logger.info("Sent cost_limit SMS notification")
@@ -5111,7 +5732,30 @@ class AgentWorkflow:
         Only broadcasts if this agent has a bus_id (i.e., is part of a sub-agent tree).
         Used for real-time sub-agent tree UI updates.
         """
+        # In-flight activity-backed background tasks, persisted as
+        # Agent.backgroundTasks so other agents' list_agents can see and
+        # message them. A change is always written, even without a bus.
+        # Only a write that carries a changed snapshot sends backgroundTasks, and
+        # those writes are serialized (_background_tasks_write_lock) with the
+        # snapshot taken inside the lock: the backend applies writes in arrival
+        # order, so an older snapshot must never be in flight beside a newer one.
+        background_changed = self._background_tree_snapshot() != getattr(self, "_persisted_background_tasks", [])
         if not self.bus_id:
+            if status is not None:
+                # No bus to broadcast on, but an explicit transition (e.g. paused
+                # awaiting the user's auth help) must still reach the DB, exactly
+                # as it does for a tree member; otherwise the root reads ACTIVE.
+                async with self._background_tasks_write_lock:
+                    payload: Dict[str, Any] = {"status": status, "_statusExplicit": True}
+                    background_tasks = self._background_tree_snapshot()
+                    carries_background = background_tasks != getattr(self, "_persisted_background_tasks", [])
+                    if carries_background:
+                        payload["backgroundTasks"] = background_tasks
+                    if await self._send_tree_state(list(self.tools_in_use), payload) and carries_background:
+                        self._persisted_background_tasks = background_tasks
+                return
+            if background_changed:
+                await self._persist_background_tasks()
             return
 
         # Per-message broadcasts from 50 parallel children melt the 10s tree
@@ -5121,6 +5765,7 @@ class AgentWorkflow:
         now = workflow.now()
         if (
             not explicit_status
+            and not background_changed
             and self.message_count != 1
             and is_oai_demo_mass_agent_task(self)
             and self._last_tree_state_emit_at is not None
@@ -5153,6 +5798,8 @@ class AgentWorkflow:
             "costCents": int(self.subtree_cost_cents),
             # Track if status was explicitly set (for DB persistence decision)
             "_statusExplicit": status is not None,
+            # Codex-style address ("/root/venue_capacities_0") once known.
+            "taskPath": getattr(self, "_own_task_path", None) or ("/root" if not self.depth else None),
         }
 
         # Always include output schema (available from spawn, cached in instance)
@@ -5169,6 +5816,20 @@ class AgentWorkflow:
 
         # Execute activity that does both broadcast AND DB persist
         # (broadcast must be in activity to avoid workflow sandbox httpx issues)
+        if not background_changed:
+            await self._send_tree_state(tools_list, broadcast_payload)
+            return
+        async with self._background_tasks_write_lock:
+            background_tasks = self._background_tree_snapshot()
+            if background_tasks == getattr(self, "_persisted_background_tasks", []):
+                # The write ahead of this one already carried this snapshot.
+                await self._send_tree_state(tools_list, broadcast_payload)
+                return
+            broadcast_payload["backgroundTasks"] = background_tasks
+            if await self._send_tree_state(tools_list, broadcast_payload):
+                self._persisted_background_tasks = background_tasks
+
+    async def _send_tree_state(self, tools_list: List[str], broadcast_payload: Dict[str, Any]) -> bool:
         try:
             await workflow.execute_activity(
                 update_agent_tree_state,
@@ -5176,8 +5837,38 @@ class AgentWorkflow:
                 start_to_close_timeout=timedelta(seconds=10),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
+            return True
         except Exception as e:
             workflow.logger.debug(f"Tree state update failed (non-fatal): {e}")
+            return False
+
+    def _background_tree_snapshot(self) -> List[Dict[str, Any]]:
+        return background_tree_entries(
+            getattr(self, "_background_tasks", {}),
+            CHILD_WORKFLOW_AGENT_TYPES,
+            getattr(self, "_background_finished", {}),
+        )
+
+    async def _persist_background_tasks(self) -> None:
+        """Bus-less agents (a root before its first spawn) still persist their in-flight tasks.
+
+        Serialized with every other backgroundTasks write; the snapshot is read
+        inside the lock, so writes reach the backend in snapshot order.
+        """
+        async with self._background_tasks_write_lock:
+            background_tasks = self._background_tree_snapshot()
+            if background_tasks == getattr(self, "_persisted_background_tasks", []):
+                return
+            try:
+                await workflow.execute_activity(
+                    update_agent_tree_state,
+                    args=[self.agent_id, list(self.tools_in_use), None, {"backgroundTasks": background_tasks}],
+                    start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+                self._persisted_background_tasks = background_tasks
+            except Exception as e:
+                workflow.logger.debug(f"Background task persistence failed (non-fatal): {e}")
 
     async def _handle_incomplete(self, result: Dict, phase: str) -> Dict:
         """Handle non-completed phase result."""
@@ -5211,11 +5902,14 @@ class AgentWorkflow:
                 workflow.logger.error("generation_handoff missing handoff_task_queue; failing open")
                 return result
             await self._prepare_response_schema_continuation()
+            # In-flight background browser/code tasks park at their next step
+            # (GENERATION_SUPERSEDED); without this wait they restart from scratch.
+            await self._settle_background_tasks_for_continuation(
+                "generation handoff", CONTINUATION_BACKGROUND_SETTLE_SECONDS
+            )
             await self._drain_fast_mode_explores()
             await self._flush_pending_messages()
-            workflow.logger.info(
-                f"continue_as_new onto generation queue {handoff_queue} (cooperative cutover)"
-            )
+            workflow.logger.info(f"continue_as_new onto generation queue {handoff_queue} (cooperative cutover)")
             workflow.continue_as_new(
                 args=self._continuation_args(
                     result.get("context"),
@@ -5226,18 +5920,20 @@ class AgentWorkflow:
             return result
 
         if result["status"] == "aborted":
-            # Orphaned (parent workflow gone) or otherwise terminally aborted.
-            # Finalize as failed immediately — do NOT wait_condition or
-            # continue_as_new: the parent that would resume us no longer exists.
+            # Orphaned (parent workflow gone), killed by kill_agent, or otherwise
+            # terminally aborted. Finalize as failed immediately — do NOT
+            # wait_condition or continue_as_new.
+            abort_reason, abort_message = self._abort_reason()
             await self._mark_failed(
                 context=result.get("context", []),
-                reason="orphaned",
-                message="Parent agent ended; orphaned sub-agent stopped.",
+                reason=abort_reason,
+                message=abort_message,
                 verifier_progress=result.get("verifier_progress", 0.0),
-                verifier_reasoning=result.get("verifier_reasoning", ""),
+                # The failed row's reason (SubAgentTree "Why not complete") is the abort.
+                verifier_reasoning=abort_message,
                 partial_structured_response=result.get("partial_structured_response"),
             )
-            return {"status": "failed", "reason": "orphaned", "goal": self.goal}
+            return {"status": "failed", "reason": abort_reason, "goal": self.goal}
 
         if result["status"] == "max_iterations":
             completion_revision = self._response_schema_revision
@@ -5245,11 +5941,10 @@ class AgentWorkflow:
                 await self._await_deferred_startup()
                 await self._drain_fast_mode_explores()
             await self._prepare_response_schema_continuation()
-            if (
-                completion_revision != self._response_schema_revision
-                or _verifier_superseded_by_user_feedback(
-                    result, self.context, requirement_revision=self._response_schema_revision,
-                )
+            if completion_revision != self._response_schema_revision or _verifier_superseded_by_user_feedback(
+                result,
+                self.context,
+                requirement_revision=self._response_schema_revision,
             ):
                 result["verifier_superseded_by_user_feedback"] = True
             verifier_progress = float(result.get("verifier_progress", 0.0) or 0.0)
@@ -5259,10 +5954,7 @@ class AgentWorkflow:
                 and self._response_schema_accepted_revision >= self._response_schema_revision
                 and not result.get("verifier_superseded_by_user_feedback")
                 and is_oai_demo_mass_agent_task(self)
-                and (
-                    verifier_progress >= 1.0
-                    or "fast mode cache trajectory ended" in verifier_reasoning.lower()
-                )
+                and (verifier_progress >= 1.0 or "fast mode cache trajectory ended" in verifier_reasoning.lower())
             )
             if fm_trajectory_complete:
                 self._require_current_response_schema_acceptance()
@@ -5398,6 +6090,78 @@ class AgentWorkflow:
             "steps_taken": steps_taken,
         }
 
+    async def _register_on_world_clock(self) -> None:
+        """Simulate mode: register on the world clock, retrying a missing world a bounded number of times."""
+        for attempt in range(WORLD_CLOCK_REGISTER_ATTEMPTS):
+            if attempt:
+                # cutover-class: bounded — at most two 2s pauses before the agent fails closed
+                await workflow.sleep(timedelta(seconds=WORLD_CLOCK_REGISTER_RETRY_SECONDS))
+            await self._world_clock_event("register")
+            if self.world_model_mode != "simulate" or "register" in self._world_clock_events:
+                return
+
+    async def _recover_world_time_cursor(self) -> None:
+        """Simulate mode: a resumed agent whose continuation state lacks a cursor re-reads its world time.
+
+        State persisted before the cursor existed has none, and without it the
+        resumed agent would plan on the real date. Outside simulate mode, or
+        with a persisted cursor, nothing runs.
+        """
+        if self.world_model_mode != "simulate" or type(self.simulated_world_time_ms) is int:
+            return
+        time_ms = await _read_world_time_ms(self)
+        if time_ms is None:
+            workflow.logger.error(f"[world_clock] Resumed agent {self.agent_id} could not recover its world time")
+            return
+        self.simulated_world_time_ms = time_ms
+        self.simulated_clock_offset_seconds = time_ms // 1000 - int(workflow.now().timestamp())
+
+    def _world_clock_missing(self) -> bool:
+        """True when a simulated agent has no acknowledged world time to start from."""
+        return (
+            self.world_model_mode == "simulate"
+            and not self._deployment_resume
+            and type(getattr(self, "simulated_world_time_ms", None)) is not int
+        )
+
+    async def _world_clock_event(self, operation: str) -> None:
+        """Simulate mode: register or finish this agent on its world's shared clock.
+
+        Children start at their parent's world time; a finished child lets its
+        parent resume at the children's latest finish, so finish precedes the
+        parent signal. Best effort: an unavailable clock leaves the run intact.
+        """
+        if self.world_model_mode != "simulate" or operation in self._world_clock_events:
+            return
+        pending = getattr(self, "_world_clock_pending_events", None)
+        if pending is None:
+            pending = self._world_clock_pending_events = {}
+        if operation in pending:
+            await pending[operation].wait()
+            return
+        completed = asyncio.Event()
+        pending[operation] = completed
+        result = None
+        try:
+            with contextlib.suppress(Exception):
+                result = await workflow.execute_activity(
+                    world_clock_activity,
+                    args=[operation, self.agent_id, self.parent_agent_id if operation == "register" else None],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+        finally:
+            pending.pop(operation, None)
+            completed.set()
+        if isinstance(result, dict) and type(result.get("time_ms")) is int:
+            self._world_clock_events.add(operation)
+        if operation == "register" and isinstance(result, dict) and type(result.get("time_ms")) is int:
+            # This agent's "now" is its world-time cursor from its first step: a
+            # child starts at its parent's world time and the world starts at
+            # its pinned scenario date, not today's date.
+            self.simulated_clock_offset_seconds = result["time_ms"] // 1000 - int(workflow.now().timestamp())
+            self.simulated_world_time_ms = result["time_ms"]
+
     async def _mark_failed(
         self,
         context: List[Dict],
@@ -5421,6 +6185,9 @@ class AgentWorkflow:
         # Latch the terminal flag FIRST — see _mark_complete for the regression
         # this prevents (status=ACTIVE clobbering FAILED on late child cost signals).
         self._is_finished = True
+        # No background agent keeps running (or billing) after its parent ends.
+        await self._stop_pending_background_agents()
+        await self._world_clock_event("finish")
         await self._flush_pending_messages()
 
         # Force a final tree-cost persist so the debounced emitter's last (≤3s
@@ -5495,11 +6262,11 @@ class AgentWorkflow:
         except Exception as e:
             workflow.logger.error(f"Failed to mark failed: {e}")
 
-        # 3b. Alert #errors (and optionally launch an RCA agent) — root agents
-        # only. Sub-agent failures are frequently recovered by the parent, so
-        # alerting on each one is noise; a sub-failure that actually breaks the
-        # run propagates to the root's _mark_failed and alerts there. Best-effort
-        # and gated: the activity never raises and swallows its own errors.
+        # 3b. Record the failure in the worker log — root agents only. Sub-agent
+        # failures are frequently recovered by the parent; a sub-failure that
+        # breaks the run propagates to the root's _mark_failed. The bug report
+        # itself comes from the backend's 24h stuck-agent job, which covers every
+        # run that is not COMPLETED. The activity never raises.
         if not self.parent_workflow_id:
             try:
                 await workflow.execute_activity(
@@ -5520,8 +6287,9 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.warning(f"report_failure_activity dispatch failed (non-fatal): {e}")
 
-        # 4. Signal parent with failure context for learning
-        if self.parent_workflow_id and not self._orphaned:
+        # 4. Signal parent with failure context for learning (orphans stay
+        # silent; a killed agent reports its failure like any other).
+        if self.parent_workflow_id and self._reports_finish_to_parent():
             try:
                 parent = workflow.get_external_workflow_handle(self.parent_workflow_id)
                 await parent.signal(
@@ -5559,9 +6327,7 @@ class AgentWorkflow:
             list(context or []),
         )
 
-    def _coalesce_structured_response(
-        self, context: List[Dict], structured_response: Optional[Dict]
-    ) -> Optional[Dict]:
+    def _coalesce_structured_response(self, context: List[Dict], structured_response: Optional[Dict]) -> Optional[Dict]:
         """Fill missing schema fields from `# field_name` sections in the transcript.
 
         Fast Mode assemble-final (and other dag_reasoning slots) often persist the
@@ -5626,6 +6392,9 @@ class AgentWorkflow:
         # (which calls _update_cost_and_signal_parent → broadcast) cannot
         # overwrite the COMPLETED status with ACTIVE/Processing.
         self._is_finished = True
+        # No background agent keeps running (or billing) after its parent ends.
+        await self._stop_pending_background_agents()
+        await self._world_clock_event("finish")
         await self._flush_pending_messages()
 
         # Force a final tree-cost persist so the debounced emitter's last (≤3s
@@ -5641,29 +6410,7 @@ class AgentWorkflow:
         await self._persist_tree_cost()
 
         # Poll for output_schema if missing (handles race condition with async schema generation)
-        max_schema_attempts = 5
-        schema_attempt = 0
-        while self.output_schema is None and schema_attempt < max_schema_attempts:
-            schema_attempt += 1
-            try:
-                agent_config = await workflow.execute_activity(
-                    fetch_agent_config,
-                    args=[self.agent_id],
-                    start_to_close_timeout=timedelta(seconds=10),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
-                self.output_schema = agent_config.get("response_schema")
-                workflow.logger.info(
-                    f"Fetched output_schema attempt {schema_attempt}/{max_schema_attempts}: {self.output_schema is not None}"
-                )
-
-                if self.output_schema is None and schema_attempt < max_schema_attempts:
-                    workflow.logger.info("Schema not ready, waiting 1s...")
-                    await asyncio.sleep(1)
-            except Exception as e:
-                workflow.logger.warning(f"Failed to fetch output_schema (attempt {schema_attempt}): {e}")
-                if schema_attempt < max_schema_attempts:
-                    await asyncio.sleep(1)
+        await self._load_output_schema(poll_until_present=True)
 
         tool_counts = {}
         summary = ""
@@ -5696,8 +6443,8 @@ class AgentWorkflow:
                     args=[
                         context,
                         # Persisted-row goal: the summary prompt labels this "ORIGINAL
-                        # GOAL" and it doubles as the Fast Mode cache namespace.
-                        self.fast_cache_goal,
+                        # GOAL" and it doubles as the DEMO cache namespace.
+                        self.demo_cache_goal,
                         self.model,
                         structured_response,
                         self.output_schema,
@@ -5713,7 +6460,7 @@ class AgentWorkflow:
                         self.user_id,
                         self.agent_id,
                         self.compute_token_lineage_key,
-                        self.compute_token_fast_cache_affinity_key,
+                        self.compute_token_demo_cache_affinity_key,
                         self.fast_mode_cache_enabled,
                         0,  # Fast Mode step — one completion summary per agent
                     ],
@@ -5730,13 +6477,9 @@ class AgentWorkflow:
             transcript = await self._completion_transcript(context)
             structured_response = self._coalesce_structured_response(transcript, structured_response)
             summary_is_invalid = is_ablated_completion_summary(summary)
-            needs_demo_detail = is_oai_demo_mass_agent_task(self) and len(
-                str(summary or "").strip()
-            ) < 200
+            needs_demo_detail = is_oai_demo_mass_agent_task(self) and len(str(summary or "").strip()) < 200
             if summary_is_invalid or needs_demo_detail:
-                recovered = strip_fast_mode_card_narration(
-                    card_summary_from_evidence(transcript, structured_response)
-                )
+                recovered = strip_fast_mode_card_narration(card_summary_from_evidence(transcript, structured_response))
                 if (
                     recovered
                     and not is_ablated_completion_summary(recovered)
@@ -5815,9 +6558,7 @@ class AgentWorkflow:
             # summary is already observable.
             # Suppress the automatic tree broadcast here; otherwise _post_message
             # would emit its default ACTIVE state after we latched _is_finished.
-            structured_response, summary = normalize_completion_notice(
-                self.goal, structured_response, summary
-            )
+            structured_response, summary = normalize_completion_notice(self.goal, structured_response, summary)
             formatted_outputs = self._format_outputs(structured_response)
             await self._post_message(
                 "",
@@ -5889,7 +6630,9 @@ class AgentWorkflow:
                     await workflow.execute_activity(
                         notify_sms_event_activity,
                         args=notification_args,
-                        start_to_close_timeout=timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS),
+                        **wmh_activity_timeout_options(
+                            self.world_model_mode, timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS)
+                        ),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
                     workflow.logger.info(f"Sent completion SMS notification: agent={self.agent_id}")
@@ -5963,7 +6706,12 @@ class AgentWorkflow:
     @workflow.query
     def parent_state_query(self) -> Dict:
         """Combined query for children to check parent's pause/cost-limit state."""
-        return {"is_paused": self.is_paused, "is_cost_limit_reached": self._cost_limit_reached}
+        return {
+            "is_paused": self.is_paused,
+            "is_cost_limit_reached": self._cost_limit_reached,
+            "is_finished": self._is_finished,
+            "user_pause_active": self.is_paused and self._user_pause_active,
+        }
 
     @workflow.query
     def deployment_initialized_query(self) -> bool:

@@ -62,32 +62,37 @@ except SystemExit as exc:
 else:
     raise AssertionError("missing transcript must fail closed")
 
-# Run the real renderer, offline, with a shared artifact root that must remain
-# untouched. The publisher owns only the per-agent canonical directory.
-import os
-import subprocess
+# Evidence renders stay private under the checkout on hosts without Cursor's
+# artifact mount; the default used to fail after the Hub upload with EACCES.
+repo = mod.REPO_ROOT
+assert mod.evidence_artifacts_root({}, cursor_mount_exists=False) == repo / ".context" / "rca_evidence"
+assert mod.evidence_artifacts_root({}, cursor_mount_exists=True) == Path("/opt/cursor/artifacts/rca_evidence")
+assert mod.evidence_artifacts_root(
+    {"CURSOR_ARTIFACTS_DIR": "/tmp/cursor"}, cursor_mount_exists=False
+) == Path("/tmp/cursor/rca_evidence")
+assert mod.evidence_artifacts_root(
+    {"RCA_EVIDENCE_ARTIFACTS_ROOT": "/tmp/explicit", "CURSOR_ARTIFACTS_DIR": "/tmp/cursor"},
+    cursor_mount_exists=True,
+) == Path("/tmp/explicit")
+
+
+# Latest evidence follows the captured canonical ID->node tree, never unrelated dumps.
 import tempfile
-from unittest.mock import patch
-with tempfile.TemporaryDirectory() as tmp:
-    root = Path(tmp)
-    shared = root / "shared"
-    shared.mkdir()
-    sentinel = shared / "last_llm_call.html"
-    sentinel.write_text("unrelated owner's artifact")
-    source = root / "completion_summary.json"
-    source.write_text('{"agent_id":"test-agent","call_site":"completion_summary","messages":[],"output":"complete"}')
-    real_run = subprocess.run
-    def offline_renderer(cmd, **kwargs):
-        env = dict(os.environ, CURSOR_ARTIFACTS_DIR=str(shared))
-        for name in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_TRACE_ARCHIVE"):
-            env.pop(name, None)
-        return real_run(cmd, **kwargs, env=env)
-    with patch.object(mod, "ARTIFACTS_ROOT", root / "owned"), patch.object(mod.subprocess, "run", offline_renderer):
-        local, url = mod.publish_llm_dump(source, "test-agent")
-    assert sentinel.read_text() == "unrelated owner's artifact", "renderer wrote into shared artifacts root"
-    assert local == root / "owned/test-agent/last_llm_call.html"
-    assert local.is_file() and "file://" not in local.read_text()
-    assert url == ""  # Offline owning-boundary test; canonical live publication separately verifies R2.
+with tempfile.TemporaryDirectory() as temporary:
+    mod.REPO_ROOT = Path(temporary)
+    root = "00000000-0000-4000-8000-000000000001"
+    child = "00000000-0000-4000-8000-000000000002"
+    grandchild = "00000000-0000-4000-8000-000000000003"
+    foreign = "00000000-0000-4000-8000-000000000004"
+    for owner, filename in [(root, "100-root.json"), (child, "200-child.json"), (grandchild, "300-grandchild.json"), (foreign, "999-foreign.json")]:
+        folder = mod.REPO_ROOT / ".llm-dumps" / owner
+        folder.mkdir(parents=True)
+        (folder / filename).write_text("{}")
+    tree = {root: {"parent_agent_id": None}, child: {"parent_agent_id": root}, grandchild: {"parent_agent_id": child}, foreign: {"parent_agent_id": "other"}}
+    captured = {"tasks": [{"agent_id": root, "logs": {"tree": tree}}]}
+    assert mod.latest_dump_for_agent(root, bundle=captured).name == "300-grandchild.json"
+    assert mod.latest_dump_for_agent(root).name == "100-root.json"
+mod.REPO_ROOT = repo
 
 print("publish_evidence_links composite projection checks passed")
 PY

@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert';
+import { testJevProgressEstimates } from './agent-progress-estimate.cases';
 import { randomUUID } from 'node:crypto';
 import { updateAgentConfig } from '../../domains/agents/agentConfigService';
 import * as agentRepo from '../../domains/agents/repo';
@@ -531,6 +532,11 @@ async function main(): Promise<void> {
       await prisma.agent.deleteMany({ where: { id: agentId } });
     }
   });
+
+  await test(
+    'JEV predictions preserve ordering, terminal state, generation, and task identity',
+    testJevProgressEstimates
+  );
 
   finish();
   await prisma.$disconnect();

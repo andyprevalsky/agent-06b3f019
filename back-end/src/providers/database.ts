@@ -3,11 +3,34 @@ import dotenv from 'dotenv';
 import { createLogger } from './logger';
 import { retryWithBackoff } from './retry';
 import { currentTraceContext } from './tracing';
+import { nonLocalDatabaseReason } from '../utils/localDatabaseUrl';
+import { demoCacheEnv } from './demoCacheEnv';
 
 // Ensure env vars are loaded before accessing DATABASE_URL
 dotenv.config();
 
 const log = createLogger('Prisma');
+
+/**
+ * Why a query from this process must be refused, or null. A test file run
+ * directly (`npx tsx src/tests/...`) skips the runners that point DATABASE_URL
+ * at local Postgres, so dotenv hands it back-end/.env's production pooler; unit
+ * tests wrote fixture rows to prod that way on 2026-10-23 and 2026-10-27.
+ * Importing this module stays harmless (structural tests only read config).
+ */
+export function testEntryRemoteDatabaseReason(
+  entry: string | undefined = process.argv[1],
+  env: NodeJS.ProcessEnv = process.env
+): string | null {
+  if (!entry || !/[\\/]src[\\/]tests[\\/]/.test(entry)) return null;
+  if (env.BACKEND_UNIT_ALLOW_REMOTE_DB === '1' || env.BLACKBOX_TEST_ALLOW_REMOTE_DATABASE === '1') {
+    return null;
+  }
+  const reason = nonLocalDatabaseReason(env.DATABASE_URL);
+  return reason === null ? null : `${reason} (test entry ${entry})`;
+}
+
+const TEST_ENTRY_REMOTE_DATABASE = testEntryRemoteDatabaseReason();
 const globalForPrisma = global as unknown as { prisma: PrismaClient };
 
 // Retryable Prisma error codes:
@@ -107,15 +130,15 @@ export async function retryOnTransientTransactionStart<T>(
 // the pooler cap — NOT Postgres `max_connections` — is the ceiling we must
 // respect. The hard invariant:
 //
-//   backendInstances * DEPLOY_OVERLAP * (connection_limit + FAST_CACHE_POOL_LIMIT)
-//     + RESERVED <= POOLER_MAX_CLIENT_CONN
+//   backendInstances * DEPLOY_OVERLAP * (connection_limit + DEMO_CACHE_POOL_LIMIT)
+//     + RESERVED + NONPROD <= POOLER_MAX_CLIENT_CONN
 //
 // Notes on each term:
 //   - Each backend instance holds TWO Prisma pools against the same pooler in
-//     prod: this main pool, and the Fast Mode cache pool (fastCacheStore.ts,
+//     prod: this main pool, and the DEMO cache pool (demoCacheStore.ts,
 //     which falls back to DATABASE_URL in production). Both count toward the
-//     client cap, so the fast-cache pool is subtracted from the per-instance
-//     budget below. fastCacheStore imports FAST_CACHE_POOL_LIMIT from here so
+//     client cap, so the demo-cache pool is subtracted from the per-instance
+//     budget below. demoCacheStore imports DEMO_CACHE_POOL_LIMIT from here so
 //     the two files can never disagree about its size.
 //   - The Fly agent fleet does NOT appear here. Workers reach the DB only over
 //     the backend HTTP API and hold ZERO DB connections; only *backend*
@@ -127,31 +150,48 @@ export async function retryOnTransientTransactionStart<T>(
 //     the window the historical EMAXCONN incidents fired in.
 //   - RESERVED covers the DIRECT_URL migration connection, ad-hoc scripts, and a
 //     local stack doing a prod-DB sync — none of which are Prisma-pool clients.
+//   - NONPROD is the slice left for dev and benchmark stacks, which reach the
+//     same pooler as the same user for the shared DEMO cache: a 50-guest DEMO
+//     fleet at 4 clients plus five stacks at 20 = 300. Production used to
+//     budget the whole cap for itself during a deploy overlap, so any such
+//     client could push it into EMAXCONN (2026-10-10/11).
 //
 // We DERIVE connection_limit from this invariant (boot-time arithmetic from
 // declared capacity — no runtime coordination, nothing to race) instead of
 // hardcoding a magic number that can silently violate the cap. To scale the
 // backend out later, raise BACKEND_INSTANCES; the limit re-derives while the
 // budget still fits — and when the declared fleet CANNOT fit under the cap
-// (e.g. too many instances for the fast-cache pool to share the budget),
+// (e.g. too many instances for the demo-cache pool to share the budget),
 // derivation throws at boot rather than shipping a config that EMAXCONNs at
 // the next deploy. A boot failure keeps Render on the old healthy instance;
 // a silent under-floor clamp would take prod down slowly instead.
 // computeProdConnectionLimit is exported so a structural test can assert the
 // invariant can never regress.
-const POOLER_MAX_CLIENT_CONN = intEnv('POOLER_MAX_CLIENT_CONN', 400);
+const POOLER_MAX_CLIENT_CONN = intEnv('POOLER_MAX_CLIENT_CONN', 1000);
 const BACKEND_INSTANCES = intEnv('BACKEND_INSTANCES', 1);
-const RESERVED_CLIENT_CONN = intEnv('POOLER_RESERVED_CLIENT_CONN', 40);
+const RESERVED_CLIENT_CONN = nonNegativeIntEnv('POOLER_RESERVED_CLIENT_CONN', 40);
+// 0 hands the whole slice back to production in an emergency.
+const NONPROD_CLIENT_BUDGET = nonNegativeIntEnv('POOLER_NONPROD_CLIENT_BUDGET', 300);
 const DEPLOY_OVERLAP = 2; // rolling deploy transiently doubles instance count
 const LOCAL_POOL_SIZE = 30; // direct Docker Postgres: each conn ~10MB, cap to avoid OOM
 
-/** Size of the Fast Mode cache Prisma pool (fastCacheStore.ts). Lives here —
- *  next to the budget it is subtracted from — and is imported by fastCacheStore,
+/** Size of the DEMO cache Prisma pool (demoCacheStore.ts). Lives here —
+ *  next to the budget it is subtracted from — and is imported by demoCacheStore,
  *  so the invariant math and the actual pool can never drift apart. */
-export const FAST_CACHE_POOL_LIMIT = intEnv('FAST_CACHE_DB_POOL', 75);
+export const DEMO_CACHE_POOL_LIMIT = intEnvValue(demoCacheEnv('DEMO_CACHE_DB_POOL'), 75);
 
 function intEnv(name: string, fallback: number): number {
+  return intEnvValue(process.env[name], fallback);
+}
+
+function nonNegativeIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+function intEnvValue(raw: string | undefined, fallback: number): number {
   if (raw === undefined || raw === '') return fallback;
   const n = Number.parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? n : fallback;
@@ -168,7 +208,7 @@ const MIN_VIABLE_POOL = 10;
  *
  * Throws when the declared fleet cannot fit under the cap with a viable main
  * pool (clamping to a floor instead would silently exceed the cap: the clamped
- * pools would still open floor+fastCache connections per instance, reproducing
+ * pools would still open floor+demoCache connections per instance, reproducing
  * the exact EMAXCONN failure this derivation exists to prevent).
  */
 export function computeProdConnectionLimit(opts?: {
@@ -176,13 +216,15 @@ export function computeProdConnectionLimit(opts?: {
   backendInstances?: number;
   reserved?: number;
   deployOverlap?: number;
-  fastCachePool?: number;
+  demoCachePool?: number;
+  nonProdBudget?: number;
 }): number {
   const maxClientConn = opts?.maxClientConn ?? POOLER_MAX_CLIENT_CONN;
   const backendInstances = opts?.backendInstances ?? BACKEND_INSTANCES;
   const reserved = opts?.reserved ?? RESERVED_CLIENT_CONN;
   const deployOverlap = opts?.deployOverlap ?? DEPLOY_OVERLAP;
-  const fastCachePool = opts?.fastCachePool ?? FAST_CACHE_POOL_LIMIT;
+  const demoCachePool = opts?.demoCachePool ?? DEMO_CACHE_POOL_LIMIT;
+  const nonProdBudget = opts?.nonProdBudget ?? NONPROD_CLIENT_BUDGET;
 
   // Explicit opts bypass intEnv's guards; a zero/NaN instance count would turn
   // the division below into Infinity/NaN, which slips past the < floor check.
@@ -191,11 +233,12 @@ export function computeProdConnectionLimit(opts?: {
     backendInstances,
     reserved,
     deployOverlap,
-    fastCachePool,
+    demoCachePool,
+    nonProdBudget,
   })) {
     if (
       !Number.isFinite(value) ||
-      (value <= 0 && name !== 'reserved' && name !== 'fastCachePool')
+      (value <= 0 && name !== 'reserved' && name !== 'demoCachePool' && name !== 'nonProdBudget')
     ) {
       throw new Error(`DB pool config: ${name} must be a finite positive number, got ${value}`);
     }
@@ -204,19 +247,19 @@ export function computeProdConnectionLimit(opts?: {
     }
   }
 
-  const budget = maxClientConn - reserved;
+  const budget = maxClientConn - reserved - nonProdBudget;
   const perInstance = Math.floor(budget / (backendInstances * deployOverlap));
-  // The fast-cache pool shares this instance's slice of the budget in prod
+  // The demo-cache pool shares this instance's slice of the budget in prod
   // (it falls back to DATABASE_URL there), so the main pool gets the remainder.
-  const derived = perInstance - fastCachePool;
+  const derived = perInstance - demoCachePool;
   if (derived < MIN_VIABLE_POOL) {
     throw new Error(
       `DB pool budget violation: ${backendInstances} backend instance(s) x ` +
-        `${deployOverlap} deploy-overlap x (main pool + fast-cache ${fastCachePool}) + ` +
-        `reserved ${reserved} cannot fit under the Supavisor client cap ${maxClientConn} ` +
+        `${deployOverlap} deploy-overlap x (main pool + demo-cache ${demoCachePool}) + ` +
+        `reserved ${reserved} + non-production ${nonProdBudget} cannot fit under the Supavisor client cap ${maxClientConn} ` +
         `(derived main pool ${derived} < ${MIN_VIABLE_POOL}). Raise POOLER_MAX_CLIENT_CONN ` +
-        `(bigger compute tier), lower BACKEND_INSTANCES/FAST_CACHE_DB_POOL, or move the ` +
-        `fast-cache to its own database.`
+        `(bigger compute tier), lower BACKEND_INSTANCES/DEMO_CACHE_DB_POOL, or move the ` +
+        `demo-cache to its own database.`
     );
   }
   return derived;
@@ -262,6 +305,13 @@ export const prisma =
   }).$extends({
     query: {
       async $allOperations({ operation, model, args, query }) {
+        if (TEST_ENTRY_REMOTE_DATABASE !== null) {
+          throw new Error(
+            `Refusing ${model ?? 'raw'}.${operation} from a test against a non-local database: ` +
+              `${TEST_ENTRY_REMOTE_DATABASE}. Run tests through scripts/run-unit-tests.ts or ` +
+              'scripts/run-blackbox-tests.sh, which point DATABASE_URL at local Postgres.'
+          );
+        }
         const maxRetries = 3;
         let lastError;
 

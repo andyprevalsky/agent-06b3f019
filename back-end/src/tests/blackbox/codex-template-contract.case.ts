@@ -25,9 +25,13 @@ export async function testPromptBuilder_sharedContractMentionsOutputRules() {
   const { buildCodeAgentSystemPrompt, CODE_AGENT_INSTRUCTIONS_VERSION } =
     await import('../../providers/codeAgentPrompt');
 
+  // A Rose Desktop account's prompt (utils/roseDesktop): the shared
+  // contract plus every Rose skill in the table of contents (C17). Codex gets
+  // this same prompt through CODE_AGENT_SYSTEM_PROMPT (written to AGENTS.md).
   const prompt = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/acme/widgets.git',
     workDir: '/home/user/workspace',
+    roseDesktop: true,
   });
 
   assert(prompt.includes(CODE_AGENT_INSTRUCTIONS_VERSION), 'Prompt version missing');
@@ -47,16 +51,79 @@ export async function testPromptBuilder_sharedContractMentionsOutputRules() {
     'Nested Claude CLI guard missing'
   );
   assert(prompt.includes('/home/user/workspace'), 'Repo workDir missing');
+
+  // The rose-ui skill carries how to build, publish and show an inline view;
+  // the prompt points at it through the table of contents.
+  assert(
+    prompt.includes('Rose skills (read ~/.rose/skills/<name>/SKILL.md before using one):'),
+    'skills table of contents missing'
+  );
+  assert(prompt.includes('\n- rose-ui: Use '), 'rose-ui skill missing from the table of contents');
+  const { installedRoseSkills } = await import('../../providers/roseSkills/skills');
+  const roseUi = installedRoseSkills(true)
+    .find((skill) => skill.name === 'rose-ui')
+    ?.files.find((file) => file.path === 'SKILL.md')
+    ?.content.toString('utf8');
+  assert(roseUi !== undefined, 'rose-ui skill installed for Rose Desktop accounts');
+  assert(roseUi.includes('`rose-ui publish`'), 'rose-ui publish rule missing');
+  assert(roseUi.includes('build it as an inline view'), 'Inline-view delivery rule missing');
+  assert(
+    roseUi.includes('Still put\n  any requested files in the output directory'),
+    'Inline view must not replace requested output files'
+  );
+
+  // Every other account gets the same contract with the stock skills only.
+  const stock = buildCodeAgentSystemPrompt({
+    githubRepoUrl: 'https://github.com/acme/widgets.git',
+    workDir: '/home/user/workspace',
+  });
+  assert(stock.includes('Do not launch a separate claude/Claude Code CLI'), 'stock contract');
+  assert(
+    !stock.includes('rose_user_ui') && !stock.includes('rose-ui'),
+    'stock prompt has no rose-ui skill'
+  );
+  assert(stock.includes('\n- talk-to-user: Use '), 'stock prompt lists talk-to-user');
 }
 
 export async function testTemplate_pinsCodexCliForGpt56() {
-  const dockerfile = readFileSync(join(resolveGptCodeE2bTemplateDir(), 'e2b.Dockerfile'), 'utf8');
+  const { CODEX_CODE_TEMPLATE, DEFAULT_CODEX_CODE_TEMPLATE_ID } =
+    await import('../../providers/codexTemplate');
+  const templateDir = resolveGptCodeE2bTemplateDir();
+  const dockerfile = readFileSync(join(templateDir, 'e2b.Dockerfile'), 'utf8');
+  const pin = dockerfile.match(/^ARG CODEX_VERSION=(\S+)$/m)?.[1];
   assert(
-    dockerfile.includes('ARG CODEX_VERSION=0.144.1') &&
+    pin !== undefined &&
       dockerfile.includes('npm install -g "@openai/codex@$CODEX_VERSION"') &&
       !dockerfile.includes('ubuntu.mirror.constant.com'),
-    'Codex E2B template must pin the GPT-5.6-compatible Codex CLI and use reliable Ubuntu sources'
+    'Codex E2B template must pin the Codex CLI and use reliable Ubuntu sources'
   );
+  // The overlaid ws-server speaks one Codex app-server protocol: the code default
+  // must name a template built from exactly this pin (R3c: 0.159 overlay vs 0.144 image).
+  assert(
+    CODEX_CODE_TEMPLATE.codexVersion === pin,
+    `codexTemplate.ts codexVersion ${CODEX_CODE_TEMPLATE.codexVersion} != Dockerfile pin ${pin}; build a new template`
+  );
+  const [major, minor] = pin.split('.');
+  assert(
+    CODEX_CODE_TEMPLATE.alias === `codex-code-v${major}${minor}` &&
+      DEFAULT_CODEX_CODE_TEMPLATE_ID === CODEX_CODE_TEMPLATE.alias,
+    `Codex template alias ${CODEX_CODE_TEMPLATE.alias} must be the versioned codex-code-v${major}${minor}`
+  );
+  const sharedAlias = readFileSync(join(templateDir, 'e2b.toml'), 'utf8').match(
+    /^template_name\s*=\s*"([^"]+)"/m
+  )?.[1];
+  assert(
+    sharedAlias !== undefined && CODEX_CODE_TEMPLATE.alias !== sharedAlias,
+    'the code default must never be the shared, unversioned template alias'
+  );
+  // Every default resolves through codexTemplate.ts; no provider re-declares one.
+  for (const file of ['e2b.ts', 'codeSessions/sandboxSize.ts', 'codeSessions/inspect.ts']) {
+    const source = readFileSync(join(process.cwd(), 'src', 'providers', file), 'utf8');
+    assert(
+      source.includes('DEFAULT_CODEX_CODE_TEMPLATE_ID') && !/=\s*'codex-code'/.test(source),
+      `${file} must default the Codex template through codexTemplate.ts`
+    );
+  }
 }
 
 export async function testRuntimeFallback_recognizesRevokedOAuthRefreshToken() {

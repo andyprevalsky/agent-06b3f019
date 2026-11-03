@@ -41,6 +41,8 @@ const task = (id: string, createdAt: string, userId = 'subscriber-user', goal = 
   createdAt: new Date(createdAt),
   tokensOut: 100,
   status: 'COMPLETED' as AgentStatus,
+  archivedBeforeOutcome: false,
+  coreTeam: userId === '1f85ff25-6e29-4c1b-8739-f917bd101a30',
 });
 
 const run = (taskId: string, createdAt: string) => ({ taskId, createdAt: new Date(createdAt) });
@@ -58,6 +60,7 @@ const gmvRecord = (
   totalCents,
   createdAt: new Date(createdAt),
   provider,
+  coreTeam: false,
 });
 
 const usage = (
@@ -102,8 +105,18 @@ const series = buildSeries(
     waitlistSignup('2026-06-21T00:00:00.000Z'),
   ],
   [
-    { userCount: 2, newUsers: 2, userIds: new Set(['subscriber-user']) },
-    { userCount: 1, newUsers: 0, userIds: new Set(['subscriber-user']) },
+    {
+      userCount: 2,
+      newUsers: 2,
+      userIds: new Set(['subscriber-user']),
+      subscribedUserIds: new Set(['subscriber-user']),
+    },
+    {
+      userCount: 1,
+      newUsers: 0,
+      userIds: new Set(['subscriber-user']),
+      subscribedUserIds: new Set(['subscriber-user']),
+    },
   ],
   [{ revenueCents: 0 }, { revenueCents: 0 }],
   [
@@ -121,6 +134,10 @@ const series = buildSeries(
     gmvRecord(1000, '2026-05-04T00:00:00.000Z'),
     gmvRecord(500, '2026-05-18T00:00:00.000Z', 'subscriber-user', 'order_confirmation'),
     gmvRecord(3000, '2026-06-05T00:00:00.000Z'),
+    // Not a subscriber: never platform GMV.
+    gmvRecord(700, '2026-05-06T00:00:00.000Z', 'outside-user'),
+    // Core team (Aman, matched by phone) counts without a subscription.
+    { ...gmvRecord(200, '2026-06-07T00:00:00.000Z', 'aman-user'), coreTeam: true },
   ],
   [
     run('may-1', '2026-05-03T00:00:00.000Z'),
@@ -152,17 +169,17 @@ assert.deepStrictEqual(
 );
 assert.deepStrictEqual(
   series.map((point) => point.taskCompletionRate),
-  [0.6667, 0.5],
-  'Completion uses every real product task in its period even if the customer is no longer subscribed'
+  [0.5, 0.5],
+  'Completion counts only Stripe subscribers in that period (plus the core team); unsubscribed users never count'
 );
 assert.deepStrictEqual(
   series.map((point) => point.gmvCents),
-  [1500, 3000],
-  'GMV must sum CLEARED AgentCard + order_confirmation spend per period'
+  [1500, 3200],
+  "GMV sums the core team + that period's Stripe subscribers only (same population as completion rate)"
 );
 assert.deepStrictEqual(
   series.map((point) => point.gmvPerTask),
-  [750, 1000],
+  [750, 1067],
   'GMV / task must divide period GMV by subscriber root-task count'
 );
 assert.strictEqual(sumGmvCents([gmvRecord(100, '2026-05-01T00:00:00.000Z')]), 100);
@@ -449,8 +466,14 @@ const benchmarkSeries = buildSeries(
   ],
   [],
   [
-    { userCount: 2, newUsers: 2, userIds: new Set([ANDY_USER_ID, 'subscriber-user']) },
-    { userCount: 0, newUsers: 0, userIds: new Set() },
+    {
+      userCount: 2,
+      newUsers: 2,
+      // invite-user is in the app via an invite code but never subscribed.
+      userIds: new Set([ANDY_USER_ID, 'subscriber-user', 'invite-user']),
+      subscribedUserIds: new Set(['subscriber-user']),
+    },
+    { userCount: 0, newUsers: 0, userIds: new Set(), subscribedUserIds: new Set() },
   ],
   [{ revenueCents: 0 }, { revenueCents: 0 }],
   [
@@ -463,6 +486,47 @@ const benchmarkSeries = buildSeries(
       ...task('cust-2', '2026-05-11T00:00:00.000Z', 'subscriber-user', 'summarize my inbox'),
       status: 'FAILED',
     },
+    // Still running: no outcome yet, so it is neither completed nor failed.
+    {
+      ...task('cust-3', '2026-05-12T00:00:00.000Z', 'subscriber-user', 'plan my trip'),
+      status: 'ACTIVE',
+    },
+    // In the app via an invite code, not subscribed: never counted.
+    {
+      ...task('invite-1', '2026-05-14T00:00:00.000Z', 'invite-user', 'plan a party'),
+      status: 'FAILED',
+    },
+    // Archived while running: FAILED by the archive, but no outcome to count.
+    {
+      ...task('cust-4', '2026-05-13T00:00:00.000Z', 'subscriber-user', 'find a dentist'),
+      status: 'FAILED',
+      archivedBeforeOutcome: true,
+    },
+    // The core team is the real in-app population; an operator retrying one goal
+    // counts once, by its latest resolved attempt (FAILED -> COMPLETED -> PAUSED).
+    {
+      ...task('andy-1', '2026-05-02T00:00:00.000Z', ANDY_USER_ID, 'order my coffee'),
+      status: 'FAILED',
+    },
+    task('andy-2', '2026-05-04T00:00:00.000Z', ANDY_USER_ID, 'order my coffee'),
+    {
+      ...task('andy-3', '2026-05-06T00:00:00.000Z', ANDY_USER_ID, 'order my coffee'),
+      status: 'PAUSED',
+    },
+    // Aman is core team by phone (no admin user id): his retries collapse too.
+    {
+      ...task('aman-1', '2026-05-07T00:00:00.000Z', 'aman-user', 'draft the deck'),
+      status: 'FAILED',
+      coreTeam: true,
+    },
+    {
+      ...task('aman-2', '2026-05-09T00:00:00.000Z', 'aman-user', 'draft the deck'),
+      coreTeam: true,
+    },
+    {
+      ...task('andy-june', '2026-06-03T00:00:00.000Z', ANDY_USER_ID, 'book me a flight'),
+      status: 'ACTIVE',
+    },
   ]
 );
 assert.strictEqual(
@@ -472,8 +536,8 @@ assert.strictEqual(
 );
 assert.deepStrictEqual(
   benchmarkSeries.map((point) => point.taskCompletionRate),
-  [0.5, 0],
-  'Customer completions are never diluted by internal runs or deduped by goal text; empty usage is zero'
+  [0.75, null],
+  'Completion = completed / resolved tasks with operator retries collapsed; archived-while-running has no outcome; no resolved task is null, never 0%'
 );
 
 const retention = buildRetentionCohorts(

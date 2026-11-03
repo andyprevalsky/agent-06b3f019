@@ -371,6 +371,9 @@ def test_cloudbench_image_build_cli_cancellation_joins_only_owned_publishers(
     context = tmp_path / "checkout"
     libraries = context / "scripts/lib"
     libraries.mkdir(parents=True)
+    registry = context / "agents/providers/rose/pools.py"
+    registry.parent.mkdir(parents=True)
+    shutil.copyfile(ROOT / "agents/providers/rose/pools.py", registry)
     (context / "Dockerfile.cloudbench-warm").write_text("FROM fixture-only\n")
     (context / "fly.cloudbench-warm.toml").write_text('app = "fixture-only"\n')
     (libraries / "cloudbench-env.sh").write_text(f"source {shlex.quote(str(ROOT / 'scripts/lib/cloudbench-env.sh'))}\n")

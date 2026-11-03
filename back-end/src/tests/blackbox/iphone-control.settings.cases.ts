@@ -205,7 +205,7 @@ export const settingsCases: Case[] = [
       let status: 'confirmed' | 'disabled' | 'unknown' = 'confirmed';
       let fail = false;
       h.setupVerifier = async (input) => {
-        assert.equal(input.expectedReceiveAddress, '+19729777432');
+        assert.equal(input.expectedReceiveAddress, f.phone);
         if (fail) throw new Error('Synthetic verifier unavailable');
         return {
           identityConfirmed: true,
@@ -216,7 +216,7 @@ export const settingsCases: Case[] = [
       };
       const submit = async (verificationTarget: string) => {
         h.observationResult = {
-          text: `Explicit ${verificationTarget} status; signed in ${f.identity}; selected enabled +19729777432`,
+          text: `Explicit ${verificationTarget} status; signed in ${f.identity}; selected enabled ${f.phone}`,
         };
         const read = await observe(h, f);
         const body = {

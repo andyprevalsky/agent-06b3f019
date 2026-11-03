@@ -11,6 +11,10 @@ export interface AgentMetadataParams {
 }
 
 export interface AgentNetworkGrepFilters {
+  /** `trace_path` given as an agent task path (`/root/...`) in the caller's tree. */
+  taskPath?: string;
+  /** Resolved from `taskPath`: that agent and its descendants (unset = whole tree). */
+  pathAgentIds?: string[];
   pathAgentId?: string;
   pathRole?: string;
   pathMessageId?: string;
@@ -18,6 +22,10 @@ export interface AgentNetworkGrepFilters {
 }
 
 export interface AgentTrajectoryGrepFilters {
+  /** `trace_path` given as an agent task path; searches the caller's own tree. */
+  taskPath?: string;
+  /** Resolved from `taskPath`: that agent and its descendants (unset = whole tree). */
+  pathAgentIds?: string[];
   pathRootAgentId?: string;
   pathAgentId?: string;
   pathRole?: string;
@@ -26,5 +34,5 @@ export interface AgentTrajectoryGrepFilters {
   until?: Date;
   role?: 'USER' | 'ASSISTANT' | 'TOOL';
   surface?: 'WEB' | 'MAC_APP' | 'SMS' | 'WHATSAPP';
-  recordKind?: 'all' | 'message' | 'llm_output' | 'llm_context';
+  recordKind?: 'all' | 'message' | 'llm_output' | 'llm_context' | 'code_event';
 }

@@ -1,0 +1,161 @@
+{
+  "recorded_at": "2026-10-15T19:33:42.578449+00:00",
+  "checkpoint": "61d66c5ee055fcdd6131ab4cfe4651ae496f5b59",
+  "product_test_source": "839485ff8b27db9f3cc6bc7d03feb61ecf2b7da0",
+  "run_id": "1792090524-436124-17648",
+  "current_SMS": {
+    "tasks": [
+      {
+        "task": "sms-supervisor-closed-no-spawn",
+        "passed": false,
+        "benchmark_status": "FAILED",
+        "duration_seconds": 54.2,
+        "reported_cost_cents": 0.0,
+        "reply_count": 1,
+        "budget_authorization_delta_cents": 200,
+        "agents_started": 1,
+        "static_evaluators": [
+          {
+            "id": "sms-closed-no-spawn-contract",
+            "passed": false,
+            "score": 0.0
+          }
+        ],
+        "semantic_judge_ran": false,
+        "semantic_evaluators": [],
+        "served_model_calls": {
+          "gpt-5.6-luna-foundry": 5
+        },
+        "cleanup_verified": true
+      },
+      {
+        "task": "sms-supervisor-fill-form-searches-then-delegates",
+        "passed": true,
+        "benchmark_status": "PASSED",
+        "duration_seconds": 79.4,
+        "reported_cost_cents": 0.0,
+        "reply_count": 1,
+        "budget_authorization_delta_cents": 100,
+        "agents_started": 1,
+        "static_evaluators": [
+          {
+            "id": "sms-fill-form-search-then-delegate-contract",
+            "passed": true,
+            "score": 1.0
+          }
+        ],
+        "semantic_judge_ran": true,
+        "semantic_evaluators": [
+          {
+            "id": "sms-fill-form-does-not-ask-for-known-facts",
+            "passed": true,
+            "score": 1.0
+          }
+        ],
+        "served_model_calls": {
+          "qwen-3.8-27b": 6
+        },
+        "cleanup_verified": true
+      },
+      {
+        "task": "sms-supervisor-open-spawns-agent",
+        "passed": true,
+        "benchmark_status": "PASSED",
+        "duration_seconds": 38.8,
+        "reported_cost_cents": 0.0,
+        "reply_count": 1,
+        "budget_authorization_delta_cents": 100,
+        "agents_started": 1,
+        "static_evaluators": [
+          {
+            "id": "sms-open-spawn-contract",
+            "passed": true,
+            "score": 1.0
+          }
+        ],
+        "semantic_judge_ran": false,
+        "semantic_evaluators": [],
+        "served_model_calls": {
+          "qwen-3.8-27b": 1
+        },
+        "cleanup_verified": true
+      }
+    ],
+    "total_reported_cost_cents": 0.0,
+    "reported_cost_limitation": "sms_runner hardcodes TaskResult.cost_cents=0; these are reported benchmark values, not reconciled provider charges. Budget authorization changes are separate counters.",
+    "closed_failure": "Static sms_no_unrequested_spend observed +200 cents authorized budget and 1 newly started agent while allow_spend=false. The semantic closure judge was not reached.",
+    "default_diagnostic_failures_preserved": true,
+    "offline_failed_owner_latency_export_preserved": true,
+    "dump_count": 16,
+    "all_dump_task_bindings_unique": false
+  },
+  "current_SMS_actual_controller_wall_seconds": 211.79897117614746,
+  "current_SMS_controller_exit_code": 1,
+  "owned_cleanup": {
+    "canonical_manifest_stopped": true,
+    "canonical_stack_cleanup_clean": true,
+    "observed_process_births": 328,
+    "retained_exact_births": [],
+    "same_boot": true,
+    "owned_port_listeners": {
+      "backend": false,
+      "frontend": false,
+      "health": false,
+      "sdk_metrics": false,
+      "wmh": false
+    },
+    "exact_owned_database_absent": true,
+    "complete_descendant_capture_proved": false,
+    "global_clean_claimed": false,
+    "exact_owned_teardown_verified": true,
+    "additional_exact_daemon_retirement": true
+  },
+  "new_owned_browser_profile_native_absence_verified": true,
+  "withdrawn_production_prompt": {
+    "id": "TAMY-RETRIEVAL-352",
+    "status": "WITHDRAWN_UNAPPLIED",
+    "at": "2026-10-15T19:24:38.315473+00:00",
+    "human_approval_inferred": false,
+    "factory_human_decision_event_fabricated": false,
+    "patch_sha256": "b2d83ea7da62d2b89982c0eb14c1ed22f8776a97df331c7eb33c974467dac1b6",
+    "remaining_pending_approval": "TAMY-FIXTURE-MENU-1"
+  },
+  "sole_pending_approval": {
+    "id": "TAMY-FIXTURE-MENU-1",
+    "status": "UNAPPLIED",
+    "patch_sha256": "6d8cf29d38d109d51f3cddaf0599661d1871e864c15b52ed6b584203f877ca41",
+    "causal_live_fix_proven": false
+  },
+  "scorecard_snapshot": {
+    "snapshot": "2026-10-15T19:30:49.459205+00:00",
+    "original_attempts": 31,
+    "resumed_attempts": 306,
+    "recorded_attempt_count": 337,
+    "recorded_attempt_status_counts": {
+      "failed": 66,
+      "passed": 271
+    },
+    "canonical_benchmark_receipt_count": 27,
+    "current_integrated_SMS_receipt_added_once": true,
+    "interval_reconciliation_difference_seconds": 0.0,
+    "unknown_gap_is_NOT_CPU_idle_or_user_delay": true,
+    "retrieval_pending_interval_stopped_at_withdrawal": true,
+    "human_approval_or_decision_event_fabricated": false
+  },
+  "older_owned_sandbox_treasury_return_still_unproved": true,
+  "current_coverage_treasury_mint_fully_reclaimed": true,
+  "all_original_source_preservation_retained": true,
+  "PR_merged": false,
+  "deployment_complete": false,
+  "remaining_required_checks": [
+    "closed SMS behavior after exact authorized repair",
+    "semantic UI",
+    "real Claude Code E2B",
+    "chat lifecycle latency",
+    "full predeploy smoke",
+    "four-task AgentCard sandbox lifecycle",
+    "bounded final exact-HEAD review",
+    "merge and applicable production verification"
+  ],
+  "raw_artifacts_private": true
+}

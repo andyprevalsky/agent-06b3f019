@@ -1,22 +1,21 @@
 import { prisma } from '../../providers/database';
+import { OLDEST_ACCOUNT_FIRST, phoneLookupVariants } from '../../providers/phoneAccountLookup';
 
 /**
- * Find an existing user by phone number (tries both +prefix and no-prefix variants).
- * Normalizes input by stripping spaces, dashes, and parentheses before querying.
+ * Find the account that owns a phone number (tries both +prefix and no-prefix
+ * variants). Normalizes input by stripping spaces, dashes, and parentheses.
+ * Legacy rows can hold one number in both forms; the oldest
+ * account always wins so login is deterministic.
  */
 export async function findUserByPhone(phone: string) {
-  const normalized = phone.replace(/[\s\-()]/g, '');
-  const digitsOnly = normalized.replace(/\+/g, '');
-  if (digitsOnly.length === 0) {
+  const variants = phoneLookupVariants(phone);
+  if (variants === null) {
     return null;
   }
-  const phoneWithPlus = normalized.startsWith('+') ? normalized : `+${normalized}`;
-  const phoneWithoutPlus = normalized.startsWith('+') ? normalized.slice(1) : normalized;
 
   return prisma.user.findFirst({
-    where: {
-      OR: [{ phone: phoneWithPlus }, { phone: phoneWithoutPlus }],
-    },
+    where: { phone: { in: variants } },
+    orderBy: OLDEST_ACCOUNT_FIRST,
     select: { userId: true },
   });
 }

@@ -20,6 +20,48 @@ export const OPENING_MESSAGES: OpeningMessage[] = [
 
 // ── Popular goals carousel ────────────────────────────────────────────────
 
+/**
+ * Complete rotation, interlacing coding, social, personal, business and impact goals
+ * (lib/roseDesktop.ts; UI ledger #15, #24). "Import Code Repo" is a plain goal
+ * pill like every other one: first in the rotation, not pinned, no special
+ * styling.
+ */
+export const ROSE_DESKTOP_POPULAR_GOALS: string[] = [
+  'Import Code Repo',
+  'Maximize my luck surface area',
+  'End world hunger',
+  'Go to youtube.com',
+  'Raise me 1 million dollars',
+  'Make sure I accomplish my body goals',
+  'Make me an app',
+  'Get me 5 new friends',
+  'Mitigate the impending climate crisis',
+  'Get me socks',
+  'Make me a master painter',
+  'Go to instagram.com',
+  'Make me a website',
+  'Find me my first 10 customers',
+  'Get me a girlfriend',
+  'Optimize my nutrition',
+  'Get Rose Api Key',
+  'Ensure my friends are well supported',
+  'Make sure my birthday is amazing',
+  'Make me a game',
+  'Go to linkedin.com',
+  'Cure cancer',
+  'Make sure my startup succeeds',
+  'Get me a boyfriend',
+  'Change my background photo',
+];
+
+/** Stock goals left out of the Rose Desktop rotation (the stock list keeps them). */
+export const ROSE_DESKTOP_HIDDEN_POPULAR_GOALS: readonly string[] = [
+  'Get me into Stanford',
+  'Make me happy',
+  'Make sure my parents are taken care of',
+  'Save children in Gaza',
+];
+
 export const POPULAR_GOALS: string[] = [
   'Maximize my luck surface area',
   'Save children in Gaza',
@@ -64,6 +106,9 @@ export const DEFAULT_BORDER = 23;
 // ── Default model ─────────────────────────────────────────────────────────
 
 export const DEFAULT_MODEL = 'rose-labs/rose-1-ultra';
+
+/** Rose Desktop accounts (lib/roseDesktop.ts) start new agents on rose-flash. */
+export const ROSE_DESKTOP_DEFAULT_MODEL = 'rose-labs/rose-1-flash';
 
 // ── Browser review account ────────────────────────────────────────────────
 

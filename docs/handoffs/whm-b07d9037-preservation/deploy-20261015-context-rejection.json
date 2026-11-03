@@ -1,0 +1,41 @@
+{
+  "format": "rose.whm.deploy-context-decision.v1",
+  "utc": "2026-10-15T17:48:33.824801+00:00",
+  "approval_id": "DEPLOY-WHM-CONTEXT-CAPS-1",
+  "user_decision": "REJECTED: branch-only context caps not approved",
+  "resolution": "WITHDRAWN; restore exact current main behavior, no replacement cap or context policy",
+  "source_before_withdrawal": "77dda2e1b1d658d322baa81dafa329ced5a977e8",
+  "fresh_main": "6ef22cc55811444f1524fb9faf22f6e97600410e",
+  "changed_files": [
+    "agents/loop/run_agent.py",
+    "agents/domains/grep/config.py",
+    "agents/domains/grep/repo.py",
+    "back-end/src/domains/data/service.ts",
+    "back-end/src/domains/data/types.ts",
+    "agents/tests/blackbox/run_agent_pure.blackbox.py",
+    "agents/tests/blackbox/grep.blackbox.py",
+    "back-end/src/tests/blackbox/data-grep.blackbox.ts",
+    "back-end/src/tests/blackbox/agent-trajectories.paging.ts",
+    "back-end/src/tests/blackbox/agent-trajectories.blackbox.ts",
+    "agents/utils/tool_result_bounds.py",
+    "agents/utils/grep_budget.py",
+    "back-end/src/domains/data/grepPageBounds.ts"
+  ],
+  "source_diff_sha256": "8a37bb3902be3aa6b7b51e54c22fed9be18cc585a05bb5b67c8ce8ffa11d9c10",
+  "main_parity": {
+    "restored_files_byte_equal": 10,
+    "cap_only_helpers_absent_in_both": 3,
+    "orphan_references": 0
+  },
+  "tests": {
+    "existing_owning_offline_cases_passed": 29,
+    "scope": "grep and run_agent_pure existing registered full callbacks, network denied; not full integrated deploy certification"
+  },
+  "root_review": "Exact13file source/test withdrawal reviewed; originalmain checks retained; cap-only assertions removed with rejectedfeature. Rootverified privatePython3.11.9/Node22dependenciesareavailable despite workerlimitationstatement.",
+  "protected_instructions_unchanged": true,
+  "Freedom_preserved": true,
+  "original_source_and_all_prior_receipts_preserved": true,
+  "R18_SCHEMA_STANDARD_2": "UNAPPLIED",
+  "production": "NOT MERGED OR DEPLOYED",
+  "deployment": "CONTINUING: rerun guards then remaining required lanes"
+}

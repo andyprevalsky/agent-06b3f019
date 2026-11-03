@@ -189,6 +189,7 @@ const grepCallSchema = z
     `Search local data sources for information specific to this user.
 
 Usage:
+- Search here before asking the user for a fact about themselves or their plans (IDs, documents, addresses, contacts, past bookings); their synced data often has it.
 - Do not use this for the public web, use web_search instead.
 - \`pattern\` is a regular expression. Plain text works for literal searches.
 - \`source\` is optional. Omit it to search messages and network.

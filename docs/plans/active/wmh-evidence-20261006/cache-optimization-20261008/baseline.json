@@ -1,0 +1,137 @@
+{
+  "iteration": 0,
+  "stack_id": "wmh-cache-20261008-i0-1791493603",
+  "context_dir": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/benchmarks/wmh-cache-20261008-i0-1791493603",
+  "source_sha256": {
+    "agents/benchmarks/wmh_rose_provider.py": "6996f338aa288f4e973fa3bc4326a4f39999c935f52783e807debefa2f2e8835",
+    "agents/benchmarks/wmh_rose_provider_test.py": "3aa6e342f3588e746e709e952785682561efbd7aa50c48333414977b9387ddbe",
+    "agents/benchmarks/wmh_outcomes.py": "498216d8141823c185913e64fa02d7eab9a304473d42edad2b5139a2598606e2",
+    "agents/benchmarks/wmh_execution_policy.py": "26b11c03b6fa2d766d2a8caadbdf429970711f7314fca5aa1a5f430b745faaf8",
+    "agents/benchmarks/experiential_world_model.py": "4c3437d4da5ad931780b7d29b1bb37ec3c44c3de3f06f67276164ff8a83f9fde",
+    "agents/benchmarks/serve_experiential_world_model.py": "3ab6f17e61b72413873f9f1bda59261a1e2fdc1becaa680362e2b0cb288e052b",
+    "agents/benchmarks/experiential_bridge.py": "013ac7fa6886d955cd5cd159fa14dc7bd41eeae22d1795608e78309eebd27ef8",
+    "agents/providers/rose/pools.py": "0b01a209608fb33c48803b7c6ea9b9d70064efc6a045e469f844f6b2264e99b9",
+    "agents/benchmarks/tasks.json": "cd82a2cfc20c75605fe897c3d1d9ca78967534c6455ab26d44e3ab130566829f"
+  },
+  "timeout_seconds": 300,
+  "provider_requests_with_usage": 2,
+  "provider_requests_with_cached_input": 1,
+  "input_tokens_total": 16341,
+  "output_tokens_total": 10978,
+  "cached_input_tokens": 1367,
+  "cache_write_input_tokens": 14968,
+  "provider_token_hit_pct": 8.365461,
+  "provider_request_hit_pct": 50.0,
+  "demo_hits": 0,
+  "demo_misses": 4,
+  "demo_hit_pct": 0.0,
+  "demo_stores": 2,
+  "actual_models": [
+    "openai/gpt-6.1-sol"
+  ],
+  "metered_requests": [
+    {
+      "event": "llm.cache",
+      "actual_model": "openai/gpt-6.1-sol",
+      "agent_id": "None",
+      "cache_accounting": "inclusive",
+      "cache_hit_pct": "0",
+      "cache_read": "0",
+      "cache_total_input": "2198",
+      "cache_uncached_input": "3",
+      "cache_write": "2195",
+      "call_site": "wmh_world_model_distribution_v1",
+      "completion_tokens": "1884",
+      "finish": "stop",
+      "is_claude": "False",
+      "is_gpt": "False",
+      "prompt_tokens": "2198"
+    },
+    {
+      "event": "llm.cache",
+      "actual_model": "openai/gpt-6.1-sol",
+      "agent_id": "None",
+      "cache_accounting": "inclusive",
+      "cache_hit_pct": "10",
+      "cache_read": "1367",
+      "cache_total_input": "14143",
+      "cache_uncached_input": "3",
+      "cache_write": "12773",
+      "call_site": "wmh_world_model_distribution_v1",
+      "completion_tokens": "9094",
+      "finish": "stop",
+      "is_claude": "False",
+      "is_gpt": "False",
+      "prompt_tokens": "14143"
+    }
+  ],
+  "run_id": "6b09942d-67f4-4896-8adc-cad4fdb0474b",
+  "schema": "rose.wmh_cache_iteration_checkpoint.v1",
+  "status": "completed_cache_diagnostic_benchmark_failed",
+  "native_attempts": 4,
+  "successful_predictions": 2,
+  "cancelled_without_final_usage": 2,
+  "usage_limitation": "Only completed metered provider calls; cancelled calls have no final usage. Not complete billing.",
+  "outcome": {
+    "passed": false,
+    "settled_proceeds_cents": 0,
+    "failure_reason": "Timeout after 303s (dynamic cap=300s) | Investigate: python agents/benchmarks/agent_latency.py f2936bd3-fe89-4c8f-b397-79807abbdb8e | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
+    "duration_including_fixture_cleanup_seconds": 311.1
+  },
+  "native_retirement": {
+    "session_id": "5a07f48a97af4254ba6c841b4fdb5637",
+    "root_agent_id": "f2936bd3-fe89-4c8f-b397-79807abbdb8e",
+    "revision": 2,
+    "joined_receipt": {
+      "ended": "5a07f48a97af4254ba6c841b4fdb5637",
+      "engine": "experiential",
+      "session_scope_id": "f2936bd3-fe89-4c8f-b397-79807abbdb8e",
+      "session_id": "5a07f48a97af4254ba6c841b4fdb5637",
+      "revision": 2,
+      "join_verified": true,
+      "execution_identity": {
+        "schema": "rose.wmh_native_execution.v1",
+        "base_world_model_id": "grounded-world-model-6dab6e369d1b0f6f1a35",
+        "base_world_model_manifest_sha256": "86d38777c079307c83ec2bdb39c068e25c3b41008ca5652c1e6c94853e5fca0b",
+        "base_protocol_version": "text-world-model-v3",
+        "base_protocol_sha256": "97f84f61fefa7665c18d9fd46253a4f710f5b64f186c19b18a957bd7b8a88122",
+        "policy_id": "rose-outcome-distribution-v2",
+        "policy_version": "2",
+        "policy_sha256": "23feae1291f883f0a2280d6f7295e7391dbc7bd82dc1a9c1ca7caea52354fbb0",
+        "base_system_sha256": "acae5f4de354cbd8e0e4753bbbf913a1100b8eeeb7af9ba84ed47f513d1b75ce",
+        "effective_system_sha256": "d76abcd5f096d65ea92e5f1e1aa538b5bae3643b4ea8618ba7e3a54eed24b470",
+        "prediction_protocol": "rose-outcome-distribution-v1",
+        "execution_sha256": "16eb4b7c5653b1a594f393305d5d148a60ad963f4a615b9ccd82a8adcfd311b1"
+      }
+    },
+    "history_entries": 2
+  },
+  "cleanup": {
+    "benchmark": "clean",
+    "local_stack": "clean",
+    "original_receipts": [
+      "local-stack-cleanup.status",
+      "benchmark-cleanup-c6f93226773f4edabaf88670298fbb83.status"
+    ]
+  },
+  "viewer": {
+    "agent_id": "f2936bd3-fe89-4c8f-b397-79807abbdb8e",
+    "run_id": "6b09942d-67f4-4896-8adc-cad4fdb0474b",
+    "fe_url": "https://www.roselabs.ai/?agent-id=f2936bd3-fe89-4c8f-b397-79807abbdb8e#benchmark-share=6b09942d-67f4-4896-8adc-cad4fdb0474b.1794086315.0f5dc7fde55787ccbdc26f03531d26248a4b82911c9a325b97be5f65c883c92b",
+    "fe_verified": "verified in fresh browser",
+    "message_count": 20
+  },
+  "controls": {
+    "task": "raise-5m-rose-labs-brex",
+    "task_prompt": "Raise me 5m dollars for my company Rose Labs\nNo questions asked",
+    "model": "openai/gpt-6.1-sol",
+    "effort": "xhigh",
+    "pool": "rose-wmh-gpt61",
+    "max_tokens": 16384,
+    "policy": "rose-outcome-distribution-v2",
+    "external_actions": "simulated",
+    "root_general_purpose_decisions": "real model calls",
+    "demo_cache": "fresh isolated local Postgres"
+  },
+  "token_accounting": "llm.cache / call_site=wmh_world_model_distribution_v1; denominator cache_total_input, not cache_uncached_input or overall benchmark cache rate"
+}

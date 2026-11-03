@@ -55,15 +55,24 @@ class TaskResult:
     duration_seconds: float
     cost_cents: float
     message_count: int
+    owned_roots: list[dict] = field(default_factory=list)
+    graded_root_creation_outcome: Optional[str] = None
     failure_reason: Optional[str] = None
     approvals_triggered: int = 0
     approvals_resolved: int = 0
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_hit_pct: float = 0.0
-    repeatable_cache_read_input_tokens: int = 0
-    repeatable_cache_creation_input_tokens: int = 0
-    repeatable_cache_hit_pct: float = 0.0
+    # Prompt-cache share over cache-sequenced calls (llm_usage.aggregate_prompt_cache_share).
+    prompt_cache_read_input_tokens: int = 0
+    prompt_cache_creation_input_tokens: int = 0
+    prompt_cache_uncached_input_tokens: int = 0
+    prompt_cache_share_pct: float = 0.0
+    prompt_cache_call_count: int = 0
+    # Cache lanes that served the sequenced calls (llm_usage.cache_route); selects the floor.
+    prompt_cache_routes: list[str] = field(default_factory=list)
+    # Pre-run static-prefix warmup receipt (benchmarks.cache_warmup); never part of the share.
+    prompt_cache_warmup: Optional[dict] = None
     llm_call_count: int = 0
     tree_agent_count: int = 0
     tokens_in: int = 0
@@ -77,9 +86,14 @@ class TaskResult:
     payment_lifecycle: Optional[dict] = None
     world_model_fidelity: Optional[dict] = None
     world_model_mode: Optional[str] = None
+    wmh_initial_state: Optional[dict] = None  # scenario seed hash, provenance, and seeded session id
     # Agent lifecycle status is a snapshot (for example PAUSED after a passed
     # abandonment check), not the evaluator or harness outcome.
     benchmark_status: Optional[str] = None
+    # Post-verdict owned-resource cleanup that could not be verified (provider
+    # sessions, payments). A harness/cleanup failure of the run: it fails CI and the
+    # owned batch, but never rewrites the evaluator's verdict above.
+    cleanup_failure: Optional[str] = None
 
 
 @dataclass
@@ -116,6 +130,7 @@ class BenchmarkRun:
             "total": total,
             "passed": passed,
             "failed": failed,
+            "cleanup_failures": sum(1 for r in self.task_results if getattr(r, "cleanup_failure", None)),
             "total_cost_cents": round(total_cost, 2),
             "total_duration_seconds": round(total_duration, 1),
             "pass_rate": round(passed / eligible, 2) if eligible > 0 else 0.0,
@@ -219,16 +234,22 @@ class BenchmarkRun:
         one task's failure must not prevent subsequent tasks from being
         recorded.
         """
+        def emit_history_diagnostic(message):
+            try:
+                print(message)
+            except BrokenPipeError:
+                pass  # Diagnostic delivery must not interrupt best-effort ledger writes.
+
         try:
             from benchmarks.timeout_history import record_attempt, record_pass
         except Exception as e:
-            print(f"⚠️  _record_history import failed (non-fatal): {e}")
+            emit_history_diagnostic(f"⚠️  _record_history import failed (non-fatal): {e}")
             return
         try:
             from benchmarks.agent_latency import record_span_history_from_logs
         except Exception as e:
             record_span_history_from_logs = None
-            print(f"⚠️  span-history import failed (non-fatal): {e}")
+            emit_history_diagnostic(f"⚠️  span-history import failed (non-fatal): {e}")
 
         environment = "local" if "localhost" in self.base_url or "127.0.0.1" in self.base_url else "prod"
         for r in self.task_results:
@@ -250,13 +271,15 @@ class BenchmarkRun:
                     # Prefer explicit BENCHMARK_ATTEMPT_SUITE (predeploy scripts)
                     # so worktree smoke cannot invalidate canary eligibility.
                     suite=os.environ.get("BENCHMARK_ATTEMPT_SUITE") or self.suite,
+                    run_id=self.run_id,
+                    outcome_class=("cleanup-failure" if r.cleanup_failure else "passed" if r.passed else "failed"),
                 )
             except Exception as e:
-                print(f"⚠️  record_attempt failed for {r.name} (non-fatal): {e}")
+                emit_history_diagnostic(f"⚠️  record_attempt failed for {r.name} (non-fatal): {e}")
             if not r.passed:
                 continue
             if r.fast_mode_cache_enabled:
-                print(f"    Timeout history skipped for {r.name}: fast mode cache was enabled")
+                emit_history_diagnostic(f"    Timeout history skipped for {r.name}: fast mode cache was enabled")
             else:
                 try:
                     record_pass(
@@ -267,7 +290,7 @@ class BenchmarkRun:
                         timestamp=self.timestamp,
                     )
                 except Exception as e:
-                    print(f"⚠️  _record_history failed for {r.name} ({r.agent_id}) (non-fatal): {e}")
+                    emit_history_diagnostic(f"⚠️  _record_history failed for {r.name} ({r.agent_id}) (non-fatal): {e}")
             try:
                 if record_span_history_from_logs and r.logs:
                     count = record_span_history_from_logs(
@@ -279,9 +302,9 @@ class BenchmarkRun:
                         run_status="passed",
                     )
                     if count:
-                        print(f"    Span history recorded: {count} spans for {r.name}")
+                        emit_history_diagnostic(f"    Span history recorded: {count} spans for {r.name}")
             except Exception as e:
-                print(f"⚠️  span-history recording failed for {r.name} ({r.agent_id}) (non-fatal): {e}")
+                emit_history_diagnostic(f"⚠️  span-history recording failed for {r.name} ({r.agent_id}) (non-fatal): {e}")
 
     @staticmethod
     def load(path: str) -> "BenchmarkRun":

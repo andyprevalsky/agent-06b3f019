@@ -17,13 +17,14 @@
  * - copiedField: string | null - Key of field currently showing "copied" feedback
  */
 
-import { memo, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { cn } from '@/lib/utils';
 import { Check, Copy } from 'lucide-react';
 import { copyToClipboard } from '@/lib/clipboard';
 import { isFilePointer } from './claudeCodeChip.utils';
 import { FilePointerDisplay } from './FilePointerDisplay';
+import { FilePointerGroup } from './inline-media/FilePointerGroup';
 import type { CompletionSummaryData, OutputField } from '../types';
 import type { FilePointer } from '../hooks';
 import { CompletionHeader, FooterStats, ToolUsageSection } from './CompletionSummarySections';
@@ -107,13 +108,7 @@ function OutputValue({ value }: OutputValueProps) {
     return <FilePointerDisplay file={value} showMiniPreview />;
   }
   if (Array.isArray(value) && value.length > 0 && isFilePointer(value[0])) {
-    return (
-      <div className="flex w-full flex-col gap-2">
-        {value.map((fp, idx) => (
-          <FilePointerDisplay key={idx} file={fp as FilePointer} showMiniPreview />
-        ))}
-      </div>
-    );
+    return <FilePointerGroup files={value as FilePointer[]} showMiniPreview />;
   }
   if (Array.isArray(value)) {
     if (value.length === 0) return <span className="text-muted-foreground">No output</span>;
@@ -268,10 +263,15 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
 
   const { summary, outputs, toolUsage, totalToolCalls, durationSeconds, costDollars } = data;
 
+  // One pending "copied" reset at a time, cancelled when the card unmounts.
+  const copiedResetRef = useRef<ReturnType<typeof setTimeout>>();
+  useEffect(() => () => clearTimeout(copiedResetRef.current), []);
+
   const handleCopy = async (value: string, fieldKey: string) => {
     await copyToClipboard(value);
     setCopiedField(fieldKey);
-    setTimeout(() => setCopiedField(null), 2000);
+    clearTimeout(copiedResetRef.current);
+    copiedResetRef.current = setTimeout(() => setCopiedField(null), 2000);
   };
 
   const totalTools = totalToolCalls || toolUsage?.reduce((sum, t) => sum + t.count, 0) || 0;

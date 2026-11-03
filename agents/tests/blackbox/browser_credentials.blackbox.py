@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -11,7 +12,8 @@ from urllib.parse import parse_qs, urlsplit
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from _test_utils import BlackboxResult, assert_captured_call, setup_mock
+from _test_utils import BlackboxResult, assert_captured_call, get_captured_requests, setup_mock, teardown_mock
+from browser_tools.dom_service import ActionHistory
 
 
 async def test_evaluate_card_field_names_remain_selectors_and_explicit_refs_resolve() -> None:
@@ -60,7 +62,6 @@ async def test_numeric_secret_masking_preserves_other_numbers_and_private_runtim
     """A CVV is masked as a numeric value, without rewriting another number."""
     from browser_tools.dom_service import DOMService
     from browser_tools.secret_refs import mask_secret_values
-    from domains.spawn_browser_agent_v3.handler import _prepare_pending_write_lock_action
     from domains.spawn_browser_agent_v3.service_actions import _browser_state_action_result
 
     refs = {"card_cvv": "234"}
@@ -91,11 +92,9 @@ async def test_numeric_secret_masking_preserves_other_numbers_and_private_runtim
     assert observed["url"] == "https://checkout1234.example/pay?cvv={{secret:card_cvv}}", observed
     assert "runtime_current_url" not in observed
     assert dom.runtime_current_url() == raw_url
-    pending = {"action": "click", "index": 1234, "params": {}}
-    restored_action, restored_state, restored_runtime_url = await _prepare_pending_write_lock_action(dom, pending)
-    assert restored_action == pending
+    restored_state = await dom.get_browser_state(include_screenshot=False)
     assert restored_state["url"] == "https://checkout1234.example/pay?cvv={{secret:card_cvv}}"
-    assert restored_runtime_url == raw_url
+    assert dom.runtime_current_url() == raw_url
     await dom.get_page_identity()
     assert dom.runtime_current_url() == raw_url
     await dom.get_current_url()
@@ -408,7 +407,7 @@ async def test_navigation_and_state_results_bind_auth_to_observed_destination() 
             patch("domains.spawn_browser_agent_v3.service_actions._execute_inspection_action", AsyncMock(return_value=action_result)),
         ):
             result = await execute_action(
-                dom, SimpleNamespace(record_action=AsyncMock()), {"action": action, "params": {}},
+                dom, ActionHistory(), {"action": action, "params": {}},
                 auth_context_for_url=auth,
             )
         auth.assert_awaited_once_with(destination)
@@ -447,7 +446,7 @@ async def test_navigation_and_state_results_bind_auth_to_observed_destination() 
             "success": True, "url": public_url, "formatted_state": "Sign-in",
         })):
             result = await execute_action(
-                dom, SimpleNamespace(record_action=AsyncMock()),
+                dom, ActionHistory(),
                 {"action": "read_browser_state", "params": {}},
                 auth_context_for_url=auth, secret_refs=refs,
             )
@@ -470,7 +469,7 @@ async def test_unchanged_interactions_reuse_observed_inventory() -> None:
                           get_page_identity=AsyncMock(return_value={"url": url}))
     auth = AsyncMock()
     with patch("domains.spawn_browser_agent_v3.service_actions._execute_interaction_action", AsyncMock(return_value={"success": True})):
-        result = await execute_action(dom, SimpleNamespace(), {"action": "input_text", "params": {}},
+        result = await execute_action(dom, ActionHistory(), {"action": "input_text", "params": {}},
                                       current_url=url, auth_context_for_url=auth)
     auth.assert_not_awaited()
     assert result == {"success": True}, "unchanged interactions duplicated the whole auth inventory"
@@ -499,7 +498,7 @@ async def test_auth_binding_reobserves_redirects_and_preserves_action_failures()
             patch("domains.spawn_browser_agent_v3.service_actions._execute_navigation_action", AsyncMock(return_value=original)),
             patch("domains.spawn_browser_agent_v3.service_actions._execute_inspection_action", AsyncMock(return_value=original)),
         ):
-            result = await execute_action(dom, SimpleNamespace(record_action=AsyncMock()),
+            result = await execute_action(dom, ActionHistory(),
                                           {"action": "read_browser_state" if read else "goto", "params": {}},
                                           auth_context_for_url=auth)
         assert [call.args[0] for call in auth.await_args_list] == [first, final]
@@ -515,13 +514,13 @@ async def test_auth_binding_reobserves_redirects_and_preserves_action_failures()
                           get_page_identity=AsyncMock(return_value={"url": final}))
     auth = AsyncMock(return_value={"auth_realm": "accounts.google.com", "inventory_status": "unknown"})
     with patch("domains.spawn_browser_agent_v3.service_actions._execute_navigation_action", AsyncMock(side_effect=RuntimeError("navigation partially failed"))):
-        result = await execute_action(dom, SimpleNamespace(record_action=AsyncMock()), {"action": "goto", "params": {}}, auth_context_for_url=auth)
+        result = await execute_action(dom, ActionHistory(), {"action": "goto", "params": {}}, auth_context_for_url=auth)
     assert result["success"] is False and result["error"] == "navigation partially failed"
     assert result["current_url"] == final and result["auth_context"]["auth_realm"] == "accounts.google.com"
 
     dom.get_page_identity = AsyncMock(side_effect=[{"url": first}, {"url": final}, {"url": "https://example.org"}])
     with patch("domains.spawn_browser_agent_v3.service_actions._execute_navigation_action", AsyncMock(return_value={"success": True})):
-        result = await execute_action(dom, SimpleNamespace(record_action=AsyncMock()), {"action": "goto", "params": {}}, auth_context_for_url=auth)
+        result = await execute_action(dom, ActionHistory(), {"action": "goto", "params": {}}, auth_context_for_url=auth)
     assert result["current_url"] == "https://example.org"
     assert result["auth_context"]["auth_realm"] == "example.org" and result["auth_context"]["inventory_status"] == "unknown"
     assert "auth_options" not in result["auth_context"] and result["auth_context"]["observation_error"]
@@ -757,6 +756,93 @@ async def test_prepare_browser_auth_uses_unified_realm_endpoint() -> None:
         header_present="x-user-id",
     )
     assert call["requestHeaders"]["x-user-id"] == "user-1"
+
+
+def test_password_use_is_sign_in_evidence_for_world_state_merge() -> None:
+    """Only a typed saved/minted password marks a site as signed in (plan A6).
+
+    The backend no longer needs this evidence to merge a login into the user's
+    browser template; it marks the login as validated, which wins keep-best.
+    """
+    from domains.spawn_browser_agent_v3.service_crypto import signed_in_realm_for_secret_refs
+
+    assert signed_in_realm_for_secret_refs({"pwd:me@github"}, "https://github.com/login") == "github.com"
+    assert signed_in_realm_for_secret_refs({"pwd:new"}, "https://www.example.org/signup") == "example.org"
+    assert signed_in_realm_for_secret_refs({"card_number", "card_cvv"}, "https://shop.example/pay") == ""
+    assert signed_in_realm_for_secret_refs(set(), "https://github.com/login") == ""
+    assert signed_in_realm_for_secret_refs({"pwd:me@github"}, "") == ""
+    assert signed_in_realm_for_secret_refs(None, "https://github.com/login") == ""
+
+
+async def test_browser_close_sends_sign_in_evidence_and_returns_world_state_receipt() -> None:
+    """Close carries the task's sign-in evidence and returns the merge receipt."""
+    from domains.spawn_browser_agent_v3.repo import close_browser_session
+
+    receipt = {
+        "task_id": "task-1",
+        "kind": "agent",
+        "sites": [
+            {
+                "site": "github.com",
+                "account": "",
+                "outcome": "merged",
+                "rule": "validated",
+                "base_revision": 0,
+                "head_revision": 1,
+                "merged_revision": 1,
+            }
+        ],
+    }
+    config = SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.example.com", api_key="internal-key"))
+    try:
+        setup_mock(
+            {"/api/browser-session/close": {"status": 200, "json": {"success": True, "world_state": receipt}}}
+        )
+        returned = await close_browser_session(
+            config, "session-1", current_url="https://github.com/", signed_in_sites=["github.com", "github.com"]
+        )
+        assert returned == receipt, returned
+        body = json.loads(get_captured_requests()[-1]["requestBody"])
+        assert body == {
+            "session_id": "session-1",
+            "pause": False,
+            "current_url": "https://github.com/",
+            "signed_in_sites": ["github.com"],
+        }, body
+
+        # No evidence: the field is omitted, so older backends see the old payload.
+        teardown_mock()
+        setup_mock({"/api/browser-session/close": {"status": 200, "json": {"success": True, "world_state": None}}})
+        assert await close_browser_session(config, "session-2") is None
+        body = json.loads(get_captured_requests()[-1]["requestBody"])
+        assert body == {"session_id": "session-2", "pause": False}, body
+    finally:
+        teardown_mock()
+
+
+def test_world_state_receipt_summary_names_account_outcome_and_rule() -> None:
+    """The close log names each site's template account, outcome and keep-best rule."""
+    from domains.spawn_browser_agent_v3.repo import world_state_receipt_summary
+
+    receipt = {
+        "task_id": "task-1",
+        "kind": "agent",
+        "sites": [
+            {"site": "github.com", "account": "", "outcome": "merged", "rule": "validated"},
+            {"site": "google.com", "account": "chrome:Profile 2", "outcome": "kept", "rule": "later_expiry"},
+            {"site": "example.com", "account": "", "outcome": "signed_out", "rule": None},
+            "not-an-entry",
+            {"outcome": "merged"},
+        ],
+    }
+    assert world_state_receipt_summary(receipt) == {
+        "github.com": "merged/validated",
+        "google.com [chrome:Profile 2]": "kept/later_expiry",
+        "example.com": "signed_out",
+    }, world_state_receipt_summary(receipt)
+    # Observability only: an absent or malformed receipt summarizes to nothing.
+    assert world_state_receipt_summary(None) == {}
+    assert world_state_receipt_summary({"sites": "nope"}) == {}
 
 
 async def test_failed_restoration_preserves_target_credential_inventory() -> None:
@@ -1553,7 +1639,7 @@ async def test_ceremony_capable_actions_arm_the_live_target_before_running() -> 
     try:
         await execute_action(
             dom_service=dom_service,
-            action_history=SimpleNamespace(),
+            action_history=ActionHistory(),
             action={"action": "press_key", "params": {"key": "Escape"}},
         )
     except Exception:
@@ -1617,6 +1703,18 @@ async def run_all_tests():
     await runner.record_async(
         "prepare_browser_auth_uses_unified_realm_endpoint",
         test_prepare_browser_auth_uses_unified_realm_endpoint,
+    )
+    runner.record(
+        "password_use_is_sign_in_evidence_for_world_state_merge",
+        test_password_use_is_sign_in_evidence_for_world_state_merge,
+    )
+    await runner.record_async(
+        "browser_close_sends_sign_in_evidence_and_returns_world_state_receipt",
+        test_browser_close_sends_sign_in_evidence_and_returns_world_state_receipt,
+    )
+    runner.record(
+        "world_state_receipt_summary_names_account_outcome_and_rule",
+        test_world_state_receipt_summary_names_account_outcome_and_rule,
     )
     await runner.record_async(
         "passkey_injection_reenables_virtual_environment_at_use_boundary",

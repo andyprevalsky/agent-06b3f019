@@ -73,6 +73,8 @@ PoolName = Literal[
     "rose-1-ultra",
     "rose-1-browser-use",
     "rose-1-oss",
+    "rose-local",
+    "rose-wmh-gpt61",
 ]
 
 # DAG / approval param-populator always uses ultra, even when the parent agent is flash.
@@ -104,9 +106,10 @@ class PoolSpec:
     OpenRouter waterfall. ``direct_auth_enabled`` does not gate it."""
 
     foundry_model: str | None = None
-    """Foundry model when it must differ from ``gpt_auth_model`` (the open-weights
-    pool keeps its guarantee on an open-weights Azure model). Defaults to
-    ``gpt_auth_model``."""
+    """Pins the pool to this Foundry model (the open-weights pool keeps its
+    guarantee on an open-weights Azure model). Unset, Foundry serves
+    ``gpt_auth_model``, and any Sol deployment serves a Sol pool (see
+    ``foundry_models``)."""
 
     waterfall_reasoning_effort: str | None = None
     """When set, the OpenRouter waterfall and the Foundry fallback stamp this
@@ -130,6 +133,27 @@ class PoolSpec:
 
 
 POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
+    "rose-local": PoolSpec(
+        name="rose-local",
+        # Inert required fields: the local branch returns before any remote leg.
+        claude_auth_model="claude-opus-5-5",
+        gpt_auth_model="gpt-6-sol",
+        waterfall=(),
+        direct_auth_enabled=False,
+    ),
+    # Explicit WMH diagnostic runner; other agent pools retain their defaults.
+    "rose-wmh-gpt61": PoolSpec(
+        name="rose-wmh-gpt61",
+        claude_auth_model="claude-opus-5-5",
+        gpt_auth_model="gpt-6.1-sol",
+        # Azure credit first; the same model on OpenRouter is the fallback.
+        foundry_enabled=True,
+        # The diagnostic runner measures GPT-6.1 Sol, so no GPT-6 Sol stand-in.
+        foundry_model="gpt-6.1-sol",
+        waterfall=("openai/gpt-6.1-sol",),
+        waterfall_reasoning_effort="xhigh",
+        direct_auth_enabled=False,
+    ),
     # Cheapest/fastest tier — used by background condensation passes
     # (web_fetch Haiku filter, tool-result summarization). claudeAuth routes
     # directly to Anthropic's Haiku 4.5; waterfall falls back to OpenRouter's
@@ -206,7 +230,15 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         name="rose-1-oss",
         claude_auth_model="claude-sonnet-5",
         gpt_auth_model="gpt-5.6-luna",
-        waterfall=("moonshotai/kimi-k3",),
+        # Two open-weights, vision-capable legs (VISION_MODELS): kimi-k3 first,
+        # Qwen 3.8 27B via OpenRouter as the rescuer. The structured-output
+        # retry excludes a model after two unparseable tool calls
+        # (helpers/llm.py), and the funded Foundry leg below has answered
+        # `deployment_disabled` ("DeepSeek-V3.2 does not support deploymentless
+        # inference") since 2026-10-30, so a single-model waterfall left the
+        # pinned biometrics task with no model at all (RoseAllFailed after
+        # kimi's second invalid spawn_agent call).
+        waterfall=("moonshotai/kimi-k3", "qwen/qwen3.8-27b"),
         direct_auth_enabled=False,
         # Funded Azure fallback stays open-weights: DeepSeek-V3.2 (MIT). On the
         # pinned biometrics task's spawn_agent schema it produced valid calls
@@ -220,6 +252,18 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
 def foundry_model(pool_spec: PoolSpec) -> str:
     """The model a pool requests from Microsoft Foundry."""
     return pool_spec.foundry_model or pool_spec.gpt_auth_model
+
+
+# Azure Sol deployments stand in for each other unless a pool pins its Foundry model.
+FOUNDRY_SOL_MODELS: Tuple[str, ...] = ("gpt-6-sol", "gpt-6.1-sol")
+
+
+def foundry_models(pool_spec: PoolSpec) -> Tuple[str, ...]:
+    """Models whose Foundry deployments may serve the pool, its own model first."""
+    model = foundry_model(pool_spec)
+    if pool_spec.foundry_model or model not in FOUNDRY_SOL_MODELS:
+        return (model,)
+    return (model, *(other for other in FOUNDRY_SOL_MODELS if other != model))
 
 
 def get_pool(name: str) -> PoolSpec:

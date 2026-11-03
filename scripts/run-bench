@@ -15,6 +15,22 @@ if [[ "${1:-}" == "report-format" ]]; then
     benchmark_agent_instructions
     exit 0
 fi
+# The mandatory progress card, rendered only from recorded run artifacts and the
+# experiments ledger. Stdlib-only, so it also works from a scripts-only checkout.
+if [[ "${1:-}" == "scorecard" ]]; then
+    shift
+    exec python3 "$ROOT_DIR/scripts/cloudbench-scorecard.py" "$@"
+fi
+# Explicit app maintenance, before catalog, campaign, or fleet setup.
+if [[ "${1:-}" == stop-all ]]; then
+    shift
+    exec python3 "$ROOT_DIR/scripts/cloudbench-stop-all.py" "$@"
+fi
+# Stopped task Machines still count against the Fly org Machine limit.
+if [[ "${1:-}" == reclaim-stopped ]]; then
+    shift
+    exec python3 "$ROOT_DIR/scripts/cloudbench-reclaim-stopped.py" "$@"
+fi
 # Reject --single-box BEFORE cd into agents/: cloudbench multi-workstream
 # sandboxes are scripts-only, and a failed cd would exit under `set -e` without
 # the parallel-safety message the guard exists to print.
@@ -172,6 +188,17 @@ if [[ "${1:-}" == "list" || "${1:-}" == "--list" ]]; then
     exec "$PY" -u benchmarks/run_benchmark.py --list
 fi
 
+# Rose vs raw-CLI parity for the code-bench tasks (plan C8): runs the CLI directly
+# on the same fixture archives and compares pass rates with Rose run records.
+if [[ "${1:-}" == "code-parity" ]]; then
+    shift
+    if [[ "$PY" == venv/* ]]; then
+        PY="$ROOT_DIR/agents/$PY"
+    fi
+    cd "$CALLER_DIR"
+    PYTHONPATH="$ROOT_DIR/agents${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -u -m benchmarks.code_bench_parity "$@"
+fi
+
 if [[ "${1:-}" == "eval" || "${1:-}" == "eval-suite" ]]; then
     shift
     benchmark_agent_instructions
@@ -213,8 +240,11 @@ fi
 usage() {
     cat <<'EOF'
 Usage: scripts/run-bench <slice-or-task...> [options]
+       scripts/run-bench stop-all --app APP --execute --out-dir NEW_PRIVATE_DIR
        scripts/run-bench report-format
+       scripts/run-bench scorecard <run-dir> [--html OUT] [--text] [--json] | --validate <card.html>
        scripts/run-bench monitor <exact-run-directory>
+       scripts/run-bench code-parity [--run-rose local | --rose-records RUN.json...] [-k K] [--cli claude|codex]
        scripts/run-bench image-build [--no-cache] [--builder native|depot]
        scripts/run-bench image-activate <exact-benchmark-image> [--ref <sha>] [--out-dir <private-directory>]
 
@@ -226,6 +256,10 @@ Image builds:
 Selections:
   daily | pre-deploy | rose-bench | polar-bench | incomplete
   or one or more exact benchmark task names
+  full               Every cloud task whose last 3 recorded runs passed, at -k 2
+                     by default with all copies at once. When that exceeds the
+                     measured Fly capacity, keeps the tasks most relevant to
+                     this branch's changes (scripts/cloudbench-full-selection.py)
   stability-proof    Run random ready-catalog slices sequentially; ordinary
                      benchmark failures advance and any INFRA outcome aborts
 
@@ -242,28 +276,56 @@ Campaign options:
   --e2e-timeout SEC   Whole experiment limit, including evidence and full release.
   --e2e-started-at EPOCH
                       Original first image-build epoch; never reset for retries.
+  --stress-defaults   Opt-in local resource defaults for200distinct tasks at-k3;
+                      native capacity/disk guards remain authoritative.
   --demo-cache        Read-only task replay for existing DEMO workloads. Declared
                       LLM judges still run and may spend. Zero LIVE proof credit.
 
 The ordinary no-flag path runs the resolved slice as one fully parallel,
 per-bench-isolated cloud fleet. Use --local first to opt into local execution.
 
+Wide runs (sharded controllers):
+  When more simultaneous copies run than one controller's copy bound (32),
+  the CLI routes the same command to the sharded controller operator: an
+  ordered manifest, K repetitions, auto-sized disposable controllers behind one
+  global strict barrier, provider-cap and native-capacity checks. Guests run
+  the clean pushed HEAD. Launch facts, the warm dependency proof and snapshot
+  inventory are discovered; a snapshot not produced for this exact HEAD (or
+  expiring before the deadline) is refreshed first via the normal producer.
+  Supported options: -k K, --timeout S (default: longest selected task; at most 7200), --ref <HEAD>,
+  --e2e-timeout S. Every routed launch runs --check first.
+  --check             Dry run: local checks plus read-only provider preflight,
+                      reporting the warm snapshot reuse/refresh decision.
+  Wide runs admit every task the ordinary fleet runs, SIM/DEMO included.
+  RUN_BENCH_CATALOG_ELIGIBILITY=live keeps a LIVE acceptance run's live-query
+  rule (refuses zero-live-spend and DEMO-replay tasks).
+
 Startup reuse:
   Completed dependency snapshots are reused automatically, including from a
   fresh checkout. Source-only changes synchronize code after boot.
-  --provision-pool N  Prepare N stopped, reusable task Machines once. Ordinary
-                      runs automatically claim and return this workspace pool.
-                      Stopped Machines retain billable volume storage.
+  --provision-pool N  Legacy generic-pool request; no implicit pool creation.
+                      Ordinary runs create disposable task Machines and Volumes.
+  --cold-handoff-request REQUEST SHA256  Internal exact cold-controller handoff; no provisioning.
+  --cold-primary-bootstrap  Explicit future empty-checkout policy for verified cold primaries.
+  --reuse-pool-only  Opt into retained existing stopped primary IDs. Pool misses and
+                      additional workers refuse new allocation; no silent clone.
+  --recover-stale-owner-to-pool TOKEN
+                      Exact canonical recovery, preserving proven stopped
+                      primaries in this workspace pool; requires sealed evidence.
   --fresh-volumes    Default: empty volumes for REAL task Machines; bootstrap
                       exact source plus baked deps. SIM snapshots remain.
                       Requires boot launch; cannot prepare a generic pool.
   --snapshot-volumes Force restored donor volumes for a provisioning diagnostic.
-  --timeout SECONDS  Set this run's task execution timeout.
+  --timeout SECONDS  Explicit hard task cap (at most 7200; longer is refused); warns if
+                     below a selected task's effective timeout. Default covers
+                     the longest selected task.
   --wait             Wait for the detached fleet and return its exit status.
 
 Monitoring:
   Launches print the mandatory parent-agent card format and maintenance policy.
   report-format retrieves that same contract without starting services or tasks.
+  Every launch also prints its exact `scripts/run-bench scorecard <run-dir> --html <file>`
+  command. Publish that CLI-rendered card; hand-written cards are non-compliant.
   Every launch prints its exact monitoring handle. Poll every 30 seconds,
   checking terminal lifecycle on every observation, including stale cards.
   Controller status is separate from task PASS/FAIL; retain genuine task FAIL.
@@ -282,23 +344,27 @@ EOF
 }
 
 RUNS=1
+RUNS_EXPLICIT=0
 CONCURRENCY=1
 CONCURRENCY_EXPLICIT=0
 RETRY_INFRA=0
 E2E_ARGS=()
 CAMPAIGN_REQUESTED=0
+STRESS_DEFAULTS=0
 INTERNAL_OPERATION=0
 DEMO_CACHE_PROBE=0
+RETRY_INFRA_EXPLICIT=0
+SHARDED_CHECK=0
 SELECTORS=()
 FLEET_ARGS=()
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -k|--runs)
             [ "$#" -ge 2 ] || { echo "❌ $1 requires a positive integer" >&2; exit 2; }
-            RUNS="$2"; CAMPAIGN_REQUESTED=1; shift 2
+            RUNS="$2"; RUNS_EXPLICIT=1; CAMPAIGN_REQUESTED=1; shift 2
             ;;
         -k=*|--runs=*)
-            RUNS="${1#*=}"; CAMPAIGN_REQUESTED=1; shift
+            RUNS="${1#*=}"; RUNS_EXPLICIT=1; CAMPAIGN_REQUESTED=1; shift
             ;;
         --concurrency)
             [ "$#" -ge 2 ] || { echo "❌ --concurrency requires a positive integer" >&2; exit 2; }
@@ -309,10 +375,13 @@ while [ "$#" -gt 0 ]; do
             ;;
         --retry-infra)
             [ "$#" -ge 2 ] || { echo "❌ --retry-infra requires a nonnegative integer" >&2; exit 2; }
-            RETRY_INFRA="$2"; CAMPAIGN_REQUESTED=1; shift 2
+            RETRY_INFRA="$2"; RETRY_INFRA_EXPLICIT=1; CAMPAIGN_REQUESTED=1; shift 2
             ;;
         --retry-infra=*)
-            RETRY_INFRA="${1#*=}"; CAMPAIGN_REQUESTED=1; shift
+            RETRY_INFRA="${1#*=}"; RETRY_INFRA_EXPLICIT=1; CAMPAIGN_REQUESTED=1; shift
+            ;;
+        --check)
+            SHARDED_CHECK=1; shift
             ;;
         --e2e-timeout|--e2e-started-at)
             [ "$#" -ge 2 ] || { echo "❌ $1 requires a value" >&2; exit 2; }
@@ -320,6 +389,9 @@ while [ "$#" -gt 0 ]; do
             ;;
         --e2e-timeout=*|--e2e-started-at=*)
             E2E_ARGS+=("$1"); CAMPAIGN_REQUESTED=1; shift
+            ;;
+        --stress-defaults)
+            STRESS_DEFAULTS=1; CAMPAIGN_REQUESTED=1; shift
             ;;
         --demo-cache)
             DEMO_CACHE_PROBE=1; shift
@@ -331,14 +403,30 @@ while [ "$#" -gt 0 ]; do
             ;;
         --sim-on|--ref|--dash-base|--timeout|--autoscale-max)
             [ "$#" -ge 2 ] || { echo "❌ $1 requires a value" >&2; exit 2; }
+            if [ "$1" = --timeout ]; then
+                # Cloud task execution windows are capped at 2 hours (sharded runner MAX_TASK_TIMEOUT).
+                case "$2" in ''|*[!0-9]*) timeout_ok=0 ;; *) timeout_ok=$(( 10#$2 >= 1 && 10#$2 <= 7200 )) ;; esac
+                [ "$timeout_ok" -eq 1 ] || {
+                    echo "❌ --timeout $2 refused: cloud execution timeouts must be 1..7200 seconds (at most 2 hours)." >&2
+                    echo "   Ask the user to choose a lower execution timeout or to change the CLI setting" >&2
+                    echo "   (MAX_TASK_TIMEOUT in scripts/cloudbench-original600-runner.py and this check in scripts/run-bench)." >&2
+                    exit 2
+                }
+            fi
             FLEET_ARGS+=("$1" "$2"); shift 2
             ;;
-        --recover-stale-owner|--provision-pool)
+        --admit-existing-idle|--admit-fixed-native-worker)
+            [ "$#" -ge 6 ] || exit 2
+            INTERNAL_OPERATION=1; FLEET_ARGS+=("$1" "$2" "$3" "$4" "$5" "$6"); shift 6 ;;
+        --cold-handoff-request)
+            [ "$#" -ge 3 ] || exit 2
+            INTERNAL_OPERATION=1; FLEET_ARGS+=("$1" "$2" "$3"); shift 3 ;;
+        --recover-stale-owner|--recover-stale-owner-to-pool|--recover-unstaged-worker|--provision-pool)
             [ "$#" -ge 2 ] || { echo "❌ $1 requires a value" >&2; exit 2; }
             INTERNAL_OPERATION=1
             FLEET_ARGS+=("$1" "$2"); shift 2
             ;;
-        --keep-clones|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier|--fresh-volumes|--snapshot-volumes)
+        --qualify-worker|--keep-clones|--reuse-pool-only|--cold-primary-bootstrap|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier|--fresh-volumes|--snapshot-volumes)
             FLEET_ARGS+=("$1"); shift
             ;;
         -h|--help)
@@ -366,6 +454,12 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+if [ "$CAMPAIGN_REQUESTED" = 1 ]; then
+    for arg in "${FLEET_ARGS[@]}"; do
+        [ "$arg" != --qualify-worker ] || { echo "❌ --qualify-worker is separate from campaigns" >&2; exit 2; }
+    done
+fi
 
 case "$RETRY_INFRA" in
     ''|*[!0-9]*) echo "❌ --retry-infra requires a nonnegative integer" >&2; exit 2 ;;
@@ -401,11 +495,31 @@ fi
 [ "${#SELECTORS[@]}" -gt 0 ] || { usage >&2; exit 2; }
 
 CATALOG_PATH="${RUN_BENCH_CATALOG_UNDER_TEST:-$ROOT_DIR/agents/benchmarks/tasks.json}"
-RESOLVED_OUTPUT="$("$PY" -u "$ROOT_DIR/scripts/cloudbench_catalog.py" \
-    resolve "$CATALOG_PATH" "${SELECTORS[@]}")" || {
-    echo "❌ benchmark selection failed" >&2
-    exit 2
-}
+FULL_SELECTION=0
+for selector in "${SELECTORS[@]}"; do
+    [ "$selector" = full ] && FULL_SELECTION=1
+done
+if [ "$FULL_SELECTION" -eq 1 ]; then
+    [ "${#SELECTORS[@]}" -eq 1 ] || { echo "❌ full selects its own tasks; run it alone" >&2; exit 2; }
+    [ "$RUNS_EXPLICIT" -eq 1 ] || RUNS=2
+    CAMPAIGN_REQUESTED=1
+    if ! command -v flyctl >/dev/null 2>&1 && [ -x "$HOME/.fly/bin/flyctl" ]; then
+        export PATH="$HOME/.fly/bin:$PATH"
+    fi
+    FULL_ARGS=(--catalog "$CATALOG_PATH" --runs "$RUNS")
+    [ -z "${RUN_BENCH_FULL_FREE_SLOTS_UNDER_TEST:-}" ] || FULL_ARGS+=(--free-slots "$RUN_BENCH_FULL_FREE_SLOTS_UNDER_TEST")
+    [ -z "${RUN_BENCH_FULL_ATTEMPTS_UNDER_TEST:-}" ] || FULL_ARGS+=(--attempts "$RUN_BENCH_FULL_ATTEMPTS_UNDER_TEST")
+    RESOLVED_OUTPUT="$("$PY" -u "$ROOT_DIR/scripts/cloudbench-full-selection.py" "${FULL_ARGS[@]}")" || {
+        echo "❌ full benchmark selection failed" >&2
+        exit 2
+    }
+else
+    RESOLVED_OUTPUT="$("$PY" -u "$ROOT_DIR/scripts/cloudbench_catalog.py" \
+        resolve "$CATALOG_PATH" "${SELECTORS[@]}")" || {
+        echo "❌ benchmark selection failed" >&2
+        exit 2
+    }
+fi
 RESOLVED_TASKS=()
 while IFS= read -r task; do
     [ -n "$task" ] && RESOLVED_TASKS+=("$task")
@@ -414,6 +528,28 @@ done <<< "$RESOLVED_OUTPUT"
     echo "❌ benchmark selection resolved no tasks" >&2
     exit 2
 }
+# full runs every selected copy at once, so wide selections take the sharded route.
+if [ "$FULL_SELECTION" -eq 1 ] && [ "$CONCURRENCY_EXPLICIT" -eq 0 ]; then
+    CONCURRENCY=$(( ${#RESOLVED_TASKS[@]} * RUNS ))
+fi
+EXPLICIT_TIMEOUT=""
+for ((timeout_arg=0; timeout_arg<${#FLEET_ARGS[@]}; timeout_arg++)); do
+    if [ "${FLEET_ARGS[$timeout_arg]}" = --timeout ]; then
+        EXPLICIT_TIMEOUT="${FLEET_ARGS[$((timeout_arg+1))]}"
+    fi
+done
+TIMEOUT_POLICY_ARGS=(--catalog "$CATALOG_PATH")
+[ -z "$EXPLICIT_TIMEOUT" ] || TIMEOUT_POLICY_ARGS+=(--requested "$EXPLICIT_TIMEOUT")
+SELECTED_MAX_TIMEOUT="$("$PY" "$ROOT_DIR/scripts/cloudbench-timeout-policy.py" \
+    "${TIMEOUT_POLICY_ARGS[@]}" "${RESOLVED_TASKS[@]}")" || exit 2
+if [ -n "${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS:-}" ]; then
+    "$PY" "$ROOT_DIR/scripts/cloudbench-timeout-policy.py" --catalog "$CATALOG_PATH" \
+        --requested "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" "${RESOLVED_TASKS[@]}" >/dev/null || exit 2
+fi
+# Ordinary fleet/campaign children retain an implicit (extendable) default;
+# explicit --timeout remains the caller's hard cap. Wide shards require one
+# bound timeout, so the wrapper passes the selected maximum to their operator.
+export RUN_BENCH_DEFAULT_TIMEOUT="$SELECTED_MAX_TIMEOUT"
 echo "🎯 resolved ${#RESOLVED_TASKS[@]} benchmark task(s): ${RESOLVED_TASKS[*]}"
 
 if [ "$DEMO_CACHE_PROBE" -eq 1 ]; then
@@ -436,8 +572,182 @@ fi
 # Keep list/help/monitor/maintenance output unchanged for their consumers.
 benchmark_agent_instructions
 
+# ── Wide cloud runs: the sharded controller operator ───────────────────────
+# One local fleet controller owns at most the operator's per-controller copy
+# bound (32 on performance-8x). Wider simultaneous runs go through the same
+# sharded operator path as the original600/polar70 campaigns: an ordered
+# manifest, K repetitions, K/bound disposable controllers behind one global
+# strict barrier, the provider-cap and capacity checks, and inputs discovered
+# from their normal producers. Narrower runs keep the existing fleet path.
+SHARDED_ROUTE_REASON=""
+if [ "$SHARDED_CHECK" -eq 1 ] || [ "${RUN_BENCH_SHARDED_ROUTE:-auto}" != never ]; then
+    if [ "$CAMPAIGN_REQUESTED" -eq 1 ]; then
+        sharded_copies=$(( ${#RESOLVED_TASKS[@]} * RUNS ))
+        sharded_active="$CONCURRENCY"
+        if [ "$CONCURRENCY_EXPLICIT" -eq 0 ] && { [ "$RETRY_INFRA" -gt 0 ] || [ "${#E2E_ARGS[@]}" -gt 0 ] || [ "$STRESS_DEFAULTS" -eq 1 ]; }; then
+            sharded_active="$sharded_copies"
+        fi
+        [ "$sharded_active" -le "$sharded_copies" ] || sharded_active="$sharded_copies"
+    else
+        sharded_copies="${#RESOLVED_TASKS[@]}"
+        sharded_active="$sharded_copies"
+    fi
+    SHARDED_BOUND="$("$PY" -c 'import runpy,sys
+c=runpy.run_path(sys.argv[1]);p=c["CONTROLLER_PROFILES"]["performance-8x"]
+print(c["copy_bound"](p["vcpus"],p["memory_mib"]))' "$ROOT_DIR/scripts/cloudbench-shard-coordinator.py")" || {
+        echo "❌ could not read the sharded controller copy bound" >&2
+        exit 2
+    }
+    if [ "$sharded_active" -gt "$SHARDED_BOUND" ]; then
+        SHARDED_ROUTE_REASON="$sharded_active simultaneous copies exceed one controller's $SHARDED_BOUND-copy bound"
+    elif [ "$SHARDED_CHECK" -eq 1 ]; then
+        echo "❌ --check is the sharded operator's dry run; $sharded_active simultaneous copies fit one controller ($SHARDED_BOUND) and use the ordinary fleet path" >&2
+        exit 2
+    fi
+fi
+# Auto routing keeps an explicitly requested ordinary-fleet option working:
+# a request the operator would refuse falls back to the ordinary fleet path
+# with one warning. RUN_BENCH_SHARDED_ROUTE=always keeps the strict refusal.
+sharded_refused_option() {
+    [ "$DEMO_CACHE_PROBE" -eq 0 ] || { echo --demo-cache; return; }
+    [ "$STRESS_DEFAULTS" -eq 0 ] || { echo --stress-defaults; return; }
+    if [ "$RETRY_INFRA_EXPLICIT" -eq 1 ] && [ "$RETRY_INFRA" != 1 ]; then echo --retry-infra; return; fi
+    if [ "$CONCURRENCY_EXPLICIT" -eq 1 ] && [ "$CONCURRENCY" -lt "$sharded_copies" ]; then echo --concurrency; return; fi
+    set -- "${FLEET_ARGS[@]}"
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --timeout|--ref) shift 2 ;;
+            --strict-barrier|--wait|--foreground) shift ;;
+            *) echo "$1"; return ;;
+        esac
+    done
+    local arg
+    for arg in "${E2E_ARGS[@]}"; do
+        case "$arg" in
+            --e2e-timeout=*) ;;
+            *) echo "${arg%%=*}"; return ;;
+        esac
+    done
+}
+if [ -n "$SHARDED_ROUTE_REASON" ] && [ "$SHARDED_CHECK" -eq 0 ] &&
+    [ "${RUN_BENCH_SHARDED_ROUTE:-auto}" = auto ]; then
+    SHARDED_REFUSED_OPTION="$(sharded_refused_option)"
+    if [ -n "$SHARDED_REFUSED_OPTION" ]; then
+        echo "⚠️  $SHARDED_ROUTE_REASON, but $SHARDED_REFUSED_OPTION is not a sharded operator option; using the ordinary fleet path (RUN_BENCH_SHARDED_ROUTE=always refuses instead)" >&2
+        SHARDED_ROUTE_REASON=""
+    fi
+fi
+if [ -n "$SHARDED_ROUTE_REASON" ]; then
+    echo "🧩 sharded controller operator: $SHARDED_ROUTE_REASON"
+    [ "$DEMO_CACHE_PROBE" -eq 0 ] && [ "$STRESS_DEFAULTS" -eq 0 ] || {
+        echo "❌ --demo-cache/--stress-defaults are not sharded operator options; the operator derives its limits" >&2
+        exit 2
+    }
+    if [ "$RETRY_INFRA_EXPLICIT" -eq 1 ] && [ "$RETRY_INFRA" != 1 ]; then
+        echo "❌ the sharded operator retries each infrastructure failure exactly once; omit --retry-infra or pass 1" >&2
+        exit 2
+    fi
+    if [ "$CONCURRENCY_EXPLICIT" -eq 1 ] && [ "$CONCURRENCY" -lt "$sharded_copies" ]; then
+        echo "❌ the sharded operator admits all $sharded_copies copies behind one barrier; omit --concurrency or pass $sharded_copies" >&2
+        exit 2
+    fi
+    SHARDED_TIMEOUT="$SELECTED_MAX_TIMEOUT"
+    if [ -z "$EXPLICIT_TIMEOUT" ]; then
+        SHARDED_TIMEOUT="$("$PY" "$ROOT_DIR/scripts/cloudbench-timeout-policy.py" \
+            --catalog "$CATALOG_PATH" --mode sharded "${RESOLVED_TASKS[@]}")" || exit 2
+    fi
+    SHARDED_REF=""
+    set -- "${FLEET_ARGS[@]}"
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --timeout) SHARDED_TIMEOUT="$2"; shift 2 ;;
+            --ref) SHARDED_REF="$2"; shift 2 ;;
+            --strict-barrier|--wait|--foreground) shift ;;  # the operator always waits behind one global barrier
+            *) echo "❌ $1 is not a sharded operator option (supported: -k, --timeout, --ref, --e2e-timeout, --check)" >&2; exit 2 ;;
+        esac
+    done
+    SHARDED_E2E=""
+    for arg in "${E2E_ARGS[@]}"; do
+        case "$arg" in
+            --e2e-timeout=*) SHARDED_E2E="${arg#*=}" ;;
+            *) echo "❌ the sharded operator owns its admission clock; omit ${arg%%=*}" >&2; exit 2 ;;
+        esac
+    done
+    PRODUCTION_STATUS=0
+    "$PY" -u "$ROOT_DIR/scripts/cloudbench-production-only-tasks.py" "${RESOLVED_TASKS[@]}" >/dev/null || PRODUCTION_STATUS=$?
+    [ "$PRODUCTION_STATUS" -ne 0 ] || { echo "❌ production-only tasks never allocate Fly guests; run them without sharding" >&2; exit 2; }
+    [ "$PRODUCTION_STATUS" -ne 2 ] || { echo "❌ production-only classifier failed" >&2; exit 2; }
+    # The guest and every controller execute exactly the pushed, clean HEAD.
+    SHARDED_ROOT="$(cd "$ROOT_DIR" && pwd -P)"
+    SHARDED_HEAD="$(git -C "$SHARDED_ROOT" rev-parse HEAD)"
+    if [ -n "$SHARDED_REF" ]; then
+        requested_ref="$(git -C "$SHARDED_ROOT" rev-parse --verify "${SHARDED_REF}^{commit}" 2>/dev/null)" || requested_ref=""
+        [ "$requested_ref" = "$SHARDED_HEAD" ] || {
+            echo "❌ sharded runs execute the pushed checkout HEAD; check out $SHARDED_REF instead of passing --ref" >&2
+            exit 2
+        }
+    fi
+    [ -z "$(git -C "$SHARDED_ROOT" status --porcelain --untracked-files=no)" ] || {
+        echo "❌ tracked changes refused: commit and push them; sharded guests run the exact pushed HEAD" >&2
+        exit 2
+    }
+    # shellcheck source=lib/cloudbench-env.sh
+    source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+    pushed_ref="$(cloudbench_fetchable_ref "$SHARDED_ROOT" "$SHARDED_HEAD" 0)" && [ "$pushed_ref" = "$SHARDED_HEAD" ] || {
+        echo "❌ HEAD $SHARDED_HEAD is not pushed to origin; push it first (guests fetch only pushed commits)" >&2
+        exit 2
+    }
+    SHARDED_STATE_DIR="${RUN_BENCH_SHARDED_STATE_DIR:-$SHARDED_ROOT/.context/sharded-runs}"
+    mkdir -p -m 700 "$SHARDED_STATE_DIR" && chmod 700 "$SHARDED_STATE_DIR"
+    SHARDED_STATE_DIR="$(cd "$SHARDED_STATE_DIR" && pwd -P)"
+    SHARDED_MANIFEST="$SHARDED_STATE_DIR/manifest-$(date -u +%Y%m%dT%H%M%SZ)-$$.private.json"
+    (umask 077 && "$PY" -c 'import json,sys
+with open(sys.argv[1],"x") as f: json.dump(sys.argv[2:],f)' "$SHARDED_MANIFEST" "${RESOLVED_TASKS[@]}") || {
+        echo "❌ could not write the ordered task manifest" >&2
+        exit 2
+    }
+    for env_file in agents/.env back-end/.env; do
+        [ -f "$ROOT_DIR/$env_file" ] || { echo "❌ $env_file is required (the complete authoritative env file)" >&2; exit 2; }
+    done
+    if [ "${#SELECTORS[@]}" -eq 1 ]; then SHARDED_LABEL="${SELECTORS[0]}"; else SHARDED_LABEL="${#RESOLVED_TASKS[@]}-tasks"; fi
+    SHARDED_HUB_PY="$ROOT_DIR/agents/venv/bin/python"
+    [ -x "$SHARDED_HUB_PY" ] || SHARDED_HUB_PY="$(command -v python3)"
+    SHARDED_ARGS=(
+        --source-ref "$SHARDED_HEAD" --task-ref "$SHARDED_HEAD"
+        --state-dir "$SHARDED_STATE_DIR" --tasks "$SHARDED_MANIFEST"
+        --agents-env "$(realpath "$ROOT_DIR/agents/.env")" --backend-env "$(realpath "$ROOT_DIR/back-end/.env")"
+        --hub-python "$SHARDED_HUB_PY" --repetitions "$RUNS"
+        --goal "${RUN_BENCH_GOAL:-$SHARDED_LABEL}" --label "$SHARDED_LABEL"
+        # A user-requested wide run admits the tasks the ordinary fleet runs
+        # (SIM/DEMO included); LIVE acceptance selects the operator's
+        # LIVE-only eligibility, which is also its default when invoked directly.
+        --catalog-eligibility "${RUN_BENCH_CATALOG_ELIGIBILITY:-ordinary}"
+    )
+    [ -z "$SHARDED_TIMEOUT" ] || SHARDED_ARGS+=(--task-timeout "$SHARDED_TIMEOUT")
+    [ -z "$SHARDED_E2E" ] || SHARDED_ARGS+=(--e2e-timeout "$SHARDED_E2E")
+    # Same Fly CLI discovery as run-bench-cloud/run-bench-fleet; the operator pins its version.
+    if ! command -v flyctl >/dev/null 2>&1 && [ -x "$HOME/.fly/bin/flyctl" ]; then
+        export PATH="$HOME/.fly/bin:$PATH"
+    fi
+    SHARDED_OPERATOR=("${RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST:-python3}" "$SHARDED_ROOT/scripts/run-original600-controller.py")
+    echo "🧾 manifest: $SHARDED_MANIFEST (${#RESOLVED_TASKS[@]} tasks x $RUNS)"
+    echo "═══ sharded operator --check (local checks + read-only provider preflight) ═══"
+    "${SHARDED_OPERATOR[@]}" "${SHARDED_ARGS[@]}" || {
+        echo "❌ sharded operator check refused the run; nothing was launched" >&2
+        exit 2
+    }
+    if [ "$SHARDED_CHECK" -eq 1 ]; then
+        echo "✅ dry run only (--check): no controller, Machine or snapshot was created"
+        exit 0
+    fi
+    echo "═══ sharded operator --run (foreground owner through joined cleanup) ═══"
+    echo "   The admission directory printed below is the scorecard handle:"
+    echo "   scripts/run-bench scorecard <admission-dir> --html <admission-dir>/scorecard.html"
+    exec "${SHARDED_OPERATOR[@]}" "${SHARDED_ARGS[@]}" --run
+fi
+
 if [ "$CAMPAIGN_REQUESTED" -eq 1 ]; then
-    if [ "$CONCURRENCY_EXPLICIT" -eq 0 ] && { [ "$RETRY_INFRA" -gt 0 ] || [ "${#E2E_ARGS[@]}" -gt 0 ]; }; then
+    if [ "$CONCURRENCY_EXPLICIT" -eq 0 ] && { [ "$RETRY_INFRA" -gt 0 ] || [ "${#E2E_ARGS[@]}" -gt 0 ] || [ "$STRESS_DEFAULTS" -eq 1 ]; }; then
         CONCURRENCY="${#RESOLVED_TASKS[@]}"
     fi
     CAMPAIGN_ARGS=(
@@ -446,6 +756,9 @@ if [ "$CAMPAIGN_REQUESTED" -eq 1 ]; then
         "--concurrency=$CONCURRENCY"
         "--retry-infra=$RETRY_INFRA"
     )
+    if [ "$STRESS_DEFAULTS" -eq 1 ]; then
+        CAMPAIGN_ARGS+=("--stress-defaults")
+    fi
     if [ "${#E2E_ARGS[@]}" -gt 0 ]; then
         CAMPAIGN_ARGS+=("${E2E_ARGS[@]}")
     fi

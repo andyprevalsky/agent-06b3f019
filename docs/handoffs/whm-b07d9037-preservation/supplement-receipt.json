@@ -1,0 +1,15 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "swap-harness/b07d9037-81f9-4c97-80d7-6f4d42b7adc1/20261012/mirror-and-published-evidence.tar.gz.gcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "5caeed86776aaa4f4869cbc4e422ec604a259efb0275924da00c8c3b94c71cc6",
+  "gzip_sha256": "9fcdd0570a97bf149739ada6967f43f75ac6262e8c0ab031bfcf17f00cb47ae7",
+  "stored_bytes": 31962284,
+  "frames": 4,
+  "files": 5,
+  "original_bytes": 32700084,
+  "manifest_sha256": "995fd06511e4132e76f13e766f528aa32cf8745e47e99b27584460ddb45dda29",
+  "full_readback_verified": true,
+  "old_box_authenticated_member_verification": true
+}

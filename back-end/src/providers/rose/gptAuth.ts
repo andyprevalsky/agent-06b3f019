@@ -32,6 +32,7 @@ import {
   providerRequiredWaitMs,
 } from './rateLimitReset';
 import { parseResponsesSSE } from './streaming';
+import { responsesToolChoice, responsesTools } from './toolContract';
 import { postCodexStream, postOpenAIResponsesStream } from './transport';
 import type { CompletionMessage, ContentBlock, ResponseFormat, RoseStreamChunk } from './types';
 
@@ -72,12 +73,18 @@ interface BuildBodyOptions {
   effort?: string;
   providerFastMode?: boolean;
   requestId: string;
+  /** Route honors GPT-5.6+ prompt_cache_breakpoint (Foundry, OpenAI API key). */
+  cacheBreakpoints?: boolean;
 }
 
 type ResponsesInputMessage = {
   role: 'user' | 'assistant';
   content: Array<
-    | { type: 'input_text' | 'output_text'; text: string }
+    | {
+        type: 'input_text' | 'output_text';
+        text: string;
+        prompt_cache_breakpoint?: { mode: 'explicit' };
+      }
     | { type: 'input_image'; image_url: string; detail?: string }
   >;
 };
@@ -108,9 +115,56 @@ function textPartType(role: 'user' | 'assistant'): 'input_text' | 'output_text' 
   return role === 'assistant' ? 'output_text' : 'input_text';
 }
 
+const MAX_PROMPT_CACHE_BREAKPOINTS = 50;
+
+/** GPT-5.6 and later cache only at breakpoints; earlier models reject the field (HTTP 400). */
+export function supportsPromptCacheBreakpoints(model?: string): boolean {
+  const match = /gpt-(\d+)(?:\.(\d+))?/.exec(model ?? '');
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2] ?? 0);
+  return major > 5 || (major === 5 && minor >= 6);
+}
+
+function hasCacheMarker(block: ContentBlock): boolean {
+  const marker = (block as ContentBlock & { cache_control?: unknown }).cache_control;
+  return typeof marker === 'object' && marker !== null;
+}
+
+/**
+ * Breakpoint after every user message before the final item (its last text part).
+ * Replaying 911 real agent calls through the measured GPT-5.6+ rule (2026-10-12):
+ * implicit mode plus these marks cost 0.51x of no caching, against 0.55x for implicit
+ * mode alone and 0.61x for explicit mode.
+ */
+function markCompletedUserMessages(items: ResponsesInputItem[]): void {
+  for (const item of items.slice(0, -1)) {
+    const message = item as ResponsesInputMessage;
+    if (message.role !== 'user' || !Array.isArray(message.content)) continue;
+    const texts = message.content.filter((part) => part.type === 'input_text');
+    const last = texts[texts.length - 1] as
+      { prompt_cache_breakpoint?: { mode: 'explicit' } } | undefined;
+    if (last) last.prompt_cache_breakpoint = { mode: 'explicit' };
+  }
+}
+
+/** Reads consider the latest 50 breakpoints; drop older marks beyond that. */
+function capPromptCacheBreakpoints(items: ResponsesInputItem[]): void {
+  const marked = items.flatMap((item) => {
+    const content = (item as ResponsesInputMessage).content;
+    return Array.isArray(content)
+      ? content.filter((part) => 'prompt_cache_breakpoint' in part)
+      : [];
+  });
+  for (const part of marked.slice(0, Math.max(marked.length - MAX_PROMPT_CACHE_BREAKPOINTS, 0))) {
+    delete (part as { prompt_cache_breakpoint?: unknown }).prompt_cache_breakpoint;
+  }
+}
+
 function contentToResponsesParts(
   content: string | ContentBlock[],
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant',
+  cacheBreakpoints = false
 ): ResponsesInputMessage['content'] {
   if (typeof content === 'string') return [{ type: textPartType(role), text: content }];
   const parts: ResponsesInputMessage['content'] = [];
@@ -121,7 +175,15 @@ function contentToResponsesParts(
       block.type === 'input_text' ||
       block.type === 'output_text'
     ) {
-      if (block.text) parts.push({ type: textPartType(role), text: block.text });
+      if (block.text) {
+        // The caller's cache marker, in GPT-5.6+'s form.
+        const breakpoint = cacheBreakpoints && role === 'user' && hasCacheMarker(block);
+        parts.push({
+          type: textPartType(role),
+          text: block.text,
+          ...(breakpoint ? { prompt_cache_breakpoint: { mode: 'explicit' as const } } : {}),
+        });
+      }
       continue;
     }
     if ((block.type === 'image_url' || block.type === 'input_image') && role === 'user') {
@@ -191,30 +253,10 @@ function normalizeCodexMessageItem(item: Record<string, unknown>): ResponsesInpu
   };
 }
 
-function responsesTools(
-  tools?: Array<Record<string, unknown>>
-): Array<Record<string, unknown>> | undefined {
-  const out: Array<Record<string, unknown>> = [];
-  for (const tool of tools ?? []) {
-    const fn =
-      typeof tool.function === 'object' && tool.function !== null
-        ? (tool.function as Record<string, unknown>)
-        : tool;
-    if (typeof fn.name !== 'string' || fn.name.length === 0) continue;
-    const parameters =
-      typeof fn.parameters === 'object' && fn.parameters !== null ? fn.parameters : {};
-    out.push({
-      type: 'function',
-      name: fn.name,
-      description: typeof fn.description === 'string' ? fn.description : '',
-      strict: typeof fn.strict === 'boolean' ? fn.strict : false,
-      parameters,
-    });
-  }
-  return out.length > 0 ? out : undefined;
-}
-
-function buildResponsesInput(messages: CompletionMessage[]): ResponsesInputItem[] {
+function buildResponsesInput(
+  messages: CompletionMessage[],
+  cacheBreakpoints = false
+): ResponsesInputItem[] {
   const out: ResponsesInputItem[] = [];
   const emittedCallIds = new Set<string>();
   for (const [msgIndex, rawMsg] of messages.entries()) {
@@ -272,7 +314,7 @@ function buildResponsesInput(messages: CompletionMessage[]): ResponsesInputItem[
     }
 
     const role = msg.role === 'assistant' ? 'assistant' : 'user';
-    out.push({ role, content: contentToResponsesParts(msg.content, role) });
+    out.push({ role, content: contentToResponsesParts(msg.content, role, cacheBreakpoints) });
   }
   while (out.length > 0 && (out[out.length - 1] as ResponsesInputMessage).role === 'assistant') {
     out.pop();
@@ -325,13 +367,18 @@ function normalizeReasoningEffort(effort?: string): string {
 
 export function buildCodexResponsesBody(opts: BuildBodyOptions): Record<string, unknown> {
   const instructions = buildInstructions(opts.messages) ?? DEFAULT_CODEX_INSTRUCTIONS;
+  const model = opts.modelOverride ?? opts.poolSpec.gptAuthModel;
+  const breakpoints = opts.cacheBreakpoints === true && supportsPromptCacheBreakpoints(model);
+  const input = buildResponsesInput(opts.messages, breakpoints);
+  if (breakpoints) markCompletedUserMessages(input);
+  capPromptCacheBreakpoints(input);
   const body: Record<string, unknown> = {
-    model: opts.modelOverride ?? opts.poolSpec.gptAuthModel,
-    input: buildResponsesInput(opts.messages),
+    model,
+    input,
     stream: true,
     store: false,
     parallel_tool_calls: true,
-    tool_choice: opts.toolChoice ?? 'auto',
+    tool_choice: responsesToolChoice(opts.toolChoice),
     prompt_cache_key: buildPromptCacheKey(opts, instructions),
     reasoning: { effort: normalizeReasoningEffort(opts.effort), summary: 'auto' },
     include: ['reasoning.encrypted_content'],
@@ -497,6 +544,7 @@ export async function* openAiApiKeyComplete(
   const body = buildCodexResponsesBody({
     poolSpec: opts.poolSpec,
     modelOverride: opts.model,
+    cacheBreakpoints: true,
     messages: opts.messages,
     responseFormat: opts.responseFormat,
     tools: opts.tools,

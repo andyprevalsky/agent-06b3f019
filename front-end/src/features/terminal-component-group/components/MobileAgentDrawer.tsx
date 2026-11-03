@@ -27,6 +27,17 @@
  *
  * Desktop is unaffected: TerminalHeader renders this only below the md
  * breakpoint (the desktop AttentionInbox bell owns notifications there).
+ *
+ * SAFE AREAS (installed PWA): content pads by the status-bar inset on top and
+ * the home-indicator inset at the bottom (Logout stays tappable); the Sheet's
+ * close target sits below the status bar at the right of the tab row, which
+ * leaves room for it (pr-12). Row menus use the shared menu layer (z 220),
+ * above the Sheet (211); Rename opens later on the same modal tier, so on top.
+ *
+ * ROSE HEADER (roseHeader, the Rose Desktop mobile header): the hamburger sits
+ * on the header's LEFT with a 40px target and opens the drawer from the LEFT
+ * (the left bar's place); no count badge on it — the pill's bell carries the
+ * unanswered count. The drawer content is unchanged.
  */
 
 import { useRef, useState } from 'react';
@@ -43,6 +54,8 @@ import {
 import { cn } from '@/lib/utils';
 
 import SidebarAgentList from './SidebarAgentList';
+import { RoseMobileAgentList } from './rose-sidebar/RoseMobileAgentList';
+import { RoseNewAgentButton, RoseSearchRow } from './rose-sidebar/RoseSidebarChrome';
 import { SidebarCreateAgentButton, SidebarSearch } from './SidebarChrome';
 import { useAgentRowActions } from './useAgentRowActions';
 import { useSidebarSearch } from './useSidebarSearch';
@@ -57,8 +70,13 @@ import type { Agent } from '../hooks';
 type DrawerTab = 'agents' | 'notifications';
 
 interface MobileAgentDrawerProps {
+  onResumeAgent?: (agentId: string) => Promise<void>;
+  resumingAgentId?: string | null;
+  realtimeReady?: boolean;
   agents: Agent[];
   isLoadingAgents: boolean;
+  /** False until the first agent load settles; background polls never reset it. */
+  hasLoadedAgents: boolean;
   selectedAgentId: string | null;
   onSelectAgent: (agentId: string | null) => void;
   onCreateAgent: () => void;
@@ -67,6 +85,8 @@ interface MobileAgentDrawerProps {
   isSignedIn: boolean;
   onLoginClick: () => void;
   onLogout: () => void;
+  /** Rose Desktop mobile header: left trigger/side, 40px target, no trigger badge. */
+  roseHeader?: boolean;
 }
 
 function CountBadge({ count, className }: { count: number; className?: string }) {
@@ -114,6 +134,7 @@ function TabButton({
 export default function MobileAgentDrawer({
   agents,
   isLoadingAgents,
+  hasLoadedAgents,
   selectedAgentId,
   onSelectAgent,
   onCreateAgent,
@@ -121,6 +142,7 @@ export default function MobileAgentDrawer({
   isSignedIn,
   onLoginClick,
   onLogout,
+  roseHeader = false,
 }: MobileAgentDrawerProps) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<DrawerTab>('agents');
@@ -176,23 +198,32 @@ export default function MobileAgentDrawer({
         <button
           type="button"
           aria-label="Open menu"
-          className="relative flex h-9 w-9 items-center justify-center rounded-lg transition-colors hover:bg-muted md:hidden"
+          className={cn(
+            'relative flex items-center justify-center rounded-lg transition-colors md:hidden',
+            roseHeader
+              ? 'h-10 w-10 text-[hsl(240_8%_45%)] hover:text-foreground dark:text-[#a3a39d] dark:hover:text-[#ecece8]'
+              : 'h-9 w-9 hover:bg-muted',
+          )}
         >
-          <Menu className="h-5 w-5 text-foreground" />
-          <CountBadge count={notifCount} className="absolute -right-1 -top-1" />
+          <Menu className={cn('h-5 w-5', !roseHeader && 'text-foreground')} />
+          {!roseHeader && <CountBadge count={notifCount} className="absolute -right-1 -top-1" />}
         </button>
       </SheetTrigger>
       <SheetContent
-        side="right"
+        side={roseHeader ? 'left' : 'right'}
         onCloseAutoFocus={handleCloseAutoFocus}
-        className="flex w-[min(340px,88vw)] flex-col p-0 pt-[var(--safe-area-inset-top)]"
+        onEscapeKeyDown={(event) => {
+          if (event.target instanceof HTMLInputElement && event.target.dataset.projectNameEditor)
+            event.preventDefault();
+        }}
+        className="flex w-screen max-w-none flex-col p-0 pt-[var(--safe-area-inset-top)] pb-[var(--safe-area-inset-bottom)]"
       >
         <SheetTitle className="sr-only">Menu</SheetTitle>
         <SheetDescription className="sr-only">Your agents and notifications</SheetDescription>
 
         {isSignedIn ? (
           <>
-            <div className="flex gap-1 border-b border-border bg-muted/50 p-1.5">
+            <div className="flex gap-1 border-b border-border bg-muted/50 p-1.5 pr-12">
               <TabButton
                 active={tab === 'agents'}
                 onClick={() => setTab('agents')}
@@ -209,25 +240,54 @@ export default function MobileAgentDrawer({
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
               {tab === 'agents' ? (
                 <>
-                  <SidebarCreateAgentButton isCollapsed={false} onCreateAgent={handleCreateAgent} />
-                  <SidebarSearch
-                    isCollapsed={false}
-                    value={searchQuery}
-                    onChange={setSearchQuery}
-                  />
-                  <SidebarAgentList
-                    agents={search.agents}
-                    isLoadingAgents={isLoadingAgents}
-                    selectedAgentId={selectedAgentId}
-                    onSelectAgent={handleSelectAgent}
-                    attentionAgentIds={attentionAgentIds}
-                    isCollapsed={false}
-                    query={searchQuery}
-                    contentMatchAgentIds={search.contentMatchAgentIds}
-                    isSearching={search.isSearching}
-                    searchError={search.searchError}
-                    {...handlers}
-                  />
+                  {roseHeader ? (
+                    <>
+                      <RoseNewAgentButton isExpanded onClick={handleCreateAgent} />
+                    </>
+                  ) : (
+                    <SidebarCreateAgentButton
+                      isCollapsed={false}
+                      onCreateAgent={handleCreateAgent}
+                    />
+                  )}
+                  {roseHeader ? (
+                    <RoseSearchRow isExpanded value={searchQuery} onChange={setSearchQuery} />
+                  ) : (
+                    <SidebarSearch
+                      isCollapsed={false}
+                      value={searchQuery}
+                      onChange={setSearchQuery}
+                    />
+                  )}
+                  {roseHeader ? (
+                    <RoseMobileAgentList
+                      agents={search.agents}
+                      selectedAgentId={selectedAgentId}
+                      onSelectAgent={handleSelectAgent}
+                      onClose={() => setOpen(false)}
+                      handlers={handlers}
+                      attentionAgentIds={attentionAgentIds}
+                      query={searchQuery}
+                      contentMatchAgentIds={search.contentMatchAgentIds}
+                      isLoading={isLoadingAgents && !hasLoadedAgents}
+                      isSearching={search.isSearching}
+                      searchError={search.searchError}
+                    />
+                  ) : (
+                    <SidebarAgentList
+                      agents={search.agents}
+                      isLoadingAgents={isLoadingAgents}
+                      selectedAgentId={selectedAgentId}
+                      onSelectAgent={handleSelectAgent}
+                      attentionAgentIds={attentionAgentIds}
+                      isCollapsed={false}
+                      query={searchQuery}
+                      contentMatchAgentIds={search.contentMatchAgentIds}
+                      isSearching={search.isSearching}
+                      searchError={search.searchError}
+                      {...handlers}
+                    />
+                  )}
                 </>
               ) : (
                 <div className="flex-1 overflow-y-auto p-3">

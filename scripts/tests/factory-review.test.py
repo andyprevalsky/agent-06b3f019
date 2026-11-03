@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1628,8 +1629,23 @@ class ApprovalLifecycleTest(unittest.TestCase):
             "deploy production-start agentcard",
             "deploy production-finish agentcard",
             "deploy outcome completed",
+            "agents/benchmarks/history/factory_events.jsonl",
+            "Every `/deploy` publishes these timestamps to the repo, whatever its outcome.",
         ):
             self.assertIn(marker, deploy_command)
+        # The publication rule, the review-cap block and Step 15 each publish.
+        self.assertGreaterEqual(
+            deploy_command.count("python3 scripts/factory_ledger.py publish"), 3
+        )
+        self.assertNotIn("factory_ledger.py sync", deploy_command)
+        blocked = deploy_command.index("deploy outcome blocked")
+        self.assertLess(
+            deploy_command.index("factory_ledger.py publish", blocked) - blocked, 120
+        )
+        self.assertIn(
+            "agents/benchmarks/history/factory_events.jsonl merge=union",
+            (ROOT / ".gitattributes").read_text(),
+        )
         for marker in (
             "rca stage evidence-trace",
             "rca stage reproduce-diagnose",
@@ -1639,6 +1655,658 @@ class ApprovalLifecycleTest(unittest.TestCase):
             "rca outcome blocked",
         ):
             self.assertIn(marker, rca_command)
+
+
+LEDGER = FACTORY_REVIEW._factory_ledger_module()
+T0 = 1_800_000_000.0
+
+
+def stage(run_id: str, name: str, start: float, end: float, status: str = "passed") -> dict:
+    return {
+        "schema_version": 1,
+        "kind": "deploy-stage",
+        "run_id": run_id,
+        "stage": name,
+        "started_epoch": T0 + start,
+        "finished_epoch": T0 + end,
+        "status": status,
+        "branch": "feat/x",
+        "git_sha": "abc",
+    }
+
+
+def event(workflow: str, name: str, value: str, at: float, branch: str = "feat/x") -> dict:
+    return {
+        "schema_version": 1,
+        "kind": "factory-event",
+        "workflow": workflow,
+        "event": name,
+        "value": value,
+        "recorded_epoch": T0 + at,
+        "workspace": "rose",
+        "branch": branch,
+    }
+
+
+class LedgerSourceTest(unittest.TestCase):
+    """/deploy and /RCA rebuilt from repo-tracked telemetry without Conductor."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def write_local_telemetry(self, root: Path) -> None:
+        run_dir = root / "deploy-runs" / "run-1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "metadata.json").write_text(
+            json.dumps({"run_id": "run-1", "branch": "feat/x", "git_sha": "abc"})
+        )
+        (run_dir / "stages.jsonl").write_text(
+            json.dumps(
+                {
+                    "run_id": "run-1",
+                    "stage": "prettier",
+                    "started_epoch": T0,
+                    "finished_epoch": T0 + 5,
+                    "status": "passed",
+                    "exit_code": 0,
+                    "log": "logs/prettier.log",
+                }
+            )
+            + "\n"
+        )
+        (root / "factory-events.jsonl").write_text(
+            "\n".join(
+                json.dumps({k: v for k, v in row.items() if k not in {"kind", "schema_version"}})
+                for row in (
+                    event("deploy", "outcome", "completed", 60),
+                    event("descend", "outcome", "completed", 61),
+                )
+            )
+            + "\nnot-json\n"
+        )
+
+    def test_sync_is_idempotent_and_keeps_machine_paths_out_of_git(self) -> None:
+        local = self.root / "context"
+        self.write_local_telemetry(local)
+        ledger = self.root / "factory_events.jsonl"
+
+        self.assertEqual(LEDGER.sync(ledger, [local]), 2)
+        self.assertEqual(LEDGER.sync(ledger, [local, local]), 0)
+
+        rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+        self.assertEqual([row["kind"] for row in rows], ["deploy-stage", "factory-event"])
+        self.assertNotIn("log", rows[0])
+        self.assertEqual(rows[0]["branch"], "feat/x")
+        self.assertEqual(rows[1]["workflow"], "deploy")
+
+    def git(self, repo: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    def clone_with_origin(self) -> tuple[Path, Path]:
+        origin = self.root / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        work = self.root / "work"
+        subprocess.run(["git", "clone", "-q", str(origin), str(work)], check=True, capture_output=True)
+        self.git(work, "config", "user.name", "Fixture")
+        self.git(work, "config", "user.email", "fixture@example.com")
+        history = work / "agents/benchmarks/history"
+        history.mkdir(parents=True)
+        (history / "descend_steps.jsonl").write_text('{"record_id":"r1","workflow":"descend"}\n')
+        (work / "README").write_text("fixture\n")
+        self.git(work, "add", ".")
+        self.git(work, "commit", "-q", "-m", "base")
+        self.git(work, "push", "-q", "origin", "HEAD:main")
+        return origin, work
+
+    def test_publish_appends_every_skill_to_main_without_touching_the_branch(self) -> None:
+        origin, work = self.clone_with_origin()
+        self.git(work, "checkout", "-q", "-b", "feat/deploying")
+        descend = work / "agents/benchmarks/history/descend_steps.jsonl"
+        descend.write_text(descend.read_text() + '{"record_id":"r2","workflow":"descend"}\n')
+        local = self.root / "context"
+        self.write_local_telemetry(local)
+        (local / "factory-events.jsonl").write_text(
+            (local / "factory-events.jsonl").read_text()
+            + json.dumps({k: v for k, v in event("rca", "outcome", "fixed", 90).items() if k != "kind"})
+            + "\n"
+        )
+        branch_head = self.git(work, "rev-parse", "HEAD")
+        status_before = self.git(work, "status", "--porcelain")
+
+        self.assertEqual(LEDGER.publish(work, [local]), 4)
+
+        self.assertEqual(self.git(work, "rev-parse", "HEAD"), branch_head)
+        self.assertEqual(self.git(work, "status", "--porcelain"), status_before)
+        main_events = self.git(origin, "show", "main:agents/benchmarks/history/factory_events.jsonl")
+        workflows = [json.loads(line).get("workflow") for line in main_events.splitlines()]
+        self.assertEqual(sorted(filter(None, workflows)), ["deploy", "rca"])
+        self.assertIn('"stage":"prettier"', main_events)
+        main_descend = self.git(origin, "show", "main:agents/benchmarks/history/descend_steps.jsonl")
+        self.assertEqual([json.loads(l)["record_id"] for l in main_descend.splitlines()], ["r1", "r2"])
+        self.assertEqual(LEDGER.publish(work, [local]), 0)
+
+    def test_publish_retries_when_main_moves_and_keeps_the_other_commit(self) -> None:
+        origin, work = self.clone_with_origin()
+        other = self.root / "other"
+        subprocess.run(["git", "clone", "-q", str(origin), str(other)], check=True, capture_output=True)
+        self.git(other, "config", "user.name", "Other")
+        self.git(other, "config", "user.email", "other@example.com")
+        local = self.root / "context"
+        self.write_local_telemetry(local)
+
+        def race(attempt: int) -> None:
+            if attempt == 0:
+                (other / "MERGED").write_text("another deploy\n")
+                self.git(other, "add", "MERGED")
+                self.git(other, "commit", "-q", "-m", "concurrent merge")
+                self.git(other, "push", "-q", "origin", "HEAD:main")
+
+        self.assertEqual(LEDGER.publish(work, [local], before_push=race), 2)
+        self.assertEqual(self.git(origin, "show", "main:MERGED"), "another deploy")
+        self.assertEqual(
+            len(self.git(origin, "show", "main:agents/benchmarks/history/factory_events.jsonl").splitlines()),
+            2,
+        )
+
+    def test_report_reads_rows_published_to_main_once(self) -> None:
+        published = LEDGER.encode_rows([stage("run-1", "prettier", 0, 5), event("deploy", "outcome", "completed", 60)])
+        ledger = self.root / "factory_events.jsonl"
+        ledger.write_text(published.splitlines()[0] + "\n")
+
+        rows = FACTORY_REVIEW.load_ledger_rows(ledger, [], [published])
+        self.assertEqual([row["kind"] for row in rows], ["deploy-stage", "factory-event"])
+
+        descend = self.root / "descend_steps.jsonl"
+        record = {"workflow": "descend", "record_type": "factory_event", "record_id": "r1", "recorded_epoch": 1}
+        descend.write_text(json.dumps(record) + "\n")
+        both = FACTORY_REVIEW.load_descend_factory_events(
+            descend, [json.dumps(record) + "\n" + json.dumps({**record, "record_id": "r2"}) + "\n"]
+        )
+        self.assertEqual([item["record_id"] for item in both], ["r1", "r2"])
+
+    def test_ledger_rebuilds_instrumented_deploy_gates_and_approvals(self) -> None:
+        rows = [
+            stage("run-1", "prompt-approval", 0, 1, status="failed"),
+            event("deploy", "approval-request", "prompt-approval", 2),
+            event("deploy", "approval-decision", "approved", 602),
+            stage("run-1", "prettier", 610, 620),
+            event("deploy", "stage-start", "runtime-blackbox", 630),
+            stage("run-1", "backend-coverage-blackbox", 630, 930),
+            event("deploy", "stage-finish", "runtime-blackbox", 930),
+            stage("run-1", "smoke", 940, 1540),
+            stage("run-1", "semantic", 940, 1240),
+            event("deploy", "stage-start", "code-review", 1600),
+            event("deploy", "stage-finish", "code-review", 1900),
+            event("deploy", "stage-start", "production-verify", 1960),
+            event("deploy", "stage-finish", "production-verify", 2260),
+            event("deploy", "outcome", "completed", 2300),
+        ]
+        turns = FACTORY_REVIEW.ledger_deploy_turns(sorted(rows, key=LEDGER.row_epoch))
+
+        self.assertEqual(len(turns), 1)
+        turn = turns[0]
+        self.assertEqual(turn.status, "completed")
+        self.assertEqual(turn.duration, 2300.0)
+        self.assertEqual(turn.consumed_approval_durations, (600.0,))
+        self.assertEqual(FACTORY_REVIEW.deploy_measurement_mode(turn), "instrumented")
+        values = FACTORY_REVIEW.deploy_turn_values(turn)
+        self.assertEqual(values["Smoke benchmarks"].durations, (600.0,))
+        self.assertEqual(values["Semantic tests"].durations, (300.0,))
+        self.assertEqual(values["Code review"].durations, (300.0,))
+        self.assertEqual(values["Production verify"].durations, (300.0,))
+        self.assertEqual(values["Group 4 wall clock"].wall_seconds, 900.0)
+
+    def test_blocked_then_resumed_deploy_is_one_logical_deploy(self) -> None:
+        rows = [
+            stage("run-1", "prettier", 0, 10),
+            event("deploy", "approval-request", "combined", 20),
+            event("deploy", "outcome", "blocked", 30),
+            event("deploy", "approval-decision", "approved", 3620),
+            stage("run-2", "prettier", 4000, 4010),
+            event("deploy", "outcome", "completed", 5000),
+        ]
+        turns = FACTORY_REVIEW.ledger_deploy_turns(sorted(rows, key=LEDGER.row_epoch))
+
+        self.assertEqual([turn.status for turn in turns], ["blocked", "completed"])
+        blocked, completed = turns
+        self.assertEqual(blocked.approval_durations, (3600.0,))
+        self.assertEqual(completed.consumed_approval_durations, (3600.0,))
+        self.assertEqual(FACTORY_REVIEW.deploy_duration(completed), 5000.0)
+
+    def test_explicit_run_identity_keeps_post_merge_events_with_original_stages(self) -> None:
+        rows = [
+            stage("run-1", "prettier", 0, 10),
+            stage("run-1", "smoke", 10, 40, status="failed"),
+            stage("other-run", "prettier", 45, 50),
+        ]
+        for name, value, at, branch in (
+            ("stage-start", "production-verify", 60, "feat/x"),
+            ("stage-finish", "production-verify", 120, "main"),
+            ("outcome", "completed", 130, "feat/x-2"),
+        ):
+            rows.append({**event("deploy", name, value, at, branch), "run_id": "run-1"})
+        turns = FACTORY_REVIEW.ledger_deploy_turns(sorted(rows, key=LEDGER.row_epoch))
+        completed = [turn for turn in turns if turn.status == "completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0].turn_id, "run-1")
+        self.assertEqual(completed[0].duration, 130)
+        self.assertEqual(
+            FACTORY_REVIEW.deploy_turn_values(completed[0])["Production verify"].durations,
+            (60,),
+        )
+        self.assertEqual(next(turn for turn in turns if turn.turn_id == "other-run").status, "incomplete")
+
+    def test_unknown_explicit_run_never_falls_back_to_a_matching_branch(self) -> None:
+        rows = [stage("run-1", "prettier", 0, 10),
+                {**event("deploy", "outcome", "completed", 20), "run_id": "not-collected"}]
+        turns = FACTORY_REVIEW.ledger_deploy_turns(rows)
+        self.assertEqual(next(turn for turn in turns if turn.turn_id == "run-1").status, "incomplete")
+        self.assertFalse(any(turn.status == "completed" for turn in turns))
+
+    def test_reporting_only_coverage_is_not_a_runtime_test_execution(self) -> None:
+        turns = FACTORY_REVIEW.ledger_deploy_turns([
+            stage("run-1", "backend-coverage-report", 0, 36),
+            {**event("deploy", "outcome", "completed", 40), "run_id": "run-1"},
+        ])
+        values = FACTORY_REVIEW.deploy_turn_values(turns[0])
+        self.assertEqual(values["Coverage"].wall_seconds, 36)
+        self.assertEqual(values["Runtime blackbox"].wall_seconds, 0)
+
+    def test_event_writer_binds_only_active_deploy_run(self) -> None:
+        run_root = self.root / "runs"
+        run_dir = run_root / "run-1"
+        run_dir.mkdir(parents=True)
+        (run_root / "current").write_text("run-1\n")
+        metadata_path = run_dir / "metadata.json"
+        metadata_path.write_text(json.dumps({"run_id": "run-1", "status": "active"}))
+        log = self.root / "events.jsonl"
+        def emit(workflow: str, name: str, value: str) -> dict:
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/record_factory_event.py"), workflow, name, value],
+                cwd=ROOT,
+                env={"FACTORY_EVENT_LOG": str(log), "DEPLOY_RUN_ROOT": str(run_root)},
+                text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(log.read_text().splitlines()[-1])
+        self.assertEqual(emit("deploy", "outcome", "completed").get("run_id"), "run-1")
+        self.assertIsNone(emit("rca", "outcome", "fixed").get("run_id"))
+        metadata_path.write_text(json.dumps({"run_id": "run-1", "status": "completed"}))
+        self.assertIsNone(emit("deploy", "outcome", "completed").get("run_id"))
+        (run_root / "current").write_text("../foreign\n")
+        self.assertIsNone(emit("deploy", "outcome", "completed").get("run_id"))
+
+    def test_append_only_identity_enrichment_is_published_once_and_read_once(self) -> None:
+        original = event("deploy", "outcome", "completed", 130, "feat/x-2")
+        enriched = {**original, "run_id": "run-1"}
+        local = self.root / "context"
+        local.mkdir()
+        (local / "factory-events.jsonl").write_text(json.dumps(enriched) + "\n")
+        old = json.dumps(original) + "\n"
+        self.assertEqual(LEDGER.pending_rows(old, [local])[0]["run_id"], "run-1")
+        combined = old + json.dumps(enriched) + "\n"
+        self.assertEqual(LEDGER.pending_rows(combined, [local]), [])
+        (local / "factory-events.jsonl").write_text(combined)
+        self.assertEqual(LEDGER.pending_rows("", [local])[0]["run_id"], "run-1")
+        original_metadata = {**original, "telemetry": {"usage": {"cost_usd": 3.0}}}
+        changed_metadata = {**enriched, "telemetry": {"usage": {"cost_usd": 0.0}}}
+        self.assertFalse(LEDGER.is_identity_enrichment(original_metadata, changed_metadata))
+        ledger = self.root / "factory.jsonl"
+        ledger.write_text(json.dumps(stage("run-1", "prettier", 0, 10)) + "\n" + combined)
+        rows = FACTORY_REVIEW.load_ledger_rows(ledger, [])
+        self.assertEqual(len(rows), 2)
+        turns = FACTORY_REVIEW.ledger_deploy_turns(rows)
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(turns[0].duration, 130)
+
+    def test_finished_stage_admission_retains_identity_until_deploy_outcome(self) -> None:
+        run_root = self.root / "runs"
+        log = self.root / "events.jsonl"
+        environment = {"DEPLOY_RUN_ROOT": str(run_root), "FACTORY_EVENT_LOG": str(log)}
+        for args in (("--start", "--run-id", "run-1"), ("--finish",)):
+            result = subprocess.run(["bash", str(ROOT / "scripts/run-deploy-stage"), *args],
+                                    cwd=ROOT, env=environment, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            if args[0] == "--start":
+                blocked = subprocess.run([sys.executable, str(ROOT / "scripts/record_factory_event.py"),
+                                          "deploy", "outcome", "blocked"], cwd=ROOT,
+                                         env=environment, text=True, capture_output=True)
+                self.assertEqual(blocked.returncode, 0, blocked.stderr)
+                self.assertEqual((run_root / "factory-current").read_text().strip(), "run-1")
+        self.assertFalse((run_root / "current").exists())
+        self.assertEqual((run_root / "factory-current").read_text().strip(), "run-1")
+        for name, value in (("stage-start", "production-verify"), ("outcome", "completed")):
+            result = subprocess.run([sys.executable, str(ROOT / "scripts/record_factory_event.py"),
+                                     "deploy", name, value], cwd=ROOT, env=environment,
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(log.read_text().splitlines()[-1])["run_id"], "run-1")
+        self.assertFalse((run_root / "factory-current").exists())
+
+    def test_run_without_outcome_is_excluded_not_zero(self) -> None:
+        turns = FACTORY_REVIEW.ledger_deploy_turns([stage("run-1", "prettier", 0, 10)])
+        self.assertEqual(turns[0].status, "incomplete")
+
+        payload = FACTORY_REVIEW.analyze(turns, "2000-01-01", 20)
+        rows = {row["step"]: row for row in payload["deploy"]["steps"]}
+        self.assertTrue(rows["Static verify"]["unavailable"])
+        self.assertTrue(rows["Total"]["unavailable"])
+        page = FACTORY_REVIEW.render_html(payload)
+        self.assertIn("No completed runs in this data source", page)
+        self.assertNotIn("0.0m end-to-end", page)
+
+    def test_ledger_rca_events_build_instrumented_rca(self) -> None:
+        rows = [
+            event("rca", "stage", "evidence-trace", 0, branch="main"),
+            event("rca", "stage", "reproduce-diagnose", 120, branch="main"),
+            event("rca", "stage", "verify-handoff", 600, branch="main"),
+            event("rca", "outcome", "fixed", 900, branch="main"),
+            event("rca", "stage", "evidence-trace", 1000, branch="main"),
+        ]
+        turns = FACTORY_REVIEW.ledger_rca_turns(rows)
+
+        self.assertEqual([turn.status for turn in turns], ["completed", "incomplete"])
+        self.assertEqual(FACTORY_REVIEW.rca_measurement_mode(turns[0]), "instrumented")
+        states = FACTORY_REVIEW.rca_state_rows(turns[0])
+        self.assertEqual([timing.durations for timing in states], [(120.0,), (480.0,), (300.0,)])
+
+    def test_partial_ledger_rca_times_recorded_stages_not_inferred_ones(self) -> None:
+        rows = [
+            event("rca", "stage", "evidence-trace", 0, branch="main"),
+            event("rca", "stage", "reproduce-diagnose", 210, branch="main"),
+            event("rca", "outcome", "diagnosis-ready", 2360, branch="main"),
+        ]
+        (turn,) = FACTORY_REVIEW.ledger_rca_turns(rows)
+
+        self.assertEqual(turn.status, "diagnosis-ready")
+        self.assertEqual(FACTORY_REVIEW.rca_measurement_mode(turn), "incomplete")
+        states = FACTORY_REVIEW.rca_state_rows(turn)
+        self.assertEqual([timing.durations for timing in states], [(210.0,), (2150.0,), ()])
+        self.assertTrue(all(timing.incomplete for timing in states))
+
+    def test_predeploy_consumption_groups_trajectories_by_deploy_branch(self) -> None:
+        history = self.root / "history"
+        history.mkdir()
+        attempts = []
+        for deploy, (branch_start, agent_prefix) in enumerate(((0, "a"), (86_400, "b"))):
+            for index, (task, passed) in enumerate((("alpha", True), ("beta", deploy == 0))):
+                for copy in range(2):
+                    attempts.append(
+                        {
+                            "task": task,
+                            "passed": passed,
+                            "duration_seconds": 100.0,
+                            "cost_cents": 5.0,
+                            "timestamp": FACTORY_REVIEW._epoch_iso(
+                                T0 + branch_start + 200 * index + 100 + copy
+                            ),
+                            "agent_id": f"{agent_prefix}{index}{copy}".ljust(36, "0"),
+                            "suite": "predeploy",
+                        }
+                    )
+        attempts.append({**attempts[0], "suite": None, "task": "ignored"})
+        (history / "task_attempts.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in attempts) + "\n"
+        )
+        (history / "span_durations.20270115.feat-x.jsonl").write_text(
+            "".join(
+                '{"agent_id": "' + row["agent_id"] + '", "benchmark": "x"}\n'
+                for row in attempts[:4]
+            )
+        )
+        catalog = self.root / "tasks.json"
+        catalog.write_text(
+            json.dumps(
+                [
+                    {"name": "alpha", "deploy_category": "payment", "tags": ["smoke"]},
+                    {"name": "beta", "deploy_category": "payment", "tags": []},
+                ]
+            )
+        )
+
+        metrics = FACTORY_REVIEW.predeploy_consumption(
+            history, catalog, now=datetime(2027, 1, 20, tzinfo=timezone.utc)
+        )
+
+        self.assertEqual(metrics["attempts"], 8)
+        self.assertEqual(metrics["deploys"], 2)
+        self.assertEqual(metrics["attributed_deploys"], 1)
+        tasks = {row["task"]: row for row in metrics["tasks"]}
+        self.assertEqual(tasks["alpha"]["attempts_per_deploy"], 2.0)
+        self.assertEqual(tasks["alpha"]["cents_per_deploy"], 10.0)
+        self.assertTrue(tasks["alpha"]["smoke"])
+        self.assertEqual(tasks["beta"]["failed_deploys"], 1)
+        self.assertAlmostEqual(tasks["beta"]["agent_share"], 0.5)
+        (category,) = metrics["categories"]
+        self.assertEqual(category["joint_pass_rate"], 0.5)
+        self.assertEqual(metrics["windows"][0]["deploys"], 2)
+        page = FACTORY_REVIEW.render_predeploy_section(metrics)
+        self.assertIn("Joint pass", page)
+
+    def test_cli_uses_ledger_when_conductor_database_is_absent(self) -> None:
+        local = self.root / "context"
+        self.write_local_telemetry(local)
+        history = self.root / "history"
+        history.mkdir()
+        output = self.root / "out"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/factory_review.py"),
+                "--db",
+                str(self.root / "missing.db"),
+                "--ledger",
+                str(self.root / "factory_events.jsonl"),
+                "--telemetry-root",
+                str(local),
+                "--history-dir",
+                str(history),
+                "--catalog",
+                str(self.root / "missing-tasks.json"),
+                "--descend-history",
+                str(history / "descend_steps.jsonl"),
+                "--output-dir",
+                str(output),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads((output / "factory-review.json").read_text())
+        self.assertEqual(payload["sources"]["mode"], "ledger")
+        self.assertEqual(payload["deploy"]["completed"], 1)
+        self.assertIn("Data source:", (output / "factory-review.html").read_text())
+        self.assertEqual(payload["diagnostics"]["coverage"]["stage_rows"], 1)
+        self.assertIn("Failures, reruns and gaps", (output / "factory-review.html").read_text())
+
+
+DIAGNOSTICS = FACTORY_REVIEW._factory_ledger_module("factory_diagnostics")
+
+
+def detailed(row: dict, **detail: object) -> dict:
+    return {**row, "detail": {"schema_version": 1, **detail}}
+
+
+class DiagnosticsTest(unittest.TestCase):
+
+    def test_invalid_nested_measurements_remain_unmeasured(self):
+        row=detailed(stage("run", "gate", 0, 10, "failed"), timing=[1], host="unknown")
+        result=DIAGNOSTICS.analyze_ledger([row])["gates"][0]
+        for field in ("median_setup_seconds", "median_queue_seconds", "median_exec_seconds", "max_load1", "min_mem_available_mb"):
+            self.assertIsNone(result[field])
+
+    def test_nested_detail_shapes_are_unknown_without_losing_valid_metrics(self):
+        base = detailed(stage("run-1", "gate", 0, 10, "failed"),
+                        outcome={"failure_class": "assertion", "failing": ["kept"]},
+                        timing={"exec_seconds": 10}, source={"sha": "a" * 40})
+        for field in ("outcome", "attempt", "timing", "host", "source", "reuse"):
+            for value in (["wrong"], "wrong", 1):
+                with self.subTest(field=field, value=value):
+                    broken = {**base, "detail": {**base["detail"], field: value}}
+                    result = DIAGNOSTICS.analyze_ledger([base, broken])
+                    self.assertEqual(result["coverage"]["stage_rows"], 2)
+                    self.assertEqual(result["gates"][0]["failed"], 2)
+                    self.assertEqual(result["gates"][0]["median_exec_seconds"], 10)
+                    self.assertIn({"name": "kept", "count": 1 if field == "outcome" else 2}, result["gates"][0]["failing_names"])
+
+    def test_nested_counter_keys_and_names_are_type_checked(self):
+        for failing in (123, "word", [["nested"]], {"name": "bad"}):
+            with self.subTest(failing=failing):
+                row = detailed(stage("run", "gate", 0, 10, "failed"),
+                               outcome={"failure_class": ["bad"], "failing": failing},
+                               attempt={"retry_cause": {"bad": True}})
+                result = DIAGNOSTICS.analyze_ledger([row])
+                self.assertEqual(result["gates"][0]["failure_classes"], [{"name": "unclassified", "count": 1}])
+                self.assertEqual(result["gates"][0]["failing_names"], [])
+                self.assertEqual(result["retry_causes"], [])
+        row = detailed(stage("run", "gate", 0, 10, "failed"), outcome={"failure_class": "assertion", "failing": ["good", ["bad"], 42]})
+        self.assertEqual(DIAGNOSTICS.analyze_ledger([row])["gates"][0]["failing_names"], [{"name":"good", "count":1}])
+
+
+    """Failure reasons, rerun causes, reuse, queue/exec and gap attribution."""
+
+    def rows(self) -> list[dict]:
+        source = {"sha": "a" * 40, "files_changed": 3, "insertions": 10, "deletions": 2, "lanes": ["scripts"]}
+        return [
+            detailed(
+                stage("run-1", "typescript", 0, 60, "failed"),
+                outcome={"exit_code": 2, "failure_class": "typecheck", "failing": ["src/a.ts"]},
+                attempt={"attempt": 1},
+                timing={"setup_seconds": 1.0, "exec_seconds": 60.0, "queue_seconds": 30.0},
+                host={"load1_peak": 7.5, "mem_available_min_mb": 900.0},
+                source=source,
+                reuse={"requested": True, "hit": False, "miss_reason": "no-prior-pass"},
+            ),
+            # 10 minutes fixing before the retry on a new commit.
+            detailed(
+                stage("run-1", "typescript", 660, 700),
+                outcome={"exit_code": 0, "failure_class": None},
+                attempt={"attempt": 2, "retry_cause": "new-commit", "fix_sha": "b" * 40},
+                timing={"setup_seconds": 0.5, "exec_seconds": 40.0},
+                reuse={"requested": True, "hit": False, "miss_reason": "inputs-changed"},
+            ),
+            detailed(stage("run-1", "typescript", 701, 701, "reused"), reuse={"requested": True, "hit": True}),
+            # An older row without detail still counts as an attempt.
+            stage("run-1", "prettier", 702, 710),
+            event("deploy", "review-request", "coderabbit", 720),
+            event("deploy", "review-arrival", "coderabbit", 1320),
+            stage("run-1", "semantic", 1330, 1400),
+            event("deploy", "production-start", "render", 1400),
+            event("deploy", "production-finish", "render", 1700),
+            event("deploy", "outcome", "completed", 1701),
+            event("rca", "repro-attempt", "reproduced", 2000),
+            event("rca", "repro-attempt", "fix-verified", 2100),
+        ]
+
+    def test_ledger_diagnostics_explain_failures_reruns_and_gaps(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            attempts = Path(directory) / "task_attempts.jsonl"
+            attempts.write_text(
+                "\n".join(
+                    json.dumps(row)
+                    for row in (
+                        {"task": "a", "passed": True, "status": "COMPLETED", "duration_seconds": 10,
+                         "timestamp": "2026-10-28T00:00:00+00:00", "run_id": "bench-1", "outcome_class": "passed"},
+                        {"task": "b", "passed": False, "status": "ERROR", "duration_seconds": 30,
+                         "timestamp": "2026-10-28T00:00:01+00:00", "run_id": "bench-1", "outcome_class": "failed"},
+                        {"task": "c", "passed": True, "status": "COMPLETED", "duration_seconds": 5,
+                         "timestamp": "2026-10-27T00:00:00+00:00"},
+                    )
+                )
+                + "\n"
+            )
+            result = DIAGNOSTICS.analyze_ledger(
+                self.rows(),
+                attempts_path=attempts,
+                descend_records=[{"run_id": "d1", "detail": {"infra_failed": 2, "scheduled_total": 600}}],
+            )
+        self.assertEqual(result["coverage"], {"stage_rows": 5, "stage_rows_with_detail": 3, "deploy_runs": 1, "rejected_rows": 0})
+        gate = next(row for row in result["gates"] if row["gate"] == "typescript")
+        self.assertEqual((gate["executed"], gate["failed"], gate["reruns"], gate["reused"]), (2, 1, 1, 1))
+        self.assertEqual(gate["failure_classes"], [{"name": "typecheck", "count": 1}])
+        self.assertEqual(gate["failing_names"], [{"name": "src/a.ts", "count": 1}])
+        self.assertEqual(gate["median_queue_seconds"], 30.0)
+        self.assertEqual(gate["median_exec_seconds"], 50.0)
+        self.assertEqual((gate["max_load1"], gate["min_mem_available_mb"]), (7.5, 900.0))
+        self.assertEqual(result["retry_causes"], [{"name": "new-commit", "count": 1}])
+        self.assertEqual(result["reuse"], {"hit": 1, "miss:inputs-changed": 1, "miss:no-prior-pass": 1})
+        causes = {row["cause"]: row for row in result["gap_causes"]}
+        self.assertEqual(causes["fix-before-retry"]["seconds"], 600.0)
+        self.assertEqual(causes["wait:review:coderabbit"]["seconds"], 600.0)
+        self.assertNotIn("unattributed", causes)
+        self.assertEqual(result["largest_gaps"][0]["before"], "typescript(passed)")
+        self.assertEqual(result["waits"]["review:coderabbit"]["median_seconds"], 600.0)
+        self.assertEqual(result["waits"]["external-deploy:render"]["total_seconds"], 300.0)
+        self.assertEqual(result["sources"][0]["files_changed"], 3)
+        self.assertEqual(result["rca"]["repro_attempts"], {"reproduced": 1, "fix-verified": 1})
+        bench = result["benchmarks"]
+        self.assertEqual(bench["attempts_without_run_id"], 1)
+        self.assertEqual(bench["runs"][0]["passed"], 1)
+        self.assertEqual(bench["runs"][0]["outcome_classes"], {"passed": 1, "failed": 1})
+        self.assertEqual(result["descend"], [{"run_id": "d1", "infra_failed": 2, "scheduled_total": 600}])
+        text = "\n".join(DIAGNOSTICS.render_text(result))
+        self.assertIn("Rerun causes: new-commit=1", text)
+        self.assertIn("typecheck (src/a.ts)", text)
+        self.assertIn("fix-before-retry", text)
+
+    def test_events_belong_to_latest_run_on_the_same_branch(self) -> None:
+        rows = [
+            stage("old", "build", 0, 10),
+            stage("new", "build", 200, 210),
+            # The event at the next start belongs to new, including the boundary.
+            event("deploy", "review-request", "coderabbit", 200),
+            event("deploy", "review-arrival", "coderabbit", 400),
+            event("deploy", "outcome", "completed", 401),
+        ]
+        result = DIAGNOSTICS.analyze_ledger(rows)
+        self.assertEqual(result["largest_gaps"], [{
+            "run_id": "new", "seconds": 190.0, "after": "build(passed)",
+            "before": "review-arrival:coderabbit", "cause": "wait:review:coderabbit",
+        }])
+        self.assertEqual(result["gap_causes"], [{
+            "cause": "wait:review:coderabbit", "count": 1, "seconds": 190.0,
+        }])
+
+    def test_event_window_is_not_cut_off_by_other_branch(self) -> None:
+        rows = [stage("original", "build", 0, 10),
+                {**stage("other", "build", 100, 110), "branch": "feat/other"},
+                event("deploy", "outcome", "completed", 200),
+                event("deploy", "outcome", "outside-window", 10 + 6 * 3600 + 1)]
+        result = DIAGNOSTICS.analyze_ledger(rows)
+        self.assertEqual([(g["run_id"], g["seconds"]) for g in result["largest_gaps"]],
+                         [("original", 190.0)])
+
+    def test_reused_rows_do_not_count_as_failed_or_executed_deploy_calls(self) -> None:
+        rows = [
+            stage("run-1", "eslint", 0, 10),
+            stage("run-1", "eslint", 20, 20, "reused"),
+            event("deploy", "outcome", "completed", 30),
+        ]
+        (turn,) = FACTORY_REVIEW.ledger_deploy_turns(rows)
+        stage_calls = [item for item in turn.invocations if "run-deploy-stage" in item.detail]
+        self.assertEqual(len(stage_calls), 1)
+        self.assertFalse(any(item.is_error for item in stage_calls))
+
+    def test_conductor_parser_accepts_event_detail_arguments(self) -> None:
+        self.assertEqual(
+            FACTORY_REVIEW.parse_factory_event_command(
+                "python3 scripts/record_factory_event.py rca repro-attempt reproduced --detail repro_attempt=2"
+            ),
+            ("rca", "repro-attempt", "reproduced"),
+        )
+        self.assertIsNone(
+            FACTORY_REVIEW.parse_factory_event_command(
+                "python3 scripts/record_factory_event.py deploy outcome completed --detail x=1; rm -rf /"
+            )
+        )
 
 
 if __name__ == "__main__":

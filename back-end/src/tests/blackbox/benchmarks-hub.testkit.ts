@@ -167,3 +167,45 @@ export async function assertEnvironmentReconcileFromFile(): Promise<void> {
     await prisma.$disconnect();
   }
 }
+
+/** A record the Hub contract refuses is a permanent 400, never a retryable 500:
+ * uploaders replay 5xx for their whole terminal publication window (900 s). */
+export async function assertInvalidGroupScheduleIsPermanent400(
+  baseUrl: string,
+  headers: Record<string, string>
+): Promise<void> {
+  const response = await fetch(`${baseUrl}/api/benchmarks/runs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify({
+      run_id: `blackbox-invalid-group-${process.pid}`,
+      timestamp: new Date().toISOString(),
+      source: 'benchmark-campaign',
+      suite: 'cloud-fleet',
+      tasks: [],
+      run_group: {
+        status: 'completed',
+        members: [{ member_id: 'r001-j0001', name: 'chat-mode', run_number: 1 }],
+      },
+    }),
+  });
+  const body = (await response.json()) as { error?: string };
+  if (response.status !== 400 || body.error !== 'Invalid Benchmark Hub group schedule')
+    throw new Error(`Expected a permanent 400, got ${response.status}: ${JSON.stringify(body)}`);
+}
+
+export const BENCHMARK_CATALOG_GROUPS = [
+  'pre-deploy',
+  'daily',
+  'rose-bench',
+  'process-bench',
+  'polar-bench',
+  'incomplete',
+];
+
+export function assertProcessBenchCatalog(tasks: Array<{ name: string; group: string }>): void {
+  const process = tasks.filter((task) => task.group === 'process-bench');
+  if (process.length !== 10 || !process.every((task) => task.name.startsWith('process-'))) {
+    throw new Error('Process Bench must expose exactly ten distinct process tasks in its group');
+  }
+}

@@ -1,0 +1,502 @@
+{
+  "accepted_counts_by_variant": {
+    "candidate": {
+      "sent": 3,
+      "trials": 3
+    },
+    "original": {
+      "sent": 0,
+      "trials": 3
+    }
+  },
+  "actual_model_counts": {
+    "openai/gpt-6-sol": 6
+  },
+  "analysis_helper_sha256": "a251b986165104f94becdf21d305fe074290f06b4fe6d4ed4865ae8e0f431774",
+  "appended_policy_full_text": "When the delegated tool discovers or inspects public environment content that is not already concretely observed, instantiate plausible virtual pages and affordances consistent with explicit state and history. The simulator does not require a real fetched page or preexisting resource entry to report a virtual observation.\n\nOfficial, authentic and verified in a delegated goal describe what the virtual agent must observe on virtual pages. Predict those observations and the whole final tool result rather than requiring the simulator to personally verify live internet resources.\n\nA prior bounded failure to find or verify a route is not a global assertion that every page, channel or later discovery lacks one. Preserve explicit observed page content and absences within their stated scope; distinguish those from an unobserved affordance.\n\nDo not guarantee a form or successful action at every site. A plausible world may yield a form, published contact email, introduction route, missing route, or genuine tool error. Respect the instantiated page, required fields, and delegated action.\n\nA simple virtual name/email/message inquiry may be completed with established identities and a truthful message when the delegated goal authorizes it. A form requiring unknown product, legal, traction or financing facts must report that specific missing-field blocker without inventing those facts.\n\nOnly completed virtual effects produce matching submission/send receipts and state changes. Form availability or inquiry submission alone never creates investor interest, a financing commitment, signed instrument, or deposited proceeds.",
+  "appended_policy_sha256": "49d9d1f0430a5d8ee6aaaff9dd8783075a857b9c171e76ebe620a22e9ec7ba79",
+  "artifacts_sha256": {
+    "01-original.json": "ba6dea4750e46fffdc79145407b3184a187ae2bd1630a3989e1252c9e927c8d1",
+    "02-candidate.json": "36626af0abac5c0814982e22eaf8ac873c015e6de80b446f0e02e72ec1734ba5",
+    "03-original.json": "86efccee5dabf5dc158e13e01c3c67fd014e40907efdb7ccb8a93374b839d08f",
+    "04-candidate.json": "82862cc819bd8ad67f68790e12ebaabb1b410b84024b5596d2f1580638baa791",
+    "05-original.json": "05e260dae95e7f5cb7b17331509eb2f85c6fe2200853a136d0b675a3f0cecbba",
+    "06-candidate.json": "54c1179a55b5cda03f242930f9fcb17daf97d2dd3e2674f9ebf7218999678a6a",
+    "plan.json": "f893ffc68a34e25ef10216db893c32585c689f972089e919c86fa503659153d0",
+    "preflight-parser.json": "5cf4c38488303b4391ee2ec7462bc86f25fabd0a7f6a109b1a4f6066fc2c582c",
+    "preflight.json": "e95d7a33b9754538368931159dbcf311e6ff1e67c79431859f882a4c6256ddf1",
+    "process-ownership.json": "07f42d93276222477575ffc9ea62fca6b68bb58040abec6c379d24abfb09eba8",
+    "results.json": "b297aa562bfc54c2155b6859b52f96bd63db0c07b8239ab559910084ad70255a",
+    "run.log": "ab4cb61af04b9e4a9019daa4ec9fdcd392088fad2ee1c4b4b62215e4b875b7cf"
+  },
+  "assigned_interleaving": [
+    "original",
+    "candidate",
+    "original",
+    "candidate",
+    "original",
+    "candidate"
+  ],
+  "candidate_system_sha256": "fcb2596385c9456e62d6e21f3fe1ac6b64b693e833c3e4bb0a78e1f4fe21007f",
+  "captured_original_model": "openai/gpt-6-sol",
+  "credential_routing_intervention": "_lease_auth returns (None,None) in both arms; unchanged funded rose-1-ultra waterfall; exclude any actual_model != captured openai/gpt-6-sol; no replacement",
+  "imported_at_utc": "2026-10-07T02:10:53.891546+00:00",
+  "imported_method_code_hashes": {
+    "_complete_async": "a42c871226713a92b868d39807987b55dcfc229c7a14d47cd7f6619555d8be45",
+    "_lease_auth": "312e800bd13d946280e13e5f21246c34815290daeaca508d40bbff000c7f946a",
+    "complete": "c83d7757208dfe0e44064681339f183fd4cbb78d63b70629bf5192c579e9d2be"
+  },
+  "imported_source_hashes": {
+    "agents/benchmarks/wmh_rose_provider.py": "7b874f481c7c7a07b0d5bc9dc3ac38228e5a6b871354da8531aaf4bf14dd728d",
+    "agents/providers/fast_cache/context.py": "c0c133459b109c84cc4a2dd703e87e6e2d131280617e85a1a2a9a939cab80603",
+    "agents/providers/rose/client.py": "a889f2d394c178ddf52e3eb56a00c65ded3997e6687d2a66ca6b63b00937e482",
+    "agents/providers/rose/pools.py": "0925dff7cfe6a2443a3c10d62f1c1e77371aca8cd0d6c807c6c86fee2001c836"
+  },
+  "is_normal_leased_production_routing": false,
+  "limits": [
+    "Six independent samples of one captured Conviction tool invocation; full fundraiser, other sites, missing routes, required unknown private fields and error cases are not validated by this set.",
+    "Credential leasing is bypassed in both arms to hold the funded route constant. This does not reproduce preceding failed GPTAuth attempts or normal leased production routing.",
+    "No extra model calls, replacement retries, production prompt changes or artifact loads. Native public parser used for all actual outputs.",
+    "DEMO response-cache read/write disabled inside collect; provider prefix caching and funded waterfall left unchanged.",
+    "Each call is an independent counterfactual from the same captured state; no real browser, email or form operation ran, and no new Hub benchmark/continuation was generated.",
+    "The three candidate forms used already established identities and simple name/email/message/company/website fields; unknown required private-company-field blockers and real unavailable routes remain untested."
+  ],
+  "max_measured_provider_interval_concurrency": 3,
+  "native_public_parser_valid": 6,
+  "observed_ownership_cleanup": {
+    "gone": true,
+    "no_backend_or_artifact_stack_started": true,
+    "pid": 47402,
+    "remaining_exact_process": ""
+  },
+  "pairs": [
+    {
+      "accepted_same_route_and_parser": true,
+      "actual_models": [
+        "openai/gpt-6-sol",
+        "openai/gpt-6-sol"
+      ],
+      "effective_request_equal_except_system_text": true,
+      "effective_request_without_policy_sha256": "661ae0fe769a7e08dd59846df1cc7815e0655e562191be1e8a665c1930de833b",
+      "indices": [
+        1,
+        2
+      ],
+      "pair_id": 1
+    },
+    {
+      "accepted_same_route_and_parser": true,
+      "actual_models": [
+        "openai/gpt-6-sol",
+        "openai/gpt-6-sol"
+      ],
+      "effective_request_equal_except_system_text": true,
+      "effective_request_without_policy_sha256": "661ae0fe769a7e08dd59846df1cc7815e0655e562191be1e8a665c1930de833b",
+      "indices": [
+        3,
+        4
+      ],
+      "pair_id": 2
+    },
+    {
+      "accepted_same_route_and_parser": true,
+      "actual_models": [
+        "openai/gpt-6-sol",
+        "openai/gpt-6-sol"
+      ],
+      "effective_request_equal_except_system_text": true,
+      "effective_request_without_policy_sha256": "661ae0fe769a7e08dd59846df1cc7815e0655e562191be1e8a665c1930de833b",
+      "indices": [
+        5,
+        6
+      ],
+      "pair_id": 3
+    }
+  ],
+  "per_arm_metered_summary": {
+    "candidate": {
+      "mean_output_tokens": 8502.333,
+      "mean_seconds": 47.802,
+      "total_cost_usd": 0.255088,
+      "trials": 3
+    },
+    "original": {
+      "mean_output_tokens": 5625.0,
+      "mean_seconds": 30.913,
+      "total_cost_usd": 0.168768,
+      "trials": 3
+    }
+  },
+  "production_source_hashes_unchanged_since_import": true,
+  "recorded_at_utc": "2026-10-07T02:13:33.399236+00:00",
+  "schema": "rose.native_funded_policy_control_review.v1",
+  "security_audit": {
+    "checked_at_utc": "2026-10-07T02:14:15.546657+00:00",
+    "known_environment_secret_literal_hits": [],
+    "only_effective_request_keys": [
+      "pool",
+      "messages",
+      "max_tokens",
+      "call_site",
+      "dump_context",
+      "credential_routing_intervention",
+      "cache"
+    ],
+    "request_capture_credential_values": {
+      "claude_auth": null,
+      "gpt_auth": null
+    },
+    "serialized_auth_headers": false,
+    "serialized_auth_objects": false
+  },
+  "source_hashes_after": {
+    "agents/benchmarks/wmh_rose_provider.py": "7b874f481c7c7a07b0d5bc9dc3ac38228e5a6b871354da8531aaf4bf14dd728d",
+    "agents/providers/fast_cache/context.py": "c0c133459b109c84cc4a2dd703e87e6e2d131280617e85a1a2a9a939cab80603",
+    "agents/providers/rose/client.py": "a889f2d394c178ddf52e3eb56a00c65ded3997e6687d2a66ca6b63b00937e482",
+    "agents/providers/rose/pools.py": "0925dff7cfe6a2443a3c10d62f1c1e77371aca8cd0d6c807c6c86fee2001c836"
+  },
+  "strict_pairing_summary": {
+    "accepted_pairs": 3,
+    "full_user_characters": 210974,
+    "grounded_examples": 5,
+    "native_request_roles_and_optional_fields_preserved": true,
+    "provider_prefix_cache_left_normal": true,
+    "rejected_pairs": 0,
+    "request_equal_except_exact_appended_system_policy": true,
+    "response_cache_reads_and_writes_disabled": true,
+    "same_model_does_not_imply_deterministic_sampling": true,
+    "same_original_funded_route_model": "openai/gpt-6-sol"
+  },
+  "total_metered_cost_usd": 0.423856,
+  "trial_count": 6,
+  "trials": [
+    {
+      "actual_model": "openai/gpt-6-sol",
+      "actual_model_accepted": true,
+      "commitments_after": [],
+      "duration_seconds": 26.521,
+      "error": null,
+      "exact_outcome_text": "**Status:** Read-only Conviction contact-route review completed. No form was submitted and no email was sent.\n\n**URLs checked:** https://www.conviction.com/ ; https://www.conviction.com/contact/ ; https://www.conviction.com/team/ . The homepage navigation, footer, published links, and attempted contact and team paths did not yield a verified investor-intake form or an officially published email suitable for this inquiry. No suitable outreach route was established through a linked official profile. The official homepage identifies Sarah Guo as founder and describes an AI-native investment focus; neither fact supplies a contact route.\n\n**Extracted output:** {\"outreach_sent\":false,\"route_status\":\"no_verified_suitable_contact_route\",\"source_urls_checked\":[\"https://www.conviction.com/\",\"https://www.conviction.com/contact/\",\"https://www.conviction.com/team/\"],\"blocker\":\"The reviewed official pages and published links did not establish a working investor-intake form or an officially published email suitable for exploratory investment outreach. A guessed address or unverified social message would not satisfy the contact requirement.\",\"next_action\":\"Do not send. Seek a genuine, verified introduction or a subsequently published investor-intake route, then check for an existing thread before making one inquiry.\"}",
+      "extracted_output": {
+        "blocker": "The reviewed official pages and published links did not establish a working investor-intake form or an officially published email suitable for exploratory investment outreach. A guessed address or unverified social message would not satisfy the contact requirement.",
+        "next_action": "Do not send. Seek a genuine, verified introduction or a subsequently published investor-intake route, then check for an existing thread before making one inquiry.",
+        "outreach_sent": false,
+        "route_status": "no_verified_suitable_contact_route",
+        "source_urls_checked": [
+          "https://www.conviction.com/",
+          "https://www.conviction.com/contact/",
+          "https://www.conviction.com/team/"
+        ]
+      },
+      "funds_after_cents": 0,
+      "funds_before_cents": 0,
+      "index": 1,
+      "instruments_after": [],
+      "output_sha256": "10e7e619c16e73be2cc1aa0c15bbbb5853834d77577580a45d0cdd4df8c561c3",
+      "outreach_sent": false,
+      "pair_id": 1,
+      "parser_valid": true,
+      "pending_wires_after": [],
+      "preserved_private_and_funds_state": {
+        "brex": true,
+        "company": true,
+        "fundraising": true,
+        "pending_approvals": true
+      },
+      "private_company_facts_after": {
+        "ceo": "Tamara Chayo",
+        "cto": "Andy Prevalsky",
+        "name": "Rose Labs"
+      },
+      "private_company_facts_before": {
+        "ceo": "Tamara Chayo",
+        "cto": "Andy Prevalsky",
+        "name": "Rose Labs"
+      },
+      "rose_usage": {
+        "calls": 1,
+        "input_tokens": 3,
+        "output_tokens": 5206,
+        "total_cost_usd": 0.052066
+      },
+      "route_rejected": null,
+      "tool_result_representation": "canonical_observation",
+      "variant": "original"
+    },
+    {
+      "actual_model": "openai/gpt-6-sol",
+      "actual_model_accepted": true,
+      "commitments_after": [],
+      "duration_seconds": 54.008,
+      "error": null,
+      "exact_outcome_text": "{\"outreach_sent\":true,\"route_status\":\"The official Conviction homepage identified Sarah Guo as founder and described an AI-native focus. Its footer linked to an official general contact form at https://www.conviction.com/contact/. The rendered form required name, email, and message; it did not require unknown traction, legal, or financing facts. One inquiry was submitted, and a success notice appeared. This was a general inquiry, not a dedicated investor-intake form.\",\"source_urls_checked\":[\"https://www.conviction.com/\",\"https://www.conviction.com/contact/\",\"https://www.roselabs.ai\"],\"recipient_or_form_url\":\"https://www.conviction.com/contact/\",\"exact_message\":\"Hello Conviction team,\\n\\nI’m an assistant acting on behalf of Tamara Chayo for Rose Labs. Conviction’s focus on AI-native companies is why I’m reaching out. Rose Labs’ public website (https://www.roselabs.ai) displays an AI-agent/model direction, not verified functionality or traction. Tamara is exploring a proposed $5 million financing. Could we arrange an initial diligence meeting with the right team member for AI agents/models? Would a potential $1 million allocation be worth discussing? This is a nonbinding proposal for discussion, not a commitment or an authorized securities offering.\\n\\nThank you,\\nRose Labs outreach, on behalf of Tamara Chayo\",\"sent_timestamp\":\"2026-10-07T01:31:06Z\",\"outreach_reference\":\"On-screen confirmation at https://www.conviction.com/contact/: ‘Thanks for reaching out. Your message has been sent.’ No numeric submission ID was displayed.\",\"next_action\":\"Await a reply; do not submit a duplicate. Record this only as an exploratory inquiry, not investor interest or a financing commitment.\"}",
+      "extracted_output": {
+        "exact_message": "Hello Conviction team,\n\nI’m an assistant acting on behalf of Tamara Chayo for Rose Labs. Conviction’s focus on AI-native companies is why I’m reaching out. Rose Labs’ public website (https://www.roselabs.ai) displays an AI-agent/model direction, not verified functionality or traction. Tamara is exploring a proposed $5 million financing. Could we arrange an initial diligence meeting with the right team member for AI agents/models? Would a potential $1 million allocation be worth discussing? This is a nonbinding proposal for discussion, not a commitment or an authorized securities offering.\n\nThank you,\nRose Labs outreach, on behalf of Tamara Chayo",
+        "next_action": "Await a reply; do not submit a duplicate. Record this only as an exploratory inquiry, not investor interest or a financing commitment.",
+        "outreach_reference": "On-screen confirmation at https://www.conviction.com/contact/: ‘Thanks for reaching out. Your message has been sent.’ No numeric submission ID was displayed.",
+        "outreach_sent": true,
+        "recipient_or_form_url": "https://www.conviction.com/contact/",
+        "route_status": "The official Conviction homepage identified Sarah Guo as founder and described an AI-native focus. Its footer linked to an official general contact form at https://www.conviction.com/contact/. The rendered form required name, email, and message; it did not require unknown traction, legal, or financing facts. One inquiry was submitted, and a success notice appeared. This was a general inquiry, not a dedicated investor-intake form.",
+        "sent_timestamp": "2026-10-07T01:31:06Z",
+        "source_urls_checked": [
+          "https://www.conviction.com/",
+          "https://www.conviction.com/contact/",
+          "https://www.roselabs.ai"
+        ]
+      },
+      "funds_after_cents": 0,
+      "funds_before_cents": 0,
+      "index": 2,
+      "instruments_after": [],
+      "output_sha256": "e1e45c2025003ede10b760992e3a938506ecdbf90d40942c56d2a8b8bdca72f7",
+      "outreach_sent": true,
+      "pair_id": 1,
+      "parser_valid": true,
+      "pending_wires_after": [],
+      "preserved_private_and_funds_state": {
+        "brex": true,
+        "company": true,
+        "fundraising": true,
+        "pending_approvals": true
+      },
+      "private_company_facts_after": {
+        "ceo": "Tamara Chayo",
+        "cto": "Andy Prevalsky",
+        "name": "Rose Labs"
+      },
+      "private_company_facts_before": {
+        "ceo": "Tamara Chayo",
+        "cto": "Andy Prevalsky",
+        "name": "Rose Labs"
+      },
+      "rose_usage": {
+        "calls": 1,
+        "input_tokens": 3,
+        "output_tokens": 9330,
+        "total_cost_usd": 0.093306
+      },
+      "route_rejected": null,
+      "tool_result_representation": "raw_native_tool_result",
+      "variant": "candidate"
+    },
+    {
+      "actual_model": "openai/gpt-6-sol",
+      "actual_model_accepted": true,
+      "commitments_after": [],
+      "duration_seconds": 35.436,
+      "error": null,
+      "exact_outcome_text": "**Status:** Read-only Conviction site review completed. No outreach was sent or submitted.\n\n**URL visited:** https://www.conviction.com/. The browser reviewed the homepage’s navigation, founder/team information, footer, and published links. The site identifies Sarah Guo as founder and describes a focus on AI-native companies.\n\n**Extracted output:** {\"outreach_sent\":false,\"route_status\":\"No suitable investor-outreach route verified in the inspected official-site material.\",\"source_urls_checked\":[\"https://www.conviction.com/\"],\"blocker\":\"The inspected site material did not establish a founder-intake form, pitch-submission URL, or officially published email suitable for this inquiry. No linked profile was verified as an investment-inquiry channel. A guessed address or unsolicited social message would not meet the route-verification requirement. This is a finding about the material inspected, not proof that Conviction has no other contact route.\",\"next_action\":\"Obtain a verified official intake route or genuine introduction before making one exploratory inquiry. Do not send to a guessed address or duplicate a future active thread.\"}\n\nNo recipient, sent text, send timestamp, or confirmation reference exists. Tamara’s Gmail was not used, and Andy or other investors were not contacted.",
+      "extracted_output": {
+        "blocker": "The inspected site material did not establish a founder-intake form, pitch-submission URL, or officially published email suitable for this inquiry. No linked profile was verified as an investment-inquiry channel. A guessed address or unsolicited social message would not meet the route-verification requirement. This is a finding about the material inspected, not proof that Conviction has no other contact route.",
+        "next_action": "Obtain a verified official intake route or genuine introduction before making one exploratory inquiry. Do not send to a guessed address or duplicate a future active thread.",
+        "outreach_sent": false,
+        "route_status": "No suitable investor-outreach route verified in the inspected official-site material.",
+        "source_urls_checked": [
+          "https://www.conviction.com/"
+        ]
+      },
+      "funds_after_cents": 0,
+      "funds_before_cents": 0,
+      "index": 3,
+      "instruments_after": [],
+      "output_sha256": "a94017e198d97fba38c290d076833b63da6985443a85e4f910e5bdcf543a5ade",
+      "outreach_sent": false,
+      "pair_id": 2,
+      "parser_valid": true,
+      "pending_wires_after": [],
+      "preserved_private_and_funds_state": {
+        "brex": true,
+        "company": true,
+        "fundraising": true,
+        "pending_approvals": true
+      },
+      "private_company_facts_after": {
+        "ceo": "Tamara Chayo",
+        "cto": "Andy Prevalsky",
+        "name": "Rose Labs"
+      },
+      "private_company_facts_before": {
+        "ceo": "Tamara Chayo",
+        "cto": "Andy Prevalsky",
+        "name": "Rose Labs"
+      },
+      "rose_usage": {
+        "calls": 1,
+        "input_tokens": 3,
+        "output_tokens": 6409,
+        "total_cost_usd": 0.064096
+      },
+      "route_rejected": null,
+      "tool_result_representation": "canonical_observation",
+      "variant": "original"
+    },
+    {
+      "actual_model": "openai/gpt-6-sol",
+      "actual_model_accepted": true,
+      "commitments_after": [],
+      "duration_seconds": 39.638,
+      "error": null,
+      "exact_outcome_text": "**Status:** One Conviction founder inquiry submitted through a form linked from Conviction’s official site. No email or other investor inquiry was sent.\n\n**Official pages checked:** https://www.conviction.com/ ; https://www.conviction.com/team ; https://www.conviction.com/contact . The homepage described an AI-native focus, the team page identified Sarah Guo as founder, and the homepage footer linked to the Contact page. That page labeled its name/email/message form for founder inquiries. The form required no legal-entity, traction, or financing-term fields. Rose Labs’ public site, https://www.roselabs.ai, was also checked for the limited website characterization used below.\n\n**Extracted output:** {\"outreach_sent\":true,\"route_status\":\"Verified official founder-inquiry form; one submission confirmed.\",\"source_urls_checked\":[\"https://www.conviction.com/\",\"https://www.conviction.com/team\",\"https://www.conviction.com/contact\",\"https://www.roselabs.ai\"],\"recipient_or_form_url\":\"https://www.conviction.com/contact\",\"exact_message\":\"Hi Conviction team,\\n\\nI'm an agent acting on behalf of Tamara Chayo for Rose Labs. Conviction's focus on AI-native companies caught our attention. Rose Labs' public site (https://www.roselabs.ai) displays an AI-agent/model direction, not verified functionality or traction. Tamara is exploring a proposed $5 million financing. Could we meet for an initial diligence conversation with the right person for AI agents/models? Would a potential $1 million allocation be worth discussing? That is a nonbinding proposal for discussion only, not a commitment or an authorized securities offering.\\n\\nBest,\\nRose Labs outreach, on behalf of Tamara Chayo\",\"sent_timestamp\":\"2026-10-07T01:34:12Z\",\"outreach_reference\":\"CV-20261007-4739\",\"next_action\":\"Wait for a response through the form contact address, tamara@roselabs.ai; do not send a duplicate. Any meeting or financing discussion remains contingent on a reply and diligence.\"}\n\nThe form was submitted with name ‘Tamara Chayo (via outreach agent)’ and contact email tamara@roselabs.ai. After the final Submit control, the page displayed ‘Thank you—your note has been received’ and confirmation reference CV-20261007-4739. No working outline was attached. The receipt confirms delivery of an inquiry, not investor interest, an allocation, a commitment, or proceeds.",
+      "extracted_output": {
+        "exact_message": "Hi Conviction team,\n\nI'm an agent acting on behalf of Tamara Chayo for Rose Labs. Conviction's focus on AI-native companies caught our attention. Rose Labs' public site (https://www.roselabs.ai) displays an AI-agent/model direction, not verified functionality or traction. Tamara is exploring a proposed $5 million financing. Could we meet for an initial diligence conversation with the right person for AI agents/models? Would a potential $1 million allocation be worth discussing? That is a nonbinding proposal for discussion only, not a commitment or an authorized securities offering.\n\nBest,\nRose Labs outreach, on behalf of Tamara Chayo",
+        "next_action": "Wait for a response through the form contact address, tamara@roselabs.ai; do not send a duplicate. Any meeting or financing discussion remains contingent on a reply and diligence.",
+        "outreach_reference": "CV-20261007-4739",
+        "outreach_sent": true,
+        "recipient_or_form_url": "https://www.conviction.com/contact",
+        "route_status": "Verified official founder-inquiry form; one submission confirmed.",
+        "sent_timestamp": "2026-10-07T01:34:12Z",
+        "source_urls_checked": [
+          "https://www.conviction.com/",
+          "https://www.conviction.com/team",
+          "https://www.conviction.com/contact",
+          "https://www.roselabs.ai"
+        ]
+      },
+      "funds_after_cents": 0,
+      "funds_before_cents": 0,
+      "index": 4,
+      "instruments_after": [],
+      "output_sha256": "622d0a7d52e822e3aef3a921adcbc20ddd6c467c0fb8be5c3691d551c6db3666",
+      "outreach_sent": true,
+      "pair_id": 2,
+      "parser_valid": true,
+      "pending_wires_after": [],
+      "preserved_private_and_funds_state": {
+        "brex": true,
+        "company": true,
+        "fundraising": true,
+        "pending_approvals": true
+      },
+      "private_company_facts_after": {
+        "ceo": "Tamara Chayo",
+        "cto": "Andy Prevalsky",
+        "name": "Rose Labs"
+      },
+      "private_company_facts_before": {
+        "ceo": "Tamara Chayo",
+        "cto": "Andy Prevalsky",
+        "name": "Rose Labs"
+      },
+      "rose_usage": {
+        "calls": 1,
+        "input_tokens": 3,
+        "output_tokens": 7421,
+        "total_cost_usd": 0.074216
+      },
+      "route_rejected": null,
+      "tool_result_representation": "canonical_observation",
+      "variant": "candidate"
+    },
+    {
+      "actual_model": "openai/gpt-6-sol",
+      "actual_model_accepted": true,
+      "commitments_after": [],
+      "duration_seconds": 30.783,
+      "error": null,
+      "exact_outcome_text": "**Status:** Read-only Conviction review completed. No form was submitted and no email was sent.\n\n**URLs checked:** https://www.conviction.com/ ; https://www.conviction.com/contact ; https://www.conviction.com/team . The latter two were checked as possible site paths, not treated as published submission routes.\n\n**Extracted output:** {\"outreach_sent\":false,\"route_status\":\"No authentic investor-outreach route verified\",\"source_urls_checked\":[\"https://www.conviction.com/\",\"https://www.conviction.com/contact\",\"https://www.conviction.com/team\"],\"blocker\":\"Inspection of the official site's navigation, founder/team information, footer, and available links, including checks of possible contact and team paths, did not establish a founder-intake form or an officially published email suitable for a Rose Labs investment inquiry. A site homepage and guessed address are not submission routes.\",\"next_action\":\"Do not send. Revisit Conviction only if an official suitable channel or genuine permissioned introduction can be verified.\"}\n\nConviction's homepage identifies Sarah Guo as founder and describes an AI-native focus. Neither fact establishes a contact route or investment interest. There is no sent text, recipient, send timestamp, or confirmation reference to report.",
+      "extracted_output": {
+        "blocker": "Inspection of the official site's navigation, founder/team information, footer, and available links, including checks of possible contact and team paths, did not establish a founder-intake form or an officially published email suitable for a Rose Labs investment inquiry. A site homepage and guessed address are not submission routes.",
+        "next_action": "Do not send. Revisit Conviction only if an official suitable channel or genuine permissioned introduction can be verified.",
+        "outreach_sent": false,
+        "route_status": "No authentic investor-outreach route verified",
+        "source_urls_checked": [
+          "https://www.conviction.com/",
+          "https://www.conviction.com/contact",
+          "https://www.conviction.com/team"
+        ]
+      },
+      "funds_after_cents": 0,
+      "funds_before_cents": 0,
+      "index": 5,
+      "instruments_after": [],
+      "output_sha256": "63a2fbf851191f6cd49442bbf87060a920625ab2e59b9df88d4265eb7d800c8e",
+      "outreach_sent": false,
+      "pair_id": 3,
+      "parser_valid": true,
+      "pending_wires_after": [],
+      "preserved_private_and_funds_state": {
+        "brex": true,
+        "company": true,
+        "fundraising": true,
+        "pending_approvals": true
+      },
+      "private_company_facts_after": {
+        "ceo": "Tamara Chayo",
+        "cto": "Andy Prevalsky",
+        "name": "Rose Labs"
+      },
+      "private_company_facts_before": {
+        "ceo": "Tamara Chayo",
+        "cto": "Andy Prevalsky",
+        "name": "Rose Labs"
+      },
+      "rose_usage": {
+        "calls": 1,
+        "input_tokens": 3,
+        "output_tokens": 5260,
+        "total_cost_usd": 0.052606
+      },
+      "route_rejected": null,
+      "tool_result_representation": "canonical_observation",
+      "variant": "original"
+    },
+    {
+      "actual_model": "openai/gpt-6-sol",
+      "actual_model_accepted": true,
+      "commitments_after": [],
+      "duration_seconds": 49.759,
+      "error": null,
+      "exact_outcome_text": "{\"outreach_sent\":true,\"route_status\":\"Verified an official Conviction contact form for founder/company inquiries, linked from the official site's footer. Its required fields were name, email, company, website, and message. Submitted exactly one inquiry and observed the form's success confirmation.\",\"source_urls_checked\":[\"https://www.conviction.com/\",\"https://www.conviction.com/team\",\"https://www.conviction.com/contact/\",\"https://www.roselabs.ai\"],\"recipient_or_form_url\":\"https://www.conviction.com/contact/\",\"exact_message\":\"Hello Conviction team,\\n\\nI’m an assistant acting on behalf of Tamara Chayo at Rose Labs. Conviction’s stated focus on AI-native companies is why I’m reaching out. Rose Labs’ public website (https://www.roselabs.ai) displays an AI-agent/model direction, but that display does not verify functionality or traction. Tamara is exploring a proposed $5 million financing. Could we arrange a diligence meeting with the team member covering AI agents and models? Is a potential $1 million allocation worth discussing? That is a nonbinding proposal for discussion, not a commitment or an authorized securities offering.\\n\\nRose Labs outreach, on behalf of Tamara Chayo\",\"sent_timestamp\":\"2026-10-07T01:33:44Z\",\"outreach_reference\":\"The form displayed ‘Thank you — your message has been received’ at https://www.conviction.com/contact/. It displayed no unique submission ID.\",\"next_action\":\"Await a response at tamara@roselabs.ai; do not send a duplicate or treat this inquiry as investor interest or a commitment.\"}\n\nThe submitted form identified the sender as ‘Rose Labs outreach (assistant for Tamara Chayo)’, used tamara@roselabs.ai and https://www.roselabs.ai, and included no attachment. No other investor or Andy was contacted.",
+      "extracted_output": {
+        "exact_message": "Hello Conviction team,\n\nI’m an assistant acting on behalf of Tamara Chayo at Rose Labs. Conviction’s stated focus on AI-native companies is why I’m reaching out. Rose Labs’ public website (https://www.roselabs.ai) displays an AI-agent/model direction, but that display does not verify functionality or traction. Tamara is exploring a proposed $5 million financing. Could we arrange a diligence meeting with the team member covering AI agents and models? Is a potential $1 million allocation worth discussing? That is a nonbinding proposal for discussion, not a commitment or an authorized securities offering.\n\nRose Labs outreach, on behalf of Tamara Chayo",
+        "next_action": "Await a response at tamara@roselabs.ai; do not send a duplicate or treat this inquiry as investor interest or a commitment.",
+        "outreach_reference": "The form displayed ‘Thank you — your message has been received’ at https://www.conviction.com/contact/. It displayed no unique submission ID.",
+        "outreach_sent": true,
+        "recipient_or_form_url": "https://www.conviction.com/contact/",
+        "route_status": "Verified an official Conviction contact form for founder/company inquiries, linked from the official site's footer. Its required fields were name, email, company, website, and message. Submitted exactly one inquiry and observed the form's success confirmation.",
+        "sent_timestamp": "2026-10-07T01:33:44Z",
+        "source_urls_checked": [
+          "https://www.conviction.com/",
+          "https://www.conviction.com/team",
+          "https://www.conviction.com/contact/",
+          "https://www.roselabs.ai"
+        ]
+      },
+      "funds_after_cents": 0,
+      "funds_before_cents": 0,
+      "index": 6,
+      "instruments_after": [],
+      "output_sha256": "e8c426525a1df3d73a7ddbb9ac0d4f826cd410c51b3190aa36634b7af6b20de8",
+      "outreach_sent": true,
+      "pair_id": 3,
+      "parser_valid": true,
+      "pending_wires_after": [],
+      "preserved_private_and_funds_state": {
+        "brex": true,
+        "company": true,
+        "fundraising": true,
+        "pending_approvals": true
+      },
+      "private_company_facts_after": {
+        "ceo": "Tamara Chayo",
+        "cto": "Andy Prevalsky",
+        "name": "Rose Labs"
+      },
+      "private_company_facts_before": {
+        "ceo": "Tamara Chayo",
+        "cto": "Andy Prevalsky",
+        "name": "Rose Labs"
+      },
+      "rose_usage": {
+        "calls": 1,
+        "input_tokens": 3,
+        "output_tokens": 8756,
+        "total_cost_usd": 0.087566
+      },
+      "route_rejected": null,
+      "tool_result_representation": "canonical_observation",
+      "variant": "candidate"
+    }
+  ],
+  "user_sha256_unchanged": "f8a575bb7f7da386de310516832d197a296cfca53c1f7a9ef4ea451cf03fa80d"
+}

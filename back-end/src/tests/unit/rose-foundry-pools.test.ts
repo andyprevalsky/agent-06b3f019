@@ -9,7 +9,11 @@
 import assert from 'node:assert/strict';
 
 import { createStreamingCompletion } from '../../providers/rose';
-import { orderedFoundryDeployments } from '../../providers/rose/foundry';
+import {
+  FOUNDRY_REGION_ENV_NAMES,
+  foundryRegions,
+  foundryRoutePlan,
+} from '../../providers/rose/foundry';
 import { POOL_REGISTRY } from '../../providers/rose/pools';
 import { CEREBRAS_API_URL } from '../../providers/rose/transport';
 
@@ -25,11 +29,13 @@ const cerebrasSse =
   `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n` +
   'data: [DONE]\n\n';
 
+/** Region-1 deployment order for a route key (the tests configure only region 1). */
+const orderedFoundryDeployments = (model: string, routeKey: string): string[] =>
+  foundryRoutePlan(foundryRegions(), model, routeKey).map(({ deployment }) => deployment);
+
 async function main(): Promise<void> {
   const envKeys = [
-    'AZURE_FOUNDRY_ENDPOINT',
-    'AZURE_FOUNDRY_API_KEY',
-    'AZURE_FOUNDRY_DEPLOYMENTS',
+    ...FOUNDRY_REGION_ENV_NAMES,
     'CEREBRAS_API_KEY',
     'GPT_API_KEY',
     'OPENAI_API_KEY',
@@ -38,6 +44,7 @@ async function main(): Promise<void> {
   ];
   const originalEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
   const originalFetch = globalThis.fetch;
+  for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
   process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
   process.env.AZURE_FOUNDRY_API_KEY = 'test-key';
   process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';

@@ -1,6 +1,6 @@
 ---
 description: "Run benchmark tasks through the isolated cloud fleet by default; use --local explicitly for local benchmarks and evals."
-argument-hint: "list | eval [--bench rose-bench|pipeline-e2e] [--agent-only] [--only a,b] | <slice-or-task...> [-k K --concurrency N] | --local <task...|--full|--rerun-failed latest>"
+argument-hint: "list | full [-k K] | eval [--bench rose-bench|pipeline-e2e] [--agent-only] [--only a,b] | <slice-or-task...> [-k K --concurrency N] [--timeout S] [--check] | --local <task...|--full|--rerun-failed latest>"
 ---
 
 # Benchmark Runner
@@ -12,20 +12,76 @@ scripts/run-bench $ARGUMENTS
 ```
 
 Every launch prints the mandatory parent-agent format and maintenance contract.
-Read it before communicating or scheduling the next slice; retrieve it again
+Read it, and the Operations Runbook in `agents/benchmarks/README.md`,
+before communicating or scheduling the next slice; retrieve it again
 without a launch with `scripts/run-bench report-format`. Its single source is
-`.claude/shared/benchmark-report-format.txt`. Send only its exact fenced `text`
-scorecard for benchmark updates, with the /deploy frame, progress bars, clocks,
-PASS/FAIL and infra percentages/counts, cost/cache/latency, cleanup and active
-sub-agents. Keep continuously progressing. Hold a new slice iff infra failures
-are >10% of terminal attempts; at ≥3 hours since the last original trigger give
-a concrete reason, owner/action and resume condition. Delegate issues with `/RCA`
-and `/deploy` with an isolated immutable checkpoint that excludes later edits.
+`.claude/shared/benchmark-report-format.txt`, governed by
+`.claude/shared/report-display-format.md`. Render the card only with the
+printed `scripts/run-bench scorecard <run-dir> --html <file>` command and publish
+that file; never hand-write it. Use its inline CSS-colored scorecard
+on boxes.dev (the `--text` fallback only when HTML is unavailable): headline
+QUEUED / IN_PROGRESS / COMPLETED, then PASS / HARNESS FAILURE / INFRA FAILURE.
+Preserve genuine agent failures, cancellations and unknown classifications
+separately; keep the infra threshold in a minor note. Include the latest three
+experiments, last-run age, recorded tokens/15-minute rate, LIFE and lifecycle
+coverage. Refresh on the 10-minute checkpoints and transitions below, without
+resetting clocks or stopping ongoing work.
+Use the original scheduled denominator for the existing 5% infra stop policy,
+not completed attempts. Delegate issues with `/RCA` and `/deploy` only within
+the user's authorized scope, using isolated immutable checkpoints.
 Required approval requests follow `.claude/shared/approval-format.md` instead,
 using the same styling and its complete evidence/diff/Links requirements.
 
+**Default delegation and parent cadence (user instruction, October 20, 2026).**
+By default, a sub-agent owns each benchmark run: launch (or adoption of an
+already-launched run), operational monitoring, infra-failure `/RCA` delegation,
+exact-owner cleanup and the returned results with clustered failures. The main
+agent does not poll the run itself. It posts only the CLI-rendered batch
+scorecard, every **10 minutes** and on three transitions: tasks started, no more
+queued, and run end (an infra early stop counts as the end). Approval requests
+for harness and eval fixes still go to the user from the main agent.
+
+**Resumed Polar scope (October 20, 2026).** The user's newer instruction
+supersedes the attachment's 50-task suggestion: at most **20 tasks at K=3**,
+grouped by comparable expected duration, fastest groups first. Reconcile and
+preserve accepted K slots before selecting only missing slots; do not rerun
+accepted slots to fill a batch. Execution timeout is **7200 seconds (2 hours)**;
+reject larger values with the requested lower-timeout/settings explanation.
+After each batch, wait for the user's explicit go before the next 20. Neither
+continuation, an infra repair nor a completed review grants that go. Keep BU
+results separate and report benchmark costs and retry costs without inventing
+missing charges. Do not use Gmail, Calendar or Drive for this work.
+
+**Explicit same-cohort rerun authorization (October 21, 2026).** After the three
+aligned repairs (result-preserving real pause, actual final-answer evidence for
+all benchmarks, and bounded/retrievable tool results for main/explore/browser)
+are implemented and well tested, run the **same 60 with the same CLI in a
+benchmark sub-agent**. Align fixes one at a time, implement independent agreed
+fixes in parallel; see `/descend` for the retained behavior contracts. This is
+an explicit repeat of the original 20-task K=3 cohort, not Batch 2 or permission
+for the next 20. Preserve original settings, baseline grades and producer clocks;
+record the rerun separately. Existing backend-first, warm-source and admission
+requirements still apply; recorded authorization needs no duplicate permission.
+
+Actual final-answer/completion-card evidence must reach the evaluator for **all
+benchmarks by default**. Verify the real producer-to-evaluator path, preserving
+text/errors and distinct messages; a fixture-only pass or judge-only replay is
+not a benchmark outcome. Tool-result truncation must keep bounded previews plus
+retrievable full tails across main, explore and browser, using one shared helper
+and one paged read through existing attachments, with generous fallback limits
+where previously uncapped. Keep full authorized archive/evaluator evidence and
+existing redaction/access controls; do not expand this into a new storage system.
+
+Harness/eval candidates go only through main-chat approval, sorted by
+priority then affected-run count, showing **X of N**, overlapping memberships
+and the exact inline diff. Use `/descend`'s owning failure-clustering guidance
+for causal coverage and reference policy. Mocked causal checks, restored judge
+evidence and judge-only replays never become accepted benchmark outcomes.
+These scope rules override unrelated campaign profiles below.
+
 For the current user-requested five consecutive LIVE DAILY runs of fifty,
-follow CLAUDE.md's **Current width-fifty LIVE acceptance** subsection. Each run
+follow the **Current width-fifty LIVE acceptance** subsection of
+the Operations Runbook in `agents/benchmarks/README.md`. Each run
 uses fifty distinct randomly selected eligible names through the normal CLI
 with `--retry-infra 1 --concurrency 50 --strict-barrier`, temporary execution
 1,200 seconds and `--e2e-timeout 5400 --e2e-started-at <original-image-epoch>`.
@@ -38,24 +94,85 @@ Use a fresh benign comment/ref plus the normal `image-build --no-cache` and
 exact-image activation every trial. LIVE autoscale remains 15; the cached mass
 profile's maximum 2 and allocation deadline do not apply. Keep the original
 hundred-task result complete, exact thirty-second monitoring, grouped early
-verdicts, generous fixed historical LIVE stage targets and no paid deploy overlap
-with accepted LIVE latency. The existing stability wrapper's width-32 cap does
-not restrict this ordinary fleet; do not substitute smaller slices.
+verdicts and generous fixed historical LIVE stage targets. The existing stability
+wrapper's width-32 cap does not restrict this ordinary fleet; do not substitute
+smaller slices.
 
 Behavior:
 
 - `scripts/run-bench list` prints the benchmark catalog.
+- `scripts/run-bench full` runs every cloud task whose last 3 recorded runs passed, at `-k 2` by default with all copies at once (the sharded route, so HEAD must be fetchable from origin). When those copies exceed the measured Fly organization capacity, it keeps the tasks most relevant to this branch's changes and lists the dropped ones. Pass `-k K` to change the repetitions and `--check` for a dry run.
 - `scripts/run-bench <slice-or-task...>` runs one isolated cloud fleet, with every resolved task running concurrently in its own Machine, database, backend and Temporal queue.
 - `scripts/run-bench --local <task-name...>` explicitly selects `agents/benchmarks/local.py` and its isolated local stack.
 - `scripts/run-bench eval ...` runs `agents/benchmarks/run_eval_suite.py` through the isolated local stack.
 - `scripts/run-bench <task> -k K --concurrency N` runs K independent copies with at most N active. These flags select a bounded campaign; omit them for one fully parallel slice.
+- Wide cloud runs route automatically to the sharded controller operator when more simultaneous copies run than one controller's copy bound (32): `scripts/run-bench <slice-or-tasks...> [-k K] [--timeout S] [--e2e-timeout S]`. It is the same path used for original600/polar70: an ordered manifest, K repetitions, auto-sized disposable controllers behind one global strict barrier, and the provider-cap and native-capacity checks. Guests run the clean, pushed HEAD. Launch facts, the warm dependency proof and snapshot inventory are discovered from their normal producers. A warm snapshot not produced for this exact HEAD with its dependency fingerprints, or one that expires before the run deadline, is first refreshed with `run-bench-cloud --refresh-deps`. Every routed launch runs `--check` before `--run`. Use `--check` alone for a dry run with no allocation; it reports the reuse/refresh decision. Report progress only with the CLI-rendered FORMAT v8 scorecard printed for the admission directory: `scripts/run-bench scorecard <admission-dir> --html <admission-dir>/scorecard.html`.
 - `scripts/run-bench stability-proof -k K --concurrency N --seed S` runs K sequential random slices of N distinct tasks. This proof wrapper has a 32-task width cap; it is separate from the predeploy selection cap of 20. For a wider explicitly requested slice, resolve the concrete task names and pass them together to the ordinary fleet entrypoint.
 - `scripts/run-bench <production-only-task>` uses the existing controller-local production runner without allocating Fly guests.
 
 `/deploy` uses `scripts/run-predeploy-local` → `scripts/run-bench --local` by default, with the history-qualified selector and its hard cap of 20; its explicit cloud alternative uses the same fleet scripts. Production payment verification uses `scripts/run-bench agent-payment-production-abandonment`. Keep compact runner regressions in the existing deploy gates; a large live stress run requires an explicit user request and does not become an automatic deploy stage.
 
+### Hub infrastructure experiment prerequisite
+
+An infrastructure experiment must not wait for the entire `/deploy` workflow.
+Qualify the affected Hub code and its owning controls, then verify that the
+**actual endpoint used by the experiment** serves that source. Keep unrelated
+application deployment gates pending; production promotion still follows its
+normal authorization, qualification and rollback requirements.
+
+The existing endpoint override is `BENCHMARK_HUB_UPLOAD_URL`. Set it inside the
+source-bound remote controller command: `run-cloudbench-controller-gate` does
+not automatically forward the caller's environment to the Machine. The
+campaign publisher inherits that environment; nested canary preflight clears
+parent/group run IDs but retains the endpoint; fleet registration, visibility
+checks and final aggregate publication use it. Guest tasks retain the owned
+parent run ID rather than creating duplicate registrations. Keep authentication
+in the existing managed secret files, never command arguments or public logs.
+Record source, endpoint, storage scope and the normal visibility/publication
+receipts; an environment setting alone is not service-alignment evidence.
+
+A localhost/127.0.0.1 override does not remove durable-publication or canonical
+evidence requirements. Individual result uploads retain their normal mirror,
+but the fleet/campaign aggregate CLI currently publishes only to the configured
+endpoint: it does not invoke that mirror. An override alone therefore does not
+prove durable aggregate publication. Do not bypass that unsupported boundary.
+The conditional-write publication codec requires compatible readers and a
+compatible rollback: an isolated experiment must not write envelopes into an
+old-reader production bucket. A local-file Hub does not qualify the R2 fence.
+An explicitly authorized real-R2 experiment can use
+`BENCHMARK_HUB_STORAGE=r2-isolated` with `BENCHMARK_ISOLATED_RUN=true`, a fresh
+root-issued `BENCHMARK_RUN_ID=hubxp_<32 lowercase hex digits>`, complete existing
+R2 credentials, and `BENCHMARK_HUB_ISOLATION_INTENT` naming its root-owned,
+read-only regular scope file. The intent binds schema
+`benchmark-hub-r2-isolation-v1`, mode, run ID and bucket. The caller must issue
+it with a fresh UUID and exclusive creation; syntax alone does not prove
+freshness. All five Hub key families use the disjoint
+`benchmark-hub-isolated/<run-id>/` prefix in the existing bucket. Do not spoof
+`RENDER`, create a bucket, or fall back to local storage on invalid configuration.
+
+Before and after the experiment, account for every original physical attempt
+in a sealed manifest: its real canonical bundle and existing-CLI publication
+receipt, or an explicit missing-canonical-bundle reason with original ledger
+custody. Preserve all original grades, clocks, identity and private endpoint
+ACKs. Publish each real canonical attempt bundle plus the group afterward with
+existing `hub_upload.py --upload-final`, explicitly targeting production and
+preserving the original publication/group environment. Never copy private
+wire envelopes to the production prefix or fabricate missing/no-agent rows.
+The normal publisher's diagnostic stripping/body limits remain visible; full
+originals stay archived. Use the existing per-agent evidence publisher for
+actual roots/recordings/last LLM dumps. `--verify-visible` alone proves run ID
+visibility, not full-body equality.
+
+If the compatible service/storage or complete original custody/publication
+manifest is unavailable, report that specific prerequisite instead of launching
+against the old Hub, inventing a publisher, creating an unapproved external
+service/bucket, or queuing the full app deployment as an experiment dependency.
+An authorized infrastructure experiment may use the supported owned local
+isolated backend/database and authenticated tunnel. Keep normal source, native
+capacity, ownership, clocks and physical resource guards unchanged.
+
 Ordinary cloud runs automatically reuse verified completed dependency snapshots,
-including from fresh checkouts. Use `scripts/run-bench --help` and CLAUDE.md's
+including from fresh checkouts. Use `scripts/run-bench --help` and the Operations Runbook's
 "Cloud startup reuse" guidance; do not rebuild dependencies for source-only changes.
 
 Before an image-build-to-fleet measurement, complete CLAUDE.md's **Fresh clone
@@ -137,7 +254,7 @@ Foreground campaigns may print no `--controller-status` marker; use only the
 actual printed handle and read each copy's controller exit separately from
 `summary.json` → `jobs[].controller_exit_code`, keyed by `job_id`. The monitor's
 null controller fields alone do not establish liveness or completion.
-For a retained failed owner, follow CLAUDE.md's exact-owner recovery route.
+For a retained failed owner, follow the Operations Runbook's exact-owner recovery route.
 An `archive-verified.json` receipt preserves originals with zero proof credit;
 keep monitoring the supported CLI through the final native release audit.
 Lifecycle clocks are `<fleet-run>/<task-name>/bench-e2e.started-epoch` and
@@ -164,7 +281,7 @@ birth before any exact-owner signal. Audit retention is separate from liveness.
 These are 50 independent one-task controllers, each retaining the task's 50
 first-level general-purpose children: 2,500, with existing explore allowances unchanged.
 They are not 50 distinct tasks. The explicit flag requires an existing DEMO task
-admitted by runtime replay policy with `fast_cache:on`; task agents stay read-only
+admitted by runtime replay policy with `demo_cache:on`; task agents stay read-only
 and refuse live fallback on misses or unresolved context. The separate harness
 keeps genuine evaluation, including declared LLM judges that may call providers.
 Do not claim a recorded hit for existing cold-terminal passthrough, total zero
@@ -181,7 +298,7 @@ retain owned abort handling. Non-strict sliding scheduling remains unchanged. Re
 
 Follow the exact monitoring command printed by every launch. Poll every 30 seconds;
 check controller terminal status even when the card is stale, and continue through
-owned-resource release. See CLAUDE.md's "Monitor every cloud launch" guidance.
+owned-resource release. See the Operations Runbook's "Monitor every cloud launch" guidance.
 Task verdicts appear before cleanup; observation timeouts never authorize a restart.
 
 Keep the ordinary 7,200-second backstops. For an explicitly requested five-minute validation, set `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300` and pass `--timeout 300`; the environment setting bounds task execution and the flag bounds the controller path. Preserve terminal task grading, meaningful real execution, exact resource cleanup and the separately monitored E2E deadline. Recovered errors and inner latency measurements remain diagnostics for an infrastructure-only campaign; an ordinary task failure can satisfy that campaign without satisfying the deploy smoke gate.

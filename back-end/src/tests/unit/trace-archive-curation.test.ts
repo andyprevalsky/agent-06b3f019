@@ -62,6 +62,20 @@ const LOCAL_ARCHIVE_ENV = {
 };
 
 async function main(): Promise<void> {
+  await test('curation rejects invalid concurrency before processing even empty inputs', async () => {
+    for (const concurrency of [NaN, Infinity, -Infinity, 0, -1, 0.5]) {
+      for (const rootAgentIds of [[], ['invalid-concurrency-must-not-touch-archive']]) {
+        await assert.rejects(
+          curateTraceArchives({ rootAgentIds, concurrency }),
+          /concurrency must be a finite number greater than or equal to 1/
+        );
+      }
+    }
+    for (const concurrency of [undefined, 1, 1.9, 3]) {
+      assert.deepStrictEqual(await curateTraceArchives({ rootAgentIds: [], concurrency }), []);
+    }
+  });
+
   await test(
     'legacy trace migration creates uniform bundles for benchmark and llm-only traces',
     withEnv(LOCAL_ARCHIVE_ENV, async () => {
@@ -295,6 +309,7 @@ async function main(): Promise<void> {
           value: {
             schema_version: 1,
             root_agent_id: 'message-root',
+            source_kind: 'benchmark-task',
             benchmark_task_name: 'chat-mode',
             benchmark_result: { passed: true, status: 'PASSED', failure_reason: null },
             run: { root_status: 'ACTIVE' },
@@ -383,6 +398,65 @@ async function main(): Promise<void> {
       assert.strictEqual(deleted[0].deleted, true);
       assert.ok(deleted[0].deletedObjectCount >= 8);
       assert.deepStrictEqual(await listArchivedObjects('legacy-root'), []);
+    })
+  );
+
+  await test(
+    'curation runs classifications concurrently and preserves input order',
+    withEnv(LOCAL_ARCHIVE_ENV, async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-archive-curation-concurrency-'));
+      process.env.TRACE_ARCHIVE_LOCAL_DIR = dir;
+      const roots = ['conc-a', 'conc-b', 'conc-c', 'conc-d', 'conc-e'];
+      for (const rootAgentId of roots) {
+        const fixture = {
+          schema_version: 1,
+          kind: 'scoped-db-fixture',
+          root_agent_id: rootAgentId,
+          user_id: 'conc-user',
+          agent_ids: [rootAgentId],
+          rows: { Agent: [{ id: rootAgentId, status: 'COMPLETED' }] },
+        };
+        for (const objectPath of ['db/start.fixture.json.gz.enc', 'db/end.fixture.json.gz.enc']) {
+          assert.ok(await archiveJson({ rootAgentId, objectPath, value: fixture }));
+        }
+        assert.ok(
+          await archiveJson({
+            rootAgentId,
+            objectPath: 'manifest.json.gz.enc',
+            value: { schema_version: 1, root_agent_id: rootAgentId, run: { status: 'COMPLETED' } },
+          })
+        );
+        assert.ok(
+          await storePlainArtifact({
+            rootAgentId,
+            objectPath: 'manifest.public.json',
+            body: Buffer.from(`{"root_agent_id":"${rootAgentId}"}\n`),
+            contentType: 'application/json',
+          })
+        );
+      }
+      const seen: number[] = [];
+      const results = await curateTraceArchives({
+        rootAgentIds: roots,
+        concurrency: 3,
+        onResult: (_result, index) => seen.push(index),
+      });
+      assert.deepStrictEqual(
+        results.map((result) => result.classification.rootAgentId),
+        roots
+      );
+      assert.deepStrictEqual(
+        [...seen].sort((a, b) => a - b),
+        [0, 1, 2, 3, 4]
+      );
+      for (const result of results) {
+        assert.strictEqual(result.deleted, false);
+        assert.strictEqual(
+          result.classification.gold,
+          true,
+          JSON.stringify(result.classification.reasons)
+        );
+      }
     })
   );
 

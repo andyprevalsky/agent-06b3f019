@@ -19,6 +19,7 @@ from utils.purchase_approval import (
     validate_product_url_for_page,
     validate_product_url_for_pages,
 )
+from utils.tool_output_schema import ReadToolOutputTool
 
 MAX_BROWSER_WAIT_MS = 60_000
 
@@ -491,7 +492,10 @@ class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
 
 
 class RecoverFromChallengeBrowserTool(BaseModel):
-    """Relatively expensive staged recovery to force-open a blocked page or service."""
+    """Relatively expensive staged recovery to force-open a blocked page or service.
+
+    It can move the browser to a different browser/IP configuration (network exit).
+    """
 
     tool: Literal["recover_from_challenge"]
     reason: str = Field(
@@ -952,6 +956,7 @@ BROWSER_TOOL_MODELS = {
     "phone": PhoneBrowserTool,
     # Observation
     "read_browser_state": ReadBrowserStateTool,
+    "read_tool_output": ReadToolOutputTool,
     "screenshot": ScreenshotTool,
     "read_logs": ReadLogsBrowserTool,
     "read_network_requests": ReadNetworkRequestsBrowserTool,

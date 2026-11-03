@@ -1,0 +1,49 @@
+{
+  "schema": "finite-controller-cold-primary-source-review-v1",
+  "reviewed": true,
+  "reviewer": "Benchmark Infra root plus independent source peer",
+  "source_ref": "123bae7c7464902d17368187f7720ac12db1cd98",
+  "source_review_fingerprint": "2257b95e7bc6a8cf3e16d7aad63703666146f75d69059562be8c46176a7b3352",
+  "pre_service_boundaries": [
+    "before-stack-launch",
+    "agent-network-index-bootstrap"
+  ],
+  "actual_recipe": {
+    "ref": "123bae7c7464902d17368187f7720ac12db1cd98",
+    "recipe_sha256": "6505bdaaf032d2132a67cdbefb8bd4d76ca09b9d588d0f2b75ecdba93ca6deb6",
+    "fingerprint": "2257b95e7bc6a8cf3e16d7aad63703666146f75d69059562be8c46176a7b3352"
+  },
+  "actual_recipe_receipt_sha256": "57ea2fc85d445db1eb102bed86637e1e30a71053fd51506908999e07eacfc540",
+  "component_packet_sha256": "2271589f2c89272e89be542b70c94f031ba527b97a372547a4230aeb7997f384",
+  "source_diff_sha256": "484751c8c49c5ba46c5729a9b32971ddbdeff95cf639dae1c1a2ecfd259591d6",
+  "root_review_sha256": "265739fcd11d58f07538f1be4c1a27c9c52c6e74fa53ff8caf341815f6072b5c",
+  "independent_final_source_review_sha256": "8173120d6d9ce833627579a11bcfd1a989d149bf6a9442d28854ae5d2247016d",
+  "source_artifacts": {
+    "agents/benchmarks/cloudbench_dependency_sync_test.py": "ead9b46a73e946f5eb7518c0c5f7b48314f37685f56b7117ba5df79bbee3631b",
+    "scripts/cloudbench-fetch-ref.sh": "5f3bace42fd42a7ec8db4b3bf354e70f1c8799fbd4e4bc428fa1015f3f2bc3b9",
+    "scripts/cloudbench-run.sh": "4e3cadca6ffd4bed8c2c7dae84ad726295762221155edb7307659877753c057b",
+    "scripts/cloudbench_execution_provenance.py": "e83e0002fa138396a169761a58b4f2b9fd20550322e8fa3f12e67455c14a4a98",
+    "scripts/run-bench": "22db4cc03a467a92ad47bcede18fe65b1319545369d81954fa27c04bdf43a1e3",
+    "scripts/run-bench-cloud": "07edacd7a9750d24a0dfe2ea502426fb9c3418cb28a526a303f3fc8616058c23",
+    "scripts/run-bench-fleet": "b889ed388f202febbf2ed512ad54804dca90dd70ea2c08b83b8b1f82568b74c8"
+  },
+  "runtime_scope": {
+    "change": "Explicit future cold-primary opt-in through owned stopped pool handoff and real empty-checkout bootstrap",
+    "required_proof": "Canonical verified zero-credit PRECONFIG consumption plus fresh exact stopped native config/version/image/profile/MID/name/volume; source/run/task-ordinal/token/proof-bound future intent before boot",
+    "preserved": "Warm/default and worker behavior; reuse-only primary miss never creates; existing transfer FSM and quarantine/retain guards; no fabricated runtime ACK/lifecycle/task credit"
+  },
+  "verification": {
+    "registered_producer": "110 PASS / 25.82s; sole subsequent provenance whitelist change 1 PASS / 0.22s",
+    "registered_root_independent": "38 PASS / 2.97s",
+    "phase_capability_owning_RED": "2 FAIL / 1.70s prior contract refuses unstarted inert config and missing runtime; future policy change, not historical warm defect",
+    "first_fetch_behavior_only_RED": "3 FAIL / 3 PASS / 1.93s; final six-case baseline shows before-git violations for existing checkout, linked parent and wrong ref",
+    "transfer_crash": "8 PASS / 12.77s warm and cold real transfer FSM; native proof modeled separately from real canonical phase controls",
+    "actual_recipe": "Author once unmodified recipe/native provider 0; peer did not repeat"
+  },
+  "limits": [
+    "Exact fingerprint and only two existing phases; retain every prior policy entry.",
+    "Future stack-phase registration only; no gate on current STOP-retain or exact recovery.",
+    "Actual eligible cold IDs remain UNKNOWN and real cold bootstrap and original600 outcomes remain PENDING.",
+    "No provider/guest operation, paid trial, quota/capacity, cleanup/latch permission, grade or release credit follows from this source review."
+  ]
+}

@@ -12,7 +12,8 @@
 #
 # The per-run path is HANDS-OFF + WARM:
 #     one-time  : --setup  → volume + machine + git clone
-#     rare      : --refresh-wmh → (re)build the cached WMH model on the volume
+#     rare      : --build-wmh → build the native WMH on an owned big machine + publish
+#                 --refresh-wmh → restore the published serving cache onto the volume
 #     per run   : <task...> [--simulate] → start warm machine → detach the on-box
 #                  driver (cloudbench-run.sh) → serve-cached-WMH → run_benchmark →
 #                  proxy the live dashboard to the Mac → retrieve report card +
@@ -53,7 +54,18 @@
 #   --builder native|depot  image-build only; native default, Depot app scope/zstd 3
 #   --no-cache         explicitly bypass image build layers (build/setup only)
 #   --build-context D  build the unchanged source in another checkout
-#   --refresh-wmh      explicit-only: (re)build the cached WMH model on /data/world-model
+#   --refresh-wmh      explicit-only: refresh the cached WMH models on the donor
+#                      (native default: restore WMH_CACHE_NAME into /data/world-model-native
+#                      + pre-create the native venv, and restore WMH_LEGACY_CACHE_NAME
+#                      (default rose-r2-archive-legacy) into /data/world-model only when
+#                      the legacy model is missing; fails before a pull without room;
+#                      WMH_ENGINE=legacy rebuilds on-box)
+#   --build-wmh        explicit-only: build the native WMH on an OWNED ephemeral
+#                      Machine+Volume forked from the donor snapshot (WMH_BUILD_VM_SIZE
+#                      performance-8x, WMH_BUILD_VM_MEMORY_MB 65536, WMH_BUILD_VOLUME_GB
+#                      80), push WMH_CACHE_NAME (serving-only) + WMH_FULL_CACHE_NAME
+#                      (full; default rose-archive-native), then destroy both. Optional
+#                      WMH_EXPORT_CACHE_NAME runs only the native step on that export.
 #   --refresh-secrets  refresh + verify the app environment, then exit (maintenance
 #                      op — the ONLY path that stages/activates app secrets)
 #   --verify-secrets   READ-ONLY check that the app environment exists, then exit.
@@ -68,7 +80,8 @@
 #   --no-dashboard     do NOT proxy/open the live dashboard (implied under CI)
 #   --dash-port <n>    local port for the proxied dashboard (default CONDUCTOR_PORT+5764
 #                      → 8765 on the standard 3001 workspace)
-#   --model <name>     WMH model artifact name (default rose-r2-archive-anthropic)
+#   --model <name>     WMH model artifact name (default rose-archive; legacy engine:
+#                      rose-r2-archive-anthropic)
 #   --vm-size <size>   machine size at --setup (default shared-cpu-4x)
 #   --vm-memory <mb>   machine memory at --setup (default 8192)
 #   --volume-size <gb> volume size at --setup (default 20)
@@ -98,6 +111,9 @@ ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && p
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"
+# Every guest refuses bench-app secrets lacking the committed guest namespace,
+# whichever launcher (or older checkout) staged them; a launcher may bind its own.
+CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE="${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-$(cloudbench_expected_guest_temporal_namespace "$APP")}"
 # shellcheck source=lib/cloudbench-github-token.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-github-token.sh"
 CLOUDBENCH_CATALOG_SCRIPT="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench_catalog.py"
@@ -105,6 +121,7 @@ CLOUDBENCH_RUNTIME_SCRIPT_ROOT="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}
 [ -d "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/lib" ] \
     && CLOUDBENCH_RUNTIME_LIB_ROOT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/lib" \
     || CLOUDBENCH_RUNTIME_LIB_ROOT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT"
+CLOUDBENCH_GUEST_GENERATION_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-isolated-generation.py"
 CLOUDBENCH_GUEST_BOOT_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-boot.sh"
 CLOUDBENCH_GUEST_BOOT_PAYLOAD_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-boot-payload.py"
 CLOUDBENCH_GUEST_CODEX_AUTH_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-codex-auth.py"
@@ -149,6 +166,11 @@ source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-app-env-
 # On-box paths (mirror scripts/cloudbench-run.sh).
 REMOTE_REPO="/data/repo"
 REMOTE_WMH="/data/world-model"
+# uv-managed Python for the native WMH venv; must live on the volume so clones keep it.
+REMOTE_UV_PYTHON="/data/uv-python"
+# The native experiential model lives beside, never inside, the legacy model
+# directory: every engine's guests fork the same donor snapshot.
+REMOTE_WMH_NATIVE="/data/world-model-native"
 REMOTE_LOG="/data/bench.log"      # detached on-box driver logs here; we poll it.
 REMOTE_TMP_SCRIPT="/tmp/rb.sh"    # the base64'd on-box invocation lands here.
 REMOTE_DASH_PORT="8009"           # on-box static dashboard http.server port.
@@ -163,7 +185,7 @@ REMOTE_BACKEND_PORT="3001"        # scripts/run.sh backend port for CONDUCTOR_PO
 CLOUDBENCH_RUNNER_USER_ID="1f85ff25-6e29-4c1b-8739-f917bd101a30"
 
 # ── Defaults ───────────────────────────────────────────────────────────────
-MODE="run"              # run | setup | refresh-wmh | refresh-secrets | destroy
+MODE="run"              # run | setup | build-wmh | refresh-wmh | refresh-secrets | destroy
 IMAGE_BUILD_NO_CACHE=0
 IMAGE_BUILD_CONTEXT="$ROOT_DIR"
 IMAGE_BUILD_BUILDER=native
@@ -174,7 +196,104 @@ BENCH_SIMULATE="1"
 BENCH_PARALLEL="0"
 BENCH_MAX_CONCURRENCY="5"
 BENCH_REF=""
-WMH_MODEL_NAME="rose-r2-archive-anthropic"
+# World-model launch configuration uses portable values, never controller paths.
+# Cloud SIM serves the same native experiential WMH as local runs by default
+# (see .claude/skills/instantiate-whm). WMH_ENGINE=legacy explicitly selects the
+# previous model and its legacy defaults; every value stays operator-overridable.
+WMH_ENGINE="${WMH_ENGINE:-experiential}"
+case "$WMH_ENGINE" in
+    legacy|experiential) ;;
+    *) echo "Invalid WMH_ENGINE: expected legacy or experiential" >&2; exit 2 ;;
+esac
+if [ "$WMH_ENGINE" = experiential ]; then
+    WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-archive}"
+    WMH_ROSE_POOL="${WMH_ROSE_POOL:-rose-wmh-gpt61}"
+    WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-rose-outcome-distribution-v4}"
+else
+    WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-r2-archive-anthropic}"
+    WMH_ROSE_POOL="${WMH_ROSE_POOL:-rose-1-ultra}"
+    WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-upstream}"
+fi
+if ! [[ "$WMH_MODEL_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "Invalid WMH_MODEL_NAME" >&2
+    exit 2
+fi
+# R2 cache name of the serving-only native build that --refresh-wmh restores.
+WMH_CACHE_NAME="${WMH_CACHE_NAME:-rose-archive-serving}"
+if ! [[ "$WMH_CACHE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "Invalid WMH_CACHE_NAME" >&2
+    exit 2
+fi
+# Both engines serve from one donor snapshot: the legacy model (main's default)
+# under /data/world-model and the native one beside it. When the donor lost the
+# legacy model, the native --refresh-wmh restores it from this R2 cache.
+WMH_LEGACY_CACHE_NAME="${WMH_LEGACY_CACHE_NAME:-rose-r2-archive-legacy}"
+WMH_LEGACY_MODEL_NAME="${WMH_LEGACY_MODEL_NAME:-rose-r2-archive-anthropic}"
+for _wmh_name_key in WMH_LEGACY_CACHE_NAME WMH_LEGACY_MODEL_NAME; do
+    if ! [[ "${!_wmh_name_key}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        echo "Invalid $_wmh_name_key" >&2
+        exit 2
+    fi
+done
+if ! [[ "$WMH_ROSE_POOL" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+    echo "Invalid WMH_ROSE_POOL" >&2
+    exit 2
+fi
+# The guest runs BENCH_REF, so its pool registry decides; this checkout may differ.
+validate_wmh_rose_pool_at_ref() {  # validate_wmh_rose_pool_at_ref <ref> <pool>
+    local ref="$1" pool="$2" registry status
+    if [ -z "$ref" ] || ! git -C "$ROOT_DIR" rev-parse --quiet --verify --end-of-options "$ref^{commit}" >/dev/null 2>&1; then
+        echo "⚠️  Benchmark ref ${ref:-<none>} is not available locally; WMH_ROSE_POOL=$pool is not validated before launch" >&2
+        return 0
+    fi
+    registry="$(mktemp "${TMPDIR:-/tmp}/rose-pools.XXXXXX")" || return 2
+    if ! git -C "$ROOT_DIR" show "$ref:agents/providers/rose/pools.py" > "$registry" 2>/dev/null; then
+        rm -f "$registry"
+        echo "Invalid WMH_ROSE_POOL: the Rose pool registry is missing at $ref" >&2
+        return 2
+    fi
+    # Read the selected ref's registry as data; never execute its code here.
+    python3 - "$registry" "$pool" <<'PY_WMH_POOL'
+import ast
+import sys
+
+names = None
+for node in ast.parse(open(sys.argv[1], encoding="utf-8").read()).body:
+    if isinstance(node, ast.AnnAssign):
+        target = node.target
+    elif isinstance(node, ast.Assign) and len(node.targets) == 1:
+        target = node.targets[0]
+    else:
+        continue
+    if isinstance(target, ast.Name) and target.id == "POOL_REGISTRY" and isinstance(node.value, ast.Dict):
+        keys = node.value.keys
+        if all(isinstance(key, ast.Constant) and isinstance(key.value, str) for key in keys):
+            names = {key.value for key in keys}
+if names is None:
+    sys.exit("POOL_REGISTRY is not a literal dict of pool names")
+sys.exit(0 if sys.argv[2] in names else 1)
+PY_WMH_POOL
+    status=$?
+    rm -f "$registry"
+    if [ "$status" -ne 0 ]; then
+        echo "Invalid WMH_ROSE_POOL: expected a Rose pool registered at $ref" >&2
+        return 2
+    fi
+}
+WMH_CONTEXT_TOKENS="${WMH_CONTEXT_TOKENS:-}"
+if [ -n "$WMH_CONTEXT_TOKENS" ] && ! [[ "$WMH_CONTEXT_TOKENS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Invalid WMH_CONTEXT_TOKENS: expected a positive integer or unset" >&2
+    exit 2
+fi
+case "$WMH_EXECUTION_POLICY" in
+    upstream|rose-virtual-public-affordances-v1|rose-virtual-public-affordances-v2|rose-outcome-distribution-v1|rose-outcome-distribution-v2|rose-outcome-distribution-v3|rose-outcome-distribution-v4) ;;
+    *) echo "Invalid WMH_EXECUTION_POLICY: expected an immutable registered policy" >&2; exit 2 ;;
+esac
+if [ "$WMH_ENGINE" != experiential ] && [ "$WMH_EXECUTION_POLICY" != upstream ]; then
+    echo "WMH_EXECUTION_POLICY requires WMH_ENGINE=experiential" >&2
+    exit 2
+fi
+# End world-model launch configuration.
 VM_SIZE="shared-cpu-4x"
 VM_MEMORY="8192"
 WARM_PARKED_VM_SIZE="${CLOUDBENCH_WARM_PARKED_VM_SIZE:-shared-cpu-1x}"
@@ -216,6 +335,7 @@ while [ $# -gt 0 ]; do
             ;;
         --build-context)  IMAGE_BUILD_CONTEXT="${2:-}"; shift 2 ;;
         --refresh-wmh)    MODE="refresh-wmh"; shift ;;
+        --build-wmh)      MODE="build-wmh"; shift ;;
         --refresh-deps)   MODE="refresh-deps"; shift ;;
         --refresh-secrets) MODE="refresh-secrets"; shift ;;
         --verify-secrets) MODE="verify-secrets"; shift ;;   # read-only preflight (concurrency-safe)
@@ -238,12 +358,126 @@ while [ $# -gt 0 ]; do
         --volume-size)    VOLUME_SIZE="${2:-}"; shift 2 ;;
         --timeout)        RUN_TIMEOUT="${2:-}"; shift 2 ;;
         -h|--help)
-            sed -n '2,76p' "$0"; exit 0 ;;
+            sed -n '2,91p' "$0"; exit 0 ;;
         --*)              echo "❌ Unknown flag: $1" >&2; exit 2 ;;
         *)                BENCH_TASKS+=("$1"); shift ;;
     esac
 done
 
+# Explicit transport selection is frozen before any provider mutation. Never
+# fall back to staged dispatch after an attempted config update.
+if [ "$MODE" != verify-secrets ]; then
+case "${CLOUDBENCH_BOOT_TRANSPORT:-config}" in
+    config) ;;
+    staged)
+        [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = 1 ] \
+            || { echo "staged boot requires explicit BOOT_LAUNCH" >&2; exit 2; }
+        ;;
+    *) echo "invalid explicit boot transport" >&2; exit 2 ;;
+esac
+fi
+
+# BEGIN archived-generation transport (also exercised by the offline owner).
+CLOUDBENCH_ARCHIVED_PROOF_B64=""
+CLOUDBENCH_ARCHIVED_PROOF_SHA=""
+CLOUDBENCH_ARCHIVED_DATA_ROOT=""
+cloudbench_outcome_ok() {  # sets OUTCOME_OK=1/0 from FINISHED TIMED_OUT BENCH_EXIT RUN_IDENTITY_OK RUN_PASS_OK IMESSAGE_RELAY_OK
+    if [ "$FINISHED" = "1" ] && [ "$TIMED_OUT" = "0" ] && [ "${BENCH_EXIT:-1}" = "0" ] \
+        && [ "$RUN_PASS_OK" = "1" ] && [ "$IMESSAGE_RELAY_OK" = "1" ]; then
+        OUTCOME_OK="1"
+        return 0
+    fi
+    # Artifact-backed recovery: fast soft-complete guests (DEMO $0 cache) can tear
+    # down the data-plane proxy before the controller finishes the post-DONE driver
+    # 410 catch-up, leaving FINISHED=0 / BENCH_EXIT=1 even when the collected run
+    # JSON validates --require-pass. Prefer validated pass artifacts over the
+    # terminal-lifecycle race — same evidence the hub already trusts.
+    # An observed exit (FINISHED=1) is authoritative: run.json is saved before
+    # post-run gates (cache/memory ratchets), so a nonzero exit with a passing
+    # artifact is a real gate failure, never a race to recover from.
+    if [ "$FINISHED" != "1" ] \
+        && [ "$TIMED_OUT" = "0" ] \
+        && [ "$RUN_IDENTITY_OK" = "1" ] \
+        && [ "$RUN_PASS_OK" = "1" ] \
+        && [ "$IMESSAGE_RELAY_OK" = "1" ]; then
+        echo "⚠️  recovering OUTCOME_OK from validated pass artifacts after terminal FINISHED race (finished=${FINISHED:-0} bench_exit=${BENCH_EXIT:-unknown})"
+        OUTCOME_OK="1"
+        return 0
+    fi
+    OUTCOME_OK="0"
+}
+
+cloudbench_load_archived_proof() {
+    [ -n "${CLOUDBENCH_ARCHIVED_REUSE_PROOF_FILE:-}" ] || {
+        [ "${CLOUDBENCH_STORAGE_MODE:-}" != retained-volume-fresh-generation ] || return 1
+        return 0
+    }
+    [ "$MODE" = run ] && [ "$BENCH_SIMULATE" = 0 ] \
+        && [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = 1 ] \
+        && [ "${CLOUDBENCH_BOOT_TRANSPORT:-config}" = config ] \
+        && [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 0 ] \
+        && [ "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" = 1 ] || return 1
+    local result
+    result="$(python3 -S - "$CLOUDBENCH_GUEST_GENERATION_SCRIPT" "$CLOUDBENCH_ARCHIVED_REUSE_PROOF_FILE" \
+        "$FLEET_MACHINE_ID" "$BENCH_REF" "${CLOUDBENCH_FLEET_RUN_TOKEN:-}" "${BENCH_TASKS[0]:-}" <<'PY'
+import base64, hashlib, importlib.util, json, os, stat, sys
+helper, path, machine, ref, token, task = sys.argv[1:]
+fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+try:
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or before.st_mode & 0o077 or not 0 < before.st_size <= 65536:
+        raise ValueError('unsafe archived proof file')
+    raw = os.read(fd, 65537)
+    after = os.fstat(fd)
+    if len(raw) != before.st_size or (before.st_ino, before.st_dev, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_dev, after.st_size, after.st_mtime_ns):
+        raise ValueError('archived proof changed during read')
+finally:
+    os.close(fd)
+# Boot and later fleet collectors must certify the same semantic proof bytes.
+# The durable proof file itself remains untouched, including its recorded hash.
+raw = json.dumps(json.loads(raw), sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+b64 = base64.b64encode(raw).decode()
+digest = hashlib.sha256(raw).hexdigest()
+spec = importlib.util.spec_from_file_location('isolated_generation', helper)
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+value = module.proof({**os.environ, 'CLOUDBENCH_STORAGE_MODE':'retained-volume-fresh-generation',
+    'CLOUDBENCH_ARCHIVED_REUSE_PROOF_B64':b64, 'CLOUDBENCH_ARCHIVED_REUSE_PROOF_SHA256':digest,
+    'FLY_MACHINE_ID':machine, 'REF':ref, 'CLOUDBENCH_RUN_TOKEN':token})
+if value['successor']['task'] != task: raise ValueError('archived task mismatch')
+print(b64, digest, value['guest']['data_dir'])
+PY
+)" || return 1
+    read -r CLOUDBENCH_ARCHIVED_PROOF_B64 CLOUDBENCH_ARCHIVED_PROOF_SHA CLOUDBENCH_ARCHIVED_DATA_ROOT <<< "$result"
+    [ -n "$CLOUDBENCH_ARCHIVED_DATA_ROOT" ]
+}
+cloudbench_namespace_command() {  # exact MID, logical command; never rewrite provenance paths
+    local id="$1" command="$2" encoded
+    [ -n "$CLOUDBENCH_ARCHIVED_PROOF_B64" ] || { printf '%s' "$command"; return 0; }
+    [ "$id" = "$FLEET_MACHINE_ID" ] || return 1
+    encoded="$(printf '%s' "$command" | base64 | tr -d '\n')"
+    printf 'env CLOUDBENCH_STORAGE_MODE=retained-volume-fresh-generation CLOUDBENCH_ARCHIVED_REUSE_PROOF_B64=%s CLOUDBENCH_ARCHIVED_REUSE_PROOF_SHA256=%s FLY_MACHINE_ID=%s REF=%s CLOUDBENCH_RUN_TOKEN=%q python3 -S /cloudbench-isolated-generation.py --external-exec /bin/bash -c "$(printf %%s %s | base64 -d)"' \
+        "$CLOUDBENCH_ARCHIVED_PROOF_B64" "$CLOUDBENCH_ARCHIVED_PROOF_SHA" "$id" "$BENCH_REF" "$CLOUDBENCH_FLEET_RUN_TOKEN" "$encoded"
+}
+cloudbench_generation_sftp_path() {
+    local id="$1" path="$2"
+    [ -n "$CLOUDBENCH_ARCHIVED_PROOF_B64" ] || { printf '%s' "$path"; return 0; }
+    [ "$id" = "$FLEET_MACHINE_ID" ] || return 1
+    case "$path" in *'/../'*|*/..|*'/./'*|*/.) return 1 ;; esac
+    case "$path" in
+        /data) printf '%s' "$CLOUDBENCH_ARCHIVED_DATA_ROOT" ;;
+        /data/*) printf '%s/%s' "$CLOUDBENCH_ARCHIVED_DATA_ROOT" "${path#/data/}" ;;
+        /tmp/*) printf '%s' "$path" ;;
+        *) return 1 ;;
+    esac
+}
+# END archived-generation transport.
+
+cloudbench_load_archived_proof || { echo "Invalid archived-generation handoff" >&2; exit 2; }
+
+case "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" in 0|1) ;; *) exit 2 ;; esac
+if [ "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" = 1 ]; then
+    [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ] || [ -n "$CLOUDBENCH_ARCHIVED_PROOF_B64" ] || { echo "Cold primary requires explicit future empty bootstrap" >&2; exit 2; }
+fi
 case "${CLOUDBENCH_FRESH_VOLUME:-0}" in 0|1) ;; *) echo "Invalid fresh-volume handoff" >&2; exit 2 ;; esac
 if [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ]; then
     [ "$MODE" = run ] && [ "$BENCH_SIMULATE" = 0 ] && [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = 1 ] || {
@@ -327,6 +561,12 @@ mkdir -p "$OUT_DIR" 2>/dev/null || true
 if [ -z "$BENCH_REF" ]; then
     BENCH_REF="$(git rev-parse HEAD 2>/dev/null || echo '')"
 fi
+validate_wmh_rose_pool_at_ref "$BENCH_REF" "$WMH_ROSE_POOL" || exit 2
+# --model may replace the configured name after the launch block validated it.
+if ! [[ "$WMH_MODEL_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "Invalid WMH_MODEL_NAME" >&2
+    exit 2
+fi
 
 # ── Fly auth token ───────────────────────────────────────────────────────────
 # Operating the bench app requires a USER/org-scoped token. Prefer, in order:
@@ -362,7 +602,51 @@ if [ -z "${FLY_API_TOKEN:-}" ]; then
 fi
 export FLY_API_TOKEN
 
-FLY() { flyctl "$@"; }
+FLY() {
+    if [ -n "${CLOUDBENCH_ARCHIVED_PROOF_B64:-}" ] && [ "${1:-} ${2:-}" = 'ssh console' ]; then
+        echo "Archived generations require the namespace SSH entry" >&2
+        return 1
+    fi
+    if [ -n "${CLOUDBENCH_ARCHIVED_PROOF_B64:-}" ] && [ "${1:-} ${2:-}" = 'ssh sftp' ]; then
+        local -a generation_args=("$@")
+        local generation_mid="" generation_i generation_remote
+        for ((generation_i=0; generation_i<${#generation_args[@]}; generation_i++)); do
+            if [ "${generation_args[$generation_i]}" = --machine ]; then
+                generation_mid="${generation_args[$((generation_i+1))]}"
+            fi
+        done
+        [ "$generation_mid" = "$FLEET_MACHINE_ID" ] || return 1
+        case "${3:-}" in
+            put)
+                generation_i=$((${#generation_args[@]}-1))
+                # No supported config-boot upload writes /data. Physical SFTP
+                # would resolve guest symlinks in the OLD host mount namespace.
+                case "${generation_args[$generation_i]}" in /data|/data/*) return 1 ;; esac
+                ;;
+            get)
+                generation_i=$((${#generation_args[@]}-2))
+                case "${generation_args[$generation_i]}" in /data|/data/*) return 1 ;; esac
+                ;;
+            *) return 1 ;;
+        esac
+        ssh_exec "$generation_mid" true >/dev/null || return 1
+        generation_remote="$(cloudbench_generation_sftp_path "$generation_mid" "${generation_args[$generation_i]}")" || return 1
+        generation_args[$generation_i]="$generation_remote"
+        flyctl "${generation_args[@]}"
+        return $?
+    fi
+    case "${1:-} ${2:-}" in
+        'machine update'|'machines update'|'machine start'|'machines start'|'machine stop'|'machines stop'|'machine destroy'|'machines destroy'|'machine restart'|'machines restart'|'volume destroy'|'volumes destroy')
+            local common arg
+            common="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)" || return 1
+            for arg in "$@"; do
+                if [ -e "$common/cloudbench-cold-handoffs/outgoing/$arg" ] || [ -L "$common/cloudbench-cold-handoffs/outgoing/$arg" ]; then
+                    echo "❌ outgoing cold handoff excludes this source allocation" >&2; return 1
+                fi
+            done ;;
+    esac
+    flyctl "$@"
+}
 
 request_machine_start() {  # request_machine_start <machine_id>
     local id="$1"
@@ -583,7 +867,7 @@ print(hashlib.sha256(payload).hexdigest())
 cloudbench_update_progress_state() {  # <state> <delta> <token> <task> <budget> <reset>
     local state_file="$1" delta_file="$2" run_token="$3"
     local expected_task="$4" expected_budget="$5" reset_stream="$6"
-    python3 - "$state_file" "$delta_file" "$run_token" \
+    python3 -S - "$state_file" "$delta_file" "$run_token" \
         "$expected_task" "$expected_budget" "$reset_stream" <<'PY'
 import base64
 import json
@@ -1033,7 +1317,10 @@ write_state() {  # write_state <machine_id>
 }
 
 ensure_app() {
-    if _machines_json >/dev/null 2>&1 && FLY apps list --json 2>/dev/null | python3 -c 'import json,sys
+    # App-scoped deploy tokens can operate the target app but cannot enumerate
+    # every app in the organization.  Treat a successful app-specific Machines
+    # API read as authoritative before falling back to the org-wide app list.
+    if FLY machines list -a "$APP" --json >/dev/null 2>&1 || FLY apps list --json 2>/dev/null | python3 -c 'import json,sys
 apps=json.load(sys.stdin)
 names={a.get("Name") or a.get("name") for a in (apps or [])}
 sys.exit(0 if "'"$APP"'" in names else 1)' 2>/dev/null; then
@@ -1345,7 +1632,7 @@ print(next(iter(providers)))
         local fallback
         fallback="$(cloudbench_env_value back-end/.env BROWSER_PROVIDER)"
         case "$fallback" in
-            kernel|steel|browser-use)
+            tilion|kernel|steel|browser-use)
                 echo "⚠️  production Fly worker list unauthorized for $PROD_APP; using local back-end/.env BROWSER_PROVIDER=$fallback" >&2
                 rm -f "$err"
                 printf '%s\n' "$fallback"
@@ -1558,16 +1845,47 @@ _inject_secrets_locked() {
     fi
     validate_environment_contract
     local agents_b64 backend_b64 gh_token agents_sha backend_sha
-    agents_b64="$(base64 < agents/.env | tr -d '\n')"
-    backend_b64="$(base64 < back-end/.env | tr -d '\n')"
-    agents_sha="$(cloudbench_env_sha256 agents/.env)"
-    backend_sha="$(cloudbench_env_sha256 back-end/.env)"
+    local agents_src=agents/.env backend_src=back-end/.env
+    local guest_temporal_override guest_env_dir="" guest_temporal_namespace=""
+    # Guest-only Temporal namespace (see cloudbench_guest_temporal_override_file):
+    # the staged blobs get the override; local and production env files do not.
+    guest_temporal_override="$(cloudbench_guest_temporal_override_file agents/.env)" || exit 1
+    if [ -n "$guest_temporal_override" ]; then
+        guest_env_dir="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-guest-env.XXXXXX")" || exit 1
+        if ! guest_temporal_namespace="$(cloudbench_write_guest_temporal_env_files \
+                agents/.env back-end/.env "$guest_temporal_override" "$guest_env_dir")"; then
+            rm -rf "$guest_env_dir"
+            exit 1
+        fi
+        agents_src="$guest_env_dir/agents.env"
+        backend_src="$guest_env_dir/backend.env"
+        echo "   guest Temporal namespace override: $guest_temporal_namespace (guest copies only; from $guest_temporal_override)"
+    else
+        echo "   guest Temporal namespace: unchanged from agents/.env (no .env.benchmark-temporal override)"
+    fi
+    if ! cloudbench_require_staged_guest_temporal_namespace "$APP" "$guest_temporal_override" \
+            "$agents_src" "$backend_src"; then
+        [ -z "$guest_env_dir" ] || rm -rf "$guest_env_dir"
+        exit 1
+    fi
+    agents_b64="$(base64 < "$agents_src" | tr -d '\n')"
+    backend_b64="$(base64 < "$backend_src" | tr -d '\n')"
+    agents_sha="$(cloudbench_env_sha256 "$agents_src")"
+    backend_sha="$(cloudbench_env_sha256 "$backend_src")"
+    local agents_lines backend_lines
+    agents_lines="$(wc -l < "$agents_src" | tr -d ' ')"
+    backend_lines="$(wc -l < "$backend_src" | tr -d ' ')"
+    [ -z "$guest_env_dir" ] || rm -rf "$guest_env_dir"
+    if [ -z "$agents_b64" ] || [ -z "$backend_b64" ] || [ -z "$agents_sha" ] || [ -z "$backend_sha" ]; then
+        echo "❌ Could not encode the benchmark guest env files." >&2
+        exit 1
+    fi
     # Fly secrets need a durable token (gh auth expires). resolve_durable_*
     # already Contents-validates candidates in priority order.
     gh_token="$(resolve_durable_github_token)" || gh_token=""
     echo "   env provenance: Render backend + Fly workers → provider=$CLOUDBENCH_PROD_BROWSER_PROVIDER"
-    echo "   agents/.env sha256=${agents_sha:0:12} ($(wc -l < agents/.env | tr -d ' ') lines)"
-    echo "   back-end/.env sha256=${backend_sha:0:12} ($(wc -l < back-end/.env | tr -d ' ') lines)"
+    echo "   agents/.env sha256=${agents_sha:0:12} ($agents_lines lines)"
+    echo "   back-end/.env sha256=${backend_sha:0:12} ($backend_lines lines)"
     local -a set_args=(
         "AGENTS_ENV_B64=$agents_b64"
         "BACKEND_ENV_B64=$backend_b64"
@@ -1603,19 +1921,23 @@ _inject_secrets_locked() {
     done <<< "$activation_targets"
     mkdir -p "$ROOT_DIR/.context"
     python3 - "$ROOT_DIR/.context/cloudbench-env-manifest.json" \
-        "$agents_sha" "$backend_sha" "$CLOUDBENCH_PROD_BROWSER_PROVIDER" <<'PY'
+        "$agents_sha" "$backend_sha" "$CLOUDBENCH_PROD_BROWSER_PROVIDER" "$guest_temporal_namespace" <<'PY'
 import json, sys
-path, agents_sha, backend_sha, provider = sys.argv[1:]
+path, agents_sha, backend_sha, provider, guest_namespace = sys.argv[1:]
+overrides = ["DATABASE_URL", "DIRECT_URL", "BACKEND_API_URL", "TEMPORAL_TASK_QUEUE", "ports", "workspace"]
+if guest_namespace:
+    overrides += ["TEMPORAL_ADDRESS", "TEMPORAL_NAMESPACE", "TEMPORAL_API_KEY"]
 with open(path, "w") as handle:
     json.dump({
         "agents_env_sha256": agents_sha,
         "backend_env_sha256": backend_sha,
         "browser_provider": provider,
+        "guest_temporal_namespace": guest_namespace or None,
         "production_sources": {
             "backend": "render:Navi",
             "worker": "fly:navi-whisper-lux",
         },
-        "isolation_overrides": ["DATABASE_URL", "DIRECT_URL", "BACKEND_API_URL", "TEMPORAL_TASK_QUEUE", "ports", "workspace"],
+        "isolation_overrides": overrides,
     }, handle, indent=2)
     handle.write("\n")
 PY
@@ -1668,9 +1990,10 @@ inject_secrets() {
 # after machine update, and a stale GITHUB_TOKEN secret may be empty or 401.
 REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN"
 verify_app_environment() {
-    local listing missing
-    listing="$(FLY secrets list -a "$APP" --json 2>/dev/null)" || {
-        echo "❌ Could not read app secrets for $APP (app missing or no access)." >&2
+    local listing missing read_status
+    listing="$(FLY secrets list -a "$APP" --json)" || {
+        read_status=$?
+        echo "❌ Could not read app secrets for $APP (read exit=$read_status)." >&2
         echo "   One-time setup: bash scripts/run-bench-cloud --setup" >&2
         return 1
     }
@@ -1835,6 +2158,7 @@ ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command> [timeout_secs]
     # git-sync/sync-deps SSH commands failing while the same commands run fine
     # by hand). base64 has no shell-special bytes, so it survives any shell.
     local id="$1" cmd="$2" to="${3:-${CLOUDBENCH_SSH_EXEC_TIMEOUT:-1800}}"
+    cmd="$(cloudbench_namespace_command "$id" "$cmd")" || return 1
     local b64
     b64="$(printf '%s' "$cmd" | base64 | tr -d '\n')"
     # Always bound (descend I-07). Use flyctl not FLY: _with_timeout/Popen
@@ -1851,21 +2175,71 @@ ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command> [timeout_secs]
 # SIGALRM is not a reliable contract across exec (a stopped-machine flyctl SSH
 # ignored it for 2h22m), which prevented the outer run deadline from being read.
 _with_timeout() {  # _with_timeout <secs> <cmd> [args...]
-    python3 -c '
-import subprocess, sys
+    local mutation_launch_code=""
+    [ "${BOOT_CONFIG_UPDATE_SLOT_SHARED:-0}" != 1 ] || mutation_launch_code="$(cloudbench_mutation_launch_code)"
+    CLOUDBENCH_TIMEOUT_NATIVE_LAUNCH_CODE="$mutation_launch_code" \
+    CLOUDBENCH_TIMEOUT_NATIVE_MUTATION="${BOOT_CONFIG_UPDATE_SLOT_SHARED:-0}" \
+    CLOUDBENCH_TIMEOUT_NATIVE_LEASE="${BOOT_CONFIG_UPDATE_SLOT:-}" \
+    CLOUDBENCH_TIMEOUT_NATIVE_OWNER_PID="$$" \
+    CLOUDBENCH_TIMEOUT_NATIVE_OWNER_START="${MUTATION_OWNER_PID_START:-}" \
+    CLOUDBENCH_TIMEOUT_NATIVE_ROOT="${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-${APP:-}}" \
+    CLOUDBENCH_TIMEOUT_NATIVE_APP="${APP:-}" \
+    CLOUDBENCH_TIMEOUT_NATIVE_HELPER="${CLOUDBENCH_RUNTIME_SCRIPT_ROOT:-}/cloudbench-campaign-mutation.py" python3 -c '
+import os, signal, subprocess, sys
 
 timeout = float(sys.argv[1])
-proc = subprocess.Popen(sys.argv[2:])
+guarded = os.environ.get("CLOUDBENCH_TIMEOUT_NATIVE_MUTATION") == "1"
+interrupted = None
+proc = None
+
+def native_receipt(action):
+    if guarded:
+        subprocess.run([sys.executable, "-c", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_LAUNCH_CODE"],
+            os.environ["CLOUDBENCH_TIMEOUT_NATIVE_HELPER"], action,
+            "--app", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_APP"],
+            "--root", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_ROOT"],
+            "--owner-pid", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_OWNER_PID"],
+            "--owner-start", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_OWNER_START"],
+            "--lease", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_LEASE"],
+            "--native-owner-pid", str(os.getpid())], check=True)
+
+def joined_receipt():
+    # Tell the caller this attempt reaped its child and wrote join-native;
+    # its exit status alone cannot distinguish that from an unjoined one.
+    path = os.environ.get("CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT")
+    if path:
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
+
+native_receipt("start-native")
+if guarded:
+    def stop(signum, _frame):
+        global interrupted
+        interrupted = signum
+        raise InterruptedError()
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, stop)
 try:
+    proc = subprocess.Popen(sys.argv[2:])
     rc = proc.wait(timeout=timeout)
-except subprocess.TimeoutExpired:
+except (subprocess.TimeoutExpired, InterruptedError):
+    if interrupted is not None:
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(signum, signal.SIG_IGN)
+    # An interruption inside Popen has no proven child handle. Retain the
+    # unjoined lease instead of asserting that a native mutation was drained.
+    if proc is None:
+        raise SystemExit(128 + interrupted if interrupted is not None else 124)
     proc.terminate()
     try:
         proc.wait(timeout=1)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
-    raise SystemExit(124)
+    native_receipt("join-native")
+    joined_receipt()
+    raise SystemExit(128 + interrupted if interrupted is not None else 124)
+native_receipt("join-native")
+joined_receipt()
 raise SystemExit(rc if rc >= 0 else 128 - rc)
 ' "$@"
 }
@@ -1873,6 +2247,7 @@ raise SystemExit(rc if rc >= 0 else 128 - rc)
 ssh_read() {  # ssh_read <machine_id> <remote-shell-command>
     local id="$1" cmd="$2" out="" tries="${SSH_READ_TRIES:-3}"
     local to="${SSH_READ_TIMEOUT:-60}"
+    cmd="$(cloudbench_namespace_command "$id" "$cmd")" || return 1
     local n=0
     while [ "$n" -lt "$tries" ]; do
         if out="$(_with_timeout "$to" flyctl ssh console -a "$APP" --machine "$id" \
@@ -2053,39 +2428,89 @@ park_warm_source() {
 # that never carried the dependency trees this transaction just verified.
 CREATED_SNAPSHOT_ID=""
 create_volume_snapshot_exact() {  # create_volume_snapshot_exact <volume-id>
-    local vol="$1" before_ids="" create_output="" snapshots_json=""
-    local candidate="" state=""
+    local vol="$1" before_ids="" listed_ids="" create_output="" snapshots_json=""
+    local candidate="" state="" requested_at="" attempt="" schedule_attempt=""
+    local baseline_attempts="${CLOUDBENCH_SNAPSHOT_BASELINE_ATTEMPTS:-6}"
+    # Measured 2026-10-12 on the warm donor: a snapshot ran about 14 minutes, and
+    # one scheduled while the donor was running waited 7 more before starting.
+    local schedule_attempts="${CLOUDBENCH_SNAPSHOT_SCHEDULE_ATTEMPTS:-120}"
+    local ready_attempts="${CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS:-180}"
     CREATED_SNAPSHOT_ID=""
-    if ! before_ids="$(FLY volume snapshots list "$vol" -a "$APP" --json 2>/dev/null | python3 -c '
+    for attempt in "$baseline_attempts" "$schedule_attempts" "$ready_attempts"; do
+        case "$attempt" in
+            ''|*[!0-9]*|0) echo "❌ CLOUDBENCH_SNAPSHOT_*_ATTEMPTS must be positive integers" >&2; return 1 ;;
+        esac
+    done
+    for schedule_attempt in $(seq 1 "$schedule_attempts"); do
+        # Fly can briefly return a valid but empty list while older snapshots
+        # exist. An empty baseline makes every existing snapshot look new, so
+        # re-read it before accepting that the volume has none.
+        for attempt in $(seq 1 "$baseline_attempts"); do
+            if ! listed_ids="$(FLY volume snapshots list "$vol" -a "$APP" --json 2>/dev/null | python3 -c '
 import json, sys
 snapshots = json.load(sys.stdin)
 if not isinstance(snapshots, list): raise SystemExit(1)
 for snapshot in snapshots:
     if isinstance(snapshot, dict) and snapshot.get("id"): print(snapshot["id"])
 ')"; then
-        echo "❌ could not capture the authoritative pre-snapshot inventory" >&2
-        return 1
-    fi
-    echo "🧊 cutting a fresh snapshot of $vol ..."
-    if ! create_output="$(FLY volumes snapshots create "$vol" -a "$APP" --json 2>&1)"; then
+                echo "❌ could not capture the authoritative pre-snapshot inventory" >&2
+                return 1
+            fi
+            before_ids="$listed_ids"
+            [ -n "$before_ids" ] && break
+            [ "$attempt" -ge "$baseline_attempts" ] || sleep $(( attempt * 3 ))
+        done
+        requested_at="$(date +%s)"
+        echo "🧊 cutting a fresh snapshot of $vol ..."
+        create_output="$(FLY volumes snapshots create "$vol" -a "$APP" --json 2>&1)" && break
+        # Fly accepts one scheduled snapshot per volume. One left by an earlier
+        # (possibly failed) transaction blocks this request until it finishes;
+        # wait for it rather than failing every queued controller in turn.
+        case "$create_output" in
+            *"snapshot is already scheduled"*)
+                if [ "$schedule_attempt" -lt "$schedule_attempts" ]; then
+                    echo "   ⏳ another snapshot of $vol is still scheduled — retry $schedule_attempt/$schedule_attempts in 10s"
+                    sleep 10
+                    continue
+                fi
+                ;;
+        esac
         [ -z "$create_output" ] || printf '%s\n' "$create_output" | sed 's/^/   /' >&2
         echo "❌ snapshot creation request failed" >&2
         return 1
-    fi
+    done
     [ -z "$create_output" ] || printf '%s\n' "$create_output" | sed 's/^/   /'
-    for _ in $(seq 1 "${CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS:-90}"); do
+    for _ in $(seq 1 "$ready_attempts"); do
         if ! snapshots_json="$(FLY volume snapshots list "$vol" -a "$APP" --json 2>/dev/null)"; then
             echo "❌ could not verify snapshot inventory" >&2
             return 1
         fi
         read -r candidate state candidate_ids <<< "$(printf '%s' "$snapshots_json" \
-            | BEFORE_IDS="$before_ids" BOUND_ID="$CREATED_SNAPSHOT_ID" python3 -c '
+            | BEFORE_IDS="$before_ids" BOUND_ID="$CREATED_SNAPSHOT_ID" REQUESTED_AT="$requested_at" \
+                BASELINE_EMPTY="$([ -n "$before_ids" ] || echo 1)" \
+                SCHEDULE_RETRIED="$([ "$schedule_attempt" -gt 1 ] && echo 1 || echo 0)" \
+                CLOCK_SKEW="${CLOUDBENCH_SNAPSHOT_CLOCK_SKEW_SECONDS:-300}" python3 -c '
 import json, os, sys
+from datetime import datetime
 snapshots = json.load(sys.stdin)
 if not isinstance(snapshots, list): raise SystemExit(1)
 valid = {"created", "complete", "completed", "ready"}
 before = set(os.environ.get("BEFORE_IDS", "").splitlines())
 bound = os.environ.get("BOUND_ID", "")
+# A snapshot Fly dated well before this request cannot be its result, even if a
+# transiently empty baseline omitted it. Pending snapshots carry a zero date and
+# unparseable dates stay candidates, so this never adopts by time.
+# A scheduling retry follows a positively competing transaction. Its snapshot
+# may finish after our baseline but before this accepted request; the ordinary
+# clock-skew allowance must not let us adopt that earlier transaction.
+skew = 0 if os.environ.get("SCHEDULE_RETRIED") == "1" else float(os.environ["CLOCK_SKEW"])
+predates = float(os.environ["REQUESTED_AT"]) - skew
+def created_before_request(snapshot):
+    try:
+        created = datetime.fromisoformat(str(snapshot.get("created_at") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return created.year > 1 and created.tzinfo is not None and created.timestamp() < predates
 if bound:
     matches = [s for s in snapshots if isinstance(s, dict) and s.get("id") == bound]
     ready = any(str(s.get("status") or "").lower() in valid and int(s.get("size") or 0) > 0 for s in matches)
@@ -2095,7 +2520,7 @@ else:
     for snapshot in snapshots:
         if not isinstance(snapshot, dict): continue
         snapshot_id = snapshot.get("id")
-        if snapshot_id and snapshot_id not in before:
+        if snapshot_id and snapshot_id not in before and not created_before_request(snapshot):
             new_by_id.setdefault(snapshot_id, []).append(snapshot)
     if len(new_by_id) > 1:
         print("ambiguous ambiguous", ",".join(sorted(new_by_id)))
@@ -2104,10 +2529,19 @@ else:
     else:
         snapshot_id, records = next(iter(new_by_id.items()))
         ready = any(str(s.get("status") or "").lower() in valid and int(s.get("size") or 0) > 0 for s in records)
-        print(snapshot_id, "complete" if ready else "pending")
+        if ready and os.environ.get("BASELINE_EMPTY") == "1":
+            # With no baseline, an already-complete snapshot cannot be the one
+            # this request just scheduled (Fly takes minutes); never adopt it.
+            print("preexisting preexisting", snapshot_id)
+        else:
+            print(snapshot_id, "complete" if ready else "pending")
 ' 2>/dev/null || echo unreadable unreadable)"
         [ "$candidate" = "ambiguous" ] && {
             echo "❌ multiple new snapshots appeared before ownership was bound (${candidate_ids:-unknown}); refusing to guess transaction ownership" >&2
+            return 1
+        }
+        [ "$candidate" = "preexisting" ] && {
+            echo "❌ only an already-complete snapshot appeared after an empty baseline (${candidate_ids:-unknown}); refusing to adopt it" >&2
             return 1
         }
         [ "$candidate" = "unreadable" ] && { echo "❌ could not parse snapshot inventory" >&2; return 1; }
@@ -2259,19 +2693,27 @@ build_warm_image() {
         # in-flight controller's publisher.
         source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-image-publisher.sh" || return $?
     fi
-    local attempt build_ok=0 build_status=0
+    local attempt build_ok=0 build_status=0 used_labels=" " build_args=()
     local completion_file="$OUT_DIR/cloudbench-image-publication.json"
-    IMAGE_LABEL="cloudbench-warm-$(date +%Y%m%d-%H%M%S)-$$"
-    local build_args=(
-        deploy "$IMAGE_BUILD_CONTEXT"
-        -c "$IMAGE_BUILD_CONTEXT/fly.cloudbench-warm.toml"
-        --dockerfile "$IMAGE_BUILD_CONTEXT/Dockerfile.cloudbench-warm"
-        "${builder_args[@]}" --remote-only --build-only --push
-        --image-label "$IMAGE_LABEL" -a "$APP"
-    )
-    [ "$IMAGE_BUILD_NO_CACHE" = 0 ] || build_args+=(--no-cache)
     echo "🏗️  Building dependency image (layer_cache_bypassed=$IMAGE_BUILD_NO_CACHE)..."
     for attempt in 1 2 3; do
+        # A failed attempt's remote builder can still publish after its local
+        # client exits. Each attempt therefore owns a fresh tag, so that output
+        # can never be read back as a later attempt's registry handoff.
+        IMAGE_LABEL="cloudbench-warm-$(date +%Y%m%d-%H%M%S)-$$"
+        while [[ "$used_labels" == *" $IMAGE_LABEL "* ]]; do
+            command sleep 1
+            IMAGE_LABEL="cloudbench-warm-$(date +%Y%m%d-%H%M%S)-$$"
+        done
+        used_labels+="$IMAGE_LABEL "
+        build_args=(
+            deploy "$IMAGE_BUILD_CONTEXT"
+            -c "$IMAGE_BUILD_CONTEXT/fly.cloudbench-warm.toml"
+            --dockerfile "$IMAGE_BUILD_CONTEXT/Dockerfile.cloudbench-warm"
+            "${builder_args[@]}" --remote-only --build-only --push
+            --image-label "$IMAGE_LABEL" -a "$APP"
+        )
+        [ "$IMAGE_BUILD_NO_CACHE" = 0 ] || build_args+=(--no-cache)
         echo "   build attempt $attempt/3 (label $IMAGE_LABEL)"
         # Fly resolves build files from the config directory. Bind every path
         # and the invocation directory to the selected checkout, even when the
@@ -2402,11 +2844,19 @@ fi
 
 # MODE: --setup — one-time: app + secrets + image + volume + machine + git clone.
 # ═════════════════════════════════════════════════════════════════════════════
+warm_source_machine_creation_admission() {
+    echo "❌ warm-source capacity gap: reuse an existing owned warm Machine; new Machine creation is withheld without measured admission" >&2
+    return 78
+}
 if [ "$MODE" = "setup" ]; then
     echo "═══ run-bench-cloud --setup ═══"
     echo "app=$APP region=$REGION machine=$MACHINE_NAME volume=$VOLUME_NAME vm=$VM_SIZE/${VM_MEMORY}MB volume_size=${VOLUME_SIZE}GB"
     echo ""
 
+    # Resolve before app/secrets/build/volume mutations. An absent or unsafe
+    # warm source is an admission gap, never permission to create another one.
+    setup_existing_machine="$(resolve_machine_id)" || { warm_source_machine_creation_admission; exit 78; }
+    [ -n "$setup_existing_machine" ] || { warm_source_machine_creation_admission; exit 78; }
     ensure_app
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
     trap 'release_app_environment_lock' EXIT
@@ -2430,6 +2880,7 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
         echo "✅ Volume $VOLUME_NAME already exists"
     else
         echo "💽 Creating volume $VOLUME_NAME (${VOLUME_SIZE}GB, region $REGION) ..."
+        warm_source_machine_creation_admission || exit $?
         FLY volumes create "$VOLUME_NAME" -a "$APP" --region "$REGION" --size "$VOLUME_SIZE" --yes 2>&1 | sed 's/^/   /' || {
             echo "❌ Failed to create volume"; exit 1
         }
@@ -2447,6 +2898,7 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
         echo "✅ Persistent machine already exists: $mid (image refreshed)"
     else
         echo "🖥️  Creating persistent machine $MACHINE_NAME ($VM_SIZE / ${VM_MEMORY}MB, volume→/data) ..."
+        warm_source_machine_creation_admission || exit $?
         RUN_LOG="$(mktemp)"
         FLY machine run "$IMAGE_REF" \
             -a "$APP" \
@@ -2544,6 +2996,47 @@ fi
 # clone pays the multi-minute rsync refresh on bring-up (the fleet's dominant
 # cost). Refresh centrally ONCE here instead; clones then no-op their dep sync.
 # ═════════════════════════════════════════════════════════════════════════════
+# Print the snapshot a peer published while this refresh request waited for the
+# app environment lock, when its proof covers the exact expected manifests and
+# passes the same complete-snapshot/epoch check the fleet applies afterwards.
+peer_refreshed_snapshot() {  # peer_refreshed_snapshot <request-epoch>
+    local since="$1" s_node="" s_py="" s_epoch="" s_snap="" written="" vol=""
+    [ -f "$WARM_DEPS_STATE_FILE" ] || return 1
+    written="$(python3 -c 'import os, sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$WARM_DEPS_STATE_FILE" 2>/dev/null)" || return 1
+    [ "${written:-0}" -ge "$since" ] || return 1
+    read -r s_node s_py s_epoch s_snap < "$WARM_DEPS_STATE_FILE" || return 1
+    [ "$s_node" = "$EXPECTED_NODE_FP" ] && [ "$s_py" = "$EXPECTED_PY_FP" ] && [ -n "$s_snap" ] || return 1
+    # Reuse only an unpatched peer snapshot of this exact source ref: a patched
+    # producer leaves no receipt, and a patched request refreshes its own tree.
+    [ -z "${REFRESH_PATCH_FILE:-}" ] || return 1
+    [ "$(cat "$WARM_DEPS_STATE_FILE.ref" 2>/dev/null)" = "$EXPECTED_REF $s_snap" ] || return 1
+    vol="$(FLY machines list -a "$APP" --json 2>/dev/null | MN="$MACHINE_NAME" python3 -c '
+import json, os, sys
+for m in json.load(sys.stdin) or []:
+    if m.get("name") == os.environ["MN"]:
+        mounts = m.get("config", {}).get("mounts") or []
+        if mounts: print(mounts[0].get("volume", ""))
+        break
+' 2>/dev/null)" || return 1
+    [ -n "$vol" ] || return 1
+    FLY volume snapshots list "$vol" -a "$APP" --json 2>/dev/null \
+        | SID="$s_snap" EPOCH="${s_epoch:-0}" python3 -c '
+import json, os, sys
+from datetime import datetime
+valid = {"created", "complete", "completed", "ready"}
+records = [s for s in json.load(sys.stdin) or [] if isinstance(s, dict) and s.get("id") == os.environ["SID"]]
+def proven(snapshot):
+    try:
+        created = datetime.fromisoformat(str(snapshot.get("created_at") or "").replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return False
+    return (str(snapshot.get("status") or "").lower() in valid and int(snapshot.get("size") or 0) > 0
+            and created >= int(os.environ["EPOCH"]) - 60)
+raise SystemExit(0 if any(proven(s) for s in records) else 1)
+' 2>/dev/null || return 1
+    printf '%s\n' "$s_snap"
+}
+
 if [ "$MODE" = "refresh-deps" ]; then
     if ! EXPECTED_REF="$(git -C "$ROOT_DIR" rev-parse --verify "${BENCH_REF}^{commit}" 2>/dev/null)"; then
         echo "❌ invalid benchmark ref: $BENCH_REF is not a local commit" >&2
@@ -2595,8 +3088,15 @@ if [ "$MODE" = "refresh-deps" ]; then
     }
     echo "═══ run-bench-cloud --refresh-deps (ref $BENCH_REF) ═══"
     ensure_app
+    REFRESH_REQUESTED_EPOCH="$(date +%s)"
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
     acquire_app_environment_lock || exit 1
+    # Concurrent controllers queue here for the same refresh. Once one finishes,
+    # the rest reuse its proof instead of each repeating a refresh and snapshot.
+    if PEER_SNAP="$(peer_refreshed_snapshot "$REFRESH_REQUESTED_EPOCH")"; then
+        echo "✅ a peer refreshed these exact manifests while this request waited; reusing snapshot $PEER_SNAP"
+        exit 0
+    fi
 
     mid="$(resolve_machine_id)"
     [ -z "$mid" ] && { echo "❌ No persistent machine — run 'run-bench-cloud --setup' first."; exit 1; }
@@ -2644,6 +3144,10 @@ REMOTE_PY_FP=\$(cloudbench_manifest_fingerprint '$REMOTE_REPO' \"\${CLOUDBENCH_P
 echo \"::DEPS-REMOTE-REF::\$REMOTE_REF\"
 echo \"::DEPS-REMOTE-NODE::\$REMOTE_NODE_FP\"
 echo \"::DEPS-REMOTE-PY::\$REMOTE_PY_FP\"
+# The donor is stopped by signal and snapshotted next; write back the synced
+# checkout and dependency trees first (see the native WMH refresh flush).
+sync -f '$REMOTE_REPO'
+sync
 echo '::DEPS-REFRESH-DONE::'"
     DEPS_LOG="$(mktemp)"
     ssh_exec "$mid" "$DEPS_CMD" 2>&1 | grep -av '^Connecting to' | tee "$DEPS_LOG" | sed 's/^/   /'
@@ -2689,6 +3193,15 @@ for m in json.load(sys.stdin) or []:
     # via the git-common dir (same pattern as pool claims).
     printf '%s %s %s %s\n' "$EXPECTED_NODE_FP" "$EXPECTED_PY_FP" "$SNAP_START_EPOCH" "$NEW_SNAP" \
         > "$WARM_DEPS_STATE_FILE"
+    # Beside the four-field proof (its format is shared with older readers),
+    # record the exact verified source ref this snapshot was produced from.
+    # Sharded runs reuse a snapshot only for their own exact ref; a patched
+    # workspace is not that ref, so it leaves no receipt.
+    rm -f "$WARM_DEPS_STATE_FILE.ref"
+    if [ -z "$REFRESH_PATCH_FILE" ]; then
+        printf '%s %s\n' "$EXPECTED_REF" "$NEW_SNAP" > "$WARM_DEPS_STATE_FILE.ref.$$" \
+            && mv -f "$WARM_DEPS_STATE_FILE.ref.$$" "$WARM_DEPS_STATE_FILE.ref"
+    fi
     if ! cloudbench_publish_warm_deps_state "$APP" "$maintenance_mid" "$VOL_ID" \
         "$EXPECTED_NODE_FP" "$EXPECTED_PY_FP" "$SNAP_START_EPOCH" "$NEW_SNAP"; then
         echo "⚠️  shared dependency proof publication failed; this checkout retains its verified snapshot" >&2
@@ -2703,16 +3216,28 @@ fi
 # This is the ONLY place the model is (re)built. NOT per run.
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "$MODE" = "refresh-wmh" ]; then
-    # Thousands of archived bundles make an uncapped per-bundle R2 signature
-    # scan take hours. Bound maintenance by default; 0 remains the explicit
-    # opt-in for an exhaustive offline rebuild.
-    WMH_REFRESH_MAX_BUNDLES="${WMH_REFRESH_MAX_BUNDLES:-20}"
+    # Refresh the complete eligible archive by default. Operators may still set
+    # a positive value for a deliberately scoped diagnostic refresh, but normal
+    # maintenance must not silently omit valid trajectories.
+    WMH_REFRESH_MAX_BUNDLES="${WMH_REFRESH_MAX_BUNDLES:-0}"
     case "$WMH_REFRESH_MAX_BUNDLES" in
         ''|*[!0-9]*)
             echo "❌ WMH_REFRESH_MAX_BUNDLES must be a non-negative integer." >&2
             exit 2
             ;;
     esac
+    # Explicit diagnostic step controls. Both default to unlimited so normal
+    # maintenance embeds every completed step from every eligible bundle.
+    WMH_REFRESH_MAX_STEPS="${WMH_REFRESH_MAX_STEPS:-0}"
+    WMH_REFRESH_MAX_STEPS_PER_BUNDLE="${WMH_REFRESH_MAX_STEPS_PER_BUNDLE:-0}"
+    for _wmh_cap in WMH_REFRESH_MAX_STEPS WMH_REFRESH_MAX_STEPS_PER_BUNDLE; do
+        case "${!_wmh_cap}" in
+            ''|*[!0-9]*)
+                echo "❌ $_wmh_cap must be a non-negative integer." >&2
+                exit 2
+                ;;
+        esac
+    done
     # An explicit corpus makes a one-trace ingestion proof attributable: retain
     # the exact prior delta-index roots and admit one named live root, instead of
     # relying on whichever UUIDs happen to fit the archive cap. Restrict values
@@ -2733,7 +3258,8 @@ if [ "$MODE" = "refresh-wmh" ]; then
         fi
     fi
     echo "═══ run-bench-cloud --refresh-wmh ═══"
-    echo "model=$WMH_MODEL_NAME target=$REMOTE_WMH max_bundles=$WMH_REFRESH_MAX_BUNDLES"
+    echo "engine=$WMH_ENGINE cache=$WMH_CACHE_NAME pool=$WMH_ROSE_POOL policy=$WMH_EXECUTION_POLICY"
+    echo "model=$WMH_MODEL_NAME target=$REMOTE_WMH max_bundles=$WMH_REFRESH_MAX_BUNDLES max_steps=$WMH_REFRESH_MAX_STEPS max_steps_per_bundle=$WMH_REFRESH_MAX_STEPS_PER_BUNDLE"
     [ -n "$WMH_REFRESH_ROOT_AGENT_IDS" ] \
         && echo "explicit_roots=${#_wmh_refresh_roots[@]} (strict corpus selection)"
     echo ""
@@ -2746,13 +3272,44 @@ if [ "$MODE" = "refresh-wmh" ]; then
     trap 'cleanup_refresh_wmh; exit 130' INT
     trap 'cleanup_refresh_wmh; exit 143' TERM
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
-    inject_secrets      # refresh secrets so R2 creds for the corpus read are current.
+    # Exclusive donor maintenance, but never restage the shared app secrets:
+    # restaging from this checkout's env reverted every concurrent guest to the
+    # prod Temporal namespace (2026-10-19). The donor already carries the app's
+    # R2 credentials; rotate them only with an explicit --refresh-secrets.
+    acquire_app_environment_lock || exit 1
+    verify_app_environment || exit 1
 
     mid="$(resolve_machine_id)"
     [ -z "$mid" ] && { echo "❌ No persistent machine — run 'run-bench-cloud --setup' first."; exit 1; }
     write_state "$mid"
 
+    # The snapshot this refresh cuts carries the donor's CURRENT dependency
+    # trees, so it may only be republished under the fingerprints of the newest
+    # donor proof — never this checkout's local receipt, which a peer devbox's
+    # dependency refresh can have superseded (the lock is per clone, not global).
+    # Resolve it before touching the donor; it is re-checked before publication.
+    # Begin WMH donor dependency proof.
+    wmh_refresh_donor_proof() {  # → "node python epoch snapshot volume"
+        local inventory volume proof
+        inventory="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
+        volume="$(printf '%s' "$inventory" | ID="$maintenance_mid" python3 -c '
+import json, os, sys
+for m in json.load(sys.stdin) or []:
+    if m.get("id") == os.environ["ID"]:
+        mounts = (m.get("config") or {}).get("mounts") or []
+        print(mounts[0].get("volume", "") if len(mounts) == 1 else "")
+')" || return 1
+        [ -n "$volume" ] || return 1
+        proof="$(printf '%s' "$inventory" | cloudbench_warm_deps_latest_proof "$APP" "$maintenance_mid" "$volume")" || return 1
+        printf '%s %s\n' "$proof" "$volume"
+    }
+    # End WMH donor dependency proof.
     maintenance_mid="$mid"
+    if ! WMH_DONOR_PROOF="$(wmh_refresh_donor_proof)"; then
+        echo "❌ the donor publishes no dependency proof for its volume; run --refresh-deps first" >&2
+        exit 1
+    fi
+    read -r RECORDED_NODE_FP RECORDED_PY_FP _ _ VOL_ID <<< "$WMH_DONOR_PROOF"
     prepare_warm_source "$mid" || exit 1
     require_machine_ready "$mid" || exit 1
 
@@ -2765,10 +3322,89 @@ if [ "$MODE" = "refresh-wmh" ]; then
     fi
     warm_source_fetch_ref "$mid" "$EXPECTED_WMH_REF" || exit 1
     echo ""
-    echo "🌍 Building the WMH model on the box → $REMOTE_WMH (WMH_GEPA_BUDGET=0 index-only) ..."
-    # Decode secrets into the checkout .env, mirror deps if needed, then run the
-    # WMH build. This is the ONLY place update_world_model_for_simulation() runs
-    # cloud-side. Runs as rose from the agents dir with the cached-model build root.
+    # Native (default): the small donor never builds. The model is built on a big
+    # owned machine and published with `wmh_build_cache push --serving-only`; here
+    # the donor restores that serving-only cache, and pre-creates the native venv
+    # (and its uv-managed Python) on the volume so guests never install at run time.
+    # The cache is restored and verified beside the live tree, then swapped into
+    # its own directory: the legacy model under $REMOTE_WMH, which other
+    # workspaces' guests still serve, is never replaced (2026-10-19 a --force
+    # restore into $REMOTE_WMH deleted rose-r2-archive-anthropic from the donor).
+    NATIVE_REFRESH_CMD="set -e
+[ -n \"\${AGENTS_ENV_B64:-}\" ] && echo \"\$AGENTS_ENV_B64\" | base64 -d > '$REMOTE_REPO/agents/.env'
+[ -n \"\${BACKEND_ENV_B64:-}\" ] && echo \"\$BACKEND_ENV_B64\" | base64 -d > '$REMOTE_REPO/back-end/.env'
+chown rose:rose '$REMOTE_REPO/agents/.env' '$REMOTE_REPO/back-end/.env' 2>/dev/null || true
+[ -x '$REMOTE_REPO/agents/venv/bin/python' ] || rsync -a /app/agents/venv/ '$REMOTE_REPO/agents/venv/'
+mkdir -p '$REMOTE_REPO/.context' '$REMOTE_UV_PYTHON'
+chown -R rose:rose '$REMOTE_REPO/agents/venv' '$REMOTE_REPO/.context' '$REMOTE_UV_PYTHON' 2>/dev/null || true
+cd '$REMOTE_REPO'
+[ -x agents/venv/bin/uv ] || gosu rose env HOME=/home/rose agents/venv/bin/python -m pip install --quiet uv
+gosu rose env HOME=/home/rose UV_PYTHON_INSTALL_DIR='$REMOTE_UV_PYTHON' UV_CACHE_DIR=/tmp/rose-uv-cache UV_LINK_MODE=copy bash scripts/setup-world-model.sh
+cd agents
+# A streaming pull stages beside its target and needs the cache's full size free
+# there (the previous tree stays until the swap): fail before pulling otherwise.
+# An optional third path counts as free: the caller would delete it first.
+wmh_require_room() {
+    local need avail reclaim=0
+    need=\$(PYTHONDONTWRITEBYTECODE=1 venv/bin/python -u -m benchmarks.wmh_build_cache status --name \"\$1\" | venv/bin/python -c 'import json, sys; print(int(json.load(sys.stdin)[\"plaintext_bytes\"]))') || { echo \"cannot read the published size of WMH cache \$1\" >&2; return 1; }
+    avail=\$(df -PB1 \"\$(dirname \"\$2\")\" | awk 'NR == 2 { print \$4 }')
+    if [ -n \"\${3:-}\" ]; then
+        reclaim=\$(du -sB1 \"\$3\" | awk 'NR == 1 { print \$1 }') && [ -n \"\$reclaim\" ] || { echo \"cannot measure \$3\" >&2; return 1; }
+        avail=\$((\${avail:-0} + reclaim))
+    fi
+    if ! [ \"\$avail\" -ge \$((need + 1073741824)) ] 2>/dev/null; then
+        echo \"insufficient donor disk for WMH cache \$1: needs \$need bytes + 1 GiB margin beside \$2, \${avail:-unknown} bytes free\" >&2
+        return 1
+    fi
+    echo \"disk headroom ok for \$1: \$need bytes needed, \$avail free\"
+}
+# The legacy model (main's default engine) must survive beside the native one.
+# Restore it atomically only when it is missing or was replaced by another model.
+if [ -f '$REMOTE_WMH/build.manifest.json' ] && [ -d '$REMOTE_WMH/models/$WMH_LEGACY_MODEL_NAME' ] && [ ! -e '$REMOTE_WMH/models/$WMH_LEGACY_MODEL_NAME/experiential.json' ]; then
+    echo 'legacy WMH model $WMH_LEGACY_MODEL_NAME intact at $REMOTE_WMH; leaving it'
+else
+    echo 'legacy WMH model $WMH_LEGACY_MODEL_NAME missing at $REMOTE_WMH; restoring cache $WMH_LEGACY_CACHE_NAME'
+    rm -rf '$REMOTE_WMH.incoming' '$REMOTE_WMH.incoming'.replaced-* '$REMOTE_WMH.previous'
+    wmh_require_room '$WMH_LEGACY_CACHE_NAME' '$REMOTE_WMH.incoming'
+    PYTHONDONTWRITEBYTECODE=1 venv/bin/python -u -m benchmarks.wmh_build_cache pull --build-dir '$REMOTE_WMH.incoming' --name '$WMH_LEGACY_CACHE_NAME' --force
+    [ -f '$REMOTE_WMH.incoming/build.manifest.json' ] && [ -d '$REMOTE_WMH.incoming/models/$WMH_LEGACY_MODEL_NAME' ] || { rm -rf '$REMOTE_WMH.incoming'; echo 'restored cache $WMH_LEGACY_CACHE_NAME lacks build.manifest.json or models/$WMH_LEGACY_MODEL_NAME' >&2; exit 1; }
+    chown -R rose:rose '$REMOTE_WMH.incoming'
+    if [ -e '$REMOTE_WMH' ]; then mv '$REMOTE_WMH' '$REMOTE_WMH.previous'; fi
+    mv '$REMOTE_WMH.incoming' '$REMOTE_WMH'
+    rm -rf '$REMOTE_WMH.previous'
+    echo 'restored legacy WMH model $WMH_LEGACY_MODEL_NAME at $REMOTE_WMH'
+fi
+rm -rf '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE.incoming'.replaced-* '$REMOTE_WMH_NATIVE.previous'
+# A previous native tree (~16 GB) and its staged replacement do not both fit a
+# 40 GB donor volume. This maintenance donor serves nothing and its snapshot is
+# published only on success (fleets keep forking the previous snapshot until
+# then), so drop the previous tree when the staged pull would not fit. Prove the
+# drop frees enough first: a refresh that cannot fit keeps the previous tree.
+if ! wmh_require_room '$WMH_CACHE_NAME' '$REMOTE_WMH_NATIVE.incoming'; then
+    [ -e '$REMOTE_WMH_NATIVE' ] || exit 1
+    wmh_require_room '$WMH_CACHE_NAME' '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE'
+    echo 'dropping the previous native WMH tree at $REMOTE_WMH_NATIVE to make room for its replacement'
+    rm -rf '$REMOTE_WMH_NATIVE'
+    wmh_require_room '$WMH_CACHE_NAME' '$REMOTE_WMH_NATIVE.incoming'
+fi
+PYTHONDONTWRITEBYTECODE=1 venv/bin/python -u -m benchmarks.wmh_build_cache pull --build-dir '$REMOTE_WMH_NATIVE.incoming' --name '$WMH_CACHE_NAME' --force
+[ -f '$REMOTE_WMH_NATIVE.incoming/models/$WMH_MODEL_NAME/experiential.json' ] || { rm -rf '$REMOTE_WMH_NATIVE.incoming'; echo 'restored cache $WMH_CACHE_NAME lacks models/$WMH_MODEL_NAME/experiential.json' >&2; exit 1; }
+[ -f '$REMOTE_WMH_NATIVE.incoming/build.manifest.json' ] || { rm -rf '$REMOTE_WMH_NATIVE.incoming'; echo 'restored cache $WMH_CACHE_NAME lacks build.manifest.json' >&2; exit 1; }
+chown -R rose:rose '$REMOTE_WMH_NATIVE.incoming'
+if [ -e '$REMOTE_WMH_NATIVE' ]; then mv '$REMOTE_WMH_NATIVE' '$REMOTE_WMH_NATIVE.previous'; fi
+mv '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE'
+rm -rf '$REMOTE_WMH_NATIVE.previous'
+# The donor is stopped and snapshotted right after this; flush every restored
+# byte first (2026-10-20 an unflushed blob tail was snapshotted truncated).
+sync -f '$REMOTE_WMH_NATIVE'
+sync
+echo '::WMH-REFRESH-DONE::'
+ls -la '$REMOTE_WMH/models' '$REMOTE_WMH_NATIVE/models' 2>/dev/null || true
+df -h /data 2>/dev/null || true"
+    # Legacy (explicit WMH_ENGINE=legacy): decode secrets into the checkout .env,
+    # mirror deps if needed, then run the WMH build. This is the ONLY place
+    # update_world_model_for_simulation() runs cloud-side. Runs as rose from the
+    # agents dir with the cached-model build root.
     BUILD_CMD="set -e
 # decode env for R2 creds the corpus read needs
 [ -n \"\${AGENTS_ENV_B64:-}\" ] && echo \"\$AGENTS_ENV_B64\" | base64 -d > '$REMOTE_REPO/agents/.env'
@@ -2779,15 +3415,21 @@ chown rose:rose '$REMOTE_REPO/agents/.env' '$REMOTE_REPO/back-end/.env' 2>/dev/n
 mkdir -p '$REMOTE_WMH'
 chown -R rose:rose '$REMOTE_WMH' '$REMOTE_REPO/agents/venv' 2>/dev/null || true
 cd '$REMOTE_REPO/agents'
-gosu rose env HOME=/home/rose WMH_BUILD_DIR='$REMOTE_WMH' WMH_MODEL_NAME='$WMH_MODEL_NAME' WMH_GEPA_BUDGET=0 WMH_MAX_BUNDLES='$WMH_REFRESH_MAX_BUNDLES' WMH_ROOT_AGENT_IDS='$WMH_REFRESH_ROOT_AGENT_IDS' \\
+gosu rose env HOME=/home/rose WMH_BUILD_DIR='$REMOTE_WMH' WMH_MODEL_NAME='$WMH_MODEL_NAME' WMH_ENGINE='$WMH_ENGINE' WMH_ROSE_POOL='$WMH_ROSE_POOL' WMH_CONTEXT_TOKENS='$WMH_CONTEXT_TOKENS' WMH_EXECUTION_POLICY='$WMH_EXECUTION_POLICY' WMH_GEPA_BUDGET=0 WMH_MAX_BUNDLES='$WMH_REFRESH_MAX_BUNDLES' WMH_MAX_STEPS='$WMH_REFRESH_MAX_STEPS' WMH_MAX_STEPS_PER_BUNDLE='$WMH_REFRESH_MAX_STEPS_PER_BUNDLE' WMH_ROOT_AGENT_IDS='$WMH_REFRESH_ROOT_AGENT_IDS' WMH_CONFORMANCE_EXAMPLES=100 WMH_REQUIRE_CONFORMANCE=1 \\
   venv/bin/python -u -c \"from benchmarks.world_model_harness import update_world_model_for_simulation as u; import json, os; ids=[value for value in os.environ.get('WMH_ROOT_AGENT_IDS', '').split(',') if value]; print(json.dumps(u(root_agent_ids=ids or None, progress=lambda e: print('[WMH]', e.get('title'), e.get('status'), flush=True))))\"
 echo '::WMH-REFRESH-DONE::'
 ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
+    if [ "$WMH_ENGINE" = experiential ]; then
+        echo "🌍 Restoring native WMH cache $WMH_CACHE_NAME → $REMOTE_WMH_NATIVE (model $WMH_MODEL_NAME; no on-box build) ..."
+        BUILD_CMD="$NATIVE_REFRESH_CMD"
+    else
+        echo "🌍 Building the legacy WMH model on the box → $REMOTE_WMH (WMH_GEPA_BUDGET=0 index-only) ..."
+    fi
     REFRESH_LOG="$(mktemp)"
     ssh_exec "$mid" "$BUILD_CMD" 2>&1 | grep -av '^Connecting to' | tee "$REFRESH_LOG" | sed 's/^/   /'
     if grep -q '::WMH-REFRESH-DONE::' "$REFRESH_LOG" 2>/dev/null; then
         echo ""
-        echo "✅ WMH model refreshed + cached at $REMOTE_WMH (served-not-rebuilt on every future run)."
+        echo "✅ WMH model ($WMH_ENGINE) refreshed + cached at $REMOTE_WMH (served-not-rebuilt on every future run)."
         rm -f "$REFRESH_LOG"
     else
         echo ""
@@ -2799,31 +3441,442 @@ ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
     # Fleet clones fork a snapshot, not the mutable warm volume. Publish the exact rebuilt
     # volume only after the model reported ready and the source is proven quiescent; otherwise
     # successful maintenance silently leaves every benchmark on the previous WMH corpus.
-    read -r RECORDED_NODE_FP RECORDED_PY_FP _ _ \
-        < "$WARM_DEPS_STATE_FILE" 2>/dev/null || true
-    if [ -z "${RECORDED_NODE_FP:-}" ] || [ -z "${RECORDED_PY_FP:-}" ]; then
-        echo "❌ cannot publish WMH snapshot without the existing dependency proof" >&2
-        exit 1
-    fi
     stop_machine_strict "$mid" || exit 1
     mid=""
-    VOL_ID="$(FLY machines list -a "$APP" --json 2>/dev/null | MN="$MACHINE_NAME" python3 -c '
-import json, os, sys
-for m in json.load(sys.stdin) or []:
-    if m.get("name") == os.environ["MN"]:
-        mounts = m.get("config", {}).get("mounts") or []
-        if mounts: print(mounts[0].get("volume", ""))
-        break
-')"
-    [ -n "$VOL_ID" ] || { echo "❌ could not resolve the rebuilt WMH volume id"; exit 1; }
+    # A peer dependency refresh during this window replaced the volume's trees:
+    # never publish this snapshot under the fingerprints read at the start.
+    if ! WMH_DONOR_PROOF_AFTER="$(wmh_refresh_donor_proof)" \
+        || [ "$WMH_DONOR_PROOF_AFTER" != "$WMH_DONOR_PROOF" ]; then
+        echo "❌ the donor dependency proof changed during the WMH refresh; not cutting or publishing a snapshot" >&2
+        exit 1
+    fi
     SNAP_START_EPOCH="$(date +%s)"
     create_volume_snapshot_exact "$VOL_ID" || exit 1
     NEW_SNAP="$CREATED_SNAPSHOT_ID"
     printf '%s %s %s %s\n' "$RECORDED_NODE_FP" "$RECORDED_PY_FP" "$SNAP_START_EPOCH" \
         "$NEW_SNAP" > "$WARM_DEPS_STATE_FILE"
+    printf '%s %s\n' "$EXPECTED_WMH_REF" "$NEW_SNAP" > "$WARM_DEPS_STATE_FILE.ref.$$" \
+        && mv -f "$WARM_DEPS_STATE_FILE.ref.$$" "$WARM_DEPS_STATE_FILE.ref"
+    # Fleets rehydrate the donor proof from its Machine metadata, not this
+    # checkout's file: without publishing, every SIM clone keeps forking the
+    # previous snapshot (and its previous WMH model).
+    if ! cloudbench_publish_warm_deps_state "$APP" "$maintenance_mid" "$VOL_ID" \
+        "$RECORDED_NODE_FP" "$RECORDED_PY_FP" "$SNAP_START_EPOCH" "$NEW_SNAP"; then
+        echo "❌ WMH snapshot $NEW_SNAP was cut but its donor proof was not published; fleets would keep the previous model" >&2
+        exit 1
+    fi
     echo "✅ WMH model snapshot published for fleet clones: $NEW_SNAP"
 
     # EXIT trap parks the already-stopped source machine.
+    exit 0
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MODE: --build-wmh — build the native WMH model on an OWNED, ephemeral big
+# Machine + Volume forked from the donor's proven snapshot, publish the
+# serving-only cache (what --refresh-wmh restores) and the full cache (the base
+# of the next incremental build), then destroy both resources. The donor itself
+# is never started, synced or modified here.
+# ═════════════════════════════════════════════════════════════════════════════
+# Begin WMH build lifecycle.
+WMH_BUILD_VM_SIZE="${WMH_BUILD_VM_SIZE:-performance-8x}"
+WMH_BUILD_VM_MEMORY_MB="${WMH_BUILD_VM_MEMORY_MB:-65536}"
+WMH_BUILD_VOLUME_GB="${WMH_BUILD_VOLUME_GB:-80}"
+WMH_BUILD_TIMEOUT_SECONDS="${WMH_BUILD_TIMEOUT_SECONDS:-14400}"
+WMH_BUILD_POLL_SECONDS="${WMH_BUILD_POLL_SECONDS:-60}"
+WMH_BUILD_RELEASE_ATTEMPTS="${WMH_BUILD_RELEASE_ATTEMPTS:-90}"
+WMH_BUILD_RELEASE_SLEEP_SECONDS="${WMH_BUILD_RELEASE_SLEEP_SECONDS:-2}"
+WMH_FULL_CACHE_NAME="${WMH_FULL_CACHE_NAME:-rose-archive-native}"
+WMH_EXPORT_CACHE_NAME="${WMH_EXPORT_CACHE_NAME:-}"
+# A rose-owned parent: wmh_build_cache pull stages its temp dir beside the build dir.
+WMH_BUILD_REMOTE_ROOT="${WMH_BUILD_REMOTE_ROOT:-/data/wmhb}"
+WMH_BUILD_REMOTE_DIR="$WMH_BUILD_REMOTE_ROOT/native"
+WMH_BUILD_REMOTE_SCRIPT="/data/wmh-build.sh"
+WMH_BUILD_REMOTE_LOG="/data/wmh-build.log"
+WMH_BUILD_REMOTE_PID="/data/wmh-build.pid"
+WMH_BUILD_LEDGER=""
+WMH_BUILD_DONOR_MID=""
+WMH_BUILD_DONOR_VOLUME=""
+WMH_BUILD_TORN_DOWN=0
+
+wmh_build_validate() {
+    local key
+    for key in WMH_BUILD_VM_MEMORY_MB WMH_BUILD_VOLUME_GB WMH_BUILD_TIMEOUT_SECONDS \
+        WMH_BUILD_RELEASE_ATTEMPTS; do
+        [[ "${!key}" =~ ^[1-9][0-9]*$ ]] || { echo "❌ $key must be a positive integer" >&2; return 2; }
+    done
+    for key in WMH_BUILD_POLL_SECONDS WMH_BUILD_RELEASE_SLEEP_SECONDS; do
+        [[ "${!key}" =~ ^[0-9]+$ ]] || { echo "❌ $key must be a non-negative integer" >&2; return 2; }
+    done
+    # The full archive export plus the forked repo/deps tree outgrew smaller volumes.
+    [ "$WMH_BUILD_VOLUME_GB" -ge 80 ] || { echo "❌ WMH_BUILD_VOLUME_GB must be at least 80" >&2; return 2; }
+    [[ "$WMH_BUILD_VM_SIZE" =~ ^[a-z0-9-]+$ ]] || { echo "❌ invalid WMH_BUILD_VM_SIZE" >&2; return 2; }
+    for key in WMH_FULL_CACHE_NAME WMH_EXPORT_CACHE_NAME; do
+        [ -z "${!key}" ] && [ "$key" = WMH_EXPORT_CACHE_NAME ] && continue
+        [[ "${!key}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "❌ invalid $key" >&2; return 2; }
+    done
+    [ "$WMH_ENGINE" = experiential ] || { echo "❌ --build-wmh builds the native experiential model only" >&2; return 2; }
+}
+
+# Durable ownership ledger: every intent and exact ID is fsynced BEFORE use, so
+# teardown (or a human after a controller crash) can release exactly this run's
+# resources and nothing else.
+wmh_build_record() {  # wmh_build_record <key> <value>
+    printf '%s=%s\n' "$1" "$2" >> "$WMH_BUILD_LEDGER" || return 1
+    python3 -c 'import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+os.fsync(fd); os.close(fd)' "$WMH_BUILD_LEDGER"
+}
+
+wmh_build_ledger_value() {  # wmh_build_ledger_value <key>
+    [ -f "$WMH_BUILD_LEDGER" ] || return 0
+    sed -n "s/^$1=//p" "$WMH_BUILD_LEDGER" | tail -1
+}
+
+wmh_build_not_donor() {  # wmh_build_not_donor <machine-or-volume-id>
+    [ -n "$1" ] || return 1
+    if [ "$1" = "$WMH_BUILD_DONOR_MID" ] || [ "$1" = "$WMH_BUILD_DONOR_VOLUME" ]; then
+        echo "❌ refusing to operate on the shared donor resource $1" >&2
+        return 1
+    fi
+}
+
+# Print "<field> of the exact-name/ID match" from a provider listing; exit 3 when
+# the listing itself is unreadable (never confuse that with "absent").
+wmh_build_lookup() {  # wmh_build_lookup machines|volumes id|name <value> <field>
+    local listing
+    listing="$(FLY "$1" list -a "$APP" --json 2>/dev/null)" || return 3
+    printf '%s' "$listing" | KEY="$2" VALUE="$3" FIELD="$4" python3 -c '
+import json, os, sys
+try:
+    rows = json.load(sys.stdin) or []
+except Exception:
+    raise SystemExit(3)
+matches = [r for r in rows if isinstance(r, dict) and r.get(os.environ["KEY"]) == os.environ["VALUE"]]
+if len(matches) > 1:
+    raise SystemExit(4)
+if matches:
+    print(matches[0].get(os.environ["FIELD"]) or "")
+'
+}
+
+wmh_build_create_resources() {  # → sets WMH_BUILD_MID / WMH_BUILD_VOLUME
+    local run_id="$1" snapshot="$2" image="$3" volume_name machine_name output
+    volume_name="wmhb_$run_id"
+    machine_name="wmhb-${run_id//_/-}"
+    WMH_BUILD_MID=""
+    WMH_BUILD_VOLUME=""
+    wmh_build_record volume_name "$volume_name" || return 1
+    echo "💽 Forking volume $volume_name (${WMH_BUILD_VOLUME_GB}GB) from donor snapshot $snapshot ..."
+    output="$(FLY volumes create "$volume_name" -a "$APP" --region "$REGION" \
+        --size "$WMH_BUILD_VOLUME_GB" --snapshot-id "$snapshot" --yes --json 2>&1)" || {
+        printf '%s\n' "$output" | sed 's/^/   /' >&2
+        echo "❌ volume fork failed" >&2
+        return 1
+    }
+    WMH_BUILD_VOLUME="$(printf '%s' "$output" | python3 -c '
+import json, sys
+text = sys.stdin.read()
+try:
+    print(json.loads(text[text.index("{"):]).get("id") or "")
+except Exception:
+    print("")
+')"
+    [[ "$WMH_BUILD_VOLUME" =~ ^vol_[A-Za-z0-9]+$ ]] || {
+        echo "❌ volume fork returned no exact ID" >&2
+        WMH_BUILD_VOLUME=""
+        return 1
+    }
+    wmh_build_not_donor "$WMH_BUILD_VOLUME" || return 1
+    wmh_build_record volume_id "$WMH_BUILD_VOLUME" || return 1
+    echo "   volume: $WMH_BUILD_VOLUME"
+    wmh_build_record machine_name "$machine_name" || return 1
+    echo "🖥️  Creating build machine $machine_name ($WMH_BUILD_VM_SIZE / ${WMH_BUILD_VM_MEMORY_MB}MB, process: sleep infinity) ..."
+    # The process must outlive any build: a finite sleep exits and stops the box.
+    output="$(FLY machine run "$image" -a "$APP" --name "$machine_name" --region "$REGION" \
+        --vm-size "$WMH_BUILD_VM_SIZE" --vm-memory "$WMH_BUILD_VM_MEMORY_MB" \
+        --volume "$WMH_BUILD_VOLUME:/data" --restart no \
+        --metadata "wmh_build_run=$run_id" --detach sleep infinity 2>&1)" || {
+        printf '%s\n' "$output" | sed 's/^/   /' >&2
+        echo "❌ build machine creation failed" >&2
+        return 1
+    }
+    WMH_BUILD_MID="$(printf '%s\n' "$output" | grep -oiE 'Machine ID: [0-9a-f]+' | tail -1 | awk '{print $3}')"
+    [ -n "$WMH_BUILD_MID" ] || WMH_BUILD_MID="$(wmh_build_lookup machines name "$machine_name" id)" || WMH_BUILD_MID=""
+    [[ "$WMH_BUILD_MID" =~ ^[0-9a-f]{8,32}$ ]] || {
+        echo "❌ build machine creation returned no exact ID" >&2
+        WMH_BUILD_MID=""
+        return 1
+    }
+    wmh_build_not_donor "$WMH_BUILD_MID" || { WMH_BUILD_MID=""; return 1; }
+    wmh_build_record machine_id "$WMH_BUILD_MID" || return 1
+    echo "   machine: $WMH_BUILD_MID"
+}
+
+# Destroy exactly the ledger's resources and prove release. Idempotent; returns
+# non-zero (with the ledger path) when either release is unproven.
+wmh_build_teardown() {
+    [ "$WMH_BUILD_TORN_DOWN" = 1 ] && return 0
+    WMH_BUILD_TORN_DOWN=1
+    [ -n "$WMH_BUILD_LEDGER" ] && [ -f "$WMH_BUILD_LEDGER" ] || return 0
+    local mid vid name state attempt status=0
+    mid="$(wmh_build_ledger_value machine_id)"
+    vid="$(wmh_build_ledger_value volume_id)"
+    # An ambiguous create recorded only its unique name; resolve that exact name.
+    name="$(wmh_build_ledger_value machine_name)"
+    if [ -z "$mid" ] && [ -n "$name" ]; then
+        mid="$(wmh_build_lookup machines name "$name" id)" || { echo "❌ cannot resolve machine $name" >&2; status=1; mid=""; }
+        [ -n "$mid" ] && wmh_build_not_donor "$mid" && wmh_build_record machine_id "$mid"
+    fi
+    name="$(wmh_build_ledger_value volume_name)"
+    if [ -z "$vid" ] && [ -n "$name" ]; then
+        vid="$(wmh_build_lookup volumes name "$name" id)" || { echo "❌ cannot resolve volume $name" >&2; status=1; vid=""; }
+        [ -n "$vid" ] && wmh_build_not_donor "$vid" && wmh_build_record volume_id "$vid"
+    fi
+    if [ -n "$mid" ] && wmh_build_not_donor "$mid"; then
+        echo "🧹 Destroying build machine $mid ..."
+        FLY machine destroy --force "$mid" -a "$APP" 2>&1 | sed 's/^/   /' || true
+        state="unknown"
+        for attempt in $(seq 1 "$WMH_BUILD_RELEASE_ATTEMPTS"); do
+            state="$(wmh_build_lookup machines id "$mid" state)" || state="unknown"
+            case "$state" in ''|destroyed) state=released; break ;; esac
+            [ "$attempt" = 15 ] && FLY machine destroy --force "$mid" -a "$APP" >/dev/null 2>&1
+            sleep "$WMH_BUILD_RELEASE_SLEEP_SECONDS"
+        done
+        if [ "$state" = released ]; then
+            wmh_build_record machine_released destroyed
+        else
+            echo "❌ build machine $mid release unproven (state=$state)" >&2
+            status=1
+        fi
+    elif [ -n "$mid" ]; then
+        status=1
+    fi
+    if [ -n "$vid" ] && wmh_build_not_donor "$vid"; then
+        echo "🧹 Destroying build volume $vid ..."
+        state="unknown"
+        for attempt in $(seq 1 "$WMH_BUILD_RELEASE_ATTEMPTS"); do
+            state="$(wmh_build_lookup volumes id "$vid" state)" || state="unknown"
+            case "$state" in ''|pending_destroy|destroyed) state="released:${state:-absent}"; break ;; esac
+            # Fly rejects deletion until the destroyed machine detaches; retry.
+            FLY volumes destroy "$vid" -a "$APP" --yes >/dev/null 2>&1 || true
+            sleep "$WMH_BUILD_RELEASE_SLEEP_SECONDS"
+        done
+        if [ "${state%%:*}" = released ]; then
+            wmh_build_record volume_released "${state#released:}"
+        else
+            echo "❌ build volume $vid release unproven (state=$state)" >&2
+            status=1
+        fi
+    elif [ -n "$vid" ]; then
+        status=1
+    fi
+    if [ "$status" -eq 0 ]; then
+        echo "✅ Build machine + volume released (ledger: $WMH_BUILD_LEDGER)"
+    else
+        echo "❌ WMH build resources NOT proven released — reconcile exactly the IDs in $WMH_BUILD_LEDGER" >&2
+    fi
+    return "$status"
+}
+
+# The detached on-box job. Values are passed as a quoted header; the body is
+# literal so it needs no escaping. Runs as root; every build step runs as rose.
+wmh_build_remote_script() {
+    printf 'B_REPO=%q\nB_UV_PYTHON=%q\nB_ROOT=%q\nB_DIR=%q\nB_PID=%q\n' \
+        "$REMOTE_REPO" "$REMOTE_UV_PYTHON" "$WMH_BUILD_REMOTE_ROOT" "$WMH_BUILD_REMOTE_DIR" "$WMH_BUILD_REMOTE_PID"
+    printf 'B_MODEL=%q\nB_POOL=%q\nB_POLICY=%q\nB_CONTEXT=%q\n' \
+        "$WMH_MODEL_NAME" "$WMH_ROSE_POOL" "$WMH_EXECUTION_POLICY" "$WMH_CONTEXT_TOKENS"
+    printf 'B_SERVING=%q\nB_FULL=%q\nB_EXPORT=%q\n' \
+        "$WMH_CACHE_NAME" "$WMH_FULL_CACHE_NAME" "$WMH_EXPORT_CACHE_NAME"
+    cat <<'WMH_BUILD_BODY'
+set -euo pipefail
+mkdir -p "$B_ROOT"
+# A re-launch after an unconfirmed launch must never start a second build.
+mkdir "$B_ROOT/.running" 2>/dev/null || { echo "[wmh-build] already running"; exit 0; }
+echo $$ > "$B_PID"
+trap 'rc=$?; [ "$rc" -eq 0 ] || echo "::WMH-BUILD-FAILED:: rc=$rc"' EXIT
+step() { echo "[wmh-build] $(date -u +%H:%M:%SZ) $*"; }
+as_rose() {
+    gosu rose env HOME=/home/rose UV_PYTHON_INSTALL_DIR="$B_UV_PYTHON" UV_CACHE_DIR="$B_ROOT/uv-cache" \
+        UV_LINK_MODE=copy PYTHONDONTWRITEBYTECODE=1 "$@"
+}
+cd "$B_REPO"
+[ -s agents/.env ] || { echo "agents/.env is missing (R2 credentials)" >&2; exit 1; }
+[ -x agents/venv/bin/python ] || rsync -a /app/agents/venv/ agents/venv/
+mkdir -p "$B_UV_PYTHON" "$B_ROOT/uv-cache" .context
+chown -R rose:rose "$B_ROOT" "$B_UV_PYTHON" .context agents/venv
+step "native venv (uv-managed Python under $B_UV_PYTHON)"
+[ -x agents/venv/bin/uv ] || as_rose agents/venv/bin/python -m pip install --quiet uv
+as_rose bash scripts/setup-world-model.sh
+cd agents
+cache() { as_rose venv/bin/python -u -m benchmarks.wmh_build_cache "$@"; }
+if [ -n "$B_EXPORT" ]; then
+    step "pull export cache $B_EXPORT"
+    cache pull --build-dir "$B_DIR" --name "$B_EXPORT" --force
+    step "native build only (model $B_MODEL, pool $B_POOL)"
+    as_rose env WMH_ENGINE=experiential WMH_ROSE_POOL="$B_POOL" WMH_EXECUTION_POLICY="$B_POLICY" \
+        venv/bin/python -u -c 'import sys; from benchmarks.experiential_bridge import build_native; build_native(sys.argv[1], sys.argv[1], sys.argv[2], sys.argv[3])' \
+        "$B_DIR" "$B_MODEL" "$B_POOL"
+else
+    status="$(cache status --name "$B_FULL" 2>&1)" && published=1 || published=0
+    if [ "$published" = 1 ]; then
+        step "pull full cache $B_FULL (only new bundles export)"
+        cache pull --build-dir "$B_DIR" --name "$B_FULL" --force
+    elif printf '%s' "$status" | grep -q "no cache published for"; then
+        step "no full cache $B_FULL published: full build"
+    else
+        printf '%s\n' "$status" >&2
+        echo "cannot read full cache $B_FULL" >&2
+        exit 1
+    fi
+    step "update_world_model_for_simulation (model $B_MODEL)"
+    as_rose env WMH_BUILD_DIR="$B_DIR" WMH_MODEL_NAME="$B_MODEL" WMH_ENGINE=experiential WMH_ROSE_POOL="$B_POOL" \
+        WMH_CONTEXT_TOKENS="$B_CONTEXT" WMH_EXECUTION_POLICY="$B_POLICY" WMH_GEPA_BUDGET=0 WMH_MAX_BUNDLES=0 \
+        WMH_CONFORMANCE_EXAMPLES=100 WMH_REQUIRE_CONFORMANCE=1 \
+        venv/bin/python -u -c "from benchmarks.world_model_harness import update_world_model_for_simulation as u; import json; print(json.dumps(u(progress=lambda e: print('[WMH]', e.get('title'), e.get('status'), flush=True)), default=str))"
+fi
+[ -f "$B_DIR/models/$B_MODEL/experiential.json" ] || { echo "build lacks models/$B_MODEL/experiential.json" >&2; exit 1; }
+[ -f "$B_DIR/build.manifest.json" ] || { echo "build lacks build.manifest.json" >&2; exit 1; }
+step "push serving-only cache $B_SERVING"
+cache push --serving-only --build-dir "$B_DIR" --name "$B_SERVING"
+step "push full cache $B_FULL"
+cache push --build-dir "$B_DIR" --name "$B_FULL"
+echo "::WMH-BUILD-DONE::"
+WMH_BUILD_BODY
+}
+
+# Poll the detached job's log with short reads; print new lines as progress.
+wmh_build_poll() {  # wmh_build_poll <machine-id>
+    local mid="$1" lines=0 deadline=$((SECONDS + WMH_BUILD_TIMEOUT_SECONDS))
+    local out body total alive misses=0 dead=0
+    while :; do
+        out="$(ssh_read "$mid" "f='$WMH_BUILD_REMOTE_LOG'; t=\$(wc -l < \"\$f\" 2>/dev/null || echo 0); sed -n '$((lines + 1)),$((lines + 2000))p' \"\$f\" 2>/dev/null; p=\$(cat '$WMH_BUILD_REMOTE_PID' 2>/dev/null); if [ -n \"\$p\" ] && kill -0 \"\$p\" 2>/dev/null; then a=alive; else a=dead; fi; echo \"::WMH-LOG-END:: \$t \$a\"")" || out=""
+        if printf '%s\n' "$out" | grep -q '^::WMH-LOG-END:: '; then
+            misses=0
+            body="$(printf '%s\n' "$out" | sed '/^::WMH-LOG-END:: /,$d')"
+            read -r _ total alive <<< "$(printf '%s\n' "$out" | grep '^::WMH-LOG-END:: ' | tail -1)"
+            [ -n "$body" ] && printf '%s\n' "$body" | sed 's/^/   /'
+            [[ "$total" =~ ^[0-9]+$ ]] || total="$lines"
+            lines=$(( total < lines + 2000 ? total : lines + 2000 ))
+            if printf '%s\n' "$body" | grep -q '^::WMH-BUILD-DONE::'; then
+                return 0
+            fi
+            if printf '%s\n' "$body" | grep -q '^::WMH-BUILD-FAILED::'; then
+                echo "❌ on-box WMH build failed (log: $WMH_BUILD_REMOTE_LOG on $mid)" >&2
+                return 1
+            fi
+            if [ "$alive" = dead ] && [ "$lines" -ge "$total" ]; then
+                dead=$((dead + 1))
+                [ "$dead" -ge 2 ] && {
+                    echo "❌ on-box WMH build exited without a completion marker" >&2
+                    return 1
+                }
+            else
+                dead=0
+            fi
+        else
+            misses=$((misses + 1))
+            echo "   ⚠️ log read failed ($misses); machine state: $(machine_state "$mid")" >&2
+            [ "$misses" -ge 10 ] && { echo "❌ build log unreadable 10 times in a row" >&2; return 1; }
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "❌ WMH build timed out after ${WMH_BUILD_TIMEOUT_SECONDS}s (WMH_BUILD_TIMEOUT_SECONDS)" >&2
+            return 1
+        fi
+        sleep "$WMH_BUILD_POLL_SECONDS"
+    done
+}
+# End WMH build lifecycle.
+
+if [ "$MODE" = "build-wmh" ]; then
+    wmh_build_validate || exit 2
+    if ! WMH_BUILD_REF="$(git -C "$ROOT_DIR" rev-parse --verify "${BENCH_REF}^{commit}" 2>/dev/null)"; then
+        echo "❌ invalid benchmark ref: $BENCH_REF is not a local commit" >&2
+        exit 1
+    fi
+    validate_wmh_rose_pool_at_ref "$WMH_BUILD_REF" "$WMH_ROSE_POOL" || exit 2
+    read -r _ _ _ WMH_BUILD_SNAPSHOT < "$WARM_DEPS_STATE_FILE" 2>/dev/null || true
+    [ -n "${WMH_BUILD_SNAPSHOT:-}" ] || {
+        echo "❌ no proven donor snapshot in $WARM_DEPS_STATE_FILE (run --refresh-deps first)" >&2
+        exit 1
+    }
+    echo "═══ run-bench-cloud --build-wmh ═══"
+    echo "ref=$WMH_BUILD_REF snapshot=$WMH_BUILD_SNAPSHOT vm=$WMH_BUILD_VM_SIZE/${WMH_BUILD_VM_MEMORY_MB}MB volume=${WMH_BUILD_VOLUME_GB}GB"
+    echo "model=$WMH_MODEL_NAME pool=$WMH_ROSE_POOL policy=$WMH_EXECUTION_POLICY serving=$WMH_CACHE_NAME full=$WMH_FULL_CACHE_NAME export=${WMH_EXPORT_CACHE_NAME:-<none>}"
+    ensure_app
+    # Read-only: the build machine inherits the shared app secrets; never mutate them here.
+    verify_app_environment || exit 1
+    WMH_BUILD_DONOR_MID="$(resolve_machine_id)"
+    [ -n "$WMH_BUILD_DONOR_MID" ] || { echo "❌ no donor machine $MACHINE_NAME to take the image from" >&2; exit 1; }
+    read -r WMH_BUILD_IMAGE WMH_BUILD_DONOR_VOLUME <<< "$(_machines_json | ID="$WMH_BUILD_DONOR_MID" python3 -c '
+import json, os, sys
+for m in json.load(sys.stdin) or []:
+    if m.get("id") == os.environ["ID"]:
+        config = m.get("config") or {}
+        mounts = config.get("mounts") or [{}]
+        print(config.get("image") or "", mounts[0].get("volume") or "")
+')"
+    [ -n "${WMH_BUILD_IMAGE:-}" ] || { echo "❌ could not read the donor image" >&2; exit 1; }
+    WMH_BUILD_RUN_ID="$(date -u +%Y%m%d%H%M%S)_$(printf '%04x' "$((RANDOM % 65536))")"
+    mkdir -p "$ROOT_DIR/.context/wmh-build/$WMH_BUILD_RUN_ID" || exit 1
+    WMH_BUILD_LEDGER="$ROOT_DIR/.context/wmh-build/$WMH_BUILD_RUN_ID/owned-resources.env"
+    wmh_build_record app "$APP" || exit 1
+    wmh_build_record source_snapshot "$WMH_BUILD_SNAPSHOT" || exit 1
+    wmh_build_record donor_machine_id "$WMH_BUILD_DONOR_MID" || exit 1
+    echo "ownership ledger: $WMH_BUILD_LEDGER"
+    wmh_build_exit() {
+        local rc=$?
+        trap - EXIT INT TERM HUP
+        wmh_build_teardown || rc=1
+        exit "$rc"
+    }
+    trap wmh_build_exit EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+
+    wmh_build_create_resources "$WMH_BUILD_RUN_ID" "$WMH_BUILD_SNAPSHOT" "$WMH_BUILD_IMAGE" || exit 1
+    require_machine_ready "$WMH_BUILD_MID" || exit 1
+    echo "🔄 checking out $WMH_BUILD_REF on the build machine ..."
+    warm_source_fetch_ref "$WMH_BUILD_MID" "$WMH_BUILD_REF" || exit 1
+    set +e   # warm_source_fetch_ref leaves errexit on; this mode handles failures explicitly.
+    ssh_exec "$WMH_BUILD_MID" "set -e
+[ -n \"\${AGENTS_ENV_B64:-}\" ] && echo \"\$AGENTS_ENV_B64\" | base64 -d > '$REMOTE_REPO/agents/.env'
+[ -n \"\${BACKEND_ENV_B64:-}\" ] && echo \"\$BACKEND_ENV_B64\" | base64 -d > '$REMOTE_REPO/back-end/.env'
+chown rose:rose '$REMOTE_REPO/agents/.env' '$REMOTE_REPO/back-end/.env'
+rm -f '$WMH_BUILD_REMOTE_SCRIPT' '$WMH_BUILD_REMOTE_PID'
+echo ::WMH-ENV-READY::" 300 2>&1 | grep -a '::WMH-ENV-READY::' >/dev/null || {
+        echo "❌ could not stage the app env files on the build machine" >&2
+        exit 1
+    }
+    WMH_BUILD_LOCAL_SCRIPT="$(mktemp)"
+    wmh_build_remote_script > "$WMH_BUILD_LOCAL_SCRIPT"
+    cloudbench_retry_command 5 3 FLY ssh sftp put -a "$APP" --machine "$WMH_BUILD_MID" -q -m 0700 \
+        "$WMH_BUILD_LOCAL_SCRIPT" "$WMH_BUILD_REMOTE_SCRIPT" || {
+        rm -f "$WMH_BUILD_LOCAL_SCRIPT"
+        echo "❌ could not upload the build job" >&2
+        exit 1
+    }
+    rm -f "$WMH_BUILD_LOCAL_SCRIPT"
+    # Fly's exec API 408s on long commands and `ssh -C` mishandles background jobs: detach the
+    # job on the box and poll its log with short reads instead.
+    WMH_BUILD_LAUNCHED=0
+    for _attempt in 1 2 3 4; do
+        FLY ssh console -a "$APP" --machine "$WMH_BUILD_MID" \
+            -C "bash -lc \"setsid nohup bash '$WMH_BUILD_REMOTE_SCRIPT' >> '$WMH_BUILD_REMOTE_LOG' 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
+        sleep 5
+        if ssh_read "$WMH_BUILD_MID" "p=\$(cat '$WMH_BUILD_REMOTE_PID' 2>/dev/null); [ -n \"\$p\" ] && kill -0 \"\$p\" && echo RUNNING; grep -q '^::WMH-BUILD-' '$WMH_BUILD_REMOTE_LOG' 2>/dev/null && echo RUNNING" \
+            2>/dev/null | grep -q RUNNING; then
+            WMH_BUILD_LAUNCHED=1
+            break
+        fi
+        echo "   ⚠️ build job not confirmed (attempt $_attempt/4); re-launching"
+    done
+    [ "$WMH_BUILD_LAUNCHED" = 1 ] || { echo "❌ build job never started on $WMH_BUILD_MID" >&2; exit 1; }
+    echo "🏗️  Build running on $WMH_BUILD_MID (log $WMH_BUILD_REMOTE_LOG; timeout ${WMH_BUILD_TIMEOUT_SECONDS}s)"
+    wmh_build_poll "$WMH_BUILD_MID" || exit 1
+    echo "✅ Native WMH built; published serving-only cache $WMH_CACHE_NAME and full cache $WMH_FULL_CACHE_NAME."
+    echo "   Next: bash scripts/run-bench-cloud --refresh-wmh   (restores $WMH_CACHE_NAME onto the donor)"
     exit 0
 fi
 
@@ -2887,7 +3940,10 @@ IMESSAGE_RELAY_EXPECTED_MESSAGE="Hi! This is the Rose iMessage send bench."
 # escapes the comma to '\,', which the double-decode + `bash` re-parse mangled,
 # dropping every task after the first).
 TASKS_CSV_B64="$(printf '%s' "$TASKS_CSV" | base64 | tr -d '\n')"
-RUN_WORKSPACE_NAME="${CLOUDBENCH_WORKSPACE_NAME:-cloudbench-$(date -u +%Y%m%d%H%M%S)-$$}"
+# A direct run's workspace becomes its shared Temporal Cloud queue and Steel
+# ownership marker. PID + second repeats across identical disposable hosts, so
+# bind the fallback to a random identity rather than this process.
+RUN_WORKSPACE_NAME="${CLOUDBENCH_WORKSPACE_NAME:-cloudbench-$(date -u +%Y%m%d%H%M%S)-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')}"
 OBSERVED_PEAK_FLY_MACHINES="${CLOUDBENCH_OBSERVED_PEAK_FLY_MACHINES:-1}"
 
 # Estimated Fly machine cost (USD/hour) for this bench's isolated VM, from its
@@ -2915,7 +3971,7 @@ print(round(mult * 0.00288 * perf + mem_gb * 0.00732, 5))
 
 echo "═══ run-bench-cloud (warm run) ═══"
 echo "tasks=[$TASKS_DISPLAY] simulate=$BENCH_SIMULATE parallel=$BENCH_PARALLEL max_concurrency=$BENCH_MAX_CONCURRENCY"
-echo "ref=${BENCH_REF:-<HEAD>} model=$WMH_MODEL_NAME app=$APP dashboard=$DASHBOARD workspace=$RUN_WORKSPACE_NAME"
+echo "ref=${BENCH_REF:-<HEAD>} model=$WMH_MODEL_NAME engine=$WMH_ENGINE app=$APP dashboard=$DASHBOARD workspace=$RUN_WORKSPACE_NAME"
 echo ""
 
 # READ-ONLY env preflight (concurrent-workstream safe): the run path only
@@ -2952,7 +4008,8 @@ stop_proxy() {
     # tunnel PIDs (not backgrounded FLY() wrapper subshells). Terminate and reap
     # them before releasing their port leases; otherwise an orphaned listener can
     # poison a later fleet with an address-in-use failure.
-    cloudbench_terminate_and_wait 5 "${PROXY_PID:-}" "${STATUS_PROXY_PID:-}"
+    cloudbench_proxy_stop PROXY_PID || true
+    cloudbench_proxy_stop STATUS_PROXY_PID || true
     STATUS_PROXY_PID=""
     [ -n "$DASHBOARD_MIRROR_PID" ] && kill "$DASHBOARD_MIRROR_PID" 2>/dev/null || true
     if [ -n "$IMESSAGE_RELAY_PID" ]; then
@@ -3277,15 +4334,26 @@ fi
 
 STOP_DONE="0"
 BOOT_CONFIG_UPDATE_SLOT=""
+MUTATION_OWNER_PID_START="$(cloudbench_pid_start_time $$)"
 acquire_boot_config_update_slot() {
     local barrier="${CLOUDBENCH_BOOT_CONFIG_BARRIER:-}" max_in_flight
     local wait_seconds deadline slots_dir slot
     [ -n "$barrier" ] || return 0
+    case "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" in 0|1) ;; *) return 1 ;; esac
     max_in_flight="${CLOUDBENCH_BOOT_CONFIG_MAX_IN_FLIGHT:-4}"
     wait_seconds="${CLOUDBENCH_BOOT_CONFIG_SLOT_WAIT_SECONDS:-${CLOUDBENCH_BOOT_CONFIG_BARRIER_WAIT_SECONDS:-1800}}"
     case "$max_in_flight:$wait_seconds" in
         *[!0-9:]*|0:*|*:0) echo "❌ invalid boot config update concurrency/wait contract" >&2; return 1 ;;
     esac
+    if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ]; then
+        # Campaign owners receive independent tracked leases; provider responses alone impose backoff.
+        BOOT_CONFIG_UPDATE_SLOT="$(cloudbench_mutation_admission "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-campaign-mutation.py" acquire \
+            --app "$APP" --root "${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}" \
+            --owner-pid "$$" --owner-start "$MUTATION_OWNER_PID_START" --wait-seconds "$wait_seconds")" || return 1
+        BOOT_CONFIG_UPDATE_SLOT_SHARED=1
+        BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=0
+        return 0
+    fi
     slots_dir="$barrier/update-slots"
     mkdir -p "$slots_dir" || return 1
     deadline=$((SECONDS + wait_seconds))
@@ -3303,13 +4371,22 @@ acquire_boot_config_update_slot() {
 }
 boot_update_with_capacity_recovery() {
     local update_log="$1" regular_attempts max_regular timeout_seconds
-    local capacity_wait capacity_retry regular_retry capacity_deadline
+    local capacity_wait capacity_retry regular_retry capacity_deadline native_budget rate_code rate_delay
+    local native_rc native_join_receipt="$1.join-native" attempt_log="$1.attempt"
+    local host_timeouts=0 host_timeout_limit attempt_number=0
     shift
+    # No native mutation is in flight until an attempt starts below, so an early
+    # refusal (invalid contract, pacing failure) leaves nothing to fence.
+    BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=1
     max_regular="${CLOUDBENCH_BOOT_UPDATE_ATTEMPTS:-10}"
     timeout_seconds="${CLOUDBENCH_BOOT_UPDATE_TIMEOUT:-90}"
     capacity_wait="${CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS:-1200}"
     capacity_retry="${CLOUDBENCH_BOOT_UPDATE_CAPACITY_RETRY_SECONDS:-8}"
     regular_retry="${CLOUDBENCH_BOOT_UPDATE_RETRY_SECONDS:-8}"
+    host_timeout_limit="${CLOUDBENCH_BOOT_UPDATE_HOST_TIMEOUT_LIMIT:-3}"
+    case "$host_timeout_limit" in
+        ''|*[!0-9]*|0) echo "❌ invalid boot update host-timeout limit" >&2; return 2 ;;
+    esac
     case "$max_regular:$timeout_seconds:$capacity_wait" in
         *[!0-9:]*|0:*|*:0:*|*:*:0)
             echo "❌ invalid boot update retry/capacity-wait contract" >&2
@@ -3325,12 +4402,67 @@ boot_update_with_capacity_recovery() {
     regular_attempts=0
     capacity_deadline=$((SECONDS + capacity_wait))
     while [ "$regular_attempts" -lt "$max_regular" ]; do
-        if _with_timeout "$timeout_seconds" "$@" > "$update_log" 2>&1; then
+        native_budget="$timeout_seconds"
+        if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ]; then
+            native_budget="$(cloudbench_mutation_admission "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-campaign-mutation.py" pace \
+                --app "$APP" --root "${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}" \
+                --owner-pid "$$" --owner-start "$MUTATION_OWNER_PID_START" \
+                --wait-seconds "$timeout_seconds" --print-budget)" || return 1
+            case "$native_budget" in ''|*[!0-9]*|0) return 1 ;; esac
+        fi
+        # Mark the lease joined exactly when this attempt's _with_timeout wrote
+        # its join-native receipt. Its exit status cannot tell: a signal-killed
+        # child (137) or an interruption after the child exists is reaped and
+        # joined, while an interruption before any child handle is not. Follow
+        # the latest attempt: the helper refuses start-native after an unjoined
+        # owner, so a later receipt also proves every earlier owner joined.
+        BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=0
+        native_rc=0
+        rm -f "$native_join_receipt" || return 1
+        # Classify each attempt from its own output, but keep every attempt in
+        # the update log: a per-attempt overwrite left only the last of ten
+        # Fly 408s as evidence for the whole retry sequence.
+        attempt_number=$((attempt_number + 1))
+        CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT="$native_join_receipt" \
+            _with_timeout "$native_budget" "$@" > "$attempt_log" 2>&1 || native_rc=$?
+        if [ -f "$native_join_receipt" ]; then
+            BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=1
+            rm -f "$native_join_receipt" || true
+        fi
+        {
+            printf '=== boot update attempt %s at %s rc=%s ===\n' \
+                "$attempt_number" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$native_rc"
+            cat "$attempt_log" 2>/dev/null
+        } >> "$update_log"
+        if [ "$native_rc" = 0 ]; then
+            rm -f "$attempt_log"
             return 0
         fi
+        # An organization Machine-count limit is a permanent refusal for this
+        # attempt, even for a same-ID update. Retain the first response; do not
+        # replay the mutation as though host CPU capacity might become free.
+        if grep -Eiq 'reached (its|the) machine limit|machine limit[^[:alnum:]]+reached' "$attempt_log" 2>/dev/null; then
+            echo "❌ boot update refused by organization Machine limit; no retry" >&2
+            return 1
+        fi
+        if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ]; then
+            rate_code=""
+            if grep -Eiq '(^|[^[:alnum:]])429([^[:alnum:]]|$)' "$attempt_log"; then rate_code=429
+            elif grep -Eiq 'resource_exhausted' "$attempt_log"; then rate_code=resource_exhausted; fi
+            if [ -n "$rate_code" ]; then
+                rate_delay="$regular_retry"
+                [ "$rate_delay" -ge 1 ] || rate_delay=1
+                [ "$rate_delay" -le 90 ] || rate_delay=90
+                cloudbench_mutation_admission "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-campaign-mutation.py" backoff \
+                    --app "$APP" --root "${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}" \
+                    --owner-pid "$$" --owner-start "$MUTATION_OWNER_PID_START" \
+                    --response-code "$rate_code" --retry-after "$rate_delay" || return 1
+            fi
+        fi
         if grep -Eiq \
-            'reached (its|the) machine limit|machine limit[^[:alnum:]]+reached|cpu_overcommit_exceeded|shared[ -]cpu.*(limit|overcommit)|insufficient CPUs available to fulfill request on the current host' \
-            "$update_log" 2>/dev/null; then
+            'cpu_overcommit_exceeded|shared[ -]cpu.*(limit|overcommit)|insufficient CPUs available to fulfill request on the current host' \
+            "$attempt_log" 2>/dev/null; then
+            host_timeouts=0
             if [ "$SECONDS" -ge "$capacity_deadline" ]; then
                 echo "❌ boot update replacement capacity did not return within ${capacity_wait}s" >&2
                 return 1
@@ -3339,12 +4471,44 @@ boot_update_with_capacity_recovery() {
             sleep "$capacity_retry"
             continue
         fi
+        # A Fly 408 naming this exact VM on a same-ID update means the flyd
+        # host that owns this Machine did not answer in time. A Machine never
+        # moves hosts, so replaying the same mutation cannot reach a healthy
+        # one. App-wide API errors (5xx, 429) are not host evidence and keep
+        # the normal budget. After consecutive host timeouts, stop spending the boot
+        # deadline here and name the exact Machine so the fleet can replace it
+        # through its owned clone lifecycle.
+        if [ -n "${BOOT_UPDATE_MACHINE_ID:-}" ] && grep -Fq \
+            "failed to update VM ${BOOT_UPDATE_MACHINE_ID}: request returned non-2xx status: 408" \
+            "$attempt_log" 2>/dev/null; then
+            host_timeouts=$((host_timeouts + 1))
+        else
+            host_timeouts=0
+        fi
+        if [ "$host_timeouts" -ge "$host_timeout_limit" ]; then
+            if [ -n "${BOOT_UPDATE_HOST_UNRESPONSIVE_MARKER:-}" ]; then
+                printf '%s\n' "${BOOT_UPDATE_MACHINE_ID:-}" > "$BOOT_UPDATE_HOST_UNRESPONSIVE_MARKER" 2>/dev/null || true
+            fi
+            echo "❌ boot update: Fly host for ${BOOT_UPDATE_MACHINE_ID:-this Machine} timed out ${host_timeouts} consecutive times; the Machine needs a replacement" >&2
+            rm -f "$attempt_log"
+            return 1
+        fi
         regular_attempts=$((regular_attempts + 1))
         [ "$regular_attempts" -lt "$max_regular" ] && sleep "$regular_retry"
     done
+    rm -f "$attempt_log"
     return 1
 }
 release_boot_config_update_slot() {
+    if [ "${BOOT_CONFIG_UPDATE_SLOT_SHARED:-0}" = 1 ] && [ -n "$BOOT_CONFIG_UPDATE_SLOT" ]; then
+        [ "${BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED:-0}" = 1 ] || return 1
+        cloudbench_mutation_admission "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-campaign-mutation.py" release \
+            --app "$APP" --root "${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}" \
+            --owner-pid "$$" --owner-start "$MUTATION_OWNER_PID_START" --lease "$BOOT_CONFIG_UPDATE_SLOT" || return 1
+        BOOT_CONFIG_UPDATE_SLOT=""
+        BOOT_CONFIG_UPDATE_SLOT_SHARED=0
+        return 0
+    fi
     if [ -n "${BOOT_CONFIG_UPDATE_SLOT:-}" ]; then
         rmdir "$BOOT_CONFIG_UPDATE_SLOT" 2>/dev/null || true
         BOOT_CONFIG_UPDATE_SLOT=""
@@ -3478,7 +4642,7 @@ confirm_guest_shutdown() {
             return 1
             ;;
     esac
-    if [ -z "${STATUS_PROXY_PID:-}" ] || ! kill -0 "$STATUS_PROXY_PID" 2>/dev/null; then
+    if ! cloudbench_proxy_alive STATUS_PROXY_PID; then
         echo "❌ guest cleanup unconfirmed: status proxy is not running" >&2
         return 1
     fi
@@ -3539,6 +4703,12 @@ confirm_guest_shutdown() {
 }
 cloudbench_prepare_runtime_evidence() {  # before boot config/start; no guest work admitted on failure
     [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] || return 0
+    if [ "${CLOUDBENCH_BOOT_TRANSPORT:-config}" = staged ] && [ "${CLOUDBENCH_INFRA_PROBE:-0}" = 1 ]; then
+        python3 "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-staged-boot.py" \
+            --prepare-probe-owner --app "$APP" --machine "${FLEET_MACHINE_ID:-$mid}" \
+            --run-token "$RUN_LOG_TOKEN" --source-ref "$BENCH_REF" --output "$OUT_DIR"
+        return $?
+    fi
     cloudbench_skip_held_driver_teardown_race && return 0
     # Fleet supplies its shared credential; a standalone boot run owns a fresh
     # credential for the same authenticated status endpoint before guest config.
@@ -3603,10 +4773,12 @@ if owner.exists() or owner.is_symlink():
     cleanup_name = f"cloudbench-stack-cleanup-{token}.status"
     expected = {"services.json", "run.json", "stack.log", cleanup_name, "logs/backend.log",
                 "logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
-    assert set(manifest["files"]) == expected
+    # The served WMH log (simulated runs) and guest diagnostics are optional.
+    optional = set(manifest["files"]) & {"wmh-serve-log.txt", "guest-diagnostics.jsonl"}
+    assert set(manifest["files"]) - optional == expected
     entries = list(capture.rglob("*"))
     assert all(not path.is_symlink() for path in entries)
-    assert {str(path.relative_to(capture)) for path in entries} == expected | {"manifest.json", "logs"}
+    assert {str(path.relative_to(capture)) for path in entries} == expected | optional | {"manifest.json", "logs"}
     cleanup = dict(line.split("=", 1) for line in read(capture / cleanup_name).decode().splitlines())
     assert cleanup["state"] == "clean" and cleanup["token"] == token
     total = 0
@@ -3754,11 +4926,21 @@ while True:
     time.sleep(0.5)
 assert expected["version"] == 1 and expected["run_token"] == run_token and expected["machine_id"] == machine
 files = expected["files"]
-required = {"services.json", "run.json", "stack.log", "logs/backend.log", f"cloudbench-stack-cleanup-{run_token}.status"}
+# A guest stopped before launching anything seals only its exact bench.log.
+prelaunch = expected.get("prelaunch") is True
+if prelaunch:
+    required = {"bench.log"}
+    assert set(expected) == {"version", "run_token", "machine_id", "files", "prelaunch"}
+    assert isinstance(files, dict) and set(files) == required
+else:
+    required = {"services.json", "run.json", "stack.log", "logs/backend.log", f"cloudbench-stack-cleanup-{run_token}.status"}
+# Present only when the stack served a world model (its per-step server timing),
+# or when the guest diagnostics sampler ran (CPU/load, DB pool, pg_stat_activity).
+OPTIONAL = {"wmh-serve-log.txt", "guest-diagnostics.jsonl"}
 assert isinstance(files, dict) and required <= files.keys() and len(files) <= 1030
 total = 0
 for name, metadata in files.items():
-    assert name in required or re.fullmatch(r"logs/worker(?:\.[1-9][0-9]*)?\.log", name)
+    assert name in required or name in OPTIONAL or re.fullmatch(r"logs/worker(?:\.[1-9][0-9]*)?\.log", name)
     assert set(metadata) == {"bytes", "sha256"}
     assert type(metadata["bytes"]) is int and metadata["bytes"] >= 0
     assert re.fullmatch(r"[0-9a-f]{64}", metadata["sha256"])
@@ -3784,10 +4966,15 @@ for name, metadata in files.items():
         output.flush()
         os.fsync(output.fileno())
     assert digest.hexdigest() == metadata["sha256"], "runtime evidence hash mismatch"
-services = json.loads((pending / "services.json").read_text())
-count = services["env"]["worker_processes"]
-assert services["status"] == "stopped" and type(count) is int and 1 <= count <= 1024
-assert set(files) == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
+if prelaunch:
+    with (pending / "bench.log").open("rb") as log:
+        stamp = ("RUNSTAMP-" + run_token + "\n").encode()
+        assert log.read(len(stamp)) == stamp, "pre-launch log belongs to another run"
+else:
+    services = json.loads((pending / "services.json").read_text())
+    count = services["env"]["worker_processes"]
+    assert services["status"] == "stopped" and type(count) is int and 1 <= count <= 1024
+    assert set(files) - OPTIONAL == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
 assert manifest() == expected, "runtime evidence changed across collection"
 with (pending / "manifest.json").open("x") as output:
     json.dump(expected, output, sort_keys=True)
@@ -3796,7 +4983,7 @@ with (pending / "manifest.json").open("x") as output:
     os.fsync(output.fileno())
 # Persist child directory entries before acknowledging the published capture.
 # File fsync alone does not make their names durable across controller failure.
-for directory in (pending / "logs", pending):
+for directory in ((pending,) if prelaunch else (pending / "logs", pending)):
     descriptor = os.open(directory, os.O_RDONLY)
     try:
         os.fsync(descriptor)
@@ -3808,7 +4995,107 @@ try:
     os.fsync(descriptor)
 finally:
     os.close(descriptor)
+if prelaunch:
+    # No run result can exist to bind the latch to; the sealed pre-launch
+    # bundle is the complete runtime evidence, so release the latch here.
+    intent.unlink()
+    descriptor = os.open(intent.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 signal.alarm(0)
+PY
+}
+
+# Diagnostic-only capture of a guest whose stack teardown failed. The driver
+# then refuses its clean ACK, so the sealed /runtime-evidence never opens and
+# the disposable teardown deletes the only copy of the worker/stack logs that
+# explain the failure (descend-full69-20261023 P8: a worker drain that ran the
+# whole 2100 s grace). This never creates remote-logs/runtime-evidence, never
+# clears runtime-evidence.pending and never changes the run's classification.
+cloudbench_collect_failed_runtime_evidence() {
+    local destination="$1" port="$2" run_token="$3" machine="$4" deadline="$5"
+    python3 - "$destination" "$port" "$run_token" "$machine" "$deadline" <<'PY'
+import hashlib
+import json
+import os
+import re
+import signal
+import sys
+import tempfile
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+destination, port, run_token, machine, deadline = sys.argv[1:]
+os.umask(0o077)
+assert port.isascii() and port.isdigit() and 1 <= int(port) <= 65535
+assert deadline.isascii() and deadline.isdigit() and int(deadline) > 0
+assert re.fullmatch(r"[A-Za-z0-9._-]+", run_token) and machine
+signal.alarm(int(deadline))
+maximum = 512 * 1024 * 1024
+parent = Path(destination)
+final = parent / "failed-runtime-evidence"
+assert not final.exists() and not final.is_symlink()
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+headers = {"Authorization": "Bearer " + os.environ["CLOUDBENCH_BARRIER_TOKEN"],
+           "X-Cloudbench-Run-Token": run_token, "X-Cloudbench-Machine-Id": machine}
+url = f"http://127.0.0.1:{port}/failed-runtime-evidence"
+
+
+def request(suffix=""):
+    return opener.open(urllib.request.Request(url + suffix, headers=headers), timeout=30)
+
+
+def manifest():
+    with request() as response:
+        data = response.read(1048577)
+        assert len(data) <= 1048576 and response.status == 200
+        return json.loads(data)
+
+
+expected = manifest()
+assert expected["version"] == 1 and expected["run_token"] == run_token and expected["machine_id"] == machine
+assert expected.get("stack_cleanup_state") == "failed"
+files = expected["files"]
+assert isinstance(files, dict) and "logs/worker.log" in files and len(files) <= 1030
+total = 0
+for name, metadata in files.items():
+    assert re.fullmatch(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)?", name) and ".." not in name
+    assert set(metadata) == {"bytes", "sha256"} and type(metadata["bytes"]) is int and metadata["bytes"] >= 0
+    total += metadata["bytes"]
+assert total <= maximum
+pending = Path(tempfile.mkdtemp(prefix=".failed-runtime-evidence-", dir=parent))
+for name, metadata in files.items():
+    target = pending / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    remaining = metadata["bytes"]
+    with request("?" + urllib.parse.urlencode({"file": name})) as response, target.open("xb") as output:
+        assert response.status == 200 and response.headers.get("Content-Length") == str(remaining)
+        while remaining:
+            chunk = response.read(min(65536, remaining))
+            assert chunk, "failed runtime evidence response ended early"
+            output.write(chunk)
+            digest.update(chunk)
+            remaining -= len(chunk)
+        assert not response.read(1), "failed runtime evidence response exceeded manifest"
+    assert digest.hexdigest() == metadata["sha256"], "failed runtime evidence hash mismatch"
+assert manifest() == expected, "failed runtime evidence changed across collection"
+with (pending / "manifest.json").open("x") as output:
+    json.dump({**expected, "diagnostic_only": True, "proof_credit": 0}, output, sort_keys=True)
+    output.write("\n")
+pending.rename(final)
+signal.alarm(0)
+print(f"📦 failed-cleanup runtime evidence captured for diagnosis: {final} ({len(files)} files)", file=sys.stderr)
 PY
 }
 
@@ -3931,6 +5218,7 @@ stage_explicit_codex_auth() {  # <controller-staged guest helper>
     : > "$stage_log"
     stage_reply="$OUT_DIR/cloudbench-codex-stage-reply.log"
     command="test \"\$(head -n 1 /data/bench.log)\" = RUNSTAMP-$RUN_LOG_TOKEN && export CLOUDBENCH_RUN_TOKEN=$RUN_LOG_TOKEN && python3 $helper stage --run-token $RUN_LOG_TOKEN --machine-id $mid --sha256 $CODEX_AUTH_SHA256"
+    command="$(cloudbench_namespace_command "$mid" "$command")" || return 1
     while [ "$SECONDS" -lt "$deadline" ]; do
         remaining=$((deadline - SECONDS))
         [ "$remaining" -le "$probe_timeout" ] || remaining="$probe_timeout"
@@ -3952,6 +5240,7 @@ stage_explicit_codex_auth() {  # <controller-staged guest helper>
         >> "$stage_log" 2>&1 || return 1
     remaining=$((deadline - SECONDS)); [ "$remaining" -gt 0 ] || return 1
     command="test \"\$(head -n 1 /data/bench.log)\" = RUNSTAMP-$RUN_LOG_TOKEN && export CLOUDBENCH_RUN_TOKEN=$RUN_LOG_TOKEN && python3 $helper publish --run-token $RUN_LOG_TOKEN --machine-id $mid --sha256 $CODEX_AUTH_SHA256"
+    command="$(cloudbench_namespace_command "$mid" "$command")" || return 1
     _with_timeout "$remaining" flyctl ssh console -a "$APP" --machine "$mid" \
         -C "bash -lc $(printf '%q' "$command")" >> "$stage_log" 2>&1
 }
@@ -4064,6 +5353,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env CLOUDBENCH_RUN_SCRIPT=/cloudbench-run.sh
         --env CLOUDBENCH_FETCH_REF_SCRIPT=/cloudbench-fetch-ref.sh
         --env "CLOUDBENCH_FRESH_VOLUME=${CLOUDBENCH_FRESH_VOLUME:-0}"
+        --env "CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP=${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}"
         --env CLOUDBENCH_SYNC_DEPS_SCRIPT=/cloudbench-sync-deps.sh
         --env CLOUDBENCH_SYNC_PRISMA_SCRIPT=/cloudbench-sync-prisma-client.sh
         --env CLOUDBENCH_NGROK_INSTALL_SCRIPT=/cloudbench-install-ngrok.sh
@@ -4086,6 +5376,10 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env "CLOUDBENCH_SEED_BUDGET_LIB=/cloudbench-seed-budget.sh"
         --env "CLOUDBENCH_STATUS_PORT=$REMOTE_STATUS_PORT"
         --env "WMH_MODEL_NAME=$WMH_MODEL_NAME"
+        --env "WMH_ENGINE=$WMH_ENGINE"
+        --env "WMH_ROSE_POOL=$WMH_ROSE_POOL"
+        --env "WMH_CONTEXT_TOKENS=$WMH_CONTEXT_TOKENS"
+        --env "WMH_EXECUTION_POLICY=$WMH_EXECUTION_POLICY"
         --env "BENCH_TASKS_B64=$TASKS_CSV_B64"
         --env "BENCH_MAX_CONCURRENCY=$BENCH_MAX_CONCURRENCY"
         --env "BENCH_SIMULATE=$BENCH_SIMULATE"
@@ -4102,7 +5396,20 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env "BENCHMARK_PEAK_FLY_MACHINES=$OBSERVED_PEAK_FLY_MACHINES"
         --env "BENCHMARK_VM_USD_PER_HOUR=$VM_USD_PER_HOUR"
         --env "CLOUDBENCH_INFRA_PROBE=${CLOUDBENCH_INFRA_PROBE:-0}"
+        --env "CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS=${CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS:-}"
+        # Explicit (also when empty) so a pooled Machine never keeps an older run's value.
+        --env "CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}"
+        # One shared compute-token authority for every guest (empty = opted out).
+        --env "CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=$(cloudbench_compute_token_authority_url)"
     )
+    _boot_command="bash /cloudbench-boot.sh"
+    if [ -n "$CLOUDBENCH_ARCHIVED_PROOF_B64" ]; then
+        [ "$mid" = "$FLEET_MACHINE_ID" ] || exit 1
+        _envargs+=(--env CLOUDBENCH_STORAGE_MODE=retained-volume-fresh-generation
+            --env "CLOUDBENCH_ARCHIVED_REUSE_PROOF_B64=$CLOUDBENCH_ARCHIVED_PROOF_B64"
+            --env "CLOUDBENCH_ARCHIVED_REUSE_PROOF_SHA256=$CLOUDBENCH_ARCHIVED_PROOF_SHA")
+        _boot_command="python3 -S /cloudbench-isolated-generation.py"
+    fi
     _pool_shape_args=()
     if [ -n "${CLOUDBENCH_POOL_BOOT_VM_SIZE:-}" ] \
         || [ -n "${CLOUDBENCH_POOL_BOOT_VM_MEMORY:-}" ]; then
@@ -4199,6 +5506,9 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
             --env "LOCAL_PATCH_COMPRESSION=" --env "LOCAL_PATCH_TRANSPORT_SHA256="
         )
     fi
+    if [ -n "$CLOUDBENCH_ARCHIVED_PROOF_B64" ]; then
+        _boot_file_args+=(--file-local "/cloudbench-isolated-generation.py=$CLOUDBENCH_GUEST_GENERATION_SCRIPT")
+    fi
     # BENCHMARK_FRONTEND_URL is consumed by run_benchmark.py for task prompt
     # substitution; cloud browser agents cannot reach the controller's localhost
     # dashboard mirror. Use a separate report-only URL so dashboard deep links can
@@ -4216,7 +5526,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     for _boot_pair in "${_boot_file_args[@]}"; do
         [ "$_boot_pair" = "--file-local" ] && continue
         case "${_boot_pair%%=*}" in
-            /cloudbench-boot.sh|/cloudbench-status-server.py)
+            /cloudbench-boot.sh|/cloudbench-status-server.py|/cloudbench-isolated-generation.py)
                 _boot_entrypoint_args+=(--file-local "$_boot_pair") ;;
             *) _boot_payload_args+=(--file-local "$_boot_pair") ;;
         esac
@@ -4281,6 +5591,20 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     # Fail loudly and specifically BEFORE spending a provider round trip. A
     # generic `request body too large` after retries is indistinguishable from a
     # transient provider fault and silently killed a whole campaign.
+    if [ "${CLOUDBENCH_BOOT_TRANSPORT:-config}" = staged ]; then
+        # Reuse the exact boot payload/environment and all BOOT_LAUNCH evidence
+        # handling. The helper admits only already matching inert Machines.
+        printf '%s\0' "${_envargs[@]}" "${_boot_file_args[@]}" | \
+            python3 "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-staged-boot.py" \
+                --app "$APP" --machine "$mid" --run-token "$RUN_LOG_TOKEN" \
+                --output "$OUT_DIR/staged-boot" \
+                --vm-size "$CLOUDBENCH_POOL_BOOT_VM_SIZE" \
+                --vm-memory "$CLOUDBENCH_POOL_BOOT_VM_MEMORY" \
+                --ready-seconds "${CLOUDBENCH_READY_TIMEOUT:-600}" || exit 1
+        printf '%s\n' "$mid" > "$POST_CONFIG_START_MARKER.tmp.$$"
+        mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"
+        stage_explicit_codex_auth /cloudbench-codex-auth.py || exit 1
+    else
     boot_config_payload_guard "${_boot_file_args[@]}" || exit 1
     echo "🚀 boot-launch: injecting boot script + setting env/command on $mid (no ssh) ..."
     _upd=0
@@ -4290,12 +5614,16 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     # Machine. Bound those provider mutations across the fleet; the separate
     # boot-config barrier still releases all guest starts together afterward.
     acquire_boot_config_update_slot || exit 1
-    if boot_update_with_capacity_recovery "$_update_log" \
+    if BOOT_UPDATE_MACHINE_ID="$mid" \
+        BOOT_UPDATE_HOST_UNRESPONSIVE_MARKER="$OUT_DIR/boot-config-host-unresponsive" \
+        boot_update_with_capacity_recovery "$_update_log" \
           flyctl machine update "$mid" -a "$APP" "${_pool_shape_args[@]}" "${_envargs[@]}" \
           "${_boot_file_args[@]}" \
-          --command "bash /cloudbench-boot.sh" --skip-health-checks --skip-start --yes; then
+          --command "$_boot_command" --skip-health-checks --skip-start --yes; then
         _upd=1
     fi
+    # boot_update_with_capacity_recovery records whether every native attempt
+    # was joined; an unjoined interruption keeps its lease fenced.
     release_boot_config_update_slot
     if [ "$_upd" = 1 ] && [ "${#_pool_shape_args[@]}" -gt 0 ]; then
         _expected_kind="${CLOUDBENCH_POOL_BOOT_VM_SIZE%%-*}"
@@ -4384,6 +5712,8 @@ except Exception:
     if [ "$_start_ok" = 1 ]; then
         echo "✅ boot-launch: $mid post-config start accepted — booting into the driver (polling over the data plane)."
     fi
+    fi
+
 else
 # ── 1. Start the warm machine + wait until it is start+ssh-ready ────────────
 # Generous timeout: ~10s warm, minutes on a cold image pull. Gate on BOTH the Fly
@@ -4532,6 +5862,10 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export CLOUDBENCH_START_BARRIER_WAIT_SECONDS=$(printf '%q' "${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}")"
     echo "export CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS=$(printf '%q' "${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-2160}")"
     echo "export WMH_MODEL_NAME=$(printf '%q' "$WMH_MODEL_NAME")"
+    echo "export WMH_ENGINE=$(printf '%q' "$WMH_ENGINE")"
+    echo "export WMH_ROSE_POOL=$(printf '%q' "$WMH_ROSE_POOL")"
+    echo "export WMH_CONTEXT_TOKENS=$(printf '%q' "$WMH_CONTEXT_TOKENS")"
+    echo "export WMH_EXECUTION_POLICY=$(printf '%q' "$WMH_EXECUTION_POLICY")"
     echo "export BENCH_TASKS_B64=$(printf '%q' "$TASKS_CSV_B64")"
     echo "export BENCH_MAX_CONCURRENCY=$(printf '%q' "$BENCH_MAX_CONCURRENCY")"
     echo "export BENCH_SIMULATE=$(printf '%q' "$BENCH_SIMULATE")"
@@ -4549,6 +5883,9 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export BENCHMARK_PEAK_FLY_MACHINES=$(printf '%q' "$OBSERVED_PEAK_FLY_MACHINES")"
     echo "export BENCHMARK_VM_USD_PER_HOUR=$(printf '%q' "$VM_USD_PER_HOUR")"
     echo "export CLOUDBENCH_INFRA_PROBE=$(printf '%q' "${CLOUDBENCH_INFRA_PROBE:-0}")"
+    echo "export CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS=$(printf '%q' "${CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS:-}")"
+    echo "export CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=$(printf '%q' "${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}")"
+    echo "export CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=$(printf '%q' "$(cloudbench_compute_token_authority_url)")"
     echo "unset BENCHMARK_FRONTEND_URL"
     if [ "$DASHBOARD" = "1" ]; then
         # Persistent FE deep links for report cards / RCA evidence. The local
@@ -4728,7 +6065,7 @@ start_leased_data_plane_proxy() {  # <preferred> <port-var> <remote-port> <host>
         if start_data_plane_proxy "$port" "$remote_port" "$host" "$log_file" "$pid_var" "$label" "$proxy_timeout"; then
             if [ "$label" = "status" ]; then
                 publish_status_proxy_port "$port" || {
-                    cloudbench_terminate_and_wait 5 "${!pid_var}"
+                    cloudbench_proxy_stop "$pid_var" || return 1
                     release_local_port_lease "$port"
                     return 1
                 }
@@ -5064,7 +6401,7 @@ read_bench_log() {
     local headers="${BENCH_LOG_HEADERS_FILE:-/dev/null}"
     BENCH_LOG_READ_EXIT=1
     BENCH_LOG_REQUEST_OFFSET="${offset:-0}"
-    [ -n "$STATUS_PROXY_PID" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null || return 1
+    cloudbench_proxy_alive STATUS_PROXY_PID || return 1
     if [ -z "$offset" ]; then
         offset="$(wc -c < "$SSH_LOG" | tr -d ' ')"
     fi
@@ -5076,7 +6413,7 @@ read_bench_log() {
         if [ "$offset" = "0" ]; then
             anchor="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         else
-            anchor="$(tail -c 4096 "$SSH_LOG" | python3 -c \
+            anchor="$(tail -c 4096 "$SSH_LOG" | python3 -S -c \
                 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
         fi
     fi
@@ -5284,7 +6621,7 @@ refresh_bench_log_to_eof() {
 }
 status_proxy_transport_healthy() {
     local health_code
-    [ -n "$STATUS_PROXY_PID" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null || return 1
+    cloudbench_proxy_alive STATUS_PROXY_PID || return 1
     # flyctl proxy can survive while its lazy DNS/GraphQL setup is wedged. PID
     # liveness alone is therefore not a transport contract. Both 204 (driver
     # alive) and 410 (server reachable, driver not yet/already gone) prove that
@@ -5296,7 +6633,7 @@ status_proxy_transport_healthy() {
 }
 ensure_status_proxy() {
     if ! status_proxy_transport_healthy; then
-        cloudbench_terminate_and_wait 5 "${STATUS_PROXY_PID:-}"
+        cloudbench_proxy_stop STATUS_PROXY_PID || return 1
         STATUS_PROXY_PID=""
         release_local_port_lease "$LOCAL_STATUS_PORT"
         start_leased_data_plane_proxy "$LOCAL_STATUS_PORT" LOCAL_STATUS_PORT \
@@ -5373,16 +6710,22 @@ progress_barrier_released="0"
 terminal_pending_exit=""
 terminal_pending_since=""
 terminal_read_failures="0"
-backlog_chunks="0"
+backlog_bytes="0"
 backlog_active="0"
 backlog_failures="0"
 log_read_failures="0"
 BENCH_LOG_CHUNKS_PER_POLL="${CLOUDBENCH_LOG_CHUNKS_PER_POLL:-4}"
 case "$BENCH_LOG_CHUNKS_PER_POLL" in ''|*[!0-9]*|0) BENCH_LOG_CHUNKS_PER_POLL=4 ;; esac
 [ "$BENCH_LOG_CHUNKS_PER_POLL" -le 4 ] || BENCH_LOG_CHUNKS_PER_POLL=4
-BENCH_LOG_BACKLOG_MAX_CHUNKS="${CLOUDBENCH_LOG_BACKLOG_MAX_CHUNKS:-128}"
-case "$BENCH_LOG_BACKLOG_MAX_CHUNKS" in ''|*[!0-9]*|0) BENCH_LOG_BACKLOG_MAX_CHUNKS=128 ;; esac
-[ "$BENCH_LOG_BACKLOG_MAX_CHUNKS" -le 128 ] || BENCH_LOG_BACKLOG_MAX_CHUNKS=128
+# Every accepted chunk strictly advances the validated offset, so a backlog is
+# bounded by bytes, not by a chunk count: the 51-agent mass-agent terminal
+# burst is ~33.5 MiB and tripped the former 128 x 256 KiB cap on every copy
+# (descend-full69-20261023 P8), truncating the guest's own FATAL lines. The
+# ceiling matches the guest's 512 MiB runtime-evidence bound; a backlog that
+# stops advancing still fails after BENCH_LOG_BACKLOG_MAX_FAILURES retries.
+BENCH_LOG_BACKLOG_MAX_BYTES="${CLOUDBENCH_LOG_BACKLOG_MAX_BYTES:-536870912}"
+case "$BENCH_LOG_BACKLOG_MAX_BYTES" in ''|*[!0-9]*|0) BENCH_LOG_BACKLOG_MAX_BYTES=536870912 ;; esac
+[ "$BENCH_LOG_BACKLOG_MAX_BYTES" -le 536870912 ] || BENCH_LOG_BACKLOG_MAX_BYTES=536870912
 BENCH_LOG_BACKLOG_MAX_FAILURES="${CLOUDBENCH_LOG_BACKLOG_MAX_FAILURES:-5}"
 case "$BENCH_LOG_BACKLOG_MAX_FAILURES" in ''|*[!0-9]*|0) BENCH_LOG_BACKLOG_MAX_FAILURES=5 ;; esac
 [ "$BENCH_LOG_BACKLOG_MAX_FAILURES" -le 5 ] || BENCH_LOG_BACKLOG_MAX_FAILURES=5
@@ -5397,6 +6740,11 @@ case "$BENCH_LOG_TERMINAL_WAIT_SECONDS" in ''|*[!0-9]*|0) BENCH_LOG_TERMINAL_WAI
 [ "$BENCH_LOG_TERMINAL_WAIT_SECONDS" -le 30 ] || BENCH_LOG_TERMINAL_WAIT_SECONDS=30
 driver_absent=0
 DRIVER_DIED="0"
+# Set when the poll loop declares infrastructure failure while the driver may
+# still be running (lost or unusable data plane, or a Machine that is gone).
+# No guest will seal runtime evidence unprompted, so the post-loop collector
+# must not wait the whole wall-clock backstop for that seal.
+PRETERMINAL_INFRA_FAILURE="0"
 # The detached on-box driver occasionally dies at launch (an early kill/crash
 # before its first STEP — seen at fleet width when the Fly API is rate-limited).
 # It then never writes the DONE marker, so a poll loop that only watches for DONE
@@ -5406,6 +6754,42 @@ DRIVER_DIED="0"
 # process is still alive; if it's gone with no DONE marker, stop promptly and
 # report a bring-up (infra) failure so the fleet controller excludes this box fast.
 DRIVER_STALL_SECONDS="${CLOUDBENCH_DRIVER_STALL_SECONDS:-210}"
+# A finite terminal artifact burst can be much larger than one chunk. Drain
+# known backlog at wire speed; fail only when it exceeds the byte ceiling or
+# stops advancing. Sets BACKLOG_DECISION to idle|drain|retry|exceeded|stuck.
+cloudbench_bench_log_backlog_step() {  # <refresh-ok 0|1> <bytes appended by this refresh>
+    local refresh_ok="$1" appended="$2"
+    [[ "$appended" =~ ^[0-9]+$ ]] || appended=0
+    if [ "$refresh_ok" = "1" ]; then
+        if [ "$BENCH_LOG_HAS_MORE" = "1" ]; then
+            backlog_active="1"
+            backlog_failures="0"
+        else
+            backlog_active="0"
+            backlog_bytes="0"
+            backlog_failures="0"
+        fi
+    elif [ "$BENCH_LOG_HAS_MORE" = "1" ]; then
+        backlog_active="1"
+    fi
+    BACKLOG_DECISION="idle"
+    [ "$backlog_active" = "1" ] || return 0
+    backlog_bytes=$((backlog_bytes + appended))
+    if [ "$backlog_bytes" -gt "$BENCH_LOG_BACKLOG_MAX_BYTES" ]; then
+        BACKLOG_DECISION="exceeded"
+        return 0
+    fi
+    if [ "$refresh_ok" = "1" ]; then
+        BACKLOG_DECISION="drain"
+        return 0
+    fi
+    backlog_failures=$((backlog_failures + 1))
+    if [ "$backlog_failures" -ge "$BENCH_LOG_BACKLOG_MAX_FAILURES" ]; then
+        BACKLOG_DECISION="stuck"
+    else
+        BACKLOG_DECISION="retry"
+    fi
+}
 while :; do
     now="$(date +%s)"
     # Pull only bounded append-only chunks over the data plane. The local file is
@@ -5415,18 +6799,25 @@ while :; do
     # PID remains owned and reapable.
     ensure_status_proxy >/dev/null 2>&1 || true
     log_refresh_ok="0"
+    log_size_before="$(wc -c < "$SSH_LOG" | tr -d ' ')"
     refresh_bench_log "$BENCH_LOG_CHUNKS_PER_POLL" 2>/dev/null \
         && log_refresh_ok="1"
+    log_size_after="$(wc -c < "$SSH_LOG" | tr -d ' ')"
+    if [ "$BENCH_LOG_RESET" = "1" ] || [ "$log_size_after" -lt "$log_size_before" ]; then
+        log_bytes_appended="$log_size_after"
+    else
+        log_bytes_appended=$((log_size_after - log_size_before))
+    fi
     if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] \
        && [ "${_start_ok:-1}" = "0" ] && [ "$log_refresh_ok" = "1" ] \
-       && [ -s "$SSH_LOG" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null; then
+       && [ -s "$SSH_LOG" ] && cloudbench_proxy_alive STATUS_PROXY_PID; then
         # refresh_bench_log accepted this exact RUNSTAMP with the bounded log
         # continuity protocol. A dead lifecycle never acknowledges boot.
         _start_health="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
             "http://127.0.0.1:$LOCAL_STATUS_PORT/driver-health" 2>/dev/null || true)"
         case "$_start_health" in
             204|425)
-                if kill -0 "$STATUS_PROXY_PID" 2>/dev/null; then
+                if cloudbench_proxy_alive STATUS_PROXY_PID; then
                     printf '%s\n' "$mid" > "$POST_CONFIG_START_MARKER.tmp.$$"
                     mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"
                     _start_ok=1
@@ -5444,12 +6835,12 @@ while :; do
             "$RUN_LOG_TOKEN" "$WATCHDOG_TASK" "$WATCHDOG_BUDGET" \
             "$BENCH_LOG_RESET" 2>/dev/null)"; then
             echo "❌ validated bench.log delta could not update bounded progress state -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
             break
         fi
         if ! cloudbench_apply_progress_update "$progress_update" "$now"; then
             echo "❌ bounded progress state returned an invalid update -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
             break
         fi
     fi
@@ -5473,41 +6864,24 @@ while :; do
         last_change="$now"
         [ "$WATCHDOG_MODE" = "progress" ] && last_meaningful_progress="$now"
     fi
-    # A finite terminal artifact burst can be much larger than one chunk (the
-    # observed Polar run ended with a 16.34 MiB log). Drain known backlog at wire
-    # speed instead of sleeping 15--20 seconds per chunk or applying a watchdog
-    # to semantic/DONE bytes which are already durable but not parsed yet.
-    if [ "$log_refresh_ok" = "1" ]; then
-        if [ "$BENCH_LOG_HAS_MORE" = "1" ]; then
-            backlog_active="1"
-            backlog_failures="0"
-        else
-            backlog_active="0"
-            backlog_chunks="0"
-            backlog_failures="0"
-        fi
-    elif [ "$BENCH_LOG_HAS_MORE" = "1" ]; then
-        backlog_active="1"
-    fi
-    if [ "$backlog_active" = "1" ]; then
-        backlog_chunks=$((backlog_chunks + BENCH_LOG_CHUNKS_READ))
-        if [ "$backlog_chunks" -ge "$BENCH_LOG_BACKLOG_MAX_CHUNKS" ]; then
-            echo "❌ bench.log backlog exceeded ${BENCH_LOG_BACKLOG_MAX_CHUNKS} bounded chunks before EOF -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
-            break
-        fi
-        if [ "$log_refresh_ok" = "1" ]; then
+    cloudbench_bench_log_backlog_step "$log_refresh_ok" "$log_bytes_appended"
+    case "$BACKLOG_DECISION" in
+        drain) continue ;;
+        retry)
+            sleep 1
             continue
-        fi
-        backlog_failures=$((backlog_failures + 1))
-        if [ "$backlog_failures" -ge "$BENCH_LOG_BACKLOG_MAX_FAILURES" ]; then
-            echo "❌ bench.log backlog could not advance after ${BENCH_LOG_BACKLOG_MAX_FAILURES} bounded retries -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
+            ;;
+        exceeded)
+            echo "❌ bench.log backlog exceeded ${BENCH_LOG_BACKLOG_MAX_BYTES} bytes before EOF -- infrastructure failure" >&2
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
             break
-        fi
-        sleep 1
-        continue
-    fi
+            ;;
+        stuck)
+            echo "❌ bench.log backlog could not advance after ${BENCH_LOG_BACKLOG_MAX_FAILURES} bounded retries -- infrastructure failure" >&2
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
+            break
+            ;;
+    esac
     # A failed first/EOF read provides no current durable state. Never let a
     # healthy but temporarily unreadable guest fall through to a benchmark
     # deadline classification. Retry only a fixed number of times, then report
@@ -5525,12 +6899,12 @@ while :; do
             ;;
         20)
             echo "❌ bench.log could not be read after ${BENCH_LOG_READ_MAX_FAILURES} bounded retries -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
             break
             ;;
         *)
             echo "❌ invalid bench.log read-gate state -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
             break
             ;;
     esac
@@ -5616,7 +6990,7 @@ while :; do
     # exists. This keeps dead-driver detection fast without killing valid quiet work.
     if [ $((now - last_change)) -ge "$DRIVER_STALL_SECONDS" ]; then
         driver_health="unknown"
-        if [ -n "$STATUS_PROXY_PID" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null; then
+        if cloudbench_proxy_alive STATUS_PROXY_PID; then
             for _health_attempt in $(seq 1 5); do
                 probe_driver_health; health_rc=$?
                 [ "$health_rc" = "0" ] && { driver_health="alive"; break; }
@@ -5637,7 +7011,7 @@ while :; do
             probe_machine_liveness; machine_rc=$?
             if [ "$machine_rc" = "10" ]; then
                 echo "❌ Fly machine is explicitly no longer running after ${DRIVER_STALL_SECONDS}s without progress -- infrastructure failure; stopping this box so the fleet can abort promptly."
-                DRIVER_DIED="1"; BENCH_EXIT="1"
+                DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
                 break
             fi
         fi
@@ -5661,11 +7035,15 @@ done
 # cleanup window before extracting artifacts, then drain the sealed log once.
 # Keep TIMED_OUT set: a recovered cancellation record is still infrastructure
 # failure. The EXIT trap reuses this result instead of granting another window.
-if [ "$TIMED_OUT" = "1" ] && [ -n "${FLEET_MACHINE_ID:-}" ]; then
+# A pre-terminal infrastructure failure is the same situation: the driver may
+# still be running, so request the bounded authenticated shutdown before
+# waiting for a seal. Its verdict stays infrastructure failure either way.
+if { [ "$TIMED_OUT" = "1" ] || [ "${PRETERMINAL_INFRA_FAILURE:-0}" = "1" ]; } \
+    && [ -n "${FLEET_MACHINE_ID:-}" ]; then
     GUEST_SHUTDOWN_RESULT=1
     if confirm_guest_shutdown; then
         GUEST_SHUTDOWN_RESULT=0
-        if cloudbench_collect_terminal_log; then
+        if [ "$TIMED_OUT" = "1" ] && cloudbench_collect_terminal_log; then
             FINISHED=1
             BENCH_EXIT="$CURRENT_TERMINAL_EXIT"
         fi
@@ -5678,6 +7056,13 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] && ! cloudbench_skip_held_driver_tea
         echo "❌ timed-out guest shutdown unconfirmed; retaining runtime evidence owner -- infrastructure failure" >&2
         exit 70
     fi
+    # Without a delivered shutdown nothing will seal the runtime evidence; do
+    # not hold the job "running" for the wall-clock backstop. The EXIT trap
+    # reuses GUEST_SHUTDOWN_RESULT and the fleet natively stops the guest.
+    if [ "${PRETERMINAL_INFRA_FAILURE:-0}" = "1" ] && [ "${GUEST_SHUTDOWN_RESULT:-1}" != "0" ]; then
+        echo "❌ guest shutdown unconfirmed after a pre-terminal infrastructure failure; retaining runtime evidence owner -- infrastructure failure" >&2
+        exit 70
+    fi
     # The driver waits for run.sh's stopped/clean receipt before ACK; the boot
     # supervisor then seals exited. Read raw logs only across that boundary,
     # through the existing data plane, before the EXIT trap destroys the guest.
@@ -5687,11 +7072,17 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] && ! cloudbench_skip_held_driver_tea
         "${CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS:-${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS:-7200}}"
     then
         echo "❌ complete terminal runtime evidence could not be verified -- infrastructure failure" >&2
+        # Keep the worker/stack logs of a failed stack teardown before the
+        # EXIT trap retires the guest. Diagnostic only: the failure stands.
+        cloudbench_collect_failed_runtime_evidence "$OUT_DIR/remote-logs" "$LOCAL_STATUS_PORT" \
+            "$RUN_LOG_TOKEN" "${FLEET_MACHINE_ID:-$mid}" \
+            "${CLOUDBENCH_FAILED_RUNTIME_EVIDENCE_SECONDS:-300}" \
+            || echo "⚠️  failed-cleanup runtime evidence is unavailable (stack did not record a failed teardown)" >&2
         exit 70
     fi
 fi
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" != "1" ]; then
-    for remote_log_name in stack.log services.json logs/backend.log logs/worker.log logs/research.log; do
+    for remote_log_name in stack.log services.json logs/backend.log logs/worker.log logs/research.log wmh-serve-log.txt guest-diagnostics.jsonl; do
         local_log_name="$(printf '%s' "$remote_log_name" | tr '/' '-')"
         ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/$remote_log_name' 2>/dev/null" \
             > "$OUT_DIR/remote-logs/$local_log_name" 2>/dev/null || true
@@ -5866,23 +7257,7 @@ if [ "$RUN_IDENTITY_OK" = "1" ] && [ -s "$RUN_OUT" ]; then
         RUN_PASS_OK="1"
     fi
 fi
-if [ "$FINISHED" = "1" ] && [ "$TIMED_OUT" = "0" ] && [ "${BENCH_EXIT:-1}" = "0" ] \
-    && [ "$RUN_PASS_OK" = "1" ] && [ "$IMESSAGE_RELAY_OK" = "1" ]; then
-    OUTCOME_OK="1"
-fi
-# Artifact-backed recovery: fast soft-complete guests (DEMO $0 cache) can tear
-# down the data-plane proxy before the controller finishes the post-DONE driver
-# 410 catch-up, leaving FINISHED=0 / BENCH_EXIT=1 even when the collected run
-# JSON validates --require-pass. Prefer validated pass artifacts over the
-# terminal-lifecycle race — same evidence the hub already trusts.
-if [ "$OUTCOME_OK" != "1" ] \
-    && [ "$TIMED_OUT" = "0" ] \
-    && [ "$RUN_IDENTITY_OK" = "1" ] \
-    && [ "$RUN_PASS_OK" = "1" ] \
-    && [ "$IMESSAGE_RELAY_OK" = "1" ]; then
-    echo "⚠️  recovering OUTCOME_OK from validated pass artifacts after terminal FINISHED race (finished=${FINISHED:-0} bench_exit=${BENCH_EXIT:-unknown})"
-    OUTCOME_OK="1"
-fi
+cloudbench_outcome_ok
 echo "🎯 result contract: identity=$RUN_IDENTITY_OK pass=$RUN_PASS_OK relay=$IMESSAGE_RELAY_OK benchmark_exit=${BENCH_EXIT:-unknown} (ok=$OUTCOME_OK)"
 
 rm -f "$SSH_LOG" "$BENCH_LOG_CHUNK_FILE" "$BENCH_LOG_HEADERS_FILE" \

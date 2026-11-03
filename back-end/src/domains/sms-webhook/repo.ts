@@ -7,35 +7,22 @@
 
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
+import { OLDEST_ACCOUNT_FIRST, phoneOwnerWhere } from '../../providers/phoneAccountLookup';
 
 /** Look up a user by phone number */
 export async function findUserByPhone(phone: string) {
   return prisma.user.findFirst({
-    where: { phone },
+    where: phoneOwnerWhere(phone),
+    orderBy: OLDEST_ACCOUNT_FIRST,
   });
 }
 
 /**
- * Find-or-create a User for an inbound phone number.
- *
- * An inbound SMS is itself proof of possession of the number (equivalent to an
- * OTP), so a first-time texter is provisioned immediately with a generated
- * `userId` — no OTP, no signup wall. Supabase auth-user creation is deferred
- * until a web gate needs a session (minted via a short-lived magic link). See
- * docs/plans/active/sms-onboarding-and-gates.md.
- *
- * Idempotent for the common single-inbound case: a concurrent double-send races
- * on the find, but that is rare and harmless (a follow-up should add a partial
- * unique index on phone to make it airtight).
+ * Find-or-create the User for an inbound number: the message proves possession
+ * of the number, so a first-time texter is provisioned immediately (no OTP, no
+ * signup wall). Concurrent first messages resolve to one account.
  */
-export async function provisionUserByPhone(phone: string) {
-  const existing = await prisma.user.findFirst({ where: { phone } });
-  if (existing) return { user: existing, created: false };
-  const user = await prisma.user.create({
-    data: { userId: randomUUID(), phone, isAnonymous: false },
-  });
-  return { user, created: true };
-}
+export { provisionUserByPhone } from '../../providers/phoneAccountProvisioning';
 
 /** Update an attention request with the user's response */
 export async function updateAttentionRequest(id: string, userResponse: string) {
@@ -45,12 +32,30 @@ export async function updateAttentionRequest(id: string, userResponse: string) {
   });
 }
 
-/** Upsert SMS session to clear message history */
-export async function clearSmsSession(userId: string) {
-  return prisma.smsSession.upsert({
+/**
+ * Clear SMS session history and advance `lastInboundSeq`, which supersedes
+ * every supervisor run in flight on ANY instance: their commit gate
+ * (inboundSeqStillCurrent) refuses to write or reply once the seq has moved.
+ *
+ * The update is a compare-and-set on the seq read first. The Prisma query
+ * layer replays a statement whose commit ack was lost (P1001/P1017); a replay
+ * then matches no row instead of clearing a message that arrived meanwhile and
+ * advancing the seq a second time.
+ */
+export async function clearSmsSession(userId: string): Promise<void> {
+  await prisma.$executeRaw`
+    INSERT INTO "SmsSession" (id, "userId", messages, "lastInboundSeq", "createdAt", "updatedAt")
+    VALUES (${randomUUID()}, ${userId}, to_jsonb('[]'::text), 0, NOW(), NOW())
+    ON CONFLICT ("userId") DO NOTHING
+  `;
+  const current = await prisma.smsSession.findUnique({
     where: { userId },
-    update: { messages: JSON.stringify([]) },
-    create: { userId, messages: JSON.stringify([]) },
+    select: { lastInboundSeq: true },
+  });
+  const seq = current?.lastInboundSeq ?? 0;
+  await prisma.smsSession.updateMany({
+    where: { userId, lastInboundSeq: seq },
+    data: { messages: JSON.stringify([]), lastInboundSeq: seq + 1 },
   });
 }
 

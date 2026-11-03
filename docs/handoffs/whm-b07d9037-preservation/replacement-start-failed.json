@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "utc": "2026-10-13T00:17:52.451316+00:00",
+  "old_devbox_id": "b07d9037-81f9-4c97-80d7-6f4d42b7adc1",
+  "source_checkpoint": "677068533e050195c62afc8118f3d35a8511f5ea",
+  "start_key": "swap-harness-whm-20261012-full-checkpoint-replacement",
+  "target": "new-devbox",
+  "agent": "codex",
+  "start_error": {
+    "errorCode": "agent_start_failed",
+    "retryable": false,
+    "message": "The delegated thread could not be started."
+  },
+  "failed_child": "ph74dvded0j3kn2ytgyj1ddwdd8g6er8",
+  "failed_child_url": "https://boxes.dev/thread/thr_e5614769703d4e9cb4523c076805f2b5",
+  "supported_child_inventory": {
+    "status": "failed",
+    "archived": false,
+    "activeTurnId": null,
+    "executionInstanceId": null,
+    "nativeThreadId": null,
+    "transcript": "awaiting_first_turn; empty"
+  },
+  "scoped_wait_observation": {
+    "status": "idle",
+    "turnId": null,
+    "executionInstanceId": null,
+    "failure": null
+  },
+  "retry_or_new_generation": "not attempted; coordinator informed, checking supported disposition",
+  "old_box": "retained; no archive request",
+  "preservation": "complete source plus six authenticated private archives; independent replacement verification still required",
+  "merged": false,
+  "deployed": false
+}

@@ -18,11 +18,18 @@
  * File System is a FE-only section: website is Download for Mac; Mac app
  * plus click stays [IDLE/READY] (no hook).
  *
+ * Rose Desktop flag (useRoseDesktop):
+ *   off → IntegrationSections (stock accordion cards, unchanged)
+ *   on  → DesktopIntegrations (flat sections, account chips, sync progress bars)
+ *   Both receive the SAME hook state; only presentation differs.
+ *
  * This component is a thin orchestrator: it calls hooks, renders sections,
  * and wires up modals. All business logic lives in ../hooks/.
  */
 
 import { Loader2 } from 'lucide-react';
+
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import {
   useAccordion,
@@ -40,6 +47,7 @@ import {
 } from '../hooks';
 import { usePlaidIntegration } from '../hooks/usePlaidIntegration';
 
+import DesktopIntegrations from './DesktopIntegrations';
 import IntegrationModals from './IntegrationModals';
 import IntegrationSections from './IntegrationSections';
 import FileInputs from './FileInputs';
@@ -53,7 +61,7 @@ export default function Integrations() {
   const browser = useBrowserSync(handlers, data.fetchIntegrations);
   const passwords = usePasswordSync(handlers, data.fetchIntegrations);
   const compute = useComputeSync(handlers, data.fetchIntegrations);
-  const messages = useMessagesSync(handlers, data.fetchIntegrations);
+  const messages = useMessagesSync(handlers, data.fetchIntegrations, data.linkedinStatus);
   const fileUpload = useFileUpload();
   const gmail = useGmailConnect(data.fetchIntegrations);
   const plaid = usePlaidIntegration();
@@ -102,7 +110,7 @@ export default function Integrations() {
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
           ) : (
-            <IntegrationSections
+            <IntegrationSectionsSwitch
               isBrowserCookiesAvailable={!!handlers.browserCookies?.isAvailable}
               isPasskeysAvailable={!!handlers.passkeys?.isAvailable}
               isIMessageAvailable={!!handlers.iMessage?.isAvailable}
@@ -128,4 +136,13 @@ export default function Integrations() {
       <IntegrationModals browser={browser} passwords={passwords} actions={actions} />
     </div>
   );
+}
+
+/** Stock cards with the flag off; the Rose Desktop list with it on. */
+function IntegrationSectionsSwitch({
+  accordion,
+  ...props
+}: React.ComponentProps<typeof IntegrationSections>) {
+  if (useRoseDesktop()) return <DesktopIntegrations {...props} />;
+  return <IntegrationSections accordion={accordion} {...props} />;
 }

@@ -38,9 +38,20 @@ async def test_evaluated_outcome_is_visible_before_agent_and_phone_teardown():
             await _assert_evaluated_before_teardown(monkeypatch, passed)
 
 
-async def _assert_evaluated_before_teardown(monkeypatch, passed):
+async def _assert_evaluated_before_teardown(
+    monkeypatch,
+    passed,
+    *,
+    native=False,
+    terminal=None,
+    retirement_failure=False,
+    log_failure=False,
+    admission_failure=False,
+    missing_agent=False,
+):
     """Exercise the real task runner through evaluation and both cleanup boundaries."""
     events = []
+    evaluations = []
     task = copy.deepcopy(bench.get_task_by_name("parallel-tool-calls"))
     task.tags = []
     task.min_steps = {}
@@ -68,10 +79,17 @@ async def _assert_evaluated_before_teardown(monkeypatch, passed):
         return []
 
     async def poll(*_args):
+        if terminal == "cancel":
+            raise asyncio.CancelledError("execution cancelled")
+        if terminal == "error":
+            raise RuntimeError("execution failed")
         return {"agent": {"status": "COMPLETED"}, "messages": []}, 0, 0, None
 
-    async def delete(*_args):
+    async def delete(_base, aid):
+        assert aid == ROOT
         events.append("agent-cleanup")
+        if missing_agent:
+            raise RuntimeError("Failed to delete agent: HTTP 404")
 
     for name in (
         "_apply_live_fixtures",
@@ -91,27 +109,93 @@ async def _assert_evaluated_before_teardown(monkeypatch, passed):
     monkeypatch.setattr(
         bench,
         "get_llm_usage_details",
-        AsyncMock(
-            return_value=(
-                {},
-                {
-                    "cache_read_input_tokens": 0,
-                    "cache_creation_input_tokens": 0,
-                    "cache_hit_pct": 0,
-                },
-            )
-        ),
+        AsyncMock(return_value=({}, bench.aggregate_prompt_cache_share([]))),
     )
-    monkeypatch.setattr(bench, "evaluate_task", lambda *_args: (passed, None if passed else "task failed"))
+
+    def evaluate(*_args):
+        evaluations.append(True)
+        return passed, None if passed else "task failed"
+
+    monkeypatch.setattr(bench, "evaluate_task", evaluate)
     monkeypatch.setattr(bench, "_evaluate_phone_call_task", AsyncMock(return_value=(True, None)))
     monkeypatch.setattr(bench, "ensure_payment_lifecycle_cleanup", AsyncMock(return_value=None))
     monkeypatch.setattr(bench, "collect_logs", AsyncMock(return_value={"messages": []}))
     monkeypatch.setattr(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("fixture", None)))
     monkeypatch.setattr(bench, "_should_delete_agent_after_run", lambda *_args: True)
     monkeypatch.setattr(bench, "delete_agent", delete)
+    if admission_failure and not native:
+        monkeypatch.setattr(bench, "create_agent", AsyncMock(side_effect=RuntimeError("execution failed")))
+    if terminal or retirement_failure:
+
+        async def get(_base, aid):
+            assert aid == ROOT
+            if missing_agent:
+                raise bench.AgentNotFoundError("Exact seeded root is absent")
+            return {"agent": {"status": "CANCELLED"}, "messages": []}
+
+        monkeypatch.setattr(bench, "get_agent", get)
+        monkeypatch.setattr(bench, "_begin_interrupt_cleanup", lambda: False)
+        monkeypatch.setattr(bench, "_should_delete_cancelled_agent", lambda *_args: True)
+
+        async def archive(*_args, **_kwargs):
+            events.append("archive")
+            return "fixture", None
+
+        monkeypatch.setattr(bench, "finalize_archive_and_score_world_model", archive)
+    if log_failure:
+        monkeypatch.setattr(bench, "collect_logs", AsyncMock(side_effect=RuntimeError("logs unavailable")))
+
+    if native:
+        receipt = {
+            "ended": "native-owned",
+            "engine": "experiential",
+            "session_id": "native-owned",
+            "session_scope_id": ROOT,
+            "revision": 3,
+            "state": {"sent": False},
+            "history": [],
+            "usage": {"calls": 3, "total_cost_usd": 0.2},
+            "join_verified": True,
+        }
+
+        async def create_native(_base, execution_task):
+            execution_task._wmh_owned_session = {
+                "base_url": "http://native.test",
+                "model_name": "rose-test",
+                "session_id": "native-owned",
+                "root_agent_id": ROOT,
+                "engine": "experiential",
+            }
+            if admission_failure:
+                if terminal == "cancel":
+                    raise asyncio.CancelledError("execution cancelled")
+                raise RuntimeError("execution failed")
+            return ROOT
+
+        class NativeClient:
+            def __init__(self, base):
+                assert base == "http://native.test"
+
+            async def end_session(self, name, session_id):
+                assert (name, session_id) == ("rose-test", "native-owned")
+                await asyncio.sleep(0)
+                if retirement_failure:
+                    events.append("native-unjoined")
+                    raise RuntimeError("retirement unavailable")
+                events.append("native-joined")
+                return receipt
+
+        async def settled_usage(*_args, **_kwargs):
+            assert events == ["native-joined"], "native provider work must join before cost is frozen"
+            return {}
+
+        monkeypatch.setattr(bench, "create_agent", create_native)
+        monkeypatch.setattr(bench, "WMHHttpClient", NativeClient)
+        monkeypatch.setattr(bench, "_get_settled_tool_usage", settled_usage)
 
     async def evaluated(result):
-        assert result.agent_id == ROOT and result.passed is passed
+        expected_root = ROOT if native or not admission_failure else ""
+        assert result.agent_id == expected_root and result.passed is passed
         await asyncio.sleep(0)
         events.append("evaluated")
 
@@ -122,7 +206,335 @@ async def _assert_evaluated_before_teardown(monkeypatch, passed):
     )
     result = await bench.run_single_task("http://localhost:39999", task, **kwargs)
     assert result.passed is passed
-    assert events == ["evaluated", "agent-cleanup", "phone-cleanup"]
+    expected = ["evaluated", "agent-cleanup", "phone-cleanup"]
+    if terminal or retirement_failure:
+        expected = ["archive", *([] if terminal == "cancel" else ["evaluated"]), "agent-cleanup", "phone-cleanup"]
+        if admission_failure and not native:
+            expected = ["evaluated", "phone-cleanup"]
+    if native:
+        expected.insert(0, "native-unjoined" if retirement_failure else "native-joined")
+    assert events == expected
+    if native:
+        if retirement_failure:
+            assert result.benchmark_status in {"ERROR", "CANCELLED"} and not result.passed
+            error = result.logs["wmh_retirement_error"]
+            assert error["type"] == "RuntimeError" and error["message"] == "retirement unavailable"
+            assert error["session_id"] == "native-owned" and error["session_scope_id"] == ROOT
+            assert error["join_verified"] is False and error["cost_verified"] is False
+            assert result.logs["benchmark_cost_placeholder"] == {"cost_cents": 0, "settled": False}
+            assert not evaluations, "an unjoined world cannot reach task evaluation or settled cost"
+            assert "retirement unavailable" in result.failure_reason
+            if terminal == "error":
+                assert "execution failed" in result.failure_reason
+                assert result.logs["benchmark_execution_error"] == {
+                    "type": "RuntimeError",
+                    "message": "execution failed",
+                }
+        else:
+            assert result.logs["wmh_retirement"] == receipt
+        if admission_failure:
+            assert result.agent_id == ROOT and not evaluations
+            admission = result.logs["wmh_agent_admission"]
+            assert admission["root_agent_id"] == ROOT and admission["creation_confirmed"] is False
+            if missing_agent:
+                assert admission["cleanup_observation"] == "not_found"
+            else:
+                assert admission["cleanup_observation"] == "deleted"
+    elif admission_failure:
+        assert result.agent_id == "" and "wmh_agent_admission" not in result.logs
+
+
+@async_case
+async def test_native_world_joins_before_cost_evaluation_and_diagnostics():
+    for passed in (True, False):
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            await _assert_evaluated_before_teardown(monkeypatch, passed, native=True)
+
+
+@pytest.mark.parametrize("terminal", ["cancel", "error"])
+@pytest.mark.parametrize("log_failure", [False, True])
+def test_native_world_retirement_preserves_cancel_error_receipts_when_logs_fail(terminal, log_failure):
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        asyncio.run(
+            _assert_evaluated_before_teardown(
+                monkeypatch,
+                False,
+                native=True,
+                terminal=terminal,
+                log_failure=log_failure,
+            )
+        )
+
+
+@pytest.mark.parametrize("terminal", [None, "cancel", "error"])
+@pytest.mark.parametrize("log_failure", [False, True])
+def test_native_world_retirement_failure_keeps_evidence_cleanup_and_original_error(terminal, log_failure):
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        asyncio.run(
+            _assert_evaluated_before_teardown(
+                monkeypatch,
+                False,
+                native=True,
+                terminal=terminal,
+                retirement_failure=True,
+                log_failure=log_failure,
+            )
+        )
+
+
+@pytest.mark.parametrize("terminal", ["cancel", "error"])
+@pytest.mark.parametrize("missing_agent", [False, True])
+def test_native_world_retirement_owned_seed_recovers_exact_root_after_admission_failure(terminal, missing_agent):
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        asyncio.run(
+            _assert_evaluated_before_teardown(
+                monkeypatch,
+                False,
+                native=True,
+                terminal=terminal,
+                admission_failure=True,
+                missing_agent=missing_agent,
+            )
+        )
+
+
+@async_case
+async def test_native_world_retirement_caller_owned_admission_does_not_invent_a_root():
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        await _assert_evaluated_before_teardown(
+            monkeypatch,
+            False,
+            terminal="error",
+            admission_failure=True,
+        )
+
+
+def test_native_world_retirement_admission_cleanup_rejects_foreign_and_unverified_roots(monkeypatch):
+    async def run():
+        task = copy.deepcopy(bench.get_task_by_name("parallel-tool-calls"))
+        task._wmh_agent_admission = {"root_agent_id": CHILD, "creation_confirmed": False}
+        deletion = AsyncMock(side_effect=RuntimeError("delete unavailable"))
+        observed = AsyncMock(return_value={"agent": {"agent_id": ROOT}})
+        monkeypatch.setattr(bench, "delete_agent", deletion)
+        monkeypatch.setattr(bench, "get_agent", observed)
+        with pytest.raises(RuntimeError, match="root does not match"):
+            await bench._delete_owned_native_admission_root("http://native.test", task, ROOT)
+        assert not deletion.called and not observed.called
+        task._wmh_agent_admission["root_agent_id"] = ROOT
+        with pytest.raises(RuntimeError, match="delete unavailable"):
+            await bench._delete_owned_native_admission_root("http://native.test", task, ROOT)
+        assert task._wmh_agent_admission["cleanup_observation"] == "unverified"
+        assert task._wmh_agent_admission["creation_confirmed"] is False
+        assert task._wmh_agent_admission["cleanup_error"] == {
+            "type": "RuntimeError",
+            "message": "delete unavailable",
+        }
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("join_verified", False),
+        ("session_scope_id", CHILD),
+        ("session_id", "foreign-session"),
+        ("revision", True),
+        ("state", None),
+        ("usage", None),
+    ],
+)
+def test_native_world_retirement_rejects_unjoined_or_foreign_receipts(monkeypatch, field, value):
+    task = copy.deepcopy(bench.get_task_by_name("parallel-tool-calls"))
+    task._wmh_owned_session = {
+        "base_url": "http://native.test",
+        "model_name": "rose-test",
+        "session_id": "owned",
+        "root_agent_id": ROOT,
+        "engine": "experiential",
+    }
+    receipt = {
+        "ended": "owned",
+        "engine": "experiential",
+        "session_id": "owned",
+        "session_scope_id": ROOT,
+        "revision": 0,
+        "state": {},
+        "history": [],
+        "usage": {},
+        "join_verified": True,
+    }
+    receipt[field] = value
+
+    class Client:
+        def __init__(self, base):
+            assert base == "http://native.test"
+
+        async def end_session(self, model, session_id):
+            assert (model, session_id) == ("rose-test", "owned")
+            return receipt
+
+    monkeypatch.setattr(bench, "WMHHttpClient", Client)
+    with pytest.raises(RuntimeError, match="exact owned provider join"):
+        asyncio.run(bench._retire_owned_native_world(task, ROOT))
+    assert getattr(task, "_wmh_retirement_receipt", None) is None
+
+
+def test_native_world_retirement_never_closes_a_different_root_or_unowned_session(monkeypatch):
+    task = copy.deepcopy(bench.get_task_by_name("parallel-tool-calls"))
+
+    class Client:
+        def __init__(self, *_args):
+            pytest.fail("unowned/foreign worlds must never reach the retirement endpoint")
+
+    monkeypatch.setattr(bench, "WMHHttpClient", Client)
+    assert asyncio.run(bench._retire_owned_native_world(task, ROOT)) is None
+    task._wmh_owned_session = {"engine": "legacy"}
+    assert asyncio.run(bench._retire_owned_native_world(task, ROOT)) is None
+    task._wmh_owned_session = {"engine": "experiential", "root_agent_id": CHILD}
+    with pytest.raises(RuntimeError, match="root does not match"):
+        asyncio.run(bench._retire_owned_native_world(task, ROOT))
+    assert task._wmh_retirement_error["join_verified"] is False
+    assert task._wmh_retirement_error["cost_verified"] is False
+
+
+def test_native_world_retirement_lost_waiter_keeps_one_owner_and_full_receipt(monkeypatch):
+    async def run():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+        task = copy.deepcopy(bench.get_task_by_name("parallel-tool-calls"))
+        task._wmh_owned_session = {
+            "base_url": "http://native.test",
+            "model_name": "rose-test",
+            "session_id": "owned",
+            "root_agent_id": ROOT,
+            "engine": "experiential",
+        }
+        receipt = {
+            "ended": "owned",
+            "engine": "experiential",
+            "session_id": "owned",
+            "session_scope_id": ROOT,
+            "revision": 1,
+            "state": {"submitted": True},
+            "history": [],
+            "usage": {"calls": 1},
+            "join_verified": True,
+        }
+
+        class Client:
+            def __init__(self, base):
+                assert base == "http://native.test"
+
+            async def end_session(self, model, session_id):
+                calls.append((model, session_id))
+                entered.set()
+                await release.wait()
+                return receipt
+
+        monkeypatch.setattr(bench, "WMHHttpClient", Client)
+        first = asyncio.create_task(bench._retire_owned_native_world(task, ROOT))
+        second = None
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            first.cancel()
+            await asyncio.gather(first, return_exceptions=True)
+            second = asyncio.create_task(bench._retire_owned_native_world(task, ROOT))
+            await asyncio.sleep(0)
+            assert calls == [("rose-test", "owned")] and not second.done()
+            release.set()
+            assert await asyncio.wait_for(second, 2) == receipt
+            assert task._wmh_retirement_receipt == receipt
+            assert await bench._retire_owned_native_world(task, ROOT) == receipt
+            assert calls == [("rose-test", "owned")]
+        finally:
+            release.set()
+            await asyncio.gather(first, *([second] if second else []), return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_native_world_retirement_parallel_cached_task_copies_keep_exact_roots(monkeypatch):
+    async def run():
+        task = copy.deepcopy(bench.get_task_by_name("parallel-tool-calls"))
+        task._wmh_initial_state_source = "caller-reviewed-seed.json"
+        task._wmh_seeded_session_id = "previous-execution"
+        admitted = asyncio.Event()
+        roots = iter((ROOT, CHILD))
+        executions = []
+        retired = []
+        inherited_sessions = []
+
+        class Client:
+            def __init__(self, base):
+                assert base == "http://native.test"
+
+            async def end_session(self, model, session):
+                assert model == "rose-test"
+                retired.append(session)
+                return {
+                    "ended": session,
+                    "engine": "experiential",
+                    "session_id": session,
+                    "session_scope_id": session,
+                    "revision": 0,
+                    "state": {},
+                    "history": [],
+                    "usage": {},
+                    "join_verified": True,
+                }
+
+        async def execute(_base, execution_task, *_args):
+            root = next(roots)
+            assert execution_task._wmh_initial_state_source == "caller-reviewed-seed.json"
+            inherited_sessions.append(execution_task._wmh_seeded_session_id)
+            execution_task._wmh_owned_session = {
+                "base_url": "http://native.test",
+                "model_name": "rose-test",
+                "session_id": root,
+                "root_agent_id": root,
+                "engine": "experiential",
+            }
+            executions.append(execution_task)
+            if len(executions) == 2:
+                admitted.set()
+            await admitted.wait()
+            receipt = await bench._retire_owned_native_world(execution_task, root)
+            return bench.TaskResult(
+                name=execution_task.name,
+                passed=False,
+                agent_id=root,
+                status="ERROR",
+                benchmark_status="ERROR",
+                progress_score=0,
+                duration_seconds=0,
+                cost_cents=0,
+                message_count=0,
+                failure_reason="fixture",
+                logs={"wmh_retirement": receipt},
+            )
+
+        monkeypatch.setattr(bench, "WMHHttpClient", Client)
+        monkeypatch.setattr(bench, "_run_single_task_as_run_user", execute)
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                bench.run_single_task("http://localhost:39999", task),
+                bench.run_single_task("http://localhost:39999", task),
+                return_exceptions=True,
+            ),
+            2,
+        )
+        assert all(isinstance(result, bench.TaskResult) for result in results), results
+        assert executions[0] is not executions[1] and all(item is not task for item in executions)
+        assert inherited_sessions == [None, None]
+        assert sorted(retired) == sorted((ROOT, CHILD))
+        for result in results:
+            assert result.logs["wmh_retirement"]["session_scope_id"] == result.agent_id
+        assert task._wmh_seeded_session_id == "previous-execution"
+        assert task._wmh_initial_state_source == "caller-reviewed-seed.json"
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
@@ -145,6 +557,11 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
         and isinstance(node.body[0], ast.If)
         and isinstance(node.body[0].test, ast.Name)
         and node.body[0].test.id == "checkpoint_source_mode"
+    )
+    finalize_and_save = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_finalize_owned_batch_and_save_run"
     )
     coordinator = ast.AsyncFunctionDef(
         name="_owning_coordinator",
@@ -206,7 +623,7 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
     async def admitted_call(_task, call):
         return await call()
 
-    async def finalizer(_base_url, results, roots):
+    async def finalizer(_base_url, results, roots, **kwargs):
         assert not admitted and not agents and roots == ({} if path == "skipped" else {task.name: [ROOT]})
         assert results == ([] if path in ("cancelled", "raised") else [returned])
         events.append("batch-finalize")
@@ -221,8 +638,14 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
         "TaskResult": bench.TaskResult,
         "base_url": "http://fixture.invalid",
         "run_single_task": delegate,
+        "_reads_base_trajectory_history": bench._reads_base_trajectory_history,
+        "_prepare_base_trajectory_history": bench._prepare_base_trajectory_history,
+        "batch_started_at": bench.datetime.now(bench.timezone.utc),
         "cloud_batch_cleanup": SimpleNamespace(contract=lambda: (tmp_path / "contract.json", "owned-token")),
+        "_task_root_custody": bench._task_root_custody,
         "_admitted_tasks": admitted,
+        "_entered_task_futures": set(),
+        "_never_admitted_results": [],
         "_admitted_agent_ids": agents,
         "_evaluated_task_results": evaluated,
         "_outcome_signatures": signatures,
@@ -240,11 +663,13 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
         "_finalize_owned_cloud_batch": finalizer,
         "_complete_interrupt_cleanup": lambda: events.append("batch-closed"),
         "_live_task_agent_ids": live_ids,
-        "_fetch_wmh_retrieval_audit": lambda: None,
+        "_wmh_evidence": SimpleNamespace(finalize=lambda: None),
         "Path": Path,
         "os": os,
+        "Any": bench.Any,
+        "Callable": bench.Callable,
     }
-    module = ast.fix_missing_locations(ast.Module(body=[wrapper, coordinator], type_ignores=[]))
+    module = ast.fix_missing_locations(ast.Module(body=[wrapper, finalize_and_save, coordinator], type_ignores=[]))
     exec(compile(module, str(bench.__file__), "exec"), namespace)
 
     async def run_coordinator():
@@ -817,14 +1242,225 @@ def test_exact_database_proof_rejects_live_child_and_foreign_stack():
                 with pytest.raises(RuntimeError, match="incomplete"):
                     cleanup.exact_root_sessions("http://localhost:31001", ROOT, require_deleted=True)
             payload["root_user_id"] = ROOT
-            with pytest.raises(RuntimeError, match="owned local stack"):
+            with pytest.raises(RuntimeError, match="not the owned local stack"):
                 cleanup.exact_root_sessions("https://production.example", ROOT)
+            # T114: a stack that went down mid-finalization says so, not "foreign database".
+            for stopped in ("stopped", "failed"):
+                (context / "services.json").write_text(json.dumps({**manifest, "status": stopped}))
+                with pytest.raises(RuntimeError, match=f"owned local stack is {stopped} before provider verification"):
+                    cleanup.exact_root_sessions("http://localhost:31001", ROOT)
+            (context / "services.json").write_text(json.dumps(manifest))
             payload["purchase_cleanup"] = None
             # Broken payment evidence must fail its own retirement contract
             # without hiding independently valid browser release authority.
             assert cleanup.exact_root_sessions("http://localhost:31001", ROOT, require_deleted=True) == payload
             with pytest.raises(RuntimeError, match="payment evidence"):
                 cleanup.pending_root_payments(payload)
+
+
+def test_exact_database_proof_recognises_tilion_rows_and_releases_them_by_exact_id():
+    """Tilion is one shared account: only this tree's exact DB rows authorize release."""
+    import os
+    import runpy
+
+    recovery = runpy.run_path(str(cleanup.REPO_ROOT / "scripts/cloudbench-guest-recovery.py"))
+    with tempfile.TemporaryDirectory() as directory:
+        context = Path(directory)
+        (context / "services.json").write_text(json.dumps({
+            "worktree": str(cleanup.REPO_ROOT),
+            "benchmark_mode": True,
+            "status": "running",
+            "temporal_task_queue": "owned-queue",
+            "ports": {"backend": 31001},
+            "database": {"name": "owned_fixture", "port": 31006},
+        }))
+        tilion_row = {"agent_id": CHILD, "provider": "tilion",
+                      "session_id": "sess_3d245e56b86d4bc8ae32095b644117d4"}
+        payload = {
+            "root_exists": True,
+            "root_user_id": ROOT,
+            "root_deleted": True,
+            "unsealed_tree_agent_ids": [],
+            "tree_agent_ids": [ROOT, CHILD],
+            "browser_sessions": [tilion_row],
+            "purchase_cleanup": [],
+        }
+        recovery["run_exact_psql"] = lambda _command, **_kwargs: json.dumps(payload)
+        environment = {
+            "BENCHMARK_CLOUD_BATCH_CLEANUP": "true",
+            "BENCHMARK_ISOLATED_RUN": "true",
+            "BENCHMARK_INTERRUPT_CLEANUP_TOKEN": "owned-token",
+            "BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE": str(context / "status"),
+            "BENCHMARK_CONTEXT_DIR": directory,
+            "TEMPORAL_TASK_QUEUE": "owned-queue",
+        }
+        with patch.dict(os.environ, environment), patch.object(cleanup.runpy, "run_path", return_value=recovery):
+            assert cleanup.exact_root_sessions("http://localhost:31001", ROOT, require_deleted=True) == payload
+            payload["browser_sessions"] = [{**tilion_row, "provider": "browserbase"}]
+            with pytest.raises(RuntimeError, match="unrecognized provider"):
+                cleanup.exact_root_sessions("http://localhost:31001", ROOT, require_deleted=True)
+
+    sealed = {**payload, "browser_sessions": [tilion_row]}
+    calls = []
+
+    def release(provider, sid, _paths):
+        calls.append((provider, sid))
+        return 410, "digest"
+
+    with (
+        patch.object(cleanup, "exact_root_sessions", return_value=sealed),
+        patch.object(cleanup.runpy, "run_path", return_value={"provider_request": release}),
+    ):
+        result = cleanup.close_exact_root_sessions("http://localhost:1", ROOT, sealed)
+    assert calls == [("tilion", tilion_row["session_id"])]
+    assert result["provider_receipts"] == [{
+        "provider": "tilion", "session_id": tilion_row["session_id"],
+        "status": 410, "response_sha256": "digest",
+    }]
+
+
+def test_preparation_cancellation_receipt_accepts_tilion_and_rejects_unknown_providers():
+    from benchmarks import browser_zero_allocation
+
+    def receipts_for(provider):
+        receipt = {
+            "version": 1, "agent_id": ROOT, "task_id": CHILD, "tool_call_id": "call-prep",
+            "session_id": "sess_3d245e56b86d4bc8ae32095b644117d4", "provider": provider,
+            "phase": "initial_session_preparation", "init_acknowledged": True,
+            "task_actions_started": False,
+        }
+        meta = {
+            "toolName": "spawn_browser_agent", "action_type": "task_complete",
+            "toolStatus": "FINISHED", "task_id": CHILD, "toolCallId": "call-prep",
+            "excludeFromModel": True, "browser_preparation_cancellation": receipt,
+        }
+        return browser_zero_allocation.preparation_cancelled_task_receipts([{"metadata": meta}], ROOT)
+
+    assert set(receipts_for("tilion")) == {CHILD}
+    assert receipts_for("browserbase") == {}
+
+
+def _postgres_binary(name):
+    import glob
+    import shutil
+
+    found = shutil.which(name) or next(iter(sorted(
+        glob.glob(f"/usr/lib/postgresql/*/bin/{name}") + glob.glob(f"/opt/homebrew/opt/postgresql@*/bin/{name}"),
+        reverse=True,
+    )), None)
+    assert found, f"{name} is required: the exact tree query must run against real Postgres rows"
+    return found
+
+
+def test_exact_tree_query_excludes_unmaterialized_logical_browsers_on_real_postgres():
+    """Every agent owns a logical BrowserSession row (sessionId NULL) until a
+    provider session exists. The owned-cloud finalizer must not reject such a
+    tree, and must still validate every row that does hold a provider session."""
+    import socket
+    import subprocess
+
+    migration = (
+        cleanup.REPO_ROOT
+        / "back-end/prisma/migrations/20261021180000_browser_logical_identity_verified_credentials/migration.sql"
+    ).read_text()
+    logical_identity_ddl = migration.split('ALTER TABLE "BrowserSiteState"', 1)[0]
+    recovery = __import__("runpy").run_path(str(cleanup.REPO_ROOT / "scripts/cloudbench-guest-recovery.py"))
+    with tempfile.TemporaryDirectory() as directory:
+        data, sockets = Path(directory) / "data", Path(directory) / "sockets"
+        sockets.mkdir()
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        subprocess.run([_postgres_binary("initdb"), "-D", str(data), "-U", "postgres", "--auth=trust", "-E", "UTF8"],
+                       check=True, capture_output=True)
+        server = [_postgres_binary("pg_ctl"), "-D", str(data), "-w", "-s"]
+        # The daemon must not inherit captured pipes, or run() waits for their EOF forever.
+        subprocess.run(server + ["-l", str(Path(directory) / "server.log"),
+                                 "-o", f"-p {port} -k {sockets} -c listen_addresses=localhost", "start"],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        try:
+            def sql(statement, database="postgres"):
+                return subprocess.run(
+                    [_postgres_binary("psql"), "-X", "-q", "-v", "ON_ERROR_STOP=1", "-h", "localhost", "-p", str(port),
+                     "-U", "postgres", "-d", database, "-c", statement],
+                    capture_output=True, text=True, timeout=30,
+                )
+            assert sql("CREATE DATABASE owned_fixture").returncode == 0
+            # The pre-migration table as main defines it, then the branch's real
+            # logical-identity migration bytes (nullable sessionId + constraints).
+            setup = sql(
+                """
+                CREATE TYPE "BrowserSessionStatus" AS ENUM ('ACTIVE', 'CLOSED', 'ERROR', 'PAUSED');
+                CREATE TABLE "Agent" (id TEXT PRIMARY KEY, "userId" TEXT NOT NULL,
+                  "parentAgentId" TEXT, "deletedAt" TIMESTAMP(3));
+                CREATE TABLE "BrowserSession" (id TEXT PRIMARY KEY, "contextId" TEXT NOT NULL,
+                  "agentId" TEXT NOT NULL, "sessionId" TEXT NOT NULL UNIQUE,
+                  status "BrowserSessionStatus" NOT NULL DEFAULT 'ACTIVE', provider TEXT NOT NULL DEFAULT 'steel');
+                CREATE TABLE "PurchaseSpend" (id TEXT PRIMARY KEY, "agentId" TEXT, status TEXT, "cardId" TEXT,
+                  "stripePaymentIntentId" TEXT, "totalCents" INTEGER);
+                CREATE TABLE "PurchaseWalletFunding" ("purchaseId" TEXT, status TEXT, "providerTransferId" TEXT,
+                  "reclaimProviderTransferId" TEXT);
+                """ + logical_identity_ddl,
+                "owned_fixture",
+            )
+            assert setup.returncode == 0, setup.stderr
+            # Agent creation's unmaterialized logical browsers (createLogicalBrowserInTransaction)
+            # plus one child that did materialize a Kernel session.
+            inserted = sql(
+                f"""
+                INSERT INTO "Agent" VALUES ('{ROOT}', '{ROOT}', NULL, NULL), ('{CHILD}', '{ROOT}', '{ROOT}', NULL);
+                INSERT INTO "BrowserSession" (id, "contextId", "agentId", "sessionId", status, provider,
+                  "logicalOwnerKey", "baselineCheckpointRef") VALUES
+                  ('logical-root', 'context', '{ROOT}', NULL, 'PAUSED', 'kernel', 'agent:{ROOT}', 'empty-baseline'),
+                  ('logical-child', 'context', '{CHILD}', NULL, 'PAUSED', 'kernel', 'agent:{CHILD}', 'empty-baseline');
+                """,
+                "owned_fixture",
+            )
+            assert inserted.returncode == 0, inserted.stderr
+            # The schema itself guarantees a NULL-session row is only an unmaterialized logical identity.
+            orphan = sql(
+                f"""INSERT INTO "BrowserSession" (id, "contextId", "agentId", "sessionId", status, provider)
+                VALUES ('orphan', 'context', '{ROOT}', NULL, 'ACTIVE', 'kernel')""",
+                "owned_fixture",
+            )
+            assert orphan.returncode != 0 and "BrowserSession_unmaterialized_check" in orphan.stderr
+
+            context = Path(directory) / "context"
+            context.mkdir()
+            (context / "services.json").write_text(json.dumps({
+                "worktree": str(cleanup.REPO_ROOT), "benchmark_mode": True, "status": "running",
+                "temporal_task_queue": "owned-queue", "ports": {"backend": 31001},
+                "database": {"name": "owned_fixture", "port": port},
+            }))
+            environment = {
+                "BENCHMARK_CLOUD_BATCH_CLEANUP": "true", "BENCHMARK_ISOLATED_RUN": "true",
+                "BENCHMARK_INTERRUPT_CLEANUP_TOKEN": "owned-token",
+                "BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE": str(context / "status"),
+                "BENCHMARK_CONTEXT_DIR": str(context), "TEMPORAL_TASK_QUEUE": "owned-queue",
+                "PATH": str(Path(_postgres_binary("psql")).parent) + os.pathsep + os.environ.get("PATH", ""),
+            }
+            with patch.dict(os.environ, environment), patch.object(cleanup.runpy, "run_path", return_value=recovery):
+                # A non-browser task: only unmaterialized logical rows, so no provider session to own.
+                snapshot = cleanup.exact_root_sessions("http://localhost:31001", ROOT)
+                assert snapshot["tree_agent_ids"] == sorted([ROOT, CHILD])
+                assert snapshot["browser_sessions"] == []
+                # A materialized Kernel session is still returned and owned exactly.
+                materialized = sql(
+                    f"""UPDATE "BrowserSession" SET "sessionId" = 'kernel_session_0001', status = 'ACTIVE'
+                    WHERE id = 'logical-child'""",
+                    "owned_fixture",
+                )
+                assert materialized.returncode == 0, materialized.stderr
+                assert cleanup.exact_root_sessions("http://localhost:31001", ROOT)["browser_sessions"] == [
+                    {"agent_id": CHILD, "session_id": "kernel_session_0001", "provider": "kernel"}
+                ]
+                # A provider-backed row from an unknown provider is still refused.
+                assert sql("""UPDATE "BrowserSession" SET provider = 'unknown-provider' WHERE id = 'logical-child'""",
+                           "owned_fixture").returncode == 0
+                with pytest.raises(RuntimeError, match="unrecognized provider session"):
+                    cleanup.exact_root_sessions("http://localhost:31001", ROOT)
+        finally:
+            subprocess.run(server + ["-m", "immediate", "stop"], capture_output=True, timeout=60)
 
 
 def test_provider_rejection_does_not_skip_other_sessions_in_same_root():
@@ -1460,3 +2096,645 @@ async def test_disconnected_delete_seal_wait_rejects_owner_drift_and_has_a_deadl
             await bench._wait_for_owned_root_seal("http://localhost:1", ROOT, before, evidence, timeout_seconds=0.02)
     assert all(not call.kwargs.get("require_deleted") for call in read.call_args_list)
     assert evidence["delete_seal_observation"]["snapshot"]["unsealed_tree_agent_ids"] == [CHILD]
+
+
+def test_native_world_retirement_retries_a_transient_unjoined_server_error(monkeypatch):
+    """Run 7 (2026-10-20): the first native DELETE after the 600s timeout returned
+    500 while ~90 cancelled predictions were still draining. The server keeps the
+    session fenced and accepts a fresh retirement, so a server/transport failure is
+    retried; a 4xx (unknown/foreign session) stays terminal."""
+    import httpx
+
+    def owned_task():
+        task = copy.deepcopy(bench.get_task_by_name("parallel-tool-calls"))
+        task._wmh_owned_session = {
+            "base_url": "http://native.test",
+            "model_name": "rose-test",
+            "session_id": "owned",
+            "root_agent_id": ROOT,
+            "engine": "experiential",
+        }
+        return task
+
+    receipt = {
+        "ended": "owned",
+        "engine": "experiential",
+        "session_id": "owned",
+        "session_scope_id": ROOT,
+        "revision": 3,
+        "state": {"raised": 0},
+        "history": [],
+        "usage": {"calls": 3},
+        "join_verified": True,
+    }
+    url = "http://native.test/world_models/rose-test/sessions/owned"
+
+    def status_error(code):
+        request = httpx.Request("DELETE", url)
+        return httpx.HTTPStatusError(f"{code}", request=request, response=httpx.Response(code, request=request))
+
+    def client_for(outcomes, calls):
+        class Client:
+            def __init__(self, base):
+                assert base == "http://native.test"
+
+            async def end_session(self, model, session_id):
+                calls.append((model, session_id))
+                outcome = outcomes.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+
+        return Client
+
+    sleeps = []
+
+    async def no_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(bench, "_NATIVE_RETIREMENT_SLEEP", no_sleep, raising=False)
+
+    calls = []
+    monkeypatch.setattr(
+        bench,
+        "WMHHttpClient",
+        client_for([status_error(500), httpx.ReadTimeout("slow", request=httpx.Request("DELETE", url)), receipt], calls),
+    )
+    task = owned_task()
+    assert asyncio.run(bench._retire_owned_native_world(task, ROOT)) == receipt
+    assert calls == [("rose-test", "owned")] * 3 and len(sleeps) == 2
+    assert task._wmh_retirement_receipt == receipt and getattr(task, "_wmh_retirement_error", None) is None
+
+    calls.clear()
+    monkeypatch.setattr(bench, "WMHHttpClient", client_for([status_error(409)], calls))
+    task = owned_task()
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(bench._retire_owned_native_world(task, ROOT))
+    assert calls == [("rose-test", "owned")] and task._wmh_retirement_error["join_verified"] is False
+
+    calls.clear()
+    attempts = getattr(bench, "_NATIVE_RETIREMENT_ATTEMPTS", 1)
+    persistent = [status_error(500) for _ in range(attempts + 1)]
+    monkeypatch.setattr(bench, "WMHHttpClient", client_for(persistent, calls))
+    task = owned_task()
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(bench._retire_owned_native_world(task, ROOT))
+    assert len(calls) == attempts > 1
+    assert task._wmh_retirement_error["cost_verified"] is False
+
+
+@async_case
+async def test_interrupt_during_archive_wait_keeps_run_record_and_exact_cleanup():
+    """SIGINT during the diagnostic archive wait must not lose the evaluated run.
+
+    polar70 (2026-10-19): a FAIL outcome was evaluated and Hub-acknowledged,
+    then the owned-batch archive refresh waited for two browser activities
+    that ignored pause. The guest watchdog interrupted it; the CancelledError
+    skipped ``run.save()`` and the remaining roots' exact cleanup, and the
+    interrupt receipt read ``failed`` although provider cleanup was verified.
+    """
+    for provider_fails in (False, True):
+        events = []
+        entered = asyncio.Event()
+        rows = [result(ROOT), result(CHILD)]
+        verdicts = [(row.passed, row.benchmark_status, row.failure_reason) for row in rows]
+
+        def query(_url, aid, **_kwargs):
+            return {"root_user_id": ROOT, "tree_agent_ids": [aid], "browser_sessions": [], "purchase_cleanup": []}
+
+        async def snapshot(_url, aid, _data, _logs, **_kwargs):
+            events.append(("snapshot", aid))
+            entered.set()
+            await asyncio.Event().wait()  # browser terminals never arrive
+
+        async def delete(_url, aid):
+            events.append(("delete", aid))
+
+        def close(_url, aid, _before, **_kwargs):
+            events.append(("release", aid))
+            if provider_fails and aid == CHILD:
+                raise RuntimeError("provider session still live")
+            return {"root_agent_id": aid}
+
+        async def payments(_url, aid, _evidence):
+            events.append(("payments", aid))
+            return {"root_agent_id": aid, "purchases": []}
+
+        saved = []
+        run = SimpleNamespace(task_results=rows, world_model_retrieval_audit=None)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            status_file = Path(temporary) / "interrupt.status"
+            record = Path(temporary) / "run-record.json"
+
+            def save():
+                saved.append([row.logs.get("cloud_cleanup_evidence") for row in rows])
+                record.write_text("{}", encoding="utf-8")
+                return str(record)
+
+            run.save = save
+            env = {
+                "BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE": str(status_file),
+                "BENCHMARK_INTERRUPT_CLEANUP_TOKEN": "polar70-token",
+                "BENCHMARK_CONTEXT_DIR": temporary,
+            }
+            with (
+                patch.dict(os.environ, env),
+                patch.object(bench, "_INTERRUPT_CLEANUP_STARTED", 0),
+                patch.object(bench, "_INTERRUPT_CLEANUP_COMPLETED", 0),
+                patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+                patch.object(cleanup, "exact_root_sessions", query),
+                patch.object(bench, "_refresh_browser_archive_snapshot", snapshot),
+                patch.object(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("ref", {}))),
+                patch.object(bench, "delete_agent", delete),
+                patch.object(cleanup, "close_exact_root_sessions", close),
+                patch.object(bench, "_finalize_owned_root_payments", payments),
+                patch.object(bench, "fetch_local_worker_logs", return_value=[]),
+            ):
+                bench._begin_interrupt_cleanup()
+                finalize = asyncio.create_task(
+                    bench._finalize_owned_batch_and_save_run(
+                        "http://localhost:1",
+                        run,
+                        {},
+                        owned_batch_cleanup=True,
+                        retrieval_audit=lambda: {"audited": True},
+                    )
+                )
+                async with asyncio.timeout(10):
+                    await entered.wait()
+                    finalize.cancel()  # asyncio.run's SIGINT delivery
+                    with pytest.raises(asyncio.CancelledError):
+                        await finalize
+                bench._finalize_interrupt_cleanup_status()
+                state = status_file.read_text(encoding="utf-8")
+
+        # The evaluated outcome is durable and unchanged by the interruption.
+        assert len(saved) == 1, "interrupted finalization skipped run.save()"
+        assert run.world_model_retrieval_audit == {"audited": True}
+        # Every owned root still crosses exact provider and payment cleanup;
+        # the interrupted archive wait is never resumed for later roots.
+        for aid in (ROOT, CHILD):
+            assert ("delete", aid) in events and ("release", aid) in events and ("payments", aid) in events
+        assert [event for event in events if event[0] == "snapshot"] == [("snapshot", ROOT)]
+        root_evidence, child_evidence = (row.logs["cloud_cleanup_evidence"] for row in rows)
+        assert any(warning.startswith("archive:") for warning in root_evidence["warnings"])
+        assert any(warning.startswith("archive:") for warning in child_evidence["warnings"])
+        if provider_fails:
+            # Unverified provider release stays fail-closed.
+            assert "state=failed" in state
+            assert child_evidence["errors"] == ["provider: provider session still live"]
+            assert (rows[1].passed, rows[1].benchmark_status) == (False, "ERROR")
+            assert (rows[0].passed, rows[0].benchmark_status, rows[0].failure_reason) == verdicts[0]
+        else:
+            assert "state=clean" in state, state
+            assert root_evidence["errors"] == [] and child_evidence["errors"] == []
+            assert [(row.passed, row.benchmark_status, row.failure_reason) for row in rows] == verdicts
+
+
+@async_case
+async def test_fixture_root_custody_refuses_unknown_foreign_and_duplicate_bindings():
+    custody={"task_name":"owned-task","roots":[],"callback":None,"graded_creation":"not_started"}
+    token=bench._task_root_custody.set(custody)
+    try:
+        for bad in (None,"","not-a-root"):
+            with pytest.raises(RuntimeError,match="unknown or duplicate"):
+                bench._register_task_root("owned-task",bad,"fixture_first_run")
+        with pytest.raises(RuntimeError,match="foreign"):
+            bench._register_task_root("foreign-task",ROOT,"fixture_first_run")
+        bench._register_task_root("owned-task",ROOT,"fixture_first_run")
+        with pytest.raises(RuntimeError,match="unknown or duplicate"):
+            bench._register_task_root("owned-task",ROOT,"fixture_first_run")
+        assert len(custody["roots"])==1
+    finally:bench._task_root_custody.reset(token)
+    for corruption in ("foreign","foreign_stage","duplicate","missing_provider","missing_seal"):
+        row=result("");row.name="owned-task";row.graded_root_creation_outcome="not_started"
+        record={"root_agent_id":ROOT,"task_name":row.name,"role":"fixture_first_run",
+                "creation":{"source":"create_agent_return","root_agent_id":ROOT},"stage_outcome":"failed","logs":{}}
+        row.owned_roots=[copy.deepcopy(record)]
+        if corruption=="foreign":row.owned_roots[0]["task_name"]="foreign-task"
+        if corruption=="foreign_stage":row.owned_roots[0]["logs"]["fixture_snapshot"]={"agent":{"id":CHILD}}
+        if corruption=="duplicate":row.owned_roots.append(copy.deepcopy(record))
+        sealed=False
+        def query(*args,**kwargs):
+            return {"root_user_id":ROOT,"tree_agent_ids":[ROOT],"browser_sessions":[],"purchase_cleanup":[],"root_deleted":sealed,"unsealed_tree_agent_ids":[] if sealed else[ROOT]}
+        async def delete(*args):
+            nonlocal sealed
+            sealed=True
+        def provider(*args,**kwargs):
+            if corruption=="missing_provider":raise RuntimeError("provider proof unavailable")
+            if corruption=="missing_seal":raise RuntimeError("exact seal unavailable")
+            return {}
+        with (
+            patch.object(cleanup,"exact_root_sessions",query),patch.object(cleanup,"close_exact_root_sessions",provider),
+            patch.object(bench,"pause_agent",AsyncMock(return_value=True)),patch.object(bench,"delete_agent",delete),
+            patch.object(bench,"_refresh_browser_archive_snapshot",AsyncMock(return_value={"messages":[]})),
+            patch.object(bench,"archive_agent_finalize",AsyncMock(return_value="fixture-archive")),
+            patch.object(bench,"finalize_archive_and_score_world_model",AsyncMock(return_value=("archive",{}))),
+            patch.object(bench,"_finalize_owned_root_payments",AsyncMock(return_value={})),
+            patch.object(bench,"fetch_local_worker_logs",return_value=[]),
+        ):
+            with pytest.raises(RuntimeError):await bench._finalize_owned_cloud_batch("http://localhost:1",[row],{row.name:[ROOT]})
+            if corruption in {"missing_provider","missing_seal"}:
+                assert row.benchmark_status=="ERROR"
+                assert row.owned_roots[0]["logs"]["cloud_cleanup_evidence"]["errors"]
+
+@async_case
+async def test_actual_task_runner_exports_fixture_custody_without_graded_root():
+    """No synthetic result: actual runner catches fixture failure/cancellation."""
+    from dataclasses import asdict
+    for mode in ("early","raise","cancel","foreign_snapshot","graded_unknown","both"):
+        task=bench.BenchmarkTask(name="owned-real-fixture",title="Owned fixture",prompt="Read owned result",timeout_seconds=10,is_chat_mode=False,expected_tools=[],tags=[],price_limit_cents=0,requires_browser_agent=True,requires_claude_code=False,attachment=None,approval_handling=None,start_phase="execute")
+        owned=[]
+        async def poll(*args):
+            assert owned==[ROOT], "real task runner lost created fixture root before polling"
+            if mode=="raise":raise RuntimeError("fixture poll error")
+            if mode=="cancel":raise asyncio.CancelledError()
+            return {"agent":{"id":CHILD if mode=="foreign_snapshot" else ROOT,"status":"COMPLETED" if mode in {"graded_unknown","both"} else "ACTIVE"}},0,0,None
+        async def apply(*args):
+            manifest={"siteId":"owned-site"}
+            await bench._run_auth_test_site_first_run(task,"http://localhost:1",manifest,"Create account")
+            return manifest
+        async def create(*args):
+            if owned:
+                if mode=="both":return CHILD
+                raise RuntimeError("graded create response unknown")
+            return ROOT
+        async def empty(*args,**kwargs):return []
+        from contextlib import ExitStack
+        targets = [
+            patch.object(bench,"_validate_task_target"),patch.object(bench,"_effective_harness",return_value="rose"),
+            patch.object(bench,"_run_user_id_override_for_task",return_value=None),
+            patch.object(bench,"_apply_live_fixtures",empty),patch.object(bench,"_apply_memory_fixtures",empty),
+            patch.object(bench,"prepare_sandbox_payment_residual",AsyncMock()),patch.object(bench,"_agentcard_setup_fixture_action",return_value=None),
+            patch.object(bench,"_apply_auth_test_site",apply),patch.object(bench,"_release_auth_test_site",AsyncMock()),
+            patch.object(bench,"_restore_live_fixture_scenarios_async",empty),
+            patch.object(bench,"create_agent",create),patch.object(bench,"poll_agent",poll),
+            patch.object(bench,"_api_headers",AsyncMock(return_value={})),patch.object(bench.auth_test_site,"mark_run",AsyncMock()),
+            patch.object(bench,"subscribe_supabase_realtime_agent",empty),patch.object(bench,"get_agent_tree",empty),
+            patch.object(bench,"post_world_model_update_events",empty),patch.object(bench,"archive_agent_start",empty),
+            patch.object(bench,"_poll_agent",AsyncMock(return_value=({"agent":{"id":CHILD,"status":"COMPLETED"},"messages":[]},0,0,None))),
+            patch.object(bench,"_get_settled_tool_usage",AsyncMock(return_value={})),patch.object(bench,"_fetch_tree_stats",AsyncMock(return_value={})),
+            patch.object(bench,"get_llm_usage_details",AsyncMock(return_value=({},bench.aggregate_prompt_cache_share([])))),patch.object(bench,"evaluate_task",return_value=(True,None)),
+            patch.object(bench,"ensure_payment_lifecycle_cleanup",AsyncMock(return_value=None)),
+            patch.object(bench,"collect_logs",AsyncMock(return_value={"messages":[]})),
+            patch.object(bench,"finalize_archive_and_score_world_model",AsyncMock(return_value=("archive",None))),
+            patch.object(bench,"_should_delete_agent_after_run",return_value=False),
+        ]
+        with ExitStack() as stack:
+            for target in targets:stack.enter_context(target)
+            row=await bench.run_single_task("http://localhost:1",task,on_agent_created=lambda name,aid:owned.append(aid))
+        assert row.agent_id==(CHILD if mode=="both" else "") and row.passed is (mode=="both")
+        # K7 (355783b87): a first-run agent that does not complete is a graded FAILED, not a runner ERROR.
+        expected_status=("PASSED" if mode=="both" else "CANCELLED" if mode=="cancel" else "FAILED" if mode=="early" else "ERROR")
+        assert row.benchmark_status==expected_status
+        assert row.owned_roots[0]["root_agent_id"]==ROOT and row.owned_roots[0]["role"]=="fixture_first_run"
+        assert row.graded_root_creation_outcome==("allocated" if mode=="both" else "unknown" if mode=="graded_unknown" else "not_started")
+        exported=asdict(row)
+        assert exported["agent_id"]==(CHILD if mode=="both" else "") and exported["owned_roots"][0]["root_agent_id"]==ROOT
+        calls=[];sealed=False
+        def query(*args,**kwargs):
+            return {"root_user_id":ROOT,"tree_agent_ids":[ROOT],"browser_sessions":[],"purchase_cleanup":[],"root_deleted":sealed,"unsealed_tree_agent_ids":[] if sealed else [ROOT]}
+        async def delete(*args):
+            nonlocal sealed
+            sealed=True;calls.append(("delete",args[1]))
+        def close(*args,**kwargs):
+            assert sealed
+            calls.append(("provider",args[1]));return {}
+        with (
+            patch.object(cleanup,"exact_root_sessions",query),patch.object(cleanup,"close_exact_root_sessions",close),
+            patch.object(bench,"pause_agent",AsyncMock(return_value=True)),patch.object(bench,"delete_agent",delete),
+            patch.object(bench,"_refresh_browser_archive_snapshot",AsyncMock(return_value={"messages":[]})),
+            patch.object(bench,"archive_agent_finalize",AsyncMock(return_value="fixture-archive")) as fixture_archive,
+            patch.object(bench,"finalize_archive_and_score_world_model",AsyncMock(return_value=("archive",{}))) as archive,
+            patch.object(bench,"_finalize_owned_root_payments",AsyncMock(return_value={})),patch.object(bench,"fetch_local_worker_logs",return_value=[]),
+        ):
+            if mode=="graded_unknown":
+                with pytest.raises(RuntimeError,match="unknown root creation outcome"):
+                    await bench._finalize_owned_cloud_batch("http://localhost:1",[row],{task.name:owned})
+            else:await bench._finalize_owned_cloud_batch("http://localhost:1",[row],{task.name:owned})
+            fixture_archive.assert_awaited_once_with("http://localhost:1",ROOT,task.name,force=True)
+            assert archive.await_count==(1 if mode=="both" else 0)
+            if mode=="both":
+                assert archive.await_args.args[1]==CHILD and archive.await_args.kwargs["benchmark_passed"] is True
+                assert archive.await_args.kwargs["benchmark_status"]=="PASSED"
+        for aid in ([ROOT,CHILD] if mode=="both" else [ROOT]):
+            assert calls.count(("delete",aid))==1 and calls.count(("provider",aid))==1
+        assert row.owned_roots[0]["logs"]["cloud_cleanup_evidence"]["root_agent_id"]==ROOT
+        assert row.benchmark_status==expected_status
+
+@async_case
+async def test_owned_cleanup_diagnostic_pipe_failure_preserves_provider_evidence():
+    await _diagnostic_pipe_case('success')
+    await _diagnostic_pipe_case('archive')
+
+
+async def _diagnostic_pipe_case(phase):
+    import builtins
+    roots = [ROOT, CHILD]
+    rows = [result(aid) for aid in roots]
+    rows[0].passed = True
+    rows[0].benchmark_status = 'PASSED'
+    rows[0].failure_reason = None
+    events = []
+    def query(_url, aid, **kwargs):
+        return {'root_user_id': ROOT, 'tree_agent_ids': [aid], 'browser_sessions': [], 'purchase_cleanup': []}
+    def release(_url, aid, before, *, evidence):
+        events.append(('provider', aid))
+        if phase == 'provider':
+            raise RuntimeError('genuine provider failure')
+        return {'root_agent_id': aid, 'tree_sealed': True, 'root_deleted': True, 'provider_receipts': []}
+    async def payments(_url, aid, evidence):
+        events.append(('payment', aid))
+        if phase == 'payment':
+            raise RuntimeError('genuine payment failure')
+        return {'root_agent_id': aid, 'purchases': []}
+    def output(*args, **kwargs):
+        text = ' '.join(str(x) for x in args)
+        if phase == 'unrelated' and 'Verified cloud root provider cleanup:' in text:
+            raise ValueError('unrelated diagnostic bug')
+        if (phase == 'success' and 'Verified cloud root provider cleanup:' in text) or (phase == 'archive' and 'Cloud archive warning:' in text):
+            raise BrokenPipeError('diagnostic fixture pipe closed')
+        return builtins.print(*args, **kwargs)
+    archive = AsyncMock(side_effect=RuntimeError('archive fixture unavailable')) if phase == 'archive' else AsyncMock(return_value=('archive', None))
+    with (
+        patch.object(cleanup, 'exact_root_sessions', query),
+        patch.object(bench, 'pause_agent', AsyncMock(return_value=True)),
+        patch.object(bench, '_refresh_browser_archive_snapshot', AsyncMock(return_value={'messages': []})),
+        patch.object(bench, 'finalize_archive_and_score_world_model', archive),
+        patch.object(bench, 'delete_agent', AsyncMock()),
+        patch.object(cleanup, 'close_exact_root_sessions', release),
+        patch.object(bench, '_finalize_owned_root_payments', payments),
+        patch.object(bench, 'fetch_local_worker_logs', return_value=[]),
+        patch.object(bench, 'print', output, create=True),
+    ):
+        if phase in {'provider', 'payment', 'unrelated'}:
+            with pytest.raises(RuntimeError):
+                await bench._finalize_owned_cloud_batch('http://localhost:1', rows, {})
+        else:
+            await bench._finalize_owned_cloud_batch('http://localhost:1', rows, {})
+    if phase in {'provider', 'payment', 'unrelated'}:
+        assert rows[0].passed is False and rows[0].benchmark_status == 'ERROR'
+        assert all(row.logs['cloud_cleanup_evidence']['errors'] for row in rows)
+        assert events.count(('payment', ROOT)) == events.count(('payment', CHILD)) == 1
+        return
+    assert rows[0].passed is True and rows[0].benchmark_status == 'PASSED'
+    assert rows[1].passed is False and rows[1].benchmark_status == 'FAILED'
+    assert rows[1].failure_reason == 'test timeout'
+    assert events == [('provider', ROOT), ('payment', ROOT), ('provider', CHILD), ('payment', CHILD)]
+    for row in rows:
+        assert row.logs['cloud_provider_cleanup']['root_agent_id'] == row.agent_id
+        assert row.logs['cloud_cleanup_evidence']['errors'] == []
+        assert any('BrokenPipeError' in warning for warning in row.logs['cloud_cleanup_evidence']['warnings'])
+
+
+@async_case
+async def test_owned_cleanup_diagnostic_sink_preserves_real_failures():
+    for phase in ('provider', 'payment', 'unrelated'):
+        await _diagnostic_pipe_case(phase)
+
+async def _cancelled_queue_owning_case(mode="allocated"):
+    """Actual coordinator AST + actual scheduler/finalizer, only external edges fake."""
+    from contextlib import ExitStack
+    import socket
+    source=inspect.getsource(bench)
+    tree=ast.parse(source)
+    wrapper=next(n for n in ast.walk(tree) if isinstance(n,ast.AsyncFunctionDef) and n.name=='_run_reported_task')
+    execution=next(n for n in ast.walk(tree) if isinstance(n,ast.Try) and n.body
+                   and isinstance(n.body[0],ast.If) and isinstance(n.body[0].test,ast.Name)
+                   and n.body[0].test.id=='checkpoint_source_mode')
+    coordinator=ast.AsyncFunctionDef(name='_cancel_coordinator',args=ast.arguments(posonlyargs=[],args=[],kwonlyargs=[],kw_defaults=[],defaults=[]),body=[execution],decorator_list=[])
+    admitted,agents,evaluated,signatures,live={},{},{},{},{}
+    entries=[]; executor_tasks=[]; external=[]; entered=asyncio.Event(); closed=[]; saved=[]
+    # Duplicate names are distinct scheduler occurrences, not a task-name set.
+    tasks=[copy.deepcopy(bench.get_task_by_name('browser-auth-email-otp')) for _ in range(12)]
+    original_finalizer=bench._finalize_owned_cloud_batch
+    def deny(*args,**kwargs):
+        external.append('network'); raise AssertionError('external network forbidden')
+    async def delegate(url,task,*,on_agent_created,on_task_evaluated,**kwargs):
+        entries.append(task);executor_tasks.append(asyncio.current_task())
+        if mode=='allocated':on_agent_created(task.name,ROOT)
+        entered.set()
+        try: await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return bench.TaskResult(name=task.name,passed=False,agent_id=ROOT if mode=='allocated' else '',status='CANCELLED',benchmark_status='CANCELLED',progress_score=0,duration_seconds=0,cost_cents=0,message_count=0,logs={},graded_root_creation_outcome='allocated' if mode=='allocated' else 'unknown')
+    @__import__('contextlib').asynccontextmanager
+    async def blocked_lock(*args):
+        entered.set();await asyncio.Event().wait();yield
+    if mode=='never':
+        for task in tasks:task.tags=[*task.tags,'agentcard-lifecycle-sandbox']
+    async def finalize(url,rows,ids,**kwargs):
+        assert len(entries)==(0 if mode=='never' else 1) and len(rows)==12
+        assert not admitted and not agents
+        queued=[r for r in rows if not r.agent_id]
+        assert len(queued)==(11 if mode=='allocated' else 12) and all(r.status==r.benchmark_status=='CANCELLED' and r.passed is False for r in queued)
+        if mode=='allocated':assert len(ids[tasks[0].name])==1 and ids[tasks[0].name][0]==ROOT
+        else:assert ids=={}
+        assert all(any(token is actual for token in namespace['_entered_task_futures']) for actual in executor_tasks)
+        # Owning contract: real finalizer must release known root and accept the
+        # coordinator's proven nonadmission, while unknown creates stay rejected.
+        await original_finalizer(url,rows,ids,**kwargs)
+        assert all(r.graded_root_creation_outcome=='not_started' for r in queued)
+    async def query_snapshot(url,aid,data,logs,**kwargs):
+        logs['messages']=[];return {'agent':{'id':aid,'status':'PAUSED'},'messages':[]}
+    def query(url,aid,**kwargs):return {'root_user_id':ROOT,'tree_agent_ids':[aid],'browser_sessions':[],'purchase_cleanup':[]}
+    def release(url,aid,before,**kwargs):closed.append(aid);return {'root_agent_id':aid}
+    async def stop_collector():return 0
+    with tempfile.TemporaryDirectory(prefix='queue-cancel-owned-') as tmp:
+        path=Path(tmp)/'run.json'
+        def save():path.write_text('{}');saved.append(True);return path
+        run=SimpleNamespace(task_results=[],save=save)
+        namespace=dict(bench.__dict__)
+        namespace.update({'run_single_task':delegate,'_entered_task_futures':set(),'_never_admitted_results':[],'_admitted_tasks':admitted,'_admitted_agent_ids':agents,
+            '_evaluated_task_results':evaluated,'_outcome_signatures':signatures,
+            '_remember_live_agent':lambda name,aid:live.setdefault(name,[]).append(aid),
+            '_emit_report':lambda **kwargs:None,'checkpoint_source_mode':False,'args':SimpleNamespace(parallel=True,keep_failed_agents=True,max_concurrency=5,prod=False),
+            'tasks':tasks,'run':run,'max_concurrency':5,'base_url':'http://offline.invalid',
+            '_run_with_sandbox_payment_lock':bench._run_with_sandbox_payment_lock,'_report_ticker_task':SimpleNamespace(cancel=lambda:None),
+            'stop_fly_log_collector':stop_collector,'realtime_started':False,'memory_gate_enabled':False,'owned_batch_cleanup':True,
+            '_finalize_owned_cloud_batch':finalize,'_complete_interrupt_cleanup':lambda:None,'_live_task_agent_ids':live,'_wmh_evidence':SimpleNamespace(finalize=lambda:None),
+            '_fetch_wmh_retrieval_audit':lambda:None,'cloud_batch_cleanup':SimpleNamespace(contract=lambda:None)})
+        code=ast.fix_missing_locations(ast.Module(body=[wrapper,coordinator],type_ignores=[]))
+        exec(compile(code,str(bench.__file__),'exec'),namespace)
+        with ExitStack() as patches:
+            if mode=='never':patches.enter_context(patch.object(bench,'_sandbox_agentcard_payment_lock',blocked_lock))
+            for obj,name,value in [(socket.socket,'connect',deny),(socket,'getaddrinfo',deny),
+                (bench,'pause_agent',AsyncMock(return_value=True)),(cleanup,'exact_root_sessions',query),
+                (bench,'_refresh_browser_archive_snapshot',query_snapshot),
+                (bench,'finalize_archive_and_score_world_model',AsyncMock(return_value=('archive-ref',{}))),
+                (bench,'delete_agent',AsyncMock()),(cleanup,'close_exact_root_sessions',release),
+                (bench,'_finalize_owned_root_payments',AsyncMock(return_value={})),
+                (bench,'fetch_local_worker_logs',lambda *args,**kwargs:[])]:patches.enter_context(patch.object(obj,name,value))
+            task=asyncio.create_task(namespace['_cancel_coordinator']())
+            ready=asyncio.create_task(entered.wait())
+            done,_=await asyncio.wait({task,ready},return_when=asyncio.FIRST_COMPLETED)
+            if task in done:
+                ready.cancel();await asyncio.gather(ready,return_exceptions=True);await task
+            await ready;await asyncio.sleep(0);task.cancel()
+            with pytest.raises(RuntimeError if mode=='unknown' else asyncio.CancelledError) as stopped:
+                await task
+            if mode=='unknown':assert 'unknown root creation outcome' in str(stopped.value)
+        assert saved==[True] and closed==([ROOT] if mode=='allocated' else []) and external==[]
+
+@async_case
+async def test_cancelled_unknown_create_stays_fail_closed():
+    row=bench.TaskResult(name='browser-auth-email-otp',passed=False,agent_id='',status='CANCELLED',benchmark_status='CANCELLED',progress_score=0,duration_seconds=0,cost_cents=0,message_count=0,graded_root_creation_outcome='unknown')
+    with pytest.raises(RuntimeError,match='unknown root creation outcome'):
+        await bench._finalize_owned_cloud_batch('http://offline.invalid',[row],{})
+    # Status/absence alone and forged not_started are not proof of nonadmission.
+    row.graded_root_creation_outcome='not_started'
+    with pytest.raises(RuntimeError,match='unknown root creation outcome'):
+        await bench._finalize_owned_cloud_batch('http://offline.invalid',[row],{})
+
+
+@async_case
+async def test_cancelled_inbox_waiters_are_proven_never_admitted():
+    await _cancelled_queue_owning_case()
+
+@async_case
+async def test_cancelled_before_any_executor_allocates_nothing():
+    await _cancelled_queue_owning_case('never')
+
+@async_case
+async def test_cancelled_entered_unknown_create_cannot_claim_nonadmission():
+    await _cancelled_queue_owning_case('unknown')
+
+@async_case
+async def test_nonadmission_proof_rejects_copies_and_forged_metadata():
+    row=bench.TaskResult(name='same-name',passed=False,agent_id='',status='CANCELLED',benchmark_status='CANCELLED',progress_score=0,duration_seconds=0,cost_cents=0,message_count=0,graded_root_creation_outcome='not_started',stop_metadata={'runner':'benchmark_coordinator','admission':'not_started','occurrence_index':0})
+    cloned=copy.deepcopy(row)
+    # Equal dataclass values are NOT the same coordinator-owned result object.
+    assert row==cloned and row is not cloned
+    for rows,proof in [([cloned],[row]),([row,cloned],[row]),([row],[]),([row],[row,row])]:
+        with pytest.raises(RuntimeError):
+            await bench._finalize_owned_cloud_batch('http://offline.invalid',rows,{},never_admitted_results=proof)
+    for key,value in [('runner','foreign'),('admission','unknown'),('occurrence_index',True),('occurrence_index',-1)]:
+        forged=copy.deepcopy(row);forged.stop_metadata[key]=value
+        with pytest.raises(RuntimeError):
+            await bench._finalize_owned_cloud_batch('http://offline.invalid',[forged],{},never_admitted_results=[forged])
+
+
+@async_case
+async def test_post_verdict_cleanup_failure_never_rewrites_graded_verdicts():
+    """T114 (Kernel antibot Run A): the memory watchdog killed the owned backend during batch
+    finalization; the verifier could not run for the roots still awaiting cleanup and the run record
+    rewrote 5 graded PASS verdicts as ERROR (report card 26 vs record 21). When the owned stack itself
+    stopped, the evaluator's verdict stays, the unverified cleanup is recorded, the batch raises and
+    CI fails. A genuine provider/payment cleanup failure still fails the task (control below)."""
+    rows = [result(ROOT), result(CHILD)]
+    rows[0].passed, rows[0].status, rows[0].benchmark_status, rows[0].failure_reason = True, "COMPLETED", "PASSED", None
+    rows[1].passed, rows[1].status, rows[1].benchmark_status, rows[1].failure_reason = False, "FAILED", "FAILED", "judge: no results"
+    graded = [(row.passed, row.status, row.benchmark_status, row.failure_reason) for row in rows]
+    before = {"root_user_id": ROOT, "tree_agent_ids": [ROOT], "browser_sessions": [{"provider": "kernel", "session_id": "nnksma2uo5sa548v"}]}
+    stopped = cleanup.OwnedStackStoppedError("owned local stack is stopped before provider verification")
+    with (
+        patch.object(cleanup, "exact_root_sessions", return_value=before),
+        patch.object(cleanup, "close_exact_root_sessions", side_effect=stopped),
+        patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+        patch.object(bench, "delete_agent", AsyncMock(return_value=True)),
+        patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(side_effect=ConnectionError("All connection attempts failed"))),
+        patch.object(bench, "_finalize_owned_root_payments", AsyncMock(side_effect=stopped)),
+        patch.object(bench, "fetch_local_worker_logs", return_value=[]),
+    ):
+        with pytest.raises(RuntimeError, match="owned cloud evidence finalization failed"):
+            await bench._finalize_owned_cloud_batch("http://localhost:1", rows, {})
+    assert [(row.passed, row.status, row.benchmark_status, row.failure_reason) for row in rows] == graded
+    for row in rows:
+        assert row.cleanup_failure == (
+            "Cloud cleanup failed: provider: owned local stack is stopped before provider verification; "
+            "payment: owned local stack is stopped before provider verification"
+        )
+    from benchmarks.results import BenchmarkRun, TaskResult
+
+    recorded = [
+        TaskResult(
+            name=row.name, passed=row.passed, agent_id=row.agent_id, status=row.status, progress_score=1,
+            duration_seconds=1, cost_cents=0, message_count=0, cleanup_failure=row.cleanup_failure,
+        )
+        for row in rows
+    ]
+    summary = BenchmarkRun(task_results=recorded).summary
+    assert (summary["passed"], summary["failed"], summary["cleanup_failures"]) == (1, 1, 2)
+    assert bench._ci_should_fail({"failed": 0, "cleanup_failures": 2}, rows) is True
+
+
+@async_case
+async def test_genuine_cleanup_failure_still_fails_the_task():
+    """Control for T114: an unreleased provider session on a live stack keeps the strict ERROR."""
+    row = result(ROOT)
+    row.passed, row.status, row.benchmark_status, row.failure_reason = True, "COMPLETED", "PASSED", None
+    before = {"root_user_id": ROOT, "tree_agent_ids": [ROOT], "browser_sessions": [{"provider": "kernel", "session_id": "nnksma2uo5sa548v"}]}
+    with (
+        patch.object(cleanup, "exact_root_sessions", return_value=before),
+        patch.object(cleanup, "close_exact_root_sessions", side_effect=RuntimeError("provider session still live")),
+        patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+        patch.object(bench, "delete_agent", AsyncMock(return_value=True)),
+        patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(return_value={})),
+        patch.object(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("ref", None))),
+        patch.object(bench, "_finalize_owned_root_payments", AsyncMock(return_value={})),
+        patch.object(bench, "fetch_local_worker_logs", return_value=[]),
+    ):
+        with pytest.raises(RuntimeError, match="owned cloud evidence finalization failed"):
+            await bench._finalize_owned_cloud_batch("http://localhost:1", [row], {})
+    assert (row.passed, row.benchmark_status) == (False, "ERROR")
+    assert row.failure_reason == "Cloud cleanup failed: provider: provider session still live"
+    assert getattr(row, "cleanup_failure", None) is None
+
+
+@async_case
+async def test_archive_retains_completed_snapshot_before_gather_resumes():
+    logs = {"messages": [{"text": "pre-pause snapshot"}]}
+    snapshot = {"messages": browser_rows(attached=False)}
+    owner = asyncio.current_task()
+
+    async def fetch(_url, aid):
+        assert aid == ROOT
+        owner.cancel()
+        return snapshot
+
+    with (
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": ROOT}])),
+        patch.object(bench, "get_agent", fetch),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await bench._refresh_browser_archive_snapshot(
+                "http://localhost:1", ROOT, {}, logs, timeout_seconds=0.01
+            )
+    observation = logs["browser_archive_observation"]
+    assert observation["completed_agent_ids"] == [ROOT]
+    assert observation["snapshots"] == {ROOT: snapshot}
+    assert observation["ready"] is False
+    assert logs["messages"] == [{"text": "pre-pause snapshot"}]
+    assert "tree" not in logs
+
+
+@async_case
+async def test_archive_timeout_retains_only_completed_snapshots():
+    snapshot = {"messages": browser_rows(attached=False)}
+    for return_root in (True, False):
+        logs = {"messages": [{"text": "pre-pause snapshot"}]}
+        pending_cancelled = set()
+
+        async def fetch(_url, aid):
+            if return_root and aid == ROOT:
+                return snapshot
+            try:
+                await asyncio.Event().wait()
+            finally:
+                pending_cancelled.add(aid)
+
+        with (
+            patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": ROOT}, {"agent_id": CHILD}])),
+            patch.object(bench, "get_agent", fetch),
+        ):
+            with pytest.raises(TimeoutError):
+                await bench._refresh_browser_archive_snapshot(
+                    "http://localhost:1", ROOT, {}, logs, timeout_seconds=0.01
+                )
+        observation = logs["browser_archive_observation"]
+        assert observation["snapshots"] == ({ROOT: snapshot} if return_root else {})
+        assert set(observation["completed_agent_ids"]) == ({ROOT} if return_root else set())
+        assert pending_cancelled == ({CHILD} if return_root else {ROOT, CHILD})
+        assert observation["ready"] is False
+        assert logs["messages"] == [{"text": "pre-pause snapshot"}]
+        assert "tree" not in logs

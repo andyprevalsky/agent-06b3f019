@@ -1,3 +1,11 @@
+## Failure handling during deployment
+
+When these suites are run by `/deploy`, apply
+`.claude/shared/deploy-failure-policy.md` to failures. Required checks retain
+their actual outcomes; a qualified delegation waiver or external-provider
+exception is not a passing test. Standalone test and benchmark work retains its
+own acceptance criteria.
+
 # Testing
 
 Single source of truth for running tests. All commands run from the repo root.
@@ -40,7 +48,7 @@ cd agents && python scripts/run_blackbox_tests.py --list        # list domains
 ```
 
 Agents coverage runs each blackbox domain in its own bounded interpreter and
-then combines coverage before fast-cache and unit checks:
+then combines coverage before DEMO cache and unit checks:
 
 ```bash
 cd agents && bash scripts/run-coverage.sh
@@ -145,7 +153,7 @@ still needs its own isolated restored volume, and those restores run in
 parallel within a slice. Avoid recopying a large donor or refreshing its
 snapshot unless dependency manifests or the donor contents actually changed.
 
-Current LIVE acceptance is documented in CLAUDE.md's **Current width-fifty LIVE
+Current LIVE acceptance is documented in the Operations Runbook's **Current width-fifty LIVE
 acceptance** subsection: five consecutive runs of fifty distinct random eligible
 DAILY tasks, temporary 1,200-second execution per task and hard 5,400-second
 image-build-start through final durable publication/native release per run.
@@ -237,5 +245,6 @@ coverage preserves those fields. The original full forensic bundle is unchanged;
 Hub transport omits duplicated diagnostic logs while keeping complete transcripts.
 Generic failed-owner archive readiness has a separate `archive-verified.json`
 receipt with `native_release_verified=false` and zero proof credit. Follow
-CLAUDE.md's supported exact-owner CLI recovery through its unchanged final
+the supported exact-owner CLI recovery in
+`agents/benchmarks/README.md`'s Operations Runbook through its unchanged final
 native provider audit; archive readiness alone is not resource release.

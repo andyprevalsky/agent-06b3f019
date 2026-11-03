@@ -57,11 +57,7 @@ async function nativeReply(prisma: PrismaClient, mode: 'dispatch' | 'commit' | '
     const pending: PendingOp[] = [];
     const result =
       mode === 'dispatch'
-        ? await dispatchToolCall({ tool: 'reply_to_agent', arguments: args }, userId, pending, {
-            currentUserMessage: 'Here is the requested value for my cloud phone',
-            visibleSessionHistory: [],
-            pendingAttentionRequestIds: [attention.id],
-          })
+        ? await dispatchToolCall({ tool: 'reply_to_agent', arguments: args }, userId, pending)
         : (
             await commitPendingWrites([{ kind: 'reply_to_agent', args, agentId: agent.id }], userId)
           )[0];

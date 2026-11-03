@@ -22,6 +22,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { releaseSteelRemoteSession, steel } from './session';
+import { reconcileSteelCandidateCleanup } from './candidateCleanup';
 import {
   SHARED_STEEL_IDENTITY,
   inFlightSteelSessionIds,
@@ -45,7 +46,7 @@ export interface LiveSteelSession {
 export interface SteelReaperDependencies {
   listLiveSessions: () => Promise<LiveSteelSession[]>;
   heldSessionIds: (candidates: string[]) => Promise<Set<string>>;
-  inFlightSessionIds: () => ReadonlySet<string>;
+  inFlightSessionIds: (candidates: string[]) => Promise<ReadonlySet<string>> | ReadonlySet<string>;
   isOwned: (sessionId: string) => boolean;
   identity: () => string;
   release: (sessionId: string) => Promise<void>;
@@ -77,7 +78,7 @@ async function heldSteelSessionIds(candidates: string[]): Promise<Set<string>> {
     where: { sessionId: { in: candidates }, status: { in: ['ACTIVE', 'PAUSED'] } },
     select: { sessionId: true },
   });
-  return new Set(rows.map((row) => row.sessionId));
+  return new Set(rows.flatMap((row) => (row.sessionId === null ? [] : [row.sessionId])));
 }
 
 function defaultDependencies(): SteelReaperDependencies {
@@ -127,8 +128,9 @@ export async function reconcileOrphanedSteelSessions(
   // Read the in-flight set before the held-row query: a session whose row
   // commits (and is unregistered) between the two reads is then still seen by
   // the later DB query, so it is never in neither set.
-  const inFlight = deps.inFlightSessionIds();
-  const held = await deps.heldSessionIds(oldEnough.map((session) => session.id));
+  const candidates = oldEnough.map((session) => session.id);
+  const inFlight = await deps.inFlightSessionIds(candidates);
+  const held = await deps.heldSessionIds(candidates);
   for (const session of oldEnough) {
     if (held.has(session.id) || inFlight.has(session.id)) {
       summary.skippedHeld += 1;
@@ -195,6 +197,7 @@ export async function runSteelSessionReaperWithLease(): Promise<SteelReaperSumma
   const ownerId = randomUUID();
   if (!(await acquireLease(ownerId))) return null;
   try {
+    await reconcileSteelCandidateCleanup();
     return await reconcileOrphanedSteelSessions();
   } finally {
     await releaseLease(ownerId).catch((error: unknown) => {

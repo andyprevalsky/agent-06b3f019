@@ -8,6 +8,7 @@
  */
 export const KNOWN_TAGS = [
   'basic',
+  'process',
   'chat',
   'smoke',
   'approval',
@@ -70,6 +71,12 @@ export const KNOWN_TAGS = [
   'planner',
   'memory',
   'plan-only',
+  // Long-horizon capability slice — months-long goals run under world-model
+  // simulate with time skipping (see raise-5m-rose-labs-brex in tasks.json).
+  'long-horizon',
+  // ICP call-booking slice — find a founder's ICP and book paid calls under
+  // world-model simulate (icp-* in tasks.json, from a real YC Bookface thread).
+  'ICP',
   // Ecommerce / real-world task category slices (see tasks.json).
   'ecommerce',
   'purchase',
@@ -123,4 +130,12 @@ export const KNOWN_TAGS = [
   'om2w2',
   'gaia',
   'browsecomp',
+  // Code-capability fixtures with hidden tests (agents/benchmarks/code_bench.py, plan C8).
+  'code-bench',
+  // Agent Display tool benchmarks (agent-display-revenue-chart).
+  'display',
+  // Parent-owned agent subtree lifecycle (kill-agent-subtree).
+  'agent-graph',
+  // Harness plumbing; matches the predeploy deploy_category of the same name.
+  'harness',
 ];

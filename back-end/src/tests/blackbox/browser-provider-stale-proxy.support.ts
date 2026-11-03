@@ -10,10 +10,12 @@
  * prod session can have resolved it.
  */
 
+import nodeAssert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { InternalServerError, type Kernel } from '@onkernel/sdk';
+import { BadRequestError, InternalServerError, type Kernel } from '@onkernel/sdk';
 import {
   KERNEL_CREATE_REQUEST_OPTIONS,
+  type KernelProxyCandidate,
   kernelProxyCandidates,
   managedKernelProxyFromSource,
 } from '../../providers/browser/kernelProxy';
@@ -25,6 +27,25 @@ import {
   type BrowserApiResponse,
   type BrowserMetadataResponse,
 } from './browser-provider.helpers';
+
+/**
+ * The parity FAIL line prints only `error.message`, and a bare Kernel SDK error
+ * (`400 proxy configuration validation failed: …`) names neither the call that
+ * made it nor the proxy tier/config Kernel was validating. Attributing such a
+ * line took an hour of backend-log forensics on 2026-10-28 (Kernel's mobile
+ * proxy vendor answered 403; residential creates were fine). Label the
+ * throwaway create at its throw site so the next FAIL line is self-diagnosing;
+ * the original SDK error stays attached as `cause`.
+ */
+function labelThrowawayCreateFailure(candidate: KernelProxyCandidate, error: unknown): Error {
+  const detail = error instanceof Error ? error.message : String(error);
+  return new Error(
+    `stale-proxy leg: Kernel proxies.create(${candidate.type} ${JSON.stringify(
+      candidate.config
+    )}) rejected: ${detail}`,
+    { cause: error }
+  );
+}
 
 export async function assertResumeReprovisionsDeletedProxy(options: {
   kernel: Kernel;
@@ -72,7 +93,9 @@ export async function assertResumeReprovisionsDeletedProxy(options: {
       isRetryable: (error) => error instanceof InternalServerError,
       component: 'browser-provider:stale-proxy-create',
     }
-  );
+  ).catch((error: unknown) => {
+    throw labelThrowawayCreateFailure(candidate, error);
+  });
   const key = { provider: 'kernel', proxyKey: candidate.proxyKey };
   let doomedDeleted = false;
   try {
@@ -115,4 +138,75 @@ export async function assertResumeReprovisionsDeletedProxy(options: {
       where: { provider: 'kernel', proxyId: doomed.id },
     });
   }
+}
+
+/**
+ * Offline regression: a rejected throwaway create surfaces the call, tier,
+ * config and the exact Kernel body, is not retried (4xx), keeps the SDK error
+ * as `cause`, and happens before any backend call (nothing to clean up).
+ */
+export async function assertStaleProxyCreateFailureIsLabeled(): Promise<void> {
+  const kernelBody = {
+    code: 'validation_error',
+    message:
+      'proxy configuration validation failed: failed to validate country: pingproxy: unexpected status 403: You do not have permission to perform this action.',
+  };
+  const creates: Array<{ type?: string; config?: unknown }> = [];
+  const kernel = {
+    proxies: {
+      create: async (body: { type?: string; config?: unknown }) => {
+        creates.push(body);
+        throw new BadRequestError(400, kernelBody, kernelBody.message, new Headers());
+      },
+      delete: async () => {
+        throw new Error('proxies.delete must not run when the create failed');
+      },
+    },
+    browsers: {
+      retrieve: async () => {
+        throw new Error('browsers.retrieve must not run when the create failed');
+      },
+    },
+  } as unknown as Kernel;
+  const backendCalls: string[] = [];
+  await nodeAssert.rejects(
+    assertResumeReprovisionsDeletedProxy({
+      kernel,
+      taskId: randomUUID(),
+      sessionId: 'kernel-session-never-paused',
+      proxySource: 'kernel_mobile_state',
+      proxyLocation: { country: 'US', state: 'IL' },
+      post: async (path) => {
+        backendCalls.push(path);
+        return {} as BrowserApiResponse;
+      },
+    }),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      for (const fragment of [
+        'stale-proxy leg',
+        'proxies.create',
+        'mobile {"country":"US","state":"IL"}',
+        `400 ${kernelBody.message}`,
+      ]) {
+        assert(
+          message.includes(fragment),
+          `labelled failure lacks ${JSON.stringify(fragment)}: ${message}`
+        );
+      }
+      assert(
+        error instanceof Error && error.cause instanceof BadRequestError,
+        'the original Kernel SDK error must be preserved as cause'
+      );
+      return true;
+    }
+  );
+  assert(
+    creates.length === 1 && creates[0]?.type === 'mobile',
+    `a Kernel 4xx must not be retried (creates=${creates.length})`
+  );
+  assert(
+    backendCalls.length === 0,
+    `no backend call may precede the throwaway create: ${backendCalls.join(',')}`
+  );
 }

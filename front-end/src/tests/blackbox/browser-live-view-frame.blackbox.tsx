@@ -21,7 +21,7 @@ vi.mock('@/features/terminal-component-group/components/BrowserCursorOverlay', (
   default: () => null,
 }));
 
-import { BrowserStatusBarFullscreen } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarFullscreen';
+import { BrowserAgentPane } from '@/features/terminal-component-group/components/browser-status-bar/BrowserAgentPane';
 import { BrowserStatusBarExpanded } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarExpanded';
 import { LiveViewFrame } from '@/features/terminal-component-group/components/browser-status-bar/BrowserLiveViewFrame';
 import {
@@ -48,7 +48,6 @@ function fullscreenProps() {
     isResuming: false,
     isUserControlling: false,
     pendingWriteLockApproval: null,
-    onClose: vi.fn(),
     onResume: vi.fn(),
   };
 }
@@ -77,8 +76,8 @@ describe('live-view iframe containment', () => {
     mobileState.value = false;
   });
 
-  it('crops desktop fullscreen Steel chrome and does not resize the remote viewport', () => {
-    renderWithProviders(<BrowserStatusBarFullscreen {...fullscreenProps()} />);
+  it('crops Steel chrome in the drawer pane and does not resize the remote viewport', () => {
+    renderWithProviders(<BrowserAgentPane {...fullscreenProps()} />);
 
     const iframe = screen.getByTitle('Browser');
     const pane = screen.getByTestId('live-view-pane');
@@ -87,12 +86,40 @@ describe('live-view iframe containment', () => {
     expectSteelContentClip(stream, iframe);
   });
 
-  it('enables the fullscreen Browser Use viewer only during user control', () => {
+  it('renders the Kernel viewer at native 1280x800 scaled to the clip (its player never upscales)', () => {
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      width: 1920,
+      height: 1200,
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: 1920,
+      bottom: 1200,
+      toJSON: () => ({}),
+    });
+    try {
+      renderWithProviders(
+        <BrowserAgentPane
+          {...fullscreenProps()}
+          browserUrl="https://prod-iad-hypeman-25.kernel.sh/browser/live/abc?readOnly=true"
+        />,
+      );
+      const iframe = screen.getByTitle('Browser');
+      expect(iframe).toHaveStyle({ width: '1280px', height: '800px' });
+      expect(iframe.style.transform).toBe('scale(1.5)');
+      expect(iframe.style.transformOrigin).toBe('top left');
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  it('enables the drawer pane Browser Use viewer only during user control', () => {
     const props = { ...fullscreenProps(), browserUrl: BROWSER_USE_PLAYER };
-    const { rerender } = renderWithProviders(<BrowserStatusBarFullscreen {...props} />);
+    const { rerender } = renderWithProviders(<BrowserAgentPane {...props} />);
     expect(screen.getByTitle('Browser')).toHaveAttribute('inert');
 
-    rerender(<BrowserStatusBarFullscreen {...props} isUserControlling />);
+    rerender(<BrowserAgentPane {...props} isUserControlling />);
     expect(screen.getByTitle('Browser')).not.toHaveAttribute('inert');
   });
 

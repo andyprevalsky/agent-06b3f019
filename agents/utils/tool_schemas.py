@@ -3,6 +3,7 @@
 import json
 import re
 from enum import Enum
+from functools import lru_cache
 from typing import Annotated, Any, Dict, List, Literal, Optional, Type, Union
 from urllib.parse import urlsplit
 
@@ -33,7 +34,14 @@ from utils.response_schema_constraints import (
     bounds_from_entries,
     coerce_direct_bounds_to_entries,
 )
+from utils.tool_output_schema import ReadToolOutputTool
 from utils.user_facing_writing_prompt import user_facing_text_description
+from utils.wait_for_bounds import (
+    WAIT_FOR_AGENTS_DEFAULT_TIMEOUT_SECONDS,
+    WAIT_FOR_AGENTS_MAX_TIMEOUT_SECONDS,
+    WAIT_FOR_AGENTS_MIN_TIMEOUT_SECONDS,
+    resolve_wait_for_agents_timeout,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -43,8 +51,32 @@ logger = structlog.get_logger(__name__)
 # Must be defined early so PlanActionType can be used in PlannerTask
 # ============================================================================
 
+# Mirrors helpers.agent_addressing.TASK_NAME_PATTERN (utils may not
+# import domains; background_agents.blackbox asserts the two stay equal).
+SPAWN_TASK_NAME_PATTERN = r"^[a-z][a-z0-9_]{0,39}$"
+SPAWN_TASK_NAME_DESCRIPTION = (
+    "Required. Short lowercase slug for this child (a-z, 0-9, _; e.g. 'venue_research'), unique among "
+    "the agents you spawn. Its address becomes <your path>/<task_name>, e.g. /root/outreach/draft_a."
+)
+RUN_IN_BACKGROUND_DESCRIPTION = (
+    "Default true: the call returns immediately with the agent's address and the agent keeps "
+    "working while you continue. Needing its result is not a reason to set false: call wait_for with "
+    "its address to wait, and the wait also ends when the user sends a new message, so you can reply "
+    "or pass it to the agent with send_message_to_agent. A foreground agent (false) holds your turn, "
+    "so messages the user sends meanwhile are read only after it returns."
+)
+# The planner reads spawn_agent's schema only as documentation (plan tasks carry
+# no arguments) and cannot assign send_message_to_agent, so its copy keeps the
+# tool-neutral wording.
+PLANNER_RUN_IN_BACKGROUND_DESCRIPTION = (
+    "Default true: the call returns immediately with the agent's address and the agent keeps "
+    "working while you continue. Set false only when you need this agent's result before you can "
+    "do anything else."
+)
+
 # Tools available during PLAN phase (research + create execution plan)
 PLAN_PHASE_TOOLS = [
+    "read_tool_output",
     "spawn_agent",  # Only type="explore" allowed in PLAN (enforced at runtime)
     "send_message_to_user",
     "set_plan",
@@ -53,11 +85,15 @@ PLAN_PHASE_TOOLS = [
 
 # Tools available during EXECUTE phase (run the plan)
 EXECUTE_PHASE_TOOLS = [
+    "read_tool_output",
     "spawn_agent",  # Unified: type=browser|code|general_purpose|explore
     "wait_for",
     "send_message_to_user_execute_phase",
+    "display",
     "call_phone_number",
     "message_person",
+    "send_message_to_agent",
+    "kill_agent",
     "attempt_completion",
 ]
 
@@ -81,7 +117,27 @@ PLANNER_ASSIGNABLE_TOOLS = [
     "call_phone_number",
     "message_person",
     "send_message_to_user_execute_phase",
+    "display",
     "reasoning",  # Pure thinking/analysis step (no tool call)
+]
+
+# Planner alias -> the execute tool the DAG executor actually runs.
+TOOL_ALIASES = {
+    "spawn_explore_agent": "spawn_agent",
+    "spawn_browser_agent": "spawn_agent",
+    "spawn_code_agent": "spawn_agent",
+    "spawn_general_purpose_agent": "spawn_agent",
+    "spawn_general_purpose_agent_for_each": "spawn_agent",
+    "wait_seconds": "wait_for",  # Backward compat for old plans
+}
+
+# Execute tools the planner can assign (via TOOL_ALIASES), in EXECUTE_PHASE_TOOLS
+# order. Tools a DAG task cannot be assigned (kill_agent, send_message_to_agent,
+# attempt_completion) are excluded, so the planner prompt never describes them.
+PLANNER_EXECUTE_TOOLS = [
+    name
+    for name in EXECUTE_PHASE_TOOLS
+    if name in {TOOL_ALIASES.get(alias, alias) for alias in PLANNER_ASSIGNABLE_TOOLS}
 ]
 
 
@@ -97,6 +153,7 @@ class PlanToolName(str, Enum):
     call_phone_number = "call_phone_number"
     message_person = "message_person"
     send_message_to_user_execute_phase = "send_message_to_user_execute_phase"
+    display = "display"
     reasoning = "reasoning"
 
 
@@ -284,7 +341,7 @@ class ResponseSchemaConfig(BaseModel):
 
 
 class WaitForTool(BaseModel):
-    """Pause execution until a timestamp or natural-language condition is met."""
+    """Pause until a timestamp, a natural-language condition, or other agents finish or message you."""
 
     tool: Literal["wait_for"]
     description: str = Field(
@@ -296,11 +353,27 @@ class WaitForTool(BaseModel):
     )
     until_timestamp: Optional[str] = Field(
         default=None,
-        description="ISO 8601 timestamp to wait until. Mutually exclusive with condition.",
+        description="ISO 8601 timestamp to wait until. Mutually exclusive with condition and agents.",
     )
     condition: Optional[str] = Field(
         default=None,
         description="Natural language condition for an explore agent to check on periodically.",
+    )
+    agents: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            'Agents to wait on: addresses like "/root/outreach/draft_a", "parent" or agent ids, or ["any"] '
+            "for any agent you spawned. Wakes when one finishes or messages you. Mutually exclusive with "
+            "until_timestamp and condition."
+        ),
+    )
+    timeout_seconds: Optional[int] = Field(
+        default=None,
+        description=(
+            f"Maximum seconds to wait for agents (default {WAIT_FOR_AGENTS_DEFAULT_TIMEOUT_SECONDS}, at most "
+            f"{WAIT_FOR_AGENTS_MAX_TIMEOUT_SECONDS}; values below {WAIT_FOR_AGENTS_MIN_TIMEOUT_SECONDS} are raised "
+            f"to {WAIT_FOR_AGENTS_MIN_TIMEOUT_SECONDS}). Only valid with agents."
+        ),
     )
     check_interval_seconds: int = Field(
         default=900,
@@ -314,6 +387,14 @@ class WaitForTool(BaseModel):
         le=100,
         description="Maximum number of condition checks before giving up (1-100, default 20). Only used with condition.",
     )
+
+    @field_validator("timeout_seconds", mode="before")
+    @classmethod
+    def _clamp_agents_timeout(cls, value: Any) -> Any:
+        # Codex wait floor: below the minimum is clamped (the handler notes it), above the maximum rejected.
+        if value is None:
+            return None
+        return resolve_wait_for_agents_timeout(value)[0]
 
     @model_validator(mode="before")
     @classmethod
@@ -337,10 +418,25 @@ class WaitForTool(BaseModel):
 
     @model_validator(mode="after")
     def check_mutual_exclusion(self) -> "WaitForTool":
-        if self.until_timestamp and self.condition:
-            raise ValueError("until_timestamp and condition are mutually exclusive.")
-        if not self.until_timestamp and not self.condition:
-            raise ValueError("Either until_timestamp or condition must be provided.")
+        modes = [name for name in ("until_timestamp", "condition") if getattr(self, name)]
+        if self.agents is not None:
+            modes.append("agents")
+        if len(modes) > 1:
+            raise ValueError(
+                f"{' and '.join(modes)} are mutually exclusive: pass exactly one of until_timestamp, condition "
+                "or agents. To wait on agents, call wait_for(agents=[...]) alone (no condition polling needed)."
+            )
+        if not modes:
+            raise ValueError("One of until_timestamp, condition or agents must be provided.")
+        if self.timeout_seconds is not None and not self.agents:
+            raise ValueError(
+                "timeout_seconds is only valid with agents. For a timed wait use until_timestamp; "
+                "for condition polling use check_interval_seconds and max_checks."
+            )
+        if isinstance(self.agents, list) and not [agent for agent in self.agents if agent.strip()]:
+            raise ValueError('agents must list at least one address, or be ["any"].')
+        if isinstance(self.agents, list) and "any" in self.agents and len(self.agents) > 1:
+            raise ValueError('["any"] waits on every agent you spawned; pass it alone, not with addresses.')
         return self
 
 
@@ -636,7 +732,11 @@ class GrepTool(BaseModel):
     )
     trace_path: Optional[str] = Field(
         default=None,
-        description="Agent trajectory root path/UUID searches its entire child tree; a child path narrows to that agent, and a message path to one message.",
+        description=(
+            "Agent trajectory root path/UUID searches its entire child tree; a child path narrows to that agent, "
+            "and a message path to one message. An agent address in your tree (/root/outreach, as list_agents "
+            "prints) scopes agent_network or agent_trajectories to that agent and every agent below it."
+        ),
     )
     order: Optional[Literal["newest_first", "oldest_first"]] = Field(
         default=None,
@@ -739,6 +839,33 @@ class GrepTool(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class InspectCodeTool(BaseModel):
+    """Ask a read-only code agent about the files in a code agent's workspace.
+
+    It answers from that session's latest checkpoint in a separate sandbox,
+    cites file:line, and cannot change the session.
+    """
+
+    tool: Literal["inspect_code"]
+    code_session_id: str = Field(description="The code_session_id from that code agent's result.")
+    question: str = Field(
+        description="A self-contained question about the code, naming the files, features or behavior to check."
+    )
+
+
+class InlineViewArg(BaseModel):
+    """A published rose_user_ui inline view rendered with the message."""
+
+    view: str = Field(description="Inline view name from the user's published rose-ui.json.")
+    props: Optional[Dict[str, Any]] = Field(default=None, description="Small JSON props passed to the view.")
+
+
+INLINE_VIEW_DESCRIPTION = (
+    "Optional inline view from the user's published Rose UI to render with this message, such as a game, "
+    "app or visual a code agent published. Use it to show the user that work in the chat."
+)
+
+
 class SendMessageToUserTool(BaseModel):
     """Message the user during PLAN phase; optionally block for a reply."""
 
@@ -754,6 +881,12 @@ class SendMessageToUserTool(BaseModel):
     )
 
 
+class SendMessageToUserRoseDesktopTool(SendMessageToUserTool):
+    """Message the user during PLAN phase; optionally block for a reply."""
+
+    inline_view: Optional[InlineViewArg] = Field(default=None, description=INLINE_VIEW_DESCRIPTION)
+
+
 class SendMessageToUserExecutePhaseTool(BaseModel):
     """Send a non-blocking informational message to the user during EXECUTE phase."""
 
@@ -763,6 +896,46 @@ class SendMessageToUserExecutePhaseTool(BaseModel):
             "The exact user-visible non-blocking update explaining what the user needs to know."
         )
     )
+
+
+class SendMessageToUserExecutePhaseRoseDesktopTool(SendMessageToUserExecutePhaseTool):
+    """Send a non-blocking informational message to the user during EXECUTE phase."""
+
+    inline_view: Optional[InlineViewArg] = Field(default=None, description=INLINE_VIEW_DESCRIPTION)
+
+
+class DisplayTool(BaseModel):
+    """Show images, videos or HTML to the user inline."""
+
+    tool: Literal["display"]
+    paths: Optional[List[str]] = Field(
+        default=None,
+        description="Files already in this agent's tree (attachments or outputs), by file name.",
+    )
+    urls: Optional[List[str]] = Field(default=None, description="Public http(s) URLs of images, videos or HTML pages.")
+    html: Optional[str] = Field(
+        default=None,
+        description="A complete HTML page you write yourself (a chart or scorecard), shown without creating a file.",
+    )
+    caption: Optional[str] = Field(
+        default=None,
+        description=user_facing_text_description("Caption shown with the media."),
+    )
+
+
+class DisplayRoseDesktopTool(DisplayTool):
+    """Show images, videos or HTML to the user inline."""
+
+    @field_validator("paths", "urls", mode="before")
+    @classmethod
+    def _decode_json_array(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        return decoded if isinstance(decoded, list) else value
 
 
 class MessagePersonTool(BaseModel):
@@ -886,6 +1059,53 @@ def url_origin_for_log(url: str) -> str:
     return f"{origin}:{port}" if port else origin
 
 
+# spawn_agent `type` description. The 'code' clause differs by account: Rose
+# Desktop accounts (utils.rose_desktop) also learn that the code sandbox holds
+# their rose_user_ui and publishes inline views; every other account gets the
+# stock clause, so its tool schema carries no Rose Desktop text.
+_SPAWN_TYPE_BROWSER = (
+    "Select by capability: 'browser' starts a browser session for stateful or authenticated web work; "
+)
+_SPAWN_TYPE_CODE_STOCK = (
+    "'code' starts a coding agent using Claude Code or Codex CLI in a persistent sandbox, selected by "
+    "available credentials and configuration; "
+)
+_SPAWN_TYPE_CODE_ROSE_DESKTOP = (
+    "'code' starts a coding agent using Claude Code or Codex CLI in a persistent sandbox, selected by "
+    "available credentials and configuration. Delegate all code writing to it except one HTML page you "
+    "can write yourself, such as a chart or scorecard, which you show with display html. Its sandbox holds the "
+    "user's Rose app UI (rose_user_ui): it edits and publishes changes to how Rose looks or behaves for "
+    "the user. For a game or app the user asks to play or use, have it publish the result "
+    "in Agent Display using rose display and return the display receipt; a file path alone does not show it. "
+)
+_SPAWN_TYPE_REST = (
+    "'general_purpose' starts a full autonomous agent for "
+    "cross-domain multi-step work - DO NOT use it or assign it a goal unless that goal is sufficiently distinct from the goal you are tasked with, and the sub-agent's task complexity is strictly less than half of your issued task complexity (otherwise do the work yourself); Be wary of infinite recursion: general_purpose sub-agents can also spawn sub-agents. When using one as an intelligent retry for a faulty tool, instruct it not to spawn more general_purpose sub-agents; otherwise it will likely spawn another general_purpose to retry the same faulty tool after the first error. 'explore' performs read-only research for web or user-data facts; "
+    "'for_each' starts one general-purpose agent per item for repeated fan-out. "
+    "A 'browser' agent is given an auth inventory at session start, separately from the goal: the user's "
+    "saved sessions, cookies, passwords and passkeys for the target site, and a minted agent-owned "
+    "identity - an email address and phone number it can read delivered messages at, including "
+    "verification codes. It can only read messages sent to that minted identity or to a mailbox the "
+    "user has connected as an integration; any other address, including one you compose from the "
+    "user's name, is write-only to it."
+)
+SPAWN_AGENT_TYPE_DESCRIPTION = _SPAWN_TYPE_BROWSER + _SPAWN_TYPE_CODE_STOCK + _SPAWN_TYPE_REST
+SPAWN_AGENT_TYPE_DESCRIPTION_ROSE_DESKTOP = _SPAWN_TYPE_BROWSER + _SPAWN_TYPE_CODE_ROSE_DESKTOP + _SPAWN_TYPE_REST
+
+
+BROWSER_GOAL_PROFILE_NOTE = (
+    "Exception: a browser agent also receives the user's profile (name, email, phone, delivery "
+    "address) and the target site's sign-in options itself; do not restate the user's profile in "
+    "its goal."
+)
+
+
+def _require_spawn_output_schema_key(schema: Dict[str, Any]) -> None:
+    required = schema.setdefault("required", [])
+    if "output_schema" not in required:
+        required.append("output_schema")
+
+
 class SpawnAgentTool(BaseModel):
     """Spawn an autonomous agent; type selects capabilities and per-type required fields.
 
@@ -899,28 +1119,20 @@ class SpawnAgentTool(BaseModel):
     general_purpose to retry the same faulty tool after the first error.
     """
 
+    model_config = ConfigDict(json_schema_extra=_require_spawn_output_schema_key)
+
     tool: Literal["spawn_agent"]
     type: Literal["browser", "code", "general_purpose", "explore", "for_each"] = Field(
-        description=(
-            "Select by capability: 'browser' starts a browser session for stateful or authenticated web work; "
-            "'code' starts a coding agent using Claude Code or Codex CLI in an ephemeral sandbox, selected by "
-            "available credentials and configuration; 'general_purpose' starts a full autonomous agent for "
-            "cross-domain multi-step work - DO NOT use it or assign it a goal unless that goal is sufficiently distinct from the goal you are tasked with, and the sub-agent's task complexity is strictly less than half of your issued task complexity (otherwise do the work yourself); Be wary of infinite recursion: general_purpose sub-agents can also spawn sub-agents. When using one as an intelligent retry for a faulty tool, instruct it not to spawn more general_purpose sub-agents; otherwise it will likely spawn another general_purpose to retry the same faulty tool after the first error. 'explore' performs read-only research for web or user-data facts; "
-            "'for_each' starts one general-purpose agent per item for repeated fan-out. "
-            "A 'browser' agent is given an auth inventory at session start, separately from the goal: the user's "
-            "saved sessions, cookies, passwords and passkeys for the target site, and a minted agent-owned "
-            "identity - an email address and phone number it can read delivered messages at, including "
-            "verification codes. It can only read messages sent to that minted identity or to a mailbox the "
-            "user has connected as an integration; any other address, including one you compose from the "
-            "user's name, is write-only to it."
-        )
+        description=SPAWN_AGENT_TYPE_DESCRIPTION
     )
+    task_name: str = Field(pattern=SPAWN_TASK_NAME_PATTERN, description=SPAWN_TASK_NAME_DESCRIPTION)
     goal: str = Field(
         description=(
             "The self-contained task/prompt and description for the spawned agent. "
             "Spawned agents have no access to ANY of your context by default. "
             "The goal and attachments parameters are their ONLY source of information. "
             "Include all relevant pieces of information. "
+            f"{BROWSER_GOAL_PROFILE_NOTE} "
             f"{SELF_CONTAINED_GOAL_RULE.strip()}"
         )
     )
@@ -959,6 +1171,21 @@ class SpawnAgentTool(BaseModel):
             "Ignored for every other type. Only provide this when the user supplied a real, "
             "accessible repository URL; do not invent placeholder repositories. If omitted, "
             "the GitHub repo defaults to a repo automatically created for this agent tree."
+        ),
+    )
+    code_session_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional when type='code'. Ignored for every other type. The code_session_id a "
+            "previous code-agent result reported, to resume that exact session (files, commits, "
+            "branch and conversation). Omit it to resume your own latest session for the repo."
+        ),
+    )
+    target: Optional[Literal["cloud", "local"]] = Field(
+        default="cloud",
+        description=(
+            "Optional when type='code': 'local' runs the coding agent on the user's Mac in a folder they "
+            "shared (requires an owned connected Mac; multiple Macs require explicit device selection), 'cloud' (default) runs it in a sandbox."
         ),
     )
     start_phase: Optional[Literal["PLAN", "EXECUTE"]] = Field(
@@ -1002,6 +1229,7 @@ class SpawnAgentTool(BaseModel):
             "that context is clearly unnecessary."
         ),
     )
+    run_in_background: bool = Field(default=True, description=RUN_IN_BACKGROUND_DESCRIPTION)
     depth: Optional[Literal["quick", "medium", "deep"]] = Field(
         default="quick",
         description=(
@@ -1053,6 +1281,36 @@ class SpawnAgentTool(BaseModel):
         return self
 
 
+class SpawnAgentRoseDesktopTool(SpawnAgentTool):
+    """Spawn an autonomous agent; type selects capabilities and per-type required fields.
+
+    general_purpose: DO NOT use this agent type or assign it a goal unless that goal is
+    sufficiently distinct from the goal you are tasked with. Each general_purpose
+    sub-agent's task complexity must be strictly less than half of your issued task
+    complexity; otherwise do the work yourself. Be wary of infinite recursion:
+    general_purpose sub-agents can also spawn sub-agents. When using one as an
+    intelligent retry for a faulty tool, instruct it not to spawn more
+    general_purpose sub-agents; otherwise it will likely spawn another
+    general_purpose to retry the same faulty tool after the first error.
+    """
+
+    type: Literal["browser", "code", "general_purpose", "explore", "for_each"] = Field(
+        description=SPAWN_AGENT_TYPE_DESCRIPTION_ROSE_DESKTOP
+    )
+
+
+class PlannerSpawnAgentTool(SpawnAgentTool):
+    run_in_background: bool = Field(default=True, description=PLANNER_RUN_IN_BACKGROUND_DESCRIPTION)
+
+
+class PlannerSpawnAgentRoseDesktopTool(SpawnAgentRoseDesktopTool):
+    run_in_background: bool = Field(default=True, description=PLANNER_RUN_IN_BACKGROUND_DESCRIPTION)
+
+
+PLANNER_TOOL_MODEL_OVERRIDES = {"spawn_agent": PlannerSpawnAgentTool}
+PLANNER_ROSE_DESKTOP_TOOL_MODEL_OVERRIDES = {"spawn_agent": PlannerSpawnAgentRoseDesktopTool}
+
+
 class SpawnAgentToolNoGP(BaseModel):
     """EXECUTE-phase spawn_agent with general_purpose / for_each removed.
 
@@ -1062,23 +1320,27 @@ class SpawnAgentToolNoGP(BaseModel):
     does for PLAN.
     """
 
+    model_config = ConfigDict(json_schema_extra=_require_spawn_output_schema_key)
+
     tool: Literal["spawn_agent"]
     type: Literal["browser", "code", "explore"] = Field(
         description=(
             "Select by capability: 'browser' starts a browser session for stateful "
             "or authenticated web work; 'code' starts a coding agent (Claude Code / "
-            "Codex CLI) in an ephemeral sandbox; 'explore' performs read-only "
+            "Codex CLI) in a persistent sandbox; 'explore' performs read-only "
             "research for web or user-data facts. "
             "general_purpose and for_each are disabled for this run -  use "
             "type='code' for GitHub discovery/ranking work."
         )
     )
+    task_name: str = Field(pattern=SPAWN_TASK_NAME_PATTERN, description=SPAWN_TASK_NAME_DESCRIPTION)
     goal: str = Field(
         description=(
             "The self-contained task/prompt and description for the spawned agent. "
             "Spawned agents have no access to ANY of your context by default. "
             "The goal and attachments parameters are their ONLY source of information. "
             "Include all relevant pieces of information. "
+            f"{BROWSER_GOAL_PROFILE_NOTE} "
             f"{SELF_CONTAINED_GOAL_RULE.strip()}"
         )
     )
@@ -1106,6 +1368,21 @@ class SpawnAgentToolNoGP(BaseModel):
             "Optional when type='code'. GitHub repository URL to clone and sync to. Ignored for every other type."
         ),
     )
+    code_session_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional when type='code'. Ignored for every other type. The code_session_id a "
+            "previous code-agent result reported, to resume that exact session (files, commits, "
+            "branch and conversation). Omit it to resume your own latest session for the repo."
+        ),
+    )
+    target: Optional[Literal["cloud", "local"]] = Field(
+        default="cloud",
+        description=(
+            "Optional when type='code': 'local' runs the coding agent on the user's Mac in a folder they "
+            "shared (requires an owned connected Mac; multiple Macs require explicit device selection), 'cloud' (default) runs it in a sandbox."
+        ),
+    )
     context_gates: Optional[Dict[str, bool]] = Field(
         default=None,
         description=(
@@ -1113,6 +1390,7 @@ class SpawnAgentToolNoGP(BaseModel):
             "'recent_communications'. Missing keys default to true."
         ),
     )
+    run_in_background: bool = Field(default=True, description=RUN_IN_BACKGROUND_DESCRIPTION)
     depth: Optional[Literal["quick", "medium", "deep"]] = Field(
         default="quick",
         description=(
@@ -1159,6 +1437,7 @@ class SpawnExploreAgentTool(BaseModel):
             "attempt_completion first."
         ),
     )
+    task_name: str = Field(pattern=SPAWN_TASK_NAME_PATTERN, description=SPAWN_TASK_NAME_DESCRIPTION)
     goal: str = Field(
         description=(
             "The self-contained task/prompt and description for the spawned agent. "
@@ -1183,6 +1462,8 @@ class SpawnExploreAgentTool(BaseModel):
             "Set a key to false only when that context is clearly unnecessary."
         ),
     )
+    # No run_in_background: PLAN-phase explore agents always run in the foreground
+    # (workflows/background_agents.py) so their findings are in context before set_plan.
     depth: Optional[Literal["quick", "medium", "deep"]] = Field(
         default="quick",
         description=(
@@ -1197,6 +1478,52 @@ class SpawnExploreAgentTool(BaseModel):
 # ============================================================================
 # Plan Phase Tools
 # ============================================================================
+
+
+class ListAgentsTool(BaseModel):
+    """Browse your agent tree like a table of contents: where you are, nearby agents, drill-down hints."""
+
+    tool: Literal["list_agents"]
+    node: Optional[str] = Field(
+        default=None,
+        description='Address to expand (a /root/... path, "parent", or an agent id). Default: you.',
+    )
+    depth: Optional[int] = Field(default=None, description="Levels of children to show under node (1-3, default 1).")
+    cursor: Optional[str] = Field(default=None, description="Next-page cursor from a previous list_agents result.")
+    query: Optional[str] = Field(default=None, description="Search agent goals in your tree (words, any order).")
+    path_prefix: Optional[str] = Field(
+        default=None, description="List agents at or below this path, e.g. /root/outreach."
+    )
+
+
+_AGENT_ADDRESS_DESCRIPTION = (
+    "Agent address: a path like /root/outreach/draft_a (agents and their background tasks), "
+    "'parent' for the agent that spawned you, or '/root'."
+)
+
+
+class SendMessageToAgentTool(BaseModel):
+    """Ask another agent in your tree for new work or give it new information, a redirect or a handoff (to learn what it already did, spawn an explore agent to grep the agent tree); a finished agent wakes with it as its next task, except completed or failed browser and code agents, which cannot be messaged."""
+
+    tool: Literal["send_message_to_agent"]
+    to: str = Field(description=_AGENT_ADDRESS_DESCRIPTION)
+    message: str = Field(description="The message. Self-contained: the recipient has not seen your conversation.")
+    continue_conversation: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Required when the recipient is a paused browser or code agent; omit it otherwise. "
+            "true resumes its exact prior conversation with this message; false starts it in a fresh "
+            "conversation with this message, its original goal and its last result. Either way it keeps "
+            "its browser state (cookies, tabs, profile, proxy) or code sandbox (files, session)."
+        ),
+    )
+
+
+class KillAgentTool(BaseModel):
+    """Kill an agent below you and everything it spawned, or one of your background tasks."""
+
+    tool: Literal["kill_agent"]
+    to: str = Field(description="Address of one of your descendants or background tasks (see your environment block).")
 
 
 class SetPlanTool(BaseModel):
@@ -1215,6 +1542,13 @@ class AttemptCompletionTool(BaseModel):
     """Trigger completion for verified agent loops."""
 
     tool: Literal["attempt_completion"]
+    result: Optional[str] = Field(
+        default=None,
+        description=(
+            "Content the task asks you to write yourself (a draft, message or summary), in full. "
+            "The grader reads it as your own work; facts in it must come from earlier tool results."
+        ),
+    )
 
 
 class AttemptCompletionWithResultTool(BaseModel):
@@ -1274,6 +1608,7 @@ ToolRegistry = Dict[str, Type[BaseModel]]
 
 # Map tool names to their Pydantic models
 TOOL_MODELS: ToolRegistry = {
+    "read_tool_output": ReadToolOutputTool,
     "wait_for": WaitForTool,
     "web_search": WebSearchTool,
     "people_search": PeopleSearchTool,
@@ -1282,8 +1617,13 @@ TOOL_MODELS: ToolRegistry = {
     "google_workspace_run": GoogleOAuthDemoTool,
     "send_message_to_user": SendMessageToUserTool,
     "send_message_to_user_execute_phase": SendMessageToUserExecutePhaseTool,
+    "display": DisplayTool,
     "spawn_agent": SpawnAgentTool,
     "message_person": MessagePersonTool,
+    # Agent-to-agent
+    "list_agents": ListAgentsTool,
+    "send_message_to_agent": SendMessageToAgentTool,
+    "kill_agent": KillAgentTool,
     # Plan phase tools
     "set_plan": SetPlanTool,
     # Universal completion tool (available in both phases)
@@ -1295,6 +1635,8 @@ TOOL_MODELS: ToolRegistry = {
     "call_phone_number": CallPhoneNumberTool,
     # Local data search
     "grep": GrepTool,
+    # Read-only look inside a code agent's workspace (explore)
+    "inspect_code": InspectCodeTool,
 }
 
 # Phase-specific override registry. PLAN narrows spawn_agent to the explore-only
@@ -1304,15 +1646,43 @@ PLAN_TOOL_MODELS: ToolRegistry = {
     "spawn_agent": SpawnExploreAgentTool,
 }
 
+# Rose Desktop accounts (utils.rose_desktop) swap these in for the stock models:
+# inline views on send_message_to_user, pinned questions on display, and the
+# rose_user_ui clause in spawn_agent's `type`. TOOL_MODELS / PLAN_TOOL_MODELS
+# stay the stock registries, so any caller that does not pass the flag gets the
+# stock surface.
+ROSE_DESKTOP_TOOL_MODELS: ToolRegistry = {
+    "send_message_to_user": SendMessageToUserRoseDesktopTool,
+    "send_message_to_user_execute_phase": SendMessageToUserExecutePhaseRoseDesktopTool,
+    "display": DisplayRoseDesktopTool,
+    "spawn_agent": SpawnAgentRoseDesktopTool,
+}
+
+
+def _with_rose_desktop_models(registry: ToolRegistry) -> ToolRegistry:
+    """Swap in the Rose Desktop variant of every stock model the registry holds.
+
+    Only exact stock entries are replaced, so the PLAN explore-only and the
+    no-general-purpose spawn_agent variants stay as they are.
+    """
+    stock = {name: TOOL_MODELS[name] for name in ROSE_DESKTOP_TOOL_MODELS}
+    return {
+        name: ROSE_DESKTOP_TOOL_MODELS[name] if stock.get(name) is model else model for name, model in registry.items()
+    }
+
+
 # Tools available inside the explore agent (subset of read-only tools).
 # Full registry list -  callers that inject tools into an explore agent MUST use
 # `get_explore_agent_tools()` so ROSE_DISABLE_API_REQUEST can strip api_request.
 EXPLORE_AGENT_TOOLS = [
+    "read_tool_output",
     "web_search",
     "people_search",
     "web_fetch",
     "grep",
+    "list_agents",
     "api_request",
+    "inspect_code",
     "attempt_completion_with_result",
 ]
 
@@ -1393,22 +1763,24 @@ def render_tool_list(
 # ============================================================================
 
 
-def get_tool_models(*, phase: Optional[str] = None) -> ToolRegistry:
+def get_tool_models(*, phase: Optional[str] = None, rose_desktop: bool = False) -> ToolRegistry:
     """Return the tool registry for ``phase``, honoring GPA kill-switch.
 
     PLAN keeps the explore-only spawn_agent variant. EXECUTE (and unspecified)
     swaps in :class:`SpawnAgentToolNoGP` when
     ``ROSE_DISABLE_GENERAL_PURPOSE_AGENT`` is set so the LLM cannot select
-    general_purpose / for_each.
+    general_purpose / for_each. ``rose_desktop`` (``utils.rose_desktop``)
+    swaps in the Rose Desktop models; the default is the stock registry.
     """
     from utils.kill_switches import general_purpose_agent_disabled
 
     if phase == "plan":
-        return dict(PLAN_TOOL_MODELS)
-    registry = dict(TOOL_MODELS)
-    if general_purpose_agent_disabled():
-        registry["spawn_agent"] = SpawnAgentToolNoGP
-    return registry
+        registry = dict(PLAN_TOOL_MODELS)
+    else:
+        registry = dict(TOOL_MODELS)
+        if general_purpose_agent_disabled():
+            registry["spawn_agent"] = SpawnAgentToolNoGP
+    return _with_rose_desktop_models(registry) if rose_desktop else registry
 
 
 def get_planner_assignable_tools() -> list[str]:
@@ -1496,6 +1868,14 @@ def create_agent_action_model(
         else:
             logger.warning(f"Tool '{name}' not found in registry, skipping")
 
+    # Compiled classes are shared definitions: instantiate them or derive a
+    # JSON schema, but do not mutate their fields or force model rebuilding.
+    return _agent_action_model_for_types(tuple(tool_types))
+
+
+@lru_cache(maxsize=128)
+def _agent_action_model_for_types(tool_types: tuple[Type[BaseModel], ...]) -> Type[BaseModel]:
+    """Compile each ordered tool-model set once, including across workflow replays."""
     # Create union type for tool calls
     if not tool_types:
         # No tools available - agent can only communicate
@@ -1556,16 +1936,26 @@ __all__ = [
     "PeopleSearchTool",
     "WebFetchTool",
     "SendMessageToUserTool",
+    "SendMessageToUserRoseDesktopTool",
     "SendMessageToUserExecutePhaseTool",
+    "SendMessageToUserExecutePhaseRoseDesktopTool",
+    "DisplayTool",
+    "DisplayRoseDesktopTool",
     "MessagePersonTool",
     "SpawnAgentTool",
+    "SpawnAgentRoseDesktopTool",
     "SpawnAgentToolNoGP",
+    "ListAgentsTool",
+    "SendMessageToAgentTool",
     "SetPlanTool",
     "AttemptCompletionTool",
     "AttemptCompletionWithResultTool",
     "CallPhoneNumberTool",
     "GrepTool",
+    "InspectCodeTool",
     "TOOL_MODELS",
+    "PLAN_TOOL_MODELS",
+    "ROSE_DESKTOP_TOOL_MODELS",
     "ToolRegistry",
     "create_agent_action_model",
     "get_tool_models",

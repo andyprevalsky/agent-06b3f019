@@ -24,6 +24,7 @@ import {
   useAgentTree,
 } from '@/hooks/useAgentTree';
 import * as RealtimeMod from '@/lib/realtime';
+import { countParentReads } from './terminal-component-chips.fixtures';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -177,6 +178,22 @@ describe('useAgentTree helpers', () => {
     });
     it('returns empty when ids are absent', () => {
       expect(filterTreeBySpawn(new Map(), ['missing']).size).toBe(0);
+    });
+    it('scans the whole tree once, however large the spawned subtree is', () => {
+      const all = new Map<string, TreeNode>();
+      const add = (agentId: string, parentAgentId: string | null) =>
+        all.set(agentId, { agentId, parentAgentId } as never);
+      add('root', null);
+      add('a', 'root');
+      const kids = Array.from({ length: 200 }, (_, i) => `a-${i}`);
+      const grandkids = kids.slice(0, 100).map((id) => `${id}-x`);
+      kids.forEach((id) => add(id, 'a'));
+      grandkids.forEach((id, i) => add(id, kids[i]));
+      for (let i = 0; i < 99; i += 1) add(`u-${i}`, 'unrelated');
+      const counter = countParentReads(all.values());
+      const out = filterTreeBySpawn(all, ['a', 'missing']);
+      expect(Array.from(out.keys())).toEqual(['a', ...kids, ...grandkids]);
+      expect(counter.reads).toBeLessThanOrEqual(all.size);
     });
   });
 

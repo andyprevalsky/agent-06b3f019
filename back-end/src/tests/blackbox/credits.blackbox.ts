@@ -38,6 +38,13 @@
 
 import { config } from 'dotenv';
 import { z } from 'zod';
+import { randomInt } from 'node:crypto';
+
+/** User.phone is unique; parallel cases need distinct numbers, not millisecond clocks. */
+function uniqueTestPhone(prefix: string): string {
+  return `${prefix}${String(randomInt(10_000_000)).padStart(7, '0')}`;
+}
+
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -297,7 +304,7 @@ async function testUsage_inviteCodeMonthlyAllowance() {
   const invitedUserId = `credits-invite-${Date.now()}`;
 
   await prisma.user.create({
-    data: { userId: invitedUserId, phone: `+1999${Date.now() % 10000000}`, usedInviteCode: 181818 },
+    data: { userId: invitedUserId, phone: uniqueTestPhone('+1999'), usedInviteCode: 181818 },
   });
 
   try {
@@ -359,7 +366,7 @@ async function testUsage_inviteCodeConcurrentAllowance() {
   const invitedUserId = `credits-invite-concurrent-${Date.now()}`;
 
   await prisma.user.create({
-    data: { userId: invitedUserId, phone: `+1998${Date.now() % 10000000}`, usedInviteCode: 181818 },
+    data: { userId: invitedUserId, phone: uniqueTestPhone('+1998'), usedInviteCode: 181818 },
   });
 
   try {
@@ -397,7 +404,7 @@ async function testUsage_noAllowanceWithoutInviteCode() {
   const plainUserId = `credits-noinvite-${Date.now()}`;
 
   await prisma.user.create({
-    data: { userId: plainUserId, phone: `+1998${Date.now() % 10000000}`, usedInviteCode: null },
+    data: { userId: plainUserId, phone: uniqueTestPhone('+1998'), usedInviteCode: null },
   });
 
   try {

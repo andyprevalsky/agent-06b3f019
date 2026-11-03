@@ -42,7 +42,6 @@ import {
   getPool,
   isRoseModel,
   markCacheable,
-  PARAM_POPULATOR_MODEL,
   POOL_REGISTRY,
   poolForModel,
   RoseAllFailed,
@@ -55,12 +54,16 @@ import {
   type CompletionChunk,
 } from '../../providers/rose';
 import { buildAnthropicBody, claudeAuthComplete } from '../../providers/rose/claudeAuth';
+import { FOUNDRY_REGION_ENV_NAMES } from '../../providers/rose/foundry';
 import { buildCerebrasChatBody } from '../../providers/rose/cerebrasRoute';
 import { buildOpenRouterCerebrasBody } from '../../providers/rose/openrouterCerebrasRoute';
 import { buildOpenRouterFastChatBody } from '../../providers/rose/openrouterFastRoute';
 import { buildOpenRouterBody } from '../../providers/rose/waterfall';
 import { buildEnvironmentToolMessages } from '../../providers/smsSupervisor/environmentMessages';
-import { buildCodexResponsesBody } from '../../providers/rose/gptAuth';
+import {
+  buildCodexResponsesBody,
+  supportsPromptCacheBreakpoints,
+} from '../../providers/rose/gptAuth';
 import {
   boundedRateLimitBackoffMs,
   extractRateLimitedUntil,
@@ -273,6 +276,7 @@ async function testPool_isRoseModelVariants() {
 }
 
 async function testPool_forModelFuzzy() {
+  assertEqual(poolForModel('rose-labs/rose-local'), 'rose-local', 'local');
   assertEqual(poolForModel('rose-labs/rose-1-flash'), 'rose-1-flash', 'flash');
   assertEqual(poolForModel('rose-labs/rose-1-lite'), 'rose-1-flash', 'legacy lite alias');
   assertEqual(poolForModel('rose-1-lite'), 'rose-1-flash', 'bare legacy lite alias');
@@ -291,6 +295,62 @@ async function testPool_forModelFuzzy() {
   assertEqual(poolForModel('rose-labs/rose-2'), null, 'future rose-labs model');
   assertEqual(poolForModel('openai/gpt-4'), null, 'non-rose');
   assertEqual(poolForModel(''), null, 'empty');
+}
+
+async function testRoseLocalOnlyCallsLoopback() {
+  const originalFetch = global.fetch;
+  const priorBase = process.env.ROSE_LOCAL_BASE_URL;
+  const priorModel = process.env.ROSE_LOCAL_MODEL;
+  const seen: string[] = [];
+  try {
+    process.env.ROSE_LOCAL_BASE_URL = 'http://127.0.0.1:8080/v1';
+    process.env.ROSE_LOCAL_MODEL = 'test-local-model';
+    global.fetch = async (input) => {
+      const url = String(input);
+      seen.push(url);
+      assertEqual(url, 'http://127.0.0.1:8080/v1/chat/completions', 'loopback URL');
+      const sse =
+        'data: {"choices":[{"index":0,"delta":{"content":"local ok"},"finish_reason":null}]}\n\n' +
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}\n\n' +
+        'data: [DONE]\n\n';
+      return new Response(sse, { headers: { 'Content-Type': 'text/event-stream' } });
+    };
+    const chunks: CompletionChunk[] = [];
+    for await (const chunk of await createStreamingCompletion({
+      model: 'rose-labs/rose-local',
+      messages: [{ role: 'user', content: 'hello' }],
+    }))
+      chunks.push(chunk);
+    assertEqual(seen.length, 1, 'one local request');
+    assert(
+      chunks.some((c) => c.choices[0]?.delta.content === 'local ok'),
+      'local output'
+    );
+    assert(
+      chunks.every((c) => c.pool_name === 'rose-local'),
+      'local provenance'
+    );
+    process.env.ROSE_LOCAL_BASE_URL = 'https://openrouter.ai/api/v1';
+    let rejected = false;
+    try {
+      for await (const chunk of await createStreamingCompletion({
+        model: 'rose-labs/rose-local',
+        messages: [{ role: 'user', content: 'hello' }],
+      })) {
+        assert(!chunk, 'unexpected streamed output');
+      }
+    } catch {
+      rejected = true;
+    }
+    assert(rejected, 'remote URL rejected');
+    assertEqual(seen.length, 1, 'no remote request');
+  } finally {
+    global.fetch = originalFetch;
+    if (priorBase === undefined) delete process.env.ROSE_LOCAL_BASE_URL;
+    else process.env.ROSE_LOCAL_BASE_URL = priorBase;
+    if (priorModel === undefined) delete process.env.ROSE_LOCAL_MODEL;
+    else process.env.ROSE_LOCAL_MODEL = priorModel;
+  }
 }
 
 async function testPool_getPoolRegistryShape() {
@@ -312,8 +372,6 @@ async function testPool_getPoolRegistryShape() {
     'flash OpenRouter waterfall'
   );
   assertEqual(ultra.name, 'rose-1-ultra', 'ultra.name');
-  assertEqual(PARAM_POPULATOR_MODEL, 'rose-labs/rose-1-ultra', 'param populator model');
-  assertEqual(poolForModel(PARAM_POPULATOR_MODEL), 'rose-1-ultra', 'param populator pool');
   assertEqual(ultra.claudeAuthModel, 'claude-opus-5-5', 'ultra claudeAuthModel');
   assertEqual(ultra.gptAuthModel, 'gpt-6-sol', 'ultra.gptAuthModel');
   // Anthropic dropped from ultra: opus-4.8 was the priciest layer while scoring
@@ -342,8 +400,9 @@ async function testPool_getPoolRegistryShape() {
     'browserUse waterfall has no anthropic layer'
   );
   assert(lite.waterfall !== ultra.waterfall, 'lite.waterfall !== ultra.waterfall');
-  assertEqual(Object.keys(POOL_REGISTRY).length, 4, 'registry has 4 pools');
+  assertEqual(Object.keys(POOL_REGISTRY).length, 5, 'registry has 5 pools');
   assert(Boolean(POOL_REGISTRY['rose-1-mini']), 'rose-1-mini registered');
+  assert(Boolean(POOL_REGISTRY['rose-local']), 'rose-local registered');
 }
 
 async function testPool_unknownModelThrows() {
@@ -776,9 +835,10 @@ async function testClaudeAuth_smsSupervisorLiftsNativeToolsWithoutUnions() {
   }
 
   const send = extracted.tools.find((tool) => tool.name === 'send_user_message');
-  const sendArgs = (
-    (send?.input_schema as Record<string, unknown>).properties as Record<string, unknown>
-  ).arguments as { properties: Record<string, Record<string, unknown>>; required?: string[] };
+  const sendArgs = send?.input_schema as {
+    properties: Record<string, Record<string, unknown>>;
+    required?: string[];
+  };
   const replyTarget = sendArgs.properties.reply_to_message_id;
   assertEqual(replyTarget.type, 'string', 'native reply target remains a string');
   assert(
@@ -793,9 +853,13 @@ async function testClaudeAuth_smsSupervisorLiftsNativeToolsWithoutUnions() {
 
   // Collapsing the union must not drop the model-facing field documentation.
   const startAgent = extracted.tools.find((tool) => tool.name === 'start_new_agent');
-  const startAgentArgs = (
-    (startAgent?.input_schema as Record<string, unknown>).properties as Record<string, unknown>
-  ).arguments as { properties: Record<string, Record<string, unknown>>; required?: string[] };
+  // Parameters are flat, as in every Python tool model: the `arguments`
+  // wrapper of the response envelope must not reach the native tool schema.
+  const startAgentArgs = startAgent?.input_schema as {
+    properties: Record<string, Record<string, unknown>>;
+    required?: string[];
+  };
+  assert(!('arguments' in startAgentArgs.properties), 'native tool parameters must be flat');
   const budget = startAgentArgs.properties;
   assert(
     typeof budget.budget_dollars.description === 'string' &&
@@ -999,8 +1063,9 @@ async function testAnthropic_nullableRelaxationPreservesNonNullableRequired() {
   } as Parameters<typeof extractToolsFromResponseFormat>[0]);
   assert(extracted !== null, 'probe envelope must lift to a native tool');
 
-  const root = extracted.tools[0].input_schema as JsonSchemaNode;
-  const schema = root.properties?.arguments as JsonSchemaNode;
+  // `{ tool, arguments }` variants lift to flat native parameters.
+  const schema = extracted.tools[0].input_schema as JsonSchemaNode;
+  assert(!('arguments' in (schema.properties ?? {})), 'arguments wrapper must be flattened');
   assertEqual(
     JSON.stringify(schema.properties?.budget_dollars),
     '{"type":"number"}',
@@ -1911,6 +1976,8 @@ async function testGptApiKey_insufficientQuotaCoolsLaterRequestsBeforeFoundry() 
   await __resetGptApiKeyCooldown();
   process.env.GPT_API_KEY = 'sk-proj-test-key';
   process.env.ANTHROPIC_API_KEY = '';
+  // Region 1 only: a developer .env may configure AZURE_FOUNDRY_*_2.._9.
+  for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
   process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
   process.env.AZURE_FOUNDRY_API_KEY = 'test-foundry-key';
   process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';
@@ -1947,10 +2014,211 @@ async function testGptApiKey_insufficientQuotaCoolsLaterRequestsBeforeFoundry() 
     restoreFetch();
     delete process.env.GPT_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
+    for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
+    await __resetGptApiKeyCooldown();
+  }
+}
+
+/**
+ * GPT-5.6+ caches only at breakpoints (measured on Azure 2026-10-12): without them the
+ * latest message is the only write point and a growing prompt is billed as 1.25x writes.
+ * Rose maps the caller's ordinary cache_control markers to prompt_cache_breakpoint on
+ * routes that honor them, as the Python client does. Prompts do not change.
+ */
+function testGpt56CacheMarkers_becomeResponsesBreakpoints() {
+  const marker = { type: 'ephemeral' };
+  const messages = [
+    { role: 'system', content: 'policy' },
+    { role: 'user', content: [{ type: 'text', text: 'unit one', cache_control: marker }] },
+    { role: 'user', content: [{ type: 'text', text: 'unit two', cache_control: marker }] },
+    { role: 'user', content: 'this call only' },
+  ] as unknown as CompletionMessage[];
+  const marks = (body: Record<string, unknown>) =>
+    (body.input as Array<{ content?: Array<Record<string, unknown>> }>).flatMap((item) =>
+      (item.content ?? []).map((part) => part.prompt_cache_breakpoint ?? null)
+    );
+  const build = (modelOverride: string, cacheBreakpoints?: boolean) =>
+    buildCodexResponsesBody({
+      poolSpec: getPool('rose-1-ultra'),
+      modelOverride,
+      messages,
+      requestId: 'r',
+      cacheBreakpoints,
+    });
+  const sol = build('gpt-6.1-sol', true);
+  assertEqual(
+    JSON.stringify(marks(sol)),
+    JSON.stringify([{ mode: 'explicit' }, { mode: 'explicit' }, null]),
+    'each marked block becomes a breakpoint'
+  );
+  assert(!('prompt_cache_options' in sol), 'implicit mode keeps the latest-message cache');
+  assert(!JSON.stringify(sol.input).includes('cache_control'), 'no Anthropic marker on the wire');
+  assertEqual(
+    JSON.stringify(marks(build('gpt-5.5', true))),
+    '[null,null,null]',
+    'earlier models reject the field'
+  );
+  assertEqual(JSON.stringify(marks(build('gpt-6.1-sol'))), '[null,null,null]', 'routes opt in');
+  const many = Array.from({ length: 60 }, (_, i) => ({
+    role: 'user',
+    content: [{ type: 'text', text: `unit ${i}`, cache_control: marker }],
+  })) as unknown as CompletionMessage[];
+  const capped = buildCodexResponsesBody({
+    poolSpec: getPool('rose-1-ultra'),
+    modelOverride: 'gpt-6-sol',
+    messages: many,
+    requestId: 'r',
+    cacheBreakpoints: true,
+  });
+  assertEqual(
+    JSON.stringify(marks(capped).map((mark) => mark !== null)),
+    JSON.stringify([...Array(10).fill(false), ...Array(50).fill(true)]),
+    'reads consider the latest 50 breakpoints'
+  );
+  assertEqual(
+    JSON.stringify(
+      [
+        'gpt-5.5',
+        'gpt-5',
+        'gpt-5.6-luna',
+        'gpt-6-sol',
+        'gpt-6.1-sol',
+        'claude-opus-5-5',
+        undefined,
+      ].map(supportsPromptCacheBreakpoints)
+    ),
+    JSON.stringify([false, false, true, true, true, false, false]),
+    'GPT-5.6 and later only'
+  );
+}
+
+/**
+ * Replaying 911 real agent calls (2026-10-12) through the measured GPT-5.6+ cache rule:
+ * implicit mode plus a breakpoint after every user message before the final item cost
+ * 0.51x of no caching (0.55x implicit only; explicit mode 0.61x). Rose applies it for
+ * every caller, marked or not; assistant and tool items and the final item stay unmarked.
+ */
+function testResponsesBody_marksEveryCompletedUserMessage() {
+  const messages = [
+    { role: 'system', content: 'policy' },
+    { role: 'user', content: 'stable context' },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: 'c1', type: 'function', function: { name: 'lookup', arguments: '{}' } }],
+    },
+    { role: 'tool', tool_call_id: 'c1', content: 'result' },
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'part a' },
+        { type: 'text', text: 'part b' },
+      ],
+    },
+    { role: 'user', content: 'this call only' },
+  ] as unknown as CompletionMessage[];
+  const shape = (body: Record<string, unknown>) =>
+    (body.input as Array<Record<string, unknown>>).map((item) =>
+      Array.isArray(item.content)
+        ? (item.content as Array<Record<string, unknown>>).map(
+            (part) => part.prompt_cache_breakpoint ?? null
+          )
+        : item.type
+    );
+  const body = buildCodexResponsesBody({
+    poolSpec: getPool('rose-1-ultra'),
+    modelOverride: 'gpt-6-sol',
+    messages,
+    tools: [{ type: 'function', function: { name: 'lookup', parameters: {} } }],
+    requestId: 'r',
+    cacheBreakpoints: true,
+  });
+  assertEqual(
+    JSON.stringify(shape(body)),
+    JSON.stringify([
+      [{ mode: 'explicit' }],
+      'function_call',
+      'function_call_output',
+      [null, { mode: 'explicit' }],
+      [null],
+    ]),
+    'every completed user message ends at a breakpoint'
+  );
+  const plain = buildCodexResponsesBody({
+    poolSpec: getPool('rose-1-ultra'),
+    modelOverride: 'gpt-6-sol',
+    messages,
+    requestId: 'r',
+  });
+  assert(
+    !JSON.stringify(plain).includes('prompt_cache_breakpoint'),
+    'routes without support unchanged'
+  );
+}
+
+async function testFoundry_sendsBreakpointsAndKeepsReportedZeroCacheWrites() {
+  process.env.ANTHROPIC_API_KEY = '';
+  process.env.GPT_API_KEY = '';
+  process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
+  process.env.AZURE_FOUNDRY_API_KEY = 'test-foundry-key';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';
+  const bodies: Array<Record<string, unknown>> = [];
+  const usages = [
+    '{"input_tokens":1000,"output_tokens":1,"total_tokens":1001,"input_tokens_details":{"cached_tokens":900,"cache_write_tokens":0}}',
+    '{"input_tokens":1000,"output_tokens":1,"total_tokens":1001,"input_tokens_details":{"cached_tokens":0}}',
+  ];
+  installFetchStub((url, init) => {
+    if (url === 'https://a-4989-resource.openai.azure.com/openai/v1/responses') {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return sseResponse([
+        'data: {"type":"response.output_text.delta","delta":"ok"}',
+        '',
+        `data: {"type":"response.completed","response":{"usage":${usages[bodies.length - 1]}}}`,
+        '',
+        'data: [DONE]',
+        '',
+      ]);
+    }
+    throw new Error(`Unexpected provider URL: ${url}`);
+  });
+  try {
+    const written: Array<number | undefined> = [];
+    for (let i = 0; i < 2; i++) {
+      const chunks = await collect(
+        await createStreamingCompletion({
+          model: 'rose-labs/rose-1-ultra',
+          messages: [
+            { role: 'system', content: 'policy' },
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: 'stable prefix', cache_control: { type: 'ephemeral' } },
+              ],
+            },
+            { role: 'user', content: 'this call only' },
+          ] as unknown as CompletionMessage[],
+        })
+      );
+      written.push(chunks[chunks.length - 1].usage?.cache_creation_input_tokens);
+    }
+    assertEqual(bodies.length, 2, 'Foundry served both requests');
+    const parts = (bodies[0].input as Array<{ content: Array<Record<string, unknown>> }>).flatMap(
+      (item) => item.content
+    );
+    assertEqual(
+      JSON.stringify(parts.map((part) => part.prompt_cache_breakpoint ?? null)),
+      JSON.stringify([{ mode: 'explicit' }, null]),
+      'Foundry request carries the caller breakpoint'
+    );
+    assertEqual(written[0], 0, 'a reported zero cache write stays zero');
+    assertEqual(written[1], 1000, 'an unreported write keeps the inclusive fallback');
+  } finally {
+    restoreFetch();
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.GPT_API_KEY;
     delete process.env.AZURE_FOUNDRY_ENDPOINT;
     delete process.env.AZURE_FOUNDRY_API_KEY;
     delete process.env.AZURE_FOUNDRY_DEPLOYMENTS;
-    await __resetGptApiKeyCooldown();
   }
 }
 
@@ -4017,6 +4285,7 @@ async function main(): Promise<void> {
   const tests: { name: string; fn: () => Promise<void> }[] = [
     { name: 'pool / isRoseModel variants', fn: testPool_isRoseModelVariants },
     { name: 'pool / poolForModel fuzzy', fn: testPool_forModelFuzzy },
+    { name: 'local / loopback only', fn: testRoseLocalOnlyCallsLoopback },
     { name: 'pool / POOL_REGISTRY shape', fn: testPool_getPoolRegistryShape },
     { name: 'pool / unknown model throws', fn: testPool_unknownModelThrows },
     { name: 'claudeAuth / happy path', fn: testClaudeAuth_happyPath },
@@ -4131,6 +4400,18 @@ async function main(): Promise<void> {
     {
       name: 'openai api-key / insufficient quota cools later requests before Foundry',
       fn: testGptApiKey_insufficientQuotaCoolsLaterRequestsBeforeFoundry,
+    },
+    {
+      name: 'responses / GPT-5.6+ cache markers become breakpoints',
+      fn: testGpt56CacheMarkers_becomeResponsesBreakpoints,
+    },
+    {
+      name: 'foundry / sends breakpoints and keeps reported zero cache writes',
+      fn: testFoundry_sendsBreakpointsAndKeepsReportedZeroCacheWrites,
+    },
+    {
+      name: 'responses / every completed user message is a breakpoint',
+      fn: testResponsesBody_marksEveryCompletedUserMessage,
     },
     {
       name: 'shared OpenAI priority / exclusive route preserves router config',

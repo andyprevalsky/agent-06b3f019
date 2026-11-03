@@ -6,6 +6,24 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# Help must be side-effect free even inside a configured cloud workspace.
+mkdir -p "$TMP/help-workspace/scripts"
+cp "${RUN_HELP_SOURCE:-$ROOT/scripts/run.sh}" "$TMP/help-workspace/scripts/run.sh"
+cat > "$TMP/help-workspace/.cloud-env" <<'ENV'
+printf 'unexpected workspace setup\n' > "$HELP_SIDE_EFFECT_MARKER"
+export CONDUCTOR_PORT=3001
+ENV
+for help_args in '--help' '-h' '--benchmark --help'; do
+  marker="$TMP/help-side-effect"
+  read -r -a help_argv <<< "$help_args"
+  if ! out=$(HELP_SIDE_EFFECT_MARKER="$marker" bash "$TMP/help-workspace/scripts/run.sh" "${help_argv[@]}" 2>&1); then
+    echo "FAIL help must exit successfully before workspace setup: $help_args" >&2
+    exit 1
+  fi
+  [ ! -e "$marker" ] || { echo 'FAIL help sourced workspace configuration' >&2; exit 1; }
+  [[ "$out" == *'Usage:'* ]] || { echo 'FAIL help omitted usage' >&2; exit 1; }
+done
+
 # Assert run.sh still contains the preserve logic (structural).
 grep -q '_cloud_env_isolated' "$ROOT/scripts/run.sh"
 grep -q 'must not clobber those' "$ROOT/scripts/run.sh"

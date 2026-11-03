@@ -147,8 +147,9 @@ function useBandProgress(
 ): { copy: string; pct: number } | null {
   const band = SETUP_BANDS.find((b) => b.key === stage) ?? (stage === null ? SETUP_BANDS[0] : null);
   const [pct, setPct] = useState(0);
-  const key = band?.key ?? null;
 
+  // `band` is a SETUP_BANDS constant, so its identity changes exactly when the
+  // server stage moves to another band (or a new run restarts the bar).
   useEffect(() => {
     if (band === undefined || band === null) return;
     setPct(band.from);
@@ -160,7 +161,7 @@ function useBandProgress(
       setPct(band.from + (band.to - band.from) * Math.min(eased, 0.97));
     }, 120);
     return () => clearInterval(timer);
-  }, [key, runId]);
+  }, [band, runId]);
 
   if (band === undefined || band === null) return null;
   return { copy: band.copy, pct };

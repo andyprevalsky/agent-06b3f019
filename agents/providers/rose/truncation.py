@@ -17,10 +17,15 @@ every such call:
        ▼
     whatever attempt 3 returns is final
 
+A provider refusal after partial output is abandoned the same way, straight to
+the next model: a larger limit cannot change a refusal.
+
 Each abandoned attempt is followed by one ``restart`` chunk telling the consumer
 to drop what it accumulated. Only consumers that understand ``restart`` opt in
 (``RoseClient.collect`` does, for every collected call); a plain-text reply is
-never retried here, since a cut-off answer is still a partial answer.
+never retried here, since a cut-off answer is still a partial answer, unless
+its caller declares the whole reply to be the result (``result_required``,
+e.g. a world-model JSON document).
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional
 
 import structlog
 
+from providers.rose.errors import RoseError, RoseRefusalError
 from providers.rose.types import StreamChunk
 
 logger = structlog.get_logger(__name__)
@@ -60,9 +66,9 @@ def model_key(model: Optional[str]) -> str:
     return re.sub(r"[^a-z0-9]", "", name)
 
 
-def needs_result(*, tools: Any, tool_choice: Any, response_model: Any) -> bool:
+def needs_result(*, tools: Any, tool_choice: Any, response_model: Any, result_required: bool = False) -> bool:
     """True for calls whose reply is only usable as a tool call or structured result."""
-    if response_model is not None:
+    if response_model is not None or result_required:
         return True
     return bool(tools) and tool_choice != "none"
 
@@ -109,12 +115,18 @@ async def recover_truncated(
     kwargs: Dict[str, Any],
 ) -> AsyncIterator[StreamChunk]:
     """Run ``attempt(**kwargs)`` under the cut-off policy above, streaming live."""
+    kwargs = dict(kwargs)
+    result_required = bool(kwargs.pop("result_required", False))
+    retry_partial_errors = bool(kwargs.pop("retry_partial_errors", False))
+    if retry_partial_errors and not result_required:
+        raise ValueError("Partial provider retries require a collected whole-result reply")
     source = (
-        _recover_structured_truncation(attempt, kwargs)
+        _recover_structured_truncation(attempt, kwargs, retry_partial_errors=retry_partial_errors)
         if needs_result(
             tools=kwargs.get("tools"),
             tool_choice=kwargs.get("tool_choice"),
             response_model=kwargs.get("response_model"),
+            result_required=result_required,
         )
         else attempt(**kwargs)
     )
@@ -124,7 +136,7 @@ async def recover_truncated(
 
 
 async def _recover_structured_truncation(
-    attempt: Callable[..., AsyncIterator[StreamChunk]], kwargs: Dict[str, Any]
+    attempt: Callable[..., AsyncIterator[StreamChunk]], kwargs: Dict[str, Any], *, retry_partial_errors: bool = False
 ) -> AsyncIterator[StreamChunk]:
     started = time.monotonic()
     deadline_s = kwargs.get("deadline_s")
@@ -145,25 +157,39 @@ async def _recover_structured_truncation(
         completion_tokens = 0
         usage_data: Dict[str, Any] = {}
         saw_tool_call = False
-        async with aclosing(attempt(**current)) as stream:
-            async for chunk in stream:
-                if chunk.kind == "metadata":
-                    actual_model = str(chunk.data.get("actual_model") or actual_model)
-                elif chunk.kind == "tool_call":
-                    saw_tool_call = True
-                elif chunk.kind == "usage":
-                    finish_reason = str(chunk.data.get("finish_reason") or "")
-                    completion_tokens = int(chunk.data.get("completion_tokens") or 0)
-                    usage_data = dict(chunk.data)
-                if chunk.kind in ("usage", "done"):
-                    held.append(chunk)
-                    continue
-                yield chunk
+        failure = None
+        try:
+            async with aclosing(attempt(**current)) as stream:
+                async for chunk in stream:
+                    if chunk.kind == "metadata":
+                        actual_model = str(chunk.data.get("actual_model") or actual_model)
+                    elif chunk.kind == "tool_call":
+                        saw_tool_call = True
+                    elif chunk.kind == "usage":
+                        finish_reason = str(chunk.data.get("finish_reason") or "")
+                        completion_tokens = int(chunk.data.get("completion_tokens") or 0)
+                        usage_data = dict(chunk.data)
+                    if chunk.kind in ("usage", "done"):
+                        held.append(chunk)
+                        continue
+                    yield chunk
+        except RoseError as exc:
+            # A refusal is the model's verdict on this request, so a partial tool
+            # call it streamed first is never the result: drop it and ask the
+            # pool's next model, as client.complete() does for a refusal before
+            # the first chunk. Other mid-stream errors keep the opt-in policy.
+            refused = isinstance(exc, RoseRefusalError) and bool(actual_model)
+            if not refused and (not retry_partial_errors or not actual_model or saw_tool_call):
+                raise
+            failure = exc
+            remaining = [stage for stage in remaining if stage != "larger_limit"]
 
         cut_off = finish_reason == "length" and not saw_tool_call
         elapsed = time.monotonic() - started
         out_of_time = deadline_s is not None and float(deadline_s) - elapsed < MIN_RETRY_BUDGET_S
-        if not cut_off or not remaining or out_of_time:
+        if not (cut_off or failure) or not remaining or out_of_time:
+            if failure is not None:
+                raise failure
             _log_unrecovered(cut_off, kwargs, actual_model, completion_tokens, out_of_time)
             for chunk in held:
                 yield _with_abandoned_usage(chunk, abandoned)
@@ -176,12 +202,12 @@ async def _recover_structured_truncation(
             {
                 "model": actual_model,
                 **{counter: int(usage_data.get(counter) or 0) for counter in USAGE_COUNTERS},
+                **({"usage_complete": bool(usage_data), "error_type": type(failure).__name__} if failure else {}),
             }
         )
-        # Codex-style Responses routes (direct GPT, the funded OpenAI key,
-        # Foundry) send no output limit at all, so a larger limit changes
-        # nothing for them; go straight to the next model.
-        if "larger_limit" in remaining and actual_model.endswith(("-gpt", "-openai", "-foundry")):
+        # Subscription Responses ignores output limits. Public API wrappers
+        # honor the caller cap and use the existing larger-limit stage.
+        if "larger_limit" in remaining and actual_model.endswith("-gpt"):
             remaining.remove("larger_limit")
             if not remaining:
                 for chunk in held:
@@ -190,7 +216,20 @@ async def _recover_structured_truncation(
         stage = remaining.pop(0)
         if stage == "next_model":
             # The direct-token routes serve one model; leaving it means the pool's waterfall.
-            current = {**current, "claude_auth": None, "gpt_auth": None, "_skip_models": skipped}
+            # Name the cut-off reason per model so the waterfall does not report a
+            # structured-output exclusion (helpers/llm.py) as a cut-off, or vice versa.
+            incoming_exclusions = frozenset(kwargs.get("_skip_models", ()))
+            cut_off_reasons = {
+                **dict(kwargs.get("_skip_reasons") or {}),
+                **{model: "reply_cut_off_at_output_limit" for model in skipped - incoming_exclusions},
+            }
+            current = {
+                **current,
+                "claude_auth": None,
+                "gpt_auth": None,
+                "_skip_models": skipped,
+                "_skip_reasons": cut_off_reasons,
+            }
         if larger:
             current = {**current, "max_tokens": larger}
         if deadline_s is not None:
@@ -207,5 +246,6 @@ async def _recover_structured_truncation(
         )
         yield StreamChunk(
             kind="restart",
-            data={"reason": "output_limit", "stage": stage, "cut_off_model": actual_model},
+            data={"reason": "provider_error" if failure else "output_limit", "stage": stage,
+                  "cut_off_model": actual_model},
         )

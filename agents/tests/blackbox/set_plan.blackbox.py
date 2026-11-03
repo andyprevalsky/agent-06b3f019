@@ -2,7 +2,10 @@
 
 import asyncio
 import json
+import sys
+from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 from _test_utils import (
@@ -70,7 +73,7 @@ def test_validate_dependencies_preds_not_list():
     """Predecessors must be a list."""
     from tools.set_plan import validate_dependencies
 
-    err = validate_dependencies(["A", "B"], {"1": "0"})  # type: ignore[dict-item]
+    err = validate_dependencies(["A", "B"], {"1": "0"})
     assert err is not None and "list" in err.lower()
 
 
@@ -374,7 +377,152 @@ def test_get_planner_tools_description_non_empty():
     assert "$defs" not in desc
 
 
+def test_planner_tools_description_lists_only_assignable_tools():
+    """The planner sees only execute tools a DAG task can be assigned (via TOOL_ALIASES)."""
+    from domains.set_plan.service import get_planner_tools_description
+    from utils.tool_schemas import PLANNER_ASSIGNABLE_TOOLS, PLANNER_EXECUTE_TOOLS, TOOL_ALIASES
+
+    desc = get_planner_tools_description()
+    headers = {line[4:] for line in desc.splitlines() if line.startswith("### ")}
+    assert headers == set(PLANNER_EXECUTE_TOOLS), headers
+    assert headers == {
+        "spawn_agent",
+        "wait_for",
+        "call_phone_number",
+        "message_person",
+        "send_message_to_user_execute_phase",
+        "display",
+    }, headers
+    # A plan task can show the root's own page (display html) without a code agent.
+    display_section = desc.split("### display\n", 1)[1].split("\n### ", 1)[0]
+    assert '"html"' in display_section and "`html` is a page you write yourself" in display_section, display_section
+    from utils.tool_schemas import get_planner_response_model
+
+    plan = get_planner_response_model().model_validate(
+        {"title": "Chart", "join": "all", "tasks": [{"task_idx": "0", "goal": "Show the chart page", "tool_name": "display"}]}
+    )
+    assert plan.tasks[0].tool_name == "display", plan
+    assert all(TOOL_ALIASES.get(name, name) in headers or name == "reasoning" for name in PLANNER_ASSIGNABLE_TOOLS)
+    for hidden in ("kill_agent", "send_message_to_agent", "attempt_completion"):
+        assert hidden not in desc, hidden
+    wait_for_section = desc.split("### wait_for\n", 1)[1].split("\n### ", 1)[0]
+    assert '"agents"' in wait_for_section and '"timeout_seconds"' in wait_for_section, wait_for_section
+
+
 # ── build_planner_messages ──────────────────────────────────────────────
+
+
+def _completed_explore_context():
+    fixture = Path(__file__).parent / "fixtures" / "planner" / "completed-explore.json"
+    return json.loads(fixture.read_text())
+
+
+def test_build_planner_messages_retains_completed_explore_result():
+    """Replay careers_scan: its real result must replace the earlier progress chip."""
+    from domains.set_plan.service import build_planner_messages
+
+    context = _completed_explore_context()
+    late_progress = deepcopy(context[-2])
+    late_progress["message_id"] = "late-progress"
+    late_progress["timestamp"] = "2026-10-26T17:33:35.000Z"
+    context.append(late_progress)
+    original = deepcopy(context)
+    completed = context[-2]
+    call_id = completed["metadata"]["toolCallId"]
+    messages, _ = build_planner_messages(context)
+    results = [message for message in messages if message.get("tool_call_id") == call_id]
+
+    assert len(results) == 1
+    expected = f"{completed['metadata']['title']}: {completed['text']}"
+    assert results[0]["content"] == expected, (
+        "Planner discarded the completed careers-scan result in favor of IN_PROGRESS"
+    )
+    assert context == original, "Planner projection mutated persisted research history"
+
+
+def test_build_planner_messages_uses_latest_visible_terminal_result():
+    """Stale terminals and excluded child/UI rows cannot replace the actual outcome."""
+    from domains.set_plan.service import build_planner_messages
+
+    for status in ("FINISHED", "ERROR"):
+        context = _completed_explore_context()
+        latest = deepcopy(context[-1])
+        latest["message_id"] = "latest-parent-result"
+        latest["timestamp"] = "2026-10-26T17:33:35.000Z"
+        latest["text"] = f"Latest parent-visible {status} outcome"
+        latest["metadata"]["toolStatus"] = status
+        context.append(latest)
+        for marker in ({"excludeFromModel": True}, {"subAgentId": "child-internal"}):
+            hidden = deepcopy(latest)
+            hidden["message_id"] = f"hidden-{next(iter(marker))}"
+            hidden["timestamp"] = "2026-10-26T17:33:36.000Z"
+            hidden["text"] = "This hidden lifecycle row is not the tool outcome"
+            hidden["metadata"].update(marker)
+            context.append(hidden)
+
+        messages, _ = build_planner_messages(context)
+        results = [
+            message for message in messages if message.get("tool_call_id") == latest["metadata"]["toolCallId"]
+        ]
+        assert len(results) == 1
+        assert results[0]["content"] == f"{latest['metadata']['title']}: {latest['text']}"
+        assert "hidden lifecycle" not in json.dumps(messages)
+
+
+def test_build_planner_messages_does_not_turn_pending_work_into_a_result():
+    """An unfinished explore supplies neither a result nor an invented completion."""
+    from domains.set_plan.service import build_planner_messages
+
+    context = _completed_explore_context()[:-1]
+    messages, _ = build_planner_messages(context)
+    assert not any(message.get("role") == "tool" for message in messages)
+    assert "Exploring:" not in json.dumps(messages)
+    assert not any(message.get("tool_calls") for message in messages)
+
+
+def test_build_planner_messages_pending_history_has_linear_pairing_work():
+    """Doubling pending history must not quadruple local context-pairing work."""
+    from domains.set_plan.service import build_planner_messages
+
+    def measured_work(count):
+        context = [{"role": "USER", "text": "Research independent tasks"}]
+        for index in range(count):
+            call_id = f"pending-{index}"
+            context.extend(
+                [
+                    {
+                        "role": "ASSISTANT",
+                        "text": "",
+                        "metadata": {"tool_calls": [{"tool": "spawn_agent", "tool_call_id": call_id}]},
+                    },
+                    {
+                        "role": "TOOL",
+                        "text": "Exploring",
+                        "metadata": {"toolCallId": call_id, "toolStatus": "IN_PROGRESS"},
+                    },
+                ]
+            )
+        steps = 0
+
+        def trace(frame, event, arg):
+            nonlocal steps
+            if event == "line" and frame.f_globals.get("__name__") == "helpers.llm":
+                steps += 1
+            return trace
+
+        previous_trace = sys.gettrace()
+        try:
+            sys.settrace(trace)
+            messages, _ = build_planner_messages(context)
+        finally:
+            sys.settrace(previous_trace)
+        assert not any(message.get("role") == "tool" or message.get("tool_calls") for message in messages)
+        return steps
+
+    smaller = measured_work(128)
+    larger = measured_work(256)
+    assert smaller > 0
+    assert larger <= 3 * smaller, f"Pending pairing grew superlinearly: {smaller} -> {larger} steps"
 
 
 def test_build_planner_messages_basic():
@@ -392,6 +540,48 @@ def test_build_planner_messages_basic():
     assert len(base_messages) == 4
     assert base_messages[0]["content"].startswith("GOAL: Find me a flight to Paris")
     assert user_messages == ["Find me a flight to Paris", "Under $500"]
+
+
+def test_build_planner_messages_agent_rows_are_assistant_and_never_the_goal():
+    """Agent messages / notifications: assistant-role Codex bodies, never user_messages / GOAL;
+    FE-only (excludeFromModel) rows never reach the planner; a trailing one is settled to user."""
+    from domains.set_plan.service import build_planner_messages
+
+    agent_message = {
+        "role": "USER",
+        "text": "Only pre-seed funds.",
+        "metadata": {
+            "agentMessage": True,
+            "fromAgentPath": "/root",
+            "toAgentPath": "/root/funds",
+            "messageType": "NEW_TASK",
+        },
+    }
+    notification = {
+        "role": "USER",
+        "text": "Message Type: FINAL_ANSWER\nTask name: /root/funds\nSender: /root/funds/scan\nPayload:\n4 funds",
+        "metadata": {"agentNotification": True, "status": "completed"},
+    }
+    context = [
+        agent_message,
+        {"role": "USER", "text": "Find Austin seed funds"},
+        {
+            "role": "TOOL",
+            "text": "bg progress",
+            "metadata": {"toolCallId": "t1", "toolStatus": "FINISHED", "excludeFromModel": True},
+        },
+        notification,
+    ]
+    base_messages, user_messages = build_planner_messages(context)
+    assert user_messages == ["Find Austin seed funds"], user_messages
+    assert base_messages[0]["content"].startswith("GOAL: Find Austin seed funds")
+    assert not any("bg progress" in str(m["content"]) for m in base_messages)
+    assert base_messages[1] == {
+        "role": "assistant",
+        "content": "Message Type: NEW_TASK\nTask name: /root/funds\nSender: /root\nPayload:\nOnly pre-seed funds.",
+    }, base_messages
+    # The last message would be stripped as assistant prefill: it is sent as user.
+    assert base_messages[-1] == {"role": "user", "content": notification["text"]}, base_messages
 
 
 def test_build_planner_messages_empty_context():
@@ -875,6 +1065,48 @@ def _patch_service_workflow(fake_workflow):
     return restore
 
 
+async def test_run_planner_attempt_passes_the_world_cursor_only_in_simulate_mode():
+    """The planner gets the last world-time cursor in simulate mode; real-mode args are unchanged."""
+    from domains.set_plan.service import run_planner_attempt
+
+    captured: list = []
+
+    class _CaptureWorkflow(_FakeWorkflowModule):
+        async def execute_activity(self, fn, *args, **kwargs):
+            captured.append(list(kwargs["args"]))
+            return {"result": {"title": "t", "join": "all", "tasks": []}, "usage": {}}
+
+    cursor = 1_791_000_000_000
+    real = _FakeWFInstance()
+    real.world_model_mode = "real"
+    real.simulated_world_time_ms = cursor  # ignored outside simulate
+    simulated = _FakeWFInstance()
+    simulated.world_model_mode = "simulate"
+    simulated.simulated_world_time_ms = cursor
+    restore = _patch_service_workflow(_CaptureWorkflow())
+    try:
+        for instance in (_FakeWFInstance(), real, simulated):
+            await run_planner_attempt(
+                workflow_instance=instance,
+                messages=[{"role": "user", "content": "goal"}],
+                tools_description="tools",
+                user_context="",
+                response_schema=None,
+                claude_max_token=None,
+                gpt_token=None,
+                gpt_account_id=None,
+                gpt_token_source=None,
+                gpt_token_pool_id=None,
+                user_messages=["goal"],
+                tool_call_id="tc-1",
+                attempt=0,
+            )
+    finally:
+        restore()
+    assert len(captured[0]) == len(captured[1]) == 22 and captured[0] == captured[1]
+    assert captured[2] == captured[0] + [cursor]
+
+
 async def test_run_planner_attempt_redelivers_after_dead_worker():
     """Planner activity must be stealable if the assigned worker dies.
 
@@ -938,6 +1170,29 @@ async def test_run_planner_attempt_redelivers_after_dead_worker():
         "never heartbeats is redelivered instead of burning the 240s LLM budget"
     )
     assert heartbeat < start_to_close
+
+    local_instance = _FakeWFInstance()
+    local_instance.model = "rose-labs/rose-local"
+    restore = _patch_service_workflow(fake_wf)
+    try:
+        await run_planner_attempt(
+            workflow_instance=local_instance,
+            messages=[{"role": "user", "content": "goal"}],
+            tools_description="tools",
+            user_context="",
+            response_schema=None,
+            claude_max_token=None,
+            gpt_token=None,
+            gpt_account_id=None,
+            gpt_token_source=None,
+            gpt_token_pool_id=None,
+            user_messages=["goal"],
+            tool_call_id="tc-local",
+            attempt=0,
+        )
+    finally:
+        restore()
+    assert captured["args"][1] == "rose-labs/rose-local", "Local planner must stay on local inference"
     assert captured.get("schedule_to_start_timeout") is None, (
         "A short schedule_to_start with max_attempts=2 can fail a healthy pickup "
         "that would have succeeded inside the 240s StartToClose budget"
@@ -991,8 +1246,17 @@ async def run_all_tests():
     r.record("build_plan_message_dag", test_build_plan_message_dag)
     # tools description
     r.record("planner_tools_description", test_get_planner_tools_description_non_empty)
+    r.record("planner_tools_description_assignable_only", test_planner_tools_description_lists_only_assignable_tools)
     # build_planner_messages
+    r.record("build_planner_messages_completed_explore", test_build_planner_messages_retains_completed_explore_result)
+    r.record("build_planner_messages_latest_terminal", test_build_planner_messages_uses_latest_visible_terminal_result)
+    r.record("build_planner_messages_pending_work", test_build_planner_messages_does_not_turn_pending_work_into_a_result)
+    r.record("build_planner_messages_linear_pending", test_build_planner_messages_pending_history_has_linear_pairing_work)
     r.record("build_planner_messages_basic", test_build_planner_messages_basic)
+    r.record(
+        "build_planner_messages_agent_rows_assistant",
+        test_build_planner_messages_agent_rows_are_assistant_and_never_the_goal,
+    )
     r.record("build_planner_messages_empty", test_build_planner_messages_empty_context)
     r.record("build_planner_messages_tool_system", test_build_planner_messages_tool_and_system_roles)
     r.record(
@@ -1019,6 +1283,10 @@ async def run_all_tests():
     await r.record_async("handler_retries_emit_event", test_handler_retries_emit_retry_event)
     await r.record_async("handler_fails_after_retries", test_handler_fails_after_all_retries)
     await r.record_async("handler_planner_exception", test_handler_planner_exception_yields_error)
+    await r.record_async(
+        "run_planner_attempt_passes_world_cursor_only_in_simulate",
+        test_run_planner_attempt_passes_the_world_cursor_only_in_simulate_mode,
+    )
     await r.record_async(
         "planner_activity_redelivers_after_dead_worker",
         test_run_planner_attempt_redelivers_after_dead_worker,

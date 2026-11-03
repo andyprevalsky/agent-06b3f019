@@ -41,3 +41,10 @@ export class AgentNotFoundError extends Error {
     this.name = 'AgentNotFoundError';
   }
 }
+
+export class AgentPathNotFoundError extends Error {
+  constructor(path: string) {
+    super(`No agent at ${path} in this agent tree. Use an address printed by list_agents.`);
+    this.name = 'AgentPathNotFoundError';
+  }
+}

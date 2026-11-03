@@ -1,0 +1,163 @@
+---
+name: biz-review
+description: Weekly business review card for main — PRs and commits merged, user task completion rate with a per-task list and per-user usage, and a provider-matched compute-cost breakdown, with major updates and clustered minors. Use for /biz-review or a request for a business/weekly review of what shipped.
+---
+
+# /biz-review
+
+Produce one interactive, color-coded card for the last 7 days (rolling, ending
+now) and compare against the 7 days before it. `$ARGUMENTS` may give
+`--days N`. The layout is fixed by `scripts/biz_review.py render`; never
+hand-edit the HTML or invent sections. Run `python3 scripts/biz_review.py
+self-test` first; it covers layout, masking, proration and every cost module.
+
+Card order: Delivery → Tasks (completion KPI, user-initiated KPI with per-user
+bars, expandable "All tasks" list, Andy’s weekly prompt-history graph) → Compute costs (total + top 3 groups, then
+one expandable row per group) → Major updates → Minor updates (expandable
+clusters). No latency, error rates, risk/warning sections, `warming` or
+placeholder values.
+
+## Prerequisites
+
+- `agents/.env` and `back-end/.env` (authoritative copies, see CLAUDE.md);
+  `back-end` dependencies installed (`npx tsx` works); `dvb-onbox` on PATH
+  (boxes.dev box-hours) and `gh`.
+- `back-end/.env` points at the PROD database; the metrics script only reads.
+
+## 1. Collect (read-only, ~1–2 min)
+
+```bash
+python3 scripts/biz_review.py collect $ARGUMENTS
+```
+
+It prints `.context/biz-review/<stamp>/data.json`:
+
+- **Delivery** — PRs merged to `origin/main` (first-parent merges and squash
+  commits with `(#N)`) and every commit those merges brought in.
+- **Tasks** (`back-end/scripts/biz-review-metrics.ts`) — root tasks real people
+  started on prod: operators (Andy, Tamara) included; benchmark, simulated and
+  fixture/test accounts excluded (`realWaitlistPersonSql`). Archived agents are
+  soft-deleted `Agent` rows (GoalHistory is legacy) and are counted as agent
+  runs or chat — never a separate category. Completion rate = COMPLETED ÷ agent
+  runs; chat-only questions show as "Answered". Titles have phone numbers and
+  emails masked.
+- **Andy’s prompt history** — calendar weeks Monday–Sunday in `America/Los_Angeles`,
+  through the collection timestamp (last bar marked partial). Counts retained,
+  nonempty USER inputs in Andy’s real root conversations, including follow-ups;
+  excludes benchmark/simulated roots, generated child goals, workflow messages,
+  A2A, schema/compaction rows, and empty attachment rows. Explicit request IDs
+  are deduplicated; identical text with distinct IDs remains separate. Counts
+  are aggregate-only. Deleted messages and unmarked legacy internal rows cannot
+  be reconstructed reliably: always retain the chart’s scope note, never call
+  this a complete lifetime total. An unavailable collection is not zero usage.
+- **Compute costs**, every row from the provider, never prod-DB recorded spend
+  (cloud benchmark stacks use their own DBs, so recorded spend misses most usage):
+
+  | Group                | Source                                                                                                                                                                                                                                                                        |
+  | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | LLM inference        | OpenRouter (`OPENROUTER_MANAGEMENT_KEY` → `/api/v1/activity`; else exact lifetime-usage snapshot delta; else October-style month-to-date billed rate × days). Cerebras (browser session, else `set-cost`). Codex Pro / Claude Max plans from `scripts/biz_review_plans.json`. |
+  | Fly.io               | `scripts/biz_review_fly.py`: Prometheus run-seconds per machine (destroyed Machines included) × size list price, per app, plus volumes/rootfs. Not a snapshot of running machines.                                                                                            |
+  | Browsers & sandboxes | Kernel, Steel, E2B session APIs × list price + prorated plan (`scripts/biz_review_browsers.py`); boxes.dev overage box-hours from `dvb-onbox billing status` + the seat plan.                                                                                                 |
+  | Hosting              | Vercel billed charges; Render and Supabase plan rates.                                                                                                                                                                                                                        |
+  | Search & data APIs   | `scripts/biz_review_search.py` (Firecrawl plan, Exa via `EXA_SERVICE_API_KEY`) and Lantern ($0, included in its plan) via `scripts/biz_review_lantern.py`.                                                                                                                    |
+
+  Rows with no reachable billing source are listed once per group as
+  "Not connected yet". The plan list (`scripts/biz_review_plans.json`) is the
+  user-confirmed source for flat subscriptions: 5 × Codex Pro $500, 2 × Claude
+  Max $200, 1 boxes.dev Pro seat $99 (2026-10-19). Update it, not code, when
+  plans change.
+
+Known gaps and how to close them (ask once, then reuse):
+
+- Cerebras: metrics API returns "Organization access to metrics API is
+  disabled". Ask the user for the 7-day dashboard figure, or have them sign in
+  at cloud.cerebras.ai in the Browser pane.
+- Parallel, Perplexity: dashboard only. Exa: needs a team admin key. Fly actual
+  invoice and OpenRouter rolling-exact: dashboard sign-in or management key.
+  Azure Foundry is intentionally excluded.
+- Record any figure the user reads off a dashboard before rendering:
+  `python3 scripts/biz_review.py set-cost --dir <run-dir> --name <row name> --usd <n> --detail "<dates · models>"`.
+
+The normal collection includes prompt history. To refresh only this read-only
+aggregate (without contacting billing providers), run:
+
+```bash
+python3 scripts/biz_review_prompts.py --out .context/biz-review/prompts.json
+```
+
+For a separate checkout, `--env-file /absolute/path/to/back-end/.env` selects the
+authoritative configuration without copying secrets. The collector explicitly
+uses `BEGIN READ ONLY`, a 25-second statement timeout, and returns only weekly
+aggregates. Its SQL fixture test uses temporary tables and must use a local DB:
+`TEST_DATABASE_URL=<local-test-connection> python3 scripts/tests/biz-review-prompt-history.test.py`.
+
+## 2. Write the narrative
+
+Read `data.json` → `git.prs` and `git.direct`; only PRs listed there belong on
+the card. Use `gh pr view <n>` only where a title is unclear. Write
+`narrative.json` in the run directory:
+
+```json
+{
+  "majors": [
+    {
+      "title": "SMS supervisor rebuilt",
+      "impact": "Native tool calling, searches before asking → smarter texts with fewer needless questions.",
+      "prs": [1473],
+      "tag": "SHIPPED"
+    }
+  ],
+  "clusters": [
+    {
+      "title": "💬 Chat quality",
+      "count": "5 PRs",
+      "items": ["Re-search after a miss, fan out queries (#1472)"]
+    }
+  ]
+}
+```
+
+- Majors (about 6–10): user-visible features, payment safety, scale or
+  reliability shifts. Title ≤ 5 words; impact is one sentence in
+  "what → why it matters" form. Tag is `SHIPPED` (or `LIVE · <version>` when
+  verified in prod); never a warning tag.
+- Cluster every other PR and direct commit into themed groups, each with an
+  emoji title, a count ("5 PRs", "~55 commits") and short items citing PRs.
+  Bulk operational commits (operator pins, history rows) collapse into one
+  "📊 Benchmark infrastructure" cluster.
+
+## 3. Render and publish
+
+```bash
+python3 scripts/biz_review.py render --dir <run-dir>
+```
+
+Preview `<run-dir>/index.html` in dark mode and at 360 px with
+`dvb-onbox visuals preview`, fix any console error or overflow, then publish
+with `dvb-onbox visuals publish --title "Weekly business review · <Mon D–D>"`
+(see the `boxes-inline-visualizations` skill). Put the printed link alone in
+its own paragraph of the final answer with at most two short sentences around
+it. Do not send screenshots or a markdown re-rendering of the card.
+
+## Meeting reminders for Tamy
+
+After the card link, list these prompts in the final answer as a simple reminder
+for Andy to ask Tamy. Keep them separate from the fixed card layout; do not
+answer them or turn them into new metrics.
+
+- What are our goals this week across our key objectives?
+- What are our goals this month?
+- What are our goals this year?
+- Which goals are need-to-have versus nice-to-have?
+- What are the 90/10 solutions for our immediate goals?
+
+Use Elon's five-step algorithm to discuss the goals:
+
+1. **Question every requirement.** Who specifically owns it, and does it make
+   sense, regardless of who proposed it?
+2. **Delete.** Which parts, processes, or features can we remove? If we never
+   have to add anything back, are we deleting enough?
+3. **Simplify and optimize.** How can we improve only what remains after
+   deletion?
+4. **Accelerate cycle time.** How can we speed up the necessary process?
+5. **Automate.** What should we automate after the first four steps?

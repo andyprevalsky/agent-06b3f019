@@ -37,11 +37,20 @@ DRIVER_PID_FILE="$DATA_DIR/cloudbench-driver.pid"
 DRIVER_STATE_FILE="$DATA_DIR/cloudbench-driver.state"
 SHUTDOWN_REQUEST_FILE="$DATA_DIR/cloudbench-shutdown-${CLOUDBENCH_RUN_TOKEN:-boot}.request"
 CLEANUP_ACK_FILE="$DATA_DIR/cloudbench-driver-clean-${CLOUDBENCH_RUN_TOKEN:-boot}.ack"
+PRELAUNCH_SEAL_FILE="$DATA_DIR/cloudbench-prelaunch-${CLOUDBENCH_RUN_TOKEN:-boot}.sealed"
 INTERRUPT_CLEANUP_STATUS_FILE="$DATA_DIR/cloudbench-interrupt-cleanup-${CLOUDBENCH_RUN_TOKEN:-boot}.status"
 
 publish_driver_state() {
     local state="$1" temporary="${DRIVER_STATE_FILE}.tmp.$$"
     printf '%s\n' "$state" > "$temporary" && mv -f "$temporary" "$DRIVER_STATE_FILE"
+}
+# Token-bound proof that this boot stopped before launching any driver, stack
+# or browser. The status server then seals bench.log as the complete runtime
+# evidence, so the fleet can retire the guest instead of retaining it forever.
+publish_prelaunch_seal() {
+    local temporary="${PRELAUNCH_SEAL_FILE}.tmp.$$"
+    printf '%s\n' "${CLOUDBENCH_RUN_TOKEN:-boot}" > "$temporary" \
+        && mv -f "$temporary" "$PRELAUNCH_SEAL_FILE"
 }
 publish_cleanup_ack() {
     local temporary="${CLEANUP_ACK_FILE}.tmp.$$"
@@ -55,7 +64,7 @@ seal_missing_injected_helper() {
     # No benchmark or browser process was launched, so cleanup is already
     # complete. Publish that token-bound fact before the explicit lifecycle
     # seal; if either durable write fails, leave the guest fail-closed.
-    if ! publish_cleanup_ack; then
+    if ! publish_prelaunch_seal || ! publish_cleanup_ack; then
         printf '[boot %s] FATAL: could not publish no-launch cleanup acknowledgement\n' \
             "$(date -u +%H:%M:%S)" >> "$LOG"
         return 1
@@ -85,7 +94,7 @@ done
 # ambiguous during checkout: it means "not launched yet", not "driver died".
 # Relays and fleet collectors only treat the terminal `exited` state as proof
 # that waiting cannot succeed.
-rm -f "$DRIVER_PID_FILE" "$SHUTDOWN_REQUEST_FILE" "$CLEANUP_ACK_FILE"
+rm -f "$DRIVER_PID_FILE" "$SHUTDOWN_REQUEST_FILE" "$CLEANUP_ACK_FILE" "$PRELAUNCH_SEAL_FILE"
 publish_driver_state booting || exit 1
 
 # RUNSTAMP first — the controller polls the log for this token to confirm the box
@@ -159,7 +168,36 @@ bootstrap_checkout_ref() {
             || echo "[boot] bootstrap fetch-ref failed (driver git_sync will retry)"
     fi
 }
-bootstrap_checkout_ref >> "$LOG" 2>&1
+# The injected cold driver owns the first empty-destination check and checkout.
+# Prefetching here would populate that destination before its mandatory guard.
+# The fetch can take minutes, far beyond the fleet's cleanup-acknowledgement
+# window, so a durable /shutdown request stops it instead of waiting it out.
+# Nothing from the checkout has run yet; the request is then consumed below.
+interruptible_bootstrap_checkout() {
+    local pid waited=0
+    set -m
+    bootstrap_checkout_ref >> "$LOG" 2>&1 &
+    pid=$!
+    set +m
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ -e "$SHUTDOWN_REQUEST_FILE" ]; then
+            printf '[boot %s] shutdown requested during bootstrap checkout; stopping it\n' \
+                "$(date -u +%H:%M:%S)" >> "$LOG"
+            kill -TERM -- "-$pid" 2>/dev/null || true
+            while kill -0 -- "-$pid" 2>/dev/null && [ "$waited" -lt 20 ]; do
+                sleep 0.5
+                waited=$((waited + 1))
+            done
+            kill -KILL -- "-$pid" 2>/dev/null || true
+            break
+        fi
+        sleep 0.5
+    done
+    wait "$pid" 2>/dev/null || true
+}
+if [ "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" != 1 ]; then
+    interruptible_bootstrap_checkout
+fi
 
 # Run the controller-injected driver, not the copy in the checkout. This matters
 # for dirty-worktree validation: cloudbench-run.sh is the process that applies
@@ -174,6 +212,7 @@ bootstrap_checkout_ref >> "$LOG" 2>&1
 # then explicitly stops/returns this Machine to the pool. If the driver crashes
 # before DONE, /driver-health still reports it dead while this supervisor lives.
 if [ -e "$SHUTDOWN_REQUEST_FILE" ]; then
+    publish_prelaunch_seal || exit 1
     publish_cleanup_ack || exit 1
     printf '[boot %s] shutdown requested before driver launch; cleanup acknowledged\n' \
         "$(date -u +%H:%M:%S)" >> "$LOG"

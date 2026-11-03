@@ -1,0 +1,26 @@
+{
+  "recorded_at": "2026-10-15T18:46:05.943703+00:00",
+  "parents": [
+    "6136b726d",
+    "d70436ea5e8c2074ca654b3b665104c9c2bc9669"
+  ],
+  "source_conflicts": {
+    "SMS_handler": "Keep approved native per-call feedback and classifier removal; retain upstream reactions, replies and reply-target duplicate identity; import existing failure formatter used by both parents.",
+    "SMS_LLM": "Keep native IDs, pool evaluation controls and private development dump; retain upstream reaction-only response model.",
+    "SMS_stream_tests": "Keep native validation case and all upstream reaction cases;19cases.",
+    "browser_tests": "Both source branches retained; upstream superset plus explicit Date|null annotation.",
+    "benchmark_tests": "Keep all source-specific test functions; remove only AST-identical duplicate CI definition.",
+    "RCA": "Retain both source narratives and registrations; canonical reindex."
+  },
+  "prisma_generate": {
+    "completed_marker": true,
+    "schema_change_source": "Already merged upstream production main; no new task-authored schema changes"
+  },
+  "merged_candidate_tsc_exit": 0,
+  "benchmark_existing_offline_owner_checks": 17,
+  "browser_syntax_and_two_mocked_profile_owners": "PASS",
+  "standalone_browser_test_typing": "Existing incoming test diagnostics retained; no clean claim",
+  "prompt_proposals": "BOTH UNAPPLIED; exact patches still pass git apply --check",
+  "fresh_integrated_full_gates": "NOT_YET_RUN",
+  "raw_evidence_private": true
+}

@@ -14,8 +14,8 @@ import type {
   FilePointer,
   CreateAgentPayload,
   InspectionContext,
+  MessageTarget,
 } from '@/lib/api';
-import type { RequestPaymentCardPayload } from '@/lib/realtime-types';
 import type { GateMetadata } from '@/features/terminal-component-group/components/attention-inbox/types';
 
 // ── View state ────────────────────────────────────────────────────────────
@@ -69,12 +69,7 @@ export type { BrowserPanelData } from '@/lib/browserPanelLifecycle';
 
 // ── Approval state ────────────────────────────────────────────────────────
 
-export interface PendingApproval {
-  attentionRequestId: string;
-  question: string;
-  imageUrl: string | null;
-  requestPaymentCard?: RequestPaymentCardPayload;
-}
+export type { PendingApproval } from '@/lib/pendingApproval';
 
 export interface PendingGate {
   attentionRequestId: string;
@@ -93,10 +88,12 @@ export interface TerminalAgentActions {
   handleCreateAgent: (data: CreateAgentPayload) => Promise<void>;
   handleResumeAgent: (agentId: string) => Promise<void>;
   handlePauseAgent: () => Promise<void>;
-  handleSendMessage: (attachments?: FilePointer[]) => Promise<void>;
+  handleSendMessage: (attachments?: FilePointer[], target?: MessageTarget) => Promise<void>;
   handleLogout: () => Promise<void>;
   handleLoginClick: () => void;
   handleCreateNewAgent: () => void;
+  /** Rose Desktop project "+": the next goal creates the agent in that project. */
+  handleCreateNewAgentInProject: (project: { id: string }, folderId?: string | null) => void;
   handleSubmitFeedback: (feedback: BlueprintFeedback) => Promise<void>;
   refreshAgentDetail: (agentId: string) => Promise<void>;
   cleanupAgentState: () => void;
@@ -108,6 +105,7 @@ export interface TerminalUIState {
   setCurrentView: (view: TerminalView) => void;
   agents: Agent[];
   isLoadingAgents: boolean;
+  hasLoadedAgents: boolean;
   createModalOpen: boolean;
   setCreateModalOpen: (open: boolean) => void;
   loginModalOpen: boolean;
@@ -133,6 +131,8 @@ export interface TerminalUIState {
 // ── AgentChatArea slices ──────────────────────────────────────────────────
 
 export interface AgentSlice {
+  newAgentProjectId?: string | null;
+  newAgentFolderId?: string | null;
   isAuthenticated: boolean;
   isAnonymous: boolean;
   handleJoinWaitlist: () => void;
@@ -158,7 +158,7 @@ export interface AgentSlice {
   isPausing: boolean;
   ancestors: AncestorNode[];
   handleSelectAgent: (id: string | null) => void;
-  handleSendMessage: (attachments?: FilePointer[]) => Promise<void>;
+  handleSendMessage: (attachments?: FilePointer[], target?: MessageTarget) => Promise<void>;
   handlePauseAgent: () => Promise<void>;
   handleSubmitFeedback: (f: BlueprintFeedback) => Promise<void>;
   refreshAgentDetail: (id: string) => Promise<void>;
@@ -188,6 +188,7 @@ export type {
   AncestorNode,
   FilePointer,
   CreateAgentPayload,
+  MessageTarget,
 } from '@/lib/api';
 
 export type { Model } from '@/hooks/useAppData';

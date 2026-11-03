@@ -87,6 +87,8 @@ class ContainerOwnership(unittest.TestCase):
         foreign_image=False,
         writable_mount=False,
         extra_mount=False,
+        foreign_registry_mount=False,
+        writable_registry_mount=False,
         cid=True,
         export_failure=False,
         export_exception=False,
@@ -108,12 +110,21 @@ class ContainerOwnership(unittest.TestCase):
                 for relative, destination, writable in [
                     ("scripts", "/repo/scripts", False),
                     ("agents/benchmarks", "/repo/agents/benchmarks", False),
+                    (
+                        "agents/providers/rose/pools.py",
+                        "/repo/agents/providers/rose/pools.py",
+                        False,
+                    ),
                 ]
             ]
             if foreign_mount:
                 mounts[0]["Source"] = str(root / "foreign-source")
             if writable_mount:
                 mounts[0]["RW"] = True
+            if foreign_registry_mount:
+                mounts[2]["Source"] = str(root / "foreign-registry.py")
+            if writable_registry_mount:
+                mounts[2]["RW"] = True
             if extra_mount:
                 mounts.append(
                     {"Source": str(root / "extra"), "Destination": "/extra", "RW": True}
@@ -213,6 +224,8 @@ class ContainerOwnership(unittest.TestCase):
             {"foreign_image": True},
             {"writable_mount": True},
             {"extra_mount": True},
+            {"foreign_registry_mount": True},
+            {"writable_registry_mount": True},
         ):
             with self.subTest(settings=settings):
                 result, calls, _ = self.check_retirement(**settings)
@@ -248,11 +261,19 @@ class ContainerOwnership(unittest.TestCase):
         platform="darwin",
         euid=501,
         native_preflight=None,
+        registry=True,
     ):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             tests = root / "scripts/tests"
             tests.mkdir(parents=True)
+            actual_registry = (
+                Path(__file__).resolve().parents[2] / "agents/providers/rose/pools.py"
+            )
+            if registry:
+                staged = root / "agents/providers/rose/pools.py"
+                staged.parent.mkdir(parents=True)
+                staged.write_bytes(actual_registry.read_bytes())
             (tests / "cloudbench-controller-linux.Dockerfile").write_text(
                 "FROM fixture\n"
             )
@@ -335,6 +356,12 @@ class ContainerOwnership(unittest.TestCase):
                 ) as retirement,
                 contextlib.redirect_stdout(io.StringIO()),
             ):
+                if not registry:
+                    with self.assertRaisesRegex(RuntimeError, "pool registry is missing"):
+                        runner.main()
+                    # No fixture container is launched without the registry.
+                    self.assertEqual(calls, [])
+                    return lifecycle
                 if cancelled:
                     with self.assertRaises(SystemExit) as exit_status:
                         runner.main()
@@ -363,8 +390,20 @@ class ContainerOwnership(unittest.TestCase):
                 for index, value in enumerate(command)
                 if value == "-v"
             ]
-            self.assertEqual(len(mounts), 2)
+            self.assertEqual(len(mounts), 3)
             self.assertTrue(all(value.endswith(":ro") for value in mounts))
+            # The real controller resolves WMH_ROSE_POOL through the exact
+            # authoritative registry, staged read-only beside the snapshot.
+            registry_mount = next(
+                value
+                for value in mounts
+                if value.endswith(":/repo/agents/providers/rose/pools.py:ro")
+            )
+            staged_registry = Path(registry_mount.split(":", 1)[0])
+            self.assertEqual(
+                staged_registry.read_bytes(), actual_registry.read_bytes()
+            )
+            self.assertIn("--init", command)
             self.assertTrue(
                 any(args[1] == "run" and "--rm" in args for args in tool_commands)
             )
@@ -373,6 +412,9 @@ class ContainerOwnership(unittest.TestCase):
     def test_dispatch_uses_native_storage_and_keeps_inherited_proxies(self):
         self.assertEqual(self.check_dispatch(), ["join", "retire"])
         self.assertEqual(self.check_dispatch(fixture_exit_code=1), ["join", "retire"])
+
+    def test_missing_pool_registry_fails_before_container_launch(self):
+        self.assertEqual(self.check_dispatch(registry=False), [])
 
     def test_status_shutdown_runs_cache_parent_controls_without_a_pytest_gate(self):
         source = Path(__file__).with_name(
@@ -429,7 +471,7 @@ class ContainerOwnership(unittest.TestCase):
             launch.assert_not_called()
 
     def test_registered_fixture_selector_preserves_exact_dispatch_owner(self):
-        for fixture in ("multi-workstream", "status-service-shutdown"):
+        for fixture in ("multi-workstream", "status-service-shutdown", "export-recovery"):
             with self.subTest(fixture=fixture):
                 self.assertEqual(
                     self.check_dispatch(fixture=fixture), ["join", "retire"]

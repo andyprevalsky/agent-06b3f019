@@ -1,6 +1,10 @@
 import { PrismaClient } from '@prisma/client';
 
-const p = new PrismaClient({ datasources: { db: { url: process.env.FAST_MODE_CACHE_DATABASE_URL! } } });
+const p = new PrismaClient({
+  datasources: {
+    db: { url: (process.env.FAST_MODE_CACHE_DATABASE_URL ?? process.env.DEMO_CACHE_DATABASE_URL)! },
+  },
+});
 
 async function main() {
   const keyPrefix = process.argv[2]; // e.g. fastmode:v42:llm:917f1178187930be:verifier_execute

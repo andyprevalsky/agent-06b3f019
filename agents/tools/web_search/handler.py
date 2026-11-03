@@ -17,26 +17,56 @@ from helpers.world_model_runtime import (
     wmh_fallback_on_unavailable_enabled,
     wmh_result_unavailable,
 )
-from providers.fast_cache import client as fast_cache_client
-from providers.fast_cache import normalize as fast_cache_normalize
+from providers.demo_cache import client as demo_cache_client
+from providers.demo_cache import normalize as demo_cache_normalize
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, format_error_message, format_tool_message
 from tools.web_search.config import (
     ACTIVITY_TIMEOUT_SECONDS,
     COST_CENTS_PER_QUERY,
     DEFAULT_MAX_TOKENS,
+    EXA_COST_CENTS_PER_QUERY,
     QUERY_DISPLAY_MAX_LENGTH,
     RETRY_BACKOFF_COEFFICIENT,
     RETRY_INITIAL_INTERVAL_SECONDS,
     RETRY_MAX_ATTEMPTS,
     RETRY_MAX_INTERVAL_SECONDS,
 )
-from tools.web_search.service import execute_search
+from tools.web_search.service import execute_search, format_search_results
 
 if TYPE_CHECKING:
     from tools.web_search.types import ExecuteActivityCallable
 
 logger = structlog.get_logger()
-FAST_CACHE_HIT_FIELD = "_fast_cache_hit"
+DEMO_CACHE_HIT_FIELD = "_fast_cache_hit"
+
+# Billed providers by SearchResult.provider. The keyless DDGS fallback is free;
+# results without a provider field predate multi-provider search (Parallel).
+_BILLED_PROVIDERS = {
+    "parallel-ai": (COST_CENTS_PER_QUERY, "Parallel AI Search"),
+    "exa": (EXA_COST_CENTS_PER_QUERY, "Exa Search"),
+}
+
+
+def _service_billing(result: Any) -> Optional[tuple[float, str]]:
+    provider = result.get("provider", "parallel-ai") if isinstance(result, dict) else "parallel-ai"
+    return _BILLED_PROVIDERS.get(provider)
+
+
+async def _project_received_excerpts(result: Any, *, user_id: Optional[str], agent_id: Optional[str], session_id: str) -> Any:
+    """Apply the old excerpt budget after retaining received text for this caller."""
+    if not isinstance(result, dict) or "_received_exa_results" not in result:
+        return result
+    from helpers.tool_output import preview_tool_text
+
+    rows = []
+    for row in result["_received_exa_results"]:
+        # Very small internal budgets still need room for the readback protocol;
+        # the public tool uses 2,000 characters per result by default.
+        preview = await preview_tool_text("\n".join(row["excerpts"]), user_id=user_id or "", agent_id=agent_id or "",
+                                          session_id=session_id, limit=max(512, result["_excerpt_limit"]))
+        rows.append({**row, "excerpts": [preview]})
+    return {**{k: v for k, v in result.items() if k not in {"_received_exa_results", "_excerpt_limit"}},
+            "answer": format_search_results(rows)}
 
 
 def _safe_time() -> float:
@@ -48,7 +78,7 @@ def _safe_time() -> float:
 
 
 class WebSearchManager(ToolManager):
-    """Manager for web search operations using Parallel AI's search capability."""
+    """Manager for web search operations (Parallel AI, then Exa, then keyless DDGS)."""
 
     tool_name = "web_search"
     read_only = True  # Research phase tool
@@ -64,6 +94,7 @@ class WebSearchManager(ToolManager):
         fast_mode_goal: Optional[str] = None,
         fast_mode_cache_write_enabled: bool = False,
         world_model_mode: str = "real",
+        session_id: str = "",
     ) -> dict[str, Any]:
         """Execute web search and post events via handle_tool_event.
 
@@ -119,7 +150,7 @@ class WebSearchManager(ToolManager):
                 activity_args.extend([None, None])
             # The cache write gate resolves this agent's tree root (a child under
             # a frozen DEMO root never writes) without changing world-model routing.
-            activity_args.append(agent_id)
+            activity_args.extend([agent_id, user_id, session_id])
             result = await execute_activity(
                 web_search_activity,
                 args=activity_args,
@@ -134,11 +165,12 @@ class WebSearchManager(ToolManager):
 
             # 3. Calculate elapsed time and cost
             elapsed_time = _safe_time() - start_time
-            cache_hit = isinstance(result, dict) and bool(result.get(FAST_CACHE_HIT_FIELD))
+            cache_hit = isinstance(result, dict) and bool(result.get(DEMO_CACHE_HIT_FIELD))
             simulated = isinstance(result, dict) and bool(result.get("world_model_simulated"))
             if cache_hit:
-                result = {k: v for k, v in result.items() if k != FAST_CACHE_HIT_FIELD}
-            total_cost_cents = 0 if cache_hit or simulated else COST_CENTS_PER_QUERY
+                result = {k: v for k, v in result.items() if k != DEMO_CACHE_HIT_FIELD}
+            billing = None if cache_hit or simulated else _service_billing(result)
+            total_cost_cents = billing[0] if billing else 0
 
             message = format_tool_message(
                 params=tool_call, result=result, time_elapsed=elapsed_time, cost_cents=total_cost_cents
@@ -162,11 +194,7 @@ class WebSearchManager(ToolManager):
                 "result": result,
                 "usage": {
                     "llm": [],
-                    "service": (
-                        []
-                        if cache_hit or simulated
-                        else [{"cost_cents": total_cost_cents, "provider": "Parallel AI Search"}]
-                    ),
+                    "service": [{"cost_cents": billing[0], "provider": billing[1]}] if billing else [],
                 },
             }
 
@@ -266,7 +294,9 @@ async def web_search_activity(
     fast_mode_cache_write_enabled: bool = False,
     agent_id: Optional[str] = None,
     world_model_mode: Optional[str] = None,
-    fast_cache_agent_id: Optional[str] = None,
+    demo_cache_agent_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    session_id: str = "",
 ) -> dict[str, Any]:
     """Activity: Perform a web search for quick facts and current information.
 
@@ -288,43 +318,38 @@ async def web_search_activity(
     """
     read_cache = fast_mode_cache_enabled and bool(fast_mode_goal)
     write_cache = (fast_mode_cache_enabled or fast_mode_cache_write_enabled) and bool(fast_mode_goal)
-    cache_key = fast_cache_normalize.web_search_key(fast_mode_goal, query, max_tokens) if write_cache else None
+    cache_key = demo_cache_normalize.web_search_key(fast_mode_goal, query, max_tokens) if write_cache else None
     if cache_key is not None and read_cache:
-        stored = await fast_cache_client.cache_get(cache_key)
+        stored = await demo_cache_client.cache_get(cache_key)
         if stored is not None:
             if wmh_fallback_on_unavailable_enabled() and wmh_result_unavailable(stored):
-                logger.info("fast_cache.web_search_unavailable_ignored", key=cache_key)
+                logger.info("demo_cache.web_search_unavailable_ignored", key=cache_key)
             else:
-                logger.info("fast_cache.web_search_hit", key=cache_key)
+                logger.info("demo_cache.web_search_hit", key=cache_key)
                 if isinstance(stored, dict):
-                    return {**stored, FAST_CACHE_HIT_FIELD: True}
+                    return await _project_received_excerpts({**stored, DEMO_CACHE_HIT_FIELD: True}, user_id=user_id, agent_id=demo_cache_agent_id or agent_id, session_id=session_id)
                 return stored
         if stored is None:
             # Fast Mode read miss: soft-complete instead of live Parallel AI.
-            # Restricted to exact-match fast_cache:on bench trees (mass-agent OAi).
-            if not await fast_cache_client.soft_complete_allowed_for_agent(
-                agent_id, fast_mode_goal
-            ):
+            # Restricted to exact-match demo_cache:on bench trees (mass-agent OAi).
+            if not await demo_cache_client.soft_complete_allowed_for_agent(agent_id, fast_mode_goal):
                 logger.info(
-                    "fast_cache.web_search_miss_live",
+                    "demo_cache.web_search_miss_live",
                     key=cache_key,
                     query=query[:120],
                     reason="soft_complete_not_allowlisted",
                 )
             else:
-                logger.info("fast_cache.web_search_soft_complete", key=cache_key, query=query[:120])
+                logger.info("demo_cache.web_search_soft_complete", key=cache_key, query=query[:120])
                 return {
-                    "answer": (
-                        "Fast Mode cache miss for this web search. Returning without a "
-                        "live provider call."
-                    ),
+                    "answer": ("Fast Mode cache miss for this web search. Returning without a live provider call."),
                     "sources": [],
                     "query": query,
                     "provider": "fast-mode-soft-complete",
-                    FAST_CACHE_HIT_FIELD: True,
+                    DEMO_CACHE_HIT_FIELD: True,
                 }
     elif cache_key is not None:
-        logger.info("fast_cache.web_search_write_only", key=cache_key)
+        logger.info("demo_cache.web_search_write_only", key=cache_key)
 
     async def real_executor(_tool_name: str, _tool_args: dict[str, Any], _tool_call_id: str) -> dict[str, Any]:
         return await execute_search(query=query, max_tokens=max_tokens)
@@ -348,10 +373,10 @@ async def web_search_activity(
     if (
         cache_key is not None
         and write_cache
-        and await fast_cache_client.cache_write_allowed_for_agent(fast_cache_agent_id or agent_id, fast_mode_goal)
+        and await demo_cache_client.cache_write_allowed_for_agent(demo_cache_agent_id or agent_id, fast_mode_goal)
     ):
-        await fast_cache_client.cache_set(
-            cache_key, "web_search", fast_cache_normalize.goal_hash(fast_mode_goal), result, goal=fast_mode_goal
+        await demo_cache_client.cache_set(
+            cache_key, "web_search", demo_cache_normalize.goal_hash(fast_mode_goal), result, goal=fast_mode_goal
         )
-        logger.info("fast_cache.web_search_stored", key=cache_key)
-    return result
+        logger.info("demo_cache.web_search_stored", key=cache_key)
+    return await _project_received_excerpts(result, user_id=user_id, agent_id=demo_cache_agent_id or agent_id, session_id=session_id)

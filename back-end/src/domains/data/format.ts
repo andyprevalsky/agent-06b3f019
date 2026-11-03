@@ -130,8 +130,10 @@ export function buildAgentNetworkMatch(
   input: ValidatedGrepInput
 ): GrepMatch {
   const path = buildAgentNetworkPath(row.agentDepth, row.agentId, row.role, row.id);
+  const agentPath = row.agentPath;
   const content = [
     valueToLine('source', 'agent_network'),
+    valueToLine('agent_path', agentPath),
     valueToLine('agent_id', row.agentId),
     valueToLine('agent_goal', row.agentGoal),
     valueToLine('agent_depth', row.agentDepth),
@@ -156,6 +158,7 @@ export function buildAgentNetworkMatch(
       source: 'agent_network',
       path,
       agent_id: row.agentId,
+      ...(agentPath !== null ? { agent_path: agentPath } : {}),
       message_id: row.id,
       role: row.role,
       field: 'message',

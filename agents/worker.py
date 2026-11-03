@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import os
+import random
 import re
 import signal
 import sys
@@ -15,6 +16,7 @@ import structlog
 from dotenv import load_dotenv
 from temporalio.client import Client
 from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import (
     FixedSizeSlotSupplier,
     Worker,
@@ -36,8 +38,16 @@ if not os.getenv("BACKEND_API_KEY"):
 from activities.param_populator import populate_tool_params_activity
 from browser_tools.secret_refs import redact_secret_log_values
 from config import load_config
+from domains.agent_messaging.service import (
+    kill_agent_activity,
+    list_agent_tree_activity,
+    resolve_agent_address_activity,
+    send_agent_message_activity,
+    send_agent_message_to_address_activity,
+)
 from domains.api_request.repo import api_request_activity
 from domains.call_phone_number.handler import call_phone_number_activity
+from domains.display.repo import display_media_activity
 from domains.gate.repo import (
     create_gate_request_activity,
     has_message_corpus_activity,
@@ -83,13 +93,21 @@ from domains.spawn_claude_code_agent.service import (
     resolve_code_agent_provider_activity,
     spawn_claude_code_activity,
 )
+from domains.spawn_claude_code_agent.service_target import resolve_code_agent_target_activity
 from domains.spawn_sub_agents.service import (
     spawn_sub_agent_activity,
     spawn_sub_agents_batch_activity,
 )
+from domains.user_tools.repo import resolve_user_tools_activity, run_user_tool_activity
 from domains.wait_for.service import evaluate_condition_activity
 from domains.web_fetch.handler import web_fetch_activity, web_fetch_download_activity
-from health_server import run_health_server, set_queue_metrics, set_worker_status
+from health_server import (
+    run_health_server,
+    set_autoscaler_role,
+    set_local_autoscaler_metrics,
+    set_queue_observation,
+    set_worker_status,
+)
 
 # Helper activities (workflow orchestration, not exposed to LLM)
 from helpers import (
@@ -113,13 +131,16 @@ from helpers import (
     mark_finished,
     poll_new_messages,
     post_agent_message,
+    resolve_fast_cache_context_activity,
     resolve_fast_cache_goal_activity,
     summarize_tool_result,
     update_agent_status,
 )
+from helpers.agent_graph import send_agent_graph_message_activity
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
 from helpers.error_alert import report_failure_activity
 from helpers.generation_handoff import parse_shutdown_grace_seconds
+from helpers.jev_progress import predict_jev_progress
 from helpers.llm import (
     call_planner_llm_activity,
     fetch_claude_max_token_activity,
@@ -144,13 +165,19 @@ from helpers.sms_activities import (
 )
 from helpers.summarize import summarize_and_filter_links
 from helpers.update_tokens import update_agent_tree_cost_activity
+from helpers.user_ui_activities import resolve_user_ui_inline_view_activity
 from helpers.worker_activation import wait_for_worker_build_activation
 from helpers.worker_event_loop import run_worker_event_loop
 from helpers.worker_generation import resolve_production_task_queue
 from helpers.workflow_sandbox import production_workflow_runner
-from helpers.world_model_runtime import world_model_step_activity
-from temporal_connection import temporal_connect_options
+from helpers.world_model_runtime import (
+    world_clock_activity,
+    world_model_specialized_agent_activity,
+    world_model_step_activity,
+)
+from temporal_connection import production_namespace_refusal, temporal_connect_options
 from tools.people_search import people_search_activity  # not yet refactored into domains/
+from tools.read_tool_output import preview_tool_output_activity, read_tool_output_activity
 from tools.web_search import web_search_activity  # not yet refactored into domains/
 from workflows import AgentWorkflow
 
@@ -222,17 +249,24 @@ _wf.logger.workflow_info_on_message = False
 logger = structlog.get_logger()
 
 
+import ipaddress
 import math
 import socket
 import threading
 import time
+from dataclasses import dataclass
 
 import httpx
 
 # ── Adaptive autoscaler ──────────────────────────────────────────────────
 # Built-in controller: no separate autoscaler machine needed.
-# Every worker polls Temporal (1s), computes desired fleet size.
-# Only the leader (lowest-IP via Fly DNS) actuates via Fly Machines API.
+# Each generation elects one leader: its lowest-IP live worker (Fly DNS plus
+# each lower peer's /autoscaler/peer view). Only the leader polls Temporal (1s),
+# computes the desired fleet size and actuates via the Fly Machines API.
+# Followers spend no Temporal calls: they publish their own readings every
+# second and mirror the leader's observation. A worker that cannot verify its
+# role observes at a reduced cadence and never actuates, so a generation is
+# never left without an observer.
 #
 # Capacity is observed in real-time from the SDK's slot metrics
 # (worker_task_slots_used + worker_task_slots_available on localhost:9090).
@@ -265,7 +299,34 @@ SCALE_UP_COOLDOWN_SECS = 20  # Seconds to wait after a scale-up before allowing 
 WORKFLOW_SATURATION_SCALE_UP = float(os.getenv("WORKFLOW_SATURATION_SCALE_UP", "0.75"))
 WORKFLOW_SLOT_TARGET_OCCUPANCY = float(os.getenv("WORKFLOW_SLOT_TARGET_OCCUPANCY", "0.6"))
 ADMISSION_PRESSURE_SCALE_UP_SECS = 60
-POLL_INTERVAL_SECS = 1  # 3 Temporal API calls/s — well within 1000 req/s limit
+# Each cycle issues CountWorkflowExecutions + two DescribeTaskQueue calls. Temporal
+# Cloud meters all three against the namespace's shared Visibility API budget, so
+# every worker on the namespace (prod and benchmark guests alike) spends 3 calls/s
+# at the 1 s default. Production keeps 1 s; isolated benchmark guests receive a
+# fleet-budgeted AUTOSCALER_POLL_INTERVAL_SECONDS from their controller.
+POLL_INTERVAL_SECS = 1
+# A ResourceExhausted answer means the namespace budget is spent. Retrying at the
+# base cadence only adds rejected load, so back off exponentially with jitter up
+# to this ceiling and return to the base cadence after the next success.
+AUTOSCALER_RATE_LIMIT_BACKOFF_MAX_SECS = 60.0
+_AUTOSCALER_RANDOM = random.Random()
+# Followers skip the three visibility calls (they cost the namespace ~3 calls/s
+# per worker); only the elected leader observes. A worker that cannot verify
+# whether a lower peer leads keeps observing, jittered between this and twice
+# this cadence, without actuating: never zero observers, never two actuators.
+AUTOSCALER_UNKNOWN_LEADER_POLL_SECS = 15.0
+# A lower peer whose local readings are older than this is not provably dead
+# (a wedged loop may resume actuating), so it makes leadership unknown.
+AUTOSCALER_LEADER_STALE_SECS = 15.0
+AUTOSCALER_PEER_PATH = "/autoscaler/peer"
+AUTOSCALER_ROLE_LEADER = "leader"
+AUTOSCALER_ROLE_FOLLOWER = "follower"
+AUTOSCALER_ROLE_UNKNOWN = "unknown"
+PEER_PROBE_TIMEOUT_SECS = 1.0
+# Local memory/admission/slot readings publish on their own cadence: peers'
+# leader decisions and the scale-down idle guard read them even while the
+# namespace throttles visibility calls.
+LOCAL_TELEMETRY_INTERVAL_SECS = 1.0
 METRICS_RPC_TIMEOUT = timedelta(seconds=5)
 LOG_INTERVAL_SECS = 30  # Periodic summary log (avoid 86k lines/day at 1s polls)
 SDK_METRICS_PORT = int(os.getenv("SDK_METRICS_PORT", "9090"))
@@ -282,6 +343,7 @@ _last_log_time: float = 0
 _last_scale_up_time: float = 0
 _prev_desired: int = MIN_MACHINES
 _admission_pressure_since: float | None = None
+_latest_local_telemetry: dict | None = None
 
 
 class ActivityAdmissionSnapshot:
@@ -348,41 +410,158 @@ class ActivityAdmissionSnapshot:
         }
 
 
+def _canonical_ip(ip: str) -> str:
+    """Canonical text form of an address.
+
+    Leadership keeps the established order (sorted canonical text), so workers
+    on old and new code agree on the lowest peer during a rolling deploy; this
+    only protects equality and order against a non-canonical FLY_PRIVATE_IP.
+    """
+    value = (ip or "").strip()
+    try:
+        return str(ipaddress.ip_address(value.split("%", 1)[0]))
+    except ValueError:
+        return value.lower()
+
+
 def _get_peer_ips(app_name: str) -> list[str]:
     """Get sorted list of all peer IPv6 addresses via Fly internal DNS."""
     try:
         addrs = socket.getaddrinfo(f"{app_name}.internal", None, socket.AF_INET6)
-        return sorted(set(a[4][0] for a in addrs))
     except socket.gaierror:
         return []
+    return sorted({_canonical_ip(a[4][0]) for a in addrs})
 
 
-def _count_fly_peers() -> int:
-    """Count running Fly machines via internal AAAA DNS."""
-    fly_app = os.getenv("FLY_APP_NAME")
-    if not fly_app:
-        return 1  # Local development
-    return max(len(_get_peer_ips(fly_app)), 1)
+@dataclass(frozen=True)
+class AutoscalerRole:
+    """This worker's autoscaler role for one cycle."""
+
+    role: str
+    reason: str
+    peers: tuple[str, ...] = ()
+    self_ip: str | None = None
+    leader_ip: str | None = None
+    leader_view: dict | None = None
 
 
-def _am_i_leader() -> bool:
-    """Leader election via DNS: lowest IPv6 address is the leader.
+def _worker_surface_hash() -> str:
+    return (os.getenv("TEMPORAL_WORKER_SURFACE_HASH") or "").strip()
 
-    All workers compute desired_machine_count, but only the leader
-    actuates by calling the Fly Machines API to start/stop machines.
-    If the leader dies, it disappears from DNS and the next-lowest
-    IP takes over automatically within 1 poll cycle.
+
+async def _probe_autoscaler_peer(http: httpx.AsyncClient, ip: str) -> dict | None:
+    """Return one peer's /autoscaler/peer view, or None when it cannot be verified."""
+    try:
+        resp = await http.get(
+            f"http://[{ip}]:{HEALTH_CHECK_PORT}{AUTOSCALER_PEER_PATH}",
+            timeout=PEER_PROBE_TIMEOUT_SECS,
+        )
+        if resp.status_code != 200:
+            return None
+        view = resp.json()
+    except Exception as e:
+        logger.debug("Failed to read peer autoscaler view", peer_ip=ip, error=str(e))
+        return None
+    return view if isinstance(view, dict) else None
+
+
+def _peer_candidacy(view: dict | None, surface: str) -> bool | None:
+    """True: a live leader candidate of this generation; False: provably not; None: unverifiable."""
+    if view is None:
+        return None  # unreachable, slow, or pre-upgrade: it may still be leading
+    if str(view.get("surface_hash") or "").strip() != surface:
+        return False  # another generation polls its own queue and actuates its own machines
+    if view.get("leader_eligible") is not True:
+        return False  # standby, opted out, compute-only, or its observer loop has exited
+    age = view.get("heartbeat_age_seconds")
+    if isinstance(age, bool) or not isinstance(age, int | float) or not math.isfinite(age):
+        return None
+    if age > AUTOSCALER_LEADER_STALE_SECS:
+        return None  # a wedged loop is not provably dead
+    return True
+
+
+async def _resolve_autoscaler_role(http: httpx.AsyncClient, stop_event: asyncio.Event) -> AutoscalerRole:
+    """Deterministic per-generation leader: the lowest-IP live worker of this generation.
+
+    Probes lower peers in ascending order and stops at the first live
+    same-generation candidate, so a follower usually reads one peer and the
+    leader reads none. If DNS, this worker's address or any lower peer cannot
+    be verified, the role is unknown: observe at a reduced cadence, never
+    actuate. Off Fly (local dev, isolated benchmark guests) the worker is alone.
     """
     fly_app = os.getenv("FLY_APP_NAME")
     if not fly_app:
-        return True  # Local dev — only worker
-    my_ip = os.getenv("FLY_PRIVATE_IP")
+        return AutoscalerRole(AUTOSCALER_ROLE_LEADER, "not_on_fly")
+    my_ip = _canonical_ip(os.getenv("FLY_PRIVATE_IP") or "")
     if not my_ip:
-        return True
-    peers = _get_peer_ips(fly_app)
+        return AutoscalerRole(AUTOSCALER_ROLE_UNKNOWN, "missing_private_ip")
+    peers = tuple(sorted({_canonical_ip(ip) for ip in _get_peer_ips(fly_app)}))
     if not peers:
-        return True
-    return my_ip == peers[0]
+        return AutoscalerRole(AUTOSCALER_ROLE_UNKNOWN, "peer_dns_unavailable", self_ip=my_ip)
+    surface = _worker_surface_hash()
+    unverified = False
+    for ip in peers:
+        if ip >= my_ip:
+            break
+        if stop_event.is_set():
+            return AutoscalerRole(AUTOSCALER_ROLE_UNKNOWN, "stopping", peers, my_ip)
+        view = await _probe_autoscaler_peer(http, ip)
+        candidacy = _peer_candidacy(view, surface)
+        if candidacy is True:
+            return AutoscalerRole(AUTOSCALER_ROLE_FOLLOWER, "lower_live_peer", peers, my_ip, ip, view)
+        unverified = unverified or candidacy is None
+    if unverified:
+        return AutoscalerRole(AUTOSCALER_ROLE_UNKNOWN, "lower_peer_unverified", peers, my_ip)
+    return AutoscalerRole(AUTOSCALER_ROLE_LEADER, "lowest_live_peer", peers, my_ip)
+
+
+async def _scrape_fleet_peer_views(
+    http: httpx.AsyncClient,
+    peer_ips: list[str],
+    stop_event: asyncio.Event | None = None,
+) -> dict[str, dict | None]:
+    """Leader-only: read every peer's view concurrently, bounded by one probe timeout."""
+
+    async def probe(ip: str) -> tuple[str, dict | None]:
+        if stop_event is not None and stop_event.is_set():
+            return ip, None
+        return ip, await _probe_autoscaler_peer(http, ip)
+
+    return dict(await asyncio.gather(*(probe(ip) for ip in peer_ips)))
+
+
+@dataclass(frozen=True)
+class FleetReadings:
+    current_machines: int
+    memory_used_percent: float
+    admission_unavailable_count: int
+
+
+def _summarize_fleet(
+    role: AutoscalerRole,
+    views: dict[str, dict | None],
+    *,
+    local_memory_used_percent: float,
+    local_activity_admission_open: bool,
+) -> FleetReadings:
+    """Aggregate this generation's fleet. Unverified peers still count as machines
+    (as DNS always did); a peer that proves another generation does not."""
+    surface = _worker_surface_hash()
+    foreign = {
+        ip for ip, view in views.items() if view is not None and str(view.get("surface_hash") or "").strip() != surface
+    }
+    same_generation = [view for ip, view in views.items() if view is not None and ip not in foreign]
+    current_machines = max(1, len([ip for ip in role.peers if ip not in foreign]))
+    memory_samples = [local_memory_used_percent]
+    unavailable = 0 if local_activity_admission_open else 1
+    for view in same_generation:
+        memory = view.get("machine_memory_used_percent")
+        if isinstance(memory, int | float) and not isinstance(memory, bool) and math.isfinite(memory):
+            memory_samples.append(float(memory))
+        if view.get("activity_admission_open") is False:
+            unavailable += 1
+    return FleetReadings(current_machines, max(memory_samples), min(unavailable, current_machines))
 
 
 def _parse_prometheus_sample(line: str) -> tuple[str, dict[str, str], float] | None:
@@ -507,85 +686,6 @@ def _extract_metric_value(metrics_text: str, metric_name: str) -> float | None:
     return None
 
 
-async def _get_fleet_memory_used_percent(
-    http: httpx.AsyncClient,
-    local_memory_used_percent: float,
-    stop_event: asyncio.Event | None = None,
-) -> float:
-    """Return max machine memory percent across the Fly worker fleet.
-
-    Only the elected leader can start machines, so the leader must consider
-    memory pressure on non-leader peers too. If peer scraping fails, fall back
-    to the local sample so autoscaling still works in local/dev environments.
-    """
-    fly_app = os.getenv("FLY_APP_NAME")
-    if not fly_app:
-        return local_memory_used_percent
-
-    peers = _get_peer_ips(fly_app)
-    if not peers:
-        return local_memory_used_percent
-
-    memory_samples = [local_memory_used_percent]
-    for ip in peers:
-        if stop_event is not None and stop_event.is_set():
-            break
-        try:
-            resp = await http.get(f"http://[{ip}]:{HEALTH_CHECK_PORT}/metrics", timeout=1.0)
-            if stop_event is not None and stop_event.is_set():
-                break
-            if resp.status_code != 200:
-                continue
-            value = _extract_metric_value(resp.text, "machine_memory_used_percent")
-            if value is not None:
-                memory_samples.append(value)
-        except Exception as e:
-            logger.debug("Failed to scrape peer memory metric", peer_ip=ip, error=str(e))
-
-    return max(memory_samples)
-
-
-async def _get_fleet_activity_admission_unavailable_count(
-    http: httpx.AsyncClient,
-    *,
-    local_activity_admission_open: bool,
-    current_machines: int,
-    stop_event: asyncio.Event | None = None,
-) -> int:
-    """Return count of workers currently closed to new activity work."""
-    fly_app = os.getenv("FLY_APP_NAME")
-    if not fly_app:
-        return 0 if local_activity_admission_open else 1
-
-    peers = _get_peer_ips(fly_app)
-    if not peers:
-        return 0 if local_activity_admission_open else 1
-
-    unavailable = 0
-    samples = 0
-    for ip in peers:
-        if stop_event is not None and stop_event.is_set():
-            break
-        try:
-            resp = await http.get(f"http://[{ip}]:{HEALTH_CHECK_PORT}/metrics", timeout=1.0)
-            if stop_event is not None and stop_event.is_set():
-                break
-            if resp.status_code != 200:
-                continue
-            value = _extract_metric_value(resp.text, "activity_admission_open")
-            if value is None:
-                continue
-            samples += 1
-            if value < 0.5:
-                unavailable += 1
-        except Exception as e:
-            logger.debug("Failed to scrape peer activity admission metric", peer_ip=ip, error=str(e))
-
-    if samples == 0:
-        return 0 if local_activity_admission_open else 1
-    return min(unavailable, current_machines)
-
-
 def _activity_admission_scale_threshold(current_machines: int) -> int:
     if current_machines <= 3:
         return 1
@@ -663,6 +763,7 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient, stop_event: asynci
         # old-gen pollers mid cooperative drain.
         if my_surface:
             machines = [m for m in machines if _machine_surface(m) == my_surface]
+
         # A retained generation can share this surface again after a rollback.
         # Its stopped pool entries need leased custody reuse before any start.
         def _owned_active_pool(machine: dict) -> bool:
@@ -706,8 +807,10 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient, stop_event: asynci
             current_build = os.getenv("TEMPORAL_WORKER_BUILD_ID")
             current_token = os.getenv("TEMPORAL_WORKER_DEPLOYMENT_TOKEN")
             stopped = [
-                m for m in stopped
-                if current_build and current_token
+                m
+                for m in stopped
+                if current_build
+                and current_token
                 and (m.get("config", {}).get("env") or {}).get("TEMPORAL_WORKER_BUILD_ID") == current_build
                 and (m.get("config", {}).get("env") or {}).get("TEMPORAL_WORKER_DEPLOYMENT_TOKEN") == current_token
             ]
@@ -753,6 +856,168 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient, stop_event: asynci
         logger.warning("Autoscaler: fleet list failed", error=str(e))
 
 
+def _autoscaler_poll_interval_seconds() -> float:
+    """Base observation cadence; invalid or non-positive values keep the 1 s default."""
+    try:
+        value = float(os.getenv("AUTOSCALER_POLL_INTERVAL_SECONDS", str(POLL_INTERVAL_SECS)))
+    except ValueError:
+        return float(POLL_INTERVAL_SECS)
+    return value if value > 0 and math.isfinite(value) else float(POLL_INTERVAL_SECS)
+
+
+def _autoscaler_queue_metrics_enabled() -> bool:
+    """Workers whose desired count nobody consumes (benchmark worker clones) opt out."""
+    return os.getenv("AUTOSCALER_QUEUE_METRICS", "1") != "0"
+
+
+def _is_rate_limited(error: BaseException) -> bool:
+    return isinstance(error, RPCError) and error.status == RPCStatusCode.RESOURCE_EXHAUSTED
+
+
+def _autoscaler_retry_delay(base_seconds: float, consecutive_rate_limits: int) -> float:
+    """Full-jitter exponential delay after consecutive ResourceExhausted cycles."""
+    if consecutive_rate_limits <= 0:
+        return base_seconds
+    ceiling = max(base_seconds, AUTOSCALER_RATE_LIMIT_BACKOFF_MAX_SECS)
+    upper = min(ceiling, base_seconds * (2 ** min(consecutive_rate_limits, 16)))
+    return _AUTOSCALER_RANDOM.uniform(base_seconds, upper)
+
+
+@dataclass(frozen=True)
+class QueueObservation:
+    workflow_count: int
+    backlog: int
+
+
+async def _observe_task_queue(
+    client: Client,
+    namespace: str,
+    task_queue: str,
+    stop_event: asyncio.Event,
+) -> tuple[QueueObservation | None, BaseException | None]:
+    """One complete observation (1 CountWorkflowExecutions + 2 DescribeTaskQueue).
+
+    Any failed call makes the whole observation unknown and ends the cycle: a
+    missing backlog is not a zero backlog, and a throttled namespace should not
+    be sent the remaining calls.
+    """
+    from temporalio.api.enums.v1 import TaskQueueType
+    from temporalio.api.taskqueue.v1 import TaskQueue as TaskQueueProto
+    from temporalio.api.workflowservice.v1 import CountWorkflowExecutionsRequest, DescribeTaskQueueRequest
+
+    try:
+        # This loop owns retries. The high-level count_workflows call retries
+        # internally, so its per-attempt deadline does not bound shutdown when
+        # a namespace keeps returning RESOURCE_EXHAUSTED.
+        count_result = await client.workflow_service.count_workflow_executions(
+            CountWorkflowExecutionsRequest(
+                namespace=namespace,
+                query=f'TaskQueue = "{task_queue}" AND ExecutionStatus = "Running"',
+            ),
+            retry=False,
+            timeout=METRICS_RPC_TIMEOUT,
+        )
+        if stop_event.is_set():
+            return None, None
+        backlog = 0
+        for task_type in [TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY, TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW]:
+            resp = await client.workflow_service.describe_task_queue(
+                DescribeTaskQueueRequest(
+                    namespace=namespace,
+                    task_queue=TaskQueueProto(name=task_queue),
+                    task_queue_type=task_type,
+                ),
+                retry=False,
+                timeout=METRICS_RPC_TIMEOUT,
+            )
+            if resp.task_queue_status:
+                backlog += resp.task_queue_status.backlog_count_hint
+            if stop_event.is_set():
+                return None, None
+        return QueueObservation(workflow_count=int(count_result.count), backlog=int(backlog)), None
+    except Exception as e:
+        return None, e
+
+
+async def _publish_local_autoscaler_metrics(
+    http: httpx.AsyncClient,
+    activity_admission_snapshot: ActivityAdmissionSnapshot,
+) -> dict:
+    """Read and publish this machine's own readings (no Temporal call)."""
+    global _latest_local_telemetry
+    # Some SDK builds expose slots_used but not slots_available; keep missing
+    # values as None so diagnostics do not confuse unknown with zero.
+    sdk_metrics = await _get_sdk_worker_metrics(http) or {}
+    activity_slots_used = sdk_metrics.get("activity_slots_used")
+    activity_slots_available = sdk_metrics.get("activity_slots_available")
+    observed_capacity = (
+        max(int(activity_slots_used or 0) + int(activity_slots_available), 1)
+        if activity_slots_available is not None
+        else None
+    )
+    memory_used_percent = _get_machine_memory_used_percent()
+    admission = activity_admission_snapshot.snapshot()
+    set_local_autoscaler_metrics(
+        machine_memory_used_percent=memory_used_percent,
+        observed_capacity=observed_capacity,
+        activity_slots_used=activity_slots_used,
+        activity_slots_available=activity_slots_available,
+        resource_slots_cpu_usage=sdk_metrics.get("resource_slots_cpu_usage"),
+        resource_slots_mem_usage=sdk_metrics.get("resource_slots_mem_usage"),
+        resource_slots_cpu_pid_output=sdk_metrics.get("resource_slots_cpu_pid_output"),
+        resource_slots_mem_pid_output=sdk_metrics.get("resource_slots_mem_pid_output"),
+        activity_task_pollers=sdk_metrics.get("activity_task_pollers"),
+        workflow_task_pollers=sdk_metrics.get("workflow_task_pollers"),
+        sticky_workflow_task_pollers=sdk_metrics.get("sticky_workflow_task_pollers"),
+        activity_admission_open=bool(admission["activity_admission_open"]),
+        activity_admission_memory_percent=float(admission["activity_admission_memory_percent"]),
+        activity_admission_close_memory_percent=float(admission["activity_admission_close_memory_percent"]),
+        activity_admission_open_memory_percent=float(admission["activity_admission_open_memory_percent"]),
+    )
+    _latest_local_telemetry = {
+        "sdk_metrics": sdk_metrics,
+        "observed_capacity": observed_capacity,
+        "memory_used_percent": memory_used_percent,
+        "admission": admission,
+    }
+    return _latest_local_telemetry
+
+
+async def _run_local_autoscaler_publisher(
+    http: httpx.AsyncClient,
+    activity_admission_snapshot: ActivityAdmissionSnapshot,
+    stop_event: asyncio.Event,
+) -> None:
+    """Keep local readings (and this worker's election heartbeat) fresh every second."""
+    while not stop_event.is_set():
+        await asyncio.sleep(LOCAL_TELEMETRY_INTERVAL_SECS)
+        if stop_event.is_set():
+            return
+        try:
+            await _publish_local_autoscaler_metrics(http, activity_admission_snapshot)
+        except Exception as e:
+            logger.warning("Failed to publish local autoscaler readings", error=str(e))
+
+
+def _mirror_leader_observation(role: AutoscalerRole) -> None:
+    """Publish the leader's own observation on a follower, or unknown."""
+    queue = (role.leader_view or {}).get("queue")
+    if isinstance(queue, dict) and queue.get("source") == "self":
+        try:
+            set_queue_observation(
+                int(queue["backlog"]),
+                int(queue["workflow_count"]),
+                desired_machines=int(queue["desired_machines"]),
+                current_machines=int(queue["current_machines"]),
+                age_seconds=float(queue.get("age_seconds") or 0.0),
+                source="leader",
+            )
+            return
+        except (KeyError, TypeError, ValueError):
+            pass
+    set_queue_observation(None, None, desired_machines=_desired_machines, current_machines=max(1, len(role.peers)))
+
+
 async def poll_queue_metrics(
     client: Client,
     namespace: str,
@@ -761,12 +1026,16 @@ async def poll_queue_metrics(
     max_workflow_slots: int,
     stop_event: asyncio.Event,
 ):
-    """Adaptive autoscaler: poll Temporal, compute desired machines, actuate via Fly API.
+    """Adaptive autoscaler: elect, observe Temporal (leader only), decide, actuate via Fly API.
 
-    Runs on every worker at 1s intervals. All workers observe and compute
-    desired_machine_count (exposed via /metrics for monitoring). Only the leader
-    (lowest-IP machine via Fly internal DNS) actuates by calling the Fly Machines
-    API to start/stop machines.
+    Every worker publishes its own memory/admission/slot readings each second,
+    independently of Temporal. Each cycle it resolves its role (see
+    _resolve_autoscaler_role). Only the leader spends the three Temporal
+    visibility calls, aggregates its generation's peer readings, computes
+    desired_machine_count and actuates. Followers mirror the leader's
+    observation. An unverified role observes every 15-30 s and never actuates.
+    Compute-only workers (AUTOSCALER_ACTUATE=0, e.g. benchmark guests) keep
+    observing at their own cadence: an external controller reads that machine.
 
     Scale-up (eager):
       Capacity is observed in real-time from the SDK's slot metrics
@@ -785,11 +1054,143 @@ async def poll_queue_metrics(
       - If no workflows running → go straight to MIN_MACHINES (fast drain)
       - If workflows still running → remove 1 machine and probe again after 60s
       If removing a machine causes backlog, we detect it within 1s and scale back up.
-      Memory pressure blocks scale-down.
+      Memory pressure blocks scale-down. An unknown backlog never counts as zero.
 
     No separate autoscaler machine needed — the navi-whisper-lux-autoscaler app
     can be decommissioned.
     """
+    global _admission_pressure_since, _backlog_zero_since
+
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        # Local readings first and independently of Temporal: the leader's fleet
+        # view and its scale-down idle guard read them even under throttling.
+        try:
+            await _publish_local_autoscaler_metrics(http, activity_admission_snapshot)
+        except Exception as e:
+            logger.warning("Failed to publish local autoscaler readings", error=str(e))
+        publisher = asyncio.create_task(_run_local_autoscaler_publisher(http, activity_admission_snapshot, stop_event))
+        last_role: str | None = None
+        try:
+            if not _autoscaler_queue_metrics_enabled():
+                # Nobody reads this worker's desired count; spending the namespace's
+                # shared Visibility API budget on it only throttles workers that do.
+                logger.info("Autoscaler queue observation disabled for this worker", task_queue=task_queue)
+                set_autoscaler_role(None, leader_eligible=False, observes_queue=False)
+                await stop_event.wait()
+                return
+
+            poll_interval = _autoscaler_poll_interval_seconds()
+            consecutive_rate_limits = 0
+            # Compute-only workers observe for an external reader; they are never
+            # an actuating fleet's leader and never defer to one.
+            independent = not AUTOSCALER_ACTUATE
+            set_autoscaler_role(None, leader_eligible=AUTOSCALER_ACTUATE, observes_queue=False)
+            if poll_interval > POLL_INTERVAL_SECS:
+                # Budgeted guests start together behind one release barrier. A random
+                # phase spreads their first observations across one interval instead
+                # of aligning every guest's calls on the same second.
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop_event.wait(), timeout=_AUTOSCALER_RANDOM.uniform(0, poll_interval))
+
+            while not stop_event.is_set():
+                next_delay = poll_interval
+                try:
+                    role = await _resolve_autoscaler_role(http, stop_event)
+                    if stop_event.is_set():
+                        return
+                    observes = independent or role.role != AUTOSCALER_ROLE_FOLLOWER
+                    set_autoscaler_role(role.role, leader_eligible=AUTOSCALER_ACTUATE, observes_queue=observes)
+                    if role.role != last_role:
+                        logger.info(
+                            "Autoscaler role",
+                            role=role.role,
+                            reason=role.reason,
+                            leader_ip=role.leader_ip,
+                            observes_queue=observes,
+                            peers=len(role.peers),
+                        )
+                        last_role = role.role
+                    if role.role != AUTOSCALER_ROLE_LEADER and not independent:
+                        # Only the leader's decision drives scaling; keep no
+                        # decision window that a later promotion could act on.
+                        _backlog_zero_since = None
+                        _admission_pressure_since = None
+
+                    if not observes:
+                        consecutive_rate_limits = 0
+                        _mirror_leader_observation(role)
+                    else:
+                        cadence = (
+                            poll_interval
+                            if independent or role.role == AUTOSCALER_ROLE_LEADER
+                            else max(poll_interval, AUTOSCALER_UNKNOWN_LEADER_POLL_SECS)
+                        )
+                        observation, error = await _observe_task_queue(client, namespace, task_queue, stop_event)
+                        if stop_event.is_set():
+                            return
+                        if observation is None:
+                            # Unknown, not zero: hold, and require a fresh run of
+                            # observed zero backlog before any scale-down probe.
+                            _backlog_zero_since = None
+                            set_queue_observation(
+                                None,
+                                None,
+                                desired_machines=_desired_machines,
+                                current_machines=max(1, len(role.peers)),
+                            )
+                            if error is not None and _is_rate_limited(error):
+                                consecutive_rate_limits += 1
+                                next_delay = _autoscaler_retry_delay(cadence, consecutive_rate_limits)
+                                logger.warning(
+                                    "Failed to poll queue metrics",
+                                    error=str(error),
+                                    consecutive_rate_limits=consecutive_rate_limits,
+                                    retry_in_seconds=round(next_delay, 3),
+                                )
+                            else:
+                                if error is not None:
+                                    logger.warning("Failed to poll queue metrics", error=str(error))
+                                next_delay = cadence
+                        else:
+                            consecutive_rate_limits = 0
+                            next_delay = (
+                                cadence
+                                if cadence == poll_interval
+                                else _AUTOSCALER_RANDOM.uniform(cadence, 2 * cadence)
+                            )
+                            await _decide_and_actuate(
+                                http,
+                                role,
+                                observation,
+                                max_workflow_slots=max_workflow_slots,
+                                stop_event=stop_event,
+                            )
+                            if stop_event.is_set():
+                                return
+                except Exception as e:
+                    logger.warning("Autoscaler cycle failed", error=str(e))
+
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=next_delay)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            # A stopped observer must never remain the peer others defer to.
+            set_autoscaler_role(last_role, leader_eligible=False, observes_queue=False)
+            publisher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await publisher
+
+
+async def _decide_and_actuate(
+    http: httpx.AsyncClient,
+    role: AutoscalerRole,
+    observation: QueueObservation,
+    *,
+    max_workflow_slots: int,
+    stop_event: asyncio.Event,
+) -> None:
+    """Compute desired_machine_count from a fresh observation; the leader actuates."""
     global \
         _admission_pressure_since, \
         _backlog_zero_since, \
@@ -798,225 +1199,150 @@ async def poll_queue_metrics(
         _last_scale_up_time, \
         _prev_desired
 
-    from temporalio.api.enums.v1 import TaskQueueType
-    from temporalio.api.taskqueue.v1 import TaskQueue as TaskQueueProto
-    from temporalio.api.workflowservice.v1 import CountWorkflowExecutionsRequest, DescribeTaskQueueRequest
+    workflow_count = observation.workflow_count
+    backlog = observation.backlog
+    local = _latest_local_telemetry or {}
+    sdk_metrics = local.get("sdk_metrics") or {}
+    admission_snapshot = local.get("admission") or {}
+    observed_capacity = local.get("observed_capacity")
+    scale_capacity_source = "sdk_slots" if observed_capacity is not None else "fallback_missing_sdk_available_slots"
+    memory_used_percent = float(local.get("memory_used_percent") or _get_machine_memory_used_percent())
+    activity_admission_open = bool(admission_snapshot.get("activity_admission_open", True))
 
-    async with httpx.AsyncClient(timeout=10.0) as http:
-        while not stop_event.is_set():
-            try:
-                # ── Observe current state ─────────────────────────────────
-                # This loop owns retries. The high-level count_workflows call
-                # retries internally, so its per-attempt deadline does not bound
-                # shutdown when a namespace keeps returning RESOURCE_EXHAUSTED.
-                count_result = await client.workflow_service.count_workflow_executions(
-                    CountWorkflowExecutionsRequest(
-                        namespace=namespace,
-                        query=f'TaskQueue = "{task_queue}" AND ExecutionStatus = "Running"',
-                    ),
-                    retry=False,
-                    timeout=METRICS_RPC_TIMEOUT,
-                )
-                if stop_event.is_set():
-                    return
-                workflow_count = count_result.count
+    if role.role == AUTOSCALER_ROLE_LEADER and role.self_ip is not None:
+        # Leader only: one concurrent view read per peer replaces every
+        # worker's two sequential /metrics scrapes of every peer.
+        views = await _scrape_fleet_peer_views(http, [ip for ip in role.peers if ip != role.self_ip], stop_event)
+        if stop_event.is_set():
+            return
+        fleet = _summarize_fleet(
+            role,
+            views,
+            local_memory_used_percent=memory_used_percent,
+            local_activity_admission_open=activity_admission_open,
+        )
+    else:
+        fleet = FleetReadings(
+            current_machines=max(1, len(role.peers)),
+            memory_used_percent=memory_used_percent,
+            admission_unavailable_count=0 if activity_admission_open else 1,
+        )
+    current_machines = fleet.current_machines
+    fleet_memory_used_percent = fleet.memory_used_percent
+    memory_pressure = fleet_memory_used_percent >= MEMORY_SCALE_UP_THRESHOLD_PERCENT
+    activity_admission_unavailable_count = fleet.admission_unavailable_count
+    activity_admission_scale_threshold = _activity_admission_scale_threshold(current_machines)
 
-                backlog = 0
-                for task_type in [TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY, TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW]:
-                    try:
-                        resp = await client.workflow_service.describe_task_queue(
-                            DescribeTaskQueueRequest(
-                                namespace=namespace,
-                                task_queue=TaskQueueProto(name=task_queue),
-                                task_queue_type=task_type,
-                            ),
-                            retry=False,
-                            timeout=METRICS_RPC_TIMEOUT,
-                        )
-                        if resp.task_queue_status:
-                            backlog += resp.task_queue_status.backlog_count_hint
-                    except Exception as e:
-                        logger.warning("Failed to describe task queue", error=str(e), task_queue_type=str(task_type))
-                    if stop_event.is_set():
-                        return
+    # ── Adaptive scaling decision ─────────────────────────────
+    now = time.monotonic()
+    in_cooldown = (now - _last_scale_up_time) < SCALE_UP_COOLDOWN_SECS
+    admission_pressure = (
+        workflow_count > 0 and activity_admission_unavailable_count >= activity_admission_scale_threshold
+    )
+    if admission_pressure:
+        if _admission_pressure_since is None:
+            _admission_pressure_since = now
+    else:
+        _admission_pressure_since = None
+    admission_pressure_seconds = 0.0 if _admission_pressure_since is None else now - _admission_pressure_since
+    # Workflow-slot occupancy: a for_each parent holds a workflow slot while
+    # awaiting its children, so a deep/wide fan-out can pin every workflow slot
+    # with ZERO Temporal backlog hint (the children can't be scheduled to even
+    # enter the backlog). Scale on observed occupancy too, or the tree deadlocks
+    # — awaiting parents starve their own children of slots — invisibly to the
+    # backlog-based signal.
+    workflow_slot_capacity = max(1, max_workflow_slots * max(current_machines, 1))
+    workflow_saturation = workflow_count / workflow_slot_capacity
+    slot_pressure = workflow_saturation >= WORKFLOW_SATURATION_SCALE_UP
+    # Machines to hold running + backlogged workflows at target occupancy,
+    # leaving headroom for the children the running parents will spawn.
+    slot_target_machines = math.ceil(
+        (workflow_count + backlog) / max(1.0, max_workflow_slots * WORKFLOW_SLOT_TARGET_OCCUPANCY)
+    )
 
-                # Get raw capacity/tuner signals from the SDK. Some SDK builds
-                # expose slots_used but not slots_available; keep missing values
-                # as None so diagnostics do not confuse unknown with zero.
-                sdk_metrics = await _get_sdk_worker_metrics(http)
-                if stop_event.is_set():
-                    return
-                if sdk_metrics is None:
-                    sdk_metrics = {}
-                activity_slots_used = sdk_metrics.get("activity_slots_used")
-                activity_slots_available = sdk_metrics.get("activity_slots_available")
-                if activity_slots_available is not None:
-                    observed_capacity = max(int(activity_slots_used or 0) + int(activity_slots_available), 1)
-                    scale_capacity_source = "sdk_slots"
-                else:
-                    observed_capacity = None
-                    scale_capacity_source = "fallback_missing_sdk_available_slots"
+    if backlog > 0 or slot_pressure:
+        _backlog_zero_since = None
+        scale_capacity = observed_capacity or DEFAULT_CAPACITY
+        additional = backlog / scale_capacity
+        # Cooldown: after a scale-up, wait for DNS to propagate
+        # before allowing another (prevents overshoot)
+        if not in_cooldown and (additional >= SCALE_UP_THRESHOLD or slot_pressure):
+            _desired_machines = max(current_machines + math.ceil(additional), slot_target_machines)
+        else:
+            _desired_machines = current_machines  # Transient blip or in cooldown
+    elif admission_pressure and admission_pressure_seconds >= ADMISSION_PRESSURE_SCALE_UP_SECS and not in_cooldown:
+        _backlog_zero_since = None
+        _desired_machines = current_machines + 1
+    elif memory_pressure and workflow_count > 0:
+        _backlog_zero_since = None
+        _desired_machines = current_machines
+    else:
+        # Backlog is 0 AND workflow slots are not saturated — safe to probe
+        # down. NEVER drain while slots are saturated: pulling a machine out
+        # from under awaiting-parent workflows re-creates the fan-out deadlock
+        # (this stalled agents mid-run and forced expensive re-spawns).
+        if _backlog_zero_since is None:
+            _backlog_zero_since = now
 
-                memory_used_percent = _get_machine_memory_used_percent()
-                fleet_memory_used_percent = await _get_fleet_memory_used_percent(http, memory_used_percent, stop_event)
-                if stop_event.is_set():
-                    return
-                memory_pressure = fleet_memory_used_percent >= MEMORY_SCALE_UP_THRESHOLD_PERCENT
-                current_machines = _count_fly_peers()
-                is_leader = _am_i_leader()
-                admission_snapshot = activity_admission_snapshot.snapshot()
-                activity_admission_open = bool(admission_snapshot["activity_admission_open"])
-                activity_admission_unavailable_count = await _get_fleet_activity_admission_unavailable_count(
-                    http,
-                    local_activity_admission_open=activity_admission_open,
-                    current_machines=current_machines,
-                    stop_event=stop_event,
-                )
-                if stop_event.is_set():
-                    return
-                activity_admission_scale_threshold = _activity_admission_scale_threshold(current_machines)
+        if now - _backlog_zero_since >= SCALE_DOWN_COOLDOWN_SECS:
+            # No work at all — go straight to minimum; otherwise probe -1
+            _desired_machines = MIN_MACHINES if workflow_count == 0 else current_machines - 1
+            _backlog_zero_since = now  # Reset timer for next probe
+        else:
+            _desired_machines = current_machines  # Hold steady
 
-                # ── Adaptive scaling decision ─────────────────────────────
-                now = time.monotonic()
-                in_cooldown = (now - _last_scale_up_time) < SCALE_UP_COOLDOWN_SECS
-                admission_pressure = (
-                    workflow_count > 0 and activity_admission_unavailable_count >= activity_admission_scale_threshold
-                )
-                if admission_pressure:
-                    if _admission_pressure_since is None:
-                        _admission_pressure_since = now
-                else:
-                    _admission_pressure_since = None
-                admission_pressure_seconds = (
-                    0.0 if _admission_pressure_since is None else now - _admission_pressure_since
-                )
-                # Workflow-slot occupancy: a for_each parent holds a workflow slot
-                # while awaiting its children, so a deep/wide fan-out can pin every
-                # workflow slot with ZERO Temporal backlog hint (the children can't be
-                # scheduled to even enter the backlog). Scale on observed occupancy too,
-                # or the tree deadlocks — awaiting parents starve their own children of
-                # slots — invisibly to the backlog-based signal.
-                workflow_slot_capacity = max(1, max_workflow_slots * max(current_machines, 1))
-                workflow_saturation = workflow_count / workflow_slot_capacity
-                slot_pressure = workflow_saturation >= WORKFLOW_SATURATION_SCALE_UP
-                # Machines to hold running + backlogged workflows at target occupancy,
-                # leaving headroom for the children the running parents will spawn.
-                slot_target_machines = math.ceil(
-                    (workflow_count + backlog) / max(1.0, max_workflow_slots * WORKFLOW_SLOT_TARGET_OCCUPANCY)
-                )
+    _desired_machines = max(MIN_MACHINES, min(MAX_MACHINES, _desired_machines))
 
-                if backlog > 0 or slot_pressure:
-                    _backlog_zero_since = None
-                    scale_capacity = observed_capacity or DEFAULT_CAPACITY
-                    additional = backlog / scale_capacity
-                    # Cooldown: after a scale-up, wait for DNS to propagate
-                    # before allowing another (prevents overshoot)
-                    if not in_cooldown and (additional >= SCALE_UP_THRESHOLD or slot_pressure):
-                        _desired_machines = max(current_machines + math.ceil(additional), slot_target_machines)
-                    else:
-                        _desired_machines = current_machines  # Transient blip or in cooldown
-                elif (
-                    admission_pressure
-                    and admission_pressure_seconds >= ADMISSION_PRESSURE_SCALE_UP_SECS
-                    and not in_cooldown
-                ):
-                    _backlog_zero_since = None
-                    _desired_machines = current_machines + 1
-                elif memory_pressure and workflow_count > 0:
-                    _backlog_zero_since = None
-                    _desired_machines = current_machines
-                else:
-                    # Backlog is 0 AND workflow slots are not saturated — safe to probe
-                    # down. NEVER drain while slots are saturated: pulling a machine out
-                    # from under awaiting-parent workflows re-creates the fan-out deadlock
-                    # (this stalled agents mid-run and forced expensive re-spawns).
-                    if _backlog_zero_since is None:
-                        _backlog_zero_since = now
+    set_queue_observation(
+        backlog,
+        workflow_count,
+        desired_machines=_desired_machines,
+        current_machines=current_machines,
+        autoscaler_memory_signal_percent=fleet_memory_used_percent,
+        autoscaler_memory_threshold_percent=MEMORY_SCALE_UP_THRESHOLD_PERCENT,
+    )
 
-                    if now - _backlog_zero_since >= SCALE_DOWN_COOLDOWN_SECS:
-                        # No work at all — go straight to minimum; otherwise probe -1
-                        _desired_machines = MIN_MACHINES if workflow_count == 0 else current_machines - 1
-                        _backlog_zero_since = now  # Reset timer for next probe
-                    else:
-                        _desired_machines = current_machines  # Hold steady
+    # ── Leader actuates (never an unverified or compute-only worker) ─
+    is_leader = role.role == AUTOSCALER_ROLE_LEADER
+    if is_leader and AUTOSCALER_ACTUATE and _desired_machines != current_machines:
+        if _desired_machines > current_machines:
+            _last_scale_up_time = time.monotonic()
+        await _scale_fleet(_desired_machines, http, stop_event)
 
-                _desired_machines = max(MIN_MACHINES, min(MAX_MACHINES, _desired_machines))
-
-                set_queue_metrics(
-                    backlog,
-                    workflow_count,
-                    _desired_machines,
-                    current_machines,
-                    is_leader,
-                    observed_capacity,
-                    activity_slots_used,
-                    activity_slots_available,
-                    memory_used_percent,
-                    MEMORY_SCALE_UP_THRESHOLD_PERCENT,
-                    fleet_memory_used_percent,
-                    resource_slots_cpu_usage=sdk_metrics.get("resource_slots_cpu_usage"),
-                    resource_slots_mem_usage=sdk_metrics.get("resource_slots_mem_usage"),
-                    resource_slots_cpu_pid_output=sdk_metrics.get("resource_slots_cpu_pid_output"),
-                    resource_slots_mem_pid_output=sdk_metrics.get("resource_slots_mem_pid_output"),
-                    activity_task_pollers=sdk_metrics.get("activity_task_pollers"),
-                    workflow_task_pollers=sdk_metrics.get("workflow_task_pollers"),
-                    sticky_workflow_task_pollers=sdk_metrics.get("sticky_workflow_task_pollers"),
-                    activity_admission_open=activity_admission_open,
-                    activity_admission_memory_percent=float(admission_snapshot["activity_admission_memory_percent"]),
-                    activity_admission_close_memory_percent=float(
-                        admission_snapshot["activity_admission_close_memory_percent"]
-                    ),
-                    activity_admission_open_memory_percent=float(
-                        admission_snapshot["activity_admission_open_memory_percent"]
-                    ),
-                )
-
-                # ── Leader actuates (unless compute-only, e.g. per-bench cloud) ─
-                if is_leader and AUTOSCALER_ACTUATE and _desired_machines != current_machines:
-                    if _desired_machines > current_machines:
-                        _last_scale_up_time = time.monotonic()
-                    await _scale_fleet(_desired_machines, http, stop_event)
-
-                # ── Smart logging (every 30s or on state change) ──────────
-                now_mono = time.monotonic()
-                if _desired_machines != _prev_desired or now_mono - _last_log_time >= LOG_INTERVAL_SECS:
-                    logger.info(
-                        "Autoscaler poll",
-                        backlog=backlog,
-                        workflow_count=workflow_count,
-                        current_machines=current_machines,
-                        desired_machines=_desired_machines,
-                        observed_capacity=observed_capacity,
-                        scale_capacity_source=scale_capacity_source,
-                        activity_slots_used=activity_slots_used,
-                        activity_slots_available=activity_slots_available,
-                        resource_slots_cpu_usage=sdk_metrics.get("resource_slots_cpu_usage"),
-                        resource_slots_mem_usage=sdk_metrics.get("resource_slots_mem_usage"),
-                        resource_slots_cpu_pid_output=sdk_metrics.get("resource_slots_cpu_pid_output"),
-                        resource_slots_mem_pid_output=sdk_metrics.get("resource_slots_mem_pid_output"),
-                        activity_task_pollers=sdk_metrics.get("activity_task_pollers"),
-                        workflow_task_pollers=sdk_metrics.get("workflow_task_pollers"),
-                        sticky_workflow_task_pollers=sdk_metrics.get("sticky_workflow_task_pollers"),
-                        activity_admission_open=activity_admission_open,
-                        activity_admission_memory_percent=admission_snapshot["activity_admission_memory_percent"],
-                        activity_admission_unavailable_count=activity_admission_unavailable_count,
-                        activity_admission_scale_threshold=activity_admission_scale_threshold,
-                        activity_admission_pressure_seconds=round(admission_pressure_seconds, 1),
-                        memory_used_percent=memory_used_percent,
-                        fleet_memory_used_percent=fleet_memory_used_percent,
-                        memory_scale_up_threshold_percent=MEMORY_SCALE_UP_THRESHOLD_PERCENT,
-                        is_leader=is_leader,
-                    )
-                    _last_log_time = now_mono
-                _prev_desired = _desired_machines
-
-            except Exception as e:
-                logger.warning("Failed to poll queue metrics", error=str(e))
-
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=POLL_INTERVAL_SECS)
-            except asyncio.TimeoutError:
-                pass
+    # ── Smart logging (every 30s or on state change) ──────────
+    now_mono = time.monotonic()
+    if _desired_machines != _prev_desired or now_mono - _last_log_time >= LOG_INTERVAL_SECS:
+        logger.info(
+            "Autoscaler poll",
+            backlog=backlog,
+            workflow_count=workflow_count,
+            current_machines=current_machines,
+            desired_machines=_desired_machines,
+            observed_capacity=observed_capacity,
+            scale_capacity_source=scale_capacity_source,
+            activity_slots_used=sdk_metrics.get("activity_slots_used"),
+            activity_slots_available=sdk_metrics.get("activity_slots_available"),
+            resource_slots_cpu_usage=sdk_metrics.get("resource_slots_cpu_usage"),
+            resource_slots_mem_usage=sdk_metrics.get("resource_slots_mem_usage"),
+            resource_slots_cpu_pid_output=sdk_metrics.get("resource_slots_cpu_pid_output"),
+            resource_slots_mem_pid_output=sdk_metrics.get("resource_slots_mem_pid_output"),
+            activity_task_pollers=sdk_metrics.get("activity_task_pollers"),
+            workflow_task_pollers=sdk_metrics.get("workflow_task_pollers"),
+            sticky_workflow_task_pollers=sdk_metrics.get("sticky_workflow_task_pollers"),
+            activity_admission_open=activity_admission_open,
+            activity_admission_memory_percent=admission_snapshot.get("activity_admission_memory_percent"),
+            activity_admission_unavailable_count=activity_admission_unavailable_count,
+            activity_admission_scale_threshold=activity_admission_scale_threshold,
+            activity_admission_pressure_seconds=round(admission_pressure_seconds, 1),
+            memory_used_percent=memory_used_percent,
+            fleet_memory_used_percent=fleet_memory_used_percent,
+            memory_scale_up_threshold_percent=MEMORY_SCALE_UP_THRESHOLD_PERCENT,
+            is_leader=is_leader,
+            autoscaler_role=role.role,
+            autoscaler_role_reason=role.reason,
+        )
+        _last_log_time = now_mono
+    _prev_desired = _desired_machines
 
 
 async def monitor_event_loop_lag(
@@ -1160,6 +1486,10 @@ async def main():
 
     # Load configuration
     config = load_config()
+    namespace_refusal = production_namespace_refusal(config.temporal.namespace, config.temporal.task_queue)
+    if namespace_refusal:
+        logger.error("Temporal namespace isolation refused worker start", reason=namespace_refusal)
+        raise SystemExit(namespace_refusal)
 
     # Log environment mode
     is_production = config.environment == "production"
@@ -1243,6 +1573,11 @@ async def main():
     )
 
     registered_activities = [
+        list_agent_tree_activity,
+        resolve_agent_address_activity,
+        send_agent_message_activity,
+        send_agent_message_to_address_activity,
+        kill_agent_activity,
         spawn_sub_agent_activity,
         spawn_sub_agents_batch_activity,
         fetch_parent_attachments_activity,
@@ -1258,14 +1593,20 @@ async def main():
         mint_purchase_card_activity,
         spawn_browser_agent_activity_v3,
         resolve_code_agent_provider_activity,
+        resolve_code_agent_target_activity,
         spawn_claude_code_activity,
         close_detached_code_session_activity,
         web_search_activity,
         people_search_activity,
         web_fetch_activity,
         web_fetch_download_activity,
+        resolve_user_tools_activity,
+        run_user_tool_activity,
+        send_agent_graph_message_activity,
         save_tool_usage,
         read_message_history_activity,
+        read_tool_output_activity,
+        preview_tool_output_activity,
         generate_message_activity,
         fetch_recent_messages_activity,
         queue_imessage_activity,
@@ -1290,6 +1631,7 @@ async def main():
         mark_gpt_token_rate_limited_activity,
         release_compute_token_lineage_activity,
         update_agent_status,
+        predict_jev_progress,
         acknowledge_workflow_replacement_bootstrap,
         finalize_workflow_replacement_bootstrap,
         compress_context,
@@ -1322,13 +1664,18 @@ async def main():
         update_agent_tree_cost_activity,
         update_agent_tree_state,
         resolve_fast_cache_goal_activity,
+        resolve_fast_cache_context_activity,
         get_agent_source,
         send_direct_sms_activity,
         notify_sms_event_activity,
+        resolve_user_ui_inline_view_activity,
+        display_media_activity,
         populate_tool_params_activity,
         execute_reasoning_activity,
         query_parent_state_activity,
         world_model_step_activity,
+        world_model_specialized_agent_activity,
+        world_clock_activity,
         report_failure_activity,
     ]
 

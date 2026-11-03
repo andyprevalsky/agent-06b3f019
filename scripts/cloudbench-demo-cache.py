@@ -10,7 +10,7 @@ from pathlib import Path
 from cloudbench_catalog import CatalogError, index_unified_catalog
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents"))
-from providers.fast_cache.normalize import demo_cache_allowed
+from providers.demo_cache.normalize import demo_cache_allowed
 
 
 def validate(catalog: Path, names: list[str]) -> None:
@@ -22,7 +22,7 @@ def validate(catalog: Path, names: list[str]) -> None:
         supported = (
             isinstance(tags, list)
             and "DEMO" in tags
-            and task.get("fast_cache") == "on"
+            and task.get("demo_cache", task.get("fast_cache")) == "on"
             and demo_cache_allowed(task.get("prompt"))
             and bool(evaluators)
             and task.get("enforce_declared_evaluators") is True
@@ -34,7 +34,7 @@ def validate(catalog: Path, names: list[str]) -> None:
         )
         if not supported:
             raise CatalogError(
-                f"--demo-cache requires an agent task with DEMO, fast_cache:on, and "
+                f"--demo-cache requires an agent task with DEMO, demo_cache:on, and "
                 f"admission by the existing DEMO replay policy: {name}"
             )
         if any(evaluator.get("method") != "static_check" for evaluator in evaluators):

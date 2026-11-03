@@ -1,0 +1,20 @@
+[
+  "src/features/user-ui/api.ts",
+  "src/features/user-ui/components/InlineUserView.tsx",
+  "src/features/user-ui/components/SafeModeControl.tsx",
+  "src/features/user-ui/components/UserUiFrame.tsx",
+  "src/features/user-ui/components/UserUiProvider.tsx",
+  "src/features/user-ui/components/UserUiShell.tsx",
+  "src/features/user-ui/components/index.ts",
+  "src/features/user-ui/config.ts",
+  "src/features/user-ui/hooks/context.ts",
+  "src/features/user-ui/hooks/index.ts",
+  "src/features/user-ui/hooks/inlineLiveCap.ts",
+  "src/features/user-ui/hooks/liveRefresh.ts",
+  "src/features/user-ui/hooks/useActiveUserUi.ts",
+  "src/features/user-ui/hooks/useInlineView.ts",
+  "src/features/user-ui/hooks/useSafeMode.ts",
+  "src/features/user-ui/hooks/useUserViewBridge.ts",
+  "src/features/user-ui/index.ts",
+  "src/features/user-ui/types.ts"
+]

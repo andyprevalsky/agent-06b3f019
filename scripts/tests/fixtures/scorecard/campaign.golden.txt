@@ -1,0 +1,25 @@
+🧪 EXPERIMENT #1 · 🔵 RUNNING
+mixed5 · 5 scheduled · cloud · src UNRECORDED
+Triggered Oct 18, 12:28:52 PM PDT
+24.0 experiments/day · 1 launch / 0.04 d · warming 1h00m
+Since last benchmark ended: RUNNING
+QUEUED 1 · IN_PROGRESS 1 · COMPLETED 3/5
+PASS 1 · HARNESS FAILURE 0 · INFRA FAILURE 1
+AGENT FAILURE 1
+Pass rate 50.0% (1/2 scored)
+Infra attempts 2/4
+Stop at 1/5 unique infra-failed jobs (5%)
+     1 AGENT FAIL: Expected tool 'spawn_browser_agent' not found in messages
+     1 INFRA: reason UNRECORDED
+Cost $0.25 metered (1/5) · infra/wmh_grounding UNMETERED
+Cache agent demo-cache avg 80% (1/5) · LLM latency UNMEASURED
+Lifecycle
+  ✅ Guests released · 3/3 terminal jobs
+  ✅ Lifecycle verified · 3/3 terminal jobs
+LAST 3 EXPERIMENTS
+  #1 🔵 RUNNING mixed5 · Oct 18, 12:28:52 PM PDT → RUNNING · PASS 1/2 · INFRA 2/4
+ACTIVE SUB-AGENTS / PARENT
+  No active agents
+ISSUES / NEXT ACTION
+  • Infra stop threshold reached: 1/5 unique jobs (stop at 1). Owner parent → stop the exact owned run; /RCA each infra cluster
+🔵 RUNNING

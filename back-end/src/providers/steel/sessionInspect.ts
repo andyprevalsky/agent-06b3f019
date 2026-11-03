@@ -111,6 +111,7 @@ export async function closeAllActiveSessions(): Promise<number> {
   let closedCount = 0;
 
   for (const session of activeSessions) {
+    if (session.sessionId === null) continue;
     try {
       log.info(`   Closing session ${session.sessionId} (agent: ${session.agentId})...`);
       await closeSession(session.sessionId);

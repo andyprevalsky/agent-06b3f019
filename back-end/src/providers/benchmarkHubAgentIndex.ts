@@ -15,6 +15,7 @@ export interface HubAgentRunIndexRevisionDocument {
 }
 
 export interface HubAgentRunIndexSnapshot {
+  cacheVersion?: string;
   revision: number;
   complete: boolean;
   repairedRevision?: number;
@@ -138,6 +139,9 @@ export function parseHubAgentRunIndex(raw: string | null): HubAgentRunIndexSnaps
     agents.set(agentId, runId);
   }
   return {
+    ...(typeof (parsed as { _hub_cache_version?: unknown })._hub_cache_version === 'string'
+      ? { cacheVersion: (parsed as { _hub_cache_version: string })._hub_cache_version }
+      : {}),
     revision: parsed.revision as number,
     complete: parsed.complete,
     ...(parsed.repaired_revision === undefined

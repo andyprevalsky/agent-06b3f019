@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "trace-archive/private/whm/e9afcffd-7ba9-4bfd-8703-d770952fe1c3/run13-grounded-whm-recovery-20261013.private.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "f4ab86b5c0bbfb056ee6121cd25e06c978d0b711784c1359615a86fa870967d3",
+  "gzip_sha256": "bc8ad7474fd7b8483ce25ced86621d22cdf1d5939eae311cb575ead364bdc440",
+  "stored_bytes": 2082043,
+  "frames": 1,
+  "files": 704,
+  "original_bytes": 9592051,
+  "manifest_sha256": "cb74b7104e03ff082adfa4bbe93104a414a3972d5f341cba9f15c7ce254fe068",
+  "full_readback_verified": true
+}

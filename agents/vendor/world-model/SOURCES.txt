@@ -1,0 +1,23 @@
+Vendored distributions for the isolated Python 3.12 world model, installed through
+agents/requirements-world-model.txt (`--find-links ./vendor/world-model`).
+
+experiential-0.7.158+rose.bf75987e.elapsed1-py3-none-any.whl
+  sha256: 2f92d69dba24b727a2de0a05395fd2241725695ad491fe1efd76831e47195130
+  source: github.com/experientiallabs/experiential @ bf75987eac5e8c984d8f3868249f84e4095d1733
+          (organization removed upstream by 2026-10-12), plus the reviewed patches in
+          patches/ applied to that original pinned build.
+  base:   experiential-0.7.158+rose.bf75987e-py3-none-any.whl
+          sha256: f15392b6c09676f1d9905be0afe5e2c3aa8222a1674cffefc94a00c2ddb2cf36
+          (vendored at commit ce9f59312; built from an exact local copy of the pin with
+          `uv build --wheel`, SOURCE_DATE_EPOCH=1791303018; all 823 package files identical
+          to the original 0.7.158 build). The upstream source tree is unavailable, so this
+          base wheel is the patch source.
+  patches:
+          0001-rag-transition-measured-elapsed.patch: RAGTransition carries the real
+          measured tool duration (`exp.tool.elapsed_ms` on the result span, never the
+          span's ordinal clocks) and each grounded example renders it as
+          `elapsed_ms`/`elapsed`. Unmeasured records keep their original bytes and IDs.
+  build:  scripts/build-world-model-wheel.sh: unpack the base, apply patches/*.patch,
+          set version 0.7.158+rose.bf75987e.elapsed1, then `wheel pack` (wheel==0.45.1)
+          with SOURCE_DATE_EPOCH=1791303018; reproducible byte for byte. Only the four
+          patched modules and METADATA/RECORD differ from the base wheel.

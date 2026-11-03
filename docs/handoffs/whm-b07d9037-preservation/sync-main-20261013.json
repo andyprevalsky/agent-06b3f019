@@ -1,0 +1,73 @@
+{
+  "schema": "rose.wmh.sync_main.v1",
+  "utc": "2026-10-13T08:52:05.968930+00:00",
+  "source_branch": "codex/whm-resumed-generation1",
+  "remote_branch": "codex/wmh-experiential-parallel-20261006",
+  "before_head": "80a26f5cdc069471c997398649e14149beb39681",
+  "merged_main": "b12f0ef0521766d65d1199f143fb5de54a7ac885",
+  "new_main_commits": 92,
+  "local_main_updated": false,
+  "local_main_update_reason": "main is checked out in the excluded shared worktree /home/boxes/rose; its ref and files are preserved.",
+  "merge_conflicts_resolved": {
+    "agents/providers/rose/client.py": "Retained browser_use, prefer_azure, retry_partial_errors and json_mode; combined main image/vision guard with opt-in route ordering.",
+    "agents/tests/blackbox/world_model_harness.blackbox.py": "Retained main browser-pool propagation/pricing assertion and WHM coverage.",
+    "docs/rca/INDEX.md": "Regenerated from union of all 870 cases.",
+    "scripts/cloudbench-prestack-source-reviews.json": "Union of original and incoming exact review entries; duplicate values verified identical; no new review claim invented.",
+    "scripts/run-deploy-structural-gates.py": "Retained both swap-harness and cloudbench-controller-linux registration.",
+    "scripts/tests/benchmark-live-results.test.py": "Union of both test selectors, including native retirement and new real-boot interruption checks."
+  },
+  "verification": {
+    "command": "cd agents; source venv/bin/activate; python scripts/run_blackbox_tests.py world-model-harness fast-cache-client rose-browser-use rose",
+    "domains_passed": 4,
+    "domains_failed": 0,
+    "seconds": 22.9,
+    "native_cases_passed": 59,
+    "provider_reliability_cases_passed": 208,
+    "rose_browser_use_cases_passed": 98,
+    "rose_cases_passed": 226,
+    "ruff": "0.17.0: both resolved agent Python files passed",
+    "resolved_python_files_parse": true,
+    "rca_archive_cases": 870,
+    "source_whitespace_check": "Passed; stored exact unified-diff artifacts excluded from whitespace lint.",
+    "all_three_unapplied_proposals_still_apply_cleanly": true
+  },
+  "database_resync": {
+    "script": "bash scripts/setup-db.sh",
+    "completed": true,
+    "conductor_workspace": "whm-gen1-e9afcffd",
+    "conductor_port": 28700,
+    "target": "localhost:5432/victoria",
+    "active_client_connections_before_reset": 0,
+    "backup": "/home/boxes/rose-wmh-resumed/.context/sync-20261013T084310Z/db-backup/victoria-before-sync.dump",
+    "backup_bytes": 37639434,
+    "backup_sha256": "c4f7bc6791b64e2b24d56f0b0688ca8a32700d9851976133097b74afc7879778",
+    "backup_permissions": "0o600",
+    "resynced_counts": {
+      "users": 16,
+      "messages": 10000
+    },
+    "benchmark_seed_cache_published": true,
+    "preserved_frozen_fixture_database": "whm_gen1_e9afcffd_fixture_20261012",
+    "fixture_message_count": 46735,
+    "fixture_message_content_fingerprint_before_after_equal": true,
+    "fixture_fingerprint_receipt": "/home/boxes/rose-wmh-resumed/.context/sync-20261013T084310Z/fixture-after.txt"
+  },
+  "preservation": {
+    "original_checkpoint_is_ancestor": true,
+    "private_original_archives_retained": true,
+    "freedom_unchanged": true,
+    "AGENTS_unchanged": true,
+    "CLAUDE_update": "Only exact upstream additive instructions from explicitly requested sync; pre-sync copy retained privately.",
+    "private_preservation_checkpoint": "/home/boxes/rose-wmh-resumed/.context/sync-20261013T084310Z",
+    "venv_symlink_preserved": true,
+    "untracked_span_ledger_preserved": true
+  },
+  "remaining_scope": {
+    "RCA_context_schema_proposals_applied": false,
+    "new_paid_calls": 0,
+    "new_paid_benchmark": false,
+    "PR_merge": false,
+    "deploy": false,
+    "managed_settings_modified": false
+  }
+}

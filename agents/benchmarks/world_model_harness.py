@@ -12,22 +12,34 @@ WMH's documented `wmh.state.*`/`wmh.trace.metadata` enrichments so upstream
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import hashlib
+import heapq
 import json
+import multiprocessing
 import os
 import re
 import sys
 import time
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable, Optional
+from typing import Any, Awaitable, Callable, Iterable, Iterator, Optional
 
 import httpx
 
+from helpers.context_scope import is_internal_subagent_message
 from helpers.trace_archive import (
+    archive_backend_is_r2,
     decrypt_and_validate_artifact,
+    list_r2_artifact_entries,
+    local_archive_root,
     read_archive_artifact,
+    read_archive_artifact_metadata,
 )
 from helpers.trace_archive import (
     list_archive_artifact_paths as list_backend_archive_artifact_paths,
@@ -35,13 +47,15 @@ from helpers.trace_archive import (
 from helpers.trace_archive import (
     list_archive_bundle_ids as list_backend_archive_bundle_ids,
 )
+from utils.world_model_observation import normalize_world_model_observation
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _LOCAL_ARCHIVE_ROOT = _REPO_ROOT / ".context" / "trace-archive"
 _WMH_REFERENCE_ROOT = _REPO_ROOT / ".context" / "reference" / "world-model-harness"
 _DEFAULT_WMH_BUILD_ROOT = _REPO_ROOT / ".context" / "world-model"
+_BENCHMARK_TASKS_FILE = Path(__file__).with_name("tasks.json")
 # Increment whenever cached per-bundle OTel/session output changes independently of archive bytes.
-_WMH_EXPORT_SCHEMA_VERSION = 3
+_WMH_EXPORT_SCHEMA_VERSION = 12
 
 _SECRET_KEY_RE = re.compile(
     r"(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret|"
@@ -64,23 +78,34 @@ _FIDELITY_DIMENSIONS = (
     "error_behavior",
     "artifact_refs",
 )
+_EXPLORE_ORCHESTRATION_TOOLS = {"spawn_explore_agent", "explore"}
+_FOR_EACH_ORCHESTRATION_TOOLS = {"spawn_general_purpose_agent_for_each", "for_each"}
 _BROWSER_ORCHESTRATION_TOOLS = {"spawn_browser_agent", "spawn_browser_agent_activity_v3", "browser"}
 _BROWSER_BOUNDARY_TOOLS = {"browser_action", "browser_click", "browser_type", "browser_http"}
 _BROWSER_TOOLS = _BROWSER_ORCHESTRATION_TOOLS | _BROWSER_BOUNDARY_TOOLS
-_CODE_TOOLS = {"spawn_claude_code_agent", "spawn_codex_code_agent", "claude_code", "codex_code"}
+_CODE_TOOLS = {
+    "spawn_code_agent",
+    "spawn_claude_code_agent",
+    "spawn_codex_code_agent",
+    "claude_code",
+    "codex_code",
+}
 _MESSAGE_TOOLS = {"message_person", "send_message_to_user", "send_sms", "send_direct_sms", "notify_sms_event"}
 _PAYMENT_TOOLS = {"request_payment_card", "payment_lookup", "payment_mint", "x402", "purchase", "purchase_item"}
 _VAPI_ORCHESTRATION_TOOLS = {"call_phone_number", "vapi"}
 _VAPI_BOUNDARY_TOOLS = {"vapi_create_call", "vapi_poll_call", "vapi_recording_fetch"}
 _VAPI_TOOLS = _VAPI_ORCHESTRATION_TOOLS | _VAPI_BOUNDARY_TOOLS
 _GREP_TOOLS = {"grep", "web_search", "web_fetch", "web_fetch_download", "people_search"}
-_FAST_CACHE_TOOLS = {"fast_cache_read", "fast_cache_write"}
-# Fast cache is intentionally NOT an environment boundary: simulated runs keep
+_DEMO_CACHE_TOOLS = {"fast_cache_read", "fast_cache_write"}
+# DEMO cache is intentionally NOT an environment boundary: simulated runs keep
 # the real cache active (WMH steps are expensive) and are isolated from real-run
 # entries by the world-model scope segment in every cache key
-# (fast_cache/normalize.py:world_model_cache_scope).
+# (demo_cache/normalize.py:world_model_cache_scope).
 _ENVIRONMENT_BOUNDARY_TOOLS = (
-    _BROWSER_BOUNDARY_TOOLS
+    _EXPLORE_ORCHESTRATION_TOOLS
+    | _CODE_TOOLS
+    | _BROWSER_ORCHESTRATION_TOOLS
+    | _BROWSER_BOUNDARY_TOOLS
     | _VAPI_ORCHESTRATION_TOOLS
     | _VAPI_BOUNDARY_TOOLS
     | {
@@ -121,6 +146,31 @@ _BROWSER_NON_ACTION_EVENTS = {
     "task_complete",
     "task_started",
     "write_lock_rejected",
+}
+_TERMINAL_TOOL_STATUSES = {"FINISHED", "ERROR"}
+# DB Message contains both agent actions and UI/workflow lifecycle rows. These
+# names are produced by workflow plumbing rather than an assistant/DAG action,
+# so treating them as environment transitions teaches the WMH to answer real
+# tool calls with progress-card copy such as "Agent initialization complete."
+_MESSAGE_FIXTURE_UI_ONLY_TOOLS = {
+    "agent_init",
+    "browser_session_auth",
+    "cloud_agent",
+    "completion_summary",
+    "credential_failure_classifier",
+}
+_MESSAGE_FIXTURE_START_ACKS = {
+    "browser agent started",
+    "code agent started",
+    "explore agent thinking",
+    "research started",
+    "task started",
+}
+_MESSAGE_FIXTURE_START_ACTION_TYPES = {
+    "browser",
+    "claude_code_started",
+    "codex_code_started",
+    "task_started",
 }
 
 
@@ -170,6 +220,17 @@ class CanonicalObservation:
     metadata: JsonObject = field(default_factory=dict)
     artifact_refs: list[str] = field(default_factory=list)
     timestamp_ms: Optional[int] = None
+    # Real measured start of the tool call whose completion is ``timestamp_ms``.
+    # Kept out of the observation text: it is grounding evidence, not output.
+    started_at_ms: Optional[int] = None
+
+    @property
+    def elapsed_ms(self) -> Optional[int]:
+        """Measured time-to-complete (completion minus start), when both real clocks exist."""
+
+        if self.started_at_ms is None or self.timestamp_ms is None or self.timestamp_ms < self.started_at_ms:
+            return None
+        return self.timestamp_ms - self.started_at_ms
 
     def to_output_text(self) -> str:
         payload: JsonObject = {
@@ -237,7 +298,32 @@ def list_archive_bundle_ids(root: Path | None = None) -> list[str]:
     return sorted(p.name for p in archive_root.iterdir() if p.is_dir())
 
 
+_archive_json_memo: contextvars.ContextVar[dict[tuple[str, ...], JsonObject] | None] = contextvars.ContextVar(
+    "wmh_archive_json_memo", default=None
+)
+
+
+@contextmanager
+def archive_json_memo() -> Iterator[None]:
+    """Memoize read_archive_json for the duration of one bundle export.
+
+    Exporting a bundle reads its start fixture three times and its end fixture
+    twice (OTel transitions, replay-session transitions, initial state); the
+    fixtures are tens of MB of ciphertext each, so the repeat downloads and
+    decrypts dominated export time. Scoped to the calling context (one export
+    worker) so memory is bounded by the in-flight bundles.
+    """
+    token = _archive_json_memo.set({})
+    try:
+        yield
+    finally:
+        _archive_json_memo.reset(token)
+
+
 def read_archive_json(root_agent_id: str, path: str) -> JsonObject:
+    memo = _archive_json_memo.get()
+    if memo is not None and (root_agent_id, path) in memo:
+        return memo[(root_agent_id, path)]
     stored = read_archive_artifact(root_agent_id=root_agent_id, path=path)
     if stored is None:
         raise FileNotFoundError(f"archive artifact not found: {root_agent_id}/{path}")
@@ -245,6 +331,8 @@ def read_archive_json(root_agent_id: str, path: str) -> JsonObject:
     value = json.loads(plaintext.decode("utf-8"))
     if not isinstance(value, dict):
         raise ValueError(f"archive artifact {path} is not a JSON object")
+    if memo is not None:
+        memo[(root_agent_id, path)] = value
     return value
 
 
@@ -253,20 +341,47 @@ _REAL_WORLD_MODEL_MODES = {"real", "shadow"}
 
 
 def bundle_world_model_mode(root_agent_id: str) -> str:
-    """World-model mode recorded in a bundle's manifest.
+    """Conservative world-model mode from the manifest and start fixture.
 
     Legacy bundles predate the marker and were real runs, so a missing field
-    reads as "real". An unreadable manifest reads as "unknown" — such bundles
-    can't be trusted for corpus grounding either way.
+    reads as "real". Any explicit non-real value wins if the two artifacts
+    disagree; this prevents a stale ``real`` manifest from admitting a run
+    whose authoritative launch snapshot says ``simulate``. An unreadable
+    required artifact reads as "unknown".
     """
     try:
         manifest = read_archive_json(root_agent_id, "manifest.json.gz.enc")
     except Exception:
         return "unknown"
-    mode = manifest.get("world_model_mode")
-    if not isinstance(mode, str) or not mode.strip():
-        return "real"
-    return mode.strip().lower()
+    manifest_value = manifest.get("world_model_mode")
+    manifest_mode = (
+        manifest_value.strip().lower() if isinstance(manifest_value, str) and manifest_value.strip() else None
+    )
+    try:
+        start = read_archive_json(root_agent_id, "db/start.fixture.json.gz.enc")
+    except FileNotFoundError:
+        start = {}
+    except Exception:
+        return "unknown"
+    rows = start.get("rows") if isinstance(start.get("rows"), dict) else {}
+    agents = rows.get("Agent") if isinstance(rows, dict) else []
+    root = (
+        next(
+            (row for row in agents if isinstance(row, dict) and row.get("id") == root_agent_id),
+            {},
+        )
+        if isinstance(agents, list)
+        else {}
+    )
+    fixture_value = root.get("worldModelMode") if isinstance(root, dict) else None
+    fixture_mode = fixture_value.strip().lower() if isinstance(fixture_value, str) and fixture_value.strip() else None
+    reported = [mode for mode in (manifest_mode, fixture_mode) if mode is not None]
+    for mode in reported:
+        if mode not in _REAL_WORLD_MODEL_MODES:
+            return mode
+    if "shadow" in reported:
+        return "shadow"
+    return "real"
 
 
 def partition_real_world_bundles(bundle_ids: list[str]) -> tuple[list[str], dict[str, str]]:
@@ -285,6 +400,337 @@ def partition_real_world_bundles(bundle_ids: list[str]) -> tuple[list[str], dict
         else:
             excluded[root_agent_id] = mode
     return real, excluded
+
+
+# Corpus eligibility = a classifiable real (non-simulated, non-legacy,
+# non-DEMO) run with its START fixture (the replay state seed) and at least one
+# possible result source. The END fixture is optional: provider/browser/trace
+# artifacts and cumulative LLM contexts already preserve completed observations
+# from unfinished runs. A launch-only shell has no completed step to embed, so
+# rejecting it loses no training signal and avoids downloading its multi-MB
+# fixture again during export.
+_CORPUS_REQUIRED_ARTIFACTS = ("manifest.json.gz.enc", "db/start.fixture.json.gz.enc")
+_CORPUS_RESULT_ARTIFACT = "db/end.fixture.json.gz.enc"
+_CORPUS_RESULT_PREFIXES = ("llm/", "provider/", "browser/", "trace/", "otel/", "transitions/", "wmh/")
+# Explicit diagnostic controls for total / per-bundle exported steps. Normal
+# builds leave both at 0 (unlimited), so every completed step from every
+# eligible bundle is embedded; a deliberately scoped operator run may opt in.
+_WMH_MAX_STEPS_ENV = "WMH_MAX_STEPS"
+_WMH_MAX_STEPS_PER_BUNDLE_ENV = "WMH_MAX_STEPS_PER_BUNDLE"
+_WMH_EXPORT_WORKERS_ENV = "WMH_EXPORT_WORKERS"
+_WMH_SCREEN_WORKERS_ENV = "WMH_SCREEN_WORKERS"
+_WMH_SCREEN_BATCH_SIZE_ENV = "WMH_SCREEN_BATCH_SIZE"
+_WMH_ARCHIVE_RETRY_ATTEMPTS_ENV = "WMH_ARCHIVE_RETRY_ATTEMPTS"
+# Verdicts that a later terminal flush cannot change; anything else is re-checked
+# after this many milliseconds (a running agent may still finalize).
+_SCREENING_RECHECK_MS = 24 * 3600 * 1000
+_FINAL_SCREENING_REASONS = ("eligible", "legacy-migrated", "simulated-run", "demo-task")
+# Bump whenever bundle_corpus_eligibility changes: cached verdicts in the delta
+# index were produced by the previous criterion and must be re-screened.
+_SCREENING_POLICY_VERSION = "real-results-v6"
+
+
+def _load_demo_benchmark_task_names() -> frozenset[str]:
+    """Load the authoritative DEMO-tag task names without blocking a build.
+
+    Archive manifests record the benchmark task name, while ``tasks.json`` owns
+    the DEMO classification. A missing catalog produces no matches instead of
+    turning archive screening into an ingestion failure.
+    """
+    try:
+        tasks = json.loads(_BENCHMARK_TASKS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return frozenset()
+    if not isinstance(tasks, list):
+        return frozenset()
+    names: set[str] = set()
+    for task in tasks:
+        if not isinstance(task, dict) or not isinstance(task.get("tags"), list):
+            continue
+        if not any(str(tag).strip().upper() == "DEMO" for tag in task["tags"]):
+            continue
+        name = task.get("name")
+        if isinstance(name, str) and name.strip():
+            names.add(name.strip())
+    return frozenset(names)
+
+
+_DEMO_BENCHMARK_TASK_NAMES = _load_demo_benchmark_task_names()
+
+
+def _manifest_demo_task_name(manifest: JsonObject) -> str | None:
+    """Return the catalog DEMO task named by an archive manifest, if any."""
+    for manifest_field in ("benchmark_task_name", "benchmark_task"):
+        value = manifest.get(manifest_field)
+        if isinstance(value, str) and value.strip() in _DEMO_BENCHMARK_TASK_NAMES:
+            return value.strip()
+    return None
+
+
+def partition_non_demo_bundles(bundle_ids: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Exclude DEMO-tagged benchmark runs without failing on unreadable manifests."""
+    eligible: list[str] = []
+    excluded: dict[str, str] = {}
+    for root_agent_id in bundle_ids:
+        try:
+            manifest = read_archive_json(root_agent_id, "manifest.json.gz.enc")
+        except Exception:
+            # The gold policy handles unreadable manifests separately. The
+            # legacy ``any-real`` policy remains best-effort, but never admits a
+            # manifest that can be positively identified as a DEMO task.
+            eligible.append(root_agent_id)
+            continue
+        demo_task_name = _manifest_demo_task_name(manifest)
+        if demo_task_name is None:
+            eligible.append(root_agent_id)
+        else:
+            excluded[root_agent_id] = f"demo-task:{demo_task_name}"
+    return eligible, excluded
+
+
+def _manifest_legacy_marker(manifest: JsonObject) -> bool:
+    if manifest.get("legacy_migrated") is True:
+        return True
+    # Benchmark provenance is valid real-world signal when the run itself was
+    # real and the catalog task is not tagged DEMO. Legacy migrations carry an
+    # explicit marker on the manifest/fixtures; do not infer synthetic data
+    # from benchmark generation alone.
+    if manifest.get("source_kind") == "llm-only":
+        return True
+    restore = manifest.get("restore")
+    if isinstance(restore, dict) and restore.get("legacy_migrated") is True:
+        return True
+    sensitive = manifest.get("sensitive")
+    return isinstance(sensitive, dict) and isinstance(sensitive.get("legacy_fixture_limitations"), list)
+
+
+def _is_transient_archive_error(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    error = response.get("Error") if isinstance(response, dict) else None
+    metadata = response.get("ResponseMetadata") if isinstance(response, dict) else None
+    code = str(error.get("Code") or "") if isinstance(error, dict) else ""
+    status = int(metadata.get("HTTPStatusCode") or 0) if isinstance(metadata, dict) else 0
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return (
+        status in {429, 500, 502, 503, 504}
+        or code.lower()
+        in {
+            "internalerror",
+            "requesttimeout",
+            "serviceunavailable",
+            "slowdown",
+            "throttling",
+            "throttlingexception",
+        }
+        or any(
+            marker in text
+            for marker in (
+                "connection reset",
+                "incomplete read",
+                "incompleteread",
+                "read timeout",
+                "reduce your concurrent request rate",
+                "responsestreamingerror",
+                "service unavailable",
+                "temporarily unavailable",
+                "too many requests",
+            )
+        )
+    )
+
+
+def _archive_listing_with_retry(
+    root_agent_id: str,
+    reader: Callable[[], list[Any]],
+) -> list[Any]:
+    attempts = max(1, int(os.environ.get(_WMH_ARCHIVE_RETRY_ATTEMPTS_ENV, "8") or "8"))
+    for attempt in range(attempts):
+        try:
+            return reader()
+        except Exception as exc:
+            if attempt + 1 >= attempts or not _is_transient_archive_error(exc):
+                raise
+            # Deterministic jitter prevents every screening worker from retrying
+            # the same R2 prefix in lockstep after a shared throttle response.
+            jitter = int(hashlib.sha256(root_agent_id.encode()).hexdigest()[:2], 16) / 255
+            time.sleep(min(8.0, 0.25 * (2**attempt)) + jitter)
+    raise AssertionError("unreachable")
+
+
+def _archive_artifact_paths_with_retry(root_agent_id: str) -> list[str]:
+    return _archive_listing_with_retry(root_agent_id, lambda: archive_artifact_paths(root_agent_id))
+
+
+def _r2_artifact_entries_with_retry(root_agent_id: str) -> list[JsonObject]:
+    return _archive_listing_with_retry(root_agent_id, lambda: list_r2_artifact_entries(root_agent_id))
+
+
+def prescreen_bundle_artifacts(root_agent_id: str) -> tuple[bool, str]:
+    """Listing-only screen for the start metadata and a possible result source.
+
+    An end fixture enriches a finalized bundle with terminal Message rows but
+    is not required: incremental real provider/browser/trace observations from
+    an unfinished run remain valid corpus steps.
+    """
+    paths = _archive_artifact_paths_with_retry(root_agent_id)
+    present = set(paths)
+    for required in _CORPUS_REQUIRED_ARTIFACTS:
+        if required not in present:
+            return False, f"missing:{required}"
+    if _CORPUS_RESULT_ARTIFACT not in present and not any(path.startswith(_CORPUS_RESULT_PREFIXES) for path in paths):
+        return False, "no-result-artifacts"
+    return True, "artifacts-present"
+
+
+def bundle_corpus_eligibility(root_agent_id: str) -> tuple[bool, str]:
+    """Gold-policy verdict for one bundle: (eligible, reason).
+
+    Runs the listing screen first so shells cost one request, then reads one
+    small manifest for mode, legacy, and DEMO markers. The exporter validates
+    the authoritative start-fixture mode before writing any OTel; doing that in
+    this archive-wide screen downloaded every large start fixture twice.
+    """
+    ok, reason = prescreen_bundle_artifacts(root_agent_id)
+    if not ok:
+        return False, reason
+    try:
+        manifest = read_archive_json(root_agent_id, "manifest.json.gz.enc")
+    except Exception as exc:
+        return False, f"manifest-unreadable:{type(exc).__name__}"
+    manifest_value = manifest.get("world_model_mode")
+    mode = manifest_value.strip().lower() if isinstance(manifest_value, str) and manifest_value.strip() else "real"
+    if mode not in _REAL_WORLD_MODEL_MODES:
+        return False, f"simulated-run:{mode}"
+    if _manifest_legacy_marker(manifest):
+        return False, "legacy-migrated"
+    demo_task_name = _manifest_demo_task_name(manifest)
+    if demo_task_name is not None:
+        return False, f"demo-task:{demo_task_name}"
+    return True, "eligible"
+
+
+def _indexed_step_count(old_bundles: Any, root_agent_id: str) -> int:
+    prior = old_bundles.get(root_agent_id) if isinstance(old_bundles, dict) else None
+    return int((prior or {}).get("steps") or 0) if isinstance(prior, dict) else 0
+
+
+def _screening_verdict_is_final(reason: str) -> bool:
+    return reason.startswith(_FINAL_SCREENING_REASONS)
+
+
+def _screen_candidates(
+    bundle_ids: list[str],
+    cache: dict[str, JsonObject],
+    now_ms: int,
+) -> tuple[list[str], dict[str, str], int]:
+    """Classify ``bundle_ids`` (parallel), reusing final or fresh cached verdicts.
+
+    Returns (eligible ids in input order, excluded id -> reason, cache hits).
+    Every verdict is written back to ``cache`` so the next refresh only pays
+    for new bundles and for non-final ones whose recheck window elapsed.
+    """
+    pending: list[str] = []
+    eligible: list[str] = []
+    excluded: dict[str, str] = {}
+    hits = 0
+    for bundle_id in bundle_ids:
+        cached = cache.get(bundle_id)
+        if isinstance(cached, dict) and isinstance(cached.get("reason"), str):
+            fresh = _screening_verdict_is_final(cached["reason"]) or (
+                now_ms - int(cached.get("checked_at_ms") or 0) < _SCREENING_RECHECK_MS
+            )
+            if fresh:
+                hits += 1
+                if cached.get("eligible") is True:
+                    eligible.append(bundle_id)
+                else:
+                    excluded[bundle_id] = cached["reason"]
+                continue
+        pending.append(bundle_id)
+    if pending:
+        verdicts: list[tuple[bool, str]] = []
+        screened_started = time.time()
+        # Each verdict is one listing request plus a manifest read only when a
+        # bundle has a possible result. R2 can transiently throttle repeated
+        # ListObjects calls, so each listing has bounded jittered retries.
+        screen_workers = max(
+            1,
+            int(os.environ.get(_WMH_SCREEN_WORKERS_ENV) or _ARCHIVE_READ_WORKERS),
+        )
+        with ThreadPoolExecutor(max_workers=min(screen_workers, len(pending))) as pool:
+            for verdict in pool.map(bundle_corpus_eligibility, pending):
+                verdicts.append(verdict)
+                if len(verdicts) % 5000 == 0:
+                    # An uncapped screen walks the whole archive (~80k bundles);
+                    # without this the build log is silent for ten-plus minutes.
+                    print(
+                        f"[WorldModel] Screened {len(verdicts)}/{len(pending)} bundles "
+                        f"({sum(1 for ok, _ in verdicts if ok)} eligible, {time.time() - screened_started:.0f}s)",
+                        flush=True,
+                    )
+        for bundle_id, (ok, reason) in zip(pending, verdicts):
+            cache[bundle_id] = {"eligible": ok, "reason": reason, "checked_at_ms": now_ms}
+            if ok:
+                eligible.append(bundle_id)
+            else:
+                excluded[bundle_id] = reason
+    # Preserve input order for eligibility (cache hits and fresh verdicts mixed).
+    order = {bundle_id: index for index, bundle_id in enumerate(bundle_ids)}
+    eligible.sort(key=order.__getitem__)
+    return eligible, excluded, hits
+
+
+def select_corpus_bundles(
+    all_bundle_ids: list[str],
+    old_bundles: dict[str, Any],
+    *,
+    max_bundles: int,
+    cache: dict[str, JsonObject],
+    now_ms: int,
+    policy: str = "gold",
+    checkpoint: Callable[[], None] | None = None,
+) -> tuple[list[str], dict[str, str], int]:
+    """Choose the corpus: gold-eligible bundles, already-indexed ones first.
+
+    With a cap, candidates are screened in cap-sized batches until enough are
+    eligible, so a refresh never classifies the whole archive just to fill a
+    small corpus. ``policy="any-real"`` restores the pre-screening behaviour
+    (cap by sorted id, then world-model mode only).
+    """
+    available = set(all_bundle_ids)
+    retained = sorted(bundle_id for bundle_id in old_bundles if bundle_id in available)
+    new = [bundle_id for bundle_id in all_bundle_ids if bundle_id not in old_bundles]
+    if policy == "any-real":
+        candidates = retained + new
+        if max_bundles > 0 and len(candidates) > max_bundles:
+            candidates = candidates[: max(max_bundles, len(retained))]
+        real, excluded = partition_real_world_bundles(candidates)
+        non_demo, demo_excluded = partition_non_demo_bundles(real)
+        excluded.update(demo_excluded)
+        return non_demo, excluded, 0
+    limit = max(max_bundles, len(retained)) if max_bundles > 0 else 0
+    ordered = retained + new
+    selected: list[str] = []
+    excluded: dict[str, str] = {}
+    hits = 0
+    position = 0
+    screen_batch_size = max(
+        1,
+        int(os.environ.get(_WMH_SCREEN_BATCH_SIZE_ENV, "5000") or "5000"),
+    )
+    while position < len(ordered) and (limit == 0 or len(selected) < limit):
+        batch_size = min(screen_batch_size, len(ordered) - position) if limit == 0 else max(limit - len(selected), 1)
+        batch = ordered[position : position + batch_size]
+        position += len(batch)
+        eligible, batch_excluded, batch_hits = _screen_candidates(batch, cache, now_ms)
+        excluded.update(batch_excluded)
+        hits += batch_hits
+        for bundle_id in eligible:
+            if limit == 0 or len(selected) < limit:
+                selected.append(bundle_id)
+        if checkpoint is not None:
+            checkpoint()
+    return selected, excluded, hits
 
 
 def archive_artifact_paths(root_agent_id: str, root: Path | None = None) -> list[str]:
@@ -355,6 +801,20 @@ def public_json_has_secret(value: Any) -> bool:
     return any(_SECRET_KEY_RE.search(key) for key in _json_keys(value))
 
 
+def _public_example_secret_violation(value: Any) -> bool:
+    """True when a public-corpus record still carries a secret value or field."""
+    if isinstance(value, dict):
+        return any(
+            (_SECRET_KEY_RE.search(str(key)) and inner != "[REDACTED]") or _public_example_secret_violation(inner)
+            for key, inner in value.items()
+        )
+    if isinstance(value, list):
+        return any(_public_example_secret_violation(inner) for inner in value)
+    if isinstance(value, str):
+        return bool(_HIGH_CONFIDENCE_SECRET_VALUE_RE.search(value.replace("[REDACTED]", "")))
+    return False
+
+
 def _json_keys(value: Any) -> Iterable[str]:
     if isinstance(value, dict):
         for key, inner in value.items():
@@ -365,7 +825,21 @@ def _json_keys(value: Any) -> Iterable[str]:
             yield from _json_keys(inner)
 
 
+def _drop_secret_fields(value: Any) -> Any:
+    """Remove secret-shaped fields from portable public evaluation artifacts."""
+
+    if isinstance(value, dict):
+        return {key: _drop_secret_fields(inner) for key, inner in value.items() if not _SECRET_KEY_RE.search(str(key))}
+    if isinstance(value, list):
+        return [_drop_secret_fields(inner) for inner in value]
+    return value
+
+
 def canonical_category_for_tool(tool_name: str) -> str:
+    if tool_name in _EXPLORE_ORCHESTRATION_TOOLS:
+        return "explore"
+    if tool_name in _FOR_EACH_ORCHESTRATION_TOOLS:
+        return "for_each"
     if tool_name in _BROWSER_TOOLS or tool_name.startswith("browser_"):
         return "browser"
     if tool_name in _CODE_TOOLS or "code" in tool_name:
@@ -378,7 +852,7 @@ def canonical_category_for_tool(tool_name: str) -> str:
         return "vapi"
     if tool_name in _GREP_TOOLS or tool_name.startswith("grep"):
         return "grep"
-    if tool_name in _FAST_CACHE_TOOLS or "cache" in tool_name:
+    if tool_name in _DEMO_CACHE_TOOLS or "cache" in tool_name:
         return "fast_cache"
     if tool_name in {"request_user_approval", "request_user_signup", "request_user_auth"}:
         return "auth_approval"
@@ -386,7 +860,11 @@ def canonical_category_for_tool(tool_name: str) -> str:
 
 
 def is_world_model_environment_boundary(tool_name: str) -> bool:
-    """Return true only for provider/environment calls, not agent-facing tools."""
+    """Return true for provider boundaries and specialized subagent calls.
+
+    General-purpose agent orchestration deliberately stays real, including
+    for-each batches.
+    """
 
     return tool_name in _ENVIRONMENT_BOUNDARY_TOOLS
 
@@ -447,6 +925,57 @@ def _timestamp_nano(base_ms: int | None, offset: int) -> str:
     return str((ms * 1_000_000) + offset)
 
 
+# Characters that Python's ``str.splitlines()`` treats as line breaks but JSON
+# does not require escaping. The upstream retriever loads ``steps.jsonl`` with
+# ``read_text().splitlines()``, so a web page containing U+2028 (4 of 132k
+# steps in the 2026-09-09 corpus) split one record in two and the model
+# refused to serve. Escaping them keeps every record on exactly one line.
+_JSONL_LINE_BREAKS = {"\u2028": "\\u2028", "\u2029": "\\u2029", "\u0085": "\\u0085"}
+
+
+def jsonl_line(text: str) -> str:
+    """One JSON document as a single physical line for any line-splitting reader."""
+    for raw, escaped in _JSONL_LINE_BREAKS.items():
+        if raw in text:
+            text = text.replace(raw, escaped)
+    return text
+
+
+def normalize_world_model_index_records(model_root: str | Path) -> JsonObject:
+    """Publish upstream's index with the same JSONL framing as delta refreshes.
+
+    Ingestion decodes the exported escapes before upstream serializes Steps again.
+    Stream physical records so embedded Unicode separators remain string content;
+    validate the complete index before replacing it, without re-embedding or
+    changing any decoded data or the parallel matrix.
+    """
+    import tempfile
+
+    import numpy as np
+    from wmh.core.types import Step
+
+    index_path = Path(model_root) / "index"
+    steps_path = index_path / "steps.jsonl"
+    matrix = np.load(index_path / "embeddings.npy", mmap_mode="r")
+    records = 0
+    escaped_records = 0
+    with tempfile.TemporaryDirectory(prefix="index-framing-", dir=str(index_path)) as tmp:
+        normalized_path = Path(tmp) / "steps.jsonl"
+        with steps_path.open(encoding="utf-8") as source, normalized_path.open("w", encoding="utf-8") as output:
+            for line in source:
+                if not line.strip():
+                    continue
+                Step.model_validate_json(line)
+                normalized = jsonl_line(line)
+                output.write(normalized)
+                records += 1
+                escaped_records += int(normalized != line)
+        if matrix.ndim != 2 or matrix.shape[0] != records:
+            raise ValueError(f"WMH index has {records} records but matrix shape {matrix.shape}")
+        os.replace(normalized_path, steps_path)
+    return {"indexed_steps": records, "escaped_records": escaped_records}
+
+
 def _otel_attr(key: str, value: Any) -> JsonObject:
     if isinstance(value, bool):
         encoded: JsonObject = {"boolValue": value}
@@ -460,10 +989,10 @@ def _otel_attr(key: str, value: Any) -> JsonObject:
 
 
 def _fixture_ref(root_agent_id: str, path: str) -> JsonObject | None:
-    stored = read_archive_artifact(root_agent_id=root_agent_id, path=path)
-    if stored is None:
+    # Metadata-only: a ref never needs the (multi-MB) fixture ciphertext itself.
+    metadata = read_archive_artifact_metadata(root_agent_id=root_agent_id, path=path)
+    if metadata is None:
         return None
-    _, metadata = stored
     return {
         "path": path,
         "plaintext_sha256": metadata.get("plaintext_sha256"),
@@ -472,10 +1001,9 @@ def _fixture_ref(root_agent_id: str, path: str) -> JsonObject | None:
 
 
 def _artifact_meta_ref(root_agent_id: str, path: str) -> JsonObject | None:
-    stored = read_archive_artifact(root_agent_id=root_agent_id, path=path)
-    if stored is None:
+    metadata = read_archive_artifact_metadata(root_agent_id=root_agent_id, path=path)
+    if metadata is None:
         return None
-    _, metadata = stored
     return {
         "path": path,
         "category": _artifact_category(path, metadata.get("content_type")),
@@ -545,6 +1073,17 @@ def _initial_trace_state(root_agent_id: str, redaction_mode: str) -> JsonObject:
 
 
 def reconstruct_initial_state(root_agent_id: str, *, redaction_mode: str = "public") -> JsonObject:
+    memo = _archive_json_memo.get()
+    memo_key = ("__initial_state__", root_agent_id, redaction_mode)
+    if memo is not None and memo_key in memo:
+        return memo[memo_key]
+    state = _reconstruct_initial_state(root_agent_id, redaction_mode=redaction_mode)
+    if memo is not None:
+        memo[memo_key] = state
+    return state
+
+
+def _reconstruct_initial_state(root_agent_id: str, *, redaction_mode: str) -> JsonObject:
     start = read_archive_json(root_agent_id, "db/start.fixture.json.gz.enc")
     rows = start.get("rows") if isinstance(start.get("rows"), dict) else {}
     row_counts = {table: len(values) for table, values in rows.items() if isinstance(values, list)}
@@ -566,9 +1105,12 @@ def reconstruct_initial_state(root_agent_id: str, *, redaction_mode: str = "publ
         "agent_ids": start.get("agent_ids", []),
         "root_goal": root_goal,
         "db_fixture_ref": _fixture_ref(root_agent_id, "db/start.fixture.json.gz.enc"),
+        # The rows themselves stay in the archive (``rows_ref`` = path + plaintext
+        # sha256): they are tens of MB per bundle, nothing downstream reads them
+        # from this state, and redacting them dominated export CPU.
         "db_fixture": {
             "restore": start.get("restore") if isinstance(start.get("restore"), dict) else {},
-            "rows": rows,
+            "rows_ref": _fixture_ref(root_agent_id, "db/start.fixture.json.gz.enc"),
         },
         "row_counts": row_counts,
         "state_before_first_action": initial_trace_state,
@@ -582,13 +1124,18 @@ def reconstruct_initial_state(root_agent_id: str, *, redaction_mode: str = "publ
 def _retrieval_state_from_initial_state(initial_state: JsonObject) -> JsonObject:
     """Remove replay-only bulk data before repeating state in every retrieval step.
 
-    The full fixture remains in ``sessions/*.session.json`` for deterministic replay. Retrieval
-    only needs the stable fixture reference/hash, row counts, goal, and other compact provenance;
-    embedding and prompting every database row adds no signal and multiplies fixtures by the
-    number of LLM tool calls.
+    Retrieval only needs the stable fixture reference/hash (``db_fixture_ref``), row counts,
+    goal, and other compact provenance; the restore strategy is replay-only. Replay re-reads
+    the rows from the archive via ``db_fixture.rows_ref``.
     """
 
     return {key: value for key, value in initial_state.items() if key != "db_fixture"}
+
+
+def _real_clock_ms(value: Any) -> int | None:
+    """Accept only an explicit nonnegative integer clock; never infer one."""
+
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def _transition_from_raw(raw: JsonObject, root_agent_id: str, redaction_mode: str) -> RoseTransition:
@@ -614,18 +1161,19 @@ def _transition_from_raw(raw: JsonObject, root_agent_id: str, redaction_mode: st
         timestamp_ms=observation_raw.get("timestamp_ms")
         if isinstance(observation_raw.get("timestamp_ms"), int)
         else None,
+        started_at_ms=_real_clock_ms(observation_raw.get("started_at_ms")),
     )
     return RoseTransition(
         state_before=_maybe_redact(state_raw, redaction_mode),
-        scratchpad=str(raw.get("scratchpad") or ""),
+        scratchpad=str(_maybe_redact(str(raw.get("scratchpad") or ""), redaction_mode)),
         action=action,
         observation=observation,
         raw_span_ids=[str(v) for v in raw.get("raw_span_ids") or []],
     )
 
 
-def _is_fast_cache_replay_transition(raw: JsonObject) -> bool:
-    """A transition whose observation was replayed from the fast cache.
+def _is_demo_cache_replay_transition(raw: JsonObject) -> bool:
+    """A transition whose observation was replayed from the DEMO cache.
 
     The fresh write that populated the cache is the original signal and is
     already in the corpus from the run that recorded it; replays are
@@ -650,17 +1198,17 @@ def _transitions_from_trace_artifact(root_agent_id: str, redaction_mode: str) ->
     if not isinstance(raw_transitions, list):
         raise ValueError("trace/transitions.json.gz.enc must contain a transitions array")
     raw_dicts = [raw for raw in raw_transitions if isinstance(raw, dict)]
-    replay_count = sum(1 for raw in raw_dicts if _is_fast_cache_replay_transition(raw))
+    replay_count = sum(1 for raw in raw_dicts if _is_demo_cache_replay_transition(raw))
     if replay_count:
         print(
-            f"[WorldModel] Dropped {replay_count} fast-cache replay transition(s) from "
+            f"[WorldModel] Dropped {replay_count} demo-cache replay transition(s) from "
             f"{root_agent_id} (corpus keeps fresh interactions only)",
             flush=True,
         )
     return [
         _transition_from_raw(raw, root_agent_id, redaction_mode)
         for raw in raw_dicts
-        if not _is_fast_cache_replay_transition(raw)
+        if not _is_demo_cache_replay_transition(raw)
     ]
 
 
@@ -765,7 +1313,7 @@ def _transitions_from_llm_dumps(
                 )
     if replay_dump_count:
         print(
-            f"[WorldModel] Dropped {replay_dump_count} fast-cache replay LLM dump(s) from "
+            f"[WorldModel] Dropped {replay_dump_count} demo-cache replay LLM dump(s) from "
             f"{root_agent_id} (corpus keeps fresh interactions only)",
             flush=True,
         )
@@ -790,11 +1338,7 @@ def _row_timestamp_ms(row: JsonObject) -> int | None:
 def _compact_browser_state(value: Any, redaction_mode: str) -> JsonObject:
     if not isinstance(value, dict):
         return {}
-    state = {
-        key: inner
-        for key, inner in value.items()
-        if key not in {"frame", "screenshot", "website_frame"}
-    }
+    state = {key: inner for key, inner in value.items() if key not in {"frame", "screenshot", "website_frame"}}
     dom_tree = state.get("dom_tree")
     if isinstance(dom_tree, str) and len(dom_tree) > 24_000:
         state["dom_tree"] = dom_tree[:24_000] + "\n[truncated]"
@@ -871,12 +1415,8 @@ def _transitions_from_browser_observations(
                     if action_key not in seen_actions and browser_state:
                         seen_actions.add(action_key)
                         grounded_task_ids.add(task_id)
-                        artifact_ref = (
-                            path if archive_agent_id == root_agent_id else f"{archive_agent_id}/{path}"
-                        )
-                        action_result = (
-                            entry.get("result") if isinstance(entry.get("result"), dict) else {}
-                        )
+                        artifact_ref = path if archive_agent_id == root_agent_id else f"{archive_agent_id}/{path}"
+                        action_result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
                         observation_payload = _maybe_redact(
                             {
                                 "browser_state": browser_state,
@@ -896,7 +1436,7 @@ def _transitions_from_browser_observations(
                         transitions.append(
                             RoseTransition(
                                 state_before=state_before,
-                                scratchpad=str(entry.get("thinking") or ""),
+                                scratchpad=str(_maybe_redact(str(entry.get("thinking") or ""), redaction_mode)),
                                 action=CanonicalAction(
                                     category="browser",
                                     name="browser_action",
@@ -978,27 +1518,290 @@ def _browser_state_from_message(title: str, message: str, action_type: str) -> J
     }
 
 
+def _assistant_tool_arguments(call: JsonObject) -> JsonObject:
+    """Read both Responses-style nested arguments and Rose's flattened calls."""
+
+    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+    raw_arguments = call.get("arguments", function.get("arguments"))
+    if isinstance(raw_arguments, str):
+        try:
+            decoded = json.loads(raw_arguments) if raw_arguments.strip() else {}
+        except json.JSONDecodeError:
+            decoded = {"value": raw_arguments}
+        return decoded if isinstance(decoded, dict) else {"value": decoded}
+    if isinstance(raw_arguments, dict):
+        return dict(raw_arguments)
+    excluded_keys = {"tool", "name", "tool_call_id", "id", "arguments", "function"}
+    if function:
+        excluded_keys.add("type")
+    return {key: value for key, value in call.items() if key not in excluded_keys}
+
+
+def _assistant_tool_name(call: JsonObject) -> str:
+    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+    return str(call.get("name") or call.get("tool") or function.get("name") or "").strip()
+
+
+def _llm_message_text(value: Any) -> str:
+    """Flatten provider-neutral message content without losing tool results."""
+
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                parts.append(text if isinstance(text, str) else json.dumps(item, ensure_ascii=False, default=str))
+            else:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part)
+    if value is None:
+        return ""
+    return json.dumps(value, ensure_ascii=False, default=str) if isinstance(value, dict) else str(value)
+
+
+def _transitions_from_llm_message_history(
+    root_agent_id: str,
+    redaction_mode: str,
+    initial_state: JsonObject,
+) -> list[RoseTransition]:
+    """Recover completed tool pairs from cumulative LLM contexts of partial runs.
+
+    A live/interrupted run has no end fixture, but every subsequent model call
+    archives its full input context. Those contexts contain the assistant tool
+    call and the real tool-role result. Parse only such completed pairs and
+    deduplicate their repeated appearances across cumulative dumps.
+    """
+
+    retrieval_state = _retrieval_state_from_initial_state(initial_state)
+    contexts: list[tuple[int, str, str, JsonObject]] = []
+    for archive_agent_id in bundle_agent_ids(root_agent_id):
+        for path in archive_artifact_paths(archive_agent_id):
+            if not path.startswith("llm/") or not path.endswith(".json.gz.enc"):
+                continue
+            try:
+                payload = read_archive_json(archive_agent_id, path)
+            except (FileNotFoundError, ValueError):
+                continue
+            metadata = read_archive_artifact_metadata(root_agent_id=archive_agent_id, path=path) or {}
+            created_at_ms = int(metadata.get("created_at_ms") or 0)
+            contexts.append((created_at_ms, path, archive_agent_id, payload))
+    contexts.sort(key=lambda item: (item[0], item[1], item[2]))
+
+    transitions: list[RoseTransition] = []
+    seen_call_ids: set[tuple[str, str]] = set()
+    last_timestamp_by_agent: dict[str, int] = {}
+    for created_at_ms, path, archive_agent_id, payload in contexts:
+        messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
+        actions: dict[str, tuple[str, JsonObject, int]] = {}
+        for position, message in enumerate(messages):
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "").lower()
+            if role == "assistant":
+                calls = message.get("tool_calls") if isinstance(message.get("tool_calls"), list) else []
+                for call in calls:
+                    if not isinstance(call, dict):
+                        continue
+                    call_id = str(call.get("id") or call.get("tool_call_id") or "").strip()
+                    tool_name = _assistant_tool_name(call)
+                    if call_id and tool_name:
+                        actions[call_id] = (tool_name, _assistant_tool_arguments(call), position)
+                continue
+            if role != "tool":
+                continue
+            call_id = str(message.get("tool_call_id") or message.get("toolCallId") or "").strip()
+            dedupe_key = (str(payload.get("agent_id") or archive_agent_id), call_id)
+            if not call_id or dedupe_key in seen_call_ids or call_id not in actions:
+                continue
+            tool_name, arguments, action_position = actions[call_id]
+            tool_name = _canonical_message_tool_name(tool_name, {}, arguments)
+            content = _llm_message_text(message.get("content"))
+            if not content:
+                continue
+            seen_call_ids.add(dedupe_key)
+            # The archive timestamp belongs to the next LLM request. These
+            # inferred ordering timestamps do not establish physical event times.
+            timestamp_ms = max(0, created_at_ms - len(messages) + action_position) if created_at_ms else None
+            if timestamp_ms is not None:
+                # Close archive writes can yield equal or decreasing estimates
+                # as the cumulative context grows. Preserve observed result
+                # order for this agent when the final corpus sort uses time.
+                timestamp_ms = max(timestamp_ms, last_timestamp_by_agent.get(dedupe_key[0], -1) + 1)
+                last_timestamp_by_agent[dedupe_key[0]] = timestamp_ms
+            artifact_ref = path if archive_agent_id == root_agent_id else f"{archive_agent_id}/{path}"
+            category = canonical_category_for_tool(tool_name)
+            transitions.append(
+                RoseTransition(
+                    state_before=_maybe_redact(retrieval_state, redaction_mode),
+                    scratchpad="",
+                    action=CanonicalAction(
+                        category=category,
+                        name=tool_name,
+                        arguments=_maybe_redact(arguments, redaction_mode),
+                        agent_id=str(payload.get("agent_id") or archive_agent_id),
+                        span_id=str(payload.get("span_id") or ""),
+                        tool_call_id=call_id,
+                        artifact_refs=[artifact_ref],
+                        timestamp_ms=timestamp_ms,
+                    ),
+                    observation=CanonicalObservation(
+                        category=f"{category}_result",
+                        content=str(_maybe_redact(content, redaction_mode)),
+                        metadata={
+                            "source": "llm_context_tool_result",
+                            "call_site": payload.get("call_site"),
+                            "result_unavailable": False,
+                        },
+                        artifact_refs=[artifact_ref],
+                        timestamp_ms=timestamp_ms,
+                    ),
+                )
+            )
+    return transitions
+
+
+def _canonical_message_tool_name(tool_name: str, metadata: JsonObject, arguments: JsonObject) -> str:
+    """Resolve unified ``spawn_agent`` rows to their concrete public tool."""
+
+    if tool_name != "spawn_agent":
+        return tool_name
+    agent_type = str(metadata.get("agentType") or arguments.get("type") or "").strip().lower()
+    return {
+        "explore": "spawn_explore_agent",
+        "browser": "spawn_browser_agent",
+        "code": "spawn_code_agent",
+        "general_purpose": "spawn_general_purpose_agent",
+        "general-purpose": "spawn_general_purpose_agent",
+        "for_each": "spawn_general_purpose_agent_for_each",
+        "for-each": "spawn_general_purpose_agent_for_each",
+    }.get(agent_type, tool_name)
+
+
+def _message_fixture_call_key(row: JsonObject, metadata: JsonObject) -> tuple[str, str] | None:
+    """Identity of one tool invocation inside a root tree's DB fixture."""
+
+    tool_call_id = str(metadata.get("toolCallId") or "").strip()
+    if not tool_call_id:
+        return None
+    return str(row.get("agentId") or ""), tool_call_id
+
+
+def _message_fixture_is_browser_action(tool_name: str, metadata: JsonObject) -> bool:
+    """Whether a Message row is one browser-policy action, not spawn lifecycle."""
+
+    if tool_name not in _BROWSER_ORCHESTRATION_TOOLS:
+        return False
+    action_type = str(metadata.get("action_type") or "").strip()
+    return bool(
+        action_type
+        and action_type not in _BROWSER_NON_ACTION_EVENTS
+        and not action_type.startswith(("agentcard_", "purchase_"))
+    )
+
+
+def _latest_message_fixture_terminal_indices(messages: list[JsonObject]) -> dict[tuple[str, str], int]:
+    """Match the agent boundary: one latest terminal result per tool call.
+
+    Browser-policy action rows are intentionally excluded from this collapse.
+    They are distinct environment steps recovered from legacy Message fixtures;
+    the shared parent spawn id on those UI rows is not their action identity.
+    """
+
+    latest: dict[tuple[str, str], int] = {}
+    for index, row in enumerate(messages):
+        if str(row.get("role") or "").upper() != "TOOL":
+            continue
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if (
+            str(metadata.get("toolStatus") or "").upper() not in _TERMINAL_TOOL_STATUSES
+            or metadata.get("world_model_simulated") is True
+            or bool(metadata.get("excludeFromModel"))
+            or is_internal_subagent_message(row)
+        ):
+            continue
+        tool_name = _canonical_message_tool_name(str(metadata.get("toolName") or ""), metadata, {})
+        if _message_fixture_is_browser_action(tool_name, metadata):
+            continue
+        key = _message_fixture_call_key(row, metadata)
+        if key is None:
+            continue
+        incumbent = latest.get(key)
+        if incumbent is None or (_row_timestamp_ms(row) or 0) > (_row_timestamp_ms(messages[incumbent]) or 0):
+            latest[key] = index
+    return latest
+
+
+def _message_fixture_is_preliminary_result(
+    tool_name: str,
+    metadata: JsonObject,
+    content: str,
+) -> bool:
+    """Reject lifecycle acknowledgements mislabeled as terminal tool results."""
+
+    if tool_name in _MESSAGE_FIXTURE_UI_ONLY_TOOLS:
+        return True
+    if tool_name == "attempt_completion" and str(metadata.get("title") or "") == "Beginning Execute Phase":
+        return True
+    action_type = str(metadata.get("action_type") or "").strip().lower()
+    if action_type in _MESSAGE_FIXTURE_START_ACTION_TYPES:
+        return True
+    normalized = " ".join(content.strip().lower().rstrip(".").split())
+    return normalized in _MESSAGE_FIXTURE_START_ACKS
+
+
+def _message_fixture_progress_arguments(row: JsonObject, metadata: JsonObject) -> JsonObject:
+    """Recover DAG-created action arguments from its IN_PROGRESS call row."""
+
+    arguments = dict(metadata.get("auxiliary")) if isinstance(metadata.get("auxiliary"), dict) else {}
+    agent_type = str(metadata.get("agentType") or "").strip()
+    if agent_type:
+        arguments.setdefault("type", agent_type)
+    goal = str(metadata.get("fullGoal") or row.get("text") or "").strip()
+    if goal:
+        arguments.setdefault("goal", goal)
+    return arguments
+
+
 def _transitions_from_message_fixture(
     root_agent_id: str,
     redaction_mode: str,
     initial_state: JsonObject,
     *,
     skip_browser_task_ids: set[str],
-) -> list[RoseTransition]:
-    """Recover real completed environment calls from the archived DB fixture."""
+) -> tuple[list[RoseTransition], bool]:
+    """Recover every real terminal tool call from the archived DB fixture.
+
+    Corpus coverage is intentionally broader than runtime interception. The
+    model update needs examples for every tool shape found in real trajectories;
+    ``is_world_model_environment_boundary`` independently decides which calls a
+    simulated run may replace.
+    """
 
     try:
         fixture = read_archive_json(root_agent_id, "db/end.fixture.json.gz.enc")
     except (FileNotFoundError, ValueError):
-        return []
+        return [], False
     rows = fixture.get("rows") if isinstance(fixture.get("rows"), dict) else {}
     raw_messages = rows.get("Message") if isinstance(rows, dict) else []
     if not isinstance(raw_messages, list):
-        return []
+        return [], True
     messages = [row for row in raw_messages if isinstance(row, dict)]
-    messages.sort(key=lambda row: (_row_timestamp_ms(row) or 0, str(row.get("id") or "")))
+    # Stable timestamp sorting matches helpers.llm: equal timestamps preserve
+    # fixture order, and the earlier terminal wins a tie.
+    messages.sort(key=lambda row: _row_timestamp_ms(row) or 0)
+    latest_terminal_indices = _latest_message_fixture_terminal_indices(messages)
 
-    assistant_args: dict[str, JsonObject] = {}
+    action_args: dict[tuple[str, str], JsonObject] = {}
+    declared_action_keys: set[tuple[str, str]] = set()
+    # Real measured start clocks per call: the tool's own first IN_PROGRESS row,
+    # otherwise the ASSISTANT row that issued the call. The terminal row's clock
+    # is the completion, so the pair is the call's actual time-to-complete.
+    progress_started_ms: dict[tuple[str, str], int] = {}
+    declared_started_ms: dict[tuple[str, str], int] = {}
     for row in messages:
         if str(row.get("role") or "").upper() != "ASSISTANT":
             continue
@@ -1010,102 +1813,158 @@ def _transitions_from_message_fixture(
             call_id = str(call.get("tool_call_id") or call.get("id") or "")
             if not call_id:
                 continue
-            assistant_args[call_id] = {
-                key: value
-                for key, value in call.items()
-                if key not in {"tool", "name", "tool_call_id", "id"}
-            }
+            call_key = (str(row.get("agentId") or ""), call_id)
+            declared_action_keys.add(call_key)
+            action_args[call_key] = _assistant_tool_arguments(call)
+            declared_ms = _row_timestamp_ms(row)
+            if declared_ms is not None:
+                declared_started_ms[call_key] = min(declared_ms, declared_started_ms.get(call_key, declared_ms))
 
-    retrieval_state = _retrieval_state_from_initial_state(initial_state)
-    root_goal = str(initial_state.get("root_goal") or "")
-    previous_browser_states: dict[str, JsonObject] = {}
-    last_observations: dict[str, str] = {}
-    transitions: list[RoseTransition] = []
+    # Planned DAG calls do not have an ASSISTANT tool_use row. Their
+    # IN_PROGRESS row is the action declaration the parent actually executed;
+    # use it to pair the later terminal result and recover its delegated goal.
     for row in messages:
         if str(row.get("role") or "").upper() != "TOOL":
             continue
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-        if str(metadata.get("toolStatus") or "").upper() != "FINISHED":
+        if (
+            str(metadata.get("toolStatus") or "").upper() != "IN_PROGRESS"
+            or metadata.get("world_model_simulated") is True
+            or bool(metadata.get("excludeFromModel"))
+            or is_internal_subagent_message(row)
+        ):
             continue
-        if metadata.get("world_model_simulated") is True:
+        call_key = _message_fixture_call_key(row, metadata)
+        if call_key is None:
+            continue
+        tool_name = _canonical_message_tool_name(str(metadata.get("toolName") or ""), metadata, {})
+        if not tool_name or tool_name in _MESSAGE_FIXTURE_UI_ONLY_TOOLS:
+            continue
+        declared_action_keys.add(call_key)
+        action_args.setdefault(call_key, _message_fixture_progress_arguments(row, metadata))
+        progress_ms = _row_timestamp_ms(row)
+        if progress_ms is not None:
+            progress_started_ms[call_key] = min(progress_ms, progress_started_ms.get(call_key, progress_ms))
+
+    retrieval_state = _retrieval_state_from_initial_state(initial_state)
+    root_goal = str(initial_state.get("root_goal") or "")
+    previous_browser_states: dict[str, JsonObject] = {}
+    last_observations: dict[tuple[str, str], str] = {}
+    transitions: list[RoseTransition] = []
+    for message_index, row in enumerate(messages):
+        if str(row.get("role") or "").upper() != "TOOL":
+            continue
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        tool_status = str(metadata.get("toolStatus") or "").upper()
+        if tool_status not in _TERMINAL_TOOL_STATUSES:
+            continue
+        if metadata.get("world_model_simulated") is True or bool(metadata.get("excludeFromModel")):
             continue
         tool_name = str(metadata.get("toolName") or "")
         tool_call_id = str(metadata.get("toolCallId") or "")
         title = str(metadata.get("title") or "").strip()
-        message = str(row.get("message") or row.get("content") or "").strip()
+        # Prisma's Message payload column is ``text``. Older synthetic fixtures
+        # used message/content, so retain those as compatibility fallbacks.
+        message = str(row.get("text") or row.get("message") or row.get("content") or "").strip()
         timestamp_ms = _row_timestamp_ms(row)
+
+        # Unified spawn_agent rows retain the public tool name in Message but
+        # identify their concrete delegation class in agentType/arguments.
+        call_key = _message_fixture_call_key(row, metadata)
+        args = action_args.get(call_key or ("", "")) or (
+            dict(metadata.get("auxiliary")) if isinstance(metadata.get("auxiliary"), dict) else {}
+        )
+        tool_name = _canonical_message_tool_name(tool_name, metadata, args)
 
         if tool_name in _BROWSER_ORCHESTRATION_TOOLS:
             action_type = str(metadata.get("action_type") or "").strip()
             task_id = str(metadata.get("task_id") or metadata.get("subAgentId") or "")
-            if (
-                not action_type
-                or action_type in _BROWSER_NON_ACTION_EVENTS
+            # A unified browser result with no browser action is a useful
+            # whole-subagent training observation. Legacy manager lifecycle
+            # rows (including task_complete) stay out of the corpus so they do
+            # not double-count the richer per-action browser extraction.
+            if not action_type or action_type == "task_complete":
+                pass
+            elif (
+                action_type in _BROWSER_NON_ACTION_EVENTS
                 or action_type.startswith(("agentcard_", "purchase_"))
                 or task_id in skip_browser_task_ids
             ):
                 continue
-            previous_state = previous_browser_states.get(task_id, {})
-            next_state = _browser_state_from_message(title, message, action_type)
-            action_args = {
-                "goal": root_goal,
-                "action": action_type,
-                "params": _browser_params_from_message(metadata, title),
-                "thinking": "",
-                "current_browser_state": previous_state,
-                "approval": {"granted": False, "type": None, "payment_card_last4": None},
-            }
-            state_before = dict(retrieval_state)
-            if previous_state:
-                state_before["browser_state"] = previous_state
-            result_payload = {
-                "browser_state": next_state,
-                "action_result": {"success": not bool(metadata.get("error")), "message": message},
-            }
-            transitions.append(
-                RoseTransition(
-                    state_before=_maybe_redact(state_before, redaction_mode),
-                    scratchpad="",
-                    action=CanonicalAction(
-                        category="browser",
-                        name="browser_action",
-                        arguments=_maybe_redact(action_args, redaction_mode),
-                        agent_id=str(row.get("agentId") or root_agent_id),
-                        tool_call_id=tool_call_id,
-                        artifact_refs=["db/end.fixture.json.gz.enc"],
-                        timestamp_ms=timestamp_ms,
-                    ),
-                    observation=CanonicalObservation(
-                        category="browser_state",
-                        content=json.dumps(
-                            _maybe_redact(result_payload, redaction_mode),
-                            ensure_ascii=False,
-                            sort_keys=True,
+            else:
+                previous_state = previous_browser_states.get(task_id, {})
+                next_state = _browser_state_from_message(title, message, action_type)
+                action_args = {
+                    "goal": root_goal,
+                    "action": action_type,
+                    "params": _browser_params_from_message(metadata, title),
+                    "thinking": "",
+                    "current_browser_state": previous_state,
+                    "approval": {"granted": False, "type": None, "payment_card_last4": None},
+                }
+                state_before = dict(retrieval_state)
+                if previous_state:
+                    state_before["browser_state"] = previous_state
+                result_payload = {
+                    "browser_state": next_state,
+                    "action_result": {"success": not bool(metadata.get("error")), "message": message},
+                }
+                transitions.append(
+                    RoseTransition(
+                        state_before=_maybe_redact(state_before, redaction_mode),
+                        scratchpad="",
+                        action=CanonicalAction(
+                            category="browser",
+                            name="browser_action",
+                            arguments=_maybe_redact(action_args, redaction_mode),
+                            agent_id=str(row.get("agentId") or root_agent_id),
+                            tool_call_id=tool_call_id,
+                            artifact_refs=["db/end.fixture.json.gz.enc"],
+                            timestamp_ms=timestamp_ms,
                         ),
-                        is_error=bool(metadata.get("error")),
-                        metadata={
-                            "source": "message_fixture",
-                            "task_id": task_id,
-                            "title": _maybe_redact(title, redaction_mode),
-                            "result_unavailable": False,
-                        },
-                        artifact_refs=["db/end.fixture.json.gz.enc"],
-                        timestamp_ms=timestamp_ms,
-                    ),
+                        observation=CanonicalObservation(
+                            category="browser_state",
+                            content=json.dumps(
+                                _maybe_redact(result_payload, redaction_mode),
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                            is_error=bool(metadata.get("error")),
+                            metadata={
+                                "source": "message_fixture",
+                                "task_id": task_id,
+                                "title": _maybe_redact(title, redaction_mode),
+                                "result_unavailable": False,
+                            },
+                            artifact_refs=["db/end.fixture.json.gz.enc"],
+                            timestamp_ms=timestamp_ms,
+                        ),
+                    )
                 )
-            )
-            previous_browser_states[task_id] = _maybe_redact(next_state, redaction_mode)
-            continue
+                previous_browser_states[task_id] = _maybe_redact(next_state, redaction_mode)
+                continue
 
-        if not is_world_model_environment_boundary(tool_name):
+        # Agent contexts expose exactly one result for a tool_use: the latest
+        # FINISHED/ERROR row for that agent + toolCallId. Earlier terminal rows
+        # are UI/activity dual-writes ("Research started", "Task Started",
+        # in-activity completion) rather than additional environment actions.
+        if is_internal_subagent_message(row):
             continue
-        content = message or title
+        if call_key is not None and latest_terminal_indices.get(call_key) != message_index:
+            continue
+        # A terminal DB chip without a corresponding assistant tool_use or DAG
+        # IN_PROGRESS declaration was never an action. The agent may show such
+        # unmatched workflow context as a user message, but it must not become
+        # a fabricated action→observation training pair.
+        if not tool_name or call_key is None or call_key not in declared_action_keys:
+            continue
+        content = message or title or f"{tool_name} {tool_status.lower()}"
+        if _message_fixture_is_preliminary_result(tool_name, metadata, content):
+            continue
         state_before = dict(retrieval_state)
-        if last_observations.get(tool_name):
-            state_before["previous_observation"] = last_observations[tool_name]
-        args = assistant_args.get(tool_call_id) or (
-            dict(metadata.get("auxiliary")) if isinstance(metadata.get("auxiliary"), dict) else {}
-        )
+        observation_key = (str(row.get("agentId") or root_agent_id), tool_name)
+        if last_observations.get(observation_key):
+            state_before["previous_observation"] = last_observations[observation_key]
         transitions.append(
             RoseTransition(
                 state_before=_maybe_redact(state_before, redaction_mode),
@@ -1122,19 +1981,21 @@ def _transitions_from_message_fixture(
                 observation=CanonicalObservation(
                     category=f"{canonical_category_for_tool(tool_name)}_result",
                     content=str(_maybe_redact(content, redaction_mode)),
-                    is_error=bool(metadata.get("error")),
+                    is_error=tool_status == "ERROR" or bool(metadata.get("error")),
                     metadata={
                         "source": "message_fixture",
                         "title": _maybe_redact(title, redaction_mode),
+                        "tool_status": tool_status,
                         "result_unavailable": False,
                     },
                     artifact_refs=["db/end.fixture.json.gz.enc"],
                     timestamp_ms=timestamp_ms,
+                    started_at_ms=progress_started_ms.get(call_key, declared_started_ms.get(call_key)),
                 ),
             )
         )
-        last_observations[tool_name] = content
-    return transitions
+        last_observations[observation_key] = content
+    return transitions, True
 
 
 def load_grounded_transitions(
@@ -1142,29 +2003,66 @@ def load_grounded_transitions(
     *,
     redaction_mode: str = "public",
 ) -> list[RoseTransition]:
-    """Load only actions paired with real archived environment observations."""
+    """Load all actions paired with real archived terminal observations."""
 
     initial_state = reconstruct_initial_state(root_agent_id, redaction_mode=redaction_mode)
-    explicit = _transitions_from_trace_artifact(root_agent_id, redaction_mode)
-    if explicit:
-        return [
-            transition
-            for transition in explicit
-            if transition.action.category != "llm_tool_call"
-            and transition.observation.metadata.get("result_unavailable") is not True
-        ]
+    explicit = [
+        transition
+        for transition in _transitions_from_trace_artifact(root_agent_id, redaction_mode)
+        if transition.action.category != "llm_tool_call"
+        and transition.observation.metadata.get("result_unavailable") is not True
+    ]
     browser, grounded_task_ids = _transitions_from_browser_observations(
         root_agent_id,
         redaction_mode,
         initial_state,
     )
-    messages = _transitions_from_message_fixture(
+    messages, has_end_fixture = _transitions_from_message_fixture(
         root_agent_id,
         redaction_mode,
         initial_state,
         skip_browser_task_ids=grounded_task_ids,
     )
-    return [*browser, *messages]
+    partial_messages = (
+        [] if has_end_fixture else _transitions_from_llm_message_history(root_agent_id, redaction_mode, initial_state)
+    )
+    # Explicit/provider and rich browser artifacts are more authoritative than
+    # their UI Message projection. Keep the projection for every other tool.
+    authoritative_call_keys = {
+        (transition.action.agent_id, transition.action.tool_call_id)
+        for transition in [*explicit, *browser]
+        if transition.action.tool_call_id
+    }
+    messages = [
+        transition
+        for transition in messages
+        if not transition.action.tool_call_id
+        or (transition.action.agent_id, transition.action.tool_call_id) not in authoritative_call_keys
+    ]
+    authoritative_call_keys.update(
+        (transition.action.agent_id, transition.action.tool_call_id)
+        for transition in messages
+        if transition.action.tool_call_id
+    )
+    partial_messages = [
+        transition
+        for transition in partial_messages
+        if not transition.action.tool_call_id
+        or (transition.action.agent_id, transition.action.tool_call_id) not in authoritative_call_keys
+    ]
+    combined = [*explicit, *browser, *messages, *partial_messages]
+    combined.sort(
+        key=lambda transition: (
+            transition.action.timestamp_ms
+            if transition.action.timestamp_ms is not None
+            else transition.observation.timestamp_ms
+            if transition.observation.timestamp_ms is not None
+            else 2**63,
+            transition.action.tool_call_id or "",
+            transition.action.name,
+        )
+    )
+    return combined
 
 
 def load_transitions(root_agent_id: str, *, redaction_mode: str = "public") -> list[RoseTransition]:
@@ -1261,7 +2159,51 @@ def _write_delta_index(index_path: Path, index: JsonObject) -> None:
     tmp.replace(index_path)
 
 
+# Archive reads are latency-bound (~100ms per small R2 object); a corpus build
+# touches hundreds of them, so signature/ref reads fan out on a thread pool.
+_ARCHIVE_READ_WORKERS = max(1, int(os.environ.get("WMH_ARCHIVE_READ_WORKERS", "16") or "16"))
+
+
+def _bundle_signature_from_r2_listing(root_agent_id: str) -> JsonObject:
+    """Change digest from the listing alone: one paginated request per bundle.
+
+    R2's listing already carries every object's size and ETag, so re-signing a
+    6k-bundle corpus no longer costs one metadata GET per artifact (~1M reads,
+    ~25 minutes, on every refresh — a mass-search bundle alone has ~5k). A
+    ciphertext without its ``.meta.json`` sidecar is retained in the change
+    digest but does not invalidate an otherwise readable bundle. If that orphan
+    is a fixture needed by export, the normal authenticated read still fails
+    closed; unrelated interrupted uploads must not discard valid trajectories.
+    """
+    entries = _r2_artifact_entries_with_retry(root_agent_id)
+    present = {entry["path"] for entry in entries}
+    artifacts: list[JsonObject] = []
+    ciphertext_bytes = 0
+    for entry in entries:
+        path = entry["path"]
+        if not path.endswith(".enc"):
+            continue
+        size = int(entry["size"])
+        ciphertext_bytes += size
+        artifact = {"path": path, "etag": entry["etag"], "ciphertext_bytes": size}
+        if f"{path}.meta.json" not in present:
+            artifact["metadata_present"] = False
+        artifacts.append(artifact)
+    digest_source = json.dumps(artifacts, sort_keys=True, separators=(",", ":"))
+    return {
+        "root_agent_id": root_agent_id,
+        "artifact_count": len(artifacts),
+        # Plaintext sizes live in the sidecars, which this path deliberately
+        # does not read; the figure is informational only.
+        "plaintext_bytes": 0,
+        "ciphertext_bytes": ciphertext_bytes,
+        "sha256": hashlib.sha256(digest_source.encode("utf-8")).hexdigest(),
+    }
+
+
 def _bundle_signature(root_agent_id: str) -> JsonObject:
+    if archive_backend_is_r2():
+        return _bundle_signature_from_r2_listing(root_agent_id)
     # Archive listings also contain intentionally plaintext public projections
     # (for example manifest.public.json). Only encrypted artifacts participate
     # in this signature and therefore carry the metadata read below.
@@ -1269,11 +2211,34 @@ def _bundle_signature(root_agent_id: str) -> JsonObject:
     artifacts: list[JsonObject] = []
     plaintext_bytes = 0
     ciphertext_bytes = 0
-    for path in paths:
-        stored = read_archive_artifact(root_agent_id=root_agent_id, path=path)
-        if stored is None:
+
+    # Metadata-only reads: the signature is a digest over the sidecar fields, so
+    # downloading every ciphertext (screenshots, DB fixtures) was pure waste.
+    def _metadata_or_orphan(path: str) -> JsonObject | None:
+        try:
+            return read_archive_artifact_metadata(root_agent_id=root_agent_id, path=path)
+        except ValueError as exc:
+            if "Archive metadata missing for" not in str(exc):
+                raise
+            return None
+
+    if paths:
+        with ThreadPoolExecutor(max_workers=min(_ARCHIVE_READ_WORKERS, len(paths))) as pool:
+            metadata_by_path = list(pool.map(_metadata_or_orphan, paths))
+    else:
+        metadata_by_path = []
+    for path, metadata in zip(paths, metadata_by_path):
+        if metadata is None:
+            cipher_bytes = (local_archive_root() / root_agent_id / path).stat().st_size
+            ciphertext_bytes += cipher_bytes
+            artifacts.append(
+                {
+                    "path": path,
+                    "ciphertext_bytes": cipher_bytes,
+                    "metadata_present": False,
+                }
+            )
             continue
-        _, metadata = stored
         plain_bytes = int(metadata.get("plaintext_bytes") or 0)
         cipher_bytes = int(metadata.get("ciphertext_bytes") or 0)
         plaintext_bytes += plain_bytes
@@ -1324,15 +2289,22 @@ def build_world_model_from_archives(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     trace_file = out_dir / "traces.otel.jsonl"
-    real_bundle_ids, excluded_bundles = partition_real_world_bundles(list(root_agent_ids))
+    eligible_bundle_ids: list[str] = []
+    excluded_bundles: dict[str, str] = {}
+    for root_agent_id in root_agent_ids:
+        eligible, reason = bundle_corpus_eligibility(root_agent_id)
+        if eligible:
+            eligible_bundle_ids.append(root_agent_id)
+        else:
+            excluded_bundles[root_agent_id] = reason
     if excluded_bundles:
         print(
-            f"[WorldModel] Excluded {len(excluded_bundles)} non-real bundle(s) from corpus build "
-            f"(modes: {sorted(set(excluded_bundles.values()))})",
+            f"[WorldModel] Excluded {len(excluded_bundles)} ineligible bundle(s) before corpus build "
+            f"(reasons: {sorted(set(reason.split(':', 1)[0] for reason in excluded_bundles.values()))})",
             flush=True,
         )
     with trace_file.open("w", encoding="utf-8") as combined:
-        for root_agent_id in real_bundle_ids:
+        for root_agent_id in eligible_bundle_ids:
             per_trace = out_dir / f"{root_agent_id}.otel.jsonl"
             export_archive_to_otel_jsonl(root_agent_id, per_trace, redaction_mode="public")
             text = per_trace.read_text(encoding="utf-8")
@@ -1426,6 +2398,9 @@ def build_world_model_from_otel_jsonl(
         judge_provider=judge_provider,
         embedder=embedder,
     )
+    index_serialization = (
+        normalize_world_model_index_records(model_root) if (model_root / "index" / "steps.jsonl").exists() else None
+    )
     metrics = getattr(result, "metrics", None)
     if hasattr(metrics, "model_dump"):
         metrics_value = metrics.model_dump()
@@ -1444,6 +2419,7 @@ def build_world_model_from_otel_jsonl(
         "model": model,
         "provider_abstraction": provider_abstraction_decision(),
         "metrics": metrics_value,
+        "index_serialization": index_serialization,
     }
     manifest_path = out_dir / "build.manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
@@ -1469,6 +2445,7 @@ def refresh_world_model_index(
     try:
         import numpy as np
         from wmh.core.render import encode_state_action
+
         # These parser helpers preserve upstream's exact OTel span -> Step mapping while consuming
         # Rose's ordered JSONL one transition at a time. OtelGenAIAdapter.from_file reads the
         # complete corpus into memory, and even one archived trace can contain hundreds of MiB.
@@ -1485,12 +2462,17 @@ def refresh_world_model_index(
             "or keep .context/reference/world-model-harness with its dependencies available"
         ) from exc
 
-    # Archived browser states vary by orders of magnitude, so a step-count batch larger than one
-    # is not a memory bound. Keep the safe default at one; operators may explicitly raise it for a
-    # known-small corpus.
-    batch_size = int(os.environ.get("WMH_INDEX_BATCH_SIZE", "1") or "1")
+    # Bounded batches keep memory flat (one batch of transitions plus its
+    # embeddings in flight) while amortising per-call overhead; the previous
+    # default of 1 spent 11 min on 132k steps (2026-09-09).
+    batch_size = int(os.environ.get("WMH_INDEX_BATCH_SIZE", "256") or "256")
     if batch_size <= 0:
         raise ValueError(f"WMH_INDEX_BATCH_SIZE must be positive, got {batch_size}")
+    # HashingEmbedder is pure Python (~4.6 ms per step, ~10 min for 132k steps on
+    # one core) and deterministic, so batches embed in forked workers and are
+    # written back in submission order; the result is byte-identical to the
+    # in-process path. WMH_EMBED_WORKERS=1 keeps everything in this process.
+    embed_workers = max(1, int(os.environ.get("WMH_EMBED_WORKERS") or (os.cpu_count() or 4)))
 
     trace_path = Path(trace_file)
 
@@ -1556,6 +2538,7 @@ def refresh_world_model_index(
 
     import tempfile
 
+    embed_pool = _export_executor(embed_workers, embed_workers) if embed_workers > 1 else None
     with tempfile.TemporaryDirectory(prefix="index-refresh-", dir=str(index_path.parent)) as tmp:
         tmp_path = Path(tmp)
         tmp_matrix_path = tmp_path / "embeddings.npy"
@@ -1572,27 +2555,38 @@ def refresh_world_model_index(
             np.save(tmp_matrix_path, np.empty((0, 0), dtype=np.float64))
 
         row = 0
+        inflight: deque[tuple[Any, list[str]]] = deque()
         with tmp_steps_path.open("w", encoding="utf-8") as steps_output:
             steps = []
 
+            def flush_oldest() -> None:
+                nonlocal row
+                pending, lines = inflight.popleft()
+                vectors = np.asarray(pending.result() if hasattr(pending, "result") else pending, dtype=np.float64)
+                expected_shape = (len(lines), embed_dim)
+                if vectors.shape != expected_shape:
+                    raise ValueError(f"embedder returned shape {vectors.shape}, expected {expected_shape}")
+                assert matrix is not None
+                matrix[row : row + len(lines)] = vectors
+                for line in lines:
+                    steps_output.write(line + "\n")
+                row += len(lines)
+
             def write_batch() -> None:
-                nonlocal row, peak_batch_steps
+                nonlocal peak_batch_steps
                 if not steps:
                     return
                 peak_batch_steps = max(peak_batch_steps, len(steps))
                 texts = [encode_state_action(step.state_before, step.action) for step in steps]
-                vectors = np.asarray(embedder.embed(texts), dtype=np.float64)
-                expected_shape = (len(steps), embed_dim)
-                if vectors.shape != expected_shape:
-                    raise ValueError(
-                        f"embedder returned shape {vectors.shape}, expected {expected_shape}"
-                    )
-                assert matrix is not None
-                matrix[row : row + len(steps)] = vectors
-                for step in steps:
-                    steps_output.write(step.model_dump_json() + "\n")
-                row += len(steps)
+                lines = [jsonl_line(step.model_dump_json()) for step in steps]
+                if embed_pool is None:
+                    inflight.append((embedder.embed(texts), lines))
+                else:
+                    inflight.append((embed_pool.submit(_embed_texts, embed_dim, texts), lines))
                 steps.clear()
+                # Bound the in-flight work so memory stays flat on a large corpus.
+                while len(inflight) > 2 * embed_workers:
+                    flush_oldest()
 
             for _trace_id, step in iter_step_events():
                 if step is not None:
@@ -1600,11 +2594,13 @@ def refresh_world_model_index(
                     if len(steps) >= batch_size:
                         write_batch()
             write_batch()
+            while inflight:
+                flush_oldest()
+        if embed_pool is not None:
+            embed_pool.shutdown()
 
         if row != indexed_steps:
-            raise RuntimeError(
-                f"trace corpus changed during index refresh: counted {indexed_steps} steps, wrote {row}"
-            )
+            raise RuntimeError(f"trace corpus changed during index refresh: counted {indexed_steps} steps, wrote {row}")
         if matrix is not None:
             matrix.flush()
             del matrix
@@ -1637,10 +2633,20 @@ def transitions_to_otel_spans(
         trace_metadata["task"] = task
 
     spans: list[JsonObject] = []
+    next_pair_start = 0
     for index, transition in enumerate(transitions):
         action_id = _stable_hex(f"{root_agent_id}:{index}:action:{transition.action.tool_call_id}", 16)
         obs_id = _stable_hex(f"{root_agent_id}:{index}:observation:{transition.action.tool_call_id}", 16)
-        base_ms = transition.action.timestamp_ms or transition.observation.timestamp_ms
+        base_ms = (
+            transition.action.timestamp_ms
+            if transition.action.timestamp_ms is not None
+            else transition.observation.timestamp_ms
+        )
+        # Native ingestion sorts by start time and pairs consecutive action/result
+        # spans. Reserve disjoint intervals even for equal or regressing archive
+        # clocks; original timestamps remain in the canonical payloads.
+        pair_start = max(int(_timestamp_nano(base_ms, 0)), next_pair_start)
+        next_pair_start = pair_start + 4
         action_attrs = [
             _otel_attr("gen_ai.operation.name", "chat"),
             _otel_attr("gen_ai.tool.name", transition.action.to_wmh_tool_name()),
@@ -1658,6 +2664,11 @@ def transitions_to_otel_spans(
             _otel_attr("wmh.trace.metadata", trace_metadata),
             _otel_attr("rose.root_agent_id", root_agent_id),
         ]
+        if transition.observation.elapsed_ms is not None:
+            # Span clocks below are ordinal pairing slots; the real measured
+            # interval travels as explicit attributes through native ingestion.
+            obs_attrs.append(_otel_attr("rose.tool.started_at_ms", transition.observation.started_at_ms))
+            obs_attrs.append(_otel_attr("rose.tool.completed_at_ms", transition.observation.timestamp_ms))
         if transition.action.agent_id:
             action_attrs.append(_otel_attr("rose.agent_id", transition.action.agent_id))
             obs_attrs.append(_otel_attr("rose.agent_id", transition.action.agent_id))
@@ -1671,8 +2682,8 @@ def transitions_to_otel_spans(
                 "traceId": trace_id,
                 "spanId": action_id,
                 "name": f"chat {transition.action.to_wmh_tool_name()}",
-                "startTimeUnixNano": _timestamp_nano(base_ms, index * 2),
-                "endTimeUnixNano": _timestamp_nano(base_ms, index * 2 + 1),
+                "startTimeUnixNano": str(pair_start),
+                "endTimeUnixNano": str(pair_start + 1),
                 "attributes": action_attrs,
                 "status": _span_status(False),
             }
@@ -1683,8 +2694,8 @@ def transitions_to_otel_spans(
                 "spanId": obs_id,
                 "parentSpanId": action_id,
                 "name": f"execute_tool {transition.action.to_wmh_tool_name()}",
-                "startTimeUnixNano": _timestamp_nano(base_ms, index * 2 + 2),
-                "endTimeUnixNano": _timestamp_nano(base_ms, index * 2 + 3),
+                "startTimeUnixNano": str(pair_start + 2),
+                "endTimeUnixNano": str(pair_start + 3),
                 "attributes": obs_attrs,
                 "status": _span_status(transition.observation.is_error),
             }
@@ -1699,6 +2710,8 @@ def export_archive_to_otel_jsonl(
     task: str | None = None,
     benchmark_task_name: str | None = None,
     redaction_mode: str = "public",
+    max_transitions: int = 0,
+    transitions: list[RoseTransition] | None = None,
 ) -> Path:
     manifest: JsonObject = {}
     try:
@@ -1708,24 +2721,322 @@ def export_archive_to_otel_jsonl(
     run = manifest.get("run") if isinstance(manifest.get("run"), dict) else {}
     task_name = benchmark_task_name or manifest.get("benchmark_task_name")
     root_goal = task or run.get("root_goal") or task_name
-    transitions = load_grounded_transitions(root_agent_id, redaction_mode=redaction_mode)
+    if transitions is None:
+        transitions = load_grounded_transitions(root_agent_id, redaction_mode=redaction_mode)
+    if max_transitions > 0 and len(transitions) > max_transitions:
+        # Keep the run's opening trajectory: the earliest steps carry the
+        # planning context that later steps only repeat (mass search loops).
+        transitions = transitions[:max_transitions]
+    # Trace metadata is repeated on every span, so it must stay small: the
+    # full artifact path list (~5k entries on a mass-search bundle) made each
+    # span ~400 KB and one bundle's OTel 246 MB. Artifact refs live in the
+    # sessions and the archive listing, not here.
     spans = transitions_to_otel_spans(
         root_agent_id,
         transitions,
-        task=str(root_goal or ""),
+        # Public corpora redact the goal like every argument and observation.
+        task=str(_maybe_redact(str(root_goal or ""), redaction_mode)),
         metadata={
             "benchmark_task_name": task_name,
             "db_start_fixture_ref": _fixture_ref(root_agent_id, "db/start.fixture.json.gz.enc"),
             "db_end_fixture_ref": _fixture_ref(root_agent_id, "db/end.fixture.json.gz.enc"),
-            "artifact_paths": archive_artifact_paths_for_tree(root_agent_id),
         },
     )
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
-        "\n".join(json.dumps(span, ensure_ascii=False, sort_keys=True) for span in spans) + "\n", encoding="utf-8"
+        "\n".join(jsonl_line(json.dumps(span, ensure_ascii=False, sort_keys=True)) for span in spans) + "\n",
+        encoding="utf-8",
     )
     return out
+
+
+def _otel_attribute_map(span: JsonObject) -> JsonObject:
+    decoded: JsonObject = {}
+    attributes = span.get("attributes") if isinstance(span.get("attributes"), list) else []
+    for attribute in attributes:
+        if not isinstance(attribute, dict) or not isinstance(attribute.get("key"), str):
+            continue
+        wrapped = attribute.get("value") if isinstance(attribute.get("value"), dict) else {}
+        value: Any = None
+        for key in ("stringValue", "intValue", "doubleValue", "boolValue"):
+            if key in wrapped:
+                value = wrapped[key]
+                break
+        decoded[attribute["key"]] = value
+    return decoded
+
+
+def _json_object_from_otel(value: Any, *, field: str, line_number: int) -> JsonObject:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"line {line_number}: {field} is not JSON: {exc.msg}") from exc
+        if isinstance(decoded, dict):
+            return decoded
+    raise ValueError(f"line {line_number}: {field} is not an object")
+
+
+def _iter_canonical_otel_examples(trace_file: str | Path) -> Iterator[tuple[JsonObject | None, str | None]]:
+    """Stream validated Rose action/observation pairs from the exported OTel."""
+
+    pending: dict[tuple[str, str], tuple[JsonObject, int]] = {}
+    with Path(trace_file).open("r", encoding="utf-8") as source:
+        for line_number, line in enumerate(source, start=1):
+            if not line.strip():
+                continue
+            try:
+                span = json.loads(line)
+            except json.JSONDecodeError as exc:
+                yield None, f"line {line_number}: invalid span JSON: {exc.msg}"
+                continue
+            if not isinstance(span, dict):
+                yield None, f"line {line_number}: span is not an object"
+                continue
+            trace_id = str(span.get("traceId") or "")
+            span_id = str(span.get("spanId") or "")
+            parent_span_id = str(span.get("parentSpanId") or "")
+            name = str(span.get("name") or "")
+            attributes = _otel_attribute_map(span)
+            if name.startswith("chat "):
+                if not trace_id or not span_id:
+                    yield None, f"line {line_number}: action span is missing traceId/spanId"
+                    continue
+                pending[(trace_id, span_id)] = (attributes, line_number)
+                continue
+            if not name.startswith("execute_tool "):
+                continue
+            pending_action = pending.pop((trace_id, parent_span_id), None)
+            if pending_action is None:
+                yield None, f"line {line_number}: observation has no matching action span"
+                continue
+            action_attributes, action_line = pending_action
+            try:
+                action = _json_object_from_otel(
+                    action_attributes.get("gen_ai.tool.call.arguments"),
+                    field="gen_ai.tool.call.arguments",
+                    line_number=action_line,
+                )
+                observation = _json_object_from_otel(
+                    attributes.get("gen_ai.tool.output"),
+                    field="gen_ai.tool.output",
+                    line_number=line_number,
+                )
+                raw_state = action_attributes.get("wmh.state.structured")
+                state_before = (
+                    _json_object_from_otel(
+                        raw_state,
+                        field="wmh.state.structured",
+                        line_number=action_line,
+                    )
+                    if raw_state is not None
+                    else {}
+                )
+                if action.get("schema") != "rose.canonical_action.v1":
+                    raise ValueError(f"line {action_line}: unknown action schema {action.get('schema')!r}")
+                if observation.get("schema") != "rose.canonical_observation.v1":
+                    raise ValueError(f"line {line_number}: unknown observation schema {observation.get('schema')!r}")
+                if not isinstance(action.get("name"), str) or not action["name"]:
+                    raise ValueError(f"line {action_line}: action name is empty")
+                if not isinstance(action.get("arguments"), dict):
+                    raise ValueError(f"line {action_line}: action arguments are not an object")
+                if not isinstance(observation.get("content"), str):
+                    raise ValueError(f"line {line_number}: observation content is not text")
+                metadata = observation.get("metadata")
+                if not isinstance(metadata, dict):
+                    raise ValueError(f"line {line_number}: observation metadata is not an object")
+                if metadata.get("result_unavailable") is True:
+                    raise ValueError(f"line {line_number}: observation result is unavailable")
+                if metadata.get("world_model_simulated") is True:
+                    raise ValueError(f"line {line_number}: simulated observation entered the real corpus")
+                root_agent_id = str(
+                    attributes.get("rose.root_agent_id") or action_attributes.get("rose.root_agent_id") or ""
+                )
+                if not root_agent_id:
+                    raise ValueError(f"line {line_number}: root trajectory id is missing")
+            except ValueError as exc:
+                yield None, str(exc)
+                continue
+            fingerprint = hashlib.sha256(
+                json.dumps(
+                    {"root_agent_id": root_agent_id, "action": action, "observation": observation},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            yield (
+                {
+                    "fingerprint": fingerprint,
+                    "root_agent_id": root_agent_id,
+                    "tool_name": action["name"],
+                    "category": str(action.get("category") or "tool"),
+                    "task": str(action_attributes.get("gen_ai.prompt") or ""),
+                    "state_before": state_before,
+                    "scratchpad": str(action_attributes.get("wmh.state.scratchpad") or ""),
+                    "action": action,
+                    "observation": observation,
+                },
+                None,
+            )
+    for (_trace_id, _span_id), (_, line_number) in pending.items():
+        yield None, f"line {line_number}: action has no matching observation span"
+
+
+def write_world_model_conformance_suite(
+    trace_file: str | Path,
+    output_path: str | Path,
+    *,
+    example_count: int = 100,
+    min_trajectories: int = 10,
+    min_categories: int = 5,
+    min_tool_names: int = 10,
+) -> JsonObject:
+    """Write a deterministic, category-stratified suite of real corpus examples.
+
+    This validates the exact OTel consumed by WMH, not a parallel synthetic
+    fixture. The bounded sampler can scan a multi-gigabyte corpus without
+    retaining every observation in memory.
+    """
+
+    if example_count <= 0:
+        raise ValueError("example_count must be positive")
+    if min_trajectories <= 0 or min_categories <= 0 or min_tool_names <= 0:
+        raise ValueError("conformance coverage minimums must be positive")
+    candidate_limit = max(2_000, example_count * 20)
+    candidate_heap: list[tuple[int, int, JsonObject]] = []
+    best_by_category: dict[str, tuple[int, JsonObject]] = {}
+    best_by_tool_name: dict[str, tuple[int, JsonObject]] = {}
+    category_counts: dict[str, int] = {}
+    tool_name_counts: dict[str, int] = {}
+    trajectory_ids: set[str] = set()
+    invalid_examples: list[str] = []
+    invalid_example_count = 0
+    eligible_examples = 0
+
+    for example, invalid in _iter_canonical_otel_examples(trace_file):
+        if invalid is not None:
+            invalid_example_count += 1
+            if len(invalid_examples) < 100:
+                invalid_examples.append(invalid)
+            continue
+        assert example is not None
+        eligible_examples += 1
+        category = str(example["category"])
+        tool_name = str(example["tool_name"])
+        trajectory_ids.add(str(example["root_agent_id"]))
+        category_counts[category] = category_counts.get(category, 0) + 1
+        tool_name_counts[tool_name] = tool_name_counts.get(tool_name, 0) + 1
+        priority = int(str(example["fingerprint"]), 16)
+        prior_category = best_by_category.get(category)
+        if prior_category is None or priority < prior_category[0]:
+            best_by_category[category] = (priority, example)
+        prior_tool = best_by_tool_name.get(tool_name)
+        if prior_tool is None or priority < prior_tool[0]:
+            best_by_tool_name[tool_name] = (priority, example)
+        heap_item = (-priority, eligible_examples, example)
+        if len(candidate_heap) < candidate_limit:
+            heapq.heappush(candidate_heap, heap_item)
+        elif heap_item[0] > candidate_heap[0][0]:
+            heapq.heapreplace(candidate_heap, heap_item)
+
+    candidates_by_fingerprint: dict[str, tuple[int, JsonObject]] = {}
+    for priority, example in [*best_by_category.values(), *best_by_tool_name.values()]:
+        candidates_by_fingerprint[str(example["fingerprint"])] = (priority, example)
+    for negative_priority, _sequence, example in candidate_heap:
+        candidates_by_fingerprint.setdefault(
+            str(example["fingerprint"]),
+            (-negative_priority, example),
+        )
+    ordered_candidates = [
+        example
+        for _priority, example in sorted(
+            candidates_by_fingerprint.values(),
+            key=lambda item: (item[0], str(item[1]["fingerprint"])),
+        )
+    ]
+
+    selected: list[JsonObject] = []
+    selected_fingerprints: set[str] = set()
+
+    def select(example: JsonObject) -> bool:
+        fingerprint = str(example["fingerprint"])
+        if len(selected) >= example_count or fingerprint in selected_fingerprints:
+            return False
+        selected.append(example)
+        selected_fingerprints.add(fingerprint)
+        return True
+
+    for category in sorted(best_by_category):
+        select(best_by_category[category][1])
+    selected_trajectories = {str(example["root_agent_id"]) for example in selected}
+    for example in ordered_candidates:
+        root_agent_id = str(example["root_agent_id"])
+        if len(selected_trajectories) >= min_trajectories:
+            break
+        if root_agent_id not in selected_trajectories and select(example):
+            selected_trajectories.add(root_agent_id)
+    for tool_name in sorted(best_by_tool_name):
+        select(best_by_tool_name[tool_name][1])
+    for example in ordered_candidates:
+        select(example)
+
+    sampled_categories = {str(example["category"]) for example in selected}
+    sampled_tool_names = {str(example["tool_name"]) for example in selected}
+    status = (
+        "passed"
+        if len(selected) == example_count
+        and invalid_example_count == 0
+        and sampled_categories == set(category_counts)
+        and len(selected_trajectories) >= min_trajectories
+        and len(sampled_categories) >= min_categories
+        and len(sampled_tool_names) >= min_tool_names
+        else "failed"
+    )
+    report: JsonObject = {
+        "schema": "rose.wmh_conformance_suite.v1",
+        "status": status,
+        "trace_file": str(Path(trace_file)),
+        "requested_examples": example_count,
+        "minimum_trajectories": min_trajectories,
+        "minimum_categories": min_categories,
+        "minimum_tool_names": min_tool_names,
+        "eligible_examples": eligible_examples,
+        "sampled_examples": len(selected),
+        "trajectory_count": len(trajectory_ids),
+        "sampled_trajectory_count": len(selected_trajectories),
+        "category_count": len(category_counts),
+        "sampled_category_count": len(sampled_categories),
+        "tool_name_count": len(tool_name_counts),
+        "sampled_tool_name_count": len(sampled_tool_names),
+        "category_counts": dict(sorted(category_counts.items())),
+        "tool_name_counts": dict(sorted(tool_name_counts.items())),
+        "invalid_example_count": invalid_example_count,
+        "invalid_examples": invalid_examples,
+        "examples": selected,
+    }
+    # Native binding hashes each example's action and observation against the
+    # corpus. A broad value pass rewrote non-secret artifact paths and
+    # fingerprints (>=32 base64-like characters), so the real case had no
+    # matching native record. Keep those exact and fail closed if they carry a
+    # secret; the non-binding task/scratchpad/state keep the public redaction.
+    examples = report.pop("examples")
+    for example in examples:
+        for name in ("task", "scratchpad", "state_before"):
+            example[name] = _drop_secret_fields(_redact(example[name]))
+    if _public_example_secret_violation(examples):
+        raise ValueError("WMH conformance suite contains unredacted secret-looking content")
+    redacted = _drop_secret_fields(_redact(report))
+    if public_json_has_secret(redacted):
+        raise ValueError("WMH conformance suite contains unredacted secret-looking content")
+    redacted["examples"] = examples
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(redacted, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return redacted
 
 
 def score_observation_prediction(
@@ -1739,9 +3050,12 @@ def score_observation_prediction(
     a disabled/not-configured report rather than pretending fidelity was measured.
     """
 
+    predicted = normalize_world_model_observation(predicted, canonical=True)
     schema_validity = 1.0 if isinstance(predicted.get("content"), str) else 0.0
     predicted_content = str(predicted.get("content") or "")
     predicted_metadata = predicted.get("metadata") if isinstance(predicted.get("metadata"), dict) else {}
+    if isinstance(predicted.get("artifact_refs"), list):
+        predicted_metadata = {**predicted_metadata, "artifact_refs": predicted["artifact_refs"]}
     content_accuracy = _token_f1(actual.content, predicted_content)
     actual_note = actual.metadata.get("state_note")
     predicted_note = predicted_metadata.get("state_note")
@@ -1950,8 +3264,11 @@ def build_replay_corpus(
     return corpus
 
 
-def _build_replay_session(root_agent_id: str, split: str) -> JsonObject:
-    transitions = load_grounded_transitions(root_agent_id, redaction_mode="public")
+def _build_replay_session(
+    root_agent_id: str, split: str, transitions: list[RoseTransition] | None = None
+) -> JsonObject:
+    if transitions is None:
+        transitions = load_grounded_transitions(root_agent_id, redaction_mode="public")
     state = reconstruct_initial_state(root_agent_id, redaction_mode="public")
     keys = []
     for transition in transitions:
@@ -1978,6 +3295,149 @@ def _build_replay_session(root_agent_id: str, split: str) -> JsonObject:
     }
 
 
+def _export_bundle_worker(job: tuple[str, str, str, str, int]) -> tuple[str, int, str | None]:
+    """Export one bundle's OTel spans + replay session; runs in a worker process.
+
+    Returns ``(root_agent_id, steps, failure)``; a failure leaves no partial
+    files behind so the bundle is simply excluded from the corpus.
+    """
+    root_agent_id, otel_path_text, session_path_text, split_name, max_steps_per_bundle = job
+    otel_path = Path(otel_path_text)
+    session_path = Path(session_path_text)
+    attempts = max(1, int(os.environ.get(_WMH_ARCHIVE_RETRY_ATTEMPTS_ENV, "8") or "8"))
+    for attempt in range(attempts):
+        try:
+            with archive_json_memo():
+                _prefetch_bundle_fixtures(root_agent_id)
+                # The manifest is the cheap archive-wide screen. Historical bundles
+                # can carry a stale ``real`` manifest while their authoritative
+                # launch snapshot says ``simulate``; reject that mismatch here,
+                # before transitions or OTel are created, while reusing the start
+                # fixture this export already needs.
+                mode = bundle_world_model_mode(root_agent_id)
+                if mode not in _REAL_WORLD_MODEL_MODES:
+                    for stale in (otel_path, session_path):
+                        if stale.exists():
+                            stale.unlink()
+                    return (
+                        root_agent_id,
+                        0,
+                        "filtered:unknown-mode" if mode == "unknown" else f"filtered:simulated-run:{mode}",
+                    )
+                transitions = load_grounded_transitions(root_agent_id, redaction_mode="public")
+                if not transitions:
+                    for stale in (otel_path, session_path):
+                        if stale.exists():
+                            stale.unlink()
+                    return root_agent_id, 0, "filtered:no-completed-results"
+                if max_steps_per_bundle > 0:
+                    # The session's similarity keys mirror the exported steps
+                    # (an uncapped mass-search bundle made a 5 MB session).
+                    transitions = transitions[:max_steps_per_bundle]
+                export_archive_to_otel_jsonl(
+                    root_agent_id,
+                    otel_path,
+                    redaction_mode="public",
+                    max_transitions=max_steps_per_bundle,
+                    transitions=transitions,
+                )
+                # One transition exports two spans (``chat`` action + ``execute_tool``
+                # observation) and the retriever indexes one step per pair, so the
+                # caps count observation spans.
+                with otel_path.open("r", encoding="utf-8") as exported:
+                    bundle_steps = sum(
+                        1
+                        for line in exported
+                        if line.strip() and str(json.loads(line).get("name") or "").startswith("execute_tool ")
+                    )
+                session = _build_replay_session(root_agent_id, split_name, transitions=transitions)
+            session_path.write_text(json.dumps(session, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            return root_agent_id, bundle_steps, None
+        except Exception as exc:
+            for stale in (otel_path, session_path):
+                if stale.exists():
+                    stale.unlink()
+            if attempt + 1 < attempts and _is_transient_archive_error(exc):
+                jitter = int(hashlib.sha256(root_agent_id.encode()).hexdigest()[:2], 16) / 255
+                time.sleep(min(8.0, 0.25 * (2**attempt)) + jitter)
+                continue
+            return root_agent_id, 0, f"export-failed:{type(exc).__name__}: {str(exc)[:160]}"
+    raise AssertionError("unreachable")
+
+
+_BUNDLE_FIXTURE_PATHS = ("manifest.json.gz.enc", "db/start.fixture.json.gz.enc", "db/end.fixture.json.gz.enc")
+
+
+def _prefetch_bundle_fixtures(root_agent_id: str) -> None:
+    """Download the bundle's three JSON inputs concurrently into the read memo.
+
+    An export otherwise fetches them one after another (each multi-MB fixture
+    is a ~0.5 s stream), and with the memo in place that serial R2 latency —
+    not CPU or bandwidth — bounded the forked exporter at ~2.6 bundles/s.
+    Missing artifacts are left for the normal readers to report.
+    """
+    memo = _archive_json_memo.get()
+    if memo is None:
+        return
+
+    def _read(path: str) -> JsonObject | None:
+        try:
+            return read_archive_json(root_agent_id, path)
+        except FileNotFoundError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=len(_BUNDLE_FIXTURE_PATHS)) as pool:
+        for path, value in zip(_BUNDLE_FIXTURE_PATHS, pool.map(_read, _BUNDLE_FIXTURE_PATHS)):
+            if value is not None:
+                memo[(root_agent_id, path)] = value
+
+
+def _embed_texts(embed_dim: int, texts: list[str]) -> list[list[float]]:
+    """Embed one batch in a worker process (HashingEmbedder is deterministic and stateless)."""
+    from wmh.retrieval import HashingEmbedder
+
+    return [list(map(float, vector)) for vector in HashingEmbedder(dim=embed_dim).embed(texts)]
+
+
+def _export_executor(workers: int, jobs: int) -> ProcessPoolExecutor | ThreadPoolExecutor:
+    """Forked worker processes (one per core) unless disabled or unavailable.
+
+    ``fork`` keeps in-process test seams (fake archive clients, patched
+    readers) visible to the workers; ``WMH_EXPORT_PROCESSES=0`` falls back to
+    threads for hosts where forking a threaded process is unsafe.
+    """
+    size = max(1, min(workers, jobs))
+    use_processes = os.environ.get("WMH_EXPORT_PROCESSES", "1") != "0" and size > 1 and hasattr(os, "fork")
+    if use_processes:
+        return ProcessPoolExecutor(max_workers=size, mp_context=multiprocessing.get_context("fork"))
+    return ThreadPoolExecutor(max_workers=size)
+
+
+def _purge_stale_bundle_exports(
+    otel_dir: Path,
+    session_dir: Path,
+    bundle_ids: Iterable[str],
+) -> int:
+    """Remove per-bundle staging files that are not members of the final corpus.
+
+    The aggregate and retriever already use ``bundle_ids`` as their allow-list,
+    but keeping an export from an older screening policy leaves misleading data
+    on disk (and bloats snapshots).  Purge only the two WHM-owned staging
+    filename patterns; aggregate/model artifacts are untouched.
+    """
+    retained = set(bundle_ids)
+    purged = 0
+    for directory, suffix in (
+        (otel_dir, ".otel.jsonl"),
+        (session_dir, ".session.json"),
+    ):
+        for path in directory.glob(f"*{suffix}"):
+            if path.name.removesuffix(suffix) not in retained:
+                path.unlink()
+                purged += 1
+    return purged
+
+
 def update_world_model_for_simulation(
     *,
     output_dir: str | Path | None = None,
@@ -1998,6 +3458,8 @@ def update_world_model_for_simulation(
     judge_provider: Any | None = None,
     embedder: Any | None = None,
     index_refresher: Callable[..., JsonObject] | None = None,
+    conformance_examples: int | None = None,
+    require_conformance: bool | None = None,
 ) -> JsonObject:
     """Incrementally update the local WMH corpus/model from archived gold bundles.
 
@@ -2013,11 +3475,23 @@ def update_world_model_for_simulation(
     model = model or os.environ.get("WMH_BUILD_MODEL") or os.environ.get("WMH_SERVE_MODEL") or "claude-opus-4-8"
     if gepa_budget is None:
         gepa_budget = int(os.environ.get("WMH_GEPA_BUDGET", "10"))
+    if conformance_examples is None:
+        conformance_examples = int(os.environ.get("WMH_CONFORMANCE_EXAMPLES", "100") or "100")
+    if conformance_examples <= 0:
+        raise ValueError("WMH_CONFORMANCE_EXAMPLES must be positive")
+    if require_conformance is None:
+        require_conformance = os.environ.get("WMH_REQUIRE_CONFORMANCE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
     index_path = out_dir / "delta-index.json"
     otel_dir = out_dir / "otel"
     session_dir = out_dir / "sessions"
     aggregate_trace_file = out_dir / "traces.otel.jsonl"
     aggregate_sessions_file = out_dir / "sessions.json"
+    conformance_path = out_dir / "conformance.json"
 
     out_dir.mkdir(parents=True, exist_ok=True)
     otel_dir.mkdir(parents=True, exist_ok=True)
@@ -2033,24 +3507,59 @@ def update_world_model_for_simulation(
     all_bundle_ids = sorted(list(root_agent_ids) if root_agent_ids is not None else list_archive_bundle_ids())
     index = _read_delta_index(index_path)
     old_bundles = index.get("bundles") if isinstance(index.get("bundles"), dict) else {}
-    # Corpus cap for fast benchmark/cloud builds. The full R2 archive is large and
-    # downloads slowly from some hosts (~KB/s); WMH_MAX_BUNDLES bounds the first
-    # build to N bundles so a serving model is ready in minutes, not hours. A later
-    # explicit --refresh-wmh (higher/unset cap) can grow it. 0/unset = no cap.
+    # Optional operator cap for deliberately scoped diagnostics. Normal builds
+    # leave this unset/zero and ingest the complete eligible archive.
     _wmh_max_bundles = int(os.environ.get("WMH_MAX_BUNDLES", "0") or "0")
-    candidate_bundle_ids = all_bundle_ids
-    if _wmh_max_bundles > 0 and len(candidate_bundle_ids) > _wmh_max_bundles:
-        # Keep already-indexed traces before deterministically admitting new
-        # ones. Otherwise maintenance can evict the known-good corpus solely
-        # because a UUID sorts outside the capped prefix. This selection must
-        # happen before partition_real_world_bundles: classification reads each
-        # encrypted manifest from R2 and was the uncapped refresh bottleneck.
-        available = set(candidate_bundle_ids)
-        retained = sorted(bundle_id for bundle_id in old_bundles if bundle_id in available)
-        new = [bundle_id for bundle_id in candidate_bundle_ids if bundle_id not in old_bundles]
-        limit = max(_wmh_max_bundles, len(retained))
-        candidate_bundle_ids = (retained + new)[:limit]
-    bundle_ids, excluded_bundles = partition_real_world_bundles(candidate_bundle_ids)
+    # Only gold-eligible bundles enter the corpus (see bundle_corpus_eligibility).
+    # Already-indexed bundles are retained first so maintenance never evicts the
+    # known-good corpus; screening verdicts persist in the delta index so a
+    # refresh only classifies new bundles and stale non-final ones.
+    screening_cache = index.get("screening") if isinstance(index.get("screening"), dict) else {}
+    if screening_cache and index.get("screening_policy") != _SCREENING_POLICY_VERSION:
+        print(
+            f"[WorldModel] Screening policy changed ({index.get('screening_policy')!r} -> "
+            f"{_SCREENING_POLICY_VERSION!r}); re-screening {len(screening_cache)} cached verdicts",
+            flush=True,
+        )
+        screening_cache = {}
+    screening_started = time.time()
+    index_before_screening = dict(index)
+
+    def _checkpoint_screening_cache() -> None:
+        if not screening_cache:
+            return
+        index_before_screening["screening"] = screening_cache
+        index_before_screening["screening_policy"] = _SCREENING_POLICY_VERSION
+        _write_delta_index(index_path, index_before_screening)
+
+    bundle_ids, excluded_bundles, screening_cache_hits = select_corpus_bundles(
+        all_bundle_ids,
+        old_bundles,
+        max_bundles=_wmh_max_bundles,
+        cache=screening_cache,
+        now_ms=int(time.time() * 1000),
+        policy=(os.environ.get("WMH_CORPUS_POLICY") or "gold").strip().lower(),
+        checkpoint=_checkpoint_screening_cache,
+    )
+    excluded_reasons: dict[str, int] = {}
+    for reason in excluded_bundles.values():
+        key = reason.split(":", 1)[0]
+        excluded_reasons[key] = excluded_reasons.get(key, 0) + 1
+    _emit_progress(
+        progress,
+        "World Model Corpus Screening",
+        "IN_PROGRESS",
+        archive_bundles=len(all_bundle_ids),
+        screened=len(bundle_ids) + len(excluded_bundles),
+        eligible=len(bundle_ids),
+        excluded_reasons=excluded_reasons,
+        screening_cache_hits=screening_cache_hits,
+        elapsed_ms=int((time.time() - screening_started) * 1000),
+    )
+    # Checkpoint the verdicts now: an uncapped screen of the archive takes
+    # ~17 minutes, and a crash in the signature/export phases below used to
+    # discard all of it because the delta index was only written at the end.
+    _checkpoint_screening_cache()
     split = deterministic_split(bundle_ids, heldout_fraction=heldout_fraction) if bundle_ids else {}
     changed: list[str] = []
     unchanged: list[str] = []
@@ -2059,8 +3568,32 @@ def update_world_model_for_simulation(
     total_ciphertext_bytes = 0
     total_artifacts = 0
 
-    for root_agent_id in bundle_ids:
-        signature = _bundle_signature(root_agent_id)
+    # Signatures are independent per bundle: compute them concurrently (under
+    # R2 each is one listing request; locally a fan-out of sidecar reads) so a
+    # corpus of thousands takes a minute, not hours of sequential round trips.
+    def _signature_or_failure(root_agent_id: str) -> JsonObject | str:
+        try:
+            return _bundle_signature(root_agent_id)
+        except Exception as exc:
+            return f"signature-failed:{type(exc).__name__}: {str(exc)[:160]}"
+
+    if bundle_ids:
+        with ThreadPoolExecutor(max_workers=min(_ARCHIVE_READ_WORKERS, len(bundle_ids))) as pool:
+            computed = list(pool.map(_signature_or_failure, bundle_ids))
+    else:
+        computed = []
+    signature_failures = {
+        root_agent_id: outcome for root_agent_id, outcome in zip(bundle_ids, computed) if isinstance(outcome, str)
+    }
+    if signature_failures:
+        # A ciphertext without its metadata sidecar means an interrupted upload;
+        # one such bundle used to abort the whole corpus refresh.
+        for root_agent_id, failure in signature_failures.items():
+            print(f"[WorldModel] Skipping bundle {root_agent_id}: {failure}", flush=True)
+        excluded_bundles.update(signature_failures)
+        bundle_ids = [bundle_id for bundle_id in bundle_ids if bundle_id not in signature_failures]
+        split = {bundle_id: value for bundle_id, value in split.items() if bundle_id not in signature_failures}
+    for root_agent_id, signature in zip(bundle_ids, [outcome for outcome in computed if not isinstance(outcome, str)]):
         signatures[root_agent_id] = signature
         total_plaintext_bytes += int(signature["plaintext_bytes"])
         total_ciphertext_bytes += int(signature["ciphertext_bytes"])
@@ -2069,9 +3602,7 @@ def update_world_model_for_simulation(
         session_path = session_dir / f"{root_agent_id}.session.json"
         previous = old_bundles.get(root_agent_id) if isinstance(old_bundles, dict) else None
         previous_sha = previous.get("sha256") if isinstance(previous, dict) else None
-        previous_export_schema = (
-            previous.get("export_schema_version") if isinstance(previous, dict) else None
-        )
+        previous_export_schema = previous.get("export_schema_version") if isinstance(previous, dict) else None
         if (
             force
             or previous_sha != signature["sha256"]
@@ -2099,17 +3630,111 @@ def update_world_model_for_simulation(
 
     exported_spans = 0
     exported_sessions = 0
-    for root_agent_id in changed:
-        otel_path = otel_dir / f"{root_agent_id}.otel.jsonl"
-        export_archive_to_otel_jsonl(root_agent_id, otel_path, redaction_mode="public")
-        with otel_path.open("r", encoding="utf-8") as exported:
-            exported_spans += sum(1 for line in exported if line.strip())
-        session = _build_replay_session(root_agent_id, split[root_agent_id])
-        (session_dir / f"{root_agent_id}.session.json").write_text(
-            json.dumps(session, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+    # A malformed bundle (no db/start fixture, undecryptable transitions, a
+    # manifest that classifies as real but lacks its artifacts) must not abort
+    # the whole corpus refresh: the R2 archive holds ~80k bundles of mixed
+    # provenance, and one bad bundle in the capped selection previously killed
+    # the build for every bench on the box. Skip it, report it, keep it out of
+    # the aggregate and the delta index so the next refresh re-evaluates it.
+    export_failures: dict[str, str] = {}
+    preexport_exclusions: dict[str, str] = {}
+    max_steps = int(os.environ.get(_WMH_MAX_STEPS_ENV, "0") or "0")
+    max_steps_per_bundle = int(os.environ.get(_WMH_MAX_STEPS_PER_BUNDLE_ENV, "0") or "0")
+    cpu_count = os.cpu_count() or 4
+    # R2 exports are dominated by fixture download latency and each worker
+    # prefetches the three fixtures concurrently. Two workers per vCPU keeps
+    # the network busy while preserving explicit WMH_EXPORT_WORKERS control.
+    default_export_workers = cpu_count * (2 if archive_backend_is_r2() else 1)
+    export_workers = max(1, int(os.environ.get(_WMH_EXPORT_WORKERS_ENV) or default_export_workers))
+
+    # Exports are independent per bundle and CPU-bound (decrypt + gunzip +
+    # JSON-parse the start and optional end fixture, then redact), so threads only reached
+    # ~1.6 bundles/s on one core under the GIL; forked worker processes use
+    # every core. Results are consumed in submission order so the total step
+    # cap drops a deterministic tail of candidates, which stay unindexed until
+    # a refresh with a higher cap admits them.
+    exported_spans += sum(_indexed_step_count(old_bundles, bundle_id) for bundle_id in unchanged)
+    exported_by_bundle: dict[str, int] = {}
+    dropped_for_step_cap: list[str] = []
+    jobs = [
+        (
+            root_agent_id,
+            str(otel_dir / f"{root_agent_id}.otel.jsonl"),
+            str(session_dir / f"{root_agent_id}.session.json"),
+            split[root_agent_id],
+            max_steps_per_bundle,
         )
-        exported_sessions += 1
+        for root_agent_id in changed
+    ]
+    if jobs:
+        with _export_executor(export_workers, len(jobs)) as pool:
+            futures = [pool.submit(_export_bundle_worker, job) for job in jobs]
+            for position, future in enumerate(futures):
+                if max_steps > 0 and exported_spans >= max_steps:
+                    for pending in futures[position:]:
+                        pending.cancel()
+                    dropped_for_step_cap.extend(changed[position:])
+                    break
+                root_agent_id, bundle_steps, failure = future.result()
+                if failure:
+                    if failure.startswith("filtered:"):
+                        reason = failure.removeprefix("filtered:")
+                        preexport_exclusions[root_agent_id] = reason
+                        screening_cache[root_agent_id] = {
+                            "eligible": False,
+                            "reason": reason,
+                            "checked_at_ms": int(time.time() * 1000),
+                        }
+                        print(
+                            f"[WorldModel] Filtering bundle {root_agent_id} before export: {reason}",
+                            flush=True,
+                        )
+                    else:
+                        export_failures[root_agent_id] = failure
+                        print(f"[WorldModel] Skipping bundle {root_agent_id}: {failure}", flush=True)
+                else:
+                    exported_by_bundle[root_agent_id] = bundle_steps
+                    exported_spans += bundle_steps
+                    exported_sessions += 1
+                completed = position + 1
+                if completed % export_workers == 0 and completed < len(futures):
+                    _emit_progress(
+                        progress,
+                        "World Model Trace Export",
+                        "IN_PROGRESS",
+                        updated_traces=len(exported_by_bundle),
+                        pending_traces=len(futures) - completed,
+                        exported_spans=exported_spans,
+                        exported_sessions=exported_sessions,
+                        export_failed=len(export_failures),
+                    )
+    if dropped_for_step_cap:
+        for bundle_id in dropped_for_step_cap:
+            excluded_bundles[bundle_id] = f"step-cap:{max_steps}"
+        print(
+            f"[WorldModel] Step cap {max_steps} reached at {exported_spans} steps; "
+            f"{len(dropped_for_step_cap)} eligible bundles left unindexed",
+            flush=True,
+        )
+        bundle_ids = [bundle_id for bundle_id in bundle_ids if bundle_id not in set(dropped_for_step_cap)]
+        changed = [bundle_id for bundle_id in changed if bundle_id not in set(dropped_for_step_cap)]
+    if export_failures:
+        excluded_bundles.update(export_failures)
+        bundle_ids = [bundle_id for bundle_id in bundle_ids if bundle_id not in export_failures]
+        changed = [bundle_id for bundle_id in changed if bundle_id not in export_failures]
+    if preexport_exclusions:
+        excluded_bundles.update(preexport_exclusions)
+        bundle_ids = [bundle_id for bundle_id in bundle_ids if bundle_id not in preexport_exclusions]
+        changed = [bundle_id for bundle_id in changed if bundle_id not in preexport_exclusions]
+
+    purged_staging_files = _purge_stale_bundle_exports(otel_dir, session_dir, bundle_ids)
+
+    # Include every exclusion stage in the final waterfall, not only the cheap
+    # archive-wide screening reasons computed above.
+    excluded_reasons = {}
+    for reason in excluded_bundles.values():
+        key = reason.split(":", 1)[0]
+        excluded_reasons[key] = excluded_reasons.get(key, 0) + 1
 
     _emit_progress(
         progress,
@@ -2118,6 +3743,8 @@ def update_world_model_for_simulation(
         updated_traces=len(changed),
         exported_spans=exported_spans,
         exported_sessions=exported_sessions,
+        export_failed=len(export_failures),
+        filtered_before_export=len(preexport_exclusions),
     )
 
     sessions: list[JsonObject] = []
@@ -2144,9 +3771,42 @@ def update_world_model_for_simulation(
 
     aggregate_bytes = aggregate_trace_file.stat().st_size if aggregate_trace_file.exists() else 0
     session_bytes = aggregate_sessions_file.stat().st_size if aggregate_sessions_file.exists() else 0
+    conformance = write_world_model_conformance_suite(
+        aggregate_trace_file,
+        conformance_path,
+        example_count=conformance_examples,
+    )
+    _emit_progress(
+        progress,
+        "World Model Corpus Conformance",
+        "FINISHED" if conformance["status"] == "passed" else "ERROR",
+        report_path=str(conformance_path),
+        requested_examples=conformance["requested_examples"],
+        eligible_examples=conformance["eligible_examples"],
+        sampled_examples=conformance["sampled_examples"],
+        trajectory_count=conformance["trajectory_count"],
+        category_count=conformance["category_count"],
+        tool_name_count=conformance["tool_name_count"],
+        invalid_example_count=conformance["invalid_example_count"],
+    )
+    if require_conformance and conformance["status"] != "passed":
+        raise RuntimeError(
+            "WMH corpus conformance failed: "
+            f"requested={conformance_examples}, eligible={conformance['eligible_examples']}, "
+            f"sampled={conformance['sampled_examples']}, invalid={conformance['invalid_example_count']}"
+        )
     manifest_path = out_dir / "build.manifest.json"
     needs_build = force or not manifest_path.exists()
-    needs_index_refresh = bool(changed) and not needs_build
+    native_engine = os.environ.get("WMH_ENGINE") == "experiential"
+    if native_engine and manifest_path.exists():
+        current_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        needs_build = needs_build or current_manifest.get("engine") != "experiential"
+    # A newly ineligible retained bundle (for example a DEMO task admitted by
+    # an older screening policy) changes the aggregate even when no surviving
+    # bundle needs re-export. Refresh the retriever so removed steps cannot
+    # remain live in its on-disk index.
+    corpus_membership_changed = set(old_bundles) != set(bundle_ids)
+    needs_index_refresh = (bool(changed) or corpus_membership_changed) and not needs_build
     _emit_progress(
         progress,
         "World Model Build",
@@ -2166,7 +3826,22 @@ def update_world_model_for_simulation(
 
     build_manifest: JsonObject
     index_refresh: JsonObject | None = None
-    if needs_build:
+    if native_engine:
+        from benchmarks.experiential_bridge import build_native
+
+        if needs_build or needs_index_refresh:
+            build_native(out_dir, out_dir, name, os.environ.get("WMH_ROSE_POOL", "rose-1-ultra"))
+        else:
+            # Rebind the refreshed suite against the verified immutable artifact,
+            # without reconstructing its dataset or index. Runtime identity checks
+            # reject a changed prompt, pool, capability contract or corrupt source.
+            build_native(out_dir, out_dir, name, os.environ.get("WMH_ROSE_POOL", "rose-1-ultra"), bind_only=True)
+        build_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        build_manifest["build_skipped"] = not (needs_build or needs_index_refresh)
+        build_ran = needs_build or needs_index_refresh
+        conformance_path = out_dir / "conformance.native.json"
+        conformance = json.loads(conformance_path.read_text(encoding="utf-8"))
+    elif needs_build:
         build_manifest = build_world_model_from_otel_jsonl(
             aggregate_trace_file,
             out_dir,
@@ -2183,7 +3858,9 @@ def update_world_model_for_simulation(
             judge_provider=judge_provider,
             embedder=embedder,
         )
+        build_ran = True
     else:
+        build_ran = False
         build_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         build_manifest["build_skipped"] = True
         if needs_index_refresh:
@@ -2208,6 +3885,8 @@ def update_world_model_for_simulation(
     index["model_name"] = name
     index["trace_file"] = str(aggregate_trace_file)
     index["replay_corpus_file"] = str(aggregate_sessions_file)
+    index["screening"] = screening_cache
+    index["screening_policy"] = _SCREENING_POLICY_VERSION
     index["bundles"] = {
         root_agent_id: {
             **signatures[root_agent_id],
@@ -2215,6 +3894,7 @@ def update_world_model_for_simulation(
             "split": split[root_agent_id],
             "otel_file": str(otel_dir / f"{root_agent_id}.otel.jsonl"),
             "session_file": str(session_dir / f"{root_agent_id}.session.json"),
+            "steps": exported_by_bundle.get(root_agent_id, _indexed_step_count(old_bundles, root_agent_id)),
             "updated_at_ms": now_ms,
         }
         for root_agent_id in bundle_ids
@@ -2230,16 +3910,28 @@ def update_world_model_for_simulation(
         "index_path": str(index_path),
         "trace_file": str(aggregate_trace_file),
         "replay_corpus_file": str(aggregate_sessions_file),
+        "conformance_path": str(conformance_path),
+        "conformance": {
+            key: value
+            for key, value in conformance.items()
+            if key not in {"examples", "category_counts", "tool_name_counts", "invalid_examples"}
+        },
         "build_manifest_path": str(manifest_path),
         "total_traces": len(bundle_ids),
+        "total_steps": exported_spans,
         "updated_traces": len(changed),
         "unchanged_traces": len(unchanged),
+        "export_failed": dict(export_failures),
+        "purged_staging_files": purged_staging_files,
+        "excluded_bundles": len(excluded_bundles),
+        "excluded_reasons": excluded_reasons,
+        "screening_cache_hits": screening_cache_hits,
         "artifact_count": total_artifacts,
         "plaintext_bytes": total_plaintext_bytes,
         "ciphertext_bytes": total_ciphertext_bytes,
         "aggregate_trace_bytes": aggregate_bytes,
         "replay_corpus_bytes": session_bytes,
-        "build_ran": needs_build,
+        "build_ran": build_ran,
         "index_refreshed": needs_index_refresh,
         "index_refresh": index_refresh,
         "elapsed_ms": elapsed_ms,
@@ -2251,11 +3943,14 @@ def update_world_model_for_simulation(
         "FINISHED",
         model_name=name,
         total_traces=len(bundle_ids),
+        total_steps=exported_spans,
         updated_traces=len(changed),
         unchanged_traces=len(unchanged),
         aggregate_trace_bytes=aggregate_bytes,
         replay_corpus_bytes=session_bytes,
-        build_ran=needs_build,
+        conformance_status=conformance["status"],
+        conformance_examples=conformance["sampled_examples"],
+        build_ran=build_ran,
         elapsed_ms=elapsed_ms,
     )
     return result
@@ -2308,11 +4003,15 @@ def compare_real_vs_world_model_benchmark(
 class WMHHttpClient:
     """Small client for WMH's local HTTP serving API."""
 
+    # WMH transitions can consume Rose's full 590-second provider deadline.
+    # Keep transport headroom for provider rotation and response serialization.
+    DEFAULT_TIMEOUT_SECONDS = 660.0
+
     def __init__(self, base_url: str, *, timeout: float | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         configured_timeout = timeout
         if configured_timeout is None:
-            configured_timeout = float(os.environ.get("WMH_HTTP_TIMEOUT_SECONDS", "180"))
+            configured_timeout = float(os.environ.get("WMH_HTTP_TIMEOUT_SECONDS", str(self.DEFAULT_TIMEOUT_SECONDS)))
         if configured_timeout <= 0:
             raise ValueError("WMH HTTP timeout must be greater than zero")
         self.timeout = configured_timeout
@@ -2324,6 +4023,15 @@ class WMHHttpClient:
             data = response.json()
         models = data.get("world_models")
         return models if isinstance(models, list) else []
+
+    async def model_identity(self, world_model: str) -> JsonObject:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.get(f"{self.base_url}/healthz")
+            response.raise_for_status()
+            data = response.json()
+        if data.get("world_model_name") != world_model:
+            raise ValueError("Served native world model identity names another model")
+        return {key: data.get(key) for key in ("world_model_id", "world_model_manifest_sha256", "execution_identity")}
 
     async def start_session(
         self, world_model: str, *, task: str | None = None, seed_state: JsonObject | None = None
@@ -2358,6 +4066,199 @@ class WMHHttpClient:
         if not isinstance(observation, dict):
             raise ValueError("WMH step response did not include observation")
         return observation
+
+
+async def evaluate_world_model_conformance_suite(
+    suite_file: str | Path,
+    *,
+    world_model_name: str,
+    base_url: str | None = None,
+    output_path: str | Path | None = None,
+    concurrency: int = 8,
+    min_mean_score: float = 0.7,
+    min_content_accuracy: float = 0.25,
+    client: Any | None = None,
+    execution_policy: str = "upstream",
+    runtime_config: dict | None = None,
+) -> JsonObject:
+    """Replay the static 100-case suite against a served model and score it.
+
+    Each example starts from its archived pre-action state in an independent
+    session. That makes this an open-loop prediction test: a preceding model
+    mistake cannot contaminate later examples, and examples from the same real
+    trajectory can run concurrently.
+    """
+
+    if concurrency <= 0:
+        raise ValueError("concurrency must be positive")
+    for name, value in (
+        ("min_mean_score", min_mean_score),
+        ("min_content_accuracy", min_content_accuracy),
+    ):
+        if value < 0 or value > 1:
+            raise ValueError(f"{name} must be between 0 and 1")
+    payload = json.loads(Path(suite_file).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("schema") != "rose.wmh_conformance_suite.v1":
+        raise ValueError("suite_file is not a Rose WMH conformance suite")
+    raw_examples = payload.get("examples")
+    if not isinstance(raw_examples, list) or not raw_examples:
+        raise ValueError("suite_file contains no examples")
+    examples = [example for example in raw_examples if isinstance(example, dict)]
+    if len(examples) != len(raw_examples):
+        raise ValueError("suite_file contains a non-object example")
+    if client is None:
+        if not base_url:
+            raise ValueError("base_url is required when client is not provided")
+        client = WMHHttpClient(base_url)
+    bound_identity: JsonObject = {}
+    if payload.get("native_world_model_id") or payload.get("native_world_model_manifest_sha256"):
+        expected_identity = {
+            "world_model_id": payload.get("native_world_model_id"),
+            "world_model_manifest_sha256": payload.get("native_world_model_manifest_sha256"),
+        }
+        if not all(isinstance(value, str) and value for value in expected_identity.values()):
+            raise ValueError("Native conformance suite has incomplete artifact identity")
+        from benchmarks.wmh_execution_policy import execution_identity
+
+        expected_execution = execution_identity(
+            execution_policy, expected_identity["world_model_id"], expected_identity["world_model_manifest_sha256"],
+            runtime_config=runtime_config,
+        )
+        suite_execution = payload.get("native_execution_identity")
+        if execution_policy != "upstream" and suite_execution is None:
+            raise ValueError("Activated native policy requires an execution-bound conformance suite")
+        if suite_execution is not None and suite_execution != expected_execution:
+            raise ValueError("Conformance suite execution identity differs from the explicit expectation")
+        identity_reader = getattr(client, "model_identity", None)
+        expected_identity["execution_identity"] = expected_execution
+        if identity_reader is None or await identity_reader(world_model_name) != expected_identity:
+            raise ValueError(
+                "Served native artifact or execution identity differs from the bound conformance expectation"
+            )
+        bound_identity = {
+            "native_world_model_id": expected_identity["world_model_id"],
+            "native_world_model_manifest_sha256": expected_identity["world_model_manifest_sha256"],
+            "native_execution_identity": expected_execution,
+        }
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def score_example(index: int, example: JsonObject) -> JsonObject:
+        action_raw = example.get("action") if isinstance(example.get("action"), dict) else {}
+        observation_raw = example.get("observation") if isinstance(example.get("observation"), dict) else {}
+        action = CanonicalAction(
+            category=str(action_raw.get("category") or "tool"),
+            name=str(action_raw.get("name") or ""),
+            arguments=dict(action_raw.get("arguments") or {}),
+            agent_id=str(action_raw.get("agent_id") or "") or None,
+            span_id=str(action_raw.get("span_id") or "") or None,
+            tool_call_id=str(action_raw.get("tool_call_id") or "") or None,
+            artifact_refs=list(action_raw.get("artifact_refs") or []),
+            timestamp_ms=(action_raw.get("timestamp_ms") if isinstance(action_raw.get("timestamp_ms"), int) else None),
+        )
+        actual = CanonicalObservation(
+            category=str(observation_raw.get("category") or "tool_result"),
+            content=str(observation_raw.get("content") or ""),
+            is_error=bool(observation_raw.get("is_error")),
+            metadata=dict(observation_raw.get("metadata") or {}),
+            artifact_refs=list(observation_raw.get("artifact_refs") or []),
+            timestamp_ms=(
+                observation_raw.get("timestamp_ms") if isinstance(observation_raw.get("timestamp_ms"), int) else None
+            ),
+        )
+        if not action.name:
+            return {"index": index, "error": "action name is empty", "score": 0.0}
+        async with semaphore:
+            try:
+                session_id = await client.start_session(
+                    world_model_name,
+                    task=str(example.get("task") or ""),
+                    seed_state={
+                        "structured": dict(example.get("state_before") or {}),
+                        "scratchpad": str(example.get("scratchpad") or ""),
+                    },
+                )
+                predicted = await client.step(world_model_name, session_id, action)
+            except Exception as exc:
+                return {
+                    "index": index,
+                    "fingerprint": example.get("fingerprint"),
+                    "root_agent_id": example.get("root_agent_id"),
+                    "tool_name": example.get("tool_name"),
+                    "category": example.get("category"),
+                    "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                    "score": 0.0,
+                }
+        score, dimensions, critique = score_observation_prediction(actual, predicted)
+        return {
+            "index": index,
+            "fingerprint": example.get("fingerprint"),
+            "root_agent_id": example.get("root_agent_id"),
+            "tool_name": example.get("tool_name"),
+            "category": example.get("category"),
+            "score": score,
+            "dimensions": dimensions,
+            "critique": critique,
+        }
+
+    scored = await asyncio.gather(*(score_example(index, example) for index, example in enumerate(examples)))
+    score_count = len(scored)
+    mean_score = sum(float(item.get("score") or 0) for item in scored) / score_count
+    dimension_means = {
+        dimension: sum(
+            float((item.get("dimensions") or {}).get(dimension) or 0)
+            for item in scored
+            if isinstance(item.get("dimensions"), dict)
+        )
+        / score_count
+        for dimension in _FIDELITY_DIMENSIONS
+    }
+    errors = [item for item in scored if item.get("error")]
+    by_category: JsonObject = {}
+    for category in sorted({str(item.get("category") or "tool") for item in scored}):
+        category_items = [item for item in scored if str(item.get("category") or "tool") == category]
+        by_category[category] = {
+            "examples": len(category_items),
+            "mean_score": sum(float(item.get("score") or 0) for item in category_items) / len(category_items),
+            "content_accuracy": sum(
+                float((item.get("dimensions") or {}).get("content_accuracy") or 0) for item in category_items
+            )
+            / len(category_items),
+        }
+    expected_count = int(payload.get("requested_examples") or len(examples))
+    passed = (
+        payload.get("status") == "passed"
+        and score_count == expected_count
+        and not errors
+        and mean_score >= min_mean_score
+        and dimension_means["content_accuracy"] >= min_content_accuracy
+    )
+    report: JsonObject = {
+        "schema": "rose.wmh_prediction_conformance.v1",
+        **bound_identity,
+        "status": "passed" if passed else "failed",
+        "world_model": world_model_name,
+        "base_url": base_url,
+        "suite_file": str(Path(suite_file)),
+        "examples": score_count,
+        "prediction_errors": len(errors),
+        "min_mean_score": min_mean_score,
+        "min_content_accuracy": min_content_accuracy,
+        "mean_score": mean_score,
+        "dimensions": dimension_means,
+        "by_category": by_category,
+        "results": scored,
+    }
+    public_report = _drop_secret_fields(_redact(report))
+    # These fields came from exact verified expectations, never from arbitrary
+    # observation text. Keep their nonsecret digests usable after redaction.
+    public_report.update(bound_identity)
+    if public_json_has_secret(public_report):
+        raise ValueError("WMH prediction conformance report contains unredacted secret-looking content")
+    if output_path is not None:
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(public_report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return public_report
 
 
 class WorldModelToolExecutionAdapter:
@@ -2518,52 +4419,6 @@ def world_model_observation_to_tool_result(
     simulated: bool,
     wall_elapsed_ms: int | None = None,
 ) -> JsonObject:
-    is_error = bool(observation.get("is_error") or observation.get("error"))
-    content = observation.get("content")
-    if not isinstance(content, str):
-        content = json.dumps(observation, ensure_ascii=False, sort_keys=True)
-    predicted_latency_ms = predicted_latency_ms_from_observation(observation)
-    payload = _observation_tool_result_payload(observation)
-    if isinstance(payload, dict):
-        result = dict(payload)
-        result.setdefault("success", not is_error)
-        result.setdefault("message", content)
-        result.setdefault("world_model_observation", observation)
-    else:
-        result = {
-            "success": not is_error,
-            "message": content,
-            "result": observation,
-        }
-    if is_error:
-        result["error"] = True
-    if simulated:
-        result["world_model_simulated"] = True
-    if predicted_latency_ms is not None:
-        result["predicted_latency_ms"] = predicted_latency_ms
-    if wall_elapsed_ms is not None:
-        result["world_model_wall_elapsed_ms"] = max(0, int(wall_elapsed_ms))
-        result["simulated_elapsed_ms"] = max(0, int(wall_elapsed_ms)) + (predicted_latency_ms or 0)
-    return result
+    from helpers.world_model_runtime import world_model_observation_to_tool_result as convert
 
-
-def _observation_tool_result_payload(observation: JsonObject) -> Any:
-    metadata = observation.get("metadata")
-    candidates = [
-        observation.get("tool_result"),
-        observation.get("result"),
-        metadata.get("tool_result") if isinstance(metadata, dict) else None,
-        metadata.get("result") if isinstance(metadata, dict) else None,
-    ]
-    for candidate in candidates:
-        if candidate is not None:
-            return candidate
-    content = observation.get("content")
-    if isinstance(content, str) and content.strip():
-        try:
-            decoded = json.loads(content)
-        except json.JSONDecodeError:
-            decoded = None
-        if isinstance(decoded, dict):
-            return decoded
-    return None
+    return convert(observation, simulated=simulated, wall_elapsed_ms=wall_elapsed_ms)

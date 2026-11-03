@@ -1,0 +1,9 @@
+# Isolated Python >=3.12 simulator. Do not install into the browser/worker venv:
+# browser-use pins anyio==4.12.1; this upstream version requires >=4.14.2.
+# Vendored: the upstream repository was removed. The +rose local version never resolves
+# from an index. See vendor/world-model/SOURCES.txt.
+--find-links ./vendor/world-model
+experiential==0.7.158+rose.bf75987e.elapsed1
+fastapi>=0.116,<1
+uvicorn>=0.34,<1
+pytest>=8,<10

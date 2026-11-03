@@ -38,6 +38,8 @@ def exercise(
     expect_deadline: bool = False,
     forbidden_manifest: bool = False,
     socket_fault: str | None = None,
+    wmh_log: bool = False,
+    guest_diagnostics: bool = False,
 ):
     token, machine = "test-run-1", "abcdef12345678"
     files = {
@@ -49,6 +51,10 @@ def exercise(
         "logs/worker.log": b"worker stopped\n",
         "logs/worker.1.log": b"worker one stopped\n",
     }
+    if wmh_log:
+        files["wmh-serve-log.txt"] = b"wmh_step_committed prediction_ms=10000\n"
+    if guest_diagnostics:
+        files["guest-diagnostics.jsonl"] = b'{"backend_pool_limit": 30, "pg": {"by_state": {"active": 30}}}\n'
     manifest = {
         "version": 1,
         "run_token": token,
@@ -256,8 +262,199 @@ def test_collectors_stop_on_clean_shutdown_without_run_result():
                  terminal_clean_without_seal=True)
 
 
+def guest_inventory_includes_optional_wmh_log():
+    """The guest seals the served WMH log when present, never through a link."""
+    import runpy
+
+    status = runpy.run_path(str(ROOT / "scripts/cloudbench-status-server.py"))
+    token = "test-run-1"
+    with tempfile.TemporaryDirectory() as directory:
+        context = Path(directory) / "repo/.context/cloudbench"
+        (context / "logs").mkdir(parents=True)
+        for name, text in {
+            "services.json": json.dumps({"status": "stopped", "env": {"worker_processes": 1}}),
+            "run.json": "{}", "stack.log": "stack\n", "logs/backend.log": "backend\n",
+            "logs/worker.log": "worker\n", f"cloudbench-stack-cleanup-{token}.status": f"state=clean\ntoken={token}\n",
+        }.items():
+            (context / name).write_text(text)
+        assert "wmh-serve-log.txt" not in status["runtime_evidence_context_paths"](context, token)
+        (context / "wmh-serve-log.txt").write_text("wmh_step_committed\n")
+        manifest = status["runtime_evidence_context_manifest"](context, token, "abcdef12345678")
+        assert manifest["files"]["wmh-serve-log.txt"]["bytes"] == len("wmh_step_committed\n")
+        (context / "wmh-serve-log.txt").unlink()
+        (context / "wmh-serve-log.txt").symlink_to(context / "stack.log")
+        try:
+            status["runtime_evidence_context_paths"](context, token)
+        except ValueError as error:
+            assert "unsafe runtime evidence" in str(error)
+        else:
+            raise AssertionError("a linked WMH log was admitted as runtime evidence")
+
+
+def _rca_capture(name, value):
+    try:
+        directory = os.environ.get("CPU_RCA_DIR")
+        if directory:
+            Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
+            Path(directory, name).write_text(json.dumps(value()))
+    except Exception:
+        pass  # Diagnostics must not change the fixture outcome or cleanup.
+
+
+def guest_diagnostics_sampler_and_inventory():
+    """The bounded sampler writes CPU, pool and pg_stat_activity samples that the
+    guest inventory seals as optional runtime evidence."""
+    import runpy
+
+    status = runpy.run_path(str(ROOT / "scripts/cloudbench-status-server.py"))
+    token = "test-run-1"
+    with tempfile.TemporaryDirectory() as directory:
+        bin_dir = Path(directory) / "bin"
+        bin_dir.mkdir()
+        psql = bin_dir / "psql"
+        psql.write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in *pg_stat_activity*) ;; *) exit 2 ;; esac\n"
+            "echo '{\"connections\": 33, \"max_connections\": 100, \"database_clients\": 30,"
+            " \"by_state\": {\"active\": 30}, \"by_wait\": {\"Lock:transactionid\": 4},"
+            " \"longest_active_s\": 2.5, \"longest_idle_in_transaction_s\": 0}'\n"
+        )
+        psql.chmod(0o755)
+        context = Path(directory) / "repo/.context/cloudbench"
+        (context / "logs").mkdir(parents=True)
+        for name, text in {
+            "services.json": json.dumps({"status": "stopped", "env": {"worker_processes": 1}}),
+            "run.json": "{}", "stack.log": "stack\n", "logs/backend.log": "backend\n",
+            "logs/worker.log": "worker\n", f"cloudbench-stack-cleanup-{token}.status": f"state=clean\ntoken={token}\n",
+        }.items():
+            (context / name).write_text(text)
+        assert "guest-diagnostics.jsonl" not in status["runtime_evidence_context_paths"](context, token)
+        output = context / "guest-diagnostics.jsonl"
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/cloudbench-guest-diagnostics.py"), str(output),
+             "postgresql://postgres:postgres@localhost:5432/victoria", "30", "0.05", "2"],
+            env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        samples = [json.loads(line) for line in output.read_text().splitlines()]
+        assert len(samples) == 2, samples
+        for sample in samples:
+            assert sample["backend_pool_limit"] == 30
+            assert sample["pg"]["database_clients"] == 30 and sample["pg"]["by_wait"] == {"Lock:transactionid": 4}
+            assert sample["pg"]["longest_active_s"] == 2.5
+            assert len(sample["load"]) == 3 and sample["cpus"] >= 1
+            assert sample["cpu_busy_pct"] is None or 0 <= sample["cpu_busy_pct"] <= 100
+            assert "postgres:postgres" not in json.dumps(sample)
+        manifest = status["runtime_evidence_context_manifest"](context, token, "abcdef12345678")
+        assert manifest["files"]["guest-diagnostics.jsonl"]["bytes"] == output.stat().st_size
+
+        # CPU mode split: hypervisor steal (a throttled shared-cpu guest) must be
+        # told apart from the guest's own user/system work. Exact arithmetic on
+        # synthetic /proc/stat counters, then the live fields on every sample.
+        sampler = runpy.run_path(str(ROOT / "scripts/cloudbench-guest-diagnostics.py"))
+        before = [100, 0, 50, 700, 50, 0, 0, 0]
+        after = [160, 0, 90, 740, 60, 0, 10, 40]
+        # total delta 200 = user 60, system 40 + softirq 10, idle 40, iowait 10, steal 40.
+        assert sampler["cpu_mode_pct"](before, after) == {
+            "user": 30.0, "system": 25.0, "iowait": 5.0, "steal": 20.0,
+        }, sampler["cpu_mode_pct"](before, after)
+        assert sampler["cpu_mode_pct"](before, before) is None
+        # Exercise the real /proc parser and interval arithmetic across comm
+        # renames and PID reuse without relying on the host scheduler.
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        def process_sample(comm, used, born):
+            fields = ["0"] * 20
+            fields[11], fields[19] = str(used), str(born)
+            stat = "123 (" + comm + ") " + " ".join(fields)
+            globals_ = sampler["process_ticks"].__globals__
+            with patch.dict(globals_, {
+                "os": SimpleNamespace(scandir=lambda _: [SimpleNamespace(name="123", path="unused")]),
+                "Path": lambda *args: SimpleNamespace(read_text=lambda: stat),
+            }):
+                return sampler["process_ticks"]()
+
+        renamed = sampler["top_processes"](
+            process_sample("worker-old", 10000, 77), process_sample("worker-new", 10001, 77), 1.0
+        )
+        assert renamed == [{"pid": 123, "comm": "worker-new", "cpu_pct": round(100 / sampler["CLOCK_TICKS"], 1)}]
+        assert sampler["top_processes"](
+            process_sample("worker", 10000, 77), process_sample("worker", 20000, 88), 1.0
+        ) == []
+        assert sampler["top_processes"]({}, process_sample("worker", 20000, 88), 1.0) == []
+
+        ticks = sampler["CLOCK_TICKS"]
+        assert sampler["top_processes"](
+            {10: ("python", 100, 1), 12: ("old", 100, 2)},
+            {10: ("python", 100 + ticks, 1), 11: ("kworker", 100000, 3), 12: ("new", 100000, 4)},
+            1.0,
+        ) == [{"pid": 10, "comm": "python", "cpu_pct": 100.0}]
+        for sample in samples:
+            assert set(sample["cpu_mode_pct"]) == {"user", "system", "iowait", "steal"}, sample
+            assert sum(sample["cpu_mode_pct"].values()) <= 100.5, sample
+
+        # Per-process attribution: a saturated guest must name the processes
+        # that burned the interval's CPU (descend-full69 P3: 99% busy guest,
+        # starved worker, no way to tell backend from Postgres from others).
+        burner = subprocess.Popen(
+            [sys.executable, "-c", "import sys\nwhile True: pass", "--password=secret-arg"],
+        )
+        prior_cpu_rca_pid = os.environ.get("CPU_RCA_BURNER_PID")
+        prior_cpu_rca_dir = os.environ.get("CPU_RCA_DIR")
+        if prior_cpu_rca_dir:
+            os.environ["CPU_RCA_DIR"] = str(Path(prior_cpu_rca_dir, f"burner-{burner.pid}"))
+            os.environ["CPU_RCA_BURNER_PID"] = str(burner.pid)
+            _rca_capture("burner-start.json", lambda: {"pid": burner.pid, "wall": time.time(), "monotonic": time.monotonic(), "stat": Path(f"/proc/{burner.pid}/stat").read_text()})
+        try:
+            attributed = Path(directory) / "attributed.jsonl"
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/cloudbench-guest-diagnostics.py"), str(attributed),
+                 "postgresql://postgres:postgres@localhost:5432/victoria", "30", "0.5", "2"],
+                env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+        finally:
+            _rca_capture("burner-final.json", lambda: {"pid": burner.pid, "wall": time.time(), "monotonic": time.monotonic(), "stat": Path(f"/proc/{burner.pid}/stat").read_text()})
+            _rca_capture("attributed.json", lambda: [json.loads(line) for line in attributed.read_text().splitlines()])
+            try:
+                burner.kill()
+                burner.wait()
+            finally:
+                _rca_capture("burner-joined.json", lambda: {"pid": burner.pid, "returncode": burner.returncode, "monotonic": time.monotonic()})
+                if prior_cpu_rca_pid is None:
+                    os.environ.pop("CPU_RCA_BURNER_PID", None)
+                else:
+                    os.environ["CPU_RCA_BURNER_PID"] = prior_cpu_rca_pid
+                if prior_cpu_rca_dir is None:
+                    os.environ.pop("CPU_RCA_DIR", None)
+                else:
+                    os.environ["CPU_RCA_DIR"] = prior_cpu_rca_dir
+        assert result.returncode == 0, result.stderr
+        samples = [json.loads(line) for line in attributed.read_text().splitlines()]
+        assert len(samples) == 2, samples
+        for sample in samples:
+            top = sample["top_processes"]
+            assert 0 < len(top) <= 8, top
+            assert [row["cpu_pct"] for row in top] == sorted((row["cpu_pct"] for row in top), reverse=True)
+            assert all(set(row) == {"pid", "comm", "cpu_pct"} for row in top), top
+            assert "secret-arg" not in json.dumps(sample)
+        burned = [row for sample in samples for row in sample["top_processes"] if row["pid"] == burner.pid]
+        assert burned and max(row["cpu_pct"] for row in burned) >= 50, samples
+        assert burned[0]["comm"].startswith("python"), burned
+
+
 def exercise_read_transition(case: str):
-    if case == "seal-transition":
+    if case == "guest-diagnostics":
+        guest_diagnostics_sampler_and_inventory()
+        for recovery in (False, True):
+            exercise(seal_after=0, deadline=3, file_delay=0, recovery=recovery, guest_diagnostics=True)
+    elif case == "wmh-serve-log":
+        guest_inventory_includes_optional_wmh_log()
+        for recovery in (False, True):
+            exercise(seal_after=0, deadline=3, file_delay=0, recovery=recovery, wmh_log=True)
+    elif case == "seal-transition":
         for recovery in (False, True):
             exercise(
                 seal_after=1,
@@ -316,6 +513,8 @@ def exercise_read_transition(case: str):
 
 
 READ_TRANSITIONS = (
+    "wmh-serve-log",
+    "guest-diagnostics",
     "seal-transition",
     "manifest-url",
     "manifest-timeout",

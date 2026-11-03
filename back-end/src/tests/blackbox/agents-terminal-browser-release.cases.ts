@@ -302,8 +302,10 @@ test("a child agent's first terminal transition releases its browser sessions", 
   assertStatus(res.status, 200, res.data);
 
   const released = await prisma.browserSession.findUnique({ where: { id: browserSessionId } });
+  // A child's terminal transition pauses (releases provider compute, keeps the
+  // profile for the root); only the root's completion tears sessions down.
   assert(
-    released?.status === 'CLOSED' && released.closedAt !== null,
-    `Terminal child left its browser rental open (status=${String(released?.status)})`
+    released?.status === 'PAUSED' && released.closedAt === null,
+    `Terminal child left its browser rental running (status=${String(released?.status)})`
   );
 });

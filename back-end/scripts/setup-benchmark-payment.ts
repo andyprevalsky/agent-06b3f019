@@ -27,6 +27,7 @@ import {
   type AgentCardOrgWallet,
 } from '../src/providers/agentcard/org-wallet-monitor';
 import {
+  configureLiveFixtureEnvironment,
   assertLiveCardholderReady,
   assertSandboxDatabaseIsLocal,
   assertUserMatchesMode,
@@ -514,7 +515,20 @@ async function provisionLiveFixture(
   );
 }
 
+export { configureLiveFixtureEnvironment } from './setup-benchmark-payment-guards';
+
 async function main(): Promise<void> {
+  if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    process.stdout.write(`Usage: setup-benchmark-payment.ts [--live] [--user-id ID]
+  [--stripe-customer-id OWNED_LIVE_CUSTOMER] [--agentcard-cardholder-id DEDICATED_ID]
+--live uses the complete AGENTCARD_ORG_OAUTH_*_LIVE pair when supplied,
+otherwise the generic production pair. Incomplete LIVE pairs are rejected.
+The cardholder must already exist, be dedicated to this fixture, and pass KYC;
+no cardholder is created or selected automatically. Ownership and live-wallet
+checks remain mandatory. Existing purchase history is preserved.
+--help performs no database or provider calls.\n`);
+    return;
+  }
   const mode: FixtureMode = process.argv.includes('--live') ? 'live' : 'sandbox';
   const selectedCustomerId = argValue('--stripe-customer-id');
   if (process.argv.includes('--stripe-customer-id') && selectedCustomerId === undefined) {
@@ -523,6 +537,14 @@ async function main(): Promise<void> {
   if (mode === 'sandbox' && selectedCustomerId !== undefined) {
     throw new Error('--stripe-customer-id requires --live');
   }
+  const selectedCardholderId = argValue('--agentcard-cardholder-id');
+  if (process.argv.includes('--agentcard-cardholder-id') && selectedCardholderId === undefined) {
+    throw new Error('--agentcard-cardholder-id requires a dedicated cardholder ID');
+  }
+  if (mode === 'sandbox' && selectedCardholderId !== undefined) {
+    throw new Error('--agentcard-cardholder-id requires --live');
+  }
+  if (mode === 'live') configureLiveFixtureEnvironment(selectedCardholderId);
   if (mode === 'sandbox') assertBenchmarkOrgCardholderPair();
   const defaultUserId =
     mode === 'live' ? BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID : DEFAULT_BENCHMARK_USER_ID;

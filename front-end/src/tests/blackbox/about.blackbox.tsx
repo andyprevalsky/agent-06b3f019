@@ -479,8 +479,7 @@ describe('About page', () => {
         expect(within(header).queryByRole('button', { name: /join waitlist/i })).toBeNull();
       });
 
-      const footer = document.querySelector('footer')!;
-      expect(within(footer).queryByRole('button', { name: /join waitlist/i })).toBeNull();
+      expect(document.querySelector('footer')).toBeNull();
     });
 
     it('keeps the Join Waitlist CTAs visible for an anonymous (not-logged-in) session', async () => {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report the explore-agent fast-cache trajectory for a prod agent_id.
+"""Report the explore-agent demo-cache trajectory for a prod agent_id.
 
 For each explore goalHash (namespace) the agent touched, prints the positions
 seen, whether each was a cache replay (hit) / miss / stored, the terminal

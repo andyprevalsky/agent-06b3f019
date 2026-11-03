@@ -1,0 +1,117 @@
+{
+  "schema": "rose.whm.schema-integration-receipt.v1",
+  "utc": "2026-10-14T20:51:05.447469+00:00",
+  "status": "source_repair_and_offline_verification_complete; upstream_acceptance_and_fundraising_open",
+  "pr": "https://github.com/Rose-Ai-Labs/rose/pull/1453",
+  "branch": "codex/wmh-experiential-parallel-20261006",
+  "source_commit": "bddb1f109834e3bb7fde3a1c7a2632c1b1813c7b",
+  "source_parent": "fda4bcb5ef2837c09073af8bc81b24bd45d78fb4",
+  "original_checkpoint": "677068533e050195c62afc8118f3d35a8511f5ea",
+  "identity": {
+    "devbox_id": "e9afcffd-7ba9-4bfd-8703-d770952fe1c3",
+    "thread_id": "ph7cc73xma14jdg6chxpnhbgth8g7c1a",
+    "thread_url": "https://boxes.dev/thread/thr_d2e1b555d6314abe8d9f74da7dd979aa",
+    "native_session_id": "01a132a3-ea1f-7b22-abfb-70608400d02e",
+    "launch_request_id": "407eed10-adb1-4d76-b4f3-36aa96b29cd0",
+    "launch_key": "swap-harness-whm-20261012-full-checkpoint-coordinator-generation1"
+  },
+  "authorization": "User explicitly authorized existing output schema wiring and infrastructure repairs. No prompt/context/retrieval policy change, merge/deploy or new paid trial.",
+  "changes": [
+    "Typed existing timed/untimed/native-v3 contract passed to normal Rose response_model; known protocols replace generic JSON object transport",
+    "Canonical structured item selection and synthetic output arguments preserve original bytes and reject cardinality, duplicate keys, nonfinite values and native semantic failures",
+    "Stock structured cache write deferred until shape and native validation; replay skips writes; normal schema-bound key material retained",
+    "Schema metadata captured safely; public validation reasons omit private reply values while private bytes remain available"
+  ],
+  "tests": {
+    "pinned_agents_python": "3.11.9",
+    "native_python_retained": "3.12.3",
+    "unit": {
+      "passed": 242,
+      "deselected": 1,
+      "excluded": "native service owner test builds model/services; not run"
+    },
+    "blackbox": {
+      "rose": 228,
+      "fast_cache_client": 10,
+      "llm_stream_contract": 2,
+      "runner": "actual agents/scripts/run_blackbox_tests.py run_tests with domain selectors; network denied except owning mocks"
+    },
+    "owning_before_after": {
+      "same_registered_callback_sha256": "30554222861e02ce3fac71f00870728d5e8ef6d8f246733d30ddfd01cfc487c5",
+      "before": "FAIL missing typed output schema",
+      "after": "PASS actual WHM-Rose-Foundry MockTransport",
+      "root_before_seconds": 0.3955460110009881
+    },
+    "original_corpus": {
+      "valid_outputs_preserved": 251,
+      "invalid_attempts_still_rejected": 105,
+      "shape_valid_but_native_invalid": 19,
+      "arbitrary_json_patch_controls": 26
+    },
+    "actual_stock_replay": "PASS content/tool shapes: first mocked live stream+write, next exact cache hit, wrong-call row rejected with no additional live stream or write",
+    "privacy_regression": "SAME assertion FAIL private input value exposed -> PASS static public reason; exact private bytes retained",
+    "rca_archive": "PASS 876 cases",
+    "warnings": "Two Pydantic field-name schema shadow warnings; no validation failure",
+    "provider_calls": 0,
+    "benchmark_calls": 0
+  },
+  "reviews": {
+    "schema": "independent bounded PASS",
+    "cache": "independent bounded PASS plus root cardinality supplement",
+    "runtime_audit": "38 controls PASS; no additional proved bug beyond assigned schema/cache/phone work",
+    "root_runtime": "PASS reviewed runtime snapshot; later replay-test fixture corrections qualified by root final checks"
+  },
+  "source_file_sha256": {
+    "agents/benchmarks/wmh_provider_capture.py": "063fc8d9ef5533457ee3f3ed9027699893234a8c27a1a669a7d77c8e6c75a89c",
+    "agents/benchmarks/wmh_reliability_test.py": "7df8c2aa5c4ac294d1f4f29ecd9c02784296e7b651ee993ee8c83d9a02366568",
+    "agents/benchmarks/wmh_response_schema.py": "ea6d52e098efb68b1b16838a4cf057a4524200058d82acb3e85df68f916668ce",
+    "agents/benchmarks/wmh_rose_provider.py": "60ffcd2ff96f741a513dd29afe257845641b8b747c107662d05b0dc31f198b90",
+    "agents/benchmarks/wmh_structured_cache_test.py": "225c6d4be7393cad622dc1e7a6ecefabc771417f5e189155da900fc8450a1bd9",
+    "agents/helpers/llm.py": "58e7e85541a4840f0cb30b8558a7967429ddd3638b67c8adb3c3d229b790b8e0",
+    "agents/tests/blackbox/rose.blackbox.py": "e8db15781231c227de4d41c6b0e877cb3b3f05cb5c78f56d154691f32cafc5d5",
+    "agents/tests/blackbox/world_model_harness.blackbox.py": "07238ebba49d5e1091fc4f4688c6993d2872b6828150bc140c250cca8fe46b2c",
+    "docs/rca/INDEX.md": "660675cc932d30a088620b513a1e5e30d0dfe12b46311cab7e207f6858afffad",
+    "docs/rca/cases/2026-10-13-wmh-rejected-reply-discarded-before-native-capture.md": "80a0ab25c0d69f2e467e52debbc4751d1cdd808c58cb6e30618f7033ba871d77",
+    "docs/rca/cases/2026-10-14-wmh-native-output-contract-not-passed-to-rose.md": "fd850d51d3b9b4301796f9ffcfc3ba8ddb55d2859d9d0b48f50dc3df3da718de",
+    "docs/rca/cases/2026-10-14-wmh-structured-consumer-bypassed-validated-recording.md": "e97a3d0da1b2f355dc4a6fe90def3656aa74d98ccdf2337dbc42442542301790"
+  },
+  "protected_hashes": {
+    "CLAUDE.md": "2a6348f3ad1701aeb496e10e98da271fb38db5709e2abb9adbe65b7c5ad0d322",
+    "AGENTS.md": "57cbb4821915f3e477996ffde6ef7ee4c9d57fab64b6f57421968e3d0e9d0eca",
+    "docs/handoffs/whm-b07d9037-preservation/private_archive.py": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4"
+  },
+  "preservation": {
+    "private_archive": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "private/whm-e9afcffd/schema-integration-20261014-bddb1f109.tar.gz.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "3ee60db317382f6c6cf9d068aed1bc6efe6141055079337c0079b8c49c412127",
+      "gzip_sha256": "4e803623451f6953e1beb15d07ee5bca94d4de5857b293e14ed4a87c25785dbd",
+      "stored_bytes": 743448,
+      "frames": 1,
+      "files": 266,
+      "original_bytes": 3476142,
+      "manifest_sha256": "98f051dff1c8d6ee7de15744ecbbd6aa28bccf939a8252ef8dd163ee7b3dea5f",
+      "full_readback_verified": true
+    },
+    "independent_verify": {
+      "authenticated_original_files": 266,
+      "key": "private/whm-e9afcffd/schema-integration-20261014-bddb1f109.tar.gz.enc"
+    },
+    "verify_command": "agents/venv/bin/python docs/handoffs/whm-b07d9037-preservation/private_archive.py verify --receipt .context/wmh-resume-generation1/schema-integration-20261014/private-archive-receipt.json",
+    "scope": "Complete new private worker/root evidence; original migration and Run17 archives retained unchanged; public docs contain no raw fixture/customer histories or credentials",
+    "integration_result_sha256": "879f0abf5eaac625f621c046f6bed40f1b27995e620bf8e5ac7762cd3b67a069"
+  },
+  "limits": [
+    "Defined nonstrict open schema preserves native arbitrary JSON. Actual Azure deployment admission remains unproved; no upstream400 resolution asserted.",
+    "Original native parser, immutable policy identity, sample-once/replay, parallel shared state, frozen Tamy fixture and benchmarks unchanged.",
+    "Actual retained DB not modified by offline mock proof; old 1659 rows are retained.",
+    "Run17 original FAIL0/1 duration3780.2 remains unchanged; approx26/100 uncalibrated trajectory not upgraded by code changes.",
+    "Next paid slice retains R17-NEXT-SLICE-1 hold: original 1/2 infrastructure rate=50%, rule 10*infra_failed>terminal_attempts; no approval inferred."
+  ],
+  "superseded_proposals": {
+    "R17-FOUNDRY-INPUT-1": "set aside, never applied; corrected request path targets missing typed output contract"
+  },
+  "remote_verification": "Source and this exact receipt will be checked against pushed HEAD; local independent remote readback saved privately after push."
+}

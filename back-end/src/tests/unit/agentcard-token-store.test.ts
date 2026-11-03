@@ -63,12 +63,12 @@ async function main(): Promise<void> {
 
   await test('pending PKCE state is single-use', async () => {
     const state = `state-${randomUUID()}`;
-    putPendingAuth(state, 'user-1', 'verifier-abc');
-    const taken = takePendingAuth(state);
+    await putPendingAuth(state, 'user-1', 'verifier-abc');
+    const taken = await takePendingAuth(state);
     assert.equal(taken?.userId, 'user-1');
     assert.equal(taken?.verifier, 'verifier-abc');
-    assert.equal(takePendingAuth(state), undefined, 'state must not be reusable');
-    assert.equal(takePendingAuth('never-set'), undefined);
+    assert.equal(await takePendingAuth(state), undefined, 'state must not be reusable');
+    assert.equal(await takePendingAuth('never-set'), undefined);
   });
 
   await test('saveUserToken then getUserToken round-trips the bundle', async () => {

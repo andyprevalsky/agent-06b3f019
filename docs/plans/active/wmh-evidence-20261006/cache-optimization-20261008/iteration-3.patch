@@ -1,0 +1,14 @@
+--- a/agents/benchmarks/wmh_rose_provider.py
++++ b/agents/benchmarks/wmh_rose_provider.py
+@@ -894 +894 @@
+-    cuts.append(len(text))
++    # Retrieval replaces the full-task marker to keep at most four.
+@@ -904 +904,3 @@
+-    # Retrieval follows history for this measured layout.
++    field("grounding_contexts")
++    field("grounded_examples")
++    cuts.append(len(text))
+@@ -941,2 +943 @@
+-    field("grounding_contexts")
+-    field("grounded_examples")
++    # Retrieval already precedes history.

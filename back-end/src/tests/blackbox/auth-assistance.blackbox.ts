@@ -12,6 +12,8 @@ import { randomUUID } from 'crypto';
 import { prisma } from '../../providers/database';
 import { authAssistanceDeploymentFenceTests } from './auth-assistance.deployment-fence-cases';
 import { authAssistanceProviderCompletionTests } from './auth-assistance.provider-cases';
+import { authAssistanceTilionTests } from './auth-assistance.tilion-cases';
+import { authAssistanceNativeTests } from './auth-assistance.native-cases';
 
 config();
 
@@ -612,6 +614,7 @@ async function main(): Promise<void> {
       testCompleteLiveViewUpsertsSteelAuthAndIsIdempotent,
     ],
     ...authAssistanceProviderCompletionTests,
+    ...authAssistanceTilionTests,
     ...authAssistanceNativeTests,
     [
       'POST /api/attention-requests/:id/respond completes auth assistance',

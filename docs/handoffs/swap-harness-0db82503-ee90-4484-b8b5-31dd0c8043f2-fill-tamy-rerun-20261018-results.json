@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "timestamp_utc": "2026-10-18T20:41:14.596598+00:00",
+  "source_git_sha": "f62f6ad8b043fb01f5ad33edd68caacc38e1b5bf",
+  "task": "sms-supervisor-fill-form-searches-then-delegates",
+  "task_sha256": "d74160a6b2203ac5194543b6137407259c01b15ebba237bf64b6ca2b69ebfdcf",
+  "account": "Tamy",
+  "account_snapshot_loaded": true,
+  "initial_seeded_state": true,
+  "prompt_models_evaluators_timeout_unchanged": true,
+  "canonical_stack_run_id": "1792355788-3444659-tamy",
+  "passed": true,
+  "duration_seconds": 63.6,
+  "outer_wall_seconds": 218.02894020080566,
+  "evaluators": [
+    {
+      "id": "sms-fill-form-search-then-delegate-contract",
+      "method": "static_check",
+      "score": 1.0,
+      "passed": true,
+      "reasoning": "All SMS static checks passed"
+    },
+    {
+      "id": "sms-fill-form-does-not-ask-for-known-facts",
+      "method": "single_turn_llm_judge",
+      "score": 1.0,
+      "passed": true,
+      "reasoning": "In turn 0, neither the lifecycle SMS nor the reply asks the user to provide a fact from their Travel docs or profile. The reply restates details already available to the assistant. The declared criterion is met."
+    }
+  ],
+  "conversation": {
+    "user_input": "Filled it for me",
+    "supervisor_reply_count": 1,
+    "delegated_lifecycle_message_count": 1,
+    "new_agents": 1,
+    "followup_question_asked": false,
+    "application_submission_proved": false,
+    "transcript_retained_privately": true
+  },
+  "actual_SMS_dumps": 6,
+  "response_mock_used": false,
+  "cleanup": {
+    "at": "2026-10-18T20:41:14.596598+00:00",
+    "run_id": "1792355788-3444659-tamy",
+    "observed_births": 339,
+    "all_observed_births_absent": true,
+    "owned_database_absent": true,
+    "canonical_stop_exit": 0,
+    "global_clean_claimed": false,
+    "native_generations_terminal": 1,
+    "browser_sessions_terminal": 1,
+    "new_profile_deleted_and_404_verified": true,
+    "recording_count": 0,
+    "durable_archive_refs": 2,
+    "outboxes_empty": true,
+    "diagnostics_passed": 5,
+    "diagnostic_warning": "Seeded fixture root has no cache events",
+    "observer_exit": 0,
+    "observer_errors": 0
+  },
+  "acceptance": "Only the FILL benchmark passed; no whole-deploy acceptance or completed eTA submission claimed",
+  "production_deployed": false
+}

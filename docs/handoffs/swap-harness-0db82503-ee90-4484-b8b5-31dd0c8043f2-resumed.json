@@ -1,0 +1,31 @@
+{
+  "old_devbox_id": "0db82503-ee90-4484-b8b5-31dd0c8043f2",
+  "new_devbox_id": "acc001c9-41fa-46c7-8e16-04bb9d3223bd",
+  "new_thread_id": "thr_87085cb874ce4cbca5c4ceac73cb6e90",
+  "new_thread_url": "https://boxes.dev/thread/thr_87085cb874ce4cbca5c4ceac73cb6e90",
+  "harness": "codex",
+  "checkpoint": "c8e72ed8821f5cc219c616b6454afee729c837a1",
+  "handoff_path": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2.md",
+  "utc_timestamp": "2026-10-12T23:48:30.171888+00:00",
+  "preservation": "complete",
+  "checkpoint_verified": true,
+  "original244_ancestry_verified": true,
+  "handoff_inventory_source_manifest_read": true,
+  "archive_verification": {
+    "archives_verified": 4,
+    "source_blobs_verified": 32,
+    "archive_read_back": "PASS",
+    "sha256": "PASS"
+  },
+  "first_continuation": {
+    "action": "Audited exact original 244a961d warning-skip diff and saved original deploy/test/review timeline; ran bash scripts/tests/semantic-deploy-gate.test.sh at exact checkpoint",
+    "result": "PASS: All semantic deploy gate checks passed; exit 0. Offline fixture failures were expected negative-path assertions. No paid runtime lane rerun claimed."
+  },
+  "skill_revision": "e0c1abb1980a5eb1a34dcc5f42c48f38167426f4",
+  "skill_installed_harnesses": [
+    "codex",
+    "claude"
+  ],
+  "unexpected_dirty_state": "none before checkout",
+  "continuation_status": "Continuing original authorized deploy; fresh setup, main integration, applicable runtime gates and bounded final review pending."
+}

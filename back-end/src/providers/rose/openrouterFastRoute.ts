@@ -18,6 +18,7 @@ import {
 } from './errors';
 import { CHAT_TIMEOUT_MS, clearsChatStallGuard } from './cerebrasRoute';
 import { parseOpenAISSE } from './streaming';
+import { openAiChatToolChoice, openAiChatTools } from './toolContract';
 import { postOpenRouterStream } from './transport';
 import { normalizeOpenAiToolCalls } from './transforms';
 import type { CompletionOptions, RoseStreamChunk } from './types';
@@ -50,7 +51,12 @@ export const OPENROUTER_CHAT_LATENCY_PROVIDER = {
   preferred_min_throughput: { p50: 80 },
   // Friendli repeatedly started streaming but missed the 15s router completion
   // bound on the exact production follow-up, despite the throughput preference.
-  ignore: ['friendli'],
+  // InferenceNet accepts strict json_schema but emits keys out of declared order
+  // (reasoning, queries, mode, goal, action): the router decides last, after it
+  // has written an agent goal, so a direct answer escalated to an agent (2/30
+  // replays vs 0/29 on order-keeping hosts), and early action detection never
+  // fires (S32, docs/rca/cases/2026-10-28-router-fallback-host-ignores-schema-key-order.md).
+  ignore: ['friendli', 'inference-net'],
   allow_fallbacks: true,
   require_parameters: true,
 } as const;
@@ -85,6 +91,7 @@ export function buildOpenRouterFastChatBody(
   options: CompletionOptions,
   requestId: string
 ): Record<string, unknown> {
+  const tools = openAiChatTools(options.tools);
   return {
     model: OPENROUTER_FAST_CHAT_MODEL,
     messages: normalizeOpenAiToolCalls(options.messages),
@@ -99,8 +106,10 @@ export function buildOpenRouterFastChatBody(
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.max_tokens !== undefined ? { max_tokens: options.max_tokens } : {}),
     ...(options.response_format ? { response_format: options.response_format } : {}),
-    ...(options.tools ? { tools: options.tools } : {}),
-    ...(options.tool_choice !== undefined ? { tool_choice: options.tool_choice } : {}),
+    ...(tools ? { tools } : {}),
+    ...(tools && options.tool_choice !== undefined
+      ? { tool_choice: openAiChatToolChoice(options.tool_choice, OPENROUTER_FAST_CHAT_MODEL) }
+      : {}),
   };
 }
 

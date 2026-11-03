@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 
 class CatalogError(ValueError):
@@ -71,6 +72,7 @@ _METADATA_FIELDS = (
     "group",
     "tags",
     "requires_browser_agent",
+    "min_agent_count",
 )
 
 CATALOG_GROUPS = (
@@ -174,12 +176,12 @@ def selected_tasks_require_gate_type(
     )
 
 
-def selected_tasks_need_shared_fast_cache(
+def selected_tasks_need_shared_demo_cache(
     catalog_path: Path, task_names: Iterable[str]
 ) -> bool:
-    """Return whether a selected task replays the shared frozen Fast Mode cache.
+    """Return whether a selected task replays the shared frozen DEMO cache.
 
-    Only ``fast_cache: on`` tasks read the shared (production pooler) cache;
+    Only ``demo_cache: on`` tasks read the shared (production pooler) cache;
     every other cloud guest keeps its cache in the isolated local database.
     """
     names = list(task_names)
@@ -187,7 +189,112 @@ def selected_tasks_need_shared_fast_cache(
     missing = [name for name in names if name not in by_name]
     if missing:
         raise CatalogError(f"unknown benchmark task(s): {', '.join(missing)}")
-    return any(by_name[name].get("fast_cache") == "on" for name in names)
+    return any(by_name[name].get("demo_cache", by_name[name].get("fast_cache")) == "on" for name in names)
+
+
+def selected_tasks_read_shared_demo_cache_only(
+    catalog_path: Path, task_names: Iterable[str]
+) -> bool:
+    """Return whether the shared DEMO cache must be strict read-only.
+
+    Mirrors ``agents/benchmarks/local.py`` isolated stacks: a shared-cache replay
+    never writes through, so a miss fails loudly instead of calling a live model.
+    The google-oauth DEMO alone keeps its deliberate live seed run.
+    """
+    names = list(task_names)
+    return selected_tasks_need_shared_demo_cache(catalog_path, names) and set(names) != {"google-oauth"}
+
+
+_OFF_VALUES = {"0", "false", "no", "off"}
+_GENERAL_PURPOSE_SPAWN_TOOLS = {
+    "spawn_general_purpose_agent",
+    "spawn_general_purpose_agent_for_each",
+}
+
+
+def task_worker_environment(
+    tasks: Iterable[Mapping[str, Any]], environ: Mapping[str, str]
+) -> dict[str, str | None]:
+    """Return the per-task worker environment for one benchmark task selection.
+
+    This is the single source of truth for local runs
+    (``agents/benchmarks/local.py:configure_task_environment`` applies it to
+    ``os.environ``) and cloud guests (``scripts/cloudbench-run.sh``
+    ``resolve_task_gate`` exports the ``task-env`` command's output). ``tasks``
+    are the selected catalog entries; ``environ`` supplies operator overrides.
+    A ``None`` value means the variable must be unset.
+    """
+    selected = list(tasks)
+    env: dict[str, str | None] = {}
+    if any(
+        isinstance(task.get("expected_gate"), dict)
+        and task["expected_gate"].get("type") == "source_connect"
+        for task in selected
+    ):
+        env["NON_PURCHASE_GATES_ENABLED"] = "1"
+    # Force Claude Code (not Codex) for tasks that declare requires_claude_code
+    # OR expect spawn_claude_code_agent. Codex sessions were failing this bench
+    # with GitHub clone 403s / sandbox timeouts that trip no_tool_failures.
+    if any(
+        task.get("requires_claude_code")
+        or "spawn_claude_code_agent" in (task.get("expected_tools") or [])
+        or ((task.get("min_tool_counts") or {}).get("spawn_claude_code_agent") or 0) > 0
+        for task in selected
+    ):
+        env["ROSE_CODE_AGENT_PROVIDER"] = "claude"
+    # TEMPORARY: strip api_request from explore tool injection + prompt context
+    # so coding-agent GitHub ranking benches are not steered onto that route.
+    # Override with ROSE_DISABLE_API_REQUEST=0.
+    if {task.get("name") for task in selected} == {"google-oauth"}:
+        env["ROSE_DISABLE_API_REQUEST"] = "0"
+    elif environ.get("ROSE_DISABLE_API_REQUEST", "1").strip().lower() not in _OFF_VALUES:
+        env["ROSE_DISABLE_API_REQUEST"] = "1"
+    # When a selected task forbids general-purpose spawn aliases, also strip
+    # general_purpose / for_each from spawn_agent schemas + planner enums so
+    # the model cannot select them (mirrors ROSE_DISABLE_API_REQUEST). Override
+    # with ROSE_DISABLE_GENERAL_PURPOSE_AGENT=0.
+
+    def requires_general_purpose_agent(task: Mapping[str, Any]) -> bool:
+        if _GENERAL_PURPOSE_SPAWN_TOOLS.intersection(task.get("expected_tools") or []):
+            return True
+        return any(
+            _GENERAL_PURPOSE_SPAWN_TOOLS.intersection(task.get(field) or {})
+            for field in ("expected_tool_counts", "min_tool_counts")
+        )
+
+    # Concurrent predeploy batches mix GPA-forbidden tasks (parallel-tool-calls)
+    # with GPA-required tasks (spawn-sub-agents). A global env disable would strip
+    # spawn_general_purpose_agent from the whole stack and false-fail the latter.
+    if any(requires_general_purpose_agent(task) for task in selected):
+        env["ROSE_DISABLE_GENERAL_PURPOSE_AGENT"] = "0"
+    elif any(
+        _GENERAL_PURPOSE_SPAWN_TOOLS.intersection(task.get("forbidden_tools") or [])
+        for task in selected
+    ) and (
+        environ.get("ROSE_DISABLE_GENERAL_PURPOSE_AGENT", "1").strip().lower()
+        not in _OFF_VALUES
+    ):
+        env["ROSE_DISABLE_GENERAL_PURPOSE_AGENT"] = "1"
+    browser_max_steps = 0
+    for task in selected:
+        max_steps = task.get("max_steps")
+        browser_limit = max_steps.get("browser") if isinstance(max_steps, dict) else None
+        if isinstance(browser_limit, int) and browser_limit > browser_max_steps:
+            browser_max_steps = browser_limit
+    env["BROWSER_MAX_ITERATIONS"] = str(browser_max_steps) if browser_max_steps > 0 else None
+    return env
+
+
+def selected_task_worker_environment(
+    catalog_path: Path, task_names: Iterable[str], environ: Mapping[str, str]
+) -> dict[str, str | None]:
+    """Resolve named tasks in the unified catalog, then their worker environment."""
+    names = list(task_names)
+    by_name = index_unified_catalog(catalog_path)
+    missing = [name for name in names if name not in by_name]
+    if missing:
+        raise CatalogError(f"unknown benchmark task(s): {', '.join(missing)}")
+    return task_worker_environment([by_name[name] for name in names], environ)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -205,11 +312,23 @@ def _build_parser() -> argparse.ArgumentParser:
     requires_gate.add_argument("gate_type")
     requires_gate.add_argument("tasks", nargs="+")
     shared_cache = subparsers.add_parser(
-        "needs-shared-fast-cache",
-        help="exit 0 when any requested task declares fast_cache: on",
+        "needs-shared-demo-cache",
+        help="exit 0 when any requested task declares demo_cache: on",
     )
     shared_cache.add_argument("catalog", type=Path)
     shared_cache.add_argument("tasks", nargs="+")
+    shared_read_only = subparsers.add_parser(
+        "shared-demo-cache-read-only",
+        help="exit 0 when the requested tasks must replay the shared cache strictly read-only",
+    )
+    shared_read_only.add_argument("catalog", type=Path)
+    shared_read_only.add_argument("tasks", nargs="+")
+    task_env = subparsers.add_parser(
+        "task-env",
+        help="print the requested tasks' worker environment as KEY=VALUE lines (empty value = unset)",
+    )
+    task_env.add_argument("catalog", type=Path)
+    task_env.add_argument("tasks", nargs="+")
     resolve = subparsers.add_parser(
         "resolve", help="print exact task names for task and named-slice selectors"
     )
@@ -229,10 +348,19 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if selected_tasks_require_gate_type(
                 args.catalog, args.tasks, args.gate_type
             ) else 10
-        if args.command == "needs-shared-fast-cache":
-            return 0 if selected_tasks_need_shared_fast_cache(
+        if args.command == "needs-shared-demo-cache":
+            return 0 if selected_tasks_need_shared_demo_cache(
                 args.catalog, args.tasks
             ) else 10
+        if args.command == "shared-demo-cache-read-only":
+            return 0 if selected_tasks_read_shared_demo_cache_only(
+                args.catalog, args.tasks
+            ) else 10
+        if args.command == "task-env":
+            env = selected_task_worker_environment(args.catalog, args.tasks, os.environ)
+            for key, value in env.items():
+                print(f"{key}={'' if value is None else value}")
+            return 0
         if args.command == "resolve":
             for task in resolve_task_selection(args.catalog, args.selectors):
                 print(task)

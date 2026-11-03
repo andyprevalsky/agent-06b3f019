@@ -1,7 +1,7 @@
 # Minimal E2B template for Codex CLI with WebSocket streaming.
 FROM ubuntu:22.04
 
-ARG CODEX_VERSION=0.144.1
+ARG CODEX_VERSION=0.159.0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -15,6 +15,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && npm install -g "@openai/codex@$CODEX_VERSION" \
+    && rm -rf /var/lib/apt/lists/*
+
+# rose-ui screenshot/record/perf/check (~/.rose/bin/rose-ui, installed per session):
+# headless Chromium through playwright-core, ffmpeg for MP4 recordings, and fonts
+# so screenshots render text and emoji. Browsers live outside $HOME for uid 1000.
+ARG PLAYWRIGHT_CORE_VERSION=1.64.0
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    fonts-noto-core \
+    fonts-noto-color-emoji \
+    && npm install -g "playwright-core@$PLAYWRIGHT_CORE_VERSION" \
+    && playwright-core install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /home/user && chown 1000:1000 /home/user

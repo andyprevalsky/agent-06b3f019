@@ -23,11 +23,7 @@ import { createMessage } from '../messages';
 import { createLogger } from '../logger';
 import { deleteAgentRecursive } from '../agentKill';
 import { deliverUserMessageToWorkflow } from '../agentResume';
-import {
-  resolveAgentPrefix,
-  smsIntendsAgentReply,
-  unknownSupervisorToolError,
-} from './supervisorTools.helpers';
+import { resolveAgentTarget, unknownSupervisorToolError } from './supervisorTools.helpers';
 import { executeGrepTool, GrepArgs } from './supervisorTools.grep';
 import { commitStartNewAgent, type StartNewAgentArgs } from './supervisorTools.startAgent';
 import type { SupervisorChannel } from './channelDelivery';
@@ -45,8 +41,9 @@ import {
   recoverCutoverKilledAgent,
 } from '../generationQueueCutover';
 import { DEPLOY_INTERRUPTED_TOOL_MESSAGE } from '../workflowGeneration';
-import { nativePhoneReplyRefusal } from './nativePhoneReply';
 import { commitIncreaseBudget } from './supervisorTools.budget';
+import { SmsSupervisorToolCallSchema } from './schema';
+import { nativePhoneReplyRefusal } from './nativePhoneReply';
 
 const log = createLogger('SmsSupervisorTools');
 
@@ -59,6 +56,8 @@ export { TOOL_SCHEMAS } from './supervisorTools.schemas';
 export interface ToolCall {
   tool: string;
   arguments: Record<string, unknown>;
+  /** Provider tool-call id on the native path; replayed in the next round's history. */
+  id?: string;
 }
 
 export interface ToolResult {
@@ -66,12 +65,6 @@ export interface ToolResult {
   success: boolean;
   result: string;
   error?: string;
-}
-
-export interface ToolInvocationContext {
-  currentUserMessage: string;
-  visibleSessionHistory: string[];
-  pendingAttentionRequestIds: string[];
 }
 
 // Per-tool argument types (validated upstream via JSON schema)
@@ -95,7 +88,7 @@ interface IncreaseBudgetArgs {
 // Prefix Resolution Helper
 // ============================================
 
-// resolveAgentPrefix lives in supervisorTools.helpers.ts
+// resolveAgentTarget / resolveAgentPrefix live in supervisorTools.helpers.ts
 // so this file stays under the max-lines budget. Both are pure DB/Temporal
 // operations with no tool-specific logic.
 
@@ -133,13 +126,11 @@ export type PendingOp =
 export async function dispatchToolCall(
   toolCall: ToolCall,
   userId: string,
-  pendingWrites: PendingOp[],
-  invocationContext?: ToolInvocationContext
+  pendingWrites: PendingOp[]
 ): Promise<ToolResult> {
   const startTime = Date.now();
   const { tool, arguments: args } = toolCall;
 
-  // Reply bodies may belong in protected phone entry; do not copy them into tool logs.
   const loggedArgs =
     tool === 'reply_to_agent'
       ? { hasAttentionRequest: args.attention_request_id !== undefined }
@@ -147,6 +138,20 @@ export async function dispatchToolCall(
   log.info('Dispatching tool', { tool, args: JSON.stringify(loggedArgs), userId });
 
   try {
+    const parsed = SmsSupervisorToolCallSchema.safeParse(toolCall);
+    // Existing executors own omitted/null defaults and value-level validation.
+    if (
+      !parsed.success &&
+      parsed.error.issues.some(
+        (issue) =>
+          issue.code === 'invalid_type' &&
+          issue.received !== 'undefined' &&
+          issue.received !== 'null'
+      )
+    ) {
+      return { tool, success: false, result: '', error: parsed.error.message };
+    }
+
     let result: ToolResult;
 
     switch (tool) {
@@ -154,8 +159,7 @@ export async function dispatchToolCall(
         result = await validateReplyToAgent(
           args as unknown as ReplyToAgentArgs,
           userId,
-          pendingWrites,
-          invocationContext
+          pendingWrites
         );
         break;
       case 'kill_agent':
@@ -233,7 +237,8 @@ export async function commitPendingWrites(
   userId: string,
   channel: SupervisorChannel = 'SMS',
   /** Current-turn inbound MMS FilePointers — auto-forwarded onto start_new_agent. */
-  inboundAttachments: readonly FilePointer[] = []
+  inboundAttachments: readonly FilePointer[] = [],
+  onAgentAllocated?: (agentId: string) => void
 ): Promise<ToolResult[]> {
   const results: ToolResult[] = [];
   for (const op of pendingWrites) {
@@ -251,7 +256,13 @@ export async function commitPendingWrites(
           result = await commitIncreaseBudget(op);
           break;
         case 'start_new_agent':
-          result = await commitStartNewAgent(op, userId, channel, inboundAttachments);
+          result = await commitStartNewAgent(
+            op,
+            userId,
+            channel,
+            inboundAttachments,
+            onAgentAllocated
+          );
           break;
       }
       log.info('Pending op committed', {
@@ -280,10 +291,9 @@ export async function commitPendingWrites(
 async function validateReplyToAgent(
   args: ReplyToAgentArgs,
   userId: string,
-  pendingWrites: PendingOp[],
-  invocationContext?: ToolInvocationContext
+  pendingWrites: PendingOp[]
 ): Promise<ToolResult> {
-  const agent = await resolveAgentPrefix(args.agent_id_or_prefix, userId);
+  const agent = await resolveAgentTarget(args.agent_id_or_prefix, userId, pendingWrites);
   if (!agent) {
     return {
       tool: 'reply_to_agent',
@@ -294,24 +304,6 @@ async function validateReplyToAgent(
   }
   const refusal = await nativePhoneReplyRefusal(userId, agent.id, args.attention_request_id);
   if (refusal) return refusal;
-  const attentionMatches =
-    args.attention_request_id !== undefined &&
-    invocationContext?.pendingAttentionRequestIds.includes(args.attention_request_id) === true;
-  const currentSmsMatches =
-    invocationContext !== undefined &&
-    smsIntendsAgentReply({
-      currentUserMessage: invocationContext.currentUserMessage,
-      visibleSessionHistory: invocationContext.visibleSessionHistory,
-      agentGoal: agent.goal,
-    });
-  if (!attentionMatches && !currentSmsMatches) {
-    return {
-      tool: 'reply_to_agent',
-      success: false,
-      result: '',
-      error: 'Current SMS does not identify this agent task or a matching pending request',
-    };
-  }
   // A rejection is only expressible as a resolved attention request: without an
   // `attention_request_id` the commit signals the bare `message`, which
   // `receive_user_response` reads as ordinary feedback. Accepting this pair
@@ -343,7 +335,7 @@ async function validateKillAgent(
   userId: string,
   pendingWrites: PendingOp[]
 ): Promise<ToolResult> {
-  const agent = await resolveAgentPrefix(args.agent_id_or_prefix, userId);
+  const agent = await resolveAgentTarget(args.agent_id_or_prefix, userId, pendingWrites);
   if (!agent) {
     return {
       tool: 'kill_agent',
@@ -365,7 +357,7 @@ async function validateIncreaseBudget(
   userId: string,
   pendingWrites: PendingOp[]
 ): Promise<ToolResult> {
-  const agent = await resolveAgentPrefix(args.agent_id_or_prefix, userId);
+  const agent = await resolveAgentTarget(args.agent_id_or_prefix, userId, pendingWrites);
   if (!agent) {
     return {
       tool: 'increase_budget',

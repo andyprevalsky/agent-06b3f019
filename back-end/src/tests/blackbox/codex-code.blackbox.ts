@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import { config } from 'dotenv';
+import { assertSmokeHandoff, handoffSmokeGoal } from './code-agent-handoff-smoke.case';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
@@ -10,8 +11,7 @@ import {
 import { testCodexWsServerOverlayUsesLocalSource } from './codex-code-overlay.case';
 import {
   testResolveCodexAuthEnvs_apiKeyFallback,
-  testResolveCodexAuthEnvs_cooldownExcludesFundedKey,
-  testResolveCodexAuthEnvs_emptyKeyThrows,
+  testResolveCodexAzureFunding_selectsWestusRegion,
   testResolveCodexAuthEnvs_noCredsNoKeyThrows,
   testResolveCodexAuthEnvs_oauthPrimaryWithApiKeyRuntimeFallback,
   testResolveCodexAuthEnvs_oauthWithoutFundedKey,
@@ -34,6 +34,7 @@ import {
   runTest,
   type TestResult,
   codexCreateUnavailableSkipReason,
+  codexOauthRevocationSignal,
   codexSmokeCreditSkipReason,
   detectCodexCreditExhaustion,
   testCreateUnavailableSkip_cooldownOnly,
@@ -76,7 +77,7 @@ async function testCreate_missingUserId() {
     headers: apiKeyHeaders(),
     body: JSON.stringify({ agent_id: crypto.randomUUID(), goal: 'test' }),
   });
-  assertStatus(res.status, 500, res.data);
+  assertStatus(res.status, 400, res.data);
   ErrorResponse.parse(res.data);
 }
 
@@ -206,6 +207,7 @@ async function testSmoke_codexCompletesE2bTask() {
   const agentId = crypto.randomUUID();
   let taskId: string | undefined;
   let sandboxId: string | undefined;
+  let closed = false;
   const sharedCooldown = await prisma.integration.findUnique({
     where: {
       userId_name_accountId: {
@@ -232,7 +234,11 @@ async function testSmoke_codexCompletesE2bTask() {
       body: JSON.stringify({
         agent_id: agentId,
         user_id: DEV_USER_ID,
-        goal: 'Create /home/user/output/codex-smoke.txt containing exactly CODEX_E2B_OK. Then reply with exactly CODEX_E2B_DONE.',
+        // The result is the handoff (turn/start outputSchema makes the final
+        // message that JSON), so no free-text reply sentinel is requested.
+        goal: handoffSmokeGoal(
+          'Create /home/user/output/codex-smoke.txt containing exactly CODEX_E2B_OK.'
+        ),
       }),
     });
     // Create-time funding/billing blocks (OpenAI org or E2B team) never reach a
@@ -271,26 +277,44 @@ async function testSmoke_codexCompletesE2bTask() {
     sandboxId = body.sandbox_id;
 
     const { output, events, exitCode } = await waitForCodexOutput(body.ws_url);
-    const outputRes = await request(`${BASE_URL}/api/codex-code-session/${taskId}/output`, {
-      method: 'POST',
-      headers: apiKeyHeaders(),
-      body: JSON.stringify({ output }),
-    });
-    assertStatus(outputRes.status, 200, outputRes.data);
+    // Classify the run before persisting its output: an exhausted run can end
+    // with no output at all, and the output route rejects an empty body, which
+    // would hide the deploy-approved credit SKIP (and any real failure) behind
+    // a 400.
     // Before treating a missing sentinel as a hard failure, check whether the
     // run simply ran out of credits on EVERY credential path (OAuth + funded
     // key). That is an external funding state, not a code regression, so it is
     // a deploy-approved SKIP rather than a FAIL.
-    const creditSkip = codexSmokeCreditSkipReason(output, events);
+    const turnCompleted = events.some((event) => {
+      const typed = event as { type?: string; raw_type?: string; status?: string };
+      return (
+        typed.type === 'turn_ended' &&
+        typed.raw_type === 'turn/completed' &&
+        typed.status === 'completed'
+      );
+    });
+    const succeeded = turnCompleted || exitCode === 0;
+    // A completed turn is the success signal; success always wins over a skip.
+    const creditSkip = succeeded ? null : codexSmokeCreditSkipReason(output, events);
     if (creditSkip) {
       throw new CredentialExhaustionSkip(
         `Codex credentials exhausted (out of credits/quota) on all paths; smoke SKIPPED without failing the deploy gate. Signal: ${creditSkip}. exit=${exitCode ?? 'unknown'}`
       );
     }
     assert(
-      output.includes('CODEX_E2B_DONE'),
-      `Codex output did not include CODEX_E2B_DONE. exit=${exitCode ?? 'unknown'} events=${JSON.stringify(events).slice(-800)} Tail: ${output.slice(-1200)}`
+      succeeded,
+      `Codex turn did not complete. exit=${exitCode ?? 'unknown'} oauth_revocation=${JSON.stringify(codexOauthRevocationSignal(output, events))} events=${JSON.stringify(events).slice(-800)} Tail: ${output.slice(-1200)}`
     );
+    // App-server can complete a turn with an empty transcript; persist only
+    // populated output after the outcome has been classified.
+    if (output !== '') {
+      const outputRes = await request(`${BASE_URL}/api/codex-code-session/${taskId}/output`, {
+        method: 'POST',
+        headers: apiKeyHeaders(),
+        body: JSON.stringify({ output }),
+      });
+      assertStatus(outputRes.status, 200, outputRes.data);
+    }
     assert(
       events.some((event) => {
         const typed = event as { type?: string; provider?: string };
@@ -301,7 +325,7 @@ async function testSmoke_codexCompletesE2bTask() {
 
     // Runtime-fallback invariant: if the ChatGPT OAuth token hit its usage limit
     // or proved revoked mid-run, the sandbox MUST re-login with the funded key
-    // (auth_fallback event) rather than giving up — otherwise CODEX_E2B_DONE above
+    // (auth_fallback event) rather than giving up — otherwise the completed turn above
     // could never have been produced on an exhausted token. This is exactly the
     // failure that stalled deploy; it passes trivially when the OAuth token is
     // healthy (no usage-limit event → no requirement).
@@ -324,7 +348,7 @@ async function testSmoke_codexCompletesE2bTask() {
         `Codex OAuth credential failed but did NOT fall back to the OpenAI API key. events=${JSON.stringify(events).slice(-1000)}`
       );
       console.log(
-        '    ↳ codex smoke completed via OPENAI_API_KEY runtime fallback (OAuth unusable)'
+        '    ↳ codex smoke completed via the Azure funded runtime fallback (OAuth unusable)'
       );
     } else {
       console.log('    ↳ codex smoke completed via ChatGPT OAuth token (no usage limit hit)');
@@ -349,8 +373,17 @@ async function testSmoke_codexCompletesE2bTask() {
       String(fileContent).trim() === 'CODEX_E2B_OK',
       `Expected output file sentinel, got: ${String(fileContent).slice(0, 200)}`
     );
+    // The parent's result is the handoff file the real CLI wrote.
+    const closeRes = await request(`${BASE_URL}/api/codex-code-session/close`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ task_id: taskId }),
+    });
+    closed = true;
+    assertStatus(closeRes.status, 200, closeRes.data);
+    assertSmokeHandoff(closeRes.data, 'CODEX_E2B_OK', '/home/user/output/codex-smoke.txt');
   } finally {
-    if (taskId) {
+    if (taskId && !closed) {
       await request(`${BASE_URL}/api/codex-code-session/close`, {
         method: 'POST',
         headers: apiKeyHeaders(),
@@ -401,16 +434,20 @@ async function runAll() {
       fn: testRuntimeFallback_recognizesRevokedOAuthRefreshToken,
     },
     {
-      name: 'auth -- OAuth primary + OPENAI_API_KEY runtime fallback injected together',
+      name: 'auth -- OAuth primary + Azure runtime fallback injected together',
       fn: async () => testResolveCodexAuthEnvs_oauthPrimaryWithApiKeyRuntimeFallback(),
     },
     {
-      name: 'auth -- OAuth alone when no funded key configured',
+      name: 'auth -- OAuth alone when no Azure deployment configured',
       fn: async () => testResolveCodexAuthEnvs_oauthWithoutFundedKey(),
     },
     {
-      name: 'auth -- falls back to OPENAI_API_KEY when token unavailable/rate-limited',
+      name: 'auth -- falls back to the Azure deployment when token unavailable/rate-limited',
       fn: async () => testResolveCodexAuthEnvs_apiKeyFallback(),
+    },
+    {
+      name: 'auth -- Azure funding resolves from the westus Foundry region',
+      fn: async () => testResolveCodexAzureFunding_selectsWestusRegion(),
     },
     {
       name: 'credit-skip -- live "no credits remaining" wording is recognized',
@@ -437,16 +474,8 @@ async function runAll() {
       fn: async () => testCodexCreditSkip_createUnavailableOnCooldownIsSkip(),
     },
     {
-      name: 'auth -- throws when no credential and no funded key',
+      name: 'auth -- throws when no credential and no Azure deployment',
       fn: async () => testResolveCodexAuthEnvs_noCredsNoKeyThrows(),
-    },
-    {
-      name: 'auth -- throws when funded key is empty',
-      fn: async () => testResolveCodexAuthEnvs_emptyKeyThrows(),
-    },
-    {
-      name: 'auth -- cooled funded key is excluded before sandbox creation',
-      fn: async () => testResolveCodexAuthEnvs_cooldownExcludesFundedKey(),
     },
     {
       name: 'feedback -- captured OAuth exhaustion cools exact credential',

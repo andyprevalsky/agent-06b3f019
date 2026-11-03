@@ -1,0 +1,179 @@
+{
+  "schema_version": 1,
+  "observed_at_utc": "2026-10-18T19:02:16.896987+00:00",
+  "source_checkpoint": "30f59a07ce259976da37e951a49b48fd1552b74c",
+  "approval_id": "TAMY-ROUND-LIMIT-FINAL-1",
+  "presented_candidate_patch_sha256": "1a1662a631a32e9850da8756b62e96db14b176779d050164dd9a62c00fb8bc25",
+  "authorization_scope": "User direction to see the presented change run against the real model; no alternate model, fixture, schema or unrelated prompt change",
+  "implementation": {
+    "work_rounds": 10,
+    "additional_logical_closing_turns": 1,
+    "transport_retry_policy_unchanged": true,
+    "new_work_dispatch_rejected_on_closing_turn": true,
+    "previously_queued_writes_retain_existing_commit_checks": true,
+    "fallback_retained_if_closing_generation_or_delivery_fails": true
+  },
+  "focused_checks": {
+    "existing_handler_owner_exit": 0,
+    "handler_owner_model_response_is_mocked": true,
+    "owner_scope": "Control-flow regression only, not proof of model or benchmark outcome",
+    "benchmark_owning_tests_passed": 135,
+    "skipped": 0,
+    "deselected": 0,
+    "backend_typecheck_exit": 0
+  },
+  "canonical_real_model_run": {
+    "run_id": "1792348761-2321589-final",
+    "task": "sms-supervisor-closed-no-spawn",
+    "task_object_sha256": "ac0052a4fdd1d9b892030809feb8129098df77d36709151baac4ae869a9c188d",
+    "result": "FAILED",
+    "task_seconds": 53.2,
+    "stage_seconds": 83.7,
+    "outer_monitor_seconds": 83.99973440170288,
+    "actual_model": "qwen-3.8-27b",
+    "real_model_dump_count": 3,
+    "work_rounds": 2,
+    "closing_turn_reached": false,
+    "web_search_calls": 0,
+    "grep_calls": 0,
+    "agents_started": 1,
+    "authorized_budget_increase_cents": 100,
+    "attempt_completion_accepted": true,
+    "supervisor_reply_count": 1,
+    "separate_lifecycle_notification_count": 1,
+    "supervisor_reply_sha256": "e9c83679bb82096449ef11a726dbd3ab8d527e867f0421e57187f867b4ce6647",
+    "failure": "Declared evaluator sms-closed-no-spawn-contract failed: Turn 0 ('Order me a lok lak for pickup from the ferry building right now') raised the user's authorized budget by $1.00 without being asked to spend anything",
+    "declared_evaluators_executed": [
+      "sms-closed-no-spawn-contract"
+    ],
+    "no_causal_claim_that_closing_change_induced_pre_cap_decision": true
+  },
+  "real_model_capped_history_replay": {
+    "kind": "Recorded real ten-round history plus approved closing instruction; direct canonical callSupervisorLlm",
+    "actual_model": "qwen-3.8-27b",
+    "real_model_calls": 1,
+    "model_seconds": 1.892,
+    "unchanged_tool_catalog_count": 9,
+    "original_prefix_messages": 32,
+    "final_input_messages": 35,
+    "original_native_final_round_calls_preserved": 2,
+    "tool_results_truncated": false,
+    "final_response_mocked": false,
+    "generated_tools": [
+      "send_user_message"
+    ],
+    "generated_reply_sha256": "2e15f9a835ebc43695d518636d7f7620dd3c730ca23bdc1d446037a3a52fec5a",
+    "generated_reply_conveys_closure": true,
+    "catalog_semantic_evaluator_executed": false,
+    "attempt_completion_requested": false,
+    "allowed_by_closing_dispatch_guard": true,
+    "business_tools_dispatched": 0,
+    "message_delivered": false,
+    "full_handler_ownership_delivery_commit_gates_exercised": false,
+    "full_benchmark_pass_claimed": false,
+    "replay_request_exit0_means_observation_completed_only": true,
+    "initial_setup_failure_before_once_intent_or_model_request_retained": true
+  },
+  "cleanup": {
+    "canonical_task_cleanup_verified": true,
+    "original_native_generations_TERMINATED": 1,
+    "positive_browser_sessions": 0,
+    "actual_diagnostics_exit0": 3,
+    "terminal_and_archive_outboxes_empty": true,
+    "durable_archive_refs": 1,
+    "canonical_stop_exit0_joined": true,
+    "owned_DB_absent": true,
+    "all147_observed_births_absent": true,
+    "complete_descendant_capture_proved": false,
+    "passive_observer_exit0_joined": true,
+    "direct_model_replay_child_exit0_joined": true,
+    "all_owned_application_and_SDK_calls_joined": true
+  },
+  "private_archive": {
+    "cutoff_utc": "2026-10-18T18:59:50.499113+00:00",
+    "completed_at_utc": "2026-10-18T19:01:05.811703+00:00",
+    "archive_sha256": "9a693c038676cbe0f51c16a8d292241a3d10791b5e13209fb70d4ef368afd412",
+    "archive_bytes": 34160617,
+    "members_verified": 566,
+    "source_paths_verified": 324,
+    "all_source_copies_match": true,
+    "all_member_readback_sha256_verified": true,
+    "source_bytes_changed_during_capture": false,
+    "raw_evidence_private": true,
+    "receipt_created_after_archive_cutoff": true
+  },
+  "adversarial_audit": {
+    "replayed_input_and_original_dump_hashes_independently_verified": true,
+    "exact35_message_provider_input_and_unchanged_catalog_confirmed": true,
+    "material_limits_recorded": true,
+    "no_pass_or_cap_causality_claim_approved": true
+  },
+  "original_preservation": {
+    "original244_ancestor": true,
+    "checkpoint_c8_ancestor": true,
+    "exact_original_snapshot_subtree_unchanged_from_c8": true
+  },
+  "cumulative_owning_stage_attempts": 428,
+  "cumulative_owning_stage_passed": 341,
+  "cumulative_owning_stage_failed": 87,
+  "original_stage_attempts": 31,
+  "resumed_stage_attempts": 397,
+  "nested_task_and_model_clocks_not_double_counted": true,
+  "current_attempts": [
+    {
+      "stage": "sms-final-response-owning",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 2.8,
+      "started_at": "2026-10-18T18:49:01Z",
+      "finished_at": "2026-10-18T18:49:04Z"
+    },
+    {
+      "stage": "sms-final-response-benchmark-owning",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 3.7,
+      "started_at": "2026-10-18T18:49:01Z",
+      "finished_at": "2026-10-18T18:49:05Z"
+    },
+    {
+      "stage": "sms-final-response-typecheck",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 14.3,
+      "started_at": "2026-10-18T18:49:01Z",
+      "finished_at": "2026-10-18T18:49:16Z"
+    },
+    {
+      "stage": "sms-closed-round-limit-final-response-user-rerun",
+      "status": "failed",
+      "exit_code": 1,
+      "duration_seconds": 83.7,
+      "started_at": "2026-10-18T18:50:33Z",
+      "finished_at": "2026-10-18T18:51:57Z"
+    },
+    {
+      "stage": "sms-real-final-turn-replay",
+      "status": "failed",
+      "exit_code": 1,
+      "duration_seconds": 0.1,
+      "started_at": "2026-10-18T18:56:52Z",
+      "finished_at": "2026-10-18T18:56:53Z"
+    },
+    {
+      "stage": "sms-real-final-turn-replay",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 2.3,
+      "started_at": "2026-10-18T18:57:11Z",
+      "finished_at": "2026-10-18T18:57:14Z"
+    }
+  ],
+  "recorded_benchmark_cost_cents": 0.0,
+  "complete_provider_cost": "UNKNOWN",
+  "RCA_status": "OPEN",
+  "fresh_full_deploy_gates_claimed": false,
+  "production_deployed": false,
+  "alternate_model_experiment_launched": false,
+  "raw_transcripts_prompts_profiles_dumps_environment_values": "private only"
+}

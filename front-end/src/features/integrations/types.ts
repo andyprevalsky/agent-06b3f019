@@ -15,6 +15,85 @@ export interface EmailCredentialHealth {
   lastFailedSyncAt: string | null;
 }
 
+/**
+ * Progress of an integration's running sync, as GET /api/integrations reports
+ * it (`accounts[0].progress`, lane L-CULL-INTEG).
+ *
+ * `total` is null when the server does not know it yet: the bar is then
+ * indeterminate and no percentage is ever invented. `eta_sec` is null when
+ * unknown: the ETA text is hidden.
+ */
+export interface SyncProgressWire {
+  pct?: number | null;
+  done?: number | null;
+  total?: number | null;
+  /** messages | chats | contacts | cookies | passwords | transactions | files | bytes | records */
+  unit?: string | null;
+  eta_sec?: number | null;
+  /** What the sync is doing right now, e.g. "Decrypting cookies" or Gmail's `scanning`. */
+  phase?: string | null;
+}
+
+/**
+ * Normalized progress of one integration's sync (see hooks/useSyncProgress).
+ * `pct` is null exactly when the total is unknown (indeterminate bar).
+ */
+export interface SyncProgress {
+  pct: number | null;
+  done: number | null;
+  total: number | null;
+  unit: string;
+  etaSec: number | null;
+  phase: string | null;
+}
+
+/**
+ * The ONE account of an integration row (backend contract, lane L-CULL-INTEG):
+ * `integrations[].accounts` holds exactly one entry and `accountsByProvider`
+ * maps each provider to that same one-entry list.
+ *
+ * `state`: syncing | synced | idle | needs_reconnect | sync_failed | EXPIRED
+ * (other strings are tolerated as legacy states).
+ */
+export interface IntegrationAccountWire {
+  provider?: string;
+  accountId: string;
+  label: string | null;
+  state: string;
+  progress?: SyncProgressWire | null;
+  lastSyncAt?: string | null;
+  lastError?: string | null;
+}
+
+/** `accountsByProvider` (also lists providers that have only reported progress). */
+export type AccountsByProvider = Record<string, IntegrationAccountWire[]>;
+
+/** GET /api/integrations/progress?since=<cursor> */
+export interface IntegrationsProgressDelta {
+  cursor: string;
+  changed: boolean;
+  /** Present only when something changed after `since`. */
+  accountsByProvider?: AccountsByProvider;
+}
+
+/** Chip tone for one account (ConnectedAccountChip). */
+export type AccountTone = 'synced' | 'syncing' | 'warning' | 'error';
+
+/** Parsed account (hooks/integrationAccounts). */
+export interface IntegrationAccount {
+  accountId: string;
+  label: string;
+  tone: AccountTone;
+  /** Raw server state, kept for titles and repair decisions. */
+  state: string;
+  progress: SyncProgress | null;
+  lastSyncAt: string | null;
+  /** Why the last sync failed / needs reconnect (null otherwise). */
+  lastError: string | null;
+  /** True when the server sent no label (callers show their own row label). */
+  unlabeled: boolean;
+}
+
 export interface ConnectedIntegration {
   id: string;
   name: string;
@@ -30,6 +109,12 @@ export interface ConnectedIntegration {
     [key: string]: unknown;
   };
   lastSuccessfulSyncAt?: string;
+  /**
+   * The row's one account with its sync state and progress (exactly one
+   * entry). Absent on backends that predate it; the UI then derives the
+   * account from the row status.
+   */
+  accounts?: IntegrationAccountWire[] | null;
   /**
    * Per-account health. A `gmail` row fans out to N addresses, so a single
    * integration status cannot say which address broke.

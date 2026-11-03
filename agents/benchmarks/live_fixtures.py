@@ -46,6 +46,17 @@ LIVE_FIXTURES: dict[str, LiveFixtureSpec] = {
             "row and browser-session init fails on AgentIdentity_userId_fkey."
         ),
     ),
+    "live-tamy-account-snapshot": LiveFixtureSpec(
+        name="live-tamy-account-snapshot",
+        description=(
+            "A prod-synced snapshot of the Mexico-based identity's ACCOUNT rows as the "
+            "run's base environment: User, credits, subscription, integrations, email "
+            "credentials, contacts, message history, API keys, blueprints, SMS session "
+            "and feedback. It is data, not a credential overlay, so it also applies in "
+            "world-model simulate mode (where the identity overlay skips itself); browser "
+            "auth is never synced. Selects her as the benchmark run user."
+        ),
+    ),
     "live-aman-food-plan-identity": LiveFixtureSpec(
         name="live-aman-food-plan-identity",
         description=(

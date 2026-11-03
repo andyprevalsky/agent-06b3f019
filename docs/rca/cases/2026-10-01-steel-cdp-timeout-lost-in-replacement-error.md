@@ -51,3 +51,44 @@ None recorded.
 ## Reusable lesson
 
 An outage classifier can stay narrow only if the provider boundary preserves the safe failure category that the classifier needs.
+
+
+## 2026-10-13: credential setup reconnect after successful validation
+
+A later PR #1473 deployment exposed a different connection boundary. Full
+backend coverage passed 192 of 193 domains and all 266 unit files, but the
+unchanged live browser-provider domain failed during rotation. A standalone
+run also failed. Successful provider creation, CDP validation, navigation and
+publication preceded an 18-second credential-setup reconnect timeout. The
+coverage failure occurred on a Kernel rotation; the standalone failure occurred
+on the Kernel-to-Steel switch. This was not the earlier missing error reason,
+and the theory that Kernel validation leaked its handle was disproved: that
+handle was already closed before credential injection requested another one.
+
+The first bad boundary was discarding the validated connection before the
+existing credential setup could borrow it. The existing initial-session path
+already lends its validation connection to injection. Resume and rotation now
+opt into the same transport handoff, with default behavior retained for direct
+provider callers. Kernel, Steel and Browser Use retain the handle only until
+the common response assembly owns it. That owner encloses the first database
+lookup, navigation, fingerprint and credential preparation and closes in a
+finally block on success or failure. Injection no longer prematurely closes a
+borrowed handle on its two early errors. Failed provider handoffs close their
+own transport, and uncommitted Steel replacement sessions retain their existing
+release path. The Browser object is excluded by the explicit HTTP response map.
+
+The existing steel-fingerprint owning suite reproduces both unwanted reconnect
+and premature borrower closure on the original code. The unchanged assertions
+pass on the fix, alongside CAS loss, lookup failure, cookie-selection race and
+nonfatal publication/release cases: 13 cases pass in the actual checkout. The
+unchanged live browser-provider command then passes in 122.168 seconds, with
+ten validated-connection reuse observations and no 18-second credential
+reconnect timeout. An independent review verified exact patch readback, cleanup
+ownership and zero P2 overlap. Full backend coverage remains a separate required
+gate; this focused result is not its substitute.
+
+At 10,000 agents this retains one already-open per-request connection through
+bounded setup instead of opening another. Ownership remains local to that
+request, with no shared mutable state, additional provider allocation, fan-in
+or polling. Existing timeouts, retry limits, models, schemas, LLM text and
+benchmark assertions are unchanged.

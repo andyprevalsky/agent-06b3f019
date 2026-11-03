@@ -131,7 +131,7 @@ describe('ResearchBlogPost page', () => {
       const breadcrumbNav =
         document.querySelector<HTMLElement>('nav[aria-label]') ?? screen.getByRole('navigation');
       const blogLink = within(breadcrumbNav).getByText('Blog');
-      expect(blogLink.closest('a')).toHaveAttribute('href', '/research');
+      expect(blogLink.closest<HTMLElement>('a')).toHaveAttribute('href', '/research');
     });
 
     it('renders breadcrumb category matching the post category', () => {
@@ -146,7 +146,7 @@ describe('ResearchBlogPost page', () => {
       const breadcrumbNav =
         document.querySelector<HTMLElement>('nav[aria-label]') ?? screen.getByRole('navigation');
       const categoryLink = within(breadcrumbNav).getByText(validPost.category);
-      expect(categoryLink.closest('a')).toHaveAttribute('href', '/research');
+      expect(categoryLink.closest<HTMLElement>('a')).toHaveAttribute('href', '/research');
     });
   });
 

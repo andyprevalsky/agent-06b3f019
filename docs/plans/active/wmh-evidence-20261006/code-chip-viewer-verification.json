@@ -1,0 +1,19 @@
+{
+  "url": "local viewer of archived root 67885bdc-fd0f-4023-aa65-d3687df7f2ec",
+  "network": [
+    {
+      "url": "http://localhost:56361/api/benchmarks/shared-agent/67885bdc-fd0f-4023-aa65-d3687df7f2ec",
+      "status": 200
+    },
+    {
+      "url": "http://localhost:56361/api/benchmarks/shared-agent/67885bdc-fd0f-4023-aa65-d3687df7f2ec",
+      "status": 200
+    }
+  ],
+  "completed_chips": 1,
+  "stuck_spinner": false,
+  "legacy_generic_completion": false,
+  "expanded_result": true,
+  "page_errors": [],
+  "screenshot": ".context/wmh-code-chip-local-viewer.png"
+}

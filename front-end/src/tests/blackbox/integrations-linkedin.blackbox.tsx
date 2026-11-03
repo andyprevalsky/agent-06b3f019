@@ -14,7 +14,10 @@ import { renderWithProviders } from './test-wrapper';
 import Integrations from '@/pages/Integrations';
 import { Toaster } from '@/components/ui/toaster';
 import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
-import { useMessagesSync } from '@/features/integrations/hooks/useMessagesSync';
+import {
+  LINKEDIN_SYNC_REFRESH_MS,
+  useMessagesSync,
+} from '@/features/integrations/hooks/useMessagesSync';
 import type { IntegrationHandlers } from '@/features/integration-handlers-context';
 
 const API_BASE = 'http://localhost:3001/api';
@@ -44,6 +47,46 @@ function integrationsHandler(integrations: unknown[] = []) {
     return HttpResponse.json({ integrations });
   });
 }
+
+function linkedinRow(status: string, syncAgentId = 'agent-linkedin') {
+  return {
+    id: 'integration-linkedin',
+    name: 'linkedin',
+    type: 'DATA_SOURCE',
+    status,
+    isActive: false,
+    config: { syncAgentId },
+  };
+}
+
+/**
+ * A stateful backend: POST /agents creates the agent, POST
+ * /integrations/linkedin/sync records it, and GET /integrations then reports
+ * the LinkedIn row SYNCING — the same order the real backend enforces.
+ */
+function linkedinBackend(createGate?: Promise<void>) {
+  const state = { agents: [] as string[], linkedin: null as unknown };
+  server.use(
+    http.post(`${API_BASE}/agents`, async () => {
+      if (createGate) await createGate;
+      const agentId = `agent-linkedin-${state.agents.length + 1}`;
+      state.agents.push(agentId);
+      return HttpResponse.json({ agent_id: agentId, status: 'ACTIVE' });
+    }),
+    http.post(`${API_BASE}/integrations/linkedin/sync`, async ({ request }) => {
+      const body = (await request.json()) as { agent_id: string };
+      if (!state.agents.includes(body.agent_id)) {
+        return HttpResponse.json({ error: 'Agent not found' }, { status: 404 });
+      }
+      state.linkedin = linkedinRow('SYNCING', body.agent_id);
+      return HttpResponse.json({ status: 'SYNCING', agent_id: body.agent_id });
+    }),
+    http.get(`${API_BASE}/integrations`, () =>
+      HttpResponse.json({ integrations: state.linkedin ? [state.linkedin] : [] }),
+    ),
+  );
+  return state;
+}
 describe('Integrations page - LinkedIn export flow', () => {
   beforeEach(() => {
     mockSession();
@@ -68,6 +111,17 @@ describe('Integrations page - LinkedIn export flow', () => {
       };
     }
 
+    function renderIntegrations() {
+      return renderWithProviders(
+        <IntegrationHandlersProvider handlers={macHandlers()}>
+          <Integrations />
+          <Toaster />
+        </IntegrationHandlersProvider>,
+        // Stock accordion UI; the Rose Desktop list is covered by integrations-rose-desktop.
+        { roseDesktop: false },
+      );
+    }
+
     async function expandSocialsAndGetLinkedInButton(user: ReturnType<typeof userEvent.setup>) {
       await waitFor(() => {
         expect(screen.getByText('Socials')).toBeInTheDocument();
@@ -80,80 +134,151 @@ describe('Integrations page - LinkedIn export flow', () => {
       return screen.getByRole('button', { name: 'Connect LinkedIn' });
     }
 
+    function linkedInRowElement() {
+      return screen
+        .getByText('LinkedIn')
+        .closest<HTMLElement>('.flex.items-center.justify-between')!;
+    }
+
+    const agentCalls = () =>
+      capturedRequests.filter((r) => r.url.endsWith('/api/agents') && r.method === 'POST');
+
     it('spawns one export agent, toasts, and blocks re-export on the second click', async () => {
       const user = userEvent.setup();
-
-      server.use(
-        http.post(`${API_BASE}/agents`, () => {
-          return HttpResponse.json({ id: 'agent-linkedin' });
-        }),
-      );
-
-      renderWithProviders(
-        <IntegrationHandlersProvider handlers={macHandlers()}>
-          <Integrations />
-          <Toaster />
-        </IntegrationHandlersProvider>,
-      );
+      linkedinBackend();
+      renderIntegrations();
 
       const linkedInButton = await expandSocialsAndGetLinkedInButton(user);
       clearCaptures();
 
       await user.click(linkedInButton);
 
-      // Toast confirms the agent was spawned.
       await waitFor(() => {
         expect(
           screen.getByText('An agent was spawned to connect your LinkedIn data.'),
         ).toBeInTheDocument();
       });
-
-      // Exactly one agent was created.
-      const agentCalls = () =>
-        capturedRequests.filter((r) => r.url.endsWith('/api/agents') && r.method === 'POST');
       expect(agentCalls().length).toBe(1);
 
-      // Button is now disabled -- re-export is blocked.
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Connect LinkedIn' })).toBeDisabled();
       });
 
-      // A second click does not spawn another agent.
       await user.click(screen.getByRole('button', { name: 'Connect LinkedIn' }));
       expect(agentCalls().length).toBe(1);
     });
 
-    it('renders the LinkedIn connect affordance as a plus button', async () => {
+    it('spawns a cloud agent directly (no chat router) and records it as the LinkedIn sync', async () => {
+      // The old flow posted `depth: 1` and a hard-coded MAC_APP source from a
+      // hand-rolled fetch; the export agent must be a normal agent instead.
       const user = userEvent.setup();
-
-      renderWithProviders(
-        <IntegrationHandlersProvider handlers={macHandlers()}>
-          <Integrations />
-        </IntegrationHandlersProvider>,
-      );
+      const backend = linkedinBackend();
+      renderIntegrations();
 
       const linkedInButton = await expandSocialsAndGetLinkedInButton(user);
-      // lucide-react renders the Plus icon with a `lucide-plus` class.
+      clearCaptures();
+      await user.click(linkedInButton);
+
+      await waitFor(() => {
+        expect(
+          capturedRequests.some(
+            (r) => r.url.endsWith('/api/integrations/linkedin/sync') && r.method === 'POST',
+          ),
+        ).toBe(true);
+      });
+      const create = agentCalls()[0];
+      const createBody = create.body as Record<string, unknown>;
+      expect(createBody.depth).toBeUndefined();
+      expect(createBody.price_limit_cents).toBeUndefined();
+      expect(createBody.source).toBe('WEB');
+      // Directly a cloud agent: the chat router never sees this request.
+      expect(createBody.start_phase).toBe('execute');
+      expect(String(createBody.goal)).toMatch(/^Download my LinkedIn data export/);
+      const record = capturedRequests.find((r) =>
+        r.url.endsWith('/api/integrations/linkedin/sync'),
+      )!;
+      expect(record.body).toEqual({ agent_id: backend.agents[0] });
+    });
+
+    it('keeps showing Connecting after a refresh while the export agent runs', async () => {
+      // Reported bug: "Connecting…" lived only in React state, so a reload of
+      // the page dropped it while the export agent was still running.
+      const user = userEvent.setup();
+      linkedinBackend();
+      const first = renderIntegrations();
+
+      await user.click(await expandSocialsAndGetLinkedInButton(user));
+      await waitFor(() => {
+        expect(within(linkedInRowElement()).getByText(/Connecting your data/)).toBeInTheDocument();
+      });
+
+      first.unmount();
+      renderIntegrations();
+
+      const button = await expandSocialsAndGetLinkedInButton(user);
+      expect(within(linkedInRowElement()).getByText(/Connecting your data/)).toBeInTheDocument();
+      expect(button).toBeDisabled();
+    });
+
+    it('clears Connecting and allows a new export once the server reports the sync failed', async () => {
+      const user = userEvent.setup();
+      server.use(integrationsHandler([linkedinRow('SYNC_FAILED')]));
+      renderIntegrations();
+
+      const button = await expandSocialsAndGetLinkedInButton(user);
+      expect(
+        within(linkedInRowElement()).queryByText(/Connecting your data/),
+      ).not.toBeInTheDocument();
+      expect(button).toBeEnabled();
+    });
+
+    it('re-reads a running sync so the row settles without a manual refresh', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        let status = 'SYNCING';
+        server.use(
+          http.get(`${API_BASE}/integrations`, () =>
+            HttpResponse.json({ integrations: [linkedinRow(status)] }),
+          ),
+        );
+        const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+        renderIntegrations();
+        await expandSocialsAndGetLinkedInButton(user);
+        expect(within(linkedInRowElement()).getByText(/Connecting your data/)).toBeInTheDocument();
+
+        status = 'SYNC_FAILED';
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(LINKEDIN_SYNC_REFRESH_MS);
+        });
+        await waitFor(() => {
+          expect(
+            within(linkedInRowElement()).queryByText(/Connecting your data/),
+          ).not.toBeInTheDocument();
+        });
+        expect(screen.getByRole('button', { name: 'Connect LinkedIn' })).toBeEnabled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('renders the LinkedIn connect affordance as a plus button', async () => {
+      const user = userEvent.setup();
+      renderIntegrations();
+
+      const linkedInButton = await expandSocialsAndGetLinkedInButton(user);
       expect(linkedInButton.querySelector('.lucide-plus')).toBeInTheDocument();
     });
 
     it('spawns only one agent for concurrent sync calls that overlap in flight', async () => {
-      // The disabled button hides this at the UI level, but the hook contract
-      // must hold on its own: `linkedinSyncStarted` is React state and only
-      // flips after the create call resolves, so two overlapping calls would
-      // both pass a state-only guard and spawn duplicate export agents.
+      // Server state only flips after the create call resolves, so two
+      // overlapping calls would both pass a state-only guard.
       let releaseCreate: () => void = () => {};
       const createGate = new Promise<void>((resolve) => {
         releaseCreate = resolve;
       });
-      server.use(
-        http.post(`${API_BASE}/agents`, async () => {
-          await createGate;
-          return HttpResponse.json({ id: 'agent-linkedin' });
-        }),
-      );
+      linkedinBackend(createGate);
 
-      const { result } = renderHook(() => useMessagesSync({} as never, async () => {}));
+      const { result } = renderHook(() => useMessagesSync({} as never, async () => {}, null));
       clearCaptures();
 
       await act(async () => {
@@ -163,69 +288,40 @@ describe('Integrations page - LinkedIn export flow', () => {
         await Promise.all([first, second]);
       });
 
-      expect(result.current.linkedinSyncStarted).toBe(true);
-      const agentCalls = capturedRequests.filter(
-        (r) => r.url.endsWith('/api/agents') && r.method === 'POST',
-      );
-      expect(agentCalls.length).toBe(1);
+      expect(agentCalls().length).toBe(1);
     });
 
     it('lights the LinkedIn row itself as connected once the export agent is spawned', async () => {
       const user = userEvent.setup();
-
-      server.use(
-        http.post(`${API_BASE}/agents`, () => {
-          return HttpResponse.json({ id: 'agent-linkedin' });
-        }),
-      );
-
-      renderWithProviders(
-        <IntegrationHandlersProvider handlers={macHandlers()}>
-          <Integrations />
-        </IntegrationHandlersProvider>,
-      );
+      linkedinBackend();
+      renderIntegrations();
 
       const linkedInButton = await expandSocialsAndGetLinkedInButton(user);
-      const linkedInRow = screen
-        .getByText('LinkedIn')
-        .closest<HTMLElement>('.flex.items-center.justify-between')!;
+      const linkedInRow = linkedInRowElement();
 
-      // Before connecting: no status sub-label and no rose glow on the row icon.
       expect(within(linkedInRow).queryByText(/Connecting your data/)).not.toBeInTheDocument();
       const glowOf = () =>
-        Array.from(linkedInRow.querySelectorAll('span[aria-hidden="true"]')).find((el) =>
+        Array.from(linkedInRowElement().querySelectorAll('span[aria-hidden="true"]')).find((el) =>
           (el as HTMLElement).style.backgroundImage.includes('254, 117, 3'),
         );
       expect(glowOf()).toBeUndefined();
 
       await user.click(linkedInButton);
 
-      // After connecting: the row (not just the section header) reads as connected.
       await waitFor(() => {
-        expect(within(linkedInRow).getByText(/Connecting your data/)).toBeInTheDocument();
+        expect(within(linkedInRowElement()).getByText(/Connecting your data/)).toBeInTheDocument();
       });
       expect(glowOf()).toBeDefined();
     });
 
     it('shows the rose Connected label on the Socials header once LinkedIn connects', async () => {
       const user = userEvent.setup();
-
-      server.use(
-        http.post(`${API_BASE}/agents`, () => {
-          return HttpResponse.json({ id: 'agent-linkedin' });
-        }),
-      );
-
-      renderWithProviders(
-        <IntegrationHandlersProvider handlers={macHandlers()}>
-          <Integrations />
-        </IntegrationHandlersProvider>,
-      );
+      linkedinBackend();
+      renderIntegrations();
 
       const linkedInButton = await expandSocialsAndGetLinkedInButton(user);
       const socialsSection = screen.getByText('Socials').closest<HTMLElement>('.rounded-lg')!;
 
-      // Before connecting the section header must not claim to be connected.
       expect(within(socialsSection).queryByText('Connected')).not.toBeInTheDocument();
 
       await user.click(linkedInButton);

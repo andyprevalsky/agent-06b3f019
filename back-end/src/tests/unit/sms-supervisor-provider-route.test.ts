@@ -2,6 +2,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import {
+  buildEnvironmentToolMessages,
+  buildNativeToolFeedbackMessages,
+  buildToolFeedbackMessages,
+} from '../../providers/smsSupervisor/environmentMessages';
+
 const SUPERVISOR_LLM_SOURCE = readFileSync(
   join(__dirname, '../../providers/smsSupervisor/supervisorLlm.ts'),
   'utf8'
@@ -33,16 +39,35 @@ test('defaults to rose-fast pool path — no exclusive cerebras / gpt-oss overri
     `expected exactly one 'direct-cerebras' mention (benchmark allowlist); found ${allDirectHits}`
   );
 
-  // Compute tokens must stay OFF the default (undefined-route) path.
-  for (const token of ['claude_token', 'gpt_token']) {
-    const gated = SUPERVISOR_LLM_SOURCE.includes(
-      `providerRoute !== undefined && ${token === 'claude_token' ? 'claudeToken' : 'gptToken'}`
-    );
+  // Compute tokens must stay OFF the default (no-override) path: only a forced
+  // route or an explicit benchmark pool lease may send them.
+  assert.ok(
+    SUPERVISOR_LLM_SOURCE.includes(
+      'const sendComputeTokens = providerRoute !== undefined || benchmarkPoolLease;'
+    )
+  );
+  for (const token of ['claudeToken', 'gptToken']) {
     assert.ok(
-      gated,
-      `${token} must be gated behind providerRoute !== undefined; ungated send puts SMS on a user compute token instead of rose-fast`
+      SUPERVISOR_LLM_SOURCE.includes(`sendComputeTokens && ${token}`),
+      `${token} must be gated behind sendComputeTokens; ungated send puts SMS on a user compute token instead of rose-fast`
     );
   }
+});
+
+test('pool-default benchmark override serves a pool exactly as production would', () => {
+  // A/B'ing another pool as the supervisor model must run that pool's normal
+  // path (no provider_route) and stay tokenless, like a real SMS_SUPERVISOR_MODEL
+  // change; forcing a route would measure a provider leg production never uses.
+  assert.ok(SUPERVISOR_LLM_SOURCE.includes("routeOverride !== 'pool-default'"));
+  // A pool lease needs the override model, pool-default, AND a pinned token type.
+  assert.ok(SUPERVISOR_LLM_SOURCE.includes("routeOverride === 'pool-default' &&"));
+  assert.ok(SUPERVISOR_LLM_SOURCE.includes('benchmarkSupervisorTokenType() !== undefined'));
+});
+
+test('dumps every supervisor call for replay (dev only)', () => {
+  // Without a dump_context the supervisor's raw request/response was never
+  // captured, so an empty-tool-call round could not be inspected or replayed.
+  assert.ok(SUPERVISOR_LLM_SOURCE.includes("dump_context: { call_site: 'sms_supervisor'"));
 });
 
 test('keeps the full grep surface — the union limit is not a reason to cut tools', () => {
@@ -73,15 +98,27 @@ test('marks assistant tool_calls as type=function for OpenAI-compatible provider
   // required", code=wrong_api_format). That is an invalid_request, so the
   // route sends it straight to the generic waterfall rather than the
   // same-model OpenRouter hop — every SMS turn silently left GLM-4.7.
-  const source = readFileSync(
-    join(__dirname, '../../providers/smsSupervisor/environmentMessages.ts'),
-    'utf8'
-  );
-  // Count, don't spot-check. A `toContain` passed with only ONE of the two
-  // tool_call sites patched, so the run still 400'd and still silently left
-  // GLM-4.7 — the assertion was satisfied while the bug was live.
-  const toolCallSites = (source.match(/tool_calls: \[/g) ?? []).length;
-  const typedSites = (source.match(/type: 'function'/g) ?? []).length;
-  assert.ok(toolCallSites > 0);
-  assert.equal(typedSites, toolCallSites);
+  // Check every builder's actual output: a source count passed with only one
+  // of two sites patched while the bug was live.
+  const grep = { tool: 'grep', arguments: { pattern: 'passport' }, id: 'call_a' };
+  const send = { tool: 'send_user_message', arguments: { message: 'hi' } };
+  const built = [
+    ...buildEnvironmentToolMessages('env', 1),
+    ...buildToolFeedbackMessages({
+      round: 0,
+      assistantPayload: '{}',
+      toolResultSummary: '',
+      guidance: 'g',
+    }),
+    ...buildNativeToolFeedbackMessages({
+      round: 1,
+      toolCalls: [grep, send],
+      resultsByCall: new Map([[grep, [{ tool: 'grep', success: true, result: 'hit' }]]]),
+      roundResults: [],
+      guidance: 'g',
+    }),
+  ];
+  const toolCalls = built.flatMap((message) => message.tool_calls ?? []);
+  assert.equal(toolCalls.length, 4);
+  for (const toolCall of toolCalls) assert.equal(toolCall.type, 'function');
 });

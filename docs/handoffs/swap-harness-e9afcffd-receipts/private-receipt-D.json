@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "whm-preservation/e9afcffd/swap-20261018-D.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "542fae7eab50e6e321a4774db4e1ff2b393b6b9fc1154984de6a271c913bab09",
+  "gzip_sha256": "fcbc6387b4dc983fb7c99ea29b77d05fde7124e4411b29d280902d38582c6d4d",
+  "stored_bytes": 1755206849,
+  "frames": 210,
+  "files": 10,
+  "original_bytes": 11255262977,
+  "manifest_sha256": "f634ea33e3d31533e2de376490954ee62c6c9e4b78b6ac2f47c294712bc70c50",
+  "full_readback_verified": true
+}

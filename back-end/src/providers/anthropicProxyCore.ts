@@ -1,5 +1,6 @@
-import { CACHE_KEY_VERSION, worldModelCacheScope } from './fastCacheNormalizeConstants';
-import { stripSecrets } from './fastCacheNormalizeCore';
+import { CACHE_KEY_VERSION, worldModelCacheScope } from './demoCacheNormalizeConstants';
+import { stripSecrets } from './demoCacheNormalizeCore';
+import type { ReserveTraceOrdinal } from './traceOrdinal';
 
 /** Headers we forward upstream (auth + anthropic protocol headers). */
 export const FORWARD_REQUEST_HEADERS = [
@@ -30,6 +31,8 @@ export interface ProxyDeps {
     body: unknown,
     headers: Record<string, string>
   ) => Promise<{ status: number; contentType: string; body: string }>;
+  /** Shared across instances in production (sharedTraceOrdinalReserver). */
+  reserveOrdinal: ReserveTraceOrdinal;
 }
 
 export function requestSeq(body: unknown): number {
@@ -54,35 +57,12 @@ export interface ProxyResult {
 export interface TraceReplayContext {
   sessionId?: string;
   ordinal?: number;
+  /** False: serve a live miss without recording it. The proxy routes pass false unless the request carries a verified recorder capability. */
+  writeEnabled?: boolean;
 }
-
-const traceOrdinalCounters = new Map<string, number>();
 
 export function anthropicSlotKey(traceHash: string, ordinal: number): string {
   return `fastmode:${CACHE_KEY_VERSION}:${worldModelCacheScope()}anthropic:${traceHash}:slot:${ordinal}`;
-}
-
-interface TraceOrdinalReservation {
-  ordinal: number;
-  rollback: () => void;
-}
-
-function reserveTraceOrdinal(traceHash: string, sessionId?: string): TraceOrdinalReservation {
-  const counterKey = `anthropic:${traceHash}:${sessionId ?? 'default'}`;
-  const ordinal = traceOrdinalCounters.get(counterKey) ?? 0;
-  traceOrdinalCounters.set(counterKey, ordinal + 1);
-  return {
-    ordinal,
-    rollback: () => {
-      if (traceOrdinalCounters.get(counterKey) === ordinal + 1) {
-        if (ordinal === 0) {
-          traceOrdinalCounters.delete(counterKey);
-        } else {
-          traceOrdinalCounters.set(counterKey, ordinal);
-        }
-      }
-    },
-  };
 }
 
 export function parseTraceParam(raw: string): { traceHash: string; sessionId?: string } {
@@ -127,7 +107,7 @@ export async function resolveAnthropic(
   const upstreamBody = normalizeAnthropicRequest(body);
   const ordinalReservation =
     traceContext.ordinal === undefined
-      ? reserveTraceOrdinal(traceHash, traceContext.sessionId)
+      ? await deps.reserveOrdinal(`anthropic:${traceHash}:${traceContext.sessionId ?? 'default'}`)
       : null;
   const ordinal = traceContext.ordinal ?? ordinalReservation?.ordinal ?? 0;
   const key = anthropicSlotKey(traceHash, ordinal);
@@ -151,7 +131,10 @@ export async function resolveAnthropic(
 
     const upstream = await deps.fetchUpstream(upstreamBody, headers);
     let wrote = false;
-    if (upstream.status >= 200 && upstream.status < 300) {
+    if (traceContext.writeEnabled === false && upstream.status >= 200 && upstream.status < 300) {
+      // A replay-only session still used this slot; keep later requests aligned.
+      consumedReservedOrdinal = true;
+    } else if (upstream.status >= 200 && upstream.status < 300) {
       const value: CachedAnthropicResponse = stripSecrets({
         status: upstream.status,
         contentType: upstream.contentType,
@@ -170,7 +153,9 @@ export async function resolveAnthropic(
     };
   } finally {
     if (!consumedReservedOrdinal) {
-      ordinalReservation?.rollback();
+      // A failed give-back only leaves a gap in the slot sequence; never let it
+      // replace the upstream response the caller is about to receive.
+      await ordinalReservation?.rollback().catch(() => undefined);
     }
   }
 }

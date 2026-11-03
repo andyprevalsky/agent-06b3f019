@@ -3,7 +3,10 @@
  * message to the correct sub-component. Kept separate so the dispatcher can
  * stay small and the logic is testable in isolation.
  */
+import { isAgentMessageMetadata, isAgentNotificationMetadata } from '@/lib/realtime-types';
 import type { Message } from '../../hooks';
+import { isBrowserAgentResult } from '../browserAgentResult';
+import { isAgentWait } from './agentToolData';
 
 const GENERAL_PURPOSE_AGENT_TOOLS = new Set([
   'spawn_general_purpose_agent',
@@ -29,6 +32,12 @@ export interface MessageRouting {
   isBrowserAgentChipMessage: boolean;
   isCompletionSummary: boolean;
   isGate: boolean;
+  /** USER/ASSISTANT row carrying another agent's message (renders as a tool card). */
+  isAgentMessage: boolean;
+  /** USER/ASSISTANT row announcing a sub-agent finished (renders as a tool card). */
+  isAgentNotification: boolean;
+  /** list_agents result → structured agent-tree chip. */
+  isListAgents: boolean;
 }
 
 export function useMessageRouting(message: Message): MessageRouting {
@@ -49,12 +58,19 @@ export function useMessageRouting(message: Message): MessageRouting {
   );
   const isExploreAgent =
     isTool && metadata?.toolName === 'spawn_agent' && metadata?.agentType === 'explore';
-  const isWaitFor = isTool && metadata?.toolName === 'wait_for';
+  // wait_for(agents=…) is a compact tool row; other waits keep WaitForChip.
+  const isWaitFor = isTool && metadata?.toolName === 'wait_for' && !isAgentWait(metadata);
+  const isListAgents = isTool && metadata?.toolName === 'list_agents';
   const isSetPlanTool = isTool && metadata?.toolName === 'set_plan';
   const isPhoneCallTool = isTool && metadata?.toolName === 'call_phone_number';
   const isClaudeCodeToolMessage = isTool && metadata?.toolName === 'spawn_claude_code_agent';
   const isCompletionSummary = isTool && metadata?.isFinalSummary === true;
   const isGate = Boolean(isTool && metadata?.gate);
+  // Agent-origin rows may arrive as USER or ASSISTANT; both render as tool cards.
+  const isAgentOriginRole = isUser || isAssistant;
+  const isAgentNotification = isAgentOriginRole && isAgentNotificationMetadata(metadata);
+  const isAgentMessage =
+    isAgentOriginRole && !isAgentNotification && isAgentMessageMetadata(metadata);
 
   const isClaudeCodeInProgress = isClaudeCodeToolMessage && metadata?.toolStatus === 'IN_PROGRESS';
   const isClaudeCodeStarted =
@@ -80,15 +96,7 @@ export function useMessageRouting(message: Message): MessageRouting {
   // "✓ Write permission granted") becomes the chip anchor mid-run; without this
   // check it renders the still-running browser agent as "Done"
   // (prod agent 7f354640-ffab-4098-b7ae-041ddf246c6f).
-  const isBrowserTerminalActionType =
-    metadata?.action_type === 'task_complete' || metadata?.action_type === 'session_paused';
-  const isBrowserAgentChipMessage = Boolean(
-    isTool &&
-    metadata?.toolName === 'spawn_browser_agent' &&
-    !metadata?.subAgentId &&
-    (metadata?.toolStatus === 'FINISHED' || metadata?.toolStatus === 'ERROR') &&
-    (isBrowserTerminalActionType || (!metadata?.task_id && metadata?.action_type == null)),
-  );
+  const isBrowserAgentChipMessage = isBrowserAgentResult(message);
 
   return {
     isUser,
@@ -108,5 +116,8 @@ export function useMessageRouting(message: Message): MessageRouting {
     isBrowserAgentChipMessage,
     isCompletionSummary,
     isGate,
+    isAgentMessage,
+    isAgentNotification,
+    isListAgents,
   };
 }

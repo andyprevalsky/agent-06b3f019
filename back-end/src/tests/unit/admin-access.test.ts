@@ -5,23 +5,21 @@ import { isAdminUser, ADMIN_USER_IDS } from '../../utils/adminAccess';
 
 const ANDY = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 const TAMY = '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9';
+// Andy's duplicate account, merged into ANDY and deleted on 2026-10-18.
+const ANDY_MERGED = 'c49b4ce3-3489-499d-bfbd-846d04ba6275';
 const SYNTH = '00000000-0000-4000-8000-000000000105';
 const RANDO = 'not-an-admin';
 
 // Hardcoded prod allowlist.
-assert.equal(ADMIN_USER_IDS.has(ANDY), true, 'Andy legacy id is a hardcoded admin');
-assert.equal(
-  ADMIN_USER_IDS.has('c49b4ce3-3489-499d-bfbd-846d04ba6275'),
-  true,
-  'Andy current id is a hardcoded admin'
-);
+assert.equal(ADMIN_USER_IDS.has(ANDY), true, 'Andy current id is a hardcoded admin');
+assert.equal(ADMIN_USER_IDS.has(ANDY_MERGED), false, 'the deleted merged Andy id is not admin');
 assert.equal(
   ADMIN_USER_IDS.has('8283e892-b0a4-4298-9ef7-b95bcc67e46b'),
   true,
   'Tamara current id is a hardcoded admin'
 );
 assert.equal(isAdminUser(ANDY), true);
-assert.equal(isAdminUser('c49b4ce3-3489-499d-bfbd-846d04ba6275'), true);
+assert.equal(isAdminUser(ANDY_MERGED), false);
 assert.equal(isAdminUser(TAMY), true);
 assert.equal(isAdminUser('8283e892-b0a4-4298-9ef7-b95bcc67e46b'), true);
 assert.equal(isAdminUser(RANDO), false);

@@ -37,6 +37,8 @@ export interface AuthOptionsResponse {
     connected_emails: string[];
     match_for_site_account: string | null;
   };
+  /** Every inbox address and phone number whose one-time codes reach the agent. */
+  readable_identifiers: string[];
   minted: null | {
     id: string;
     accountLabel: string;

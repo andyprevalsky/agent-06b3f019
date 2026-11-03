@@ -2,29 +2,34 @@
  * Agent lifecycle service — create and delete agents.
  */
 
+import { resolveCreateAgentPlacement } from './agentProject';
 import { randomUUID } from '../../providers/crypto';
-import { startAgentWorkflowExecution } from '../../providers/temporal';
-import { bindStartedRunIdentity } from '../../providers/workflowGeneration';
-import { getX402Endpoints } from '../../providers/x402Endpoints';
-import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/chat';
+import { handleChatMessage } from '../../providers/chat';
+import { startDirectWorkflow } from './agentDirectStartService';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
 import { deleteAgentRecursive as killAgentRecursive } from '../../providers/agentKill';
-import { createGithubRepo } from '../../providers/github';
+import { assertCodeSessionShareTarget, recordCodeSessionShare } from './agentCodeSessionShare';
 import { createLogger } from '../../providers/logger';
+import { originDeviceFields } from './agentOriginService';
 import { resolvePriceLimitCents } from '../../providers/priceLimitDefaults';
 import type { CreateAgentBody } from './types';
 import { getPromptSecret } from './config';
 import * as repo from './repo';
 import { resolveCreateMetadata } from './agentCreateMetadata';
+import { resolveCreateTaskPaths } from './agentTaskPathCreate';
+import { createAgentResponse } from './agentCreateResponse';
 import { prepareAgentStartArchive } from '../../providers/traceArchiveLifecycle';
 import {
   applyFastModeDefault,
   applyFastModeInheritance,
   applyMemoryDefault,
   applyMemoryInheritance,
+  applySpeedDefault,
+  applySpeedInheritance,
   applyWorldModelModeInheritance,
   assertWorldModelModeAccess,
   disableFastModeForWorldModel,
+  resolvedSpeed,
 } from './agentExecutionMode';
 import {
   resumeExistingSubAgent,
@@ -70,69 +75,15 @@ function runPostCreateSideEffects(
 }
 
 /* c8 ignore start -- startSubAgentWorkflow, startDirectWorkflow, startChatMode require Temporal/GitHub/LLM infrastructure */
-/** Start root agent directly in plan/execute (bypass chat). */
-async function startDirectWorkflow(
-  body: CreateAgentBody,
-  agentDbId: string,
-  userId: string,
-  verifier: { type: string },
-  priceLimitCents: number
-): Promise<string> {
-  const execution = await startAgentWorkflowExecution({
-    agentId: agentDbId,
-    userId,
-    goal: body.goal,
-    model: body.model,
-    reasoningMaxTokens: body.reasoning_max_tokens,
-    verifier: { type: verifier.type },
-    ...(body.task_queue !== undefined ? { taskQueue: body.task_queue } : {}),
-    startPhase: body.start_phase!,
-    ...(body.max_iterations !== undefined ? { maxIterations: body.max_iterations } : {}),
-    priceLimitCents,
-    ...(body.fast_mode_cache_enabled !== undefined
-      ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
-      : {}),
-    ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
-    ...(body.memory_enabled !== undefined ? { memoryEnabled: body.memory_enabled } : {}),
-    ...(body.context_gates !== undefined ? { contextGates: body.context_gates } : {}),
-  });
-  // temporalWorkflowId was set during createAgentTransaction (see comment on
-  // startSubAgentWorkflow above); bind the run so cleanup can tell this
-  // generation from a later follow-up that reuses the same Workflow ID.
-  await bindStartedRunIdentity(agentDbId, execution);
-  await broadcastAgentModeStarted(agentDbId);
-  return execution.workflowId;
-}
-
 /** Start root agent in chat mode (fire-and-forget). */
 async function startChatMode(
   body: CreateAgentBody,
   agentDbId: string,
-  agentId: string,
   userId: string
 ): Promise<void> {
-  const repoName = `agent-${agentId.substring(0, 8)}`;
-  createGithubRepo(repoName)
-    .then(async (repoUrl) => {
-      if (repoUrl !== null && repoUrl !== undefined) {
-        try {
-          await repo.updateAgent(agentDbId, { githubRepoUrl: repoUrl });
-          await repo.createGithubRepoAccess(userId, repoUrl);
-        } catch (err: unknown) {
-          log.error('Failed to persist repo URL', {
-            agent_id: agentDbId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-    })
-    .catch((err: unknown) => {
-      log.error('Repo creation failed', {
-        agent_id: agentDbId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-
+  // The tree's GitHub repo is created when it first starts a code session
+  // (ensureAgentTreeRepo), not for every chat: most chats never write code, and
+  // every create shares one account-wide GitHub rate limit.
   handleChatMessage({ agentId: agentDbId, userId, model: body.model }).catch((err: unknown) => {
     void recoverChatHandlerFailure({
       agentId: agentDbId,
@@ -158,14 +109,64 @@ async function resolveSubAgentBenchmarkFlag(
   const parent = await repo.findAgent(body.parent_agent_id, userId);
   if (
     body.fast_mode_cache_enabled === undefined ||
+    body.speed === undefined ||
     body.world_model_mode === undefined ||
     body.memory_enabled === undefined
   ) {
     applyFastModeInheritance(body, parent?.fastModeCacheEnabled);
+    applySpeedInheritance(body, parent);
     applyWorldModelModeInheritance(body, parent?.worldModelMode);
     applyMemoryInheritance(body, parent?.memoryEnabled);
   }
   return !isBenchmark && parent?.isBenchmark === true ? true : isBenchmark;
+}
+
+/** Server-side create options that are not part of the public request body. */
+export interface CreateAgentOptions {
+  /** Internal independent spawn: recorded atomically before its workflow starts. */
+  graphSpawn?: { title: string; folderId: string; requestHash: string };
+  /** Root repository for code sessions, persisted in the create transaction. */
+  githubRepoUrl?: string;
+  /**
+   * `X-Rose-Device-Id` sent by the Rose Mac app's main process (C14). Recorded
+   * only for a MAC_APP root agent and only when the caller owns that device.
+   */
+  originDeviceHeader?: string;
+}
+
+function graphSpawnFields(options: CreateAgentOptions) {
+  return options.graphSpawn === undefined
+    ? {}
+    : {
+        title: options.graphSpawn.title,
+        folderId: options.graphSpawn.folderId,
+        graphSpawnHash: options.graphSpawn.requestHash,
+      };
+}
+
+/** Server-side create fields: the root repository and the Mac that started it. */
+async function serverCreateFields(
+  body: CreateAgentBody,
+  userId: string,
+  isSubAgent: boolean,
+  options: CreateAgentOptions
+): Promise<{ githubRepoUrl?: string; originDeviceId?: string }> {
+  return {
+    ...(options.githubRepoUrl !== undefined ? { githubRepoUrl: options.githubRepoUrl } : {}),
+    ...(await originDeviceFields(body, userId, isSubAgent, options.originDeviceHeader)),
+  };
+}
+
+/** Defaults and access checks every create body passes before any row is written. */
+async function applyCreateBodyRules(
+  body: CreateAgentBody,
+  userId: string,
+  benchmarkFlag: boolean
+): Promise<void> {
+  applyMemoryDefault(body, benchmarkFlag);
+  disableFastModeForWorldModel(body);
+  assertWorldModelModeAccess(body, userId);
+  await assertCodeSessionShareTarget(body, userId);
 }
 
 export async function createAgent(
@@ -173,22 +174,25 @@ export async function createAgent(
   userId: string,
   isInternal: boolean,
   clientIP: string | null,
-  isBenchmark = false
+  isBenchmark = false,
+  options: CreateAgentOptions = {}
 ) {
   if (isInternal) body.goal = resolvePromptSecrets(body.goal);
   const verifier = { type: 'FLOAT_LLM_JUDGE' as const };
   const isSubAgent = body.parent_agent_id !== undefined;
+  // Speed reads the raw legacy flag, so it resolves before the Fast Mode default.
+  applySpeedDefault(body);
   applyFastModeDefault(body, userId);
 
   const benchmarkFlag = await resolveSubAgentBenchmarkFlag(body, userId, isBenchmark);
-  applyMemoryDefault(body, benchmarkFlag);
-  disableFastModeForWorldModel(body);
-  assertWorldModelModeAccess(body, userId);
+  await applyCreateBodyRules(body, userId, benchmarkFlag);
   const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);
   if (existingSubAgent !== null) return existingSubAgent;
+  const { projectId, folderId } = await resolveCreateAgentPlacement(body, userId);
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
     await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null, userId);
   const agentId = body.agent_id ?? randomUUID();
+  const [taskPath] = await resolveCreateTaskPaths([body]);
   // Workflow ID === agent ID by convention (see providers/temporal.ts:88).
   // For sub-agents and direct (plan/execute) root agents, the workflow always
   // starts immediately after this transaction, so set the column up-front and
@@ -216,6 +220,7 @@ export async function createAgent(
     priceLimitCents: resolvePriceLimitCents(body.price_limit_cents),
     writeLockEnabled: body.write_lock_enabled,
     fastModeCacheEnabled: body.fast_mode_cache_enabled,
+    speed: resolvedSpeed(body),
     memoryEnabled: body.memory_enabled,
     worldModelMode: body.world_model_mode,
     verifierType: verifier.type,
@@ -226,31 +231,30 @@ export async function createAgent(
     workflowContextGates: body.context_gates,
     workflowStartPhase: body.start_phase,
     workflowTaskQueue: body.task_queue,
+    ...(await serverCreateFields(body, userId, isSubAgent, options)),
+    projectId,
+    folderId,
+    ...graphSpawnFields(options),
+    taskPath,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;
+  await recordCodeSessionShare(body, userId, agent.agent.id);
 
-  const workflowId = await launchAgentWorkflow(body, agent, userId, isSubAgent, agentId, verifier);
+  const workflowId = await launchAgentWorkflow(
+    body,
+    agent,
+    userId,
+    isSubAgent,
+    agentId,
+    verifier,
+    options.graphSpawn !== undefined
+  );
+  if (options.graphSpawn !== undefined)
+    await repo.updateAgent(agentId, { temporalWorkflowStartPending: false });
 
   runPostCreateSideEffects(agent.agent.id, archiveStartFixture);
 
-  return {
-    agent_id: agent.agent.id,
-    progress: agent.agent.progress,
-    goal: agent.agent.goal,
-    title: agent.agent.title,
-    model: agent.agent.model,
-    source: body.source,
-    reasoning_max_tokens: body.reasoning_max_tokens,
-    status: isSubAgent ? agent.agent.status : 'ACTIVE',
-    status_message: agent.agent.statusMessage,
-    temporal_workflow_id: workflowId,
-    fast_mode_cache_enabled: agent.agent.fastModeCacheEnabled,
-    memory_enabled: agent.agent.memoryEnabled,
-    world_model_mode: agent.agent.worldModelMode,
-    created_at: agent.agent.createdAt,
-    updated_at: agent.agent.updatedAt,
-    available_endpoints: getX402Endpoints(agent.agent.id),
-  };
+  return createAgentResponse(agent, body, isSubAgent, workflowId);
 }
 
 /* c8 ignore start -- launchAgentWorkflow delegates to Temporal-dependent functions */
@@ -260,7 +264,8 @@ async function launchAgentWorkflow(
   userId: string,
   isSubAgent: boolean,
   agentId: string,
-  verifier: { type: 'FLOAT_LLM_JUDGE' }
+  verifier: { type: 'FLOAT_LLM_JUDGE' },
+  independent = false
 ): Promise<string | null> {
   if (isSubAgent) {
     try {
@@ -287,10 +292,17 @@ async function launchAgentWorkflow(
     }
   }
   if (body.start_phase !== undefined) {
-    return startDirectWorkflow(body, agent.agent.id, userId, verifier, agent.agent.priceLimitCents);
+    return startDirectWorkflow(
+      body,
+      agent.agent.id,
+      userId,
+      verifier,
+      agent.agent.priceLimitCents,
+      independent
+    );
   }
   await repo.updateAgent(agent.agent.id, { status: 'ACTIVE' });
-  void startChatMode(body, agent.agent.id, agentId, userId);
+  void startChatMode(body, agent.agent.id, userId);
   return null;
 }
 /* c8 ignore stop */

@@ -1,0 +1,117 @@
+{
+  "source_session": "3c034a09bf4848c2b40fb569fbc2ea6e",
+  "method": "Offline exact marked-prefix overlap; only successful native responses finished before request start and less than 5min old; token estimates omit protocol overhead; no live cache claims.",
+  "logical_json_equal_for_all_layouts": true,
+  "system_text_unchanged": true,
+  "results": [
+    {
+      "mode": "static",
+      "requests": 75,
+      "max_markers": 1,
+      "strict_matching_prefix_requests": 74,
+      "estimated_cached_tokens": 100714,
+      "estimated_input_tokens": 2063170,
+      "estimated_token_hit_fraction": 0.04881517276811896
+    },
+    {
+      "mode": "static-full",
+      "requests": 75,
+      "max_markers": 2,
+      "strict_matching_prefix_requests": 74,
+      "estimated_cached_tokens": 110212,
+      "estimated_input_tokens": 2063170,
+      "estimated_token_hit_fraction": 0.05341876820620695
+    },
+    {
+      "mode": "static-full-entries",
+      "requests": 75,
+      "max_markers": 4,
+      "strict_matching_prefix_requests": 74,
+      "estimated_cached_tokens": 110212,
+      "estimated_input_tokens": 2063170,
+      "estimated_token_hit_fraction": 0.05341876820620695
+    },
+    {
+      "mode": "static-full-batches",
+      "requests": 75,
+      "max_markers": 4,
+      "strict_matching_prefix_requests": 74,
+      "estimated_cached_tokens": 648889,
+      "estimated_input_tokens": 2063170,
+      "estimated_token_hit_fraction": 0.31451068016692757
+    },
+    {
+      "mode": "static-batches-retrieval-after",
+      "requests": 75,
+      "max_markers": 4,
+      "strict_matching_prefix_requests": 74,
+      "estimated_cached_tokens": 647193,
+      "estimated_input_tokens": 2063170,
+      "estimated_token_hit_fraction": 0.3136886441737714
+    },
+    {
+      "mode": "static-full-one-batch-retrieval-after",
+      "requests": 75,
+      "max_markers": 4,
+      "strict_matching_prefix_requests": 74,
+      "estimated_cached_tokens": 110212,
+      "estimated_input_tokens": 2063170,
+      "estimated_token_hit_fraction": 0.05341876820620695
+    },
+    {
+      "mode": "static-full-one-batch-retrieval-first",
+      "requests": 75,
+      "max_markers": 4,
+      "strict_matching_prefix_requests": 74,
+      "estimated_cached_tokens": 742974,
+      "estimated_input_tokens": 2063170,
+      "estimated_token_hit_fraction": 0.3601128360726455
+    },
+    {
+      "mode": "static-batches-retrieval-first",
+      "requests": 75,
+      "max_markers": 4,
+      "strict_matching_prefix_requests": 74,
+      "estimated_cached_tokens": 1178243,
+      "estimated_input_tokens": 2063170,
+      "estimated_token_hit_fraction": 0.5710838176204578
+    }
+  ],
+  "cohort_audit": {
+    "exact_rag_pair_distinct": 16,
+    "rag_pair_group_sizes_descending": [
+      12,
+      11,
+      10,
+      6,
+      6,
+      6,
+      5,
+      5,
+      3,
+      3,
+      2,
+      2,
+      1,
+      1,
+      1,
+      1
+    ],
+    "task_tools_distinct": 4,
+    "histories_distinct": 16,
+    "complete_history_result_batch_sizes": {
+      "1": 619
+    },
+    "malformed_batches": 0,
+    "i3_best_prefix_request_counts": {
+      "static": 17,
+      "history-previous": 41,
+      "retrieval": 16
+    },
+    "i3_estimated_cached_tokens_by_prefix": {
+      "static": 23137,
+      "history-previous": 974619,
+      "retrieval": 180487
+    }
+  }
+}

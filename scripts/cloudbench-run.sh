@@ -38,7 +38,10 @@
 #
 # Inputs (all from env, exported by run-bench-cloud's on-box invocation):
 #   REF                 branch/sha to sync + run (required; defaults to HEAD if empty)
-#   WMH_MODEL_NAME      cached WMH model artifact name (default rose-r2-archive-anthropic)
+#   WMH_ENGINE          experiential (default, native) | legacy
+#   WMH_MODEL_NAME      cached WMH model artifact name (default rose-archive;
+#                       legacy engine: rose-r2-archive-anthropic)
+#   WMH_ROSE_POOL / WMH_EXECUTION_POLICY / WMH_CONTEXT_TOKENS  native serving config
 #   BENCH_TASKS         comma- OR space-separated task list (required)
 #   BENCH_MAX_CONCURRENCY  max concurrent tasks when >1 task (default 5)
 #   BENCH_SIMULATE      "1" simulate (default) | "0" real mode (no WMH)
@@ -81,7 +84,33 @@ EXECUTION_PROVENANCE_SCRIPT="${CLOUDBENCH_EXECUTION_PROVENANCE_SCRIPT:-$CONTROL_
 
 # ── Inputs (env) ────────────────────────────────────────────────────────────
 REF="${REF:-}"
-WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-r2-archive-anthropic}"
+# Begin WMH selection.
+# World-model selection: the controller (run-bench-cloud) always passes these;
+# the defaults mirror its native experiential defaults for direct invocations.
+WMH_ENGINE="${WMH_ENGINE:-experiential}"
+if [ "$WMH_ENGINE" = experiential ]; then
+    WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-archive}"
+    WMH_ROSE_POOL="${WMH_ROSE_POOL:-rose-wmh-gpt61}"
+    WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-rose-outcome-distribution-v4}"
+else
+    WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-r2-archive-anthropic}"
+    WMH_ROSE_POOL="${WMH_ROSE_POOL:-rose-1-ultra}"
+    WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-upstream}"
+fi
+WMH_CONTEXT_TOKENS="${WMH_CONTEXT_TOKENS:-}"
+case "$WMH_ENGINE" in legacy|experiential) ;; *) echo "Invalid WMH_ENGINE: $WMH_ENGINE" >&2; exit 2 ;; esac
+for _wmh_value in "$WMH_MODEL_NAME" "$WMH_ROSE_POOL" "$WMH_EXECUTION_POLICY"; do
+    [[ "$_wmh_value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "Invalid WMH setting: $_wmh_value" >&2; exit 2; }
+done
+# Each engine serves its own donor directory: the native model is restored to
+# world-model-native so it never replaces the legacy model other workspaces serve.
+if [ -z "${CLOUDBENCH_WMH_DIR:-}" ] && [ "$WMH_ENGINE" = experiential ]; then
+    WMH_DIR="$DATA_DIR/world-model-native"
+fi
+# The native venv (and its uv-managed Python under /data/uv-python) is created on
+# the donor volume by `run-bench-cloud --refresh-wmh`; guests never install it.
+WMH_NATIVE_VENV="${CLOUDBENCH_WMH_NATIVE_VENV:-$REPO_DIR/.context/experiential-venv}"
+# End WMH selection.
 BENCH_TASKS="${BENCH_TASKS:-}"
 # The controller passes the task list base64-encoded (BENCH_TASKS_B64) so commas
 # survive the base64/exec layers verbatim; fall back to a raw BENCH_TASKS.
@@ -163,6 +192,7 @@ HEARTBEAT_SLEEP_PID=""
 STACK_PID=""
 STACK_NATIVE_IDENTITY=""
 TAIL_PID=""
+GUEST_DIAGNOSTICS_PID=""
 
 publish_cleanup_ack() {
     local temporary="${CLEANUP_ACK_FILE}.tmp.$$" cleanup_state cleanup_token cleanup_status_temporary cleanup_stack_pid cleanup_stack_birth cleanup_stack_native_identity cleanup_native_count cleanup_identity_matches=0 cleanup_version cleanup_version_count token_matches=0
@@ -252,6 +282,12 @@ cleanup_stack() {
     trap '' HUP INT TERM
     [ -z "$HEARTBEAT_SLEEP_PID" ] || kill "$HEARTBEAT_SLEEP_PID" 2>/dev/null || true
     [ -z "$TAIL_PID" ] || kill "$TAIL_PID" 2>/dev/null || true
+    # Stop the sampler before the stack so its evidence file is final when the
+    # stopped stack is sealed into the runtime evidence manifest.
+    if [ -n "$GUEST_DIAGNOSTICS_PID" ]; then
+        kill -TERM "$GUEST_DIAGNOSTICS_PID" 2>/dev/null || true
+        wait "$GUEST_DIAGNOSTICS_PID" 2>/dev/null || true
+    fi
     declare -F stop_dashboard >/dev/null 2>&1 && stop_dashboard
     if [ -n "$STACK_PID" ] && kill -0 "$STACK_PID" 2>/dev/null; then
         # Signal only run.sh. It owns its worker/backend descendants and waits
@@ -283,7 +319,9 @@ request_graceful_shutdown() {
     local signal_rc=0 signal_ignored_mask="unreadable" signal_caught_mask="unreadable" signal_process_group="unreadable"
     ACTIVE_COMMAND_SHUTDOWN_PENDING=1
     log "guest shutdown requested; draining benchmark root before stack teardown"
-    if [ -n "$ACTIVE_COMMAND_PID" ] && kill -0 "$ACTIVE_COMMAND_PID" 2>/dev/null; then
+    # An already-cancelled command may exit (and be reaped) before a repeated
+    # request; run_with_heartbeat still owns its wait and exit status.
+    if [ -n "$ACTIVE_COMMAND_PID" ] && { [ "$ACTIVE_COMMAND_SIGNALLED" = "1" ] || kill -0 "$ACTIVE_COMMAND_PID" 2>/dev/null; }; then
         if [ "$ACTIVE_COMMAND_SIGNALLED" != "1" ]; then
             ACTIVE_COMMAND_SIGNALLED=1
             # Bash defers traps while a foreground `sleep` is running. The
@@ -339,7 +377,7 @@ fi
 source "$SEED_BUDGET_LIB"
 
 run_with_heartbeat() {
-    local label="$1" command_pid interval command_rc=0
+    local label="$1" command_pid interval command_rc=0 command_collected=0
     shift
     interval="${CLOUDBENCH_HEARTBEAT_SECONDS:-30}"
     # A background job launched with job control disabled inherits SIGINT as
@@ -366,15 +404,15 @@ run_with_heartbeat() {
             # Signals are ignored after the one canonical cancellation above,
             # so this wait cannot be shortened into premature stack teardown.
             wait "$command_pid" 2>/dev/null || command_rc=$?
+            command_collected=1
             break
         fi
         if kill -0 "$command_pid" 2>/dev/null; then
             log "$label heartbeat (pid=$command_pid)"
         fi
     done
-    if [ "$ACTIVE_COMMAND_SIGNALLED" != "1" ]; then
-        wait "$command_pid" 2>/dev/null || command_rc=$?
-    fi
+    # A signalled child reaped before the loop still has a saved status.
+    [ "$command_collected" = 1 ] || wait "$command_pid" 2>/dev/null || command_rc=$?
     if [ "$label" = benchmark ]; then
         ACTIVE_COMMAND_PID=""
     else
@@ -465,30 +503,30 @@ resolve_task_gate() {
         echo "[cloudbench] FATAL: no Python interpreter is available for task gate resolution" >&2
         return 1
     fi
-    "$task_gate_python" "$CATALOG_SCRIPT" requires-gate \
-        "$REPO_DIR/agents/benchmarks/tasks.json" source_connect \
-        "${BENCH_TASK_LIST[@]}"
+    # One per-task worker environment for local and cloud runs: local.py
+    # configure_task_environment applies this same catalog policy. An empty
+    # value is exported as-is so an inherited setting is cleared.
+    local task_env_output entry
+    task_env_output="$("$task_gate_python" "$CATALOG_SCRIPT" task-env \
+        "$REPO_DIR/agents/benchmarks/tasks.json" "${BENCH_TASK_LIST[@]}")"
     task_gate_status=$?
-    case "$task_gate_status" in
-        0)
-            TASK_WORKER_ENV+=("NON_PURCHASE_GATES_ENABLED=1")
-            ;;
-        10)
-            ;;
-        *)
-            echo "[cloudbench] FATAL: task gate resolution failed (exit $task_gate_status)" >&2
-            return "$task_gate_status"
-            ;;
-    esac
+    if [ "$task_gate_status" -ne 0 ]; then
+        echo "[cloudbench] FATAL: task gate resolution failed (exit $task_gate_status)" >&2
+        return "$task_gate_status"
+    fi
+    while IFS= read -r entry; do
+        [ -n "$entry" ] && TASK_WORKER_ENV+=("$entry")
+    done <<< "$task_env_output"
+    return 0
 }
-# Fast Mode cache route. Only fast_cache:on tasks replay the frozen shared
+# DEMO cache route. Only demo_cache:on tasks replay the frozen shared
 # cache through the production pooler; every other guest keeps the cache in its
 # isolated local DB (as local isolated stacks already do), so a LIVE fleet holds
 # no production pooler client slots for the cache. Infra probes never run their
 # sampled task and always stay local. The local route also blanks any inherited
 # FAST_MODE_CACHE_DATABASE_URL, which run.sh would otherwise prefer.
 STACK_CACHE_ENV=()
-resolve_fast_cache_route() {
+resolve_demo_cache_route() {
     local cache_python cache_status
     STACK_CACHE_ENV=()
     if [ "${CLOUDBENCH_INFRA_PROBE:-0}" = "1" ]; then
@@ -497,10 +535,10 @@ resolve_fast_cache_route() {
     fi
     cache_python="${CLOUDBENCH_TASK_GATE_PYTHON:-$(command -v python3 || true)}"
     if [ -z "$cache_python" ]; then
-        echo "[cloudbench] FATAL: no Python interpreter is available for Fast Mode cache routing" >&2
+        echo "[cloudbench] FATAL: no Python interpreter is available for DEMO cache routing" >&2
         return 1
     fi
-    "$cache_python" "$CATALOG_SCRIPT" needs-shared-fast-cache \
+    "$cache_python" "$CATALOG_SCRIPT" needs-shared-demo-cache \
         "$REPO_DIR/agents/benchmarks/tasks.json" "${BENCH_TASK_LIST[@]}"
     cache_status=$?
     case "$cache_status" in
@@ -510,12 +548,25 @@ resolve_fast_cache_route() {
             # ~12 ms round trip serves the replay's ~40 reads/s through 4. Clear
             # an inherited local route so run.sh keeps the shared cache.
             STACK_CACHE_ENV+=("FAST_MODE_CACHE_USE_LOCAL=0" "FAST_CACHE_DB_POOL=${CLOUDBENCH_SHARED_CACHE_DB_POOL:-4}")
+            # Same write policy as local isolated stacks: a shared-cache miss
+            # fails loudly instead of calling a live model.
+            "$cache_python" "$CATALOG_SCRIPT" shared-demo-cache-read-only \
+                "$REPO_DIR/agents/benchmarks/tasks.json" "${BENCH_TASK_LIST[@]}"
+            cache_status=$?
+            case "$cache_status" in
+                0) STACK_CACHE_ENV+=("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1") ;;
+                10) ;;
+                *)
+                    echo "[cloudbench] FATAL: DEMO cache write policy failed (exit $cache_status)" >&2
+                    return "$cache_status"
+                    ;;
+            esac
             ;;
         10)
             STACK_CACHE_ENV+=("FAST_MODE_CACHE_USE_LOCAL=1" "FAST_MODE_CACHE_DATABASE_URL=")
             ;;
         *)
-            echo "[cloudbench] FATAL: Fast Mode cache routing failed (exit $cache_status)" >&2
+            echo "[cloudbench] FATAL: DEMO cache routing failed (exit $cache_status)" >&2
             return "$cache_status"
             ;;
     esac
@@ -574,7 +625,7 @@ TASK_WORKER_EXPORTS=""
 
 if [ "${CLOUDBENCH_PRINT_TASK_ENV:-0}" = "1" ]; then
     resolve_task_gate || exit $?
-    resolve_fast_cache_route || exit $?
+    resolve_demo_cache_route || exit $?
     TASK_WORKER_EXPORTS="$(render_task_worker_exports)"
     if [ "${#TASK_WORKER_ENV[@]}" -gt 0 ]; then
         for entry in "${TASK_WORKER_ENV[@]}"; do
@@ -690,9 +741,9 @@ if [ -n "${CLOUDBENCH_CODEX_AUTH_SHA256:-}" ]; then
 fi
 
 # ── 0. Sanity: the volume + repo checkout must exist (created at box setup) ──
-if [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ] && [ ! -d "$REPO_DIR/.git" ]; then
+if [ "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" = 1 ] || { [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ] && [ ! -d "$REPO_DIR/.git" ]; }; then
     [ "$BENCH_SIMULATE" = 0 ] && [ -n "$REF" ] || { log "FATAL: fresh checkout requires an exact REAL task ref"; finish 1; }
-    if ! CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
+    if ! CLOUDBENCH_REQUIRE_EMPTY_CHECKOUT="${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
         log "FATAL: could not bootstrap requested ref on fresh storage"
         finish 1
     fi
@@ -722,7 +773,7 @@ step git_sync
 # box provisioning), so a plain fetch/checkout/reset needs NO token handling here.
 if [ -n "$REF" ]; then
     log "git-syncing + verifying $REPO_DIR → $REF"
-    if ! CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
+    if ! CLOUDBENCH_REQUIRE_EMPTY_CHECKOUT=0 CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
         log "FATAL: could not verify requested ref $REF"
         finish 1
     fi
@@ -733,7 +784,15 @@ unset CLOUDBENCH_GITHUB_TOKEN_B64
 # reset --hard does not remove untracked files created by an earlier uploaded
 # worktree patch. Remove only non-ignored untracked files; dependency/cache trees
 # are ignored and remain warm.
-if ! gosu "$APP_USER" git -C "$REPO_DIR" clean -ffd 2>&1 | sed 's/^/   /'; then
+clean_exclusions=()
+if [ -e "$REPO_DIR/.cloudbench-deps-overlays" ] || [ -L "$REPO_DIR/.cloudbench-deps-overlays" ]; then
+    if ! bash "$SYNC_DEPS_SCRIPT" --verify-overlay-cache "$DEPS_DIR" "$REPO_DIR"; then
+        log "FATAL: invalid dependency overlay cache before worktree cleanup"
+        finish 1
+    fi
+    clean_exclusions=(-e '/.cloudbench-deps-overlays/')
+fi
+if ! gosu "$APP_USER" git -C "$REPO_DIR" clean -ffd "${clean_exclusions[@]}" 2>&1 | sed 's/^/   /'; then
     log "FATAL: could not remove stale untracked worktree files"
     finish 1
 fi
@@ -805,10 +864,10 @@ task_gate_status=$?
 if [ "$task_gate_status" -ne 0 ]; then
     finish "$task_gate_status"
 fi
-resolve_fast_cache_route
-fast_cache_route_status=$?
-if [ "$fast_cache_route_status" -ne 0 ]; then
-    finish "$fast_cache_route_status"
+resolve_demo_cache_route
+demo_cache_route_status=$?
+if [ "$demo_cache_route_status" -ne 0 ]; then
+    finish "$demo_cache_route_status"
 fi
 TASK_WORKER_EXPORTS="$(render_task_worker_exports)"
 
@@ -852,7 +911,10 @@ chown "$APP_USER:$APP_USER" "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 chmod 600 "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 cloudbench_verify_env_file "$REPO_DIR/agents/.env" "${AGENTS_ENV_SHA256:-}" agents || finish 1
 cloudbench_verify_env_file "$REPO_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" backend || finish 1
+cloudbench_require_guest_temporal_namespace "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
+    "${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}" || finish 1
 cloudbench_require_agentcard_org_oauth "$REPO_DIR/back-end/.env" || finish 1
+cloudbench_apply_compute_token_authority "$REPO_DIR/back-end/.env" || finish 1
 cloudbench_validate_browser_provider_contract \
     "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
     "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || finish 1
@@ -962,10 +1024,38 @@ fi
 log "system Postgres ready (victoria on :5432)"
 
 # ── 6. Guard the cached WMH model (simulate serves it verbatim — no R2 read) ─
-if [ "$BENCH_SIMULATE" = "1" ]; then
+# Begin cached WMH guard.
+# Prints the reason and returns 1 when the volume cannot serve WMH_ENGINE's
+# model without building or installing anything at run time.
+cloudbench_cached_wmh_problem() {
     if [ ! -f "$WMH_DIR/build.manifest.json" ] || [ ! -d "$WMH_DIR/models/$WMH_MODEL_NAME" ]; then
-        log "FATAL: no cached WMH model at $WMH_DIR/models/$WMH_MODEL_NAME"
-        log "       (expected a PRE-BUILT volume model — never build from R2 at run time)"
+        echo "no cached WMH model at $WMH_DIR/models/$WMH_MODEL_NAME"
+        return 1
+    fi
+    [ "$WMH_ENGINE" = experiential ] || return 0
+    if [ ! -f "$WMH_DIR/models/$WMH_MODEL_NAME/experiential.json" ]; then
+        echo "cached WMH model $WMH_MODEL_NAME has no native pointer models/$WMH_MODEL_NAME/experiential.json"
+        return 1
+    fi
+    if [ ! -x "$WMH_NATIVE_VENV/bin/python" ]; then
+        echo "native WMH venv is absent at $WMH_NATIVE_VENV"
+        return 1
+    fi
+    local wanted recorded
+    wanted="$(sha256sum "$REPO_DIR/agents/requirements-world-model.txt" 2>/dev/null | cut -d ' ' -f 1)"
+    recorded="$(cat "$WMH_NATIVE_VENV/requirements.sha256" 2>/dev/null || true)"
+    if [ -z "$wanted" ] || [ "$wanted" != "$recorded" ]; then
+        echo "native WMH venv at $WMH_NATIVE_VENV does not match agents/requirements-world-model.txt at this ref"
+        return 1
+    fi
+    return 0
+}
+# End cached WMH guard.
+if [ "$BENCH_SIMULATE" = "1" ]; then
+    if ! WMH_GUARD_PROBLEM="$(cloudbench_cached_wmh_problem)"; then
+        log "FATAL: $WMH_GUARD_PROBLEM (engine=$WMH_ENGINE)"
+        log "       (expected a PRE-BUILT volume model + native venv — never build or install at run time;"
+        log "        publish them with: bash scripts/run-bench-cloud --refresh-wmh)"
         finish 1
     fi
 fi
@@ -1068,6 +1158,10 @@ STACK_ENV=(
     "WMH_MODEL_NAME=$WMH_MODEL_NAME"
     "WMH_BUILD_DIR=$WMH_DIR"
     "BENCHMARK_SKIP_WMH_DELTA=1"
+    # serve_world_model selects its engine/pool/policy from these.
+    "WMH_ENGINE=$WMH_ENGINE"
+    "WMH_ROSE_POOL=$WMH_ROSE_POOL"
+    "WMH_EXECUTION_POLICY=$WMH_EXECUTION_POLICY"
     # One isolated guest runs one benchmark. A single worker still supports many
     # workflow/activity slots; eight workers per guest at fleet width exhaust
     # the shared Temporal namespace poll budget and delay stack health by minutes.
@@ -1078,6 +1172,22 @@ STACK_ENV=(
     # the Anthropic family.
     "ROSE_EXCLUDE_ANTHROPIC_FAMILY=${ROSE_EXCLUDE_ANTHROPIC_FAMILY:-}"
 )
+if [ -n "$WMH_CONTEXT_TOKENS" ]; then
+    STACK_ENV+=("WMH_CONTEXT_TOKENS=$WMH_CONTEXT_TOKENS")
+fi
+if [ "$WMH_ENGINE" = experiential ]; then
+    # Pin the guarded, pre-created interpreter: setup-world-model.sh then only
+    # validates it and never runs uv on the guest.
+    STACK_ENV+=("WMH_NATIVE_PYTHON=$WMH_NATIVE_VENV/bin/python")
+    # Native inference settings validated by the local instantiate-whm runs
+    # (.claude/skills/instantiate-whm/scripts/run-trajectory.sh).
+    STACK_ENV+=(
+        "WMH_INFERENCE_POOL=${WMH_INFERENCE_POOL:-rose-1-flash}"
+        "WMH_AZURE_FIRST=${WMH_AZURE_FIRST:-1}"
+        "WMH_EXCLUDE_FAILED_TOOL_EXAMPLES=${WMH_EXCLUDE_FAILED_TOOL_EXAMPLES:-1}"
+        "WMH_JSON_MODE=${WMH_JSON_MODE:-1}"
+    )
+fi
 if [ -n "$BENCHMARK_FAST_MODE_CACHE" ]; then
     STACK_ENV+=("BENCHMARK_FAST_MODE_CACHE=$BENCHMARK_FAST_MODE_CACHE")
 fi
@@ -1099,9 +1209,34 @@ fi
 if [ "${#STACK_CACHE_ENV[@]}" -gt 0 ]; then
     STACK_ENV+=("${STACK_CACHE_ENV[@]}")
 fi
+# Compute-token authority (A1): lease, cooldown and Foundry rate-limit state go
+# to one shared backend, authenticated with this guest's own BACKEND_API_KEY.
+# An unreachable authority fails those calls closed; it never falls back here.
+CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL="$(cloudbench_compute_token_authority_url)"
+if [ -n "$CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL" ]; then
+    authority_key="$(cloudbench_env_value "$REPO_DIR/back-end/.env" BACKEND_API_KEY)"
+    if [ -z "$authority_key" ]; then
+        log "FATAL: compute-token authority $CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL needs BACKEND_API_KEY in back-end/.env"
+        finish 1
+    fi
+    STACK_ENV+=("BENCHMARK_COMPUTE_TOKEN_AUTHORITY=on"
+                "COMPUTE_TOKEN_AUTHORITY_URL=$CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL"
+                "COMPUTE_TOKEN_AUTHORITY_API_KEY=$authority_key")
+    log "compute-token authority: $CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL"
+    unset authority_key
+else
+    STACK_ENV+=("BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off"
+                "COMPUTE_TOKEN_AUTHORITY_URL=" "COMPUTE_TOKEN_AUTHORITY_API_KEY=")
+fi
 if [ "${#TASK_WORKER_ENV[@]}" -gt 0 ]; then
     STACK_ENV+=("${TASK_WORKER_ENV[@]}")
 fi
+case "${CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS:-}" in
+    ''|*[!0-9]*|0) ;;
+    # Controller-budgeted queue observation: N guests share the Temporal
+    # namespace's Visibility API budget with production workers.
+    *) STACK_ENV+=("AUTOSCALER_POLL_INTERVAL_SECONDS=$CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS") ;;
+esac
 if [ "${CLOUDBENCH_INFRA_PROBE:-0}" = "1" ]; then
     # The probe executes no benchmark task. One Temporal worker proves stack
     # readiness without starting eight idle Python processes on a 4 GB guest
@@ -1222,6 +1357,22 @@ STATUS="none"
 # startup even if run.sh rejects a dump that looked restorable at preflight. A
 # successful warm restore still exits this loop as soon as health is ready.
 STACK_WAIT_SECONDS="$(stack_wait_budget_seconds)"
+# Isolated run.sh writes each service to $CONTEXT_DIR/logs. The driver log is
+# the one file the controller always pulls back, even when sealed runtime
+# evidence is unavailable, so a stack that dies before health must leave each
+# service's exit cause here (a worker rc=1 at 873s was otherwise unexplained).
+log_file_tail() {
+    [ -f "$1" ] || return 0
+    log "───── last $2 lines of $3 log ($1) ─────"
+    tail -"$2" "$1" 2>/dev/null | while IFS= read -r _line; do log "  | $_line"; done
+}
+log_stack_service_tails() {
+    log_file_tail "$STACK_LOG" 40 stack
+    log_file_tail "$CONTEXT_DIR/logs/worker.log" 120 worker
+    log_file_tail "$CONTEXT_DIR/logs/backend.log" 60 backend
+    log_file_tail "$CONTEXT_DIR/logs/frontend.log" 80 frontend
+    log_file_tail "$REPO_DIR/front-end/frontend-logs.log" 80 frontend
+}
 if [ ! -s "$STACK_SEED_DUMP" ]; then
     log "first-run seed dump absent — using cold stack health budget ${STACK_WAIT_SECONDS}s"
 fi
@@ -1234,14 +1385,7 @@ for i in $(seq 1 "$STACK_WAIT_SECONDS"); do
         # so a sporadic bring-up death is diagnosable from the pulled-back logs.
         wait "$STACK_PID" 2>/dev/null; stack_rc=$?
         log "FATAL: stack process exited (rc=$stack_rc) before becoming healthy after ${i}s"
-        log "───── last 40 lines of stack log ($STACK_LOG) ─────"
-        tail -40 "$STACK_LOG" 2>/dev/null | while IFS= read -r _line; do log "  | $_line"; done
-        for _frontend_log in "$CONTEXT_DIR/logs/frontend.log" "$REPO_DIR/front-end/frontend-logs.log"; do
-            if [ -f "$_frontend_log" ]; then
-                log "───── last 80 lines of frontend log ($_frontend_log) ─────"
-                tail -80 "$_frontend_log" 2>/dev/null | while IFS= read -r _line; do log "  | $_line"; done
-            fi
-        done
+        log_stack_service_tails
         if [ "$stack_rc" = 137 ] || dmesg 2>/dev/null | grep -qiE 'out of memory|oom-kill'; then
             log "  ⚠️ rc=137/OOM signature — stack was SIGKILLed (likely out-of-memory); check machine RAM vs concurrent service footprint"
         fi
@@ -1272,14 +1416,11 @@ done
 
 if ! $STACK_READY; then
     log "FATAL: stack did not become healthy within the timeout"
-    log "─── tail of stack log ───"
-    tail -80 "$STACK_LOG" || true
+    log_stack_service_tails
     finish 1
 fi
 log "stack healthy — backend :$BACKEND_PORT, WMH :$WMH_PORT, dashboard :$BENCH_DASHPORT"
-if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
-    PAYMENT_USER_ID="${BENCHMARK_AGENT_PAYMENT_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
-    STACK_DB_URL="$(python3 - "$MANIFEST" <<'PY'
+STACK_DB_URL="$(python3 - "$MANIFEST" <<'PY'
 import json, sys
 from pathlib import Path
 manifest = json.loads(Path(sys.argv[1]).read_text())
@@ -1292,6 +1433,17 @@ if not url:
 print(url)
 PY
 )"
+# Bounded guest diagnostics (one JSON line per 15 s, at most 12 h): CPU/load,
+# backend client connections vs. its Prisma connection_limit, pg_stat_activity
+# states/wait events/longest query. Exported as guest-diagnostics.jsonl with
+# the runtime evidence so a slow stack can be classified as pool queueing, CPU
+# saturation or Postgres contention. 30 is back-end/src/providers/database.ts
+# LOCAL_POOL_SIZE, the pool a localhost DATABASE_URL gets without an override.
+python3 "$REPO_DIR/scripts/cloudbench-guest-diagnostics.py" "$CONTEXT_DIR/guest-diagnostics.jsonl" \
+    "$STACK_DB_URL" "${DB_CONNECTION_LIMIT:-30}" 15 2880 >/dev/null 2>&1 &
+GUEST_DIAGNOSTICS_PID=$!
+if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
+    PAYMENT_USER_ID="${BENCHMARK_AGENT_PAYMENT_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
     log "seeding isolated payment fixture for $PAYMENT_USER_ID"
     if ! gosu "$APP_USER" env \
         DATABASE_URL="$STACK_DB_URL" \
@@ -1447,6 +1599,7 @@ if [ "${BENCHMARK_DEMO_CACHE_READ_ONLY:-}" = 1 ]; then
     # evaluation path, including real provider calls when its cache misses.
     BENCH_HARNESS_ENV+=(
         -u FAST_MODE_CACHE_DISABLE_WRITE_THROUGH
+        -u DEMO_CACHE_DISABLE_WRITE_THROUGH
         -u BENCHMARK_DEMO_CACHE_READ_ONLY
         -u CLOUDBENCH_FAST_CACHE_READ_ONLY
     )
@@ -1483,6 +1636,9 @@ export BENCHMARK_SEED_DUMP='$STACK_SEED_DUMP'
 # deterministic in cloud runs instead of failing closed (or using live search).
 export BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE='$CONTEXT_DIR/sms-web-search-fixture.json'
 export BENCHMARK_REQUIRE_SEED_DUMP=1
+# The runner records which engine owns each seeded WMH session.
+export WMH_ENGINE='$WMH_ENGINE'
+export WMH_MODEL_NAME='$WMH_MODEL_NAME'
 if [ -n '$BENCHMARK_FAST_MODE_CACHE' ]; then
   export BENCHMARK_FAST_MODE_CACHE='$BENCHMARK_FAST_MODE_CACHE'
 fi

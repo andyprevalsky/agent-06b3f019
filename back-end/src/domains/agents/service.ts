@@ -29,11 +29,6 @@ export {
   getAgentStatus,
 } from './agentQueryService';
 
-export {
-  postMessage,
-  uploadAttachment,
-  getAttachmentSignedUrl,
-  getMessagesBatch,
-  generateSchema,
-  batchFetchMessages,
-} from './agentMessageService';
+export { postMessage } from './agentMessageService';
+export { getMessagesBatch, generateSchema, batchFetchMessages } from './agentMessageLookupService';
+export { uploadAttachment, getAttachmentSignedUrl } from './agentAttachmentService';

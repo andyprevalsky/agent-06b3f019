@@ -61,16 +61,18 @@ expect_flag_pass() {
   echo "PASS: $label"
 }
 
-expect_deferred_pass() {
+expect_retired_deferral_rejected() {
   local dir="$1"
   local label="$2"
-  if ! (
+  local status=0
+  (
     cd "$dir" &&
       AUTO_RCA_EXACT_HEAD_APPROVAL_DEFERRED=true \
         bash scripts/check-prompt-human-approval.sh \
           --defer-human-approval-to-exact-head-pr-review=true >/tmp/prompt-guard-test.out 2>&1
-  ); then
-    echo "FAIL: expected trusted exact-head deferral pass: $label" >&2
+  ) || status=$?
+  if [ "$status" -ne 2 ] || ! grep -Fq 'Unknown flag: --defer-human-approval-to-exact-head-pr-review=true' /tmp/prompt-guard-test.out; then
+    echo "FAIL: expected the retired exact-head deferral flag to be rejected (exit 2): $label" >&2
     cat /tmp/prompt-guard-test.out >&2
     exit 1
   fi
@@ -128,14 +130,7 @@ MD
 git -C "$prompt_path_repo" add .claude/commands/deploy.md
 expect_fail "$prompt_path_repo" "prompt artifact path requires approval"
 expect_flag_pass "$prompt_path_repo" "approval flag permits prompt artifact path"
-if (cd "$prompt_path_repo" && env -u AUTO_RCA_EXACT_HEAD_APPROVAL_DEFERRED \
-  bash scripts/check-prompt-human-approval.sh \
-  --defer-human-approval-to-exact-head-pr-review=true >/tmp/prompt-guard-test.out 2>&1); then
-  echo "FAIL: untrusted caller deferred prompt approval" >&2
-  exit 1
-fi
-echo "PASS: exact-head deferral is restricted to trusted Auto RCA"
-expect_deferred_pass "$prompt_path_repo" "trusted Auto RCA may defer prompt approval to the exact-head review"
+expect_retired_deferral_rejected "$prompt_path_repo" "no caller can defer prompt approval to an exact-head review"
 
 shared_instruction_repo="$(new_repo shared-instruction-path)"
 mkdir -p "$shared_instruction_repo/.claude/shared"
@@ -148,26 +143,12 @@ expect_flag_pass "$shared_instruction_repo" "approval flag permits shared Claude
 
 prompt_text_repo="$(new_repo prompt-text-path)"
 mkdir -p "$prompt_text_repo/.github"
-cat >"$prompt_text_repo/.github/auto-rca-prompt.txt" <<'TXT'
-New automated RCA instruction.
+cat >"$prompt_text_repo/.github/reviewer-prompt.txt" <<'TXT'
+New automated reviewer instruction.
 TXT
-git -C "$prompt_text_repo" add .github/auto-rca-prompt.txt
+git -C "$prompt_text_repo" add .github/reviewer-prompt.txt
 expect_fail "$prompt_text_repo" "prompt text artifact requires approval"
 expect_flag_pass "$prompt_text_repo" "approval flag permits prompt text artifact"
-
-runtime_prompt_repo="$(new_repo runtime-prompt-workflow)"
-mkdir -p "$runtime_prompt_repo/.github/workflows"
-cat >"$runtime_prompt_repo/.github/workflows/auto-rca.yml" <<'YAML'
-name: Auto RCA
-jobs:
-  rca:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "prompt=/RCA on production agent <agent-id>"
-YAML
-git -C "$runtime_prompt_repo" add .github/workflows/auto-rca.yml
-expect_fail "$runtime_prompt_repo" "runtime prompt workflow requires approval"
-expect_flag_pass "$runtime_prompt_repo" "approval flag permits runtime prompt workflow"
 
 prompt_constant_repo="$(new_repo prompt-constant)"
 mkdir -p "$prompt_constant_repo/src"
@@ -220,6 +201,28 @@ sed -i.bak 's/ordinary load failure/uncited load failure/' \
 rm "$browser_tool_continuation_repo/agents/providers/rose/browser_use.py.bak"
 expect_fail "$browser_tool_continuation_repo" "browser tool description continuation requires approval"
 expect_flag_pass "$browser_tool_continuation_repo" "approval flag permits a browser tool continuation edit"
+
+# Auth-option rendering is model-facing even when only a continuation changes.
+auth_options_continuation_repo="$(new_repo auth-options-continuation)"
+mkdir -p "$auth_options_continuation_repo/agents/domains/spawn_browser_agent_v3"
+cat >"$auth_options_continuation_repo/agents/domains/spawn_browser_agent_v3/service_crypto.py" <<'PYTHON'
+def build_auth_options_prompt_section(minted):
+    minted_phone = minted.get("phone")
+    phone_clause = f" | Phone -> {minted_phone}" if minted_phone else ""
+    return phone_clause
+PYTHON
+git -C "$auth_options_continuation_repo" add agents/domains/spawn_browser_agent_v3/service_crypto.py
+git -C "$auth_options_continuation_repo" commit -q -m "seed auth option renderer"
+cat >"$auth_options_continuation_repo/agents/domains/spawn_browser_agent_v3/service_crypto.py" <<'PYTHON'
+def build_auth_options_prompt_section(minted):
+    minted_phone = minted.get("phone")
+    phone_clause = f" | Phone -> {minted_phone}" if minted_phone else ""
+    if minted_phone and minted.get("phoneProvider") == "agentphone" and not minted.get("disabled"):
+        phone_clause += " (SMS codes sent here are read automatically)"
+    return phone_clause
+PYTHON
+expect_fail "$auth_options_continuation_repo" "auth option phone continuation requires approval"
+expect_flag_pass "$auth_options_continuation_repo" "fixture approval flag permits an auth option continuation edit"
 
 # Regression: 2026-08-04 Blue Bottle — SMS Tools.schemas.ts puts the description
 # string on the line AFTER `description:`, so assignment-line matching misses.

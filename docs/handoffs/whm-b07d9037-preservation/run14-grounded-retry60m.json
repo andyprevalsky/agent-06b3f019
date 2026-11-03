@@ -1,0 +1,201 @@
+{
+  "schema": 1,
+  "source_checkpoint": "c3a575907c3f8f3969307c9165c56ffb999fba13",
+  "replacement_box": "e9afcffd-7ba9-4bfd-8703-d770952fe1c3",
+  "root_agent": "f1f436c9-8c1e-43a9-bf25-d4613c94e441",
+  "hub_group": "1a5883a9-e14d-40b9-a44e-e966c40c0f26",
+  "run_id": "wmh-raise-5m-rose-labs-brex-1791918927",
+  "native_session": "c7806e3c6ef6417f94e50c7b97691b0c",
+  "task": "raise-5m-rose-labs-brex",
+  "mode": "local-simulated-native-experiential",
+  "goal_triggered_at": "2026-10-13T18:49:31.837Z",
+  "slice_triggered_at": "2026-10-13T19:01:19.510373Z",
+  "task_started_at": "2026-10-13T19:17:11.499Z",
+  "execution_limit_s": 3600,
+  "reported_duration_s": 3691.4,
+  "task_verdict": "FAIL",
+  "reason": "60-minute execution-window timeout; root PAUSED instead of COMPLETED",
+  "paid_trials": 1,
+  "pre_model_startup_attempts": 2,
+  "startup_failure": "relative native artifact root before any model call; retained and corrected absolute path",
+  "infra_terminal_failures": 0,
+  "terminal_trials": 1,
+  "publication": {
+    "url": "https://www.roselabs.ai/?agent-id=f1f436c9-8c1e-43a9-bf25-d4613c94e441",
+    "fresh_browser_verified": true,
+    "root_messages": 76
+  },
+  "cleanup": {
+    "controller_exit": 1,
+    "benchmark_and_stack_receipts_clean": true,
+    "native_retirement_ended": true,
+    "join_verified": true,
+    "native_scope_inactive": true,
+    "verified_absent_owned_pids": [
+      2348498,
+      2469785,
+      2482006
+    ]
+  },
+  "initial_fixture": {
+    "owned_source": "whm_gen1_e9afcffd_fixture_20261012",
+    "seed_message_limit": 100000,
+    "tamy_people": 2225,
+    "tamy_message_records": 42910,
+    "whole_static_network_prefix": true,
+    "prefix_candidate_sha256": "009394a4fc293c14230d15d4fc70b798876fb2d8ec4489ba3b4db560343ba5d1",
+    "first_paid_prediction": "79afe8154b0a46c7bead7ec8a23f3ae4",
+    "approved_packet_byte_equality_verified": true
+  },
+  "trajectory": {
+    "progress_band_pct": [
+      20,
+      25
+    ],
+    "display_approximation_pct": 22,
+    "calibration": "Initial outreach milestone estimate; not a calibrated money-raised percentage. No proved advancement to a later stage.",
+    "world_revision": 151,
+    "committed_world_steps": 151,
+    "explore_boundaries": 113,
+    "browser_boundaries": 33,
+    "message_transport_send": 2,
+    "notify_user": 3,
+    "no_reply_wait_polls": 84,
+    "virtual_poll_span_days": 7.03,
+    "outreach_emails": 3,
+    "distinct_email_recipients": 2,
+    "generic_firm_form_inquiries": 1,
+    "new_substantive_replies": 0,
+    "new_held_meetings": 0,
+    "commitments": 0,
+    "signed_instruments": 0,
+    "settled_proceeds_usd": 0,
+    "children_completed": 3,
+    "warm_introduction_grounding": "Original historical messages support the investor intro and scheduling paths; preserved in private stage proof."
+  },
+  "native_prediction_validation": {
+    "terminal_prediction_captures": 155,
+    "committed_history": 151,
+    "validated_selection_proposals": 153,
+    "rejected_raw_replies": 12,
+    "affected_predictions": 11,
+    "finish_reason_stop_rejections": 12,
+    "json_syntax_rejections": 0,
+    "rose_semantic_recoveries": 9,
+    "native_protocol_recoveries": 1,
+    "cutoff_interrupted_repair": 1,
+    "all_request_hashes_verified": 155,
+    "validated_branch_records": 252,
+    "selection_receipts_verified": 153,
+    "open": "No proved producer/validation/recovery defect from exact rejected replies; generating model cause remains open."
+  },
+  "cache": {
+    "demo_hits": 0,
+    "demo_lookups": 226,
+    "agent_lookups": 71,
+    "native_lookups": 155,
+    "reported_native_stores": 153,
+    "actual_native_durable_stores": 0,
+    "backend_readonly_skips": 153,
+    "exact_skip_store_key_multisets_equal": true,
+    "agent_cached_input": 706210,
+    "agent_all_input": 1275056,
+    "agent_prompt_hit_pct": 55.38658694,
+    "whm_cached_input": 74844477,
+    "whm_all_input": 83973412,
+    "whm_prompt_hit_pct": 89.12877924,
+    "root_cause": "Backend read-only write outcome erased in HTTP acknowledgement; client treated HTTP200 as persisted. Isolated cache was resettable and read-only."
+  },
+  "latency_s": {
+    "agent": {
+      "avg": 5.430495,
+      "p95": 15.237381,
+      "p99": 28.78191,
+      "final_metered_calls": 155
+    },
+    "whm_raw_rose": {
+      "avg": 15.121212,
+      "p95": 133,
+      "p99": 162,
+      "final_metered_calls": 165
+    },
+    "native_completion_owner": {
+      "avg": 19.893748,
+      "p95": 151.267,
+      "p99": 170.647,
+      "owners": 155
+    },
+    "coverage": "Observed start-to-terminal final-metered call latency. Native logs second-resolution; provider errors without final usage are not complete billing."
+  },
+  "cost_estimate": {
+    "utc": "2026-10-13T20:34:01.380612+00:00",
+    "azure_agent_estimate_usd": 2.2284140000000003,
+    "azure_whm_estimate_usd": 4.4693149,
+    "azure_total_estimate_usd": 6.6977288999999995,
+    "other_provider_estimate_usd": 4.9950094406000005,
+    "total_known_metered_list_estimate_usd": 11.6927383406,
+    "other_models": {
+      "google/gemini-3.8-flash": {
+        "calls": 10,
+        "input": 11981570,
+        "read": 5990785,
+        "output": 10133,
+        "estimate_usd": 4.980396375
+      },
+      "qwen/qwen3.8-27b": {
+        "calls": 1,
+        "input": 566261,
+        "read": 540672,
+        "output": 1254,
+        "estimate_usd": 0.014613065599999999
+      }
+    },
+    "pricing_receipt_sha256": "e92932e1889851485308a81c22de1ee3bf930b6e68ad0925a4cfee129257b638",
+    "invoice_reconciled": false,
+    "limits": "Published/list-price estimate of final metering only. Incomplete attempts, selected provider pricing differences, explicit cached-storage time/charges and infrastructure unmetered. Azure user-facing0credits does not mean physicalspend0."
+  },
+  "private_archives": {
+    "run14-final-private-receipt.json": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "trace-archive/private/whm/e9afcffd-7ba9-4bfd-8703-d770952fe1c3/run14-grounded-retry60m-20261013.private.aesgcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "c91cf3075c481deb492af59be55347348544f17c4041a9c390478efb08898404",
+      "gzip_sha256": "cd4e866cd3e7f373ade86097e60fbb16a7597d84ced5b75c71e5a74f84642bbf",
+      "stored_bytes": 261830021,
+      "frames": 32,
+      "files": 526,
+      "original_bytes": 836664924,
+      "manifest_sha256": "6c5497902a0802075e9e2fddc7a4d4356dd4f4787342bdf87781584b44bd585d",
+      "full_readback_verified": true,
+      "receipt_sha256": "20224be1593134ce1f87a72d9aa6e40c65eff956d67591d3a7581e04ca2cf0d0"
+    },
+    "run14-llm-dump-private-receipt.json": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "trace-archive/private/whm/e9afcffd-7ba9-4bfd-8703-d770952fe1c3/run14-agent-llm-dumps-20261013.private.aesgcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "7e87480174a5bf242b0539ba2281d6ae4754ff1378cc6f3a869df2f09a9972ed",
+      "gzip_sha256": "f69a83e7ec49a3f26405231e3342ff81080fc6546229e664abf8266a498c50cd",
+      "stored_bytes": 2999735,
+      "frames": 1,
+      "files": 71,
+      "original_bytes": 7959733,
+      "manifest_sha256": "8553126a4b40b7fc04c867cc4b650c3ded76d770a406fd42a410181765a584d2",
+      "full_readback_verified": true,
+      "receipt_sha256": "f8584dfac3f2e448ebe6e77311226d93ab5f2c6934013637a7d0bbaf5f15a153"
+    }
+  },
+  "rca_status": {
+    "cache": "causal mechanism proven; candidate applied; owning integration checks in progress",
+    "protocol": "OPEN: no causal code defect proven",
+    "progress": "OPEN: no later fundraising stage reached; no false-success or old child step-cap recurrence",
+    "transport": "active exact managed turn 01a13700-88f8-7e72-b57b-49cb45973c5a"
+  },
+  "constraints": {
+    "no_merge_or_deploy": true,
+    "no_fixture_prompt_policy_model_change": true,
+    "freedom_preserved": true,
+    "old_archived_boxes_untouched": true
+  }
+}

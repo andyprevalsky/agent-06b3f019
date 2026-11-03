@@ -1,0 +1,89 @@
+/**
+ * Shared context object + types for the Rose Desktop app icons and panels.
+ * Split from the provider so panel components don't import the provider
+ * module (which mounts them).
+ */
+
+import { createContext, useContext } from 'react';
+import type { BrowserSessionMetadata } from '../browser-status-bar/types';
+import type { Agent } from '../../hooks';
+
+/**
+ * Everything that opens in the right-panel slot (one at a time):
+ *   browser       full screen between the left bar and the right edge
+ *   phone         floating device, no panel
+ *   integrations | benchmarks | feedback | health | settings   flush right panels
+ */
+export type RoseApp =
+  | 'browser'
+  | 'validation'
+  | 'phone'
+  | 'integrations'
+  | 'benchmarks'
+  | 'feedback'
+  | 'health'
+  | 'settings';
+
+export interface AgentBrowserTab {
+  agentId: string;
+  taskId: string;
+  taskLabel?: string;
+  live: boolean;
+  /** Owning agent finished: address bar reads "Session ended", never "Connecting…". */
+  ended?: boolean;
+  /** Page the agent's browser is on (address bar, UI ledger row 74); null = unknown yet. */
+  pageUrl?: string | null;
+  /** Latest model reported by this browser task, never the owner model selection. */
+  actualModel?: string | null;
+  /** Rose pool this browser task's steps reported (composer label); null on older rows. */
+  rosePool?: string | null;
+  browserSessionMetadata?: BrowserSessionMetadata | null;
+}
+
+export interface RoseAppsValue {
+  openApp: RoseApp | null;
+  browserMode: 'local' | 'remote';
+  setBrowserMode: (mode: 'local' | 'remote') => void;
+  /** null = Root tab (or NO_SESSION for a selected agent unless Root was chosen). */
+  browserTabAgentId: string | null;
+  /** The user explicitly clicked Root; a selected agent's missing tab never falls back to it. */
+  browserRootChosen: boolean;
+  browserTabTaskId: string | null;
+  tabs: AgentBrowserTab[];
+  agents: Agent[];
+  selectedAgentId: string | null;
+  drawerWidth: number;
+  isResizing: boolean;
+  slot: HTMLElement | null;
+  browserComposerSlot: HTMLElement | null;
+  setBrowserComposerSlot: (element: HTMLElement | null) => void;
+  /** Bumped by the Browser drawer's Reload button; the live view remounts on change. */
+  browserReloadKey: number;
+  reloadBrowser: () => void;
+  toggleApp: (app: RoseApp) => void;
+  closeApp: () => void;
+  openAgentBrowser: (agentId: string, taskId: string) => void;
+  selectBrowserTab: (agentId: string | null, taskId?: string) => void;
+  /** Open an agent in the main chat (Benchmarks panel rows). */
+  openAgent: (agentId: string) => void;
+  /** Sign out (Settings panel); undefined when the host has no session. */
+  onLogout?: () => void;
+  onCreateAgentInProject?: (
+    project: import('@/lib/api/projects').Project,
+    folderId?: string | null,
+  ) => void;
+  newAgentFolderId?: string | null;
+  setSlot: (el: HTMLElement | null) => void;
+  setDrawerWidth: (width: number) => void;
+  setIsResizing: (resizing: boolean) => void;
+  registerAgentBrowser: (tab: AgentBrowserTab) => void;
+  unregisterAgentBrowser: (agentId: string, taskId: string) => void;
+  /** True when this task's live view should render inside the browser drawer. */
+  isTaskInDrawer: (agentId: string | null, taskId: string) => boolean;
+}
+
+export const RoseAppsContext = createContext<RoseAppsValue | null>(null);
+
+export function useRoseApps(): RoseAppsValue | null {
+  return useContext(RoseAppsContext);
+}

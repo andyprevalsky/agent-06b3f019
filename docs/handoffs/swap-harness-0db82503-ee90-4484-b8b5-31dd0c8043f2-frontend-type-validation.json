@@ -1,0 +1,71 @@
+{
+  "recorded_at_utc": "2026-10-13T06:04:36.690159+00:00",
+  "original_app_typecheck_errors": 215,
+  "local_same_owning_typecheck_after_fixes": "pass0errors",
+  "problem_class": [
+    "Empty solution-project check hides app typing errors",
+    "Cache reads obsolete message field"
+  ],
+  "cache_local_repro": "existing use-message-filtering suite: red1failure14pass, green15pass",
+  "normal_deploy_regressions": [
+    "existing frontend coverage includes cache regression",
+    "coverage now executes explicit nonempty app-project tsc",
+    "existing structural suite pins coverage/typecheck order"
+  ],
+  "compatibility": "Generic raw metadata tolerance retained; specialized validated tool contracts preserved; emitted app code only changes actual cached Message.text comparison.",
+  "p2_feature_work": false,
+  "p2_patch_path_overlap": [],
+  "environment_toolchain_dependency_schema_model_catalog_timeout_changes": false,
+  "compiler_check_target": "ES2024 noEmit matches existing Unicode-set syntax; Vite/SWC emitted targets unchanged (773 source comparisons).",
+  "pending_native_decoder_is_unapplied": true,
+  "suppression_cleanup": {
+    "recorded_at_utc": "2026-10-13T06:04:36.690159+00:00",
+    "source_parent": "2201b2fe0491d15e4bce8d9088fcc205dbdd576b",
+    "tested_frontend_files_sha256": {
+      "front-end/src/features/terminal-component-group/components/claudeCodeChip.terminal.ts": "48ae9d44bf04b7428486ed8c7e0c24737348a0cfed592d4326c75641dc184484",
+      "front-end/src/features/terminal-component-group/components/claudeCodeChip.theme.ts": "adbafbc42a7897c215ce7012a3bc14319cd8e60b1001f0a33e9942a027852b8f",
+      "front-end/src/lib/realtime-types/guards.ts": "03afef9d92c7f1a6d038c8f2a78d6d3c752d764f6c517d57a0f5c45a3f4f70f6",
+      "front-end/src/tests/blackbox/message-bubble-routing.blackbox.tsx": "6fe4aa0d959badc7ae1a0213acaa944802f080ece7915ca76ab3f85cfc04a3e8",
+      "front-end/src/tests/blackbox/message-bubble.blackbox.tsx": "8dbeb4963be920e84195a7b26829f60dd2c56bd5a5a2fac0dcba8b30c99e5844",
+      "front-end/src/tests/blackbox/realtime-types-extractors.blackbox.ts": "5a23a248ba33a47425a0de8ffcdb79d4d1bf48150d462d6a2fe8473a952c5fea",
+      "front-end/src/tests/blackbox/realtime-types.blackbox.ts": "2838f099352bc1db8ae2e200b9c281054abd6f56d7608ff639026b778afdecf5",
+      "front-end/src/tests/blackbox/terminal-component-chips.blackbox.tsx": "fab55c3c2a8047bae575b84afba8d46ef4dee890b02fb28f13541f2634ffb643",
+      "front-end/src/tests/blackbox/terminal-component-tree.blackbox.tsx": "13573c108632ef271b5c5de5a74553e0f93f596530757bf2d61f580797bbab01"
+    },
+    "formatting_after_coverage": "Prettier-only changes in five test split files; executable production source unchanged since coverage/build.",
+    "fresh_coverage": {
+      "status": "pass",
+      "test_files": 157,
+      "tests_passed": 2725,
+      "existing_skips": 3,
+      "app_typescript_errors": 0,
+      "statements_percent": 81.03,
+      "branches_percent": 73.14,
+      "functions_percent": 81.36,
+      "lines_percent": 83.36,
+      "duration_seconds": 254.1
+    },
+    "fresh_build": {
+      "status": "pass",
+      "vite_seconds": 27.21,
+      "stage_seconds": 28.1
+    },
+    "touched_frontend_suppressions_remaining": 0,
+    "test_split_preservation": {
+      "existing_cases_before": 214,
+      "existing_cases_after": 214,
+      "exact_case_name_multiset": true,
+      "existing_assertion_calls": 730,
+      "assertion_semantics_preserved": true,
+      "new_cases": 0
+    },
+    "terminal_formatter_extraction": "20 pure definitions moved unchanged to existing theme module; public exports and all four terminal/WebSocket/saved-fetch hooks preserve behavior.",
+    "raw_guard": "Type input permits invalid raw toolName so the unchanged negative fixture needs no suppression; emitted runtime is unchanged.",
+    "p2_feature_edits": false,
+    "p2_overlap": [],
+    "preserved_checkpoint_ancestor": true,
+    "preserved_original_warning_skip_ancestor": true,
+    "previous_failed_format_attempt_retained": true,
+    "actual_final_format_and_lint": "pass across65 changed frontend TypeScript files; zero errors"
+  }
+}

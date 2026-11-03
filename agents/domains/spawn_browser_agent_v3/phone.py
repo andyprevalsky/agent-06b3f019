@@ -673,23 +673,3 @@ async def request_native_phone_authentication(
         return await read_receipt(request_id)
     except Exception:
         return failure
-
-
-async def bind_approved_message(config, user_id: str, task_id: str, queue_id: str, *, client=None):
-    """Bind only after server-created BrowserSession exists; never from model args."""
-    if client is None:
-        async with httpx.AsyncClient() as owned:
-            return await bind_approved_message(config, user_id, task_id, queue_id, client=owned)
-    if not all(isinstance(value, str) and value for value in (user_id, task_id, queue_id)):
-        raise RuntimeError("Approved cloud message binding unavailable")
-    response = await client.post(
-        config.backend.api_url.rstrip("/") + f"/api/imessage/queue/{quote(queue_id, safe='')}/phone-bind",
-        headers={"X-API-Key": config.backend.api_key or "", "X-User-Id": user_id},
-        json={"user_id": user_id, "browser_task_id": task_id}, timeout=15.0,
-    )
-    if response.status_code != 200:
-        raise RuntimeError("Approved cloud message binding rejected")
-    value = response.json()
-    if (value.get("success") is not True or value.get("provider") != "phone_harness"
-        or value.get("queue_id") != queue_id or value.get("browser_task_id") != task_id):
-        raise RuntimeError("Approved cloud message binding mismatch")

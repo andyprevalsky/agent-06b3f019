@@ -25,6 +25,7 @@ import httpx
 import structlog
 from PIL import Image
 
+from browser_tools.result_projection import prepare_browser_result
 from browser_tools.schemas import (
     MAX_BROWSER_WAIT_MS,
     RequestPaymentCardBrowserTool,
@@ -49,6 +50,7 @@ from domains.spawn_browser_agent_v3.service_crypto import (
 )
 from utils.error_utils import extract_error_message
 from utils.purchase_approval import validate_image_url_for_page, validate_product_url_for_pages
+from helpers.tool_output import read_tool_output
 
 if TYPE_CHECKING:
     from browser_tools.dom_service import ActionHistory, DOMService
@@ -198,6 +200,15 @@ def get_element_description(element: Any, max_length: int = 40) -> str:
 # ========================================
 # VISUAL CURSOR
 # ========================================
+
+
+class BrowserEvaluateDeadlineExceeded(asyncio.TimeoutError):
+    """The owned Runtime.evaluate deadline expired, before its outer supervisor."""
+
+    def __init__(self, timeout_seconds: float, elapsed_seconds: float):
+        super().__init__("Runtime.evaluate deadline exceeded")
+        self.timeout_seconds = timeout_seconds
+        self.elapsed_seconds = elapsed_seconds
 
 
 async def move_visual_cursor(dom_service: DOMService, x: int, y: int) -> None:
@@ -502,6 +513,8 @@ _BROWSER_PROVIDER_DOMAIN_SUFFIXES = (
     "kernel.sh",
     "steel.dev",
     "browser-use.com",
+    # Tilion live view / CDP: back.tilion.dev
+    "tilion.dev",
     "browserbase.com",
     "hyperbrowser.ai",
 )
@@ -835,6 +848,7 @@ _INTERACTION_ACTIONS = {
 _NAVIGATION_ACTIONS = {"goto", "navback", "wait", "switch_tab", "close_tab", "open_new_tab"}
 _INSPECTION_ACTIONS = {
     "read_browser_state",
+    "read_tool_output",
     "read_logs",
     "read_network_requests",
     "evaluate",
@@ -920,11 +934,13 @@ async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[
             "success": False,
             "error": f"request_payment_card receipt is incomplete: {'; '.join(image_errors)}.",
         }
-    return {
+    from browser_tools.control_projection import OperationalResult
+
+    return OperationalResult({
         "status": "awaiting_payment_card_approval",
-        "payment_request": context.params,
+        "payment_request": payment_request.model_dump(exclude={"tool"}, exclude_unset=True),
         "current_url": context.current_url,
-    }
+    }, field="payment_request", source=payment_request)
 
 
 def _browser_state_action_result(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -943,6 +959,7 @@ def _browser_state_action_result(state: Dict[str, Any]) -> Dict[str, Any]:
         "dom_tree": state.get("dom_tree", ""),
         "recent_events": state.get("recent_events"),
         "closed_popups": state.get("closed_popups"),
+        "downloaded_files": state.get("downloaded_files"),
     }
 
 
@@ -952,7 +969,10 @@ async def _execute_read_browser_state(context: _ActionContext) -> Dict[str, Any]
     # DOM walk is pure duplicate cost. URL/title-only observes have no dom_tree.
     state = context.prefetched_browser_state
     if not isinstance(state, dict) or "dom_tree" not in state:
+        downloads = (state or {}).get("downloaded_files") if isinstance(state, dict) else None
         state = await context.dom_service.get_browser_state(include_screenshot=False)
+        if downloads:
+            state = {**state, "downloaded_files": downloads}
     result = _browser_state_action_result(state)
     await context.action_history.record_action(
         dom_service=context.dom_service,
@@ -1150,7 +1170,15 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
             if write_lock_result:
                 return write_lock_result
         provider_pressed = False
-        if context.config is not None and context.session_id and context.user_id.strip():
+        # Tilion fails REST input (409 session_driven_by_client) while the
+        # worker holds CDP, and has no browser-window UI to reach; use CDP input.
+        provider_window_input = getattr(context.dom_service, "single_cdp_client", False) is not True
+        if (
+            provider_window_input
+            and context.config is not None
+            and context.session_id
+            and context.user_id.strip()
+        ):
             from domains.spawn_browser_agent_v3.repo import press_browser_computer_key
 
             # Fall back only when the provider reports unsupported input or the
@@ -1305,6 +1333,7 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
             config=context.config,
             current_auth_realm=context.current_auth_realm,
             prepare_credentials_for_url=context.prepare_credentials_for_url,
+            browser_network_recorder=context.browser_network_recorder,
         )
     if context.action_name == "navback":
         guard = _navigation_guard_error(context, action="navback")
@@ -1519,6 +1548,13 @@ async def classify_evaluate_cdp_stall(
 
 
 async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
+    if context.action_name == "read_tool_output":
+        from helpers.tracing import current_agent_id
+        page = await read_tool_output(user_id=context.user_id, agent_id=current_agent_id() or "", session_id=context.session_id or "", **context.params)
+        result = {"success": True, **page}
+        await context.action_history.record_action(dom_service=context.dom_service, action="read_tool_output",
+            thinking=context.thinking, params=context.params, result=result)
+        return result
     if context.action_name == "read_browser_state":
         return await _execute_read_browser_state(context)
     if context.action_name == "read_logs":
@@ -1555,15 +1591,16 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
         cdp_session = await context.session.get_or_create_cdp_session(focus=True)
         session_acquire_ms = round((time_module.monotonic() - started) * 1000)
         eval_started = time_module.monotonic()
+        evaluate_deadline = asyncio.timeout(timeout_s)
         try:
-            result = await asyncio.wait_for(
-                cdp_session.cdp_client.send.Runtime.evaluate(
+            async with evaluate_deadline:
+                result = await cdp_session.cdp_client.send.Runtime.evaluate(
                     params={"expression": code, "returnByValue": True, "awaitPromise": True},
                     session_id=cdp_session.session_id,
-                ),
-                timeout=timeout_s,
-            )
+                )
         except asyncio.TimeoutError:
+            if not evaluate_deadline.expired():
+                raise
             eval_ms = round((time_module.monotonic() - eval_started) * 1000)
             logger.warning(
                 "Browser evaluate timed out waiting for Runtime.evaluate",
@@ -1575,7 +1612,7 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
             )
             # Propagate so the outer supervisor classify + hard-recover path
             # runs instead of burning the full action budget on a wedged CDP.
-            raise
+            raise BrowserEvaluateDeadlineExceeded(timeout_s, eval_ms / 1000) from None
         eval_ms = round((time_module.monotonic() - eval_started) * 1000)
         from .service_crypto import mask_secret_values
 
@@ -1622,7 +1659,7 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
             params={"code": code, "timeout": timeout_s},
             result={"success": True, "value": value},
         )
-        return {"success": True, "message": f"Executed JS, result: {value}", "value": value}
+        return {"success": True, "message": "Executed JS.", "value": value}
     if context.action_name == "extract":
         return {"success": False, "error": "extract is disabled. Use evaluate to read DOM/page content directly."}
     if context.action_name == "screenshot":
@@ -1725,6 +1762,8 @@ async def execute_action(
     for key in ("agent_id", "browser_task_id", "tool_call_id_decision", "phone_snapshot"):
         execution.pop(key)
     execution.pop("successful_secret_refs")
+    previous_action_step = None
+    action_execution_started = False
     if successful_secret_refs is not None:
         successful_secret_refs.clear()
     refs = dict(secret_refs or {})
@@ -1739,7 +1778,8 @@ async def execute_action(
         # Keep the public boundary safe for adapters without DOMService policy.
         action_policy = getattr(type(dom_service), "model_visible_action_result", None)
         if isinstance(value, dict) and callable(action_policy):
-            return action_policy(dom_service, action_name, value)
+            from browser_tools.control_projection import retain_operational_source
+            return retain_operational_source(value, action_policy(dom_service, action_name, value))
         policy = getattr(type(dom_service), "model_visible_value", None)
         return policy(dom_service, value) if callable(policy) else mask_secret_values(value, refs)
 
@@ -1770,6 +1810,8 @@ async def execute_action(
         execution["action"] = {**action, "params": params}
         execution["model_params"] = model_params
         execution["action_history"] = _PrivateActionHistory(action_history, refs)
+        previous_action_step = action_history.last_action_step()
+        action_execution_started = True
         with secret_logging_context(refs):
             result = await _execute_resolved_action(**execution)
         if result.get("success") and len(used) == 1:
@@ -1786,13 +1828,31 @@ async def execute_action(
         result = {"success": False, "error": error_text}
     if result.get("success") and successful_secret_refs is not None:
         successful_secret_refs.update(used)
-    safe_result = visible(result)
+    with secret_logging_context(refs):
+        safe_result = visible(result)
+    if action_name == "read_tool_output":
+        from browser_tools.result_projection import preserve_output_protocol
+        safe_result = preserve_output_protocol(result, safe_result, action_name, visible)
+    completed_action_step = action_history.last_action_step() if action_execution_started else None
+    attach_observation = action_name == "read_browser_state" or (
+        auth_context_for_url is not None and not result.get("status")
+        and (action_name in _INTERACTION_ACTIONS or action_name in _NAVIGATION_ACTIONS or action_name == "evaluate")
+    )
+    if attach_observation and completed_action_step is not None and completed_action_step != previous_action_step:
+        action_history.attach_observed_result(completed_action_step, safe_result)
+
     if used_credential:
         # Credential bookkeeping comes from the private binding inventory,
         # rather than page data. Preserve its exact routing identity even if
         # a short secret happens to occur in the credential's public ID.
         safe_result["credential_ref"] = dict(used_credential)
-    return safe_result
+    from helpers.tracing import current_agent_id
+    try:
+        with secret_logging_context(refs):
+            return await prepare_browser_result(action_name, safe_result, user_id=user_id,
+                                                agent_id=current_agent_id() or "", session_id=session_id or "")
+    except Exception as error:
+        return {"success": False, "error": visible(f"Action result retention failed; action may have executed: {error}")}
 
 
 class _PrivateActionHistory:
@@ -3408,6 +3468,38 @@ _READ_CLICK_RECEIPT_JS = """
 """
 
 
+# CDP replies can be withheld (a busy renderer or the provider holding commands);
+# every await on the click path is bounded so one lost reply never hangs a step.
+_CLICK_RECEIPT_TIMEOUT_SECONDS = 3.0
+_CLICK_COORDINATES_TIMEOUT_SECONDS = 10.0
+
+
+async def _bounded_cdp(awaitable: Any, *, cdp_method: str, timeout: float) -> Any:
+    """Await one CDP-backed call within ``timeout``; log the method and elapsed time on expiry.
+
+    Returns by ``timeout`` even if the call holds its cancellation (a busy renderer):
+    the expired call is cancelled but not awaited, like ``_gather_within``.
+    """
+    started = time_module.monotonic()
+    task = asyncio.ensure_future(awaitable)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+    except BaseException:
+        task.cancel()
+        raise
+    if task in done:
+        return task.result()
+    task.cancel()
+    task.add_done_callback(lambda finished: finished.cancelled() or finished.exception())
+    logger.warning(
+        "Browser CDP call timed out",
+        cdp_method=cdp_method,
+        elapsed_ms=round((time_module.monotonic() - started) * 1000),
+        timeout_s=timeout,
+    )
+    raise asyncio.TimeoutError(f"{cdp_method} did not answer within {timeout:g}s")
+
+
 async def _arm_click_receipt(session: Any, coords: Dict[str, int]) -> Optional[tuple[Any, str]]:
     """Observe DOM delivery on the authoritative browser-use page, not the input transport."""
     get_page = getattr(session, "get_page", None) or getattr(session, "get_current_page", None)
@@ -3418,8 +3510,10 @@ async def _arm_click_receipt(session: Any, coords: Dict[str, int]) -> Optional[t
         if page is None:
             return None
         token = uuid.uuid4().hex
-        armed = await page.evaluate(
-            _ARM_CLICK_RECEIPT_JS, {"token": token, "x": int(coords["x"]), "y": int(coords["y"])}
+        armed = await _bounded_cdp(
+            page.evaluate(_ARM_CLICK_RECEIPT_JS, {"token": token, "x": int(coords["x"]), "y": int(coords["y"])}),
+            cdp_method="Runtime.evaluate(arm click receipt)",
+            timeout=_CLICK_RECEIPT_TIMEOUT_SECONDS,
         )
         return (page, token) if armed is True else None
     except Exception as error:
@@ -3432,7 +3526,12 @@ async def _read_click_receipt(receipt: Optional[tuple[Any, str]]) -> Optional[bo
         return None
     page, token = receipt
     try:
-        delivered = await page.evaluate(_READ_CLICK_RECEIPT_JS, token)
+        # Timeout keeps "receipt unknown" (None), like a navigation would.
+        delivered = await _bounded_cdp(
+            page.evaluate(_READ_CLICK_RECEIPT_JS, token),
+            cdp_method="Runtime.evaluate(read click receipt)",
+            timeout=_CLICK_RECEIPT_TIMEOUT_SECONDS,
+        )
         return delivered if isinstance(delivered, bool) else None
     except Exception as error:
         # A navigation can destroy the old document immediately after a valid click.
@@ -3461,9 +3560,20 @@ async def _execute_click(
 
     element_coords = None
     if element:
-        coord_tuple = await _maybe_await(dom_service.get_click_coordinates(index))
-        if not coord_tuple:
-            coord_tuple = await _refresh_element_coordinates(dom_service, index, for_click=True)
+        try:
+            coord_tuple = await _bounded_cdp(
+                _maybe_await(dom_service.get_click_coordinates(index)),
+                cdp_method="DOM.getContentQuads(click coordinates)",
+                timeout=_CLICK_COORDINATES_TIMEOUT_SECONDS,
+            )
+            if not coord_tuple:
+                coord_tuple = await _bounded_cdp(
+                    _refresh_element_coordinates(dom_service, index, for_click=True),
+                    cdp_method="DOM refresh + coordinates",
+                    timeout=_CLICK_COORDINATES_TIMEOUT_SECONDS,
+                )
+        except asyncio.TimeoutError:
+            coord_tuple = None
         element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
 
     if write_lock_enabled and (element or coords):
@@ -3971,6 +4081,7 @@ async def _execute_goto(
     current_auth_realm: str = "",
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
     wait_for_navigation: Optional[Callable[..., Awaitable[None]]] = None,
+    browser_network_recorder: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Prepare a target realm's credentials, then execute navigation."""
     from browser_use.browser.events import NavigateToUrlEvent
@@ -4014,6 +4125,8 @@ async def _execute_goto(
                 if key in prepared
             }
 
+    network_clock = getattr(browser_network_recorder, "network_clock_ms", None)
+    navigation_started_ms = network_clock() if callable(network_clock) else None
     try:
         event = session.event_bus.dispatch(NavigateToUrlEvent(url=url))
         await event
@@ -4067,7 +4180,23 @@ async def _execute_goto(
                 return result
         raise
 
-    result = {"success": True, "message": "", "current_url": url}
+    proxy_lookup = getattr(browser_network_recorder, "provider_proxy_error_document", None)
+    proxy_page = proxy_lookup(url, since_ms=navigation_started_ms) if callable(proxy_lookup) else None
+    if proxy_page:
+        # Kernel's proxy answers a failed upstream connect with its own error
+        # page; the browser "loads" it, but the site was never reached.
+        host = urlparse(proxy_page["url"] or url).hostname or url
+        result = {
+            "success": False,
+            "error": (
+                f"Navigation failed: Kernel's browser proxy could not reach {host} "
+                f"({proxy_page['proxy_error']}) and served its own HTTP {proxy_page['status']} page. "
+                "The browser's network exit failed, not the site."
+            ),
+            "current_url": url,
+        }
+    else:
+        result = {"success": True, "message": "", "current_url": url}
     if credential_summary is not None:
         # The preparation callback consumes encrypted credential material
         # internally. Only its deliberately non-sensitive summary may enter
@@ -4135,9 +4264,26 @@ async def _execute_upload_file(
     if humanizer and element_coords:
         await humanizer.click_at_coords(element_coords["x"], element_coords["y"])
 
-    event = session.event_bus.dispatch(UploadFileEvent(node=element, file_path=remote_path))
-    await event
-    await event.event_result(raise_if_any=True, raise_if_none=False)
+    from domains.spawn_browser_agent_v3 import tilion_worker
+
+    if tilion_worker.is_staged_upload_path(remote_path):
+        # Tilion: a remote path set by DOM.setFileInputFiles silently does
+        # nothing, so set the worker-held bytes through Playwright.
+        payload = tilion_worker.staged_upload_payload(remote_path)
+        if payload is None:
+            return {"success": False, "error": f"File '{filename}' is no longer staged for this browser session"}
+        landed = await tilion_worker.set_staged_file_on_input(
+            input_page=_humanizer_input_page(humanizer),
+            browser_session=session,
+            element=element,
+            payload=payload,
+        )
+        if landed != len(payload["buffer"]):
+            return {"success": False, "error": f"File '{filename}' did not land on the input ({landed} bytes)"}
+    else:
+        event = session.event_bus.dispatch(UploadFileEvent(node=element, file_path=remote_path))
+        await event
+        await event.event_result(raise_if_any=True, raise_if_none=False)
 
     await action_history.record_action(
         dom_service=dom_service,
@@ -4253,7 +4399,13 @@ async def _execute_screenshot(
     if not session_id:
         raise RuntimeError("Browser session id is required for screenshot capture")
 
-    screenshot_result = await take_browser_computer_screenshot(config, session_id)
+    single_cdp_client = getattr(dom_service, "single_cdp_client", False) is True
+    if single_cdp_client:
+        # Tilion: REST screenshots fail while the worker holds CDP; its
+        # full_browser:false sessions have no window chrome to crop.
+        screenshot_result = {"base64_image": await dom_service.capture_viewport_png(), "provider": "tilion"}
+    else:
+        screenshot_result = await take_browser_computer_screenshot(config, session_id)
     full_screenshot_b64 = screenshot_result["base64_image"]
     full_screenshot_bytes = base64.b64decode(full_screenshot_b64)
     screenshot_bytes = (
@@ -4264,7 +4416,11 @@ async def _execute_screenshot(
     screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
 
     saved_path = None
-    if config:
+    if single_cdp_client:
+        from domains.spawn_browser_agent_v3.tilion_worker import stage_upload
+
+        saved_path = stage_upload(session_id, "screenshot.png", screenshot_bytes, "image/png")["path"]
+    elif config:
         upload_name = (
             f"screenshot-{uuid.uuid4().hex}.png"
             if screenshot_result.get("provider") == "browser-use"

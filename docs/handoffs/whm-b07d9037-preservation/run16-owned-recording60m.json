@@ -1,0 +1,580 @@
+{
+  "schema": "rose.whm.run16.continuation.v1",
+  "recorded_at_utc": "2026-10-14T01:33:39.157367+00:00",
+  "original_checkpoint": "677068533e050195c62afc8118f3d35a8511f5ea",
+  "original_restore_receipt": "docs/handoffs/swap-harness-b07d9037-81f9-4c97-80d7-6f4d42b7adc1-resumed.json",
+  "replacement": {
+    "devbox_id": "e9afcffd-7ba9-4bfd-8703-d770952fe1c3",
+    "internal_thread_id": "ph7cc73xma14jdg6chxpnhbgth8g7c1a",
+    "thread_url": "https://boxes.dev/thread/thr_d2e1b555d6314abe8d9f74da7dd979aa",
+    "native_session_id": "01a132a3-ea1f-7b22-abfb-70608400d02e",
+    "managed_start_key": "swap-harness-whm-20261012-full-checkpoint-coordinator-generation1"
+  },
+  "run": {
+    "local_id": "wmh-run16-e9afcffd-1791932983",
+    "hub_id": "ea2c575a-6d35-44e9-82b3-4d221384b675",
+    "root_agent_id": "8912bdc6-1ea8-4b59-8822-06cf17da540c",
+    "native_session_id": "1b95be9f66564e72bc011c228dc1168b",
+    "source_checkpoint": "5011265ba0d101516062e9b37c8d9e017cfbe590",
+    "goal_triggered_at": "2026-10-13T18:49:31.837Z",
+    "triggered_at": "2026-10-13T23:09:43.135058Z",
+    "workflow_started_at": "2026-10-13T23:23:06.626994Z",
+    "execution_limit_seconds": 3600,
+    "reported_duration_seconds": 3670.7,
+    "canonical_status": "ERROR",
+    "canonical_sha256": "7ccd8e1ca587a233d0cc44e415b4d298c64d068f1a0f3fee589d1125e5d686f1",
+    "failure": "Native session operations did not join during retirement; native DELETE HTTP500; initial join/cost verification failed",
+    "root_goal_verdict": "unavailable",
+    "controller_exit": 1,
+    "controller_finished_at": "2026-10-14T00:25:19.068466Z",
+    "durable_frontend": "https://www.roselabs.ai/?agent-id=8912bdc6-1ea8-4b59-8822-06cf17da540c",
+    "fresh_browser_verified": true,
+    "fresh_browser_root_messages": 80
+  },
+  "trajectory": {
+    "progress_0_to_100": 24,
+    "confidence": "LOW numerical/source qualification; uncalibrated descriptive initial-outreach band, not cash fraction or probability",
+    "within_run_progress": [
+      15,
+      17,
+      24
+    ],
+    "prior_run15_progress": 22,
+    "committed_actions": 236,
+    "selections": 238,
+    "selected_bodies_independently_joined_to_commits": 236,
+    "activity_counts": {
+      "rose.message.notify_sms_event": 12,
+      "rose.explore.spawn_explore_agent": 123,
+      "rose.browser.spawn_browser_agent": 93,
+      "rose.code.spawn_claude_code_agent": 2,
+      "rose.message.message_transport_send": 6
+    },
+    "native_email_send_observations": 5,
+    "native_official_form_submissions": 2,
+    "other_transport_rejection_observations": 3,
+    "new_source_qualified_warm_connections": 0,
+    "new_verified_replies": 0,
+    "new_verified_scheduled_or_held_meetings": 0,
+    "commitments": 0,
+    "signed_instruments": 0,
+    "pending_wires": 0,
+    "settled_proceeds_cents": 0,
+    "draft_document_urls": 4,
+    "draft_document_version_rows": 8,
+    "qualification_gaps": [
+      "Recipient provenance diverges first in selected native observation at revision164; later194/204 inherit it; no source-qualified alias proof.",
+      "Two sent-state rows were appended by selected notification patches without positive delivery receipts; excluded from outreach census.",
+      "Native document observations do not independently authenticate provider artifact bytes.",
+      "Source, logical horizons and stochastic runs differ; progress scores are descriptive bands."
+    ],
+    "shared_world_elapsed_ms": 2171195
+  },
+  "fixture": {
+    "source_database": "whm_gen1_e9afcffd_fixture_20261012",
+    "iteration_database": "victoria_bench_wmh_run16_e9afcffd_1791932983",
+    "people": 2225,
+    "message_records": 42910,
+    "seed_message_limit": 100000,
+    "initial_state_sha256": "009394a4fc293c14230d15d4fc70b798876fb2d8ec4489ba3b4db560343ba5d1",
+    "startup_prefix": "All2225x33Person values/types match approved frozen startup packet; static network loaded at run start.",
+    "raw_message_admission_scope": "Actual fixture rows exist; full raw message-body admission to every predictor call is not claimed."
+  },
+  "cache": {
+    "DEMO": {
+      "Agent": {
+        "hits": 1,
+        "lookups": 235,
+        "acknowledged_stores": 234
+      },
+      "WMH": {
+        "hits": 0,
+        "lookups": 304,
+        "acknowledged_stores": 238
+      }
+    },
+    "total_hits": 1,
+    "total_lookups": 539,
+    "total_hit_percent": 0.18552875695732837,
+    "hit_origin": "Genuine original Run15 planner recording; not Run16 self-replay.",
+    "agent_prompt": {
+      "calls": 234,
+      "inclusive_prompt": 3825384,
+      "read": 2579343,
+      "output": 194710,
+      "cache_write": 1221570,
+      "azure_estimate": 5.024245600000002,
+      "other_estimate": 0.0,
+      "models": {
+        "gpt-6-sol-foundry": 223,
+        "openai/gpt-6-sol": 11
+      },
+      "cache_read_pct": 67.4270347761166
+    },
+    "WHM_prompt": {
+      "calls": 393,
+      "inclusive_prompt": 214785323,
+      "read": 191304346,
+      "output": 507243,
+      "cache_write": 48382827,
+      "azure_estimate": 11.176253220000001,
+      "other_estimate": 26.085868444800013,
+      "models": {
+        "google/gemini-3.8-flash": 50,
+        "gpt-5.6-luna-foundry": 272,
+        "qwen/qwen3.8-27b": 71
+      },
+      "cache_read_pct": 89.06769947218415
+    },
+    "retained_database": "victoria_wmh_recording_e9afcffd_20261013",
+    "retained_oid": 69016,
+    "after_cleanup_rows": 1103,
+    "prior_rows": 631,
+    "new_ACK_count": 472,
+    "full_final_payload_audit": {
+      "status": "PASS supporting preservation proof; causal fix/outcome OPEN",
+      "source_rows": 472,
+      "Agent_rows": 234,
+      "native_rows": 238,
+      "prior631_full_rows_unchanged": true,
+      "proof_sha256": "0886c16186f92101dbae42dcd3ea89eca3d57135171ced40b7bd5274f89e8665",
+      "scope_exception": "Reviewer did not certify scope compliance: own outside-scratch timing-file write removed; originals untouched."
+    },
+    "no_key_remapping_or_response_invention": true
+  },
+  "cost": {
+    "scope": "Combined unchangedhistoricalbaseline Gemini/Qwen/directAzure assumptions PLUS currentstandardGPT6OpenRouter11rows; NOT allactualbilled/standardallmodels",
+    "unchanged_baseline_total": 42.2863672648,
+    "new_openrouter_standard": 0.54159,
+    "combined_total": 42.8279572648,
+    "direct_Azure": {
+      "Agent": 5.0242456,
+      "WHM": 11.17625322,
+      "total": 16.20049882
+    },
+    "OpenRouter": {
+      "Agent": 0.54159,
+      "WHM": 26.0858684448,
+      "total": 26.6274584448
+    },
+    "invoice": false,
+    "OR_upstream_physical_Azure": "UNKNOWN; OpenRouter transport does not identify upstreamAzure allocation",
+    "rates": {
+      "GPT6_OR_standard_perM": [
+        2,
+        0.2,
+        2.5,
+        10
+      ],
+      "Qwen_legacy_Wafer_current_endpoint_perM": [
+        0.04,
+        0.0198,
+        2.3
+      ],
+      "Qwen_repo_default_perM": [
+        0.15,
+        0.8
+      ]
+    },
+    "all_assumptions": [
+      "Named GlobalStandard Azure short/long rule assumed not authenticated deploymentSKU",
+      "Existing Gemini reconstructed max cache_total_input may overlap read/write; unchangedhistorical",
+      "Qwen Wafer historical currentendpointprice conditional not route proof",
+      "NewOR standard upstream unknown, all11shortcontexts atprefix; costs exclude partialunknown/infra/storage/toolfees",
+      "NewOR normalized180042writes assumed billable at2.5/M; upstreamraw branch and billedcounter validity unproved. Endpoint scenarios assume these complete counters billable; not invoicebound."
+    ],
+    "new_OR_write_assumption": "The $0.54159 conditional projection treats logged180042 cache_write tokens as billable writes at $2.50/M and15555 readtokens at$0.20/M. Original rawusage writeprovenance/billability and actualupstreamendpoint not proved; this is not a settledcharge."
+  },
+  "latency": {
+    "raw_Rose_completions": {
+      "Agent": {
+        "n": 234,
+        "avg": 7.952754858974356,
+        "p95": 26.505904,
+        "p99": 38.552089
+      },
+      "WMH": {
+        "n": 393,
+        "avg": 41.56488549618321,
+        "p95": 159.0,
+        "p99": 226.0
+      }
+    },
+    "native_completion_owner_including_failed_retry_cancellation_spans": {
+      "n": 304,
+      "avg": 76.10215131578946,
+      "p95": 216.661,
+      "p99": 377.544,
+      "errors": 66,
+      "pending": 0,
+      "selections": 238
+    }
+  },
+  "cleanup": {
+    "benchmark_and_stack_receipts": "clean",
+    "all20recorded_processes_absent": true,
+    "native_scope_inactive": true,
+    "fixture_database_absent": true,
+    "retained_database_preserved": true,
+    "later_native_retirement_join_verified": true,
+    "later_retirement_revision": 236,
+    "later_retirement_sha256": "437b325c2b6417dd72dfa84f0d7c8a773ac881ec41df866a071e244fce6dcb43",
+    "later_retirement_bytes": 219466526,
+    "original_ERROR_remains_immutable": true,
+    "MVCC_dump_snapshots": [
+      {
+        "started_at": "2026-10-13T23:49:15.007644+00:00",
+        "finished_at": "2026-10-13T23:49:19.791630+00:00",
+        "database": "victoria_bench_wmh_run16_e9afcffd_1791932983",
+        "consistent_mvcc": true,
+        "final_state_claim": false,
+        "path": "/home/boxes/rose-wmh-resumed/.context/wmh-resume-generation1/run16-owned-recording60m/run16-midrun-private-db.dump",
+        "bytes": 43673082,
+        "sha256": "ff443d7a946e3cb1df72e5e83db6f2ef9cc10d863396039d6b02194314d56c85"
+      },
+      {
+        "started_at": "2026-10-14T00:18:00.001108+00:00",
+        "finished_at": "2026-10-14T00:18:05.195412+00:00",
+        "database": "victoria_bench_wmh_run16_e9afcffd_1791932983",
+        "consistent_mvcc": true,
+        "final_state_claim": false,
+        "path": "/home/boxes/rose-wmh-resumed/.context/wmh-resume-generation1/run16-owned-recording60m/run16-precutoff-private-db.dump",
+        "bytes": 44700045,
+        "sha256": "cf074b5e98b092123f31766042de7a90c98bf2fe933f833a677a0b3c02421e70",
+        "exit_code": 0
+      },
+      {
+        "started_at": "2026-10-14T00:21:00.000359+00:00",
+        "finished_at": "2026-10-14T00:21:04.422109+00:00",
+        "database": "victoria_bench_wmh_run16_e9afcffd_1791932983",
+        "consistent_mvcc": true,
+        "final_state_claim": false,
+        "path": "/home/boxes/rose-wmh-resumed/.context/wmh-resume-generation1/run16-owned-recording60m/run16-last-minute-private-db.dump",
+        "bytes": 44773130,
+        "sha256": "903a271402ecb486533bda69215434f3eb2c9ac1b8a2c1ad469312008ef79cbd",
+        "exit_code": 0
+      }
+    ]
+  },
+  "authenticated_archives": {
+    "metering-followup": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "private/whm-e9afcffd/run16-metering-followup-20261013.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "28d12b5b01ae457ef9cd11bc91dffb062c739b262fda38ea858d4ebe722dc5a1",
+      "gzip_sha256": "3cc1c7796abe7065c57657e2f543c9fd55a28383648591f57eaed881e2dd3805",
+      "stored_bytes": 543505,
+      "frames": 1,
+      "files": 38,
+      "original_bytes": 3308966,
+      "manifest_sha256": "9c9be8406b9e6cdc6fbd91131d033f806b18cf66febaddd2303531e3faff99ec",
+      "full_readback_verified": true
+    },
+    "midrun": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "private/whm-e9afcffd/run16-midrun-20261013.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "d6cd4d39e995776bf894a7ad323197c6cf172a9613837f62fc2e526836ab54e9",
+      "gzip_sha256": "36ad8949df6483b8a503e0cb9e68d39291f41e08d9b6a839ff61deac48a9cebb",
+      "stored_bytes": 44391013,
+      "frames": 6,
+      "files": 35,
+      "original_bytes": 47405383,
+      "manifest_sha256": "7dd63f9c7904a19577c467a72eac8b92b81be13ca3e9077ba84d2187e5d61d30",
+      "full_readback_verified": true
+    },
+    "protocol-midrun": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "private/whm-e9afcffd/run16-protocol-midrun-20261013.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "4db36a069d7c15ceeaf5ea48eeb11be1b85eed6ab0d12d2636cf960e428beacc",
+      "gzip_sha256": "c3c44f6977b6d6712a21f820503a0e06881a8c6944200ed16d8b69373aecbb09",
+      "stored_bytes": 14012200,
+      "frames": 2,
+      "files": 76,
+      "original_bytes": 42354070,
+      "manifest_sha256": "eba230aafc0229ce43e2f6731282edc8f4bbbccae7bb728186c9806456ee0f0d",
+      "full_readback_verified": true
+    },
+    "cache-midrun": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "private/whm-e9afcffd/run16-cache-midrun-20261014.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "4780e7b2bcb6efef526866a2086359dee76e34a4fb989fd5ccbf93f34cb72197",
+      "gzip_sha256": "2b5ccee3cd833b5edf455db9499033053ac05c4de27e2acc5d93d13e554d7990",
+      "stored_bytes": 5057915,
+      "frames": 1,
+      "files": 41,
+      "original_bytes": 19971146,
+      "manifest_sha256": "7c80488ba4b4efed1d9cf490c5fdc69d9d80895376d28d16eb3a60ced3157042",
+      "full_readback_verified": true
+    },
+    "transport-midrun": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "private/whm-e9afcffd/run16-transport-midrun-20261014.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "e34bdece6d692dda9a70d96bccb4ac5f1536405e0023d6367ce683ef9f45cf1e",
+      "gzip_sha256": "cc1cd980df998a7e6dc17efd96631eaf3ef81f07e8688f919cc42bee0aa17d6b",
+      "stored_bytes": 1420277,
+      "frames": 1,
+      "files": 23,
+      "original_bytes": 4918879,
+      "manifest_sha256": "9efbb6bf86247592153376f764a469bd682ce46aa81e50739be77792924a84da",
+      "full_readback_verified": true
+    },
+    "progress-second-midrun": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "private/whm-e9afcffd/run16-progress-second-midrun-20261014.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "3b16e3b285e3fe705628c5ed0aa611260c0d893ec473234a4a02e3b165dc567a",
+      "gzip_sha256": "0509269dd06e61a3d0d342ad9e624875464d1381b9ffad98a68f8ce077510cbe",
+      "stored_bytes": 816696,
+      "frames": 1,
+      "files": 19,
+      "original_bytes": 2956222,
+      "manifest_sha256": "86c1d0ac40455c7305806ed0da4f5b8cf3faeec3e7b6eb7926452661b9d8931e",
+      "full_readback_verified": true
+    },
+    "final-core": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "private/whm-e9afcffd/run16-final-core-20261014.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "2f68c2a2a9fd57b166e2d2ce0b9547c69ac78a2b22f9fa0b340d43ac4fcfa12d",
+      "gzip_sha256": "0978909469ee174ec25ac679f5333bced0aeac507aaccd09203f899a2a2378fe",
+      "stored_bytes": 410463190,
+      "frames": 49,
+      "files": 1166,
+      "original_bytes": 1156227099,
+      "manifest_sha256": "77e794882447aeb7814a0af147939771c4c90e77cf8b2b91c08b9f216a4a201f",
+      "full_readback_verified": true
+    },
+    "final-rca": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "private/whm-e9afcffd/run16-final-rca-20261014.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "70ad597c5a239314dc134be3ac2e690467995ad4856aac80fc2e0c23d6aa2e38",
+      "gzip_sha256": "1120c9966c6d41aef7596b253f644506b13c32d9e56fef975c19feb748ab6aab",
+      "stored_bytes": 99759894,
+      "frames": 12,
+      "files": 161,
+      "original_bytes": 562010337,
+      "manifest_sha256": "fdce2074238cc1b8504d31e3a76785e5695b5c579779c484728c460aaea97ecb",
+      "full_readback_verified": true
+    },
+    "cache-and-retirement-controls": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "private/whm-e9afcffd/run16-cache-and-retirement-controls-20261014.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "6abd01e0a3b21835f5e8b0acd644bf1d3c1c657395a65143ac41efee08f8064f",
+      "gzip_sha256": "0d45d2658c465a3aef7bf764a8b3c1265050ab777e370da75b29b10f2495df49",
+      "stored_bytes": 10119508,
+      "frames": 2,
+      "files": 113,
+      "original_bytes": 41256908,
+      "manifest_sha256": "95f68dc1dfb8e83f02982dac0b0174a53bf78e7125ce4bd6443a1fee0d6779c8",
+      "full_readback_verified": true
+    },
+    "retirement-v2-controls": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "private/whm-e9afcffd/run16-retirement-v2-controls-20261014.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "426dc169735e3869cbd51d5f0bcf4733f4988cace1fa4ff949ff4cff58c8f723",
+      "gzip_sha256": "4b23d6d12425245f9da31b6c3c5ba5c9e62dfd4a316d9dab3d6aabf5cce73f1c",
+      "stored_bytes": 242095,
+      "frames": 1,
+      "files": 33,
+      "original_bytes": 750006,
+      "manifest_sha256": "f59cfa4d2671664f8b7f5c9778da4eeccda6a64c698540252ec102c4dc1540d8",
+      "full_readback_verified": true
+    },
+    "retirement-v3-controls": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "private/whm-e9afcffd/run16-retirement-v3-controls-20261014.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "5464d7f420135a70def9be27598ede90b9e3ff719e1b98d82942e05a2f64a895",
+      "gzip_sha256": "1c3808907bfd7ce678c4c0d523096f196cbcbc95206a62b727550e4cfb9f4b7f",
+      "stored_bytes": 92952,
+      "frames": 1,
+      "files": 40,
+      "original_bytes": 329749,
+      "manifest_sha256": "48a41bbf7dbbe6deb44f014f676cc79a578e5c4b44affd0f7aa6c8158a9ea26c",
+      "full_readback_verified": true
+    },
+    "outreach-grounding": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "private/whm-e9afcffd/run16-outreach-grounding-20261014.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "fbe3e0b7d94ef8160d916c37b85919e9f2884fd1b9ba5d03371086f527066ff0",
+      "gzip_sha256": "aed43632523c41f902f671f564f1442dc9ae2bd3dd0d5b15ec42f9110c00f983",
+      "stored_bytes": 4452141,
+      "frames": 1,
+      "files": 15,
+      "original_bytes": 14686728,
+      "manifest_sha256": "5ac0dd3354ea7093e03e4af3701cf1290daae4ad144909fcd13aa538a1074167",
+      "full_readback_verified": true
+    },
+    "retirement-final-qualification": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "private/whm-e9afcffd/run16-retirement-final-qualification-20261014.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "6a854bf8095b3c110894bbffc03d60f0eb341bcbc86eb97a7492b4ea43aaa358",
+      "gzip_sha256": "5472cc1bcb60e44cf66cee5ed7a9167dca8ff8f7cea10cf46c5c9a25687c4b38",
+      "stored_bytes": 219366,
+      "frames": 1,
+      "files": 128,
+      "original_bytes": 1796672,
+      "manifest_sha256": "ae94ff65fa32eb859ff73637d1e7b4e3259667fc1d0b2047dbaaeb6b8807c18d",
+      "full_readback_verified": true
+    },
+    "final-root-qualification": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "private/whm-e9afcffd/run16-final-root-qualification-20261014.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "fbdc833eac5b7ba620c967d3da43ece8ca09c2021ea8a9d8fe2bb052050d3499",
+      "gzip_sha256": "9906d5101be59f2fd98c497dcebbb2dbc38bab00c0778428f52f5a2d905bd5ab",
+      "stored_bytes": 1043132,
+      "frames": 1,
+      "files": 133,
+      "original_bytes": 4170558,
+      "manifest_sha256": "73f8053df23d71d1db7de48e027e5f1d38e1a7852e4cc3203f3c04b32e55c220",
+      "full_readback_verified": true
+    }
+  },
+  "rca_clusters": {
+    "retirement": {
+      "original_pending_phase": "OPEN",
+      "canonical_outcome": "ERROR preserved",
+      "private_first_candidate": "BLOCKED: canceled inner executor can yield verified acknowledgment before writer completion; unchanged exact candidate regression FAIL; no application.",
+      "review_result_sha256": "f1ea3cf160b1b78852bac1dbda87153919ca15e88d80df552dcb1036213e01dd",
+      "revised_private_candidate": "v3 ACTIVE; no application or outcome closure",
+      "private_v2_candidate": "BLOCKED: independent actual-step writer submission failure yielded verified retirement with zero persisted records. Candidate unapplied.",
+      "private_v2_patch_sha256": "488ad0c12fad174bb41126076effc09b309cad5361ef39e766fe6ed05884728a",
+      "private_v3_candidate": {
+        "status": "HOLD; no application",
+        "owning_suite_PASS": 62,
+        "new_controls_PASS": 3,
+        "patch_sha256": "2975e9b45e6cd6b238748e400bfa5e3ed2a598338166054cafd88091c8d82f2c",
+        "qualification": "Final independent lifecycle review and corrected extra-controls runner remain open."
+      },
+      "final_private_candidate": {
+        "status": "OWNERSHIP_BOUNDARY_PRIVATE_QUALIFIED;SOURCE_APPLICATION_HOLD",
+        "source_patch_sha256": "f1d15317f6ea52d4d3892ad8642fba4716ec4a20a45c5c935cf7d5a7dcde8178",
+        "test_patch_sha256": "cbd46658677e8612196d17539e8bf5ea195b34408cf9306dbc3cbcc96515be46",
+        "combined_patch_sha256": "4b0362e32056cdb48af013832cd15e4f00aaa792a9eac262767c316fb98b33f1",
+        "preFAIL": "Exact2975 direct-gather/proxy/public waiter/fence control:1FAIL4PASS62deselected,5.53s; assertion actual close owner must stay pending while writer unfinished",
+        "privatepostPASS": "Identical assertions + four focused controls + five extra + all prior owning goldens:67PASS2warnings6.92s",
+        "sealed_suite": "67PASS2warnings6.95s, PYTEST_ADDOPTS --basetemp inside qualification-work",
+        "scope_qualifications": [
+          "Public close waiter cancellation returns immediately while shielded retained owner performs cleanup; no synchronous waiter drain claim",
+          "Private closeowner direct cancellation controlled only finite actual publishers/threads; no absolute event-loop termination immunity",
+          "Exception-finished close owner terminal failure remains cached; executor pointer retained on shutdown error; no retry recovery claim",
+          "First session error insertion-order precedence over shutdown error; secondary pending-join errors not comprehensive reporting",
+          "Unbounded filesystem/retrieval drain requires explicit user approval; provider360/590/3 unchanged",
+          "OriginalRun16pendingphasecausalattribution OPEN; canonical ERROR preserved; unchanged fundraiser PASS OPEN",
+          "Outer registered domain launcher not executed: invokes prohibited setup; actual discovery and full delegated owning suite verified offline"
+        ],
+        "result_sha256": "509eae2bff866d959fa81597fc650d2fef480cc3bf4ee0fc233579375bd70728",
+        "application": false
+      },
+      "final_deadline_regression": {
+        "utc": "2026-10-14T01:32:01.570038+00:00",
+        "source_checkpoint": "5011265ba0d101516062e9b37c8d9e017cfbe590",
+        "same_registered_assertion": true,
+        "baseline": "1 failed,67 deselected; (finished,writes,operation_done,join_verified)=(False,0,False,False); Native session operations did not join during retirement;11.42s including release",
+        "final_candidate": "68 passed,2 warnings,17.91s",
+        "runtime_candidate_sha256": "f9900c4088087b382d7e5353212b7c85700f499e7700ada7d9a33b630e965d32",
+        "source_patch_sha256": "f1d15317f6ea52d4d3892ad8642fba4716ec4a20a45c5c935cf7d5a7dcde8178",
+        "test_patch_sha256": "62e7812b03aa54bd9d5d4848897e41949dce4d290afc8cffc69bbaceabe2e653",
+        "combined_patch_sha256": "d2e91c93c6eca2cc02d9e779d9ece9a2cf4b569ea52a5f8145e9ace4ed6d5f82",
+        "fixture": "minimal nonsensitive execution identity; actual NativePredictionWriter, actual model.step and end_session",
+        "future_suite": "new test appended to existing complete owning module; unchanged registered blackbox delegates this entire module",
+        "production_application": false,
+        "original_R16_cause": "OPEN; controlled boundary and original timer matched, historical pending stacks unavailable",
+        "original_outcome": "ERROR preserved; no fundraising PASS",
+        "source_changes": 0,
+        "paid_calls": 0
+      },
+      "final_focused_review_sha256": "d2ac2b35a0e9c9c10b4984a4b1c2bcdf68475f82d8daba459ee9ab3c8601ea6f"
+    },
+    "protocol": "304predictions:238valid outputs/51protocol errors/14cancellations/1internal500/0pending.155strict rejection and4partial captures exact replay verified; no causal producer/model-only proof or source fix.",
+    "metering": "627logged provider rows,155completed rejections already uniquely metered,4partial attempts billing unknown. Conditional projection preserves legacy Gemini/Qwen assumptions and assumes11newOR billable cachewrites.",
+    "trajectory": "236committed body/callID/hashjoins pass. Factual/source qualification conflicts preserved, not repaired.",
+    "cache": {
+      "status": "Preservation and original-value qualification PASS; no cache defect demonstrated",
+      "result_sha256": "0886c16186f92101dbae42dcd3ea89eca3d57135171ced40b7bd5274f89e8665",
+      "manifest_sha256": "d6afc7ce976d8e8ddc4f2185717769983c4c43825b5faf0c83ab0a54ae3d7c1f",
+      "models_calls": 0,
+      "source_changes": 0
+    },
+    "outreach_grounding": {
+      "status": "OPEN; no causal fix or approval-ready guard",
+      "native_parser_original_cases_accepted": 7,
+      "unsupported_sent_patch_revisions": [
+        170,
+        224
+      ],
+      "later_unverified_delivery_revisions": [
+        218,
+        232
+      ],
+      "first_recipient_drift_revision": 164,
+      "later_revisions_inherit_drift": [
+        194,
+        204
+      ],
+      "result_sha256": "b27c27aa9e4f18f855521992797605044445627e3068f2543c2002ad27e0d8e6",
+      "manifest_sha256": "8be599f8502bcf8c531821699292787e08364a0933e4846105d718be7e8e1f91",
+      "model_provider_benchmark_calls": 0,
+      "source_changes": 0
+    }
+  },
+  "continuation": {
+    "next_slice": "HOLD:infra1/1=100%",
+    "first_meaningful_action": "Ran authorized original60-minute DEMO-on Run16 from immutable501checkpoint, preserved full original outcome and final state, performed per-cluster offline subagent RCA, published actual frontend and authenticated every final archive member.",
+    "new_paid_migration_calls": 0,
+    "paid_RCA_model_replays": 0,
+    "merge_or_deploy": false,
+    "source_changes_since_run16": 0,
+    "pending_unapproved_proposals": [
+      "Original goal-filter/context proposal",
+      "R14-HTTP-CAPTURE-2 passive HTTP evidence capture, shown at user request, unapproved",
+      "R16-NATIVE-OWNER-JOIN-1 final ownership policy proposal, unapproved",
+      "Typed receipt/source provenance guard design, no exact candidate or approval-ready proof"
+    ],
+    "active_followup": "All dispatched offline RCA turns complete; runtime ownership repair is privately qualified, unbounded filesystem-join decision awaits user approval. Next paid slice remains infrastructure HOLD.",
+    "ownership_approval_snapshot": {
+      "approval_id": "R16-NATIVE-OWNER-JOIN-1",
+      "combined_patch_sha256": "d2e91c93c6eca2cc02d9e779d9ece9a2cf4b569ea52a5f8145e9ace4ed6d5f82",
+      "status": "Unapproved; source application HOLD",
+      "ordinary_absent_false": "Previously qualified original behavior unchanged; runtime candidate scoped to existing WHM validation_recovery opt-in",
+      "outer_WMH_HTTP_timeout_seconds": 660,
+      "provider_attempt_seconds": 360,
+      "provider_shared_seconds": 590,
+      "filesystem_join": "No independent hard bound on owned filesystem/retrieval drain; explicit approval requested."
+    }
+  },
+  "preservation": {
+    "Freedom_preserved": true,
+    "protected_hashes": {
+      "CLAUDE.md": "2a6348f3ad1701aeb496e10e98da271fb38db5709e2abb9adbe65b7c5ad0d322",
+      "AGENTS.md": "57cbb4821915f3e477996ffde6ef7ee4c9d57fab64b6f57421968e3d0e9d0eca"
+    },
+    "current_source_head": "5011265ba0d101516062e9b37c8d9e017cfbe590",
+    "tracked_dirty_paths": [],
+    "new_observer_discrepancy": "Root updated its own pending-turn polling receipt after second-midrun worker included it in its17member seal.16immutable proof members still match; expected old observer hash/current completed receipt/discrepancy preserved in19file authenticated archive. No old originals or stage/native/source proof changed. No original receipt fabricated."
+  }
+}

@@ -12,26 +12,30 @@
  *     v
  * [COLLAPSED]
  *
- * FULLSCREEN STATE:
- * [NORMAL] <-- isFullscreen: false
+ * FLAG: Rose Desktop accounts (lib/roseDesktop.ts) → drawer path below; others →
+ * LegacyBrowserStatusBar (stock chip + portaled fullscreen view).
+ *
+ * BROWSER DRAWER STATE (replaces the old fullscreen view):
+ * [INLINE] <-- isInDrawer: false
  *     |
- *     | (click fullscreen button)
+ *     | (click thumbnail / maximize / Open Browser / ?browser-id deep link /
+ *     |  navi-open-browser event) -> RoseApps.openAgentBrowser(agent, task)
  *     v
- * [FULLSCREEN] <-- isFullscreen: true (renders via portal)
- *     |
- *     | (click close or Escape)
+ * [IN_DRAWER] <-- isInDrawer: true. The Browser app drawer slides in on this
+ *     |          agent's tab; BrowserAgentPane portals into its slot. The chip
+ *     |          stays inline as a thumbnail-less minimized row (one iframe).
+ *     | (drawer close / Escape / other tab / maximize again)
  *     v
- * [NORMAL]
+ * [INLINE]
  *
  * Orchestrator responsibilities:
  *   - Derives the view-model via useBrowserStatusBarState.
  *   - Owns UI flags + handlers via useBrowserStatusBarUi.
- *   - Dispatches to the three presentational variants (Minimized / Expanded /
- *     Fullscreen) based on current state + forceMinimized prop.
- *
- * PHONE ENTRY: expanded + new owned phone event -> existing fullscreen;
- * collapsed/force-minimized stay passive. Closed fullscreen does not reopen for
- * the same event. The phone overlay preserves the mounted fullscreen browser.
+ *   - Registers this agent's browser as a drawer tab while mounted, with the
+ *     page URL its latest step reported (drawer address bar); the drawer's
+ *     Reload remounts the portaled pane (key = browserReloadKey).
+ *   - Dispatches to the presentational variants (Minimized / Expanded) and
+ *     portals BrowserAgentPane into the drawer when this task is shown there.
  *
  * AGENT ACTIVITY STATE:
  * [ACTIVE] <-- no pending auth assistance and no disconnect
@@ -53,6 +57,8 @@
  *   provider session is released). Auth handoff shows the interactive bound
  *   URL once a binding is known; user control shows the interactive bound URL.
  *   live=false (closed / provider ended) -> LiveViewLoading instead of iframe;
+ *   owning agent terminal (COMPLETED/FAILED/...) -> [ENDED] "Browser session
+ *   ended", never "Connecting…", even if the task never recorded its end;
  *   each new URL shows LiveViewLoading until its iframe loads.
  *
  * TAKE CONTROL (same live session, no reinjection):
@@ -68,13 +74,18 @@
  * [AGENT]
  */
 
-import { memo } from 'react';
-import { phoneAttentionCandidate } from './browser-status-bar/phone/phoneAttentionState';
-import { usePhoneFullscreenEntry } from './browser-status-bar/phone/usePhoneFullscreenEntry';
-import { useAgentContext } from '../hooks';
+import { memo, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
+import { useAgentContext, type Message } from '../hooks';
+import { BrowserAgentPane } from './browser-status-bar/BrowserAgentPane';
 import { BrowserStatusBarExpanded } from './browser-status-bar/BrowserStatusBarExpanded';
-import { BrowserStatusBarFullscreen } from './browser-status-bar/BrowserStatusBarFullscreen';
 import { BrowserStatusBarMinimized } from './browser-status-bar/BrowserStatusBarMinimized';
+import { browserTaskLabel } from './rose-apps/browserTaskLabel';
+import { latestBrowserPageUrl } from './rose-apps/browserPageUrl';
+import { latestBrowserActualModel, latestBrowserRosePool } from './rose-apps/browserActualModel';
+import { useRoseApps } from './rose-apps/roseAppsState';
+import { LegacyBrowserStatusBar } from './browser-status-bar/legacy/LegacyBrowserStatusBar';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { resolveBrowserControlState } from './browserControlState';
 import { useBrowserStatusBarState } from './browser-status-bar/useBrowserStatusBarState';
 import {
@@ -82,11 +93,8 @@ import {
   useBrowserStatusBarUi,
 } from './browser-status-bar/useBrowserStatusBarUi';
 import { useRefreshedAuthAssistanceUrl } from './browser-status-bar/useRefreshedAuthAssistanceUrl';
-import type {
-  BrowserStatusBarProps,
-  PendingAuthAssistance,
-  BrowserStatusBarViewModel,
-} from './browser-status-bar/types';
+import type { BrowserStatusBarProps, PendingAuthAssistance } from './browser-status-bar/types';
+import { isFinishedAgentStatus } from './browser-status-bar/liveViewDisplay';
 
 function presentedControlState(
   isUserControlling: boolean,
@@ -114,99 +122,176 @@ function controlActionFor(
   return () => ui.onTakeControl(isDisconnected);
 }
 
-function sharedBrowserView(vm: BrowserStatusBarViewModel, ui: BrowserStatusBarUi) {
+/** Keep this agent's browser listed as a Browser-drawer tab while mounted. */
+function useDrawerTabRegistration(
+  agentId: string | null,
+  taskId: string,
+  { browserLive: live, browserEnded: ended }: { browserLive: boolean; browserEnded: boolean },
+  messages: Message[],
+  { browserSessionMetadata }: ReturnType<typeof useBrowserStatusBarState>,
+) {
+  const pageUrl = useMemo(() => latestBrowserPageUrl(messages, taskId), [messages, taskId]);
+  const actualModel = useMemo(() => latestBrowserActualModel(messages, taskId), [messages, taskId]);
+  const rosePool = useMemo(() => latestBrowserRosePool(messages, taskId), [messages, taskId]);
+  const taskLabel = useMemo(() => browserTaskLabel(messages, taskId), [messages, taskId]);
+  const apps = useRoseApps();
+  const register = apps?.registerAgentBrowser;
+  const unregister = apps?.unregisterAgentBrowser;
+  const missing =
+    agentId !== null &&
+    apps?.tabs.some((t) => t.agentId === agentId && t.taskId === taskId) !== true;
+  useEffect(() => {
+    if (agentId === null || !register) return;
+    register({
+      agentId,
+      taskId,
+      taskLabel,
+      live: live && !ended,
+      ended,
+      pageUrl,
+      actualModel,
+      rosePool,
+      browserSessionMetadata,
+    });
+  }, [
+    agentId,
+    taskLabel,
+    live,
+    ended,
+    missing,
+    pageUrl,
+    actualModel,
+    rosePool,
+    register,
+    taskId,
+    browserSessionMetadata,
+  ]);
+  useEffect(() => {
+    if (agentId === null || !unregister) return undefined;
+    return () => unregister(agentId, taskId);
+  }, [agentId, taskId, unregister]);
+  return { slot: apps?.slot ?? null, reloadKey: apps?.browserReloadKey ?? 0 };
+}
+
+/** Session/control props the drawer pane needs beyond the shared view props. */
+function drawerPaneState(
+  vm: ReturnType<typeof useBrowserStatusBarState>,
+  ui: BrowserStatusBarUi,
+  messages: Message[],
+  isDisconnected: boolean,
+  isWaitingForAuthAssistance: boolean,
+) {
   return {
-    browserUrl: ui.browserUrl,
-    browserLive: ui.isLive,
-    outputSchema: vm.outputSchema,
-    browserSessionMetadata: vm.browserSessionMetadata,
+    messages,
+    stepProgress: vm.stepProgress,
+    isDisconnected,
+    isWaitingForAuthAssistance,
+    authAssistanceRequest: vm.pendingAuthAssistance?.request,
+    isResuming: ui.isResuming,
+    isUserControlling: ui.isUserControlling,
+    pendingWriteLockApproval: vm.readOnly ? null : vm.pendingWriteLockApproval,
   };
+}
+
+/** Live view to hand the user during auth assistance (refreshed URL first). */
+function useHandoffBrowserUrl(vm: ReturnType<typeof useBrowserStatusBarState>): string | null {
+  const refreshedAuthUrl = useRefreshedAuthAssistanceUrl(
+    vm.readOnly ? null : vm.pendingAuthAssistance,
+  );
+  return refreshedAuthUrl ?? vm.pendingAuthAssistance?.liveViewUrl ?? null;
 }
 
 function BrowserStatusBarImpl(props: BrowserStatusBarProps) {
   const { taskId, browserUrl, forceMinimized = false } = props;
   const { agent, messages, selectedAgentId } = useAgentContext();
+  const agentId = agent?.agent_id ?? selectedAgentId ?? null;
   const vm = useBrowserStatusBarState(taskId);
-  const refreshedAuthUrl = useRefreshedAuthAssistanceUrl(
-    vm.readOnly ? null : vm.pendingAuthAssistance,
-  );
-  const handoffBrowserUrl = refreshedAuthUrl ?? vm.pendingAuthAssistance?.liveViewUrl ?? null;
+  const handoffBrowserUrl = useHandoffBrowserUrl(vm);
   const ui = useBrowserStatusBarUi(
     taskId,
     forceMinimized,
-    agent?.agent_id ?? selectedAgentId ?? null,
+    agentId,
     browserUrl,
     handoffBrowserUrl,
     vm.readOnly,
   );
-  const nativeRequestId = phoneAttentionCandidate(
-    taskId,
-    agent?.agent_id ?? selectedAgentId,
-    messages,
-  );
-  usePhoneFullscreenEntry(taskId, messages, ui, forceMinimized, vm.readOnly ? '' : nativeRequestId);
-  const sharedViewProps = sharedBrowserView(vm, ui);
-  const isWaitingForAuthAssistance =
-    vm.pendingAuthAssistance !== null && !vm.pendingAuthAssistance.target && !ui.hasReconnected;
-
+  const sharedViewProps = {
+    browserUrl: ui.browserUrl,
+    browserLive: ui.isLive,
+    browserEnded: isFinishedAgentStatus(agent?.status),
+    outputSchema: vm.outputSchema,
+    browserSessionMetadata: vm.browserSessionMetadata,
+  };
+  const isWaitingForAuthAssistance = vm.pendingAuthAssistance !== null && !ui.hasReconnected;
+  const isDisconnected = vm.isDisconnected && !ui.hasReconnected;
   const controlState = presentedControlState(
     ui.isUserControlling,
-    vm.isDisconnected && !ui.hasReconnected,
+    isDisconnected,
     isWaitingForAuthAssistance,
   );
   const handleControlAction = controlActionFor(ui, vm.pendingAuthAssistance, controlState, {
-    isDisconnected: vm.isDisconnected && !ui.hasReconnected,
+    isDisconnected,
   });
+  const drawer = useDrawerTabRegistration(agentId, taskId, sharedViewProps, messages, vm);
 
-  if (ui.isFullscreen) {
-    return (
-      <BrowserStatusBarFullscreen
-        readOnly={vm.readOnly}
-        agentId={agent?.agent_id ?? selectedAgentId ?? null}
-        taskId={taskId}
-        {...sharedViewProps}
-        messages={messages}
-        stepProgress={vm.stepProgress}
-        isDisconnected={vm.isDisconnected && !ui.hasReconnected}
-        isWaitingForAuthAssistance={isWaitingForAuthAssistance}
-        authAssistanceRequest={vm.pendingAuthAssistance?.request}
-        isResuming={ui.isResuming}
-        isUserControlling={ui.isUserControlling}
-        pendingWriteLockApproval={vm.readOnly ? null : vm.pendingWriteLockApproval}
-        onClose={ui.onFullscreenClose}
-        onResume={handleControlAction}
-      />
-    );
-  }
+  const drawerPane =
+    ui.isInDrawer && drawer.slot !== null
+      ? createPortal(
+          <BrowserAgentPane
+            key={drawer.reloadKey}
+            readOnly={vm.readOnly}
+            agentId={agentId}
+            taskId={taskId}
+            {...sharedViewProps}
+            {...drawerPaneState(vm, ui, messages, isDisconnected, isWaitingForAuthAssistance)}
+            onResume={handleControlAction}
+          />,
+          drawer.slot,
+        )
+      : null;
 
-  if (!ui.isExpanded) {
-    return (
+  const inline =
+    ui.isInDrawer || !ui.isExpanded ? (
       <BrowserStatusBarMinimized
         {...sharedViewProps}
         forceMinimized={forceMinimized}
+        showThumbnail={!ui.isInDrawer}
         lastActionType={vm.lastActionType}
         lastActionTitle={vm.lastActionTitle}
         controlState={controlState}
         onExpand={ui.onExpand}
         onThumbnailClick={ui.onThumbnailClick}
-        onFullscreenClick={ui.onFullscreenToggle}
+        onFullscreenClick={ui.onDrawerToggle}
+      />
+    ) : (
+      <BrowserStatusBarExpanded
+        taskId={taskId}
+        {...sharedViewProps}
+        isDisconnected={isDisconnected}
+        isWaitingForAuthAssistance={isWaitingForAuthAssistance}
+        stepProgress={vm.stepProgress}
+        onThumbnailClick={ui.onThumbnailClick}
+        onFullscreenToggle={ui.onDrawerToggle}
+        onCollapse={ui.onCollapse}
       />
     );
-  }
 
   return (
-    <BrowserStatusBarExpanded
-      taskId={taskId}
-      {...sharedViewProps}
-      isDisconnected={vm.isDisconnected && !ui.hasReconnected}
-      isWaitingForAuthAssistance={isWaitingForAuthAssistance}
-      stepProgress={vm.stepProgress}
-      onThumbnailClick={ui.onThumbnailClick}
-      onFullscreenToggle={ui.onFullscreenToggle}
-      onCollapse={ui.onCollapse}
-    />
+    <>
+      {inline}
+      {drawerPane}
+    </>
   );
 }
 
-const BrowserStatusBar = memo(BrowserStatusBarImpl);
+/** Rose Desktop accounts get the Browser drawer; everyone else keeps the stock fullscreen view. */
+function BrowserStatusBarSwitch(props: BrowserStatusBarProps) {
+  return useRoseDesktop() ? (
+    <BrowserStatusBarImpl {...props} />
+  ) : (
+    <LegacyBrowserStatusBar {...props} />
+  );
+}
+
+const BrowserStatusBar = memo(BrowserStatusBarSwitch);
 export default BrowserStatusBar;

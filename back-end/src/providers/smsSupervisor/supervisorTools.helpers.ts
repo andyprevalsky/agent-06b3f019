@@ -9,6 +9,7 @@
 
 import { prisma } from '../database';
 import { createLogger } from '../logger';
+import type { PendingOp } from './supervisorTools';
 
 const log = createLogger('SmsSupervisorTools');
 
@@ -17,58 +18,6 @@ export function unknownSupervisorToolError(tool: string): string {
     return 'Unknown tool: spawn_agent. On the SMS surface use start_new_agent (and kill_agent) — spawn_agent is the main-agent tool, not available here.';
   }
   return `Unknown tool: ${tool}`;
-}
-
-const REPLY_INTENT_STOP_WORDS = new Set([
-  'agent',
-  'task',
-  'call',
-  'ask',
-  'tell',
-  'reply',
-  'message',
-  'please',
-  'about',
-  'with',
-  'that',
-  'this',
-  'from',
-  'have',
-  'what',
-  'when',
-  'where',
-]);
-
-function intentKeywords(value: string): Set<string> {
-  return new Set(
-    value
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, ' ')
-      .split(' ')
-      .filter((word) => word.length >= 3 && !REPLY_INTENT_STOP_WORDS.has(word))
-  );
-}
-
-function referencesGoal(message: string, goal: string): boolean {
-  const messageWords = intentKeywords(message);
-  return [...intentKeywords(goal)].some((word) => messageWords.has(word));
-}
-
-/** Require the current SMS—not ambient agent state—to justify an agent reply. */
-export function smsIntendsAgentReply(params: {
-  currentUserMessage: string;
-  visibleSessionHistory: string[];
-  agentGoal: string;
-}): boolean {
-  if (referencesGoal(params.currentUserMessage, params.agentGoal)) return true;
-  const isShortConfirmation =
-    /^(yes|yep|yeah|ok|okay|sure|approved?|go ahead|do it|proceed|sounds good)[.!\s]*$/i.test(
-      params.currentUserMessage.trim()
-    );
-  if (!isShortConfirmation) return false;
-  return params.visibleSessionHistory
-    .slice(-4)
-    .some((message) => referencesGoal(message, params.agentGoal));
 }
 
 /**
@@ -123,4 +72,28 @@ export async function resolveAgentPrefix(
   }
 
   return agent;
+}
+
+/**
+ * Resolve a write-tool target, including an agent this run queued with
+ * start_new_agent. The queued result advertises its provisional id, the start
+ * commit creates the row with exactly that id, and pending writes commit in
+ * order, so a write queued against it lands after the agent exists.
+ */
+export async function resolveAgentTarget(
+  prefixOrId: string,
+  userId: string,
+  pendingWrites: readonly PendingOp[]
+): Promise<{ id: string } | null> {
+  const input = prefixOrId.trim();
+  const queued =
+    input.length > 0
+      ? pendingWrites.find(
+          (op): op is Extract<PendingOp, { kind: 'start_new_agent' }> =>
+            op.kind === 'start_new_agent' && op.provisionalId.startsWith(input)
+        )
+      : undefined;
+  if (queued) return { id: queued.provisionalId };
+  const agent = await resolveAgentPrefix(input, userId);
+  return agent ? { id: agent.id } : null;
 }

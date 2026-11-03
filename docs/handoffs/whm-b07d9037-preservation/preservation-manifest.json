@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "old_devbox_id": "b07d9037-81f9-4c97-80d7-6f4d42b7adc1",
+  "original_claude_session": "4f2f012f-6f90-478e-8068-2b9474d4e5da",
+  "all_original_task_source_checkpointed": true,
+  "important_private_state_durably_preserved": true,
+  "old_box_authenticated_all_archive_members": true,
+  "replacement_authenticated_member_verification": "verified: all6archives/44485original members authenticated/decrypted from newe9afcffd; exact inventory comparisons passed",
+  "archives": [
+    "native-static-receipt.json",
+    "original-runtime-receipt.json",
+    "original-git-control-receipt.json",
+    "supplement-receipt.json",
+    "protected-instructions-receipt.json",
+    "original-session-receipt.json"
+  ],
+  "archived_member_count": 44485,
+  "original_bytes": 23144595408,
+  "ciphertext_bytes": 4131361474,
+  "source_variants": "four exact unpushed cache commits verified in PR Git bundle; original two worktree heads are PR ancestors",
+  "ignored_helpers": "15 byte-exact originals with manifest in PR",
+  "legacy_stash": "exact source patch in PR; complete original stash bundle in private Git-control archive; full original repo19544refs in runtime archive",
+  "nested_reference": "upstream mirror refs/native tag preserved in private full Git bundle, CLI-help patch in PR; no unpublished task-owned changes",
+  "regenerable_exclusions": [
+    "installed dependency trees/venvs/node_modules, pinned manifests and wheels retained",
+    "generated .context/test-runs scratch fixtures, registered producers retained",
+    "frontend build caches and transient lock/cache files"
+  ],
+  "local_db_disposition": "two source fixtures and prior owned workspace database dumps preserved; original benchmark DB removed by normal original launcher after final transcript/native export, not recreated",
+  "raw_original_context": "19 original Claude/subagent files privately encrypted; no raw sessions in Git",
+  "owned_runtime": "run12 finished naturally; benchmark and stack clean receipts; native retirement joined revision105; all exact owned processes absent",
+  "standing_protections": "Freedom unchanged; protected original instruction copies privately preserved; no locks/permissions/ownership weakened",
+  "migration_complete": false,
+  "archive_disposition": "ready for own old-box archive request; durable verified continuation63eb4817c; acceptance/completion not yet claimed"
+}

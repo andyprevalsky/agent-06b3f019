@@ -1,8 +1,8 @@
 """Goal identity for test-mass-agent-run-0 (the July OAi demo tree).
 
-Nested GP skip, the Andy name rewrite and Fast Mode cache replay must apply to
+Nested GP skip, the Andy name rewrite and DEMO cache replay must apply to
 this tree only, so the workflow, the spawn/wait domains, the LLM helpers and
-the fast cache all gate on these predicates.
+the DEMO cache all gate on these predicates.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def is_oai_demo_mass_agent_task(workflow_instance: Any) -> bool:
     blows the 900s smoke cap.
     """
     chunks = (
-        getattr(workflow_instance, "fast_cache_goal", None) or "",
+        getattr(workflow_instance, "demo_cache_goal", None) or "",
         getattr(workflow_instance, "goal", None) or "",
         getattr(workflow_instance, "root_goal", None) or "",
     )

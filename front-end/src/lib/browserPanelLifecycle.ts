@@ -8,14 +8,7 @@ export interface BrowserPanelData {
 
 // ── Browser panels ────────────────────────────────────────────────────────
 
-const TERMINAL_BROWSER_ACTION_TYPES = new Set([
-  'task_complete',
-  'session_paused',
-  // User rejected a write-lock approval — the browser task ends without
-  // task_complete (handler returns immediately). Prod agent c27b4f28
-  // (2026-08-22): chip stayed visible after Aman rejected a 1-item checkout.
-  'write_lock_rejected',
-]);
+const TERMINAL_BROWSER_ACTION_TYPES = new Set(['task_complete', 'session_paused']);
 const TERMINAL_BROWSER_TOOL_STATUSES = new Set(['FINISHED', 'ERROR']);
 
 const BROWSER_CLEANUP_ACTION_TYPES = new Set(['diagnostics', 'network_recording', 'recording']);
@@ -86,78 +79,71 @@ function compareBrowserMessageOrder(a: Message, b: Message): number {
   return 0;
 }
 
+interface BrowserPanelState extends BrowserPanelData {
+  toolCallId: string | undefined;
+  complete: boolean;
+}
+
 /**
- * Browser status chip lifecycle:
+ * Browser status chip lifecycle, reduced in persisted event order:
  *
- * spawn_browser_agent init/browser/system/session_started
- *   -> [VISIBLE_STATUS_CHIP]
- *   -> browser URL events --sort by persisted event time--> [LATEST_LIVE_VIEW]
- *      (API hydration/realtime delivery order does not affect the selected URL)
- *   -> task-scoped browser progress messages
- *   -> terminal message, at either scope:
- *        - task-scoped (metadata.task_id set): action_type
- *          task_complete/session_paused, or legacy system/untyped
- *          spawn_browser_agent toolStatus FINISHED/ERROR
- *        - tool-call-scoped (no task_id, matched via the init message's
- *          toolCallId): same predicate — covers session_paused and the
- *          worker's generic tool-error path, which only knows the toolCallId
- *   -> auth_assistance FINISHED remains non-terminal and resumes this task
- *   -> [HIDDEN_STATUS_CHIP]
+ * [ABSENT] --browser/session_started/session_init (legacy system)--> [VISIBLE]
+ * [VISIBLE] --current task/call terminal--> [HIDDEN]
+ * [VISIBLE] --write-lock rejection feedback--> [VISIBLE]
+ * [HIDDEN] --explicit session start or new invocation on same task--> [VISIBLE]
+ * [HIDDEN] --verifier system / recording / diagnostics--> [HIDDEN]
+ *
+ * A task is a reusable BrowserSession identity. Only its current invocation's
+ * terminal events close it; old-call cleanup cannot close a reopened session.
+ * A retry's new task supersedes the previous task of the same tool call.
  */
 export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelData[] {
-  const panels: BrowserPanelData[] = [];
-  const browserTaskIds = new Set<string>();
+  const tasks = new Map<string, BrowserPanelState>();
   const terminalToolCallIds = new Set<string>();
   const latestTaskByToolCallId = new Map<string, string>();
 
-  [...messages].sort(compareBrowserMessageOrder).forEach((m) => {
-    const taskId = m.metadata?.task_id;
-    if (taskId && m.metadata?.toolName === 'spawn_browser_agent') {
-      browserTaskIds.add(taskId);
+  for (const m of [...messages].sort(compareBrowserMessageOrder)) {
+    const {
+      task_id: taskId,
+      toolCallId,
+      action_type: actionType,
+      browser_url: url,
+    } = m.metadata ?? {};
+    let task = taskId ? tasks.get(taskId) : undefined;
+    if (taskId && isBrowserInitMessage(m) && (!task || actionType !== 'system')) {
+      // `browser` carries the spawn invocation id. Session/action events can
+      // carry their own tool-call ids, so a rebind retains that invocation.
+      const ownerCallId = actionType === 'browser' || !task ? toolCallId : task.toolCallId;
+      task = { taskId, toolCallId: ownerCallId, browserUrl: url ?? '', complete: false };
+      tasks.set(taskId, task);
+      if (ownerCallId) {
+        latestTaskByToolCallId.set(ownerCallId, taskId);
+        terminalToolCallIds.delete(ownerCallId);
+      }
     }
-    const toolCallId = m.metadata?.toolCallId;
-    if (taskId && toolCallId && isBrowserInitMessage(m)) {
-      // A Temporal retry can allocate a new task id for the same logical tool
-      // call. Its init supersedes the earlier attempt even if hydration or
-      // realtime input does not contain the prior attempt's terminal event.
-      latestTaskByToolCallId.set(toolCallId, taskId);
+    const terminal = isBrowserTaskTerminalMessage(m);
+    if (task && (!terminal || !toolCallId || !task.toolCallId || toolCallId === task.toolCallId)) {
+      if (
+        typeof url === 'string' &&
+        url !== '' &&
+        !BROWSER_CLEANUP_ACTION_TYPES.has(actionType ?? '')
+      ) {
+        task.browserUrl = url;
+      }
+      if (terminal) task.complete = true;
     }
     if (toolCallId && isToolCallScopedTerminalMessage(m)) {
       terminalToolCallIds.add(toolCallId);
     }
-  });
+  }
 
-  browserTaskIds.forEach((taskId) => {
-    const taskMessages = messages
-      .filter((m) => m.metadata?.task_id === taskId)
-      .sort(compareBrowserMessageOrder);
-    const initMessage = taskMessages.find(isBrowserInitMessage);
-    const initToolCallId = initMessage?.metadata?.toolCallId;
-    const latestBrowserMessage = [...taskMessages]
-      .reverse()
-      .find(
-        (m) =>
-          typeof m.metadata?.browser_url === 'string' &&
-          m.metadata.browser_url !== '' &&
-          !BROWSER_CLEANUP_ACTION_TYPES.has(m.metadata.action_type ?? ''),
-      );
-
-    const hasTerminalTaskMessage = taskMessages.some(isBrowserTaskTerminalMessage);
-
-    const isComplete =
-      hasTerminalTaskMessage ||
-      (typeof initToolCallId === 'string' && terminalToolCallIds.has(initToolCallId));
-    const isSuperseded =
-      typeof initToolCallId === 'string' && latestTaskByToolCallId.get(initToolCallId) !== taskId;
-
-    if (!isComplete && !isSuperseded && initMessage) {
-      panels.push({
-        taskId,
-        browserUrl:
-          latestBrowserMessage?.metadata?.browser_url || initMessage.metadata?.browser_url || '',
-      });
-    }
-  });
-
-  return panels;
+  return [...tasks.values()]
+    .filter(
+      (task) =>
+        !task.complete &&
+        (!task.toolCallId ||
+          (!terminalToolCallIds.has(task.toolCallId) &&
+            latestTaskByToolCallId.get(task.toolCallId) === task.taskId)),
+    )
+    .map(({ taskId, browserUrl }) => ({ taskId, browserUrl }));
 }

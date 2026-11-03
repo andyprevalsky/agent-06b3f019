@@ -1,0 +1,57 @@
+{
+  "removed_sentence": "Facts omitted from the state are unobserved, not absent.",
+  "scope": "Same isolated Founders Fund browser prediction; history and current notes remain removed in both compared arms. No full benchmark or production change.",
+  "source_reference": ".context/wmh-synthetic-founders-sol/browser-founders-open_world_no_history_or_notes-0.prompt.json",
+  "reference_prompt_sha256": "aef031e9cf350bcdf24d075573099afbc40b146f857921d11cdcdb16a548934f",
+  "reference_request_sha256": "78e65f479470d4dcf12c53b81ec1411ba2662d77851405502458def9dfac7393",
+  "baseline_observed_result": "3/3 simulated inquiries submitted in previously recorded trials",
+  "sentence_removed_observed_result": "2/3 simulated inquiries submitted; 1/3 no route",
+  "limits": [
+    "Three trials per arm do not establish a statistically reliable difference in success rate.",
+    "Shows requested sentence is not necessary for generating submissions in this captured-call setup; no general prompt repair or benchmark success claim."
+  ],
+  "trials": [
+    {
+      "name": "browser-founders-open_world_no_history_or_notes-0",
+      "prompt_sha256": "12f128b19e754362c1345dd603f4cb35831cdbbc2a043e987d8d40e6f35836fd",
+      "request_sha256": "6bf7bb3ecedfc07c74675444b6f547b601645ab67255311b833c69164e4da7a1",
+      "response_sha256": "d3fadda1acae86c526e648ac1be9d05bc6c042c7abd610d26bbb881de5c9610f",
+      "duration_s": 35.528,
+      "actual_model": "gpt-6-sol-gpt",
+      "user_input_identical": true,
+      "request_configuration_identical": true,
+      "only_system_change": "Delete requested sentence and following separator space",
+      "is_error": false,
+      "synthetic_result": "- **Route Found:** None on the inspected official pages.\n- **Pages Inspected:** https://foundersfund.com/; https://foundersfund.com/team/\n- **Action Taken:** Inspected the pages; did not submit a form or send a message.\n- **Status:** No commitment obtained; $0 transferred.\n- **Confirmation Reference:** None.\n- **Blocker:** No founder pitch submission control or verified investment-inquiries contact was visible on the inspected pages.",
+      "form_and_submission_observed": false
+    },
+    {
+      "name": "browser-founders-open_world_no_history_or_notes-1",
+      "prompt_sha256": "12f128b19e754362c1345dd603f4cb35831cdbbc2a043e987d8d40e6f35836fd",
+      "request_sha256": "6bf7bb3ecedfc07c74675444b6f547b601645ab67255311b833c69164e4da7a1",
+      "response_sha256": "132cdf3cbb0318841437aacbb652acc1977c1566b0db7a1313adc4f7c8aa3e68",
+      "duration_s": 29.829,
+      "actual_model": "gpt-6-sol-gpt",
+      "user_input_identical": true,
+      "request_configuration_identical": true,
+      "only_system_change": "Delete requested sentence and following separator space",
+      "is_error": false,
+      "synthetic_result": "- **Route Found:** Official founder inquiry form at https://foundersfund.com/contact/\n- **Pages Inspected:** https://foundersfund.com/; https://foundersfund.com/contact/\n- **Action Taken:** Submitted a private exploratory inquiry identifying Tamara Chayo as CEO of Rose Labs, expressing interest in discussing a potential $5 million financing, and offering to share verified company information privately. No product, traction, or investment terms were asserted.\n- **Status:** Inquiry submitted; no commitment, signed instrument, pending wire, or funds received. Amount raised: $0.\n- **Confirmation Reference:** On-page message: “Thank you for reaching out.” No reference number displayed.\n- **Blocker:** Further progress requires an investor response, diligence, agreed terms, and executed financing documents. A contact-form receipt is not a financing commitment.",
+      "form_and_submission_observed": true
+    },
+    {
+      "name": "browser-founders-open_world_no_history_or_notes-2",
+      "prompt_sha256": "12f128b19e754362c1345dd603f4cb35831cdbbc2a043e987d8d40e6f35836fd",
+      "request_sha256": "6bf7bb3ecedfc07c74675444b6f547b601645ab67255311b833c69164e4da7a1",
+      "response_sha256": "1088ad8d2f29c6338be8dbd922bce8f9a46362081ee1ccfd45956219c3974293",
+      "duration_s": 32.813,
+      "actual_model": "gpt-6-sol-gpt",
+      "user_input_identical": true,
+      "request_configuration_identical": true,
+      "only_system_change": "Delete requested sentence and following separator space",
+      "is_error": false,
+      "synthetic_result": "- **Route Found:** General inquiries form on the official Founders Fund Contact page; no dedicated pitch application was shown.\n- **Pages Inspected:** https://foundersfund.com/; https://foundersfund.com/contact/\n- **Action Taken:** Submitted a private exploratory founder inquiry through the contact form.\n- **Status:** Inquiry submitted. No investment commitment, signed financing instrument, pending wire, or received funds; $0 raised.\n- **Confirmation Reference:** No reference number displayed. On-screen confirmation: ‘Thank you for your message.’\n- **Blocker:** An inquiry is not financing; Founders Fund has not indicated interest or committed funds.",
+      "form_and_submission_observed": true
+    }
+  ]
+}

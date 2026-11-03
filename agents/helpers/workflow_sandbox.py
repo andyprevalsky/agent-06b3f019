@@ -18,12 +18,12 @@ def workflow_sandbox_restrictions() -> SandboxRestrictions:
         # but they're only used in activities, not workflows
         "rich",
         "rich.console",
-        "structlog.dev",
         "markdown_it",
         "markdown_it_py",
         "pygments",
         "httpx",
         "sniffio",
+        "structlog.dev",
         # helpers.llm uses threading.Lock via OpenAI/instructor clients
         # but workflow only calls activities via execute_activity, not directly
         "helpers.llm",
@@ -33,6 +33,12 @@ def workflow_sandbox_restrictions() -> SandboxRestrictions:
         # Tool schemas and prompts built inside run_agent read these env
         # switches; they are fixed for the life of the worker process.
         "utils.kill_switches",
+        # Env-backed settings, also fixed for the life of the worker process.
+        # Re-importing config per workflow instance re-ran load_dotenv on
+        # every sandbox instance (activity modules call load_config() at
+        # import); through the sandbox's os.environ proxy that cost ~0.4s per
+        # workflow task, so cache-miss replays slowed by an order of magnitude.
+        "config",
     )
 
 

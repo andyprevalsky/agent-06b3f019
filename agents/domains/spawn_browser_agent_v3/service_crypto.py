@@ -642,6 +642,20 @@ def auth_realm_from_url(url: str) -> str:
     return host
 
 
+def signed_in_realm_for_secret_refs(used_refs: Any, url: str) -> str:
+    """Realm where an action just typed a saved (or newly minted) password.
+
+    This is the sign-in evidence the browser close sends as ``signed_in_sites``:
+    the backend marks that site's login in the user's browser template as
+    validated, which wins its keep-best rule. Card and other non-password refs
+    are not a sign-in. Empty when there is no evidence. The backend
+    canonicalizes the host to its registrable domain.
+    """
+    if not any(isinstance(ref, str) and ref.startswith("pwd:") for ref in (used_refs or ())):
+        return ""
+    return auth_realm_from_url(url or "")
+
+
 def auth_realm_matches_url(auth_realm: str, url: str) -> bool:
     """Return whether a backend-authoritative realm owns this URL host."""
     if not auth_realm or not url:
@@ -781,6 +795,11 @@ def build_auth_options_prompt_section(
     passwords = auth_options.get("passwords") or []
     email_otp = auth_options.get("email_otp") or auth_options.get("emailOtp") or {}
     minted = auth_options.get("minted")
+    # Inboxes and phones whose one-time codes the runtime delivers to the agent.
+    readable = {str(value).lower() for value in auth_options.get("readable_identifiers") or []}
+
+    def _reachable(identifier: Any) -> str:
+        return " (codes sent here reach you automatically)" if str(identifier).lower() in readable else ""
 
     lines: List[str] = [f"# Auth Options for {realm}"]
 
@@ -829,6 +848,15 @@ def build_auth_options_prompt_section(
             credential_id = pwd.get("id") or (matched or {}).get("id") or ref
             display_origin = origin_for_ref or "saved password"
 
+            if pwd.get("browserSource") == "agent_passwordless":
+                # A minted identity's account on a code- or link-only site: no password to type.
+                credential_refs_by_secret_ref[str(username)] = {"kind": "password", "id": str(credential_id)}
+                lines.append(
+                    f"  - {display_origin} | {username}{_reachable(username)} | no password (sign in with a code "
+                    f"or link sent to it) | {_disabled_label(pwd)}"
+                )
+                continue
+
             if not encrypted:
                 unavailable_password_count += 1
                 lines.append(
@@ -842,7 +870,10 @@ def build_auth_options_prompt_section(
                 password_origins[ref] = origin_for_ref
             credential_refs_by_secret_ref[ref] = {"kind": "password", "id": str(credential_id)}
 
-            lines.append(f"  - {display_origin} | {username} | ref: {secret_placeholder(ref)} | {_disabled_label(pwd)}")
+            lines.append(
+                f"  - {display_origin} | {username}{_reachable(username)} | ref: {secret_placeholder(ref)} "
+                f"| {_disabled_label(pwd)}"
+            )
         if unavailable_password_count:
             lines.append(
                 f"  - {unavailable_password_count} saved password(s) were omitted as refs because this session "
@@ -865,6 +896,7 @@ def build_auth_options_prompt_section(
     else:
         lines.append("- Passkey: none")
 
+    accounts_end = len(lines)
     available = bool(email_otp.get("available"))
     connected = email_otp.get("connected_emails") or email_otp.get("connectedEmails") or []
     match = email_otp.get("match_for_site_account") or email_otp.get("matchForSiteAccount")
@@ -922,6 +954,14 @@ def build_auth_options_prompt_section(
     else:
         lines.append("- Minted account: none")
 
+    # What exists for this site, apart from the identities codes reach.
+    lines = [
+        lines[0],
+        "- Accounts for this site:",
+        *[f"  {line}" for line in lines[1:accounts_end]],
+        "- Identities you can use (codes sent to these reach you automatically):",
+        *[f"  {line}" for line in lines[accounts_end:]],
+    ]
     return "\n".join(lines), ref_to_encrypted, password_origins, credential_refs_by_secret_ref
 
 
@@ -1043,7 +1083,9 @@ def finalize_parked_payment_card_approval_history(
     if not isinstance(resume_state, dict):
         return resume_state
     ready = payment_card_ready_tool_result(last4)
-    ready_json = json.dumps(ready, separators=(",", ":"), ensure_ascii=False)
+
+    def completed_result(previous: Any) -> Dict[str, Any]:
+        return {**(previous if isinstance(previous, dict) else {}), **ready}
 
     history = resume_state.get("action_history")
     if isinstance(history, list):
@@ -1053,7 +1095,7 @@ def finalize_parked_payment_card_approval_history(
             if entry.get("action") != "request_payment_card":
                 continue
             if _is_awaiting_payment_card_approval_result(entry.get("result")):
-                entry["result"] = dict(ready)
+                entry["result"] = completed_result(entry["result"])
 
     simulated = resume_state.get("simulated_action_entries")
     if isinstance(simulated, list):
@@ -1063,7 +1105,7 @@ def finalize_parked_payment_card_approval_history(
             if entry.get("action") != "request_payment_card":
                 continue
             if _is_awaiting_payment_card_approval_result(entry.get("result")):
-                entry["result"] = dict(ready)
+                entry["result"] = completed_result(entry["result"])
 
     for turns_key in ("browser_turn_messages", "simulated_turn_messages"):
         turns = resume_state.get(turns_key)
@@ -1079,7 +1121,13 @@ def finalize_parked_payment_card_approval_history(
             if name not in {None, "", "request_payment_card"}:
                 continue
             if _tool_message_content_is_awaiting_payment_card(message.get("content")):
-                message["content"] = ready_json
+                try:
+                    previous = json.loads(message["content"])
+                except (TypeError, ValueError):
+                    previous = {}
+                message["content"] = json.dumps(
+                    completed_result(previous), separators=(",", ":"), ensure_ascii=False
+                )
                 message["name"] = "request_payment_card"
 
     return resume_state

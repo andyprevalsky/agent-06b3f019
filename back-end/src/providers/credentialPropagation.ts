@@ -27,6 +27,7 @@ import {
 import { prisma } from './database';
 import { createLogger } from './logger';
 import { createMessage } from './messages';
+import { saveMintedPasswordlessLogin } from './mintedAccountPassword';
 
 export {
   buildCredentialClassifierSystemPrompt,
@@ -118,9 +119,23 @@ async function applyCredentialDecision(
         }
       }
       return;
-    case 'minted':
+    case 'minted': {
       await tx.mintedAccount.updateMany({ where: { id: credentialRef.id }, data });
+      if (decision.outcome !== 'success' || !credentialRef.username || !credentialRef.origin)
+        return;
+      const minted = await tx.mintedAccount.findUnique({
+        where: { id: credentialRef.id },
+        select: { userId: true },
+      });
+      if (minted === null) return;
+      await saveMintedPasswordlessLogin(tx, {
+        userId: minted.userId,
+        origin: credentialRef.origin,
+        username: credentialRef.username,
+        nowMs: Date.now(),
+      });
       return;
+    }
     case 'passkey':
       // auth_failed here means the relying party rejected our stored passkey
       // (revoked, counter mismatch) -> disable so auth-options stops surfacing it.

@@ -1,0 +1,16 @@
+{
+  "schema": "rose.wmh_base_rates.v1",
+  "task": "raise-5m-rose-labs-brex",
+  "source": "User-specified fundraiser base rates (2026-10-10 events-r1.json). Authoritative default for this simulation; values are the user's exact set.",
+  "applicability_note": "applies_to names the exact candidate call (canonical category, tool name and the argument that marks a send) verified against native Run13-18 captures: email sends use message.message_transport_send with to_email. Browser-agent sends carry no structured send field and are not matched by call; any outcome that records outreach in structured.outreach is matched by effect through applies_to_outreach (warm flag) instead.",
+  "base_rates": [
+    {"key": "cold_reply", "probability": 0.07, "event": "Investor replies to a cold first-touch outreach (email, SMS or LinkedIn)", "applies_when": "first contact with no warm introduction", "applies_to": [{"category": "message", "tool": "message_transport_send", "argument": "to_email"}], "applies_to_outreach": {"warm": false}, "group": "first_response", "precondition": {"counterparty_argument": "to_email", "delivered_base_rate_keys": ["cold_reply", "warm_reply"], "present": false}},
+    {"key": "warm_reply", "probability": 0.35, "event": "Investor replies to a warm-introduction or referred outreach", "applies_when": "a mutual contact introduced or referred Rose Labs", "applies_to": [{"category": "message", "tool": "message_transport_send", "argument": "to_email"}], "applies_to_outreach": {"warm": true}, "group": "first_response", "precondition": {"counterparty_argument": "to_email", "delivered_base_rate_keys": ["cold_reply", "warm_reply"], "present": false}},
+    {"key": "meeting_accepted", "probability": 0.45, "event": "Replying investor agrees to schedule a pitch meeting", "applies_when": "the investor replied and the fund invests at seed stage", "applies_to": [{"category": "message", "tool": "message_transport_send", "argument": "to_email"}], "group": "after_reply", "precondition": {"counterparty_argument": "to_email", "delivered_base_rate_keys": ["cold_reply", "warm_reply"], "present": true}},
+    {"key": "meeting_held", "probability": 0.85, "event": "Booked pitch meeting takes place as scheduled", "applies_when": "a meeting time was confirmed by both sides"},
+    {"key": "follow_up", "probability": 0.25, "event": "Investor asks for a follow-up meeting or diligence materials after a pitch", "applies_when": "a pitch meeting took place"},
+    {"key": "verbal_commit", "probability": 0.05, "event": "Investor verbally commits to invest after a pitch meeting", "applies_when": "a pitch meeting took place; the check size fits the investor's typical seed check, so roughly 200 meetings are needed to raise $5M"},
+    {"key": "safe_signed", "probability": 0.95, "event": "Committed investor signs the SAFE by e-signature", "applies_when": "the investor verbally committed and received the SAFE"},
+    {"key": "wire_settled", "probability": 0.95, "event": "Committed investor's wire settles in Rose Labs' Brex account within one simulated business day", "applies_when": "the SAFE is signed and wire instructions were sent"}
+  ]
+}

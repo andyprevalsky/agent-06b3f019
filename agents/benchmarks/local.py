@@ -11,7 +11,9 @@ import argparse
 import codecs
 import contextlib
 import fcntl
+import functools
 import hashlib
+import importlib.util
 import json
 import os
 import random
@@ -31,6 +33,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence, TextIO
+from urllib.parse import urlsplit
 
 AGENTS_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = AGENTS_DIR.parent
@@ -40,15 +43,69 @@ if str(AGENTS_DIR) not in sys.path:
 from benchmarks.benchmark_tasks import (
     RUNNABLE_TASK_RUNNERS,
     all_tasks,
-    selected_tasks_require_gate_type,
+    get_task_by_name,
 )
 from benchmarks.polar_catalog import is_polar_bench_task
 
 
-def selected_tasks_need_shared_fast_cache(task_names: Sequence[str]) -> bool:
-    """True when a selected task must read the shared July Fast Mode cache."""
+def apply_owned_wmh_recording(
+    env: dict[str, str],
+    *,
+    isolated: bool,
+    simulate: bool,
+    tasks: Sequence[object],
+    workspace: str | None,
+    fixture_database: str,
+) -> bool:
+    """Admit explicitly selected recording only into its retained owned cache."""
+    recording = env.get("FAST_MODE_CACHE_RECORD_DEMO", env.get("DEMO_CACHE_RECORD_DEMO", "")).strip().lower()
+    if not (isolated and simulate and recording in {"1", "true", "yes", "on"}):
+        return False
+    if not tasks or not all(getattr(task, "demo_cache", None) == "on" for task in tasks):
+        return False
+    manifest_path = env.get("WMH_OWNED_RECORDING_CACHE_MANIFEST", "")
+    retained_url = env.get("WMH_OWNED_RECORDING_CACHE_DATABASE_URL", "")
+    if not manifest_path and not retained_url:
+        return False
+    if not manifest_path:
+        raise ValueError("Selected isolated WMH recording requires a retained owned cache manifest")
+    manifest_file = Path(manifest_path)
+    if manifest_file.is_symlink() or not manifest_file.is_file():
+        raise ValueError("Owned recording manifest must be a regular private file")
+    manifest = json.loads(manifest_file.read_text())
+    url = env.get("WMH_OWNED_RECORDING_CACHE_DATABASE_URL", "")
+    parsed = urlsplit(url)
+    database = parsed.path.removeprefix("/")
+    owned = (
+        parsed.scheme in {"postgres", "postgresql"}
+        and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        and database.startswith("victoria_wmh_recording_")
+        and database != fixture_database
+        and manifest.get("checkout") == str(REPO_ROOT.resolve())
+        and manifest.get("owner_workspace") == workspace
+        and manifest.get("database") == database
+        and manifest.get("host") == parsed.hostname
+        and manifest.get("url_sha256") == hashlib.sha256(url.encode()).hexdigest()
+        and manifest.get("retained_across_iterations") is True
+    )
+    if not owned:
+        raise ValueError("WMH recording cache must be a retained loopback owner separate from the fixture")
+    env["FAST_MODE_CACHE_DATABASE_URL"] = url
+    _pop_demo_cache_env(env, "USE_LOCAL")
+    env["FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"] = "0"
+    return True
+
+
+def _pop_demo_cache_env(env: dict[str, str], suffix: str) -> None:
+    """Clear both spellings (DEMO_CACHE_* and legacy FAST_MODE_CACHE_*) from a child env."""
+    env.pop(f"DEMO_CACHE_{suffix}", None)
+    env.pop(f"FAST_MODE_CACHE_{suffix}", None)
+
+
+def selected_tasks_need_shared_demo_cache(task_names: Sequence[str]) -> bool:
+    """True when a selected task must read the shared July DEMO cache."""
     selected = set(task_names)
-    return any(task.fast_cache == "on" and task.name in selected for task in all_tasks())
+    return any(task.demo_cache == "on" and task.name in selected for task in all_tasks())
 
 
 def _dotenv_fast_mode_cache_database_url() -> str:
@@ -69,16 +126,22 @@ def _dotenv_fast_mode_cache_database_url() -> str:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
-        if key not in {"FAST_MODE_CACHE_DATABASE_URL", "DATABASE_URL"}:
+        if key not in {"FAST_MODE_CACHE_DATABASE_URL", "DEMO_CACHE_DATABASE_URL", "DATABASE_URL"}:
             continue
         value = value.strip()
         if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
             value = value[1:-1]
         found[key] = value
-    return found.get("FAST_MODE_CACHE_DATABASE_URL") or found.get("DATABASE_URL") or ""
+    return (
+        found.get("FAST_MODE_CACHE_DATABASE_URL")
+        or found.get("DEMO_CACHE_DATABASE_URL")
+        or found.get("DATABASE_URL")
+        or ""
+    )
 
 
 from benchmarks.dashboard import DashboardServer, dashboard_enabled, maybe_launch_dashboard
+from benchmarks.display_check import SANDBOX_DISPLAY_CHECK_TYPES
 from benchmarks.results import bounded_path_component
 from benchmarks.seed_cache_path import canonical_base_dump_path, seed_dump_path
 
@@ -107,6 +170,11 @@ SERVICE_START_TIMEOUT_SECONDS = 600
 # manifest. Keep the normal bound for cached starts, but give that one-time
 # bootstrap enough room to finish cleanly.
 COLD_SEED_SERVICE_START_TIMEOUT_SECONDS = 1200
+# A simulate stack with NO prebuilt World Model must list the R2 trace archive
+# (~80k bundles) and export/build the capped corpus before run.sh publishes its
+# manifest. That first build is a one-time cost per machine; give it an honest
+# budget instead of killing a healthy build at the warm-start bound.
+WMH_FIRST_BUILD_SERVICE_START_TIMEOUT_SECONDS = 1800
 DOCKER_CLEANUP_TIMEOUT_SECONDS = 5
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 NEW_USER_PAYMENT_JOURNEY_TASK_NAME = "agent-payment-new-user-journey"
@@ -255,6 +323,15 @@ def _owned_shutdown_timeout() -> int:
     if seconds <= 0:
         raise RuntimeError("invalid owned worker shutdown deadline")
     return seconds
+
+
+def _own_process_start_ticks() -> str:
+    """This process's kernel start time (/proc stat field 22); empty off Linux."""
+    try:
+        stat = Path(f"/proc/{os.getpid()}/stat").read_text()
+        return stat.rsplit(") ", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return ""
 
 
 def _record_stack_cleanup_owner(stack: ServiceStack, process: subprocess.Popen, token: str) -> None:
@@ -522,6 +599,21 @@ def _release_port_range(base: int | None) -> None:
         handle.close()
 
 
+def workspace_preferred_base(conductor_port: str | None) -> int | None:
+    """Prefer the workspace-adjacent range unless the kernel can hand it out.
+
+    An explicit --base-port is the caller's own range. This derived preference
+    is not, so it obeys the same ephemeral-range exclusion as automatic ranges.
+    """
+    if not conductor_port or not conductor_port.isdigit():
+        return None
+    base = int(conductor_port) + 200
+    ephemeral_range = _linux_ephemeral_port_range()
+    if ephemeral_range is not None and _overlaps_port_range(base, ephemeral_range):
+        return None
+    return base
+
+
 def allocate_port_range(preferred_base: int | None = None) -> int:
     docker_ports = _docker_ports_snapshot()
     candidates: list[int] = []
@@ -585,9 +677,7 @@ def build_service_stack(args: argparse.Namespace) -> ServiceStack:
     workspace_name = isolated_workspace_name(base_name, run_id)
     preferred_base = args.base_port
     if preferred_base is None:
-        env_base = os.environ.get("CONDUCTOR_PORT")
-        if env_base and env_base.isdigit():
-            preferred_base = int(env_base) + 200
+        preferred_base = workspace_preferred_base(os.environ.get("CONDUCTOR_PORT"))
     return ServiceStack(
         run_id=run_id,
         context_dir=context_dir,
@@ -659,6 +749,8 @@ def build_benchmark_args(
     keep_failed_agents: bool = True,
     simulate: bool = False,
     world_model_name: str | None = None,
+    wmh_initial_state_file: str | None = None,
+    timeout_seconds: int | None = None,
 ) -> list[str]:
     args = [_benchmark_python(), "-u", "benchmarks/run_benchmark.py"]
     args.extend(build_task_selector_args(selected_tasks, known_task_names()))
@@ -676,6 +768,10 @@ def build_benchmark_args(
         args.append("--simulate")
         if world_model_name:
             args.extend(["--world-model-name", world_model_name])
+    if wmh_initial_state_file:
+        args.extend(["--wmh-initial-state-file", wmh_initial_state_file])
+    if timeout_seconds is not None:
+        args.extend(["--timeout-seconds", str(timeout_seconds)])
     if len(selected_tasks) > 1:
         args.extend(["--parallel", "--max-concurrency", str(max_concurrency)])
     return args
@@ -1144,6 +1240,15 @@ def sms_web_search_fixture_path(stack: "ServiceStack") -> str:
     return str((stack.context_dir / "sms-web-search-fixture.json").resolve())
 
 
+def _declares_display_check(task) -> bool:
+    return any(
+        check.get("type") in SANDBOX_DISPLAY_CHECK_TYPES
+        for evaluator in task.evaluators or []
+        if evaluator.get("method") == "static_check"
+        for check in evaluator.get("checks", [])
+    )
+
+
 def needs_public_tunnel(tasks: Sequence[str]) -> bool:
     """True when some selected task actually needs a publicly reachable frontend.
 
@@ -1169,6 +1274,10 @@ def needs_public_tunnel(tasks: Sequence[str]) -> bool:
         if "{frontend_url}" in task.prompt:
             return True
         if isinstance(task.phone_persona, dict) and task.phone_persona.get("hold_line"):
+            return True
+        # A code agent publishes to Agent Display from its E2B sandbox, which
+        # reaches the backend only through the tunnel (export_sandbox_backend_base_url).
+        if _declares_display_check(task):
             return True
     return False
 
@@ -1199,10 +1308,6 @@ def needs_payment_fixture(tasks: Sequence[str]) -> bool:
     return bool(AGENT_PAYMENT_TASK_NAMES & set(tasks))
 
 
-def needs_non_purchase_gates(tasks: Sequence[str]) -> bool:
-    return selected_tasks_require_gate_type(list(tasks), "source_connect")
-
-
 def _dotenv_values(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.exists():
@@ -1214,6 +1319,43 @@ def _dotenv_values(path: Path) -> dict[str, str]:
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip().strip("\"'")
     return values
+
+
+COMPUTE_TOKEN_AUTHORITY_DEFAULT_URL = "https://navi-j9a9.onrender.com"
+
+
+def apply_compute_token_authority_env(env: dict[str, str]) -> None:
+    """Point an isolated stack's compute-token state at one shared authority.
+
+    A1 (approved 2026-10-20): every isolated stack restores its own database
+    with copies of the same real compute tokens, so its lease semaphore,
+    rate-limit marks and Foundry deployment cooldowns diverge from production's
+    and from every other stack's (RCA
+    2026-10-20-bench-guests-ran-independent-compute-token-semaphores). The
+    stack's backend delegates those internal calls to the production backend,
+    authenticated with ``BACKEND_API_KEY`` from ``back-end/.env``; an
+    unreachable authority fails them closed. ``BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off``
+    keeps the copied local state for diagnostics; an explicit
+    ``COMPUTE_TOKEN_AUTHORITY_URL`` / ``_API_KEY`` in the environment wins.
+    """
+    if env.get("BENCHMARK_COMPUTE_TOKEN_AUTHORITY", "").strip().lower() in {"off", "0", "false", "no"}:
+        # Empty exports also mask saved dotenv values in the child services.
+        env["COMPUTE_TOKEN_AUTHORITY_URL"] = ""
+        env["COMPUTE_TOKEN_AUTHORITY_API_KEY"] = ""
+        return
+    url = (env.get("COMPUTE_TOKEN_AUTHORITY_URL") or "").strip() or COMPUTE_TOKEN_AUTHORITY_DEFAULT_URL
+    api_key = (env.get("COMPUTE_TOKEN_AUTHORITY_API_KEY") or "").strip()
+    if not api_key:
+        api_key = (env.get("BACKEND_API_KEY") or "").strip()
+    if not api_key:
+        api_key = _dotenv_values(REPO_ROOT / "back-end" / ".env").get("BACKEND_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            f"compute-token authority {url} needs BACKEND_API_KEY in back-end/.env "
+            "(or BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off to keep the stack's copied token state for diagnostics)"
+        )
+    env["COMPUTE_TOKEN_AUTHORITY_URL"] = url
+    env["COMPUTE_TOKEN_AUTHORITY_API_KEY"] = api_key
 
 
 def validate_agentcard_org_credentials(
@@ -1256,6 +1398,19 @@ def validate_benchmark_archive_environment() -> None:
         )
 
 
+@functools.cache
+def _cloudbench_catalog():
+    """Load the stdlib-only catalog helper that owns the per-task worker env."""
+    spec = importlib.util.spec_from_file_location(
+        "cloudbench_catalog", REPO_ROOT / "scripts" / "cloudbench_catalog.py"
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("could not load scripts/cloudbench_catalog.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) -> None:
     # The local runner owns both the isolated stack and the later benchmark
     # subprocesses. Keep their isolation view aligned so credential refreshes
@@ -1274,8 +1429,6 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
     if needs_public_tunnel(tasks) and not os.environ.get("BENCHMARK_FRONTEND_URL"):
         os.environ["BENCHMARK_BUNDLED_FRONTEND"] = "true"
     selected = set(tasks)
-    if needs_non_purchase_gates(tasks):
-        os.environ["NON_PURCHASE_GATES_ENABLED"] = "1"
     if (AGENT_PAYMENT_TASK_NAMES | NEW_USER_PAYMENT_TASK_NAMES) & selected:
         # Keep the consolidated isolated lane behaviorally equivalent to the
         # former per-task lifecycle launcher. Payment tasks share one fixture,
@@ -1312,89 +1465,17 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
         if ADMIN_BYPASS_USER_ID not in configured:
             configured.append(ADMIN_BYPASS_USER_ID)
         os.environ["ADMIN_USER_IDS_EXTRA"] = ",".join(configured)
-    # Force Claude Code (not Codex) for tasks that declare requires_claude_code
-    # OR expect spawn_claude_code_agent. Codex sessions were failing this bench
-    # with GitHub clone 403s / sandbox timeouts that trip no_tool_failures.
-    if any(
-        task.name in selected
-        and (
-            task.requires_claude_code
-            or "spawn_claude_code_agent" in (task.expected_tools or [])
-            or (task.min_tool_counts or {}).get("spawn_claude_code_agent", 0) > 0
-        )
-        for task in all_tasks()
-    ):
-        os.environ["ROSE_CODE_AGENT_PROVIDER"] = "claude"
-    # TEMPORARY: skip post-run Claude Code / Codex dual-agent verifier. The
-    # verifier cannot see sandbox files and false-fails complete runs. Re-enable
-    # by unsetting ROSE_DISABLE_CODE_AGENT_VERIFIER once we have an in-sandbox
-    # agentic verifier. Override with ROSE_DISABLE_CODE_AGENT_VERIFIER=0.
-    if os.environ.get("ROSE_DISABLE_CODE_AGENT_VERIFIER", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }:
-        os.environ["ROSE_DISABLE_CODE_AGENT_VERIFIER"] = "1"
-    # TEMPORARY: strip api_request from explore tool injection + prompt context
-    # so coding-agent GitHub ranking benches are not steered onto that route.
-    # Override with ROSE_DISABLE_API_REQUEST=0.
-    if selected == {"google-oauth"}:
-        os.environ["ROSE_DISABLE_API_REQUEST"] = "0"
-    elif os.environ.get("ROSE_DISABLE_API_REQUEST", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }:
-        os.environ["ROSE_DISABLE_API_REQUEST"] = "1"
-    # When a selected task forbids general-purpose spawn aliases, also strip
-    # general_purpose / for_each from spawn_agent schemas + planner enums so
-    # the model cannot select them (mirrors ROSE_DISABLE_API_REQUEST). Override
-    # with ROSE_DISABLE_GENERAL_PURPOSE_AGENT=0.
-    _GPA_FORBIDDEN = {
-        "spawn_general_purpose_agent",
-        "spawn_general_purpose_agent_for_each",
-    }
-    _GPA_REQUIRED = {
-        "spawn_general_purpose_agent",
-        "spawn_general_purpose_agent_for_each",
-    }
-
-    def _task_requires_general_purpose_agent(task) -> bool:
-        if _GPA_REQUIRED.intersection(task.expected_tools or []):
-            return True
-        for counts in (task.expected_tool_counts or {}, task.min_tool_counts or {}):
-            if _GPA_REQUIRED.intersection(counts):
-                return True
-        return False
-
-    selected_tasks = [task for task in all_tasks() if task.name in selected]
-    gpa_forbidden_by_any = any(_GPA_FORBIDDEN.intersection(task.forbidden_tools or []) for task in selected_tasks)
-    gpa_required_by_any = any(_task_requires_general_purpose_agent(task) for task in selected_tasks)
-    # Concurrent predeploy batches mix GPA-forbidden tasks (parallel-tool-calls)
-    # with GPA-required tasks (spawn-sub-agents). A global env disable would strip
-    # spawn_general_purpose_agent from the whole stack and false-fail the latter.
-    if gpa_required_by_any:
-        os.environ["ROSE_DISABLE_GENERAL_PURPOSE_AGENT"] = "0"
-    elif gpa_forbidden_by_any and os.environ.get("ROSE_DISABLE_GENERAL_PURPOSE_AGENT", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }:
-        os.environ["ROSE_DISABLE_GENERAL_PURPOSE_AGENT"] = "1"
-    browser_max_steps = 0
-    for task in all_tasks():
-        if task.name not in selected:
-            continue
-        browser_limit = task.max_steps.get("browser")
-        if isinstance(browser_limit, int) and browser_limit > browser_max_steps:
-            browser_max_steps = browser_limit
-    if browser_max_steps > 0:
-        os.environ["BROWSER_MAX_ITERATIONS"] = str(browser_max_steps)
-    else:
-        os.environ.pop("BROWSER_MAX_ITERATIONS", None)
+    # Agent-behavior flags come from the one policy cloud guests also export
+    # (scripts/cloudbench-run.sh resolve_task_gate), so a local pass and a cloud
+    # run of the same task get the same worker environment.
+    worker_env = _cloudbench_catalog().task_worker_environment(
+        [vars(task) for task in all_tasks() if task.name in selected], os.environ
+    )
+    for key, value in worker_env.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
 
 def seed_payment_fixture(manifest: dict) -> None:
@@ -1455,6 +1536,17 @@ def _context_dir_env_value(context_dir: Path) -> str:
         return str(context_dir.relative_to(REPO_ROOT))
     except ValueError:
         return str(context_dir)
+
+
+def print_scorecard_instruction(run_dir: Path) -> None:
+    """Print the mandatory CLI scorecard command for this run's report card directory."""
+    renderer = REPO_ROOT / "scripts" / "cloudbench-scorecard.py"
+    if not renderer.is_file():
+        return
+    try:
+        runpy.run_path(str(renderer))["print_instruction"](run_dir)
+    except Exception:  # a reporting aid never blocks the benchmark
+        return
 
 
 def _dashboard_context_dir(stack: ServiceStack) -> Path:
@@ -1686,7 +1778,7 @@ def apply_isolated_postgres_default(
 def benchmark_runner_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     """Environment for the run_benchmark.py process a local run launches."""
     env = {**(os.environ if base is None else base), "PYTHONUNBUFFERED": "1"}
-    # Disable fast-cache for local benchmark runs so trajectories are actually executed
+    # Disable demo-cache for local benchmark runs so trajectories are actually executed
     # rather than replayed from cache. This is required for payment-lifecycle tasks (real
     # side effects must not be cache-replayed) and also ensures the world model is exercised
     # during simulate runs. run_benchmark reads this and sets fast_mode_cache_enabled=false
@@ -1740,29 +1832,45 @@ def start_services(
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
         env["CONDUCTOR_PORT"] = str(stack.base_port)
         env["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] = "1"
-        # Default isolated stacks keep Fast Mode cache on the local Postgres so
+        apply_compute_token_authority_env(env)
+        # Default isolated stacks keep DEMO cache on the local Postgres so
         # Tokyo / other smokes cannot write through Andy into the shared pooler.
-        # fast_cache:on tasks (test-mass-agent-run-0) must read the July cache,
-        # so those batches keep FAST_MODE_CACHE_DATABASE_URL and disable writes.
-        if selected_tasks_need_shared_fast_cache(tasks):
+        # demo_cache:on tasks read the shared July cache. Ordinary agent
+        # write-through stays disabled; recognized DEMO WHM completions are
+        # allowed to populate their scoped keys via _WMHDemoCacheContext.
+        owned_recording = apply_owned_wmh_recording(
+            env,
+            isolated=stack.isolated,
+            simulate=resolve_simulate_mode(simulate, tasks),
+            tasks=[get_task_by_name(name) for name in tasks],
+            workspace=stack.workspace_name,
+            fixture_database=(
+                f"victoria_bench_{re.sub(r'[^a-zA-Z0-9]', '_', stack.run_id)}"
+                if stack.use_system_postgres
+                else f"victoria_{stack.workspace_name}"
+            ),
+        )
+        if owned_recording:
+            pass
+        elif selected_tasks_need_shared_demo_cache(tasks):
             shared_url = (
-                env.get("FAST_MODE_CACHE_DATABASE_URL") or ""
+                env.get("FAST_MODE_CACHE_DATABASE_URL") or env.get("DEMO_CACHE_DATABASE_URL") or ""
             ).strip() or _dotenv_fast_mode_cache_database_url()
             if not shared_url:
                 raise RuntimeError(
-                    "fast_cache:on isolated benches require FAST_MODE_CACHE_DATABASE_URL "
+                    "demo_cache:on isolated benches require FAST_MODE_CACHE_DATABASE_URL "
                     "(shared July cache). Set it in back-end/.env."
                 )
             env["FAST_MODE_CACHE_DATABASE_URL"] = shared_url
-            env.pop("FAST_MODE_CACHE_USE_LOCAL", None)
+            _pop_demo_cache_env(env, "USE_LOCAL")
             # This exact, synthetic DEMO needs one live seed run before it can
             # replay its own tool trajectory. Other shared-cache benches stay read-only.
             if set(tasks) == {"google-oauth"}:
-                env.pop("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", None)
+                _pop_demo_cache_env(env, "DISABLE_WRITE_THROUGH")
             else:
                 env["FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"] = "1"
         else:
-            env.pop("FAST_MODE_CACHE_DATABASE_URL", None)
+            _pop_demo_cache_env(env, "DATABASE_URL")
             env["FAST_MODE_CACHE_USE_LOCAL"] = "1"
         # resolve_temporal_task_queue() preserves an inherited TEMPORAL_TASK_QUEUE.
         # /deploy's configure_deploy_local_env mints a Step-5 semantic queue in the
@@ -1802,13 +1910,13 @@ def start_services(
             env.setdefault("BENCHMARK_SKIP_WMH_BUILD", "1")
         if simulate:
             # Put the worker into simulate mode. run.sh forks the agents worker from this
-            # env, so these must be set here (the worker's WMH adapter + fast-cache scope
+            # env, so these must be set here (the worker's WMH adapter + demo-cache scope
             # read them from its process env). WMH_PORT mirrors run.sh's +6 offset.
-            env["BENCHMARK_WORLD_MODEL_MODE"] = "simulate"
-            env["WMH_BASE_URL"] = f"http://localhost:{stack.base_port + 6}"
-            resolved_model = world_model_name or os.environ.get("WMH_MODEL_NAME")
-            if resolved_model:
-                env["WMH_MODEL_NAME"] = resolved_model
+            apply_local_simulate_wmh_env(
+                env,
+                base_port=stack.base_port,
+                world_model_name=world_model_name,
+            )
     # The SMS benchmarks stub web_search through a file the backend re-reads per
     # call. The path has to be in the BACKEND's env at boot — it is already
     # running by the time a task selects its fixture — so publish it here.
@@ -1816,7 +1924,11 @@ def start_services(
     # A/B the SMS supervisor against another model with everything else held
     # fixed. Read from the caller's env so `BENCHMARK_SMS_SUPERVISOR_MODEL=x
     # scripts/run-bench --local <task>` just works; the backend needs it at boot.
-    for key in ("BENCHMARK_SMS_SUPERVISOR_MODEL", "BENCHMARK_SMS_SUPERVISOR_ROUTE"):
+    for key in (
+        "BENCHMARK_SMS_SUPERVISOR_MODEL",
+        "BENCHMARK_SMS_SUPERVISOR_ROUTE",
+        "BENCHMARK_SMS_SUPERVISOR_TOKEN_TYPE",
+    ):
         if os.environ.get(key):
             env[key] = os.environ[key]
 
@@ -1829,6 +1941,14 @@ def start_services(
         # apply_public_tunnel_env() (already applied above; keep EPHEMERAL
         # pinned off here for the non-isolated path).
         env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0"
+
+    if stack.isolated:
+        # The stack runs in its own session, so no signal to this controller's
+        # group reaches it. A wrapper's grace-period SIGKILL of this process
+        # would otherwise orphan it; run.sh shuts down once this exact process
+        # (pid + start time) is gone.
+        env["RUN_SH_OWNER_PID"] = str(os.getpid())
+        env["RUN_SH_OWNER_START"] = _own_process_start_ticks()
 
     try:
         with open(stack.service_log, "w") as service_log:
@@ -1848,9 +1968,14 @@ def start_services(
                 _record_stack_cleanup_owner(stack, process, stack_cleanup_token)
             if on_owner_ready is not None:
                 on_owner_ready()
-            service_start_timeout = SERVICE_START_TIMEOUT_SECONDS
-            if stack.isolated and env.get("BENCHMARK_REQUIRE_SEED_DUMP") == "0":
-                service_start_timeout = COLD_SEED_SERVICE_START_TIMEOUT_SECONDS
+            service_start_timeout = service_start_timeout_seconds(
+                isolated=stack.isolated, env=env, simulate=simulate
+            )
+            if service_start_timeout == WMH_FIRST_BUILD_SERVICE_START_TIMEOUT_SECONDS:
+                print(
+                    "🌍 First World Model build for this machine — extending the stack readiness "
+                    f"budget to {service_start_timeout}s"
+                )
             manifest = wait_for_services(
                 stack.manifest_path,
                 process=process,
@@ -1956,9 +2081,17 @@ def stop_services(process: subprocess.Popen | None = None, *, stack: ServiceStac
             if code != 0 or not _wait_for_pid_exit(owner["pid"], timeout):
                 raise RuntimeError("owned stack shutdown remains unverified")
             verified_native_identity = owner["native_identity"]
-    receipt = _read_cleanup_receipt(
-        stack.context_dir / "local-stack-cleanup.status", owner["token"], allowed_versions=("1", "2")
-    )
+    try:
+        receipt = _read_cleanup_receipt(
+            stack.context_dir / "local-stack-cleanup.status", owner["token"], allowed_versions=("1", "2")
+        )
+    except RuntimeError as error:
+        # An owner that died inside its EXIT trap leaves state=pending forever.
+        # The supported recovery re-verifies the real leftovers and rewrites it.
+        raise RuntimeError(
+            f"{error}. If the stack owner exited, run: scripts/run-bench --local --run-id {stack.run_id} "
+            "--reconcile-cleanup"
+        ) from error
     _validate_stack_cleanup_receipt(receipt, owner, verified_native_identity=verified_native_identity)
 
 
@@ -1987,6 +2120,9 @@ def apply_manifest_environment(manifest: dict) -> None:
     task_queue = manifest.get("temporal_task_queue")
     if task_queue:
         os.environ["TEMPORAL_TASK_QUEUE"] = str(task_queue)
+        from temporal_connection import apply_stack_temporal_namespace
+
+        apply_stack_temporal_namespace(REPO_ROOT)
         prefix = "navi-agent-tasks-"
         if str(task_queue).startswith(prefix):
             os.environ["CONDUCTOR_WORKSPACE_NAME"] = str(task_queue)[len(prefix) :]
@@ -1998,7 +2134,7 @@ def apply_manifest_environment(manifest: dict) -> None:
     # World Model Harness: when run.sh served the WMH (benchmark/simulate builds),
     # the manifest carries its URL. Inject WMH_BASE_URL/WMH_MODEL_NAME so the
     # benchmark subprocess (run_benchmark.py) resolves the auto-served server.
-    wmh_url = (urls.get("wmh") if isinstance(urls, dict) else "") or ""
+    wmh_url = (urls.get("wmh") if isinstance(urls, dict) else "") or external_wmh_base_url()
     if wmh_url:
         os.environ["WMH_BASE_URL"] = str(wmh_url).rstrip("/")
         wmh_model = manifest.get("wmh_model_name") if isinstance(manifest, dict) else None
@@ -2490,6 +2626,8 @@ def run_benchmark_invocation(
     max_concurrency: int,
     simulate: bool = False,
     world_model_name: str | None = None,
+    wmh_initial_state_file: str | None = None,
+    timeout_seconds: int | None = None,
     owner: LocalBenchmarkOwner | None = None,
 ) -> Path:
     started = time.time()
@@ -2502,6 +2640,8 @@ def run_benchmark_invocation(
         keep_failed_agents=True,
         simulate=simulate,
         world_model_name=world_model_name,
+        wmh_initial_state_file=wmh_initial_state_file,
+        timeout_seconds=timeout_seconds,
     )
     print(f"\n== Running {invocation.label}: {', '.join(invocation.tasks)}")
     print("$ " + " ".join(command))
@@ -2558,6 +2698,88 @@ def run_benchmark_invocation(
             raise RuntimeError(f"Benchmark invocation failed with exit code {code}; result: {result_path}")
         print(f"Benchmark tasks failed with exit code {code}; collecting diagnostics from: {result_path}")
     return result_path
+
+
+def wmh_model_prebuilt(env: dict[str, str] | None = None) -> bool:
+    """True when run.sh will serve an existing World Model instead of cold-building one."""
+    env = env or os.environ
+    build_dir = Path(env.get("WMH_BUILD_DIR") or (REPO_ROOT / ".context" / "world-model"))
+    model_name = env.get("WMH_MODEL_NAME") or "rose-archive"
+    return (build_dir / "build.manifest.json").is_file() and (build_dir / "models" / model_name).is_dir()
+
+
+def service_start_timeout_seconds(*, isolated: bool, env: dict[str, str], simulate: bool) -> int:
+    """Readiness budget for an isolated stack, by the slowest step it must complete."""
+    if isolated and env.get("BENCHMARK_REQUIRE_SEED_DUMP") == "0":
+        return COLD_SEED_SERVICE_START_TIMEOUT_SECONDS
+    if simulate and env.get("BENCHMARK_SKIP_WMH_BUILD") != "1" and not wmh_model_prebuilt(env):
+        return WMH_FIRST_BUILD_SERVICE_START_TIMEOUT_SECONDS
+    return SERVICE_START_TIMEOUT_SECONDS
+
+
+def resolve_simulate_mode(simulate_flag: bool, task_names: Sequence[str]) -> bool:
+    """CLI --simulate or any catalog world_model_mode=simulate enables the WMH.
+
+    The fleet already honors the catalog mode; local must match so a bench that
+    declares simulate (wait-for-trigger, raise-5m-rose-labs-brex) never places
+    a real call / contacts a real person just because --simulate was omitted.
+    """
+    if simulate_flag:
+        return True
+    for name in task_names:
+        try:
+            task = get_task_by_name(name)
+        except Exception:
+            continue
+        mode = (getattr(task, "world_model_mode", None) or "").strip().lower()
+        if mode == "simulate":
+            return True
+    return False
+
+
+def external_wmh_base_url() -> str:
+    """Opt-in loopback URL of an already-served WMH (WMH_EXTERNAL_BASE_URL)."""
+    value = (os.environ.get("WMH_EXTERNAL_BASE_URL") or "").strip().rstrip("/")
+    if value and not re.fullmatch(r"http://(?:127\.0\.0\.1|localhost):[1-9][0-9]{1,4}", value):
+        raise ValueError("WMH_EXTERNAL_BASE_URL must be a loopback http://host:port URL")
+    return value
+
+
+def apply_local_simulate_wmh_env(
+    env: dict[str, str],
+    *,
+    base_port: int,
+    world_model_name: str | None = None,
+) -> dict[str, str]:
+    """Env overrides so a local simulate stack serves the complete eligible WHM corpus.
+
+    run.sh forks the agents worker from this env, so the worker's WMH adapter and
+    demo-cache scope read these from its process env. WMH_PORT mirrors run.sh's
+    +6 offset.
+    """
+    env["BENCHMARK_WORLD_MODEL_MODE"] = "simulate"
+    external = external_wmh_base_url()
+    if external:
+        # An operator-owned WMH that is already healthy (for example a native
+        # model loaded in a RAM-bounded scope whose cold load exceeds run.sh's
+        # readiness bound). run.sh neither serves nor owns it.
+        env["WMH_BASE_URL"] = external
+        env["BENCHMARK_SKIP_WMH_BUILD"] = "1"
+    else:
+        env["WMH_BASE_URL"] = f"http://localhost:{base_port + 6}"
+    # The worker's WMH adapter (helpers/world_model_runtime.py:from_env) needs
+    # WMH_MODEL_NAME at fork time or the first simulated boundary tool raises
+    # "WMH simulation requires WMH_BASE_URL and WMH_MODEL_NAME". run.sh only
+    # exports the name after the WMH answers /healthz, which is after the
+    # workers fork, so pin the default here (matches run.sh + run_benchmark).
+    env["WMH_MODEL_NAME"] = world_model_name or os.environ.get("WMH_MODEL_NAME") or "rose-archive"
+    # No implicit bundle cap: every eligible archived trajectory participates.
+    # An operator can still set WMH_MAX_BUNDLES for a deliberately scoped run.
+    env.setdefault("WMH_MAX_BUNDLES", os.environ.get("WMH_MAX_BUNDLES") or "0")
+    # Skip GEPA for local simulate cold builds — serve a corpus-backed model
+    # without the multi-hour prompt-optimize pass (cloudbench does the same).
+    env.setdefault("WMH_GEPA_BUDGET", os.environ.get("WMH_GEPA_BUDGET") or "0")
+    return env
 
 
 def tasks_from_args(args: argparse.Namespace) -> list[str]:
@@ -2627,6 +2849,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Pass --bench through to run_eval_suite.py",
     )
     parser.add_argument("--bootstrap", action="store_true", help="Pass --bootstrap through to run_benchmark.py")
+    parser.add_argument("--timeout-seconds", type=int, help="Override the selected task timeout for this run")
     parser.add_argument(
         "--anon",
         action="store_true",
@@ -2636,11 +2859,16 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--simulate",
         action="store_true",
-        help="Run in world-model simulate mode (run.sh serves the WMH; env boundaries hit the world model)",
+        help="Run in world-model simulate mode (provider boundaries and specialized "
+        "explore/browser/code subagents hit WMH; general-purpose and for-each loops stay real)",
     )
     parser.add_argument(
         "--world-model-name",
         help="World model to simulate against (defaults to the model run.sh served, i.e. WMH_MODEL_NAME)",
+    )
+    parser.add_argument(
+        "--wmh-initial-state-file",
+        help="Override the WHM initial state for one simulate-mode benchmark task.",
     )
     parser.add_argument("--keep-services", action="store_true", help="Leave local services running after benchmarks")
     parser.add_argument("--use-existing", action="store_true", help="Use services from .context/services.json")
@@ -2650,6 +2878,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Use the default .context/services.json stack instead of a per-run isolated stack",
     )
     parser.add_argument("--run-id", help="Stable id for the isolated benchmark stack")
+    parser.add_argument(
+        "--reconcile-cleanup",
+        action="store_true",
+        help="Verify an exited --run-id stack left nothing behind and resolve its pending cleanup receipt",
+    )
     parser.add_argument("--cohort-task", action="append", dest="cohort_tasks", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--world-ready-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--base-port", type=int, help="Preferred base port for an isolated benchmark stack")
@@ -2733,6 +2966,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Fast Mode cache flag for the resumed checkpoint agent",
     )
     args = parser.parse_args(argv)
+    if args.reconcile_cleanup:
+        # Recovery of an exited stack's receipt: no benchmark selection, no services.
+        if not args.run_id or args.tasks or args.suite or args.full or args.rerun_failed or args.eval_suite:
+            parser.error("--reconcile-cleanup takes only --run-id <stack-run-id>")
+        return args
     selected_modes = sum(
         1
         for enabled in (bool(args.tasks), bool(args.suite), args.full, bool(args.rerun_failed), args.eval_suite)
@@ -2746,6 +2984,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         parser.error("--bootstrap and --anon are task-runner options, not --eval-suite options")
     if args.max_concurrency < 1:
         parser.error("--max-concurrency must be >= 1")
+    if args.timeout_seconds is not None and args.timeout_seconds <= 0:
+        parser.error("--timeout-seconds must be positive")
     if args.use_existing and (args.shared_stack or args.run_id or args.base_port or args.no_clean):
         parser.error("--use-existing cannot be combined with --shared-stack, --run-id, --base-port, or --no-clean")
     if args.base_port is not None and args.base_port < 1024:
@@ -2783,8 +3023,23 @@ def run_eval_suite_invocation(*, port: int, args: argparse.Namespace) -> int:
     return subprocess.run(command, cwd=AGENTS_DIR, env=env).returncode
 
 
+def enforce_provider_capacity(benches: int) -> None:
+    """Refuse a local width above the shared provider rate-limit cap (the cloud registry)."""
+    capacity = runpy.run_path(str(REPO_ROOT / "scripts/cloudbench-provider-capacity.py"))
+    try:
+        refused = capacity["check"](benches)
+    except capacity["RegistryError"] as error:
+        raise SystemExit(f"❌ {error}; no local benchmark stack started") from None
+    if refused:
+        raise SystemExit(refused)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
+    if getattr(args, "reconcile_cleanup", False):
+        from benchmarks import local_cleanup_reconcile
+
+        return local_cleanup_reconcile.main(sys.modules[__name__], args)
     world_ready_fd = getattr(args, "world_ready_fd", None)
     if bool(getattr(args, "cohort_tasks", [])) != (world_ready_fd is not None):
         raise ValueError("a child world requires its coordinator ownership handshake")
@@ -2800,10 +3055,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         finally:
             os.close(world_ready_fd)
     selected_tasks = tasks_from_args(args)
-    validate_benchmark_archive_environment()
+    if getattr(args, "wmh_initial_state_file", None) and len(selected_tasks) != 1:
+        raise ValueError("--wmh-initial-state-file requires exactly one benchmark task")
+    if not getattr(args, "cohort_tasks", []) and not args.eval_suite:
+        # Before any stack, child world or provider call; child worlds belong
+        # to this already-admitted parent width.
+        enforce_provider_capacity(min(args.max_concurrency, len(selected_tasks)))
     validate_agentcard_org_credentials(selected_tasks)
     if checkpoint_requested(args) and len(selected_tasks) != 1:
         raise ValueError("--checkpoint requires exactly one resolved benchmark task")
+    # Catalog world_model_mode=simulate wins even without an explicit --simulate.
+    args.simulate = resolve_simulate_mode(bool(args.simulate), selected_tasks)
+    if args.simulate:
+        print("World-model simulate mode ON (CLI --simulate and/or catalog world_model_mode)")
+    validate_benchmark_archive_environment()
     cohort_tasks = getattr(args, "cohort_tasks", []) or selected_tasks
     if getattr(args, "cohort_tasks", []):
         validate_task_names(cohort_tasks)
@@ -2823,6 +3088,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     result_paths: list[Path] = []
     benchmark_owner = LocalBenchmarkOwner(stack)
     if stack.isolated:
+        # Every child started from here on (run.sh, run_benchmark.py, tunnels,
+        # the dashboard) inherits the run id, so the deploy pipeline's
+        # owner-run classification sees a carrier for a custom run id too (a
+        # generated id already embeds this controller's pid). A runtime
+        # environment write never reaches this process's own /proc environ;
+        # the controller itself is recognised by its ``--run-id`` argument.
+        os.environ["BENCHMARK_RUN_ID"] = stack.run_id
         benchmark_owner.record("not_started")
     previous_isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES")
     # Isolated stacks and --use-existing local stacks both key browser-provider
@@ -2930,6 +3202,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # a browser. run_benchmark.py resolves the same dir via BENCHMARK_CONTEXT_DIR.
         if dashboard_enabled(ci=args.no_dashboard):
             dashboard = maybe_launch_dashboard(_dashboard_context_dir(stack), enabled=True)
+        print_scorecard_instruction(_dashboard_context_dir(stack))
         if needs_payment_fixture(cohort_tasks):
             seed_payment_fixture(manifest)
         if needs_frontend_tunnel(selected_tasks):
@@ -2971,6 +3244,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     max_concurrency=args.max_concurrency,
                     simulate=args.simulate,
                     world_model_name=args.world_model_name,
+                    wmh_initial_state_file=getattr(args, "wmh_initial_state_file", None),
+                    timeout_seconds=getattr(args, "timeout_seconds", None),
                     owner=benchmark_owner,
                 )
             finally:
@@ -2993,6 +3268,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if diag_dir:
                     print(f"Diagnostics saved: {diag_dir}")
         all_failures = [failure for path in result_paths for failure in failed_tasks_from_run(path)]
+        print_scorecard_instruction(_dashboard_context_dir(stack))
         if all_failures:
             print("\nFailed tasks:")
             for failure in all_failures:

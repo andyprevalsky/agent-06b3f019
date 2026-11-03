@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "utc": "2026-10-14T22:47:09.338895+00:00",
+  "status": "AUTHORIZED_INFRA_REPAIRS_VERIFIED_AND_PRESERVED; LIVE_ACCEPTANCE_AND_NEXT_SLICE_OPEN",
+  "old_box_id": "b07d9037-81f9-4c97-80d7-6f4d42b7adc1",
+  "replacement_box_id": "e9afcffd-7ba9-4bfd-8703-d770952fe1c3",
+  "replacement_thread_id": "ph7cc73xma14jdg6chxpnhbgth8g7c1a",
+  "replacement_thread_url": "https://boxes.dev/thread/thr_d2e1b555d6314abe8d9f74da7dd979aa",
+  "harness": "Codex",
+  "supplied_original_checkpoint": "677068533e050195c62afc8118f3d35a8511f5ea",
+  "source_checkpoint": "748685925fa2b58fec0f2301c0bc4427646d1468",
+  "original_checkpoint_is_ancestor": true,
+  "original_migration_receipt": "docs/handoffs/swap-harness-b07d9037-81f9-4c97-80d7-6f4d42b7adc1-resumed.json",
+  "prior_schema_receipt": "docs/handoffs/whm-b07d9037-preservation/schema-integration-20261014.json",
+  "changes": [
+    "Foundry and funded OpenAI public Responses wrappers forward existing non-None caller max_tokens as max_output_tokens.",
+    "Permanent owning regressions assert actual HTTP request fields and exact omitted/None parity.",
+    "Truncation explanatory comment updated; retry behavior unchanged.",
+    "Dated histories in two completed root-owned derived test snapshots authenticated before disk cleanup; recovered originals unchanged."
+  ],
+  "owning_proofs": {
+    "Foundry": {
+      "registered_test_sha256": "48a2e836c8aad1c47335b48f5d700dafdb15437ac58368486caeed1d7acb6c5b",
+      "root_pre_failure_s": 0.477543,
+      "pre_failure": "Caller requested cap missing from actual Foundry HTTP body",
+      "worker_post_pass_s": 0.199172,
+      "final_registered_suite": "PASS"
+    },
+    "funded_OpenAI": {
+      "registered_test_sha256": "2940eabcc67496e2b0338a062069b06683913b4273cc2d455a09074924e316a7",
+      "root_pre_failure_s": 0.23875520200817846,
+      "pre_failure": "Caller requested cap missing from actual funded Responses HTTP body",
+      "worker_post_pass_s": 0.020284536003600806,
+      "final_registered_suite": "PASS"
+    }
+  },
+  "offline_checks": {
+    "WHM": 242,
+    "Rose": 230,
+    "cache_client": 10,
+    "stream_contract": 2,
+    "total": 484,
+    "excluded": "one native service/build case",
+    "python": "3.11.9",
+    "native_python": "3.12.3",
+    "blackbox_wall_seconds": 7.404862934999983,
+    "WHM_unit_wall_seconds": 2.1836666430026526,
+    "network": "Real sockets/DNS/default HTTPX denied; owning MockTransport allowed",
+    "RCA_archive": "877 cases validated",
+    "live_provider_acceptance_or_fundraiser_PASS": false
+  },
+  "source_member_sha256": {
+    "agents/providers/rose/client.py": "39e5e48d143ce6b04c9dc6217cd87799122a15b8cd083f6d9c78564a1ab2712f",
+    "agents/providers/rose/foundry.py": "93d75a06dfa39de061e7c3cc6176faed7a1f18c08f8ac85cc0520abbad068bdc",
+    "agents/providers/rose/gpt_auth.py": "2b22980d9ad1b9ca874232851632898bc28752b42a2665fa3ad175c04ef882c8",
+    "agents/providers/rose/truncation.py": "e58a8c6a95ad0f4da0b3be9e418fd62594e803b37b1715611adcb2d7581112c8",
+    "agents/tests/blackbox/rose.blackbox.py": "c37c3a88b4db97711e6f587d238aebff1f10f17a8f21efbcf38f16d12a84f500",
+    "docs/rca/cases/2026-10-14-public-responses-request-output-budget-not-forwarded.md": "d82ab0650d34b88b13b93e7a4b8f7efe7cc6e48fe61e9dbf3913a664287e6e6e",
+    "docs/rca/INDEX.md": "a7422efba396c0026d0086a051fa2d1a2921301ba4b4b496fbd38ad93ad50948"
+  },
+  "private_proof_archive": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "private/whm-e9afcffd/provider-followthrough-20261014-748685925.tar.gz.enc",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "a1d59cecde1d881f8a41c260f21341230f6d95800b7c0b7cf601a830f23c813b",
+    "gzip_sha256": "3a95832f7645260281f8e9ac772e91bd6168cb33dc4ef313dbcac578842737b6",
+    "stored_bytes": 1839741,
+    "frames": 1,
+    "files": 600,
+    "original_bytes": 9450485,
+    "manifest_sha256": "9e608b602630af62c7b42eb7f3cb4d28b158506c0d5ab51b7cbd1781bd62ad4e",
+    "full_readback_verified": true,
+    "independent_original_helper_per_member_verification": true,
+    "verification_location": "/home/boxes/rose-wmh-resumed/.context/wmh-resume-generation1/semantic-followthrough-20261014/private-continuation-independent-verify.log"
+  },
+  "derived_history_archive": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "private/whm-e9afcffd/derived-rca-histories-20261014-53fc17e2-v2.tar.gz.enc",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "9233df637db9346040c846d902593f616883ae352b31f923311d7d3527f8e0e7",
+    "gzip_sha256": "dbc92206408dbed2deb839036b17fce8c6eabab1f85eeb1d26ba518aff40ed6d",
+    "stored_bytes": 70714185,
+    "frames": 9,
+    "files": 155,
+    "original_bytes": 3770969785,
+    "manifest_sha256": "20c2d952912b594522633c6467a307873ea134aea0c8cc6bec7dafa4c99ea7cd",
+    "full_readback_verified": true,
+    "independent_original_helper_per_member_verification": true,
+    "original_git_blob_checks": 155,
+    "scope": "Only dated benchmark histories in two completed Codex-derived RCA source snapshots; every selected byte preserved in encrypted archive and exact historical Git blobs.",
+    "cleanup_result": {
+      "utc": "2026-10-14T22:41:45.710855+00:00",
+      "files_removed_from_derived_test_snapshots": 155,
+      "all_paths_absent": true,
+      "before_available_bytes": 2436251648,
+      "after_available_bytes": 4366409728,
+      "actual_available_increase_bytes": 1930158080,
+      "private_archive_members": 155,
+      "archive_manifest_sha256": "20c2d952912b594522633c6467a307873ea134aea0c8cc6bec7dafa4c99ea7cd",
+      "independent_original_helper_verify": true,
+      "source_bytes_remain_authenticated_private_archive_and_git": true,
+      "recovered_originals_protected_instructions_Freedom_untouched": true,
+      "active_snapshot_readers_writers": [],
+      "restore": "Original private_archive.py restore receipt into EMPTY staging, then deliberately restore selected derived snapshot histories; no original/protected replacement."
+    }
+  },
+  "private_locations": {
+    "followthrough": "/home/boxes/rose-wmh-resumed/.context/wmh-resume-generation1/semantic-followthrough-20261014",
+    "schema_and_root_owning_tests": "/home/boxes/rose-wmh-resumed/.context/wmh-resume-generation1/schema-integration-20261014",
+    "current_next_run_plan": "/home/boxes/rose-wmh-resumed/.context/wmh-resume-generation1/semantic-followthrough-20261014/root-next-run-plan.private.json",
+    "read_only_readiness": "/home/boxes/rose-wmh-resumed/.context/wmh-resume-generation1/semantic-followthrough-20261014/root-next-run-readiness.private.json"
+  },
+  "resource_readiness": {
+    "available_disk_bytes": 4362379264,
+    "retained_cache_database_oid": 69016,
+    "frozen_fixture_database_present": true,
+    "approved_prefix_sha256": "009394a4fc293c14230d15d4fc70b798876fb2d8ec4489ba3b4db560343ba5d1",
+    "authoritative_backend_api_key_present_equal": true,
+    "fresh_runtime_resource_identity_admission_still_required": true
+  },
+  "remaining_open": [
+    "Exact live Azure acceptance of the existing non-strict schema with arbitrary JSON values.",
+    "Incorrect recipient and unrelated sent-ledger state claims: no existing typed authoritative action-effect/source contract; new semantic design requires review.",
+    "Canonical fundraiser PASS; original Run16 ERROR and Run17 FAIL unchanged.",
+    "Next paid slice blocked by recorded infrastructure1/2=50%, exceeding10%; existing gate unanswered."
+  ],
+  "next_slice_boundary": {
+    "instruction": ".claude/shared/benchmark-report-format.txt:28",
+    "rule": "10 * infra_failed > terminal_attempts",
+    "infra_failed": 1,
+    "terminal_attempts": 2,
+    "rate_percent": 50,
+    "approval": "Existing R17-NEXT-SLICE-1 unanswered; no override inferred from finish.",
+    "proposal": "One unchanged 60min simulated raise-5m-rose-labs-brex trial, DEMO on, full approved static network prefix, existing model/policy/retry identities. No new prompt/context/retrieval logic. Paid misses and multi-provider retries remain possible; no USD ceiling or billing estimate fabricated."
+  },
+  "protected_instruction_hashes": {
+    "CLAUDE.md": "2a6348f3ad1701aeb496e10e98da271fb38db5709e2abb9adbe65b7c5ad0d322",
+    "AGENTS.md": "57cbb4821915f3e477996ffde6ef7ee4c9d57fab64b6f57421968e3d0e9d0eca",
+    "docs/handoffs/whm-b07d9037-preservation/private_archive.py": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4"
+  },
+  "preserved": "Freedom/protected copies, all recovered originals/native artifacts/fixture/env/DB dumps/Git refs and swap retained. Source/output limits only; no context/routing/retry/native parser or sampling edits.",
+  "known_execution_exceptions": [
+    "First derived upload produced hardlink tar entries and was rejected; all copies retained until independent regular-member authentication succeeded. Original helper unchanged.",
+    "First root-funded baseline used system Python and failed before runtime; pinned identical control then reproduced and passed.",
+    "First read-only readiness compared PostgreSQL JSON OID string with integer; corrected conversion confirms unchanged owned identities.",
+    "Resource audit produced only conditional CAS proposal; no native blob hardlink/deletion performed."
+  ],
+  "new_paid_model_calls": 0,
+  "new_benchmark_runs": 0,
+  "new_harness_launches": 0,
+  "merge_or_deploy": false
+}

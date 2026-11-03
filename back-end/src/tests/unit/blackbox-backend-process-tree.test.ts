@@ -250,7 +250,7 @@ if (termProof.stopMs < 900 || termProof.stopMs >= 4000) {
 
 assert.match(
   runner,
-  /npx tsx src\/bootstrap\.ts >"\$BACKEND_LOG" 2>&1 &\nBACKEND_PID=\$!/,
+  /npx tsx src\/bootstrap\.ts >"\$BACKEND_LOG" 2>&1 &\n[ \t]*BACKEND_PID=\$!/,
   'the isolated blackbox backend must stay a child of the runner, in its process group'
 );
 assert.equal(

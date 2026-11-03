@@ -14,7 +14,8 @@
 # destroys it on scale-down / teardown.
 #
 # Injected env (by the controller wrapper): REF, LOCAL_PATCH_FILE, WORKSPACE_NAME,
-# PRIMARY_HOST, BACKEND_PORT, WMH_PORT, BENCH_SIMULATE, HEALTH_PORT, SDK_PORT.
+# PRIMARY_HOST, BACKEND_PORT, WMH_PORT, WMH_MODEL_NAME, WMH_EXECUTION_POLICY, BENCH_SIMULATE,
+# HEALTH_PORT, SDK_PORT.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
@@ -45,7 +46,8 @@ if [ -n "${REF:-}" ]; then
         log "FATAL: missing controller-owned executable cloudbench-fetch-ref helper"
         exit 1
     fi
-    if ! CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
+    if ! CLOUDBENCH_APP_USER="$APP_USER" CLOUDBENCH_SOURCE_SCOPE=worker-runtime \
+        bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
         log "FATAL: could not verify requested ref $REF"
         exit 1
     fi
@@ -55,6 +57,19 @@ cd "$REPO_DIR" 2>/dev/null || { log "FATAL: no $REPO_DIR"; exit 1; }
 # it flow into the benchmark worker or agent subprocess environments.
 unset CLOUDBENCH_GITHUB_TOKEN_B64
 rm -f /tmp/rbw.env 2>/dev/null || true
+# Autoscaled capacity is cloned from the active primary, whose tracked checkout
+# already contains the uploaded worktree patch.  The exact-ref fetch helper has
+# an intentional same-HEAD fast path, so it does not discard those tracked
+# changes.  Restore only tracked files to the pinned commit before cleaning and
+# applying the authoritative patch payload; otherwise a worker starts from a
+# half-clean checkout and the second git-apply fails across every changed file.
+if [ -n "${REF:-}" ]; then
+    if ! gosu "$APP_USER" git -C "$REPO_DIR" restore \
+        --source "$REF" --staged --worktree -- . 2>&1 | sed 's/^/   /'; then
+        log "FATAL: could not restore tracked worker checkout to $REF"
+        exit 1
+    fi
+fi
 if ! gosu "$APP_USER" git -C "$REPO_DIR" clean -fd 2>&1 | sed 's/^/   /'; then
     log "FATAL: could not remove stale untracked worktree files"
     exit 1
@@ -134,6 +149,9 @@ export CONDUCTOR_WORKSPACE_NAME="$WORKSPACE_NAME"
 export TEMPORAL_TASK_QUEUE="navi-agent-tasks-$WORKSPACE_NAME"
 export BACKEND_URL BACKEND_API_URL="$BACKEND_URL"
 export AUTOSCALER_ACTUATE=0            # controller is the sole scaler
+# The controller reads desired capacity only from the primary. A clone's queue
+# observation would spend 3 shared Temporal Visibility API calls/s for nothing.
+export AUTOSCALER_QUEUE_METRICS=0
 export HEALTH_CHECK_PORT="$HEALTH_PORT"
 export SDK_METRICS_PORT="$SDK_PORT"
 export ENABLE_BENCHMARK_MEMORY_BASELINE=1
@@ -161,8 +179,11 @@ exec gosu "$APP_USER" env \
     TEMPORAL_TASK_QUEUE="$TEMPORAL_TASK_QUEUE" \
     BACKEND_URL="$BACKEND_URL" BACKEND_API_URL="$BACKEND_URL" \
     AUTOSCALER_ACTUATE=0 \
+    AUTOSCALER_QUEUE_METRICS=0 \
     HEALTH_CHECK_PORT="$HEALTH_PORT" SDK_METRICS_PORT="$SDK_PORT" \
     BENCHMARK_WORLD_MODEL_MODE="${BENCHMARK_WORLD_MODEL_MODE}" \
     ${WMH_BASE_URL:+WMH_BASE_URL="$WMH_BASE_URL"} \
+    ${WMH_BASE_URL:+${WMH_MODEL_NAME:+WMH_MODEL_NAME="$WMH_MODEL_NAME"}} \
+    ${WMH_BASE_URL:+${WMH_EXECUTION_POLICY:+WMH_EXECUTION_POLICY="$WMH_EXECUTION_POLICY"}} \
     ENABLE_BENCHMARK_MEMORY_BASELINE=1 \
     bash ./scripts/run_local_worker.sh

@@ -172,6 +172,27 @@ PREDEPLOY_RUN_ID="${PREDEPLOY_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-$$}"
 ARTIFACT_DIR="$RUN_ROOT/$PREDEPLOY_RUN_ID"
 RUNNER_LOG="$ARTIFACT_DIR/runner.log"
 SUMMARY_PATH="$ARTIFACT_DIR/summary.json"
+# Inside a deploy (an isolated deploy worktree, ROSE_DEPLOY_WORKTREE=1, or the
+# explicit PREDEPLOY_PARK_LEDGERS=1) the benchmark ledger rows this run records
+# are parked under .context instead of being appended to the tracked
+# agents/benchmarks/history/*.jsonl files: a tracked-ledger write while smoke
+# runs changes this lane's own --reuse-passed fingerprint ("deploy inputs
+# changed while smoke ran") and the exact-worktree fingerprint of every lane
+# admitted after it. The rows themselves are unchanged (same writers, same
+# bytes); `python3 scripts/benchmark-history-latest-only.py --apply-parked
+# <park dir> --write` replays them into the tracked ledgers when the deploy
+# publishes its history. Reads (timeout derivation, the canary history gate)
+# keep the tracked ledgers. An explicit BENCHMARK_HISTORY_PARK_DIR is honoured
+# as-is, and the printed publish command names the directory actually used so
+# a custom park is never left behind by the default replay.
+if [ -n "${BENCHMARK_HISTORY_PARK_DIR:-}" ] \
+    || [ "${ROSE_DEPLOY_WORKTREE:-0}" = "1" ] \
+    || [ "${PREDEPLOY_PARK_LEDGERS:-0}" = "1" ]; then
+    BENCHMARK_HISTORY_PARK_DIR="${BENCHMARK_HISTORY_PARK_DIR:-$ROOT_DIR/.context/deploy-ledger-park}"
+    mkdir -p "$BENCHMARK_HISTORY_PARK_DIR"
+    export BENCHMARK_HISTORY_PARK_DIR
+    echo "📦 Benchmark ledger rows are parked in $BENCHMARK_HISTORY_PARK_DIR; publish them with: python3 scripts/benchmark-history-latest-only.py --base origin/main --apply-parked \"$BENCHMARK_HISTORY_PARK_DIR\" --write"
+fi
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STARTED_EPOCH="$(python3 -c 'import time; print(time.time())')"
 GIT_SHA="$(git rev-parse HEAD)"
@@ -243,7 +264,7 @@ trap 'forward_signal INT 130' INT
 trap 'forward_signal TERM 143' TERM
 
 # Split the smoke set so Tokyo/other FM-off tasks stay on the isolated local
-# cache, while fast_cache:on tasks (test-mass-agent-run-0) read the shared July
+# cache, while demo_cache:on tasks (test-mass-agent-run-0) read the shared July
 # cache with write-through disabled. One shared stack would either empty-cache
 # the OAi replay or let Andy write-through poison prod.
 LOCAL_CACHE_TASKS=()
@@ -260,7 +281,7 @@ with open(sys.argv[1]) as handle:
     tasks = json.load(handle)
 for task in tasks:
     if task.get("name") == name:
-        print("on" if task.get("fast_cache") == "on" else "off")
+        print("on" if task.get("demo_cache", task.get("fast_cache")) == "on" else "off")
         break
 else:
     print("off")
@@ -298,12 +319,12 @@ run_smoke_batch() {
     # This launcher promises a per-run isolated stack. Do not let a caller's remote
     # cache override—or run.sh's shared-cache default—turn startup into a production
     # pooler dependency. run.sh creates the same cache schema in this run's local DB.
-    unset FAST_MODE_CACHE_DATABASE_URL
+    unset FAST_MODE_CACHE_DATABASE_URL DEMO_CACHE_DATABASE_URL
     if [ "$cache_mode" = "shared" ]; then
         FAST_MODE_CACHE_DATABASE_URL="$(shared_fast_mode_cache_url)"
         export FAST_MODE_CACHE_DATABASE_URL
         [ -n "$FAST_MODE_CACHE_DATABASE_URL" ] || {
-            echo "FAST_MODE_CACHE_DATABASE_URL is required for fast_cache:on smoke tasks" >&2
+            echo "FAST_MODE_CACHE_DATABASE_URL is required for demo_cache:on smoke tasks" >&2
             return 2
         }
         FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1 \
@@ -320,7 +341,7 @@ run_smoke_batch() {
     fi
     # Seeded prod users can have Fast Mode on. If the create body omits
     # fast_mode_cache_enabled, local-cache smokes inherit that default.
-    # Pin the flag off for this batch only; shared/fast_cache:on tasks
+    # Pin the flag off for this batch only; shared/demo_cache:on tasks
     # keep Fast Mode. This does not change oss-pinned tasks
     # (browser-biometrics-webdecoy uses rose-1-oss / OpenRouter).
     FAST_MODE_CACHE_USE_LOCAL=1 \

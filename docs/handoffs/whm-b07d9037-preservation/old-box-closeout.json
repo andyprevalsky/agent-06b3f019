@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "utc": "2026-10-13T00:40:06.060100+00:00",
+  "old_devbox_id": "b07d9037-81f9-4c97-80d7-6f4d42b7adc1",
+  "replacement_devbox_id": "e9afcffd-7ba9-4bfd-8703-d770952fe1c3",
+  "replacement_thread_url": "https://boxes.dev/thread/thr_d2e1b555d6314abe8d9f74da7dd979aa",
+  "source_checkpoint": "677068533e050195c62afc8118f3d35a8511f5ea",
+  "verified_new_receipt_commit": "63eb4817c2f05cd70d147007a2dc7b9ec39c43ef",
+  "verified_new_receipt_path": "docs/handoffs/swap-harness-b07d9037-81f9-4c97-80d7-6f4d42b7adc1-resumed.json",
+  "independent_old_worker_review": "GitHub receipt byte-identical to fetched commit; all6archive identifiers/member counts/ciphertext+gzip+manifest hashes and NEW per-member verification flags match original inventory;15helpers/fourcache refs/helper/bundle/result/retirement hashes exact;26offline tests,116exactfolds,42910fixture messages and useful original trajectory/quality analysis verified",
+  "late_state": {
+    "original_tracked_worktrees_clean": true,
+    "original_helpers_byte_exact": true,
+    "owned_exact_pids_absent": [
+      3856322,
+      3856384,
+      3856610,
+      4013847,
+      4020038,
+      4014291,
+      4019372,
+      506449,
+      506450
+    ],
+    "benchmark_cleanup": "clean",
+    "stack_cleanup": "clean",
+    "native_retirement": "joined105",
+    "owned_multipart_uploads": "completed/authenticated or exact supported abort after known failure; no live upload controllers",
+    "remaining_unsaved_important_original_task_state": []
+  },
+  "preservation_complete": true,
+  "new_authenticated_original_members": 44485,
+  "original_task_continuation": "active offline diagnostics/next-trial preparation; goal incomplete; serving recovered model still requires>=40GB swap/memory scope preflight",
+  "no_new_paid_model_or_benchmark_calls": true,
+  "merged": false,
+  "deployed": false,
+  "freedom_and_protected_instructions": "unchanged; original protected copies privately preserved and independently member-hash verified",
+  "archive_intent": "request own OLD b07d9037 only via dvb-onbox box destroy --json after pushing and verifying this closeout; acceptance/disposition to be reported to coordinator",
+  "archive_accepted": false,
+  "archive_completed": false
+}

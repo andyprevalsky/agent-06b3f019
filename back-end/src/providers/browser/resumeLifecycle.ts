@@ -1,0 +1,605 @@
+/** Shared logical provider materialization owner; native Steel custody stays in lifecycleClaim. */
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import { Prisma } from '@prisma/client';
+import { retryWithBackoff } from '../retry';
+import { prisma, runTransactionWithRetry } from '../database';
+import { steelSessionTimeoutMs } from '../steel/sessionLifetime';
+import { isConfirmedBrowserEnd } from './sessionPersist';
+import { abandonFailedHydration, type Request, type ResumeBinding } from './resumeHydrationCleanup';
+import { steelEnvironmentIdentity, SHARED_STEEL_IDENTITY } from '../steel/sessionIdentity';
+import {
+  nativeRequestRejected,
+  type withSteelLifecycleClaim,
+  type SteelLifecycleMutation,
+} from '../steel/lifecycleClaim';
+
+export type HydrationTarget = { targetId: string; urlHash: string; seedUrlHash?: string };
+
+const RESUME_TYPE = 'browser_task_resume';
+const RESUME_WAIT_MS = 30_000;
+const keyFor = (taskId: string) => `steel-browser-task-lifecycle:${taskId}`;
+type Native = { id: string; status: string };
+
+type Scope = {
+  taskId: string;
+  beforeCreate(
+    provider: string,
+    nativeId?: string
+  ): Promise<{ marker: string; ownershipIdentity: string; recoveredId?: string }>;
+  assertOwned(transaction?: Prisma.TransactionClient): Promise<void>;
+  beforeHydration(expectedSessionId: string): Promise<void>;
+  assertHydrationOwned(): Promise<void>;
+  hydrationTransportOpened(): void;
+  hydrationTransportClosed(): void;
+  recordHydrationTargets(targets: HydrationTarget[]): Promise<void>;
+  nativeCreate<T>(create: () => Promise<T>): Promise<T>;
+  settleCreate(nativeId: string): Promise<void>;
+  recovering(): boolean;
+  sourceEnded(): boolean;
+};
+const scope = new AsyncLocalStorage<Scope>();
+export const browserResumeScope = () => scope.getStore();
+/** Issue a provider create, recording a definite rejection for resume custody. */
+export const resumeNativeCreate = <T>(create: () => Promise<T>): Promise<T> =>
+  scope.getStore()?.nativeCreate(create) ?? create();
+
+/** Steel replacement borrows the enclosing logical resume owner, never a second task lease. */
+export const withBrowserResumeClaim: typeof withSteelLifecycleClaim = async (taskId, callback) => {
+  const held = scope.getStore();
+  if (!held || held.taskId !== taskId) throw new Error('Browser resume owner does not match task');
+  const mutate: SteelLifecycleMutation = async (action, existing) => {
+    const owned = async (tx: Prisma.TransactionClient) => {
+      await tx.$queryRaw`SELECT id FROM "ToolSideEffect" WHERE "operationKey" = ${keyFor(taskId)} FOR UPDATE`;
+      await held.assertOwned(tx);
+      const result = await action(tx);
+      await held.assertOwned(tx);
+      return result;
+    };
+    return existing ? owned(existing) : runTransactionWithRetry(owned);
+  };
+  return callback(
+    held.assertOwned,
+    async (_id, effect, action) => {
+      await held.assertOwned();
+      return effect === 'create' ? held.nativeCreate(action) : action();
+    },
+    mutate,
+    async () => false
+  );
+};
+
+export interface ResumeLifecycleDependencies<T> {
+  readBinding(): Promise<ResumeBinding>;
+  resume(): Promise<T>;
+  retryHydration?(nativeId: string, targets: HydrationTarget[]): Promise<T>;
+  follow(): Promise<T>;
+  compatibility: string;
+  canFollow(): Promise<boolean>;
+  reuseCompleted: boolean;
+  sourceEnded(): boolean;
+  inspect(provider: string, marker: string, identity: string): Promise<Native | null>;
+  /** Release one exact native candidate; true only when the provider confirmed the release. */
+  release(provider: string, nativeId: string): Promise<boolean>;
+  /** Whether the provider reports this exact native as terminal (never a guess). */
+  ended(nativeId: string): Promise<boolean>;
+}
+
+export { failedHydrationCleanup } from './resumeHydrationCleanup';
+
+/**
+ * The ledger holds no credentials. An expired uncertain create is adopted only
+ * by exact provider marker; zero matches stay unknown and never authorize POST.
+ */
+export async function withBrowserResumeLifecycle<T>(
+  taskId: string,
+  deps: ResumeLifecycleDependencies<T>
+): Promise<T> {
+  const operationKey = keyFor(taskId);
+  const identity = steelEnvironmentIdentity();
+  if (identity === SHARED_STEEL_IDENTITY)
+    throw new Error('Browser resume requires an isolated ownership identity');
+  const initial = await deps.readBinding();
+  const owner = randomUUID();
+  const until = Date.now() + RESUME_WAIT_MS;
+  let recoveredId: string | undefined;
+  let joinedInFlight = false;
+  let retryHydration = false;
+  let retryReceipt: Prisma.InputJsonObject | undefined;
+  let expectedRetryBinding: unknown;
+  let hydrationSnapshot: ReturnType<typeof hydrationBinding> | undefined;
+  const hydrationBinding = (binding: ResumeBinding) => ({
+    sessionId: binding.sessionId,
+    status: binding.status,
+    provider: binding.provider ?? null,
+    baselineCheckpointRef: binding.baselineCheckpointRef ?? null,
+    currentUrlHash: binding.currentUrl
+      ? createHash('sha256').update(binding.currentUrl).digest('hex')
+      : null,
+    startUrlHash: binding.startUrl
+      ? createHash('sha256').update(binding.startUrl).digest('hex')
+      : null,
+    wsUrlHash: binding.wsUrl ? createHash('sha256').update(binding.wsUrl).digest('hex') : null,
+    debugUrlHash: binding.debugUrl
+      ? createHash('sha256').update(binding.debugUrl).digest('hex')
+      : null,
+    controlState: binding.controlState ?? null,
+    controlLeaseExpiresAt: binding.controlLeaseExpiresAt?.toISOString() ?? null,
+    contextId: binding.contextId ?? null,
+    logicalOwnerKey: binding.logicalOwnerKey ?? null,
+    checkpointRef: binding.checkpointRef ?? null,
+    checkpointRevision: binding.checkpointRevision ?? null,
+  });
+  const sameHydrationBinding = (left: unknown, right: ResumeBinding) =>
+    isDeepStrictEqual(left, hydrationBinding(right));
+  let request!: Request;
+  const acquired = await retryWithBackoff<
+    { kind: 'followed'; result: T } | { kind: 'claimed' } | null
+  >(
+    async () => {
+      const row = await prisma.toolSideEffect.findUnique({ where: { operationKey } });
+      const current = await deps.readBinding();
+      if (row?.operationType === RESUME_TYPE && row.status === 'RELEASED') {
+        const ready = row.response as { phase?: string; sessionId?: string } | null;
+        if ((row.request as Prisma.JsonObject | null)?.ownershipIdentity !== identity) {
+          throw new Error('Browser resume ownership identity changed');
+        }
+        if (
+          (deps.reuseCompleted || joinedInFlight) &&
+          (row.request as Prisma.JsonObject | null)?.compatibility === deps.compatibility &&
+          ready?.phase === 'ready' &&
+          ready.sessionId === current.sessionId &&
+          current.status === 'ACTIVE'
+        ) {
+          if (await deps.canFollow()) {
+            const assertReady = async () => {
+              const latest = await prisma.toolSideEffect.findUnique({ where: { operationKey } });
+              const binding = await deps.readBinding();
+              const latestRequest = latest?.request as Prisma.JsonObject | null;
+              const latestReady = latest?.response as { phase?: string; sessionId?: string } | null;
+              if (
+                latest?.id !== row.id ||
+                latest?.operationType !== RESUME_TYPE ||
+                latest.status !== 'RELEASED' ||
+                latest.externalId !== row.externalId ||
+                latestRequest?.requestId !== (row.request as Prisma.JsonObject | null)?.requestId ||
+                latestRequest?.ownershipIdentity !== identity ||
+                latestRequest?.compatibility !== deps.compatibility ||
+                latestReady?.phase !== 'ready' ||
+                latestReady.sessionId !== current.sessionId ||
+                binding.status !== 'ACTIVE' ||
+                binding.sessionId !== current.sessionId ||
+                binding.contextId !== current.contextId ||
+                binding.logicalOwnerKey !== current.logicalOwnerKey ||
+                (binding.controlState !== undefined &&
+                  binding.controlState !== 'AGENT' &&
+                  (binding.controlLeaseExpiresAt === null ||
+                    binding.controlLeaseExpiresAt === undefined ||
+                    binding.controlLeaseExpiresAt.getTime() > Date.now()))
+              )
+                throw new Error('Browser ready receipt or binding changed during follow');
+            };
+            await assertReady();
+            const result = await deps.follow();
+            await assertReady();
+            return { kind: 'followed', result };
+          }
+        }
+      }
+      if (row?.status === 'STARTED') {
+        const held = row.request as unknown as Request;
+        if (row.operationType === RESUME_TYPE && held.compatibility === deps.compatibility)
+          joinedInFlight = true;
+        if (row.operationType === RESUME_TYPE && held.compatibility !== deps.compatibility) {
+          throw new Error('Browser resume request is incompatible with the in-flight operation');
+        }
+        const failed = row.response as {
+          phase?: string;
+          requestId?: string;
+          nativeId?: string;
+          source?: string | null;
+          binding?: unknown;
+          targets?: unknown;
+        } | null;
+        if (row.operationType === RESUME_TYPE && failed?.phase === 'hydration_failed') {
+          if (
+            !deps.retryHydration ||
+            Date.parse(held.expiresAt) <= Date.now() ||
+            held.phase !== 'hydrating' ||
+            held.ownershipIdentity !== identity ||
+            !held.nativeId ||
+            !held.hydrationTargets?.length ||
+            !isDeepStrictEqual(failed.targets, held.hydrationTargets) ||
+            failed.nativeId !== held.nativeId ||
+            failed.requestId !== held.requestId ||
+            failed.source !== held.source ||
+            current.sessionId !== held.nativeId ||
+            current.status !== 'PAUSED' ||
+            !sameHydrationBinding(failed.binding, current)
+          )
+            throw new Error('Acknowledged browser hydration binding changed');
+          const native = await deps.inspect(held.provider, held.requestId, identity);
+          const latestBinding = await deps.readBinding();
+          if (
+            !native ||
+            native.id !== held.nativeId ||
+            native.status !== 'active' ||
+            latestBinding.status !== 'PAUSED' ||
+            !sameHydrationBinding(failed.binding, latestBinding)
+          )
+            throw new Error('Acknowledged browser hydration native is not verified');
+          request = { ...held };
+          const claimed = await prisma.toolSideEffect.updateMany({
+            where: {
+              operationKey,
+              operationType: RESUME_TYPE,
+              status: 'STARTED',
+              externalId: row.externalId,
+              updatedAt: row.updatedAt,
+            },
+            data: {
+              externalId: owner,
+              request: request as unknown as Prisma.InputJsonObject,
+              response: Prisma.DbNull,
+            },
+          });
+          if (claimed.count !== 1) return null;
+          recoveredId = native.id;
+          retryHydration = true;
+          expectedRetryBinding = failed.binding;
+          retryReceipt = row.response as Prisma.InputJsonObject;
+          return { kind: 'claimed' };
+        }
+        if (row.operationType !== RESUME_TYPE || Date.parse(held.expiresAt) > Date.now()) {
+          if (Date.now() >= until) throw new Error('Browser resume is still in progress');
+          return null;
+        }
+        if (held.ownershipIdentity !== identity)
+          throw new Error('Browser resume ownership identity changed');
+        if (held.phase === 'hydrating')
+          throw new Error('Browser resume hydration outcome remains unknown');
+        const native = await deps.inspect(held.provider, held.requestId, identity);
+        if (!native || (native.status !== 'active' && !isConfirmedBrowserEnd(native.status)))
+          throw new Error('Browser resume create outcome remains unknown');
+        if (held.nativeId && held.nativeId !== native.id)
+          throw new Error('Browser resume native identity changed');
+        if (current.sessionId !== held.source && current.sessionId !== native.id)
+          throw new Error('Browser resume source binding changed');
+        const settled = isConfirmedBrowserEnd(native.status);
+        if (settled && current.sessionId !== held.source)
+          throw new Error('Browser resume ended candidate changed the source binding');
+        if (held.nativeOutstanding === false && !settled)
+          throw new Error('Browser resume settled candidate is no longer terminal');
+        request = {
+          ...held,
+          nativeId: native.id,
+          nativeOutstanding: !settled,
+          expiresAt: new Date(Date.now() + steelSessionTimeoutMs()).toISOString(),
+        };
+        const claimed = await prisma.toolSideEffect.updateMany({
+          where: {
+            operationKey,
+            operationType: RESUME_TYPE,
+            status: 'STARTED',
+            externalId: row.externalId,
+            updatedAt: row.updatedAt,
+          },
+          data: { externalId: owner, request: request as unknown as Prisma.InputJsonObject },
+        });
+        if (claimed.count !== 1) return null;
+        recoveredId = settled ? undefined : native.id;
+        return { kind: 'claimed' };
+      }
+      if (current.sessionId !== initial.sessionId)
+        throw new Error('Browser resume source binding changed without a ready receipt');
+      request = {
+        source: current.sessionId,
+        provider: '',
+        requestId: randomUUID(),
+        ownershipIdentity: identity,
+        expiresAt: new Date(Date.now() + steelSessionTimeoutMs()).toISOString(),
+        phase: 'allocated',
+        nativeOutstanding: true,
+        compatibility: deps.compatibility,
+      };
+      const rows = await prisma.$queryRaw<Array<{ externalId: string }>>(Prisma.sql`
+      INSERT INTO "ToolSideEffect" (id, "operationKey", "operationType", status, "externalId", request, "createdAt", "updatedAt")
+      VALUES (${randomUUID()}, ${operationKey}, ${RESUME_TYPE}, 'STARTED', ${owner}, ${JSON.stringify(request)}::jsonb, NOW(), NOW())
+      ON CONFLICT ("operationKey") DO UPDATE SET "operationType" = ${RESUME_TYPE}, status = 'STARTED',
+        "externalId" = ${owner}, request = ${JSON.stringify(request)}::jsonb, response = NULL, "updatedAt" = NOW()
+      WHERE "ToolSideEffect".status <> 'STARTED'
+      RETURNING "externalId"
+    `);
+      return rows[0]?.externalId === owner ? { kind: 'claimed' } : null;
+    },
+    {
+      maxRetries: 601,
+      initialBackoffMs: 50,
+      fixedDelays: Array.from({ length: 600 }, () => 50),
+      shouldRetryResult: (value) => value === null,
+      isRetryable: () => false,
+      component: 'BrowserResumeCustody',
+    }
+  );
+  if (acquired === null) throw new Error('Browser resume is still in progress');
+  if (acquired.kind === 'followed') return acquired.result;
+
+  const assertOwned = async (transaction?: Prisma.TransactionClient) => {
+    const row = await (transaction ?? prisma).toolSideEffect.findUnique({
+      where: { operationKey },
+    });
+    if (
+      row?.externalId !== owner ||
+      row.operationType !== RESUME_TYPE ||
+      row.status !== 'STARTED' ||
+      Date.now() >= Date.parse(request.expiresAt)
+    ) {
+      throw new Error('Browser resume lifecycle ownership lost');
+    }
+  };
+  let hydrationTransportOpened = false;
+  let hydrationTransportClosed = false;
+  let createEntered = false;
+  let createRejected = false;
+  return scope.run(
+    {
+      taskId,
+      assertOwned,
+      recovering: () => recoveredId !== undefined,
+      sourceEnded: deps.sourceEnded,
+      beforeHydration: async (expectedSessionId) => {
+        await assertOwned();
+        const current = await deps.readBinding();
+        if (current.sessionId !== expectedSessionId) {
+          throw new Error('Browser resume binding changed before hydration');
+        }
+        if (
+          current.controlState !== undefined &&
+          current.controlState !== 'AGENT' &&
+          (!current.controlLeaseExpiresAt || current.controlLeaseExpiresAt.getTime() > Date.now())
+        )
+          throw new Error('Browser resume cannot hydrate a session under user control');
+        if (retryHydration && !sameHydrationBinding(expectedRetryBinding, current))
+          throw new Error('Acknowledged browser hydration binding changed before restoration');
+        hydrationSnapshot = hydrationBinding(current);
+        request = {
+          ...request,
+          phase: 'hydrating',
+          nativeId: expectedSessionId,
+        };
+        const changed = await prisma.toolSideEffect.updateMany({
+          where: { operationKey, externalId: owner, status: 'STARTED' },
+          data: { request: request as unknown as Prisma.InputJsonObject },
+        });
+        if (changed.count !== 1)
+          throw new Error('Browser resume lifecycle ownership lost before hydration');
+      },
+      hydrationTransportOpened: () => {
+        hydrationTransportOpened = true;
+      },
+      hydrationTransportClosed: () => {
+        hydrationTransportClosed = true;
+      },
+      assertHydrationOwned: async () => {
+        await assertOwned();
+        const current = await deps.readBinding();
+        if (!hydrationSnapshot || !sameHydrationBinding(hydrationSnapshot, current))
+          throw new Error('Browser hydration ownership or checkpoint changed');
+      },
+      recordHydrationTargets: async (targets) => {
+        await assertOwned();
+        if (request.phase !== 'hydrating')
+          throw new Error('Browser hydration provenance has no owner');
+        request = { ...request, hydrationTargets: targets };
+        const changed = await prisma.toolSideEffect.updateMany({
+          where: { operationKey, externalId: owner, status: 'STARTED' },
+          data: { request: request as unknown as Prisma.InputJsonObject },
+        });
+        if (changed.count !== 1) throw new Error('Browser hydration provenance ownership lost');
+      },
+      beforeCreate: async (provider, nativeId) => {
+        await assertOwned();
+        const binding = await deps.readBinding();
+        if (binding.sessionId !== request.source && binding.sessionId !== recoveredId)
+          throw new Error('Browser resume source binding changed before create');
+        // A definitely rejected create allocated nothing, so the provider may
+        // retry within this resume (e.g. Kernel re-resolving a deleted proxy).
+        if (createEntered && !createRejected)
+          throw new Error('Browser resume native attempt requires reconciliation before retry');
+        createEntered = true;
+        createRejected = false;
+        request = {
+          ...request,
+          provider,
+          phase: 'creating',
+          nativeId: undefined,
+          nativeOutstanding: true,
+          ...(nativeId && !recoveredId ? { requestId: nativeId } : {}),
+        };
+        const changed = await prisma.toolSideEffect.updateMany({
+          where: { operationKey, externalId: owner, status: 'STARTED' },
+          data: { request: request as unknown as Prisma.InputJsonObject },
+        });
+        if (changed.count !== 1)
+          throw new Error('Browser resume lifecycle ownership lost before create');
+        return { marker: request.requestId, ownershipIdentity: identity, recoveredId };
+      },
+      settleCreate: async (nativeId) => {
+        await assertOwned();
+        if (request.phase !== 'creating' || !createEntered || !request.nativeOutstanding)
+          throw new Error('Browser resume has no outstanding create to settle');
+        const terminal = await deps.inspect(request.provider, request.requestId, identity);
+        await assertOwned();
+        const binding = await deps.readBinding();
+        if (
+          !terminal ||
+          terminal.id !== nativeId ||
+          !isConfirmedBrowserEnd(terminal.status) ||
+          binding.sessionId !== request.source
+        )
+          throw new Error('Browser resume candidate release is not verified');
+        request = { ...request, nativeId, nativeOutstanding: false };
+        const changed = await prisma.toolSideEffect.updateMany({
+          where: { operationKey, externalId: owner, status: 'STARTED' },
+          data: { request: request as unknown as Prisma.InputJsonObject },
+        });
+        if (changed.count !== 1) throw new Error('Browser resume ownership lost before settlement');
+        createRejected = true;
+      },
+      nativeCreate: async (create) => {
+        try {
+          return await create();
+        } catch (error) {
+          createRejected = recoveredId === undefined && nativeRequestRejected(error);
+          throw error;
+        }
+      },
+    },
+    async () => {
+      let result: T;
+      try {
+        result = retryHydration
+          ? await deps.retryHydration!(recoveredId!, request.hydrationTargets!)
+          : await deps.resume();
+      } catch (error) {
+        let retainHydrationCustody = hydrationTransportOpened && !hydrationTransportClosed;
+        if (
+          retryReceipt &&
+          !hydrationSnapshot &&
+          (!hydrationTransportOpened || hydrationTransportClosed)
+        ) {
+          // No restoration began. Preserve the settled predecessor's exact receipt.
+          const restored = await prisma.toolSideEffect
+            .updateMany({
+              where: {
+                operationKey,
+                operationType: RESUME_TYPE,
+                externalId: owner,
+                status: 'STARTED',
+                request: { equals: request as unknown as Prisma.InputJsonObject },
+              },
+              data: { response: retryReceipt },
+            })
+            .catch(() => undefined);
+          retainHydrationCustody ||= restored?.count === 1;
+        }
+        if (
+          deps.retryHydration &&
+          hydrationTransportClosed &&
+          request.phase === 'hydrating' &&
+          request.nativeId &&
+          request.hydrationTargets?.length
+        ) {
+          try {
+            await assertOwned();
+            const binding = await deps.readBinding();
+            if (
+              hydrationSnapshot?.status === 'PAUSED' &&
+              hydrationSnapshot.controlState === 'AGENT' &&
+              hydrationSnapshot.logicalOwnerKey &&
+              binding.sessionId === request.nativeId &&
+              binding.status === 'PAUSED' &&
+              sameHydrationBinding(hydrationSnapshot, binding)
+            ) {
+              const acknowledged = await prisma.toolSideEffect.updateMany({
+                where: {
+                  operationKey,
+                  operationType: RESUME_TYPE,
+                  externalId: owner,
+                  status: 'STARTED',
+                  request: {
+                    equals: request as unknown as Prisma.InputJsonObject,
+                  },
+                },
+                data: {
+                  response: {
+                    phase: 'hydration_failed',
+                    requestId: request.requestId,
+                    nativeId: request.nativeId,
+                    source: request.source,
+                    binding: hydrationSnapshot,
+                    targets: request.hydrationTargets,
+                  },
+                },
+              });
+              retainHydrationCustody ||= acknowledged.count === 1;
+            }
+          } catch {
+            // Failed acknowledgement retains unknown custody and the original error.
+          }
+        }
+        // A definitely rejected create allocated nothing, so no outcome remains
+        // to reconcile: release custody so the next resume can create at once.
+        if (
+          request.phase === 'allocated' ||
+          (!request.nativeOutstanding && request.phase === 'creating') ||
+          (createRejected && request.phase === 'creating')
+        ) {
+          await prisma.toolSideEffect.updateMany({
+            where: { operationKey, externalId: owner, status: 'STARTED' },
+            data: {
+              status: 'RELEASED',
+              response: { phase: 'rejected', source: request.source },
+            },
+          });
+        } else if (
+          request.phase === 'hydrating' &&
+          request.nativeId !== undefined &&
+          !retainHydrationCustody
+        ) {
+          // Acknowledged retry custody is retained by its exact receipt above.
+          // Unknown transport ownership must stay fenced, never be abandoned.
+          await abandonFailedHydration({
+            taskId,
+            operationKey,
+            owner,
+            request,
+            initial,
+            candidate: request.nativeId,
+            cause: error,
+            assertOwned,
+            deps,
+            settleRequest: (settled) => {
+              request = settled;
+            },
+          });
+        }
+        throw error;
+      }
+      await assertOwned();
+      const current = await deps.readBinding();
+      if (
+        (current.status !== 'ACTIVE' && current.status !== 'PAUSED') ||
+        current.sessionId !== request.nativeId
+      ) {
+        throw new Error('Browser resume did not retain its hydrated binding');
+      }
+      if (retryHydration && !sameHydrationBinding(expectedRetryBinding, current))
+        throw new Error('Acknowledged browser hydration binding changed before readiness');
+      const readyStatus = current.status;
+      await runTransactionWithRetry(async (tx) => {
+        const changed = await tx.toolSideEffect.updateMany({
+          where: { operationKey, externalId: owner, status: 'STARTED' },
+          data: {
+            status: 'RELEASED',
+            response: { phase: 'ready', source: request.source, sessionId: current.sessionId },
+          },
+        });
+        if (changed.count !== 1)
+          throw new Error('Browser resume lifecycle ownership lost before ready');
+        const ready = await tx.browserSession.updateMany({
+          where: {
+            id: taskId,
+            sessionId: request.nativeId,
+            status: readyStatus,
+            OR: [{ controlState: 'AGENT' }, { controlLeaseExpiresAt: { lte: new Date() } }],
+          },
+          data: { status: 'ACTIVE', closedAt: null },
+        });
+        if (ready.count !== 1) throw new Error('Browser resume lost binding before ready');
+      });
+      return result;
+    }
+  );
+}

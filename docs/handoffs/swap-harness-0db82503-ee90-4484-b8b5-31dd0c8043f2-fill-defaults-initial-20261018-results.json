@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "timestamp_utc": "2026-10-18T20:30:11.628799+00:00",
+  "source_git_sha": "3882424951a99a7d173729622153c845d561afb8",
+  "task": "sms-supervisor-fill-form-searches-then-delegates",
+  "task_sha256": "6f1bbd62321cc1da406e1d7bc8cda3fc171d0e661112b6908cdfea073bf7ae97",
+  "initial_seeded_state": true,
+  "task_model_schema_timeout_and_evaluator_unchanged": true,
+  "approved_change": "System instruction: for details you want to double check with the user, make them extremely easy to parse, and include the defaults that you are assuming",
+  "canonical_stack_run_id": "1792355260-3347491-fill-defaults",
+  "input": "Filled it for me",
+  "duration_seconds": 69.9,
+  "outer_monitor_seconds": 107.95529341697693,
+  "passed": false,
+  "evaluators": [
+    {
+      "id": "sms-fill-form-search-then-delegate-contract",
+      "method": "static_check",
+      "score": 1.0,
+      "passed": true,
+      "reasoning": "All SMS static checks passed"
+    },
+    {
+      "id": "sms-fill-form-does-not-ask-for-known-facts",
+      "method": "single_turn_llm_judge",
+      "score": 0.0,
+      "passed": false,
+      "reasoning": "In turn 0, the first SMS (\u201cI'm on it\u201d) makes no request. The next SMS asks the user for their current residential address, explicitly including \u201ccountry.\u201d The available profile already lists the user's country as United States, so this is the first message that asks for a known fact."
+    }
+  ],
+  "actual_SMS_model_calls": 6,
+  "actual_SMS_models": [
+    "qwen-3.8-27b"
+  ],
+  "response_mock_used": false,
+  "outbound_SMS_transport": "Canonical fake Surge transport; model responses real",
+  "actions": {
+    "grep_calls": 5,
+    "new_agents": 1,
+    "supervisor_replies": 1,
+    "completion_accepted": true,
+    "completion_round": 4,
+    "round_limit_reached": false
+  },
+  "failure_origin": "Delegated agent lifecycle SMS asked country, already present in profile; supervisor reply omitted country but did not present assumed defaults. No causal fix claim.",
+  "cleanup": {
+    "at": "2026-10-18T20:30:06.217886+00:00",
+    "run_id": "1792355260-3347491-fill-defaults",
+    "observed_process_births": 193,
+    "remaining_exact_observed_births": [],
+    "owned_database_absent": true,
+    "canonical_stop_exit": 0,
+    "observer_exit": 1,
+    "observer_failure": "JSONDecodeError while initial trigger was being written; no passive snapshots captured",
+    "independent_terminal_native_provider_DB_readback_completed": true,
+    "global_clean_claimed": false,
+    "native_generations_terminal": 1,
+    "provider_sessions": 0,
+    "durable_archive_refs": 2,
+    "outboxes_empty": true,
+    "diagnostics_passed": 5,
+    "diagnostics_failed": 1,
+    "diagnostic_failure": "Seeded old fixture root has no cache events"
+  },
+  "private_capture": {
+    "saved_SMS_dump_hashes_readback_verified": true,
+    "owned_database_dump_bytes": 31683193,
+    "raw_profiles_prompts_transcripts_environment_private": true
+  },
+  "PR_merged": false,
+  "production_deployed": false
+}

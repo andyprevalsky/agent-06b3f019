@@ -393,6 +393,32 @@ passed.
 
 The lane reruns unchanged on the post-main-sync HEAD.
 
+## Deploy warn-skip (2026-10-12)
+
+The `sms-supervisor-native-tools` deploy hit the same stall twice. On
+transfer `owt_ff135698c18b095f3a40a249` (card `card_b2e87905c62c34ba8abff4d4`,
+4396 transferred), agent `44c46dff-69fa-4fa8-9e9f-9f591e92bd31` stayed `HELD` /
+`RECLAIMING` with `consumed`, `releasedCents=0`. At the user's request, `/deploy`
+Step 6a now sets `BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=1`. With that flag,
+`run_benchmark.py` reports this exact sandbox state as a loud SKIP and does
+not fail the lane:
+
+- the purchase is `HELD`;
+- funding is `RECLAIMING`;
+- the card is `CLOSED`;
+- the card's own test-mode transfer is `consumed` with nothing released.
+
+Its owned cleanup records a warning instead of an error, so the isolated stack
+is released.
+
+Any other lifecycle, a live transfer, or a different card still fails. Without
+the flag, the runner is unchanged. The skip leaves the Stripe test charge
+captured, and this case stays open until AgentCard releases closed-card
+transfers. The regressions live in the agents `benchmark` blackbox domain
+(`abandonment_timeout_classifies_sandbox_release_stall`,
+`owned_payment_release_stall_warn_skip`,
+`ci_permits_only_opt_in_agentcard_release_skip`).
+
 ### Recurrence on 2026-10-12 (PR #1472 deploy, sandbox)
 
 The local AgentCard lifecycle lane for PR #1472 (deploy run
@@ -436,6 +462,19 @@ The user explicitly instructed on October12: "make this test skippable w a warng
 The restored deploy-scoped flag reports the exact sandbox release stall as `SKIPPED` with a loud warning, neverPASS. It requires purchaseHELD, fundingRECLAIMING, a CLOSEDcard with zero balance, matching nonempty card/transfer card IDs, and a test-mode transfer stillconsumed with released0. The common predicate additionally rejects missing/boolean balance and foreign-card state; both legacy and owned-timer boundaries are covered while preserving existing deadlines. Genuine read failures, cancellation, live transfers and unrelated cleanup errors remain strict. Owned cleanup may record this sandbox failure as a warning after fresh exact-owner reads; the test capture/refund remains explicitly unresolved. Production LIVE abandonment/refund requirements remain unchanged.
 
 Six permanent owning controls cover CI skip admission, exact native stall classification, owned cleanup warning, identity/balance guards, both timeout owners with flagON/OFF, and read-error/cancellation rejection. Against the original4db runtime 0/6passed; with the restored policy all6pass, alongside12unchanged payment controls. No timeout, task definition, prompt, model or payment success oracle changed. The original4389native run's3PASSED/1ERROR and original failed cleanup receipt remain historical evidence; an explicit waiver does not retroactively make that attempt pass.
+
+### October 14 integration duplicate-test repair
+
+Main integration preserved later original copies of four test/helper definitions
+that shadowed main's strengthened sandbox fixture and opt-in controls. Five exact
+owning cases failed offline on the integrated test module, while the unchanged
+main runtime and main test module passed. Removing only those redundant copies
+and three duplicate registrations restores all ten selected positive/negative
+controls without changing any runtime guard, assertion, deadline or catalog.
+The main definitions and the branch SMS scoring case remain intact; exact
+original source, warning commit ancestry and lossless preservation snapshots
+remain unchanged. This repair supplies no historical failed run or live lane
+acceptance credit.
 
 ### Recurrence on 2026-10-14 during PR #1512 production verification
 
@@ -585,3 +624,21 @@ is not PASS, native release or a refund; the $1 allocation remains a recorded
 liability. The underlying provider release cause remains open. At 10,000 agents
 this policy adds only local validation of the existing per-root snapshot, no
 new provider calls, polling loops, shared subscriptions or production writes.
+
+### October 26 sandbox recurrence under the standing exception
+
+Final integrated source 646ee1bab18145f519306376014282bcfadea99d produced
+three passed tasks and one warning SKIP in run
+33f845e4-8b57-4250-8fea-315d48a213e5, ending at 21:52:30.417Z.
+The skipped abandonment root was 6f79b389-9a82-41a9-9de8-751ccb4e72aa.
+Native evidence records its card CLOSED with balance0, purchase HELD, funding
+RECLAIMING and exact sandbox transfer consumed/transferred4396/released0.
+The $43.96 sandbox allocation remains unreleased; financial reconciliation is
+pending. This receipt does not prove a release or refund and is not PASS.
+
+The existing October 15 policy classified this known condition automatically;
+no second allocation or retry was created to seek a passing result. All four
+roots completed separate execution/provider cleanup, and the local owner
+receipt reached cleanup_verified. Physical cleanup does not settle the
+financial liability. Original native snapshots, warning, run bundle and owner
+receipt remain in .context/benchmarks/1793050320-4012092-89922.

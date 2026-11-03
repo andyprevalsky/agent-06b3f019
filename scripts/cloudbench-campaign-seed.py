@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import signal
 import subprocess
@@ -78,8 +79,13 @@ def manifest(barrier):
     if path.is_symlink():
         raise ValueError("symlinked cohort manifest")
     value = json.loads(path.read_text())
-    if set(value) != {"cohort_id", "jobs"} or not value["jobs"]:
+    required = {"cohort_id", "jobs"}
+    if not isinstance(value, dict) or not required <= set(value) or set(value) - required - {"e2e_deadline_monotonic"} or not value["jobs"]:
         raise ValueError("invalid cohort manifest")
+    if "e2e_deadline_monotonic" in value:
+        deadline = value["e2e_deadline_monotonic"]
+        if isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or not math.isfinite(deadline) or deadline <= 0:
+            raise ValueError("invalid cohort deadline")
     return value
 
 
@@ -101,6 +107,8 @@ def fixture(root, helpers):
                         continue
                     key, value = line.split("=", 1)
                     key, value = key.strip(), value.strip()
+                    if key.startswith("export") and key[6:7].isspace():
+                        key = key[6:].strip()
                     if key not in (
                         "R2_ACCOUNT_ID",
                         "R2_ENDPOINT",
@@ -258,9 +266,14 @@ def get(root, helpers, identity, directory, deadline=None):
                     break
                 time.sleep(0.2)
             stop_get(process)
-        size = path.stat().st_size
-        if cancelled or process.returncode or size <= 0:
+        if cancelled:
             raise ValueError("canonical fixture full GET failed")
+        # The host GET helper removes its probe on every miss or transport failure.
+        size = path.stat().st_size if path.exists() else 0
+        if process.returncode or size <= 0:
+            raise ValueError(
+                f"canonical fixture key missing or unreadable: {identity['token']} (see {log})"
+            )
         payload_digest = hashlib.sha256()
         with path.open("rb") as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -298,7 +311,7 @@ def prepare(root, helpers, inventory, barrier, deadline=None):
     if owner(inventory, barrier) != authority:
         raise ValueError("campaign owner changed during full GET")
     current = manifest(barrier)
-    if current["cohort_id"] != cohort["cohort_id"] or sorted(current["jobs"]) != sorted(cohort["jobs"]):
+    if current["cohort_id"] != cohort["cohort_id"] or sorted(current["jobs"]) != sorted(cohort["jobs"]) or current.get("e2e_deadline_monotonic") != cohort.get("e2e_deadline_monotonic"):
         raise ValueError("campaign membership changed during full GET")
     value = {
         "version": 1,
@@ -387,4 +400,9 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except ValueError as error:
+        # A typed refusal, not a traceback; the exit status stays fail-closed.
+        print(f"cloudbench-campaign-seed: {error}", file=sys.stderr)
+        raise SystemExit(1)

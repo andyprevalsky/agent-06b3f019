@@ -1,0 +1,114 @@
+From fffd8714cb1b716c1dce5ab98f28e5871636c74d Mon Sep 17 00:00:00 2001
+From: Andy Prevalsky <andyprevalsky@yahoo.com>
+Date: Fri, 9 Oct 2026 22:12:13 +0000
+Subject: [PATCH] benchmarks(local): accept an operator-owned external WMH for
+ simulate runs
+
+A native World Model loaded under a RAM-bounded scope on a 15 GB devbox
+takes far longer than run.sh's 600-second WMH readiness bound, and an
+external server on the stack's WMH port blocks its port allocation. The
+opt-in WMH_EXTERNAL_BASE_URL (loopback http only) points the worker and the
+benchmark runner at an already-healthy WMH and makes run.sh skip serving
+it; a run.sh-served WMH in the manifest stays authoritative. Unset, local
+stacks are unchanged. The local simulate-env blackbox control covers the
+external, manifest-precedence and non-loopback rejection cases.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 45ee29ecadd839abc3124f098d9389f8a4d8c4eb)
+---
+ agents/benchmarks/local.py                  | 20 +++++++++++--
+ agents/tests/blackbox/benchmark.blackbox.py | 33 +++++++++++++++++++++
+ 2 files changed, 51 insertions(+), 2 deletions(-)
+
+diff --git a/agents/benchmarks/local.py b/agents/benchmarks/local.py
+index 15a5a8d9b..a7a8c9eb8 100644
+--- a/agents/benchmarks/local.py
++++ b/agents/benchmarks/local.py
+@@ -1965,7 +1965,7 @@ def apply_manifest_environment(manifest: dict) -> None:
+     # World Model Harness: when run.sh served the WMH (benchmark/simulate builds),
+     # the manifest carries its URL. Inject WMH_BASE_URL/WMH_MODEL_NAME so the
+     # benchmark subprocess (run_benchmark.py) resolves the auto-served server.
+-    wmh_url = (urls.get("wmh") if isinstance(urls, dict) else "") or ""
++    wmh_url = (urls.get("wmh") if isinstance(urls, dict) else "") or external_wmh_base_url()
+     if wmh_url:
+         os.environ["WMH_BASE_URL"] = str(wmh_url).rstrip("/")
+         wmh_model = manifest.get("wmh_model_name") if isinstance(manifest, dict) else None
+@@ -2568,6 +2568,14 @@ def resolve_simulate_mode(simulate_flag: bool, task_names: Sequence[str]) -> boo
+     return False
+ 
+ 
++def external_wmh_base_url() -> str:
++    """Opt-in loopback URL of an already-served WMH (WMH_EXTERNAL_BASE_URL)."""
++    value = (os.environ.get("WMH_EXTERNAL_BASE_URL") or "").strip().rstrip("/")
++    if value and not re.fullmatch(r"http://(?:127\.0\.0\.1|localhost):[1-9][0-9]{1,4}", value):
++        raise ValueError("WMH_EXTERNAL_BASE_URL must be a loopback http://host:port URL")
++    return value
++
++
+ def apply_local_simulate_wmh_env(
+     env: dict[str, str],
+     *,
+@@ -2581,7 +2589,15 @@ def apply_local_simulate_wmh_env(
+     +6 offset.
+     """
+     env["BENCHMARK_WORLD_MODEL_MODE"] = "simulate"
+-    env["WMH_BASE_URL"] = f"http://localhost:{base_port + 6}"
++    external = external_wmh_base_url()
++    if external:
++        # An operator-owned WMH that is already healthy (for example a native
++        # model loaded in a RAM-bounded scope whose cold load exceeds run.sh's
++        # readiness bound). run.sh neither serves nor owns it.
++        env["WMH_BASE_URL"] = external
++        env["BENCHMARK_SKIP_WMH_BUILD"] = "1"
++    else:
++        env["WMH_BASE_URL"] = f"http://localhost:{base_port + 6}"
+     # The worker's WMH adapter (helpers/world_model_runtime.py:from_env) needs
+     # WMH_MODEL_NAME at fork time or the first simulated boundary tool raises
+     # "WMH simulation requires WMH_BASE_URL and WMH_MODEL_NAME". run.sh only
+diff --git a/agents/tests/blackbox/benchmark.blackbox.py b/agents/tests/blackbox/benchmark.blackbox.py
+index 5f4a976ed..df6164fc2 100644
+--- a/agents/tests/blackbox/benchmark.blackbox.py
++++ b/agents/tests/blackbox/benchmark.blackbox.py
+@@ -13563,6 +13563,39 @@ def test_local_simulate_wmh_env_uses_complete_corpus_and_skips_gepa():
+     # No explicit model: the worker still needs a name at fork time (its WMH
+     # adapter reads WMH_MODEL_NAME from its process env at the first boundary).
+     assert pinned["WMH_MODEL_NAME"] == "rose-archive"
++    assert "BENCHMARK_SKIP_WMH_BUILD" not in env
++
++    # An operator-owned, already-healthy WMH replaces run.sh's served port for
++    # the worker and the benchmark runner; run.sh then neither serves nor owns it.
++    from benchmarks.local import apply_manifest_environment
++
++    saved = {key: os.environ.get(key) for key in ("WMH_EXTERNAL_BASE_URL", "WMH_BASE_URL", "WMH_MODEL_NAME")}
++    try:
++        os.environ["WMH_EXTERNAL_BASE_URL"] = "http://127.0.0.1:28690/"
++        external: dict = {}
++        apply_local_simulate_wmh_env(external, base_port=54100, world_model_name="rose-archive")
++        assert external["WMH_BASE_URL"] == "http://127.0.0.1:28690"
++        assert external["BENCHMARK_SKIP_WMH_BUILD"] == "1"
++        os.environ.pop("WMH_BASE_URL", None)
++        apply_manifest_environment({"urls": {}})
++        assert os.environ["WMH_BASE_URL"] == "http://127.0.0.1:28690"
++        # A run.sh-served WMH in the manifest stays authoritative.
++        apply_manifest_environment({"urls": {"wmh": "http://localhost:54106"}})
++        assert os.environ["WMH_BASE_URL"] == "http://localhost:54106"
++        for invalid in ("http://10.0.0.5:28690", "https://127.0.0.1:28690", "http://127.0.0.1"):
++            os.environ["WMH_EXTERNAL_BASE_URL"] = invalid
++            try:
++                apply_local_simulate_wmh_env({}, base_port=54100)
++            except ValueError:
++                pass
++            else:
++                raise AssertionError(f"accepted non-loopback external WMH {invalid}")
++    finally:
++        for key, value in saved.items():
++            if value is None:
++                os.environ.pop(key, None)
++            else:
++                os.environ[key] = value
+ 
+ 
+ def test_local_service_start_timeout_extends_only_for_first_wmh_build():
+-- 
+2.43.0
+

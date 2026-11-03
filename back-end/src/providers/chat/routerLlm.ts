@@ -11,9 +11,9 @@ import {
   type CompletionOptions,
 } from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
-import { agentFastMode, cacheSet } from '../fastCacheStore';
-import { goalHash } from '../fastCacheNormalizeCore';
-import { contentKey } from '../fastCacheNormalizeKeys';
+import { agentFastMode, cacheSet } from '../demoCacheStore';
+import { goalHash } from '../demoCacheNormalizeCore';
+import { contentKey } from '../demoCacheNormalizeKeys';
 import {
   ROUTER_AFTER_SEARCH_SYSTEM_PROMPT,
   ROUTER_SEARCH_BUDGET_SPENT_SYSTEM_PROMPT,
@@ -34,8 +34,8 @@ import {
   type ClosedRouterAction,
 } from './routerJsonStream';
 import { delayedCacheStreamHedge } from './delayedCacheStreamHedge';
-import { isOpeningRouterTurn, readRouterFastCache } from './routerFastCache';
-import { isOaiDemoGoal } from '../fastCacheNormalizeOaiDemo';
+import { isOpeningRouterTurn, readRouterDemoCache } from './routerDemoCache';
+import { isOaiDemoGoal } from '../demoCacheNormalizeOaiDemo';
 import type { ChatProviderRoute } from './phaseModels';
 import type { ChatCompletionParams } from './completionOptions';
 import { withCurrentTimeContext } from '../currentTimeContext';
@@ -70,7 +70,7 @@ const log = createLogger('RouterLLM');
 /**
  * What differs between the turn's first route and the routes after its web
  * searches. A separate call site keeps after-search routes out of the first
- * route's Fast Mode cache rows (including the opening-turn drift replay) and
+ * route's DEMO cache rows (including the opening-turn drift replay) and
  * apart in LLM dumps. Once the search rounds are spent, web_search is gone.
  */
 const ROUTER_STAGES = {
@@ -190,7 +190,7 @@ export function buildRouterCompletionOptions(
     temperature: ROUTER_TEMPERATURE,
     // Cerebras reserves the model's full sequence length when this is omitted,
     // exhausting the shared token quota even for a short routing decision.
-    ...(params.providerRoute === 'direct-cerebras' ? { max_tokens: 1_024 } : {}),
+    ...(params.providerRoute === 'direct-cerebras' ? { max_tokens: 2_048 } : {}),
     // The router is a small structured classification step. Gemini 3.5 Flash
     // enables medium reasoning by default on OpenRouter, which can consume most
     // of the synchronous chat latency budget after a Cerebras stall. Keep its
@@ -338,7 +338,7 @@ export async function callRouterLlm(params: {
     agentId: params.agentId,
     attempt: async (attempt) => {
       lastStreamedText = '';
-      const skipFastCache = attempt > 1 && fcCacheWon;
+      const skipDemoCache = attempt > 1 && fcCacheWon;
       fcCacheWon = false;
       const attemptUsage = emptyChatLlmUsage();
       try {
@@ -376,10 +376,10 @@ export async function callRouterLlm(params: {
           );
 
         let stream: AsyncIterable<CompletionChunk>;
-        if (fcKey && fastModeRead && !skipFastCache) {
+        if (fcKey && fastModeRead && !skipDemoCache) {
           const cacheKey = fcKey;
           stream = delayedCacheStreamHedge({
-            readCache: () => readRouterFastCache({ agentId: params.agentId, cacheKey, driftGoal }),
+            readCache: () => readRouterDemoCache({ agentId: params.agentId, cacheKey, driftGoal }),
             createLive: (abortSignal) => createLiveStream(abortSignal),
             createCached: syntheticChatStream,
             isLiveCommitChunk: (chunk) => {
@@ -389,7 +389,7 @@ export async function callRouterLlm(params: {
             awaitCacheFirst: isOaiDemoGoal(fastMode.goal),
             hangTimeoutMs: ROUTER_CACHE_HANG_MS,
             onCacheError: (error) =>
-              log.warn('fast_cache.chat_router_read_failed', {
+              log.warn('demo_cache.chat_router_read_failed', {
                 agentId: params.agentId,
                 key: cacheKey,
                 error: error instanceof Error ? error.message : String(error),
@@ -400,7 +400,7 @@ export async function callRouterLlm(params: {
           });
         } else {
           if (fcKey) {
-            log.info('fast_cache.chat_router_write_only', { agentId: params.agentId, key: fcKey });
+            log.info('demo_cache.chat_router_write_only', { agentId: params.agentId, key: fcKey });
           }
           stream = await createLiveStream().catch((error: unknown) => {
             completionDeadline.dispose();
@@ -667,9 +667,9 @@ export async function callRouterLlm(params: {
           goalHash: goalHash(cacheGoal),
           value: { json: fullJson },
         }),
-      () => log.info('fast_cache.chat_router_stored', { agentId: params.agentId, key: fcKey }),
+      () => log.info('demo_cache.chat_router_stored', { agentId: params.agentId, key: fcKey }),
       (error) =>
-        log.warn('fast_cache.chat_router_store_failed', {
+        log.warn('demo_cache.chat_router_store_failed', {
           agentId: params.agentId,
           key: fcKey,
           error: error instanceof Error ? error.message : String(error),

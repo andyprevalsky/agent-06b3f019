@@ -1,0 +1,37 @@
+[
+  {
+    "branch": "fix/cloudbench-original-volume-capture",
+    "head": "e6c4a2d1906581011729584d8695aa1a935ae9f7",
+    "handoff_remote_readback_verified": true,
+    "source_hashes_verified": 7,
+    "pr_url": "https://github.com/Rose-Ai-Labs/rose/pull/1479"
+  },
+  {
+    "branch": "fix/benchmark-hub-upload-timeout",
+    "head": "718ab9a1eed72ca17c8a768baa592330da38e3f1",
+    "handoff_remote_readback_verified": true,
+    "source_hashes_verified": 11,
+    "pr_url": "https://github.com/Rose-Ai-Labs/rose/pull/1480"
+  },
+  {
+    "branch": "fix/cloudbench-image-push-stall",
+    "head": "1d903162bf4affbb3f7d9bc22603e35801b4a95d",
+    "handoff_remote_readback_verified": true,
+    "source_hashes_verified": 0,
+    "pr_url": "https://github.com/Rose-Ai-Labs/rose/pull/1481"
+  },
+  {
+    "branch": "fix/cloudbench-post-canary-inventory-herd",
+    "head": "609f65a05f95a8047584c5f6ceba6a16a6c597f1",
+    "handoff_remote_readback_verified": true,
+    "source_hashes_verified": 0,
+    "pr_url": "https://github.com/Rose-Ai-Labs/rose/pull/1482"
+  },
+  {
+    "branch": "swap-harness/c5f40427-00e7-4554-b3a8-ef48bd5f0222-live50-checkpoint",
+    "head": "ff1940fe9d850f77564401c77869a6132b96d0b9",
+    "handoff_remote_readback_verified": true,
+    "source_hashes_verified": 43,
+    "pr_url": "https://github.com/Rose-Ai-Labs/rose/pull/1483"
+  }
+]

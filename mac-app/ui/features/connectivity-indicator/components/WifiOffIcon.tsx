@@ -4,7 +4,7 @@
 
 export const WifiOffIcon = (): React.ReactElement => (
   <svg
-    className="h-3.5 w-3.5 text-red-600"
+    className="h-3.5 w-3.5 text-red-600 dark:text-red-400"
     fill="none"
     viewBox="0 0 24 24"
     stroke="currentColor"

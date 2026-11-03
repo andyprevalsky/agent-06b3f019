@@ -9,6 +9,14 @@
  *
  * Archived agents are soft-deleted rows (`deletedAt` non-null). The list is
  * bounded server-side, so this never grows without limit for a heavy account.
+ *
+ * LAYOUT: DialogContent is a CSS grid, and a grid item's default
+ * `min-width: auto` is its min-content width. A long untruncated title (one
+ * nowrap line) therefore widened the track past the dialog, and the hovered
+ * row painted off the panel. `min-w-0` on the list wrapper pins it to the
+ * dialog's content box so rows ellipsize at the real edge; the full goal stays
+ * in each title's native tooltip. The list scrolls vertically inside its
+ * max-height, below the header; a row cut at the top edge is scroll position.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -88,7 +96,7 @@ export default function ArchivedAgentsDialog({
             Restoring brings an agent back to the sidebar. It does not resume the run.
           </DialogDescription>
         </DialogHeader>
-        <div className="max-h-[60vh] flex flex-col">
+        <div className="flex min-w-0 max-h-[60vh] flex-col">
           <SidebarAgentList
             agents={agents}
             isLoadingAgents={isLoading}

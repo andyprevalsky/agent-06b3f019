@@ -1,4 +1,7 @@
-import { randomUUID } from 'node:crypto';
+import { KernelSessionValidationError, resetKernelSessionTabs } from './kernelTabs';
+export { resetKernelSessionTabs } from './kernelTabs';
+import { browserResumeScope, resumeNativeCreate } from '../steel/lifecycleClaim';
+import { kernelResumeTags, replacementBinding } from './resumeRecovery';
 import { PermissionDeniedError, RateLimitError } from '@onkernel/sdk';
 import type { Browser } from 'playwright';
 import { prisma } from '../database';
@@ -11,6 +14,11 @@ import { kernelCaptchaTelemetryConfig } from './captchaTelemetry';
 import { installCaptchaSolveIndicator } from './captchaSolveIndicator';
 import { getProviderProfile, rememberProviderProfile } from './context';
 import { persistBrowserSessionRow } from './sessionPersist';
+import {
+  abandonKernelProfileWriterClaim,
+  bindKernelProfileWriter,
+  claimKernelProfileWriter,
+} from './kernelProfileWriter';
 import {
   createSessionOnKernelProxyLadder,
   KERNEL_CREATE_REQUEST_OPTIONS,
@@ -26,7 +34,6 @@ import {
   BrowserProviderRateLimitError,
   type BrowserProviderResumeSession,
   type BrowserProviderSession,
-  type BrowserSessionHealth,
 } from './types';
 import {
   benchmarkIsolatedBrowserProfilesEnabled,
@@ -46,6 +53,7 @@ import { releaseKernelRemoteSession } from './kernelSessionDelete';
 import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
 export { releaseKernelRemoteSession } from './kernelSessionDelete';
 import {
+  getKernelSessionHealth,
   captureKernelScreenshot,
   ensureKernelSessionFileDirectories,
   getKernelCaptchaTelemetry,
@@ -57,6 +65,7 @@ import {
 } from './kernelSessionIo';
 
 export {
+  getKernelSessionHealth,
   captureKernelScreenshot,
   ensureKernelSessionFileDirectories,
   getKernelCaptchaTelemetry,
@@ -69,28 +78,8 @@ export {
 
 const log = createLogger('Kernel');
 
-class KernelSessionValidationError extends Error {}
-
 export async function cleanupBenchmarkKernelProfiles(): Promise<void> {
   await cleanupIsolatedKernelProfiles(kernelClient());
-}
-
-/**
- * Kernel profiles persist Chromium's open pages along with cookies and storage.
- * Replace restored pages with one clean bootstrap tab. Kernel destroys the
- * Playwright context when its final page closes, so creating the clean tab
- * first is required for the caller to reuse this validated connection for
- * credential injection.
- */
-export async function resetKernelSessionTabs(browser: Browser): Promise<number> {
-  const primaryContext = browser.contexts()[0];
-  if (primaryContext === undefined) {
-    throw new KernelSessionValidationError('Kernel browser has no context after CDP validation');
-  }
-  const pages = browser.contexts().flatMap((context) => context.pages());
-  await primaryContext.newPage();
-  await Promise.all(pages.map((page) => page.close({ runBeforeUnload: false })));
-  return pages.length;
 }
 
 type KernelProxySelection = {
@@ -112,6 +101,19 @@ interface KernelRemoteSessionOptions {
   omitManagedProxy?: boolean;
   omitProfile?: boolean;
   boundProfile?: ProviderProfileBinding;
+  /** The session a recreate supersedes; its profile-writer role moves to the new browser. */
+  replacingSessionId?: string | null;
+}
+
+/** A plan without profile support runs ephemeral only when profiles are optional. */
+function profilesUnavailable(error: unknown): { profileId: null; profileSource: string } {
+  if (!(error instanceof PermissionDeniedError)) throw error;
+  const message = `Kernel profiles are required but unavailable: ${error.message}`;
+  if (browserProviderEnabled('KERNEL_PROFILE_REQUIRED', true)) {
+    throw new Error(message, { cause: error });
+  }
+  log.warn(`${message}; using an ephemeral browser`);
+  return { profileId: null, profileSource: 'unavailable_plan' };
 }
 
 async function createProfile(
@@ -136,15 +138,7 @@ async function createProfile(
       // benchmark agent because BrowserContext is unique per user.
       return await getOrCreateBenchmarkKernelProfile(client, agentId);
     } catch (error) {
-      if (error instanceof PermissionDeniedError) {
-        const message = `Kernel profiles are required but unavailable: ${error.message}`;
-        if (browserProviderEnabled('KERNEL_PROFILE_REQUIRED', true)) {
-          throw new Error(message, { cause: error });
-        }
-        log.warn(`${message}; using an ephemeral browser`);
-        return { profileId: null, profileSource: 'unavailable_plan' };
-      }
-      throw error;
+      return profilesUnavailable(error);
     }
   }
   const existing = await getProviderProfile(contextId, 'kernel');
@@ -156,15 +150,7 @@ async function createProfile(
   try {
     profile = await client.profiles.create({});
   } catch (error) {
-    if (error instanceof PermissionDeniedError) {
-      const message = `Kernel profiles are required but unavailable: ${error.message}`;
-      if (browserProviderEnabled('KERNEL_PROFILE_REQUIRED', true)) {
-        throw new Error(message, { cause: error });
-      }
-      log.warn(`${message}; using an ephemeral browser`);
-      return { profileId: null, profileSource: 'unavailable_plan' };
-    }
-    throw error;
+    return profilesUnavailable(error);
   }
   try {
     await rememberProviderProfile(contextId, 'kernel', profile.id);
@@ -196,6 +182,7 @@ async function createRemoteSession(
   proxyLocation: ProxyGeoLocation;
   profileId: string | null;
   profileSource: string;
+  profilePersist: boolean;
   validationBrowser: Browser;
 }> {
   const client = kernelClient();
@@ -208,33 +195,42 @@ async function createRemoteSession(
     profileSource: profile.profileSource,
     durationMs: Date.now() - profileStartedAt,
   });
+  const writerClaim = await claimKernelProfileWriter(profile.profileId, options.replacingSessionId);
   const stealth = browserProviderEnabled('KERNEL_STEALTH_ENABLED', true);
 
   const createValidatedSession = async (proxy: KernelProxySelection) =>
     retryWithBackoff(
       async () => {
         const createStartedAt = Date.now();
-        log.info('Kernel browser creation requested', { agentId, proxySource: proxy.proxySource });
-        const session = await client.browsers.create(
-          {
-            headless: browserProviderEnabled('KERNEL_HEADLESS_ENABLED', false),
-            stealth,
-            telemetry: kernelCaptchaTelemetryConfig(),
-            gpu: browserProviderEnabled('KERNEL_GPU_ENABLED', false),
-            // Do not let Chromium reopen the profile's previous window. The new-tab
-            // page created by this policy is replaced below along with any unexpected
-            // restored pages, leaving one clean bootstrap tab.
-            chrome_policy: { RestoreOnStartup: 5 },
-            timeout_seconds: kernelTimeoutSeconds(),
-            viewport: { width: 1280, height: 800, refresh_rate: 60 },
-            ...(profile.profileId !== null
-              ? { profile: { id: profile.profileId, save_changes: true } }
-              : {}),
-            ...(proxy.proxyId !== undefined ? { proxy_id: proxy.proxyId } : {}),
-            tags: { rose_agent_id: agentId, rose_session_request: randomUUID() },
-          },
-          KERNEL_CREATE_REQUEST_OPTIONS
-        );
+        log.info('Kernel browser creation requested', {
+          agentId,
+          proxySource: proxy.proxySource,
+        });
+        const intent = await browserResumeScope()?.beforeCreate('kernel');
+        const session = intent?.recoveredId
+          ? await client.browsers.retrieve(intent.recoveredId, {}, KERNEL_CREATE_REQUEST_OPTIONS)
+          : await resumeNativeCreate(() =>
+              client.browsers.create(
+                {
+                  headless: browserProviderEnabled('KERNEL_HEADLESS_ENABLED', false),
+                  stealth,
+                  telemetry: kernelCaptchaTelemetryConfig(),
+                  gpu: browserProviderEnabled('KERNEL_GPU_ENABLED', false),
+                  // Do not let Chromium reopen the profile's previous window. The new-tab
+                  // page created by this policy is replaced below along with any unexpected
+                  // restored pages, leaving one clean bootstrap tab.
+                  chrome_policy: { RestoreOnStartup: 5 },
+                  timeout_seconds: kernelTimeoutSeconds(),
+                  viewport: { width: 1280, height: 800, refresh_rate: 60 },
+                  ...(profile.profileId !== null
+                    ? { profile: { id: profile.profileId, save_changes: writerClaim.writer } }
+                    : {}),
+                  ...(proxy.proxyId !== undefined ? { proxy_id: proxy.proxyId } : {}),
+                  tags: kernelResumeTags(agentId, intent),
+                },
+                KERNEL_CREATE_REQUEST_OPTIONS
+              )
+            );
         log.info('Kernel browser creation completed', {
           agentId,
           sessionId: session.session_id,
@@ -256,7 +252,9 @@ async function createRemoteSession(
         if (validationBrowser !== null) {
           try {
             await ensureKernelSessionFileDirectories(session.session_id);
-            const closedTabCount = await resetKernelSessionTabs(validationBrowser);
+            const closedTabCount = intent?.recoveredId
+              ? 0
+              : await resetKernelSessionTabs(validationBrowser);
             // Visible live-view cue while Kernel's stealth auto-solver runs.
             // Agent CDP attach re-installs this — validation connections close
             // before the worker attaches (see captchaSolveIndicator.ts).
@@ -273,6 +271,7 @@ async function createRemoteSession(
               proxyLocation: proxy.proxyLocation,
               profileId: session.profile?.id ?? profile.profileId,
               profileSource: profile.profileSource,
+              profilePersist: writerClaim.writer,
               validationBrowser,
             };
           } catch (error) {
@@ -373,8 +372,10 @@ async function createRemoteSession(
     // recreate row update) may still fail and release the remote session. A
     // premature bind would label the next retry user_persistent instead of
     // new_user_persistent (breaks webdecoy isolation metadata proofs).
+    await bindKernelProfileWriter(writerClaim, remote, releaseKernelRemoteSession);
     return remote;
   } catch (error) {
+    await abandonKernelProfileWriterClaim(writerClaim);
     if (error instanceof RateLimitError) {
       throw new BrowserProviderRateLimitError('kernel', error.message);
     }
@@ -413,7 +414,7 @@ export async function createKernelSessionWithContext(
       startUrl: _startUrl || undefined,
       provider: 'kernel',
       kernelProxySource: remote.proxySource,
-      ...providerProfileData(remote.profileId, remote.profileSource, true),
+      ...providerProfileData(remote.profileId, remote.profileSource, remote.profilePersist),
       releaseRemoteSession: releaseKernelRemoteSession,
     });
   } catch (error) {
@@ -501,7 +502,11 @@ export async function closeKernelSession(
 /** Recreate on the persisted Kernel proxy choice and provider-scoped profile. */
 async function recreateKernelSession(
   taskId: string,
-  opts: { forceManagedProxyType?: KernelProxyType; proxyTier?: string } = {}
+  opts: {
+    forceManagedProxyType?: KernelProxyType;
+    proxyTier?: string;
+    keepValidationConnection?: boolean;
+  } = {}
 ): Promise<BrowserProviderResumeSession> {
   const oldSession = await prisma.browserSession.findUnique({
     where: { id: taskId },
@@ -531,6 +536,7 @@ async function recreateKernelSession(
   // location would silently move the session back.
   const recordedLocation =
     opts.forceManagedProxyType === undefined &&
+    previousSessionId !== null &&
     managedKernelProxyFromSource(oldSession.kernelProxySource) !== undefined
       ? await recordedKernelProxyLocation(kernelClient(), previousSessionId)
       : undefined;
@@ -552,6 +558,9 @@ async function recreateKernelSession(
     oldSession.agentId,
     proxyLocation,
     {
+      // Logical browsers keep their bound Kernel profile too: its saved state is
+      // what carries a live sign-in across rotate_ip, which (unlike pause) takes
+      // no checkpoint before replacing the provider session.
       ...kernelRecreateProxySelection(
         oldSession.kernelProxySource,
         oldSession.proxyTier,
@@ -562,79 +571,99 @@ async function recreateKernelSession(
       // must use its Kernel profile, never the Browser Use profile ID.
       boundProfile:
         oldSession.provider === 'kernel' ? recordedProviderProfileBinding(oldSession) : undefined,
+      replacingSessionId: oldSession.provider === 'kernel' ? previousSessionId : null,
     }
   );
-  await remote.validationBrowser.close().catch(() => {});
+  let handedOff = false;
+  try {
+    if (!opts.keepValidationConnection) await remote.validationBrowser.close().catch(() => {});
 
-  const replaced = await prisma.browserSession.updateMany({
-    where: { id: taskId, sessionId: previousSessionId },
-    data: {
-      sessionId: remote.sessionId,
-      debugUrl: remote.debugUrl,
-      wsUrl: remote.wsUrl,
-      status: 'ACTIVE',
-      closedAt: null,
-      provider: 'kernel',
-      kernelProxySource: remote.proxySource,
-      ...providerProfileData(remote.profileId, remote.profileSource, true),
-      ...(opts.proxyTier !== undefined ? { proxyTier: opts.proxyTier } : {}),
-    },
-  });
-
-  if (replaced.count !== 1) {
-    await Promise.allSettled([
-      releaseKernelRemoteSession(remote.sessionId),
-      remote.validationBrowser.close(),
-    ]);
-    throw new Error(`Browser session changed concurrently while recreating task ${taskId}`);
-  }
-  // Announce before evicting the superseded session so the live view switches first.
-  await announceBrowserSessionBinding({ id: taskId });
-  if (remote.profileId !== null) {
-    await markBenchmarkKernelProfileBound(oldSession.agentId, remote.profileId);
-  }
-
-  // Evict the superseded Kernel browser so we never leak a paid session. On the
-  // resume path the old browser was already deleted at pause time (delete
-  // tolerates 404); on the rotate path it is still live and must be reaped.
-  if (
-    oldSession.provider === 'kernel' &&
-    previousSessionId !== '' &&
-    previousSessionId !== remote.sessionId
-  ) {
-    await releaseKernelRemoteSession(previousSessionId).catch((error) => {
-      log.warn('Failed to evict superseded Kernel session after recreate', {
-        previousSessionId,
-        error: error instanceof Error ? error.message : String(error),
-      });
+    await browserResumeScope()?.assertOwned();
+    const replaced = await prisma.browserSession.updateMany({
+      where: replacementBinding(taskId, oldSession),
+      data: {
+        sessionId: remote.sessionId,
+        debugUrl: remote.debugUrl,
+        wsUrl: remote.wsUrl,
+        status: oldSession.logicalOwnerKey ? 'PAUSED' : 'ACTIVE',
+        closedAt: null,
+        provider: 'kernel',
+        kernelProxySource: remote.proxySource,
+        ...providerProfileData(remote.profileId, remote.profileSource, remote.profilePersist),
+        ...(opts.proxyTier !== undefined ? { proxyTier: opts.proxyTier } : {}),
+      },
     });
-  }
 
-  const savedUrl = oldSession.currentUrl || oldSession.startUrl || undefined;
-  if (savedUrl && (await validateSessionConnection(remote.wsUrl))) {
-    const { chromium } = await import('playwright');
-    const browser = await chromium.connectOverCDP(remote.wsUrl);
-    const context = browser.contexts()[0];
-    const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto(savedUrl, { waitUntil: 'domcontentloaded', timeout: 10_000 }).catch(() => {});
-    await browser.close().catch(() => {});
-  }
+    if (replaced.count !== 1) {
+      await Promise.allSettled([
+        releaseKernelRemoteSession(remote.sessionId),
+        ...(opts.keepValidationConnection ? [] : [remote.validationBrowser.close()]),
+      ]);
+      throw new Error(`Browser session changed concurrently while recreating task ${taskId}`);
+    }
+    // Announce before evicting the superseded session so the live view switches first.
+    await announceBrowserSessionBinding({ id: taskId });
+    if (remote.profileId !== null) {
+      await markBenchmarkKernelProfileBound(oldSession.agentId, remote.profileId);
+    }
 
-  return {
-    provider: 'kernel',
-    debugUrl: remote.debugUrl,
-    sessionId: remote.sessionId,
-    wsUrl: remote.wsUrl,
-    savedUrl,
-    proxySource: remote.proxySource,
-    proxyLocation: remote.proxyLocation,
-    profileId: remote.profileId,
-    profileSource: remote.profileSource,
-  };
+    // Evict the superseded Kernel browser so we never leak a paid session. On the
+    // resume path the old browser was already deleted at pause time (delete
+    // tolerates 404); on the rotate path it is still live and must be reaped.
+    if (
+      oldSession.provider === 'kernel' &&
+      previousSessionId !== null &&
+      previousSessionId !== '' &&
+      previousSessionId !== remote.sessionId
+    ) {
+      await releaseKernelRemoteSession(previousSessionId).catch((error) => {
+        log.warn('Failed to evict superseded Kernel session after recreate', {
+          previousSessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
+
+    const savedUrl = oldSession.currentUrl || oldSession.startUrl || undefined;
+    if (
+      savedUrl &&
+      !oldSession.logicalOwnerKey &&
+      (opts.keepValidationConnection || (await validateSessionConnection(remote.wsUrl)))
+    ) {
+      const { chromium } = await import('playwright');
+      const browser = opts.keepValidationConnection
+        ? remote.validationBrowser
+        : await chromium.connectOverCDP(remote.wsUrl);
+      const context = browser.contexts()[0];
+      const page = context.pages()[0] ?? (await context.newPage());
+      await page.goto(savedUrl, { waitUntil: 'domcontentloaded', timeout: 10_000 }).catch(() => {});
+      if (!opts.keepValidationConnection) await browser.close().catch(() => {});
+    }
+
+    handedOff = true;
+    return {
+      ...(opts.keepValidationConnection ? { validationBrowser: remote.validationBrowser } : {}),
+      provider: 'kernel',
+      debugUrl: remote.debugUrl,
+      sessionId: remote.sessionId,
+      wsUrl: remote.wsUrl,
+      savedUrl,
+      proxySource: remote.proxySource,
+      proxyLocation: remote.proxyLocation,
+      profileId: remote.profileId,
+      profileSource: remote.profileSource,
+    };
+  } finally {
+    if (opts.keepValidationConnection && !handedOff)
+      await remote.validationBrowser.close().catch(() => {});
+  }
 }
 
-export async function resumeKernelSession(taskId: string): Promise<BrowserProviderResumeSession> {
-  return recreateKernelSession(taskId);
+export async function resumeKernelSession(
+  taskId: string,
+  options: { keepValidationConnection?: boolean } = {}
+): Promise<BrowserProviderResumeSession> {
+  return recreateKernelSession(taskId, options);
 }
 
 /**
@@ -644,25 +673,12 @@ export async function resumeKernelSession(taskId: string): Promise<BrowserProvid
  */
 export async function rotateKernelSession(
   taskId: string,
-  proxyType: KernelProxyType
+  proxyType: KernelProxyType,
+  options: { keepValidationConnection?: boolean } = {}
 ): Promise<BrowserProviderResumeSession> {
   return recreateKernelSession(taskId, {
+    ...options,
     forceManagedProxyType: proxyType,
     proxyTier: proxyType,
   });
-}
-
-export async function getKernelSessionHealth(sessionId: string): Promise<BrowserSessionHealth> {
-  const session = await kernelClient().browsers.retrieve(sessionId, { include_deleted: true });
-  return {
-    provider: 'kernel',
-    sessionId,
-    status: session.deleted_at ? 'deleted' : 'active',
-    createdAt: session.created_at,
-    timeoutMs: session.timeout_seconds * 1000,
-    expiresAt: null,
-    ttlMs: null,
-    profileId: session.profile?.id ?? null,
-    uptimeMs: session.usage?.uptime_ms ?? null,
-  };
 }

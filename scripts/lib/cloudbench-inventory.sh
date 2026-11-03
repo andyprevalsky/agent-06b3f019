@@ -51,6 +51,8 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
     while [ "${secs#0}" != "$secs" ]; do secs="${secs#0}"; done
     [ -n "$secs" ] || return 142
     local out notify_fd read_fd pid rc read_status=0 completed running
+    local child_birth=unknown returned=unknown marker_pid marker_birth marker_rc marker_extra stat_line local_shell_pid marker_shell_flags completion_markers_safe=1 completion_token marker_token returned_pid returned_birth
+    local -a stat_fields
     out="$(mktemp)" || return 1
     if ! mkfifo -m 600 "$out.done"; then
         rm -f "$out"
@@ -69,11 +71,34 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
         return 1
     fi
     rm -f "$out.done"
+    # Existing siblings are not evidence from this invocation. An invocation
+    # token additionally binds records to this exact wrapper rather than a PID.
+    [ ! -e "$out.started" ] && [ ! -L "$out.started" ] && \
+        [ ! -e "$out.returned" ] && [ ! -L "$out.returned" ] || completion_markers_safe=0
+    completion_token="$BASHPID-$RANDOM-$RANDOM"
     (
         exec {read_fd}<&-
         # Keep the writer through native exec and EXIT handlers. Production
         # FLY owns a foreground flyctl; detached writers fail at the deadline.
+        # Private, best-effort completion evidence only. No marker grants success;
+        # the original FIFO EOF plus wait status remains the acceptance boundary.
+        local_shell_pid="$BASHPID"
+        child_birth=unknown
+        if [ -r "/proc/$BASHPID/stat" ]; then
+            IFS= read -r stat_line < "/proc/$BASHPID/stat" || true
+            stat_line="${stat_line##*) }"
+            read -r -a stat_fields <<< "$stat_line"
+            child_birth="${stat_fields[19]:-unknown}"
+        fi
+        marker_shell_flags="$-"
+        set -C
+        { [ "$completion_markers_safe" = 1 ] && printf '%s %s %s\n' "$completion_token" "$local_shell_pid" "$child_birth" > "$out.started"; } 2>/dev/null || true
+        case "$marker_shell_flags" in *C*) ;; *) set +C ;; esac
         if FLY "$@" >"$out" 2>&1; then rc=0; else rc=$?; fi
+        marker_shell_flags="$-"
+        set -C
+        { [ "$completion_markers_safe" = 1 ] && printf '%s %s %s %s\n' "$completion_token" "$local_shell_pid" "$child_birth" "$rc" > "$out.returned"; } 2>/dev/null || true
+        case "$marker_shell_flags" in *C*) ;; *) set +C ;; esac
         exit "$rc"
     ) &
     pid=$!
@@ -81,28 +106,59 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
     IFS= read -r -t "$secs" -u "$read_fd" completed || read_status=$?
     exec {read_fd}<&-
     if [ "$read_status" -ne 1 ]; then
+        if [ "$completion_markers_safe" = 1 ] && [ -f "$out.started" ] && [ ! -L "$out.started" ]; then
+            IFS=' ' read -r marker_token marker_pid marker_birth marker_extra < "$out.started" || true
+            if [ "${marker_token:-}" = "$completion_token" ] && [ "${marker_pid:-}" = "$pid" ] && [ -z "${marker_extra:-}" ]; then
+                case "${marker_birth:-}" in ''|*[!0-9]*) ;; *) child_birth="$marker_birth" ;; esac
+            fi
+        fi
+        if [ "$completion_markers_safe" = 1 ] && [ -f "$out.returned" ] && [ ! -L "$out.returned" ]; then
+            IFS=' ' read -r marker_token returned_pid returned_birth marker_rc marker_extra < "$out.returned" || true
+            case "${marker_rc:-}" in ''|*[!0-9]*) ;; *)
+                [ "${marker_token:-}" = "$completion_token" ] && [ "${returned_pid:-}" = "$pid" ] && \
+                    [ "${returned_birth:-}" = "$child_birth" ] && [ -z "${marker_extra:-}" ] && returned="$marker_rc" ;;
+            esac
+        fi
+        printf '[warn] FLY_COMPLETION_TIMEOUT shell_pid=%s shell_start_ticks=%s fly_return_status=%s fifo_read_status=%s\n' \
+            "$pid" "$child_birth" "$returned" "$read_status" >&2
         # Only EOF establishes completion. Deadline, interrupted read, and
         # invalid/read-error statuses must never fall through to an unbounded
         # successful wait. A shell job check avoids signalling a reused PID if
         # an unsupported detached descendant retained a FIFO descriptor.
+        # Signal the native children first and keep their wrapper shell alive:
+        # while it runs, `-P "$pid"` still names exactly this invocation's
+        # children. Terminating the wrapper first reparents a TERM-surviving
+        # flyctl to init, where the KILL escalation can no longer reach it.
         running="$(jobs -pr)"
         if [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]]; then
             pkill -TERM -P "$pid" 2>/dev/null || true
-            kill -TERM "$pid" 2>/dev/null || true
-            sleep 2
-            running="$(jobs -pr)"
+            local grace
+            for grace in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+                running="$(jobs -pr)"
+                [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]] || break
+                sleep 0.1
+            done
             if [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]]; then
                 pkill -KILL -P "$pid" 2>/dev/null || true
-                kill -KILL "$pid" 2>/dev/null || true
+                for grace in 1 2 3 4 5 6 7 8 9 10; do
+                    running="$(jobs -pr)"
+                    [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]] || break
+                    sleep 0.1
+                done
+                if [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]]; then
+                    kill -KILL "$pid" 2>/dev/null || true
+                fi
             fi
         fi
         wait "$pid" 2>/dev/null || true
         cat "$out"; rm -f "$out"
+        [ "$completion_markers_safe" != 1 ] || rm -f "$out.started" "$out.returned"
         [ "$read_status" -gt 128 ] && return 142
         return 1
     fi
     if wait "$pid"; then rc=0; else rc=$?; fi
     cat "$out"; rm -f "$out"
+    [ "$completion_markers_safe" != 1 ] || rm -f "$out.started" "$out.returned"
     return "$rc"
 }
 
@@ -134,7 +190,7 @@ INVENTORY_CLOCK_EPOCH="$(date +%s)"
 INVENTORY_CLOCK_SECONDS="$SECONDS"
 
 inventory_refresh_diagnostic() {  # <phase> <native-status|pending> <private-output> <started-SECONDS>
-    local phase="$1" status="$2" raw="${3:-}" started="${4:-$SECONDS}"
+    local phase="$1" status="$2" raw="${3:-}" started="${4:-$SECONDS}" phase_source="${5:-}"
     local directory="${INVENTORY_HOME:-$FLEET_DIR}/inventory-refresh-diagnostics" temporary private_tmp
     [ -d "$directory" ] || mkdir -m 700 "$directory" || return 1
     [ ! -L "$directory" ] || return 1
@@ -152,6 +208,24 @@ inventory_refresh_diagnostic() {  # <phase> <native-status|pending> <private-out
             >> "$directory/history" || return 1
         chmod 600 "$directory/history" || return 1
     fi
+    # The helper writes only allowlisted phase rows to its exclusive private
+    # sidecar. Keep these separate from native JSON; diagnostics grant nothing.
+    if [ -n "$phase_source" ] && [ -f "$phase_source" ] && [ ! -L "$phase_source" ]; then
+        private_tmp="$(mktemp "$directory/.phase.XXXXXX")" || return 1
+        if cp "$phase_source" "$private_tmp" && chmod 600 "$private_tmp" \
+            && mv "$private_tmp" "$directory/phase.latest.private"; then
+            case "$status" in
+                pending|0) rm -f "$phase_source" ;;
+                *)
+                    private_tmp="$(mktemp "$directory/.failure-phase.XXXXXX")" || return 1
+                    if cp "$phase_source" "$private_tmp" && chmod 600 "$private_tmp" \
+                        && mv "$private_tmp" "$directory/failure.phase.private"; then
+                        rm -f "$phase_source"
+                    fi
+                    ;;
+            esac
+        fi
+    fi
     case "$status" in pending|0) return 0 ;; esac
     private_tmp="$(mktemp "$directory/.failure.XXXXXX")" || return 1
     if [ -f "$raw" ] && [ ! -L "$raw" ]; then
@@ -161,7 +235,7 @@ inventory_refresh_diagnostic() {  # <phase> <native-status|pending> <private-out
 }
 
 _refresh_inventory_snapshot_unlocked() {
-    local suffix machines_tmp volumes_tmp publish_tmp started status=0
+    local suffix machines_tmp volumes_tmp publish_tmp phase_tmp started status=0
     # Native Machine JSON can contain configured env and files. Keep even
     # short-lived snapshots private before any diagnostic copy is made.
     umask 077
@@ -169,19 +243,22 @@ _refresh_inventory_snapshot_unlocked() {
     suffix="${BASHPID:-$$}.$RANDOM"
     machines_tmp="$MACHINES_SNAPSHOT.tmp.$suffix"
     volumes_tmp="$VOLUMES_SNAPSHOT.tmp.$suffix"
+    phase_tmp="${INVENTORY_HOME:-$FLEET_DIR}/inventory-refresh-diagnostics/.machines-phase.$suffix"
     publish_tmp="${INVENTORY_HOME:-$FLEET_DIR}/inventory-publish.tmp.$suffix"
+    # Pinned flyctl sends headless CLI analytics after JSON. Keep that optional
+    # finalizer out of these bounded reads; native EOF/status still decide success.
     inventory_refresh_diagnostic machines-list pending "" "$started" || true
-    fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" \
-        machines list -a "$APP" --json > "$machines_tmp" || status=$?
+    CLOUDBENCH_INVENTORY_PHASE_FILE="$phase_tmp" FLY_SEND_METRICS=0 \
+        fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" machines list -a "$APP" --json > "$machines_tmp" || status=$?
     if [ "$status" -ne 0 ] || [ ! -s "$machines_tmp" ]; then
         [ "$status" -ne 0 ] || status=1
-        inventory_refresh_diagnostic machines-list "$status" "$machines_tmp" "$started" || true
+        inventory_refresh_diagnostic machines-list "$status" "$machines_tmp" "$started" "$phase_tmp" || true
         rm -f "$machines_tmp" "$volumes_tmp"
         return 1
     fi
-    inventory_refresh_diagnostic volumes-list pending "" "$started" || true
+    inventory_refresh_diagnostic volumes-list pending "" "$started" "$phase_tmp" || true
     status=0
-    fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" \
+    FLY_SEND_METRICS=0 fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" \
         volumes list -a "$APP" --json > "$volumes_tmp" || status=$?
     if [ "$status" -ne 0 ] || [ ! -s "$volumes_tmp" ]; then
         [ "$status" -ne 0 ] || status=1
@@ -191,7 +268,7 @@ _refresh_inventory_snapshot_unlocked() {
     fi
     inventory_refresh_diagnostic publish-index pending "" "$started" || true
     status=0
-    python3 "$MACHINE_READINESS_SCRIPT" --publish-index \
+    python3 -S "$MACHINE_READINESS_SCRIPT" --publish-index \
         "$machines_tmp" "$volumes_tmp" "$INVENTORY_INDEX" > "$publish_tmp" 2>&1 || status=$?
     if [ "$status" -ne 0 ]; then
         inventory_refresh_diagnostic publish-index "$status" "$publish_tmp" "$started" || true
@@ -443,15 +520,33 @@ _fresh_snapshot_or() {  # _fresh_snapshot_or <snapshot-file> <live-cmd...>
     # provider request per child during the exact rate-limit condition we absorb.
     local f="$1"; shift
     if [ -n "${SNAPSHOT_LOOP_PID:-}" ]; then
-        inventory_index_healthy || return 1
-        [ -s "$f" ] || return 1
+        inventory_index_healthy || return $?
+        [ -s "$f" ] || return 75
         cat "$f"
-        return 0
+        return $?
     fi
     "$@" 2>/dev/null
 }
 fleet_machines_json() { _fresh_snapshot_or "$MACHINES_SNAPSHOT" FLY machines list -a "$APP" --json; }
+fleet_admission_machines_json() {
+    # Borrow the original campaign publisher even during warm-source lookup;
+    # never retain app-wide inline boot payloads in each waiting controller.
+    if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
+        [ -n "${SNAPSHOT_LOOP_PID:-}" ] || return 75
+        _fresh_snapshot_or "$INVENTORY_INDEX/current/admission-machines.json" FLY machines list -a "$APP" --json
+        return $?
+    fi
+    fleet_machines_json
+}
 fleet_volumes_json()  { _fresh_snapshot_or "$VOLUMES_SNAPSHOT" FLY volumes list -a "$APP" --json; }
+
+inventory_borrowed_generation_wait_seconds() {
+    # A borrower cannot refresh the parent feed. One healthy publication cycle is
+    # the publisher's deliberate sleep (poll plus at most two seconds of jitter)
+    # followed by the existing bounded refresh budget. Sharded campaigns lengthen
+    # the poll (60 s at 20 controllers); a budget sized for 15 s cannot cover it.
+    printf '%s' "${CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS:-$((SNAPSHOT_POLL + 2 + SNAPSHOT_REFRESH_TIMEOUT * 3 + 5))}"
+}
 
 machines_snapshot_identity() {
     local key value generation="missing"
@@ -462,7 +557,40 @@ machines_snapshot_identity() {
     printf '%s' "$generation"
 }
 
-refresh_machines_snapshot_after() {  # refresh_machines_snapshot_after <prior-identity>
+refresh_machines_snapshot_after() {  # <prior-identity> [original-caller-deadline]
+    if [ "${INVENTORY_PUBLISHER_BORROWED:-0}" = 1 ]; then
+        # Post-mutation borrowers must observe a NEW healthy parent generation.
+        # They never become a second producer or take its refresh mutex: a slow
+        # child native CLI would otherwise prevent the healthy parent publishing.
+        local borrowed_prior="$1" before after health_status wait_seconds deadline caller_deadline="${2:-}"
+        wait_seconds="$(inventory_borrowed_generation_wait_seconds)"
+        case "$wait_seconds" in ''|*[!0-9]*) return 1 ;; esac
+        deadline=$((SECONDS + wait_seconds))
+        if [ -n "$caller_deadline" ]; then
+            case "$caller_deadline" in *[!0-9]*) return 1 ;; esac
+            [ "$caller_deadline" -ge "$deadline" ] || deadline="$caller_deadline"
+        fi
+        while [ "$SECONDS" -lt "$deadline" ]; do
+            before="$(machines_snapshot_identity)"
+            health_status=0
+            inventory_index_healthy || health_status=$?
+            case "$health_status" in
+                0)
+                    after="$(machines_snapshot_identity)"
+                    if [ -n "$before" ] && [ "$before" != missing ] && \
+                        [ "$before" = "$after" ] && [ "$before" != "$borrowed_prior" ]; then
+                        [ "$SECONDS" -lt "$deadline" ] || return 1
+                        return 0
+                    fi
+                    ;;
+                75) ;;  # Only real live, birth/token-fenced availability is pending.
+                *) return 1 ;;
+            esac
+            inventory_refresh_wait_tick || return 1
+        done
+        echo "❌ timed out waiting for a new healthy parent inventory generation" >&2
+        return 1
+    fi
     # Clone output very rarely omits the target id. All exceptional resolvers
     # coalesce behind one bounded refresh. The lock carries a process-start
     # identity so a SIGKILLed owner can never wedge every later refresh.
@@ -491,7 +619,7 @@ inventory_machine_record_path() {  # inventory_machine_record_path <id>
 
 inventory_machine_field() {  # inventory_machine_field <id> <field>
     local path key value
-    inventory_index_healthy || return 1
+    inventory_index_healthy || return $?
     path="$(inventory_machine_record_path "$1")" || return 1
     [ -s "$path" ] || return 1
     while IFS='=' read -r key value; do
@@ -523,11 +651,21 @@ inventory_machine_id_for_name() {
 # Keep every clone start behind the same storage lifecycle contract as the
 # per-benchmark child runner.
 machine_storage_ready() {  # machine_storage_ready <id>
-    [ "$(inventory_machine_field "$1" storage_ready 2>/dev/null || true)" = "1" ]
+    local value status=0
+    inventory_index_healthy || status=$?
+    case "$status" in 0) ;; 75) return 75 ;; *) return 2 ;; esac
+    # A missing record or changed generation cannot prove native storage state.
+    value="$(inventory_machine_field "$1" storage_ready)" || return 75
+    case "$value" in 1) return 0 ;; 0) return 1 ;; *) return 2 ;; esac
 }
 
 machine_storage_failed() {  # machine_storage_failed <id>
-    [ "$(inventory_machine_field "$1" storage_failed 2>/dev/null || true)" = "1" ]
+    local value status=0
+    inventory_index_healthy || status=$?
+    case "$status" in 0) ;; 75) return 75 ;; *) return 2 ;; esac
+    # A missing record or changed generation cannot prove native storage state.
+    value="$(inventory_machine_field "$1" storage_failed)" || return 75
+    case "$value" in 1) return 0 ;; 0) return 1 ;; *) return 2 ;; esac
 }
 
 snapshot_machine_state() {  # snapshot_machine_state <id>; 0=state, 1=absent, 2=unsafe

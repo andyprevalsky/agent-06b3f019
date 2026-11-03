@@ -17,7 +17,10 @@ import { config } from 'dotenv';
 config();
 
 import { prisma } from '../../providers/database';
-import { deleteAgentRecursive } from '../../providers/agentKill';
+import {
+  deleteAgentRecursive,
+  waitForScheduledRootArchiveFinalizations,
+} from '../../providers/agentKill';
 import { listArchivedObjectsStrict } from '../../providers/traceArchive';
 import { inspectFinalizedManifest } from '../../providers/traceArchiveManifest';
 import {
@@ -31,6 +34,8 @@ let passed = 0;
 const failures: string[] = [];
 
 async function test(name: string, fn: () => Promise<void> | void): Promise<void> {
+  if (process.argv.includes('--kill-retry-only') && !name.startsWith('explicit kill retries'))
+    return;
   try {
     await fn();
     passed += 1;
@@ -200,6 +205,7 @@ async function main(): Promise<void> {
       assert.equal(before, 2);
 
       await deleteAgentRecursive(parentId, { terminateReason: 'unit-test' });
+      await waitForScheduledRootArchiveFinalizations();
 
       const after = await prisma.agentAttentionRequest.count({
         where: { agentId: { in: [parentId, childId] } },
@@ -266,6 +272,7 @@ async function main(): Promise<void> {
 
     try {
       await deleteAgentRecursive(rootId, { terminateReason: 'unit-test retry' });
+      await waitForScheduledRootArchiveFinalizations();
 
       const retained = await prisma.traceArchiveFinalization.findUnique({
         where: { rootAgentId: rootId },
@@ -280,6 +287,7 @@ async function main(): Promise<void> {
 
       process.env.TRACE_ARCHIVE_LOCAL_DIR = recoveredArchiveRoot;
       await deleteAgentRecursive(rootId, { terminateReason: 'unit-test retry' });
+      await waitForScheduledRootArchiveFinalizations();
 
       const stillRetained = await prisma.traceArchiveFinalization.findUniqueOrThrow({
         where: { rootAgentId: rootId },
@@ -392,8 +400,12 @@ async function main(): Promise<void> {
           maxConcurrency: 1,
           ignoreGrace: true,
         }),
-        AggregateError,
-        'a descendant Temporal cleanup obligation must block the end fixture'
+        (error: unknown) =>
+          error instanceof AggregateError &&
+          error.message.includes(
+            `Trace archive agent ${childId} still has Temporal cleanup pending`
+          ),
+        'a descendant Temporal cleanup obligation must block the end fixture, and the error must name it'
       );
       assert.equal(
         (
@@ -446,6 +458,129 @@ async function main(): Promise<void> {
       assert.equal((await inspectFinalizedManifest(rootId)).status, 'current');
     } finally {
       await prisma.agent.deleteMany({ where: { id: { in: [childId, rootId] } } });
+      await prisma.user.deleteMany({ where: { userId } });
+      rmSync(archiveDir, { recursive: true, force: true });
+      if (priorArchiveBackend === undefined) delete process.env.TRACE_ARCHIVE_BACKEND;
+      else process.env.TRACE_ARCHIVE_BACKEND = priorArchiveBackend;
+      if (priorArchiveEnabled === undefined) delete process.env.TRACE_ARCHIVE_ENABLED;
+      else process.env.TRACE_ARCHIVE_ENABLED = priorArchiveEnabled;
+      if (priorArchiveDir === undefined) delete process.env.TRACE_ARCHIVE_LOCAL_DIR;
+      else process.env.TRACE_ARCHIVE_LOCAL_DIR = priorArchiveDir;
+    }
+  });
+
+  await test('explicit kill retries cleanup after archival and a transient failure', async () => {
+    const userId = `kill-retry-${randomUUID()}`;
+    const id = randomUUID();
+    const original = prisma.agentAttentionRequest.deleteMany.bind(prisma.agentAttentionRequest);
+    const previousArchive = process.env.TRACE_ARCHIVE_ENABLED;
+    process.env.TRACE_ARCHIVE_ENABLED = 'false';
+    try {
+      await prisma.user.create({ data: { userId, phone: `+1553${String(Date.now()).slice(-7)}` } });
+      await prisma.agent.create({ data: { id, userId, goal: 'kill retry', status: 'ACTIVE' } });
+      await prisma.agentAttentionRequest.create({
+        data: { userId, agentId: id, workflowId: id, question: 'retry fixture' },
+      });
+      let failed = false;
+      prisma.agentAttentionRequest.deleteMany = (async (...args: Parameters<typeof original>) => {
+        if (!failed) {
+          failed = true;
+          throw new Error('synthetic transient cleanup failure');
+        }
+        return original(...args);
+      }) as typeof prisma.agentAttentionRequest.deleteMany;
+      await assert.rejects(deleteAgentRecursive(id, { retryArchived: true }), /transient cleanup/);
+      assert.ok((await prisma.agent.findUniqueOrThrow({ where: { id } })).deletedAt);
+      assert.equal(await prisma.agentAttentionRequest.count({ where: { agentId: id } }), 1);
+      await deleteAgentRecursive(id, { retryArchived: true });
+      assert.equal(await prisma.agentAttentionRequest.count({ where: { agentId: id } }), 0);
+    } finally {
+      prisma.agentAttentionRequest.deleteMany = original;
+      await prisma.agent.deleteMany({ where: { id } });
+      await prisma.user.deleteMany({ where: { userId } });
+      if (previousArchive === undefined) delete process.env.TRACE_ARCHIVE_ENABLED;
+      else process.env.TRACE_ARCHIVE_ENABLED = previousArchive;
+    }
+  });
+
+  await test('deleting a completed root discharges its Temporal cleanup and finalizes the archive', async () => {
+    // descend-full69 r004-j0055 (agent 5cce9d33): COMPLETED fired the schema
+    // trigger's TemporalWorkflowCleanup row (5-minute grace). The teardown
+    // DELETE terminated the workflow itself ("already completed") but left that
+    // row, so the forced post-delete finalize failed with
+    // "still has Temporal cleanup pending" behind an AggregateError and the
+    // obligation was retained (never retried where the crons are disabled).
+    const userId = `archive-completed-${randomUUID()}`;
+    const rootId = randomUUID();
+    const archiveDir = mkdtempSync(join(tmpdir(), 'rose-agent-kill-completed-'));
+    const priorArchiveBackend = process.env.TRACE_ARCHIVE_BACKEND;
+    const priorArchiveEnabled = process.env.TRACE_ARCHIVE_ENABLED;
+    const priorArchiveDir = process.env.TRACE_ARCHIVE_LOCAL_DIR;
+    process.env.TRACE_ARCHIVE_BACKEND = 'local';
+    process.env.TRACE_ARCHIVE_ENABLED = 'true';
+    process.env.TRACE_ARCHIVE_LOCAL_DIR = archiveDir;
+    const terminated: string[] = [];
+    const cleanupTerminated: string[] = [];
+
+    await prisma.user.create({
+      data: { userId, phone: `+1554${String(Date.now()).slice(-7)}` },
+    });
+    await prisma.agent.create({
+      data: {
+        id: rootId,
+        userId,
+        goal: 'completed root archive',
+        status: 'COMPLETED',
+        busId: rootId,
+        temporalWorkflowId: rootId,
+        temporalFirstExecutionRunId: `run-${rootId}`,
+        verifier: { create: {} },
+      },
+    });
+
+    try {
+      assert.equal(
+        (await prisma.agent.findUniqueOrThrow({ where: { id: rootId } })).temporalCleanupPending,
+        true,
+        'fixture: the terminal transition must enqueue Temporal cleanup like production'
+      );
+
+      await deleteAgentRecursive(
+        rootId,
+        { terminateReason: 'unit-test' },
+        {
+          terminateWorkflow: async (workflowId) => {
+            terminated.push(workflowId);
+            throw new Error('workflow execution already completed');
+          },
+          workflowCleanup: {
+            terminate: async (execution) => {
+              cleanupTerminated.push(execution.workflowId);
+            },
+          },
+        }
+      );
+      await waitForScheduledRootArchiveFinalizations();
+
+      const obligation = await prisma.traceArchiveFinalization.findUnique({
+        where: { rootAgentId: rootId },
+      });
+      assert.equal(
+        obligation,
+        null,
+        `the post-delete finalization must complete, got lastError=${obligation?.lastError ?? ''}`
+      );
+      assert.equal((await inspectFinalizedManifest(rootId)).status, 'current');
+      assert.equal(await prisma.temporalWorkflowCleanup.count({ where: { agentId: rootId } }), 0);
+      assert.equal(
+        (await prisma.agent.findUniqueOrThrow({ where: { id: rootId } })).temporalCleanupPending,
+        false
+      );
+      assert.deepEqual(terminated, [rootId]);
+      assert.deepEqual(cleanupTerminated, [rootId]);
+    } finally {
+      await prisma.traceArchiveFinalization.deleteMany({ where: { rootAgentId: rootId } });
+      await prisma.agent.deleteMany({ where: { id: rootId } });
       await prisma.user.deleteMany({ where: { userId } });
       rmSync(archiveDir, { recursive: true, force: true });
       if (priorArchiveBackend === undefined) delete process.env.TRACE_ARCHIVE_BACKEND;

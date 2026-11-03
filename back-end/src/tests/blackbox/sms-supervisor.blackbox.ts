@@ -54,13 +54,11 @@ import {
   testRealLlm_blueRecolorSpawnsAgentWithAllFiveAttachments,
   testWriteCommit_startNewAgentForwardsInboundImageAttachments,
 } from './sms-supervisor.media.behavior';
-import {
-  bareRejectionBlackboxCase,
-  replyIntentBlackboxCase,
-} from './sms-supervisor.intent.behavior';
+import { bareRejectionBlackboxCase } from './sms-supervisor.intent.behavior';
 import { smsTimezoneBehaviorCases } from './sms-supervisor.timezone.behavior';
 import { smsPausedReplyBehaviorCases } from './sms-supervisor.paused-reply.behavior';
 import { smsStartPhaseBehaviorCases } from './sms-supervisor.start-phase.behavior';
+import { smsQueuedAgentBehaviorCases } from './sms-supervisor.queued-agent.behavior';
 import { smsPhoneAttentionBehaviorCases } from './sms-supervisor.phone-attention.behavior';
 import { buildToolFailureMessage } from '../../providers/smsSupervisor/supervisorHandler';
 import { commitPendingWrites, PendingOp } from '../../providers/smsSupervisor/supervisorTools';
@@ -627,11 +625,12 @@ async function runAll() {
       name: 'natural approval -- ambiguous approval asks clarification',
       fn: () => testNaturalApproval_ambiguousApprovalAsksClarification(prisma),
     },
-    replyIntentBlackboxCase(prisma),
     bareRejectionBlackboxCase(prisma),
     ...smsPhoneAttentionBehaviorCases(prisma),
     ...smsPausedReplyBehaviorCases(prisma),
     ...smsStartPhaseBehaviorCases(prisma),
+    ...smsQueuedAgentBehaviorCases(prisma),
+    ...smsPhoneAttentionBehaviorCases(prisma),
     {
       name: 'prompt -- supervisor never exposes routing identifiers',
       fn: () => testPrompt_neverExposeRoutingIds(prisma),

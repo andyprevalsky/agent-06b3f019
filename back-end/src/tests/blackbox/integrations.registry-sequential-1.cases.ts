@@ -1,4 +1,17 @@
 import { testLanternCredentials } from './integrations.context';
+import {
+  testMessagingUpload_survivesProcessExitAfterAck,
+  testMessagingUpload_largeLegacyBodyIngestsInBoundedParts,
+  testMessagingUpload_nonFinalChunkKeepsCursor,
+  testMessagingUpload_exhaustedPartFailsSyncAndKeepsCursor,
+  testMessagingUpload_chunkStoreFailureLeavesPartRetryable,
+  testContactUpsert_roundTripsScaleWithChunks,
+  testMessagingUpload_splitContactFrequencyUsesFullHistory,
+  testMessagingUpload_idlessMessageRetryStoresOnce,
+  testIntegrationDelete_removesQueuedUploadParts,
+  testMessagingUpload_finalizeDuringAcceptKeepsFinalChunk,
+  testMessagingUpload_staleFinalizeDoesNotStrandNewerUpload,
+} from './integrations.messaging-ingestion.cases';
 import { testGoogleRevocationFailures_doNotStarveLaterPurge } from './integrations.email-credentials-2.cases';
 import { testStateTransition_fullLifecycle } from './integrations.lifecycle-boundaries-1.cases';
 import {
@@ -30,6 +43,50 @@ export function sequentialTestsPart1() {
     {
       name: 'claude-code billing-failure -- funded API key backed off globally',
       fn: testClaudeCodeBillingFailure_backsOffFundedApiKey,
+    },
+    {
+      name: 'messaging upload -- acknowledged upload survives process exit after the 200',
+      fn: testMessagingUpload_survivesProcessExitAfterAck,
+    },
+    {
+      name: 'messaging upload -- large legacy body ingests once in bounded parts',
+      fn: testMessagingUpload_largeLegacyBodyIngestsInBoundedParts,
+    },
+    {
+      name: 'messaging upload -- non-final chunk keeps the incremental cursor',
+      fn: testMessagingUpload_nonFinalChunkKeepsCursor,
+    },
+    {
+      name: 'messaging upload -- exhausted part fails the sync and keeps the cursor',
+      fn: testMessagingUpload_exhaustedPartFailsSyncAndKeepsCursor,
+    },
+    {
+      name: 'messaging upload -- chunk store failure leaves the part retryable',
+      fn: testMessagingUpload_chunkStoreFailureLeavesPartRetryable,
+    },
+    {
+      name: 'contact upsert -- DB round trips scale with chunks, not contacts',
+      fn: testContactUpsert_roundTripsScaleWithChunks,
+    },
+    {
+      name: 'messaging upload -- split contact frequency uses its full stored history',
+      fn: testMessagingUpload_splitContactFrequencyUsesFullHistory,
+    },
+    {
+      name: 'messaging upload -- retried part stores ID-less messages once',
+      fn: testMessagingUpload_idlessMessageRetryStoresOnce,
+    },
+    {
+      name: 'integration delete -- removes queued messaging upload parts',
+      fn: testIntegrationDelete_removesQueuedUploadParts,
+    },
+    {
+      name: 'messaging upload -- drain during accept keeps the final chunk',
+      fn: testMessagingUpload_finalizeDuringAcceptKeepsFinalChunk,
+    },
+    {
+      name: 'messaging upload -- stale finalization does not strand a newer upload',
+      fn: testMessagingUpload_staleFinalizeDoesNotStrandNewerUpload,
     },
   ];
 }

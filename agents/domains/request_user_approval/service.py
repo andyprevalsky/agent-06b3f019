@@ -17,6 +17,7 @@ Approval SMS (per attention request):
 
 from __future__ import annotations
 
+from helpers.wmh_activity_policy import wmh_activity_timeout_options
 import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncGenerator, Callable, Dict, Optional
@@ -436,7 +437,7 @@ async def _send_approval_sms(
         await workflow.execute_activity(
             notify_sms_event_activity,
             args=notification_args,
-            start_to_close_timeout=timedelta(seconds=SMS_NOTIFY_TIMEOUT_SECONDS),
+            **wmh_activity_timeout_options(world_model_mode, timedelta(seconds=SMS_NOTIFY_TIMEOUT_SECONDS)),
             retry_policy=RetryPolicy(maximum_attempts=SMS_NOTIFY_MAX_ATTEMPTS),
         )
         logger.info(
@@ -802,7 +803,7 @@ async def request_user_attention_direct(
             await workflow.execute_activity(
                 notify_sms_event_activity,
                 args=notification_args,
-                start_to_close_timeout=timedelta(seconds=SMS_NOTIFY_TIMEOUT_SECONDS),
+                **wmh_activity_timeout_options(world_model_mode, timedelta(seconds=SMS_NOTIFY_TIMEOUT_SECONDS)),
                 retry_policy=RetryPolicy(maximum_attempts=SMS_NOTIFY_MAX_ATTEMPTS),
             )
             logger.info(

@@ -144,6 +144,52 @@ this is traffic distribution, not a quota increase. See [Microsoft's current
 quota scope](https://learn.microsoft.com/en-us/azure/foundry/openai/quotas-limits)
 and [quota management guide](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/quota).
 
+## Multiple regions
+
+A single deployment's TPM ceiling is a hard per-deployment limit: Azure reports
+it as a 429 or, mid-request, as an in-stream `rate_limit_exceeded` error. Both
+clients therefore accept further Azure resources, normally in other regions.
+The unsuffixed variables stay region 1; numbered sets add regions 2 to 9:
+
+```dotenv
+AZURE_FOUNDRY_ENDPOINT_2=https://<resource>.openai.azure.com
+AZURE_FOUNDRY_API_KEY_2=<that resource's key>
+AZURE_FOUNDRY_DEPLOYMENTS_2=gpt-6-sol
+```
+
+A region needs both endpoint and key; every configured endpoint must be HTTPS
+or the Foundry route rejects the request before sending anything. Region 1 still
+falls back to the model ID when its list names no matching deployment; regions
+2 to 9 serve only the deployments they list, so a resource with only GPT-6 Sol
+never receives Luna or DeepSeek traffic.
+
+Routing per request:
+
+- The route key (agent ID, then user ID, then request ID) ranks regions by
+  rendezvous hashing. One agent keeps the same primary region while healthy,
+  preserving its prompt cache; agents spread evenly over regions; adding a
+  region moves only the agents it takes over. Inside a region, deployments keep
+  the existing per-key rotation.
+- Before any visible output, a 429 or in-stream rate limit cools that exact
+  region and deployment for `retry-after-ms`/`Retry-After` (1 to 60 seconds) and
+  the next region is tried at once. 5xx and transport errors also try the next
+  region, without a cooldown. Each failing region's traffic spreads over all
+  other regions in that key's own order.
+- A 401/403 cools only that region's key for five minutes; the other regions
+  keep serving. A 400 or in-stream invalid request stops the Foundry route,
+  because every region would reject the same body.
+- Output already sent is never followed by another region's output.
+- When every region and deployment is cooling, the route raises
+  `RoseRateLimitError` without a request, and the waterfall continues.
+
+`rose.foundry.attempt_failed`, `stream_failed`, `transport_failed` and `served`
+(agents) and `foundry.*` (backend) log `region` (endpoint host), `region_slot`
+and `deployment`, never a key. Cooldowns are per process, sized by the number
+of configured deployments; a request makes at most one attempt per
+(region, deployment) and none while all are cooling. Additional regions add
+deployment-level throughput only within the subscription's model quota.
+The live contract tests above probe every configured region separately.
+
 ## Verification status
 
 The mocked Responses and 429/stream tests and both live contract tests pass.
@@ -153,6 +199,3 @@ and `/health` returned 200. Fly lists all three secrets as Deployed, and every
 started worker checked had the matching runtime values. The fallback was merged
 and deployed to both Render and Fly on 2026-10-01. The production semantic gate
 passed after rollout. These checks do not measure sustained throughput.
-The repo also requires these backend secrets mirrored to its
-Codex-cloud `rose` environment through that environment's settings UI; this
-workspace has no setter for it, so that mirror remains to be verified.

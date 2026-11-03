@@ -24,10 +24,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import ssl
 import time
 import uuid
 from contextlib import aclosing
-from typing import Any, AsyncIterator, Dict, FrozenSet, List, Optional, Type, cast
+from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Mapping, Optional, Type, cast
 
 import structlog
 from pydantic import BaseModel
@@ -40,15 +41,17 @@ from providers.rose.browser_use import (
     build_browser_use_tools,
     filter_browser_use_actions_for_state,
     normalize_browser_use_response,
+    normalize_browser_use_tool_call,
     normalize_browser_use_tool_calls,
 )
-from providers.rose.cerebras import cerebras_complete
+from providers.rose.cerebras import CEREBRAS_DIRECT_POOL, cerebras_complete
 from providers.rose.claude_auth import (
     DEFAULT_REASONING_EFFORT,
     anthropic_api_key_complete,
     claude_auth_complete,
 )
 from providers.rose.errors import (
+    BrowserModelOutputValidationError,
     RoseAuthError,
     RoseDeadlineError,
     RoseError,
@@ -59,8 +62,9 @@ from providers.rose.errors import (
     RoseServerError,
     RoseStallError,
 )
-from providers.rose.foundry import foundry_complete, foundry_configured
-from providers.rose.gpt_auth import gpt_auth_complete, openai_api_key_complete
+from providers.rose.foundry import _NO_REASONING_MODELS, foundry_candidates, foundry_complete, foundry_configured
+from providers.rose.gpt_auth import _normalize_reasoning_effort, gpt_auth_complete, openai_api_key_complete
+from providers.rose.inter_agent_context import settle_trailing_inter_agent_messages
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
 from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import PoolName, foundry_model, get_pool
@@ -72,7 +76,7 @@ from providers.rose.schema import (
 from providers.rose.streaming import _stream_progress
 from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.transforms import messages_contain_images, route_model_accepts_images
-from providers.rose.truncation import model_key, recover_truncated
+from providers.rose.truncation import model_key, needs_result, recover_truncated
 from providers.rose.types import (
     ChunkKind,
     ClaudeAuthContext,
@@ -106,9 +110,11 @@ _DEFAULT_IDLE_TIMEOUT_S: Optional[float] = 120.0
 _HEARTBEAT_INTERVAL_S = 10.0
 _STALL_TOKEN_COOLDOWN_S = 10 * 60
 
-# Errors from claude_auth that mean "try the waterfall next" — as long as
+# Provider errors that mean "try the next route" — as long as
 # they fire before the first non-metadata chunk reaches the caller.
+# TLS record alerts can escape httpx as raw SSLError while reading headers.
 _FALL_THROUGH_ERRORS = (
+    ssl.SSLError,
     RoseInvalidRequest,
     RoseStallError,
     RoseServerError,
@@ -322,12 +328,18 @@ def _fire_and_forget_lease_heartbeat(auth: ComputeAuthContext) -> None:
 
 
 def _compute_token_payload(auth: ComputeAuthContext) -> Dict[str, Any]:
+    """Non-secret identity of the lease that served this call.
+
+    Usage is serialized into Temporal activity results, LLM dumps (ClickHouse
+    and the trace archive) and run records, so it must never carry the
+    credential itself. Consumers that need the rotated credential re-read it
+    from the backend lease by ``lineageKey``.
+    """
     return {
         "type": auth.token_type,
-        "accessToken": auth.token,
-        "accountId": auth.account_id,
         "source": auth.source,
         "poolTokenId": auth.pool_token_id,
+        "lineageKey": auth.lineage_key,
     }
 
 
@@ -496,9 +508,24 @@ def _browser_use_dump_config(
     """Capture behavior-shaping values for a browser-use LLM call dump."""
     actual_model = response.actual_model or ""
     effective_model = _dump_display_model(actual_model)
-    # complete_browser_use omits effort → body builders stamp DEFAULT (xhigh).
-    # Record the effective wire value so dumps match what was actually sent.
-    effective_effort = DEFAULT_REASONING_EFFORT
+    # complete_browser_use omits effort → body builders stamp DEFAULT (xhigh) on
+    # direct auth. Pool-pinned routes override it; record the value the serving
+    # route actually sent so the dump matches the wire.
+    effective_effort: Optional[str] = DEFAULT_REASONING_EFFORT
+    wire_temperature: Optional[float] = temperature
+    if mode not in ("gpt", "claude"):
+        if response.pool_name == CEREBRAS_DIRECT_POOL:
+            effective_effort = pool_spec.cerebras_reasoning_effort
+        elif response.pool_name == "foundry":
+            # The Responses body carries no temperature; no-reasoning models drop effort.
+            wire_temperature = None
+            effective_effort = (
+                None
+                if effective_model in _NO_REASONING_MODELS
+                else _normalize_reasoning_effort(pool_spec.waterfall_reasoning_effort)
+            )
+        else:
+            effective_effort = pool_spec.waterfall_reasoning_effort or DEFAULT_REASONING_EFFORT
     if mode == "gpt":
         effective_params = {
             "model": pool_spec.gpt_auth_model,
@@ -521,7 +548,7 @@ def _browser_use_dump_config(
     else:
         effective_params = {
             "model": effective_model,
-            "temperature": temperature,
+            "temperature": wire_temperature,
             "max_tokens": max_tokens,
             "reasoning_effort": effective_effort,
             "stream": True,
@@ -614,39 +641,50 @@ class RoseClient:
         return load_config().openrouter.api_key
 
     async def complete(self, **kwargs: Any) -> AsyncIterator[StreamChunk]:
-        """CENTRAL Fast Mode cache notch. EVERY agent LLM call funnels through
+        """CENTRAL DEMO cache notch. EVERY agent LLM call funnels through
         `RoseClient.complete()`, so record/replay lives here — one place, no gaps,
         no per-call-site wiring. The cache context is read from the contextvar
         (position keying, set by the main loop for drift-robustness) or auto-resolved
         from `agent_id` (content keying, for every other call). On a hit the stored
         response is re-emitted as a synthetic stream; on a miss the live stream is
         teed and written when the `done` chunk arrives (never in a finally — see the
-        GeneratorExit note in fast_cache.rose_cache). Allowlisted accounts can
+        GeneratorExit note in demo_cache.rose_cache). Allowlisted accounts can
         write-through with Fast Mode off: no read/replay, but successful calls are
         recorded for future Fast Mode runs.
         """
-        from providers.fast_cache import client as _fc
-        from providers.fast_cache.context import cache_writes_disabled, current_context
-        from providers.fast_cache.rose_cache import FastCacheLookupError
-        from providers.fast_cache.rose_cache import (
+        from providers.demo_cache import client as _fc
+        from providers.demo_cache.context import cache_writes_disabled, current_context
+        from providers.demo_cache.rose_cache import DemoCacheLookupError
+        from providers.demo_cache.rose_cache import (
             accumulate_chunk as _fc_accumulate,
         )
-        from providers.fast_cache.rose_cache import (
+        from providers.demo_cache.rose_cache import (
             empty_response as _fc_empty,
         )
-        from providers.fast_cache.rose_cache import (
+        from providers.demo_cache.rose_cache import (
             replay_with_context as _fc_replay,
         )
-        from providers.fast_cache.rose_cache import (
+        from providers.demo_cache.rose_cache import (
             request_key_material as _fc_request_key_material,
         )
-        from providers.fast_cache.rose_cache import soft_complete_on_miss as _fc_soft_complete
-        from providers.fast_cache.rose_cache import swf_scrape_passthrough as _fc_swf_passthrough
+        from providers.demo_cache.rose_cache import soft_complete_on_miss as _fc_soft_complete
+        from providers.demo_cache.rose_cache import swf_scrape_passthrough as _fc_swf_passthrough
 
         call_site = kwargs.get("call_site", "unspecified")
         agent_id = kwargs.get("agent_id")
+        # A trailing inter-agent (assistant-role) message would be stripped as
+        # assistant prefill by every transport; send it as user role instead.
+        settled_messages = settle_trailing_inter_agent_messages(kwargs.get("messages"))
+        if settled_messages is not kwargs.get("messages"):
+            kwargs = {**kwargs, "messages": settled_messages}
         messages = kwargs.get("messages")
         pool = kwargs.get("pool")
+        if pool == "rose-local":
+            # Local mode must never consult the cloud-backed DEMO cache.
+            async with aclosing(self._complete_impl(**kwargs)) as live_stream:
+                async for chunk in live_stream:
+                    yield chunk
+            return
         probe_read_only = os.environ.get("BENCHMARK_DEMO_CACHE_READ_ONLY") == "1" and os.environ.get(
             "BENCHMARK_ISOLATED_RUN", ""
         ).strip().lower() in {"1", "true", "yes", "on"}
@@ -659,7 +697,7 @@ class RoseClient:
         browser_use = bool(kwargs.pop("browser_use", False))
         if browser_use or pool == "rose-1-browser-use" or str(call_site).startswith("browser_use"):
             if probe_read_only:
-                raise FastCacheLookupError("DEMO replay probe forbids live browser LLM calls")
+                raise DemoCacheLookupError("DEMO replay probe forbids live browser LLM calls")
             async with aclosing(self._complete_impl(**kwargs, browser_use=True)) as live_stream:
                 async for chunk in live_stream:
                     yield chunk
@@ -673,7 +711,7 @@ class RoseClient:
             if ctx is not None and ctx.active:
                 kwargs = {**kwargs, "provider_fast_mode": bool(ctx.provider_fast_mode)}
             elif agent_id:
-                from providers.fast_cache.client import resolve_provider_fast_mode
+                from providers.demo_cache.client import resolve_provider_fast_mode
 
                 kwargs = {
                     **kwargs,
@@ -682,24 +720,25 @@ class RoseClient:
 
         if ctx is None or not ctx.active or messages is None:
             if probe_read_only:
-                raise FastCacheLookupError("DEMO replay probe has no usable cache context; live fallback is disabled")
+                raise DemoCacheLookupError("DEMO replay probe has no usable cache context; live fallback is disabled")
             async with aclosing(self._complete_impl(**kwargs)) as live_stream:
                 async for chunk in live_stream:
                     yield chunk
             return
 
-        key = ctx.llm_key(call_site, _fc_request_key_material(kwargs))
+        key_material = _fc_request_key_material(kwargs)
+        key, lookup_keys = ctx.llm_keys(call_site, key_material)
         if ctx.read_enabled:
             lookup_failed = False
             stored: Any = None
             hit_key: Any = None
             try:
-                from providers.fast_cache.rose_cache import lookup_llm_cache
+                from providers.demo_cache.rose_cache import lookup_llm_cache
 
-                stored, hit_key = await lookup_llm_cache(ctx, call_site, _fc_request_key_material(kwargs))
-            except FastCacheLookupError as exc:
+                stored, hit_key = await lookup_llm_cache(ctx, call_site, key_material, lookup_keys)
+            except DemoCacheLookupError as exc:
                 logger.warning(
-                    "fast_cache.get_error",
+                    "demo_cache.get_error",
                     key=key,
                     error=f"{type(exc).__name__}: {exc}"[:200],
                 )
@@ -831,7 +870,7 @@ class RoseClient:
                 # Cold allowlisted sites must not burn live LLM under Fast Mode read.
                 # Known July GP execute namespaces start at p:1 — do not stub them
                 # as cold when the first get-position flakes.
-                from providers.fast_cache.rose_cache import is_july_explore_site, is_july_gp_execute_site
+                from providers.demo_cache.rose_cache import is_july_explore_site, is_july_gp_execute_site
 
                 if (
                     soft is not None
@@ -869,9 +908,9 @@ class RoseClient:
             logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
         if probe_read_only:
-            raise FastCacheLookupError("DEMO replay probe cache miss; live fallback is disabled")
-        if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled():
-            raise FastCacheLookupError(
+            raise DemoCacheLookupError("DEMO replay probe cache miss; live fallback is disabled")
+        if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled() and not ctx.should_write:
+            raise DemoCacheLookupError(
                 f"Strict read-only benchmark cache miss for {call_site or 'unknown'}; live fallback is disabled"
             )
 
@@ -881,8 +920,10 @@ class RoseClient:
             async for chunk in live_stream:
                 _fc_accumulate(acc, chunk)
                 if chunk.kind == "done" and ctx.should_write and not structured_response_model:
-                    await _fc.cache_set(key, "llm", ctx.goal_hash, acc)
-                    logger.info("llm.cache.stored", call_site=call_site, key=key)
+                    stored = await _fc.cache_set(key, "llm", ctx.goal_hash, acc)
+                    logger.info(
+                        "llm.cache.stored" if stored else "llm.cache.store_skipped", call_site=call_site, key=key
+                    )
                 yield chunk
 
     async def _complete_impl(self, **kwargs: Any) -> AsyncIterator[StreamChunk]:
@@ -892,6 +933,8 @@ class RoseClient:
         chunks; everyone else gets exactly one attempt, as before.
         """
         if not kwargs.pop("recover_truncation", False):
+            kwargs.pop("result_required", None)
+            kwargs.pop("retry_partial_errors", None)
             async with aclosing(self._complete_once(**kwargs)) as stream:
                 async for chunk in stream:
                     yield chunk
@@ -929,9 +972,12 @@ class RoseClient:
         dump_context: bool = True,
         dump_extra: Optional[Dict[str, Any]] = None,
         cache_namespace: Optional[str] = None,
+        prefer_azure: bool = False,
+        json_mode: bool = False,
         browser_use: bool = False,
         _exclude_anthropic_family: bool = False,
         _skip_models: FrozenSet[str] = frozenset(),
+        _skip_reasons: Optional[Mapping[str, str]] = None,
     ) -> AsyncIterator[StreamChunk]:
         """Run a full Rose completion, yielding normalized StreamChunks.
 
@@ -952,7 +998,11 @@ class RoseClient:
         first_contentful_at: Optional[float] = None
 
         openrouter_response_format = (
-            build_openai_response_format(response_model) if response_model is not None else None
+            build_openai_response_format(response_model)
+            if response_model is not None
+            else {"type": "json_object"}
+            if json_mode
+            else None
         )
         direct_auth_tools = tools
         effective_tool_choice = tool_choice
@@ -971,6 +1021,22 @@ class RoseClient:
             waterfall_tools = direct_auth_tools
         if waterfall_tools:
             waterfall_tool_choice = effective_tool_choice or "any"
+        if pool == "rose-local":
+            # No auth, cloud cache, remote dump, or paid fallback is reachable.
+            from providers.rose.local import local_complete
+
+            async for chunk in local_complete(
+                messages=messages,
+                tools=waterfall_tools,
+                tool_choice=waterfall_tool_choice,
+                response_format=None if waterfall_tools else openrouter_response_format,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                seed=seed,
+                request_id=rid,
+            ):
+                yield chunk
+            return
         dump_path: Optional[str] = None
         dump_result = RoseResponse()
         if dump_context:
@@ -1197,6 +1263,7 @@ class RoseClient:
             source: AsyncIterator[StreamChunk],
             *,
             ttft_override: Optional[float] = None,
+            is_opaque: Optional[Callable[[str], bool]] = None,
         ) -> AsyncIterator[StreamChunk]:
             """Wrap an upstream generator with deadline + TTFT + idle checks.
 
@@ -1214,6 +1281,13 @@ class RoseClient:
             They refresh a configured idle window without emitting partial
             tools. When idle checks are disabled, TTFT still bounds the wait
             for the first emitted productive chunk.
+            An encrypted Responses reasoning item (`codex_reasoning_item`) is
+            opaque replay state: it ends TTFT but never refreshes the idle
+            window, so a stream of back-to-back empty reasoning items with no
+            text or tool output is idle (seen on Foundry gpt-6.x under a
+            required tool choice: 800+ items in 590s and no reply).
+            `is_opaque` lets a leg mark more kinds opaque the same way (the
+            Foundry leg's held reasoning text before any answer output).
             Each HTTP attempt resets TTFT; metadata/keepalives do not refresh it.
             """
             nonlocal first_chunk_at, first_contentful_at, first_productive_kind
@@ -1225,15 +1299,19 @@ class RoseClient:
             saw_emitted_productive_chunk = False
             attempt_started = time.monotonic()
             last_progress_at: Optional[float] = None
+            # Start of an idle window that opaque reasoning items keep open;
+            # None while the window restarts at each wait (backpressure-safe).
+            opaque_idle_since: Optional[float] = None
             productive_kinds = {"content", "reasoning", "tool_call", "codex_reasoning_item"}
 
             def note_progress(kind: str, size: int) -> None:
                 nonlocal saw_productive_chunk, attempt_started, last_progress_at
                 nonlocal saw_emitted_productive_chunk
-                nonlocal buffered_tool_argument_fragments, last_tool_argument_at
+                nonlocal buffered_tool_argument_fragments, last_tool_argument_at, opaque_idle_since
                 now = time.monotonic()
                 if kind == "attempt":
                     attempt_started = now
+                    opaque_idle_since = None
                     saw_productive_chunk = False
                     saw_emitted_productive_chunk = False
                     last_progress_at = None
@@ -1269,6 +1347,7 @@ class RoseClient:
                     # The pending task inherits this request's callback; the
                     # consumer and concurrent sibling requests never do.
                     _stream_progress.reset(progress_token)
+                polled = False
                 try:
                     while True:
                         using_idle_budget = saw_productive_chunk and (
@@ -1279,8 +1358,9 @@ class RoseClient:
                             # Preserve consumer backpressure tolerance between
                             # normalized chunks, while refreshing a pending
                             # chunk only from actual parser progress.
+                            window_start = wait_started if opaque_idle_since is None else opaque_idle_since
                             progress_deadline = (
-                                max(wait_started, last_progress_at or wait_started) + progress_timeout
+                                max(window_start, last_progress_at or window_start) + progress_timeout
                                 if progress_timeout is not None
                                 else started + deadline_s
                             )
@@ -1293,10 +1373,14 @@ class RoseClient:
                             _HEARTBEAT_INTERVAL_S,
                             wait_deadline - time.monotonic(),
                         )
-                        if slice_timeout <= 0:
+                        if slice_timeout <= 0 and polled:
                             timed_out = True
                             break
-                        done, _pending = await asyncio.wait({next_item}, timeout=slice_timeout)
+                        # A window can already be spent when the wait begins
+                        # (opaque reasoning items). Poll once so the read is in
+                        # flight and cancellation runs the source's cleanup.
+                        polled = True
+                        done, _pending = await asyncio.wait({next_item}, timeout=max(slice_timeout, 0.0))
                         if next_item in done:
                             try:
                                 chunk = next_item.result()
@@ -1366,9 +1450,18 @@ class RoseClient:
                             elapsed_s=round(now - started, 3),
                             chunk_counts=dict(chunk_counts),
                         )
+                    opaque = chunk.kind == "codex_reasoning_item" or (
+                        is_opaque is not None and is_opaque(chunk.kind)
+                    )
+                    if not opaque:
+                        opaque_idle_since = None
+                        last_progress_at = now
+                    elif opaque_idle_since is None:
+                        # Keep the current idle window running; the first
+                        # productive chunk opens it at its arrival.
+                        opaque_idle_since = wait_started if saw_productive_chunk else now
                     saw_productive_chunk = True
                     saw_emitted_productive_chunk = True
-                    last_progress_at = now
                 if now - last_heartbeat >= _HEARTBEAT_INTERVAL_S:
                     _safe_heartbeat(f"rose.complete call_site={call_site} request_id={rid}")
                     last_heartbeat = now
@@ -1379,6 +1472,8 @@ class RoseClient:
                     # consumer deliberately keeps this generator suspended.
                     # The fixed whole-call deadline still includes that time.
                     attempt_started += time.monotonic() - yielded_at
+                elif opaque_idle_since is not None:
+                    opaque_idle_since += time.monotonic() - yielded_at
 
         def _with_timing_if_done(chunk: StreamChunk) -> StreamChunk:
             if chunk.kind != "done":
@@ -1683,6 +1778,7 @@ class RoseClient:
                 try:
                     async for chunk in _guarded(
                         _try_openai_api_key(
+                            **({"max_tokens": max_tokens} if max_tokens is not None else {}),
                             pool_spec=pool_spec,
                             model=pool_spec.gpt_auth_model,
                             messages=messages,
@@ -1830,154 +1926,191 @@ class RoseClient:
                     )
 
             cerebras_key = _cerebras_api_key() if pool_spec.cerebras_model else ""
-            if cerebras_key and model_key(pool_spec.cerebras_model) not in _skip_models:
-                active_route = "cerebras"
-                cerebras_yielded_any = False
-                try:
-                    async with aclosing(
-                        cerebras_complete(
-                            pool_spec=pool_spec,
-                            messages=messages,
-                            tools=waterfall_tools,
-                            tool_choice=waterfall_tool_choice,
-                            response_format=None if waterfall_tools else openrouter_response_format,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            cerebras_key=cerebras_key,
+            for route in ("foundry", "cerebras") if prefer_azure else ("cerebras", "foundry"):
+                if route == "cerebras" and cerebras_key and model_key(pool_spec.cerebras_model) not in _skip_models:
+                    active_route = "cerebras"
+                    cerebras_yielded_any = False
+                    try:
+                        async with aclosing(
+                            cerebras_complete(
+                                pool_spec=pool_spec,
+                                messages=messages,
+                                tools=waterfall_tools,
+                                tool_choice=waterfall_tool_choice,
+                                response_format=None if waterfall_tools else openrouter_response_format,
+                                temperature=temperature,
+                                max_tokens=max_tokens,
+                                cerebras_key=cerebras_key,
+                                request_id=rid,
+                                agent_id=agent_id,
+                                call_site=call_site,
+                                per_step_timeout_s=ttft_timeout_s,
+                                idle_timeout_s=idle_timeout_s,
+                            )
+                        ) as cerebras_source:
+                            async for chunk in _guarded(cerebras_source):
+                                chunk = _with_timing_if_done(chunk)
+                                cerebras_yielded_any = True
+                                if chunk.kind == "metadata":
+                                    metadata = dict(chunk.data)
+                                    if claude_token_error is not None:
+                                        metadata["claude_token_error"] = claude_token_error
+                                    if gpt_token_error is not None:
+                                        metadata["gpt_token_error"] = gpt_token_error
+                                    chunk = StreamChunk(kind="metadata", data=metadata)
+                                    if chunk.data.get("actual_model"):
+                                        _seen_actual_model = chunk.data["actual_model"]
+                                elif chunk.kind == "usage":
+                                    _emit_llm_cache(chunk.data)
+                                    chunk = StreamChunk(
+                                        kind="usage",
+                                        data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
+                                    )
+                                chunk = _with_cache_sequence(chunk)
+                                _record_dump_chunk(chunk)
+                                yield chunk
+                        logger.info(
+                            "rose.complete.cerebras.done",
                             request_id=rid,
                             agent_id=agent_id,
                             call_site=call_site,
-                            per_step_timeout_s=ttft_timeout_s,
-                            idle_timeout_s=idle_timeout_s,
+                            elapsed_s=round(time.monotonic() - started, 3),
+                            **_observability_fields(),  # pragma: allowlist secret
                         )
-                    ) as cerebras_source:
-                        async for chunk in _guarded(cerebras_source):
-                            chunk = _with_timing_if_done(chunk)
-                            cerebras_yielded_any = True
-                            if chunk.kind == "metadata":
-                                metadata = dict(chunk.data)
-                                if claude_token_error is not None:
-                                    metadata["claude_token_error"] = claude_token_error
-                                if gpt_token_error is not None:
-                                    metadata["gpt_token_error"] = gpt_token_error
-                                chunk = StreamChunk(kind="metadata", data=metadata)
-                                if chunk.data.get("actual_model"):
-                                    _seen_actual_model = chunk.data["actual_model"]
-                            elif chunk.kind == "usage":
-                                _emit_llm_cache(chunk.data)
-                                chunk = StreamChunk(
-                                    kind="usage",
-                                    data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
-                                )
-                            chunk = _with_cache_sequence(chunk)
-                            _record_dump_chunk(chunk)
-                            yield chunk
-                    logger.info(
-                        "rose.complete.cerebras.done",
-                        request_id=rid,
-                        agent_id=agent_id,
-                        call_site=call_site,
-                        elapsed_s=round(time.monotonic() - started, 3),
-                        **_observability_fields(),  # pragma: allowlist secret
-                    )
-                    _finalize_dump()
-                    return
-                except (_FallThrough, RoseStallError, RoseError) as exc:
-                    if cerebras_yielded_any:
-                        raise
-                    cause = exc.__cause__ if isinstance(exc, _FallThrough) else exc
-                    logger.info(
-                        "rose.complete.cerebras.fall_through",
-                        request_id=rid,
-                        agent_id=agent_id,
-                        call_site=call_site,
-                        reason=type(cause).__name__ if cause else type(exc).__name__,
-                    )
+                        _finalize_dump()
+                        return
+                    except (_FallThrough, RoseStallError, RoseError) as exc:
+                        if cerebras_yielded_any:
+                            raise
+                        cause = exc.__cause__ if isinstance(exc, _FallThrough) else exc
+                        logger.info(
+                            "rose.complete.cerebras.fall_through",
+                            request_id=rid,
+                            agent_id=agent_id,
+                            call_site=call_site,
+                            reason=type(cause).__name__ if cause else type(exc).__name__,
+                        )
 
-            # Funded Azure fallback for the pool's GPT model and Responses shape
-            # (the compute-token contract). It follows direct credentials and
-            # the direct Cerebras hop, so speed pools keep Cerebras first. A
-            # pre-content failure continues to OpenRouter; an interrupted
-            # visible response remains an error.
-            # A model that was cut off at its output limit is excluded from every
-            # route that serves it, funded ones included (see truncation.py).
-            # A text-only Foundry model (rose-1-oss's DeepSeek) cannot see an
-            # image request, so screenshots go straight to the vision waterfall.
-            foundry_blind = messages_contain_images(messages) and not route_model_accepts_images(
-                foundry_model(pool_spec)
-            )
-            if foundry_blind and foundry_configured(pool_spec):
-                logger.info(
-                    "rose.complete.foundry.skipped",
-                    request_id=rid,
-                    agent_id=agent_id,
-                    call_site=call_site,
-                    model=foundry_model(pool_spec),
-                    reason="images_need_vision",
+                # Funded Azure fallback for the pool's GPT model and Responses shape
+                # (the compute-token contract). It follows direct credentials and
+                # direct Cerebras hop by default. Collected WHM calls can prefer
+                # Azure and discard a partial reply before retrying another model.
+                # Ordinary visible partial replies remain errors.
+                # A model that was cut off at its output limit is excluded from every
+                # route that serves it, funded ones included (see truncation.py).
+                if route != "foundry":
+                    continue
+                # A text-only Foundry model cannot see an image request, so
+                # screenshots retain main's direct vision-waterfall routing.
+                foundry_blind = messages_contain_images(messages) and not route_model_accepts_images(
+                    foundry_model(pool_spec)
                 )
-            if (
-                foundry_configured(pool_spec)
-                and not foundry_blind
-                and model_key(foundry_model(pool_spec)) not in _skip_models
-            ):
-                active_route = "foundry"
-                foundry_yielded_any = False
-                try:
-                    async with aclosing(
-                        foundry_complete(
-                            pool_spec=pool_spec,
-                            messages=messages,
-                            response_format=None if gpt_api_key_tools else openrouter_response_format,
-                            tools=gpt_api_key_tools,
-                            context_tools=context_tools,
-                            tool_choice=gpt_api_key_tool_choice,
-                            temperature=temperature,
-                            # A fallback layer: speed pools pin their fast effort (xhigh TTFT is slow).
-                            effort=pool_spec.waterfall_reasoning_effort or effort,
-                            provider_fast_mode=provider_fast_mode,
-                            request_id=rid,
-                            route_key=foundry_route_key,
-                            agent_id=agent_id,
-                            call_site=call_site,
-                            cache_namespace=cache_namespace,
-                            ttft_timeout_s=ttft_timeout_s,
-                            idle_timeout_s=idle_timeout_s,
-                        )
-                    ) as foundry_source:
-                        async for chunk in _guarded(foundry_source):
-                            chunk = _with_timing_if_done(chunk)
-                            foundry_yielded_any = True
-                            if chunk.kind == "metadata":
-                                metadata = dict(chunk.data)
-                                if claude_token_error is not None:
-                                    metadata["claude_token_error"] = claude_token_error
-                                if gpt_token_error is not None:
-                                    metadata["gpt_token_error"] = gpt_token_error
-                                chunk = StreamChunk(kind="metadata", data=metadata)
-                                if chunk.data.get("actual_model"):
-                                    _seen_actual_model = chunk.data["actual_model"]
-                            elif chunk.kind == "usage":
-                                _emit_llm_cache(chunk.data)
-                                chunk = StreamChunk(
-                                    kind="usage", data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data)
-                                )
-                            chunk = _with_cache_sequence(chunk)
-                            _record_dump_chunk(chunk)
-                            yield chunk
-                    logger.info("rose.complete.foundry.done", request_id=rid, agent_id=agent_id, call_site=call_site)
-                    _finalize_dump()
-                    return
-                except (_FallThrough, RoseStallError, RoseError) as exc:
-                    if foundry_yielded_any:
-                        raise
-                    cause = exc.__cause__ if isinstance(exc, _FallThrough) else exc
+                if foundry_blind and foundry_configured(pool_spec):
                     logger.info(
-                        "rose.complete.foundry.fall_through",
+                        "rose.complete.foundry.skipped",
                         request_id=rid,
                         agent_id=agent_id,
                         call_site=call_site,
-                        reason=type(cause).__name__ if cause else "unknown",
+                        model=foundry_model(pool_spec),
+                        reason="images_need_vision",
                     )
+                if foundry_configured(pool_spec) and not foundry_blind and foundry_candidates(pool_spec, _skip_models):
+                    active_route = "foundry"
+                    foundry_yielded_any = False
+                    # Reasoning is not a reply (see truncation.py). Hold this
+                    # leg's metadata and encrypted reasoning items, plus its
+                    # reasoning text when the call needs a tool call or
+                    # structured result, until answer output starts. A leg that
+                    # stalls first has produced no output, so it uses the
+                    # pool's next leg and none of its reasoning reaches the
+                    # consumer or a later turn.
+                    foundry_held: List[StreamChunk] = []
+                    foundry_hold_kinds = {"metadata", "codex_reasoning_item"}
+                    if needs_result(
+                        tools=gpt_api_key_tools, tool_choice=gpt_api_key_tool_choice, response_model=response_model
+                    ):
+                        foundry_hold_kinds.add("reasoning")
+
+                    def _foundry_out(chunk: StreamChunk) -> StreamChunk:
+                        nonlocal _seen_actual_model
+                        if chunk.kind == "metadata":
+                            metadata = dict(chunk.data)
+                            if claude_token_error is not None:
+                                metadata["claude_token_error"] = claude_token_error
+                            if gpt_token_error is not None:
+                                metadata["gpt_token_error"] = gpt_token_error
+                            chunk = StreamChunk(kind="metadata", data=metadata)
+                            if chunk.data.get("actual_model"):
+                                _seen_actual_model = chunk.data["actual_model"]
+                        elif chunk.kind == "usage":
+                            _emit_llm_cache(chunk.data)
+                            chunk = StreamChunk(
+                                kind="usage", data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data)
+                            )
+                        chunk = _with_cache_sequence(chunk)
+                        _record_dump_chunk(chunk)
+                        return chunk
+
+                    try:
+                        async with aclosing(
+                            foundry_complete(
+                                **({"max_tokens": max_tokens} if max_tokens is not None else {}),
+                                pool_spec=pool_spec,
+                                messages=messages,
+                                response_format=None if gpt_api_key_tools else openrouter_response_format,
+                                tools=gpt_api_key_tools,
+                                context_tools=context_tools,
+                                tool_choice=gpt_api_key_tool_choice,
+                                temperature=temperature,
+                                # A fallback layer: speed pools pin their fast effort (xhigh TTFT is slow).
+                                effort=pool_spec.waterfall_reasoning_effort or effort,
+                                provider_fast_mode=provider_fast_mode,
+                                request_id=rid,
+                                route_key=foundry_route_key,
+                                agent_id=agent_id,
+                                call_site=call_site,
+                                cache_namespace=cache_namespace,
+                                ttft_timeout_s=ttft_timeout_s,
+                                idle_timeout_s=idle_timeout_s,
+                                skip_models=_skip_models,
+                            )
+                        ) as foundry_source:
+                            async for chunk in _guarded(
+                                foundry_source,
+                                # Held reasoning is not answer output, so it
+                                # must not keep the idle window open either.
+                                is_opaque=lambda kind: not foundry_yielded_any and kind in foundry_hold_kinds,
+                            ):
+                                chunk = _with_timing_if_done(chunk)
+                                if not foundry_yielded_any and chunk.kind in foundry_hold_kinds:
+                                    foundry_held.append(chunk)
+                                    continue
+                                foundry_yielded_any = True
+                                for pending in (*foundry_held, chunk):
+                                    yield _foundry_out(pending)
+                                foundry_held.clear()
+                        for pending in foundry_held:
+                            yield _foundry_out(pending)
+                        logger.info(
+                            "rose.complete.foundry.done", request_id=rid, agent_id=agent_id, call_site=call_site
+                        )
+                        _finalize_dump()
+                        return
+                    except (_FallThrough, RoseStallError, RoseError) as exc:
+                        # The whole-call deadline stays terminal for every leg.
+                        if foundry_yielded_any or remaining() <= 0:
+                            raise
+                        cause = exc.__cause__ if isinstance(exc, _FallThrough) else exc
+                        logger.info(
+                            "rose.complete.foundry.fall_through",
+                            request_id=rid,
+                            agent_id=agent_id,
+                            call_site=call_site,
+                            reason=type(cause).__name__ if cause else "unknown",
+                            dropped_reasoning_items=sum(1 for c in foundry_held if c.kind == "codex_reasoning_item"),
+                            dropped_reasoning_chars=sum(len(c.data.get("text") or "") for c in foundry_held),
+                            elapsed_s=round(time.monotonic() - started, 3),
+                        )
 
             active_route = "waterfall"
             async for chunk in waterfall_complete(
@@ -2001,6 +2134,7 @@ class RoseClient:
                 cache_namespace=cache_namespace,
                 skip_cache_write=skip_cache_write,
                 skip_models=_skip_models,
+                skip_reasons=_skip_reasons,
                 browser_use=browser_use,
                 stream_guard=_guarded,
             ):
@@ -2199,13 +2333,32 @@ class RoseClient:
         # through the waterfall (sequential pool tries via OpenRouter).
         is_claude = actual_model.endswith("-claude")
         mode = "claude" if is_claude else ("gpt" if actual_model.endswith("-gpt") else "waterfall")
-        if response.tool_calls:
-            action = normalize_browser_use_tool_calls(
-                response.tool_calls,
-                thinking=(response.reasoning or response.content or None),
+        from browser_tools.schemas import BrowserToolArgsValidationError
+
+        output_validation_error = None
+        action = None
+        try:
+            available_tool_names = [tool["name"] for tool in tools]
+            if response.tool_calls:
+                # Check the declared action before coordinate/key projections
+                # can replace its name with an internal implementation action.
+                normalize_browser_use_tool_call(
+                    response.tool_calls[0], available_actions=available_tool_names,
+                )
+                action = normalize_browser_use_tool_calls(
+                    response.tool_calls,
+                    thinking=(response.reasoning or response.content or None),
+                )
+            else:
+                action = normalize_browser_use_response(
+                    response.content, available_actions=available_tool_names,
+                )
+        except BrowserToolArgsValidationError:
+            raise
+        except ValueError as normalization_error:
+            output_validation_error = BrowserModelOutputValidationError(
+                str(normalization_error), response=response,
             )
-        else:
-            action = normalize_browser_use_response(response.content)
 
         try:
             from helpers.observability import dump_llm_context
@@ -2237,6 +2390,7 @@ class RoseClient:
                 tools=tools,
                 output={
                     "action": action,
+                    **({"output_validation_error": str(output_validation_error), "private_output_validation_detail": output_validation_error.private_detail} if output_validation_error else {}),
                     "content": response.content,
                     "reasoning": response.reasoning,
                     "tool_calls": response.tool_calls,
@@ -2253,6 +2407,9 @@ class RoseClient:
             )
         except Exception:
             logger.debug("rose.browser_use.dump_output_failed", call_site=call_site, exc_info=True)
+
+        if output_validation_error is not None:
+            raise output_validation_error
 
         return {
             "action": action,
@@ -2287,10 +2444,18 @@ class RoseClient:
         dump_context: bool = True,
         dump_extra: Optional[Dict[str, Any]] = None,
         cache_namespace: Optional[str] = None,
+        result_required: bool = False,
+        prefer_azure: bool = False,
+        retry_partial_errors: bool = False,
+        json_mode: bool = False,
         browser_use: bool = False,
     ) -> RoseResponse:
         """Consume the stream into a single `RoseResponse` — convenience for
-        non-streaming callers who don't care about incremental chunks."""
+        non-streaming callers who don't care about incremental chunks.
+
+        `result_required` declares a plain reply that is itself the result (for
+        example a JSON document), so an output-limit cut-off gets the shared
+        recovery in `providers/rose/truncation.py` instead of a partial reply."""
         result = RoseResponse()
         structured_output = StructuredOutputAccumulator() if response_model is not None else None
         async for chunk in self.complete(
@@ -2314,6 +2479,10 @@ class RoseClient:
             cache_namespace=cache_namespace,
             browser_use=browser_use,
             recover_truncation=True,
+            result_required=result_required,
+            **({"prefer_azure": True} if prefer_azure else {}),
+            **({"retry_partial_errors": True} if retry_partial_errors else {}),
+            **({"json_mode": True} if json_mode else {}),
         ):
             if chunk.kind == "restart":
                 result = RoseResponse()
@@ -2498,12 +2667,14 @@ async def _try_openai_api_key(
     cache_namespace: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
+    max_tokens: Optional[int] = None,
 ) -> AsyncIterator[StreamChunk]:
     """Yield from the funded OpenAI API-key route, buffering metadata for
     pre-content fall-through."""
     buffered: Optional[StreamChunk] = None
     yielded_any = False
     gen = openai_api_key_complete(
+        **({"max_tokens": max_tokens} if max_tokens is not None else {}),
         pool_spec=pool_spec,
         model=model,
         messages=messages,

@@ -12,12 +12,13 @@ import structlog
 from domains.param_populator.config import (
     CALL_SITE,
     MAX_TOKENS,
-    PARAM_POPULATOR_MODEL,
     REASONING_MAX_TOKENS,
     TEMPERATURE,
 )
 from domains.param_populator.repo import fetch_agent_context
+from helpers.attachment_context import attachment_request_overhead
 from helpers.llm import build_llm_messages, call_llm_structured_streaming
+from helpers.model_info import get_model_context_window
 from utils.prompts import (
     CONTEXT_POINTERS_RULE,
     EPHEMERAL_SESSION_RULE,
@@ -91,6 +92,7 @@ async def populate_tool_params(
     tool_name: str,
     goal: str,
     agent_id: str,
+    model: str,
     alias_hint: str = "",
     claude_token: str | None = None,
     *,
@@ -102,6 +104,7 @@ async def populate_tool_params(
         tool_name: Name of the tool to populate params for.
         goal: The task goal from the plan.
         agent_id: Agent ID to fetch context from DB.
+        model: Model selected for the agent.
         alias_hint: Original alias name for type-specific prompt instructions.
         claude_token: Optional Claude OAuth token for direct Anthropic calls.
         heartbeat: Optional callable for Temporal heartbeat signals.
@@ -126,7 +129,11 @@ async def populate_tool_params(
         heartbeat("Fetching context from DB")
     context = await fetch_agent_context(agent_id)
 
-    messages = await build_llm_messages(context, system_prompt)
+    messages = await build_llm_messages(
+        context, system_prompt,
+        max_context_tokens=await get_model_context_window(model),
+        request_overhead=attachment_request_overhead(agent_action, f"Execute the task: {goal}"),
+    )
     messages.append({"role": "user", "content": f"Execute the task: {goal}"})
 
     if heartbeat:
@@ -137,7 +144,7 @@ async def populate_tool_params(
 
     pydantic_result, usage, _detected_tools = await call_llm_structured_streaming(
         messages=messages,
-        model=PARAM_POPULATOR_MODEL,
+        model=model,
         temperature=TEMPERATURE,
         max_tokens=MAX_TOKENS,
         response_model=agent_action,
@@ -178,8 +185,9 @@ async def populate_tool_params(
     params = {k: v for k, v in tool_call.items() if k != "tool"}
 
     tool_model = TOOL_MODELS[tool_name]
-    model_schema = tool_model.model_json_schema()
-    required = model_schema.get("required", [])
+    # Wire schemas may require nullable keys that are optional at runtime.
+    # Conditional constraints already ran during structured-result validation.
+    required = [name for name, field in tool_model.model_fields.items() if field.is_required()]
     for field in required:
         if field == "tool":
             continue

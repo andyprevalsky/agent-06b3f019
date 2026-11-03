@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -99,7 +100,7 @@ def _text_part_type(role: str) -> str:
     return "output_text" if role == "assistant" else "input_text"
 
 
-def _content_to_responses_parts(content: Any, *, role: str) -> Any:
+def _content_to_responses_parts(content: Any, *, role: str, cache_breakpoints: bool = False) -> Any:
     if isinstance(content, str):
         return [{"type": _text_part_type(role), "text": content}]
     if not isinstance(content, list):
@@ -115,7 +116,11 @@ def _content_to_responses_parts(content: Any, *, role: str) -> Any:
         if block_type in ("text", "input_text", "output_text") or isinstance(block.get("text"), str):
             text = block.get("text") or ""
             if text:
-                parts.append({"type": _text_part_type(role), "text": text})
+                part = {"type": _text_part_type(role), "text": text}
+                if cache_breakpoints and role == "user" and isinstance(block.get("cache_control"), dict):
+                    # The caller's cache marker, in GPT-5.6+'s form.
+                    part["prompt_cache_breakpoint"] = {"mode": "explicit"}
+                parts.append(part)
             continue
 
         if block_type in ("image_url", "input_image") and role == "user":
@@ -232,7 +237,45 @@ def _normalize_codex_reasoning_item(item: Any) -> Optional[Dict[str, Any]]:
     }
 
 
-def _build_responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+_MAX_PROMPT_CACHE_BREAKPOINTS = 50
+_BREAKPOINT_MODEL_RE = re.compile(r"gpt-(\d+)(?:\.(\d+))?")
+
+
+def supports_prompt_cache_breakpoints(model: Optional[str]) -> bool:
+    """GPT-5.6 and later cache only at breakpoints; earlier models reject the field (HTTP 400)."""
+    match = _BREAKPOINT_MODEL_RE.search(model or "")
+    if not match:
+        return False
+    major, minor = int(match.group(1)), int(match.group(2) or 0)
+    return major > 5 or (major == 5 and minor >= 6)
+
+
+def _mark_completed_user_messages(items: List[Dict[str, Any]]) -> None:
+    """Breakpoint after every user message before the final item (its last text part).
+
+    Replaying 911 real agent calls through the measured GPT-5.6+ rule (2026-10-12):
+    implicit mode plus these marks cost 0.51x of no caching, against 0.55x for
+    implicit mode alone and 0.61x for explicit mode, which loses the latest-message
+    and opening-instructions caching that chat-style calls rely on.
+    """
+    for item in items[:-1]:
+        content = item.get("content")
+        if item.get("role") != "user" or not isinstance(content, list):
+            continue
+        texts = [part for part in content if isinstance(part, dict) and part.get("type") == "input_text"]
+        if texts:
+            texts[-1]["prompt_cache_breakpoint"] = {"mode": "explicit"}
+
+
+def _cap_prompt_cache_breakpoints(items: List[Dict[str, Any]]) -> None:
+    """Reads consider the latest 50 breakpoints; drop older marks beyond that."""
+    marked = [part for item in items for part in item.get("content", []) if isinstance(item.get("content"), list)
+              and isinstance(part, dict) and "prompt_cache_breakpoint" in part]
+    for part in marked[: max(len(marked) - _MAX_PROMPT_CACHE_BREAKPOINTS, 0)]:
+        part.pop("prompt_cache_breakpoint", None)
+
+
+def _build_responses_input(messages: List[Dict[str, Any]], *, cache_breakpoints: bool = False) -> List[Dict[str, Any]]:
     out: list[dict[str, Any]] = []
     emitted_call_ids: set[str] = set()
     for msg_index, msg in enumerate(messages):
@@ -300,7 +343,9 @@ def _build_responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any
             continue
 
         response_role = "assistant" if role == "assistant" else "user"
-        content = _content_to_responses_parts(msg.get("content", ""), role=response_role)
+        content = _content_to_responses_parts(
+            msg.get("content", ""), role=response_role, cache_breakpoints=cache_breakpoints
+        )
         if not content:
             continue
         out.append({"role": response_role, "content": content})
@@ -326,9 +371,18 @@ def _build_instructions(messages: List[Dict[str, Any]]) -> Optional[str]:
     text = _build_system_text(messages)
     if not text:
         return None
-    if SYSTEM_PROMPT_DYNAMIC_BOUNDARY not in text:
+    # The system producer's final delimiter can lose its surrounding newline.
+    # Match reserved lines only; inline prose and non-system data stay intact.
+    sections = [[]]
+    for line in text.split("\n"):
+        if line.strip(" \t\r") == SYSTEM_PROMPT_DYNAMIC_BOUNDARY.strip():
+            sections.append([])
+        else:
+            sections[-1].append(line)
+    if len(sections) == 1:
         return text
-    return "\n\n".join(part.strip() for part in text.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY) if part.strip()) or None
+    parts = ["\n".join(section) for section in sections]
+    return "\n\n".join(part.strip() for part in parts if part.strip()) or None
 
 
 def _build_static_cache_scope(messages: List[Dict[str, Any]]) -> Optional[str]:
@@ -424,6 +478,7 @@ def build_codex_responses_body(
     provider_fast_mode: bool = True,
     cache_namespace: Optional[str] = None,
     request_id: str,
+    cache_breakpoints: bool = False,
 ) -> Dict[str, Any]:
     """Assemble the Codex Responses request body.
 
@@ -432,9 +487,10 @@ def build_codex_responses_body(
     """
     instructions = _build_instructions(messages) or _DEFAULT_CODEX_INSTRUCTIONS
     static_cache_scope = _build_static_cache_scope(messages) or _DEFAULT_CODEX_INSTRUCTIONS
+    breakpoints = cache_breakpoints and supports_prompt_cache_breakpoints(model_override or pool_spec.gpt_auth_model)
     body: Dict[str, Any] = {
         "model": model_override or pool_spec.gpt_auth_model,
-        "input": _build_responses_input(messages),
+        "input": _build_responses_input(messages, cache_breakpoints=breakpoints),
         "stream": True,
         "store": False,
         "parallel_tool_calls": True,
@@ -452,6 +508,9 @@ def build_codex_responses_body(
         },
     }
     body["instructions"] = instructions
+    if breakpoints:
+        _mark_completed_user_messages(body["input"])
+    _cap_prompt_cache_breakpoints(body["input"])
     responses_tools = _responses_tools(tools)
     # Responses input may retain historical function_call/output items without
     # re-declaring those functions. Definitions in body.tools are selectable,
@@ -460,15 +519,18 @@ def build_codex_responses_body(
     if responses_tools:
         body["tools"] = responses_tools
     if response_format:
-        json_schema = response_format.get("json_schema") or {}
-        body["text"] = {
-            "format": {
-                "type": "json_schema",
-                "name": json_schema.get("name", "response"),
-                "strict": json_schema.get("strict", True),
-                "schema": json_schema.get("schema") or {},
+        if response_format.get("type") == "json_object":
+            body["text"] = {"format": {"type": "json_object"}}
+        else:
+            json_schema = response_format.get("json_schema") or {}
+            body["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "name": json_schema.get("name", "response"),
+                    "strict": json_schema.get("strict", True),
+                    "schema": json_schema.get("schema") or {},
+                }
             }
-        }
     if provider_fast_mode:
         body["service_tier"] = "priority"
     return body
@@ -493,6 +555,9 @@ async def gpt_auth_complete(
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = None,
 ) -> AsyncIterator[StreamChunk]:
+    # No cache_breakpoints here: the ChatGPT backend answers prompt_cache_breakpoint
+    # with HTTP 400 (measured 2026-10-25 on gpt-6-sol) and already caches by prefix
+    # without it.
     body = build_codex_responses_body(
         pool_spec=pool_spec,
         messages=messages,
@@ -599,10 +664,12 @@ async def openai_api_key_complete(
     provider_fast_mode: bool = True,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = None,
+    max_tokens: Optional[int] = None,
 ) -> AsyncIterator[StreamChunk]:
     body = build_codex_responses_body(
         pool_spec=pool_spec,
         model_override=model,
+        cache_breakpoints=True,
         messages=messages,
         response_format=response_format,
         tools=tools,
@@ -623,6 +690,8 @@ async def openai_api_key_complete(
         ),
         request_id=request_id,
     )
+    if max_tokens is not None:
+        body["max_output_tokens"] = max_tokens
     actual_model = f"{model}-openai"
     last_error: Optional[Exception] = None
 

@@ -599,8 +599,8 @@ def test_prod_worker_posts_encrypted_artifact_to_backend():
         teardown_mock()
 
 
-async def test_fast_cache_write_archives_without_replay_reads_or_backend_success():
-    import providers.fast_cache.client as fast_cache_client
+async def test_demo_cache_write_archives_without_replay_reads_or_backend_success():
+    import providers.demo_cache.client as demo_cache_client
     from helpers.trace_archive import decrypt_and_validate_artifact, read_local_artifact
 
     class _Response:
@@ -618,11 +618,11 @@ async def test_fast_cache_write_archives_without_replay_reads_or_backend_success
 
     with tempfile.TemporaryDirectory() as tmp:
         restore = _with_archive_env(tmp)
-        old_client = fast_cache_client._client
-        token = structlog.contextvars.bind_contextvars(agent_id="agent-fast-cache", span_id="span-fast-cache")
+        old_client = demo_cache_client._client
+        token = structlog.contextvars.bind_contextvars(agent_id="agent-demo-cache", span_id="span-demo-cache")
         try:
-            fast_cache_client._client = _Client()
-            ok = await fast_cache_client.cache_set(
+            demo_cache_client._client = _Client()
+            ok = await demo_cache_client.cache_set(
                 "provider-request-key",
                 "web_fetch",
                 "goal-hash",
@@ -631,7 +631,7 @@ async def test_fast_cache_write_archives_without_replay_reads_or_backend_success
             assert ok is False
             expected_hash = hashlib.sha256(b"provider-request-key").hexdigest()
             stored = read_local_artifact(
-                root_agent_id="agent-fast-cache",
+                root_agent_id="agent-demo-cache",
                 path=f"provider/fast-cache/web_fetch/{expected_hash}.json.gz.enc",
             )
             assert stored is not None
@@ -640,17 +640,17 @@ async def test_fast_cache_write_archives_without_replay_reads_or_backend_success
             assert payload["key"] == "provider-request-key"
             assert payload["kind"] == "web_fetch"
             assert payload["goal_hash"] == "goal-hash"
-            assert payload["span_id"] == "span-fast-cache"
+            assert payload["span_id"] == "span-demo-cache"
             assert payload["value"]["request"]["url"] == "https://example.com"
             assert payload["value"]["response"]["status"] == 200
         finally:
             structlog.contextvars.reset_contextvars(**token)
-            fast_cache_client._client = old_client
+            demo_cache_client._client = old_client
             restore()
 
 
-async def test_fast_cache_read_archives_hit_response_for_replay():
-    import providers.fast_cache.client as fast_cache_client
+async def test_demo_cache_read_archives_hit_response_for_replay():
+    import providers.demo_cache.client as demo_cache_client
     from helpers.trace_archive import (
         decrypt_and_validate_artifact,
         list_local_artifact_paths,
@@ -676,29 +676,29 @@ async def test_fast_cache_read_archives_hit_response_for_replay():
 
     with tempfile.TemporaryDirectory() as tmp:
         restore = _with_archive_env(tmp)
-        old_client = fast_cache_client._client
-        token = structlog.contextvars.bind_contextvars(agent_id="agent-fast-cache", span_id="span-read")
+        old_client = demo_cache_client._client
+        token = structlog.contextvars.bind_contextvars(agent_id="agent-demo-cache", span_id="span-read")
         try:
-            fast_cache_client._client = _Client()
-            record = await fast_cache_client.cache_get_record("provider-read-key")
+            demo_cache_client._client = _Client()
+            record = await demo_cache_client.cache_get_record("provider-read-key")
             assert record["hit"] is True
             expected_hash = hashlib.sha256(b"provider-read-key").hexdigest()
             paths = [
                 path
-                for path in list_local_artifact_paths("agent-fast-cache")
+                for path in list_local_artifact_paths("agent-demo-cache")
                 if path.startswith(f"provider/fast-cache/read/{expected_hash}.")
             ]
             for _ in range(100):
-                if paths and read_local_artifact(root_agent_id="agent-fast-cache", path=paths[0]) is not None:
+                if paths and read_local_artifact(root_agent_id="agent-demo-cache", path=paths[0]) is not None:
                     break
                 await asyncio.sleep(0.05)
                 paths = [
                     path
-                    for path in list_local_artifact_paths("agent-fast-cache")
+                    for path in list_local_artifact_paths("agent-demo-cache")
                     if path.startswith(f"provider/fast-cache/read/{expected_hash}.")
                 ]
             assert len(paths) == 1
-            stored = read_local_artifact(root_agent_id="agent-fast-cache", path=paths[0])
+            stored = read_local_artifact(root_agent_id="agent-demo-cache", path=paths[0])
             assert stored is not None
             ciphertext, metadata = stored
             payload = json.loads(decrypt_and_validate_artifact(ciphertext, metadata).decode("utf-8"))
@@ -710,12 +710,12 @@ async def test_fast_cache_read_archives_hit_response_for_replay():
             assert payload["value"]["response"]["answer"] == "cached"
         finally:
             structlog.contextvars.reset_contextvars(**token)
-            fast_cache_client._client = old_client
+            demo_cache_client._client = old_client
             restore()
 
 
-async def test_fast_cache_archive_uses_resolved_root_agent_id():
-    import providers.fast_cache.client as fast_cache_client
+async def test_demo_cache_archive_uses_resolved_root_agent_id():
+    import providers.demo_cache.client as demo_cache_client
     from helpers.trace_archive import list_local_artifact_paths
 
     class _Response:
@@ -740,17 +740,17 @@ async def test_fast_cache_archive_uses_resolved_root_agent_id():
                         "rootAgentId": "root-agent-for-cache",
                     },
                 )
-            return _Response(200, {"ok": True})
+            return _Response(200, {"ok": True, "stored": True})
 
     with tempfile.TemporaryDirectory() as tmp:
         restore = _with_archive_env(tmp)
-        old_client = fast_cache_client._client
-        old_memo = dict(fast_cache_client._AGENT_FASTMODE)
+        old_client = demo_cache_client._client
+        old_memo = dict(demo_cache_client._AGENT_FASTMODE)
         token = structlog.contextvars.bind_contextvars(agent_id="child-agent-for-cache", span_id="span-root")
         try:
-            fast_cache_client._client = _Client()
-            fast_cache_client._AGENT_FASTMODE.clear()
-            ok = await fast_cache_client.cache_set(
+            demo_cache_client._client = _Client()
+            demo_cache_client._AGENT_FASTMODE.clear()
+            ok = await demo_cache_client.cache_set(
                 "root-resolved-key",
                 "llm",
                 "goal-hash",
@@ -762,9 +762,9 @@ async def test_fast_cache_archive_uses_resolved_root_agent_id():
             assert any(path.startswith("provider/fast-cache/llm/") for path in root_paths)
         finally:
             structlog.contextvars.reset_contextvars(**token)
-            fast_cache_client._client = old_client
-            fast_cache_client._AGENT_FASTMODE.clear()
-            fast_cache_client._AGENT_FASTMODE.update(old_memo)
+            demo_cache_client._client = old_client
+            demo_cache_client._AGENT_FASTMODE.clear()
+            demo_cache_client._AGENT_FASTMODE.update(old_memo)
             restore()
 
 
@@ -1569,7 +1569,7 @@ def test_prod_local_root_uses_fallback_for_repo_context_path():
 async def test_browser_http_cache_ops_do_not_archive():
     """browser_http cache ops fire per page subresource (thousands/session) and
     must never hit the archive endpoint; llm-kind ops keep archiving."""
-    from providers.fast_cache import client as fast_cache_client
+    from providers.demo_cache import client as demo_cache_client
 
     calls: list[str] = []
 
@@ -1577,30 +1577,30 @@ async def test_browser_http_cache_ops_do_not_archive():
         calls.append(kwargs["path"])
         return {"ref": kwargs["path"], "metadata": None}
 
-    old_deferred_archive = fast_cache_client.archive_json_deferred
-    old_resolver = fast_cache_client.resolve_archive_root_agent_id
+    old_deferred_archive = demo_cache_client.archive_json_deferred
+    old_resolver = demo_cache_client.resolve_archive_root_agent_id
 
     async def fake_resolver():
         return "root-agent"
 
-    fast_cache_client.archive_json_deferred = fake_archive_json_deferred
-    fast_cache_client.resolve_archive_root_agent_id = fake_resolver
+    demo_cache_client.archive_json_deferred = fake_archive_json_deferred
+    demo_cache_client.resolve_archive_root_agent_id = fake_resolver
     try:
-        await fast_cache_client._archive_cache_write(
+        await demo_cache_client._archive_cache_write(
             "fastmode:v42:browser_http:global:GET:abc:public:no-body", "browser_http", "gh", {"v": 1}, None
         )
-        await fast_cache_client._archive_cache_read(
+        await demo_cache_client._archive_cache_read(
             "fastmode:v42:browser_http:global:GET:abc:public:no-body", hit=True, value={"v": 1}, blob_path=None
         )
         assert calls == []
-        await fast_cache_client._archive_cache_write("fastmode:v42:llm:gh:site:c:abc", "llm", "gh", {"v": 1}, None)
-        await fast_cache_client._archive_cache_read(
+        await demo_cache_client._archive_cache_write("fastmode:v42:llm:gh:site:c:abc", "llm", "gh", {"v": 1}, None)
+        await demo_cache_client._archive_cache_read(
             "fastmode:v42:llm:gh:site:c:abc", hit=True, value={"v": 1}, blob_path=None
         )
         assert len(calls) == 2
     finally:
-        fast_cache_client.archive_json_deferred = old_deferred_archive
-        fast_cache_client.resolve_archive_root_agent_id = old_resolver
+        demo_cache_client.archive_json_deferred = old_deferred_archive
+        demo_cache_client.resolve_archive_root_agent_id = old_resolver
 
 
 def test_oversized_artifact_is_dropped_with_warning():
@@ -1636,12 +1636,184 @@ def test_oversized_artifact_is_dropped_with_warning():
             restore()
 
 
+def test_read_archive_artifact_metadata_never_reads_ciphertext():
+    """Metadata-only reads share the artifact contract but skip the body.
+
+    Local: metadata from the sidecar; None when the artifact is absent;
+    ValueError when ciphertext exists without its sidecar. R2: only the
+    ``.meta.json`` object is fetched on the hit path, and the miss path probes
+    existence without reading a body.
+    """
+    from helpers.trace_archive import (
+        archive_json,
+        read_archive_artifact,
+        read_archive_artifact_metadata,
+    )
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        try:
+            root_agent_id = "root-meta-only"
+            archive_json(root_agent_id=root_agent_id, path="trace/transitions.json.gz.enc", payload={"steps": [1, 2, 3]})
+            full = read_archive_artifact(root_agent_id=root_agent_id, path="trace/transitions.json.gz.enc")
+            assert full is not None
+            _, full_metadata = full
+            metadata = read_archive_artifact_metadata(root_agent_id=root_agent_id, path="trace/transitions.json.gz.enc")
+            assert metadata == full_metadata
+            assert read_archive_artifact_metadata(root_agent_id=root_agent_id, path="missing.json.gz.enc") is None
+            target = Path(tmp) / root_agent_id / "trace" / "transitions.json.gz.enc"
+            (target.with_suffix(target.suffix + ".meta.json")).unlink()
+            try:
+                read_archive_artifact_metadata(root_agent_id=root_agent_id, path="trace/transitions.json.gz.enc")
+            except ValueError as exc:
+                assert "Archive metadata missing" in str(exc)
+            else:
+                raise AssertionError("ciphertext without metadata must fail closed")
+
+            objects: dict[str, bytes] = {}
+            for item in Path(tmp).rglob("*"):
+                if item.is_file():
+                    objects["trace-archive/" + item.relative_to(tmp).as_posix()] = item.read_bytes()
+        finally:
+            restore()
+
+    meta_key = f"trace-archive/{root_agent_id}/trace/transitions.json.gz.enc.meta.json"
+    objects[meta_key] = json.dumps(full_metadata).encode("utf-8")
+    fetched: list[str] = []
+
+    class _Body:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+
+        def read(self) -> bytes:
+            return self._data
+
+    class _Client:
+        def get_object(self, *, Bucket: str, Key: str) -> dict:
+            fetched.append(Key)
+            if Key not in objects:
+                error = Exception(f"NoSuchKey: {Key}")
+                error.response = {"Error": {"Code": "NoSuchKey"}}
+                raise error
+            return {"Body": _Body(objects[Key])}
+
+        def head_object(self, *, Bucket: str, Key: str) -> dict:
+            fetched.append(Key)
+            if Key not in objects:
+                error = Exception(f"NoSuchKey: {Key}")
+                error.response = {"Error": {"Code": "NoSuchKey"}}
+                raise error
+            return {}
+
+    old_client = trace_archive._R2_CLIENT
+    old_env = {key: os.environ.get(key) for key in ["TRACE_ARCHIVE_BACKEND", "R2_BUCKET_TRACE_ARCHIVE"]}
+    trace_archive._R2_CLIENT = _Client()
+    os.environ["TRACE_ARCHIVE_BACKEND"] = "r2"
+    os.environ["R2_BUCKET_TRACE_ARCHIVE"] = "unit-bucket"
+    try:
+        assert read_archive_artifact_metadata(root_agent_id=root_agent_id, path="trace/transitions.json.gz.enc") == full_metadata
+        assert fetched == [meta_key[:-len(".meta.json")], meta_key]
+        fetched.clear()
+        assert read_archive_artifact_metadata(root_agent_id=root_agent_id, path="nope.json.gz.enc") is None
+        assert fetched == [f"trace-archive/{root_agent_id}/nope.json.gz.enc"]
+        objects[f"trace-archive/{root_agent_id}/orphan.enc"] = b"ciphertext without sidecar"
+        try:
+            read_archive_artifact_metadata(root_agent_id=root_agent_id, path="orphan.enc")
+        except ValueError as exc:
+            assert "Archive metadata missing for orphan.enc" in str(exc)
+        else:
+            raise AssertionError("R2 ciphertext without metadata must fail closed")
+    finally:
+        trace_archive._R2_CLIENT = old_client
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_r2_metadata_requires_ciphertext_and_preserves_head_errors():
+    """A sidecar is not an artifact; existence never opens a ciphertext body."""
+    import helpers.trace_archive as archive
+    from unittest.mock import patch
+
+    metadata = {"plaintext_sha256": "test-digest", "plaintext_bytes": 7}
+    key = archive._object_key("root-sidecar-contract", "trace/example.enc")
+    sidecar = key + ".meta.json"
+
+    class R2Error(Exception):
+        def __init__(self, code):
+            super().__init__(code)
+            self.response = {"Error": {"Code": code}}
+
+    class Body:
+        def read(self):
+            return json.dumps(metadata).encode()
+
+    class Client:
+        def __init__(self, ciphertext, meta, head_error=None):
+            self.ciphertext = ciphertext
+            self.meta = meta
+            self.head_error = head_error
+            self.gets = []
+            self.heads = []
+
+        def get_object(self, *, Bucket, Key):
+            self.gets.append(Key)
+            assert Key == sidecar, "metadata reader opened a ciphertext body"
+            if not self.meta:
+                raise R2Error("NoSuchKey")
+            return {"Body": Body()}
+
+        def head_object(self, *, Bucket, Key):
+            self.heads.append(Key)
+            assert Key == key
+            if self.head_error:
+                raise self.head_error
+            if not self.ciphertext:
+                raise R2Error("NoSuchKey")
+            return {"ContentLength": 7}
+
+    cases = [(False, True, None), (True, True, metadata), (False, False, None)]
+    for ciphertext, meta, expected in cases:
+        client = Client(ciphertext, meta)
+        with patch.object(archive, "_r2_client", return_value=client), patch.object(archive, "_r2_bucket", return_value="test-bucket"):
+            assert archive.read_r2_artifact_metadata(root_agent_id="root-sidecar-contract", path="trace/example.enc") == expected
+        assert client.heads == [key], "every metadata result must establish ciphertext existence"
+        assert key not in client.gets
+
+    client = Client(True, False)
+    with patch.object(archive, "_r2_client", return_value=client), patch.object(archive, "_r2_bucket", return_value="test-bucket"):
+        try:
+            archive.read_r2_artifact_metadata(root_agent_id="root-sidecar-contract", path="trace/example.enc")
+        except ValueError as exc:
+            assert "Archive metadata missing for trace/example.enc" in str(exc)
+        else:
+            raise AssertionError("ciphertext without metadata was accepted")
+    assert client.heads == [key] and key not in client.gets
+
+    for code in ["AccessDenied", "InternalError"]:
+        failure = R2Error(code)
+        client = Client(True, True, failure)
+        with patch.object(archive, "_r2_client", return_value=client), patch.object(archive, "_r2_bucket", return_value="test-bucket"):
+            try:
+                archive.read_r2_artifact_metadata(root_agent_id="root-sidecar-contract", path="trace/example.enc")
+            except R2Error as exc:
+                assert exc is failure
+            else:
+                raise AssertionError("nonmissing HEAD error was swallowed")
+        assert client.heads == [key] and key not in client.gets
+
+
 async def run_all_tests():
     print("trace archive blackbox tests:")
     r = BlackboxResult()
     r.record("encrypt_json_gzip_roundtrip", test_encrypt_json_gzip_roundtrip)
     r.record("encrypt_media_skips_gzip", test_encrypt_media_skips_gzip)
     r.record("local_store_writes_ciphertext_and_metadata", test_local_store_writes_ciphertext_and_metadata)
+    r.record("read_archive_artifact_metadata_never_reads_ciphertext", test_read_archive_artifact_metadata_never_reads_ciphertext)
+    r.record("r2_metadata_requires_ciphertext_and_preserves_head_errors", test_r2_metadata_requires_ciphertext_and_preserves_head_errors)
     r.record("local_store_publishes_metadata_atomically", test_local_store_publishes_metadata_atomically)
     r.record(
         "artifact_transaction_recovers_crash_between_pair_replacements",
@@ -1667,14 +1839,14 @@ async def run_all_tests():
     )
     r.record("prod_worker_posts_encrypted_artifact_to_backend", test_prod_worker_posts_encrypted_artifact_to_backend)
     await r.record_async(
-        "fast_cache_write_archives_without_replay_reads_or_backend_success",
-        test_fast_cache_write_archives_without_replay_reads_or_backend_success,
+        "demo_cache_write_archives_without_replay_reads_or_backend_success",
+        test_demo_cache_write_archives_without_replay_reads_or_backend_success,
     )
     await r.record_async(
-        "fast_cache_read_archives_hit_response_for_replay", test_fast_cache_read_archives_hit_response_for_replay
+        "demo_cache_read_archives_hit_response_for_replay", test_demo_cache_read_archives_hit_response_for_replay
     )
     await r.record_async(
-        "fast_cache_archive_uses_resolved_root_agent_id", test_fast_cache_archive_uses_resolved_root_agent_id
+        "demo_cache_archive_uses_resolved_root_agent_id", test_demo_cache_archive_uses_resolved_root_agent_id
     )
     await r.record_async(
         "worker_async_writes_defer_off_event_loop_and_complete",

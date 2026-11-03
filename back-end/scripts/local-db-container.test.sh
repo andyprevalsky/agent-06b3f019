@@ -91,4 +91,80 @@ if system_db_fallback_is_safe; then
   exit 1
 fi
 
+# ── System Postgres fallback: each workspace's own database, never `victoria` ──
+[[ "$(workspace_system_db_name "agent-a8eed88f04ecb85c0")" == "victoria_agent-a8eed88f04ecb85c0" ]] || {
+  echo "Expected victoria_<workspace> for a worktree hint" >&2
+  exit 1
+}
+for bad in "" "../x" "a b" "x;drop" "-lead" "$(printf 'x%.0s' {1..60})"; do
+  if workspace_system_db_name "$bad" >/dev/null; then
+    echo "Expected workspace hint '$bad' to be rejected" >&2
+    exit 1
+  fi
+done
+
+PSQL_CALLS=""
+DB_PRESENT=""
+psql() {
+  PSQL_CALLS+="$*"$'\n'
+  if [[ "$*" == *"SELECT 1 FROM pg_database"* ]]; then
+    [[ -n "$DB_PRESENT" ]] && echo 1
+    return 0
+  fi
+  if [[ "$*" == *"CREATE DATABASE"* ]]; then
+    DB_PRESENT=1
+    return 0
+  fi
+  return 1
+}
+ensure_workspace_system_db 5432 "victoria_agent-x" || {
+  echo "Expected a missing workspace database to be created" >&2
+  exit 1
+}
+[[ "$PSQL_CALLS" == *'CREATE DATABASE "victoria_agent-x"'* ]] || {
+  echo "Expected CREATE DATABASE for the workspace database, got: $PSQL_CALLS" >&2
+  exit 1
+}
+PSQL_CALLS=""
+ensure_workspace_system_db 5432 "victoria_agent-x" || exit 1
+[[ "$PSQL_CALLS" != *"CREATE DATABASE"* ]] || {
+  echo "Expected an existing workspace database to be reused" >&2
+  exit 1
+}
+if ensure_workspace_system_db 5432 "victoria"; then
+  echo "Expected the shared victoria database to be refused" >&2
+  exit 1
+fi
+unset -f psql
+
+# Both runners' system fallback must go through the workspace database. A
+# coverage shard appends its own suffix to the same workspace hint
+# ("$WORKSPACE_HINT$SHARD_DB_SUFFIX"), which stays workspace-scoped.
+for runner in run-blackbox-tests.sh run-coverage.sh; do
+  hint='$WORKSPACE_HINT'
+  [[ "$runner" != "run-coverage.sh" ]] || hint='$WORKSPACE_HINT$SHARD_DB_SUFFIX'
+  grep -Fq "workspace_system_db_name \"$hint\"" "$SCRIPT_DIR/$runner" || {
+    echo "Expected $runner's system Postgres fallback to use workspace_system_db_name with $hint" >&2
+    exit 1
+  }
+done
+
+# A workspace-owned Docker container also hosts the dev stack's seeded
+# `victoria` (run.sh): the standalone runners select the workspace database in
+# that container too. Only an existing-backend run may use the stack database.
+DOCKER_BRANCH="$(sed -n '/^# Try Docker container first/,/^# Fall back to system Postgres/p' "$SCRIPT_DIR/run-blackbox-tests.sh")"
+grep -q 'ENSURE_SYSTEM_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT")"' <<<"$DOCKER_BRANCH" &&
+  grep -q 'SELECTED_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$ENSURE_SYSTEM_DB_NAME"' <<<"$DOCKER_BRANCH" || {
+  echo "Expected run-blackbox-tests.sh's Docker branch to select the victoria_<workspace> database URL" >&2
+  exit 1
+}
+grep -q 'LOCAL_PSQL_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$ENSURE_SYSTEM_DB_NAME"' "$SCRIPT_DIR/run-coverage.sh" || {
+  echo "Expected run-coverage.sh's container helper to select the victoria_<workspace> database URL" >&2
+  exit 1
+}
+[[ "$(grep -c 'use_workspace_container_db$' "$SCRIPT_DIR/run-coverage.sh")" -eq 2 ]] || {
+  echo "Expected both run-coverage.sh Docker branches to select the workspace database" >&2
+  exit 1
+}
+
 echo "Local DB container resolution tests passed"

@@ -1,4 +1,7 @@
-import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import postcss from 'postcss';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
@@ -12,6 +15,12 @@ import {
   SIDEBAR_WIDTH_COLLAPSED,
   SIDEBAR_WIDTH_EXPANDED,
 } from '@/features/terminal-component-group/config';
+
+// Keep legacy renderer coverage explicit now that real accounts default to Rose UI.
+vi.mock('@/lib/roseDesktop', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/roseDesktop')>()),
+  isRoseDesktopUser: () => false,
+}));
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -169,12 +178,10 @@ describe('Terminal page', () => {
       expect(screen.getByLabelText('Last name')).toBeInTheDocument();
     });
 
-    it('shows Popular Goals carousel when no agent is selected', async () => {
+    it('omits Popular Goals when no agent is selected', async () => {
       renderWithProviders(<Terminal />);
-      await waitFor(() => {
-        // Should show at least one popular goal button
-        expect(screen.getAllByText('Maximize my luck surface area').length).toBeGreaterThan(0);
-      });
+      expect(await screen.findByPlaceholderText('Enter any goal')).toBeInTheDocument();
+      expect(screen.queryByTestId('popular-goals-row')).not.toBeInTheDocument();
     });
 
     it('keeps grid energy pills in the background layer below terminal content', async () => {
@@ -221,7 +228,8 @@ describe('Terminal page', () => {
       );
     });
 
-    it('keeps legal links in the visible mobile layout', async () => {
+    it('keeps legal links on the signed-out mobile website', async () => {
+      localStorage.clear();
       setViewport(390, 844);
       const user = userEvent.setup();
 
@@ -264,6 +272,33 @@ describe('Terminal page', () => {
         'h-[var(--mobile-terminal-header-height)]',
         'md:h-24',
       );
+    });
+
+    it('locks document scroll while mounted so the mobile query box stays fixed', async () => {
+      setViewport(390, 844);
+      const root = document.documentElement;
+
+      const { unmount } = renderWithProviders(<Terminal />);
+
+      expect(await screen.findByTestId('terminal-input-area')).toBeInTheDocument();
+      expect(root).toHaveClass('rose-app-shell');
+      unmount();
+      expect(root).not.toHaveClass('rose-app-shell');
+
+      const css = fs.readFileSync(path.resolve(__dirname, '../../index.css'), 'utf-8');
+      const lock: Record<string, string> = {};
+      postcss.parse(css).walkRules((rule) => {
+        if (!rule.selectors.includes('html.rose-app-shell body')) return;
+        expect(rule.selectors).toContain('html.rose-app-shell');
+        rule.walkDecls((d) => {
+          lock[d.prop] = d.value;
+        });
+      });
+      expect(lock).toMatchObject({
+        height: '100%',
+        overflow: 'hidden',
+        'overscroll-behavior': 'none',
+      });
     });
 
     it('applies only a visual mobile transform to the opening ASCII art', async () => {
@@ -341,15 +376,7 @@ describe('Terminal page', () => {
       await user.click(await screen.findByText('Test agent'));
 
       expect(await screen.findByText('Approval Required')).toBeInTheDocument();
-      const legalLinks = screen.getByTestId('terminal-legal-links');
-      expect(within(legalLinks).getByRole('link', { name: 'Privacy' })).toHaveAttribute(
-        'href',
-        '/privacy',
-      );
-      expect(within(legalLinks).getByRole('link', { name: 'Terms' })).toHaveAttribute(
-        'href',
-        '/terms',
-      );
+      expect(screen.queryByTestId('terminal-legal-links')).not.toBeInTheDocument();
       expect(screen.queryByPlaceholderText('Type your message...')).not.toBeInTheDocument();
       expect(screen.getByPlaceholderText('Add context (optional)...')).toBeInTheDocument();
 
@@ -491,20 +518,13 @@ describe('Terminal page', () => {
       expect(textarea).toHaveValue('Find me a new apartment');
     });
 
-    it('clicking a popular goal populates the input', async () => {
+    it('keeps the composer available without suggested goals', async () => {
       const user = userEvent.setup({ delay: null });
       renderWithProviders(<Terminal />);
-
-      await waitFor(() => {
-        expect(screen.getAllByText('Get me socks').length).toBeGreaterThan(0);
-      });
-
-      // Click the first instance of a popular goal
-      const goalButtons = screen.getAllByText('Get me socks');
-      await user.click(goalButtons[0]);
-
-      const textarea = screen.getByPlaceholderText('Enter any goal');
-      expect(textarea).toHaveValue('Get me socks');
+      const textarea = await screen.findByPlaceholderText('Enter any goal');
+      expect(screen.queryByText('Get me socks')).not.toBeInTheDocument();
+      await user.type(textarea, 'My own goal');
+      expect(textarea).toHaveValue('My own goal');
     });
 
     it('submitting a goal creates a new agent via POST /api/agents', async () => {

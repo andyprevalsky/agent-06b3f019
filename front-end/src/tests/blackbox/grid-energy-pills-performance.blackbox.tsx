@@ -1,4 +1,4 @@
-import { act, render } from '@testing-library/react';
+import { act, render, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BackgroundPattern } from '@/features/terminal/components/BackgroundPattern';
 import {
@@ -80,14 +80,19 @@ describe('grid energy pill performance budget', () => {
     expect(container.querySelectorAll('[attributeName="transform"]')).toHaveLength(0);
   });
 
-  it('keeps the square/dot tile animation canvas on desktop only', () => {
+  it('keeps the square/dot tile animation canvas on desktop only', async () => {
     setViewport(1440, 900);
 
     const { container } = renderBackgroundPattern();
 
-    expect(
-      container.querySelector('[data-testid="terminal-small-tile-animation-canvas"]'),
-    ).toBeInTheDocument();
+    // Cold deferred-module compilation shares the existing theme loader budget.
+    await waitFor(
+      () =>
+        expect(
+          container.querySelector('[data-testid="terminal-small-tile-animation-canvas"]'),
+        ).toBeInTheDocument(),
+      { timeout: 15000 },
+    );
   });
 
   it('draws mobile energy motion through canvas animation frames', () => {

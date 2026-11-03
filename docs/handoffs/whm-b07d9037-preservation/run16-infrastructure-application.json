@@ -1,0 +1,35 @@
+{
+  "schema": "rose.whm_infrastructure_application.v1",
+  "recorded_at_utc": "2026-10-14T02:00:56.289438+00:00",
+  "authorization": "User: infrastructure changes auto-approved; WHM context content or runtime context acquisition changes need approval.",
+  "base_checkpoint": "5c039b5dec7d0ad08875d7518a9e91a9821fb726",
+  "applied_snapshots": {
+    "R14-HTTP-CAPTURE-2": "3f143ddec55ac3256717e600f93c12fbd61b2e726e18d668ce3dd71d75f70da0",
+    "R16-NATIVE-OWNER-JOIN-1": "d2e91c93c6eca2cc02d9e779d9ece9a2cf4b569ea52a5f8145e9ace4ed6d5f82"
+  },
+  "tests": {
+    "native_owning": "68PASS19.18s",
+    "agent_reliability_clock_wire_cleanup": "162PASS4.68s",
+    "provider": "115PASS6.27s",
+    "actual_registered_native_gate": "68PASS19.06s; installed pinned native interpreter; no dependency installation/model rebuild"
+  },
+  "WHM_context_changed": false,
+  "WHM_runtime_context_acquisition_changed": false,
+  "static_prefix_sha256": "009394a4fc293c14230d15d4fc70b798876fb2d8ec4489ba3b4db560343ba5d1",
+  "retriever_query_top_k_examples_and_packing": "unchanged; same retrieval call, only cancellation/executor ownership changed",
+  "private_HTTP_failures": "Diagnostic native provider_attempts; not inserted into prediction context",
+  "pending_context_proposals": [
+    "Original goal-filter/context proposal",
+    "Typed receipt/source provenance guard design"
+  ],
+  "original_run16_outcome": "ERROR preserved",
+  "original_cause_attribution": "OPEN; owning timer/durability mechanisms proven, historical pending stacks absent",
+  "original_source_files_preserved": true,
+  "protected_hashes": {
+    "CLAUDE.md": "2a6348f3ad1701aeb496e10e98da271fb38db5709e2abb9adbe65b7c5ad0d322",
+    "AGENTS.md": "57cbb4821915f3e477996ffde6ef7ee4c9d57fab64b6f57421968e3d0e9d0eca"
+  },
+  "paid_test_calls": 0,
+  "merge_deploy": false,
+  "next_action": "Same failed logical member verification retry under original authorized60-minute DEMO-on cycle; preserve original goal/slice triggers and originalERROR."
+}

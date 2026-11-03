@@ -1,6 +1,10 @@
 #!/usr/bin/env tsx
 
 import nodeAssert from 'node:assert/strict';
+import { tilionContractCases } from './browser-provider.tilion-contract.support';
+import { assertBrowserUseMissingHealth } from './browser-provider.browser-use-health.support';
+import { assertSteelProfileReplacementLifecycle } from './browser-provider.steel-profile-lifecycle.support';
+import { assertKernelProxyHealthFallback } from './browser-provider.kernel-health.support';
 import { createSessionWithContextUsingDependencies } from '../../providers/browser';
 import { computeGrantBrowserProvider } from '../../domains/compute-grants/config';
 import { selectedBrowserProvider } from '../../providers/browser/config';
@@ -29,10 +33,20 @@ import {
   isSteelProvisioningOutage,
   isSteelSessionValidationFailure,
 } from './browser-provider-rotation.support';
-import { runLiveKernelSteelAuthPersist } from './browser-provider.auth-persist.live';
 import { assertAuthPersistFailedInitCustody } from './browser-provider.auth-persist.cleanup.support';
 import { runLiveProviderParity } from './browser-provider.live.support';
+import {
+  gateOverridden,
+  KERNEL_RESIDENTIAL_LIVE_OVERRIDE,
+  logOverriddenLiveCase,
+  runLiveCrossProviderCases,
+} from './browser-provider.tilion-live-cases.support';
+import { runLiveTilionHarvest } from './browser-provider.tilion-harvest.live';
+import { assertKernelUnhealthyProxyRelaxesLocation } from './browser-provider-proxy-health.support';
+import { assertStaleProxyCreateFailureIsLabeled } from './browser-provider-stale-proxy.support';
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
+import { tilionWiringCases } from './browser-provider.tilion-wiring.support';
+import { steelAuthShareCases } from './browser-provider.steel-auth-share.support';
 import {
   createBrowserUseRecoverySession,
   browserUseProxyCountry,
@@ -47,6 +61,19 @@ const browserUseFlagBeforeContractTests = process.env.BROWSER_AGENT_BROWSER_USE_
 process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
 
 const tests: Array<[string, () => void | Promise<void>]> = [
+  ...tilionContractCases,
+  [
+    'Browser Use missing health is terminal, while other failures remain errors',
+    assertBrowserUseMissingHealth,
+  ],
+  [
+    'Kernel proxy health errors preserve bounded geo fallback and cache custody',
+    assertKernelProxyHealthFallback,
+  ],
+  [
+    'Steel first-profile replacement preserves its full binding and the source on failure',
+    assertSteelProfileReplacementLifecycle,
+  ],
   [
     'Steel same-profile rotation releases before attachment and avoids duplicate cleanup',
     () => assertSteelSameProfileReplacement(false),
@@ -59,13 +86,9 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     'auth-persist failed-init cleanup discovers owned allocations and retains recovery custody',
     assertAuthPersistFailedInitCustody,
   ],
-  [
-    'Kernel is the default provider',
-    () =>
-      withProvider(undefined, () =>
-        assert(selectedBrowserProvider() === 'kernel', 'expected kernel')
-      ),
-  ],
+  // Tilion became the default for new sessions (docs/plans/completed/tilion-browser-provider.md).
+  ...tilionWiringCases,
+  ...steelAuthShareCases,
   [
     'Kernel is selected by one environment parameter',
     () =>
@@ -397,7 +420,15 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     },
   ],
   ['Kernel city inventory errors trigger location fallback', assertKernelCityInventoryFallback],
+  [
+    'Kernel proxy marked unavailable by its health check relaxes location and drops the cached row',
+    assertKernelUnhealthyProxyRelaxesLocation,
+  ],
   ['Kernel SDK request timeouts trigger location fallback', assertKernelTimeoutFallback],
+  [
+    'stale-proxy leg labels a rejected throwaway Kernel proxy create with the call, tier and config',
+    assertStaleProxyCreateFailureIsLabeled,
+  ],
   [
     'Kernel navigation retries only transient proxy failures',
     () => {
@@ -534,6 +565,7 @@ async function main(): Promise<void> {
   }
 
   failed += await runOptionalLiveBrowserUseProvider();
+  failed += await runLiveTilionHarvest();
 
   if (process.env.RUN_BROWSER_USE_HANDOFF_LIVE === '1') {
     try {
@@ -553,26 +585,25 @@ async function main(): Promise<void> {
   if (browserUseFlagBeforeContractTests === undefined)
     delete process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
   else process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = browserUseFlagBeforeContractTests;
-  try {
-    await runLiveProviderParity();
-    if (process.env.TEST_BASE_URL) console.log('PASS live Kernel provider parity');
-  } catch (error) {
-    failed++;
-    console.error(
-      `FAIL live Kernel provider parity: ${error instanceof Error ? error.message : String(error)}`
+  if (process.env.TEST_BASE_URL && gateOverridden(KERNEL_RESIDENTIAL_LIVE_OVERRIDE)) {
+    logOverriddenLiveCase(
+      'live Kernel provider parity',
+      KERNEL_RESIDENTIAL_LIVE_OVERRIDE,
+      'Kernel residential proxy unavailable'
     );
-  }
-
-  if (process.env.TEST_BASE_URL) {
+  } else {
     try {
-      await runLiveKernelSteelAuthPersist();
+      await runLiveProviderParity();
+      if (process.env.TEST_BASE_URL) console.log('PASS live Kernel provider parity');
     } catch (error) {
       failed++;
       console.error(
-        `FAIL live Kernel/Steel auth persist: ${error instanceof Error ? error.message : String(error)}`
+        `FAIL live Kernel provider parity: ${error instanceof Error ? error.message : String(error)}`
       );
     }
   }
+
+  failed += await runLiveCrossProviderCases();
 
   if (failed > 0) process.exit(1);
   console.log(

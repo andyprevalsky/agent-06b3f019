@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from _test_utils import (
     BlackboxResult,
     teardown_mock,
+    retained_tool_output_fixture,
 )
 
 
@@ -79,6 +80,10 @@ async def _run_single_iteration(
     iteration_offset=0,
     system_prompt_override=None,
     verifier_prompt_override=None,
+    poll_inbox_override=None,
+    build_messages_override=None,
+    get_pending_background_status_override=None,
+    completion_handoff_override=None,
 ):
     from loop.run_agent import run_agent
 
@@ -200,10 +205,21 @@ async def _run_single_iteration(
             post_message=mock_post_message,
             poll_messages=poll_messages_override,
             execute_tool=default_execute_tool,
-            build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+            **({"completion_handoff": completion_handoff_override} if "completion_handoff" in inspect.signature(run_agent).parameters else {}),
+            build_messages=build_messages_override or (lambda context, prompt: [{"role": "system", "content": prompt}]),
+            **({"poll_inbox": poll_inbox_override} if poll_inbox_override is not None else {}),
+            **(
+                {"get_pending_background_status": get_pending_background_status_override}
+                if get_pending_background_status_override is not None
+                else {}
+            ),
             max_iterations=max_iterations,
             iteration_offset=iteration_offset,
-            **({"get_requirement_revision": get_requirement_revision} if "get_requirement_revision" in inspect.signature(run_agent).parameters else {}),
+            **(
+                {"get_requirement_revision": get_requirement_revision}
+                if "get_requirement_revision" in inspect.signature(run_agent).parameters
+                else {}
+            ),
             winddown_window=winddown_window,
             skip_verification=skip_verification,
             skip_status_updates=True,
@@ -221,6 +237,25 @@ async def _run_single_iteration(
         )
 
     return result, posted_messages, executed_tools
+
+
+async def test_jev_schedules_every_turn_without_changing_decisions():
+    from helpers.jev_progress import JEVSession
+    snapshots = []
+    def record(session, goal, schema, events):
+        snapshots.append({"goal": goal, "schema": schema, "events": events})
+    with patch.object(JEVSession, "schedule", record), patch.object(JEVSession, "close") as close:
+        result, _, executed = await _run_single_iteration(
+            [{"tool": "web_search", "query": "facts"}],
+            [("web_search", "tc-jev", 1.0)], max_iterations=2,
+            response_schema={"type": "object"},
+        )
+    assert len(snapshots) == 2
+    assert snapshots[0]["events"] == []
+    assert sum(e["role"] == "assistant" for e in snapshots[1]["events"]) == 1
+    assert snapshots[0]["schema"] == {"type": "object"}
+    assert len(executed) == 2 and result["status"] == "max_iterations"
+    close.assert_called_once()
 
 
 async def test_iteration_fixture_retires_its_realtime_sender():
@@ -429,10 +464,13 @@ async def test_rejected_completion_posts_error_in_workflow_polling_mode():
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         "detected_tools_ordered": [("attempt_completion_with_result", "tc-rejected", 1.0)],
     }
-    with patch(
-        "loop.run_agent.workflow.execute_activity",
-        new=AsyncMock(return_value=workflow_llm_result),
-    ):
+    async def mock_activity(fn, args=None, **_kwargs):
+        from tools.read_tool_output import preview_tool_output_activity
+        if fn is preview_tool_output_activity:
+            return await fn(*(args or []))
+        return workflow_llm_result
+
+    with patch("loop.run_agent.workflow.execute_activity", new=AsyncMock(side_effect=mock_activity)):
         _, posted, _ = await _run_single_iteration(
             workflow_llm_result["tool_calls"],
             workflow_llm_result["detected_tools_ordered"],
@@ -698,6 +736,82 @@ async def test_no_tool_calls_nudges_then_errors_after_3_consecutive():
     assert "no tool calls" in result["message"].lower()
 
 
+async def test_no_tool_turn_with_background_agents_gets_normal_no_tool_handling():
+    """Running background agents never change a tool-less turn: it is nudged like any other.
+
+    Waiting is the model's choice through wait_for(agents=[...]); run_agent has
+    no background-wait hook at all.
+    """
+    from loop import run_agent as run_agent_module
+
+    assert "wait_for_background_agents" not in inspect.signature(run_agent_module.run_agent).parameters
+    result, posted, _ = await _run_single_iteration(
+        [],
+        [],
+        skip_verification=True,
+        max_iterations=5,
+        get_pending_background_status_override=lambda: "- /root/a (type: explore, status: running): x",
+    )
+
+    assert result["status"] == "error", result
+    assert "no tool calls" in result["message"].lower()
+    nudges = [m for m in result["context"] if "You MUST call tools" in str(m.get("text"))]
+    assert len(nudges) == 2, nudges
+
+
+async def test_completion_with_background_agents_reaches_verifier_with_their_status():
+    """attempt_completion is never rejected for running background agents.
+
+    It reaches the normal verifier, whose evidence ends with the factual
+    status block; a rejection is ordinary verifier feedback (no wait), and an
+    accept completes the run.
+    """
+    status_block = (
+        "Background agents still running when completion was attempted:\n"
+        "- bg_x (type: explore, status: running): Find the population of Tokyo."
+    )
+    verifier_args = []
+
+    for score, expected_status in ((0.4, "max_iterations"), (1.0, "completed")):
+        verifier_args.clear()
+
+        async def verifier(*args, _score=score, **_kwargs):
+            verifier_args.append(args)
+            return {"score": _score, "reasoning": "judged", "usage": {}}
+
+        result, posted, executed = await _run_single_iteration(
+            [{"tool": "attempt_completion"}],
+            [("attempt_completion", f"tc-ac-bg-{score}", 1.0)],
+            skip_verification=False,
+            max_iterations=1,
+            verifier_override=verifier,
+            get_pending_background_status_override=lambda: status_block,
+        )
+
+        assert result["status"] == expected_status, result
+        assert [tool["tool_name"] for tool in executed] == ["attempt_completion"], executed
+        # The completion verifier (first call) ends its evidence with the status.
+        assert verifier_args and verifier_args[0][-1] == status_block, verifier_args
+        assert not [m for m in posted if (m.get("metadata") or {}).get("toolStatus") == "ERROR"], posted
+
+    # Nothing pending: the verifier receives its unchanged argument list.
+    verifier_args.clear()
+
+    async def verifier_no_bg(*args, **_kwargs):
+        verifier_args.append(args)
+        return {"score": 1.0, "reasoning": "judged", "usage": {}}
+
+    await _run_single_iteration(
+        [{"tool": "attempt_completion"}],
+        [("attempt_completion", "tc-ac-no-bg", 1.0)],
+        skip_verification=False,
+        max_iterations=1,
+        verifier_override=verifier_no_bg,
+        get_pending_background_status_override=lambda: None,
+    )
+    assert verifier_args and len(verifier_args[0]) == 21, [len(a) for a in verifier_args]
+
+
 async def test_tool_exception_continues_loop_without_posting_a_duplicate_chip():
     """Exception in execute_tool → loop continues; the TOOL owns the error chip.
 
@@ -830,7 +944,7 @@ def _with_native_schema_test_transport(test):
         with (
             patch("helpers.messages._get_broadcast_client", return_value=client),
             patch(
-                "providers.fast_cache.client.resolve_agent_fast_mode",
+                "providers.demo_cache.client.resolve_agent_fast_mode",
                 new=AsyncMock(return_value=(False, None, False, None, None, True)),
             ),
         ):
@@ -871,9 +985,13 @@ async def _exercise_native_schema_preparation_retry(*, persistent=False, prompt_
 
     with patch("loop.run_agent.asyncio.sleep", new=AsyncMock()) as sleep:
         result, posted, _ = await _run_single_iteration(
-            [{"tool": "web_search", "query": "Current venue prices"}], [("web_search", "productive-call", 1.0)],
-            max_iterations=1, response_schema=previous, get_response_schema_override=schema,
-            system_prompt_override=prompt, execute_tool_override=productive_tool,
+            [{"tool": "web_search", "query": "Current venue prices"}],
+            [("web_search", "productive-call", 1.0)],
+            max_iterations=1,
+            response_schema=previous,
+            get_response_schema_override=schema,
+            system_prompt_override=prompt,
+            execute_tool_override=productive_tool,
         )
     assert observed["calls"] == 3, "schema preparation bypassed the existing three-attempt pre-acceptance boundary"
     assert [call.args[0] for call in sleep.await_args_list if call.args[0] >= 1] == [2, 4], (
@@ -882,7 +1000,9 @@ async def _exercise_native_schema_preparation_retry(*, persistent=False, prompt_
     if persistent:
         assert result["status"] == "error" and str(failure) in result["message"]
         assert observed["prompts"] == []
-        assert not any(message.get("role") == "ASSISTANT" for message in posted), "failed preparation accepted a provider turn"
+        assert not any(message.get("role") == "ASSISTANT" for message in posted), (
+            "failed preparation accepted a provider turn"
+        )
     else:
         assert result["status"] == "completed", "preparation retries consumed the productive iteration"
         assert observed["prompts"] == [current], "provider prompt used the previous schema after preparation recovered"
@@ -910,19 +1030,32 @@ async def test_schema_preparation_lifecycle_errors_propagate_without_retry():
     from helpers.generation_handoff import GenerationHandoffRequested
     from helpers.workflow_generation import WorkflowGenerationSealed
 
-    failures = [CancelledError("schema read cancelled"), WorkflowGenerationSealed("generation replaced"),
-                GenerationHandoffRequested("replacement-queue")]
+    failures = [
+        CancelledError("schema read cancelled"),
+        WorkflowGenerationSealed("generation replaced"),
+        GenerationHandoffRequested("replacement-queue"),
+    ]
     for kind in ("CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested"):
-        error = ActivityError("schema read failed", scheduled_event_id=1, started_event_id=2, identity="test",
-                              activity_type="schema", activity_id="schema-read", retry_state=RetryState.NON_RETRYABLE_FAILURE)
+        error = ActivityError(
+            "schema read failed",
+            scheduled_event_id=1,
+            started_event_id=2,
+            identity="test",
+            activity_type="schema",
+            activity_id="schema-read",
+            retry_state=RetryState.NON_RETRYABLE_FAILURE,
+        )
         error.__cause__ = ApplicationError("lifecycle boundary", type=kind)
         failures.append(error)
     for failure in failures:
         getter = AsyncMock(side_effect=failure)
         with patch("loop.run_agent.asyncio.sleep", new=AsyncMock()) as sleep:
             try:
-                await _run_single_iteration([{"tool": "web_search", "query": "unused"}], [("web_search", "unused", 1.0)],
-                                            get_response_schema_override=getter)
+                await _run_single_iteration(
+                    [{"tool": "web_search", "query": "unused"}],
+                    [("web_search", "unused", 1.0)],
+                    get_response_schema_override=getter,
+                )
             except BaseException as observed:
                 assert observed is failure, "schema preparation replaced the native lifecycle error"
             else:
@@ -941,11 +1074,22 @@ async def test_schema_preparation_lifecycle_errors_propagate_without_retry():
 async def test_completed_child_optimization_uses_current_native_schema():
     previous = {"fields": [{"name": "venues", "type": "list[str]", "required": True}]}
     current = {"fields": [*previous["fields"], {"name": "venue_prices", "type": "list[int]", "required": True}]}
-    context = [{"role": "USER", "text": "Read venues", "timestamp": "2026-10-15T00:00:00Z"}, {
-        "role": "TOOL", "text": "Browser finished", "timestamp": "2026-10-15T00:00:01Z",
-        "metadata": {"toolCallId": "browser-result", "toolName": "spawn_browser_agent", "toolStatus": "FINISHED",
-                     "action_type": "task_complete", "success": True, "structured_response": {"venues": ["Old child field"]}},
-    }]
+    context = [
+        {"role": "USER", "text": "Read venues", "timestamp": "2026-10-15T00:00:00Z"},
+        {
+            "role": "TOOL",
+            "text": "Browser finished",
+            "timestamp": "2026-10-15T00:00:01Z",
+            "metadata": {
+                "toolCallId": "browser-result",
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
+                "structured_response": {"venues": ["Old child field"]},
+            },
+        },
+    ]
     executed = []
 
     async def tool(name, *_args):
@@ -953,9 +1097,13 @@ async def test_completed_child_optimization_uses_current_native_schema():
         return {"status": "completed", "result": "Current venue prices obtained"}
 
     result, _, _ = await _run_single_iteration(
-        [{"tool": "web_search", "query": "Get missing venue prices"}], [("web_search", "current-field-work", 1.0)],
-        initial_context=context, skip_verification=False, response_schema=previous,
-        get_response_schema_override=AsyncMock(return_value=current), execute_tool_override=tool,
+        [{"tool": "web_search", "query": "Get missing venue prices"}],
+        [("web_search", "current-field-work", 1.0)],
+        initial_context=context,
+        skip_verification=False,
+        response_schema=previous,
+        get_response_schema_override=AsyncMock(return_value=current),
+        execute_tool_override=tool,
         verifier_structured_response={"venues": ["Old child field"]},
     )
     assert executed == ["web_search"], "completed-child optimization accepted coverage of the stale local schema"
@@ -1053,23 +1201,46 @@ async def test_verifier_score_1_returns_completed():
 async def test_verifier_uses_authored_attention_event_identity_across_row_retries():
     from loop.run_agent import _run_verifier, _verifier_superseded_by_user_feedback
 
-    context = [{"id": "authored-row-1", "role": "USER", "text": "Use the shared calendar.",
-                "metadata": {"source": "attention_response", "attentionRequestId": "request-a"}}]
+    context = [
+        {
+            "id": "authored-row-1",
+            "role": "USER",
+            "text": "Use the shared calendar.",
+            "metadata": {"source": "attention_response", "attentionRequestId": "request-a"},
+        }
+    ]
     duplicate = {**context[0], "id": "authored-row-retry"}
-    provider_result = {"score": 1.0, "reasoning": "Shared calendar inspected",
-                       "structured_response": {"events": []}, "usage": {"prompt_tokens": 5}}
+    provider_result = {
+        "score": 1.0,
+        "reasoning": "Shared calendar inspected",
+        "structured_response": {"events": []},
+        "usage": {"prompt_tokens": 5},
+    }
 
     result = await _run_verifier(
-        execute_activity=AsyncMock(return_value=provider_result), context=context,
+        execute_activity=AsyncMock(return_value=provider_result),
+        context=context,
         verifier_prompt_generator=AsyncMock(return_value="Verify the calendar"),
-        model="model", agent_id="agent", task_id="task", post_message=None,
+        model="model",
+        agent_id="agent",
+        task_id="task",
+        post_message=None,
         poll_messages=AsyncMock(return_value=[duplicate]),
     )
-    assert result.get("superseded_by_user_feedback") is not True, "retry of the same authored event invalidated its verdict"
+    assert result.get("superseded_by_user_feedback") is not True, (
+        "retry of the same authored event invalidated its verdict"
+    )
     assert result["score"] == 1.0 and result["structured_response"] == {"events": []}
-    context.append({**duplicate, "id": "new-authored-row",
-                    "metadata": {"source": "attention_response", "attentionRequestId": "request-b"}})
-    assert _verifier_superseded_by_user_feedback(result, context), "distinct authored event with identical text was dropped"
+    context.append(
+        {
+            **duplicate,
+            "id": "new-authored-row",
+            "metadata": {"source": "attention_response", "attentionRequestId": "request-b"},
+        }
+    )
+    assert _verifier_superseded_by_user_feedback(result, context), (
+        "distinct authored event with identical text was dropped"
+    )
 
 
 async def test_verifier_rechecks_real_user_requirements_at_completion_boundaries():
@@ -1080,10 +1251,15 @@ async def test_verifier_rechecks_real_user_requirements_at_completion_boundaries
 
             def publish():
                 if not published:
-                    published.append({"id": "correction", "role": "USER",
-                                      "text": "Use my shared calendar access instead",
-                                      "timestamp": datetime.now(timezone.utc).isoformat(),
-                                      "metadata": {"hidden": hidden}})
+                    published.append(
+                        {
+                            "id": "correction",
+                            "role": "USER",
+                            "text": "Use my shared calendar access instead",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "metadata": {"hidden": hidden},
+                        }
+                    )
 
             async def poll_messages(_since):
                 return list(published)
@@ -1092,9 +1268,12 @@ async def test_verifier_rechecks_real_user_requirements_at_completion_boundaries
                 verdicts.append(list(args[0]))
                 if stage == "provider":
                     publish()
-                return {"score": 1.0, "reasoning": "Calendar inspected",
-                        "structured_response": {"events": ["old account" if len(verdicts) == 1 else "shared calendar"]},
-                        "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11}}
+                return {
+                    "score": 1.0,
+                    "reasoning": "Calendar inspected",
+                    "structured_response": {"events": ["old account" if len(verdicts) == 1 else "shared calendar"]},
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
+                }
 
             async def post(_text, _role, metadata):
                 if stage == "post" and (metadata or {}).get("verifierMessage"):
@@ -1105,19 +1284,28 @@ async def test_verifier_rechecks_real_user_requirements_at_completion_boundaries
                     publish()
 
             result, posted, _ = await _run_single_iteration(
-                [{"tool": "attempt_completion"}], [("attempt_completion", "tc-late-user", 1.0)],
-                skip_verification=False, max_iterations=3, poll_messages_override=poll_messages,
-                verifier_override=verifier, post_message_override=post, on_tokens_override=tokens,
+                [{"tool": "attempt_completion"}],
+                [("attempt_completion", "tc-late-user", 1.0)],
+                skip_verification=False,
+                max_iterations=3,
+                poll_messages_override=poll_messages,
+                verifier_override=verifier,
+                post_message_override=post,
+                on_tokens_override=tokens,
             )
             expected_calls = 1 if hidden else 2
             assert result["status"] == "completed", result
             assert len(verdicts) == expected_calls, f"root accepted a superseded USER verdict after {stage} await"
             assert result["structured_response"] == {"events": ["old account" if hidden else "shared calendar"]}
-            assert isinstance(result.get("_verified_user_requirement_keys"), list), "caller lost the verified requirement version"
+            assert isinstance(result.get("_verified_user_requirement_keys"), list), (
+                "caller lost the verified requirement version"
+            )
             assert result["token_count"] == 11 * expected_calls, "discarding a verdict lost its actual usage"
             finished = [message for message in posted if (message.get("metadata") or {}).get("verifierMessage")]
             assert all("Calendar inspected" in message["text"] for message in finished)
-            assert not any("Verifier score: 0%" in message["text"] for message in finished), "supersession fabricated a rejected verdict"
+            assert not any("Verifier score: 0%" in message["text"] for message in finished), (
+                "supersession fabricated a rejected verdict"
+            )
 
 
 async def test_final_verifier_does_not_publish_stale_completion_data():
@@ -1126,8 +1314,14 @@ async def test_final_verifier_does_not_publish_stale_completion_data():
 
         def publish():
             if not published:
-                published.append({"id": "final-correction", "role": "USER", "text": "Use shared calendar access",
-                                  "timestamp": datetime.now(timezone.utc).isoformat()})
+                published.append(
+                    {
+                        "id": "final-correction",
+                        "role": "USER",
+                        "text": "Use shared calendar access",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
 
         async def poll_messages(_since):
             return list(published)
@@ -1135,8 +1329,12 @@ async def test_final_verifier_does_not_publish_stale_completion_data():
         async def verifier(*_args, **_kwargs):
             if stage == "provider":
                 publish()
-            return {"score": 1.0, "reasoning": "Calendar inspected", "structured_response": {"events": ["old account"]},
-                    "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11}}
+            return {
+                "score": 1.0,
+                "reasoning": "Calendar inspected",
+                "structured_response": {"events": ["old account"]},
+                "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
+            }
 
         async def post(_text, _role, metadata):
             if stage == "post" and (metadata or {}).get("verifierMessage"):
@@ -1147,17 +1345,28 @@ async def test_final_verifier_does_not_publish_stale_completion_data():
                 publish()
 
         result, posted, _ = await _run_single_iteration(
-            [{"tool": "web_search", "query": "calendar access"}], [("web_search", "tc-search", 1.0)],
-            skip_verification=False, max_iterations=1, poll_messages_override=poll_messages,
-            verifier_override=verifier, post_message_override=post, on_tokens_override=tokens,
+            [{"tool": "web_search", "query": "calendar access"}],
+            [("web_search", "tc-search", 1.0)],
+            skip_verification=False,
+            max_iterations=1,
+            poll_messages_override=poll_messages,
+            verifier_override=verifier,
+            post_message_override=post,
+            on_tokens_override=tokens,
         )
         assert result["status"] == "max_iterations"
-        assert result["verifier_progress"] is None, f"final verifier retained stale completion progress after {stage} await"
+        assert result["verifier_progress"] is None, (
+            f"final verifier retained stale completion progress after {stage} await"
+        )
         assert result.get("verifier_superseded_by_user_feedback") is True
         assert isinstance(result.get("_verified_user_requirement_keys"), list)
         assert result["partial_structured_response"] is None
         assert result["token_count"] == 11
-        assert all("Calendar inspected" in message["text"] for message in posted if (message.get("metadata") or {}).get("verifierMessage"))
+        assert all(
+            "Calendar inspected" in message["text"]
+            for message in posted
+            if (message.get("metadata") or {}).get("verifierMessage")
+        )
 
 
 async def test_superseded_verifier_keeps_actual_provider_result():
@@ -1165,21 +1374,215 @@ async def test_superseded_verifier_keeps_actual_provider_result():
 
     context = [{"id": "goal", "role": "USER", "text": "List calendar events"}]
     posted = []
+
     async def execute(_activity, **_kwargs):
         context.append({"id": "update", "role": "USER", "text": "Use shared calendar access"})
-        return {"score": 1.0, "reasoning": "Actual provider verdict", "structured_response": {"events": ["old account"]},
-                "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11}}
+        return {
+            "score": 1.0,
+            "reasoning": "Actual provider verdict",
+            "structured_response": {"events": ["old account"]},
+            "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
+        }
+
     async def post(text, role, metadata):
         posted.append({"text": text, "metadata": metadata})
+
     result = await _run_verifier(
-        execute_activity=execute, context=context, verifier_prompt_generator=AsyncMock(return_value="Verify calendar"),
-        model="test-model", agent_id="agent-1", task_id=None, post_message=post,
+        execute_activity=execute,
+        context=context,
+        verifier_prompt_generator=AsyncMock(return_value="Verify calendar"),
+        model="test-model",
+        agent_id="agent-1",
+        task_id=None,
+        post_message=post,
     )
     assert result.get("superseded_by_user_feedback") is True, "verifier did not mark new real USER requirements"
     assert result["score"] == 1.0 and result["reasoning"] == "Actual provider verdict"
     assert result["structured_response"] == {"events": ["old account"]} and result["usage"]["total_tokens"] == 11
     assert posted[-1]["metadata"].get("supersededByUserFeedback") is True
     assert "Actual provider verdict" in posted[-1]["text"] and "Verifier score: 0%" not in posted[-1]["text"]
+
+
+async def test_parent_agent_task_update_supersedes_verdict_but_other_agent_rows_do_not():
+    """A parent's TASK_UPDATE_FROM_PARENT_AGENT during check_progress outdates the verdict.
+
+    The verifier treats an ancestor's agentMessage as a later requirement. One
+    that lands while check_progress runs was not judged, so the verdict must be
+    superseded. Sibling chatter, child notifications and task-addressed inbox rows
+    are not requirements for this agent; they keep the verdict. The same rows are
+    response-schema feedback (_requirement_keys); user-only keys exclude them.
+    """
+    from loop.run_agent import _real_user_requirement_keys, _requirement_keys, _run_verifier
+
+    def agent_row(row_id, metadata):
+        return {
+            "id": row_id,
+            "role": "USER",
+            "text": "Use the Shinjuku hotel instead.",
+            "timestamp": "2026-10-22T10:00:05Z",
+            "metadata": metadata,
+        }
+
+    parent_update = agent_row(
+        "parent-update",
+        {"agentMessage": True, "fromAgentId": "agent-root", "fromAgentPath": "/root", "toAgentPath": "/root/hotels"},
+    )
+    cases = [
+        ("parent_update", parent_update, True),
+        (
+            "sibling_message",
+            agent_row(
+                "sibling",
+                {
+                    "agentMessage": True,
+                    "fromAgentId": "agent-flights",
+                    "fromAgentPath": "/root/flights",
+                    "toAgentPath": "/root/hotels",
+                },
+            ),
+            False,
+        ),
+        (
+            "child_notification",
+            agent_row("notification", {"agentNotification": True, "toolName": "agent_notification"}),
+            False,
+        ),
+        (
+            "task_addressed_inbox_row",
+            agent_row(
+                "task-inbox",
+                {
+                    "agentMessage": True,
+                    "fromAgentId": "agent-root",
+                    "fromAgentPath": "/root",
+                    "toAgentPath": "/root/hotels/search",
+                    "recipientTaskId": "toolu_search",
+                    "excludeFromModel": True,
+                },
+            ),
+            False,
+        ),
+    ]
+    for name, arriving, expect_superseded in cases:
+        context = [{"id": "goal", "role": "USER", "text": "Book a Tokyo hotel", "timestamp": "2026-10-22T10:00:00Z"}]
+
+        async def execute(_activity, _arriving=arriving, _context=context, **_kwargs):
+            _context.append(_arriving)
+            return {"score": 1.0, "reasoning": "Hotel booked", "usage": {"prompt_tokens": 5}}
+
+        result = await _run_verifier(
+            execute_activity=execute,
+            context=context,
+            verifier_prompt_generator=AsyncMock(return_value="Verify the booking"),
+            model="test-model",
+            agent_id="agent-hotels",
+            task_id=None,
+            post_message=None,
+        )
+        assert (result.get("superseded_by_user_feedback") is True) is expect_superseded, (name, result)
+        assert result["score"] == 1.0 and result["reasoning"] == "Hotel booked", (name, result)
+
+    # A parent update already in context when the verifier ran was judged.
+    judged = await _run_verifier(
+        execute_activity=AsyncMock(return_value={"score": 1.0, "reasoning": "ok", "usage": {}}),
+        context=[parent_update],
+        verifier_prompt_generator=AsyncMock(return_value="Verify"),
+        model="test-model",
+        agent_id="agent-hotels",
+        task_id=None,
+        post_message=None,
+        poll_messages=AsyncMock(return_value=[dict(parent_update)]),
+    )
+    assert judged.get("superseded_by_user_feedback") is not True, judged
+    assert _real_user_requirement_keys([parent_update]) == set(), "user-only keys exclude agent rows"
+    assert _requirement_keys([parent_update]) == {("id", "parent-update")}, "a parent's task update is a requirement"
+    for name, arriving, expect_requirement in cases:
+        assert bool(_requirement_keys([arriving])) is expect_requirement, name
+
+
+class _FakeInterrupts:
+    """The workflow's DAG interrupt hook: wake counter + user/agent-message filter."""
+
+    def __init__(self):
+        self._seq = 0
+        self._changed = asyncio.Event()
+        self.pending = False
+
+    def seq(self):
+        return self._seq
+
+    async def wait(self, seq):
+        while self._seq == seq:
+            self._changed.clear()
+            await self._changed.wait()
+
+    def message_pending(self):
+        return self.pending
+
+    def wake(self, *, message: bool):
+        self.pending = self.pending or message
+        self._seq += 1
+        self._changed.set()
+
+
+async def test_verifier_is_interrupted_by_a_new_user_or_agent_message():
+    """A user/agent message cancels the running check; other wakes (child completions) do not."""
+    from loop.run_agent import VERIFIER_INTERRUPTED_MESSAGE, _run_verifier
+
+    def verifier_kwargs(execute, posts, interrupts):
+        async def post(text, role, metadata):
+            posts.append((text, role, metadata))
+
+        return dict(
+            execute_activity=execute,
+            context=[{"id": "goal", "role": "USER", "text": "Book a Tokyo hotel", "timestamp": "2026-10-22T10:00:00Z"}],
+            verifier_prompt_generator=AsyncMock(return_value="Verify the booking"),
+            model="test-model",
+            agent_id="agent-hotels",
+            task_id=None,
+            post_message=post,
+            tool_call_id="toolu_done",
+            interrupts=interrupts,
+        )
+
+    # A message mid-check: the activity is cancelled and the attempt closes as superseded.
+    interrupts, posts, started, cancelled = _FakeInterrupts(), [], asyncio.Event(), []
+
+    async def slow_check(_activity, **_kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    running = asyncio.create_task(_run_verifier(**verifier_kwargs(slow_check, posts, interrupts)))
+    await asyncio.wait_for(started.wait(), 1)
+    interrupts.wake(message=False)  # a child completed: not new input, keep verifying
+    await asyncio.sleep(0.01)
+    assert not running.done() and not cancelled
+    interrupts.wake(message=True)
+    result = await asyncio.wait_for(running, 1)
+    assert cancelled == [True], "the verifier activity is cancelled"
+    assert result["superseded_by_user_feedback"] is True and result["interrupted_by_message"] is True, result
+    assert result["score"] == 0.0 and result["usage"] == {}, result
+    finished = [m for _t, _r, m in posts if m["toolStatus"] == "FINISHED"]
+    assert len(finished) == 1 and finished[0]["toolCallId"] == "toolu_done", posts
+    assert finished[0]["interrupted"] is True and finished[0]["supersededByUserFeedback"] is True
+    assert posts[-1][0] == VERIFIER_INTERRUPTED_MESSAGE
+
+    # A message already pending: the check never starts.
+    interrupts, posts = _FakeInterrupts(), []
+    interrupts.pending = True
+    never = AsyncMock(side_effect=AssertionError("verifier must not start"))
+    result = await _run_verifier(**verifier_kwargs(never, posts, interrupts))
+    assert result["interrupted_by_message"] is True and never.await_count == 0
+
+    # No new input: the verdict is returned unchanged.
+    interrupts, posts = _FakeInterrupts(), []
+    done = AsyncMock(return_value={"score": 1.0, "reasoning": "Hotel booked", "usage": {}})
+    result = await _run_verifier(**verifier_kwargs(done, posts, interrupts))
+    assert result["score"] == 1.0 and not result.get("interrupted_by_message"), result
 
 
 async def test_keyed_feedback_revision_supersedes_verdict_without_user_row():
@@ -1189,34 +1592,53 @@ async def test_keyed_feedback_revision_supersedes_verdict_without_user_row():
             revision, calls = 0, []
             old_schema = {"fields": [{"name": "venue_name", "type": "str", "required": True}]}
             new_schema = {"fields": [{"name": "venue_prices", "type": "list[str]", "required": True}]}
+
             async def schema():
                 return new_schema if revision else old_schema
+
             def revise():
                 nonlocal revision
                 revision = 1
+
             async def verifier(*args, **_kwargs):
                 calls.append(args[3])
                 if stage == "provider":
                     revise()
-                return {"score": 1.0, "reasoning": "Verified actual schema",
-                        "structured_response": {"venue_name": "Original venue"} if len(calls) == 1 else {"venue_prices": ["$40"]},
-                        "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11}}
+                return {
+                    "score": 1.0,
+                    "reasoning": "Verified actual schema",
+                    "structured_response": {"venue_name": "Original venue"}
+                    if len(calls) == 1
+                    else {"venue_prices": ["$40"]},
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
+                }
+
             async def post(_text, _role, metadata):
                 if stage == "post" and (metadata or {}).get("verifierMessage"):
                     revise()
+
             async def tokens(_in, _out, _model, **metadata):
                 if stage == "tokens" and metadata.get("call_site") == "verifier_execute":
                     revise()
+
             result, posted, _ = await _run_single_iteration(
                 [{"tool": "web_search", "query": "venue prices"}] if final else [{"tool": "attempt_completion"}],
                 [("web_search", "tc-search", 1.0)] if final else [("attempt_completion", "tc-keyed", 1.0)],
-                skip_verification=False, max_iterations=1 if final else 3,
-                get_requirement_revision=lambda: revision, get_response_schema_override=schema,
-                verifier_override=verifier, post_message_override=post, on_tokens_override=tokens,
+                skip_verification=False,
+                max_iterations=1 if final else 3,
+                get_requirement_revision=lambda: revision,
+                get_response_schema_override=schema,
+                verifier_override=verifier,
+                post_message_override=post,
+                on_tokens_override=tokens,
             )
-            assert len([row for row in result["context"] if row.get("role") == "USER"]) == 1, "keyed response fabricated a USER row"
+            assert len([row for row in result["context"] if row.get("role") == "USER"]) == 1, (
+                "keyed response fabricated a USER row"
+            )
             if final:
-                assert result["verifier_progress"] is None, f"final keyed correction accepted stale verdict after {stage}"
+                assert result["verifier_progress"] is None, (
+                    f"final keyed correction accepted stale verdict after {stage}"
+                )
                 assert result.get("verifier_superseded_by_user_feedback") is True
                 assert result["partial_structured_response"] is None
             else:
@@ -1225,28 +1647,44 @@ async def test_keyed_feedback_revision_supersedes_verdict_without_user_row():
                 assert result["structured_response"] == {"venue_prices": ["$40"]}
                 assert result.get("_verified_requirement_revision") == 1
             assert result["token_count"] == 11 * len(calls)
-            assert not any("Verifier score: 0%" in row["text"] for row in posted), "keyed supersession fabricated rejection"
+            assert not any("Verifier score: 0%" in row["text"] for row in posted), (
+                "keyed supersession fabricated rejection"
+            )
 
 
 async def test_verifier_reloads_prompt_and_schema_until_requirement_revision_matches():
     from loop.run_agent import _run_verifier
+
     revision, prompts, inputs = 0, [], []
+
     async def prompt():
         nonlocal revision
         observed = revision
         prompts.append(observed)
         revision = 1
         return f"Verify requirement {observed}"
+
     async def schema():
         return {"fields": [{"name": f"requirement_{revision}", "type": "str", "required": True}]}
+
     async def execute(_activity, **kwargs):
         inputs.append(kwargs["args"][:4])
         return {"score": 1.0, "reasoning": "Actual verdict", "usage": {}}
+
     result = await _run_verifier(
-        execute_activity=execute, context=[{"role": "USER", "text": "Find a venue"}],
-        verifier_prompt_generator=prompt, get_response_schema=schema,
-        model="test-model", agent_id="agent-1", task_id=None, post_message=None,
-        **({"get_requirement_revision": lambda: revision} if "get_requirement_revision" in inspect.signature(_run_verifier).parameters else {}),
+        execute_activity=execute,
+        context=[{"role": "USER", "text": "Find a venue"}],
+        verifier_prompt_generator=prompt,
+        get_response_schema=schema,
+        model="test-model",
+        agent_id="agent-1",
+        task_id=None,
+        post_message=None,
+        **(
+            {"get_requirement_revision": lambda: revision}
+            if "get_requirement_revision" in inspect.signature(_run_verifier).parameters
+            else {}
+        ),
     )
     assert inputs[0][1] == "Verify requirement 1", "verifier mixed the previous prompt with a newer native schema"
     assert inputs[0][3]["fields"][0]["name"] == "requirement_1"
@@ -1571,9 +2009,9 @@ async def test_run_agent_reuses_rotated_compute_token_next_iteration():
                     "gpt_token_error": "stall",
                     "compute_token_used": {
                         "type": "claude",
-                        "accessToken": "rotated-claude-token",
                         "source": "pool",
                         "poolTokenId": "pool-1",
+                        "lineageKey": "agent:agent-test",
                     },
                     "compute_token_rotated": True,
                 },
@@ -1585,9 +2023,24 @@ async def test_run_agent_reuses_rotated_compute_token_next_iteration():
             [],
         )
 
-    with patch(
-        "loop.run_agent.call_llm_structured_streaming",
-        new=AsyncMock(side_effect=mock_call_llm_structured_streaming),
+    lease_fetches = []
+
+    async def mock_fetch_compute_token(user_id, **kwargs):
+        lease_fetches.append((user_id, kwargs))
+        return {
+            "type": "claude",
+            "accessToken": "rotated-claude-token",
+            "source": "pool",
+            "poolTokenId": "pool-1",
+            "lineageKey": "agent:agent-test",
+        }
+
+    with (
+        patch(
+            "loop.run_agent.call_llm_structured_streaming",
+            new=AsyncMock(side_effect=mock_call_llm_structured_streaming),
+        ),
+        patch("loop.run_agent.fetch_compute_token_activity", new=mock_fetch_compute_token),
     ):
         await run_agent(
             agent_id="agent-test",
@@ -1616,12 +2069,221 @@ async def test_run_agent_reuses_rotated_compute_token_next_iteration():
     assert llm_kwargs[1]["claude_token_source"] == "pool"
     assert llm_kwargs[1]["claude_token_pool_id"] == "pool-1"
     assert llm_kwargs[1]["gpt_token"] is None
+    assert lease_fetches == [
+        (
+            "user-test",
+            {
+                "lineage_key": "agent:agent-test",
+                "agent_id": "agent-test",
+                "demo_cache_affinity_key": None,
+                "token_type": "claude",
+            },
+        )
+    ]
 
 
-async def test_fast_cache_position_retries_same_step_after_llm_failure():
-    """A failed LLM attempt must not consume the next fast-cache position."""
+async def test_run_agent_drops_rotated_out_credential_when_lease_reread_fails():
+    """If the rotated lease cannot be re-read, never reuse the credential RoseClient rotated away from."""
     from loop.run_agent import run_agent
-    import providers.fast_cache.context as fast_cache_context
+
+    llm_kwargs = []
+    posted_messages = []
+
+    async def system_prompt():
+        return "System prompt"
+
+    async def verifier_prompt():
+        return "Verifier prompt"
+
+    async def post_message(text, role, metadata=None):
+        posted_messages.append({"text": text, "role": role, "metadata": metadata})
+
+    async def execute_tool(tool_name, tool_args, tool_call_id):
+        posted_messages.append(
+            {
+                "text": f"{tool_name} complete",
+                "role": "TOOL",
+                "metadata": {
+                    "toolCallId": tool_call_id,
+                    "toolName": tool_name,
+                    "toolStatus": "FINISHED",
+                },
+            }
+        )
+        return {"message": f"{tool_name} complete"}
+
+    async def mock_call_llm_structured_streaming(**kwargs):
+        llm_kwargs.append(kwargs)
+        if len(llm_kwargs) == 1:
+            return (
+                _DummyLLMResult("", [{"tool": "web_search", "query": "first"}]),
+                {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                    "actual_model": "claude-sonnet-4-6-claude",
+                    "gpt_token_error": "stall",
+                    "compute_token_used": {
+                        "type": "claude",
+                        "source": "pool",
+                        "poolTokenId": "pool-1",
+                        "lineageKey": "agent:agent-test",
+                    },
+                    "compute_token_rotated": True,
+                },
+                [("web_search", "tc-web-search-1", 1.0)],
+            )
+        return (
+            _DummyLLMResult("", []),
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            [],
+        )
+
+    lease_fetches = []
+
+    async def mock_fetch_compute_token(user_id, **kwargs):
+        lease_fetches.append((user_id, kwargs))
+        return None
+
+    with (
+        patch(
+            "loop.run_agent.call_llm_structured_streaming",
+            new=AsyncMock(side_effect=mock_call_llm_structured_streaming),
+        ),
+        patch("loop.run_agent.fetch_compute_token_activity", new=mock_fetch_compute_token),
+    ):
+        await run_agent(
+            agent_id="agent-test",
+            user_id="user-test",
+            system_prompt=system_prompt,
+            verifier_prompt_generator=verifier_prompt,
+            model="rose-labs/rose-1-flash",
+            tools=["web_search", "attempt_completion"],
+            initial_context=[{"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}],
+            is_inside_temporal_activity=True,
+            post_message=post_message,
+            execute_tool=execute_tool,
+            build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+            max_iterations=2,
+            skip_verification=True,
+            skip_status_updates=True,
+            gpt_token="stale-gpt-token",
+            gpt_account_id="acct-1",
+            get_gpt_token_source=lambda: "user",
+        )
+
+    assert len(llm_kwargs) == 2
+    assert llm_kwargs[0]["gpt_token"] == "stale-gpt-token"
+    assert llm_kwargs[1]["claude_token"] is None
+    assert llm_kwargs[1]["gpt_token"] is None
+    assert len(lease_fetches) == 1
+
+
+async def test_run_agent_records_served_lease_identity_without_rotation():
+    """An unrotated call keeps its credential and records the served lease identity."""
+    from loop.run_agent import run_agent
+
+    llm_kwargs = []
+    posted_messages = []
+
+    async def system_prompt():
+        return "System prompt"
+
+    async def verifier_prompt():
+        return "Verifier prompt"
+
+    async def post_message(text, role, metadata=None):
+        posted_messages.append({"text": text, "role": role, "metadata": metadata})
+
+    async def execute_tool(tool_name, tool_args, tool_call_id):
+        posted_messages.append(
+            {
+                "text": f"{tool_name} complete",
+                "role": "TOOL",
+                "metadata": {
+                    "toolCallId": tool_call_id,
+                    "toolName": tool_name,
+                    "toolStatus": "FINISHED",
+                },
+            }
+        )
+        return {"message": f"{tool_name} complete"}
+
+    async def mock_call_llm_structured_streaming(**kwargs):
+        llm_kwargs.append(kwargs)
+        if len(llm_kwargs) == 1:
+            return (
+                _DummyLLMResult("", [{"tool": "web_search", "query": "first"}]),
+                {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                    "actual_model": "gpt-6-sol-gpt",
+                    "compute_token_used": {
+                        "type": "gpt",
+                        "source": "pool",
+                        "poolTokenId": "pool-gpt-1",
+                        "lineageKey": "agent:agent-test",
+                    },
+                    "compute_token_rotated": False,
+                },
+                [("web_search", "tc-web-search-1", 1.0)],
+            )
+        return (
+            _DummyLLMResult("", []),
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            [],
+        )
+
+    lease_fetches = []
+
+    async def mock_fetch_compute_token(user_id, **kwargs):
+        lease_fetches.append((user_id, kwargs))
+        return {
+            "type": "claude",
+            "accessToken": "rotated-claude-token",
+            "source": "pool",
+            "poolTokenId": "pool-1",
+            "lineageKey": "agent:agent-test",
+        }
+
+    with (
+        patch(
+            "loop.run_agent.call_llm_structured_streaming",
+            new=AsyncMock(side_effect=mock_call_llm_structured_streaming),
+        ),
+        patch("loop.run_agent.fetch_compute_token_activity", new=mock_fetch_compute_token),
+    ):
+        await run_agent(
+            agent_id="agent-test",
+            user_id="user-test",
+            system_prompt=system_prompt,
+            verifier_prompt_generator=verifier_prompt,
+            model="rose-labs/rose-1-flash",
+            tools=["web_search", "attempt_completion"],
+            initial_context=[{"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}],
+            is_inside_temporal_activity=True,
+            post_message=post_message,
+            execute_tool=execute_tool,
+            build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+            max_iterations=2,
+            skip_verification=True,
+            skip_status_updates=True,
+            gpt_token="stale-gpt-token",
+            gpt_account_id="acct-1",
+        )
+
+    assert len(llm_kwargs) == 2
+    assert llm_kwargs[1]["gpt_token"] == "stale-gpt-token"
+    assert llm_kwargs[1]["gpt_token_source"] == "pool"
+    assert llm_kwargs[1]["gpt_token_pool_id"] == "pool-gpt-1"
+    assert lease_fetches == []
+
+
+async def test_demo_cache_position_retries_same_step_after_llm_failure():
+    """A failed LLM attempt must not consume the next demo-cache position."""
+    from loop.run_agent import run_agent
+    import providers.demo_cache.context as demo_cache_context
 
     cache_steps = []
     llm_calls = []
@@ -1655,8 +2317,8 @@ async def test_fast_cache_position_retries_same_step_after_llm_failure():
             new=AsyncMock(side_effect=mock_call_llm_structured_streaming),
         ),
         patch("loop.run_agent.asyncio.sleep", new=AsyncMock()),
-        patch.object(fast_cache_context, "set_context", side_effect=mock_set_context),
-        patch.object(fast_cache_context, "write_through_enabled_for_user", return_value=False),
+        patch.object(demo_cache_context, "set_context", side_effect=mock_set_context),
+        patch.object(demo_cache_context, "write_through_enabled_for_user", return_value=False),
     ):
         result = await run_agent(
             agent_id="agent-test",
@@ -1681,7 +2343,7 @@ async def test_fast_cache_position_retries_same_step_after_llm_failure():
     # (see failed_llm_call_does_not_consume_iteration_budget), so both of
     # max_iterations=2's turns remain available for real work.
     assert len(llm_calls) == 3
-    # The invariant under test: the retry reuses the SAME fast-cache step.
+    # The invariant under test: the retry reuses the SAME demo-cache step.
     assert cache_steps[:2] == [1, 1]
     assert result["status"] in {"max_iterations", "error"}
 
@@ -1891,7 +2553,7 @@ async def test_activity_tool_results_are_hard_capped_before_context_append():
     """
     from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS
 
-    huge = "AMAZON_ORDER_CONFIRMATION " * 20_000  # well above the hard cap
+    huge = "AMAZON_ORDER_CONFIRMATION " * 20_000 + "EXACT_TAIL_SENTINEL"  # well above the hard cap
     assert len(huge) > TOOL_RESULT_HARD_CAP_CHARS
 
     tool_calls = [{"tool": "grep", "pattern": "amazon"}]
@@ -1900,15 +2562,36 @@ async def test_activity_tool_results_are_hard_capped_before_context_append():
     async def mock_execute_tool(tool_name, tool_args, tool_call_id):
         return {"success": True, "message": huge}
 
-    result, _, _ = await _run_single_iteration(
-        tool_calls,
-        detected_tools,
-        skip_verification=True,
-        execute_tool_override=mock_execute_tool,
-        max_iterations=1,
-        is_inside_temporal_activity=True,
-        poll_messages_override=None,
-    )
+    with retained_tool_output_fixture():
+        result, _, _ = await _run_single_iteration(
+            tool_calls,
+            detected_tools,
+            skip_verification=True,
+            execute_tool_override=mock_execute_tool,
+            max_iterations=1,
+            is_inside_temporal_activity=True,
+            poll_messages_override=None,
+        )
+        import re
+        from tools.read_tool_output import read_tool_output_activity
+        text = [m for m in result["context"] if m["role"] == "TOOL"][-1]["text"]
+        output_id = re.search(r'output_id="([a-f0-9]{32})"', text)[1]
+        page = await read_tool_output_activity("user-test", "agent-test", "", {"output_id": output_id, "query": "EXACT_TAIL_SENTINEL"})
+        assert page["content"] == "EXACT_TAIL_SENTINEL"
+        assert [m for m in result["context"] if m["role"] == "TOOL"][-1]["metadata"]["toolStatus"] == "FINISHED"
+
+        async def failed_tool(*args):
+            return {"success": False, "error": True, "message": huge}
+
+        failed, _, _ = await _run_single_iteration(
+            tool_calls, detected_tools, execute_tool_override=failed_tool,
+            max_iterations=1, is_inside_temporal_activity=True, poll_messages_override=None,
+        )
+        error_row = [m for m in failed["context"] if m["role"] == "TOOL"][-1]
+        assert error_row["metadata"]["toolStatus"] == "ERROR"
+        assert error_row["metadata"]["error"] is True
+        error_id = re.search(r'output_id="([a-f0-9]{32})"', error_row["text"])[1]
+        assert (await read_tool_output_activity("user-test", "agent-test", "", {"output_id": error_id, "query": "EXACT_TAIL_SENTINEL"}))["content"] == "EXACT_TAIL_SENTINEL"
 
     tool_msgs = [m for m in result.get("context") or [] if m.get("role") == "TOOL"]
     assert tool_msgs, "expected the grep tool result in context"
@@ -1916,7 +2599,131 @@ async def test_activity_tool_results_are_hard_capped_before_context_append():
     assert len(text) <= TOOL_RESULT_HARD_CAP_CHARS + 80, (
         f"uncapped tool result entered context ({len(text)} chars); hard cap is {TOOL_RESULT_HARD_CAP_CHARS}"
     )
-    assert "truncated, original_len=" in text
+    assert "Retained tool output:" in text
+
+
+async def test_workflow_output_retention_uses_activity():
+    """Large workflow receipts perform storage I/O inside a registered activity."""
+    import re
+    import loop.run_agent as loop
+    from tools.read_tool_output import preview_tool_output_activity, read_tool_output_activity
+
+    calls = []
+    async def execute_activity(fn, *, args, **kwargs):
+        calls.append(fn.__name__)
+        if fn is loop.call_llm_activity:
+            return {"response": "", "tool_calls": [{"tool": "web_search", "query": "x"}],
+                    "detected_tools_ordered": [("web_search", "tc", 1.0)], "usage": {}}
+        assert fn is preview_tool_output_activity, fn
+        return await fn(*args)
+
+    async def failed_tool(*args):
+        raise RuntimeError("failure " * 10000 + "WORKFLOW_TAIL")
+
+    with retained_tool_output_fixture(), patch.object(loop.workflow, "execute_activity", execute_activity), patch.object(loop, "preview_tool_text", side_effect=AssertionError("I/O entered workflow")):
+        result, _, _ = await _run_single_iteration(
+            [{"tool": "web_search", "query": "x"}], [("web_search", "tc", 1.0)],
+            execute_tool_override=failed_tool, is_inside_temporal_activity=False,
+        )
+        text = [m["text"] for m in result["context"] if m["role"] == "TOOL"][-1]
+        output_id = re.search(r'output_id="([a-f0-9]{32})"', text)[1]
+        page = await read_tool_output_activity("user-test", "agent-test", "", {"output_id": output_id, "query": "WORKFLOW_TAIL"})
+        assert page["content"] == "WORKFLOW_TAIL"
+        assert "preview_tool_output_activity" in calls
+
+        calls.clear()
+        async def short_failed_tool(*args):
+            raise RuntimeError("short result")
+        await _run_single_iteration(
+            [{"tool": "web_search", "query": "x"}], [("web_search", "tc-short", 1.0)],
+            execute_tool_override=short_failed_tool, is_inside_temporal_activity=False,
+        )
+        assert "preview_tool_output_activity" in calls
+
+
+async def test_activity_preview_retention_failure_keeps_stated_cut():
+    """A retained-output storage failure must leave a bounded tool result in
+    context instead of failing the loop iteration."""
+    from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS
+
+    huge = "STORAGE_DOWN_RESULT " * 20_000 + "EXACT_TAIL_SENTINEL"
+
+    async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        return {"success": True, "message": huge}
+
+    async def disk_full(*args, **kwargs):
+        raise OSError("fixture disk full")
+
+    with retained_tool_output_fixture(), patch("helpers.attachments.upload_to_storage", side_effect=disk_full):
+        result, _, _ = await _run_single_iteration(
+            [{"tool": "grep", "pattern": "x"}], [("grep", "tc-storage-down", 1.0)],
+            skip_verification=True, execute_tool_override=mock_execute_tool, max_iterations=1,
+            is_inside_temporal_activity=True, poll_messages_override=None,
+        )
+    assert result.get("status") != "error", result.get("status")
+    text = [m for m in result["context"] if m["role"] == "TOOL"][-1]["text"]
+    assert len(text) <= TOOL_RESULT_HARD_CAP_CHARS + 80
+    assert "storage failure" in text and "EXACT_TAIL_SENTINEL" not in text
+
+
+async def test_workflow_marker_verification_uses_activity():
+    """A short receipt carrying a retained marker is verified against storage;
+    that download must run in an activity, never in workflow code."""
+    import loop.run_agent as loop
+    from tools.read_tool_output import preview_tool_output_activity
+
+    marker = ('\n[Retained tool output: read_tool_output output_id="' + "a" * 32 + '" offset=600 '
+              "limit=20000; total_chars=900; Unicode characters; originating agent/session only; expires after 24h.]")
+    calls = []
+    async def execute_activity(fn, *, args, **kwargs):
+        calls.append(fn.__name__)
+        if fn is loop.call_llm_activity:
+            return {"response": "", "tool_calls": [{"tool": "web_search", "query": "x"}],
+                    "detected_tools_ordered": [("web_search", "tc", 1.0)], "usage": {}}
+        assert fn is preview_tool_output_activity, fn
+        return await fn(*args)
+
+    async def failed_tool(*args):
+        raise RuntimeError("short failure " + "p" * 600 + marker)
+
+    with retained_tool_output_fixture(), patch.object(loop.workflow, "execute_activity", execute_activity), patch.object(loop, "preview_tool_text", side_effect=AssertionError("I/O entered workflow")):
+        await _run_single_iteration(
+            [{"tool": "web_search", "query": "x"}], [("web_search", "tc", 1.0)],
+            execute_tool_override=failed_tool, is_inside_temporal_activity=False,
+        )
+    assert "preview_tool_output_activity" in calls, calls
+
+
+async def test_workflow_preview_timeout_keeps_stated_cut():
+    import loop.run_agent as loop
+    from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS
+    from temporalio.exceptions import ActivityError, RetryState, TimeoutError as TemporalTimeoutError, TimeoutType
+    from tools.read_tool_output import preview_tool_output_activity
+
+    async def execute_activity(fn, *, args, **kwargs):
+        if fn is loop.call_llm_activity:
+            return {"response": "", "tool_calls": [{"tool": "grep", "pattern": "x"}],
+                    "detected_tools_ordered": [("grep", "tc-timeout", 1.0)], "usage": {}}
+        assert fn is preview_tool_output_activity
+        error = ActivityError("preview timed out", scheduled_event_id=1, started_event_id=2,
+                              identity="test", activity_type="preview", activity_id="preview",
+                              retry_state=RetryState.TIMEOUT)
+        error.__cause__ = TemporalTimeoutError("start-to-close", type=TimeoutType.START_TO_CLOSE,
+                                               last_heartbeat_details=[])
+        raise error
+
+    async def long_tool(*args):
+        return {"success": True, "message": "TIMED_OUT_OUTPUT " * 10_000 + "EXACT_TAIL_SENTINEL"}
+
+    with retained_tool_output_fixture(), patch.object(loop.workflow, "execute_activity", execute_activity):
+        result, _, _ = await _run_single_iteration(
+            [{"tool": "grep", "pattern": "x"}], [("grep", "tc-timeout", 1.0)],
+            execute_tool_override=long_tool, is_inside_temporal_activity=False,
+            skip_verification=True, max_iterations=1,
+        )
+    text = [m["text"] for m in result["context"] if m["role"] == "TOOL"][-1]
+    assert len(text) <= TOOL_RESULT_HARD_CAP_CHARS + 80
+    assert "preview timeout" in text and "EXACT_TAIL_SENTINEL" not in text
 
 
 async def test_activity_tool_result_cap_prevents_protected_tail_overflow():
@@ -1942,7 +2749,7 @@ async def test_activity_tool_result_cap_prevents_protected_tail_overflow():
         context = kwargs["context"]
         return [context[0], *context[-4:]], True
 
-    with patch.object(run_mod, "_compress_context", side_effect=protected_head_tail) as compressor:
+    with retained_tool_output_fixture(), patch.object(run_mod, "_compress_context", side_effect=protected_head_tail) as compressor:
         result, _, _ = await _run_single_iteration(
             tool_calls,
             detected_tools,
@@ -2129,9 +2936,15 @@ async def _capture_verifier_prerequisite_failure(stage, failure, *, supplied_id=
     with patch("loop.run_agent._safe_uuid4", return_value="generated-verifier-call"):
         try:
             await _run_verifier(
-                execute_activity=provider, context=[], verifier_prompt_generator=prompt,
-                model="test-model", agent_id="agent", task_id=None, post_message=post,
-                get_response_schema=schema, tool_call_id="supplied-verifier-call" if supplied_id else None,
+                execute_activity=provider,
+                context=[],
+                verifier_prompt_generator=prompt,
+                model="test-model",
+                agent_id="agent",
+                task_id=None,
+                post_message=post,
+                get_response_schema=schema,
+                tool_call_id="supplied-verifier-call" if supplied_id else None,
             )
         except BaseException as error:
             observed = error
@@ -2159,13 +2972,23 @@ async def _assert_verifier_prerequisite_error_closure(stage, *, supplied_id):
     assert "Take a NEW action" not in closure["text"] and "Verifier score" not in closure["text"]
     context = [{"role": "USER", "text": "Current task", "timestamp": "2026-10-15T00:00:00Z"}]
     if supplied_id:
-        context.append({"role": "ASSISTANT", "text": "", "timestamp": "2026-10-15T00:00:01Z",
-                        "metadata": {"tool_calls": [{"tool": "attempt_completion", "tool_call_id": call_id}]}})
+        context.append(
+            {
+                "role": "ASSISTANT",
+                "text": "",
+                "timestamp": "2026-10-15T00:00:01Z",
+                "metadata": {"tool_calls": [{"tool": "attempt_completion", "tool_call_id": call_id}]},
+            }
+        )
     expected = await build_llm_messages(context, "System")
     actual = await build_llm_messages(context + posted, "System")
     assert actual == expected, "UI error closure entered model context"
-    assert not any(message.get("tool_call_id") == call_id for message in actual), "UI closure invented a model tool result"
-    assert not any(call.get("id") == call_id for message in actual for call in message.get("tool_calls", [])), "UI closure left an unpaired model tool use"
+    assert not any(message.get("tool_call_id") == call_id for message in actual), (
+        "UI closure invented a model tool result"
+    )
+    assert not any(call.get("id") == call_id for message in actual for call in message.get("tool_calls", [])), (
+        "UI closure left an unpaired model tool use"
+    )
 
 
 async def test_verifier_prompt_prerequisite_error_closes_supplied_call():
@@ -2181,12 +3004,22 @@ def _verifier_prerequisite_lifecycle_failures():
     from helpers.generation_handoff import GenerationHandoffRequested
     from helpers.workflow_generation import WorkflowGenerationSealed
 
-    failures = [asyncio.CancelledError(), CancelledError("cancelled"),
-                WorkflowGenerationSealed("generation replaced"), GenerationHandoffRequested("replacement-queue")]
+    failures = [
+        asyncio.CancelledError(),
+        CancelledError("cancelled"),
+        WorkflowGenerationSealed("generation replaced"),
+        GenerationHandoffRequested("replacement-queue"),
+    ]
     for kind in ("CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested"):
-        error = ActivityError("prerequisite activity failed", scheduled_event_id=1, started_event_id=2,
-                              identity="test", activity_type="schema", activity_id="schema-read",
-                              retry_state=RetryState.NON_RETRYABLE_FAILURE)
+        error = ActivityError(
+            "prerequisite activity failed",
+            scheduled_event_id=1,
+            started_event_id=2,
+            identity="test",
+            activity_type="schema",
+            activity_id="schema-read",
+            retry_state=RetryState.NON_RETRYABLE_FAILURE,
+        )
         error.__cause__ = ApplicationError("native lifecycle", type=kind)
         failures.append(error)
     return failures
@@ -2202,7 +3035,9 @@ async def test_verifier_prerequisite_lifecycle_errors_bypass_error_closure():
 
 async def test_verifier_error_closure_failure_preserves_native_error_semantics():
     failure = RuntimeError("original schema read failure")
-    posted, observed = await _capture_verifier_prerequisite_failure("schema", failure, closure_failure=RuntimeError("write failed"))
+    posted, observed = await _capture_verifier_prerequisite_failure(
+        "schema", failure, closure_failure=RuntimeError("write failed")
+    )
     assert len(posted) == 2, "verifier never attempted to close its failed prerequisite row"
     assert observed is failure, "ordinary error-closure write failure replaced the prerequisite error"
     for lifecycle in _verifier_prerequisite_lifecycle_failures():
@@ -2253,14 +3088,27 @@ async def _exercise_native_verifier_prerequisite_recovery(stage, *, persistent=F
     async def post(text, role, metadata=None):
         posted.append({"text": text, "role": role, "metadata": dict(metadata or {})})
 
-    provider = AsyncMock(return_value={"score": 1.0, "reasoning": "Actual completed verdict",
-                                      "structured_response": {"current": "done"}, "usage": {}})
+    provider = AsyncMock(
+        return_value={
+            "score": 1.0,
+            "reasoning": "Actual completed verdict",
+            "structured_response": {"current": "done"},
+            "usage": {},
+        }
+    )
     with patch("loop.run_agent.asyncio.sleep", new=AsyncMock()) as sleep:
         result, _, _ = await _run_single_iteration(
-            [], detected, skip_verification=False, max_iterations=max_iterations,
-            llm_tool_calls_factory=next_completion, llm_response_models=models,
-            system_prompt_override=system_prompt, verifier_prompt_override=verifier_prompt,
-            get_response_schema_override=schema, verifier_override=provider, post_message_override=post,
+            [],
+            detected,
+            skip_verification=False,
+            max_iterations=max_iterations,
+            llm_tool_calls_factory=next_completion,
+            llm_response_models=models,
+            system_prompt_override=system_prompt,
+            verifier_prompt_override=verifier_prompt,
+            get_response_schema_override=schema,
+            verifier_override=provider,
+            post_message_override=post,
         )
     assert not any(call.args[0] >= 1 for call in sleep.await_args_list), "verifier errors used preparation backoff"
     errors = [row for row in posted if row["metadata"].get("toolStatus") == "ERROR"]
@@ -2308,9 +3156,13 @@ async def test_native_verifier_callers_propagate_lifecycle_errors_without_extra_
             tool = "web_search" if final_caller else "attempt_completion"
             try:
                 await _run_single_iteration(
-                    [{"tool": tool}], [(tool, "native-lifecycle", 1.0)], skip_verification=False,
-                    max_iterations=1 if final_caller else 5, verifier_prompt_override=prompt,
-                    verifier_override=provider, llm_response_models=models,
+                    [{"tool": tool}],
+                    [(tool, "native-lifecycle", 1.0)],
+                    skip_verification=False,
+                    max_iterations=1 if final_caller else 5,
+                    verifier_prompt_override=prompt,
+                    verifier_override=provider,
+                    llm_response_models=models,
                 )
             except BaseException as observed:
                 assert observed is failure, "native verifier caller replaced lifecycle error"
@@ -2323,8 +3175,10 @@ async def test_native_verifier_callers_propagate_lifecycle_errors_without_extra_
 
 @_with_native_schema_test_transport
 async def test_native_verifier_returned_and_raised_errors_share_counter_and_reset():
-    for sequence in (("returned", "raised", "returned"),
-                     ("returned", "raised", "healthy_rejection", "raised", "returned", "returned")):
+    for sequence in (
+        ("returned", "raised", "returned"),
+        ("returned", "raised", "healthy_rejection", "raised", "returned", "returned"),
+    ):
         models, attempts = [], []
         state = {}
         failure = RuntimeError("actual mixed prerequisite failure")
@@ -2340,14 +3194,22 @@ async def test_native_verifier_returned_and_raised_errors_share_counter_and_rese
         async def verdict(*_args, **_kwargs):
             if state["event"] == "healthy_rejection":
                 return {"score": 0.4, "reasoning": "Actual work remains", "structured_response": None, "usage": {}}
-            return {"score": 0.5, "reasoning": "Progress check failed: actual provider outage",
-                    "structured_response": None, "usage": {}}
+            return {
+                "score": 0.5,
+                "reasoning": "Progress check failed: actual provider outage",
+                "structured_response": None,
+                "usage": {},
+            }
 
         provider = AsyncMock(side_effect=verdict)
         result, posted, _ = await _run_single_iteration(
-            [{"tool": "attempt_completion"}], [("attempt_completion", "shared-error-counter", 1.0)],
-            skip_verification=False, max_iterations=len(sequence) + 1,
-            verifier_prompt_override=prompt, verifier_override=provider, llm_response_models=models,
+            [{"tool": "attempt_completion"}],
+            [("attempt_completion", "shared-error-counter", 1.0)],
+            skip_verification=False,
+            max_iterations=len(sequence) + 1,
+            verifier_prompt_override=prompt,
+            verifier_override=provider,
+            llm_response_models=models,
             response_schema={"fields": [{"name": "answer", "type": "str", "required": True}]},
         )
         assert result["status"] == "error" and len(models) == len(attempts) == len(sequence)
@@ -2365,9 +3227,13 @@ async def test_raised_verifier_error_preserves_successful_tool_no_tool_reset():
     prompt = AsyncMock(side_effect=[failure, "Verify after recovery"])
     models = []
     result, posted, _ = await _run_single_iteration(
-        [], [("attempt_completion", "no-tool-reset", 1.0)], skip_verification=False, max_iterations=5,
+        [],
+        [("attempt_completion", "no-tool-reset", 1.0)],
+        skip_verification=False,
+        max_iterations=5,
         llm_tool_calls_sequence=[[], [], [{"tool": "attempt_completion"}], [], [{"tool": "attempt_completion"}]],
-        verifier_prompt_override=prompt, llm_response_models=models,
+        verifier_prompt_override=prompt,
+        llm_response_models=models,
     )
     assert result["status"] == "completed", "intervening attempt_completion failed to reset consecutive no-tool count"
     assert len(models) == 5 and prompt.await_count == 2
@@ -2378,8 +3244,12 @@ async def test_verifier_healthy_prerequisites_preserve_provider_verdict():
     from loop.run_agent import _run_verifier
 
     schema = {"fields": [{"name": "answer", "type": "str", "required": True}]}
-    verdict = {"score": 0.63, "reasoning": "Actual provider finding", "structured_response": {"answer": "42"},
-               "usage": {"prompt_tokens": 17}}
+    verdict = {
+        "score": 0.63,
+        "reasoning": "Actual provider finding",
+        "structured_response": {"answer": "42"},
+        "usage": {"prompt_tokens": 17},
+    }
     provider = AsyncMock(return_value=verdict)
     posted = []
 
@@ -2387,9 +3257,15 @@ async def test_verifier_healthy_prerequisites_preserve_provider_verdict():
         posted.append({"text": text, "role": role, "metadata": metadata})
 
     result = await _run_verifier(
-        execute_activity=provider, context=[], verifier_prompt_generator=AsyncMock(return_value="Actual prompt"),
-        model="test-model", agent_id="agent", task_id="task", post_message=post,
-        get_response_schema=AsyncMock(return_value=schema), tool_call_id="healthy-call",
+        execute_activity=provider,
+        context=[],
+        verifier_prompt_generator=AsyncMock(return_value="Actual prompt"),
+        model="test-model",
+        agent_id="agent",
+        task_id="task",
+        post_message=post,
+        get_response_schema=AsyncMock(return_value=schema),
+        tool_call_id="healthy-call",
     )
     assert result is verdict and result["score"] == 0.63 and result["reasoning"] == "Actual provider finding"
     assert result["structured_response"] == {"answer": "42"} and result["resolved_response_schema"] == schema
@@ -2621,7 +3497,7 @@ async def test_rejected_completed_child_handoff_returns_control_to_llm():
         return [{"tool": "web_search", "query": "correct the rejected handoff"}]
 
     with patch(
-        "providers.fast_cache.client.ensure_position_context",
+        "providers.demo_cache.client.ensure_position_context",
         new=AsyncMock(side_effect=record_cache_step),
     ):
         result, _, executed = await _run_single_iteration(
@@ -2697,7 +3573,7 @@ async def test_verifier_usage_does_not_invent_cache_sequence_identity():
 
 async def test_completed_child_required_tool_is_enforced_inside_direct_activity():
     """A schema-complete child dispatches completion without another LLM call."""
-    import providers.fast_cache.context as fast_cache_context
+    import providers.demo_cache.context as demo_cache_context
 
     response_schema = {
         "fields": [
@@ -2749,7 +3625,7 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
     usage_reports = []
     event_order = []
     llm_call_count = 0
-    original_set_context = fast_cache_context.set_context
+    original_set_context = demo_cache_context.set_context
 
     class CapturingBroadcaster:
         def __init__(self, **_kwargs):
@@ -2776,7 +3652,7 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
         nonlocal llm_call_count
         llm_call_count += 1
         event_order.append(f"llm_{llm_call_count}")
-        cache_context = fast_cache_context.current_context()
+        cache_context = demo_cache_context.current_context()
         if cache_context is not None and cache_context.active:
             return [{"tool": "web_search", "query": "replayed rejected response"}]
         return [{"tool": "attempt_completion"}]
@@ -2797,8 +3673,8 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
         tool_calls: list = Field(default_factory=list)
 
     with (
-        patch.object(fast_cache_context, "set_context", side_effect=capture_cache_context),
-        patch.object(fast_cache_context, "write_through_enabled_for_user", return_value=False),
+        patch.object(demo_cache_context, "set_context", side_effect=capture_cache_context),
+        patch.object(demo_cache_context, "write_through_enabled_for_user", return_value=False),
         patch("loop.run_agent.CoalescingStreamBroadcaster", CapturingBroadcaster),
         patch("loop.run_agent.activity.heartbeat"),
     ):
@@ -2821,10 +3697,9 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
                     "gpt_token_rotated": True,
                     "compute_token_used": {
                         "type": "gpt",
-                        "accessToken": "rotated-gpt-token",
-                        "accountId": "rotated-gpt-account",
                         "source": "pool",
                         "poolTokenId": "pool-token-2",
+                        "lineageKey": "agent:agent-test",
                     },
                 },
                 {
@@ -2963,6 +3838,45 @@ async def test_max_iterations_runs_final_verifier():
     assert result["status"] == "max_iterations"
     assert result["verifier_progress"] == 0.3
     assert "partial progress" in result["verifier_reasoning"]
+
+
+async def test_poll_inbox_rows_reach_next_llm_call_once_and_failures_continue():
+    """In-activity agents append agent-message rows before the next LLM call.
+
+    A raising inbox hook must not end the loop; each delivered row is visible
+    to every later LLM call exactly once.
+    """
+    row = {
+        "role": "USER",
+        "text": "Use Denver.",
+        "timestamp": "2024-01-01T00:00:01Z",
+        "metadata": {"agentMessage": True, "agentMessageId": "m1", "fromAgentPath": "/root"},
+    }
+    responses = [[], [row], RuntimeError("inbox down")]
+    seen_contexts = []
+
+    async def poll_inbox():
+        item = responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return [dict(r) for r in item]
+
+    def build_messages(context, prompt):
+        seen_contexts.append([dict(m) for m in context])
+        return [{"role": "system", "content": prompt}]
+
+    result, _, _ = await _run_single_iteration(
+        [{"tool": "web_search", "query": "x"}],
+        [("web_search", "tc-1", 1.0)],
+        max_iterations=3,
+        poll_inbox_override=poll_inbox,
+        build_messages_override=build_messages,
+    )
+    agent_rows = [[m for m in ctx if (m.get("metadata") or {}).get("agentMessage")] for ctx in seen_contexts]
+    assert len(seen_contexts) == 3, "inbox failure stopped the loop"
+    assert [len(rows) for rows in agent_rows] == [0, 1, 1]
+    assert agent_rows[1][0]["role"] == "USER" and agent_rows[1][0]["text"] == row["text"]
+    assert result["status"] == "max_iterations"
 
 
 def _count_winddown_msgs(context):
@@ -3128,12 +4042,214 @@ async def test_failed_tool_posts_no_duplicate_chip_but_still_reaches_context():
 
 
 @_owned_realtime_fixture()
+async def test_attempt_completion_result_reaches_the_verifier_as_authored_work():
+    """attempt_completion(result=...) is the agent's own writing; the verifier must see it.
+
+    tree-feedback-routing b056f571: a drafter had no tool that could show its
+    draft to the verifier, so it spawned a code agent just to archive the text.
+    """
+    seen = []
+
+    async def verifier(*args, **kwargs):
+        seen.append([dict(m) for m in args[0]])
+        return {"score": 1.0, "reasoning": "ok", "structured_response": None, "usage": {}}
+
+    for args, expected in (
+        ({"tool": "attempt_completion", "result": "Hi Garry,\n...\nAndy Prevalskii, Founder, Rose Labs"}, True),
+        ({"tool": "attempt_completion"}, False),
+    ):
+        seen.clear()
+        await _run_single_iteration(
+            [args],
+            [("attempt_completion", "tc-1", 1.0)],
+            skip_verification=False,
+            max_iterations=1,
+            verifier_override=verifier,
+        )
+        assert seen, "verifier did not run"
+        authored = [
+            m
+            for m in seen[-1]
+            if (m.get("metadata") or {}).get("toolName") == "attempt_completion"
+            and (m.get("metadata") or {}).get("title") == "Authored result"
+        ]
+        if expected:
+            assert len(authored) == 1, seen[-1]
+            assert authored[0]["role"] == "TOOL" and authored[0]["metadata"]["toolStatus"] == "FINISHED"
+            # End to end through the verifier's own context builder (b056f571 rerun
+            # 46ce6f37: the row's text was empty there).
+            from helpers.llm import build_verifier_context_messages
+
+            rendered = "\n".join(str(m["content"]) for m in build_verifier_context_messages(seen[-1], "V"))
+            assert '"tool_name": "attempt_completion"' in rendered
+            assert "Andy Prevalskii, Founder, Rose Labs" in rendered, rendered
+        else:
+            assert authored == [], seen[-1]
+
+
+async def _exercise_explore_terminal_handoff(kind):
+    import helpers.agent_inbox as inbox_module
+
+    inbox = inbox_module.AgentInbox("owner", "same-task")
+    stored, seen, calls = [], [], []
+    waits = []
+    original_wait = asyncio.wait
+    release_stale = asyncio.Event()
+    fetch_count = 0
+    row = {
+        "id": "marker",
+        "text": "Forwarded marker: HTTP core document",
+        "created_at": "2026-10-29T17:47:49.682Z",
+    }
+
+    async def count_wait(*args, **kwargs):
+        waits.append(kwargs.get("timeout"))
+        return await original_wait(*args, **kwargs)
+
+    async def fetch(*args):
+        nonlocal fetch_count
+        fetch_count += 1
+        snapshot = list(stored)
+        if kind == "stale-read" and fetch_count == 1:
+            await release_stale.wait()
+        if kind == "failed-read":
+            raise RuntimeError("controlled read failure")
+        return snapshot
+
+    async def poll():
+        rows = await inbox.next_step_messages()
+        seen.extend(item["id"] for item in rows)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)  # Let the model turn's nonblocking read finish empty.
+        return [{"role": "USER", "text": item["text"], "metadata": {"agentMessage": True}} for item in rows]
+
+    async def execute(*args):
+        calls.append(args[0])
+        if len(calls) == 1 and kind not in ("no-message", "failed-read", "cancel"):
+            stored.extend([row, row] if kind == "duplicate" else [row])
+        deferred = await inbox.unread_before_finish()
+        release_stale.set()
+        if deferred:
+            return {"error": True, "message": "existing deferred message"}
+        return {"success": True}
+
+    async def handoff():
+        if kind == "cancel":
+            raise asyncio.CancelledError()
+        if await inbox.settle_for_handoff():
+            return "existing deferred message"
+        return None
+
+    kwargs = dict(
+        tool_calls=[{"tool": "attempt_completion", "result": "done"}],
+        detected_tools_ordered=[("attempt_completion", "tc", 1.0)],
+        max_iterations=1 if kind == "last-budget" else 2,
+        execute_tool_override=execute,
+        poll_inbox_override=poll,
+        completion_handoff_override=handoff,
+    )
+    with (
+        patch.object(inbox_module, "fetch_agent_inbox", fetch),
+        patch.object(asyncio, "wait", count_wait),
+        patch("providers.demo_cache.client.resolve_agent_fast_mode", new=AsyncMock(return_value=(False, None, False, None, None, True))),
+        patch("providers.demo_cache.client.ensure_position_context", new=AsyncMock()),
+    ):
+        if kind == "cancel":
+            try:
+                await _run_single_iteration(**kwargs)
+            except asyncio.CancelledError:
+                return
+            raise AssertionError("cancellation swallowed")
+        result, _, _ = await _run_single_iteration(**kwargs)
+        waits_before_finish = len(waits)
+        late = await inbox.finish()
+        assert len(waits) == waits_before_finish, "finish spent the terminal read wait twice"
+        assert not inbox._reads, "finish left an unsettled read"
+        assert not inbox._fetched, "finish left a message without custody"
+
+    if kind in ("no-message", "failed-read"):
+        assert result["status"] == "completed" and len(calls) == 1 and seen == []
+    elif kind == "last-budget":
+        assert result["status"] == "max_iterations" and len(calls) == 1
+        assert [item["id"] for item in late] == ["marker"], "iteration cap must retain parent handoff"
+    else:
+        assert seen == ["marker"], (kind, "same task must consume once", seen, [item["id"] for item in late])
+        assert result["status"] == "completed" and len(calls) == 2
+        assert not late, late
+    assert len(waits) == len(calls), "each completion attempt settles its existing read once"
+
+
+async def test_explore_consumes_final_call_message_before_terminal_handoff():
+    await _exercise_explore_terminal_handoff("final-call")
+
+
+async def test_explore_terminal_handoff_deduplicates_message_id():
+    await _exercise_explore_terminal_handoff("duplicate")
+
+
+async def test_explore_terminal_handoff_no_message_finishes():
+    await _exercise_explore_terminal_handoff("no-message")
+
+
+async def test_explore_terminal_handoff_failed_read_preserves_completion():
+    await _exercise_explore_terminal_handoff("failed-read")
+
+
+async def test_explore_terminal_handoff_does_not_refund_last_iteration():
+    await _exercise_explore_terminal_handoff("last-budget")
+
+
+async def test_explore_terminal_handoff_propagates_cancellation():
+    await _exercise_explore_terminal_handoff("cancel")
+
+
+async def test_explore_terminal_handoff_refreshes_stale_pending_snapshot():
+    await _exercise_explore_terminal_handoff("stale-read")
+
+
 async def run_all_tests():
     from helpers.messages import flush_realtime_broadcasts_for_tests
 
     print("run-agent blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "explore_terminal_handoff_refreshes_stale_pending_snapshot",
+        test_explore_terminal_handoff_refreshes_stale_pending_snapshot,
+    )
+    await r.record_async(
+        "explore_consumes_final_call_message_before_terminal_handoff",
+        test_explore_consumes_final_call_message_before_terminal_handoff,
+    )
+    await r.record_async(
+        "explore_terminal_handoff_deduplicates_message_id",
+        test_explore_terminal_handoff_deduplicates_message_id,
+    )
+    await r.record_async(
+        "explore_terminal_handoff_no_message_finishes",
+        test_explore_terminal_handoff_no_message_finishes,
+    )
+    await r.record_async(
+        "explore_terminal_handoff_failed_read_preserves_completion",
+        test_explore_terminal_handoff_failed_read_preserves_completion,
+    )
+    await r.record_async(
+        "explore_terminal_handoff_does_not_refund_last_iteration",
+        test_explore_terminal_handoff_does_not_refund_last_iteration,
+    )
+    await r.record_async(
+        "explore_terminal_handoff_propagates_cancellation",
+        test_explore_terminal_handoff_propagates_cancellation,
+    )
+    await r.record_async("jev_schedules_every_turn", test_jev_schedules_every_turn_without_changing_decisions)
+    await r.record_async("workflow_output_retention_activity", test_workflow_output_retention_uses_activity)
+    await r.record_async("workflow_marker_verification_activity", test_workflow_marker_verification_uses_activity)
+    await r.record_async("workflow_preview_timeout_stated_cut", test_workflow_preview_timeout_keeps_stated_cut)
+    await r.record_async("activity_preview_retention_failure_stated_cut", test_activity_preview_retention_failure_keeps_stated_cut)
     await r.record_async("iteration_fixture_retires_realtime", test_iteration_fixture_retires_its_realtime_sender)
+    await r.record_async(
+        "poll_inbox_rows_reach_next_llm_call_once",
+        test_poll_inbox_rows_reach_next_llm_call_once_and_failures_continue,
+    )
     await r.record_async(
         "iteration_offset_reported_with_usage",
         test_iteration_offset_is_reported_with_each_billed_llm_turn,
@@ -3189,6 +4305,14 @@ async def run_all_tests():
         test_no_tool_calls_nudges_then_errors_after_3_consecutive,
     )
     await r.record_async(
+        "no_tool_turn_with_background_agents_normal_handling",
+        test_no_tool_turn_with_background_agents_gets_normal_no_tool_handling,
+    )
+    await r.record_async(
+        "completion_with_background_agents_reaches_verifier",
+        test_completion_with_background_agents_reaches_verifier_with_their_status,
+    )
+    await r.record_async(
         "tool_exception_continues_loop_no_duplicate_chip",
         test_tool_exception_continues_loop_without_posting_a_duplicate_chip,
     )
@@ -3233,17 +4357,33 @@ async def run_all_tests():
         test_run_agent_reuses_rotated_compute_token_next_iteration,
     )
     await r.record_async(
-        "fast_cache_position_retries_same_step_after_llm_failure",
-        test_fast_cache_position_retries_same_step_after_llm_failure,
+        "run_agent_drops_rotated_out_credential_when_lease_reread_fails",
+        test_run_agent_drops_rotated_out_credential_when_lease_reread_fails,
+    )
+    await r.record_async(
+        "run_agent_records_served_lease_identity_without_rotation",
+        test_run_agent_records_served_lease_identity_without_rotation,
+    )
+    await r.record_async(
+        "demo_cache_position_retries_same_step_after_llm_failure",
+        test_demo_cache_position_retries_same_step_after_llm_failure,
     )
     await r.record_async(
         "run_agent_refusal_retry_excludes_anthropic_without_backoff",
         test_run_agent_refusal_retry_excludes_anthropic_without_backoff,
     )
-    await r.record_async("schema_getter_native_retry", test_schema_getter_failures_use_existing_native_preacceptance_retry)
-    await r.record_async("schema_getter_native_bound", test_schema_getter_persistent_failure_uses_existing_three_attempt_bound)
-    await r.record_async("system_prompt_schema_native_retry", test_system_prompt_schema_failures_use_existing_native_retry)
-    await r.record_async("schema_preparation_lifecycle", test_schema_preparation_lifecycle_errors_propagate_without_retry)
+    await r.record_async(
+        "schema_getter_native_retry", test_schema_getter_failures_use_existing_native_preacceptance_retry
+    )
+    await r.record_async(
+        "schema_getter_native_bound", test_schema_getter_persistent_failure_uses_existing_three_attempt_bound
+    )
+    await r.record_async(
+        "system_prompt_schema_native_retry", test_system_prompt_schema_failures_use_existing_native_retry
+    )
+    await r.record_async(
+        "schema_preparation_lifecycle", test_schema_preparation_lifecycle_errors_propagate_without_retry
+    )
     await r.record_async("completed_child_current_schema", test_completed_child_optimization_uses_current_native_schema)
     await r.record_async(
         "run_agent_refusal_reroute_crosses_the_temporal_activity_boundary",
@@ -3281,29 +4421,77 @@ async def run_all_tests():
         "run_verifier_posts_in_progress_and_finished", test_run_verifier_posts_in_progress_and_finished
     )
     await r.record_async("run_verifier_dynamic_schema_getter", test_run_verifier_dynamic_schema_getter)
-    await r.record_async("verifier_prompt_prerequisite_error_closure", test_verifier_prompt_prerequisite_error_closes_supplied_call)
-    await r.record_async("verifier_schema_prerequisite_error_closure", test_verifier_schema_prerequisite_error_closes_generated_call)
-    await r.record_async("verifier_prerequisite_lifecycle", test_verifier_prerequisite_lifecycle_errors_bypass_error_closure)
-    await r.record_async("verifier_error_closure_failure_semantics", test_verifier_error_closure_failure_preserves_native_error_semantics)
-    await r.record_async("verifier_healthy_prerequisite_verdict", test_verifier_healthy_prerequisites_preserve_provider_verdict)
-    await r.record_async("attempt_completion_prerequisite_native_recovery", test_attempt_completion_prerequisite_errors_recover_on_next_native_iteration)
-    await r.record_async("attempt_completion_prerequisite_existing_bound", test_attempt_completion_prerequisite_errors_use_existing_three_error_bound)
-    await r.record_async("attempt_completion_prerequisite_iteration_budget", test_attempt_completion_prerequisite_errors_preserve_iteration_budget)
-    await r.record_async("native_verifier_caller_lifecycle", test_native_verifier_callers_propagate_lifecycle_errors_without_extra_turns)
-    await r.record_async("native_verifier_shared_counter_reset", test_native_verifier_returned_and_raised_errors_share_counter_and_reset)
-    await r.record_async("native_verifier_error_no_tool_reset", test_raised_verifier_error_preserves_successful_tool_no_tool_reset)
-    await r.record_async("verifier_authored_attention_event_identity", test_verifier_uses_authored_attention_event_identity_across_row_retries)
-    await r.record_async("verifier_requirement_completion_boundaries", test_verifier_rechecks_real_user_requirements_at_completion_boundaries)
-    await r.record_async("final_verifier_suppresses_stale_completion_data", test_final_verifier_does_not_publish_stale_completion_data)
-    await r.record_async("superseded_verifier_preserves_provider_result", test_superseded_verifier_keeps_actual_provider_result)
-    await r.record_async("keyed_feedback_revision_versions_verdict", test_keyed_feedback_revision_supersedes_verdict_without_user_row)
-    await r.record_async("verifier_prompt_schema_same_requirement_revision", test_verifier_reloads_prompt_and_schema_until_requirement_revision_matches)
+    await r.record_async(
+        "verifier_prompt_prerequisite_error_closure", test_verifier_prompt_prerequisite_error_closes_supplied_call
+    )
+    await r.record_async(
+        "verifier_schema_prerequisite_error_closure", test_verifier_schema_prerequisite_error_closes_generated_call
+    )
+    await r.record_async(
+        "verifier_prerequisite_lifecycle", test_verifier_prerequisite_lifecycle_errors_bypass_error_closure
+    )
+    await r.record_async(
+        "verifier_error_closure_failure_semantics", test_verifier_error_closure_failure_preserves_native_error_semantics
+    )
+    await r.record_async(
+        "verifier_healthy_prerequisite_verdict", test_verifier_healthy_prerequisites_preserve_provider_verdict
+    )
+    await r.record_async(
+        "attempt_completion_prerequisite_native_recovery",
+        test_attempt_completion_prerequisite_errors_recover_on_next_native_iteration,
+    )
+    await r.record_async(
+        "attempt_completion_prerequisite_existing_bound",
+        test_attempt_completion_prerequisite_errors_use_existing_three_error_bound,
+    )
+    await r.record_async(
+        "attempt_completion_prerequisite_iteration_budget",
+        test_attempt_completion_prerequisite_errors_preserve_iteration_budget,
+    )
+    await r.record_async(
+        "native_verifier_caller_lifecycle", test_native_verifier_callers_propagate_lifecycle_errors_without_extra_turns
+    )
+    await r.record_async(
+        "native_verifier_shared_counter_reset", test_native_verifier_returned_and_raised_errors_share_counter_and_reset
+    )
+    await r.record_async(
+        "native_verifier_error_no_tool_reset", test_raised_verifier_error_preserves_successful_tool_no_tool_reset
+    )
+    await r.record_async(
+        "verifier_authored_attention_event_identity",
+        test_verifier_uses_authored_attention_event_identity_across_row_retries,
+    )
+    await r.record_async(
+        "verifier_requirement_completion_boundaries",
+        test_verifier_rechecks_real_user_requirements_at_completion_boundaries,
+    )
+    await r.record_async(
+        "final_verifier_suppresses_stale_completion_data", test_final_verifier_does_not_publish_stale_completion_data
+    )
+    await r.record_async(
+        "superseded_verifier_preserves_provider_result", test_superseded_verifier_keeps_actual_provider_result
+    )
+    await r.record_async(
+        "parent_agent_task_update_supersedes_verdict",
+        test_parent_agent_task_update_supersedes_verdict_but_other_agent_rows_do_not,
+    )
+    await r.record_async(
+        "verifier_interrupted_by_new_message",
+        test_verifier_is_interrupted_by_a_new_user_or_agent_message,
+    )
+    await r.record_async(
+        "keyed_feedback_revision_versions_verdict", test_keyed_feedback_revision_supersedes_verdict_without_user_row
+    )
+    await r.record_async(
+        "verifier_prompt_schema_same_requirement_revision",
+        test_verifier_reloads_prompt_and_schema_until_requirement_revision_matches,
+    )
     await r.record_async(
         "completed_browser_output_forces_parent_completion",
         test_completed_browser_output_forces_parent_completion_instead_of_second_browser,
     )
     await r.record_async(
-        "completed_child_bypasses_llm_and_fast_cache",
+        "completed_child_bypasses_llm_and_demo_cache",
         test_completed_child_required_tool_is_enforced_inside_direct_activity,
     )
     await r.record_async(
@@ -3336,6 +4524,10 @@ async def run_all_tests():
     await r.record_async(
         "failed_tool_posts_no_duplicate_chip",
         test_failed_tool_posts_no_duplicate_chip_but_still_reaches_context,
+    )
+    await r.record_async(
+        "attempt_completion_result_reaches_the_verifier_as_authored_work",
+        test_attempt_completion_result_reaches_the_verifier_as_authored_work,
     )
     await flush_realtime_broadcasts_for_tests()
     teardown_mock()

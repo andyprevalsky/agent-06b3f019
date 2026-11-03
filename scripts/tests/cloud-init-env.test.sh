@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# cloud-init.sh mirrors an INJECTED BROWSER_AGENT_BROWSER_USE_ENABLED into
+# cloud-init.sh mirrors INJECTED browser-provider settings (Browser Use flag,
+# Tilion key/tuning/kill switch) and an INJECTED BROWSER_AGENT_BROWSER_USE_ENABLED into
 # agents/.env and back-end/.env so dotenv children agree with the parent shell.
 # An injected-but-empty value is "disabled" to the parent; it must overwrite a
 # stale `true` with `false` rather than being skipped (upsert_env_key ignores
@@ -102,6 +103,48 @@ expect_flag injected-false-overwrites-stale-true false
 
 run_cloud_init injected-true-overwrites-stale-false false BROWSER_AGENT_BROWSER_USE_ENABLED=true
 expect_flag injected-true-overwrites-stale-false true
+
+# Tilion is the default provider: injected credentials/tuning reach both .env
+# files (never the log), an explicit tilion survives, and an unsupported value
+# is forced to tilion only when a TILION_API_KEY exists, otherwise kernel.
+TILION_FAKE_KEY='tl_fake_cloud_init_key_0123456789'
+expect_env_line() {
+  local name="$1" line="$2" envf
+  for envf in agents/.env back-end/.env; do
+    grep -qxF "$line" "$TMP_ROOT/$name/$envf" || fail "$name: $envf lacks '$line'"
+  done
+}
+expect_no_secret_in_log() {
+  if grep -qF "$TILION_FAKE_KEY" "$TMP_ROOT/$1/cloud-init.log"; then
+    fail "$1: cloud-init.log printed TILION_API_KEY"
+  fi
+}
+
+run_cloud_init tilion-injected-env-synced false BROWSER_PROVIDER=tilion \
+  TILION_API_KEY="$TILION_FAKE_KEY" TILION_BASE_URL=https://back.tilion.dev \
+  TILION_SESSION_TTL_SECONDS=7200 TILION_IDLE_TIMEOUT_SECONDS=600 TILION_CDP_OBSERVE=false \
+  BROWSER_AGENT_TILION_ENABLED=false
+expect_env_line tilion-injected-env-synced "TILION_API_KEY=$TILION_FAKE_KEY"
+expect_env_line tilion-injected-env-synced 'TILION_BASE_URL=https://back.tilion.dev'
+expect_env_line tilion-injected-env-synced 'TILION_SESSION_TTL_SECONDS=7200'
+expect_env_line tilion-injected-env-synced 'TILION_IDLE_TIMEOUT_SECONDS=600'
+expect_env_line tilion-injected-env-synced 'TILION_CDP_OBSERVE=false'
+expect_env_line tilion-injected-env-synced 'BROWSER_AGENT_TILION_ENABLED=false'
+expect_no_secret_in_log tilion-injected-env-synced
+if grep -q '^BROWSER_PROVIDER=' "$TMP_ROOT/tilion-injected-env-synced/back-end/.env"; then
+  fail "tilion-injected-env-synced: a supported tilion provider must not be rewritten"
+fi
+echo "PASS: tilion-injected-env-synced"
+
+run_cloud_init unsupported-provider-with-tilion-key false BROWSER_PROVIDER=browserbase \
+  TILION_API_KEY="$TILION_FAKE_KEY"
+expect_env_line unsupported-provider-with-tilion-key 'BROWSER_PROVIDER="tilion"'
+expect_no_secret_in_log unsupported-provider-with-tilion-key
+echo "PASS: unsupported-provider-with-tilion-key"
+
+run_cloud_init unsupported-provider-without-tilion-key false BROWSER_PROVIDER=browserbase
+expect_env_line unsupported-provider-without-tilion-key 'BROWSER_PROVIDER="kernel"'
+echo "PASS: unsupported-provider-without-tilion-key"
 
 # Failed dependency setup + unseeded DB: npx without --no-install blocks on a
 # hidden install prompt. The stub models that prompt as an indefinite wait.

@@ -60,6 +60,28 @@ run_drain_owned_agents() {
   fi
 }
 
+# A TERM/INT/HUP that kills run.sh runs its EXIT trap, but bash dies on a SECOND
+# signal in the middle of that trap: an operator re-sending TERM to a slow
+# teardown (T112: a worker held ~7 min by archive uploads) aborted cleanup after
+# its first step, stranding the backend, worker, vite and tunnel with a pending
+# cleanup receipt. Fatal signals therefore become an explicit `exit`, so cleanup
+# runs once from the EXIT trap, and cleanup silences further signals for itself.
+run_install_teardown_signal_traps() {
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  trap 'exit 129' HUP
+}
+
+run_note_teardown_signal() {  # <name>
+  echo "⚠️  Ignoring repeated $1: stack teardown is already running; it is bounded by the worker drain deadline. If this run's owner is gone, recover with: scripts/run-bench --local --run-id <id> --reconcile-cleanup" >&2
+}
+
+run_ignore_repeated_teardown_signals() {
+  trap 'run_note_teardown_signal TERM' TERM
+  trap 'run_note_teardown_signal INT' INT
+  trap 'run_note_teardown_signal HUP' HUP
+}
+
 run_publish_stack_cleanup_status() {  # <state>
   local state="$1" path="${RUN_STACK_CLEANUP_STATUS_FILE:-}" temporary birth native_identity
   [ -n "$path" ] || return 0
@@ -133,6 +155,87 @@ run_process_env_value_wait() {
   return 1
 }
 
+# Lexical (no filesystem access) normalization into the variable named <out>:
+# drops empty and `.` segments and resolves `..` against the preceding segment
+# (`/..` is `/`). Without it `<root>/../other` passed the `"$root"/*` prefix
+# test and a process outside the worktree looked owned (CodeRabbit, PR #1592).
+# A path containing a newline cannot be one argv/cwd token: fail closed.
+run_path_normalize() {  # <path> <out-var>
+  # Locals are prefixed: `printf -v` assigns through dynamic scope, so a local
+  # sharing the caller's <out-var> name would swallow the result.
+  local _rpn_in="$1" _rpn_seg _rpn_out="" _rpn_abs=""
+  local -a _rpn_parts _rpn_kept
+  _rpn_kept=()
+  [ -n "$_rpn_in" ] || return 1
+  case "$_rpn_in" in *$'\n'*) return 1 ;; /*) _rpn_abs=1 ;; esac
+  IFS=/ read -r -a _rpn_parts <<<"$_rpn_in" || true
+  for _rpn_seg in ${_rpn_parts[@]+"${_rpn_parts[@]}"}; do
+    case "$_rpn_seg" in
+      "" | .) ;;
+      ..)
+        if [ "${#_rpn_kept[@]}" -gt 0 ] && [ "${_rpn_kept[${#_rpn_kept[@]}-1]}" != ".." ]; then
+          unset "_rpn_kept[${#_rpn_kept[@]}-1]"
+        elif [ -z "$_rpn_abs" ]; then
+          _rpn_kept+=("..")
+        fi
+        ;;
+      *) _rpn_kept+=("$_rpn_seg") ;;
+    esac
+  done
+  for _rpn_seg in ${_rpn_kept[@]+"${_rpn_kept[@]}"}; do
+    _rpn_out="$_rpn_out/$_rpn_seg"
+  done
+  if [ -n "$_rpn_abs" ]; then
+    _rpn_out="${_rpn_out:-/}"
+  else
+    _rpn_out="${_rpn_out#/}"
+    _rpn_out="${_rpn_out:-.}"
+  fi
+  printf -v "$2" '%s' "$_rpn_out"
+}
+
+# Agent worktrees live INSIDE the canonical checkout (`.claude/worktrees/<n>`),
+# so a bare "$root"/* prefix test claims every nested worktree's processes as
+# this stack's. On 2026-10-26 a canonical-checkout sweep SIGTERMed a gate
+# worker's run.sh in .claude/worktrees/gate-GH that way. A path is in <root>
+# only when no directory between <root> (exclusive) and the path has its own
+# `.git` — i.e. it does not cross into a nested worktree or checkout.
+run_path_in_worktree() {  # <path> <root>
+  local path root dir
+  [ -n "$1" ] && [ -n "$2" ] || return 1
+  run_path_normalize "$1" path || return 1
+  run_path_normalize "$2" root || return 1
+  # `/` (the old empty "${2%/}") never scopes a sweep.
+  [ "$root" != "/" ] || return 1
+  case "$path" in
+    "$root") return 0 ;;
+    "$root"/*) ;;
+    *) return 1 ;;
+  esac
+  dir="${path%/}"
+  while [ -n "$dir" ] && [ "$dir" != "$root" ]; do
+    [ -e "$dir/.git" ] && return 1
+    dir="${dir%/*}"
+  done
+  return 0
+}
+
+# argv form of run_path_in_worktree: some token names a path inside <root>
+# (bounded at a path separator, so `<root>-other` and nested worktrees miss).
+run_cmd_mentions_worktree() {  # <command> <root>
+  local cmd="$1" root="${2%/}" token rest
+  [ -n "$root" ] || return 1
+  local -a tokens
+  read -r -a tokens <<<"$cmd" || true
+  for token in ${tokens[@]+"${tokens[@]}"}; do
+    case "$token" in *"$root"*) ;; *) continue ;; esac
+    rest="${token#*"$root"}"
+    case "$rest" in ""|/*) ;; *) continue ;; esac
+    run_path_in_worktree "$root$rest" "$root" && return 0
+  done
+  return 1
+}
+
 run_process_cwd_in_tree() {
   local pid="$1"
   local root="$2"
@@ -142,10 +245,7 @@ run_process_cwd_in_tree() {
   [ -n "$cwd" ] || return 1
   root_physical="$(cd "$root" && pwd -P)" || return 1
 
-  case "$cwd" in
-    "$root_physical"|"$root_physical"/*) return 0 ;;
-  esac
-  return 1
+  run_path_in_worktree "$cwd" "$root_physical"
 }
 
 run_process_has_ancestor() {

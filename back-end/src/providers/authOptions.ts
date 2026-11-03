@@ -9,6 +9,7 @@
 import { canonicalAuthRealm, hostnameFromRealmInput } from './authRealm';
 import { benchmarkSavedBrowserAuthDisabled } from './benchmarkBrowserAuth';
 import { primitiveDomain, createMintedInbox, findMintedInbox } from './primitive';
+import { withSerializedLock } from './sharedState';
 import { createAgentPhoneNumber, isAgentPhoneEmailFallbackSafe } from './agentPhone';
 import { createLogger } from './logger';
 import { MINTED_PASSWORD_BROWSER_SOURCE, mintedNewPasswordOption } from './mintedAccountPassword';
@@ -80,7 +81,7 @@ export async function getAuthOptions(
       repo.findPasskeys(userId, realm),
       repo.findMintedAccount(userId, realm),
       repo.findAgentIdentity(userId),
-      repo.findReadableInboxEmails(userId),
+      repo.findReadableInboxes(userId),
     ]);
 
   const hideSavedBrowserAuth = benchmarkSavedBrowserAuthDisabled();
@@ -97,7 +98,7 @@ export async function getAuthOptions(
   // A code a site emails to one of the user's connected inboxes is read by the
   // one-time-code poller and handed to the agent, so those inboxes are a real
   // sign-in path and the agent has to know which addresses they are.
-  const emailOtpEmails = hideSavedBrowserAuth ? [] : readableInboxes;
+  const emailOtpEmails = hideSavedBrowserAuth ? [] : readableInboxes.userInboxEmails;
   const emailOtpAvailable = emailOtpEmails.length > 0;
   const enabledSteelSession =
     steelAuth !== null && steelAuth.disabledAt === null && !hideSavedBrowserAuth;
@@ -145,6 +146,16 @@ export async function getAuthOptions(
       connected_emails: emailOtpEmails,
       match_for_site_account: null,
     },
+    // The same inboxes the one-time-code poller reads, plus the agent's phone.
+    readable_identifiers: [
+      ...new Set([
+        ...emailOtpEmails,
+        ...readableInboxes.mintedInboxEmails,
+        ...(mintedIdentity?.phoneProvider === 'agentphone' && mintedIdentity.phone
+          ? [mintedIdentity.phone]
+          : []),
+      ]),
+    ],
     minted:
       shouldExposeMinted && mintedAccount !== null
         ? {
@@ -272,24 +283,39 @@ async function resolveMintedAccount({
 type AgentIdentityRow = Awaited<ReturnType<typeof repo.findAgentIdentity>>;
 
 /**
- * One in-flight mint per user in this process. Browser agents that start
- * together each ask for auth options at once; without this every one of them
- * minted its own inbox (and provisioned its own phone number), and each was
- * told a different identity than the one finally stored.
+ * One mint per user at a time. Browser agents that start together each ask for
+ * auth options at once; without this every one of them minted its own inbox
+ * (and provisioned its own phone number), and each was told a different
+ * identity than the one finally stored. The Map coalesces callers on this
+ * instance; the per-user shared lock serializes mints across instances, and the
+ * holder re-reads the identity a peer may have just stored.
  */
 const identityMints = new Map<string, Promise<AgentIdentityRow>>();
+
+async function identityIsComplete(identity: AgentIdentityRow): Promise<boolean> {
+  return (
+    identity !== null &&
+    identity.phone !== null &&
+    emailUsesCurrentMintedDomain(identity.email) &&
+    (await findMintedInbox(identity.email)) !== null
+  );
+}
 
 async function ensureMintedIdentity(
   userId: string,
   existingIdentity: AgentIdentityRow,
   existingMintedAccount: Awaited<ReturnType<typeof repo.findMintedAccount>>
 ): Promise<AgentIdentityRow> {
+  // The common case has nothing to mint, so it takes no lock.
+  if (await identityIsComplete(existingIdentity)) return existingIdentity;
   // Callers that already hold a minted account label must not inherit a mint
   // that started without one, or the fresh inbox no longer matches their label.
   const key = `${userId}|${existingMintedAccount?.accountLabel ?? ''}`;
   const inFlight = identityMints.get(key);
   if (inFlight !== undefined) return inFlight;
-  const mint = mintIdentity(userId, existingIdentity, existingMintedAccount).finally(() => {
+  const mint = withSerializedLock(`identity-mint:${userId}`, async () =>
+    mintIdentity(userId, await repo.findAgentIdentity(userId), existingMintedAccount)
+  ).finally(() => {
     identityMints.delete(key);
   });
   identityMints.set(key, mint);
@@ -302,8 +328,7 @@ async function mintIdentity(
   existingMintedAccount: Awaited<ReturnType<typeof repo.findMintedAccount>>
 ): Promise<AgentIdentityRow> {
   const agentName = await repo.findUserAgentName(userId);
-  // A caller that queued behind another mint read "no identity" before it landed.
-  let identity = existingIdentity ?? (await repo.findAgentIdentity(userId));
+  let identity = existingIdentity;
 
   if (identity === null) {
     const existingEmail = existingMintedAccount?.accountLabel ?? null;

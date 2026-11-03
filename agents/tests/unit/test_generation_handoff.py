@@ -10,6 +10,9 @@ from helpers.generation_handoff import (
     should_handoff_to_generation,
 )
 from helpers.wait_condition_or_handoff import (
+    HANDOFF_POLL_SECONDS,
+    IDLE_HANDOFF_SAFETY_SECONDS,
+    note_generation_handoff,
     sleep_or_generation_handoff,
     wait_condition_or_generation_handoff,
 )
@@ -52,6 +55,8 @@ class _FakeWorkflowMod:
         self.wait_calls.append(timeout)
         if predicate():
             return
+        if timeout is not None:
+            self.now_value = self.now_value + timeout
         raise asyncio.TimeoutError()
 
     async def sleep(self, seconds):
@@ -63,6 +68,7 @@ def test_wait_condition_raises_when_live_queue_differs():
         return "navi-agent-tasks@new"
 
     instance = SimpleNamespace(_check_generation_handoff=check)
+    note_generation_handoff(instance, "navi-agent-tasks@new", "navi-agent-tasks@old")
 
     async def _run():
         await wait_condition_or_generation_handoff(
@@ -94,20 +100,75 @@ def test_sleep_raises_on_handoff_before_first_slice():
         return "navi-agent-tasks@new"
 
     fake = _FakeWorkflowMod()
+    instance = SimpleNamespace(_check_generation_handoff=check)
+    note_generation_handoff(instance, "navi-agent-tasks@new", "navi-agent-tasks@old")
 
     async def _run():
-        await sleep_or_generation_handoff(
-            SimpleNamespace(_check_generation_handoff=check),
-            90,
-            poll_seconds=30,
-            workflow_mod=fake,
-        )
+        await sleep_or_generation_handoff(instance, 90, poll_seconds=30, workflow_mod=fake)
 
     try:
         asyncio.run(_run())
         raise AssertionError("expected GenerationHandoffRequested")
     except GenerationHandoffRequested:
-        assert fake.sleep_calls == []
+        assert fake.wait_calls == []
+
+
+def test_unsignalled_park_reads_pointer_only_at_safety_slices():
+    """10k idle agents: no pointer activity per 30s; one read per safety slice."""
+    reads = []
+
+    async def check():
+        reads.append(1)
+        return None
+
+    fake = _FakeWorkflowMod()
+    instance = SimpleNamespace(_check_generation_handoff=check)
+    hours = 2 * 3600
+
+    async def _run():
+        await sleep_or_generation_handoff(instance, hours, workflow_mod=fake)
+
+    asyncio.run(_run())
+    slices = [timeout.total_seconds() for timeout in fake.wait_calls]
+    assert slices == [IDLE_HANDOFF_SAFETY_SECONDS] * int(hours // IDLE_HANDOFF_SAFETY_SECONDS), slices
+    # The final slice ends the sleep itself; every earlier one re-checks once.
+    assert len(reads) == len(slices) - 1, reads
+
+
+def test_signalled_but_unconfirmed_handoff_rechecks_every_poll():
+    """A signal whose pointer read is not yet admitted re-checks at HANDOFF_POLL_SECONDS."""
+    reads = []
+
+    async def check():
+        reads.append(1)
+        return None if len(reads) < 3 else "navi-agent-tasks@new"
+
+    fake = _FakeWorkflowMod()
+    instance = SimpleNamespace(_check_generation_handoff=check)
+    note_generation_handoff(instance, "navi-agent-tasks@new", "navi-agent-tasks@old")
+
+    async def _run():
+        await wait_condition_or_generation_handoff(lambda: False, instance, workflow_mod=fake)
+
+    try:
+        asyncio.run(_run())
+        raise AssertionError("expected GenerationHandoffRequested")
+    except GenerationHandoffRequested as exc:
+        assert exc.task_queue == "navi-agent-tasks@new"
+    assert [t.total_seconds() for t in fake.wait_calls] == [HANDOFF_POLL_SECONDS] * 2
+    assert len(reads) == 3
+
+
+def test_note_generation_handoff_is_idempotent_and_ignores_own_queue():
+    instance = SimpleNamespace()
+    assert note_generation_handoff(instance, "q@old", "q@old") is False
+    assert getattr(instance, "_generation_handoff_hint", None) is None
+    assert note_generation_handoff(instance, " q@new ", "q@old") is True
+    assert note_generation_handoff(instance, "q@new", "q@old") is False
+    assert instance._generation_handoff_hint == "q@new"
+    assert instance._generation_handoff_hint_seq == 1
+    assert note_generation_handoff(instance, "", "q@old") is False
+    assert note_generation_handoff(instance, None, "q@old") is False
 
 
 def test_wait_condition_overall_timeout_normalizes_temporal_timeout():
@@ -155,4 +216,37 @@ def test_sleep_slices_long_wait_into_handoff_polls():
         )
 
     asyncio.run(_run())
-    assert fake.sleep_calls == [30.0, 30.0, 30.0]
+    # Unsignalled: one deterministic timer for the whole (sub-safety-slice) sleep.
+    assert [t.total_seconds() for t in fake.wait_calls] == [90.0]
+
+
+def test_short_caller_slices_still_reach_the_lost_signal_backstop():
+    """A 30s reconcile loop re-entering the park keeps one per-run safety clock.
+
+    Each 30s caller timeout must not read the pointer (that is the old 30s poll),
+    but the lost-signal backstop must still fire once per IDLE_HANDOFF_SAFETY_SECONDS.
+    """
+    from datetime import timedelta
+
+    reads = []
+
+    async def check():
+        reads.append(1)
+        return None
+
+    fake = _FakeWorkflowMod()
+    instance = SimpleNamespace(_check_generation_handoff=check)
+    loops = int(2 * IDLE_HANDOFF_SAFETY_SECONDS // 30)
+
+    async def _run():
+        for _ in range(loops):
+            try:
+                await wait_condition_or_generation_handoff(
+                    lambda: False, instance, timeout=timedelta(seconds=30), workflow_mod=fake
+                )
+            except asyncio.TimeoutError:
+                continue
+
+    asyncio.run(_run())
+    assert len(reads) == 1, reads  # at the 20-minute mark; the 40-minute check is the next park
+    assert all(t.total_seconds() == 30 for t in fake.wait_calls), fake.wait_calls

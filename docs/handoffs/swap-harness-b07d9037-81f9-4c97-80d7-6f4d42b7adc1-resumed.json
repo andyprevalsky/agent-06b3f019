@@ -1,0 +1,588 @@
+{
+  "schemaVersion": 1,
+  "utc": "2026-10-13T00:34:15.489798+00:00",
+  "phase": "authenticated originals restored; meaningful offline original-task continuation complete; awaiting coordinator verification before old archival",
+  "old_devbox_id": "b07d9037-81f9-4c97-80d7-6f4d42b7adc1",
+  "old_internal_thread_id": "ph7dvh51k0atw7myrk0jk1bynx8fy2kj",
+  "old_public_thread_url": "https://boxes.dev/thread/thr_8b123724f677458da61d5e215786a405",
+  "old_native_session_id": "4f2f012f-6f90-478e-8068-2b9474d4e5da",
+  "replacement_devbox_id": "e9afcffd-7ba9-4bfd-8703-d770952fe1c3",
+  "replacement_internal_thread_id": "ph7cc73xma14jdg6chxpnhbgth8g7c1a",
+  "replacement_public_thread_id": "thr_d2e1b555d6314abe8d9f74da7dd979aa",
+  "replacement_thread_url": "https://boxes.dev/thread/thr_d2e1b555d6314abe8d9f74da7dd979aa",
+  "replacement_native_session_id": "01a132a3-ea1f-7b22-abfb-70608400d02e",
+  "replacement_active_turn_id": "01a132a3-f0ef-7943-a08b-9e1db969e1a4",
+  "launch_request_id": "407eed10-adb1-4d76-b4f3-36aa96b29cd0",
+  "start_key": "swap-harness-whm-20261012-full-checkpoint-coordinator-generation1",
+  "identity_source": "coordinator saved managed start receipt and explicit launch-metadata message; supported current get-link matches public thread URL",
+  "harness": "codex",
+  "supplied_checkpoint_sha": "677068533e050195c62afc8118f3d35a8511f5ea",
+  "initial_checked_out_sha": "677068533e050195c62afc8118f3d35a8511f5ea",
+  "checked_out_sha": "3879ae4c849b56fa1b1626ba61d037cc3479a794",
+  "checkout_path": "/home/boxes/rose-wmh-resumed",
+  "local_branch": "codex/whm-resumed-generation1",
+  "existing_pr_branch": "codex/wmh-experiential-parallel-20261006",
+  "handoff_path": "docs/handoffs/swap-harness-b07d9037-81f9-4c97-80d7-6f4d42b7adc1.md",
+  "instructions_read": [
+    "CLAUDE.md",
+    "AGENTS.md",
+    "WMH_HANDOFF.md",
+    "docs/plans/active/wmh-local-continuation-20261006.md",
+    ".claude/skills/instantiate-whm/SKILL.md",
+    "docs/testing.md",
+    "docs/handoffs/swap-harness-thr_8b123724f677458da61d5e215786a405.md",
+    "all nonsecret receipts in docs/handoffs/whm-b07d9037-preservation"
+  ],
+  "unexpected_dirty_source": {
+    "initial_status": "clean",
+    "original_root_head": "7133565ba85531db4e0d25498d9a7a22d491291a",
+    "root_preserved": true,
+    "no_resets_or_force_push": true,
+    "current_local_generated_untracked": "agents/venv symlink, not authored task source"
+  },
+  "source_checks": {
+    "original_resume_head_is_ancestor": true,
+    "original_run12_head_is_ancestor": true,
+    "runtime_source_matches_run12_sha": true,
+    "runtime_paths_compared": [
+      "agents",
+      "back-end",
+      "front-end",
+      "scripts",
+      ".claude"
+    ],
+    "original_helper_manifest_sha256": "f89f41b868b04d2b9190f7b6bf6c712ae273fe813e132a87d50545c67c866dda",
+    "original_helpers_verified": 15,
+    "original_helpers": [
+      {
+        "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/build.sh",
+        "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/build.sh",
+        "sha256": "bcf769c8591f77eb53698da5868ce985bdc64cf6e16a0036906289a96f63181c",
+        "bytes": 668
+      },
+      {
+        "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/handoff-realistic-draft.md",
+        "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/handoff-realistic-draft.md",
+        "sha256": "ff535c8c744c2bcaee16a1431a48c6d58f654d3a952f842b19f70016a5d54484",
+        "bytes": 3427
+      },
+      {
+        "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/handoff-section-draft.md",
+        "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/handoff-section-draft.md",
+        "sha256": "8e493f7bb96a667f759360a3708e5c4d5685df7c6d4183fd8aa611edc2284ae7",
+        "bytes": 3908
+      },
+      {
+        "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/history_prefix_contract_test.py",
+        "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/history_prefix_contract_test.py",
+        "sha256": "756d77041d036f49e39578552051fd912cc46c787c639c6b33543bb3c80d3295",
+        "bytes": 3901
+      },
+      {
+        "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/launch-fundraiser-merged.sh",
+        "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/launch-fundraiser-merged.sh",
+        "sha256": "de5776539427474a2c15fb24d464f6be861672054cd7a552d1bc6897a156b4e5",
+        "bytes": 2537
+      },
+      {
+        "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/launch.sh",
+        "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/launch.sh",
+        "sha256": "a66816d1c176f05bfaf368c7d40470401b22a5b9f788849772f14c3178012d94",
+        "bytes": 2403
+      },
+      {
+        "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/measure.py",
+        "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/measure.py",
+        "sha256": "d5872a62ada7484f3343caec41284fbd76daea6d6db1f56857238c9495999626",
+        "bytes": 4826
+      },
+      {
+        "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/native-build.sh",
+        "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/native-build.sh",
+        "sha256": "3ea62c2941cb1a3d0993880d5e3633b9194017c0b31e62c166fc066ab7b8295e",
+        "bytes": 571
+      },
+      {
+        "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/run-condition.sh",
+        "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/run-condition.sh",
+        "sha256": "1af07e2b23272892fce70f53af5b4642152e27c0483e96fbe65d4325c8596e91",
+        "bytes": 3178
+      },
+      {
+        "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/run-fundraiser.sh",
+        "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/run-fundraiser.sh",
+        "sha256": "22aeb5a850e76152384761bf1faa80df8157c62c7af5b4d08bb8706eb780ecc5",
+        "bytes": 2879
+      },
+      {
+        "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/serve-test.sh",
+        "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/serve-test.sh",
+        "sha256": "2682d23e0df1e257aee26c0bf7210369a65f981c52a2e699ef69e6ee2517b051",
+        "bytes": 1720
+      },
+      {
+        "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/wmh-serve-merged.sh",
+        "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/wmh-serve-merged.sh",
+        "sha256": "93b0e2d73bcf26c12ed47f48d7ca2ef6ade212e64878005a5ed325fa2b452291",
+        "bytes": 1110
+      },
+      {
+        "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/wmh-serve.sh",
+        "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/wmh-serve.sh",
+        "sha256": "1c8d79d29098e0c1871c42e94d0cabd9f75d632dd43bff45eb6bacda0ad3f265",
+        "bytes": 1091
+      },
+      {
+        "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/fundraiser/progress.sh",
+        "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/fundraiser/progress.sh",
+        "sha256": "9b270d3020e7b9d27009f386037dff8b9187d113c4144ab9d0eb85ea444bba12",
+        "bytes": 1683
+      },
+      {
+        "original": "/home/boxes/rose-wmh-merge/.context/run-named-bb.py",
+        "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-merge/.context/run-named-bb.py",
+        "sha256": "86d94eeb036bf011870a0ff8567b8b78571fc2f0cc3e43bfaf092115a6db8fa5",
+        "bytes": 1057
+      }
+    ],
+    "cache_bundle_sha256": "a9b1c7819849190460300f84afab335cce1e7343ba470b46c55f297c4c212ef3",
+    "cache_bundle_verify_exit_code": 0,
+    "recovered_exact_cache_refs": {
+      "wmh-cache-i0-run": "440028235afa0a3eb10c1cdbccbbc183f191dd5a",
+      "wmh-cache-i1-run": "30290584503df457fc920c3e7282bd0368e7843b",
+      "wmh-cache-i2-run": "ef58395a8c905e0bd2f6535cde8f699d03edd1aa",
+      "wmh-cache-i3-run": "fffd8714cb1b716c1dce5ab98f28e5871636c74d"
+    },
+    "prerequisite_commits_present": true,
+    "full_original_git_bundle_path": "/home/boxes/whm-originals-generation1/original-runtime/rose/.context/swap-harness/all-original-repository-refs.bundle",
+    "full_original_git_bundle_verify_exit_code": 0,
+    "archive_helper_sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4"
+  },
+  "swap_harness_install": {
+    "published_sha": "724321f5d5e50cc9b817cdccdbb83579db7141fc",
+    "scratch_path": "/var/tmp/.agents/skills/swap-harness",
+    "only_skill_folder_extracted": true,
+    "installer_exit_code": 0,
+    "installed_for": [
+      "/home/boxes/.agents/skills/swap-harness",
+      "/home/boxes/.codex/skills/swap-harness",
+      "/home/boxes/.claude/skills/swap-harness"
+    ],
+    "feature_branch_not_merged": true
+  },
+  "archive_verifications": [
+    {
+      "receipt": "docs/handoffs/whm-b07d9037-preservation/native-static-receipt.json",
+      "verified_from_replacement_filesystem": true,
+      "authenticated_original_files": 15,
+      "all_member_sha256_match": true,
+      "ciphertext_and_gzip_sha256_match": true,
+      "embedded_manifest_sha256_match": true,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "swap-harness/b07d9037-81f9-4c97-80d7-6f4d42b7adc1/20261012/native-static.tar.gz.gcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "e02cee387253ebae4539e4f989710bb6f7c8314357bc6d3cc1b6796e4012ebed",
+      "gzip_sha256": "e137a01e222fe2d90b7b8d0a843235b5a8a3a2459ae13210075be364ec6ffa57",
+      "stored_bytes": 1759256930,
+      "frames": 210,
+      "files": 15,
+      "original_bytes": 11278508882,
+      "manifest_sha256": "8ad02e566cde3170b8b9bbca3b1aeee9537ded510574145994cb971aeba9da52",
+      "full_readback_verified": true,
+      "old_box_authenticated_member_verification": true
+    },
+    {
+      "receipt": "docs/handoffs/whm-b07d9037-preservation/original-runtime-receipt.json",
+      "verified_from_replacement_filesystem": true,
+      "authenticated_original_files": 44439,
+      "all_member_sha256_match": true,
+      "ciphertext_and_gzip_sha256_match": true,
+      "embedded_manifest_sha256_match": true,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "swap-harness/b07d9037-81f9-4c97-80d7-6f4d42b7adc1/20261012/original-runtime.tar.gz.gcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "aa1c527d066ff52856001fcd5f8e13ce72dc60d14d124d9eece7defdeddec71d",
+      "gzip_sha256": "d3e60e5aac0d82edc0efb3c4c5a3037b4fb1faf81365ea6e0173d690f1972ea8",
+      "stored_bytes": 2320147995,
+      "frames": 277,
+      "files": 44439,
+      "original_bytes": 11789967360,
+      "manifest_sha256": "b2ecd73efb8833e1669d8a1e23fee8ae6d87b2fece58aa23bf2414d71fd3c7fe",
+      "full_readback_verified": true,
+      "old_box_authenticated_member_verification": true
+    },
+    {
+      "receipt": "docs/handoffs/whm-b07d9037-preservation/original-git-control-receipt.json",
+      "verified_from_replacement_filesystem": true,
+      "authenticated_original_files": 3,
+      "all_member_sha256_match": true,
+      "ciphertext_and_gzip_sha256_match": true,
+      "embedded_manifest_sha256_match": true,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "swap-harness/b07d9037-81f9-4c97-80d7-6f4d42b7adc1/20261012/original-git-control.tar.gz.gcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "24a06cadb320bcfbb304bc603c8deb08d90828729a7004e53dc4914bd574f81d",
+      "gzip_sha256": "39a589165a060cde567e775e069eede080cb8fba801b5ae2439cbce54d10c2c9",
+      "stored_bytes": 41023,
+      "frames": 1,
+      "files": 3,
+      "original_bytes": 43957,
+      "manifest_sha256": "79262ee3d4c81f51634faca68b172b4fd8cd303f47600083000b6c53c4093a2e",
+      "full_readback_verified": true,
+      "old_box_authenticated_member_verification": true
+    },
+    {
+      "receipt": "docs/handoffs/whm-b07d9037-preservation/supplement-receipt.json",
+      "verified_from_replacement_filesystem": true,
+      "authenticated_original_files": 5,
+      "all_member_sha256_match": true,
+      "ciphertext_and_gzip_sha256_match": true,
+      "embedded_manifest_sha256_match": true,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "swap-harness/b07d9037-81f9-4c97-80d7-6f4d42b7adc1/20261012/mirror-and-published-evidence.tar.gz.gcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "5caeed86776aaa4f4869cbc4e422ec604a259efb0275924da00c8c3b94c71cc6",
+      "gzip_sha256": "9fcdd0570a97bf149739ada6967f43f75ac6262e8c0ab031bfcf17f00cb47ae7",
+      "stored_bytes": 31962284,
+      "frames": 4,
+      "files": 5,
+      "original_bytes": 32700084,
+      "manifest_sha256": "995fd06511e4132e76f13e766f528aa32cf8745e47e99b27584460ddb45dda29",
+      "full_readback_verified": true,
+      "old_box_authenticated_member_verification": true
+    },
+    {
+      "receipt": "docs/handoffs/whm-b07d9037-preservation/protected-instructions-receipt.json",
+      "verified_from_replacement_filesystem": true,
+      "authenticated_original_files": 4,
+      "all_member_sha256_match": true,
+      "ciphertext_and_gzip_sha256_match": true,
+      "embedded_manifest_sha256_match": true,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "swap-harness/b07d9037-81f9-4c97-80d7-6f4d42b7adc1/20261012/protected-instruction-copies.tar.gz.gcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "f8af5c4626c8d96eb102cbd6cfeaae57e2033ecbd944d1075ee3e94ba84a301c",
+      "gzip_sha256": "e425a2534d1713ac39a9e16d45fce50c3b7d3d531e8c905d63690dad313338cc",
+      "stored_bytes": 74802,
+      "frames": 1,
+      "files": 4,
+      "original_bytes": 170577,
+      "manifest_sha256": "b4a2cac25eb2b709aba6fbb8cbcbddd48503c3c78b4aeb24b6da863b21983a7c",
+      "full_readback_verified": true,
+      "old_box_authenticated_member_verification": true
+    },
+    {
+      "receipt": "docs/handoffs/whm-b07d9037-preservation/original-session-receipt.json",
+      "verified_from_replacement_filesystem": true,
+      "authenticated_original_files": 19,
+      "all_member_sha256_match": true,
+      "ciphertext_and_gzip_sha256_match": true,
+      "embedded_manifest_sha256_match": true,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "swap-harness/b07d9037-81f9-4c97-80d7-6f4d42b7adc1/20261012/original-claude-context.tar.gz.gcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "8c53be7df6e260c8069e86d01a3e8e008a8374b1c56c57f5a5bdba15e51350c4",
+      "gzip_sha256": "27d97b44ebe002be597af2e859502eeb7c7e6efa76ded7f8180875ee9dcddecc",
+      "stored_bytes": 19878440,
+      "frames": 3,
+      "files": 19,
+      "original_bytes": 43204548,
+      "manifest_sha256": "91ce195d253d3da5bb9a9acc8a7175b437abc3f4b85f68c5a9ff2521355275df",
+      "full_readback_verified": true,
+      "old_box_authenticated_member_verification": true
+    }
+  ],
+  "archive_totals": {
+    "original_members": 44485,
+    "original_bytes": 23144595408,
+    "ciphertext_bytes": 4131361474,
+    "all_six_verify_commands_exit_code": 0,
+    "new_filesystem_authenticated_decrypted_every_member": true,
+    "upload_acknowledgements_not_used_as_restore_proof": true
+  },
+  "restore": {
+    "native_static": {
+      "empty_staging_destination": "/home/boxes/whm-originals-generation1/native-static",
+      "restore_exit_code": 0,
+      "restored_files": 15
+    },
+    "original_runtime": {
+      "empty_staging_destination": "/home/boxes/whm-originals-generation1/original-runtime",
+      "restore_exit_code": 0,
+      "restored_files": 44439
+    },
+    "usable_native_model_and_dynamic_state": "/home/boxes/rose-wmh-resumed/.context/world-model-native-resume",
+    "usable_fixture_initial_state_quality_run12_directory": "/home/boxes/rose-wmh-resumed/.context/wmh-resume-20261009",
+    "usable_private_db_dump_directory": "/home/boxes/rose-wmh-resumed/.context/original-database-snapshots",
+    "usable_original_root_git_bundle": "/home/boxes/rose-wmh-resumed/.context/original-repository-refs.bundle",
+    "original_env_files_private_at": "/home/boxes/whm-originals-generation1/original-runtime/rose",
+    "other_four_archives": "complete authenticated/decrypted streaming member verification; protected/session/control/mirror originals preserved remotely; no protected files replaced"
+  },
+  "environment": {
+    "authoritative_files": [
+      "/home/boxes/rose/agents/.env",
+      "/home/boxes/rose/back-end/.env",
+      "/home/boxes/rose/front-end/.env"
+    ],
+    "linked_complete_files": true,
+    "old_restored_dotenvs_match_inherited_authoritative_values": true,
+    "backend_api_key_present_and_agrees": true,
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "key_authentication_succeeded": true,
+    "agents_python": "3.11.9",
+    "native_python": "3.12.3",
+    "native_experiential": "0.7.158+rose.bf75987e",
+    "native_setup_command": "bash scripts/setup-world-model.sh",
+    "native_setup_exit_code": 0,
+    "dependency_manifests_match_inherited_trees": true,
+    "node": "22.23.3",
+    "postgres_server_and_client": "16.15",
+    "unique_workspace": "whm-gen1-e9afcffd",
+    "unique_temporal_queue": "navi-agent-tasks-whm-gen1-e9afcffd",
+    "unique_local_fixture_db": "whm_gen1_e9afcffd_fixture_20261012",
+    "private_workspace_config": "/home/boxes/rose-wmh-resumed/.context/whm-migration/workspace.env",
+    "workers_started": 0,
+    "managed_project_settings_changed": false,
+    "native_load_not_attempted": "new box has no swap configured; >=40GB swap/memory scope preflight remains required before serving recovered model"
+  },
+  "first_meaningful_continuation": {
+    "action": "Read and hash-verify original run12 result and joined native retirement, compare restored frozen fixture to initial-state counts, replay original canonical requests through current wire stream offline, and run existing clock/stream owning checks",
+    "result_path": "/home/boxes/whm-originals-generation1/original-runtime/rose-wmh-merge/agents/benchmarks/runs/20261012_234833_6f4ddc5c-6874-4121-b36e-ca5f2f34ce81_raise-5m-rose-labs-brex.json",
+    "result_sha256": "ced3f734e3a80b0d3cca1acc421c7955e6844bd1d7ac29aa112ed466227cea1a",
+    "retirement_path": "/home/boxes/whm-originals-generation1/original-runtime/rose-wmh-resume/.context/world-model-native-resume/native-retirements/78d15f8582e54904891498644fe4c1da.json",
+    "retirement_sha256": "e7fe63858245cc665c368098779805995a70824cf646bc2ca5eea1b5364ff0a9",
+    "initial_state_path": "/home/boxes/whm-originals-generation1/original-runtime/rose-wmh-resume/.context/wmh-resume-20261009/fundraiser/context/run-state-messaging-20261012.json",
+    "initial_state_sha256": "cdf955f29336eb54f70e3779bc8c07b79db6bf2c4a80f7d5bf0c61ba5e183c49",
+    "terminal_result": "FAILURE",
+    "duration_seconds": 3665.3,
+    "native_joined_revision": 105,
+    "full_history_fixture": {
+      "messages_by_channel": [
+        {
+          "channel": "IMESSAGE",
+          "count": 23130,
+          "earliest": "2019-02-23T22:59:16.535",
+          "latest": "2026-10-12T21:35:21.763"
+        },
+        {
+          "channel": "WHATSAPP",
+          "count": 9187,
+          "earliest": "2026-07-14T20:39:18",
+          "latest": "2026-10-12T20:30:33"
+        },
+        {
+          "channel": "EMAIL",
+          "count": 10593,
+          "earliest": "2014-02-18T19:20:20",
+          "latest": "2026-10-12T22:22:19"
+        }
+      ],
+      "contacts": 2225,
+      "integration_count": 9,
+      "connected_integration_count": 9,
+      "message_total": 42910,
+      "fast_cache_entries": 0
+    },
+    "full_history_evidence": "Restored original 20261012 fixture DB queried READ ONLY: 42910 rows and matching per-channel history ranges, 2225 contacts, 9 connected integrations, 0 FastModeCacheEntry; original initial-state counts match; original run.env records seed_message_limit=100000 and seed_source_db=wmh_fixture_source_20261012; original fixture-seed log confirms42910 message records",
+    "benchmark_db_limit": "Original benchmark DB was removed by its canonical launcher; no missing bytes reconstructed. Per-row comparison to that deleted DB is unavailable.",
+    "world_as_of_utc": "2026-10-12T23:00:00Z",
+    "trajectory": {
+      "research_attempts": 79,
+      "research_runs": 10,
+      "research_status_groups": {
+        "partial_or_incomplete_or_unresolved": 37,
+        "completed_or_other": 33,
+        "failed_or_error": 9
+      },
+      "outreach_attempts": 3,
+      "outreach_status_counts": {
+        "submitted_on_page_confirmation_verified": 1,
+        "sent_provider_accepted": 2
+      },
+      "provider_accepted_email_sends": 2,
+      "delivered_to_recipient_proven": false,
+      "submission_attempts": 6,
+      "submission_status_counts": {
+        "submitted_confirmed": 2,
+        "submission_attempted_receipt_unverified": 2,
+        "submitted_confirmed_eligibility_unresolved": 1,
+        "retry_submitted_confirmed": 1
+      },
+      "confirmed_submission_records": 4,
+      "unverified_submission_records": 2,
+      "confirmed_founder_intake_outreach_records": 1,
+      "blocked_intake_attempts": 1,
+      "human_responses_observed_in_outreach_submission": 0,
+      "investor_meeting_calendar_events": 0,
+      "private_review_calendar_events": 2,
+      "commitments": 0,
+      "signed_instruments": 0,
+      "pending_wires": 0,
+      "settled_proceeds_cents": 0,
+      "incoming_transfers": 0,
+      "unique_submissions_uncertain": "4 confirmed submission records plus 1 founder-intake outreach record; retry/duplicate risk prevents equating records with unique applications",
+      "stage_rubric": {
+        "stages": [
+          "research",
+          "outreach",
+          "replies",
+          "meetings",
+          "commitments",
+          "signing",
+          "wires",
+          "goal_met"
+        ],
+        "stages_with_evidence": 2,
+        "binary_stage_fraction_pct": 25,
+        "interpretation": "Descriptive 2/8 stage-presence rubric; research/outreach remain incomplete. This is not calibrated task completion and does not establish progress beyond outreach."
+      }
+    },
+    "execution_identity": {
+      "schema": "rose.wmh_native_execution.v1",
+      "base_world_model_id": "grounded-world-model-785e30597233ee43e354",
+      "base_world_model_manifest_sha256": "cdc82bf8b55b35309c5e6925659fd7e74e51825dbccf2dc338b5777fbdffe703",
+      "base_protocol_version": "text-world-model-v3",
+      "base_protocol_sha256": "97f84f61fefa7665c18d9fd46253a4f710f5b64f186c19b18a957bd7b8a88122",
+      "policy_id": "rose-outcome-distribution-v3",
+      "policy_version": "3",
+      "policy_sha256": "3ace77b6b1a3a33ca94e69541cd1e671a4c3a7694d3612b9ddc68f1ccdf6da8a",
+      "base_system_sha256": "acae5f4de354cbd8e0e4753bbbf913a1100b8eeeb7af9ba84ed47f513d1b75ce",
+      "effective_system_sha256": "d772e38450ffae45f44598e215b9cf50237062f86ad867d4a1d4fa7c9c198041",
+      "prediction_protocol": "rose-timed-outcome-distribution-v1",
+      "execution_sha256": "c954e3d7605357572b62dab6db16f690d59258d54305e8b5ada1bac9bdb8fdb5"
+    },
+    "prediction_quality": {
+      "distribution_checks": {
+        "json_parsed_response_distributions": 107,
+        "outcome_count_range": [2, 6],
+        "probability_sum_within_1e_6": 107,
+        "committed_selected_probability_mean": 0.5386666666666666,
+        "selection_identity_fields_complete": 107,
+        "sample_once_keys": "read-only, unchanged; no replay generated"
+      },
+      "historical_ab": {
+        "cases": 8,
+        "arm_predictions": 24,
+        "valid_predictions": 24,
+        "mean_overlap_snapshot_repeat": 0.8180000000000001,
+        "mean_overlap_snapshot_stream": 0.8985,
+        "mean_overlap_repeat_stream": 0.86175,
+        "limitation": "Historical 8-case A/B, not run12 quality calibration or equivalent-outcome proof"
+      },
+      "exact_original_request_folds": {
+        "records": 116,
+        "exact_canonical_folds": 116,
+        "canonical_layout_fallbacks": 0,
+        "stream_guide": "current checkpoint",
+        "model_calls": 0,
+        "book_fields": {
+          "_max_change_ratio": 3.0,
+          "_min_change_chars": 60000,
+          "_max_stream_chars": 1200000,
+          "_max_streams": 512,
+          "resets": ["changes_exceed_baseline"],
+          "fallbacks": [],
+          "branches": 0
+        }
+      },
+      "limitations": "Offline validation and historical A/B preserve evidence; no new stochastic calibration, goal success or causal root established"
+    },
+    "diagnostics": {
+      "prediction_json_files": 223,
+      "responses": 107,
+      "validated_proposal_selection_records": 107,
+      "prediction_error_records": 9,
+      "error_types": {
+        "CancelledError": 4,
+        "HTTPStatusError": 4,
+        "TextWorldModelProtocolError": 1
+      },
+      "committed_modeled_error_observations": 9,
+      "commits_with_state_retry": 2,
+      "state_retries_total": 2,
+      "append_merged_commits": 96,
+      "committed_prediction_attempts": 108,
+      "protocol_repair_attempts": 1,
+      "prediction_elapsed_wall_seconds": {
+        "min": 4.964,
+        "median": 125.697,
+        "max": 994.712
+      },
+      "world_clock": {
+        "start_ms": 1791846000000,
+        "shared_time_ms": 1791848886900,
+        "shared_advance_seconds": 2886.9,
+        "agents": 11,
+        "terminal_snapshot_agent_states": {
+          "waiting_on_children": 1,
+          "done": 5,
+          "running": 4,
+          "waiting": 1
+        }
+      },
+      "root_cause": "Unestablished; error counts and incomplete research are observations, not a causal diagnosis."
+    },
+    "wmh_usage": {
+      "actual_models": ["gpt-6.1-sol-foundry", "openai/gpt-6.1-sol"],
+      "call_sites": [
+        "wmh_world_model_distribution_v1",
+        "wmh_world_model_timed_distribution_v1"
+      ],
+      "demo_hit_pct": 0.0,
+      "demo_hits": 0,
+      "demo_lookups": 116,
+      "demo_misses": 116,
+      "demo_stores": 107,
+      "demo_write_only": 0,
+      "native_attempts": 116,
+      "native_errors_by_type": {
+        "CancelledError": 4,
+        "HTTPStatusError": 4,
+        "TextWorldModelProtocolError": 1
+      },
+      "native_successful_responses": 107,
+      "provider_cache_write_tokens": 769433,
+      "provider_cached_input_tokens": 17673634,
+      "provider_input_cost_vs_no_cache": 0.1001,
+      "provider_metered_requests": 108,
+      "provider_output_tokens": 700143,
+      "provider_plain_input_tokens": 324,
+      "provider_requests_with_cached_input": 106,
+      "provider_token_hit_pct": 95.82638,
+      "provider_total_input_tokens": 18443391,
+      "validated_proposals": 107
+    },
+    "agent_cache_pct_separate": 79.2,
+    "durable_fe_url": "https://www.roselabs.ai/?agent-id=65889659-9f08-4488-917e-9611223be811",
+    "fresh_browser_verification": "original publisher verified55 messages; not re-published or independently re-browsered in this offline continuation",
+    "offline_analysis_path": "/home/boxes/rose-wmh-resumed/.context/whm-migration/run12-offline-trajectory.json",
+    "offline_analysis_sha256": "6fd1baa0d90532221a2707686b9a6af3c7cb6f5fc212ade160b7ccf20694445c"
+  },
+  "tests": [
+    {
+      "command": "cd agents && source venv/bin/activate && python -m pytest benchmarks/wmh_world_clock_test.py benchmarks/wmh_wire_stream_test.py -q",
+      "python": "3.11.9",
+      "exit_code": 0,
+      "passed": 26,
+      "duration_seconds": 0.31,
+      "registered_owner": "agents/tests/blackbox/world_model_harness.blackbox.py:test_native_rose_provider_regressions"
+    }
+  ],
+  "resource_and_approval_status": {
+    "original_run_terminal_and_cleanup_receipts_read": "benchmark clean; stack clean; joined native retirement105",
+    "new_paid_benchmark_or_model_calls": 0,
+    "merged": false,
+    "deployed": false,
+    "freedom_and_protected_instructions_preserved": true,
+    "old_box_archival": "awaiting coordinator verification of this durable receipt; no archive operation issued here",
+    "browser_mode_p2_excluded": true,
+    "no_other_task_lifecycle_changes": true
+  },
+  "next_safe_work": "Inspect correlated cancellation/provider diagnostics from original logs and prepare original-user multiple-choice options before any new paid trial"
+}

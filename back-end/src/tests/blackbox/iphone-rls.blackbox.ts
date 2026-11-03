@@ -9,6 +9,9 @@ import { nonLocalDatabaseReason } from '../../utils/localDatabaseUrl';
 for (const key of ['DATABASE_URL', 'DIRECT_URL'])
   assert.equal(nonLocalDatabaseReason(process.env[key]), null, `${key} must be explicit loopback`);
 const url = new URL(process.env.DIRECT_URL!);
+// Runners append Prisma pool parameters that libpq/psql rejects as URI options.
+for (const key of ['connection_limit', 'pool_timeout', 'pgbouncer', 'schema', 'socket_timeout'])
+  url.searchParams.delete(key);
 const name = `victoria_iphone_rls_${randomUUID().replaceAll('-', '')}`;
 const sql = (target: URL, input: string) =>
   execFileSync('psql', ['-X', target.toString(), '-v', 'ON_ERROR_STOP=1', '-f', '-'], {

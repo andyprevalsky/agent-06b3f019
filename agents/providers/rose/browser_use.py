@@ -25,6 +25,7 @@ import structlog
 
 from providers.rose.schema import build_anthropic_tools_from_response_model
 from tools.prompts import attempt_completion_prompt
+from utils.browser_auth_contract import build_authentication_contract
 
 # Single source of truth for verifier rules. The browser prompt embeds the
 # same grading block as the main agent so attempt_completion semantics do not
@@ -32,6 +33,7 @@ from tools.prompts import attempt_completion_prompt
 from utils.prompts import VERIFICATION_RULES
 
 logger = structlog.get_logger()
+
 
 
 def recover_from_challenge_enabled() -> bool:
@@ -193,6 +195,18 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "description": "Open a new browser tab, optionally navigating to a URL",
         "params": {"url": {"type": "string", "description": "URL to open in new tab (defaults to about:blank)"}},
     },
+    "read_tool_output": {
+        "description": (
+            "Read omitted tool output using its opaque output_id. Pages use Unicode character offsets; "
+            "follow next_offset or search with query. Only outputs from this agent/session can be read."
+        ),
+        "params": {
+            "output_id": {"type": "string", "description": "Opaque ID from a tool result preview.", "required": True},
+            "offset": {"type": "integer", "description": "Character offset; use next_offset to continue."},
+            "limit": {"type": "integer", "description": "Maximum number of Unicode characters to read (default: 20000, max: 20000)."},
+            "query": {"type": "string", "description": "Optional literal substring to find at or after offset."},
+        },
+    },
     "upload_file": {
         "description": (
             "Upload a file to a file input element. The file must be available in the session's available_files "
@@ -218,8 +232,8 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "available, the minted agent account when it has an email, and guest/anonymous completion when the "
             "page offers it (for example Continue as guest, Checkout as guest, or I'll reserve). Cookie and "
             "Steel-session auth are applied automatically before you start. "
-            "Before calling, leave the site's sign-in form (username/password or code entry) open and "
-            "visible, so the user can sign in without navigating. "
+            "Before calling, leave the auth step you are blocked on open and visible, so the user can "
+            "complete it without navigating. "
             "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, access-denied interstitials, or "
             "unusual-traffic pages - those are not authentication blockers. Use recover_from_challenge for "
             "those instead of trying to solve them yourself."
@@ -706,9 +720,7 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
     from browser_tools.schemas import BROWSER_TOOL_MODELS, create_browser_agent_action_model
 
     if not recover_from_challenge_enabled():
-        available_actions = [
-            name for name in available_actions if name != "recover_from_challenge"
-        ]
+        available_actions = [name for name in available_actions if name != "recover_from_challenge"]
 
     known_actions = [name for name in available_actions if name in BROWSER_TOOL_MODELS]
     if not known_actions:
@@ -723,10 +735,7 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
         generated_tool = by_name[action_name]
         prompt_metadata = BROWSER_USE_TOOLS.get(action_name) or {}
         description = prompt_metadata.get("description") or generated_tool["description"]
-        if (
-            action_name == "request_user_assistance_for_authentication"
-            and not recover_from_challenge_enabled()
-        ):
+        if action_name == "request_user_assistance_for_authentication" and not recover_from_challenge_enabled():
             description = (
                 "Waterfall step 8: request user help signing in only after steps 1-7 are "
                 "exhausted or unavailable. Before calling, you must have tried every saved "
@@ -734,8 +743,8 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
                 "account when it has an email, and guest/anonymous completion when the page "
                 "offers it (for example Continue as guest, Checkout as guest, or I'll reserve). "
                 "Cookie and Steel-session auth are applied automatically before you start. "
-                "Before calling, leave the site's sign-in form (username/password or code entry) "
-                "open and visible, so the user can sign in without navigating. "
+                "Before calling, leave the auth step you are blocked on open and visible, so the user "
+                "can complete it without navigating. "
                 "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, "
                 "access-denied interstitials, or unusual-traffic pages - those are not "
                 "authentication blockers. Wait briefly or try an alternate URL/path instead "
@@ -768,6 +777,18 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
     return tools
 
 
+def build_browser_authentication_contract(available_actions: List[str]) -> str:
+    recover_enabled = recover_from_challenge_enabled() and "recover_from_challenge" in set(available_actions or [])
+    contract = build_authentication_contract(recover_enabled=recover_enabled)
+    if "phone" not in available_actions:
+        return contract
+    return (
+        "This authentication ladder applies to targetKind=browser. For targetKind=iphone, "
+        "follow the Cloud iPhone skill's authentication rules instead.\n"
+        + contract
+    )
+
+
 def build_browser_use_system_prompt(available_actions: List[str]) -> str:
     """Canonical browser-automation system prompt.
 
@@ -778,36 +799,8 @@ def build_browser_use_system_prompt(available_actions: List[str]) -> str:
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY by the caller when dynamic context is
     present. Provider transforms strip the marker before sending the request.
     """
-    native_auth_rule = (
-        "This authentication ladder applies to targetKind=browser. For targetKind=iphone, "
-        "use the native criticalReason contract: request help only for a blocking password "
-        "or user-only verification; ordinary phone navigation stays autonomous.\n"
-        if "phone" in available_actions else ""
-    )
-    recover_enabled = (
-        recover_from_challenge_enabled()
-        and "recover_from_challenge" in set(available_actions or [])
-    )
-    if recover_enabled:
-        challenge_rule = (
-            "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
-            "are not authentication. recover_from_challenge is a relatively expensive way to "
-            "force-open a blocked page or service - do not use it when an alternate path can "
-            "complete the goal. Do not drag sliders, click verify buttons, or otherwise try "
-            "to solve challenge widgets yourself. Never call "
-            "request_user_assistance_for_authentication while a challenge interstitial is "
-            "still visible."
-        )
-    else:
-        challenge_rule = (
-            "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
-            "are not authentication. No challenge-recovery tool is available - wait briefly "
-            "for the provider auto-solver, try an alternate URL or path to complete the "
-            "goal, and do not drag sliders, click verify buttons, or otherwise try to solve "
-            "challenge widgets yourself. Never call "
-            "request_user_assistance_for_authentication while a challenge interstitial is "
-            "still visible."
-        )
+    _ = available_actions
+    authentication_contract = build_browser_authentication_contract(available_actions)
     return f"""# Role
 
 You are a browser automation agent. You take in a user goal and complete the goal by interacting with a browser you are exposed to via tools.
@@ -867,30 +860,7 @@ action envelope in text; use the provided tool call.
 - When the goal excludes groceries (or food), treat food, beverages, snacks, protein bars, candy, water, soft drinks, and grocery-marketplace packs as groceries even if Amazon shows a Return items button for a packaged SKU. Prefer the most recently delivered eligible non-excluded physical item.
 - If Amazon shows that a return request needs to be reviewed or to contact customer service, that item's self-service return path is blocked. Do not open Contact Us. Leave that item, pick the next eligible non-excluded item, or report the exact visible blocker if none remain.
 
-# Authentication
-{native_auth_rule}
-- Use the cheapest viable authentication path for this single site.
-- Priority:
-  - 1. Existing Steel/cookie session
-  - 2. Passkey (if one is listed in Auth Options)
-  - 3. Saved passwords
-  - 4. Email OTP
-  - 5. SMS OTP
-  - 6. Guest/anonymous completion, if viable (prefer guest checkout over Sign in / Log in when both appear)
-  - 7. Minted account
-  - 8. request_user_assistance_for_authentication - only after 1-7 are exhausted or unavailable
-- Cookie-based and existing Steel-session auth are applied automatically before you start.
-- If a passkey is listed for this site and you are not already logged in, you MUST try the passkey path before any saved password. The passkey is pre-loaded into the browser's authenticator and signs silently once the site starts WebAuthn; no browser passkey popup is expected. First focus/click the username, email, or account field to trigger any passkey autofill/conditional WebAuthn. If the site asks for an identifier, enter the relevant account email/username from the page or saved credentials and continue, but do not type a password yet. If a "Sign in with a passkey", "Use passkey", or similar option appears, choose it. Wait briefly for navigation, OTP, or account access. Only fall through to saved passwords after the passkey option is absent, unavailable, or visibly fails.
-- For saved passwords, use the listed private placeholder in your chosen browser tool and target. The runtime resolves it privately in input_text, evaluate, and other browser tools, and redacts credential values from observations. Enter each field explicitly.
-- For multi-account sites, prefer the task-specific user context when present, then the freshest enabled cookie bundle.
-- When a site offers OTP delivery options, prefer email over SMS.
-- OTP codes from email or SMS are automatically injected as user messages into your context as soon as they become available. If no OTP code is received after 60 seconds since requested, request a resend of the OTP code. If after another 60 seconds no OTP code is received, consider that authentication route exhausted and unusable.
-- Do not open Sign in / Log in and call step 8 while a guest/anonymous path remains viable on the site. Exhaust step 6 first.
-- If members pay less than guests and membership is free, sign up with the minted account instead of checking out as a guest; if sign-up fails, check out as a guest.
-- When authentication still blocks the task after steps 1-7 are exhausted or unavailable, call request_user_assistance_for_authentication (step 8). Do not call attempt_completion, send_message_to_user, or report a status instead.
-- Before calling request_user_assistance_for_authentication, leave the site's sign-in form (username/password or code entry) open and visible, so the user can sign in without navigating.
-{challenge_rule}
-- Do not open webmail or inbox websites to retrieve OTP codes."""
+{authentication_contract}"""
 
 
 # ---------------------------------------------------------------------------
@@ -965,6 +935,16 @@ def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
         for popup in popups:
             popups_text += f"  - {popup}\n"
 
+    downloads = bs.get("downloaded_files") or []
+    downloads_text = ""
+    if downloads:
+        # File names come from the site: quote them so a name stays one inert line.
+        downloads_text = "\nDownloaded files (this browser session):\n"
+        for item in downloads:
+            size = item.get("size")
+            name = json.dumps(str(item.get("name") or "")[:200])
+            downloads_text += f"  - {name}" + (f" ({size} bytes)" if isinstance(size, int) else "") + "\n"
+
     viewport = bs.get("viewport") or {}
     title_part = f" - {bs['title']}" if bs.get("title") else ""
     url = str(bs.get("url") or "")
@@ -972,14 +952,15 @@ def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
     block_note = detect_amazon_return_self_service_block(url, f"{bs.get('title') or ''}\n{dom_tree}")
     block_text = f"\nPage Signal: {block_note}\n" if block_note else ""
 
-    return (
+    text = (
         f"# Current Browser State\n\n"
         f"Timestamp: {timestamp}\n"
         f"{stats_text}Current URL: {url}{title_part}\n"
         f"Viewport: {viewport.get('width', 0)}x{viewport.get('height', 0)}\n"
-        f"{scroll_text}{tabs_text}{events_text}{popups_text}{block_text}"
+        f"{scroll_text}{tabs_text}{events_text}{popups_text}{downloads_text}{block_text}"
         f"Interactive elements:\n{dom_tree}"
     )
+    return text
 
 
 def build_browser_state_message_content(
@@ -1145,6 +1126,7 @@ def normalize_browser_use_tool_call(
     *,
     thinking: Optional[str] = None,
     validation_context: Optional[Dict[str, Any]] = None,
+    available_actions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Validate one provider-native tool call and return UnifiedAction."""
     name = tool_call.get("name")
@@ -1177,6 +1159,8 @@ def normalize_browser_use_tool_call(
         )
 
     normalized_name = _ACTION_NAME_MAP.get(name, name)
+    if available_actions is not None and normalized_name not in available_actions:
+        raise ValueError("Browser action is not available in this request.")
     # Keep the same lazy-import boundary as build_browser_use_tools; importing
     # browser_tools at providers.rose module load time creates a package cycle.
     from browser_tools.schemas import (
@@ -1238,10 +1222,7 @@ def normalize_browser_use_tool_calls(
 
         keys = [call.get("params", {}).get("key") for call in normalized_calls]
         if normalized_calls and all(
-            call.get("action") == "press_key"
-            and isinstance(key, str)
-            and len(key) == 1
-            and key.isprintable()
+            call.get("action") == "press_key" and isinstance(key, str) and len(key) == 1 and key.isprintable()
             for call, key in zip(normalized_calls, keys)
         ):
             return {
@@ -1259,10 +1240,7 @@ def normalize_browser_use_tool_calls(
             normalized_calls
             and len(set(indexes)) == 1
             and all(
-                call.get("action") == "input_text"
-                and isinstance(text, str)
-                and len(text) == 1
-                and text.isprintable()
+                call.get("action") == "input_text" and isinstance(text, str) and len(text) == 1 and text.isprintable()
                 for call, text in zip(normalized_calls, texts)
             )
         ):
@@ -1319,6 +1297,7 @@ _VALID_ACTIONS = frozenset(
         "switch_tab",
         "close_tab",
         "open_new_tab",
+        "read_tool_output",
         "attempt_completion",
         "request_user_assistance_for_authentication",
         "request_payment_card",
@@ -1334,7 +1313,9 @@ _VALID_ACTIONS = frozenset(
 )
 
 
-def normalize_browser_use_response(completion: Any) -> Dict[str, Any]:
+def normalize_browser_use_response(
+    completion: Any, *, available_actions: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Convert a model completion into the agent's UnifiedAction shape.
 
     Mirrors `normalizeBrowserUseResponse` in
@@ -1353,7 +1334,7 @@ def normalize_browser_use_response(completion: Any) -> Dict[str, Any]:
             raise ValueError(
                 f"normalize_browser_use_response: Could not extract JSON from completion: {completion[:200]}"
             )
-        return normalize_browser_use_response(parsed)
+        return normalize_browser_use_response(parsed, available_actions=available_actions)
 
     if not isinstance(completion, dict):
         raise ValueError(
@@ -1385,6 +1366,8 @@ def normalize_browser_use_response(completion: Any) -> Dict[str, Any]:
         index = params.get("index")
 
     normalized_action = _ACTION_NAME_MAP.get(action_name, action_name)
+    if available_actions is not None and normalized_action not in available_actions:
+        raise ValueError("Browser action is not available in this request.")
     if normalized_action not in _VALID_ACTIONS:
         raise ValueError(
             f'normalize_browser_use_response: Unknown action "{normalized_action}" '
@@ -1462,6 +1445,13 @@ def _normalize_action_params(
         return validate_browser_tool_args("phone", params)
     if normalized_action == "generate_write_lock_notification":
         return dict(params)
+    if normalized_action == "read_tool_output":
+        # Validate against read_tool_output's own schema and pass the coerced
+        # values; the generic mapping below drops output_id/offset/limit and
+        # renames query to instruction.
+        from browser_tools.schemas import validate_browser_tool_args
+
+        return validate_browser_tool_args("read_tool_output", params)
 
     if normalized_action == "read_logs":
         log_params: Dict[str, Any] = {}

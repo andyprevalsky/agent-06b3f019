@@ -35,6 +35,24 @@ export const FIXTURE_TABLE_ORDER = [
 ] as const;
 
 type FixtureTable = (typeof FIXTURE_TABLE_ORDER)[number];
+
+// The user's lifetime history grows with the account, not with one run (a
+// heavy user has ~190k MessageRecords and ~25k Cookies). The canonical base
+// image carries it; per-run fixtures capture only rows bounded by the run and
+// the user's small configuration, so their read cost and restore scope never
+// scale with history. Older fixtures list these tables in their own
+// `table_order`, and restore still honours that list.
+const USER_HISTORY_TABLES: ReadonlySet<FixtureTable> = new Set([
+  'Person',
+  'MessageRecord',
+  'Cookie',
+  'CookieBundle',
+  'BrowserPassword',
+  'AgentPhoneMessage',
+]);
+const RUN_FIXTURE_TABLE_ORDER = FIXTURE_TABLE_ORDER.filter(
+  (table) => !USER_HISTORY_TABLES.has(table)
+);
 type JsonRows = Record<string, unknown[]>;
 type FixtureDbClient = Prisma.TransactionClient;
 type FixtureAgent = Prisma.AgentGetPayload<{
@@ -174,7 +192,6 @@ async function collectFixtureWithClient(
     attentionRequests,
     browserSessions,
     claudeCodeSessions,
-    people,
     integrations,
     userEnvironmentRows,
     credentialPropagations,
@@ -202,15 +219,12 @@ async function collectFixtureWithClient(
     db.claudeCodeSession.findMany({
       where: { agentId: { in: agentIds } },
     }),
-    db.person.findMany({ where: { userId: tree.userId } }),
     db.integration.findMany({ where: { userId: tree.userId } }),
     collectUserEnvironmentRows(db, tree.userId),
     db.agentRunCredentialPropagation.findMany({
       where: { agentId: { in: agentIds } },
     }),
-    db.toolSideEffect.findMany({
-      where: { OR: agentIds.map((id) => ({ operationKey: { contains: id } })) },
-    }),
+    db.$queryRaw<unknown[]>(toolSideEffectsForAgentsSql(agentIds)),
     db.smsShortcode.findMany({ where: { agentId: { in: agentIds } } }),
   ]);
 
@@ -224,7 +238,6 @@ async function collectFixtureWithClient(
   rows.AgentAttentionRequest = attentionRequests;
   rows.BrowserSession = browserSessions;
   rows.ClaudeCodeSession = claudeCodeSessions;
-  rows.Person = people;
   rows.Integration = integrations;
   Object.assign(rows, userEnvironmentRows);
   rows.AgentRunCredentialPropagation = credentialPropagations;
@@ -238,68 +251,56 @@ async function collectFixtureWithClient(
   const contextIds = rows.BrowserSession.map(
     (row) => (row as { contextId?: string }).contextId
   ).filter((id): id is string => typeof id === 'string');
-  const personIds = ids(rows.Person);
   const integrationIds = ids(rows.Integration);
 
-  const [tools, userAuthAssistanceRequests, browserContexts, messageRecords, emailCredentials] =
-    await Promise.all([
-      toolIds.length > 0 ? db.tool.findMany({ where: { id: { in: toolIds } } }) : [],
-      attentionIds.length > 0
-        ? db.userAuthAssistanceRequest.findMany({ where: { id: { in: attentionIds } } })
-        : [],
-      contextIds.length > 0
-        ? db.browserContext.findMany({ where: { id: { in: contextIds } } })
-        : [],
-      personIds.length > 0
-        ? db.messageRecord.findMany({ where: { personId: { in: personIds } } })
-        : [],
-      integrationIds.length > 0
-        ? db.emailIntegrationCredential.findMany({
-            where: { integrationId: { in: integrationIds } },
-          })
-        : [],
-    ]);
+  const [tools, userAuthAssistanceRequests, browserContexts, emailCredentials] = await Promise.all([
+    toolIds.length > 0 ? db.tool.findMany({ where: { id: { in: toolIds } } }) : [],
+    attentionIds.length > 0
+      ? db.userAuthAssistanceRequest.findMany({ where: { id: { in: attentionIds } } })
+      : [],
+    contextIds.length > 0 ? db.browserContext.findMany({ where: { id: { in: contextIds } } }) : [],
+    integrationIds.length > 0
+      ? db.emailIntegrationCredential.findMany({
+          where: { integrationId: { in: integrationIds } },
+        })
+      : [],
+  ]);
 
   rows.Tool = tools;
   rows.UserAuthAssistanceRequest = userAuthAssistanceRequests;
   rows.BrowserContext = browserContexts;
-  rows.MessageRecord = messageRecords;
   rows.EmailIntegrationCredential = emailCredentials;
   return buildFixture(rootAgentId, phase, tree.userId, agentIds, rows);
 }
 
+/**
+ * Side effects whose operation key names one of the run's agents. Keys embed
+ * the agent ID at varying positions, so this is a substring match; the
+ * ToolSideEffect_operationKey_trgm_idx trigram index lets it seek.
+ */
+export function toolSideEffectsForAgentsSql(agentIds: string[]): Prisma.Sql {
+  const matches = agentIds.map((id) => Prisma.sql`"operationKey" LIKE ${`%${id}%`}`);
+  return Prisma.sql`
+    SELECT * FROM "ToolSideEffect"
+    WHERE ${matches.length > 0 ? Prisma.join(matches, ' OR ') : Prisma.sql`FALSE`}
+  `;
+}
+
 async function collectUserEnvironmentRows(db: FixtureDbClient, userId: string): Promise<JsonRows> {
-  const [
-    cookies,
-    browserPasswords,
-    cookieBundles,
-    steelSessionAuths,
-    mintedAccounts,
-    passkeyCredentials,
-    agentIdentity,
-    agentPhoneMessages,
-    smsSession,
-  ] = await Promise.all([
-    db.cookie.findMany({ where: { userId } }),
-    db.browserPassword.findMany({ where: { userId } }),
-    db.cookieBundle.findMany({ where: { userId } }),
-    db.steelSessionAuth.findMany({ where: { userId } }),
-    db.mintedAccount.findMany({ where: { userId } }),
-    db.passkeyCredential.findMany({ where: { userId } }),
-    db.agentIdentity.findUnique({ where: { userId } }),
-    db.agentPhoneMessage.findMany({ where: { userId } }),
-    db.smsSession.findUnique({ where: { userId } }),
-  ]);
+  const [steelSessionAuths, mintedAccounts, passkeyCredentials, agentIdentity, smsSession] =
+    await Promise.all([
+      db.steelSessionAuth.findMany({ where: { userId } }),
+      db.mintedAccount.findMany({ where: { userId } }),
+      db.passkeyCredential.findMany({ where: { userId } }),
+      db.agentIdentity.findUnique({ where: { userId } }),
+      db.smsSession.findUnique({ where: { userId } }),
+    ]);
 
   return {
-    Cookie: cookies,
-    BrowserPassword: browserPasswords,
-    CookieBundle: cookieBundles,
     SteelSessionAuth: steelSessionAuths,
     MintedAccount: mintedAccounts,
     PasskeyCredential: passkeyCredentials,
     AgentIdentity: asArray(agentIdentity),
-    AgentPhoneMessage: agentPhoneMessages,
     SmsSession: asArray(smsSession),
   };
 }
@@ -320,10 +321,11 @@ function buildFixture(
     root_agent_id: rootAgentId,
     user_id: userId,
     agent_ids: agentIds,
-    table_order: FIXTURE_TABLE_ORDER,
+    table_order: RUN_FIXTURE_TABLE_ORDER,
     restore: {
       strategy: 'delete-scoped-rows-then-insert-in-table-order',
       scope: { root_agent_id: rootAgentId, user_id: userId, agent_ids: agentIds },
+      user_history: 'base-image',
     },
     rows,
   };
@@ -332,15 +334,29 @@ function buildFixture(
 export async function restoreFixture(fixture: ScopedDbFixture): Promise<void> {
   await deleteFixtureScope(fixture);
   for (const table of fixture.table_order) {
-    const tableRows = (fixture.rows[table] ?? []).map((row) => normalizeRow(table, row));
+    const tableRows = (fixture.rows[table] ?? []).map((row) =>
+      normalizeRow(table, row, fixture.user_id)
+    );
     if (tableRows.length === 0) continue;
-    await delegate(table).createMany({ data: tableRows, skipDuplicates: table === 'Tool' });
+    await delegate(table).createMany({
+      data: tableRows,
+      skipDuplicates: table === 'Tool' || preservedParent(fixture, table),
+    });
   }
+}
+
+/**
+ * Deleting the User cascades to its lifetime history (CookieBundle,
+ * AgentPhoneMessage, ...). A base-image fixture does not carry that history,
+ * so its User is kept and only inserted when the base image lacks it.
+ */
+function preservedParent(fixture: ScopedDbFixture, table: FixtureTable): boolean {
+  return table === 'User' && fixture.restore.user_history === 'base-image';
 }
 
 async function deleteFixtureScope(fixture: ScopedDbFixture): Promise<void> {
   for (const table of [...fixture.table_order].reverse()) {
-    if (table === 'Tool') continue;
+    if (table === 'Tool' || preservedParent(fixture, table)) continue;
     const where = deleteWhere(table, fixture);
     if (where !== null) await delegate(table).deleteMany({ where });
   }
@@ -401,8 +417,11 @@ function delegate(table: FixtureTable): ModelDelegate {
   return (prisma as unknown as Record<string, ModelDelegate>)[name];
 }
 
-function normalizeRow(table: FixtureTable, row: unknown): Record<string, unknown> {
+function normalizeRow(table: FixtureTable, row: unknown, userId: string): Record<string, unknown> {
   const normalized = { ...(row as Record<string, unknown>) };
+  // Fixtures archived before MessageRecord.userId existed omit it; every
+  // captured Person, and so every message, belongs to the fixture's user.
+  if (table === 'MessageRecord' && normalized.userId === undefined) normalized.userId = userId;
   for (const field of BIGINT_FIELDS[table] ?? []) {
     const value = normalized[field];
     if (typeof value === 'string' || typeof value === 'number') normalized[field] = BigInt(value);

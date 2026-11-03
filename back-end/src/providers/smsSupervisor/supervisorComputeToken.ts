@@ -18,9 +18,22 @@ export interface SupervisorComputeToken {
   accountId?: string;
 }
 
+/**
+ * Benchmark-only compute-token type pin for supervisor model A/Bs
+ * (BENCHMARK_SMS_SUPERVISOR_TOKEN_TYPE=claude|gpt). Unset in production.
+ */
+export function benchmarkSupervisorTokenType(): 'claude' | 'gpt' | undefined {
+  const value = process.env.BENCHMARK_SMS_SUPERVISOR_TOKEN_TYPE;
+  return value === 'claude' || value === 'gpt' ? value : undefined;
+}
+
 export async function getComputeToken(userId: string): Promise<SupervisorComputeToken | null> {
   try {
-    const computeToken = await fetchComputeTokenForUser(userId);
+    const tokenType = benchmarkSupervisorTokenType();
+    const computeToken = await fetchComputeTokenForUser(
+      userId,
+      tokenType === undefined ? undefined : { tokenType }
+    );
     if (computeToken) {
       log.info('[SmsSupervisor] Using compute token', {
         userId,

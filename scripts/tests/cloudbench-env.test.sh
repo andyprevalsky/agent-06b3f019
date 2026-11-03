@@ -32,6 +32,988 @@ require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
 # shellcheck source=../lib/cloudbench-env.sh
 source "$HELPER_SRC"
 
+# Execute the actual controller launch fragments without touching cloud resources.
+python3 - "$ROOT_DIR" <<'PY' || fail "world-model cloud launch handoff failed"
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+root = Path(sys.argv[1])
+source = (root / "scripts/run-bench-cloud").read_text()
+configuration = re.search(
+    r"^# World-model launch configuration.*?^# End world-model launch configuration\.\n",
+    source, re.M | re.S,
+)
+configuration = configuration.group(0) if configuration else ""
+
+def run(script, values=None):
+    environment = {
+        "PATH": os.environ["PATH"], "ROOT_DIR": str(root),
+        "WMH_ENGINE": "experiential", "WMH_ROSE_POOL": "rose-1-mini",
+        "WMH_CONTEXT_TOKENS": "131072",
+        "WMH_NATIVE_PYTHON": "/controller/local/python",
+        "WMH_BUILD_DIR": "/controller/local/model",
+    }
+    environment.update(values or {})
+    return subprocess.run(["bash", "-c", configuration + script], env=environment,
+                          text=True, capture_output=True)
+
+# Donor free space as `df -PB1` reports it; DF_AVAIL sets the available bytes.
+# DF_AVAIL_FREED (optional) is reported once $REMOTE_WMH_NATIVE no longer exists.
+DF_FAKE = ("df() { a=\"$DF_AVAIL\"; if [ -n \"${DF_AVAIL_FREED:-}\" ] && [ ! -e \"$REMOTE_WMH_NATIVE\" ]; then a=\"$DF_AVAIL_FREED\"; fi; "
+           "printf 'Filesystem 1-blocks Used Available Capacity Mounted\\nfake 0 0 %s 0%% /data\\n' \"$a\"; };\n")
+
+class WorldModelLaunch(unittest.TestCase):
+    def assert_handoff(self, values, *, engine="experiential", pool="rose-1-mini",
+                       policy="rose-outcome-distribution-v4"):
+        self.assertEqual({key: values.get(key) for key in (
+            "WMH_ENGINE", "WMH_ROSE_POOL", "WMH_CONTEXT_TOKENS", "WMH_EXECUTION_POLICY",
+        )}, {"WMH_ENGINE": engine, "WMH_ROSE_POOL": pool,
+            "WMH_CONTEXT_TOKENS": "131072", "WMH_EXECUTION_POLICY": policy})
+        self.assertNotIn("WMH_NATIVE_PYTHON", values)
+        self.assertNotIn("WMH_BUILD_DIR", values)
+
+    def test_boot_machine_arguments(self):
+        fragment = re.search(r"^    _envargs=\(\n.*?^    \)\n", source, re.M | re.S).group(0)
+        result = run(fragment + 'printf "%s\\n" "${_envargs[@]}"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_handoff(dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line))
+
+    def test_ssh_wrapper_exports(self):
+        fragment = "\n".join(line for line in source.splitlines()
+                             if re.match(r'^    echo "export WMH_', line))
+        result = run(fragment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        exports = run(result.stdout + '\nprintf "%s\\n" "$WMH_ENGINE" "$WMH_ROSE_POOL" "$WMH_CONTEXT_TOKENS"',
+                      {"WMH_ENGINE": "legacy", "WMH_ROSE_POOL": "rose-1-ultra", "WMH_CONTEXT_TOKENS": ""})
+        self.assertEqual(exports.returncode, 0, exports.stderr)
+        self.assertEqual(exports.stdout.splitlines(), ["experiential", "rose-1-mini", "131072"])
+        model = run(result.stdout + '\nprintf "%s\\n" "$WMH_MODEL_NAME" "$WMH_EXECUTION_POLICY"', {})
+        self.assertEqual(model.stdout.splitlines(), ["rose-archive", "rose-outcome-distribution-v4"])
+        exported_keys = {line.split("=", 1)[0].removeprefix("export ") for line in result.stdout.splitlines()}
+        self.assertFalse(exported_keys & {"WMH_NATIVE_PYTHON", "WMH_BUILD_DIR"})
+
+    def test_refresh_build_receives_guest_settings(self):
+        fragment = re.search(r'^    BUILD_CMD="set -e\n.*?^    REFRESH_LOG=', source, re.M | re.S).group(0)
+        fragment = fragment[:fragment.rfind("    REFRESH_LOG=")]
+        with tempfile.TemporaryDirectory(prefix="wmh-refresh-launch-") as temporary:
+            scratch = Path(temporary)
+            repo = scratch / "repo"
+            executable = repo / "agents/venv/bin/python"
+            executable.parent.mkdir(parents=True)
+            (repo / "back-end").mkdir()
+            receipt = scratch / "receipt.json"
+            executable.write_text("#!" + sys.executable + "\nimport json,os,sys\n"
+                                  "from pathlib import Path\nPath(os.environ['LAUNCH_RECEIPT']).write_text(json.dumps("
+                                  "{'env': {k:v for k,v in os.environ.items() if k.startswith('WMH_')}, 'args':sys.argv[1:]}))\n")
+            executable.chmod(0o755)
+            # The on-box build is the explicit legacy path; native restores a cache.
+            result = run(
+                "gosu() { shift; \"$@\"; }; chown() { :; };\n" + fragment
+                + '\nunset WMH_ENGINE WMH_ROSE_POOL WMH_CONTEXT_TOKENS WMH_NATIVE_PYTHON WMH_BUILD_DIR; eval "$BUILD_CMD"',
+                {"WMH_ENGINE": "legacy", "WMH_EXECUTION_POLICY": "upstream",
+                 "REMOTE_REPO": str(repo), "REMOTE_WMH": str(scratch / "world-model"),
+                 "WMH_MODEL_NAME": "rose-test", "WMH_REFRESH_MAX_BUNDLES": "0",
+                 "WMH_REFRESH_MAX_STEPS": "0", "WMH_REFRESH_MAX_STEPS_PER_BUNDLE": "0",
+                 "WMH_REFRESH_ROOT_AGENT_IDS": "", "LAUNCH_RECEIPT": str(receipt)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            captured = json.loads(receipt.read_text())
+            settings = captured["env"]
+            self.assertEqual(settings.pop("WMH_BUILD_DIR"), str(scratch / "world-model"))
+            self.assert_handoff(settings, engine="legacy", policy="upstream")
+            self.assertEqual(captured["args"][:2], ["-u", "-c"])
+            self.assertIn("update_world_model_for_simulation", captured["args"][2])
+
+    def test_defaults_and_invalid_configuration(self):
+        show = 'printf "%s\\n" "$WMH_ENGINE" "$WMH_MODEL_NAME" "$WMH_ROSE_POOL" "$WMH_EXECUTION_POLICY" "$WMH_CONTEXT_TOKENS" "$WMH_CACHE_NAME"'
+        unset = {"WMH_ENGINE": "", "WMH_ROSE_POOL": "", "WMH_CONTEXT_TOKENS": ""}
+        result = run(show, unset)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Cloud SIM defaults to the native experiential WMH the local runs use.
+        self.assertEqual(result.stdout.splitlines(), [
+            "experiential", "rose-archive", "rose-wmh-gpt61", "rose-outcome-distribution-v4", "",
+            "rose-archive-serving"])
+        legacy = run(show, {**unset, "WMH_ENGINE": "legacy"})
+        self.assertEqual(legacy.returncode, 0, legacy.stderr)
+        self.assertEqual(legacy.stdout.splitlines(), [
+            "legacy", "rose-r2-archive-anthropic", "rose-1-ultra", "upstream", "", "rose-archive-serving"])
+        overridden = run(show, {**unset, "WMH_MODEL_NAME": "custom-model", "WMH_ROSE_POOL": "rose-1-ultra",
+                                "WMH_EXECUTION_POLICY": "upstream", "WMH_CACHE_NAME": "custom-cache"})
+        self.assertEqual(overridden.stdout.splitlines(), [
+            "experiential", "custom-model", "rose-1-ultra", "upstream", "", "custom-cache"])
+        self.assertEqual(run(":", {"WMH_ENGINE": "legacy",
+                                   "WMH_EXECUTION_POLICY": "rose-outcome-distribution-v4"}).returncode, 2)
+        legacy_names = run('printf "%s\\n" "$WMH_LEGACY_CACHE_NAME" "$WMH_LEGACY_MODEL_NAME"', unset)
+        self.assertEqual(legacy_names.stdout.splitlines(), ["rose-r2-archive-legacy", "rose-r2-archive-anthropic"])
+        for key in ("WMH_MODEL_NAME", "WMH_CACHE_NAME", "WMH_LEGACY_CACHE_NAME", "WMH_LEGACY_MODEL_NAME"):
+            with self.subTest(unsafe=key):
+                self.assertEqual(run(":", {key: "x';id'"}).returncode, 2)
+        for key, value in (("WMH_ENGINE", "unknown"),
+                           ("WMH_ROSE_POOL", "pool;invalid"), ("WMH_CONTEXT_TOKENS", "0"),
+                           ("WMH_CONTEXT_TOKENS", "-1"), ("WMH_CONTEXT_TOKENS", "1.5")):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(run(":", {key: value}).returncode, 2)
+
+    def test_native_refresh_restores_the_serving_cache_without_building(self):
+        refresh = source[source.index('if [ "$MODE" = "refresh-wmh" ]; then'):source.index("# MODE: run (default)")]
+        # The WMH refresh shares the bench app with concurrent fleets: it holds
+        # the maintenance lock and verifies secrets read-only, and never
+        # restages them (that reverted other guests' Temporal namespace).
+        refresh_mode = refresh[:refresh.index("# MODE: --build-wmh")] if "# MODE: --build-wmh" in refresh else refresh
+        self.assertNotIn("inject_secrets", refresh_mode)
+        self.assertLess(refresh_mode.index("acquire_app_environment_lock || exit 1"),
+                        refresh_mode.index("verify_app_environment || exit 1"))
+        self.assertLess(refresh_mode.index("verify_app_environment || exit 1"),
+                        refresh_mode.index('prepare_warm_source "$mid"'))
+        # Experiential (the default) selects the cache restore; only legacy builds on the donor.
+        self.assertRegex(refresh, r'if \[ "\$WMH_ENGINE" = experiential \]; then\n[^\n]*\n\s+BUILD_CMD="\$NATIVE_REFRESH_CMD"')
+        fragment = re.search(r'^    NATIVE_REFRESH_CMD="set -e\n.*?^ {4}# Legacy', source, re.M | re.S).group(0)
+        fragment = fragment[:fragment.rfind("    # Legacy")]
+        self.assertNotIn("update_world_model_for_simulation", fragment)
+        # The native restore writes the legacy model directory only through the
+        # guarded legacy-cache restore (2026-10-19 a --force restore into
+        # $REMOTE_WMH deleted rose-r2-archive-anthropic from the donor).
+        legacy_block = re.search(r"^if \[ -f '\$REMOTE_WMH/build\.manifest\.json' \].*?^fi\n", fragment, re.M | re.S).group(0)
+        # (the closing read-only listing reports both model directories)
+        outside = "\n".join(line for line in fragment.replace(legacy_block, "").splitlines()
+                             if not line.startswith("ls -la "))
+        self.assertNotIn("$REMOTE_WMH'", outside)
+        self.assertNotIn("$REMOTE_WMH/", outside)
+        self.assertNotIn("$REMOTE_WMH.", outside)
+        self.assertIn("create_volume_snapshot_exact", refresh[refresh.index('BUILD_CMD="$NATIVE_REFRESH_CMD"'):])
+        # The restored tree is flushed after the swap and before the donor stops
+        # for its snapshot (2026-10-20 an unflushed blob tail was snapshotted
+        # truncated and every SIM guest failed the native artifact digest).
+        swap = fragment.index("mv '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE'")
+        # Separate commands: under set -e a failed `sync -f` in `a && b` would not
+        # stop the refresh before the DONE marker (CodeRabbit, PR #1560).
+        flush = fragment.index("sync -f '$REMOTE_WMH_NATIVE'\nsync\n")
+        self.assertLess(swap, flush)
+        self.assertLess(flush, fragment.index("echo '::WMH-REFRESH-DONE::'"))
+        # Fleets rehydrate the donor proof from Machine metadata (observed
+        # 2026-10-19: a refreshed WMH snapshot was never forked because only the
+        # local state file named it). Publication must name the new snapshot
+        # and fail the refresh when it cannot be published.
+        publication = refresh[refresh.index('create_volume_snapshot_exact "$VOL_ID"'):]
+        self.assertRegex(publication, r'if ! cloudbench_publish_warm_deps_state "\$APP" "\$maintenance_mid" "\$VOL_ID" \\\n\s+"\$RECORDED_NODE_FP" "\$RECORDED_PY_FP" "\$SNAP_START_EPOCH" "\$NEW_SNAP"; then\n[^\n]*\n\s+exit 1')
+        self.assertIn('printf \'%s %s\\n\' "$EXPECTED_WMH_REF" "$NEW_SNAP"', publication)
+        fake_python = (
+            "#!" + sys.executable + "\nimport json,os,sys\nfrom pathlib import Path\n"
+            "argv=sys.argv[1:]\n"
+            "open(os.environ['CALLS'],'a').write(json.dumps({'tool':'python','argv':argv,"
+            "'user_home':os.environ.get('HOME')})+'\\n')\n"
+            "if argv[:4]==['-m','pip','install','--quiet']:\n"
+            "    uv=Path(sys.argv[0]).parent/'uv'; uv.write_text('#!/bin/sh\\n'); uv.chmod(0o755)\n"
+            "if argv[:1]==['-c']:\n"
+            "    os.execv(sys.executable,[sys.executable]+argv)\n"
+            "if 'status' in argv:\n"
+            "    print(json.dumps({'name':argv[-1],'plaintext_bytes':int(os.environ['CACHE_BYTES'])})); sys.exit(0)\n"
+            "if 'benchmarks.wmh_build_cache' in argv and argv[argv.index('--name')+1]==os.environ.get('LEGACY_CACHE'):\n"
+            "    root=Path(argv[argv.index('--build-dir')+1])\n"
+            "    (root/'models/rose-r2-archive-anthropic').mkdir(parents=True)\n"
+            "    if os.environ.get('LEGACY_PULL')!='no-model':\n"
+            "        (root/'models/rose-r2-archive-anthropic/model.json').write_text('restored-legacy')\n"
+            "    else:\n"
+            "        (root/'models/rose-r2-archive-anthropic').rmdir()\n"
+            "    (root/'build.manifest.json').write_text('restored-legacy-manifest')\n"
+            "    sys.exit(0)\n"
+            "if 'benchmarks.wmh_build_cache' in argv and os.environ.get('PULL_MODE')!='fail':\n"
+            "    root=Path(argv[argv.index('--build-dir')+1])\n"
+            "    (root/'models/rose-archive').mkdir(parents=True, exist_ok=True)\n"
+            "    if os.environ.get('PULL_MODE')!='no-pointer':\n"
+            "        (root/'models/rose-archive/experiential.json').write_text('{}')\n"
+            "    (root/'build.manifest.json').write_text('{}')\n"
+            "sys.exit(3 if os.environ.get('PULL_MODE')=='fail' and 'benchmarks.wmh_build_cache' in argv else 0)\n"
+        )
+        for mode, ok in (("ok", True), ("no-pointer", False), ("fail", False)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix="wmh-native-refresh-") as temporary:
+                scratch = Path(temporary)
+                repo = scratch / "repo"
+                python = repo / "agents/venv/bin/python"
+                python.parent.mkdir(parents=True)
+                (repo / "back-end").mkdir()
+                (repo / "scripts").mkdir()
+                python.write_text(fake_python)
+                python.chmod(0o755)
+                calls = scratch / "calls.jsonl"
+                (repo / "scripts/setup-world-model.sh").write_text(
+                    "printf '{\"tool\":\"setup\",\"uv_python\":\"%s\",\"cwd\":\"%s\"}\\n' "
+                    "\"$UV_PYTHON_INSTALL_DIR\" \"$PWD\" >> \"$CALLS\"\n")
+                world = scratch / "world-model"
+                legacy_model = world / "models/rose-r2-archive-anthropic/model.json"
+                legacy_model.parent.mkdir(parents=True)
+                legacy_model.write_text("legacy")
+                (world / "build.manifest.json").write_text("legacy-manifest")
+                native = scratch / "world-model-native"
+                (native / "models/rose-archive").mkdir(parents=True)
+                (native / "models/rose-archive/experiential.json").write_text("previous")
+                result = run(
+                    "gosu() { shift; \"$@\"; }; chown() { :; }; rsync() { return 1; };\n" + DF_FAKE + fragment
+                    + '\neval "$NATIVE_REFRESH_CMD"',
+                    {"REMOTE_REPO": str(repo), "REMOTE_WMH": str(world), "REMOTE_WMH_NATIVE": str(native),
+                     "WMH_MODEL_NAME": "rose-archive", "WMH_LEGACY_CACHE_NAME": "rose-r2-archive-legacy",
+                     "WMH_LEGACY_MODEL_NAME": "rose-r2-archive-anthropic", "LEGACY_CACHE": "rose-r2-archive-legacy",
+                     "WMH_CACHE_NAME": "rose-archive-serving", "REMOTE_UV_PYTHON": str(scratch / "uv-python"),
+                     "CALLS": str(calls), "PULL_MODE": mode, "CACHE_BYTES": "1000", "DF_AVAIL": str(2 << 30)},
+                )
+                self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+                self.assertEqual("::WMH-REFRESH-DONE::" in result.stdout, ok)
+                records = [json.loads(line) for line in calls.read_text().splitlines()]
+                pythons = [record["argv"] for record in records if record["tool"] == "python" and record["argv"][:1] != ["-c"]]
+                self.assertEqual(pythons[0], ["-m", "pip", "install", "--quiet", "uv"])
+                # An intact legacy model is left alone: only the native cache is sized and pulled.
+                self.assertEqual(pythons[1], ["-u", "-m", "benchmarks.wmh_build_cache", "status", "--name",
+                                              "rose-archive-serving"])
+                pythons.pop(1)
+                self.assertEqual(pythons[1], ["-u", "-m", "benchmarks.wmh_build_cache", "pull", "--build-dir",
+                                              str(native) + ".incoming", "--name", "rose-archive-serving", "--force"])
+                # Other workspaces' legacy model and manifest survive every outcome.
+                self.assertEqual(legacy_model.read_text(), "legacy")
+                self.assertEqual((world / "build.manifest.json").read_text(), "legacy-manifest")
+                self.assertEqual(sorted(path.name for path in scratch.iterdir() if path.name.startswith("world-model")),
+                                 ["world-model", "world-model-native"])
+                pointer = (native / "models/rose-archive/experiential.json").read_text()
+                self.assertEqual(pointer, "{}" if ok else "previous")
+                self.assertEqual(len(pythons), 2)
+                setup = [record for record in records if record["tool"] == "setup"]
+                self.assertEqual(setup, [{"tool": "setup", "uv_python": str(scratch / "uv-python"),
+                                          "cwd": str(repo)}])
+                self.assertTrue((scratch / "uv-python").is_dir())
+
+    def test_native_refresh_replaces_a_previous_native_tree_that_leaves_too_little_room(self):
+        # 2026-10-20 re-refreshing a donor that already held a ~16 GB native tree
+        # failed its headroom check (7.1 GB free, 20.5 GB needed), so a corrupt
+        # native model could never be replaced. The previous tree is dropped only
+        # when the staged pull would not otherwise fit, and only after proving the
+        # drop frees enough: a refresh that cannot fit keeps the previous tree.
+        fragment = re.search(r'^    NATIVE_REFRESH_CMD="set -e\n.*?^ {4}# Legacy', source, re.M | re.S).group(0)
+        fragment = fragment[:fragment.rfind("    # Legacy")]
+        fake_python = (
+            "#!" + sys.executable + "\nimport json,os,sys\nfrom pathlib import Path\nargv=sys.argv[1:]\n"
+            "if argv[:1]==['-c']:\n    os.execv(sys.executable,[sys.executable]+argv)\n"
+            "open(os.environ['CALLS'],'a').write(json.dumps(argv)+'\\n')\n"
+            "if argv[:4]==['-m','pip','install','--quiet']:\n"
+            "    uv=Path(sys.argv[0]).parent/'uv'; uv.write_text('#!/bin/sh\\n'); uv.chmod(0o755); sys.exit(0)\n"
+            "if 'status' in argv:\n"
+            "    print(json.dumps({'plaintext_bytes':19*10**9})); sys.exit(0)\n"
+            "root=Path(argv[argv.index('--build-dir')+1])\n"
+            "(root/'models/rose-archive').mkdir(parents=True)\n"
+            "(root/'models/rose-archive/experiential.json').write_text('fresh')\n"
+            "(root/'build.manifest.json').write_text('native-manifest')\n"
+        )
+        gib = 1 << 30
+        for case, freed, ok, sync_fails in (("room-after-drop", 30 * gib, True, ""),
+                                            ("no-room-even-after-drop", 10 * gib, False, ""),
+                                            ("flush-fails", 30 * gib, False, "1")):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="wmh-native-replace-") as temporary:
+                scratch = Path(temporary)
+                repo = scratch / "repo"
+                python = repo / "agents/venv/bin/python"
+                python.parent.mkdir(parents=True)
+                (repo / "back-end").mkdir()
+                (repo / "scripts").mkdir()
+                (repo / "scripts/setup-world-model.sh").write_text(":\n")
+                python.write_text(fake_python)
+                python.chmod(0o755)
+                world = scratch / "world-model"
+                (world / "models/rose-r2-archive-anthropic").mkdir(parents=True)
+                (world / "models/rose-r2-archive-anthropic/model.json").write_text("donor-legacy")
+                (world / "build.manifest.json").write_text("donor-legacy-manifest")
+                native = scratch / "world-model-native"
+                (native / "models/rose-archive").mkdir(parents=True)
+                (native / "models/rose-archive/experiential.json").write_text("corrupt-previous")
+                calls = scratch / "calls.jsonl"
+                result = run(
+                    "gosu() { shift; \"$@\"; }; chown() { :; }; rsync() { return 1; };\n"
+                    "sync() { [ -z \"$SYNC_FAILS\" ] || [ \"${1:-}\" != -f ]; };\n"
+                    # The previous tree occupies exactly what dropping it frees.
+                    "du() { printf '%s\\t%s\\n' \"$((DF_AVAIL_FREED - DF_AVAIL))\" \"${@: -1}\"; };\n" + DF_FAKE + fragment
+                    + '\neval "$NATIVE_REFRESH_CMD"',
+                    {"REMOTE_REPO": str(repo), "REMOTE_WMH": str(world), "REMOTE_WMH_NATIVE": str(native),
+                     "WMH_MODEL_NAME": "rose-archive", "WMH_CACHE_NAME": "rose-archive-serving",
+                     "WMH_LEGACY_CACHE_NAME": "rose-r2-archive-legacy",
+                     "WMH_LEGACY_MODEL_NAME": "rose-r2-archive-anthropic",
+                     "REMOTE_UV_PYTHON": str(scratch / "uv-python"), "CALLS": str(calls),
+                     "DF_AVAIL": str(7 * gib), "DF_AVAIL_FREED": str(freed), "SYNC_FAILS": sync_fails},
+                )
+                self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+                self.assertEqual("::WMH-REFRESH-DONE::" in result.stdout, ok)
+                pulls = [json.loads(line) for line in calls.read_text().splitlines() if '"pull"' in line]
+                pulled = ok or bool(sync_fails)
+                self.assertEqual(len(pulls), 1 if pulled else 0)
+                self.assertEqual((native / "models/rose-archive/experiential.json").read_text(),
+                                 "fresh" if pulled else "corrupt-previous")
+                self.assertEqual("dropping the previous native WMH tree" in result.stdout, pulled)
+                self.assertEqual((world / "models/rose-r2-archive-anthropic/model.json").read_text(), "donor-legacy")
+
+    def test_native_refresh_restores_a_lost_legacy_model_beside_the_native_one(self):
+        # 2026-10-19 a native restore overwrote /data/world-model, so main's
+        # legacy engine lost rose-r2-archive-anthropic. One refresh must leave
+        # both engines servable: legacy restored from its R2 cache atomically
+        # when missing, after a disk-headroom check, before the native pull.
+        fragment = re.search(r'^    NATIVE_REFRESH_CMD="set -e\n.*?^ {4}# Legacy', source, re.M | re.S).group(0)
+        fragment = fragment[:fragment.rfind("    # Legacy")]
+        fake_python = (
+            "#!" + sys.executable + "\nimport json,os,sys\nfrom pathlib import Path\nargv=sys.argv[1:]\n"
+            "if argv[:1]==['-c']:\n    os.execv(sys.executable,[sys.executable]+argv)\n"
+            "open(os.environ['CALLS'],'a').write(json.dumps(argv)+'\\n')\n"
+            "if argv[:4]==['-m','pip','install','--quiet']:\n"
+            "    uv=Path(sys.argv[0]).parent/'uv'; uv.write_text('#!/bin/sh\\n'); uv.chmod(0o755); sys.exit(0)\n"
+            "name=argv[argv.index('--name')+1] if '--name' in argv else ''\n"
+            "if 'status' in argv:\n"
+            "    print(json.dumps({'name':name,'plaintext_bytes':int(os.environ['BYTES_'+name.replace('-','_')])})); sys.exit(0)\n"
+            "root=Path(argv[argv.index('--build-dir')+1])\n"
+            "if name=='rose-r2-archive-legacy':\n"
+            "    root.mkdir(parents=True)\n"
+            "    if os.environ.get('LEGACY_PULL')!='no-model':\n"
+            "        (root/'models/rose-r2-archive-anthropic').mkdir(parents=True)\n"
+            "        (root/'models/rose-r2-archive-anthropic/model.json').write_text('restored-legacy')\n"
+            "    (root/'build.manifest.json').write_text('legacy-manifest')\n"
+            "else:\n"
+            "    (root/'models/rose-archive').mkdir(parents=True)\n"
+            "    (root/'models/rose-archive/experiential.json').write_text('native')\n"
+            "    (root/'build.manifest.json').write_text('native-manifest')\n"
+        )
+        gib = 1 << 30
+        legacy_pull = ["-u", "-m", "benchmarks.wmh_build_cache", "pull", "--build-dir", "{world}.incoming",
+                       "--name", "rose-r2-archive-legacy", "--force"]
+        native_pull = ["-u", "-m", "benchmarks.wmh_build_cache", "pull", "--build-dir", "{native}.incoming",
+                       "--name", "rose-archive-serving", "--force"]
+        status = lambda name: ["-u", "-m", "benchmarks.wmh_build_cache", "status", "--name", name]
+        # (case, donor legacy dir state, legacy pull, free bytes, ok, expected cache calls, legacy after)
+        cases = (
+            ("native-in-legacy-dir", "native", "ok", 30 * gib, True,
+             [status("rose-r2-archive-legacy"), legacy_pull, status("rose-archive-serving"), native_pull], "restored-legacy"),
+            ("legacy-dir-absent", "absent", "ok", 30 * gib, True,
+             [status("rose-r2-archive-legacy"), legacy_pull, status("rose-archive-serving"), native_pull], "restored-legacy"),
+            ("legacy-intact", "legacy", "ok", 30 * gib, True,
+             [status("rose-archive-serving"), native_pull], "donor-legacy"),
+            ("legacy-cache-lacks-model", "native", "no-model", 30 * gib, False,
+             [status("rose-r2-archive-legacy"), legacy_pull], None),
+            ("no-room-for-legacy", "native", "ok", 5 * gib, False,
+             [status("rose-r2-archive-legacy")], None),
+            ("no-room-for-native", "legacy", "ok", 10 * gib, False,
+             [status("rose-archive-serving")], "donor-legacy"),
+        )
+        for case, donor_state, legacy_mode, free, ok, expected, legacy_after in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="wmh-dual-refresh-") as temporary:
+                scratch = Path(temporary)
+                repo = scratch / "repo"
+                python = repo / "agents/venv/bin/python"
+                python.parent.mkdir(parents=True)
+                (repo / "back-end").mkdir()
+                (repo / "scripts").mkdir()
+                (repo / "scripts/setup-world-model.sh").write_text(":\n")
+                python.write_text(fake_python)
+                python.chmod(0o755)
+                calls = scratch / "calls.jsonl"
+                world = scratch / "world-model"
+                native = scratch / "world-model-native"
+                if donor_state == "native":
+                    (world / "models/rose-archive").mkdir(parents=True)
+                    (world / "models/rose-archive/experiential.json").write_text("stale-native")
+                    (world / "build.manifest.json").write_text("stale-native-manifest")
+                elif donor_state == "legacy":
+                    (world / "models/rose-r2-archive-anthropic").mkdir(parents=True)
+                    (world / "models/rose-r2-archive-anthropic/model.json").write_text("donor-legacy")
+                    (world / "build.manifest.json").write_text("donor-legacy-manifest")
+                before = sorted(str(path.relative_to(scratch)) for path in scratch.rglob("*") if "world-model" in str(path))
+                result = run(
+                    "gosu() { shift; \"$@\"; }; chown() { :; }; rsync() { return 1; };\n" + DF_FAKE + fragment
+                    + '\neval "$NATIVE_REFRESH_CMD"',
+                    {"REMOTE_REPO": str(repo), "REMOTE_WMH": str(world), "REMOTE_WMH_NATIVE": str(native),
+                     "WMH_MODEL_NAME": "rose-archive", "WMH_CACHE_NAME": "rose-archive-serving",
+                     "WMH_LEGACY_CACHE_NAME": "rose-r2-archive-legacy",
+                     "WMH_LEGACY_MODEL_NAME": "rose-r2-archive-anthropic",
+                     "REMOTE_UV_PYTHON": str(scratch / "uv-python"), "CALLS": str(calls),
+                     "LEGACY_PULL": legacy_mode, "DF_AVAIL": str(free),
+                     # Published sizes: legacy ~4.6 GB, native ~19 GB.
+                     "BYTES_rose_r2_archive_legacy": str(4600 * 10**6),
+                     "BYTES_rose_archive_serving": str(19 * 10**9)},
+                )
+                self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+                self.assertEqual("::WMH-REFRESH-DONE::" in result.stdout, ok)
+                cache_calls = [json.loads(line) for line in calls.read_text().splitlines()]
+                cache_calls = [call for call in cache_calls if "benchmarks.wmh_build_cache" in call]
+                self.assertEqual(cache_calls, [[arg.format(world=world, native=native) for arg in call]
+                                               for call in expected])
+                if not ok and "no-room" in case:
+                    self.assertIn("insufficient donor disk for WMH cache", result.stderr)
+                # No staging residue survives any outcome.
+                self.assertEqual(sorted(path.name for path in scratch.iterdir() if path.name.startswith("world-model")),
+                                 [name for name in ("world-model", "world-model-native")
+                                  if (scratch / name).exists()])
+                legacy_model = world / "models/rose-r2-archive-anthropic/model.json"
+                if legacy_after is None:
+                    # A failed legacy restore leaves the donor's directory exactly as it was.
+                    after = sorted(str(path.relative_to(scratch)) for path in scratch.rglob("*") if "world-model" in str(path))
+                    self.assertEqual(after, before)
+                else:
+                    self.assertEqual(legacy_model.read_text(), legacy_after)
+                    self.assertFalse((world / "models/rose-archive").exists())
+                if ok:
+                    self.assertEqual((native / "models/rose-archive/experiential.json").read_text(), "native")
+
+    def test_refresh_republishes_only_the_donors_current_dependency_proof(self):
+        # 2026-10-19: --refresh-wmh republished this checkout's local receipt.
+        # The donor volume holds whichever trees the newest refresh installed
+        # (any devbox; the app env lock is per clone), so the cut snapshot may
+        # only be published under the newest donor proof's fingerprints.
+        refresh = source[source.index('if [ "$MODE" = "refresh-wmh" ]; then'):source.index("# MODE: --build-wmh")]
+        self.assertNotIn("WARM_DEPS_STATE_FILE\" 2>/dev/null", refresh)
+        self.assertNotRegex(refresh, r"read -r RECORDED_NODE_FP[^\n]*\n[^\n]*< \"\$WARM_DEPS_STATE_FILE\"")
+        self.assertLess(refresh.index("WMH_DONOR_PROOF=\"$(wmh_refresh_donor_proof)\""),
+                        refresh.index('prepare_warm_source "$mid"'))
+        recheck = refresh.index("WMH_DONOR_PROOF_AFTER=\"$(wmh_refresh_donor_proof)\"")
+        self.assertLess(refresh.index('stop_machine_strict "$mid"'), recheck)
+        self.assertLess(recheck, refresh.index('create_volume_snapshot_exact "$VOL_ID"'))
+        helper = (root / "scripts/lib/cloudbench-env.sh").read_text()
+        latest = re.search(r"^cloudbench_warm_deps_latest_proof\(\) \{.*?^\}\n", helper, re.M | re.S).group(0)
+        proof_fn = re.search(r"^    # Begin WMH donor dependency proof\.\n.*?^    # End WMH donor dependency proof\.\n",
+                             refresh, re.M | re.S).group(0)
+        a, b, c = "a" * 64, "b" * 64, "c" * 64
+        def donor(metadata, volume="vol_donor"):
+            return [{"id": "m1", "name": "cloudbench-warm",
+                     "config": {"mounts": [{"volume": volume}], "metadata": metadata}},
+                    {"id": "other", "config": {"mounts": [{"volume": "vol_x"}],
+                                               "metadata": {"rose_cloudbench_deps_z": f"{c} {c} 9999999999 vs_z vol_x other app"}}}]
+        stale = {"rose_cloudbench_deps_1": f"{a} {b} 100 vs_old vol_donor m1 app",
+                 "rose_cloudbench_deps_2": f"{c} {b} 200 vs_new vol_donor m1 app",
+                 "rose_cloudbench_deps_3": "probe same-session 0 diagnostic vol_donor m1 app",
+                 "rose_cloudbench_deps_4": f"{a} {a} 900 vs_foreign vol_elsewhere m1 app",
+                 "unrelated": "x"}
+        def proof(inventory):
+            script = latest + proof_fn + 'FLY() { printf "%s" "$INVENTORY"; }\nmaintenance_mid=m1 APP=app wmh_refresh_donor_proof'
+            return subprocess.run(["bash", "-c", script], env={"PATH": os.environ["PATH"],
+                                  "INVENTORY": json.dumps(inventory)}, text=True, capture_output=True)
+        newest = proof(donor(stale))
+        self.assertEqual(newest.returncode, 0, newest.stderr)
+        # The newest proof bound to this donor+volume wins over an older local receipt.
+        self.assertEqual(newest.stdout.split(), [c, b, "200", "vs_new", "vol_donor"])
+        self.assertNotEqual(proof(donor({"rose_cloudbench_deps_3": stale["rose_cloudbench_deps_3"]})).returncode, 0)
+        self.assertNotEqual(proof(donor(stale, volume="")).returncode, 0)
+        self.assertNotEqual(proof([]).returncode, 0)
+
+    def test_guest_guard_requires_the_native_pointer_and_pre_created_venv(self):
+        run_script = (root / "scripts/cloudbench-run.sh").read_text()
+        guard = re.search(r"^# Begin cached WMH guard\.\n.*?^# End cached WMH guard\.\n", run_script, re.M | re.S).group(0)
+        requirements = (root / "agents/requirements-world-model.txt").read_bytes()
+        with tempfile.TemporaryDirectory(prefix="wmh-guest-guard-") as temporary:
+            scratch = Path(temporary)
+            repo, world, venv = scratch / "repo", scratch / "world-model", scratch / "venv"
+            (repo / "agents").mkdir(parents=True)
+            (repo / "agents/requirements-world-model.txt").write_bytes(requirements)
+            values = {"REPO_DIR": str(repo), "WMH_DIR": str(world), "WMH_NATIVE_VENV": str(venv),
+                      "WMH_MODEL_NAME": "rose-archive", "WMH_ENGINE": "experiential"}
+            def check():
+                outcome = subprocess.run(["bash", "-c", guard + "cloudbench_cached_wmh_problem"],
+                                         env={"PATH": os.environ["PATH"], **values}, text=True, capture_output=True)
+                return outcome.returncode, outcome.stdout
+            self.assertIn("no cached WMH model", check()[1])
+            (world / "models/rose-archive").mkdir(parents=True)
+            (world / "build.manifest.json").write_text("{}")
+            self.assertIn("models/rose-archive/experiential.json", check()[1])
+            values["WMH_ENGINE"] = "legacy"
+            self.assertEqual(check(), (0, ""))
+            values["WMH_ENGINE"] = "experiential"
+            (world / "models/rose-archive/experiential.json").write_text("{}")
+            self.assertIn("native WMH venv is absent", check()[1])
+            (venv / "bin").mkdir(parents=True)
+            (venv / "bin/python").symlink_to(sys.executable)
+            self.assertIn("does not match", check()[1])
+            (venv / "requirements.sha256").write_text(hashlib.sha256(requirements).hexdigest() + "\n")
+            self.assertEqual(check(), (0, ""))
+            (repo / "agents/requirements-world-model.txt").write_bytes(requirements + b"\nchanged==1\n")
+            self.assertIn("does not match", check()[1])
+        self.assertNotRegex(guard, r"\buv\b|pip install")
+
+    def test_guest_stack_receives_native_serving_settings(self):
+        run_script = (root / "scripts/cloudbench-run.sh").read_text()
+        selection = re.search(r"^# Begin WMH selection\.\n.*?^# End WMH selection\.\n", run_script, re.M | re.S).group(0)
+        stack = run_script[run_script.index("STACK_ENV=(\n"):run_script.index('if [ -n "$BENCHMARK_FAST_MODE_CACHE" ]; then\n    STACK_ENV')]
+        def stack_env(values):
+            outcome = subprocess.run(["bash", "-c", selection + stack + 'printf "%s\\n" "${STACK_ENV[@]}"'],
+                                     env={"PATH": os.environ["PATH"], "REPO_DIR": "/data/repo", "DATA_DIR": "/data",
+                                          "WMH_DIR": "/data/world-model", **values}, text=True, capture_output=True)
+            self.assertEqual(outcome.returncode, 0, outcome.stderr)
+            return dict(line.split("=", 1) for line in outcome.stdout.splitlines() if "=" in line)
+        native = stack_env({})
+        self.assertEqual({key: native.get(key) for key in (
+            "WMH_ENGINE", "WMH_MODEL_NAME", "WMH_ROSE_POOL", "WMH_EXECUTION_POLICY", "WMH_BUILD_DIR",
+            "BENCHMARK_SKIP_WMH_DELTA", "WMH_NATIVE_PYTHON")}, {
+            "WMH_ENGINE": "experiential", "WMH_MODEL_NAME": "rose-archive", "WMH_ROSE_POOL": "rose-wmh-gpt61",
+            "WMH_EXECUTION_POLICY": "rose-outcome-distribution-v4", "WMH_BUILD_DIR": "/data/world-model-native",
+            "BENCHMARK_SKIP_WMH_DELTA": "1", "WMH_NATIVE_PYTHON": "/data/repo/.context/experiential-venv/bin/python"})
+        self.assertNotIn("WMH_CONTEXT_TOKENS", native)
+        # Native inference matches the validated local instantiate-whm runs.
+        self.assertEqual({key: native.get(key) for key in (
+            "WMH_INFERENCE_POOL", "WMH_AZURE_FIRST", "WMH_EXCLUDE_FAILED_TOOL_EXAMPLES", "WMH_JSON_MODE")}, {
+            "WMH_INFERENCE_POOL": "rose-1-flash", "WMH_AZURE_FIRST": "1",
+            "WMH_EXCLUDE_FAILED_TOOL_EXAMPLES": "1", "WMH_JSON_MODE": "1"})
+        handed = stack_env({"WMH_ENGINE": "experiential", "WMH_MODEL_NAME": "custom", "WMH_ROSE_POOL": "rose-1-mini",
+                            "WMH_EXECUTION_POLICY": "upstream", "WMH_CONTEXT_TOKENS": "131072"})
+        self.assertEqual((handed["WMH_MODEL_NAME"], handed["WMH_ROSE_POOL"], handed["WMH_EXECUTION_POLICY"],
+                          handed["WMH_CONTEXT_TOKENS"]), ("custom", "rose-1-mini", "upstream", "131072"))
+        legacy = stack_env({"WMH_ENGINE": "legacy"})
+        self.assertEqual((legacy["WMH_MODEL_NAME"], legacy["WMH_ROSE_POOL"], legacy["WMH_EXECUTION_POLICY"]),
+                         ("rose-r2-archive-anthropic", "rose-1-ultra", "upstream"))
+        # Engines serve separate donor directories (the legacy one is what
+        # other workspaces' guests serve); an explicit directory still wins.
+        self.assertEqual(legacy["WMH_BUILD_DIR"], "/data/world-model")
+        self.assertEqual(stack_env({"CLOUDBENCH_WMH_DIR": "/data/world-model"})["WMH_BUILD_DIR"], "/data/world-model")
+        # The isolated fleet launcher must not pin the legacy directory: it did,
+        # so native guests read /data/world-model regardless of engine.
+        generation = (root / "scripts/cloudbench-isolated-generation.py").read_text()
+        self.assertNotIn('os.environ["CLOUDBENCH_WMH_DIR"] =', generation)
+        generation_root = {"DATA_DIR": "/data/gen", "WMH_DIR": "/data/gen/world-model"}
+        self.assertEqual(stack_env(generation_root)["WMH_BUILD_DIR"], "/data/gen/world-model-native")
+        self.assertEqual(stack_env({**generation_root, "WMH_ENGINE": "legacy"})["WMH_BUILD_DIR"], "/data/gen/world-model")
+        self.assertNotIn("WMH_NATIVE_PYTHON", legacy)
+        self.assertNotIn("WMH_INFERENCE_POOL", legacy)
+        rejected = subprocess.run(["bash", "-c", selection], env={"PATH": os.environ["PATH"], "WMH_MODEL_NAME": "a b"},
+                                  text=True, capture_output=True)
+        self.assertEqual(rejected.returncode, 2)
+        # The benchmark runner records the engine that owns each seeded session.
+        self.assertIn("export WMH_ENGINE='$WMH_ENGINE'", run_script)
+        self.assertIn('--world-model-name "$WMH_MODEL_NAME"', run_script)
+
+    def test_fleet_resolves_the_same_defaults_for_children_workers_and_provenance(self):
+        fleet = (root / "scripts/run-bench-fleet").read_text()
+        defaults = re.search(r"^# Begin fleet WMH defaults\.\n.*?^# End fleet WMH defaults\.\n", fleet, re.M | re.S).group(0)
+        show = 'printf "%s\\n" "$WMH_ENGINE" "$WMH_MODEL_NAME" "$WMH_ROSE_POOL" "$WMH_EXECUTION_POLICY"'
+        for values in ({}, {"WMH_ENGINE": "legacy"}, {"WMH_MODEL_NAME": "custom"}):
+            with self.subTest(values=values):
+                fleet_values = subprocess.run(["bash", "-c", defaults + "bash -c " + repr(show)],
+                                              env={"PATH": os.environ["PATH"], **values}, text=True, capture_output=True)
+                cloud_values = run(show, {"WMH_ENGINE": "", "WMH_ROSE_POOL": "", **values})
+                self.assertEqual(cloud_values.returncode, 0, cloud_values.stderr)
+                self.assertEqual(fleet_values.stdout, cloud_values.stdout)
+        self.assertNotIn("rose-r2-archive-anthropic\"", fleet.replace('"${WMH_MODEL_NAME:-rose-r2-archive-anthropic}"', ""))
+        keys = set(re.findall(r'--config-value "(wmh_[a-z_]+)=', fleet))
+        self.assertEqual(keys, {"wmh_model_name", "wmh_engine", "wmh_rose_pool", "wmh_execution_policy"})
+        sys.path.insert(0, str(root / "scripts"))
+        try:
+            import cloudbench_execution_provenance as provenance
+        finally:
+            sys.path.remove(str(root / "scripts"))
+        self.assertTrue(keys <= provenance._CONFIG_SCALAR_KEYS)
+        # Autoscaled worker-only clones need the model name for simulated tool calls.
+        self.assertIn('echo "export WMH_MODEL_NAME=$(printf \'%q\' "$WMH_MODEL_NAME")"', fleet)
+        worker = (root / "scripts/cloudbench-worker.sh").read_text()
+        self.assertIn('${WMH_BASE_URL:+${WMH_MODEL_NAME:+WMH_MODEL_NAME="$WMH_MODEL_NAME"}}', worker)
+
+    def test_rose_pool_is_validated_against_the_benchmark_ref(self):
+        # A pool that exists only at the requested ref must pass, and one that
+        # exists only in this checkout must not.
+        check = 'validate_wmh_rose_pool_at_ref "$BENCH_REF" "$WMH_ROSE_POOL"'
+        result = run(check, {"BENCH_REF": "HEAD", "WMH_ROSE_POOL": "rose-1-ultra"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(run(check, {"BENCH_REF": "HEAD", "WMH_ROSE_POOL": "unknown-pool"}).returncode, 2)
+        with tempfile.TemporaryDirectory(prefix="wmh-pool-ref-") as temporary:
+            repo = Path(temporary)
+            registry = repo / "agents/providers/rose/pools.py"
+            registry.parent.mkdir(parents=True)
+            git = lambda *args: subprocess.run(["git", "-C", str(repo), *args], check=True,
+                                               capture_output=True, text=True).stdout.strip()
+            git("init", "-q")
+            git("config", "user.email", "test@example.invalid")
+            git("config", "user.name", "test")
+            marker = repo / "executed"
+            def commit(pool, registry_text=None):
+                # Importing this registry would leave a marker; validation must not run it.
+                registry.write_text(registry_text or (
+                    f"open({str(marker)!r}, 'w').close()\n"
+                    f"POOL_REGISTRY: dict = {{{pool!r}: object()}}\n"
+                ))
+                git("add", "-A")
+                git("commit", "-qm", pool)
+                return git("rev-parse", "HEAD")
+            older = commit("ref-only-pool")
+            commit("checkout-only-pool")
+            for ref, pool, code in ((older, "ref-only-pool", 0), (older, "checkout-only-pool", 2),
+                                    ("HEAD", "checkout-only-pool", 0)):
+                with self.subTest(ref=ref, pool=pool):
+                    outcome = run(check, {"ROOT_DIR": str(repo), "BENCH_REF": ref, "WMH_ROSE_POOL": pool})
+                    self.assertEqual(outcome.returncode, code, outcome.stderr)
+            self.assertFalse(marker.exists(), "the selected ref's registry code must not execute")
+            # A registry that is not a literal dict of names cannot be validated as data.
+            computed = commit("computed", "POOL_REGISTRY = dict(computed=1)\n")
+            self.assertEqual(run(check, {"ROOT_DIR": str(repo), "BENCH_REF": computed,
+                                         "WMH_ROSE_POOL": "computed"}).returncode, 2)
+            # Only a commit this controller has not fetched skips the check.
+            missing = run(check, {"ROOT_DIR": str(repo), "BENCH_REF": "0" * 40,
+                                  "WMH_ROSE_POOL": "ref-only-pool"})
+            self.assertEqual(missing.returncode, 0, missing.stderr)
+            self.assertIn("is not available locally", missing.stderr)
+            for ref in ("--output=/dev/null", "HEAD:agents"):
+                with self.subTest(unsafe_ref=ref):
+                    self.assertEqual(run(check, {"ROOT_DIR": str(repo), "BENCH_REF": ref,
+                                                 "WMH_ROSE_POOL": "ref-only-pool"}).returncode, 0)
+            # A present commit without the registry fails closed.
+            registry.unlink()
+            git("add", "-A")
+            git("commit", "-qm", "drop registry")
+            self.assertEqual(run(check, {"ROOT_DIR": str(repo), "BENCH_REF": "HEAD",
+                                         "WMH_ROSE_POOL": "checkout-only-pool"}).returncode, 2)
+
+    def test_execution_policy_allowlist_admits_every_registered_policy(self):
+        # The cloud launch must accept each immutable registered policy and
+        # nothing else; a stale allowlist rejects a reviewed local policy.
+        import runpy
+        sys.path.insert(0, str(root / "agents"))
+        try:
+            policies = runpy.run_path(str(root / "agents/benchmarks/wmh_execution_policy.py"))["_POLICIES"]
+        finally:
+            sys.path.remove(str(root / "agents"))
+        self.assertIn("rose-outcome-distribution-v2", policies)
+        for name in policies:
+            with self.subTest(policy=name):
+                result = run(":", {"WMH_ENGINE": "experiential", "WMH_EXECUTION_POLICY": name})
+                self.assertEqual(result.returncode, 0, result.stderr)
+        unregistered = "rose-outcome-distribution-v999"
+        self.assertNotIn(unregistered, policies)
+        for name in (unregistered, "upstream;id"):
+            with self.subTest(policy=name):
+                self.assertEqual(run(":", {"WMH_ENGINE": "experiential", "WMH_EXECUTION_POLICY": name}).returncode, 2)
+
+    def test_setup_uses_linux_hash_and_keeps_runtime_validation(self):
+        with tempfile.TemporaryDirectory(prefix="wmh-linux-checksum-") as temporary:
+            scratch = Path(temporary)
+            repo = scratch / "repo"
+            (repo / "scripts").mkdir(parents=True)
+            (repo / "agents").mkdir()
+            for path in ("scripts/setup-world-model.sh", "agents/requirements-world-model.txt",
+                         "agents/vendor/world-model/SOURCES.txt",
+                         "agents/vendor/world-model/experiential-0.7.158+rose.bf75987e.elapsed1-py3-none-any.whl"):
+                (repo / path).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(root / path, repo / path)
+            native = repo / ".context/experiential-venv/bin"
+            native.mkdir(parents=True)
+            (native / "python").symlink_to(sys.executable)
+            binaries = scratch / "bin"
+            binaries.mkdir()
+            for command in ("dirname", "cut", "cat"):
+                (binaries / command).symlink_to(shutil.which(command))
+            digest_tool = binaries / "sha256sum"
+            digest_tool.write_text("#!" + sys.executable + "\nimport hashlib,sys\nfrom pathlib import Path\n"
+                                   "print(hashlib.sha256(Path(sys.argv[-1]).read_bytes()).hexdigest()+'  '+sys.argv[-1])\n")
+            digest_tool.chmod(0o755)
+            calls = scratch / "uv-calls"
+            uv = binaries / "uv"
+            uv.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$UV_CALLS"\n')
+            uv.chmod(0o755)
+            result = subprocess.run(["/bin/bash", str(repo / "scripts/setup-world-model.sh")],
+                                    env={"PATH": str(binaries), "UV_CALLS": str(calls)},
+                                    text=True, capture_output=True)
+            expected = hashlib.sha256((repo / "agents/requirements-world-model.txt").read_bytes()).hexdigest()
+            marker = repo / ".context/experiential-venv/requirements.sha256"
+            self.assertFalse(marker.exists(), "failed runtime validation must not mark the environment healthy")
+            self.assertEqual(len(calls.read_text().splitlines()), 2)
+            self.assertNotEqual(result.returncode, 0, "missing pinned native dependency must still fail closed")
+            self.assertTrue("Native world model requires Python" in result.stderr
+                            or "PackageNotFoundError" in result.stderr, result.stderr)
+
+FAKE_FLY = r'''
+import json, os, sys
+state_path = os.environ["FLY_STATE"]
+state = json.load(open(state_path))
+args = sys.argv[1:]
+state["calls"].append(args)
+def save():
+    json.dump(state, open(state_path, "w"))
+def value(flag):
+    return args[args.index(flag) + 1]
+verb = " ".join(args[:2])
+if verb in ("machines list", "machine list"):
+    print(json.dumps(state["machines"])); save(); sys.exit(0)
+if verb in ("volumes list", "volume list"):
+    print(json.dumps(state["volumes"])); save(); sys.exit(0)
+if verb == "volumes create":
+    if state.get("fail") == "volume_create":
+        save(); sys.exit(1)
+    row = {"id": "vol_build1", "name": args[2], "state": "created", "size_gb": int(value("--size")),
+           "snapshot_id": value("--snapshot-id")}
+    state["volumes"].append(row); save(); print(json.dumps(row)); sys.exit(0)
+if verb == "machine run":
+    if os.path.exists(os.environ["LEDGER_PATH"]):
+        state["ledger_at_machine_run"] = open(os.environ["LEDGER_PATH"]).read()
+    row = {"id": state.get("new_mid", "b0110000000001"), "name": value("--name"), "state": "started",
+           "volume": value("--volume").split(":")[0]}
+    state["machines"].append(row); save()
+    if state.get("fail") == "machine_run_ambiguous":
+        sys.exit(1)
+    print("Machine ID: " + row["id"]); sys.exit(0)
+if verb == "machine destroy":
+    state["machines"] = [m for m in state["machines"] if m["id"] != args[-3]]
+    save(); sys.exit(0)
+if verb == "volumes destroy":
+    vid = args[2]
+    if any(m.get("volume") == vid for m in state["machines"]):
+        save(); sys.exit(1)
+    for v in state["volumes"]:
+        if v["id"] == vid and not state.get("stuck_volume"):
+            v["state"] = "pending_destroy"
+    save(); sys.exit(0)
+save(); sys.exit(9)
+'''
+
+lifecycle = re.search(r"^# Begin WMH build lifecycle\.\n.*?^# End WMH build lifecycle\.\n", source, re.M | re.S)
+lifecycle = lifecycle.group(0) if lifecycle else ""
+build_mode = source[source.index('if [ "$MODE" = "build-wmh" ]; then'):source.index("# MODE: run (default)")]
+DONOR = "d0e0000000000001"
+
+class NativeWorldModelBuild(unittest.TestCase):
+    """--build-wmh: owned ephemeral big machine, native build, cache publication, teardown."""
+
+    def fly(self, scratch, **overrides):
+        state = {"calls": [], "machines": [{"id": DONOR, "name": "cloudbench-warm", "state": "stopped",
+                 "volume": "vol_donor", "config": {"image": "registry.fly.io/bench:warm",
+                 "mounts": [{"volume": "vol_donor", "path": "/data"}]}}],
+                 "volumes": [{"id": "vol_donor", "name": "cloudbench_data", "state": "created"}]}
+        state.update(overrides)
+        (scratch / "fly.json").write_text(json.dumps(state))
+        (scratch / "fake_fly.py").write_text(FAKE_FLY)
+        return scratch / "fly.json"
+
+    def lifecycle(self, scratch, script, values=None, **state):
+        self.assertTrue(lifecycle)
+        path = self.fly(scratch, **state)
+        ledger = scratch / "owned-resources.env"
+        prefix = (f'APP=navi-whisper-lux-bench; REGION=iad; REMOTE_REPO=/data/repo; REMOTE_UV_PYTHON=/data/uv-python\n'
+                  f'FLY() {{ python3 {scratch / "fake_fly.py"} "$@"; }}\n')
+        suffix = (f'\nWMH_BUILD_LEDGER={ledger}; WMH_BUILD_DONOR_MID={DONOR}; WMH_BUILD_DONOR_VOLUME=vol_donor\n'
+                  'WMH_BUILD_RELEASE_SLEEP_SECONDS=0; WMH_BUILD_RELEASE_ATTEMPTS=3\n')
+        result = run(prefix + lifecycle + suffix + script,
+                     {"FLY_STATE": str(path), "LEDGER_PATH": str(ledger), **(values or {})})
+        return result, json.loads(path.read_text()), (ledger.read_text() if ledger.exists() else "")
+
+    def test_owned_machine_is_big_sleeps_forever_and_is_released(self):
+        with tempfile.TemporaryDirectory(prefix="wmh-build-owned-") as temporary:
+            result, fly, ledger = self.lifecycle(Path(temporary), (
+                'wmh_build_validate || exit 2\n'
+                'wmh_build_create_resources 20261019000000_abcd snap_proven registry.fly.io/bench:warm || exit 1\n'
+                'wmh_build_teardown'))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            create = next(c for c in fly["calls"] if c[:2] == ["volumes", "create"])
+            self.assertEqual(create[create.index("--snapshot-id") + 1], "snap_proven")
+            self.assertEqual(create[create.index("--size") + 1], "80")
+            machine = next(c for c in fly["calls"] if c[:2] == ["machine", "run"])
+            self.assertEqual(machine[2], "registry.fly.io/bench:warm")
+            self.assertEqual(machine[machine.index("--vm-size") + 1], "performance-8x")
+            self.assertEqual(machine[machine.index("--vm-memory") + 1], "65536")
+            self.assertEqual(machine[machine.index("--volume") + 1], "vol_build1:/data")
+            self.assertEqual(machine[-2:], ["sleep", "infinity"])
+            # Exact IDs are durable before the next allocation uses them.
+            self.assertIn("volume_id=vol_build1\nmachine_name=wmhb-20261019000000-abcd\n", fly["ledger_at_machine_run"])
+            self.assertIn("machine_id=b0110000000001\nmachine_released=destroyed\nvolume_released=pending_destroy\n", ledger)
+            self.assertEqual([m["id"] for m in fly["machines"]], [DONOR])
+            self.assertEqual({v["id"]: v["state"] for v in fly["volumes"]},
+                             {"vol_donor": "created", "vol_build1": "pending_destroy"})
+            touched = [c for c in fly["calls"] if c[:2] not in (["machines", "list"], ["volumes", "list"])]
+            self.assertFalse([c for c in touched if DONOR in c or "vol_donor" in c])
+
+    def test_shape_overrides_and_minimum_volume(self):
+        with tempfile.TemporaryDirectory(prefix="wmh-build-shape-") as temporary:
+            values = {"WMH_BUILD_VM_SIZE": "performance-16x", "WMH_BUILD_VM_MEMORY_MB": "131072",
+                      "WMH_BUILD_VOLUME_GB": "120"}
+            result, fly, _ = self.lifecycle(Path(temporary), (
+                'wmh_build_validate || exit 2\nwmh_build_create_resources 1_a snap registry/img || exit 1'), values)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            machine = next(c for c in fly["calls"] if c[:2] == ["machine", "run"])
+            create = next(c for c in fly["calls"] if c[:2] == ["volumes", "create"])
+            self.assertEqual((machine[machine.index("--vm-size") + 1], machine[machine.index("--vm-memory") + 1],
+                              create[create.index("--size") + 1]), ("performance-16x", "131072", "120"))
+            for key, bad in (("WMH_BUILD_VOLUME_GB", "40"), ("WMH_BUILD_VM_MEMORY_MB", "64g"),
+                             ("WMH_FULL_CACHE_NAME", "x;id"), ("WMH_EXPORT_CACHE_NAME", "../x"),
+                             ("WMH_ENGINE", "legacy")):
+                with self.subTest(key=key):
+                    rejected, fly, _ = self.lifecycle(Path(temporary), "wmh_build_validate", {key: bad})
+                    self.assertEqual(rejected.returncode, 2, rejected.stderr)
+
+    def test_failed_or_ambiguous_creation_is_torn_down_by_exact_name(self):
+        with tempfile.TemporaryDirectory(prefix="wmh-build-ambiguous-") as temporary:
+            result, fly, ledger = self.lifecycle(Path(temporary), (
+                'wmh_build_create_resources 1_a snap registry/img && exit 9\nwmh_build_teardown'),
+                fail="machine_run_ambiguous")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual([m["id"] for m in fly["machines"]], [DONOR])
+            self.assertIn("machine_id=b0110000000001\n", ledger)
+            self.assertIn("volume_released=pending_destroy", ledger)
+        with tempfile.TemporaryDirectory(prefix="wmh-build-stuck-") as temporary:
+            result, fly, ledger = self.lifecycle(Path(temporary), (
+                'wmh_build_create_resources 1_a snap registry/img\nwmh_build_teardown'), stuck_volume=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("NOT proven released", result.stderr)
+            self.assertNotIn("volume_released", ledger)
+
+    def test_donor_identity_is_never_adopted_or_destroyed(self):
+        with tempfile.TemporaryDirectory(prefix="wmh-build-donor-") as temporary:
+            result, fly, ledger = self.lifecycle(Path(temporary), (
+                'wmh_build_create_resources 1_a snap registry/img && exit 9\nwmh_build_teardown'), new_mid=DONOR)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn(f"machine_id={DONOR}", ledger)
+            self.assertFalse([c for c in fly["calls"] if c[:2] == ["machine", "destroy"] and DONOR in c])
+            self.assertIn("refusing to operate on the shared donor", result.stderr)
+
+    def test_mode_tears_down_owned_resources_on_failure_and_signal(self):
+        stubs = ('git() { echo 0123456789abcdef0123456789abcdef01234567; }\n'
+                 'validate_wmh_rose_pool_at_ref() { :; }; ensure_app() { :; }; verify_app_environment() { :; }\n'
+                 f'resolve_machine_id() {{ echo {DONOR}; }}; _machines_json() {{ FLY machines list --json; }}\n'
+                 'warm_source_fetch_ref() { echo "fetch $1" >> "$TRACE"; }; ssh_exec() { echo "exec $1" >> "$TRACE"; return 1; }\n')
+        for name, ready in (("failure", "return 1"), ("term", "kill -TERM $$; :")):
+            with self.subTest(exit=name), tempfile.TemporaryDirectory(prefix="wmh-build-mode-") as temporary:
+                scratch = Path(temporary)
+                state = scratch / "warm-deps.fp"
+                state.write_text("node py 1 snap_proven\n")
+                trace = scratch / "trace"
+                result, fly, _ = self.lifecycle(scratch, stubs
+                    + f'require_machine_ready() {{ echo "ready $1" >> "$TRACE"; {ready}; }}\n'
+                    + f'MODE=build-wmh; BENCH_REF=HEAD; ROOT_DIR={scratch}; WARM_DEPS_STATE_FILE={state}\n'
+                    + 'WMH_BUILD_LEDGER=""\n' + build_mode, {"TRACE": str(trace)})
+                self.assertEqual(result.returncode, 1 if name == "failure" else 143, result.stdout + result.stderr)
+                ledger = next((scratch / ".context/wmh-build").glob("*/owned-resources.env")).read_text()
+                self.assertIn("machine_released=destroyed", ledger)
+                self.assertIn("volume_released=pending_destroy", ledger)
+                self.assertEqual([m["id"] for m in fly["machines"]], [DONOR])
+                self.assertEqual(trace.read_text().split(), ["ready", "b0110000000001"])
+
+    def test_mode_only_targets_the_owned_machine(self):
+        self.assertIn("trap wmh_build_exit EXIT", build_mode)
+        self.assertIn("trap 'exit 143' TERM", build_mode)
+        self.assertIn("trap 'exit 130' INT", build_mode)
+        for forbidden in ("inject_secrets", "prepare_warm_source", "park_warm_source", "start_machine",
+                          "stop_machine", "create_volume_snapshot_exact", "machines exec"):
+            self.assertNotIn(forbidden, build_mode)
+        targets = re.findall(r'\b(?:ssh_exec|ssh_read|warm_source_fetch_ref|require_machine_ready|wmh_build_poll) "\$([A-Z_]+)"',
+                             build_mode)
+        targets += re.findall(r'--machine "\$([A-Z_]+)"', build_mode)
+        self.assertGreaterEqual(len(targets), 6)
+        self.assertEqual(set(targets), {"WMH_BUILD_MID"})
+        # The documented publication path is the supported CLI, not a hand-built machine.
+        for doc in ("CLAUDE.md", ".claude/skills/instantiate-whm/SKILL.md"):
+            self.assertIn("bash scripts/run-bench-cloud --build-wmh", (root / doc).read_text())
+
+    def remote(self, scratch, values, python_mode):
+        repo, data = scratch / "data/repo", scratch / "data"
+        python = repo / "agents/venv/bin/python"
+        python.parent.mkdir(parents=True)
+        (repo / "scripts").mkdir()
+        (repo / "agents/.env").write_text("R2=1\n")
+        calls = scratch / "calls.jsonl"
+        python.write_text(
+            "#!" + sys.executable + "\nimport json,os,sys\nfrom pathlib import Path\nargv=sys.argv[1:]\n"
+            "keys=('WMH_BUILD_DIR','WMH_ENGINE','WMH_ROSE_POOL','WMH_EXECUTION_POLICY','WMH_GEPA_BUDGET',"
+            "'WMH_MAX_BUNDLES','WMH_CONFORMANCE_EXAMPLES','WMH_REQUIRE_CONFORMANCE','UV_PYTHON_INSTALL_DIR','HOME')\n"
+            "open(os.environ['CALLS'],'a').write(json.dumps({'argv':argv,'env':{k:os.environ.get(k) for k in keys}})+'\\n')\n"
+            "mode=os.environ['PY_MODE']\n"
+            "if 'status' in argv:\n"
+            "    if mode=='absent': print('no cache published for '+argv[-1]); sys.exit(1)\n"
+            "    if mode=='unreadable': print('Traceback: R2 403'); sys.exit(1)\n"
+            "    sys.exit(0)\n"
+            "if '-c' in argv:\n"
+            "    if mode=='build-fails': sys.exit(5)\n"
+            "    root=Path(os.environ.get('WMH_BUILD_DIR') or argv[3]); (root/'models/rose-archive').mkdir(parents=True,exist_ok=True)\n"
+            "    (root/'models/rose-archive/experiential.json').write_text('{}'); (root/'build.manifest.json').write_text('{}')\n"
+            "if argv[:4]==['-m','pip','install','--quiet']:\n"
+            "    uv=Path(sys.argv[0]).parent/'uv'; uv.write_text('#!/bin/sh\\n'); uv.chmod(0o755)\n")
+        python.chmod(0o755)
+        (repo / "scripts/setup-world-model.sh").write_text(
+            "printf '{\"argv\":[\"setup\"],\"env\":{\"UV_PYTHON_INSTALL_DIR\":\"%s\"}}\\n' \"$UV_PYTHON_INSTALL_DIR\" >> \"$CALLS\"\n")
+        script = scratch / "wmh-build.sh"
+        generated = run(lifecycle + f'\nREMOTE_REPO={repo}; REMOTE_UV_PYTHON={data}/uv-python\n'
+                        f'WMH_BUILD_REMOTE_ROOT={data}/wmhb; WMH_BUILD_REMOTE_DIR={data}/wmhb/native; '
+                        f'WMH_BUILD_REMOTE_PID={data}/wmh-build.pid\nwmh_build_remote_script', values)
+        self.assertEqual(generated.returncode, 0, generated.stderr)
+        script.write_text(generated.stdout)
+        result = subprocess.run(["bash", "-c", "gosu() { shift; \"$@\"; }; chown() { :; }; rsync() { return 1; }\n"
+                                 "source " + str(script)], env={"PATH": os.environ["PATH"], "CALLS": str(calls),
+                                 "PY_MODE": python_mode}, text=True, capture_output=True)
+        records = [json.loads(line) for line in calls.read_text().splitlines()]
+        return result, records, data
+
+    def test_remote_build_pulls_full_cache_builds_and_publishes_both_caches(self):
+        values = {"WMH_CACHE_NAME": "serving-custom", "WMH_FULL_CACHE_NAME": "full-custom"}
+        for mode in ("published", "absent", "unreadable", "build-fails"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix="wmh-build-remote-") as temporary:
+                result, records, data = self.remote(Path(temporary), values, mode)
+                ok = mode in ("published", "absent")
+                self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+                self.assertEqual("::WMH-BUILD-DONE::" in result.stdout, ok)
+                self.assertEqual("::WMH-BUILD-FAILED::" in result.stdout, not ok)
+                built = str(data / "wmhb/native")
+                argvs = [r["argv"] for r in records]
+                self.assertEqual(argvs[0], ["-m", "pip", "install", "--quiet", "uv"])
+                self.assertEqual(records[1], {"argv": ["setup"], "env": {"UV_PYTHON_INSTALL_DIR": str(data / "uv-python")}})
+                cache = ["-u", "-m", "benchmarks.wmh_build_cache"]
+                self.assertEqual(argvs[2], cache + ["status", "--name", "full-custom"])
+                pulled = cache + ["pull", "--build-dir", built, "--name", "full-custom", "--force"]
+                self.assertEqual(pulled in argvs, mode in ("published", "build-fails"))
+                pushes = [a for a in argvs if a[3:4] == ["push"]]
+                if not ok:
+                    self.assertEqual(pushes, [])
+                    continue
+                update = next(r for r in records if "-c" in r["argv"])
+                self.assertIn("update_world_model_for_simulation", update["argv"][2])
+                self.assertEqual({k: update["env"][k] for k in ("WMH_BUILD_DIR", "WMH_ENGINE", "WMH_GEPA_BUDGET",
+                                 "WMH_MAX_BUNDLES", "WMH_CONFORMANCE_EXAMPLES", "WMH_REQUIRE_CONFORMANCE",
+                                 "UV_PYTHON_INSTALL_DIR", "HOME")},
+                                 {"WMH_BUILD_DIR": built, "WMH_ENGINE": "experiential", "WMH_GEPA_BUDGET": "0",
+                                  "WMH_MAX_BUNDLES": "0", "WMH_CONFORMANCE_EXAMPLES": "100",
+                                  "WMH_REQUIRE_CONFORMANCE": "1", "UV_PYTHON_INSTALL_DIR": str(data / "uv-python"),
+                                  "HOME": "/home/rose"})
+                self.assertEqual(pushes, [cache + ["push", "--serving-only", "--build-dir", built, "--name", "serving-custom"],
+                                          cache + ["push", "--build-dir", built, "--name", "full-custom"]])
+
+    def test_remote_export_cache_runs_only_the_native_step(self):
+        with tempfile.TemporaryDirectory(prefix="wmh-build-export-") as temporary:
+            result, records, data = self.remote(Path(temporary), {"WMH_EXPORT_CACHE_NAME": "rose-archive-export",
+                                                                  "WMH_ROSE_POOL": ""}, "published")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            built = str(data / "wmhb/native")
+            argvs = [r["argv"] for r in records]
+            cache = ["-u", "-m", "benchmarks.wmh_build_cache"]
+            self.assertEqual(argvs[2], cache + ["pull", "--build-dir", built, "--name", "rose-archive-export", "--force"])
+            native = records[3]
+            self.assertIn("build_native", native["argv"][2])
+            self.assertNotIn("update_world_model_for_simulation", native["argv"][2])
+            self.assertEqual(native["argv"][3:], [built, "rose-archive", "rose-wmh-gpt61"])
+            self.assertEqual((native["env"]["WMH_ENGINE"], native["env"]["WMH_ROSE_POOL"],
+                              native["env"]["WMH_EXECUTION_POLICY"]),
+                             ("experiential", "rose-wmh-gpt61", "rose-outcome-distribution-v4"))
+            self.assertEqual(argvs[4:], [cache + ["push", "--serving-only", "--build-dir", built, "--name", "rose-archive-serving"],
+                                         cache + ["push", "--build-dir", built, "--name", "rose-archive-native"]])
+
+    def test_poll_reports_progress_completion_failure_death_and_timeout(self):
+        cases = {
+            "done": (["[wmh-build] step one", "::WMH-LOG-END:: 1 alive", "[wmh-build] step one\n[wmh-build] push\n::WMH-BUILD-DONE::\n::WMH-LOG-END:: 3 dead"], 0, "push"),
+            "failed": (["boom\n::WMH-BUILD-FAILED:: rc=5\n::WMH-LOG-END:: 2 dead"], 1, "on-box WMH build failed"),
+            "died": (["partial\n::WMH-LOG-END:: 1 dead"] * 3, 1, "without a completion marker"),
+            "timeout": (["::WMH-LOG-END:: 0 alive"] * 50, 1, "timed out"),
+        }
+        for name, (responses, rc, text) in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory(prefix="wmh-build-poll-") as temporary:
+                scratch = Path(temporary)
+                for index, response in enumerate(responses):
+                    (scratch / str(index)).write_text(response)
+                fake = ('ssh_read() { local n; n=$(cat "$S/n" 2>/dev/null || echo 0); echo $((n + 1)) > "$S/n"; '
+                        '[ "$1" = b0110000000001 ] || return 1; cat "$S/$n"; }\nmachine_state() { echo started; }\n')
+                values = {"S": str(scratch), "WMH_BUILD_POLL_SECONDS": "0.05" if name == "timeout" else "0",
+                          "WMH_BUILD_TIMEOUT_SECONDS": "1" if name == "timeout" else "60"}
+                result = run(lifecycle + fake + "wmh_build_poll b0110000000001", values)
+                self.assertEqual(result.returncode, rc, result.stdout + result.stderr)
+                self.assertIn(text, result.stdout + result.stderr)
+
+unittest.main(argv=[sys.argv[0]], verbosity=1)
+PY
+
 agents_env="$TMP_ROOT/agents.env"
 backend_env="$TMP_ROOT/backend.env"
 printf 'BROWSER_PROVIDER=browserbase\nSECRET=value-one\n' > "$agents_env"
@@ -42,6 +1024,24 @@ if cloudbench_validate_browser_provider_contract "$agents_env" "$backend_env" ke
 fi
 
 sed -i.bak 's/browserbase/kernel/' "$agents_env" "$backend_env"
+rm -f "$agents_env.bak" "$backend_env.bak"
+cloudbench_validate_browser_provider_contract "$agents_env" "$backend_env" kernel kernel >/dev/null
+
+# Tilion contract: accepted only when the guest backend env carries its key,
+# which reaches guests inside BACKEND_ENV_B64 exactly like KERNEL_API_KEY.
+sed -i.bak 's/^BROWSER_PROVIDER=kernel$/BROWSER_PROVIDER=tilion/' "$agents_env" "$backend_env"
+rm -f "$agents_env.bak" "$backend_env.bak"
+if tilion_out="$(cloudbench_validate_browser_provider_contract "$agents_env" "$backend_env" tilion tilion 2>&1)"; then
+  fail "a tilion contract without TILION_API_KEY must fail closed"
+fi
+case "$tilion_out" in *"no TILION_API_KEY"*) ;; *) fail "missing-key failure must name TILION_API_KEY: $tilion_out" ;; esac
+printf 'TILION_API_KEY=tl_fake_contract_key\n' >> "$backend_env"
+tilion_out="$(cloudbench_validate_browser_provider_contract "$agents_env" "$backend_env" tilion tilion)"
+case "$tilion_out" in *tl_fake_contract_key*) fail "contract output printed TILION_API_KEY" ;; esac
+if cloudbench_validate_browser_provider_contract "$agents_env" "$backend_env" tilion kernel >/dev/null 2>&1; then
+  fail "tilion backend with kernel workers must fail as provider drift"
+fi
+sed -i.bak -e 's/^BROWSER_PROVIDER=tilion$/BROWSER_PROVIDER=kernel/' -e '/^TILION_API_KEY=/d' "$agents_env" "$backend_env"
 rm -f "$agents_env.bak" "$backend_env.bak"
 cloudbench_validate_browser_provider_contract "$agents_env" "$backend_env" kernel kernel >/dev/null
 
@@ -67,6 +1067,38 @@ require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'cloudbench_require_agentcard_org_oauth back-end/.env' \
   "run-bench-cloud must refuse to stage a BACKEND_ENV_B64 without AgentCard org OAuth"
+
+# Guests restore their own DB, so a guest-local lease store gives each copy its
+# own semaphore on the same real token (proof 2: ~80 live leases against the
+# shared capacity of 16, 429 burst). The decoded guest back-end/.env must point
+# compute-token requests at the single production authority.
+authority_env="$TMP_ROOT/authority-backend.env"
+printf 'BACKEND_API_KEY=guest-internal-key-0123456789\nOTHER=1' > "$authority_env"
+cloudbench_apply_compute_token_authority "$authority_env" >/dev/null ||
+  fail "a guest backend env with BACKEND_API_KEY must gain the compute-token authority"
+[ "$(cloudbench_env_value "$authority_env" COMPUTE_TOKEN_AUTHORITY_URL)" = https://navi-j9a9.onrender.com ] ||
+  fail "guests must default to the production compute-token authority"
+[ "$(cloudbench_env_value "$authority_env" COMPUTE_TOKEN_AUTHORITY_API_KEY)" = guest-internal-key-0123456789 ] ||
+  fail "the authority must be authenticated with the guest's internal BACKEND_API_KEY"
+[ "$(cloudbench_env_value "$authority_env" OTHER)" = 1 ] ||
+  fail "appending the authority must not corrupt an unterminated last line"
+cloudbench_apply_compute_token_authority "$authority_env" >/dev/null
+[ "$(grep -c '^COMPUTE_TOKEN_AUTHORITY_URL=' "$authority_env")" = 1 ] ||
+  fail "an env file that already names an authority must be left unchanged"
+printf 'BACKEND_API_KEY=k\n' > "$authority_env"
+CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=off cloudbench_apply_compute_token_authority "$authority_env" >/dev/null
+[ -z "$(cloudbench_env_value "$authority_env" COMPUTE_TOKEN_AUTHORITY_URL)" ] ||
+  fail "CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=off must keep guest-local leases"
+if CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=http://example.test cloudbench_apply_compute_token_authority "$authority_env" >/dev/null 2>&1; then
+  fail "a non-https compute-token authority must fail closed"
+fi
+printf 'OTHER=1\n' > "$authority_env"
+if cloudbench_apply_compute_token_authority "$authority_env" >/dev/null 2>&1; then
+  fail "a guest backend env without BACKEND_API_KEY must fail closed"
+fi
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'cloudbench_apply_compute_token_authority "$REPO_DIR/back-end/.env"' \
+  "cloudbench-run must point the guest backend at the shared compute-token authority"
 
 retry_attempts=0
 fail_twice_then_succeed() {
@@ -685,8 +1717,13 @@ unset CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS
 # primary shape rather than inheriting the oversized warm maintenance machine.
 primary_default_line="$(grep '^FLEET_PRIMARY_VM_SIZE=' "$ROOT_DIR/scripts/run-bench-fleet")"
 primary_memory_line="$(grep '^FLEET_PRIMARY_VM_MEMORY=' "$ROOT_DIR/scripts/run-bench-fleet")"
-[[ "$primary_default_line" = *"shared-cpu-2x"* && "$primary_memory_line" = *"4096"* ]] ||
+[[ "$primary_default_line" = *":-shared-cpu-4x}\"" && "$primary_memory_line" = *"4096"* ]] ||
   fail "fleet default must fit both Fly's shared-memory matrix and performance-CPU reservation ceiling"
+# descend-full69 proof 2: 3 of 15 shared-cpu-2x primaries were throttled to
+# 81-93% steal and expired interactive transactions; 0 of 55 shared-cpu-4x
+# primaries exceeded 9%. The default primary must never fall back to 2x.
+[ "$(CLOUDBENCH_FLEET_PRIMARY_VM_SIZE='' bash -c "$primary_default_line"'; printf %s "$FLEET_PRIMARY_VM_SIZE"')" = "shared-cpu-4x" ] ||
+  fail "default fleet primary must be shared-cpu-4x (shared-cpu-2x guests were throttled to 81-93% steal)"
 clone_function_source="$(awk '
   /^clone_machine_target\(\)/ { capture = 1 }
   capture { print }
@@ -694,14 +1731,22 @@ clone_function_source="$(awk '
 ' "$ROOT_DIR/scripts/run-bench-fleet")"
 [ -n "$clone_function_source" ] || fail "could not load production clone command builder"
 fleet_production_function() {
+  # Subshell-bodied functions (`name() (`) close with a column-zero `)`.
   awk -v function_name="$1" '
-    $0 ~ "^" function_name "\\(\\)" { capture = 1 }
+    !capture && $0 ~ "^" function_name "\\(\\)" {
+      capture = 1
+      terminator = ($0 ~ "^" function_name "\\(\\) \\(") ? ")" : "}"
+    }
     capture { print }
-    capture && /^}$/ { exit }
+    capture && $0 == terminator { exit }
   ' "$ROOT_DIR/scripts/run-bench-fleet" "$ROOT_DIR/scripts/lib/cloudbench-inventory.sh"
 }
-for function_name in worker_ledger_lock_acquire worker_ledger_lock_release \
-  inventory_index_healthy inventory_machine_record_path inventory_machine_field; do
+# clone_machine_target verifies every new storage-ready target through the
+# production disposable-Volume bridge; outside a disposable lifecycle that
+# bridge is an exact no-op, so load it rather than stubbing the call away.
+for function_name in machine_creation_admission fleet_clone_with_queue_admission worker_ledger_lock_acquire worker_ledger_lock_release \
+  inventory_index_healthy inventory_machine_record_path inventory_machine_field fleet_disable_disposable_volume_snapshots \
+  clone_volume_receipt_field clone_attach_failure_prelaunch clone_retire_owned_volume clone_create_owned_volume clone_storage_ready_seconds; do
   function_source="$(fleet_production_function "$function_name")"
   [ -n "$function_source" ] || fail "could not load production function $function_name"
   eval "$function_source"
@@ -726,13 +1771,38 @@ python3 "$ROOT_DIR/scripts/cloudbench-machine-readiness.py" --publish-index \
 fleet_registry_record_name() { return 0; }
 fleet_registry_record_id() { return 0; }
 fleet_registry_release_name() { return 0; }
-machine_volume_id() { printf 'vol-primary-owned'; }
+machine_volume_id() { printf 'vol_primaryowned'; }
+# Fake Machines API for the exact owned Volume created before the clone.
+volume_args="$TMP_ROOT/primary-volume.args"
+fleet_clone_volume_request() {
+  shift
+  printf '%s\n' "$*" > "$volume_args"
+  printf '{"outcome":"created","id":"vol_primaryowned"}\n'
+}
+fleet_registry_record_volume() { return 0; }
 machine_storage_ready() { return 0; }
 machine_storage_failed() { return 1; }
 fly_with_timeout() {
   shift
   printf '%s\n' "$*" > "$clone_args"
   echo "Machine abcdef12345678 has been created..."
+}
+# The real entry point now refuses unmeasured new allocation. Exercise that
+# guard before the historical shape replay; it must not reach even our fake
+# provider or publish a target ledger.
+clone_admission_rc=0
+clone_machine_target "$TMP_ROOT/withheld-primary.ids" \
+  > "$TMP_ROOT/withheld-primary.stdout" 2> "$TMP_ROOT/withheld-primary.stderr" \
+  || clone_admission_rc=$?
+[ "$clone_admission_rc" -eq 78 ] || fail "real clone admission must refuse unmeasured allocation"
+require_text "$TMP_ROOT/withheld-primary.stderr" "new Machine allocation withheld" \
+  "real clone admission must explain its refusal"
+[ ! -e "$clone_args" ] && [ ! -e "$TMP_ROOT/withheld-primary.ids" ] || \
+  fail "refused clone admission reached transport or published a ledger"
+# Mock only admission for this exact fake-provider fixture. Keep the complete
+# production command builder and its CPU/memory assertions below unchanged.
+machine_creation_admission() {
+  [ "$1" = "$TMP_ROOT/primary.ids" ] || return 78
 }
 primary_id="$(clone_machine_target "$TMP_ROOT/primary.ids")" ||
   fail "production clone command builder failed in the capacity replay"
@@ -741,14 +1811,20 @@ require_text "$clone_args" "--vm-size shared-cpu-2x" \
   "primary clone must avoid both the running CPU ceiling and performance reservation ceiling"
 require_text "$clone_args" "--vm-memory 4096" \
   "primary clone memory must fit Fly's shared-cpu-2x memory ceiling"
+require_text "$clone_args" "--attach-volume vol_primaryowned" \
+  "primary clone must attach its exact pre-created owned Volume"
+require_text "$volume_args" "--vm-size shared-cpu-2x --vm-memory 4096" \
+  "owned Volume placement must request the same primary compute shape"
 primary_cpus="$(sed -nE 's/.*--vm-size ([^ ]+).*/\1/p' "$clone_args" | sed -nE 's/.*-([0-9]+)x$/\1/p')"
 [ -n "$primary_cpus" ] || fail "capacity replay could not parse primary CPU allocation"
 [ $((16 + 37 * primary_cpus)) -le 160 ] ||
   fail "daily fleet primary shape exceeds the observed Fly CPU governor ceiling"
-unset -f clone_machine_target fleet_registry_record_name fleet_registry_record_id \
+unset -f clone_machine_target machine_creation_admission fleet_registry_record_name fleet_registry_record_id \
   fleet_registry_release_name machine_volume_id machine_storage_ready machine_storage_failed fly_with_timeout \
-  worker_ledger_lock_acquire worker_ledger_lock_release fleet_production_function \
-  inventory_index_healthy inventory_machine_record_path inventory_machine_field
+  fleet_clone_with_queue_admission worker_ledger_lock_acquire worker_ledger_lock_release fleet_production_function \
+  inventory_index_healthy inventory_machine_record_path inventory_machine_field fleet_disable_disposable_volume_snapshots \
+  clone_volume_receipt_field clone_attach_failure_prelaunch clone_retire_owned_volume clone_create_owned_volume \
+  clone_storage_ready_seconds fleet_clone_volume_request fleet_registry_record_volume
 unset INVENTORY_INDEX INVENTORY_CLOCK_EPOCH INVENTORY_CLOCK_SECONDS SNAPSHOT_LOOP_PID SNAPSHOT_LOOP_TOKEN
 
 resize_function_source="$(awk '
@@ -794,6 +1870,10 @@ normalize_function_source="$(awk '
   fail "could not load production pool shape normalizer"
 eval "$shape_function_source"
 eval "$normalize_function_source"
+# The normalizer first honors explicit per-Machine reuse admissions under the
+# git-common directory; keep that real guard on an isolated empty root.
+GIT_COMMON_DIR="$TMP_ROOT/shape-normalize-common"
+mkdir -p "$GIT_COMMON_DIR"
 POOL_IDS_FILE="$TMP_ROOT/shape-pool.ids"
 printf 'old-shape\ncorrect-shape\n' > "$POOL_IDS_FILE"
 FLEET_DIR="$TMP_ROOT/shape-run"
@@ -828,6 +1908,20 @@ claim_function_source="$(awk '
   fail "could not load production shape-aware pool claims"
 eval "$shape_hints_source"
 eval "$claim_function_source"
+# The current claimer checks outgoing handoffs and reuse proofs even in this
+# shape-only fixture. Keep those real guards on an isolated empty Gitcommon.
+GIT_COMMON_DIR="$TMP_ROOT/mixed-shape-common"
+mkdir -p "$GIT_COMMON_DIR"
+proof_path_source="$(grep '^pool_reuse_proof_file()' "$ROOT_DIR/scripts/run-bench-fleet")"
+proof_verify_source="$(awk '
+  /^pool_verify_reuse_proof\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-fleet")"
+[ -n "$proof_path_source" ] && [ -n "$proof_verify_source" ] ||
+  fail "could not load production pool reuse proof guards"
+eval "$proof_path_source"
+eval "$proof_verify_source"
 POOL_IDS_FILE="$TMP_ROOT/mixed-shape-pool.ids"
 printf 'a1\nb2\n' > "$POOL_IDS_FILE"
 FLEET_DIR="$TMP_ROOT/mixed-shape-run"
@@ -847,10 +1941,25 @@ UNAVAILABLE_POOL_IDS=()
 : > "$CLAIMED_POOL_FILE"
 # Drain stdin like the real reader: under pipefail the inventory printf otherwise
 # races this fake's exit into SIGPIPE, and the claim sees no volume.
-machine_volume_id_from_json() { cat >/dev/null; printf 'vol-mixed-shape'; }
+machine_volume_id_from_json() {
+  cat >/dev/null || return
+  printf 'vol-mixed-shape'
+}
 write_pool_claim() { printf 'owned\n' > "$1"; }
 cloudbench_env_sha256() { printf '%064d' 0; }
 fleet_audit_record_pool_machine() { return 0; }
+volume_fixture_input="$TMP_ROOT/mixed-shape-inventory.json"
+python3 - "$volume_fixture_input" "$POOL_INVENTORY_JSON" <<'PY'
+import sys
+from pathlib import Path
+
+# Provider inventories can exceed a pipe buffer. Retain valid JSON while
+# proving the fixture consumer drains the stream before returning its volume.
+Path(sys.argv[1]).write_text(" " * (1024 * 1024) + sys.argv[2])
+PY
+fixture_volume="$(cat "$volume_fixture_input" | machine_volume_id_from_json a1)" ||
+  fail "pool volume fixture did not consume its complete JSON input"
+[ "$fixture_volume" = "vol-mixed-shape" ] || fail "pool volume fixture changed its volume"
 large_claim="$(claim_pool_machine shared-cpu-4x 8192)"
 [ "$large_claim" = "b2" ] ||
   fail "large benchmark did not prefer the admitted 8GB Machine"
@@ -860,7 +1969,8 @@ small_claim="$(claim_pool_machine shared-cpu-2x 4096)"
 unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
 unset -f pool_machine_shape_from_json normalize_current_pool_shape pool_write_shape_hints \
   claim_pool_machine resize_pool_machine machine_volume_id_from_json write_pool_claim \
-  cloudbench_env_sha256 fleet_audit_record_pool_machine
+  cloudbench_env_sha256 fleet_audit_record_pool_machine pool_reuse_proof_file pool_verify_reuse_proof
+unset GIT_COMMON_DIR
 
 boot_update_source="$(awk '
   /^boot_update_with_capacity_recovery\(\)/ { capture = 1 }
@@ -890,6 +2000,306 @@ unset -f boot_update_with_capacity_recovery _with_timeout sleep
 unset CLOUDBENCH_BOOT_UPDATE_ATTEMPTS CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS \
   CLOUDBENCH_BOOT_UPDATE_CAPACITY_RETRY_SECONDS
 
+# Production replay (original600-1792976687768099299 shard-01): Fly answered
+# every same-ID boot-config update for Machine 863745ce73de38 with
+# "request returned non-2xx status: 408". The child replayed it ten times on
+# the dead host and the update log kept only the last response; the fleet
+# barrier then aborted every copy. A fake flyctl returns that exact 408 for
+# one Machine only.
+(
+  boot_timeout_source="$(awk '
+    /^_with_timeout\(\)/ { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud")"
+  eval "$boot_timeout_source"
+  eval "$boot_update_source"
+  fake_fly_dir="$TMP_ROOT/fake-fly-408"
+  mkdir -p "$fake_fly_dir"
+  cat > "$fake_fly_dir/flyctl" <<'FAKEFLY'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FAKE_FLY_CALLS:?}"
+if [ "$1 $2 $3" = "machine update m408dead00000a" ]; then
+  echo "Updating machine $3"
+  echo "Error: could not update machine $3: failed to update VM $3: request returned non-2xx status: 408:  (Request ID: 01M5TWKRQW2VX1JSXAQHWGVFME-iad)"
+  exit 1
+fi
+if [ "$1 $2 $3" = "machine update m503api00000d" ]; then
+  echo "Error: request returned non-2xx status: 503"
+  exit 1
+fi
+echo "Machine $3 updated"
+FAKEFLY
+  chmod +x "$fake_fly_dir/flyctl"
+  PATH="$fake_fly_dir:$PATH"
+  BOOT_CONFIG_UPDATE_SLOT_SHARED=0
+  CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION=0
+  CLOUDBENCH_BOOT_UPDATE_RETRY_SECONDS=0
+  for host_case in m408dead00000a:1 m200live00000b:0 m503api00000d:2; do
+    host_mid="${host_case%%:*}"
+    host_expect="${host_case#*:}"
+    FAKE_FLY_CALLS="$TMP_ROOT/fake-fly-$host_mid.calls"
+    export FAKE_FLY_CALLS
+    : > "$FAKE_FLY_CALLS"
+    host_log="$TMP_ROOT/host-$host_mid-update.log"
+    host_marker="$TMP_ROOT/host-$host_mid.unresponsive"
+    rm -f "$host_log" "$host_marker"
+    host_rc=0
+    BOOT_UPDATE_MACHINE_ID="$host_mid" BOOT_UPDATE_HOST_UNRESPONSIVE_MARKER="$host_marker" \
+      boot_update_with_capacity_recovery "$host_log" \
+      flyctl machine update "$host_mid" -a fixture --skip-start --yes 2>/dev/null || host_rc=$?
+    if [ "$host_expect" = 2 ]; then
+      # An app-wide API 5xx is not evidence about this Machine's host.
+      [ "$host_rc" = 1 ] && [ ! -e "$host_marker" ] && [ "$(wc -l < "$FAKE_FLY_CALLS")" = 10 ] ||
+        fail "API-wide 503 was treated as an unresponsive Machine host"
+      continue
+    fi
+    if [ "$host_expect" = 0 ]; then
+      [ "$host_rc" = 0 ] && [ ! -e "$host_marker" ] && [ "$(wc -l < "$FAKE_FLY_CALLS")" = 1 ] ||
+        fail "healthy-host boot update did not succeed once without a replacement marker"
+      continue
+    fi
+    [ "$host_rc" = 1 ] || fail "unresponsive-host boot update returned $host_rc"
+    [ "$(wc -l < "$FAKE_FLY_CALLS")" = 3 ] ||
+      fail "unresponsive-host boot update replayed $(wc -l < "$FAKE_FLY_CALLS") same-ID mutations (expected 3 consecutive host timeouts)"
+    [ "$(cat "$host_marker" 2>/dev/null)" = "$host_mid" ] ||
+      fail "unresponsive-host boot update did not name the exact Machine for replacement"
+    [ "$(grep -Ec '^=== boot update attempt [1-3] at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z rc=1 ===$' "$host_log")" = 3 ] &&
+      [ "$(grep -c 'non-2xx status: 408' "$host_log")" = 3 ] ||
+      fail "boot update log did not keep every timestamped attempt"
+    [ ! -e "$host_log.attempt" ] || fail "boot update left its per-attempt scratch log"
+  done
+) || fail "unresponsive Fly host boot update checks failed"
+
+# The fleet barrier replaces that one disposable clone once instead of
+# aborting the whole fleet; pool claims and a second dead host still abort.
+(
+  for fleet_fn in boot_config_failed_child fleet_replace_host_unresponsive_child; do
+    fleet_fn_source="$(awk -v name="$fleet_fn" '
+      $0 ~ "^" name "\\(\\) *\\{" { capture = 1 }
+      capture { print }
+      capture && /^}$/ { exit }
+    ' "$ROOT_DIR/scripts/run-bench-fleet")"
+    [ -n "$fleet_fn_source" ] || fail "missing fleet function $fleet_fn"
+    eval "$fleet_fn_source"
+  done
+  awk '/boot_config_failed_slot="\$\(boot_config_failed_child\)"/ { found = 1 } found && /fleet_replace_host_unresponsive_child "\$boot_config_failed_slot"/ { ok = 1; exit } END { exit !ok }' \
+    "$ROOT_DIR/scripts/run-bench-fleet" || fail "boot-config barrier does not try a host replacement before aborting"
+  fleet_job_running() { return 1; }
+  wait_for_mandatory_autoscaler_startup() { printf 'autoscaler-wait %s\n' "$*" >> "$TMP_ROOT/fleet-replace.events"; }
+  provision_primary_machine() { fail "host replacement must not claim from the pool"; }
+  primary_vm_size_for_bench() { echo shared-cpu-2x; }
+  primary_vm_memory_for_bench() { echo 4096; }
+  primary_clone_storage_mode() { echo fresh; }
+  WARM_ID=warm00000000; SNAP_ID=snap0
+  clone_machine_target() {
+    printf 'provision %s\n' "${1%/primary.ids}" >> "$TMP_ROOT/fleet-replace.events"
+    [ -n "${FAKE_REPLACEMENT_ID:-}" ] || return 1
+    printf '%s\n' "$FAKE_REPLACEMENT_ID"
+  }
+  launch_fleet_bench_child() {
+    printf 'launch %s\n' "$*" >> "$TMP_ROOT/fleet-replace.events"
+    CHILD_MACHINE[$3]="$FAKE_REPLACEMENT_ID"
+    CHILD_PIDS[$3]=""
+  }
+  BOOT_CONFIG_BARRIER="$TMP_ROOT/fleet-replace-barrier"
+  mkdir -p "$BOOT_CONFIG_BARRIER/ready"
+  fleet_out="$TMP_ROOT/fleet-replace/browser-auth-saved-password-retry"
+  ok_out="$TMP_ROOT/fleet-replace/healthy"
+  mkdir -p "$fleet_out" "$ok_out"
+  CHILD_OUT=("$ok_out" "$fleet_out")
+  CHILD_BENCH=(healthy browser-auth-saved-password-retry)
+  CHILD_MACHINE=(m200live00000b m408dead00000a)
+  CHILD_BENCH_INDEX=(0 3)
+  CHILD_PIDS=("" "")
+  AUTOSCALER_PIDS=()
+  : > "$BOOT_CONFIG_BARRIER/ready/m200live00000b"
+  printf 'clone m408dead00000a\n' > "$fleet_out/.cid"
+  printf '125\n' > "$fleet_out/benchmark-child.finished"
+  printf 'm408dead00000a\n' > "$fleet_out/boot-config-unapplied"
+  printf 'm408dead00000a\n' > "$fleet_out/boot-config-host-unresponsive"
+  echo 'non-2xx status: 408' > "$fleet_out/cloudbench-boot-update.log"
+  printf '{"machine_id": "m408dead00000a"}\n' > "$fleet_out/runtime-evidence.owner.json"
+  : > "$fleet_out/runtime-evidence.pending"
+  # A failed replacement clone restores the exact original failure state.
+  : > "$TMP_ROOT/fleet-replace.events"
+  FAKE_REPLACEMENT_ID=""
+  ! fleet_replace_host_unresponsive_child 1 $((SECONDS + 60)) 2>/dev/null &&
+    [ "$(cat "$fleet_out/.cid")" = "clone m408dead00000a" ] &&
+    [ -e "$fleet_out/runtime-evidence.owner.json" ] && [ -e "$fleet_out/boot-config-unapplied" ] &&
+    [ -e "$fleet_out/boot-config-host-unresponsive" ] && [ ! -e "$fleet_out/boot-config-host-replaced" ] &&
+    [ ! -e "$fleet_out/host-replaced-m408dead00000a" ] ||
+    fail "a failed replacement clone did not restore the original failure state"
+  : > "$TMP_ROOT/fleet-replace.events"
+  failed_slot="$(boot_config_failed_child)" && [ "$failed_slot" = 1 ] ||
+    fail "boot-config barrier did not identify the unapplied child slot"
+  FAKE_REPLACEMENT_ID=m200fresh0000c
+  fleet_replace_host_unresponsive_child 1 $((SECONDS + 60)) 2>/dev/null ||
+    fail "host-unresponsive clone was not replaced before the barrier aborted"
+  [ "$(cat "$TMP_ROOT/fleet-replace.events")" = "$(printf 'provision %s\nlaunch 3 browser-auth-saved-password-retry 1' "$fleet_out")" ] ||
+    fail "host replacement did not re-provision and relaunch the same bench slot: $(cat "$TMP_ROOT/fleet-replace.events")"
+  [ "${CHILD_MACHINE[1]}" = m200fresh0000c ] && [ ! -e "$fleet_out/benchmark-child.finished" ] &&
+    grep -q 408 "$fleet_out/host-replaced-m408dead00000a/cloudbench-boot-update.log" &&
+    [ "$(cat "$fleet_out/host-replaced-m408dead00000a/.cid")" = "clone m408dead00000a" ] &&
+    [ "$(cat "$fleet_out/.cid")" = "clone m200fresh0000c" ] &&
+    [ ! -e "$fleet_out/runtime-evidence.owner.json" ] && [ ! -e "$fleet_out/runtime-evidence.pending" ] &&
+    [ -e "$fleet_out/host-replaced-m408dead00000a/runtime-evidence.owner.json" ] ||
+    fail "host replacement did not preserve the failed attempt's evidence"
+  # The replacement's host also dies: strict abort, no second replacement.
+  printf '125\n' > "$fleet_out/benchmark-child.finished"
+  printf 'm200fresh0000c\n' > "$fleet_out/boot-config-host-unresponsive"
+  : > "$TMP_ROOT/fleet-replace.events"
+  ! fleet_replace_host_unresponsive_child 1 $((SECONDS + 60)) 2>/dev/null &&
+    [ ! -s "$TMP_ROOT/fleet-replace.events" ] || fail "a second unresponsive host was replaced again"
+  # Ordinary unapplied failures and pool claims keep the strict abort.
+  rm -f "$fleet_out/boot-config-host-replaced" "$fleet_out/boot-config-host-unresponsive"
+  ! fleet_replace_host_unresponsive_child 1 $((SECONDS + 60)) 2>/dev/null ||
+    fail "a boot failure without host-timeout proof was replaced"
+  printf 'pool m200fresh0000c\n' > "$fleet_out/.cid"
+  printf 'm200fresh0000c\n' > "$fleet_out/boot-config-host-unresponsive"
+  ! fleet_replace_host_unresponsive_child 1 $((SECONDS + 60)) 2>/dev/null &&
+    [ ! -s "$TMP_ROOT/fleet-replace.events" ] || fail "a claimed pool Machine was replaced by a clone"
+  printf 'clone m200fresh0000c\n' > "$fleet_out/.cid"
+  ! fleet_replace_host_unresponsive_child 1 $((SECONDS - 1)) 2>/dev/null &&
+    [ ! -s "$TMP_ROOT/fleet-replace.events" ] || fail "host replacement ran past the boot-config deadline"
+) || fail "fleet host-unresponsive replacement checks failed"
+
+# A shared mutation lease is joined exactly when _with_timeout wrote its
+# join-native receipt for the latest attempt, whatever its exit status: a
+# signal-killed child (137) or an interruption after the child exists (143)
+# is reaped and joined; an interruption before any child handle is not.
+boot_release_source="$(awk '
+  /^release_boot_config_update_slot\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-cloud")"
+[ -n "$boot_release_source" ] || fail "missing production boot config slot release"
+(
+eval "$boot_update_source"
+eval "$boot_release_source"
+APP=fixture-app
+MUTATION_OWNER_PID_START=fixture-start
+CLOUDBENCH_RUNTIME_SCRIPT_ROOT=/fixture
+CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=1
+CLOUDBENCH_BOOT_UPDATE_RETRY_SECONDS=0
+sleep() { :; }
+cloudbench_mutation_admission() { printf '%s\n' "$2" >> "$TMP_ROOT/boot-lease-events"; }
+# _with_timeout fake: <rc>:<receipt> where receipt=1 writes the join-native receipt.
+boot_fake_attempts=""
+_with_timeout() {
+  local attempt
+  attempt="${boot_fake_attempts%% *}"
+  boot_fake_attempts="${boot_fake_attempts#* }"
+  [ "${attempt#*:}" != 1 ] || : > "${CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT:?join receipt path not passed}"
+  return "${attempt%%:*}"
+}
+for boot_case in 0:1:0:1:released 1:1:1:1:released 124:1:1:1:released 137:1:1:1:released \
+    143:1:1:1:released 143:0:1:0:retained 130:0:1:0:retained 1:0:1:0:retained; do
+  IFS=: read -r boot_native_rc boot_receipt boot_expect_rc boot_expect_joined boot_expect_release <<EOF_CASE
+$boot_case
+EOF_CASE
+  : > "$TMP_ROOT/boot-lease-events"
+  boot_fake_attempts="$boot_native_rc:$boot_receipt "
+  BOOT_CONFIG_UPDATE_SLOT=fixture-lease
+  BOOT_CONFIG_UPDATE_SLOT_SHARED=1
+  BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=0
+  boot_update_rc=0
+  boot_update_with_capacity_recovery "$TMP_ROOT/boot-lease-update.log" fake update || boot_update_rc=$?
+  [ "$boot_update_rc" = "$boot_expect_rc" ] ||
+    fail "boot update wrapper rc $boot_native_rc returned $boot_update_rc"
+  [ "$BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED" = "$boot_expect_joined" ] ||
+    fail "boot update wrapper rc $boot_native_rc marked joined=$BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED"
+  release_rc=0
+  release_boot_config_update_slot || release_rc=$?
+  if [ "$boot_expect_release" = released ]; then
+    [ "$release_rc" = 0 ] && [ -z "$BOOT_CONFIG_UPDATE_SLOT" ] &&
+      grep -qx release "$TMP_ROOT/boot-lease-events" ||
+      fail "joined boot update lease (rc $boot_native_rc) was not released"
+  else
+    [ "$release_rc" != 0 ] && [ "$BOOT_CONFIG_UPDATE_SLOT" = fixture-lease ] &&
+      ! grep -qx release "$TMP_ROOT/boot-lease-events" ||
+      fail "unjoined boot update lease (rc $boot_native_rc) was released"
+  fi
+done
+# Joined state follows the latest attempt's receipt: an earlier joined failure
+# (signal-killed child) is not sticky, and a later receiptless attempt fences.
+# The helper refuses start-native after an unjoined owner, so a receipt on a
+# later attempt also proves every earlier native owner was joined.
+CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=2
+for boot_retry in "137:1 0:1 :0:1" "137:1 1:0 :1:0"; do
+  boot_fake_attempts="${boot_retry% :*:*} "
+  boot_retry_expect="${boot_retry##* :}"
+  : > "$TMP_ROOT/boot-lease-events"
+  BOOT_CONFIG_UPDATE_SLOT=fixture-lease
+  BOOT_CONFIG_UPDATE_SLOT_SHARED=1
+  BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=0
+  boot_update_rc=0
+  boot_update_with_capacity_recovery "$TMP_ROOT/boot-lease-update.log" fake update || boot_update_rc=$?
+  [ "$boot_update_rc:$BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED" = "$boot_retry_expect" ] ||
+    fail "boot update retry ($boot_retry) returned rc:joined $boot_update_rc:$BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED"
+done
+# The actual wrapper writes the join receipt after reaping its child, including
+# a signal-killed child, and never without a child handle.
+boot_timeout_source="$(awk '
+  /^_with_timeout\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-cloud")"
+[ -n "$boot_timeout_source" ] || fail "missing production native timeout wrapper"
+(
+  eval "$boot_timeout_source"
+  BOOT_CONFIG_UPDATE_SLOT_SHARED=0
+  for boot_child in "0:true" "137:kill -KILL \$\$" "3:exit 3"; do
+    rm -f "$TMP_ROOT/real-join-receipt"
+    boot_real_rc=0
+    CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT="$TMP_ROOT/real-join-receipt" \
+      _with_timeout 20 sh -c "${boot_child#*:}" || boot_real_rc=$?
+    [ "$boot_real_rc" = "${boot_child%%:*}" ] && [ -f "$TMP_ROOT/real-join-receipt" ] ||
+      fail "native timeout wrapper ($boot_child) returned $boot_real_rc without its join receipt"
+  done
+  rm -f "$TMP_ROOT/real-join-receipt"
+  boot_real_rc=0
+  CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT="$TMP_ROOT/real-join-receipt" \
+    _with_timeout 20 "$TMP_ROOT/absent-native-command" 2>/dev/null || boot_real_rc=$?
+  [ "$boot_real_rc" != 0 ] && [ ! -e "$TMP_ROOT/real-join-receipt" ] ||
+    fail "native timeout wrapper wrote a join receipt without a child handle"
+) || fail "native timeout wrapper join receipt checks failed"
+# A refusal before any native attempt has nothing in flight: its lease is
+# released (invalid contract, then a pacing failure on the first attempt).
+for boot_early in contract pace; do
+  : > "$TMP_ROOT/boot-lease-events"
+  _with_timeout() { fail "early boot update refusal ($boot_early) started a native attempt"; }
+  CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=2
+  CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION=0
+  if [ "$boot_early" = contract ]; then
+    CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=0
+  else
+    CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION=1
+    cloudbench_mutation_admission() {
+      printf '%s\n' "$2" >> "$TMP_ROOT/boot-lease-events"
+      [ "$2" != pace ]
+    }
+  fi
+  BOOT_CONFIG_UPDATE_SLOT=fixture-lease
+  BOOT_CONFIG_UPDATE_SLOT_SHARED=1
+  BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=0
+  boot_update_with_capacity_recovery "$TMP_ROOT/boot-lease-update.log" fake update &&
+    fail "early boot update refusal ($boot_early) reported success"
+  release_boot_config_update_slot && [ -z "$BOOT_CONFIG_UPDATE_SLOT" ] &&
+    grep -qx release "$TMP_ROOT/boot-lease-events" ||
+    fail "early boot update refusal ($boot_early) retained an unused lease"
+done
+CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION=0
+# Outside the wrapper's own bookkeeping, no call site may mark the lease joined.
+if awk '
+  /^boot_update_with_capacity_recovery\(\)/ { inside = 1 }
+  !inside { print }
+  inside && /^}$/ { inside = 0 }
+' "$ROOT_DIR/scripts/run-bench-cloud" | grep -Eq '^[[:space:]]*BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=1[[:space:]]*$'; then
+  fail "boot config update call site marks the native lease joined unconditionally"
+fi
+)
+
 # The resize optimization only changes pool admission. A real large-primary
 # task keeps its 8GB request, while the default path still forks a separate
 # large Machine when the opt-in is absent.
@@ -907,7 +2317,7 @@ rows = get_task_metadata(
 assert rows[0]["requires_browser_agent"] is True
 assert rows[1]["requires_browser_agent"] is not True
 PY_BROWSER_METADATA
-for function_name in bench_needs_large_primary primary_vm_size_for_bench \
+for function_name in is_sim_on bench_needs_large_primary bench_declares_fanout primary_vm_size_for_bench \
   primary_vm_memory_for_bench bench_uses_default_pool_shape; do
   function_source="$(awk -v name="$function_name" '
     $0 ~ ("^" name "\\(\\)") { capture = 1 }
@@ -920,6 +2330,7 @@ done
 FLEET_BUNDLED_FRONTEND_VM_SIZE="shared-cpu-4x"
 FLEET_BUNDLED_FRONTEND_VM_MEMORY="8192"
 INFRA_PROBE=0
+SIM_ON_CSV=""
 CATALOG_BROWSER_REQUIRED_TASKS=(polar-bu-065)
 unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
 bench_uses_default_pool_shape parallel-tool-calls ||
@@ -942,8 +2353,79 @@ INFRA_PROBE=1
   fail "task-free infra probes must retain the default primary shape"
 INFRA_PROBE=0
 unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
+# --sim-on guests serve the native WMH themselves and get the measured large
+# shape; every task NOT named by --sim-on keeps exactly its previous shape and
+# pool eligibility, so other workstreams' REAL runs are unchanged.
+FLEET_SIM_VM_SIZE="performance-8x"
+FLEET_SIM_VM_MEMORY="65536"
+SIM_ON_CSV="raise-5m-rose-labs-brex"
+[ "$(primary_vm_size_for_bench raise-5m-rose-labs-brex)/$(primary_vm_memory_for_bench raise-5m-rose-labs-brex)" = "performance-8x/65536" ] ||
+  fail "--sim-on tasks must request the native WMH serving shape"
+if bench_uses_default_pool_shape raise-5m-rose-labs-brex; then
+  fail "--sim-on tasks must not claim a default-shape pool Machine"
+fi
+[ "$(primary_vm_size_for_bench parallel-tool-calls)/$(primary_vm_memory_for_bench parallel-tool-calls)" = "$FLEET_PRIMARY_VM_SIZE/$FLEET_PRIMARY_VM_MEMORY" ] ||
+  fail "tasks outside --sim-on must keep the default primary shape"
+[ "$(primary_vm_size_for_bench polar-bu-065)/$(primary_vm_memory_for_bench polar-bu-065)" = "shared-cpu-4x/8192" ] ||
+  fail "browser tasks outside --sim-on must keep the large primary shape"
+bench_uses_default_pool_shape parallel-tool-calls ||
+  fail "tasks outside --sim-on must retain default pool admission"
+INFRA_PROBE=1
+[ "$(primary_vm_size_for_bench raise-5m-rose-labs-brex)" = "$FLEET_PRIMARY_VM_SIZE" ] ||
+  fail "task-free infra probes must never request the SIM shape"
+INFRA_PROBE=0
+SIM_ON_CSV=""
+[ "$(primary_vm_size_for_bench raise-5m-rose-labs-brex)" = "$FLEET_PRIMARY_VM_SIZE" ] ||
+  fail "a REAL run of a SIM-capable task must keep the default primary shape"
+# A catalog-declared wide tree (min_agent_count >= FLEET_FANOUT_MIN_AGENT_COUNT)
+# gets dedicated vCPUs: shared-cpu-2x was throttled under the 51-agent tree
+# (descend-full69 P3). Other tasks keep exactly their previous shape.
+FLEET_FANOUT_MIN_AGENT_COUNT=20
+FLEET_FANOUT_VM_SIZE="performance-2x"
+FLEET_FANOUT_VM_MEMORY="4096"
+CATALOG_FANOUT_TASKS=(test-mass-agent-run-0)
+CATALOG_BROWSER_REQUIRED_TASKS=(polar-bu-065)
+[ "$(primary_vm_size_for_bench test-mass-agent-run-0)/$(primary_vm_memory_for_bench test-mass-agent-run-0)" = "performance-2x/4096" ] ||
+  fail "a catalog fan-out task must request dedicated vCPUs"
+[ "$(primary_vm_size_for_bench parallel-tool-calls)/$(primary_vm_memory_for_bench parallel-tool-calls)" = "$FLEET_PRIMARY_VM_SIZE/$FLEET_PRIMARY_VM_MEMORY" ] ||
+  fail "tasks without a fan-out declaration must keep the default primary shape"
+[ "$(primary_vm_size_for_bench polar-bu-065)/$(primary_vm_memory_for_bench polar-bu-065)" = "shared-cpu-4x/8192" ] ||
+  fail "browser tasks must keep the large shared primary shape beside a fan-out task"
+if bench_uses_default_pool_shape test-mass-agent-run-0; then
+  fail "a fan-out task must not claim a default shared-cpu pool Machine"
+fi
+CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1
+if bench_uses_default_pool_shape test-mass-agent-run-0; then
+  fail "dynamic pool resize opt-in must not turn a fan-out task into a shared-cpu claim"
+fi
+unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
+INFRA_PROBE=1
+[ "$(primary_vm_size_for_bench test-mass-agent-run-0)" = "$FLEET_PRIMARY_VM_SIZE" ] ||
+  fail "task-free infra probes must never request the fan-out shape"
+INFRA_PROBE=0
+FLEET_SIM_VM_SIZE="performance-8x"; FLEET_SIM_VM_MEMORY="65536"; SIM_ON_CSV="test-mass-agent-run-0"
+[ "$(primary_vm_size_for_bench test-mass-agent-run-0)" = "performance-8x" ] ||
+  fail "--sim-on serving shape must outrank the fan-out shape"
+python3 - "$ROOT_DIR" <<'PY_FANOUT_METADATA' || fail "catalog must declare the fan-out task through min_agent_count"
+import sys
+from pathlib import Path
+
+sys.path.insert(0, f"{sys.argv[1]}/scripts")
+from cloudbench_catalog import get_task_metadata
+
+rows = {
+    row["name"]: row
+    for row in get_task_metadata(
+        Path(sys.argv[1]) / "agents/benchmarks/tasks.json",
+        ["test-mass-agent-run-0", "parallel-tool-calls"],
+    )
+}
+assert rows["test-mass-agent-run-0"]["min_agent_count"] >= 20, rows["test-mass-agent-run-0"]
+assert (rows["parallel-tool-calls"]["min_agent_count"] or 0) < 20, rows["parallel-tool-calls"]
+PY_FANOUT_METADATA
+unset SIM_ON_CSV FLEET_SIM_VM_SIZE FLEET_SIM_VM_MEMORY CATALOG_FANOUT_TASKS FLEET_FANOUT_VM_SIZE FLEET_FANOUT_VM_MEMORY FLEET_FANOUT_MIN_AGENT_COUNT
 unset CATALOG_BROWSER_REQUIRED_TASKS
-unset -f bench_needs_large_primary primary_vm_size_for_bench \
+unset -f is_sim_on bench_needs_large_primary bench_declares_fanout primary_vm_size_for_bench \
   primary_vm_memory_for_bench bench_uses_default_pool_shape
 
 machine_states="$TMP_ROOT/machine-states"
@@ -1664,6 +3146,8 @@ for name, block in (("refresh-deps", deps), ("refresh-wmh", wmh)):
             raise SystemExit(f"{name} must not mask warm_source_fetch_ref failures")
     if "GITHUB_TOKEN:-" in block and "build_controller_authenticated_git_sync_cmd" in block:
         raise SystemExit(f"{name} must not optionally skip AUTH_HDR when box GITHUB_TOKEN is empty")
+if "WMH_CONFORMANCE_EXAMPLES=100" not in wmh or "WMH_REQUIRE_CONFORMANCE=1" not in wmh:
+    raise SystemExit("refresh-wmh must fail closed on the 100-example real-trajectory conformance suite")
 
 def extract_bash_function(source: str, name: str) -> str:
     marker = f"{name}() {{"
@@ -1902,11 +3386,11 @@ PY
 # used to burn a full fleet launch and then die on a bare "BACKEND_API_KEY is
 # required" line that named neither the file it read nor the provisioning step.
 hub_key_guard="$(sed -n '/^require_in_app_hub_visibility()/,/^}/p' "$ROOT_DIR/scripts/run-bench-fleet")"
-printf '%s' "$hub_key_guard" | grep -q 'looked in:' ||
+grep -q 'looked in:' <<<"$hub_key_guard" ||
   fail "the in-app Hub key failure must name every source it searched"
-printf '%s' "$hub_key_guard" | grep -q 'back-end/.env does not exist' ||
+grep -q 'back-end/.env does not exist' <<<"$hub_key_guard" ||
   fail "the in-app Hub key failure must distinguish a missing .env from an empty key"
-printf '%s' "$hub_key_guard" | grep -q 'prepare-deploy-worktree.sh' ||
+grep -q 'prepare-deploy-worktree.sh' <<<"$hub_key_guard" ||
   fail "the in-app Hub key failure must name the provisioning command that fixes it"
 
 # ── Validated GitHub token for private-repo git-sync (descend I-01 + #1034) ──
@@ -2173,3 +3657,507 @@ bash "$ROOT_DIR/scripts/tests/cloudbench-pid-identity.test.sh" ||
   fail "cloudbench PID birth identities must survive a wall-clock step"
 
 echo "All cloud benchmark environment checks passed."
+# BEGIN registered controller lock race controls
+python3 - "$HELPER_SRC" <<'PYLOCK'
+import os, pathlib, subprocess, sys, tempfile, unittest
+HELPER=sys.argv[1]
+class ControllerKernelLock(unittest.TestCase):
+ def run_case(self,mode):
+  with tempfile.TemporaryDirectory()as td:
+   script=r'''
+set -eu
+PATH=/usr/bin:/bin; export PATH
+source "$1"
+d="$2"; mode="$3"; lock="$d/controller.lock"
+actual_flock="$(command -v flock)"
+export actual_flock
+bash -c 'exec 9<> "$1"; "$actual_flock" 9; printf "99999999\n" > "$1"; touch "$2/ready"; while [ ! -e "$2/release" ]; do sleep .01; done; "$actual_flock" -u 9; exec 9>&-; touch "$2/released"' _ "$lock" "$d" &
+holder=$!
+trap 'touch "$d/release"; wait "$holder"' EXIT
+for n in $(seq 1 200); do [ -e "$d/ready" ] && break; sleep .01; done
+[ -e "$d/ready" ]
+first=1
+flock(){
+ local rc=0
+ "$actual_flock" "$@" || rc=$?
+ if [ "$1" = -n ] && [ "$first" = 1 ]; then
+  first=0
+  [ "$rc" = 1 ]
+  if [ "$mode" != held ]; then
+   touch "$d/release"
+   for n in $(seq 1 200); do [ -e "$d/released" ] && break; sleep .01; done
+   [ -e "$d/released" ]
+   if [ "$mode" = replaced ]; then mv "$lock" "$lock.old"; printf '99999999\n' > "$lock"; fi
+  fi
+ fi
+ return "$rc"
+}
+rc=0
+cloudbench_controller_lock_acquire_wait "$lock" 1 || rc=$?
+if [ "$mode" = released ]; then
+ [ "$rc" = 0 ]
+ [ "$(cat "$lock")" = "$$" ]
+ ! "$actual_flock" -n "$lock" true
+ cloudbench_controller_lock_release "$lock"
+else
+ [ "$rc" != 0 ]
+ [ "$(cat "$lock")" = 99999999 ]
+fi
+'''
+   result=subprocess.run(['bash','-c',script,'_',HELPER,td,mode],capture_output=True,text=True,timeout=8)
+   self.assertEqual(result.returncode,0,result.stderr)
+ def test_released_owner_reacquires_same_kernel_inode(self):self.run_case('released')
+ def test_dead_metadata_with_live_kernel_holder_refuses(self):self.run_case('held')
+ def test_replaced_inode_is_not_acquired(self):self.run_case('replaced')
+unittest.main(argv=['controller-kernel-lock'],verbosity=2)
+PYLOCK
+# END registered controller lock race controls
+
+# ── Benchmark guests use their own Temporal namespace (run600c, 2026-10-18) ──
+# 600 guests on the production namespace exhausted its Visibility API budget and
+# blinded production's autoscaler for ~35 minutes. The real _inject_secrets_locked
+# stages guest copies of agents/.env and back-end/.env with only TEMPORAL_ADDRESS,
+# TEMPORAL_NAMESPACE and TEMPORAL_API_KEY replaced from a private override file;
+# the controller's own env files stay byte-identical, and no override file keeps
+# the historical byte-identical blobs.
+# Earlier sections unset helper functions they stub; reload the real helper.
+# shellcheck source=../lib/cloudbench-env.sh
+source "$HELPER_SRC"
+guest_temporal_case() {  # <case> ; prints nothing on success
+  local case_name="$1" dir="$TMP_ROOT/guest-temporal-$1"
+  mkdir -p "$dir/repo/agents" "$dir/repo/back-end" "$dir/tmp"
+  chmod 700 "$dir/tmp"
+  printf 'OPENAI_API_KEY=sk-agents\nTEMPORAL_ADDRESS=prod.example:7233\nTEMPORAL_NAMESPACE=prod-ns.acct\nTEMPORAL_API_KEY=prod-secret-key\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS_NOTE=keep\n' > "$dir/repo/agents/.env"
+  if [ "$case_name" = appended ]; then
+    printf 'DATABASE_URL=postgres://prod\nTEMPORAL_TASK_QUEUE=navi-agent-tasks' > "$dir/repo/back-end/.env"
+  else
+    printf 'DATABASE_URL=postgres://prod\r\nexport TEMPORAL_NAMESPACE=prod-ns.acct\r\nTEMPORAL_API_KEY="prod-secret-key"\r\nTEMPORAL_ADDRESS=prod.example:7233\r\n' > "$dir/repo/back-end/.env"
+  fi
+  chmod 600 "$dir/repo/agents/.env" "$dir/repo/back-end/.env"
+  local override="$dir/repo/agents/.env.benchmark-temporal"
+  # bench-* cases stage the real bench app, whose guest namespace is committed.
+  local app=cloudbench-guest-temporal guest_namespace=bench-ns.acct
+  case "$case_name" in bench-*) app=navi-whisper-lux-bench ;; esac
+  [ "$case_name" != bench-applied ] || guest_namespace=rose-labs-bench.tch2n
+  case "$case_name" in
+    missing|bench-missing|bench-off) ;;
+    *)
+      printf '# guest only\nCLOUDBENCH_GUEST_TEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nCLOUDBENCH_GUEST_TEMPORAL_NAMESPACE=%s\nCLOUDBENCH_GUEST_TEMPORAL_API_KEY=guest-secret-key\n' "$guest_namespace" > "$override"
+      chmod 600 "$override"
+      ;;
+  esac
+  [ "$case_name" != loose-mode ] || chmod 640 "$override"
+  [ "$case_name" != incomplete ] || sed -i '/API_KEY/d' "$override"
+  local before_agents before_backend
+  before_agents="$(cloudbench_env_sha256 "$dir/repo/agents/.env")"
+  before_backend="$(cloudbench_env_sha256 "$dir/repo/back-end/.env")"
+  local function_body rc=0
+  function_body="$(awk '
+    $0 ~ /^_inject_secrets_locked\(\)/ { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud")"
+  [ -n "$function_body" ] || fail "could not load _inject_secrets_locked"
+  (
+    cd "$dir/repo"
+    eval "$function_body"
+    APP="$app"
+    ROOT_DIR="$dir/repo"
+    export TMPDIR="$dir/tmp"
+    case "$case_name" in
+      off|bench-off) export CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE=off ;;
+      explicit-missing) export CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE="$dir/absent" ;;
+      *) unset CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE ;;
+    esac
+    validate_environment_contract() { CLOUDBENCH_PROD_BROWSER_PROVIDER=kernel; }
+    resolve_durable_github_token() { echo gh-token; }
+    assert_app_environment_lock_ownership() { return 0; }
+    environment_activation_targets() { printf 'pool\tpool-1\n'; }
+    activate_machine_environment() { echo "$1" >> "$dir/activated"; }
+    FLY() {
+      local arg
+      for arg in "$@"; do
+        case "$arg" in
+          AGENTS_ENV_B64=*) printf '%s' "${arg#*=}" | base64 -d > "$dir/staged-agents.env" ;;
+          BACKEND_ENV_B64=*) printf '%s' "${arg#*=}" | base64 -d > "$dir/staged-backend.env" ;;
+          AGENTS_ENV_SHA256=*) printf '%s' "${arg#*=}" > "$dir/staged-agents.sha" ;;
+          BACKEND_ENV_SHA256=*) printf '%s' "${arg#*=}" > "$dir/staged-backend.sha" ;;
+        esac
+      done
+    }
+    _inject_secrets_locked
+  ) > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$(cloudbench_env_sha256 "$dir/repo/agents/.env")" = "$before_agents" ] ||
+    fail "$case_name: controller agents/.env must stay byte-identical"
+  [ "$(cloudbench_env_sha256 "$dir/repo/back-end/.env")" = "$before_backend" ] ||
+    fail "$case_name: controller back-end/.env must stay byte-identical"
+  ! grep -Rq 'secret-key' "$dir/stdout" "$dir/stderr" || fail "$case_name: staging output leaked a Temporal key"
+  [ -z "$(ls -A "$dir/tmp")" ] || fail "$case_name: private guest env copies were left behind"
+  case "$case_name" in
+    explicit-missing|loose-mode|incomplete)
+      [ "$rc" -ne 0 ] || fail "$case_name: unusable override must fail closed"
+      [ ! -e "$dir/staged-agents.env" ] && [ ! -e "$dir/activated" ] ||
+        fail "$case_name: unusable override must stage and activate nothing"
+      return 0
+      ;;
+    bench-missing|bench-off|bench-wrong-ns)
+      # 2026-10-19: a host without the private override restaged the bench app
+      # with the production namespace; guests refused only at launch.
+      [ "$rc" -ne 0 ] || fail "$case_name: bench app staging without its committed guest namespace must fail closed"
+      [ ! -e "$dir/staged-agents.env" ] && [ ! -e "$dir/activated" ] ||
+        fail "$case_name: refused bench staging must stage and activate nothing"
+      grep -Fq 'rose-labs-bench.tch2n' "$dir/stderr" || fail "$case_name: refusal must name the expected bench namespace"
+      [ "$case_name" = bench-wrong-ns ] || grep -Fq '.env.benchmark-temporal' "$dir/stderr" ||
+        fail "$case_name: refusal must say how to provide the guest override"
+      return 0
+      ;;
+  esac
+  [ "$rc" -eq 0 ] || fail "$case_name: staging failed: $(cat "$dir/stderr")"
+  [ "$(cat "$dir/activated")" = pool-1 ] || fail "$case_name: pool machine was not activated"
+  # Each staged digest is the one the guest checks after decoding.
+  cloudbench_verify_env_file "$dir/staged-agents.env" "$(cat "$dir/staged-agents.sha")" agents >/dev/null ||
+    fail "$case_name: staged agents digest must verify on the guest"
+  cloudbench_verify_env_file "$dir/staged-backend.env" "$(cat "$dir/staged-backend.sha")" backend >/dev/null ||
+    fail "$case_name: staged backend digest must verify on the guest"
+  local manifest_namespace
+  manifest_namespace="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["guest_temporal_namespace"])' "$dir/repo/.context/cloudbench-env-manifest.json")"
+  case "$case_name" in
+    missing|off)
+      cmp -s "$dir/staged-agents.env" "$dir/repo/agents/.env" && cmp -s "$dir/staged-backend.env" "$dir/repo/back-end/.env" ||
+        fail "$case_name: without an override the staged env must equal the controller env byte-for-byte"
+      [ "$manifest_namespace" = None ] || fail "$case_name: manifest must not claim a guest namespace"
+      ;;
+    applied)
+      printf 'OPENAI_API_KEY=sk-agents\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nTEMPORAL_NAMESPACE=bench-ns.acct\nTEMPORAL_API_KEY=guest-secret-key\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS_NOTE=keep\n' > "$dir/expected-agents"
+      printf 'DATABASE_URL=postgres://prod\r\nexport TEMPORAL_NAMESPACE=bench-ns.acct\r\nTEMPORAL_API_KEY=guest-secret-key\r\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\r\n' > "$dir/expected-backend"
+      cmp -s "$dir/staged-agents.env" "$dir/expected-agents" || fail "applied: guest agents env must change only the three Temporal keys"
+      cmp -s "$dir/staged-backend.env" "$dir/expected-backend" || fail "applied: guest backend env must change only the three Temporal keys"
+      grep -Fq 'guest Temporal namespace override: bench-ns.acct' "$dir/stdout" || fail "applied: staging must report the guest namespace"
+      [ "$manifest_namespace" = bench-ns.acct ] || fail "applied: manifest must record the guest namespace"
+      ;;
+    bench-applied)
+      [ "$manifest_namespace" = rose-labs-bench.tch2n ] || fail "bench-applied: manifest must record the committed bench namespace"
+      [ "$(cloudbench_env_value "$dir/staged-agents.env" TEMPORAL_NAMESPACE)" = rose-labs-bench.tch2n ] ||
+        fail "bench-applied: staged guest agents env must carry the committed bench namespace"
+      ;;
+    appended)
+      printf 'DATABASE_URL=postgres://prod\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nTEMPORAL_NAMESPACE=bench-ns.acct\nTEMPORAL_API_KEY=guest-secret-key\n' > "$dir/expected-backend"
+      cmp -s "$dir/staged-backend.env" "$dir/expected-backend" || fail "appended: absent guest Temporal keys must be appended"
+      ;;
+  esac
+}
+for guest_case in applied appended missing off explicit-missing loose-mode incomplete bench-applied bench-missing bench-off bench-wrong-ns; do
+  guest_temporal_case "$guest_case"
+done
+# A linked worktree env finds the override beside the authoritative file.
+(
+  dir="$TMP_ROOT/guest-temporal-linked"
+  mkdir -p "$dir/authority/agents" "$dir/worktree/agents"
+  : > "$dir/authority/agents/.env"
+  : > "$dir/authority/agents/.env.benchmark-temporal"
+  ln -s "$dir/authority/agents/.env" "$dir/worktree/agents/.env"
+  unset CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE
+  [ "$(cloudbench_guest_temporal_override_file "$dir/worktree/agents/.env")" = "$dir/authority/agents/.env.benchmark-temporal" ]
+) || fail "a linked agents/.env must resolve the authoritative guest Temporal override"
+# A copied env in a linked Git worktree falls back to the main checkout's file.
+(
+  dir="$TMP_ROOT/guest-temporal-worktree"
+  mkdir -p "$dir/main/agents"
+  git -C "$dir/main" init -q
+  git -C "$dir/main" -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init
+  git -C "$dir/main" worktree add -q "$dir/linked" >/dev/null 2>&1
+  mkdir -p "$dir/linked/agents"
+  : > "$dir/linked/agents/.env"
+  unset CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE
+  [ -z "$(cloudbench_guest_temporal_override_file "$dir/linked/agents/.env")" ]
+  : > "$dir/main/agents/.env.benchmark-temporal"
+  [ "$(cloudbench_guest_temporal_override_file "$dir/linked/agents/.env")" = "$(cd "$dir/main" && pwd -P)/agents/.env.benchmark-temporal" ]
+) || fail "a linked Git worktree must resolve the main checkout's guest Temporal override"
+# A launcher-bound guest namespace (original600 operator → controller fleet →
+# boot env) must fail a guest whose decoded bench-app secrets still carry the
+# controller/production namespace, before any Temporal worker starts. No bound
+# namespace keeps the historical behavior; guest/fleet wiring stays explicit.
+(
+  dir="$TMP_ROOT/guest-temporal-require"
+  mkdir -p "$dir"
+  printf 'TEMPORAL_NAMESPACE=rose-labs-bench.acct\nTEMPORAL_API_KEY=bench-secret\n' > "$dir/agents.env"
+  printf 'DATABASE_URL=x\nTEMPORAL_NAMESPACE="rose-labs-bench.acct"\n' > "$dir/backend.env"
+  printf 'TEMPORAL_NAMESPACE=prod-ns.acct\nTEMPORAL_API_KEY=prod-secret\n' > "$dir/stale-agents.env"
+  printf 'DATABASE_URL=x\r\nexport TEMPORAL_NAMESPACE=rose-labs-bench.acct\r\n' > "$dir/export-backend.env"
+  : > "$dir/unset.env"
+  cloudbench_require_guest_temporal_namespace "$dir/agents.env" "$dir/backend.env" rose-labs-bench.acct
+  # dotenv's `export KEY=value` form is the same key to the guest's loaders.
+  cloudbench_require_guest_temporal_namespace "$dir/agents.env" "$dir/export-backend.env" rose-labs-bench.acct
+  [ "$(cloudbench_expected_guest_temporal_namespace navi-whisper-lux-bench)" = rose-labs-bench.tch2n ]
+  [ -z "$(cloudbench_expected_guest_temporal_namespace some-other-app)" ]
+  cloudbench_require_guest_temporal_namespace "$dir/stale-agents.env" "$dir/backend.env" ""
+  ! cloudbench_require_guest_temporal_namespace "$dir/stale-agents.env" "$dir/backend.env" rose-labs-bench.acct 2> "$dir/stale.err"
+  grep -q 'TEMPORAL_NAMESPACE=prod-ns.acct differs' "$dir/stale.err"
+  ! grep -q -e prod-secret -e bench-secret "$dir/stale.err"
+  ! cloudbench_require_guest_temporal_namespace "$dir/agents.env" "$dir/unset.env" rose-labs-bench.acct 2>/dev/null
+  # Conflicting repeats: the first value matches, but dotenv loaders apply the
+  # last one. Guest and staging checks both refuse them. Identical repeats (real
+  # env files repeat the key; the override rewrites every line) still pass.
+  printf 'TEMPORAL_NAMESPACE=rose-labs-bench.tch2n\nexport TEMPORAL_NAMESPACE=prod-ns.acct\n' > "$dir/dup-agents.env"
+  printf 'TEMPORAL_NAMESPACE=rose-labs-bench.tch2n\nTEMPORAL_NAMESPACE="rose-labs-bench.tch2n"\n' > "$dir/same-agents.env"
+  printf 'export TEMPORAL_NAMESPACE=rose-labs-bench.tch2n\n' > "$dir/one-backend.env"
+  [ "$(cloudbench_env_distinct_value_count "$dir/dup-agents.env" TEMPORAL_NAMESPACE)" = 2 ]
+  [ "$(cloudbench_env_distinct_value_count "$dir/same-agents.env" TEMPORAL_NAMESPACE)" = 1 ]
+  [ "$(cloudbench_env_distinct_value_count "$dir/unset.env" TEMPORAL_NAMESPACE)" = 0 ]
+  ! cloudbench_require_guest_temporal_namespace "$dir/dup-agents.env" "$dir/one-backend.env" rose-labs-bench.tch2n 2> "$dir/dup-guest.err"
+  grep -q 'assigns 2 different TEMPORAL_NAMESPACE values' "$dir/dup-guest.err"
+  ! cloudbench_require_staged_guest_temporal_namespace navi-whisper-lux-bench "" "$dir/dup-agents.env" "$dir/one-backend.env" 2> "$dir/dup-stage.err"
+  grep -q 'assigns 2 different TEMPORAL_NAMESPACE values' "$dir/dup-stage.err"
+  ! grep -q prod-ns.acct "$dir/dup-stage.err"
+  cloudbench_require_staged_guest_temporal_namespace navi-whisper-lux-bench "" "$dir/same-agents.env" "$dir/one-backend.env"
+  cloudbench_require_guest_temporal_namespace "$dir/same-agents.env" "$dir/one-backend.env" rose-labs-bench.tch2n
+  python3 - "$ROOT_DIR/scripts/cloudbench-run.sh" "$ROOT_DIR/scripts/run-bench-cloud" <<'PYWIRE'
+import sys
+from pathlib import Path
+run, cloud = (Path(path).read_text() for path in sys.argv[1:])
+check = 'cloudbench_require_guest_temporal_namespace "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"'
+verify = 'cloudbench_verify_env_file "$REPO_DIR/back-end/.env"'
+assert run.count(check) == 1 and run.index(verify) < run.index(check) < run.index('step stack_launch'), 'guest check after digest verify, before stack'
+assert '--env "CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}"' in cloud
+default = 'CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE="${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-$(cloudbench_expected_guest_temporal_namespace "$APP")}"'
+assert cloud.count(default) == 1 and cloud.index('cloudbench-env.sh"') < cloud.index(default) < cloud.index('--env "CLOUDBENCH_EXPECTED_GUEST'), 'launches bind the committed guest namespace by default'
+stage_check = 'cloudbench_require_staged_guest_temporal_namespace "$APP" "$guest_temporal_override"'
+body = cloud[cloud.index('_inject_secrets_locked() {'):]
+assert body.index(stage_check) < body.index('FLY secrets set --stage'), 'staging refuses a wrong guest namespace before any secret is set'
+assert 'echo "export CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=$(printf \'%q\' "${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}")"' in cloud
+PYWIRE
+) || fail "a launcher-bound guest Temporal namespace must reject stale bench-app secrets"
+# Benchmark stacks route BACKEND_API_URL to their own isolated backend, whose
+# seeded database never holds a rotating Lantern grant. Without an explicit
+# credential, every people_search returned 404 LANTERN_NOT_CONNECTED and all 28
+# lantern-people-* cloud jobs hit the 300s backstop (original600-1792433794419199295).
+# Execute run.sh's actual fragment: benchmark stacks use the central broker,
+# explicit broker/bearer configuration wins, and ordinary dev stacks are unchanged.
+(
+  dir="$TMP_ROOT/people-credential-authority"
+  mkdir -p "$dir"
+  fragment="$(sed -n '/^# People credential authority\.$/,/^# End people credential authority\.$/p' "$ROOT_DIR/scripts/run.sh")"
+  [ -n "$fragment" ] || { echo "run.sh has no people credential authority fragment" >&2; exit 1; }
+  python3 - "$ROOT_DIR/scripts/run.sh" <<'PYWIRE'
+import sys
+from pathlib import Path
+run = Path(sys.argv[1]).read_text()
+start = run.index('# People credential authority.')
+assert run.index('export BENCHMARK_MODE BENCHMARK_ISOLATED_RUN') < start, 'fragment must follow the benchmark flag export'
+assert start < run.index('run_local_worker.sh'), 'fragment must run before any worker launch'
+PYWIRE
+  effective() {  # <benchmark-mode> <agents-env-file> [VAR=value...] -> worker-visible broker
+    local mode="$1" env_file="$2"; shift 2
+    env -i PATH="$PATH" "$@" bash -c '
+      set -eo pipefail
+      source "$1"; BENCHMARK_MODE="$2"; SCRIPT_DIR="$3"
+      eval "$4" >/dev/null
+      printf "%s" "${PEOPLE_CREDENTIAL_BROKER_URL:-}"
+    ' _ "$HELPER_SRC" "$mode" "$dir/scripts" "$fragment"
+  }
+  mkdir -p "$dir/scripts" "$dir/agents"
+  printf 'PEOPLE_API_URL="https://people.lantern.md"\nPEOPLE_API_TOKEN=""\nPEOPLE_CREDENTIAL_BROKER_URL=""\n' > "$dir/agents/.env"
+  [ "$(effective true "$dir/agents/.env")" = "https://navi-j9a9.onrender.com" ] \
+    || { echo "blank benchmark credentials must use the central broker" >&2; exit 1; }
+  [ -z "$(effective false "$dir/agents/.env")" ] \
+    || { echo "ordinary dev stacks must keep their configured credential path" >&2; exit 1; }
+  [ "$(effective true "$dir/agents/.env" PEOPLE_CREDENTIAL_BROKER_URL=https://broker.example)" = "https://broker.example" ] \
+    || { echo "an explicit broker in the environment must win" >&2; exit 1; }
+  [ -z "$(effective true "$dir/agents/.env" PEOPLE_API_TOKEN=explicit-bearer)" ] \
+    || { echo "an explicit bearer in the environment must not be overridden" >&2; exit 1; }
+  printf 'PEOPLE_API_TOKEN="explicit-bearer"\n' > "$dir/agents/.env"
+  [ -z "$(effective true "$dir/agents/.env")" ] \
+    || { echo "an explicit bearer in agents/.env must not be overridden" >&2; exit 1; }
+  printf "PEOPLE_CREDENTIAL_BROKER_URL='https://broker.example'\n" > "$dir/agents/.env"
+  [ -z "$(effective true "$dir/agents/.env")" ] \
+    || { echo "an explicit broker in agents/.env must be left for the worker to load" >&2; exit 1; }
+  rm "$dir/agents/.env"
+  [ "$(effective true "$dir/agents/.env")" = "https://navi-j9a9.onrender.com" ] \
+    || { echo "a missing agents/.env has no explicit Lantern credential" >&2; exit 1; }
+) || fail "benchmark stacks must give workers the central people credential broker"
+
+# Production replay (PR #1627 Group 4 cloud smoke, fleet 20261028-181310-2300577):
+# the devbox VM paused for 537 s (kernel audit seq 73645→73646, 18:33:12→18:42:09Z)
+# while six status proxies were still retrying through Fly GraphQL 503s. The
+# readiness loop measured its 180 s budget with wall-clock time, so the pause
+# consumed it; after the thaw every one of those guests was failed closed as
+# INFRA without one further probe or attempt, although the identical tunnels
+# came up within 20 s for the three guests whose proxies already existed. A
+# host stall is not controller runtime: only the bounded work of each step may
+# be charged, and the loop must keep probing/attempting after the thaw. Two
+# observed variants: (A) the attempt's flyctl had already died on the 503 and
+# the pause landed before the next attempt (test-mass-agent-run-0); (B) the
+# attempt's flyctl was alive with HTTP 000 when the pause hit and the same
+# tunnel served after the thaw (chat-mode). Fakes advance a file-backed clock
+# instead of sleeping, so the replay is offline and deterministic.
+(
+  stall_replay() {  # <variant A|B> ; fakes share state through STALL_* files
+    local variant="$1" stall_dir="$TMP_ROOT/proxy-host-stall-$1"
+    mkdir -p "$stall_dir"
+    export STALL_VARIANT="$variant" STALL_CLOCK="$stall_dir/clock" \
+      STALL_COUNT="$stall_dir/attempts" STALL_MARKER="$stall_dir/stall-pending" \
+      STALL_DONE="$stall_dir/stall-applied"
+    printf '1793212307\n' > "$STALL_CLOCK"
+    rm -f "$STALL_COUNT" "$STALL_MARKER" "$STALL_DONE"
+    date() {
+      case "$*" in
+        *+%s*) cat "$STALL_CLOCK" ;;
+        *) printf '18:31:47\n' ;;
+      esac
+    }
+    sleep() {  # advance the fake clock; a pending host pause lands in this sleep
+      local now secs="${1:-0}"
+      secs="${secs%%.*}"
+      case "$secs" in ''|*[!0-9]*) secs=1 ;; esac
+      [ "$secs" -ge 1 ] || secs=1
+      now="$(cat "$STALL_CLOCK")"
+      if [ -e "$STALL_MARKER" ]; then
+        rm -f "$STALL_MARKER"
+        : > "$STALL_DONE"
+        now=$((now + 537))
+      fi
+      printf '%s\n' "$((now + secs))" > "$STALL_CLOCK"
+      command sleep 0.02
+    }
+    flyctl() {  # A: attempts 1-4 die on the Fly GraphQL 503 (pause after #4); B: always alive
+      local n
+      n=$(( $(cat "$STALL_COUNT" 2>/dev/null || echo 0) + 1 ))
+      if [ "$STALL_VARIANT" = A ] && [ "$n" -eq 4 ]; then : > "$STALL_MARKER"; fi
+      printf '%s\n' "$n" > "$STALL_COUNT"
+      if [ "$STALL_VARIANT" = A ] && [ "$n" -le 4 ]; then
+        echo 'Error: failed to run mutation($input: ValidateWireGuardPeersInput!) { validateWireGuardPeers(input: $input) { invalidPeerIps } }: server returned a non-200 status code: 503'
+        return 1
+      fi
+      exec sleep 60
+    }
+    curl() {
+      case " $* " in
+        *" -w %{http_code} "*)
+          if [ -e "$STALL_DONE" ]; then
+            printf 204
+          else
+            # B: the first health probe fails with HTTP 000 and the pause lands
+            # in the wait that follows; the same live tunnel serves after it.
+            [ -e "$STALL_MARKER" ] || : > "$STALL_MARKER"
+            printf 000
+          fi
+          return 0 ;;
+      esac
+      # Lazy-DNS probe: let the background fake register its attempt first, and
+      # let a dying attempt finish exiting, so the replay never races the parent.
+      while [ "$(cat "$STALL_COUNT" 2>/dev/null || echo 0)" -lt "${attempt:-1}" ]; do command sleep 0.01; done
+      if [ "$STALL_VARIANT" = A ] && [ "$(cat "$STALL_COUNT")" -le 4 ]; then
+        for _ in $(seq 1 500); do kill -0 "${pid:-0}" 2>/dev/null || break; command sleep 0.01; done
+      fi
+      return 0
+    }
+    APP="cloudbench-proxy-host-stall"
+    local proxy_log="$stall_dir/cloudbench-status-proxy.log" proxy_status=0 attempts_run
+    proxy_pid=""
+    cloudbench_start_data_plane_proxy 61807 8011 "fdaa::stall-$variant" "$proxy_log" proxy_pid status 180 \
+      2> "$stall_dir/stderr" || proxy_status=$?
+    cat "$stall_dir/stderr" >&2
+    attempts_run="$(cat "$STALL_COUNT" 2>/dev/null || echo 0)"
+    [ "$proxy_status" -eq 0 ] ||
+      fail "variant $variant: a 537s host stall must not fail the status proxy closed (exit=$proxy_status, attempts=$attempts_run)"
+    [ -n "$proxy_pid" ] && kill -0 "$proxy_pid" 2>/dev/null ||
+      fail "variant $variant: a ready status proxy must publish its live pid (pid=${proxy_pid:-<empty>})"
+    grep -Eq 'host stall 5[0-9][0-9]s during a [0-9]+s-bounded step' "$proxy_log" ||
+      fail "variant $variant: the excluded host stall must be recorded in the proxy log"
+    [ -e "$STALL_DONE" ] || fail "variant $variant: the replay never applied its host pause"
+    case "$variant" in
+      A) [ "$attempts_run" -ge 5 ] ||
+           fail "variant A: the loop must make a further attempt after the thaw (attempts=$attempts_run)" ;;
+      B) [ "$attempts_run" -eq 1 ] ||
+           fail "variant B: a live tunnel that serves after the thaw must not be restarted (attempts=$attempts_run)" ;;
+    esac
+    cloudbench_terminate_and_wait 1 "$proxy_pid"
+  }
+  stall_replay A
+  stall_replay B
+) || fail "status proxy readiness must exclude host stalls from its budget and keep probing after the thaw"
+
+# The same replay lost the first-phase readiness evidence of the three guests
+# that passed: ensure_status_proxy re-enters the launcher after the thaw and the
+# launcher truncated the log, so only the restart survived. Restarts must retain
+# earlier attempts, and the bind-collision classifier must then read only the
+# current attempt's output instead of an older port's collision.
+(
+  retain_dir="$TMP_ROOT/proxy-log-retention"
+  mkdir -p "$retain_dir"
+  CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0
+  flyctl() { exec sleep 60; }
+  curl() {
+    case " $* " in *" -w %{http_code} "*) printf 204 ;; esac
+    return 0
+  }
+  APP="cloudbench-proxy-log-retention"
+  proxy_log="$retain_dir/cloudbench-status-proxy.log"
+  printf '[18:31:47] status proxy attempt 1: localhost:61807 -> fdaa::retain:8011\n' > "$proxy_log"
+  printf 'Error: listen tcp 127.0.0.1:61807: bind: address already in use\n' >> "$proxy_log"
+  proxy_pid=""
+  proxy_status=0
+  cloudbench_start_data_plane_proxy 61808 8011 fdaa::retain "$proxy_log" proxy_pid status 30 \
+    2> "$retain_dir/stderr" || proxy_status=$?
+  cat "$retain_dir/stderr" >&2
+  [ "$proxy_status" -eq 0 ] ||
+    fail "an older port's collision line must not classify the new attempt (exit=$proxy_status)"
+  grep -q 'attempt 1: localhost:61807' "$proxy_log" ||
+    fail "a proxy restart must retain the earlier attempts' evidence in the log"
+  grep -q 'localhost:61808' "$proxy_log" ||
+    fail "the restart's own attempt must be appended to the retained log"
+  cloudbench_terminate_and_wait 1 "$proxy_pid"
+) || fail "status proxy restarts must retain earlier readiness evidence"
+
+python3 "$ROOT_DIR/scripts/tests/cloudbench-proxy-review.test.py"
+# A1 (approved 2026-10-20): every cloud guest delegates compute-token lease,
+# cooldown and Foundry rate-limit state to one authority (the production
+# backend by default), so N guests cannot run N copies of one token's
+# semaphore (RCA 2026-10-20-bench-guests-ran-independent-compute-token-semaphores).
+# Fresh and pooled Machines both receive the value explicitly (also when opted
+# out, so a pooled Machine never keeps an older run's authority), and the guest
+# hands it to the stack with its own BACKEND_API_KEY or refuses to start.
+(
+  dir="$TMP_ROOT/compute-token-authority"
+  mkdir -p "$dir"
+  [ "$(env -u CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL -u BENCHMARK_COMPUTE_TOKEN_AUTHORITY bash -c 'source "$1"; cloudbench_compute_token_authority_url' _ "$HELPER_SRC")" = "https://navi-j9a9.onrender.com" ] \
+    || { echo "guests must default to the production compute-token authority" >&2; exit 1; }
+  [ "$(CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=https://authority.example bash -c 'source "$1"; cloudbench_compute_token_authority_url' _ "$HELPER_SRC")" = "https://authority.example" ] \
+    || { echo "an explicit authority URL must win" >&2; exit 1; }
+  [ -z "$(BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=https://authority.example bash -c 'source "$1"; cloudbench_compute_token_authority_url' _ "$HELPER_SRC")" ] \
+    || { echo "BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off must opt the guests out" >&2; exit 1; }
+  fragment="$(sed -n '/^# Compute-token authority (A1)/,/^fi$/p' "$ROOT_DIR/scripts/cloudbench-run.sh")"
+  [ -n "$fragment" ] || { echo "cloudbench-run.sh has no compute-token authority fragment" >&2; exit 1; }
+  mkdir -p "$dir/repo/back-end"
+  run_fragment() {  # <authority-url> -> STACK_ENV entries, one per line
+    env -i PATH="$PATH" CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL="$1" BENCHMARK_COMPUTE_TOKEN_AUTHORITY="${2:-on}" bash -c '
+      set -eo pipefail
+      source "$1"; REPO_DIR="$2"; STACK_ENV=()
+      log() { echo "$*" >&2; }; finish() { exit "$1"; }
+      eval "$3"
+      printf "%s\n" "${STACK_ENV[@]}"
+    ' _ "$HELPER_SRC" "$dir/repo" "$fragment"
+  }
+  printf 'DATABASE_URL=x\nBACKEND_API_KEY="guest-internal-key"\n' > "$dir/repo/back-end/.env"
+  [ "$(run_fragment https://navi-j9a9.onrender.com)" = "$(printf 'BENCHMARK_COMPUTE_TOKEN_AUTHORITY=on\nCOMPUTE_TOKEN_AUTHORITY_URL=https://navi-j9a9.onrender.com\nCOMPUTE_TOKEN_AUTHORITY_API_KEY=guest-internal-key')" ] \
+    || { echo "the stack must receive the authority URL and the guest's BACKEND_API_KEY" >&2; exit 1; }
+  [ "$(run_fragment '')" = "$(printf 'BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off\nCOMPUTE_TOKEN_AUTHORITY_URL=\nCOMPUTE_TOKEN_AUTHORITY_API_KEY=')" ] || { echo "an opted-out guest must disable local-stack defaults too" >&2; exit 1; }
+  [ "$(run_fragment https://authority.example off)" = "$(run_fragment '')" ] \
+    || { echo "explicit diagnostic opt-out must override a saved authority URL" >&2; exit 1; }
+  printf 'DATABASE_URL=x\n' > "$dir/repo/back-end/.env"
+  ! run_fragment https://navi-j9a9.onrender.com > /dev/null 2> "$dir/missing.err" \
+    || { echo "a guest without BACKEND_API_KEY must refuse to start" >&2; exit 1; }
+  grep -q 'needs BACKEND_API_KEY' "$dir/missing.err"
+  python3 - "$ROOT_DIR/scripts/run-bench-cloud" "$ROOT_DIR/scripts/cloudbench-run.sh" <<'PYWIRE'
+import sys
+from pathlib import Path
+cloud, run = (Path(path).read_text() for path in sys.argv[1:])
+fresh = '--env "CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=$(cloudbench_compute_token_authority_url)"'
+pooled = 'echo "export CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=$(printf \'%q\' "$(cloudbench_compute_token_authority_url)")"'
+assert cloud.count(fresh) == 1, 'fresh Machines must receive the authority explicitly'
+assert cloud.count(pooled) == 1, 'pooled Machines must receive the authority explicitly'
+start = run.index('# Compute-token authority (A1)')
+assert run.index('STACK_ENV=(') < start < run.index('env "${STACK_ENV[@]}" bash "$REPO_DIR/scripts/run.sh" --benchmark'), \
+    'the authority must be in the stack env before run.sh starts'
+PYWIRE
+) || fail "cloud guests must delegate compute-token state to the shared authority"

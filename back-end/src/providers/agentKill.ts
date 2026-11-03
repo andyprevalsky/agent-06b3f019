@@ -29,12 +29,43 @@ import {
   runTraceArchiveFinalizationRetries,
   type TraceArchiveDeletionLease,
 } from './traceArchiveFinalizationRetry';
+import {
+  cleanupTerminalAgentWorkflowZombies,
+  type WorkflowTerminalCleanupDependencies,
+} from './workflowTerminalCleanup';
 
 const log = createLogger('AgentKill');
 
 export interface DeleteAgentOptions {
+  /** Retry unconfirmed cleanup of an already archived subtree. */
+  retryArchived?: boolean;
   /** Temporal terminate reason. Defaults to the UI-archive wording. */
   terminateReason?: string;
+}
+
+/** Temporal seams; production uses the live client. */
+export interface AgentKillDependencies {
+  terminateWorkflow: (workflowId: string, reason: string) => Promise<void>;
+  workflowCleanup: Partial<WorkflowTerminalCleanupDependencies>;
+}
+
+/* c8 ignore start -- Temporal termination requires live Temporal server */
+async function terminateWorkflowById(workflowId: string, reason: string): Promise<void> {
+  const client = await getTemporalClient();
+  await client.workflow.getHandle(workflowId).terminate(reason);
+}
+/* c8 ignore stop */
+
+const defaultDependencies: AgentKillDependencies = {
+  terminateWorkflow: terminateWorkflowById,
+  workflowCleanup: {},
+};
+
+function errorDetail(error: unknown): string {
+  if (error instanceof AggregateError) {
+    return [error.message, ...error.errors.map(errorDetail)].join('; ');
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 interface SealedAgentKill {
@@ -69,26 +100,56 @@ async function retryRootArchiveFinalization(agentId: string, ignoreGrace: boolea
   } catch (error) {
     log.warn('Trace archive finalization retained for retry after agent deletion', {
       agent_id: agentId,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorDetail(error),
     });
   }
 }
 
+// Root finalization reads every archived artifact, so a long run takes minutes.
+// Callers (UI Archive, SMS kill_agent inside the per-user commit lock, /clear)
+// must not wait for it: the durable TraceArchiveFinalization row is already
+// released and claimable, so run it after the kill returns, one root at a time
+// per process. The row survives a crash for the production retry cron.
+let rootArchiveFinalizationQueue: Promise<void> = Promise.resolve();
+
+function scheduleRootArchiveFinalization(agentId: string, ignoreGrace: boolean): void {
+  rootArchiveFinalizationQueue = rootArchiveFinalizationQueue.then(() =>
+    retryRootArchiveFinalization(agentId, ignoreGrace)
+  );
+}
+
+/** Resolves once every root finalization scheduled so far has settled. */
+export async function waitForScheduledRootArchiveFinalizations(): Promise<void> {
+  await rootArchiveFinalizationQueue;
+}
+
+/** Status written for an archived agent that had not reached a terminal status. */
+export const ARCHIVED_AGENT_STATUS_MESSAGE = 'Archived by user';
+const NON_TERMINAL_AGENT_STATUSES = ['STARTING_UP', 'ACTIVE', 'PAUSED'] as const;
+
 /**
  * Recursively soft-delete an agent and all its descendants.
  * Cleans up sessions, terminates Temporal workflows, deletes attention requests,
- * then sets `deletedAt`. Idempotent when the agent is already archived.
+ * then sets `deletedAt`. A still-running agent also becomes FAILED ("Archived by
+ * user") in the same transaction, so archived rows never stay ACTIVE/PAUSED;
+ * FAILED is irreversible for later worker status writes. Idempotent when the
+ * agent is already archived.
  */
 export async function deleteAgentRecursive(
   agentId: string,
-  options: DeleteAgentOptions = {}
+  options: DeleteAgentOptions = {},
+  dependencyOverrides: Partial<AgentKillDependencies> = {}
 ): Promise<void> {
-  await deleteAgentRecursiveInternal(agentId, options);
+  await deleteAgentRecursiveInternal(agentId, options, {
+    ...defaultDependencies,
+    ...dependencyOverrides,
+  });
 }
 
 async function deleteAgentRecursiveInternal(
   agentId: string,
-  options: DeleteAgentOptions
+  options: DeleteAgentOptions,
+  dependencies: AgentKillDependencies
 ): Promise<boolean> {
   const terminateReason = options.terminateReason ?? 'Agent deleted by user';
 
@@ -97,22 +158,32 @@ async function deleteAgentRecursiveInternal(
   const sealed = await runTransactionWithRetry(async (tx) => {
     await lockAgentWorkflowGeneration(tx, agentId);
     const agent = await tx.agent.findFirst({
-      where: { id: agentId, deletedAt: null },
+      where: { id: agentId, ...(options.retryArchived === true ? {} : { deletedAt: null }) },
       select: {
+        deletedAt: true,
         temporalWorkflowId: true,
         parentAgentId: true,
-        children: { where: { deletedAt: null }, select: { id: true } },
+        children: {
+          ...(options.retryArchived === true ? {} : { where: { deletedAt: null } }),
+          select: { id: true },
+        },
       },
     });
     if (agent === null) {
       return null;
     }
-    await tx.agent.update({
-      where: { id: agentId },
-      data: { deletedAt: new Date() },
+    if (agent.deletedAt === null) {
+      await tx.agent.update({
+        where: { id: agentId },
+        data: { deletedAt: new Date() },
+      });
+    }
+    await tx.agent.updateMany({
+      where: { id: agentId, status: { in: [...NON_TERMINAL_AGENT_STATUSES] } },
+      data: { status: 'FAILED', statusMessage: ARCHIVED_AGENT_STATUS_MESSAGE },
     });
     const traceArchiveDeletionLease =
-      agent.parentAgentId === null && archiveEnabled()
+      agent.deletedAt === null && agent.parentAgentId === null && archiveEnabled()
         ? await enqueueTraceArchiveFinalization(tx, agentId)
         : null;
     const result: SealedAgentKill = {
@@ -123,7 +194,7 @@ async function deleteAgentRecursiveInternal(
     return result;
   });
   if (sealed === null) {
-    if (archiveEnabled()) await retryRootArchiveFinalization(agentId, false);
+    if (archiveEnabled()) scheduleRootArchiveFinalization(agentId, false);
     return true;
   }
 
@@ -134,19 +205,17 @@ async function deleteAgentRecursiveInternal(
   let workflowTerminationHandled = true;
   try {
     for (const childId of sealed.childIds) {
-      if (!(await deleteAgentRecursiveInternal(childId, options))) {
+      if (!(await deleteAgentRecursiveInternal(childId, options, dependencies))) {
         workflowTerminationHandled = false;
       }
     }
 
     await cleanupAgentSessions(agentId);
 
-    /* c8 ignore start -- Temporal termination requires live Temporal server */
+    let ownWorkflowTerminated = true;
     if (sealed.temporalWorkflowId !== null && sealed.temporalWorkflowId !== '') {
       try {
-        const client = await getTemporalClient();
-        const handle = client.workflow.getHandle(sealed.temporalWorkflowId);
-        await handle.terminate(terminateReason);
+        await dependencies.terminateWorkflow(sealed.temporalWorkflowId, terminateReason);
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         if (
@@ -161,6 +230,7 @@ async function deleteAgentRecursiveInternal(
           });
         } else {
           workflowTerminationHandled = false;
+          ownWorkflowTerminated = false;
           log.warn('Failed to terminate workflow', {
             agent_id: agentId,
             workflow_id: sealed.temporalWorkflowId,
@@ -169,18 +239,37 @@ async function deleteAgentRecursiveInternal(
         }
       }
     } else {
-      /* c8 ignore stop */
       log.info('No workflow id for agent, skipping termination', { agent_id: agentId });
     }
 
+    // A terminal transition or this soft-delete enqueued a graced
+    // TemporalWorkflowCleanup row, which fences the root's R2 finalization.
+    // The workflow is already terminated here, so discharge it now through the
+    // canonical exact cleanup instead of leaving it for the later cron.
+    if (ownWorkflowTerminated) {
+      try {
+        await cleanupTerminalAgentWorkflowZombies(dependencies.workflowCleanup, {
+          agentIds: [agentId],
+          ignoreGrace: true,
+          maxConcurrency: 1,
+          batchSize: 1,
+        });
+      } catch (error) {
+        log.warn('Temporal workflow cleanup retained after agent deletion', {
+          agent_id: agentId,
+          error: errorDetail(error),
+        });
+      }
+    }
+
     await prisma.agentAttentionRequest.deleteMany({ where: { agentId } });
-    // Fast Mode cache entries intentionally outlive agent deletion. They are keyed by
-    // goal hash and only removed by the explicit fast-cache purge endpoint.
+    // DEMO cache entries intentionally outlive agent deletion. They are keyed by
+    // goal hash and only removed by the explicit demo-cache purge endpoint.
 
     if (sealed.traceArchiveDeletionLease !== null && workflowTerminationHandled) {
       try {
         await releaseTraceArchiveDeletion(sealed.traceArchiveDeletionLease);
-        await retryRootArchiveFinalization(agentId, true);
+        scheduleRootArchiveFinalization(agentId, true);
       } catch (error) {
         log.warn('Trace archive deletion lease retained for retry', {
           agent_id: agentId,

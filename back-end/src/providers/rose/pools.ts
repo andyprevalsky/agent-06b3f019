@@ -17,10 +17,8 @@
  * Planner stays rose-1-ultra (Opus 5.5).
  */
 
-export type PoolName = 'rose-1-mini' | 'rose-1-flash' | 'rose-1-ultra' | 'rose-1-browser-use';
-
-/** DAG / approval param-populator always uses ultra, even when the parent agent is flash. */
-export const PARAM_POPULATOR_MODEL = 'rose-labs/rose-1-ultra';
+export type PoolName =
+  'rose-1-mini' | 'rose-1-flash' | 'rose-1-ultra' | 'rose-1-browser-use' | 'rose-local';
 
 export interface PoolSpec {
   name: PoolName;
@@ -52,6 +50,14 @@ export interface PoolSpec {
 }
 
 export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
+  'rose-local': {
+    name: 'rose-local',
+    // Inert required fields: the local branch returns before any remote leg.
+    claudeAuthModel: 'claude-opus-5-5',
+    gptAuthModel: 'gpt-6-sol',
+    waterfall: [],
+    directAuthEnabled: false,
+  },
   'rose-1-mini': {
     name: 'rose-1-mini',
     claudeAuthModel: 'claude-haiku-4-5',
@@ -102,6 +108,8 @@ const ALIAS_TO_POOL: Record<string, PoolName> = {
   'rose-labs/rose-1-lite': 'rose-1-flash',
   'rose-labs/rose-1-ultra': 'rose-1-ultra',
   'rose-labs/rose-1-browser-use': 'rose-1-browser-use',
+  'rose-labs/rose-local': 'rose-local',
+  'rose-local': 'rose-local',
   rose: 'rose-1-flash',
   'rose-flash': 'rose-1-flash',
   'rose-fast': 'rose-1-flash',

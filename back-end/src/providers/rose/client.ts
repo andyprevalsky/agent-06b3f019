@@ -40,8 +40,10 @@ import { RoseAllFailed, RoseAuthError, RoseError, RosePaymentRequiredError } fro
 import { attemptClaudeAuthWithRecovery } from './claudeAuthAttempt';
 import { gptAuthComplete, openAiApiKeyComplete } from './gptAuth';
 import { getPool, poolForModel } from './pools';
+import { localCompletion } from './local';
 import { buildOpenAiResponseFormat } from './schema';
 import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './types';
+import { withNativeToolContract } from './transforms';
 import { waterfallComplete } from './waterfall';
 import { dumpLlmContext, updateLlmDump } from '../llmDump';
 import { exclusiveOpenRouterWaterfall } from './openrouterRoute';
@@ -82,10 +84,6 @@ function requiredEnv(name: string): string {
   return v;
 }
 
-function shortRequestId(): string {
-  return randomUUID().replace(/-/g, '').slice(0, 12);
-}
-
 function openAiApiKey(): string | undefined {
   return process.env[GPT_API_KEY_ENV];
 }
@@ -109,7 +107,7 @@ export async function createStreamingCompletion(
   if (options.response_format && options.response_model) {
     throw new Error('Rose: pass either response_format or response_model, not both');
   }
-
+  if (pool === 'rose-local') return localCompletion(options);
   const normalizedOptions: CompletionOptions = {
     ...options,
     // Provider Anthropic/OpenRouter speed=fast is on by default; callers opt out
@@ -120,7 +118,7 @@ export async function createStreamingCompletion(
       : options.response_format,
   };
 
-  const requestId = shortRequestId();
+  const requestId = randomUUID().replace(/-/g, '').slice(0, 12);
   const callSite = options.dump_context?.call_site ?? 'chat';
 
   log.info('request', {
@@ -159,6 +157,15 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   const acc = createStreamAccumulator();
   let dumpPath: string | null = null;
 
+  // OpenAI-dialect legs receive a tool-envelope response_model as native tools.
+  // Anthropic legs extract the same tools from response_format themselves.
+  const toolOptions = withNativeToolContract(opts.options);
+  const openAiToolFields = {
+    responseFormat: toolOptions.response_format,
+    tools: toolOptions.tools,
+    toolChoice: toolOptions.tool_choice,
+  };
+
   if (opts.options.dump_context) {
     dumpPath = dumpLlmContext({
       call_site: opts.options.dump_context.call_site,
@@ -166,8 +173,8 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       model: opts.options.model,
       message_count: opts.options.messages.length,
       messages: opts.options.messages,
-      response_format: opts.options.response_format,
-      tools: opts.options.tools,
+      response_format: toolOptions.response_format,
+      tools: toolOptions.tools,
       config: {
         pool: opts.pool,
         call_site: opts.callSite,
@@ -175,9 +182,9 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         temperature: opts.options.temperature,
         max_tokens: opts.options.max_tokens,
         reasoning_effort: opts.options.effort,
-        response_format: opts.options.response_format,
-        tools: opts.options.tools,
-        tool_choice: opts.options.tool_choice,
+        response_format: toolOptions.response_format,
+        tools: toolOptions.tools,
+        tool_choice: toolOptions.tool_choice,
         direct_auth: {
           claude_token: Boolean(opts.options.claude_token),
           gpt_token: Boolean(opts.options.gpt_token),
@@ -244,7 +251,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     let cerebrasRoute;
     try {
       cerebrasRoute = selectExclusiveCerebrasChatRoute({
-        options: opts.options,
+        options: toolOptions,
         requestId: opts.requestId,
         callSite: opts.callSite,
       });
@@ -255,7 +262,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     const foundryRequest = () =>
       foundryRequestFor({
         poolSpec,
-        options: opts.options,
+        options: toolOptions,
         requestId: opts.requestId,
         callSite: opts.callSite,
       });
@@ -275,7 +282,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           yield* runCerebrasChatWithWaterfallFallback({
             cerebrasRoute,
             poolSpec,
-            options: opts.options,
+            options: toolOptions,
             requestId: opts.requestId,
             pool: opts.pool,
             callSite: opts.callSite,
@@ -305,7 +312,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             produce: () =>
               exclusiveOpenRouterWaterfall({
                 poolSpec,
-                options: opts.options,
+                options: toolOptions,
                 requestId: opts.requestId,
                 callSite: opts.callSite,
               }),
@@ -352,9 +359,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
               poolSpec,
               model: poolSpec.gptAuthModel,
               messages: opts.options.messages,
-              responseFormat: opts.options.response_format,
-              tools: opts.options.tools,
-              toolChoice: opts.options.tool_choice,
+              ...openAiToolFields,
               temperature: opts.options.temperature,
               effort: opts.options.effort,
               openAiKey: sharedOpenAiKey,
@@ -424,9 +429,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             gptAuthComplete({
               poolSpec,
               messages: opts.options.messages,
-              responseFormat: opts.options.response_format,
-              tools: opts.options.tools,
-              toolChoice: opts.options.tool_choice,
+              ...openAiToolFields,
               temperature: opts.options.temperature,
               effort: opts.options.effort,
               gptToken: opts.options.gpt_token!,
@@ -476,9 +479,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
               poolSpec,
               model: poolSpec.gptAuthModel,
               messages: opts.options.messages,
-              responseFormat: opts.options.response_format,
-              tools: opts.options.tools,
-              toolChoice: opts.options.tool_choice,
+              ...openAiToolFields,
               temperature: opts.options.temperature,
               effort: opts.options.effort,
               openAiKey: sharedOpenAiKey,
@@ -586,7 +587,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         yield* runWithFallThrough({
           produce: () =>
             exclusiveCerebrasCompletion({
-              options: opts.options,
+              options: toolOptions,
               cerebrasKey,
               requestId: opts.requestId,
               callSite: opts.callSite,
@@ -666,7 +667,8 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           waterfallComplete({
             poolSpec,
             messages: opts.options.messages,
-            responseFormat: opts.options.response_format,
+            ...openAiToolFields,
+            anthropicTools: toolOptions.anthropic_tools,
             temperature: opts.options.temperature,
             maxTokens: opts.options.max_tokens,
             reasoningEffort: opts.options.effort,

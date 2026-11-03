@@ -1,12 +1,14 @@
 import { AuthService } from '../../services/auth';
 import { IMessageReader } from '../../services/iMessageReader';
 import { BatchUploader } from '../../services/batchUploader';
+import { IntegrationProgress, type ProgressRun } from '../../services/integrationProgress';
 import { IntegrationCache } from '../../services/sync/IntegrationCache';
 import { sessionForLocalMachineData } from '../../base/impersonation';
 import type {
   AuthSession,
   IMessageData,
   Integration,
+  MessagingUploadOptions,
   NormalizedMessage,
   UploadResult,
 } from './types';
@@ -71,11 +73,19 @@ export async function isIntegrationConnected(name: string): Promise<boolean> {
 }
 
 /**
+ * Start a best-effort sync-progress run for the `imessage` Integration row.
+ */
+export function startImessageProgressRun(): ProgressRun {
+  return IntegrationProgress.startRun('imessage');
+}
+
+/**
  * Upload a payload via the BatchUploader for the given integration type.
  */
 export async function uploadImessagePayload(
   data: unknown,
-  accessToken: string
+  accessToken: string,
+  options: MessagingUploadOptions = {}
 ): Promise<UploadResult> {
-  return BatchUploader.uploadInBatches('imessage', data, accessToken, null);
+  return BatchUploader.uploadInBatches('imessage', data, accessToken, null, options);
 }

@@ -1,17 +1,22 @@
 /**
  * Blackbox tests for AgentSettingsDialog.
  * Covers open/close, no-agent state, metrics rendering, price-limit edit/save/cancel,
- * response-schema rendering, the 1.8s delete-confirmation timer, and admin Report Bug
- * (including dragged / pasted screenshots).
+ * response-schema rendering, the 1.8s delete-confirmation timer (stock gear only; the
+ * Rose Desktop drawer panel has no Delete Agent), admin Report bug as its own control
+ * outside Agent Settings (including dragged / pasted screenshots), and the panel's anchor direction: the
+ * Rose Desktop tab gear (left side of the query box) opens the panel rightward from
+ * the gear, staying inside the viewport; the stock right-side gear opens it leftward.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
 import AgentSettingsDialog from '@/features/terminal-component-group/components/AgentSettingsDialog';
+import ReportBugDialog from '@/features/terminal-component-group/components/ReportBugDialog';
+import QueryInput from '@/features/terminal-component-group/components/QueryInput';
 import type { AgentDetail } from '@/lib/api';
 
 const API_BASE = 'http://localhost:3001/api';
@@ -306,14 +311,9 @@ describe('AgentSettingsDialog', () => {
     expect(screen.queryByText('Price Limit')).not.toBeInTheDocument();
   });
 
-  it('hides Report Bug for non-admin users', async () => {
-    const u = userEvent.setup();
-    renderWithProviders(<AgentSettingsDialog agent={makeAgent()} />);
-    await u.click(document.querySelector('button')!);
-    await waitFor(() => {
-      expect(screen.getByText('Metrics')).toBeInTheDocument();
-    });
-    expect(screen.queryByTestId('report-bug-open')).toBeNull();
+  it('hides the Report bug control for non-admin users', () => {
+    renderWithProviders(<ReportBugDialog agent={makeAgent()} />);
+    expect(screen.queryByTestId('report-bug-trigger')).toBeNull();
   });
 
   it('opens Report Bug composer and submits description for admins', async () => {
@@ -337,9 +337,8 @@ describe('AgentSettingsDialog', () => {
       }),
     );
 
-    renderWithProviders(<AgentSettingsDialog agent={makeAgent()} />);
-    await u.click(document.querySelector('button')!);
-    await u.click(await screen.findByTestId('report-bug-open'));
+    renderWithProviders(<ReportBugDialog agent={makeAgent()} />);
+    await u.click(screen.getByTestId('report-bug-trigger'));
 
     const textarea = await screen.findByTestId('report-bug-description');
     expect(screen.queryByText(/SMS/i)).toBeNull();
@@ -389,9 +388,8 @@ describe('AgentSettingsDialog', () => {
       }),
     );
 
-    renderWithProviders(<AgentSettingsDialog agent={makeAgent()} />);
-    await u.click(document.querySelector('button')!);
-    await u.click(await screen.findByTestId('report-bug-open'));
+    renderWithProviders(<ReportBugDialog agent={makeAgent()} />);
+    await u.click(screen.getByTestId('report-bug-trigger'));
     const textarea = await screen.findByTestId('report-bug-description');
     await u.type(textarea, 'Unconfigured case');
     await u.click(screen.getByTestId('report-bug-submit'));
@@ -444,9 +442,8 @@ describe('AgentSettingsDialog', () => {
       }),
     );
 
-    renderWithProviders(<AgentSettingsDialog agent={makeAgent()} />);
-    await u.click(document.querySelector('button')!);
-    await u.click(await screen.findByTestId('report-bug-open'));
+    renderWithProviders(<ReportBugDialog agent={makeAgent()} />);
+    await u.click(screen.getByTestId('report-bug-trigger'));
     const textarea = (await screen.findByTestId('report-bug-description')) as HTMLTextAreaElement;
     expect(screen.getByTestId('report-bug-screenshot-hint')).toHaveTextContent(
       'Drag, drop or paste screenshots',
@@ -502,9 +499,8 @@ describe('AgentSettingsDialog', () => {
       }),
     );
 
-    renderWithProviders(<AgentSettingsDialog agent={makeAgent()} />);
-    await u.click(document.querySelector('button')!);
-    await u.click(await screen.findByTestId('report-bug-open'));
+    renderWithProviders(<ReportBugDialog agent={makeAgent()} />);
+    await u.click(screen.getByTestId('report-bug-trigger'));
     const textarea = (await screen.findByTestId('report-bug-description')) as HTMLTextAreaElement;
 
     const notes = new File(['notes'], 'notes.txt', { type: 'text/plain' });
@@ -518,5 +514,126 @@ describe('AgentSettingsDialog', () => {
       expect(textarea.value).toBe('![clipboard.jpg](https://img.example/clipboard.jpg)\n'),
     );
     expect(uploads).toEqual(['image/jpeg']);
+  });
+});
+
+// ─── Anchor direction (UI #20): the panel opens away from its gear's side ────
+
+const queryProps = {
+  value: '',
+  onChange: vi.fn(),
+  onSubmit: vi.fn(),
+  selectedModel: 'rose-labs/rose-1-flash',
+  availableModels: [
+    { id: 'rose-labs/rose-1-flash', name: 'rose-fast', provider: 'rose-labs', description: 'fast' },
+  ],
+};
+
+interface Box {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+function setViewport(width: number, height: number) {
+  Object.defineProperty(window, 'innerWidth', { value: width, configurable: true });
+  Object.defineProperty(window, 'innerHeight', { value: height, configurable: true });
+}
+
+/** Pin the opener's on-screen rect (jsdom has no layout). */
+function placeOpener(el: Element, box: Box) {
+  vi.spyOn(el, 'getBoundingClientRect').mockReturnValue({
+    ...box,
+    x: box.left,
+    y: box.top,
+    width: box.right - box.left,
+    height: box.bottom - box.top,
+    toJSON: () => box,
+  } as DOMRect);
+}
+
+/** The panel's horizontal extent from its fixed-position inline style. */
+function panelX(panel: HTMLElement): { left: number; right: number } {
+  const vw = window.innerWidth;
+  const max = panel.style.maxWidth.endsWith('vw')
+    ? (parseFloat(panel.style.maxWidth) / 100) * vw
+    : Infinity;
+  const width = Math.min(parseFloat(panel.style.width), max);
+  const left =
+    panel.style.left && panel.style.left !== 'auto'
+      ? parseFloat(panel.style.left)
+      : vw - parseFloat(panel.style.right) - width;
+  return { left, right: left + width };
+}
+
+describe('AgentSettingsDialog anchor direction (UI #20)', () => {
+  const realWidth = window.innerWidth;
+  const realHeight = window.innerHeight;
+  beforeEach(() => mockSession());
+  afterEach(() => {
+    setViewport(realWidth, realHeight);
+    vi.restoreAllMocks();
+    localStorage.clear();
+  });
+
+  function openRoseDesktopSettings(gearBox: Box) {
+    renderWithProviders(<QueryInput {...queryProps} agentDetail={makeAgent()} />, {
+      roseDesktop: true,
+    });
+    const gear = within(screen.getByTestId('query-toolbar-nub')).getByLabelText('Agent settings');
+    placeOpener(gear, gearBox);
+    fireEvent.click(gear);
+    return screen.findByRole('dialog');
+  }
+
+  it('Rose Desktop tab gear (left of the box): opens rightward from the gear, above it', async () => {
+    setViewport(1280, 800);
+    const gear = { left: 180, right: 192, top: 690, bottom: 708 };
+    const panel = await openRoseDesktopSettings(gear);
+    expect(within(panel).getByText('Agent Settings')).toBeInTheDocument();
+    await waitFor(() => expect(panelX(panel).left).toBe(gear.left));
+    const x = panelX(panel);
+    // Left edges aligned; the panel grows to the right of the gear, on screen.
+    expect(x.right).toBeGreaterThan(gear.right);
+    expect(x.left).toBeGreaterThanOrEqual(0);
+    expect(x.right).toBeLessThanOrEqual(1280);
+    // Grows upward from just above the gear.
+    expect(panel.style.bottom).toBe(`${800 - gear.top + 8}px`);
+    expect(panel.style.top).toBe('auto');
+  });
+
+  it('narrow viewport: shifts left only as far as needed to stay on screen', async () => {
+    setViewport(375, 700);
+    const gear = { left: 150, right: 162, top: 600, bottom: 618 };
+    const panel = await openRoseDesktopSettings(gear);
+    await waitFor(() => expect(panelX(panel).right).toBeLessThanOrEqual(375));
+    const x = panelX(panel);
+    expect(x.left).toBeGreaterThanOrEqual(0);
+    // Still spans the gear, extending right of it.
+    expect(x.left).toBeLessThanOrEqual(gear.left);
+    expect(x.right).toBeGreaterThan(gear.right);
+  });
+
+  it('opener near the right edge: never runs off the right side', async () => {
+    setViewport(1024, 768);
+    const gear = { left: 900, right: 912, top: 700, bottom: 718 };
+    const panel = await openRoseDesktopSettings(gear);
+    await waitFor(() => expect(panelX(panel).right).toBeLessThanOrEqual(1024));
+    expect(panelX(panel).left).toBeGreaterThanOrEqual(0);
+  });
+
+  it('stock right-side gear keeps opening leftward (right edges aligned)', async () => {
+    setViewport(1280, 800);
+    renderWithProviders(<QueryInput {...queryProps} agentDetail={makeAgent()} />, {
+      roseDesktop: false,
+    });
+    const gear = document.querySelector('svg.lucide-settings')!.closest('button')!;
+    const box = { left: 1180, right: 1208, top: 690, bottom: 718 };
+    placeOpener(gear, box);
+    fireEvent.click(gear);
+    const panel = await screen.findByRole('dialog');
+    await waitFor(() => expect(panelX(panel).right).toBe(box.right));
+    expect(panelX(panel).left).toBeGreaterThanOrEqual(0);
   });
 });

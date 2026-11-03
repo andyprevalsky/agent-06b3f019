@@ -164,6 +164,25 @@ if [ "${BROWSER_AGENT_BROWSER_USE_ENABLED+x}" = x ]; then
     done
     log "synced BROWSER_AGENT_BROWSER_USE_ENABLED into agents/.env and back-end/.env"
 fi
+# Tilion (default browser provider): mirror injected credentials/tuning so
+# dotenv children agree with this shell. Values are never logged.
+for key in TILION_API_KEY TILION_BASE_URL TILION_SESSION_TTL_SECONDS \
+    TILION_IDLE_TIMEOUT_SECONDS TILION_CDP_OBSERVE; do
+    if [ -n "${!key:-}" ]; then
+        for envf in agents/.env back-end/.env; do
+            upsert_env_key "$envf" "$key" "${!key}"
+        done
+        log "synced $key into agents/.env and back-end/.env"
+    fi
+done
+# The kill switch mirrors like the Browser Use flag: injected-but-empty is
+# "unset" (default on), so only a non-empty value overwrites a stale one.
+if [ -n "${BROWSER_AGENT_TILION_ENABLED:-}" ]; then
+    for envf in agents/.env back-end/.env; do
+        upsert_env_key "$envf" BROWSER_AGENT_TILION_ENABLED "$BROWSER_AGENT_TILION_ENABLED"
+    done
+    log "synced BROWSER_AGENT_TILION_ENABLED into agents/.env and back-end/.env"
+fi
 # Injected Cursor GITHUB_TOKEN is often an invalid github_pat_ that `gh auth
 # token` still echoes back. Overwrite process env + local .env with the working
 # hosts.yml / insteadOf credential so children inherit a valid token.
@@ -227,18 +246,24 @@ fi
 
 # Injected Cursor Secrets override dotenv (Node/Python keep existing env). An
 # unsupported BROWSER_PROVIDER (e.g. browserbase) makes live /init 500. Force a
-# supported value into this shell AND rewrite .env so children agree.
+# supported value into this shell AND rewrite .env so children agree. Tilion is
+# the default provider but needs TILION_API_KEY; without one the box uses kernel.
 case "${BROWSER_PROVIDER:-}" in
-  kernel|steel|browser-use) ;;
+  tilion|kernel|steel|browser-use) ;;
   *)
-    log "WARN: BROWSER_PROVIDER='${BROWSER_PROVIDER:-}' unsupported — forcing kernel"
-    export BROWSER_PROVIDER=kernel
+    forced_provider=kernel
+    if [ -n "${TILION_API_KEY:-}" ] ||
+      grep -Eq '^TILION_API_KEY=["'"'"']?[^"'"'"'[:space:]]' back-end/.env 2>/dev/null; then
+      forced_provider=tilion
+    fi
+    log "WARN: BROWSER_PROVIDER='${BROWSER_PROVIDER:-}' unsupported — forcing $forced_provider"
+    export BROWSER_PROVIDER="$forced_provider"
     for envf in back-end/.env agents/.env; do
       if [ -f "$envf" ]; then
         if grep -q '^BROWSER_PROVIDER=' "$envf" 2>/dev/null; then
-          sed -i 's/^BROWSER_PROVIDER=.*/BROWSER_PROVIDER="kernel"/' "$envf"
+          sed -i "s/^BROWSER_PROVIDER=.*/BROWSER_PROVIDER=\"$forced_provider\"/" "$envf"
         else
-          printf '\nBROWSER_PROVIDER="kernel"\n' >> "$envf"
+          printf '\nBROWSER_PROVIDER="%s"\n' "$forced_provider" >> "$envf"
         fi
       fi
     done
@@ -247,7 +272,7 @@ esac
 
 # ── 2. System tools a fresh cloud box lacks (idempotent, fail-soft) ───────────
 # Everything our test suites + cloud benchmark runner need beyond the base image:
-#   ruby   — deploy-gate workflow-YAML checks (scripts/tests/auto-rca-workflow)
+#   ruby   — workflow-YAML parse fallback (scripts/tests/mac-app-release-drift)
 #   rsync  — cloudbench dependency sync (scripts/cloudbench-sync-deps.sh)
 #   lsof   — local stack/benchmark cleanup finds listener PIDs and process cwds
 #   time   — GNU /usr/bin/time for seed-memory RSS ratchet (bash builtin has no RSS)
@@ -375,7 +400,7 @@ else
     # --no-install: when dependency setup failed, npx would otherwise wait on a
     # hidden "Ok to proceed?" install prompt (output is discarded) forever.
     ( cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
-        npx --no-install prisma db push --skip-generate --accept-data-loss >/dev/null 2>&1 ) \
+        PRISMA_CLI_DATABASE_URL="$LOCAL_DB_URL" npx --no-install prisma db push --skip-generate --accept-data-loss >/dev/null 2>&1 ) \
         || log "WARN: prisma db push failed"
     ( cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
         LOCAL_DB_NAME=victoria bash scripts/apply-local-workflow-ddl.sh >/dev/null 2>&1 ) \

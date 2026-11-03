@@ -1,3 +1,4 @@
+import { phoneFixtureNumber } from './phone-fixture-users';
 import imessageRouter from '../../domains/imessage/routes';
 import type { MessageVerifier } from '../../providers/phoneMessageVerifier';
 import { syntheticConfiguration } from './iphone-control.synthetic-setup';
@@ -48,6 +49,7 @@ export interface ProviderCall {
   idempotencyKey?: string;
 }
 export interface Fixture {
+  phone: string;
   userId: string;
   deviceId: string;
   providerDeviceId: string;
@@ -486,7 +488,8 @@ export class Harness {
   async fixture(): Promise<Fixture> {
     const userId = `iphone-control-${randomUUID()}`;
     this.users.push(userId);
-    await prisma.user.create({ data: { userId, phone: '+19729777432', isAnonymous: false } });
+    const phone = phoneFixtureNumber();
+    await prisma.user.create({ data: { userId, phone, isAnonymous: false } });
     const userApiKey = `rose-phone-fixture-${randomUUID()}`;
     this.userKeys.set(userId, userApiKey);
     await prisma.roseApiKey.create({ data: { userId, apiKey: userApiKey } });
@@ -523,6 +526,7 @@ export class Harness {
     const agent = await this.createAgent(userId);
     const lease = await this.acquire(userId, agent.id);
     return {
+      phone,
       userId,
       deviceId: device.id,
       providerDeviceId,

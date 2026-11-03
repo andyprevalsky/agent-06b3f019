@@ -37,6 +37,14 @@ The fixture/provider/coverage files are byte-identical to prior passing9f/5221 s
 
 Native custody journal `auth-persist-ZdtzOf/custody.json` records cleanup-complete, zero failures, and successful release of both browsers, Kernel profile and local fixture. Processes joined, owned ports closed and prepared DB had zero other clients.
 
+### Recurrence 2026-10-26 (PR fix/scale-s5-cookie-sync-diff deploy)
+
+Backend coverage at `7825de8dd` (diff limited to the cookie upload path, no browser-provider code) failed only
+`browser-provider` with the same `FAIL live Kernel/Steel auth persist: page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://example.com/`
+(224/225 domains; bundle `backend-coverage-failed-20261026-175357-4111023`). The unchanged focused
+`bash scripts/run-blackbox-tests.sh browser-provider` failed identically at ~18:00Z, so the tunnel failure persisted for
+several minutes rather than being a single blip. The earlier coverage run on the same SHA (17:22Z) had passed this domain.
+
 ## Solution
 
 No causal code fix was established or applied. Root authorized one unchanged normal focused retry: owner60543 ran `cd back-end && bash scripts/run-blackbox-tests.sh browser-provider`, actual start04:30:05.260021Z, next eligible due04:40:05.260021Z. It passed in105916ms (wrapper118.8s); custody cleanup succeeded and its newly owned standalone DB was dropped before further work.
@@ -54,3 +62,23 @@ None recorded.
 ## Reusable lesson
 
 An unchanged successful retry establishes recovery, not the cause of a missing proxy-transport response; preserve the original failure and distinguish canonical requalification from fabricated coverage reuse.
+
+## October 29 renewed investigation — U4 original target recovered
+
+Read-only recovery located two encrypted original checkpoint objects for task
+`049e6363-f71a-596f-927e-03c3769066b8`. Revision 2's single saved tab exactly
+matches the original failed ipify navigation, including its nonce; it has no
+cookies, storage origins or tab-session entries. The earlier missing-checkpoint
+gap is closed. Encrypted revision 2 SHA256:
+`4db6f1da4c6d014d74ed79dc46a24ed52ba1e7528f351519998ea385f6b20d1a`.
+
+A read of the exact already-released Steel session returns region `iad`,
+proxySource `steel`, 60759 proxy bytes, zero events and empty metadata. These
+are retained metadata, not the original CONNECT response. No allocation,
+release, CDP attachment or payment was performed by this investigation.
+
+The original proxy refusal response and reason are unavailable in retained
+evidence or the installed SDK's historical APIs. This does not establish an
+outage, credential failure or malformed request. Historical U4 and attribution
+remain OPEN; no runtime fix is proposed. Evidence:
+plan:.context/unresolved-six-20261029/storage-tunnel/U4-REPORT.md.

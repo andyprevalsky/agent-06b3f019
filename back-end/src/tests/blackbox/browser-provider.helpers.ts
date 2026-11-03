@@ -4,6 +4,7 @@ import { prisma } from '../../providers/database';
 import { recreateSession } from '../../providers/steel/sessionResume';
 import { rotateProxy } from '../../providers/browser';
 import { steel } from '../../providers/steel/session';
+import { steelEnvironmentIdentity } from '../../providers/steel/sessionIdentity';
 import { APIConnectionTimeoutError } from '@onkernel/sdk';
 import {
   isKernelProxyAvailabilityError,
@@ -265,17 +266,36 @@ export function withProvider(value: string | undefined, test: () => void): void 
 
 /** Exercise actual Steel replacement/facade with offline native and DB boundaries. */
 export async function assertSteelSameProfileReplacement(retryReleased: boolean): Promise<void> {
-  const find = prisma.browserSession.findUnique;
-  const fingerprint = prisma.integration.findUnique;
-  const update = prisma.browserSession.updateMany;
-  const remember = prisma.browserProviderProfile.upsert;
-  const contextUpdate = prisma.browserContext.update;
-  const create = steel.sessions.create;
-  const release = steel.sessions.release;
-  const get = steel.get;
-  const connect = chromium.connectOverCDP;
-  const transaction = prisma.$transaction;
-  const leaseUpdate = prisma.toolSideEffect.updateMany;
+  await assertSteelSameProfileReplacementState(retryReleased, true);
+  if (retryReleased) await assertSteelSameProfileReplacementState(true, false);
+}
+
+async function assertSteelSameProfileReplacementState(
+  retryReleased: boolean,
+  inspectReleased: boolean
+): Promise<void> {
+  const originals = {
+    find: prisma.browserSession.findUnique,
+    fingerprint: prisma.integration.findUnique,
+    update: prisma.browserSession.updateMany,
+    remember: prisma.browserProviderProfile.upsert,
+    contextUpdate: prisma.browserContext.update,
+    create: steel.sessions.create,
+    inspect: steel.sessions.retrieve,
+    release: steel.sessions.release,
+    get: steel.get,
+    connect: chromium.connectOverCDP,
+    query: prisma.$queryRaw,
+    transaction: prisma.$transaction,
+    intentCreate: prisma.toolSideEffect.create,
+    effectFind: prisma.toolSideEffect.findUnique,
+    effectUpsert: prisma.toolSideEffect.upsert,
+    execute: prisma.$executeRaw,
+    effectList: prisma.toolSideEffect.findMany,
+    effectUpdate: prisma.toolSideEffect.updateMany,
+    fetch: globalThis.fetch,
+    workspace: process.env.CONDUCTOR_WORKSPACE_NAME,
+  };
   const row = {
     id: 'offline-task',
     sessionId: 'offline-source',
@@ -289,163 +309,311 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
     startUrl: null,
     proxyRotationCount: 4,
     status: 'ACTIVE',
-    closedAt: null,
+    closedAt: null as Date | null,
     context: { userId: 'offline-user' },
   };
-  let ready = false;
-  let profileReads = 0;
-  let releases = 0;
-  let failCreate = retryReleased;
-  let leaseRow: {
+  type Effect = {
     operationKey: string;
     operationType: string;
     status: string;
     externalId: string;
-    updatedAt: Date;
-    request: { leaseMs: number; renewedAt?: string };
-  } | null = null;
-  let leaseReleases = 0;
-  prisma.$transaction = (async (callback: (tx: unknown) => Promise<unknown>) =>
-    callback({
-      $executeRaw: async () => 0,
-      $queryRaw: async (query: TemplateStringsArray) => {
+    request: Record<string, unknown>;
+    updatedAt?: Date;
+  };
+  const claims = new Map<string, Effect>();
+  const candidates = new Map<string, Effect>();
+  const leases = new Map<string, Effect>();
+  const claimOwners: string[] = [];
+  const releasedOwners: string[] = [];
+  const inspectedSourceStates: string[] = [];
+  const allocated = new Set<string>();
+  const requested = new Set<string>();
+  let ready = false;
+  let profileReads = 0;
+  let releases = 0;
+  let failCreate = retryReleased;
+  let createAttempts = 0;
+  let replacementId = '';
+  let externalCalls = 0;
+  const matches = (effect: Effect, where: Record<string, unknown>): boolean =>
+    Object.entries(where).every(([key, expected]) => {
+      if (key === 'request' && typeof expected === 'object' && expected !== null) {
+        const filter = expected as { path: string[]; equals: unknown };
+        return (
+          filter.path.reduce<unknown>(
+            (value, part) => (value as Record<string, unknown>)[part],
+            effect.request
+          ) === filter.equals
+        );
+      }
+      const actual = effect[key as keyof Effect];
+      if (typeof expected === 'object' && expected !== null && 'gt' in expected) {
+        return (
+          expected.gt instanceof Date &&
+          actual instanceof Date &&
+          actual.getTime() > expected.gt.getTime()
+        );
+      }
+      return actual === expected;
+    });
+  try {
+    process.env.CONDUCTOR_WORKSPACE_NAME = `offline-steel-same-profile-${retryReleased}-${inspectReleased}`;
+    globalThis.fetch = (async () => {
+      externalCalls++;
+      throw new Error('unexpected external request in same-profile fixture');
+    }) as typeof fetch;
+    prisma.$transaction = (async (callback: (tx: typeof prisma) => Promise<unknown>) =>
+      callback(prisma)) as typeof originals.transaction;
+    prisma.$executeRaw = (async () => 0) as typeof originals.execute;
+    prisma.$queryRaw = (async (
+      query: { strings: string[]; values: unknown[] } | TemplateStringsArray
+    ) => {
+      if (Array.isArray(query)) {
         nodeAssert.strictEqual(query.join(''), 'SELECT clock_timestamp() AS now');
         return [{ now: new Date() }];
-      },
-      toolSideEffect: {
-        findUnique: async () => leaseRow,
-        upsert: async (args: { create: NonNullable<typeof leaseRow> }) => {
-          leaseRow = { ...args.create };
-          return leaseRow;
-        },
-        updateMany: (...args: Parameters<typeof leaseUpdate>) =>
-          prisma.toolSideEffect.updateMany(...args),
-      },
-    })) as typeof transaction;
-  prisma.toolSideEffect.updateMany = (async (args: {
-    where: Record<string, unknown>;
-    data: {
-      status?: string;
-      updatedAt?: Date;
-      request?: { leaseMs: number; renewedAt?: string };
-      response?: unknown;
-    };
-  }) => {
-    if (
-      leaseRow === null ||
-      Object.entries(args.where).some(([key, value]) => {
-        const actual = leaseRow?.[key as keyof typeof leaseRow];
-        if (value && typeof value === 'object' && 'gt' in value) {
-          return !(
-            value.gt instanceof Date &&
-            actual instanceof Date &&
-            actual.getTime() > value.gt.getTime()
-          );
-        }
-        return actual !== value;
-      })
-    ) {
-      return { count: 0 };
-    }
-    if (args.data.status === 'RELEASED') leaseReleases++;
-    Object.assign(leaseRow, args.data);
-    return { count: 1 };
-  }) as unknown as typeof leaseUpdate;
-  prisma.browserSession.findUnique = (async (args: unknown) => {
-    if ('agentId' in ((args as { select?: object }).select ?? {})) return null;
-    return { ...row };
-  }) as typeof find;
-  prisma.integration.findUnique = (async () => null) as unknown as typeof fingerprint;
-  prisma.browserSession.updateMany = (async (args: unknown) => {
-    const { where, data } = args as { where: { sessionId: string }; data: Partial<typeof row> };
-    if (Object.entries(where).some(([key, value]) => row[key as keyof typeof row] !== value)) {
-      return { count: 0 };
-    }
-    Object.assign(row, data);
-    return { count: 1 };
-  }) as typeof update;
-  prisma.browserProviderProfile.upsert = (async () => ({})) as unknown as typeof remember;
-  prisma.browserContext.update = (async () => ({})) as unknown as typeof contextUpdate;
-  steel.sessions.release = (async (id: string) => {
-    nodeAssert.strictEqual(id, 'offline-source');
-    nodeAssert.strictEqual(row.status, 'PAUSED', 'source release must retain recovery custody');
-    releases++;
-    if (ready) throw Object.assign(new Error('already released'), { status: 404 });
-    ready = true;
-    return {};
-  }) as typeof release;
-  steel.get = (async (path: string) => {
-    nodeAssert.strictEqual(path, '/v1/profiles/offline-profile');
-    nodeAssert(ready, 'profile readiness must follow acknowledged source release');
-    nodeAssert.strictEqual(row.status, 'PAUSED', 'readiness must retain recovery custody');
-    profileReads++;
-    return { status: 'READY' };
-  }) as typeof get;
-  steel.sessions.create = (async (input: { profileId?: string }) => {
-    if (!ready) {
-      throw Object.assign(
-        new Error(
-          "409 Profile 'offline-profile' is still uploading and cannot be attached to a session yet. Wait for its status to become 'ready', then retry."
-        ),
-        { status: 409 }
+      }
+      const sql = query as { strings: string[]; values: unknown[] };
+      if (sql.strings[0].includes('SELECT')) {
+        nodeAssert(sql.strings.join('').includes('FOR UPDATE'), 'missing atomic claim row lock');
+        const effect = claims.get(String(sql.values[0]));
+        return effect ? [{ ...effect, request: { ...effect.request } }] : [];
+      }
+      const key = String(sql.values[1]);
+      nodeAssert(
+        [
+          'steel-browser-task-lifecycle:offline-task',
+          'steel-browser-task-lifecycle:profile:offline-profile',
+        ].includes(key)
       );
-    }
-    nodeAssert(profileReads > 0, 'replacement create requires native profile readiness');
-    nodeAssert.strictEqual(row.status, 'PAUSED');
-    nodeAssert.strictEqual(row.closedAt, null);
-    nodeAssert.strictEqual(input.profileId, 'offline-profile');
-    if (failCreate) throw Object.assign(new Error('offline create failed'), { status: 429 });
-    return {
-      id: 'offline-replacement',
-      debugUrl: 'https://offline.invalid',
-      profileId: 'offline-profile',
-    };
-  }) as typeof create;
-  chromium.connectOverCDP = (async () =>
-    ({
-      contexts: () => [{ pages: () => [{}] }],
-      close: async () => {},
-    }) as unknown as Browser) as typeof connect;
-  try {
+      const now = sql.values[5] as Date;
+      const previous = claims.get(key);
+      if (
+        previous?.status === 'STARTED' &&
+        (Date.parse(String(previous.request.expiresAt)) > now.getTime() ||
+          previous.request.nativeOutstanding === true)
+      )
+        return [];
+      const owner = String(sql.values[3]);
+      const request = JSON.parse(String(sql.values[4]));
+      nodeAssert.strictEqual(sql.values[2], 'steel_browser_task_lifecycle');
+      claimOwners.push(`${key}:${owner}`);
+      claims.set(key, {
+        operationKey: key,
+        operationType: 'steel_browser_task_lifecycle',
+        status: 'STARTED',
+        externalId: owner,
+        request,
+        updatedAt: now,
+      });
+      return [{ externalId: owner }];
+    }) as typeof originals.query;
+    prisma.toolSideEffect.create = (async ({ data }: { data: Effect }) => {
+      nodeAssert.strictEqual(data.operationType, 'steel_candidate_cleanup');
+      nodeAssert.strictEqual(data.status, 'PENDING');
+      nodeAssert.strictEqual(data.request.taskId, row.id);
+      nodeAssert.strictEqual(data.request.profileId, row.providerProfileId);
+      nodeAssert.strictEqual(data.request.ownershipIdentity, steelEnvironmentIdentity());
+      nodeAssert(!candidates.has(data.operationKey), 'duplicate candidate custody');
+      candidates.set(data.operationKey, data);
+      return data;
+    }) as typeof originals.intentCreate;
+    prisma.toolSideEffect.upsert = (async (args: {
+      where: { operationKey: string };
+      create: Effect;
+      update: Partial<Effect>;
+    }) => {
+      const existing = leases.get(args.where.operationKey);
+      const next = existing ? { ...existing, ...args.update } : { ...args.create };
+      nodeAssert(next.updatedAt instanceof Date, 'lease must retain database timestamp');
+      nodeAssert(typeof next.request.leaseMs === 'number', 'lease duration missing from request');
+      leases.set(args.where.operationKey, next);
+      return next;
+    }) as typeof originals.effectUpsert;
+    prisma.toolSideEffect.findUnique = (async ({ where }: { where: { operationKey: string } }) =>
+      claims.get(where.operationKey) ??
+      candidates.get(where.operationKey) ??
+      leases.get(where.operationKey) ??
+      null) as typeof originals.effectFind;
+    prisma.toolSideEffect.findMany = (async () =>
+      [...candidates.values()].filter(
+        (candidate) => candidate.status === 'PENDING'
+      )) as typeof originals.effectList;
+    prisma.toolSideEffect.updateMany = (async (args: {
+      where: Record<string, unknown>;
+      data: Partial<Effect>;
+    }) => {
+      const table =
+        args.where.operationType === 'steel_candidate_cleanup'
+          ? candidates
+          : leases.has(String(args.where.operationKey))
+            ? leases
+            : claims;
+      const effect = table.get(String(args.where.operationKey));
+      if (!effect || !matches(effect, args.where)) return { count: 0 };
+      if (table === claims && args.data.status === 'RELEASED') {
+        nodeAssert.strictEqual(effect.status, 'STARTED');
+        nodeAssert.strictEqual(args.where.externalId, effect.externalId);
+        releasedOwners.push(`${effect.operationKey}:${effect.externalId}`);
+      }
+      Object.assign(effect, args.data);
+      return { count: 1 };
+    }) as typeof originals.effectUpdate;
+    prisma.browserSession.findUnique = (async (args: { select?: object }) =>
+      'agentId' in (args.select ?? {}) ? null : { ...row }) as typeof originals.find;
+    prisma.integration.findUnique = (async () => null) as typeof originals.fingerprint;
+    prisma.browserSession.updateMany = (async (args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }) => {
+      if (
+        Object.entries(args.where).some(
+          ([key, expected]) => row[key as keyof typeof row] !== expected
+        )
+      )
+        return { count: 0 };
+      Object.assign(row, args.data);
+      return { count: 1 };
+    }) as typeof originals.update;
+    prisma.browserProviderProfile.upsert = (async () => ({})) as typeof originals.remember;
+    prisma.browserContext.update = (async () => ({})) as typeof originals.contextUpdate;
+    steel.sessions.retrieve = (async (id: string) => {
+      nodeAssert.strictEqual(id, 'offline-source', 'unexpected foreign/native inspection');
+      const status = ready && inspectReleased ? 'released' : 'live';
+      inspectedSourceStates.push(status);
+      return { id, profileId: 'offline-profile', persistProfile: true, status };
+    }) as typeof originals.inspect;
+    steel.sessions.release = (async (id: string) => {
+      nodeAssert.strictEqual(id, 'offline-source', 'released unallocated/foreign candidate');
+      nodeAssert.strictEqual(row.status, 'PAUSED', 'source release must retain recovery custody');
+      if (inspectReleased)
+        nodeAssert(!ready, 'exact released proof forbids a duplicate native release');
+      releases++;
+      if (ready) throw Object.assign(new Error('already released'), { status: 404 });
+      ready = true;
+      return {};
+    }) as typeof originals.release;
+    steel.get = (async (path: string) => {
+      nodeAssert.strictEqual(path, '/v1/profiles/offline-profile');
+      nodeAssert(ready, 'profile readiness must follow acknowledged source release');
+      nodeAssert.strictEqual(row.status, 'PAUSED', 'readiness must retain recovery custody');
+      profileReads++;
+      return { status: 'READY' };
+    }) as typeof originals.get;
+    steel.sessions.create = (async (input: {
+      sessionId: string;
+      profileId?: string;
+      persistProfile?: boolean;
+      sessionContext?: unknown;
+    }) => {
+      createAttempts++;
+      nodeAssert(ready, 'same-profile attach preceded source release');
+      nodeAssert(profileReads > 0, 'replacement create requires native profile readiness');
+      nodeAssert.strictEqual(row.status, 'PAUSED');
+      nodeAssert.strictEqual(row.closedAt, null);
+      nodeAssert.strictEqual(input.profileId, 'offline-profile');
+      nodeAssert.strictEqual(input.persistProfile, true, 'full profile persistence was dropped');
+      nodeAssert.strictEqual(
+        input.sessionContext,
+        undefined,
+        'context substituted for full profile'
+      );
+      const intent = candidates.get(`steel-candidate-cleanup:${input.sessionId}`);
+      nodeAssert.strictEqual(intent?.status, 'PENDING', 'native create preceded durable custody');
+      nodeAssert.strictEqual(intent?.externalId, input.sessionId);
+      nodeAssert(!requested.has(input.sessionId), 'a requested UUID was reused');
+      requested.add(input.sessionId);
+      if (failCreate) throw Object.assign(new Error('offline create failed'), { status: 429 });
+      allocated.add(input.sessionId);
+      replacementId = input.sessionId;
+      return {
+        id: input.sessionId,
+        debugUrl: 'https://offline.invalid',
+        profileId: 'offline-profile',
+      };
+    }) as typeof originals.create;
+    chromium.connectOverCDP = (async () =>
+      ({
+        contexts: () => [{ pages: () => [{}] }],
+        close: async () => {},
+      }) as unknown as Browser) as typeof originals.connect;
     if (retryReleased) {
       await nodeAssert.rejects(
         () => recreateSession('offline-task', { forceManagedRotation: true }),
         /offline create failed/
       );
+      nodeAssert.strictEqual(createAttempts, 1, 'HTTP429 must preserve immediate rate-limit exit');
       nodeAssert.strictEqual(row.status, 'PAUSED');
       nodeAssert.strictEqual(row.closedAt, null);
       nodeAssert.strictEqual(row.sessionId, 'offline-source');
+      nodeAssert.strictEqual(row.providerProfileId, 'offline-profile');
+      nodeAssert(
+        [...candidates.values()].every((candidate) => candidate.status === 'RELEASED'),
+        'definite rejected creates retained unresolved candidate custody'
+      );
       failCreate = false;
       const recovered = await recreateSession('offline-task', { forceManagedRotation: true });
       nodeAssert.strictEqual(recovered.previousSessionReleased, true);
-      nodeAssert.strictEqual(
-        releases,
-        2,
-        'second invocation must use the existing idempotent release404 contract'
-      );
+      if (inspectReleased) {
+        // The second exact native inspection proves released; no release404 is required.
+        nodeAssert.deepStrictEqual(inspectedSourceStates, ['live', 'released']);
+        nodeAssert.strictEqual(releases, 1, 'already released writer was released again');
+      } else {
+        // Stale/live inspection cannot prove release; retain the SDK's idempotent 404 path.
+        nodeAssert.deepStrictEqual(inspectedSourceStates, ['live', 'live']);
+        nodeAssert.strictEqual(
+          releases,
+          2,
+          'second invocation must use the existing idempotent release404 contract'
+        );
+      }
     } else {
       const result = await rotateProxy('offline-task', {
         provider: 'steel',
         proxyType: 'residential',
         recoveryAction: 'ip_rotated',
       });
-      nodeAssert.strictEqual(result.sessionId, 'offline-replacement');
+      nodeAssert.strictEqual(result.sessionId, replacementId);
       nodeAssert.strictEqual(releases, 1, 'facade released the source a second time');
     }
     nodeAssert.strictEqual(row.status, 'ACTIVE');
-    nodeAssert.strictEqual(row.sessionId, 'offline-replacement');
-    nodeAssert.strictEqual(leaseReleases, retryReleased ? 2 : 1);
+    nodeAssert.strictEqual(row.sessionId, replacementId);
+    nodeAssert.strictEqual(row.providerProfileId, 'offline-profile');
+    nodeAssert.strictEqual(row.providerProfilePersist, true);
+    nodeAssert.strictEqual(allocated.size, 1);
+    nodeAssert.strictEqual(
+      candidates.get(`steel-candidate-cleanup:${replacementId}`)?.status,
+      'COMMITTED'
+    );
+    nodeAssert(![...candidates.values()].some((candidate) => candidate.status === 'PENDING'));
+    nodeAssert.strictEqual(claimOwners.length, retryReleased ? 4 : 2, 'task/profile claim missing');
+    nodeAssert.deepStrictEqual(
+      releasedOwners.slice().sort(),
+      claimOwners.slice().sort(),
+      'claim release lost exact task/profile owner identity'
+    );
+    nodeAssert([...claims.values()].every((claim) => claim.status === 'RELEASED'));
   } finally {
-    prisma.browserSession.findUnique = find;
-    prisma.integration.findUnique = fingerprint;
-    prisma.browserSession.updateMany = update;
-    prisma.browserProviderProfile.upsert = remember;
-    prisma.browserContext.update = contextUpdate;
-    steel.sessions.create = create;
-    steel.sessions.release = release;
-    steel.get = get;
-    chromium.connectOverCDP = connect;
-    prisma.$transaction = transaction;
-    prisma.toolSideEffect.updateMany = leaseUpdate;
+    prisma.browserSession.findUnique = originals.find;
+    prisma.integration.findUnique = originals.fingerprint;
+    prisma.browserSession.updateMany = originals.update;
+    prisma.browserProviderProfile.upsert = originals.remember;
+    prisma.browserContext.update = originals.contextUpdate;
+    steel.sessions.create = originals.create;
+    steel.sessions.retrieve = originals.inspect;
+    steel.sessions.release = originals.release;
+    steel.get = originals.get;
+    chromium.connectOverCDP = originals.connect;
+    prisma.$queryRaw = originals.query;
+    prisma.$transaction = originals.transaction;
+    prisma.toolSideEffect.create = originals.intentCreate;
+    prisma.toolSideEffect.findUnique = originals.effectFind;
+    prisma.toolSideEffect.upsert = originals.effectUpsert;
+    prisma.$executeRaw = originals.execute;
+    prisma.toolSideEffect.findMany = originals.effectList;
+    prisma.toolSideEffect.updateMany = originals.effectUpdate;
+    globalThis.fetch = originals.fetch;
+    if (originals.workspace === undefined) delete process.env.CONDUCTOR_WORKSPACE_NAME;
+    else process.env.CONDUCTOR_WORKSPACE_NAME = originals.workspace;
+    nodeAssert.strictEqual(externalCalls, 0, 'unexpected external call was swallowed');
   }
 }

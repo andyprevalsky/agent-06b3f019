@@ -1,4 +1,4 @@
-import fetch, { RequestInit, Response } from 'node-fetch';
+// Use the platform fetch so the shared outbound capture/replay boundary owns Gmail HTTP.
 import { createLogger } from '../../providers/logger';
 import { upsertPersonAndMessageRecords } from './personMessageManager';
 import {
@@ -13,6 +13,17 @@ import {
   extractEmailAddresses,
 } from './gmailParser.helpers';
 import { identifyNeededMessageIds, transformEmailsToContacts } from './gmailParser.contacts';
+import {
+  GMAIL_UNITS,
+  GmailQuotaPacer,
+  gmailPacerForAccess,
+  gmailToken,
+  isGmailRateLimited,
+  refreshGmailAccess,
+  type GmailAccess,
+} from './gmailQuota';
+
+export type { GmailAccess, RefreshableGmailAccess } from './gmailQuota';
 
 export type {
   ParsedEmail,
@@ -31,41 +42,67 @@ const log = createLogger('GmailParser');
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Attempts per request; rate-limit waits of 5+10+20+40s outlast Google's per-minute window. */
+const MAX_ATTEMPTS = 5;
+
+/**
+ * One Gmail request: paced against the per-user quota (when a pacer is given),
+ * retried on network errors, 5xx and rate limits (429 or 403 rateLimitExceeded),
+ * and retried once with a fresh token on 401 when the access can refresh.
+ * Returns the final response; callers decide what a non-OK status means.
+ */
 async function fetchWithRetry(
   url: string,
-  accessToken: string,
-  init?: RequestInit
+  access: GmailAccess,
+  init?: RequestInit,
+  quota?: { pacer: GmailQuotaPacer; units: number }
 ): Promise<Response> {
-  for (let attempt = 0; attempt < 3; attempt++) {
+  let refreshed = false;
+  for (let attempt = 0; ; attempt++) {
+    const last = attempt === MAX_ATTEMPTS - 1;
+    if (quota) await quota.pacer.take(quota.units);
+    const token = gmailToken(access);
     let response: Response;
     try {
       response = await fetch(url, {
         ...init,
-        headers: { Authorization: `Bearer ${accessToken}`, ...init?.headers },
+        headers: { Authorization: `Bearer ${token}`, ...init?.headers },
       });
     } catch (err) {
+      if (last) throw err;
       // Network error (DNS, timeout, connection reset) — retryable
       const wait = Math.pow(2, attempt) * 2;
       log.warn('Network error, retrying', {
         wait_seconds: wait,
         attempt: attempt + 1,
-        max_attempts: 3,
+        max_attempts: MAX_ATTEMPTS,
         error: err instanceof Error ? err.message : String(err),
       });
       await sleep(wait * 1000);
       continue;
     }
+    if (last) return response;
+    if (response.status === 401 && !refreshed && (await refreshGmailAccess(access, token))) {
+      refreshed = true;
+      log.info('Access token rejected, retrying with a refreshed token', {
+        attempt: attempt + 1,
+      });
+      continue;
+    }
     if (
-      response.status === 429 ||
-      (response.status === 403 && (await response.clone().text()).includes('rateLimitExceeded'))
+      (response.status === 429 || response.status === 403) &&
+      isGmailRateLimited(response.status, await response.clone().text())
     ) {
-      const retryAfter = response.headers.get('Retry-After');
-      const wait = retryAfter ? Math.min(parseInt(retryAfter), 60) : Math.pow(2, attempt) * 5;
+      // Retry-After may be seconds or an HTTP date; anything unparsable backs off.
+      const retryAfter = Number(response.headers.get('Retry-After') ?? NaN);
+      const wait = Number.isFinite(retryAfter)
+        ? Math.min(Math.max(retryAfter, 0), 60)
+        : Math.pow(2, attempt) * 5;
       log.info('Rate limited, waiting', {
         status: response.status,
         wait_seconds: wait,
         attempt: attempt + 1,
-        max_attempts: 3,
+        max_attempts: MAX_ATTEMPTS,
       });
       await sleep(wait * 1000);
       continue;
@@ -76,27 +113,23 @@ async function fetchWithRetry(
         status: response.status,
         wait_seconds: wait,
         attempt: attempt + 1,
-        max_attempts: 3,
+        max_attempts: MAX_ATTEMPTS,
       });
       await sleep(wait * 1000);
       continue;
     }
     return response;
   }
-  // Final attempt — let it throw or return whatever happens
-  return fetch(url, {
-    ...init,
-    headers: { Authorization: `Bearer ${accessToken}`, ...init?.headers },
-  });
 }
 
 /**
  * Get Gmail profile including current historyId
  */
-export async function getGmailProfile(accessToken: string): Promise<GmailProfileResponse> {
-  const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+export async function getGmailProfile(accessToken: GmailAccess): Promise<GmailProfileResponse> {
+  const response = await fetchWithRetry(
+    'https://gmail.googleapis.com/gmail/v1/users/me/profile',
+    accessToken
+  );
 
   if (!response.ok) {
     log.error('Failed to get profile', {
@@ -113,7 +146,7 @@ export async function getGmailProfile(accessToken: string): Promise<GmailProfile
  * Returns message IDs that were added since the historyId, and the new historyId
  */
 export async function fetchGmailHistory(
-  accessToken: string,
+  accessToken: GmailAccess,
   startHistoryId: string
 ): Promise<{ addedMessageIds: string[]; newHistoryId: string }> {
   const addedMessageIds: string[] = [];
@@ -130,9 +163,7 @@ export async function fetchGmailHistory(
       url.searchParams.set('pageToken', pageToken);
     }
 
-    const response = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    const response = await fetchWithRetry(url.toString(), accessToken);
 
     if (!response.ok) {
       // 404 means historyId is too old or invalid - need full sync
@@ -172,8 +203,9 @@ export async function fetchGmailHistory(
  * Fetch specific messages by their IDs
  */
 export async function fetchMessagesByIds(
-  accessToken: string,
-  messageIds: string[]
+  accessToken: GmailAccess,
+  messageIds: string[],
+  pacer: GmailQuotaPacer = gmailPacerForAccess(accessToken)
 ): Promise<ParsedEmail[]> {
   if (messageIds.length === 0) return [];
 
@@ -184,21 +216,10 @@ export async function fetchMessagesByIds(
 
   for (let i = 0; i < messageIds.length; i += BATCH_SIZE) {
     const batch = messageIds.slice(i, i + BATCH_SIZE);
-
-    try {
-      const batchResults = await fetchMessagesBatch(accessToken, batch);
-      const validEmails = batchResults.filter((e): e is ParsedEmail => e !== null);
-      emails.push(...validEmails);
-    } catch (error) {
-      log.error('Batch request failed', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-
-    // Small delay between batches
-    if (i + BATCH_SIZE < messageIds.length) {
-      await sleep(100);
-    }
+    // A batch that cannot be fetched fails the caller: a sync that saved its
+    // historyId past unfetched messages would never see them again.
+    const batchResults = await fetchMessagesBatch(accessToken, batch, pacer);
+    emails.push(...batchResults.filter((e): e is ParsedEmail => e !== null));
   }
 
   log.info('Successfully fetched messages', { count: emails.length });
@@ -210,7 +231,7 @@ export async function fetchMessagesByIds(
  * Returns all emails (no filtering by contact) - useful for OTPs and notifications
  */
 export async function fetchGmailMessagesSince(
-  accessToken: string,
+  accessToken: GmailAccess,
   since: Date,
   limit: number = 50
 ): Promise<ParsedEmail[]> {
@@ -268,11 +289,42 @@ export async function fetchGmailMessagesSince(
 }
 
 /**
- * Fetch multiple messages using Gmail Batch API (up to 100 per request)
+ * GET one message, paced and retried. Returns null when Google says it no
+ * longer exists (deleted between list and get); throws on anything else.
+ */
+async function fetchMessage(
+  accessToken: GmailAccess,
+  id: string,
+  format: 'full' | 'metadata',
+  pacer: GmailQuotaPacer
+): Promise<GmailMessageResponse | null> {
+  const query =
+    format === 'full'
+      ? 'format=full'
+      : 'format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc';
+  const response = await fetchWithRetry(
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?${query}`,
+    accessToken,
+    undefined,
+    { pacer, units: GMAIL_UNITS.messagesGet }
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    log.error('Failed to fetch message', { status: response.status, format });
+    throw new Error(`Gmail API error: ${response.status}`);
+  }
+  return (await response.json()) as GmailMessageResponse;
+}
+
+/**
+ * Fetch multiple messages using Gmail Batch API (up to 100 per request).
+ * Sub-requests Google rejected transiently (rate limit, 5xx) are re-fetched
+ * one at a time through the paced, retrying single GET.
  */
 async function fetchMessagesBatch(
-  accessToken: string,
-  messageIds: string[]
+  accessToken: GmailAccess,
+  messageIds: string[],
+  pacer: GmailQuotaPacer
 ): Promise<(ParsedEmail | null)[]> {
   const boundary = `batch_gmail_${Date.now()}`;
 
@@ -286,11 +338,17 @@ async function fetchMessagesBatch(
   );
   const body = parts.join('') + `--${boundary}--`;
 
-  const response = await fetchWithRetry('https://www.googleapis.com/batch/gmail/v1', accessToken, {
-    method: 'POST',
-    headers: { 'Content-Type': `multipart/mixed; boundary=${boundary}` },
-    body,
-  });
+  // Every sub-request is metered as its own messages.get.
+  const response = await fetchWithRetry(
+    'https://www.googleapis.com/batch/gmail/v1',
+    accessToken,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': `multipart/mixed; boundary=${boundary}` },
+      body,
+    },
+    { pacer, units: GMAIL_UNITS.messagesGet * messageIds.length }
+  );
 
   if (!response.ok) {
     log.error('Batch request failed', {
@@ -305,18 +363,17 @@ async function fetchMessagesBatch(
 
   if (!responseBoundary) {
     log.error('Could not find boundary in batch response');
-    return messageIds.map(() => null);
+    throw new Error('Gmail batch API error: response has no multipart boundary');
   }
 
   const resultMap = new Map<string, ParsedEmail>();
-  const rateLimitedIds: string[] = [];
+  const retryIds: string[] = [];
   const cleanBoundary = responseBoundary.replace(/^"(.*)"$/, '$1');
   const responseParts = responseText.split(`--${cleanBoundary}`);
 
   for (const part of responseParts) {
     if (!part.trim() || part.trim() === '--') continue;
 
-    // Check for rate limiting within sub-response
     const statusMatch = part.match(/HTTP\/\d\.\d (\d+)/);
     const status = statusMatch ? parseInt(statusMatch[1]) : 0;
 
@@ -324,13 +381,16 @@ async function fetchMessagesBatch(
     const contentIdMatch = part.match(/Content-ID:\s*<response-([^>]+)>/i);
     const msgId = contentIdMatch?.[1];
 
-    if (status === 429 && msgId) {
-      rateLimitedIds.push(msgId);
+    const jsonMatch = part.match(/\{[\s\S]*\}/);
+    if (msgId && (status >= 500 || isGmailRateLimited(status, jsonMatch?.[0] ?? ''))) {
+      retryIds.push(msgId);
       continue;
     }
-
-    const jsonMatch = part.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) continue;
+    if (status === 404) continue; // deleted between list and get
+    if (status !== 200 || !jsonMatch) {
+      log.error('Batch sub-request failed', { status });
+      throw new Error(`Gmail batch sub-request error: ${status}`);
+    }
 
     try {
       const msgData = JSON.parse(jsonMatch[0]) as GmailMessageResponse;
@@ -343,24 +403,13 @@ async function fetchMessagesBatch(
     }
   }
 
-  // Retry rate-limited messages: only retry if a small number failed (not mass rate limiting)
-  if (rateLimitedIds.length > 0 && rateLimitedIds.length <= messageIds.length * 0.5) {
-    await sleep(2000);
-    for (const id of rateLimitedIds) {
-      try {
-        const singleRes = await fetch(
-          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
-          { headers: { Authorization: `Bearer ${accessToken}` } }
-        );
-        if (singleRes.ok) {
-          const msgData = (await singleRes.json()) as GmailMessageResponse;
-          if (msgData.id && msgData.payload) {
-            const parsed = parseGmailMessage(msgData);
-            if (parsed) resultMap.set(msgData.id, parsed);
-          }
-        }
-      } catch {
-        // skip individual failures
+  if (retryIds.length > 0) {
+    log.info('Retrying batch sub-requests one at a time', { count: retryIds.length });
+    for (const id of retryIds) {
+      const msgData = await fetchMessage(accessToken, id, 'full', pacer);
+      if (msgData?.id && msgData.payload) {
+        const parsed = parseGmailMessage(msgData);
+        if (parsed) resultMap.set(msgData.id, parsed);
       }
     }
   }
@@ -375,11 +424,13 @@ async function fetchMessagesBatch(
  * Phase 2: Fetch full content only for messages involving contacts user has sent to
  */
 export async function fetchGmailEmails(
-  accessToken: string,
+  accessToken: GmailAccess,
   userEmail: string
 ): Promise<ParsedEmail[]> {
   let pageToken: string | undefined;
   let pageCount = 0;
+  // The mailbox's shared budget: list, metadata and full-content requests.
+  const pacer = gmailPacerForAccess(accessToken);
 
   log.info('Starting to fetch all emails');
 
@@ -393,7 +444,10 @@ export async function fetchGmailEmails(
       listUrl.searchParams.set('pageToken', pageToken);
     }
 
-    const listResponse = await fetchWithRetry(listUrl.toString(), accessToken);
+    const listResponse = await fetchWithRetry(listUrl.toString(), accessToken, undefined, {
+      pacer,
+      units: GMAIL_UNITS.messagesList,
+    });
 
     if (!listResponse.ok) {
       log.error('Failed to list messages', {
@@ -421,55 +475,35 @@ export async function fetchGmailEmails(
 
   log.info('Total message IDs listed', { count: allMessageIds.length });
 
-  // Phase 1: Fetch metadata for all messages using concurrent individual requests
+  // Phase 1: Fetch metadata for all messages. Requests run CONCURRENCY at a
+  // time but start no faster than the per-user quota allows (see gmailQuota.ts).
   log.info('Phase 1: fetching metadata', { message_count: allMessageIds.length });
   const allMetadata: EmailMetadata[] = [];
   const CONCURRENCY = 20;
   let completed = 0;
-  let rateLimited = 0;
-  let rateLimitedIds: string[] = [];
 
   for (let i = 0; i < allMessageIds.length; i += CONCURRENCY) {
     const chunk = allMessageIds.slice(i, i + CONCURRENCY);
     const results = await Promise.all(
       chunk.map(async (id) => {
-        try {
-          const response = await fetch(
-            `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc`,
-            { headers: { Authorization: `Bearer ${accessToken}` } }
-          );
-          if (response.status === 429) {
-            rateLimited++;
-            return { rateLimited: true, id } as const;
-          }
-          if (!response.ok) return null;
-          const msg = (await response.json()) as GmailMessageResponse;
-          if (!msg.id || !msg.payload) return null;
-          const headers = msg.payload.headers || [];
-          const getHeader = (name: string) =>
-            headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value || '';
-          const from = extractEmailAddress(getHeader('From'));
-          if (!from) return null;
-          return {
-            id: msg.id,
-            from,
-            to: extractEmailAddresses(getHeader('To')),
-            cc: extractEmailAddresses(getHeader('Cc')),
-            isSent: (msg.labelIds || []).includes('SENT'),
-          } as EmailMetadata;
-        } catch {
-          return null;
-        }
+        const msg = await fetchMessage(accessToken, id, 'metadata', pacer);
+        if (!msg?.id || !msg.payload) return null;
+        const headers = msg.payload.headers || [];
+        const getHeader = (name: string) =>
+          headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value || '';
+        const from = extractEmailAddress(getHeader('From'));
+        if (!from) return null;
+        return {
+          id: msg.id,
+          from,
+          to: extractEmailAddresses(getHeader('To')),
+          cc: extractEmailAddresses(getHeader('Cc')),
+          isSent: (msg.labelIds || []).includes('SENT'),
+        } as EmailMetadata;
       })
     );
 
-    for (const r of results) {
-      if (r && 'rateLimited' in r) {
-        rateLimitedIds.push(r.id);
-      } else if (r) {
-        allMetadata.push(r);
-      }
-    }
+    for (const r of results) if (r) allMetadata.push(r);
     completed += chunk.length;
 
     if (completed % 5000 === 0 || completed >= allMessageIds.length) {
@@ -477,81 +511,11 @@ export async function fetchGmailEmails(
         completed,
         total: allMessageIds.length,
         valid: allMetadata.length,
-        rate_limited: rateLimited,
-      });
-    }
-
-    // Back off if we're getting rate limited
-    if (rateLimited > completed * 0.1) {
-      await sleep(2000);
-    } else {
-      await sleep(50);
-    }
-  }
-
-  // Retry rate-limited messages with exponential backoff
-  if (rateLimitedIds.length > 0) {
-    log.info('Retrying rate-limited messages', { count: rateLimitedIds.length });
-    for (let attempt = 0; attempt < 3 && rateLimitedIds.length > 0; attempt++) {
-      await sleep(Math.pow(2, attempt) * 5000); // 5s, 10s, 20s
-      const stillLimited: string[] = [];
-
-      for (let i = 0; i < rateLimitedIds.length; i += CONCURRENCY) {
-        const chunk = rateLimitedIds.slice(i, i + CONCURRENCY);
-        const results = await Promise.all(
-          chunk.map(async (id) => {
-            try {
-              const response = await fetch(
-                `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc`,
-                { headers: { Authorization: `Bearer ${accessToken}` } }
-              );
-              if (response.status === 429) return { rateLimited: true, id } as const;
-              if (!response.ok) return null;
-              const msg = (await response.json()) as GmailMessageResponse;
-              if (!msg.id || !msg.payload) return null;
-              const headers = msg.payload.headers || [];
-              const getHeader = (name: string) =>
-                headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value || '';
-              const from = extractEmailAddress(getHeader('From'));
-              if (!from) return null;
-              return {
-                id: msg.id,
-                from,
-                to: extractEmailAddresses(getHeader('To')),
-                cc: extractEmailAddresses(getHeader('Cc')),
-                isSent: (msg.labelIds || []).includes('SENT'),
-              } as EmailMetadata;
-            } catch {
-              return null;
-            }
-          })
-        );
-        for (const r of results) {
-          if (r && 'rateLimited' in r) stillLimited.push(r.id);
-          else if (r) allMetadata.push(r);
-        }
-        await sleep(200);
-      }
-
-      log.info('Retry attempt', {
-        attempt: attempt + 1,
-        recovered: rateLimitedIds.length - stillLimited.length,
-        still_limited: stillLimited.length,
-      });
-      rateLimitedIds = stillLimited;
-    }
-
-    if (rateLimitedIds.length > 0) {
-      log.warn('Messages could not be fetched after retries', {
-        count: rateLimitedIds.length,
       });
     }
   }
 
-  log.info('Phase 1 complete', {
-    metadata_fetched: allMetadata.length,
-    unrecoverable: rateLimitedIds.length,
-  });
+  log.info('Phase 1 complete', { metadata_fetched: allMetadata.length });
 
   // Phase 2: Identify which messages we actually need
   const neededIds = identifyNeededMessageIds(allMetadata, userEmail);
@@ -559,7 +523,7 @@ export async function fetchGmailEmails(
 
   // Phase 3: Fetch full content for needed messages only
   if (neededIds.size === 0) return [];
-  const fullEmails = await fetchMessagesByIds(accessToken, [...neededIds]);
+  const fullEmails = await fetchMessagesByIds(accessToken, [...neededIds], pacer);
   log.info('Phase 3 complete', { full_emails_fetched: fullEmails.length });
   return fullEmails;
 }
@@ -602,36 +566,4 @@ export async function parseGmailOAuthEmails(
     messages: result.messages,
   });
   return result;
-}
-
-/**
- * Search for emails matching a query and fetch their full content
- */
-export async function searchAndFetchEmails(
-  accessToken: string,
-  query: string,
-  maxResults: number = 500
-): Promise<ParsedEmail[]> {
-  const messageIds: string[] = [];
-  let pageToken: string | undefined;
-
-  do {
-    const url = new URL('https://gmail.googleapis.com/gmail/v1/users/me/messages');
-    url.searchParams.set('q', query);
-    url.searchParams.set('maxResults', String(Math.min(maxResults - messageIds.length, 500)));
-    if (pageToken) url.searchParams.set('pageToken', pageToken);
-
-    const res = await fetchWithRetry(url.toString(), accessToken);
-    if (!res.ok) break;
-
-    const data = (await res.json()) as GmailMessageListResponse;
-    if (data.messages) messageIds.push(...data.messages.map((m) => m.id));
-    pageToken = data.nextPageToken;
-    if (messageIds.length >= maxResults) break;
-  } while (pageToken);
-
-  if (messageIds.length === 0) return [];
-
-  log.info('Fetching messages for query', { count: messageIds.length });
-  return fetchMessagesByIds(accessToken, messageIds.slice(0, maxResults));
 }

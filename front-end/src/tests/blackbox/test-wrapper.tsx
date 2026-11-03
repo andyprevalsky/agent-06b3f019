@@ -8,25 +8,23 @@ import { MemoryRouter, type MemoryRouterProps } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { AppDataProvider } from '@/hooks/useAppData';
-import {
-  AttentionRequestsProvider,
-  useAttentionRequests,
-} from '@/features/terminal-component-group';
+import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
+import { RoseAppsProvider } from '@/features/terminal-component-group';
+import { RoseThemeProvider } from '@/features/rose-theme';
+import { AttentionScope } from './attention-scope';
 
 interface TestWrapperOptions {
   route?: string;
   routerProps?: MemoryRouterProps;
-}
-
-/**
- * Mirrors the real TerminalLayout wiring: one attention subscription held above
- * the tree, fanned out via context. Runs the actual hook (MSW serves the
- * endpoint) rather than a stub, so components under test exercise the same path
- * they do in the app.
- */
-function AttentionScope({ children }: { children: React.ReactNode }) {
-  const attention = useAttentionRequests(false);
-  return <AttentionRequestsProvider value={attention}>{children}</AttentionRequestsProvider>;
+  /** Rose Desktop flag (lib/roseDesktop.ts). Defaults on; pass false to test the stock UI. */
+  roseDesktop?: boolean;
+  /**
+   * Signed-in user id for RoseThemeProvider (mirrors TerminalLayout). Omitted,
+   * the theme stays stock light and the top-right Dark mode toggle is a no-op.
+   */
+  roseThemeUserId?: string;
+  /** Agent selected in the RoseApps provider (mirrors TerminalLayout's selectedAgentId). */
+  selectedAgentId?: string | null;
 }
 
 function createTestWrapper(options: TestWrapperOptions = {}) {
@@ -49,7 +47,15 @@ function createTestWrapper(options: TestWrapperOptions = {}) {
                 initialEntries={options.route ? [options.route] : ['/']}
                 {...options.routerProps}
               >
-                {children}
+                {/* Mirrors TerminalLayout: the Browser drawer (which replaced the
+                    fullscreen browser) is mounted by the RoseApps provider. */}
+                <RoseDesktopContext.Provider value={options.roseDesktop ?? true}>
+                  <RoseThemeProvider userId={options.roseThemeUserId ?? null}>
+                    <RoseAppsProvider selectedAgentId={options.selectedAgentId ?? null}>
+                      {children}
+                    </RoseAppsProvider>
+                  </RoseThemeProvider>
+                </RoseDesktopContext.Provider>
               </MemoryRouter>
             </AttentionScope>
           </TooltipProvider>
@@ -63,9 +69,16 @@ export function renderWithProviders(
   ui: React.ReactElement,
   options?: TestWrapperOptions & Omit<RenderOptions, 'wrapper'>,
 ) {
-  const { route, routerProps, ...renderOptions } = options ?? {};
+  const { route, routerProps, roseDesktop, roseThemeUserId, selectedAgentId, ...renderOptions } =
+    options ?? {};
   return render(ui, {
-    wrapper: createTestWrapper({ route, routerProps }),
+    wrapper: createTestWrapper({
+      route,
+      routerProps,
+      roseDesktop,
+      roseThemeUserId,
+      selectedAgentId,
+    }),
     ...renderOptions,
   });
 }

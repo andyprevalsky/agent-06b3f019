@@ -18,7 +18,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { SMS_SURFACE_OVERLAY } from '../../providers/smsSupervisor/contextBuilder';
-import { buildToolFeedbackMessages } from '../../providers/smsSupervisor/environmentMessages';
+import {
+  buildNativeToolFeedbackMessages,
+  buildToolFeedbackMessages,
+} from '../../providers/smsSupervisor/environmentMessages';
+import type { ToolCall, ToolResult } from '../../providers/smsSupervisor/supervisorTools';
 import { TOOL_SCHEMAS } from '../../providers/smsSupervisor/supervisorTools.schemas';
 import { SUPERVISOR_RESPONSE_SCHEMA } from '../../providers/smsSupervisor/schema';
 
@@ -97,10 +101,84 @@ test('never appends a synthetic user turn', () => {
   assert.ok(HANDLER_SOURCE.includes("{ role: 'user', content: inboundContent }"));
 });
 
-test('routes every loop nudge through buildToolFeedbackMessages', () => {
+test('routes every loop nudge through the tool channel', () => {
   assert.doesNotMatch(HANDLER_SOURCE, /messages\.push\(\{\s*role: 'user'/);
-  const feedbackCalls = HANDLER_SOURCE.match(/environment\.buildToolFeedbackMessages\(/g) ?? [];
-  assert.ok(feedbackCalls.length >= 3);
+  // Rounds with tool calls replay them natively; only a round with no tool
+  // call to answer still uses the synthetic tool_results pair.
+  const nativeRounds = HANDLER_SOURCE.match(/\.\.\.nativeFeedback\(/g) ?? [];
+  const emptyRounds = HANDLER_SOURCE.match(/environment\.buildToolFeedbackMessages\(/g) ?? [];
+  assert.equal(nativeRounds.length, 3);
+  assert.equal(emptyRounds.length, 1);
+  assert.doesNotMatch(
+    HANDLER_SOURCE,
+    /assistantPayload: JSON\.stringify\(\{\s*reasoning: llmResponse\.reasoning,\s*tool_calls: llmResponse\.tool_calls/
+  );
+});
+
+// Native tool history (Rose.complete standard): the next round sees the calls
+// the model actually made, each answered by its own result, instead of a JSON
+// envelope echoed back as assistant text.
+const grepCall: ToolCall = { tool: 'grep', arguments: { pattern: 'passport' }, id: 'call_grep' };
+const searchCall: ToolCall = { tool: 'web_search', arguments: { query: 'canada eta' } };
+const completionCall: ToolCall = { tool: 'attempt_completion', arguments: {} };
+const nativeFeedback = buildNativeToolFeedbackMessages({
+  round: 2,
+  toolCalls: [grepCall, searchCall, completionCall],
+  resultsByCall: new Map<ToolCall, ToolResult[]>([
+    [grepCall, [{ tool: 'grep', success: true, result: 'Passport: G58219473' }]],
+    [searchCall, [{ tool: 'web_search', success: true, result: 'canada.ca/eta' }]],
+    [
+      completionCall,
+      [
+        {
+          tool: 'attempt_completion',
+          success: false,
+          result: '',
+          error: 'Rejected: this run has not successfully called send_user_message',
+        },
+      ],
+    ],
+  ]),
+  roundResults: [{ tool: 'start_new_agent', success: true, result: 'Started agent a3f2b1' }],
+  guidance: 'Correct the failed call.',
+});
+
+test('replays the model calls with their provider ids and arguments', () => {
+  const [assistant] = nativeFeedback;
+  assert.equal(assistant.role, 'assistant');
+  assert.equal(assistant.content, '');
+  assert.deepEqual(
+    assistant.tool_calls?.map((call) => [call.id, call.function?.name, call.function?.arguments]),
+    [
+      ['call_grep', 'grep', '{"pattern":"passport"}'],
+      ['sms-2-1', 'web_search', '{"query":"canada eta"}'],
+      ['sms-2-2', 'attempt_completion', '{}'],
+    ]
+  );
+});
+
+test('answers each call with its own result, never a user turn', () => {
+  const results = nativeFeedback.slice(1);
+  assert.deepEqual(
+    results.map((message) => [message.role, message.tool_call_id]),
+    [
+      ['tool', 'call_grep'],
+      ['tool', 'sms-2-1'],
+      ['tool', 'sms-2-2'],
+    ]
+  );
+  assert.equal(results[0].content, '[grep] OK: Passport: G58219473');
+  assert.equal(results[1].content, '[web_search] OK: canada.ca/eta');
+});
+
+test('puts round-level outcomes and guidance on the last result', () => {
+  const last = String(nativeFeedback[nativeFeedback.length - 1].content);
+  assert.ok(
+    last.startsWith(
+      '[attempt_completion] ERROR: Rejected: this run has not successfully called send_user_message'
+    )
+  );
+  assert.ok(last.endsWith('[start_new_agent] OK: Started agent a3f2b1\nCorrect the failed call.'));
 });
 
 test('describes the runtime the model is actually running in', () => {

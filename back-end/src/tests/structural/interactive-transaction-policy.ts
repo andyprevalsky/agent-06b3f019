@@ -66,11 +66,17 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     reason: 'legacy migration debt',
   },
   {
-    file: 'providers/benchmarkHubStore.ts',
+    file: 'providers/benchmarkHubStore.base.ts',
     scope: 'withIndexLock',
     fingerprint: '19952f6e5ed95ad9',
+    reason: 'immutable PR1480 original comparison; whole-file hash is checked by layer-deps',
+  },
+  {
+    file: 'providers/benchmarkHubStore.ts',
+    scope: 'withIndexLock',
+    fingerprint: '34e5d3bbbfe61fd1',
     reason:
-      'transaction-scoped advisory lock with explicit maxWait/timeout for bounded index writes',
+      'epoch-scoped advisory lock with SQL-budget cancellation/drain for bounded Hub publication cohorts; external conditional writes are not replayed by a SQL retry',
   },
   {
     file: 'providers/computeCredentials.ts',

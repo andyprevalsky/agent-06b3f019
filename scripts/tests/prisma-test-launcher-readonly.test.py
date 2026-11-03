@@ -54,10 +54,16 @@ console.log(JSON.stringify({client, prisma: dirname(backend.resolve('prisma/pack
                 launcher,
                 "local-db-container.sh",
                 "coverage-failure-evidence.sh",
+                "coverage-report-heap.sh",
                 "coverage-process-lock.py",
+                "test-db-run-lock.sh",
                 "coverage_process_registry.py",
                 "blackbox-auto-rca-env.sh",
                 "assert-prisma-client-current.mjs",
+                "normalize-local-user-phones.sh",
+                "backfill-local-message-record-owner.sh",
+                "apply-local-message-record-trgm-index.sh",
+                "blackbox-phone-env.sh",
             ):
                 source = ROOT / "back-end/scripts" / name
                 if source.exists():
@@ -97,8 +103,23 @@ console.log(JSON.stringify({client, prisma: dirname(backend.resolve('prisma/pack
             commands = {
                 "docker": "exit 1\n",
                 "pg_isready": "exit 0\n",
-                "psql": 'printf "psql\\n" >> "$PRISMA_TEST_EVENTS"\ncat >/dev/null\nexit 0\n',
+                # The workspace test database is created on demand (never the
+                # shared `victoria`); record those calls distinctly.
+                "psql": (
+                    'case "$*" in\n'
+                    '  *"CREATE DATABASE"*) printf "psql create-db\\n" >> "$PRISMA_TEST_EVENTS";;\n'
+                    '  *"FROM pg_database"*) printf "psql db-exists\\n" >> "$PRISMA_TEST_EVENTS";;\n'
+                    '  *) printf "psql\\n" >> "$PRISMA_TEST_EVENTS";;\n'
+                    "esac\n"
+                    "cat >/dev/null\nexit 0\n"
+                ),
                 "npx": (
+                    'case "$*" in\n'
+                    # Pre-push User.phone normalization: a data rewrite on the
+                    # local DB, never a Prisma client regeneration.
+                    '  "--no-install prisma db execute --url "*" --stdin")\n'
+                    '    cat >/dev/null; printf "prisma db execute\\n" >> "$PRISMA_TEST_EVENTS"; exit 0;;\n'
+                    "esac\n"
                     'printf "%s\\n" "$*" >> "$PRISMA_TEST_EVENTS"\n'
                     'case "$*" in\n'
                     '  "prisma generate"|"prisma db push --skip-generate --accept-data-loss") exit 0;;\n'
@@ -149,7 +170,14 @@ console.log(JSON.stringify({client, prisma: dirname(backend.resolve('prisma/pack
                 self.assertEqual(result.returncode, 77, result.stdout + result.stderr)
                 self.assertEqual(
                     calls,
-                    ["psql", "prisma db push --skip-generate --accept-data-loss"],
+                    [
+                        "psql db-exists",
+                        "psql create-db",
+                        "psql",
+                        "prisma db execute",
+                        "prisma db execute",
+                        "prisma db push --skip-generate --accept-data-loss",
+                    ],
                     "test preparation rewrote a client that concurrent stacks can be loading",
                 )
 

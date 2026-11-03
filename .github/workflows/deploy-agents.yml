@@ -21,10 +21,11 @@ on:
       - "!agents/scripts/run_coverage_blackbox_parallel.py"
       - ".github/workflows/deploy-agents.yml"
       - "scripts/deploy-agents-cooperative-cutover.sh"
-      - "scripts/worker_pool_cutover.py"
+      - "scripts/agents-image-context.sh"
+      - "scripts/worker_pool_*.py"
       - "scripts/retained_agent_machine.py"
       - "back-end/scripts/worker-deployment-queue.ts"
-      - "back-end/src/providers/workerDeploymentQueue.ts"
+      - "back-end/src/providers/workerDeployment*.ts"
 
 permissions:
   contents: read
@@ -51,7 +52,18 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           fetch-depth: 2
+          # A full checkout downloads ~3.3 GB (2.8 GB is agents/benchmarks
+          # history the worker image excludes) and cost ~4 min per run. Fetch
+          # trees only and materialize everything except unused heavy paths.
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/agents/benchmarks/
+            !/front-end/public/
+            !/claude-code-src/
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
@@ -127,6 +139,15 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/agents/benchmarks/
+            !/front-end/public/
+            !/claude-code-src/
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - uses: actions/setup-node@v4
         with:

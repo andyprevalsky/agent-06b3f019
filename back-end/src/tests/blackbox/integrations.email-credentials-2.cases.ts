@@ -95,6 +95,7 @@ export async function testEmailGmailAccountDelete_removesOneCredential() {
       {
         id: purgedMessageId,
         personId: person.id,
+        userId: person.userId,
         channel: 'EMAIL',
         from: 'primary@gmail.com',
         to: 'secondary@gmail.com',
@@ -105,6 +106,7 @@ export async function testEmailGmailAccountDelete_removesOneCredential() {
       {
         id: keptMessageId,
         personId: person.id,
+        userId: person.userId,
         channel: 'EMAIL',
         from: 'primary@gmail.com',
         to: 'secondary@gmail.com',
@@ -115,6 +117,7 @@ export async function testEmailGmailAccountDelete_removesOneCredential() {
       {
         id: legacyCrossAccountId,
         personId: person.id,
+        userId: person.userId,
         channel: 'EMAIL',
         from: 'primary@gmail.com',
         to: 'secondary@gmail.com',

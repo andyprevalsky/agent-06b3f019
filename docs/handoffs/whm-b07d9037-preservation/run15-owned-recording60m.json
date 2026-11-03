@@ -1,0 +1,280 @@
+{
+  "schema": "rose.whm.run15.continuation.v1",
+  "recorded_at_utc": "2026-10-13T23:05:19.751115+00:00",
+  "original_checkpoint": "677068533e050195c62afc8118f3d35a8511f5ea",
+  "original_restore_receipt": "docs/handoffs/swap-harness-b07d9037-81f9-4c97-80d7-6f4d42b7adc1-resumed.json",
+  "replacement": {
+    "devbox_id": "e9afcffd-7ba9-4bfd-8703-d770952fe1c3",
+    "internal_thread_id": "ph7cc73xma14jdg6chxpnhbgth8g7c1a",
+    "thread_url": "https://boxes.dev/thread/thr_d2e1b555d6314abe8d9f74da7dd979aa",
+    "native_session_id": "01a132a3-ea1f-7b22-abfb-70608400d02e",
+    "managed_start_key": "swap-harness-whm-20261012-full-checkpoint-coordinator-generation1"
+  },
+  "run": {
+    "task": "raise-5m-rose-labs-brex",
+    "hub_id": "15de54a9-88d1-4210-94e1-a06ab9cf23db",
+    "local_run_id": "wmh-run15-e9afcffd-1791925973",
+    "root_agent_id": "a2185bc7-9e95-4ee8-8b34-e704bc72f9a6",
+    "native_session_id": "bca6f8fc206f46a3abd714a2fc808d30",
+    "source_sha": "c9af1843a80823465b2249449d8194c6e1525ded",
+    "slice_triggered_at": "2026-10-13T21:12:53.853638Z",
+    "goal_triggered_at": "2026-10-13T18:49:31.837Z",
+    "workflow_started_at": "2026-10-13T21:41:04.487Z",
+    "execution_limit_seconds": 3600,
+    "timeout_observed_seconds": 3602,
+    "reported_duration_seconds": 3762.5,
+    "task_passed": false,
+    "task_failed": 1,
+    "infra_failed": 0,
+    "attempts": 1,
+    "benchmark_definition_fixture_timeout_unchanged": true,
+    "authorization": "Original user-directed repeating60min DEMO-on / per-clusterRCA / scorecard-or-approval cycle; not migration authority",
+    "fe_url": "https://www.roselabs.ai/?agent-id=a2185bc7-9e95-4ee8-8b34-e704bc72f9a6",
+    "fresh_browser_verified": true,
+    "published_messages": 150,
+    "publisher_exit_code": 0
+  },
+  "trajectory": {
+    "qualitative_progress_0_to_100": 22,
+    "calibration": "Uncalibrated initial warm-outreach milestone judgment; low numerical confidence, not a dollar fraction or calibrated probability",
+    "committed_steps": 208,
+    "research_steps": 157,
+    "browser_steps": 42,
+    "code_steps": 8,
+    "notifications": 1,
+    "warm_native_send_observations": 4,
+    "named_addressees": 5,
+    "sent_recipient_header_and_stable_id_gap": true,
+    "new_substantive_replies": 0,
+    "new_meetings_scheduled": 0,
+    "meetings_held": 0,
+    "commitments": 0,
+    "signed_instruments": 0,
+    "pending_wires": 0,
+    "settled_proceeds_cents": 0,
+    "shared_world_elapsed_seconds": 8064.225,
+    "unavailable_result_flags": 108,
+    "error_flags": 11,
+    "flags_may_overlap": true,
+    "cause": "Not proved; summaries, missing references, source contradictions and invalid artifact claims retained as evidence"
+  },
+  "fixture": {
+    "source_database": "whm_gen1_e9afcffd_fixture_20261012",
+    "actual_person_count": 2225,
+    "actual_message_count": 42910,
+    "seed_message_limit": 100000,
+    "static_full_network_startup_matches_approved_packet": true,
+    "approved_initial_state_sha256": "009394a4fc293c14230d15d4fc70b798876fb2d8ec4489ba3b4db560343ba5d1",
+    "no_production_fixture_write": true
+  },
+  "runtime": {
+    "pool": "rose-1-flash",
+    "azure_first": true,
+    "exclude_failed_tool_examples": true,
+    "json_mode": true,
+    "validation_recovery": true,
+    "policy_sha256": "3ace77b6b1a3a33ca94e69541cd1e671a4c3a7694d3612b9ddc68f1ccdf6da8a",
+    "execution_sha256": "f0b730da91d7df165157843e3752dc623383c849f08389949a5c7e5af6cbb3f0",
+    "native_model_rebuilt": false
+  },
+  "cache": {
+    "demo_hits": 0,
+    "demo_lookups": 538,
+    "demo_percent": 0,
+    "agent": {
+      "calls": 338,
+      "inclusive_prompt": 3418145,
+      "read": 2055750,
+      "output": 289292,
+      "cache_write": 1333252,
+      "azure_estimate": 6.695485999999998,
+      "other_estimate": 0.0,
+      "models": {
+        "gpt-6-sol-foundry": 338
+      },
+      "cache_read_pct": 60.14227014945241
+    },
+    "whm": {
+      "calls": 243,
+      "inclusive_prompt": 119824901,
+      "read": 104077876,
+      "output": 228558,
+      "cache_write": 22821772,
+      "azure_estimate": 11.026794560000008,
+      "other_estimate": 7.4226812472,
+      "models": {
+        "google/gemini-3.8-flash": 14,
+        "gpt-5.6-luna-foundry": 218,
+        "qwen/qwen3.8-27b": 11
+      },
+      "cache_read_pct": 86.8583033504864
+    },
+    "denominator": "Logged inclusive provider prompt_tokens, DEMO replays excluded; not invoice-certified physical cache efficacy",
+    "retained_database": "victoria_wmh_recording_e9afcffd_20261013",
+    "retained_database_oid": 69016,
+    "final_rows": 631,
+    "old_authenticated_rows_preserved": 153,
+    "new_acknowledged_keys_persisted": 478,
+    "original_key_overlap": 0,
+    "cross_request_response_reuse_rejected_by_strict_call_identity": true,
+    "no_key_remapping": true
+  },
+  "cost": {
+    "estimate_usd": 25.144961807200005,
+    "azure_estimate_usd": 17.722280560000005,
+    "other_estimate_usd": 7.4226812472,
+    "agent_estimate_usd": 6.695485999999998,
+    "whm_estimate_usd": 18.44947580720001,
+    "invoice_verified": false,
+    "limitations": "Historical locally recorded list-rate estimate; Azure primary rate capture/invoice and Gemini cache-write overlap unresolved. Incomplete attempts, storage, infrastructure and evaluator coverage unpriced. Native synthetic usage and user charge zero are not physical provider billing."
+  },
+  "latency": {
+    "agent_raw_rose": {
+      "n": 338,
+      "avg": 9.095543804733726,
+      "p95": 27.337888,
+      "p99": 35.592968
+    },
+    "whm_raw_rose": {
+      "n": 243,
+      "avg": 23.88477366255144,
+      "p95": 138.0,
+      "p99": 192.0
+    },
+    "whm_completion_owner": {
+      "n": 245,
+      "avg": 42.006097959183684,
+      "p95": 168.868,
+      "p99": 331.087,
+      "errors": 35,
+      "pending": 0,
+      "selections": 209
+    },
+    "qualification": "Native owner includes retries, failures and cutoff cancellations; raw route calls use a different clock. Concurrent elapsed spans overlap."
+  },
+  "cleanup": {
+    "controller_exit_code": 1,
+    "controller_finished_at": "2026-10-13T22:45:26.845311Z",
+    "benchmark_cleanup_clean": true,
+    "stack_cleanup_clean": true,
+    "all_exact_pids_absent": [
+      3991362,
+      3991487,
+      3991551,
+      3991680,
+      234941,
+      222650
+    ],
+    "native_scope_inactive": true,
+    "native_ended_and_join_verified": true,
+    "native_revision": 208,
+    "fixture_database_absence_and_retained_presence_query_proof": "/home/boxes/rose-wmh-resumed/.context/wmh-resume-generation1/run15-owned-recording60m/root-aftercleanup-database-provenance.private.json",
+    "consistent_database_snapshots": "22:13,22:33,22:41 MVCC captures; none is represented as complete final database bytes"
+  },
+  "authenticated_archives": {
+    "run15-precutoff-private-receipt.json": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "trace-archive/private/whm/e9afcffd-7ba9-4bfd-8703-d770952fe1c3/run15-precutoff-immutable-evidence-20261013.private.aesgcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "62155da0b2846744878eac764a4959398261f0b253a1418e782169e8459ade6f",
+      "gzip_sha256": "2506d5be55a1e3a273d03e13bce1c0e6e31e3ca240cf8241bc3eb6313eb53a33",
+      "stored_bytes": 834299521,
+      "frames": 100,
+      "files": 19556,
+      "original_bytes": 5236036228,
+      "manifest_sha256": "9209ccf9d085b8493e370253aee43307ccee95bc0e83c0f9c6889455d7ac4284",
+      "full_readback_verified": true
+    },
+    "run15-final-private-receipt.json": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "trace-archive/private/whm/e9afcffd-7ba9-4bfd-8703-d770952fe1c3/run15-final-native-runtime-llm-20261013.private.aesgcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "d0783418fd7017191e70d9c4aaf90dbf2b8ff275317a45a6e939f8a194ec2da6",
+      "gzip_sha256": "db4cdd991bd21ab05071dd805ffca198a21c89b67f34b0fecc9e75fba513981d",
+      "stored_bytes": 365431205,
+      "frames": 44,
+      "files": 1090,
+      "original_bytes": 1259715777,
+      "manifest_sha256": "5c36ccd999487411d93b7b689b5811ab0b2eb19faab4b514ae59385c556a9823",
+      "full_readback_verified": true
+    },
+    "run15-rca-private-receipt.json": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "trace-archive/private/whm/e9afcffd-7ba9-4bfd-8703-d770952fe1c3/run15-final-six-rca-20261013.private.aesgcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "fb7dd0ce8faee268ac9da70d91f6a916f7acd9b167aedf53421382fd99776889",
+      "gzip_sha256": "93b4daf0b45bf3d8a12aaae04001b1690605a010ba85e25c62825d0b87f7b1ad",
+      "stored_bytes": 115649691,
+      "frames": 14,
+      "files": 378,
+      "original_bytes": 616346834,
+      "manifest_sha256": "d8859551b6cbb0b5ee2d712fa96233abf519ad7521c0bc8063b483d6e32cf91d",
+      "full_readback_verified": true
+    }
+  },
+  "rca_clusters": [
+    {
+      "cluster": "trajectory",
+      "artifact_path": "/home/boxes/rose-wmh-resumed/.context/wmh-resume-generation1/run15-owned-recording60m/rca-progress-final/result.private.json",
+      "sha256": "7e4f627a25d6a314586be2412684caf54a93c23694d9ae3a56ab2829190327a2",
+      "fundraising_outcome_gate": "OPEN; exact unchanged Run15 failed; no canonical post-fix PASS claimed"
+    },
+    {
+      "cluster": "protocol",
+      "artifact_path": "/home/boxes/rose-wmh-resumed/.context/wmh-resume-generation1/run15-owned-recording60m/rca-protocol-final/result.json",
+      "sha256": "a249da8c170e134203dabdd997b1e1f7c05b814e8043dc3a5d1131e87b62c89c",
+      "fundraising_outcome_gate": "OPEN; exact unchanged Run15 failed; no canonical post-fix PASS claimed"
+    },
+    {
+      "cluster": "cache",
+      "artifact_path": "/home/boxes/rose-wmh-resumed/.context/wmh-resume-generation1/run15-owned-recording60m/rca-cache-final/result.private.json",
+      "sha256": "7a3aa421d01f52ae409df0d520662ed672427d5a3cedbd857d99695c7ec95424",
+      "fundraising_outcome_gate": "OPEN; exact unchanged Run15 failed; no canonical post-fix PASS claimed"
+    },
+    {
+      "cluster": "transport",
+      "artifact_path": "/home/boxes/rose-wmh-resumed/.context/wmh-resume-generation1/run15-owned-recording60m/rca-transport-final/receipt.private.json",
+      "sha256": "5a3544be991865fa1222b14b13c7f27148eb0d31d5c7ddbd5d70dc6b8ecab9ab",
+      "fundraising_outcome_gate": "OPEN; exact unchanged Run15 failed; no canonical post-fix PASS claimed"
+    },
+    {
+      "cluster": "verifier",
+      "artifact_path": "/home/boxes/rose-wmh-resumed/.context/wmh-resume-generation1/run15-owned-recording60m/rca-verifier-final/case.private.md",
+      "sha256": "a88ae334594d80778bc237dff7b2d30bf77ee844051b3dd11924f96afab4dd52",
+      "fundraising_outcome_gate": "OPEN; exact unchanged Run15 failed; no canonical post-fix PASS claimed"
+    },
+    {
+      "cluster": "data",
+      "artifact_path": "/home/boxes/rose-wmh-resumed/.context/wmh-resume-generation1/run15-owned-recording60m/rca-data-final/README.private.md",
+      "sha256": "708db9fa24ff5236533ec8f807525ce28a558c4660d8cd67d27e72f87e131475",
+      "fundraising_outcome_gate": "OPEN; exact unchanged Run15 failed; no canonical post-fix PASS claimed"
+    }
+  ],
+  "continuation": {
+    "source_checkpoint": "a3f5203558dc1f2f97f98ef13af64d3dfec08e3a",
+    "change": "Pass parent attachment log fields using stdlib extra; actual maps/HTTP/tool/prompt/schema/timeouts unchanged",
+    "owning_pre_exit": 1,
+    "owning_post_exit": 0,
+    "registered_attachments_cases_passed": 34,
+    "registered_attachments_duration_seconds": 0.2,
+    "ruff": "PASS using existing cached executable, no install",
+    "rca_archive_validation": "PASS873cases",
+    "adversarial_review": "PASS_WITH_NONBLOCKING_COVERAGE_LIMITATIONS",
+    "actual_fundraising_outcome": "OPEN",
+    "unapproved_goal_filter_or_HTTP_capture_applied": false
+  },
+  "preservation": {
+    "protected_instruction_sha256": {
+      "CLAUDE.md": "2a6348f3ad1701aeb496e10e98da271fb38db5709e2abb9adbe65b7c5ad0d322",
+      "AGENTS.md": "57cbb4821915f3e477996ffde6ef7ee4c9d57fab64b6f57421968e3d0e9d0eca"
+    },
+    "original_source_ancestor_verified": true,
+    "all_original_member_paths_and_bytes_retained": true,
+    "duplicate_history_copies": "Only authenticated byte-identical immutable private RCA historical JSONL copies linked together; all paths retained. No protected instructions/source/model bytes replaced.",
+    "no_merge_deploy": true,
+    "no_new_migration_launch": true
+  }
+}

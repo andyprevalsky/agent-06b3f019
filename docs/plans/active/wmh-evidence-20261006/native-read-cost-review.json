@@ -1,0 +1,988 @@
+{
+  "schema": "rose.wmh_native_read_cost_review.v1",
+  "date": "2026-10-06",
+  "upstream_revision": "bf75987eac5e8c984d8f3868249f84e4095d1733",
+  "status": "offline_measurements_only_full_scale_cause_unproven",
+  "scope": {
+    "artifact_fixture": "Existing _source_fixture: one completed real-source trace with two canonical action/observation pairs.",
+    "models_called": 0,
+    "network_inference_calls": 0,
+    "active_full_builder_touched": false,
+    "full_corpus_loaded_for_review": false,
+    "production_implementation_changed": false,
+    "reference_or_installed_upstream_changed": false,
+    "only_authorized_write": "docs/plans/active/wmh-evidence-20261006/native-read-cost-review.json"
+  },
+  "baseline_measurement": {
+    "implementation_state": "Historical measurement before the owning agent added load_native's scoped _ReadSnapshot. Its recorded command is a receipt of that baseline, not an expectation that today's optimized loader still repeats those reads.",
+    "source_traces": 1,
+    "source_observations": 2,
+    "build_seconds": 0.3004356250166893,
+    "load_seconds": 0.08249008294660598,
+    "calls": {
+      "build": {
+        "_assert_payload_secret_free": 34,
+        "_decode_trace_record": 2,
+        "_load_real_sources": 1,
+        "_verify_sources": 1,
+        "canonical_json_bytes": 77,
+        "canonical_jsonl_bytes": 3,
+        "extract_real_transitions": 2,
+        "load_rag_index": 1,
+        "load_trace_dataset": 2,
+        "read:trace-dataset": 8,
+        "read:trace-rag-index": 4
+      },
+      "load": {
+        "_assert_payload_secret_free": 23,
+        "_decode_trace_record": 1,
+        "_verify_sources": 1,
+        "canonical_json_bytes": 38,
+        "load_rag_index": 1,
+        "load_trace_dataset": 1,
+        "read:grounded-world-model": 3,
+        "read:trace-dataset": 4,
+        "read:trace-rag-index": 4
+      }
+    },
+    "read_bytes_requested": {
+      "build": {
+        "rag-index.json": 1,
+        "trace-dataset.json": 2,
+        "traces.jsonl": 2,
+        "transitions.jsonl": 1,
+        "vectors.jsonl": 1
+      },
+      "load": {
+        "rag-index.json": 1,
+        "trace-dataset.json": 1,
+        "traces.jsonl": 1,
+        "transitions.jsonl": 1,
+        "vectors.jsonl": 1,
+        "world-model.json": 1
+      }
+    },
+    "verified_payload_bytes": {
+      "build": {
+        "trace-dataset": 37648,
+        "trace-rag-index": 32428
+      },
+      "load": {
+        "grounded-world-model": 3027,
+        "trace-dataset": 18824,
+        "trace-rag-index": 32428
+      }
+    }
+  },
+  "snapshot_assessment": {
+    "scope": "Private process-local prototype over a temporary fixture. Public ArtifactStore.read verifies each artifact once; subsequent public loader reads reuse its exact immutable StoredArtifact. No application implementation was written.",
+    "measurement": {
+      "decoded_artifact_and_rag_equal": true,
+      "guards": {
+        "cold_corrupt_dataset_rejected": "ArtifactCorruptionError",
+        "wrong_pool_identity_rejected": true
+      },
+      "phase_counts": {
+        "baseline": {
+          "_assert_payload_secret_free": 23,
+          "_decode_trace_record": 1,
+          "_verify_sources": 1,
+          "load_rag_index": 1,
+          "load_trace_dataset": 1,
+          "verified_payload_bytes": 54279,
+          "verified_read:grounded-world-model": 3,
+          "verified_read:trace-dataset": 4,
+          "verified_read:trace-rag-index": 4
+        },
+        "snapshot": {
+          "_assert_payload_secret_free": 6,
+          "_decode_trace_record": 1,
+          "_verify_sources": 1,
+          "cache_hits": 8,
+          "load_rag_index": 1,
+          "load_trace_dataset": 1,
+          "verified_payload_bytes": 13822,
+          "verified_read:grounded-world-model": 1,
+          "verified_read:trace-dataset": 1,
+          "verified_read:trace-rag-index": 1
+        }
+      },
+      "snapshot_payload_bytes_after_release": 0,
+      "verified_snapshot_payload_bytes_retained_before_release": 13822
+    },
+    "command": "PYTHONPATH=agents .context/experiential-venv/bin/python - <<'PY'\nimport collections,json,sys,tempfile\nfrom pathlib import Path\nfrom exp.common.project import ArtifactStore,ProjectPaths\nfrom exp.common.project.database import project_connection\nfrom benchmarks.experiential_world_model_checks import _source_fixture\nfrom benchmarks.build_experiential_world_model import build\nimport benchmarks.serve_experiential_world_model as serving\nphase='setup';counts={p:collections.Counter() for p in ('setup','baseline','snapshot','guards')};original_read=ArtifactStore.read\ninstances=[]\ndef counted_read(self,artifact_id):\n    value=original_read(self,artifact_id);counts[phase]['verified_read:'+value.manifest.artifact_type]+=1\n    counts[phase]['verified_payload_bytes']+=sum(len(p) for p in value.payloads.values())\n    return value\nArtifactStore.read=counted_read\nclass ReadSnapshot(ArtifactStore):\n    def __init__(self,paths):super().__init__(paths);self.cached={};instances.append(self)\n    def read(self,artifact_id):\n        if artifact_id not in self.cached:self.cached[artifact_id]=super().read(artifact_id)\n        else:counts[phase]['cache_hits']+=1\n        return self.cached[artifact_id]\n    def release(self):self.cached.clear()\nwanted={'load_trace_dataset','_decode_trace_record','_verify_sources','load_rag_index','_assert_payload_secret_free'}\ndef profile(frame,event,arg):\n    if event=='call' and frame.f_code.co_name in wanted and '/exp/' in frame.f_code.co_filename:counts[phase][frame.f_code.co_name]+=1\nsys.setprofile(profile)\nwith tempfile.TemporaryDirectory(prefix='wmh-snapshot-assessment-') as d:\n    root=Path(d);source=_source_fixture(root);out=root/'native';pointer=build(source,out,'rose-test','rose-1-ultra','a'*64)\n    phase='baseline';before,rag_before=serving.load_native(out,'rose-test','rose-1-ultra','a'*64)\n    serving.ArtifactStore=ReadSnapshot;phase='snapshot';after,rag_after=serving.load_native(out,'rose-test','rose-1-ultra','a'*64)\n    equality=before==after and rag_before.loaded==rag_after.loaded\n    retained=sum(sum(len(p) for item in instance.cached.values() for p in item.payloads.values()) for instance in instances)\n    for instance in instances:instance.release()\n    released=sum(sum(len(p) for item in instance.cached.values() for p in item.payloads.values()) for instance in instances)\n    phase='guards';guards={}\n    try:serving.load_native(out,'rose-test','rose-1-ultra','b'*64)\n    except ValueError:guards['wrong_pool_identity_rejected']=True\n    paths=ProjectPaths(out/'experiential','rose-test');base=ArtifactStore(paths)\n    dataset_id=rag_after.loaded.manifest.inputs[0].artifact_id\n    good=base.read_bytes(dataset_id,'trace-dataset.json')\n    with project_connection(paths.root,write=True) as db:db.execute('UPDATE project_artifact_files SET payload=? WHERE project_id=? AND artifact_id=? AND path=?',(b'{\"corrupted\":true}',paths.project_id,dataset_id,'trace-dataset.json'))\n    try:serving.load_native(out,'rose-test','rose-1-ultra','a'*64)\n    except Exception as exc:guards['cold_corrupt_dataset_rejected']=type(exc).__name__\n    finally:\n        with project_connection(paths.root,write=True) as db:db.execute('UPDATE project_artifact_files SET payload=? WHERE project_id=? AND artifact_id=? AND path=?',(good,paths.project_id,dataset_id,'trace-dataset.json'))\n    for instance in instances:instance.release()\n    sys.setprofile(None)\n    print(json.dumps({'phase_counts':{p:dict(counts[p]) for p in ('baseline','snapshot')},'decoded_artifact_and_rag_equal':equality,'verified_snapshot_payload_bytes_retained_before_release':retained,'snapshot_payload_bytes_after_release':released,'guards':guards,'scope':'private offline prototype, no production implementation, no full-corpus startup measurement'},sort_keys=True))\nPY",
+    "limitations": [
+      "No full-scale startup failure or 180-second gate result was observed in this review.",
+      "Times and byte totals from temporary fixture runs are not full-corpus estimates; timestamps and temporary source paths can change exact artifact byte sizes.",
+      "The candidate must be scoped to one load, per project and artifact identity, cache only successful public reads, expose no writes, and clear every raw payload reference on success or failure.",
+      "Reusing a verified byte snapshot within a load does not promise detection of later on-disk mutation during that same load. A fresh load must reverify and reject corruption.",
+      "Public content-ID, manifest, typed trace/vector, source provenance, lineage, span and prompt/model checks remain necessary; the prototype changed none of those functions.",
+      "Wrong pool identity and a cold corrupted dataset were executed. The source/provenance verifier was counted as executing unchanged; no new forged-provenance fixture was executed here.",
+      "The active macOS sample shows JSON encoding and Pydantic work without Python frames sufficient to assign the current bottleneck."
+    ]
+  },
+  "interpretation": {
+    "proven": [
+      "The measured baseline native startup invoked three verified world-model reads, four verified RAG reads, and four verified trace-dataset reads.",
+      "Each public read_bytes invokes a complete ArtifactStore.read, including payload digest and secret checks.",
+      "Startup reopens and decodes the entire source trace dataset once to run public RAG source validation.",
+      "Building also reopens sources for persist_trace_rag and again for persist_grounded_world_model.",
+      "A load-scoped verified-byte snapshot eliminates repeated payload verification on the tiny fixture while preserving all observed public typed/source checks and exact decoded artifact/RAG equality."
+    ],
+    "unproven": [
+      "Repeated verification is the first-bad cause of the active full build's elapsed time or memory peak.",
+      "The candidate will meet the full native load target of 180 seconds.",
+      "Native corpus, benchmark, viewer replay, production outcome or large-agent capacity acceptance."
+    ]
+  },
+  "observed_active_profile": {
+    "source": ".context/native-rag-build.sample.txt",
+    "sample_time_local": "2026-10-06 16:17:15.967 -0700",
+    "physical_footprint": "14.9G",
+    "physical_footprint_peak": "38.6G",
+    "status": "Read-only sample evidence, not a reproduced full-scale root cause."
+  },
+  "full_build_metadata_review": {
+    "receipt_saved_at_utc": "2026-10-06T23:41:46Z",
+    "scope": "Read-only SQLite manifests, the 488497-byte inline dataset envelope, runtime file names and existing process samples. No read of the 3079529667-byte traces.jsonl blob, full source load, new build, model call, injection or process termination.",
+    "source_metadata": {
+      "project_id": "rose-archive",
+      "dataset_id": "rose-real-traces-2ff2d425fc285834a3ac",
+      "manifest_sha256": "e7b255d826ccf31ffdfe667b034b3a683254051790c5abef1899ab84b95b8c2c",
+      "created_at": "2026-10-06T23:04:17.278910Z",
+      "code_revision": "rose-native-canonical-export-v1@bf75987eac5e8c984d8f3868249f84e4095d1733",
+      "semantic_convention_version": "rose-canonical-export-v11",
+      "trace_count": 12510,
+      "trace_ids_ordered_and_unique": true,
+      "traces_sha256": "484921ab1a6774aba103c0b55c1513319b321d94acc8bf700d4351564bb7dacf",
+      "traces_bytes": 3079529667,
+      "dataset_envelope_bytes": 488497,
+      "verification_limit": "These are storage metadata observations. This review did not independently verify or decode the full published source blob. The public RAG path does so before embedding."
+    },
+    "checkpoint_progress": {
+      "storage": "SQLite project_state_records; checkpoint JSON files are not used by this upstream version.",
+      "namespace": "rag-embeddings/2ceec7249aa93b6f93f81cbf87a218cc3f639bf1e423d13c626766aa14e78947",
+      "record_count": 230101,
+      "payload_bytes": 664638971,
+      "maximum_record_revision": 2301,
+      "lock_mtime_local": "2026-10-06 16:40:17 America/Los_Angeles",
+      "interpretation": "The lock is first acquired at checkpoint lookup after complete source verification, transition extraction and embedding input planning. Nonempty checkpoint records additionally prove committed embedding work, beyond the lock alone. This is progress evidence, not a completed RAG artifact, native startup proof or benchmark result.",
+      "query": "SELECT namespace,COUNT(*),SUM(length(payload)),MAX(revision) FROM project_state_records WHERE project_id='rose-archive' AND namespace LIKE 'rag-embeddings/%' GROUP BY namespace",
+      "command": "PYTHONPATH=agents .context/experiential-venv/bin/python - <<'PY'\nimport json,sqlite3\nfrom pathlib import Path\np=Path('.context/world-model-native/experiential/gateway/traffic.db').resolve()\nc=sqlite3.connect(p.as_uri()+'?mode=ro',uri=True,timeout=2)\nrows=c.execute(\"SELECT namespace,COUNT(*),SUM(length(payload)),MAX(revision) FROM project_state_records WHERE project_id=? AND namespace LIKE 'rag-embeddings/%' GROUP BY namespace\",('rose-archive',)).fetchall()\nprint(json.dumps({'checkpoint_namespaces':rows,'read_only':True,'large_source_blob_read':False}))\nc.close()\nPY"
+    },
+    "public_build_path": {
+      "verified_whole_source_reads_before_embedding": 4,
+      "basis": "Pinned persist_trace_rag calls _load_real_sources; its direct store.read plus load_trace_dataset's direct read and two read_bytes calls each fully verify all artifact payloads. The existing real tiny-fixture counters confirm this public path. The advancing full process uses this path without a build-time read snapshot.",
+      "source_files": [
+        "exp/simulation/retrieval/build.py:236",
+        "exp/common/traces/store.py:45",
+        "exp/common/traces/store.py:50",
+        "exp/common/traces/store.py:64",
+        "exp/common/project/store.py:385"
+      ],
+      "limits": "The full process's individual reads were not instrumented. Repeated verification follows from the pinned executed public path, but does not prove that those reads caused its elapsed time or peak memory. Startup's scoped snapshot does not change this already running build."
+    },
+    "import_copy_retention": {
+      "current_source": "agents/benchmarks/build_experiential_world_model.py:318 releases traces and records before public RAG construction.",
+      "active_process_version": "The owning parent reports that child 53121 imported the earlier function before that release was added. Earlier build locals keep the imported typed traces and serialized records alive across persist_trace_rag, which then loads its own source records.",
+      "direct_active_heap_measurement": false,
+      "limit": "The reviewer did not inspect active heap references or inject Python code. Source-level retention and owner-reported launch chronology do not assign the observed full memory peak."
+    },
+    "safe_resume_contract": {
+      "status": "Source-reviewed option only; no full resume or independent fresh-process full verification performed.",
+      "path": "After the existing owner exits, a fresh process may invoke the public persist_trace_rag with the exact committed ArtifactInput, deterministic original fit lineage bindings, original code revision, local embedder identity and top_k. Public loading must reverify the source manifest, full payload digests, secrets, typed traces and real provenance. Preserve ordered source identities and the original observation-count gate. Then retain the public world-model persistence, conformance binding, exact model/prompt identity and startup gates before publishing a pointer.",
+      "checkpoint_reuse": "The public checkpoint namespace binds the exact project, model connection, RAG key schema and chunk identity, and validates saved vectors. Earlier real tiny-fixture tests proved completed components are reused on identical rebuild; uncommitted work can repeat.",
+      "guardrails": "Do not run a competing full resume while the current owner is active, trust metadata alone, skip source verification, change lineage membership, cap the corpus or lose original exclusion/redaction audit records.",
+      "recommendation": "Keep the progressing owner alive. Observe its existing checkpoint counts and native-ready receipt. Once the exact artifact is ready, measure the required public full native startup with the scoped snapshot and the 180-second gate. Only an actual startup failure can establish that next incident."
+    },
+    "acceptance_limit": "No full startup occurred in this review. Native artifact readiness, full conformance, captured semantic improvements, fundraising benchmark, viewer-visible replay, production result and capacity acceptance remain open."
+  },
+  "reproduction": {
+    "cwd": "Repository root of the migration worktree.",
+    "setup": "Use the already installed pinned Python 3.12 environment. Do not launch a full build, full load or inference.",
+    "baseline_command": "PYTHONPATH=agents .context/experiential-venv/bin/python - <<'PY'\nimport collections,json,sys,tempfile,time\nfrom pathlib import Path\nfrom exp.common.project import ArtifactStore\nfrom benchmarks.experiential_world_model_checks import _source_fixture\nfrom benchmarks.build_experiential_world_model import build\nfrom benchmarks.serve_experiential_world_model import load_native\nphase='build';stats={key:collections.Counter() for key in ('build','load')};read_paths={key:collections.Counter() for key in ('build','load')};read_bytes={key:collections.Counter() for key in ('build','load')}\noriginal_read=ArtifactStore.read;original_read_bytes=ArtifactStore.read_bytes\ndef counted_read(self,artifact_id):\n    value=original_read(self,artifact_id);kind=value.manifest.artifact_type\n    stats[phase]['read:'+kind]+=1;read_bytes[phase][kind]+=sum(len(v) for v in value.payloads.values())\n    return value\ndef counted_bytes(self,artifact_id,path):\n    read_paths[phase][path]+=1\n    return original_read_bytes(self,artifact_id,path)\nArtifactStore.read=counted_read;ArtifactStore.read_bytes=counted_bytes\nwanted={'load_trace_dataset','_decode_trace_record','extract_real_transitions','load_rag_index','_assert_payload_secret_free','canonical_json_bytes','canonical_jsonl_bytes','_verify_sources','_load_real_sources'}\ndef profile(frame,event,arg):\n    if event=='call' and frame.f_code.co_name in wanted:\n        filename=frame.f_code.co_filename\n        if '/exp/' in filename:stats[phase][frame.f_code.co_name]+=1\nsys.setprofile(profile)\nwith tempfile.TemporaryDirectory(prefix='wmh-verify-path-review-') as d:\n    root=Path(d);source=_source_fixture(root);out=root/'native';started=time.perf_counter();pointer=build(source,out,'rose-test','rose-1-ultra','a'*64);build_seconds=time.perf_counter()-started\n    phase='load';started=time.perf_counter();artifact,retriever=load_native(out,'rose-test','rose-1-ultra','a'*64);load_seconds=time.perf_counter()-started\n    sys.setprofile(None)\n    print(json.dumps({'source_traces':1,'source_observations':2,'build_seconds':build_seconds,'load_seconds':load_seconds,'calls':{k:dict(v) for k,v in stats.items()},'read_bytes_requested':{k:dict(v) for k,v in read_paths.items()},'verified_payload_bytes':{k:dict(v) for k,v in read_bytes.items()}},sort_keys=True))\nPY"
+  },
+  "startup_gc_assessment": {
+    "status": "bounded_startup_optimization_implemented_with_owning_regressions_full_scale_acceptance_pending",
+    "scope": "Only temporary real-source fixtures and metadata/profile reads. No full source load, full model load, additional full build, model call, network inference, active process modification, upstream change, or R2 format change. The parent authorized the startup-only implementation after the bounded measurements.",
+    "observed_full_build_point_sample": {
+      "path": ".context/native-model-persist.sample.txt",
+      "sample_time_local": "2026-10-06 16:50:32.336 -0700",
+      "child_pid": 53121,
+      "physical_footprint": "27.3G",
+      "physical_footprint_peak": "42.4G",
+      "main_thread_samples": 92,
+      "samples_inside_python_gc": 92,
+      "stack": "Pydantic model validation in tuple decoding -> _Py_RunGC -> gc_collect_main -> deduce_unreachable/dict_traverse",
+      "limit": "One one-second sample, not a cumulative time profile, full-build root-cause reproduction, memory attribution or startup failure."
+    },
+    "baseline_revision": "a1142bc14e632dacc2e6a1579c9d9e487ec6753f",
+    "baseline_loader_sha256": "da97d5776768128867062e7dc464a2bc762208d14154b1bc4a746ccf41d7d0bb",
+    "fixture": {
+      "construction": "Existing _source_fixture expanded to 128 distinct real-source traces, each preserving both canonical pairs and adding 100 nested resource JSON entries to initial context.",
+      "traces": 128,
+      "observations": 256,
+      "source_file_bytes": 3846100,
+      "models_called": 0,
+      "default_gc_thresholds": [
+        700,
+        10,
+        10
+      ],
+      "live_ballast_dicts": 100000,
+      "live_ballast_lists": 100000
+    },
+    "repeated_trials": {
+      "build_seconds": 4.84762725001201,
+      "trials": [
+        {
+          "mode": "normal",
+          "seconds": 0.5608047910500318,
+          "gc_seconds": 0.07699783693533391,
+          "collections": {
+            "0": 236,
+            "1": 21,
+            "2": 1
+          }
+        },
+        {
+          "mode": "disabled",
+          "seconds": 0.4615182909183204,
+          "gc_seconds": 0.008968750014901161,
+          "collections": {
+            "0": 1
+          }
+        },
+        {
+          "mode": "disabled",
+          "seconds": 0.502647333079949,
+          "gc_seconds": 0.009444500086829066,
+          "collections": {
+            "0": 1
+          }
+        },
+        {
+          "mode": "normal",
+          "seconds": 0.6448264999780804,
+          "gc_seconds": 0.08158295752946287,
+          "collections": {
+            "0": 236,
+            "1": 21,
+            "2": 1
+          }
+        },
+        {
+          "mode": "normal",
+          "seconds": 0.6037117090309039,
+          "gc_seconds": 0.07295818044804037,
+          "collections": {
+            "0": 236,
+            "1": 21,
+            "2": 1
+          }
+        },
+        {
+          "mode": "disabled",
+          "seconds": 0.5374978750478476,
+          "gc_seconds": 0.011275000055320561,
+          "collections": {
+            "0": 1
+          }
+        }
+      ],
+      "all_decoded_artifact_ordered_transitions_and_vectors_equal": true,
+      "wrong_pool_rejected_initial_gc_on_and_off": true,
+      "prior_gc_state_restored_success_and_failure": true,
+      "limit": "The first probe records total callback time across the wrapper boundary; its remaining disabled-arm gen0 event was not separately phase-labelled. The follow-up separates load and restoration below."
+    },
+    "heap_size_controls": {
+      "rows": [
+        {
+          "ballast_dicts": 0,
+          "ballast_lists": 0,
+          "mode": "normal",
+          "seconds_including_restore": 0.5042540410067886,
+          "gc_counts": {
+            "load:gen0": 236,
+            "load:gen1": 21,
+            "load:gen2": 1
+          },
+          "gc_seconds": {
+            "load:gen0": 0.004292715224437416,
+            "load:gen1": 0.0063166250474750996,
+            "load:gen2": 0.049527583993040025
+          },
+          "all_observed_collections_reclaimed_objects": 0,
+          "decoded_equal": true
+        },
+        {
+          "ballast_dicts": 0,
+          "ballast_lists": 0,
+          "mode": "disabled",
+          "seconds_including_restore": 0.4438712919363752,
+          "gc_counts": {},
+          "gc_seconds": {},
+          "all_observed_collections_reclaimed_objects": 0,
+          "decoded_equal": true
+        },
+        {
+          "ballast_dicts": 100000,
+          "ballast_lists": 100000,
+          "mode": "normal",
+          "seconds_including_restore": 0.5180379169760272,
+          "gc_counts": {
+            "load:gen0": 236,
+            "load:gen1": 21,
+            "load:gen2": 1
+          },
+          "gc_seconds": {
+            "load:gen0": 0.004227072582580149,
+            "load:gen1": 0.005952250096015632,
+            "load:gen2": 0.05405637505464256
+          },
+          "all_observed_collections_reclaimed_objects": 0,
+          "decoded_equal": true
+        },
+        {
+          "ballast_dicts": 100000,
+          "ballast_lists": 100000,
+          "mode": "disabled",
+          "seconds_including_restore": 0.4432139160344377,
+          "gc_counts": {},
+          "gc_seconds": {},
+          "all_observed_collections_reclaimed_objects": 0,
+          "decoded_equal": true
+        },
+        {
+          "ballast_dicts": 300000,
+          "ballast_lists": 300000,
+          "mode": "normal",
+          "seconds_including_restore": 0.47041724994778633,
+          "gc_counts": {
+            "load:gen0": 237,
+            "load:gen1": 21
+          },
+          "gc_seconds": {
+            "load:gen0": 0.004212625208310783,
+            "load:gen1": 0.006827625213190913
+          },
+          "all_observed_collections_reclaimed_objects": 0,
+          "decoded_equal": true
+        },
+        {
+          "ballast_dicts": 300000,
+          "ballast_lists": 300000,
+          "mode": "disabled",
+          "seconds_including_restore": 0.45189533301163465,
+          "gc_counts": {},
+          "gc_seconds": {},
+          "all_observed_collections_reclaimed_objects": 0,
+          "decoded_equal": true
+        }
+      ],
+      "limit": "Normal collection counts are not monotonic with retained live heap. The 300k arm did not perform a gen2 collection; these measurements do not establish linear heap-size scaling or predict a full-corpus speedup.",
+      "all_gc_states_restored": true
+    },
+    "public_validation_guards": {
+      "artifact_and_rag_equal": true,
+      "fixture": "one real-source trace, two observations",
+      "gc_threshold_unchanged": true,
+      "guards": {
+        "cold_corruption_rejected_False": "ArtifactCorruptionError",
+        "cold_corruption_rejected_True": "ArtifactCorruptionError",
+        "state_restored_on_corruption_False": true,
+        "state_restored_on_corruption_True": true
+      },
+      "public_validations_identical": {
+        "_assert_payload_secret_free": true,
+        "_decode_trace_record": true,
+        "_parse_transitions": true,
+        "_parse_vectors": true,
+        "_verify_records": true,
+        "_verify_sources": true,
+        "load_grounded_world_model_artifact": true,
+        "load_rag_index": true,
+        "load_trace_dataset": true
+      },
+      "snapshots_cleared_success_and_failure": true,
+      "validation_counts": {
+        "disabled": {
+          "_assert_payload_secret_free": 6,
+          "_decode_trace_record": 1,
+          "_parse_transitions": 1,
+          "_parse_vectors": 1,
+          "_verify_records": 1,
+          "_verify_sources": 1,
+          "load_grounded_world_model_artifact": 1,
+          "load_rag_index": 1,
+          "load_trace_dataset": 1,
+          "public_read_gc_disabled": 11
+        },
+        "normal": {
+          "_assert_payload_secret_free": 6,
+          "_decode_trace_record": 1,
+          "_parse_transitions": 1,
+          "_parse_vectors": 1,
+          "_verify_records": 1,
+          "_verify_sources": 1,
+          "load_grounded_world_model_artifact": 1,
+          "load_rag_index": 1,
+          "load_trace_dataset": 1,
+          "public_read_gc_enabled": 11
+        }
+      }
+    },
+    "implementation": {
+      "file": "agents/benchmarks/serve_experiential_world_model.py",
+      "behavior": "Suppress automatic GC only during the existing synchronous startup _load_snapshot. Preserve all public artifact, typed, source, lineage, prompt and model validators. Clear the verified byte snapshot before restoring the exact caller GC enabled/disabled state in finally; leave thresholds unchanged.",
+      "no_gc_freeze": true,
+      "runtime_parallelism": "No inference, commit, retry, session or provider path changed. This scope precedes serving; no per-agent work or serialization was added.",
+      "limit": "gc.disable is interpreter-wide. Current production callers are synchronous startup/bind commands before serving, not a general concurrent-load API. Refcounts and public validators remain active. Full-scale peak memory and later GC cost are unmeasured here.",
+      "independent_review": "Owning parent independently reviewed and accepted the startup-only scope: validators unchanged, bytes cleared before restoring prior state, and no event-loop inference inside the scope."
+    },
+    "owning_regression": {
+      "file": "agents/benchmarks/experiential_world_model_checks.py",
+      "test": "test_native_load_verifies_each_immutable_artifact_once[True/False]",
+      "assertions": [
+        "Real ArtifactStore reads execute while automatic GC is disabled.",
+        "Exact returned artifact, ordered RAG transitions and vectors equal a separate verified baseline load.",
+        "Each cold load verifies all three artifacts once.",
+        "Initially enabled and initially disabled caller state and thresholds are preserved after success, pool mismatch and physical source corruption.",
+        "Raw snapshot bytes are cleared after successful and failed public loads."
+      ],
+      "recurring_gate": "agents/tests/blackbox/world_model_harness.blackbox.py:test_native_upstream_shared_world_regressions",
+      "unchanged_focused_command": "PYTHONPATH=agents .context/experiential-venv/bin/python -m pytest --confcutdir=agents/benchmarks -q agents/benchmarks/experiential_world_model_checks.py::test_native_load_verifies_each_immutable_artifact_once",
+      "red": {
+        "log": ".context/native-load-gc-red.log",
+        "result": "1 failed, 1 passed in 0.92s; initially enabled case failed actual public-read assertion."
+      },
+      "green": {
+        "log": ".context/native-load-gc-green.log",
+        "result": "2 passed in 0.93s."
+      },
+      "complete_native": {
+        "command": "PYTHONPATH=agents .context/experiential-venv/bin/python -m pytest --confcutdir=agents/benchmarks -q agents/benchmarks/experiential_world_model_checks.py",
+        "log": ".context/native-load-gc-owning-green.log",
+        "result": "25 passed in 1.14s."
+      },
+      "complete_blackbox": {
+        "command": "agents/venv/bin/python agents/scripts/run_blackbox_tests.py world-model-harness",
+        "log": ".context/native-load-gc-blackbox-green.log",
+        "result": "world-model-harness PASS; 1 domain passed, 0 failed in 16.9s."
+      },
+      "lint_and_format": {
+        "commands": [
+          "ruff check agents/benchmarks/serve_experiential_world_model.py agents/benchmarks/experiential_world_model_checks.py",
+          "ruff format --check agents/benchmarks/serve_experiential_world_model.py agents/benchmarks/experiential_world_model_checks.py"
+        ],
+        "result": "All checks passed; 2 files already formatted."
+      }
+    },
+    "commands": {
+      "repeated_timing": "PYTHONPATH=agents .context/experiential-venv/bin/python - <<'PY'\nimport collections,contextlib,gc,hashlib,io,json,sys,tempfile,time\nfrom copy import deepcopy\nfrom pathlib import Path\nfrom benchmarks.experiential_world_model_checks import _source_fixture\nfrom benchmarks.build_experiential_world_model import build\nfrom benchmarks.serve_experiential_world_model import load_native\noriginal_enabled=gc.isenabled();original_threshold=gc.get_threshold()\n@contextlib.contextmanager\ndef no_gc():\n    enabled=gc.isenabled()\n    if enabled:gc.disable()\n    try:yield\n    finally:\n        if enabled:gc.enable()\n        else:gc.disable()\nwith tempfile.TemporaryDirectory(prefix='wmh-native-gc-review-') as d:\n    root=Path(d);source=_source_fixture(root)\n    base_session=json.loads((source/'sessions'/'real-root.session.json').read_text())\n    base_spans=[json.loads(line) for line in (source/'otel'/'real-root.otel.jsonl').read_text().splitlines()]\n    payload=[{'position':i,'items':[{'label':'fixture resource '+str(i),'value':i}, {'label':'nested observation','value':[True,i,None]}]} for i in range(100)]\n    sessions=[]\n    for i in range(128):\n        name=f'gc-review-{i:04d}';session=deepcopy(base_session);session['root_agent_id']=name;session['initial_state']['root_agent_id']=name;session['initial_state']['public_fixture_resources']=payload\n        (source/'sessions'/f'{name}.session.json').write_text(json.dumps(session))\n        (source/'otel'/f'{name}.otel.jsonl').write_text('\\n'.join(json.dumps(row) for row in base_spans)+'\\n')\n        sessions.append(session)\n    (source/'sessions.json').write_text(json.dumps({'sessions':sessions}))\n    out=root/'native';started=time.perf_counter()\n    with contextlib.redirect_stdout(io.StringIO()):pointer=build(source,out,'rose-gc-review','rose-1-ultra','a'*64)\n    build_seconds=time.perf_counter()-started\n    source_bytes=sum(p.stat().st_size for p in source.rglob('*') if p.is_file())\n    assert source_bytes<16*1024*1024 and pointer['observations']==256\n    artifact,rag=load_native(out,'rose-gc-review','rose-1-ultra','a'*64)\n    expected=hashlib.sha256(json.dumps({'artifact':artifact.model_dump(mode='json'),'transitions':[v.model_dump(mode='json') for v in rag.loaded.transitions],'vectors':[v.model_dump(mode='json') for v in rag.loaded.vectors]},sort_keys=True).encode()).hexdigest()\n    del artifact,rag;sessions.clear();del payload;gc.collect()\n    ballast=[{'index':i,'children':[i,i+1]} for i in range(100000)]\n    gc.collect()\n    rows=[]\n    def digest(value):\n        a,r=value\n        return hashlib.sha256(json.dumps({'artifact':a.model_dump(mode='json'),'transitions':[v.model_dump(mode='json') for v in r.loaded.transitions],'vectors':[v.model_dump(mode='json') for v in r.loaded.vectors]},sort_keys=True).encode()).hexdigest()\n    for mode in ('normal','disabled','disabled','normal','normal','disabled'):\n        gc.collect();starts={};events=collections.Counter();gc_seconds=0.0\n        def callback(phase,info):\n            global gc_seconds\n            generation=info['generation']\n            if phase=='start':starts[generation]=time.perf_counter()\n            elif generation in starts:\n                gc_seconds+=time.perf_counter()-starts.pop(generation);events[generation]+=1\n        gc.callbacks.append(callback);before=gc.isenabled();started=time.perf_counter()\n        try:\n            with no_gc() if mode=='disabled' else contextlib.nullcontext():\n                result=load_native(out,'rose-gc-review','rose-1-ultra','a'*64)\n            elapsed=time.perf_counter()-started\n        finally:gc.callbacks.remove(callback)\n        after=gc.isenabled();equality=digest(result)==expected;del result\n        rows.append({'mode':mode,'seconds':elapsed,'gc_seconds':gc_seconds,'gc_collections_by_generation':dict(events),'decoded_equal':equality,'gc_enabled_before':before,'gc_enabled_after':after})\n        assert equality and before==after\n    guards={}\n    for enabled in (True,False):\n        (gc.enable if enabled else gc.disable)()\n        try:\n            with no_gc():load_native(out,'rose-gc-review','rose-1-ultra','b'*64)\n        except ValueError:guards['wrong_pool_rejected_'+str(enabled)]=True\n        guards['state_restored_on_failure_'+str(enabled)]=gc.isenabled()==enabled\n    (gc.enable if original_enabled else gc.disable)();gc.set_threshold(*original_threshold)\n    print(json.dumps({'scope':'temporary bounded real-source native fixture; no models/network/full source/active process touched','traces':128,'observations':256,'source_file_bytes':source_bytes,'build_seconds':build_seconds,'live_ballast_dict_count':len(ballast),'live_ballast_nested_list_count':len(ballast),'gc_thresholds':original_threshold,'trials':rows,'guards':guards,'gc_original_state_restored':gc.isenabled()==original_enabled},sort_keys=True))\nPY",
+      "phase_labelled_heap_controls": "PYTHONPATH=agents .context/experiential-venv/bin/python - <<'PY'\nimport collections,contextlib,gc,hashlib,io,json,sys,tempfile,time\nfrom copy import deepcopy\nfrom pathlib import Path\nfrom benchmarks.experiential_world_model_checks import _source_fixture\nfrom benchmarks.build_experiential_world_model import build\nfrom benchmarks.serve_experiential_world_model import load_native\noriginal_enabled=gc.isenabled();original_threshold=gc.get_threshold()\n@contextlib.contextmanager\ndef no_gc():\n    enabled=gc.isenabled()\n    if enabled:gc.disable()\n    try:yield\n    finally:\n        if enabled:gc.enable()\n        else:gc.disable()\nwith tempfile.TemporaryDirectory(prefix='wmh-native-gc-review-') as d:\n    root=Path(d);source=_source_fixture(root)\n    base_session=json.loads((source/'sessions'/'real-root.session.json').read_text())\n    base_spans=[json.loads(line) for line in (source/'otel'/'real-root.otel.jsonl').read_text().splitlines()]\n    payload=[{'position':i,'items':[{'label':'fixture resource '+str(i),'value':i}, {'label':'nested observation','value':[True,i,None]}]} for i in range(100)]\n    sessions=[]\n    for i in range(128):\n        name=f'gc-review-{i:04d}';session=deepcopy(base_session);session['root_agent_id']=name;session['initial_state']['root_agent_id']=name;session['initial_state']['public_fixture_resources']=payload\n        (source/'sessions'/f'{name}.session.json').write_text(json.dumps(session))\n        (source/'otel'/f'{name}.otel.jsonl').write_text('\\n'.join(json.dumps(row) for row in base_spans)+'\\n')\n        sessions.append(session)\n    (source/'sessions.json').write_text(json.dumps({'sessions':sessions}))\n    out=root/'native';started=time.perf_counter()\n    with contextlib.redirect_stdout(io.StringIO()):pointer=build(source,out,'rose-gc-review','rose-1-ultra','a'*64)\n    build_seconds=time.perf_counter()-started\n    source_bytes=sum(p.stat().st_size for p in source.rglob('*') if p.is_file())\n    assert source_bytes<16*1024*1024 and pointer['observations']==256\n    artifact,rag=load_native(out,'rose-gc-review','rose-1-ultra','a'*64)\n    expected=hashlib.sha256(json.dumps({'artifact':artifact.model_dump(mode='json'),'transitions':[v.model_dump(mode='json') for v in rag.loaded.transitions],'vectors':[v.model_dump(mode='json') for v in rag.loaded.vectors]},sort_keys=True).encode()).hexdigest()\n    del artifact,rag;sessions.clear();del payload;gc.collect()\n    def digest(value):\n        a,r=value\n        return hashlib.sha256(json.dumps({'artifact':a.model_dump(mode='json'),'transitions':[v.model_dump(mode='json') for v in r.loaded.transitions],'vectors':[v.model_dump(mode='json') for v in r.loaded.vectors]},sort_keys=True).encode()).hexdigest()\n    rows=[]\n    for size in (0,100000,300000):\n        ballast=[{'index':i,'children':[i,i+1]} for i in range(size)]\n        for mode in ('normal','disabled'):\n            gc.enable();gc.collect();starts={};events=collections.Counter();times=collections.Counter();collected=collections.Counter();phase='setup'\n            def callback(event,info):\n                generation=info['generation'];key=phase+':gen'+str(generation)\n                if event=='start':starts[generation]=(time.perf_counter(),key)\n                elif generation in starts:\n                    then,original_key=starts.pop(generation);events[original_key]+=1;times[original_key]+=time.perf_counter()-then;collected[original_key]+=info['collected']\n            gc.callbacks.append(callback);started=time.perf_counter()\n            try:\n                if mode=='disabled':gc.disable()\n                phase='load';result=load_native(out,'rose-gc-review','rose-1-ultra','a'*64)\n                phase='restore'\n                if mode=='disabled':gc.enable()\n                phase='after';elapsed=time.perf_counter()-started\n            finally:gc.callbacks.remove(callback);gc.enable()\n            equality=digest(result)==expected;del result\n            rows.append({'ballast_dicts':size,'ballast_lists':size,'mode':mode,'seconds_including_restore':elapsed,'gc_counts':dict(events),'gc_seconds':dict(times),'gc_collected_objects':dict(collected),'decoded_equal':equality})\n            assert equality\n        del ballast;gc.collect()\n    (gc.enable if original_enabled else gc.disable)();gc.set_threshold(*original_threshold)\n    print(json.dumps({'scope':'bounded public native loader, default thresholds, separate temporary process','traces':128,'observations':256,'source_file_bytes':source_bytes,'rows':rows,'original_gc_restored':gc.isenabled()==original_enabled},sort_keys=True))\nPY",
+      "public_validation_and_corruption_guards": "PYTHONPATH=agents .context/experiential-venv/bin/python - <<'PY'\nimport collections,contextlib,gc,io,json,sys,tempfile\nfrom pathlib import Path\nfrom exp.common.project import ProjectPaths\nfrom exp.common.project.database import project_connection\nfrom benchmarks.experiential_world_model_checks import _source_fixture\nfrom benchmarks.build_experiential_world_model import build\nimport benchmarks.serve_experiential_world_model as serving\noriginal_enabled=gc.isenabled();original_threshold=gc.get_threshold()\n@contextlib.contextmanager\ndef no_gc():\n    before=gc.isenabled()\n    if before:gc.disable()\n    try:yield\n    finally:\n        if before:gc.enable()\n        else:gc.disable()\nphase='setup';counts={name:collections.Counter() for name in ('normal','disabled')};instances=[]\nwanted={'_assert_payload_secret_free','_decode_trace_record','_verify_sources','_verify_records','_parse_transitions','_parse_vectors','load_rag_index','load_trace_dataset','load_grounded_world_model_artifact'}\ndef profile(frame,event,arg):\n    if event=='call' and phase in counts and frame.f_code.co_name in wanted and '/exp/' in frame.f_code.co_filename:counts[phase][frame.f_code.co_name]+=1\noriginal_snapshot=serving._ReadSnapshot\nclass RecordedSnapshot(original_snapshot):\n    def __init__(self,*args,**kwargs):super().__init__(*args,**kwargs);instances.append(self)\n    def read(self,artifact_id):\n        if phase in counts:counts[phase]['public_read_gc_disabled' if not gc.isenabled() else 'public_read_gc_enabled']+=1\n        return super().read(artifact_id)\nserving._ReadSnapshot=RecordedSnapshot\ntry:\n    with tempfile.TemporaryDirectory(prefix='wmh-native-gc-guards-') as d:\n        root=Path(d);source=_source_fixture(root);out=root/'native'\n        with contextlib.redirect_stdout(io.StringIO()):build(source,out,'rose-test','rose-1-ultra','a'*64)\n        gc.enable();sys.setprofile(profile);phase='normal';before=serving.load_native(out,'rose-test','rose-1-ultra','a'*64)\n        phase='disabled'\n        with no_gc():after=serving.load_native(out,'rose-test','rose-1-ultra','a'*64)\n        phase='guards';sys.setprofile(None)\n        public_fields={name:counts['normal'][name]==counts['disabled'][name] and counts['normal'][name]>0 for name in sorted(wanted)}\n        assert all(public_fields.values()) and before[0]==after[0] and before[1].loaded==after[1].loaded\n        paths=ProjectPaths(out/'experiential','rose-test');dataset=after[1].loaded.manifest.inputs[0].artifact_id\n        store=original_snapshot(paths);good=store.read_bytes(dataset,'trace-dataset.json');store.verified.clear()\n        guards={}\n        with project_connection(paths.root,write=True) as db:db.execute('UPDATE project_artifact_files SET payload=? WHERE project_id=? AND artifact_id=? AND path=?',(b'{\"corrupted\":true}',paths.project_id,dataset,'trace-dataset.json'))\n        try:\n            for enabled in (True,False):\n                (gc.enable if enabled else gc.disable)()\n                try:\n                    with no_gc():serving.load_native(out,'rose-test','rose-1-ultra','a'*64)\n                except Exception as exc:guards['cold_corruption_rejected_'+str(enabled)]=type(exc).__name__\n                guards['state_restored_on_corruption_'+str(enabled)]=gc.isenabled()==enabled\n        finally:\n            with project_connection(paths.root,write=True) as db:db.execute('UPDATE project_artifact_files SET payload=? WHERE project_id=? AND artifact_id=? AND path=?',(good,paths.project_id,dataset,'trace-dataset.json'))\n        snapshots_clear=all(not item.verified for item in instances)\n        assert snapshots_clear and all(guards['state_restored_on_corruption_'+str(x)] for x in (True,False))\n        print(json.dumps({'fixture':'one real-source trace, two observations','validation_counts':{k:dict(v) for k,v in counts.items()},'public_validations_identical':public_fields,'artifact_and_rag_equal':True,'guards':guards,'snapshots_cleared_success_and_failure':snapshots_clear,'gc_threshold_unchanged':gc.get_threshold()==original_threshold},sort_keys=True))\nfinally:\n    sys.setprofile(None);serving._ReadSnapshot=original_snapshot\n    (gc.enable if original_enabled else gc.disable)();gc.set_threshold(*original_threshold)\nPY"
+    },
+    "reproduction_limit": "Timing and public-validation counter commands ran before the startup GC change. Use the recorded baseline loader revision/hash when reproducing the normal-versus-disabled contrast; current load_native already suppresses automatic GC. Temporary paths and timestamps can change artifact IDs/byte sizes. Timings are exploratory bounded measurements, not statistical reliability claims.",
+    "acceptance_limit": "The parent reports the original full build completed successfully. This review did not independently load that artifact, prove a full-startup failure or 180-second gate result, measure fundraising success, verify viewer replay or report production deployment.",
+    "public_typed_parse_reuse_review": {
+      "status": "source_and_small_fixture_review_no_full_artifact_reload",
+      "public_calls_measured_per_startup": {
+        "load_grounded_world_model_artifact": 1,
+        "load_rag_index": 1,
+        "_parse_transitions": 1,
+        "_parse_vectors": 1,
+        "load_trace_dataset": 1,
+        "_decode_trace_record": 1,
+        "_verify_sources": 1
+      },
+      "evidence": "Measured on the actual one-trace/two-observation fixture; larger traces retain one dataset/transition/vector loader invocation but increase record decode counts.",
+      "source_paths": [
+        "exp/simulation/world_model/runtime.py:438",
+        "exp/simulation/retrieval/store.py:37",
+        "exp/simulation/retrieval/store.py:161",
+        "exp/common/traces/store.py:31",
+        "exp/common/project/store.py:827"
+      ],
+      "finding": "load_grounded_world_model_artifact returns only the verified model envelope and does not load a RAG index. The current Rose _load_snapshot separately invokes load_rag_index once. That loader parses each transition/vector once and reopens/decodes its real source dataset once for provenance. There is no second domain RAG parse in current startup.",
+      "remaining_overlap": "The mandatory public ArtifactStore.read secret boundary decodes JSON/JSONL to generic JsonValue before downstream public typed domain loaders parse the same verified bytes. The read snapshot removes repeated full ArtifactStore.read verification, but does not skip either distinct validator.",
+      "supported_reuse": [
+        "Retain the verified LoadedRAGIndex result and construct TraceRAGRetriever from it. RoseNativeRetriever already uses this path without loading again.",
+        "Retain the verified GroundedWorldModelArtifact and its exact ArtifactInput within the same loaded runtime, rather than invoking load_grounded_world_model again.",
+        "A fresh process/cold load must execute the public loaders again; no durable typed-object cache or source-verification bypass is proposed."
+      ],
+      "unsupported": "The pinned public load_rag_index/load_trace_dataset signatures offer no parameter for reusing an already-decoded TraceDataset or the JsonValue objects consumed by secret scanning. Eliminating this overlap would require upstream API/implementation work; none is authorized or implemented here.",
+      "acceptance_limit": "No static parsing/reuse finding assigns full-scale elapsed time or proves the startup deadline."
+    }
+  },
+  "ascii_republication_assessment": {
+    "status": "public_api_ascii_republication_implemented_owning_gates_green_full_acceptance_pending",
+    "observed_full_failure": {
+      "startup_receipt": ".context/native-full-startup.json",
+      "preserved_original_receipts": ".context/native-unicode-original",
+      "health_timeout_seconds": 180,
+      "elapsed_seconds": 180.69639304094017,
+      "status": "startup-timeout",
+      "exit_code": 143,
+      "owner_parent_pid": 15276,
+      "owner_child_pid": 15539,
+      "ownership": "The root agent ran the unchanged cold-start owner and retired/joined its exact failed owner and child. This reviewer did not terminate, inject or load a full artifact.",
+      "full_bind_owner_report": {
+        "real_seconds": 241.62,
+        "user_seconds": 143.03,
+        "sys_seconds": 39.17,
+        "max_rss_gb": 17.55,
+        "peak_footprint_gb": 38.74,
+        "exact_cases_bound": 100
+      },
+      "point_sample": {
+        "path": ".context/native-full-bind.sample.txt",
+        "sample_time_local": "2026-10-06 17:00:49.238 -0700",
+        "main_thread_samples": 807,
+        "samples_in_unicode_split": 807,
+        "leaf": "ucs4lib_split_char/_PyUnicode_FromUCS4",
+        "physical_footprint": "30.3G",
+        "limit": "A point sample identifies wide Unicode splitting, but does not assign total elapsed time to a particular JSONL payload or loader."
+      }
+    },
+    "public_api_review": {
+      "native_canonical_serializer": "exp/common/core/artifacts.py:239 hardcodes ensure_ascii=False; canonical_jsonl_bytes has no encoding option.",
+      "high_level_rag_persistence": "exp/simulation/retrieval/build.py:141-142 always serializes transitions and vectors through that canonical serializer. ASCII source publication alone does not make its RAG transition JSONL ASCII.",
+      "public_read_surface": "ArtifactStore.read returns complete verified StoredArtifact payload bytes; read_bytes returns one full byte payload after full artifact validation. Public source/RAG loaders decode and split complete JSONL payloads. No supported streaming payload/record loader was found.",
+      "supported_path": "Publish equivalent ASCII JSONL as new immutable artifacts through the public ArtifactStore.write_or_replay, typed TraceDataset/RAGIndex envelopes and public loaders; persist the new world model through the public persist_grounded_world_model."
+    },
+    "bounded_public_probe": {
+      "result": {
+        "decoded_transitions_vectors_identical": true,
+        "results": {
+          "ascii_escaped": {
+            "dataset_id": "rose-real-traces-b7772065ac3f700e9ff7",
+            "public_load_rag_verified": true,
+            "rag_id": "trace-rag-38bd64f865a9600604c7",
+            "rag_transition_ascii_only": false,
+            "rag_transition_bytes": 3209,
+            "raw_astral_unicode_in_rag": true,
+            "source_ascii_only": true,
+            "source_bytes": 4149,
+            "source_sha256": "35227de2cecb6dbab2d97beeab59bed8daac9ab664533518bcd8ee8db9e43cd3",
+            "trace_exactly_preserved": true
+          },
+          "decoded_source_text_allocation_bytes": {
+            "ascii_escaped": 4190,
+            "native_utf8": 16532
+          },
+          "generic_public_ascii_rag": {
+            "guards": {
+              "physical_source_digest_rejected": "ArtifactCorruptionError",
+              "self_consistent_unknown_source_span_rejected": {
+                "reason": "RAG transition names an unknown source span",
+                "type": "ArtifactCorruptionError"
+              }
+            },
+            "native_load_rag_all_validators_passed": true,
+            "native_world_persistence_and_content_identity_passed": true,
+            "old_artifacts_unchanged": true,
+            "ordered_transitions_and_vectors_exactly_preserved": true,
+            "rag_id": "trace-rag-bb571af717f7bd065d73",
+            "raw_trace_source_identity_and_hash_unchanged": true,
+            "reembedding_calls_for_republication": 0,
+            "rose_cold_pointer_load_passed": true,
+            "scope": "generic public ArtifactStore.write_or_replay; not a serializer flag on persist_trace_rag",
+            "source_ascii_only": true,
+            "transition_ascii_only": true,
+            "transition_bytes": 3297,
+            "world_model_id": "grounded-world-model-1eb62750f5e814a04a91"
+          },
+          "native_utf8": {
+            "dataset_id": "rose-real-traces-eeaab6d711a358d3dace",
+            "public_load_rag_verified": true,
+            "rag_id": "trace-rag-d5b36c09afb14479e43e",
+            "rag_transition_ascii_only": false,
+            "rag_transition_bytes": 3209,
+            "raw_astral_unicode_in_rag": true,
+            "source_ascii_only": false,
+            "source_bytes": 4127,
+            "source_sha256": "b58e83bf98ffd2bb258dfea2e1c164efff274a7e946222210ac750fe93a35b01",
+            "trace_exactly_preserved": true
+          }
+        },
+        "scope": "temporary one-trace/two-observation actual public persistence and load; no models/network/full corpus",
+        "source_redactions": 0
+      },
+      "command": "PYTHONPATH=agents .context/experiential-venv/bin/python - <<'PY'\nimport hashlib,json,tempfile\nfrom datetime import datetime,timezone\nfrom pathlib import Path\nfrom exp.common.core.artifacts import SourceIdentity,canonical_json_bytes,canonical_jsonl_bytes,stable_id\nfrom exp.common.project import ArtifactStore,ProjectPaths,artifact_input\nfrom exp.common.traces import TraceDataset,load_trace_dataset\nfrom exp.simulation.retrieval import RAGLineageBinding,persist_trace_rag,load_rag_index\nfrom benchmarks.experiential_world_model_checks import _source_fixture\nfrom benchmarks.build_experiential_world_model import UPSTREAM_REVISION,load_rose_trace\nfrom benchmarks.experiential_world_model import lineage_id\nwith tempfile.TemporaryDirectory(prefix='wmh-native-ascii-review-') as d:\n    root=Path(d);source=_source_fixture(root);session_path=source/'sessions/real-root.session.json';session=json.loads(session_path.read_text());session['initial_state']['unicode_probe']='caf\u00e9 \ud83d\ude80 \\u2028 \\u2029 \\u0085';session_path.write_text(json.dumps(session,ensure_ascii=False))\n    trace,count,redactions=load_rose_trace(source/'otel/real-root.otel.jsonl',session_path)\n    utf8=canonical_jsonl_bytes((trace,));ascii_payload=(json.dumps(trace.model_dump(mode='json',by_alias=True,exclude_none=False),ensure_ascii=True,allow_nan=False,separators=(',',':'),sort_keys=True)+'\\n').encode('ascii')\n    assert utf8!=ascii_payload and json.loads(utf8)==json.loads(ascii_payload)\n    store=ArtifactStore(ProjectPaths(root/'native'/'experiential','ascii-review'));results={};rags={}\n    for label,payload in (('native_utf8',utf8),('ascii_escaped',ascii_payload)):\n        digest=hashlib.sha256(payload).hexdigest();dataset_id=stable_id('rose-real-traces',{'records_sha256':digest,'upstream_revision':UPSTREAM_REVISION});now=datetime.now(timezone.utc)\n        dataset=TraceDataset(created_at=now,inputs=(),code_revision='offline-ascii-fixture',source=SourceIdentity(kind='file',source_id='offline-real-source-fixture',sha256=digest),dataset_id=dataset_id,semantic_convention_version='rose-canonical-export-v11',traces_path='traces.jsonl',traces_sha256=digest,trace_ids=(trace.trace_id,))\n        _,manifest=store.write_or_replay(artifact_id=dataset_id,artifact_type='trace-dataset',envelope=dataset,envelope_path='trace-dataset.json',envelope_type=TraceDataset,files={'trace-dataset.json':canonical_json_bytes(dataset),'traces.jsonl':payload})\n        loaded=load_trace_dataset(store,dataset_id);assert loaded.traces==(trace,)\n        rag=persist_trace_rag(store,(artifact_input(manifest),),(RAGLineageBinding(trace_id=trace.trace_id,lineage_id=lineage_id(trace.trace_id),partition='fit'),),created_at=now,code_revision='offline-ascii-fixture')\n        verified=load_rag_index(store,rag.index.rag_id);assert len(verified.transitions)==count==2\n        transitions=store.read_bytes(rag.index.rag_id,rag.index.transitions_path)\n        results[label]={'source_bytes':len(payload),'source_ascii_only':payload.isascii(),'source_sha256':digest,'dataset_id':dataset_id,'trace_exactly_preserved':True,'rag_id':rag.index.rag_id,'rag_transition_bytes':len(transitions),'rag_transition_ascii_only':transitions.isascii(),'raw_astral_unicode_in_rag': '\ud83d\ude80'.encode() in transitions,'public_load_rag_verified':True}\n        rags[label]=verified\n    assert rags['native_utf8'].transitions==rags['ascii_escaped'].transitions and rags['native_utf8'].vectors==rags['ascii_escaped'].vectors\n    native=rags['ascii_escaped'];old=native.index\n    escaped_transitions=b''.join((json.dumps(t.model_dump(mode='json',by_alias=True,exclude_none=False),ensure_ascii=True,allow_nan=False,separators=(',',':'),sort_keys=True)+'\\n').encode('ascii') for t in native.transitions)\n    vectors_payload=canonical_jsonl_bytes(native.vectors)\n    from exp.simulation.retrieval.contracts import RAGIndex\n    from exp.simulation.world_model.artifact import persist_grounded_world_model\n    from exp.simulation.world_model.runtime import load_grounded_world_model_artifact\n    from benchmarks.build_experiential_world_model import model_snapshot\n    values=old.model_dump(mode='json');values['transitions_sha256']=hashlib.sha256(escaped_transitions).hexdigest();values['code_revision']='offline-ascii-storage-fixture'\n    fields=('code_revision','default_top_k','embedder','embedding_dimension','embedding_chunk_bytes','fit_lineage_ids','included_lineage_ids','included_partitions','key_schema_version','schema_version','sources','transition_count','transition_ids','transitions_path','transitions_sha256','vectors_path','vectors_sha256')\n    values['rag_id']=stable_id('trace-rag',{key:values[key] for key in fields});index=RAGIndex.model_validate(values)\n    _,manifest=store.write_or_replay(artifact_id=index.rag_id,artifact_type='trace-rag-index',envelope=index,envelope_path='rag-index.json',envelope_type=RAGIndex,files={'rag-index.json':canonical_json_bytes(index),'transitions.jsonl':escaped_transitions,'vectors.jsonl':vectors_payload})\n    verified=load_rag_index(store,index.rag_id)\n    assert verified.transitions==native.transitions and verified.vectors==native.vectors\n    world=persist_grounded_world_model(store,artifact_input(manifest),model_alias='rose-1-ultra',model=model_snapshot('rose-1-ultra','a'*64),created_at=datetime.now(timezone.utc),code_revision='offline-ascii-storage-fixture',top_k=5)\n    public_world=load_grounded_world_model_artifact(store,artifact_input(world.manifest))\n    assert public_world==world.artifact\n    from benchmarks.serve_experiential_world_model import load_native\n    from benchmarks.build_experiential_world_model import ADAPTER_CONTRACT\n    pointer_path=root/'native/models/ascii-review/experiential.json';pointer_path.parent.mkdir(parents=True)\n    pointer_path.write_text(json.dumps({'schema':'rose.experiential_model.v1','upstream_revision':UPSTREAM_REVISION,'adapter_contract':ADAPTER_CONTRACT,'world_model_id':world.artifact.world_model_id,'world_model_manifest_sha256':artifact_input(world.manifest).sha256}))\n    cold_world,cold_retriever=load_native(root/'native','ascii-review','rose-1-ultra','a'*64)\n    assert cold_world==world.artifact and cold_retriever.loaded.transitions==native.transitions and cold_retriever.loaded.vectors==native.vectors\n    assert tuple(t.source.identity for t in load_trace_dataset(store,native.index.sources[0].artifact_input.artifact_id).traces)==(trace.source.identity,)\n    results['generic_public_ascii_rag']={'rag_id':index.rag_id,'world_model_id':world.artifact.world_model_id,'transition_bytes':len(escaped_transitions),'transition_ascii_only':escaped_transitions.isascii(),'ordered_transitions_and_vectors_exactly_preserved':True,'native_load_rag_all_validators_passed':True,'native_world_persistence_and_content_identity_passed':True,'source_ascii_only':True,'reembedding_calls_for_republication':0,'old_artifacts_unchanged':True,'rose_cold_pointer_load_passed':True,'raw_trace_source_identity_and_hash_unchanged':True,'scope':'generic public ArtifactStore.write_or_replay; not a serializer flag on persist_trace_rag'}\n    from exp.common.project.database import project_connection\n    from exp.simulation.retrieval.contracts import RAGTransition,RAGVector\n    guards={}\n    dataset_id=native.index.sources[0].artifact_input.artifact_id;original_source=store.read_bytes(dataset_id,'traces.jsonl')\n    with project_connection(store.paths.root,write=True) as db:db.execute('UPDATE project_artifact_files SET payload=? WHERE project_id=? AND artifact_id=? AND path=?',(b'corrupted source','ascii-review',dataset_id,'traces.jsonl'))\n    try:\n        try:load_native(root/'native','ascii-review','rose-1-ultra','a'*64)\n        except Exception as exc:guards['physical_source_digest_rejected']=type(exc).__name__\n    finally:\n        with project_connection(store.paths.root,write=True) as db:db.execute('UPDATE project_artifact_files SET payload=? WHERE project_id=? AND artifact_id=? AND path=?',(original_source,'ascii-review',dataset_id,'traces.jsonl'))\n    forged=native.transitions[0].model_dump(mode='json');forged['action_span_id']='absent-public-probe-span'\n    material={'action':native.transitions[0].action.model_dump(mode='json',exclude_none=False),'action_span_id':forged['action_span_id'],'key_schema_version':index.key_schema_version,'lineage_id':forged['lineage_id'],'observation':native.transitions[0].observation.model_dump(mode='json'),'observation_span_id':forged['observation_span_id'],'trace_id':forged['trace_id']}\n    forged['transition_id']=stable_id('rag-transition',material);forged_transition=RAGTransition.model_validate(forged)\n    bad_transitions=(forged_transition,)+native.transitions[1:]\n    vector=native.vectors[0].model_dump(mode='json');vector['transition_id']=forged_transition.transition_id;bad_vectors=(RAGVector.model_validate(vector),)+native.vectors[1:]\n    bad_t=b''.join((json.dumps(t.model_dump(mode='json'),ensure_ascii=True,allow_nan=False,separators=(',',':'),sort_keys=True)+'\\n').encode('ascii') for t in bad_transitions);bad_v=canonical_jsonl_bytes(bad_vectors)\n    bad_values=index.model_dump(mode='json');bad_values['transitions_sha256']=hashlib.sha256(bad_t).hexdigest();bad_values['vectors_sha256']=hashlib.sha256(bad_v).hexdigest();bad_values['transition_ids']=[t.transition_id for t in bad_transitions];bad_values['rag_id']=stable_id('trace-rag',{key:bad_values[key] for key in fields});bad_index=RAGIndex.model_validate(bad_values)\n    store.write_or_replay(artifact_id=bad_index.rag_id,artifact_type='trace-rag-index',envelope=bad_index,envelope_path='rag-index.json',envelope_type=RAGIndex,files={'rag-index.json':canonical_json_bytes(bad_index),'transitions.jsonl':bad_t,'vectors.jsonl':bad_v})\n    try:load_rag_index(store,bad_index.rag_id)\n    except Exception as exc:guards['self_consistent_unknown_source_span_rejected']={'type':type(exc).__name__,'reason':str(exc)}\n    assert guards['physical_source_digest_rejected']=='ArtifactCorruptionError' and guards['self_consistent_unknown_source_span_rejected']['reason']=='RAG transition names an unknown source span'\n    import sys\n    results['generic_public_ascii_rag']['guards']=guards\n    results['decoded_source_text_allocation_bytes']={'native_utf8':sys.getsizeof(utf8.decode('utf-8')),'ascii_escaped':sys.getsizeof(ascii_payload.decode('utf-8'))}\n    print(json.dumps({'scope':'temporary one-trace/two-observation actual public persistence and load; no models/network/full corpus','results':results,'decoded_transitions_vectors_identical':True,'source_redactions':redactions},sort_keys=True))\nPY",
+      "scope": "Actual public persistence/load on one real-source trace/two observations with caf\u00e9, astral Unicode, U+2028/U+2029/U+0085. No model/network/full-corpus calls.",
+      "allocation_effect": "Equivalent source payloads were 4127 native UTF-8 bytes versus 4149 escaped ASCII bytes. sys.getsizeof of whole decoded text was 16532 versus 4190 bytes; parsed typed traces, ordered transitions, vectors and original raw trace source identity/hash were identical. This is an allocation mechanism reproduction, not a full-scale startup guarantee."
+    },
+    "implementation": {
+      "source_file": "agents/benchmarks/build_experiential_world_model.py",
+      "test_file": "agents/benchmarks/experiential_world_model_checks.py",
+      "storage_encoding": "ascii-jsonl-v1",
+      "future_builds": "Publish ASCII source JSONL before native RAG construction; republish the native-generated RAG as equivalent ASCII records before native-ready/pointer selection.",
+      "conversion_cli": "PYTHONPATH=agents .context/experiential-venv/bin/python -m benchmarks.build_experiential_world_model --root <existing-native-root> --name rose-archive --pool rose-1-ultra --pool-sha256 <original-real-pool-sha256> --republish-ascii --source-root <original-conformance-root>",
+      "preserved": "Every parsed source trace, transition, vector, goal, state, action/result/span ID, canonical scalar type, raw per-trace source identity/hash, model/prompt identity, top_k, original exclusion and redaction receipt. Vector wire digest stays exactly unchanged.",
+      "changed": "Physical source record and transition JSONL byte digests, corresponding immutable source/RAG/model IDs/manifests, RAG inputs/source references, conformance artifact binding and selected pointer. Original immutable artifacts remain present and untouched.",
+      "provenance": "All old and new artifact, secret, typed trace/vector, source/span, manifest/content-ID, model and prompt validators execute unchanged. Ordered fingerprints use canonical typed JSON plus record separators and distinguish boolean/integer/floating-point values.",
+      "memory": "Each old source graph and read snapshot is released before its new source verification. Old RAG is reduced to ASCII wire bytes plus compact ordered semantic fingerprints; its graph and read snapshot are released before new RAG verification. Public world-model persistence releases its new typed RAG before the separate equality/conformance load. Public reads use load-scoped _ReadSnapshot and restore prior GC state.",
+      "promotion": "Require a complete existing conformance suite and the current pinned prompt version/SHA before conversion. Bind the unchanged requested cases to the validated new artifact before publishing the selected pointer. Idempotent calls still validate actual ASCII wire and rebind the requested suite.",
+      "excluded_actions": [
+        "No upstream edit or monkeypatch",
+        "No decoding proxy/custom bytes objects",
+        "No original OTel reimport during conversion",
+        "No reembedding during conversion",
+        "No dropped/capped source records",
+        "No hash/secret/source/protocol validator bypass",
+        "No full converter or artifact load launched by reviewer"
+      ],
+      "independent_review": "The root agent reviewed and accepted memory isolation, prompt guard, mandatory suite, idempotent rebinding and promotion; no remaining code objections reported."
+    },
+    "owning_proofs": {
+      "tests": [
+        "test_native_ascii_jsonl_preserves_unicode_and_public_provenance",
+        "test_native_republication_reuses_embeddings_rebinds_cases_and_keeps_old_artifacts"
+      ],
+      "red": {
+        "log": ".context/native-ascii-jsonl-red.log",
+        "result": "Actual future-build source wire is non-ASCII; unchanged official native fixture fails isascii assertion.",
+        "command": "PYTHONPATH=agents .context/experiential-venv/bin/python -m pytest -c /dev/null --confcutdir=agents/benchmarks -q agents/benchmarks/experiential_world_model_checks.py::test_native_ascii_jsonl_preserves_unicode_and_public_provenance"
+      },
+      "same_command_green": {
+        "log": ".context/native-ascii-jsonl-green-unchanged.log",
+        "result": "1 passed."
+      },
+      "assertions": [
+        "Actual ASCII source/transition/vector wire bytes; Unicode and bool/int/float decoded values unchanged.",
+        "Actual legacy native artifact conversion through public APIs; zero load_rose_trace/embed_rag_texts calls during conversion.",
+        "Canonical all-field source/transition/vector equality and original raw source hash; new source/RAG/model identities and exact reference chain.",
+        "Original artifact payload bytes unchanged; original exclusions/redactions retained.",
+        "Complete existing cases rebound, including changed suite on an idempotent call.",
+        "Missing suites, wrong prompt digest with self-consistent model ID, and cold physical source corruption reject; selected pointer remains unchanged."
+      ],
+      "complete_native": {
+        "log": ".context/native-ascii-jsonl-final-green.log",
+        "result": "27 passed in 1.69s.",
+        "command": "PYTHONPATH=agents .context/experiential-venv/bin/python -m pytest -c /dev/null -o cache_dir=\"$PWD/.context/native-pytest-cache\" --confcutdir=agents/benchmarks -q agents/benchmarks/experiential_world_model_checks.py"
+      },
+      "registered_blackbox": {
+        "log": ".context/native-ascii-jsonl-final-blackbox-green.log",
+        "result": "world-model-harness PASS; 1 domain passed, 0 failed in 9.3s.",
+        "command": "agents/venv/bin/python agents/scripts/run_blackbox_tests.py world-model-harness"
+      },
+      "lint_format_diff": "ruff check and ruff format --check on both changed source/test files; git diff --check: passed."
+    },
+    "archive_review": {
+      "searches": [
+        "UCS4|wide.Unicode|unicode_split|whole.file.*alloc|split.*memory",
+        "native.*startup|trace-dataset|whole.corpus|full.build"
+      ],
+      "finding": "No matching wide-Unicode allocation case found. The earlier WMH full-build JSONL framing case is related but fixes splitlines record-boundary corruption, rather than this literal-newline loader's wide-string allocation cost. Process feedback was previously read and applied."
+    },
+    "acceptance_limit": "The root agent owns the one full converter, fresh100-case binding, exact same180-second cold-start owner, unchanged benchmark, viewer replay and production deployment. None is credited by these bounded probes or owning checks."
+  },
+  "native_cloud_launch_correctness": {
+    "scope": "Explicit portable native engine/pool/context handoff and hash-tool portability only; no cloud provisioning, model/prompt/artifact changes, inference serialization, or acceptance-bound changes.",
+    "source_files": [
+      "scripts/run-bench-cloud",
+      "scripts/setup-world-model.sh",
+      "agents/benchmarks/serve_world_model.py"
+    ],
+    "owning_tests": [
+      "scripts/tests/cloudbench-env.test.sh",
+      "agents/benchmarks/wmh_rose_provider_test.py"
+    ],
+    "red": [
+      {
+        "command": "bash scripts/tests/cloudbench-env.test.sh",
+        "receipt": ".context/native-launch-cloud-red.log",
+        "exit_code": 1,
+        "result": "All5 new launch/checksum cases failed against unchanged source: boot missing native settings, SSH missing exports, refresh missing remote settings, missing/default validation, Linux-only SHA utility unsupported."
+      },
+      {
+        "command": "PYTHONPATH=agents agents/venv/bin/python -m pytest -q agents/benchmarks/wmh_rose_provider_test.py -k 'serving_cli'",
+        "receipt": ".context/native-launch-serving-red.log",
+        "exit_code": 1,
+        "result": "2 failed,3 passed: both native and legacy CLI ignored WMH_ROSE_POOL; existing explicit override/default cases passed."
+      }
+    ],
+    "green": [
+      {
+        "command": "bash scripts/tests/cloudbench-env.test.sh",
+        "receipt": ".context/native-launch-cloud-green.log",
+        "exit_code": 0,
+        "result": "5 new cases passed and complete existing cloud benchmark environment suite passed."
+      },
+      {
+        "command": "PYTHONPATH=agents agents/venv/bin/python -m pytest -q agents/benchmarks/wmh_rose_provider_test.py -k 'serving_cli'",
+        "receipt": ".context/native-launch-serving-green.log",
+        "exit_code": 0,
+        "result": "5 passed."
+      },
+      {
+        "command": "agents/venv/bin/python agents/scripts/run_blackbox_tests.py world-model-harness",
+        "receipt": ".context/native-launch-wmh-blackbox-green.log",
+        "exit_code": 0,
+        "result": "1 domain passed,0 failed;27 native checks and52 provider checks included;74.7 seconds."
+      }
+    ],
+    "proof": {
+      "controller": "Unchanged actual boot argument array, generated SSH exports and refresh BUILD_CMD execute under scratch fixtures; native settings arrive, invalid engine/pool/context rejected, legacy/ultra/unset-context defaults retained.",
+      "serving": "Actual public CLI main dispatches declared pool to both engine entry points; explicit --pool overrides preserved.",
+      "checksum": "Actual setup script with only sha256sum in PATH stores exact manifest digest and invokes existing installer/check options; actual runtime identity validator still rejects missing pinned native runtime.",
+      "path_boundary": "Neither controller-local WMH_NATIVE_PYTHON nor WMH_BUILD_DIR is forwarded. Refresh retains its owned guest artifact root.",
+      "review": "Root independently accepted source/test scope under RCA Step7; no source objections remained."
+    },
+    "remaining_readiness": "Native host provisioning/authenticated pinned dependency installation, complete verified artifact transport and full cold-start/resource/benchmark/viewer/production acceptance remain root-owned and unproven by these fixtures."
+  },
+  "native_controller_fixture_registry_and_export": {
+    "scope": "Offline Linux controller test infrastructure only; full unchanged multi-workstream qualification and canonical dispatcher both passed. No WMH semantic benchmark or production outcome claim.",
+    "registry": {
+      "original_red": ".context/native-controller-checks/07.log",
+      "cause": "Scripts-only fixture/snapshot omitted actual agents/providers/rose/pools.py newly consumed by cloud preflight. Stage and mount that authoritative single file read-only; retain actual registry validation.",
+      "registry_sha256": "0925dff7cfe6a2443a3c10d62f1c1e77371aca8cd0d6c807c6c86fee2001c836",
+      "owning_red": ".context/native-pool-registry-runner-red.log",
+      "owning_green": ".context/native-pool-registry-runner-green-final.log",
+      "dispatcher_cases": 10,
+      "full_command_after_fix": {
+        "log": ".context/native-pool-registry-multi-green.log",
+        "exit": 1,
+        "claim": "Original missing-registry failure cleared; later exact cancellation readiness failed, and historical host extraction was not proven complete."
+      }
+    },
+    "export": {
+      "independent_actual_red": ".context/native-controller-checks/12-linux-initial-cleanup-calls.json",
+      "unchanged_owning_command": "CLOUDBENCH_TEST_LINUX_EXPORT_REAL=1 python3 scripts/tests/cloudbench-controller-linux.test.py ContainerOwnership.test_real_restrictive_linux_export_keeps_complete_bytes_and_retires_owner",
+      "red_log": ".context/native-controller-export-red.log",
+      "red_snapshot": ".context/cloudbench-controller-tests/export-proof-uvdd6hsl",
+      "first_bad_boundary": "docker cp CID:/tmp/. <host fixture-tmp> exits1 because guest restrictive directory mode is applied before host child creation; mkdir restrictive/nested: permission denied. Stop0/removal0/exact absence1.",
+      "fix": "Capture same docker cp CID:/tmp/. - stream into0600tar in0700snapshot. Inventory and SHA256 every regular member without extracting paths or following symlinks; retain private exact lifecycle command streams. Ownership label/image/CID/3readonlymounts and30second stop bound unchanged.",
+      "same_owning_green": ".context/native-controller-export-green.log",
+      "green_snapshot": ".context/cloudbench-controller-tests/export-proof-kkgm_kny",
+      "green_cases": 11,
+      "final_unit_log": ".context/native-controller-export-unit-green-final.log",
+      "guard": "Malformed tar, cp failure/exception and stop failure fail closed while exact verified owner removal is still attempted. Foreign identity/image/mount or writable mount never mutated.",
+      "actual_green_archive": {
+        "sha256": "c9ae40c4b5110bceeb1ef79d2bfe7ff620329d3662ee8ae12926ef63e8bfc2ba",
+        "bytes": 4608,
+        "regular_files": 2,
+        "regular_bytes": 9
+      },
+      "final_registered_command": "python3 scripts/tests/cloudbench-controller-linux.test.py",
+      "final_registered_log": ".context/native-controller-dispatcher-final.log",
+      "final_registered_result": {
+        "passed": 11,
+        "skipped": 0,
+        "seconds": 34.179,
+        "real_docker_default": "Mandatory on Darwin; optional explicit enablement elsewhere, whose native fixture path uses no host Docker extraction."
+      },
+      "final_real_fixture_cleanup": "Exact ownership-guarded finally cleanup covers launch/readiness/assertion failures; no broad container cleanup."
+    },
+    "cancellation": {
+      "status": "Fixed at standard Docker launcher environment: unchanged full32scenario fixture passed; production PID classifier untouched.",
+      "observed_focused_red": ".context/native-cancellation-focused-observed.log",
+      "native_capture": ".context/native-cancellation-observer.jsonl",
+      "complete_export_snapshot": ".context/cloudbench-controller-tests/native-yuqsc_i5",
+      "facts": "Without Docker init, fixture shell is Linux PID1. It records protected live neighbor pid1 with exact proc-start birth. cloudbench_pid_birth_state requires pid>1; controller logs stale-neighbor recovery and attempts its volume cleanup. Own clone/audit/.cid eventually appear, but no status-proxy.port before unchanged400x0.05 readiness ends. Observer attached late after initial creation race; no complete no-init timing profile claimed. Same source/gates with Docker init gives fixture pid7 and PID1docker-init, preserves live neighbor, publishes status-proxy.port, and passes exact cancellation/recovery checks.",
+      "causal_control": {
+        "red_log": ".context/native-cancellation-focused-observed.log",
+        "red_native_capture": ".context/native-cancellation-observer.jsonl",
+        "green_log": ".context/native-cancellation-focused-init.log",
+        "green_native_capture": ".context/native-cancellation-init-observer.jsonl",
+        "delta": "Only Docker --init in private actual-launch argv, preserving source/image/CPU2/all gates and deadlines. Init gives fixture ordinary PID and reaps detached descendants. Protected live-neighbor preserved, exact recovery/subsequent ordering assertions passed.",
+        "green_snapshot": ".context/cloudbench-controller-tests/native-3v8am5i3"
+      },
+      "dispatcher_guard": {
+        "red_log": ".context/native-controller-init-owning-red.log",
+        "green_log": ".context/native-controller-init-owning-green.log",
+        "registered_cases": 11,
+        "real_container_case": "Opt-in real Docker proof runs separately; ordinary unit command skips only that case.",
+        "final_canonical_log": ".context/native-controller-dispatcher-final.log"
+      },
+      "full_candidate": {
+        "command": "bash -c 'source .context/deploy-worktree.env; bash scripts/tests/cloudbench-multi-workstream.test.sh'",
+        "log": ".context/native-pool-registry-multi-final.log",
+        "status": "passed",
+        "exit_code": 0,
+        "proof": ".context/native-controller-full7-proof.json",
+        "scenario_count": 32
+      }
+    },
+    "source_sha256": {
+      "scripts/tests/run-cloudbench-controller-linux.py": "e934d8009281c45a3e3279fb5d849d803320e3a21f67677a4fc6b5489104fbd9",
+      "scripts/tests/cloudbench-controller-linux.test.py": "2dcb57d18d67620b5e15afdb6525905dff96d42f479daba22907f1d2f549453b",
+      "scripts/tests/cloudbench-multi-workstream.test.sh": "e249011a4578ddcf1348f428d1d54ec7cf1561c776fb39e63c82f70ca2d151c8"
+    },
+    "archive_searches": [
+      "python3 scripts/rca_archive.py search \"docker cp permission denied fixture export\"",
+      "python3 scripts/rca_archive.py search \"controller fixture PID1 detached reaping\""
+    ],
+    "archive_scope": "Earlier cleanup-retention, terminal-zombie assertion and reserve-allocation cases are relatives with different first-bad boundaries. Existing reserve allocator and32MiB fixture reserve preserved. No literal tar/PID1 exporter match found; archive broad search hits are leads, not causal proof.",
+    "final_full_fixture": {
+      "command": "bash -c 'source .context/deploy-worktree.env; bash scripts/tests/cloudbench-multi-workstream.test.sh'",
+      "exit_code": 0,
+      "log": ".context/native-pool-registry-multi-final.log",
+      "log_sha256": "53c25f429b714627c82e709f02fa380860de678f03b4555859a6127aef662cca",
+      "scenario_pass_count": 32,
+      "terminal_assertions": [
+        "PASS: every controller, including fail-closed runs, reaped its own local processes",
+        "PASS: two workstreams ran cloud benchmarks concurrently, isolated end to end"
+      ],
+      "snapshot": ".context/cloudbench-controller-tests/native-mreh4a28",
+      "container_id": "bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323",
+      "owner": {
+        "name": "rose-cloudbench-controller-tests-e284409cae214294",
+        "owner": "e284409cae214294b79cc24e8dce5a8f",
+        "image_id": "sha256:ccfcd49a1667d5ca12f76805f0f3a238c34e3090da0efd11ea3a360376b05e2a"
+      },
+      "recipe_sha256": "d51342e8c125b67fddc1c4bb6b6249736f2ae8821a6d6096d7fa3d6994a6018f",
+      "source_bindings": {
+        "scripts/tests/cloudbench-multi-workstream.test.sh": {
+          "snapshot_sha256": "e249011a4578ddcf1348f428d1d54ec7cf1561c776fb39e63c82f70ca2d151c8",
+          "current_sha256": "e249011a4578ddcf1348f428d1d54ec7cf1561c776fb39e63c82f70ca2d151c8"
+        },
+        "scripts/tests/run-cloudbench-controller-linux.py": {
+          "snapshot_sha256": "e934d8009281c45a3e3279fb5d849d803320e3a21f67677a4fc6b5489104fbd9",
+          "current_sha256": "e934d8009281c45a3e3279fb5d849d803320e3a21f67677a4fc6b5489104fbd9"
+        },
+        "agents/providers/rose/pools.py": {
+          "snapshot_sha256": "0925dff7cfe6a2443a3c10d62f1c1e77371aca8cd0d6c807c6c86fee2001c836",
+          "current_sha256": "0925dff7cfe6a2443a3c10d62f1c1e77371aca8cd0d6c807c6c86fee2001c836"
+        }
+      },
+      "source_scope": "Executed fixture/helper/authoritative pool registry match final current bytes. The uninvoked dispatcher unittest file received final Darwin discovery/finally changes during the full fixture; final current unittest source separately passed11/11.",
+      "dispatcher": {
+        "command": "python3 scripts/tests/cloudbench-controller-linux.test.py",
+        "log": ".context/native-controller-dispatcher-final.log",
+        "passed": 11,
+        "skipped": 0,
+        "seconds": 34.179,
+        "test_source_sha256": "2dcb57d18d67620b5e15afdb6525905dff96d42f479daba22907f1d2f549453b"
+      },
+      "exact_cleanup_commands": [
+        {
+          "args": [
+            "docker",
+            "inspect",
+            "bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323",
+            "--format",
+            "{{.Id}}\n{{.Name}}\n{{index .Config.Labels \"org.rose.controller-test-owner\"}}\n{{.Image}}\n{{json .Mounts}}"
+          ],
+          "returncode": 0,
+          "stdout": "bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323\n/rose-cloudbench-controller-tests-e284409cae214294\ne284409cae214294b79cc24e8dce5a8f\nsha256:ccfcd49a1667d5ca12f76805f0f3a238c34e3090da0efd11ea3a360376b05e2a\n[{\"Destination\":\"/repo/scripts\",\"Mode\":\"ro\",\"Propagation\":\"rprivate\",\"RW\":false,\"Source\":\"/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/cloudbench-controller-tests/native-mreh4a28/scripts\",\"Type\":\"bind\"},{\"Destination\":\"/repo/agents/benchmarks\",\"Mode\":\"ro\",\"Propagation\":\"rprivate\",\"RW\":false,\"Source\":\"/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/cloudbench-controller-tests/native-mreh4a28/agents/benchmarks\",\"Type\":\"bind\"},{\"Destination\":\"/repo/agents/providers/rose/pools.py\",\"Mode\":\"ro\",\"Propagation\":\"rprivate\",\"RW\":false,\"Source\":\"/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/cloudbench-controller-tests/native-mreh4a28/agents/providers/rose/pools.py\",\"Type\":\"bind\"}]\n",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "docker",
+            "stop",
+            "--time",
+            "30",
+            "bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323"
+          ],
+          "returncode": 0,
+          "stdout": "Flag --time has been deprecated, use --timeout instead\nbdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323\n",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "docker",
+            "cp",
+            "bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323:/tmp/.",
+            "-"
+          ],
+          "returncode": 0,
+          "stdout": null,
+          "stderr": ""
+        },
+        {
+          "args": [
+            "docker",
+            "rm",
+            "bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323"
+          ],
+          "returncode": 0,
+          "stdout": "bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323\n",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "docker",
+            "inspect",
+            "bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323"
+          ],
+          "returncode": 1,
+          "stdout": "[]\n",
+          "stderr": "error: no such object: bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323\n"
+        }
+      ],
+      "independent_native_absence": {
+        "exit_code": 1,
+        "stderr": "error: no such object: bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323"
+      },
+      "archive": {
+        "path": ".context/cloudbench-controller-tests/native-mreh4a28/fixture-tmp.tar",
+        "sha256": "5504305a49ec1ca2023628d1594ae577fc9a34d9d72f0bc0018df564b0d60278",
+        "bytes": 2048,
+        "regular_files": 0,
+        "regular_bytes": 0,
+        "nonregular_members": 2,
+        "snapshot_mode": "0o700",
+        "archive_mode": "0o600",
+        "inventory_mode": "0o600",
+        "scope": "A successful fixture deliberately removes its temporary root, so this complete archive contains0regularfiles. Separate mandatory Darwin restrictive-mode regression proves original bytes retained without unsafe extraction."
+      },
+      "runtime_limits": "CPU2, no network, original fixture assertions/readiness400x0.05/timeouts unchanged; standard Docker init only restores host-like PID/subreaping semantics.",
+      "verified_at_utc": "2026-10-07T01:14:57.642636+00:00"
+    },
+    "archive_verification_records": [
+      {
+        "id": "native-controller-fixture-omitted-authoritative-pool-registry",
+        "classification": "test-bug",
+        "problem_class": "fixture-environment-data-mismatch",
+        "first_bad_boundary": "Linux snapshot and scratch worktrees staged scripts/benchmarks but omitted actual agents/providers/rose/pools.py consumed by run-bench-cloud preflight.",
+        "problem": "Actual unchanged cmd7 exited before allocation with missing pools.py then Invalid WMH_ROSE_POOL.",
+        "diagnosis": "A real new source dependency was missing from the legitimate hermetic fixture, not a bad pool value. Owning dispatcher tests failed7/10 before exact registry staging/mount correction.",
+        "solution": "Stage/copy/hash authoritative single registry file and mount it read-only; preserve actual registry validation and exact mount-ownership checks. Full32scenario cmd7 and final11case dispatcher passed.",
+        "human_feedback": "Task direction explicitly prohibited skipping or stubbing registry validation, broad provider mounts, or raised bounds.",
+        "reusable_lesson": "Stage the authoritative dependencies consumed by the real launcher and bind their exact bytes in the fixture snapshot.",
+        "status": "fixed",
+        "repro": "python3 scripts/tests/cloudbench-controller-linux.test.py",
+        "red": ".context/native-pool-registry-runner-red.log",
+        "green": ".context/native-controller-dispatcher-final.log"
+      },
+      {
+        "id": "native-controller-fixture-launched-as-linux-pid1",
+        "classification": "test-bug",
+        "problem_class": "fixture-environment-data-mismatch",
+        "first_bad_boundary": "Standard Docker launcher ran the ownership fixture itself as PID1 without host-like init/subreaping semantics.",
+        "problem": "Unchanged400x0.05 cancellation gate did not observe exact recoverable guest identity.",
+        "diagnosis": "Native capture proves fixture live-neighbor metadata had exact pid1 birth; PID identity contract requires pid>1, and real controller logged stale-neighbor recovery/volume attempt. Same actual focused source/gates passed with only Docker--init, using ordinary fixture pid7 and docker-init PID1. Historical full red state was not captured; no complete timing-profile claim.",
+        "solution": "Standard Docker--init in actual launcher plus owning public dispatcher assertion. Production classifier unchanged; full32scenarios including cancellation passed with original deadlines.",
+        "human_feedback": "Task direction required exact native identity evidence and prohibited classifier relaxation, timeout changes, or silent test skipping.",
+        "reusable_lesson": "Give process-ownership fixtures ordinary host-like PIDs and a real subreaper rather than running the fixture as container init.",
+        "status": "fixed",
+        "repro": "CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY=1 through the existing native dispatcher",
+        "red": ".context/native-cancellation-focused-observed.log",
+        "green": ".context/native-cancellation-focused-init.log",
+        "permanent_owning_red": ".context/native-controller-init-owning-red.log",
+        "permanent_owning_green": ".context/native-controller-dispatcher-final.log"
+      },
+      {
+        "id": "native-controller-host-export-applied-restrictive-guest-modes",
+        "classification": "test-bug",
+        "problem_class": "logical-inconsistency-in-harness-contracts",
+        "first_bad_boundary": "Docker host extraction applied guest directory permissions before creating nested fixture files.",
+        "problem": "Actual cp1 mkdir restrictive/nested: permission denied despite stop0/removal0/native absence1.",
+        "diagnosis": "Genuine unchanged permanent real-container test reproduced same extraction mechanism, with0500directory/0400file. Same command passed after stream publication and byte inventory. Earlier unexplained fullcmd7 exporter verdict remains historical proof gap, not claimed same cause.",
+        "solution": "Same exact docker cp source goes to0600tar under0700snapshot; digest archive and every regular member without extraction/link following. Preserve exact owner/image/CID/readonlymount/stop/removal gates and record lifecycle streams. Mandatory Darwin regression runs unchanged canonical deploy command. Malformed tar and failed copy fail closed.",
+        "human_feedback": "Task direction required complete private export, exact owned-container retirement, and actual restrictive-permission red/green without weakening modes or cleanup checks.",
+        "reusable_lesson": "Preserve untrusted guest filesystem evidence as a private verified archive instead of applying guest paths and modes on the host.",
+        "status": "fixed",
+        "repro": "CLOUDBENCH_TEST_LINUX_EXPORT_REAL=1 python3 scripts/tests/cloudbench-controller-linux.test.py ContainerOwnership.test_real_restrictive_linux_export_keeps_complete_bytes_and_retires_owner",
+        "red": ".context/native-controller-export-red.log",
+        "green": ".context/native-controller-export-owning-green-final.log",
+        "permanent_deploy_green": ".context/native-controller-dispatcher-final.log",
+        "scaling": "One bounded owning-container lifecycle; streaming1MiBchunks and per-member metadata, no dependence on production agent count and no inference/shared-state changes."
+      }
+    ],
+    "markdown_scope": "No new Markdown case created: CLAUDE.md1327 prohibits new .md docs unless explicitly requested; no explicit /deploy new-case exception found. Existing JSON preserves each independent first-bad boundary and exact reproducible evidence; no claim these records are entries in the Markdown case index."
+  }
+}

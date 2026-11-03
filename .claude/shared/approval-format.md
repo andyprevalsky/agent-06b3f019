@@ -7,6 +7,10 @@ summary, and do not rename, reorder, or omit its seven required sections
 (Before Behavior, After Behavior, How, TL;DR, Evidence, Detail, Downstream
 Implications). Present them exactly as described in Presentation below.
 
+Every approval request first passes the Golden-reference adversarial review at
+the end of this file. A `GROUNDED` verdict clears change approvals without the
+user; only the other verdicts reach the user.
+
 Use one approval ID per snapshot-scoped decision. Group hunks only when one
 decision necessarily covers them together. Include clickable file-and-line links
 for every code, prompt, instruction, test, configuration, or migration hunk in
@@ -78,6 +82,8 @@ Evidence:
   Golden reference: <reference-repo>/<path>:<line> — <what the reference
     harness does>; this change <converges on it | diverges from it because
     <reason>>.
+  Golden review: <NOT_GROUNDED | HUMAN_REQUIRED> by `<reviewer agent id>` @
+    <snapshot> — <blocking findings or operational reason>
   Environment:
     Evaluators: `<id>` — <how checked>: <what is checked>. Catalog:
       `<method>` / `<check.type or judge>`
@@ -238,7 +244,8 @@ Do not omit `Tests:`; a command list without saying what is asserted is invalid.
 **Golden reference:** `<reference-repo>/<path>:<line>` — <what the reference harness does in this situation, in one sentence>; this change <converges on it | diverges from it because <reason>>.
 
 Name the implementation in a reference harness that handles the same problem:
-`claude-code-src/` (vendored), `openclaw/`, `hermes-agent/`, or `codex/` (run
+`claude-code-src/` (vendored), `openclaw/`, `hermes-agent/`, `codex/`, or
+`kimi-code/` (run
 `bash scripts/sync-reference-repos.sh` when a clone is missing). Cite a real
 `path:line` you opened in this session, one line per repo that has an analog,
 and say for each whether the proposed change moves Rose toward it. These
@@ -248,6 +255,11 @@ approach does not fit. Look the references up before designing the fix, not
 after the request is questioned. When no reference repo has an analog, write
 `Not applicable — <which repos you searched and for what>`. Never cite a
 reference from memory, and never cite only the repo name.
+
+**Golden review:** `<NOT_GROUNDED | HUMAN_REQUIRED>` by `<reviewer agent id>` @ `<snapshot>` — <every blocking finding, or the operational reason a human must decide>.
+
+The verdict of the Golden-reference adversarial review below. A `GROUNDED`
+packet never reaches the user, so this line says why this one did.
 
 **Environment**
 
@@ -342,8 +354,68 @@ Evidence field, in-scope file
 link, **What failed:** task-framed sentence, concrete FE agent link, last-call
 rendered LLM dump, local-repro `Tests:` sentence plus steps and measured
 wall-clock, **Golden reference:** citation, or Environment triple (evaluators
-with how they are checked, fixtures, task prompt) is missing. For prompt / LLM-visible text approvals it
-is also invalid if the exact diff body is omitted or replaced by a file link
-alone. `Not applicable — <reason>` counts as present; a blank field does
+with how they are checked, fixtures, task prompt) is missing, or if it reaches
+the user without its **Golden review:** verdict. For prompt / LLM-visible
+text approvals it is also invalid if the
+exact diff body is omitted or replaced by a file link alone. `Not applicable — <reason>` counts as present; a blank field does
 not. Approval remains snapshot-scoped: if an in-scope hunk changes, issue a new
 approval ID and present all seven sections again.
+
+## Golden-reference adversarial review
+
+Every approval request passes this review before it reaches the user. Draft
+the complete packet first; the reviewer reads the packet, not a summary.
+
+Scope: only the hunks inside the mandatory user-approval section, meaning the
+hunks a gate flagged for human approval (deploy Steps 0p/0b/0c, Zod schema
+changes, `/RCA` or `/descend` harness-fix packets). Never ground the rest of
+the diff: ordinary code, tests and UI changes outside that scope need no
+golden citation and are not reviewed here.
+
+1. **Reviewer.** Fire a fresh sub-agent that did not author the change. It
+   inherits the parent's model, reasoning effort and speed (CLAUDE.md
+   Sub-agent delegation), works read-only in an existing checkout, and is told
+   to refute the grounding, not to confirm it. Give it the approval ID,
+   snapshot, exact diff of every in-scope hunk and the drafted packet.
+2. **Checks.** The reviewer must:
+   - research at least the three most relevant open-source references for
+     the hunk's mechanism itself, choosing by closeness to the change and
+     reading their actual code or prompts, and name each with the `path:line`
+     it opened. Fewer than three opened is `NOT_GROUNDED`; a reference cited
+     in the packet does not count unless the reviewer opened it and decided
+     its verdict from what it found;
+   - open every cited golden reference itself (run
+     `bash scripts/sync-reference-repos.sh` when a clone is missing) and
+     confirm that the `path:line` exists and does what the packet claims,
+     with its concrete values;
+   - map every in-scope hunk to a reference behavior; a hunk without an
+     analog, a citation from memory or a bare repo name is ungrounded;
+   - search the other references for contrary practice and confirm that the
+     change converges on their shared pattern with the same mechanism and
+     comparable limits, and is no broader than the reference; an unexplained
+     or weak divergence is ungrounded;
+   - confirm that the packet is otherwise valid under this file and that the
+     change breaks no CLAUDE.md hard rule (reward hacking, runtime nudges,
+     string-matching classifiers, 10k-agent scaling). A reference doing it does
+     not override a repo rule.
+3. **Verdict.** Return one verdict per approval ID: `GROUNDED` only when every
+   hunk passes, otherwise `NOT_GROUNDED` with every blocking finding listed
+   together. Operational approvals return `HUMAN_REQUIRED` after the packet
+   check: writing env vars or credentials, billing or spend beyond existing
+   authorization, destructive or irreversible actions, explicit gate overrides,
+   and benchmark definition, pass-criteria or timeout changes.
+4. **`GROUNDED` clears the human gate.** The change passes every manual
+   human-review gate for deploy (`/deploy` Steps 0p, 0b and 0c, Zod schema
+   changes) and the `/RCA` or `/descend` harness-fix decision without reaching
+   the user. Record the approval ID, snapshot, reviewer agent ID and verified
+   citations where the human decision would have been recorded (`TEST_REPORT`,
+   PR body, `/descend` ledger), and list cleared approvals in the final
+   handoff. Do not emit `approval-request` or `approval-decision` factory
+   events for it; those measure human waits.
+5. **Otherwise the user decides.** Fix the findings and review again once if
+   the bytes change, or send the packet with the verdict on its
+   `Golden review:` line. An explicit user rejection, or a user instruction to
+   review a specific change personally, always wins.
+
+The verdict is snapshot-scoped: any change to an in-scope hunk needs a new
+review.

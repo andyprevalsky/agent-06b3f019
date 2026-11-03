@@ -1,0 +1,26 @@
+{
+  "schema": "rose-swap-harness-private-v1",
+  "old_devbox_id": "c5f40427-00e7-4554-b3a8-ef48bd5f0222",
+  "bucket": "trace-archive",
+  "object_key": "swap-harness-private/c5f40427-00e7-4554-b3a8-ef48bd5f0222/benchmark-infra-old-host-observation-78d7f7ee0b2505272e7e6e9e6b6a4b720732faf0d9a23ffab87c4fc428977bbf.tar.gz.aesgcm",
+  "encrypted_bytes": 1417,
+  "sha256": "78d7f7ee0b2505272e7e6e9e6b6a4b720732faf0d9a23ffab87c4fc428977bbf",
+  "remote_full_readback_verified": true,
+  "file_count": 1,
+  "roots": [
+    "/home/boxes/rose/.context/swap-harness/original-host-controller-absence.json"
+  ],
+  "key_source": "authoritative agents/.env BACKEND_API_KEY",
+  "restore": "Read ROSESWAP1 magic, 4-byte big-endian JSON header length and JSON header; derive AES key with HKDF-SHA256 salt/header hkdf_info and authoritative BACKEND_API_KEY; AES-GCM nonce from header, header bytes as AAD, final 16 bytes as tag. Decrypt to gzip tar. Extract privately into an isolated recovery directory; never overwrite live .git or runtime identities.",
+  "authenticated_decryption_verified": true,
+  "decrypted_gzip_sha256": "b3e0a62fdce89068c6c0f37bf1b118ee9183de3e6cccb47b7d1fc07a1e98dd1d",
+  "replacement_must_compare_all_members": true,
+  "original_member_hashes": [
+    {
+      "path": "rose/.context/swap-harness/original-host-controller-absence.json",
+      "type": "0",
+      "bytes": 1312,
+      "sha256": "18c21036c6f2247ffa5fcc4c84cecb7ec17dc5d1b5df8b5ce22c09061ade8859"
+    }
+  ]
+}

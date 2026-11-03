@@ -1,5 +1,5 @@
 {
-  "_doc": "Catalog of every prompt to review. Each entry has: repo (ours|claude-code-src|openclaw|hermes-agent|codex|prime-agent), path (relative to repo root), id (stable name \u2014 variable name, function, or basename), category, summary, keywords. The build script extracts text using id (regex anchor) with line-range as fallback. To add a prompt, append to the relevant list \u2014 no schema changes needed.",
+  "_doc": "Catalog of every prompt to review. Each entry has: repo (ours|claude-code-src|openclaw|hermes-agent|codex|prime-agent|kimi-code), path (relative to repo root), id (stable name \u2014 variable name, function, or basename), category, summary, keywords. The build script extracts text using id (regex anchor) with line-range as fallback. To add a prompt, append to the relevant list \u2014 no schema changes needed.",
   "ours": [
     {
       "path": "agents/utils/user_facing_writing_prompt.py",
@@ -21,7 +21,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       }
     },
     {
@@ -44,7 +45,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       }
     },
     {
@@ -155,7 +157,8 @@
         "openclaw": "openclaw_buildAgentSystemPrompt",
         "hermes": "hermes_default_agent_identity",
         "codex": "codex_base_instructions",
-        "prime": "prime_core_harness"
+        "prime": "prime_core_harness",
+        "kimi": "kimi_system_prompt"
       },
       "agent": "main_shared"
     },
@@ -222,7 +225,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "verifier"
     },
@@ -258,7 +262,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "planner"
     },
@@ -281,7 +286,8 @@
         "openclaw": "openclaw_subagent_system_prompt",
         "hermes": "hermes_explore_reference",
         "codex": "codex_multi_agent_subagent",
-        "prime": null
+        "prime": null,
+        "kimi": "kimi_explore_overlay"
       },
       "agent": "explore"
     },
@@ -303,7 +309,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": "prime_skill_goal"
+        "prime": "prime_skill_goal",
+        "kimi": "kimi_tool_update_goal"
       },
       "agent": "main_shared"
     },
@@ -325,7 +332,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "main_execute"
     },
@@ -347,7 +355,8 @@
         "openclaw": null,
         "hermes": "hermes_search_files_tool",
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": "kimi_tool_grep"
       },
       "agent": "explore"
     },
@@ -370,7 +379,8 @@
         "openclaw": "openclaw_message_tool",
         "hermes": "hermes_send_message_tool",
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "main_execute"
     },
@@ -391,7 +401,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "main_execute"
     },
@@ -414,7 +425,8 @@
         "openclaw": "openclaw_message_tool",
         "hermes": "hermes_send_message_tool",
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": "kimi_tool_notify_user"
       },
       "agent": "main_plan"
     },
@@ -436,7 +448,8 @@
         "openclaw": "openclaw_message_tool",
         "hermes": "hermes_send_message_tool",
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": "kimi_tool_notify_user"
       },
       "agent": "main_execute"
     },
@@ -458,7 +471,8 @@
         "openclaw": "openclaw_update_plan",
         "hermes": null,
         "codex": null,
-        "prime": "prime_skill_factory"
+        "prime": "prime_skill_factory",
+        "kimi": "kimi_tool_todo_list"
       },
       "agent": "main_plan"
     },
@@ -481,7 +495,8 @@
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool",
         "codex": "codex_orchestrator",
-        "prime": "prime_subagents"
+        "prime": "prime_subagents",
+        "kimi": "kimi_tool_agent"
       },
       "agent": "main_shared"
     },
@@ -504,7 +519,8 @@
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool",
         "codex": "codex_orchestrator",
-        "prime": "prime_subagents"
+        "prime": "prime_subagents",
+        "kimi": "kimi_tool_agent"
       },
       "agent": "main_execute"
     },
@@ -527,7 +543,8 @@
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool",
         "codex": "codex_orchestrator",
-        "prime": "prime_subagents"
+        "prime": "prime_subagents",
+        "kimi": "kimi_tool_agent"
       },
       "agent": "main_execute"
     },
@@ -550,7 +567,8 @@
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool",
         "codex": "codex_orchestrator",
-        "prime": "prime_subagents"
+        "prime": "prime_subagents",
+        "kimi": "kimi_tool_agent"
       },
       "agent": "main_shared"
     },
@@ -572,7 +590,8 @@
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool",
         "codex": "codex_orchestrator",
-        "prime": "prime_subagents"
+        "prime": "prime_subagents",
+        "kimi": "kimi_tool_agent"
       },
       "agent": "main_execute"
     },
@@ -595,7 +614,8 @@
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool",
         "codex": "codex_orchestrator",
-        "prime": "prime_skill_factory"
+        "prime": "prime_skill_factory",
+        "kimi": "kimi_tool_agent_swarm"
       },
       "agent": "main_execute"
     },
@@ -617,7 +637,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": "prime_skill_rlm_heartbeat"
+        "prime": "prime_skill_rlm_heartbeat",
+        "kimi": "kimi_tool_task_wait"
       },
       "agent": "main_execute"
     },
@@ -640,7 +661,8 @@
         "openclaw": "openclaw_web_fetch",
         "hermes": "hermes_web_extract_tool",
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": "kimi_tool_fetch_url"
       },
       "agent": "explore"
     },
@@ -663,7 +685,8 @@
         "openclaw": "openclaw_web_search",
         "hermes": "hermes_web_search_tool",
         "codex": null,
-        "prime": "prime_skill_websearch"
+        "prime": "prime_skill_websearch",
+        "kimi": "kimi_tool_web_search"
       },
       "agent": "explore"
     },
@@ -685,7 +708,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "browser"
     },
@@ -707,7 +731,8 @@
         "openclaw": "openclaw_browser_action_snapshot",
         "hermes": "hermes_browser_snapshot",
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "browser"
     },
@@ -729,7 +754,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "browser"
     },
@@ -752,7 +778,8 @@
         "openclaw": "openclaw_browser_action_act_click",
         "hermes": "hermes_browser_click",
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "browser"
     },
@@ -774,7 +801,8 @@
         "openclaw": "openclaw_browser_action_act_fill",
         "hermes": "hermes_browser_type",
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "browser"
     },
@@ -796,7 +824,8 @@
         "openclaw": "openclaw_browser_action_act_type",
         "hermes": "hermes_browser_type",
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "browser"
     },
@@ -818,7 +847,8 @@
         "openclaw": "openclaw_browser_action_act_press",
         "hermes": "hermes_browser_press",
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "browser"
     },
@@ -839,7 +869,8 @@
         "openclaw": "openclaw_browser_action_navigate",
         "hermes": "hermes_browser_navigate",
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "browser"
     },
@@ -859,7 +890,8 @@
         "openclaw": null,
         "hermes": "hermes_browser_scroll",
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "browser"
     },
@@ -880,7 +912,8 @@
         "openclaw": "openclaw_browser_action_act_wait",
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "browser"
     },
@@ -901,7 +934,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "browser"
     },
@@ -922,7 +956,8 @@
         "openclaw": "openclaw_browser_action_screenshot",
         "hermes": "hermes_browser_vision",
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "browser"
     },
@@ -944,7 +979,8 @@
         "openclaw": "openclaw_browser_action_snapshot_aria",
         "hermes": "hermes_browser_snapshot",
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "browser"
     },
@@ -965,7 +1001,8 @@
         "openclaw": null,
         "hermes": "hermes_browser_back",
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "browser"
     },
@@ -986,7 +1023,8 @@
         "openclaw": "openclaw_browser_action_act_clickCoords",
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "browser"
     },
@@ -1007,7 +1045,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "main_execute"
     },
@@ -1029,7 +1068,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "browser"
     },
@@ -1123,7 +1163,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "planner"
     },
@@ -1159,7 +1200,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": "codex_compact_prompt",
-        "prime": "prime_compaction_prompt"
+        "prime": "prime_compaction_prompt",
+        "kimi": "kimi_compaction_instruction"
       },
       "agent": "shared"
     },
@@ -1181,7 +1223,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": "codex_compact_prompt",
-        "prime": "prime_compaction_prompt"
+        "prime": "prime_compaction_prompt",
+        "kimi": "kimi_compaction_instruction"
       }
     },
     {
@@ -1216,7 +1259,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "chat"
     },
@@ -1238,7 +1282,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "chat"
     },
@@ -1259,7 +1304,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "chat"
     },
@@ -1281,7 +1327,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "voice"
     },
@@ -1303,7 +1350,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "sms"
     },
@@ -1354,7 +1402,8 @@
         "openclaw": null,
         "hermes": null,
         "codex": null,
-        "prime": null
+        "prime": null,
+        "kimi": null
       },
       "agent": "shared"
     },
@@ -3179,6 +3228,322 @@
         "evaluator",
         "gates",
         "quality"
+      ]
+    }
+  ],
+  "kimi-code": [
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/app/agentProfileCatalog/system.md",
+      "anchor": "You are ${product_name}, an interactive general AI agent run",
+      "id": "kimi_system_prompt",
+      "category": "system_prompt",
+      "summary": "Main agent system prompt template \u2014 identity, communication, tool use, coding, risky actions.",
+      "keywords": [
+        "system",
+        "identity",
+        "communication",
+        "tool",
+        "coding",
+        "risky"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/session/agentLifecycle/profile/explore-overlay.md",
+      "anchor": "You are now running as a subagent. All the `user` messages a",
+      "id": "kimi_explore_overlay",
+      "category": "system_prompt",
+      "summary": "Explore subagent overlay \u2014 caller is the parent agent; read-only codebase exploration specialist.",
+      "keywords": [
+        "explore",
+        "subagent",
+        "overlay",
+        "read-only",
+        "search"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/features/tower/tower-worker-overlay.md",
+      "anchor": "You are a tower worker/reviewer in a multi-agent tower works",
+      "id": "kimi_tower_worker_overlay",
+      "category": "system_prompt",
+      "summary": "Tower worker/reviewer overlay \u2014 multi-agent workspace protocol through Tower* tools only.",
+      "keywords": [
+        "tower",
+        "worker",
+        "reviewer",
+        "multi-agent",
+        "overlay"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/features/sessionInit/profile/init.md",
+      "anchor": "You are a software engineering expert with many years of pro",
+      "id": "kimi_session_init",
+      "category": "system_prompt",
+      "summary": "/init profile \u2014 explore the project and write AGENTS.md.",
+      "keywords": [
+        "init",
+        "agents.md",
+        "explore",
+        "project"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/agent/fullCompaction/compaction-instruction.md",
+      "anchor": "You are about to run out of context. Create a handoff summar",
+      "id": "kimi_compaction_instruction",
+      "category": "system_prompt",
+      "summary": "Full compaction instruction \u2014 self-sufficient handoff summary for the resuming model.",
+      "keywords": [
+        "compaction",
+        "summary",
+        "handoff",
+        "context"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/agent/fullCompaction/context-recovery-footer.md",
+      "anchor": "## Context Recovery",
+      "id": "kimi_context_recovery_footer",
+      "category": "system_prompt",
+      "summary": "Post-compaction footer \u2014 pointer to the on-disk event log for exact earlier context.",
+      "keywords": [
+        "compaction",
+        "recovery",
+        "event",
+        "log",
+        "context"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/features/plan/injection/plan-mode-full-reminder.md",
+      "anchor": "Plan mode is active: the user turned it on to review a plan ",
+      "id": "kimi_plan_mode_full_reminder",
+      "category": "system_prompt",
+      "summary": "Plan-mode reminder \u2014 no edits except the plan file until the user approves.",
+      "keywords": [
+        "plan",
+        "mode",
+        "reminder",
+        "read-only"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/features/goal/injection/goal-active-reminder.md",
+      "anchor": "You are working under an active goal (goal mode).",
+      "id": "kimi_goal_active_reminder",
+      "category": "system_prompt",
+      "summary": "Goal-mode reminder \u2014 work the user objective autonomously; objective is data, not instructions.",
+      "keywords": [
+        "goal",
+        "autonomous",
+        "reminder",
+        "objective"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/agent/tools/agent/agent.md",
+      "anchor": "Launch a subagent to handle a task. The subagent runs as a s",
+      "id": "kimi_tool_agent",
+      "category": "tool_description",
+      "summary": "Tool: Agent \u2014 launch a subagent only when the user asks; agent types and background mode.",
+      "keywords": [
+        "agent",
+        "subagent",
+        "spawn",
+        "delegate"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/features/swarm/tools/agent-swarm/agent-swarm.md",
+      "anchor": "Launch multiple subagents from one prompt template, existing",
+      "id": "kimi_tool_agent_swarm",
+      "category": "tool_description",
+      "summary": "Tool: AgentSwarm \u2014 fan out one prompt template over many items (swarm mode only).",
+      "keywords": [
+        "swarm",
+        "fanout",
+        "subagents",
+        "template",
+        "items"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/agent/tools/task/task-wait/task-wait.md",
+      "anchor": "Wait for background tasks to finish without ending the curre",
+      "id": "kimi_tool_task_wait",
+      "category": "tool_description",
+      "summary": "Tool: TaskWait \u2014 block in-turn on background tasks only when nothing else can proceed.",
+      "keywords": [
+        "wait",
+        "background",
+        "task",
+        "timeout"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/agent/tools/os/bash/bash.md",
+      "anchor": "Execute a `${SHELL_NAME}` command. Use this for shell semant",
+      "id": "kimi_tool_bash",
+      "category": "tool_description",
+      "summary": "Tool: Bash \u2014 shell semantics; translate cat/sed/find to dedicated tools.",
+      "keywords": [
+        "bash",
+        "shell",
+        "command",
+        "process"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/agent/tools/os/grep/grep.md",
+      "anchor": "Search file contents using regular expressions (powered by r",
+      "id": "kimi_tool_grep",
+      "category": "tool_description",
+      "summary": "Tool: Grep \u2014 ripgrep content search.",
+      "keywords": [
+        "grep",
+        "search",
+        "ripgrep",
+        "regex"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/agent/tools/os/read/read.md",
+      "anchor": "Read a text file from the local filesystem.",
+      "id": "kimi_tool_read",
+      "category": "tool_description",
+      "summary": "Tool: Read \u2014 read a file with line numbers and limits.",
+      "keywords": [
+        "read",
+        "file",
+        "lines"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/agent/tools/edit/edit.md",
+      "anchor": "Perform exact replacements in existing files.",
+      "id": "kimi_tool_edit",
+      "category": "tool_description",
+      "summary": "Tool: Edit \u2014 exact replacements; read first, no sed.",
+      "keywords": [
+        "edit",
+        "replace",
+        "file"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/agent/tools/web-search/web-search.md",
+      "anchor": "Search the web for information. Use this when you need up-to",
+      "id": "kimi_tool_web_search",
+      "category": "tool_description",
+      "summary": "Tool: WebSearch \u2014 snippet results; fetch only the URLs you need.",
+      "keywords": [
+        "web",
+        "search",
+        "query",
+        "results"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/agent/tools/fetch-url/fetch-url.md",
+      "anchor": "Fetch content from a URL. The content is returned either as ",
+      "id": "kimi_tool_fetch_url",
+      "category": "tool_description",
+      "summary": "Tool: FetchURL \u2014 public http(s) page text or verbatim body.",
+      "keywords": [
+        "fetch",
+        "url",
+        "web",
+        "page"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/agent/tools/ask-user-question/ask-user.md",
+      "anchor": "Use this tool when you need to ask the user questions with s",
+      "id": "kimi_tool_ask_user",
+      "category": "tool_description",
+      "summary": "Tool: AskUserQuestion \u2014 structured options; be decisive when context suffices.",
+      "keywords": [
+        "ask",
+        "user",
+        "question",
+        "options"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/features/notify/tools/notify-user/notify-user.md",
+      "anchor": "Show the end user a progress update without ending your turn",
+      "id": "kimi_tool_notify_user",
+      "category": "tool_description",
+      "summary": "Tool: NotifyUser \u2014 progress update to the end user without ending the turn.",
+      "keywords": [
+        "notify",
+        "user",
+        "progress",
+        "message"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/features/todo/tools/todo-list/todo-list.md",
+      "anchor": "Use this tool to maintain a structured TODO list as you work",
+      "id": "kimi_tool_todo_list",
+      "category": "tool_description",
+      "summary": "Tool: TodoList \u2014 live structured progress list for multi-step work.",
+      "keywords": [
+        "todo",
+        "plan",
+        "progress",
+        "tasks"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/features/plan/tools/exit-plan-mode/exit-plan-mode.md",
+      "anchor": "Use this tool when you are in plan mode and have finished wr",
+      "id": "kimi_tool_exit_plan_mode",
+      "category": "tool_description",
+      "summary": "Tool: ExitPlanMode \u2014 submit the written plan file for user approval.",
+      "keywords": [
+        "plan",
+        "exit",
+        "approval"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/features/goal/tools/update-goal/update-goal.md",
+      "anchor": "Set the status of the current goal. This is how you resume, ",
+      "id": "kimi_tool_update_goal",
+      "category": "tool_description",
+      "summary": "Tool: UpdateGoal \u2014 resume, complete or block the active goal after verifying the objective.",
+      "keywords": [
+        "goal",
+        "complete",
+        "blocked",
+        "status",
+        "completion"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/features/skill/tools/skill.md",
+      "anchor": "Invoke a registered skill from the current skill listing. BL",
+      "id": "kimi_tool_skill",
+      "category": "tool_description",
+      "summary": "Tool: Skill \u2014 invoke a registered skill when it matches the request.",
+      "keywords": [
+        "skill",
+        "invoke"
+      ]
+    },
+    {
+      "path": "kimi-code/packages/agent-core-v2/src/features/cron/tools/cron-create/cron-create.md",
+      "anchor": "Schedule a prompt to be enqueued at a future time. Use for b",
+      "id": "kimi_tool_cron_create",
+      "category": "tool_description",
+      "summary": "Tool: CronCreate \u2014 schedule recurring or one-shot prompts.",
+      "keywords": [
+        "cron",
+        "schedule",
+        "reminder",
+        "recurring"
       ]
     }
   ]

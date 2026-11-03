@@ -1,10 +1,13 @@
+import { createLogicalBrowserInTransaction } from '../../providers/browser/logicalSession';
 /**
  * Agents domain repo mutations — create, update, delete operations.
  */
 
 import type { Prisma, AgentSource, VerifierType } from '@prisma/client';
 import { runTransactionWithRetry } from '../../providers/database';
+import type { AgentSpeed } from '../../providers/rose/speed';
 import { assertCurrentParentWorkflowGenerations } from './repoParentWorkflowFence';
+import { assertTaskPathsFree } from './repoTaskPath';
 
 export {
   clearWorkflowForTerminalAgent,
@@ -41,11 +44,25 @@ function optionalAgentCreateFields(params: {
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
+  speed?: AgentSpeed;
   memoryEnabled?: boolean;
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   isBenchmark?: boolean;
+  githubRepoUrl?: string;
+  originDeviceId?: string;
+  projectId?: string | null;
+  folderId?: string | null;
+  title?: string;
+  taskPath?: string | null;
 }): Partial<Prisma.AgentUncheckedCreateInput> {
   return {
+    ...(params.folderId !== undefined && params.folderId !== null
+      ? { folderId: params.folderId }
+      : {}),
+    ...(params.title !== undefined ? { title: params.title } : {}),
+    ...(params.projectId !== undefined && params.projectId !== null
+      ? { projectId: params.projectId }
+      : {}),
     ...(params.temporalWorkflowId !== undefined && params.temporalWorkflowId !== null
       ? { temporalWorkflowId: params.temporalWorkflowId }
       : {}),
@@ -68,9 +85,15 @@ function optionalAgentCreateFields(params: {
     ...(params.fastModeCacheEnabled !== undefined
       ? { fastModeCacheEnabled: params.fastModeCacheEnabled }
       : {}),
+    ...(params.speed !== undefined ? { speed: params.speed } : {}),
     ...(params.memoryEnabled !== undefined ? { memoryEnabled: params.memoryEnabled } : {}),
     ...(params.worldModelMode !== undefined ? { worldModelMode: params.worldModelMode } : {}),
     ...(params.isBenchmark === true ? { isBenchmark: true } : {}),
+    ...(params.githubRepoUrl !== undefined ? { githubRepoUrl: params.githubRepoUrl } : {}),
+    ...(params.originDeviceId !== undefined ? { originDeviceId: params.originDeviceId } : {}),
+    ...(params.taskPath !== undefined && params.taskPath !== null
+      ? { taskPath: params.taskPath }
+      : {}),
   };
 }
 
@@ -113,6 +136,7 @@ export interface CreateAgentParams {
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
+  speed?: AgentSpeed;
   memoryEnabled?: boolean;
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   verifierType: string;
@@ -123,6 +147,15 @@ export interface CreateAgentParams {
   workflowContextGates?: Record<string, boolean>;
   workflowStartPhase?: string;
   workflowTaskQueue?: string;
+  /** Repository code sessions in this tree clone (set before the workflow starts). */
+  githubRepoUrl?: string;
+  /** Rose Mac app device that started this root agent (C14 local code agents). */
+  originDeviceId?: string;
+  projectId?: string | null;
+  folderId?: string | null;
+  title?: string;
+  graphSpawnHash?: string;
+  taskPath?: string | null;
 }
 
 /** Create an agent with verifier and goal message in a transaction. */
@@ -135,6 +168,7 @@ export async function createAgentTransaction(params: CreateAgentParams) {
   // resilient to transient pool saturation.
   return runTransactionWithRetry(async (tx) => {
     await assertCurrentParentWorkflowGenerations(tx, [params]);
+    await assertTaskPathsFree(tx, [params]);
     const tracksDescendantStart =
       params.parentAgentId !== null &&
       params.parentWorkflowId !== null &&
@@ -160,10 +194,12 @@ export async function createAgentTransaction(params: CreateAgentParams) {
         proxyCountry: params.proxyCountry,
         proxyState: params.proxyState,
         proxyCity: params.proxyCity,
-        temporalWorkflowStartPending: tracksDescendantStart,
+        temporalWorkflowStartPending: tracksDescendantStart || params.graphSpawnHash !== undefined,
         ...optionalAgentCreateFields(params),
       },
     });
+
+    await createLogicalBrowserInTransaction(tx, params.userId, newAgent.id);
 
     await tx.verifier.create({
       data: {
@@ -178,6 +214,9 @@ export async function createAgentTransaction(params: CreateAgentParams) {
         text: params.goal,
         role: 'USER',
         timestamp: new Date(),
+        ...(params.graphSpawnHash === undefined
+          ? {}
+          : { metadata: { graph_spawn_hash: params.graphSpawnHash } }),
       },
     });
 
@@ -190,6 +229,8 @@ export async function createAgentTransaction(params: CreateAgentParams) {
 }
 
 export interface BatchCreateAgentParams {
+  projectId?: string | null;
+  folderId?: string | null;
   agentId: string;
   userId: string;
   parentAgentId: string | null;
@@ -210,6 +251,7 @@ export interface BatchCreateAgentParams {
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
+  speed?: AgentSpeed;
   memoryEnabled?: boolean;
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   verifierType: string;
@@ -219,6 +261,7 @@ export interface BatchCreateAgentParams {
   workflowContextGates?: Record<string, boolean>;
   workflowStartPhase?: string;
   workflowTaskQueue?: string;
+  taskPath?: string | null;
 }
 
 /** Create N agents (each with verifier + goal message) in a single transaction.
@@ -230,6 +273,7 @@ export async function createAgentBatchTransaction(items: BatchCreateAgentParams[
   // the pool is most contended, so guard the interactive-transaction start.
   return runTransactionWithRetry(async (tx) => {
     await assertCurrentParentWorkflowGenerations(tx, items);
+    await assertTaskPathsFree(tx, items);
     const goalMessageTimestamp = new Date();
     await tx.agent.createMany({
       data: items.map((params) => ({
@@ -256,6 +300,9 @@ export async function createAgentBatchTransaction(items: BatchCreateAgentParams[
         ...optionalAgentCreateFields(params),
       })),
     });
+
+    for (const item of items)
+      await createLogicalBrowserInTransaction(tx, item.userId, item.agentId);
 
     await tx.verifier.createMany({
       data: items.map((params) => ({

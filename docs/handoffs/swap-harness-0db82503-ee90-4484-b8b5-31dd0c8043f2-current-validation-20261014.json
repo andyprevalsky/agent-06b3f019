@@ -1,0 +1,1089 @@
+{
+  "recorded_at": "2026-10-14T23:57:23.456080+00:00",
+  "runtime_source_head": "f5c3c84238240ae457acabc9d9973f5145086889",
+  "durable_cleanup_source_commit": "8268388a393cf89676073f02d8e1415e291e8d67",
+  "fixture_only_deadline_commit": "077a39ae6a968bab3553a7bc09b973ae2e76d1c3",
+  "generated_index_only_commit": "f5c3c84238240ae457acabc9d9973f5145086889",
+  "full_current_backend_coverage": {
+    "source_git_sha": "8268388a393cf89676073f02d8e1415e291e8d67",
+    "current_head_qualified_same_backend_inputs": "077a39ae6a968bab3553a7bc09b973ae2e76d1c3",
+    "backend_runtime_cli_and_coverage_closure_unchanged": true,
+    "original_timing_run": "20261012-234924-2614623",
+    "stage": "sms-pending-final-backend-coverage",
+    "started_at": "2026-10-14T22:08:04.225072+00:00",
+    "finished_at": "2026-10-14T22:18:42.204653+00:00",
+    "elapsed_seconds": 637.98,
+    "exit_code": 0,
+    "domain_counts": {
+      "passed": 197,
+      "failed": 0,
+      "total": 197
+    },
+    "unit_counts": {
+      "total": 266,
+      "passed": 266,
+      "failed": 0
+    },
+    "workflow_terminal_cleanup_owner": {
+      "captured_at": "2026-10-14T22:12:35.224899+00:00",
+      "source_git_sha": "8268388a393cf89676073f02d8e1415e291e8d67",
+      "canonical_unit_log": "/home/boxes/rose/back-end/coverage/unit-run/workflow-terminal-cleanup.log",
+      "canonical_console": "/home/boxes/rose/.context/tamy-resumed/sms-pending-backend-coverage/console.log",
+      "owner_file_exit_code": 0,
+      "owner_file_duration_ms": 3191,
+      "summary": {
+        "cases": 25,
+        "passed": 25,
+        "failure_exit_code": false,
+        "summary_line": "workflow terminal cleanup unit tests: 25 passed",
+        "format": "existing custom owning summary, not Node TAP"
+      },
+      "owner_log_sha256": "649571bfb27afbe9220ab42a889a43bcffad3a29b56b817bbfc7881dbe19c223",
+      "source_hashes": {
+        "agents/benchmarks/sms_runner.py": "04b1b857de7234c410ceee4afe51f92e37450bbeaf25697de71419357b6746d6",
+        "back-end/scripts/finalize-sms-owned-cleanup.ts": "f504a4a5355e5ca61166fc76d506ad0d9a5496bc58785716f678866c55ea603e",
+        "back-end/src/tests/unit/workflow-terminal-cleanup.test.ts": "8dd2fa704ead483d09c362d31b4d30cc44d99aff604c7e629a9dfe650766073b"
+      },
+      "full_backend_still_running": true
+    },
+    "coverage": {
+      "lines": {
+        "total": 116158,
+        "covered": 104019,
+        "skipped": 0,
+        "pct": 89.54
+      },
+      "statements": {
+        "total": 116158,
+        "covered": 104019,
+        "skipped": 0,
+        "pct": 89.54
+      },
+      "functions": {
+        "total": 10834,
+        "covered": 10031,
+        "skipped": 0,
+        "pct": 92.58
+      },
+      "branches": {
+        "total": 31459,
+        "covered": 25481,
+        "skipped": 0,
+        "pct": 80.99
+      },
+      "branchesTrue": {
+        "total": 0,
+        "covered": 0,
+        "skipped": 0,
+        "pct": 100
+      }
+    },
+    "trailing_teardown": {
+      "unrecognized_domain_teardown": true,
+      "sigterm_teardown": true
+    },
+    "selected_domains": [
+      {
+        "domain": "browser-provider",
+        "passed": true,
+        "duration": 102731,
+        "logPath": "/home/boxes/rose/back-end/coverage/blackbox-run/browser-provider.log"
+      },
+      {
+        "domain": "browser-session-credential-injection",
+        "passed": true,
+        "duration": 1311,
+        "logPath": "/home/boxes/rose/back-end/coverage/blackbox-run/browser-session-credential-injection.log"
+      },
+      {
+        "domain": "steel-injection",
+        "passed": true,
+        "duration": 31782,
+        "logPath": "/home/boxes/rose/back-end/coverage/blackbox-run/steel-injection.log"
+      },
+      {
+        "domain": "treasury-rails",
+        "passed": true,
+        "duration": 286848,
+        "logPath": "/home/boxes/rose/back-end/coverage/blackbox-run/treasury-rails.log"
+      }
+    ],
+    "live_browser": {
+      "auth_persist_pass": true,
+      "complete_provider_ladder": true,
+      "same_persisted_steel_profile_assertion_executed_successfully": true,
+      "rotation_owning_source_sha256": "3e6ee45914d6f135753807edf235f15c79a0b663c5108f7fbef1569283ace4f0"
+    },
+    "native_retirement": {
+      "complete": true,
+      "total_handles": 12,
+      "kernel_browser": 7,
+      "steel_session": 3,
+      "kernel_profile": 2,
+      "final_inventory_exactly_matches_audited_handles": true,
+      "exact_offline_mock_log_excluded_by_source_proof": true,
+      "one_rejected_readonly_mock_probe_400_retained": true
+    },
+    "process_retirement": {
+      "captured_births": 797,
+      "all_captured_births_retired": true,
+      "births_absent": 797
+    },
+    "treasury_current": {
+      "strict_gate_pass": true,
+      "cards_created": 1,
+      "native_cards_closed_balance_zero": true,
+      "released_cents": [
+        0
+      ],
+      "transfer_statuses": [
+        "consumed"
+      ],
+      "new_pending_ledger_entries": 1,
+      "release_not_observed": true,
+      "canonical_deferred_reclaim_deadline_hours": 24,
+      "narrow_agentcard_waiver_not_applied_to_treasury": true,
+      "historical_overdue_failures_remain_unsettled_proof": true
+    },
+    "source_hashes": {
+      "agents/benchmarks/sms_runner.py": "04b1b857de7234c410ceee4afe51f92e37450bbeaf25697de71419357b6746d6",
+      "agents/benchmarks/sms_runner_test.py": "bad58d7cc7f6471feb0932e1a6cadcfd42aa85f23b5e9bf12b76b6a09535b0a0",
+      "back-end/scripts/finalize-sms-owned-cleanup.ts": "f504a4a5355e5ca61166fc76d506ad0d9a5496bc58785716f678866c55ea603e",
+      "back-end/src/tests/unit/workflow-terminal-cleanup.test.ts": "8dd2fa704ead483d09c362d31b4d30cc44d99aff604c7e629a9dfe650766073b",
+      "back-end/scripts/run-coverage.sh": "3d55284ed9a4860a3c2a9d16520232dab9583fb44c73bd24a687ee407496d359",
+      "back-end/scripts/run-blackbox-tests.sh": "c3bd792c4a1ccbfa21e999e51ed3c22eefbadd2251deef8fe4dec3f875bec987",
+      "scripts/run-deploy-stage": "b1fae490991bf1dd9e9bfa033e6fe76782e5bbcacf387aa1d0b5314ef5de0434",
+      "scripts/tests/blackbox-backend-teardown.test.sh": "cdf8789a927b17b15566f2f7c11e9ae093b222dd3b22a1998cbc92cfeeb879f4"
+    },
+    "console_sha256": "f1703d1dc2e599430116157426f32c5fd77da7b2eecb28a8bbdea1a283a49abd",
+    "collected_at": "2026-10-14T22:23:53.404519+00:00"
+  },
+  "full_current_agents_coverage": {
+    "schema_version": 1,
+    "source_head": "077a39ae6a968bab3553a7bc09b973ae2e76d1c3",
+    "source_head_at_readback": "077a39ae6a968bab3553a7bc09b973ae2e76d1c3",
+    "selected14_runtime_source_hashes_unchanged": true,
+    "stage": "sms-pending-final-agents",
+    "artifact_directory": "sms-pending-final-agents-077",
+    "overall_exit_code": 0,
+    "blackbox": {
+      "passed": 110,
+      "failed": 0,
+      "total": 110,
+      "concurrency": 4,
+      "benchmark_ran_once_in_this_attempt": true
+    },
+    "fast_cache": {
+      "passed": 184,
+      "seconds": 4.99
+    },
+    "unit": {
+      "passed": 134,
+      "seconds": 47.14
+    },
+    "coverage": {
+      "statements": 32723,
+      "misses": 5000,
+      "branches": 12126,
+      "partial": 1941,
+      "percent": 82,
+      "required_percent": 80,
+      "passed": true
+    },
+    "canonical_stage_seconds": 250.9,
+    "wall_seconds": 251.0690062046051,
+    "started_utc": "2026-10-14T22:17:27.357895+00:00",
+    "finished_utc": "2026-10-14T22:21:38.426879+00:00",
+    "timing_run": "20261012-234924-2614623",
+    "actual_failed826_attempt_preserved": {
+      "exit": 1,
+      "canonical_seconds": 206.6,
+      "wall_seconds": 206.79079222679138,
+      "passed_domains": 109,
+      "failed_domains": 1,
+      "fast_cache_units_threshold_not_reached": true,
+      "frozen_archive_sha256": "55d33919f70eb8a8e298bbcf4781b7b189c7ed0b94bc32c8cc2f65e309902740"
+    },
+    "fixture_correction": "Only timeout_seconds420 on two existing synthetic SMS tasks; standard unchanged canonical SMS budget; owning actualRED/privateGREEN/root actualGREEN/currentfullPASS",
+    "source_model_catalog_timeout_default_environment_values_assertions_unchanged_by_gate_agent": true,
+    "source_qualification": "piecewise-source-qualification.json",
+    "controller_qualification": "controller-integrated-readback.json",
+    "current_full_backend_source_qualified_owner_receipt_sha256": "bcb25557c874d68b83ebb3ea3267c9ffb81a861fab1f2b657e9cf6d89ef0c157",
+    "retirement": {
+      "observed_process_births": 1529,
+      "observed_groups": 340,
+      "captured_exact_processes_remaining": [],
+      "observed_group_members_remaining": [],
+      "monitor_native_absent": true,
+      "boot_id": "6af9c450-c2c8-4647-a911-8ab19a296bbf",
+      "complete_descendant_capture_proved": false,
+      "global_resource_cleanup_claimed": false,
+      "foreign_resource_mutations_or_signals": 0
+    },
+    "raw_captures_environment_values_private": true,
+    "no_new_paid_cloud_machines": true,
+    "no_paid_ad_hoc_probe": true,
+    "prior_and_failed_coverage_caches_preserved": true,
+    "console_sha256": "796a95dd8b574e7586d9443ab414dbad2f23ae0c879826a8a32956dcc48b02ed",
+    "recorded_utc": "2026-10-14T22:25:54.138591+00:00"
+  },
+  "current_static_prior077": {
+    "recorded_at": "2026-10-14T22:30:35.108121+00:00",
+    "source_git_sha": "077a39ae6a968bab3553a7bc09b973ae2e76d1c3",
+    "deploy_run_id": "20261012-234924-2614623",
+    "deploy_structural_exit": 0,
+    "deploy_suites_passed": 46,
+    "deploy_suites_total": 46,
+    "backend_structural_exit": 1,
+    "backend_first_bad_boundary": {
+      "test": "back-end/src/tests/structural/rca-archive.test.ts",
+      "rule": "canonical generated RCA INDEX exact equality",
+      "observed_header_count": 857,
+      "expected_header_count": 858,
+      "all858caseentries_present": true,
+      "only_header_count_correction_required": true,
+      "candidate_red_exit": 1,
+      "candidate_generator_exit": 0,
+      "candidate_green_exit": 0
+    },
+    "backend_layer_test_counts": [
+      [
+        1518,
+        0,
+        1518
+      ],
+      [
+        6,
+        0,
+        6
+      ],
+      [
+        38,
+        0,
+        38
+      ]
+    ],
+    "guards": {
+      "prompt_unflagged": 1,
+      "prompt_qualified": 0,
+      "behavior_unflagged": 0,
+      "trajectory_unflagged": 0
+    },
+    "source_hashes_unchanged": true,
+    "native_retirement": {
+      "boot_id_same": true,
+      "observed_owned_births": 5,
+      "remaining_owned_births": [],
+      "actual_both_stage_result_files_present": true
+    },
+    "source_edits_by_verifier": false,
+    "paid_or_live_calls_by_verifier": false,
+    "raw_stdout_private": true
+  },
+  "failed_three_SMS_behavior": {
+    "recorded_at": "2026-10-14T22:45:01.334370+00:00",
+    "source_git_sha": "f5c3c84238240ae457acabc9d9973f5145086889",
+    "current_source_same": true,
+    "run_result_sha256": "9e4c0b90d6ffb9882354dd18e810f9192a543ec625e35ec2790993b11d537156",
+    "backend_log_sha256": "08348a435855d20662fe93f4d5800e63565a5b9a5bf7c9d32aead568102b7cdb",
+    "paid_calls_by_verifier": false,
+    "new_classifiers_prompts_models_or_source_changes": false,
+    "task_results": [
+      {
+        "name": "sms-supervisor-closed-no-spawn",
+        "overall_passed": false,
+        "benchmark_status": "FAILED",
+        "precleanup_declared_evaluators": [
+          {
+            "id": "sms-closed-no-spawn-contract",
+            "method": "static_check",
+            "score": 0.0,
+            "passed": false,
+            "reasoning_sha256": "8eef437b86a8b172dbbb7b9dda03d51f65d38ca265fc6968c682a3ad8d6598f1",
+            "failed_completion_accepted": true
+          }
+        ],
+        "declared_evaluators_not_run": [
+          "sms-closed-states-closure"
+        ],
+        "all_executed_declared_behavior_evaluators_passed": false,
+        "behavior_failure_first_bad_boundary": "sms_completion_accepted",
+        "cleanup_verified": true,
+        "cleanup_error_present": false,
+        "cleanup_error_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "failure_reason_sha256": "2b1cb754df4989df5e3c473cc9d7f045a6f7a24aa89793bafdabfeb5481f114b",
+        "turn_counters": [
+          {
+            "reply_count": 1,
+            "budget_delta_cents": 0,
+            "agents_started": 0,
+            "reply_equals_public_fallback": true
+          }
+        ],
+        "tool_counts_by_phase": {
+          "dispatch": {
+            "web_search": 12,
+            "grep": 2
+          },
+          "commit": {},
+          "completion": {}
+        },
+        "start_new_agent_dispatches": 0,
+        "start_new_agent_commits": 0,
+        "increase_budget_dispatches": 0,
+        "fixture_search_dispatches": 12,
+        "fixture_tool_result_exact_match_count": 12,
+        "fixture_native_feedback_request_grounding": [
+          {
+            "dump_sha256": "acb1384e7963ca6f802426ca0cb3c6aef4b570a8d012c0e0b31c3ef6385eafb7",
+            "tool_turns_containing_exact_fixture": 0,
+            "native_tool_call_turns": 1,
+            "native_result_field_present": false
+          },
+          {
+            "dump_sha256": "e31ca8e57a64ba9b7772a15deb252cc39681973c776ad321cf65dcdc22b652e1",
+            "tool_turns_containing_exact_fixture": 1,
+            "native_tool_call_turns": 2,
+            "native_result_field_present": false
+          },
+          {
+            "dump_sha256": "3c7a90a001aab4b2921cd5f00b910dd88e9273aec182955bf9924940aa97e58a",
+            "tool_turns_containing_exact_fixture": 2,
+            "native_tool_call_turns": 3,
+            "native_result_field_present": false
+          },
+          {
+            "dump_sha256": "9b21bea09907e028425f31f0d4cb1bc917cc925ea62ae0bf8f432160277de669",
+            "tool_turns_containing_exact_fixture": 3,
+            "native_tool_call_turns": 4,
+            "native_result_field_present": false
+          },
+          {
+            "dump_sha256": "092f981cc59bf5f9965d29c6b8cee0d58b60be353ccfa44dee810a93eb81cb28",
+            "tool_turns_containing_exact_fixture": 5,
+            "native_tool_call_turns": 5,
+            "native_result_field_present": false
+          },
+          {
+            "dump_sha256": "67db576c3ba09fc72d179293fc3144f529b90b9d3892e6fae1e611db8877d0cd",
+            "tool_turns_containing_exact_fixture": 5,
+            "native_tool_call_turns": 6,
+            "native_result_field_present": false
+          },
+          {
+            "dump_sha256": "3f671d5f041062dd486bf221822663fef1e66bf8de2034b91cf288d704a39b31",
+            "tool_turns_containing_exact_fixture": 7,
+            "native_tool_call_turns": 7,
+            "native_result_field_present": false
+          },
+          {
+            "dump_sha256": "4c2578b3da367eeca4244b4eb1504468dab66d0d478f0e5e31a73b98b9340f2e",
+            "tool_turns_containing_exact_fixture": 8,
+            "native_tool_call_turns": 8,
+            "native_result_field_present": false
+          },
+          {
+            "dump_sha256": "9122180ccea17f08f03bdc9ce7c41a39bba7a5fcb1770b8915a2a98702194903",
+            "tool_turns_containing_exact_fixture": 10,
+            "native_tool_call_turns": 9,
+            "native_result_field_present": false
+          },
+          {
+            "dump_sha256": "7db4c7c34b307225d5ad9253caf3fef5a74e1cd90e867cef6e4df6d232524572",
+            "tool_turns_containing_exact_fixture": 11,
+            "native_tool_call_turns": 10,
+            "native_result_field_present": false
+          }
+        ],
+        "supervisor_end": {
+          "completion_accepted": false,
+          "safety_cap_seen_in_segment": true
+        },
+        "actual_llm_call_count": 10,
+        "request_model_hashes": [
+          "040104ac99b5ab7b1917e619111d520a5b3b75e9151fc018f46bd12e48e760bb"
+        ],
+        "request_route_hashes": [
+          "4d9e2962c7463e22d6cc3d3263a866a3c31df99b72927f7e3874d894c23fdc86"
+        ],
+        "actual_model_hashes": [
+          "87256d73762a874b0a3925ad7ade3c0524b2a4ddf9f2a1c9a4be4605b35efb54"
+        ],
+        "actual_pool_hashes": [
+          "6623693b58c36aec707395b6006029cc8ac9ffeb28c46bf57f2eeebf90698fb0"
+        ],
+        "actual_response_usage": {
+          "prompt_tokens": 57451,
+          "completion_tokens": 3319,
+          "total_tokens": 60770
+        },
+        "run_report_usage_values_are_zero": true
+      },
+      {
+        "name": "sms-supervisor-fill-form-searches-then-delegates",
+        "overall_passed": false,
+        "benchmark_status": "ERROR",
+        "precleanup_declared_evaluators": [
+          {
+            "id": "sms-fill-form-search-then-delegate-contract",
+            "method": "static_check",
+            "score": 1.0,
+            "passed": true,
+            "reasoning_sha256": "3ccb31751cc9966f1ffb7de32369f48f32973ee95717a1874b96c78751dab557",
+            "failed_completion_accepted": false
+          },
+          {
+            "id": "sms-fill-form-does-not-ask-for-known-facts",
+            "method": "single_turn_llm_judge",
+            "score": 1.0,
+            "passed": true,
+            "reasoning_sha256": "0dca403221d72641b44dd783b1308a57d6469c2076b5f39d0b110244392ed47e",
+            "failed_completion_accepted": false
+          }
+        ],
+        "declared_evaluators_not_run": [],
+        "all_executed_declared_behavior_evaluators_passed": true,
+        "behavior_failure_first_bad_boundary": null,
+        "cleanup_verified": false,
+        "cleanup_error_present": true,
+        "cleanup_error_sha256": "f48938b508694e3b650dce877f34c8dd4146ae21e50fd13d6e03755a5fa1c13e",
+        "failure_reason_sha256": "a66edb1e6fa9ad9bd3d2c3f874bcf18d42a3be8771d6cef27b2e5a9070ed26e6",
+        "turn_counters": [
+          {
+            "reply_count": 1,
+            "budget_delta_cents": 100,
+            "agents_started": 1,
+            "reply_equals_public_fallback": false
+          }
+        ],
+        "tool_counts_by_phase": {
+          "dispatch": {
+            "grep": 4,
+            "start_new_agent": 1,
+            "send_user_message": 1
+          },
+          "commit": {
+            "start_new_agent": 1
+          },
+          "completion": {
+            "attempt_completion": 1
+          }
+        },
+        "start_new_agent_dispatches": 1,
+        "start_new_agent_commits": 1,
+        "increase_budget_dispatches": 0,
+        "fixture_search_dispatches": 0,
+        "fixture_tool_result_exact_match_count": 0,
+        "fixture_native_feedback_request_grounding": [
+          {
+            "dump_sha256": "49a329e2b6a115e3ea6835dbd5aa9f3bc1f0ef70f9d90a1d283524d0d1b62afe",
+            "tool_turns_containing_exact_fixture": 0,
+            "native_tool_call_turns": 1,
+            "native_result_field_present": false
+          },
+          {
+            "dump_sha256": "7e5be60223217dae1fe64d1f5970863a4d1ff770a48bbbff2ce48a4b30ec87ca",
+            "tool_turns_containing_exact_fixture": 0,
+            "native_tool_call_turns": 2,
+            "native_result_field_present": false
+          },
+          {
+            "dump_sha256": "07363e9885261b06233fa57279cee0fba3ed40d6ff0767fee89e26572cb99f4a",
+            "tool_turns_containing_exact_fixture": 0,
+            "native_tool_call_turns": 3,
+            "native_result_field_present": false
+          },
+          {
+            "dump_sha256": "bbc89210d206d6465695b99b57fbf9ffdcfc5b293ab119849b6ae5e447c1ab3b",
+            "tool_turns_containing_exact_fixture": 0,
+            "native_tool_call_turns": 4,
+            "native_result_field_present": false
+          },
+          {
+            "dump_sha256": "94f42e199de8301e7d0854561863ba5e58f6a71a41d6d6b7bcb21db0d0cdf877",
+            "tool_turns_containing_exact_fixture": 0,
+            "native_tool_call_turns": 5,
+            "native_result_field_present": false
+          }
+        ],
+        "supervisor_end": {
+          "completion_accepted": true,
+          "safety_cap_seen_in_segment": false
+        },
+        "actual_llm_call_count": 5,
+        "request_model_hashes": [
+          "040104ac99b5ab7b1917e619111d520a5b3b75e9151fc018f46bd12e48e760bb"
+        ],
+        "request_route_hashes": [
+          "4d9e2962c7463e22d6cc3d3263a866a3c31df99b72927f7e3874d894c23fdc86"
+        ],
+        "actual_model_hashes": [
+          "87256d73762a874b0a3925ad7ade3c0524b2a4ddf9f2a1c9a4be4605b35efb54"
+        ],
+        "actual_pool_hashes": [
+          "6623693b58c36aec707395b6006029cc8ac9ffeb28c46bf57f2eeebf90698fb0"
+        ],
+        "actual_response_usage": {
+          "prompt_tokens": 73966,
+          "completion_tokens": 1809,
+          "total_tokens": 75775
+        },
+        "run_report_usage_values_are_zero": true
+      },
+      {
+        "name": "sms-supervisor-open-spawns-agent",
+        "overall_passed": false,
+        "benchmark_status": "ERROR",
+        "precleanup_declared_evaluators": [
+          {
+            "id": "sms-open-spawn-contract",
+            "method": "static_check",
+            "score": 1.0,
+            "passed": true,
+            "reasoning_sha256": "3ccb31751cc9966f1ffb7de32369f48f32973ee95717a1874b96c78751dab557",
+            "failed_completion_accepted": false
+          }
+        ],
+        "declared_evaluators_not_run": [],
+        "all_executed_declared_behavior_evaluators_passed": true,
+        "behavior_failure_first_bad_boundary": null,
+        "cleanup_verified": false,
+        "cleanup_error_present": true,
+        "cleanup_error_sha256": "9f6d3c3046fe2d8e45b0cb51bcc78edf2062cf174e689cdf38e268d5f5b1708c",
+        "failure_reason_sha256": "02f27d9755a7cb06afe3ee86ebc8c9889e54e640666e49eb37284b942f915be6",
+        "turn_counters": [
+          {
+            "reply_count": 1,
+            "budget_delta_cents": 100,
+            "agents_started": 1,
+            "reply_equals_public_fallback": false
+          }
+        ],
+        "tool_counts_by_phase": {
+          "dispatch": {
+            "web_search": 2,
+            "start_new_agent": 1,
+            "send_user_message": 1
+          },
+          "commit": {
+            "start_new_agent": 1
+          },
+          "completion": {
+            "attempt_completion": 1
+          }
+        },
+        "start_new_agent_dispatches": 1,
+        "start_new_agent_commits": 1,
+        "increase_budget_dispatches": 0,
+        "fixture_search_dispatches": 2,
+        "fixture_tool_result_exact_match_count": 2,
+        "fixture_native_feedback_request_grounding": [
+          {
+            "dump_sha256": "aceffac434120f9098f59966297115dcf2d4922996408fa79c23d5f15ea3339c",
+            "tool_turns_containing_exact_fixture": 0,
+            "native_tool_call_turns": 1,
+            "native_result_field_present": false
+          },
+          {
+            "dump_sha256": "503d8d783e0253bf13da9d7ef1a938be00278ed3476a2bd8a3eb979f654fd41b",
+            "tool_turns_containing_exact_fixture": 2,
+            "native_tool_call_turns": 2,
+            "native_result_field_present": false
+          },
+          {
+            "dump_sha256": "410982c94d5d9d527139bf7b6d91012440f8e7a15228e40314768d1db16be469",
+            "tool_turns_containing_exact_fixture": 2,
+            "native_tool_call_turns": 3,
+            "native_result_field_present": false
+          }
+        ],
+        "supervisor_end": {
+          "completion_accepted": true,
+          "safety_cap_seen_in_segment": false
+        },
+        "actual_llm_call_count": 3,
+        "request_model_hashes": [
+          "040104ac99b5ab7b1917e619111d520a5b3b75e9151fc018f46bd12e48e760bb"
+        ],
+        "request_route_hashes": [
+          "4d9e2962c7463e22d6cc3d3263a866a3c31df99b72927f7e3874d894c23fdc86"
+        ],
+        "actual_model_hashes": [
+          "87256d73762a874b0a3925ad7ade3c0524b2a4ddf9f2a1c9a4be4605b35efb54"
+        ],
+        "actual_pool_hashes": [
+          "6623693b58c36aec707395b6006029cc8ac9ffeb28c46bf57f2eeebf90698fb0"
+        ],
+        "actual_response_usage": {
+          "prompt_tokens": 19359,
+          "completion_tokens": 1200,
+          "total_tokens": 20559
+        },
+        "run_report_usage_values_are_zero": true
+      }
+    ],
+    "unavailable_fields": [],
+    "caller_request_model_canonical_match": true,
+    "caller_route_canonical_match": true,
+    "dump_to_end_segmentation_proved": true,
+    "overall_summary": {
+      "actual_behavior_pass_tasks": 2,
+      "actual_behavior_failed_tasks": 1,
+      "cleanup_error_tasks": 2,
+      "closed_did_not_spawn_or_raise_budget": true,
+      "closed_fixture_real_native_feedback_proved": true
+    }
+  },
+  "normal_focused_open_independent_resource_read": {
+    "run_id": "1792018148-2602922-64306",
+    "source_git_sha": "f5c3c84238240ae457acabc9d9973f5145086889",
+    "captured_at": "2026-10-14T22:54:21.517627+00:00",
+    "before_stack_stop": true,
+    "actual_database_identity_exact_match": true,
+    "database_name_length": 39,
+    "read_only": true,
+    "canonical_normal_adapter_verified": true,
+    "canonical_receipts": [
+      {
+        "path": "/home/boxes/rose/.context/benchmarks/1792018148-2602922-64306/sms-terminal-obligations-50b6a4a5-fa82-447d-8cda-0d5098498c79.json",
+        "sha256": "660ba75fcadf919330145cf50abbdd9851cbd9c09fa49d81d8f59cab83b39bcb",
+        "verified": true,
+        "child_handles_retired": true,
+        "terminal_after": 0,
+        "archive_after": 0,
+        "real_archive_refs": 1
+      }
+    ],
+    "positive_root_count": 1,
+    "owned_tree_count": 1,
+    "actual_exact_agent_rows_remaining": 0,
+    "terminal_obligations_remaining": 0,
+    "archive_obligations_remaining": 0,
+    "cleanup_pending_flags": 0,
+    "start_pending_flags": 0,
+    "real_archive_refs": [
+      "r2://trace-archive/trace-archive/50b6a4a5-fa82-447d-8cda-0d5098498c79/manifest.json.gz.enc"
+    ],
+    "native_workflows_terminal_fresh_fenced": true,
+    "native_workflow_count": 1,
+    "allocated_browsers": 0,
+    "allocated_profiles": 0,
+    "allocation_basis": "all canonical exact before/after/final snapshots empty; no exact current-root Kernel profile/creation events; no positive allocation handle",
+    "no_provider_mutation_needed": true
+  },
+  "three_SMS_complete": false,
+  "menu_proposal_applied": false,
+  "paid_Group4_lanes_still_running": true,
+  "merged": false,
+  "deployed": false,
+  "raw_captures_private": true,
+  "scorecard_snapshot_at": "2026-10-14T22:50:13.069802+00:00",
+  "selected_proof_sha256": {
+    ".context/tamy-resumed/sms-focused-open-short-id-f5/final-independent-resource-sql.json": "5ed44fc37c2ee2e9e898c20bf07290ade1f36c1bb8abe7845e06324fa10eca4e",
+    ".context/tamy-resumed/sms-final-three-cohort-8268388a/behavior-audit-safe.json": "04ad5560dbc27d663617ced190057944d4c79e89da3993d43f10f59d1697c600",
+    ".context/tamy-resumed/scorecard-audit-current.json": "2f88207d5d5b62aed8af96d4203ba7c54d171d144750170abddb64af8da9b489"
+  },
+  "full_smoke": {
+    "source_git_sha": "f5c3c84238240ae457acabc9d9973f5145086889",
+    "deploy_run_id": "20261012-234924-2614623",
+    "started_at": "2026-10-14T22:50:02.684934+00:00",
+    "finished_at": "2026-10-14T23:17:50.042498+00:00",
+    "actual_stage_exit": 0,
+    "canonical_selected_count": 10,
+    "actual_passed": 10,
+    "actual_failed": 0,
+    "actual_skipped": 0,
+    "canonical_selector_recomputed": true,
+    "normal_concurrency": 2,
+    "trace_archive_enabled": true,
+    "current_source_sha_same": true,
+    "runtime_source_hashes_unchanged": true,
+    "result_file_hashes": [
+      {
+        "path": "/home/boxes/rose/agents/benchmarks/runs/20261014_230947_26051bf7-1c00-4ae4-a42d-e77a73cbeedc_browser-auth-member-discount-purchase,browser-auth-guest-purchase,browser-biometrics-webdecoy,spawn-sub-agents,agent-payment-new-user-journey,browser-smoke,parallel-tool-calls,claude-c+792bf90050a6.json",
+        "sha256": "169295b04efa62de3d7a1eefa93ef6cf0f4bf90ca8dc060140fab21c60d1b6b7"
+      },
+      {
+        "path": "/home/boxes/rose/agents/benchmarks/runs/20261014_231601_2f9114e4-5363-4c1b-82e9-c71edef4047c_test-mass-agent-run-0.json",
+        "sha256": "e4b96764197f8273523f910b787e98ef84ddc0bd4c02262ec7b17ac251a149de"
+      }
+    ],
+    "canonical_summary_path": "/home/boxes/rose/.context/predeploy-runs/smk-f178e095/summary.json",
+    "canonical_summary_sha256": "903c7d9ed4d1178acb0dec6f2c186a53ffa0dee8f741765886c652edb66f9738",
+    "canonical_summary_keys": [
+      "schema_version",
+      "run_id",
+      "started_at",
+      "finished_at",
+      "duration_seconds",
+      "status",
+      "exit_code",
+      "concurrency",
+      "tasks",
+      "schedule",
+      "git_sha",
+      "runner_log"
+    ],
+    "canonical_provider_cleanup_roots": 10,
+    "canonical_payment_cleanup_roots": 10,
+    "sealed_roots": 10,
+    "deleted_roots": 10,
+    "canonical_cleanup_errors": 0,
+    "canonical_cleanup_warnings": 0,
+    "provider_receipts": [
+      {
+        "provider_hash": "6923dd1bc0460082c5d55a831908c24a282860b7f1cd6c2b79cf1bc8857c639c",
+        "field_keys": [
+          "provider",
+          "session_id",
+          "status",
+          "response_sha256"
+        ],
+        "receipt_sha256": "01cd130ae5657781176a2e98641e0c5fbfe48cc9a33a3520b7b08f8332387ff0"
+      },
+      {
+        "provider_hash": "6923dd1bc0460082c5d55a831908c24a282860b7f1cd6c2b79cf1bc8857c639c",
+        "field_keys": [
+          "provider",
+          "session_id",
+          "status",
+          "response_sha256"
+        ],
+        "receipt_sha256": "3e4eb5413a859261ff2dd4a4d765bfe074c9bf74ddae6edb2a1d651c65deec4e"
+      },
+      {
+        "provider_hash": "6923dd1bc0460082c5d55a831908c24a282860b7f1cd6c2b79cf1bc8857c639c",
+        "field_keys": [
+          "provider",
+          "session_id",
+          "status",
+          "response_sha256"
+        ],
+        "receipt_sha256": "4307219d60fed33401b9e7b7b57459109fe986113d95c76c8e784320e7201ba2"
+      },
+      {
+        "provider_hash": "6923dd1bc0460082c5d55a831908c24a282860b7f1cd6c2b79cf1bc8857c639c",
+        "field_keys": [
+          "provider",
+          "session_id",
+          "status",
+          "response_sha256"
+        ],
+        "receipt_sha256": "d1f856536769da212ccaa14166d97bdcccd8c2a12d8787a6cc6c312c50f4cc7a"
+      },
+      {
+        "provider_hash": "6923dd1bc0460082c5d55a831908c24a282860b7f1cd6c2b79cf1bc8857c639c",
+        "field_keys": [
+          "provider",
+          "session_id",
+          "status",
+          "response_sha256"
+        ],
+        "receipt_sha256": "487d4ff61453a2299451b2b84c84dd2db9b088ffd7e1d82c5dd58a32b14b0106"
+      }
+    ],
+    "owned_native_births_observed": 87,
+    "owned_native_births_remaining": 0,
+    "canonical_stack_receipts_verified": true,
+    "canonical_benchmark_receipts_verified": true,
+    "both_service_manifests_stopped": true,
+    "failed_agent_diagnostic_views_required": 0,
+    "no_failed_agents": true,
+    "claude_cache_warning_printed": false,
+    "tasks": [
+      {
+        "name": "browser-biometrics-webdecoy",
+        "status": "COMPLETED",
+        "passed": true,
+        "duration_seconds": 182.4,
+        "cost_cents": 14,
+        "llm_call_count": 25,
+        "tokens_in": 101976,
+        "tokens_out": 847,
+        "repeatable_cache_hit_pct": 100.0,
+        "repeatable_cache_read_input_tokens": 74240,
+        "repeatable_cache_creation_input_tokens": 0,
+        "tree_agent_count": 1,
+        "archive_manifest_ref_present": true
+      },
+      {
+        "name": "spawn-sub-agents",
+        "status": "COMPLETED",
+        "passed": true,
+        "duration_seconds": 126.6,
+        "cost_cents": 4,
+        "llm_call_count": 31,
+        "tokens_in": 191528,
+        "tokens_out": 10521,
+        "repeatable_cache_hit_pct": 62.7,
+        "repeatable_cache_read_input_tokens": 40338,
+        "repeatable_cache_creation_input_tokens": 23972,
+        "tree_agent_count": 3,
+        "archive_manifest_ref_present": true
+      },
+      {
+        "name": "browser-auth-member-discount-purchase",
+        "status": "COMPLETED",
+        "passed": true,
+        "duration_seconds": 268.1,
+        "cost_cents": 0,
+        "llm_call_count": 9,
+        "tokens_in": 127114,
+        "tokens_out": 1341,
+        "repeatable_cache_hit_pct": 97.3,
+        "repeatable_cache_read_input_tokens": 106226,
+        "repeatable_cache_creation_input_tokens": 2917,
+        "tree_agent_count": 1,
+        "archive_manifest_ref_present": true
+      },
+      {
+        "name": "browser-smoke",
+        "status": "COMPLETED",
+        "passed": true,
+        "duration_seconds": 129.3,
+        "cost_cents": 1,
+        "llm_call_count": 15,
+        "tokens_in": 186946,
+        "tokens_out": 2749,
+        "repeatable_cache_hit_pct": 87.2,
+        "repeatable_cache_read_input_tokens": 146838,
+        "repeatable_cache_creation_input_tokens": 21562,
+        "tree_agent_count": 1,
+        "archive_manifest_ref_present": true
+      },
+      {
+        "name": "claude-code-agent",
+        "status": "COMPLETED",
+        "passed": true,
+        "duration_seconds": 57.9,
+        "cost_cents": 0,
+        "llm_call_count": 4,
+        "tokens_in": 34562,
+        "tokens_out": 1043,
+        "repeatable_cache_hit_pct": 36.2,
+        "repeatable_cache_read_input_tokens": 7464,
+        "repeatable_cache_creation_input_tokens": 13163,
+        "tree_agent_count": 1,
+        "archive_manifest_ref_present": true
+      },
+      {
+        "name": "chat-mode",
+        "status": "ACTIVE",
+        "passed": true,
+        "duration_seconds": 16.2,
+        "cost_cents": 0,
+        "llm_call_count": 3,
+        "tokens_in": 10708,
+        "tokens_out": 790,
+        "repeatable_cache_hit_pct": 0.0,
+        "repeatable_cache_read_input_tokens": 0,
+        "repeatable_cache_creation_input_tokens": 0,
+        "tree_agent_count": 1,
+        "archive_manifest_ref_present": true
+      },
+      {
+        "name": "parallel-tool-calls",
+        "status": "COMPLETED",
+        "passed": true,
+        "duration_seconds": 120.7,
+        "cost_cents": 0,
+        "llm_call_count": 16,
+        "tokens_in": 150107,
+        "tokens_out": 11012,
+        "repeatable_cache_hit_pct": 41.8,
+        "repeatable_cache_read_input_tokens": 37582,
+        "repeatable_cache_creation_input_tokens": 52365,
+        "tree_agent_count": 1,
+        "archive_manifest_ref_present": true
+      },
+      {
+        "name": "browser-auth-guest-purchase",
+        "status": "COMPLETED",
+        "passed": true,
+        "duration_seconds": 210.3,
+        "cost_cents": 3,
+        "llm_call_count": 9,
+        "tokens_in": 105829,
+        "tokens_out": 2199,
+        "repeatable_cache_hit_pct": 96.9,
+        "repeatable_cache_read_input_tokens": 83871,
+        "repeatable_cache_creation_input_tokens": 2676,
+        "tree_agent_count": 1,
+        "archive_manifest_ref_present": true
+      },
+      {
+        "name": "agent-payment-new-user-journey",
+        "status": "COMPLETED",
+        "passed": true,
+        "duration_seconds": 179.8,
+        "cost_cents": 0,
+        "llm_call_count": 12,
+        "tokens_in": 119901,
+        "tokens_out": 1299,
+        "repeatable_cache_hit_pct": 95.0,
+        "repeatable_cache_read_input_tokens": 100220,
+        "repeatable_cache_creation_input_tokens": 5274,
+        "tree_agent_count": 1,
+        "archive_manifest_ref_present": true
+      },
+      {
+        "name": "test-mass-agent-run-0",
+        "status": "COMPLETED",
+        "passed": true,
+        "duration_seconds": 251.1,
+        "cost_cents": 0,
+        "llm_call_count": 3432,
+        "tokens_in": 119791512,
+        "tokens_out": 0,
+        "repeatable_cache_hit_pct": 100.0,
+        "repeatable_cache_read_input_tokens": 113852931,
+        "repeatable_cache_creation_input_tokens": 0,
+        "tree_agent_count": 51,
+        "archive_manifest_ref_present": true
+      }
+    ],
+    "no_source_envfile_model_schema_catalog_timeout_changes": true,
+    "no_http_evidence_publisher_calls": true,
+    "raw_values_private": true,
+    "recorded_at": "2026-10-14T23:20:14.954825+00:00",
+    "native_temporal_generation_proof": {
+      "captured_original_positive_generations": 61,
+      "fresh_latest_sdk_observations": 61,
+      "native_errors": 0,
+      "all_current_native_chains_completed": true,
+      "all_original_first_and_queue_match": true,
+      "unbound_backend_chat_agents": 1,
+      "no_native_queue_or_userdelta_adoption": true,
+      "no_native_termination_required": true,
+      "receipt_sha256": "46848a1f9bc216cb718288b3b1f923d92051d84a1beb30090fa49fe77d5582db"
+    },
+    "terminal_archive_outbox_custody": "UNKNOWN_NOT_CAPTURED_BEFORE_DB_STOP",
+    "outbox_zero_or_pass_claimed": false,
+    "paid_rerun_performed": false
+  },
+  "UI_E2B": {
+    "head": "f5c3c84238240ae457acabc9d9973f5145086889",
+    "timing_run": "20261012-234924-2614623",
+    "semantic_UI": {
+      "canonical_stage": "semantic",
+      "requested_workers": 4,
+      "effective_workers": 3,
+      "cases_passed": 8,
+      "cases_failed": 0,
+      "canonical_seconds": 44.2,
+      "observer_seconds": 45.929447889328,
+      "exit_code": 0,
+      "console_sha256": "9595f9ae883b9e111f5c9cd79e69176044e2e91857b16f13fb9fa5cacc30280c",
+      "latency_not_run_yet": true
+    },
+    "real_E2B": {
+      "canonical_stage": "claude-code-e2b-smoke",
+      "passed_cases": 56,
+      "failed_cases": 0,
+      "domain_seconds": 17.178,
+      "whole_observer_seconds": 25.139265060424805,
+      "real_smoke_seconds": 9.557,
+      "strict_smoke_PASS": true,
+      "smoke_skip_markers": 0,
+      "completion_and_file_sentinel_assertions_passed_actual_current_source": true,
+      "runtime_expected_completion_sentinel": "CLAUDE_E2B_DONE",
+      "runtime_expected_file_sentinel": "CLAUDE_E2B_OK",
+      "test_label_is_historic_math_label_but_actual_prompt_is_output_file_sentinel": true,
+      "log_sha256": "8e1681740c349a48de7e6cb033a3cd4e3b04ad138c200e220bd5f0b4ec8eecec",
+      "provider_native_absence_count": 3,
+      "owned_native_teardown": "E2B-owned-resource-final-safe.json",
+      "prior_setup_failed_stage_retained": true,
+      "prior_setup_failed_seconds": 7.150257349014282,
+      "prior_setup_actual_test_count": 0
+    },
+    "setup_detours": {
+      "first_context_retirement_seconds": 275.4740755558014,
+      "second_mistimed_restart_retirement_seconds": 73.71715760231018,
+      "all_first128_and_second104_captured_births_absent": true,
+      "misbound_UI_preflight_seconds": 0.08415746688842773,
+      "not_labeled_functional_PASS": true
+    },
+    "source_mutations_by_this_agent": false,
+    "new_paid_VM_count": 0,
+    "raw_evidence_private": true,
+    "stack_retirement": {
+      "at": "2026-10-14T23:21:35.820027+00:00",
+      "head": "f5c3c84238240ae457acabc9d9973f5145086889",
+      "timing_run": "20261012-234924-2614623",
+      "latency_status": "UNRUN superseded by next main integration; neverPASS",
+      "functional_UI8_pass_preserved": true,
+      "functional_real_E2B56_pass_preserved": true,
+      "exact_UI_roots4_and_original_native_workflows2": true,
+      "captured_outboxes2_consumed_before_DBdrop": true,
+      "assert_no_pending_exact4_passed": true,
+      "trace_archive_pending0_no_benchmark_credit_added": true,
+      "all_original2_native_firstRun_queue_matched_TERMINATED": true,
+      "semantic_Claude_sandbox1_SDK_native_absent": true,
+      "synthetic_browser1_seed_source_no_native_allocation_SDK400_localERROR": true,
+      "browser404_claimed": false,
+      "no_new_profile_binding_or_inherited_profile_delete": true,
+      "iMessage_pending_outbox0": true,
+      "manifest_status": "stopped",
+      "cleanup_receipt_state": "clean",
+      "cleanup_token_and_native_identity_match": true,
+      "root_exit": -15,
+      "root_was_deliberately_retired_after_supersession": true,
+      "root_total_seconds": 1476.883651971817,
+      "captured_births1372_absent": true,
+      "captured_birth_count": 1372,
+      "observed_group_count": 11,
+      "all_observed_groups_empty": true,
+      "actual_remaining_observed_group_members": [],
+      "own_semantic_database_absent": true,
+      "owned_service_listener_ports_absent": [
+        38900,
+        38901,
+        38902,
+        38904,
+        38909
+      ],
+      "complete_descendant_capture_proved": false,
+      "global_clean_claimed": false,
+      "primary_systemPG_preserved": true,
+      "source_or_ledger_mutations_by_child": false
+    },
+    "final_archive": {
+      "at": "2026-10-14T23:22:15.157277+00:00",
+      "head": "f5c3c84238240ae457acabc9d9973f5145086889",
+      "archive_path": "/project/tamy-supervisor-continuation/acc001c9-41fa-46c7-8e16-04bb9d3223bd/group4-semantic-final-f5c3-20261014-232213.tar.gz",
+      "archive_sha256": "7583585fad86ac73a12e205b0fce16f61018e386b5c1bff7165a533b26e35c9c",
+      "mode": "0o600",
+      "gzip_decompressed_regularfiles_sha256_verified": 123,
+      "freeze": ".context/tamy-resumed/group4-f5c3-current/final-frozen-20261014-232213",
+      "full_transitive_closure_claimed": false,
+      "latency_status": "UNRUN superseded by upcoming main integration; neverPASS",
+      "source_code_or_ledger_edits_by_child": false,
+      "raw_provider_workflow_outbox_custody_private": true,
+      "final_native_retirement_receipt_sha256": "f454e43e7bdb42f6c608641e2a68a2d3e99d59db25a4f949477a85b15ab8cc43",
+      "previous_UI_E2B_archive_preserved": true
+    }
+  },
+  "AgentCard_sandbox": {
+    "source_head": "f5c3c84238240ae457acabc9d9973f5145086889",
+    "actual_stage_exit": 0,
+    "passed": 3,
+    "skipped": 1,
+    "failed": 0,
+    "only_approved_sandbox_consumed_transfer_releasedCents0_skip": true,
+    "duration_seconds": 2079.258,
+    "observed_births": 2145,
+    "births_absent": 2145,
+    "result_sha256": "4f79263570cec0fcc0dcdde7fab307397f9b383b6b24fbedff72f9ecfdbe5014",
+    "resource_readback": "Independent canonical/native receipts still being sealed; not global cleanup proof",
+    "live_gate_waived": false
+  },
+  "main_integration": {
+    "status": "PENDING; f5 proofs do not prove incoming changed runtime",
+    "main_head": "cdbe16c54ac36e369cc019967390fbc5528a46f5"
+  },
+  "latency": {
+    "status": "UNRUN superseded by main integration",
+    "passed": false
+  },
+  "all_tests_green": false
+}

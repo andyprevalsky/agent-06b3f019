@@ -5,13 +5,7 @@
 
 import assert from 'node:assert/strict';
 
-import {
-  dispatchToolCall,
-  type PendingOp,
-  type ToolInvocationContext,
-} from '../../providers/smsSupervisor/supervisorTools';
-
-const emptyContext = {} as ToolInvocationContext;
+import { dispatchToolCall, type PendingOp } from '../../providers/smsSupervisor/supervisorTools';
 
 async function testPurchaseScaleBudgetRejected(): Promise<void> {
   const pending: PendingOp[] = [];
@@ -21,8 +15,7 @@ async function testPurchaseScaleBudgetRejected(): Promise<void> {
       arguments: { goal: 'Purchase Laneige Lip Glowy Balm from Amazon', budget_dollars: 15 },
     },
     'unit-test-user',
-    pending,
-    emptyContext
+    pending
   );
   assert.equal(result.success, false);
   assert.match(result.error ?? '', /NOT the purchase price/);
@@ -37,8 +30,7 @@ async function testAgentRunBudgetAccepted(): Promise<void> {
       arguments: { goal: 'Purchase lip balm from Amazon', budget_dollars: 1 },
     },
     'unit-test-user',
-    pending,
-    emptyContext
+    pending
   );
   assert.equal(result.success, true);
   assert.equal(pending.length, 1);

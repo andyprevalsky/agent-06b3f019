@@ -11,6 +11,8 @@ import { sendSms, sendMms } from '../../providers/smsQueue';
 import { SMS_TEMPLATES, getPersonalizedVcardUrl } from '../../providers/smsTemplates';
 import { mirrorOnboardingWelcomeToWhatsApp } from '../../providers/whatsappOnboarding';
 import { createLogger } from '../../providers/logger';
+import { canonicalPhone, isUniqueViolation } from '../../providers/phoneAccountLookup';
+import { applyUserUpdates, preferPhoneOwner, resolveRacedAccount } from './service.accounts';
 import * as repo from './repo';
 import type { SessionTokens, AnonymousSessionResult } from './types';
 import { generateSupabaseSession, generateAnonymousSession } from './service.session';
@@ -123,7 +125,11 @@ export async function sendOtp(phone: string): Promise<{ success: boolean; error?
 // OTP verify + user init helpers
 // ---------------------------------------------------------------------------
 
-/** Handle creating a new user record during OTP verification. */
+/**
+ * Handle creating a new user record during OTP verification. Returns false,
+ * without side effects, when a concurrent request already created this user or
+ * another account for the phone (unique User.phone index).
+ */
 async function handleNewUser(
   userId: string,
   phone: string,
@@ -131,20 +137,34 @@ async function handleNewUser(
   lastName: string | undefined,
   email: string | undefined,
   anonymousUserId: string | undefined
-): Promise<void> {
+): Promise<boolean> {
   const nameParts = [firstName, lastName].filter(
     (part): part is string => part !== undefined && part !== ''
   );
   const fullName = nameParts.length > 0 ? nameParts.join(' ') : null;
   const normalizedEmail = normalizeEmail(email);
 
-  await repo.createUser({
-    userId,
-    phone,
-    name: fullName,
-    email: normalizedEmail ?? null,
-    isAnonymous: false,
-  });
+  // Another account may already own this number in either stored form (legacy
+  // bare digits never collide with '+digits' on the unique index).
+  const owner = await repo.findUserByPhone(phone);
+  if (owner !== null && owner.userId !== userId) {
+    log.warn('OTP login phone already belongs to another account', { user_id: userId });
+    return false;
+  }
+
+  try {
+    await repo.createUser({
+      userId,
+      phone: canonicalPhone(phone) ?? undefined,
+      name: fullName,
+      email: normalizedEmail ?? null,
+      isAnonymous: false,
+    });
+  } catch (error) {
+    if (!isUniqueViolation(error)) throw error;
+    log.warn('Concurrent OTP login created this account first', { user_id: userId });
+    return false;
+  }
   log.info('Created user record', {
     user_id: userId,
     phone: phone.slice(0, -4) + '****',
@@ -165,6 +185,7 @@ async function handleNewUser(
   if (anonymousUserId !== undefined && anonymousUserId !== '' && anonymousUserId !== userId) {
     await mergeAnonymousUserResources(anonymousUserId, userId);
   }
+  return true;
 }
 
 /** Handle updating an existing user record during OTP verification. */
@@ -179,8 +200,11 @@ async function handleExistingUser(
 ): Promise<void> {
   const updates: { phone?: string; name?: string; isAnonymous?: boolean } = {};
 
-  if ((existingUser.phone === null || existingUser.phone === '') && phone !== '') {
-    updates.phone = phone;
+  const storedPhone = canonicalPhone(phone);
+  if ((existingUser.phone === null || existingUser.phone === '') && storedPhone !== null) {
+    // Never copy a phone another account owns (User.phone is unique).
+    const owner = await repo.findUserByPhone(storedPhone);
+    if (owner === null || owner.userId === userId) updates.phone = storedPhone;
   }
 
   if (
@@ -210,7 +234,7 @@ async function handleExistingUser(
 
   if (existingUser.isAnonymous) {
     updates.isAnonymous = false;
-    await repo.updateUser(userId, updates);
+    await applyUserUpdates(userId, updates);
     let bonusGranted = true;
     try {
       await createSignupBonusCredit(userId);
@@ -226,7 +250,7 @@ async function handleExistingUser(
       bonusGranted,
     });
   } else if (Object.keys(updates).length > 0) {
-    await repo.updateUser(userId, updates);
+    await applyUserUpdates(userId, updates);
     // Log field names only — `updates` can carry PII (email, name).
     log.info('Updated user', { user_id: userId, updatedFields: Object.keys(updates).join(',') });
   } else {
@@ -279,13 +303,23 @@ export async function verifyOtpAndInitUser(params: {
     return { success: false, error: 'Failed to create user session', statusCode: 500 };
   }
 
-  const { userId } = supabaseUser;
-  const session = generateSupabaseSession(userId, phone);
-  const existingUser = await repo.findUserById(userId);
+  let { userId } = supabaseUser;
+  let session = generateSupabaseSession(userId, phone);
+  let existingUser = await repo.findUserById(userId);
 
   if (existingUser === null) {
-    await handleNewUser(userId, phone, firstName, lastName, email, anonymousUserId);
+    const created = await handleNewUser(userId, phone, firstName, lastName, email, anonymousUserId);
+    // Lost a create race: sign in to the account that won it.
+    if (!created) existingUser = await resolveRacedAccount(userId, phone);
   } else {
+    // A phoneless account never shadows the account that owns this phone.
+    existingUser = await preferPhoneOwner(existingUser, phone);
+  }
+  if (existingUser !== null && existingUser.userId !== userId) {
+    userId = existingUser.userId;
+    session = generateSupabaseSession(userId, phone);
+  }
+  if (existingUser !== null) {
     await handleExistingUser(
       existingUser,
       userId,

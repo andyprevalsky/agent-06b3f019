@@ -70,14 +70,15 @@ expect_flag_pass() {
   echo "PASS: $label"
 }
 
-expect_deferred_pass() {
-  local dir="$1" label="$2"
-  if ! (
+expect_retired_deferral_rejected() {
+  local dir="$1" label="$2" status=0
+  (
     cd "$dir" && AUTO_RCA_EXACT_HEAD_APPROVAL_DEFERRED=true \
       bash scripts/check-agent-behavior-approval.sh \
         --defer-human-approval-to-exact-head-pr-review=true >/tmp/agent-behavior-guard.out 2>&1
-  ); then
-    echo "FAIL: expected trusted exact-head deferral PASS: $label" >&2
+  ) || status=$?
+  if [ "$status" -ne 2 ] || ! grep -Fq 'Unknown flag: --defer-human-approval-to-exact-head-pr-review=true' /tmp/agent-behavior-guard.out; then
+    echo "FAIL: expected the retired exact-head deferral flag to be rejected (exit 2): $label" >&2
     cat /tmp/agent-behavior-guard.out >&2
     exit 1
   fi
@@ -93,14 +94,7 @@ PY
 git -C "$terminal_repo" add agents/workflows/agent_workflow.py
 expect_fail "$terminal_repo" "adding a terminal _handle_incomplete handoff requires approval"
 expect_flag_pass "$terminal_repo" "approval flag permits the terminal-handoff change"
-if (cd "$terminal_repo" && env -u AUTO_RCA_EXACT_HEAD_APPROVAL_DEFERRED \
-  bash scripts/check-agent-behavior-approval.sh \
-  --defer-human-approval-to-exact-head-pr-review=true >/tmp/agent-behavior-guard.out 2>&1); then
-  echo "FAIL: untrusted caller deferred agent-behavior approval" >&2
-  exit 1
-fi
-echo "PASS: agent-behavior exact-head deferral is restricted to trusted Auto RCA"
-expect_deferred_pass "$terminal_repo" "trusted Auto RCA may defer behavior approval to the exact-head review"
+expect_retired_deferral_rejected "$terminal_repo" "no caller can defer behavior approval to an exact-head review"
 
 # 2. Flipping a returned status literal between recoverable and terminal.
 status_repo="$(new_repo status-literal)"
@@ -190,6 +184,65 @@ if (cd "$failclosed_repo" && bash scripts/check-agent-behavior-approval.sh --bas
   exit 1
 fi
 echo "PASS: an unresolvable base ref fails closed"
+
+# Browser OTP harvesting owns sealed-generation stop/continue behavior.
+handler_repo="$(new_repo browser-handler-sealed)"
+mkdir -p "$handler_repo/agents/domains/spawn_browser_agent_v3"
+cat >"$handler_repo/agents/domains/spawn_browser_agent_v3/handler.py" <<'PY'
+def _harvest_otp_poll(task):
+    error = task.exception()
+    if error is not None:
+        logger.warning("Failed to fetch OTPs", error=str(error)[:200])
+PY
+git -C "$handler_repo" add agents/domains/spawn_browser_agent_v3/handler.py
+git -C "$handler_repo" commit -q -m "seed browser OTP harvest"
+cat >"$handler_repo/agents/domains/spawn_browser_agent_v3/handler.py" <<'PY'
+def _harvest_otp_poll(task, *, propagate_sealed=True):
+    error = task.exception()
+    if isinstance(error, WorkflowGenerationSealed):
+        if propagate_sealed:
+            raise error
+    elif error is not None:
+        logger.warning("Failed to fetch OTPs", error=str(error)[:200])
+PY
+expect_fail "$handler_repo" "browser handler sealed OTP harvest stop requires approval"
+git -C "$handler_repo" add agents/domains/spawn_browser_agent_v3/handler.py
+expect_fail "$handler_repo" "staged browser handler sealed OTP harvest stop requires approval"
+git -C "$handler_repo" commit -q -m "seed sealed generation propagation"
+sed -i.bak 's/isinstance(error, WorkflowGenerationSealed)/error is not None/' \
+  "$handler_repo/agents/domains/spawn_browser_agent_v3/handler.py"
+rm "$handler_repo/agents/domains/spawn_browser_agent_v3/handler.py.bak"
+expect_fail "$handler_repo" "removing browser handler sealed propagation requires approval"
+
+handler_catch_repo="$(new_repo browser-handler-sealed-catch)"
+mkdir -p "$handler_catch_repo/agents/domains/spawn_browser_agent_v3"
+cat >"$handler_catch_repo/agents/domains/spawn_browser_agent_v3/handler.py" <<'PY'
+try:
+    await collect()
+except Exception as e:
+    consecutive_api_failures += 1
+PY
+git -C "$handler_catch_repo" add agents/domains/spawn_browser_agent_v3/handler.py
+git -C "$handler_catch_repo" commit -q -m "seed browser decision catch"
+cat >"$handler_catch_repo/agents/domains/spawn_browser_agent_v3/handler.py" <<'PY'
+try:
+    await collect()
+except WorkflowGenerationSealed:
+    raise
+except Exception as e:
+    consecutive_api_failures += 1
+PY
+expect_fail "$handler_catch_repo" "browser handler sealed catch before generic retry requires approval"
+
+handler_noise_repo="$(new_repo browser-handler-noise)"
+mkdir -p "$handler_noise_repo/agents/domains/spawn_browser_agent_v3"
+cat >"$handler_noise_repo/agents/domains/spawn_browser_agent_v3/handler.py" <<'PY'
+# WorkflowGenerationSealed is mentioned only in a comment.
+def ordinary_work():
+    logger.info("poll finished")
+    return 1
+PY
+expect_pass "$handler_noise_repo" "ordinary browser handler code and sealed comment need no approval"
 
 # Isolated repos must commit even when the host requires signing. Cloud VMs
 # inherit commit.gpgsign=true with no live ssh-agent; without a local override

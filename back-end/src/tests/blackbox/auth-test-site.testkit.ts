@@ -51,6 +51,11 @@ export interface Manifest {
   expectedMemberNumber: string | null;
   namedAccountEmail: string | null;
   userSignIn: { email: string; password: string } | null;
+  appApprovalUser: {
+    deviceUrl: string;
+    expectedNumber: string;
+    challengeLifetimeSeconds: number;
+  } | null;
   savedSession: 'valid' | 'expired' | null;
   savedBrowserAuthHidden: boolean;
   authOptionsPreview: {

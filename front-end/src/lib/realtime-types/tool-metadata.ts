@@ -302,6 +302,8 @@ export interface RequestUserApprovalMetadata extends BaseToolMetadata {
     writePermission?: boolean;
     url?: string;
     requestPaymentCard?: RequestPaymentCardPayload;
+    /** Who asked (code agents via agent-tools); parsed by the code-agent contract. */
+    requestingAgent?: unknown;
   };
 }
 
@@ -367,6 +369,7 @@ export interface SimpleToolMetadata extends BaseToolMetadata {
  * Union of all tool-specific metadata types.
  */
 export type ToolMessageMetadata =
+  | SpawnAgentMetadata
   | SpawnBrowserAgentMetadata
   | SpawnClaudeCodeAgentMetadata
   | SpawnAgentMetadata

@@ -27,7 +27,7 @@ from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
 import httpx
 
 from providers.rose import POOL_REGISTRY, RoseClient, claude_auth_from_token, get_pool, gpt_auth_from_token
-from providers.fast_cache.context import FastCacheContext, reset_context, set_context
+from providers.demo_cache.context import DemoCacheContext, reset_context, set_context
 from providers.rose.browser_use import (
     BROWSER_USE_TOOLS,
     _ACTION_NAME_MAP,
@@ -331,7 +331,10 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     assert "  - 4. Email OTP" in prompt
     assert "  - 5. SMS OTP" in prompt
     assert "  - 6. Guest/anonymous completion, if viable" in prompt
-    assert "- If members pay less than guests and membership is free, sign up with the minted account instead of checking out as a guest; if sign-up fails, check out as a guest.\n" in prompt
+    assert (
+        "- If members pay less than guests and membership is free, sign up with the minted account instead of checking out as a guest; if sign-up fails, check out as a guest.\n"
+        in prompt
+    )
     assert "  - 7. Minted account\n" in prompt
     assert "  - 8. request_user_assistance_for_authentication" in prompt
     assert "OTP codes from email or SMS are automatically injected" in prompt
@@ -348,21 +351,19 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
 
 
 def test_auth_assistance_requires_sign_in_form_open_with_and_without_challenge_recovery():
-    """Cement: the auth handoff lands the user on the sign-in form, so they never navigate."""
-    rule = (
-        "leave the site's sign-in form (username/password or code entry) open and visible, "
-        "so the user can sign in without navigating."
-    )
+    """A handoff preserves the current auth step, including an accepted-password challenge."""
+    blocked_step = "leave the auth step you are blocked on open and visible"
     for disable_recover in ("", "1"):
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": disable_recover}):
             (auth_help,) = build_browser_use_tools(["request_user_assistance_for_authentication"])
             prompt = build_browser_use_system_prompt(
                 ["request_user_assistance_for_authentication", "recover_from_challenge"]
             )
-        assert rule in auth_help["description"], f"tool description missing rule (disable={disable_recover!r})"
-        assert f"- Before calling request_user_assistance_for_authentication, {rule}" in prompt, (
-            f"system prompt missing rule (disable={disable_recover!r})"
-        )
+        assert blocked_step in auth_help["description"], f"tool description missing rule (disable={disable_recover!r})"
+        assert blocked_step in prompt, f"system prompt missing rule (disable={disable_recover!r})"
+        # A pending approval is the blocked step; sending the agent back to a password form cancels it.
+        assert "username/password or code entry" not in auth_help["description"]
+        assert "username/password or code entry" not in prompt
 
 
 def test_build_browser_use_system_prompt_reuses_main_grading_prompt():
@@ -2193,8 +2194,8 @@ async def test_complete_browser_use_cancellation_skips_failure_capture():
     await _assert_failed_browser_context_capture(cancelled=True)
 
 
-async def test_complete_browser_use_bypasses_fast_cache_context():
-    """Browser-use LLM calls must not read or write provider fast-cache."""
+async def test_complete_browser_use_bypasses_demo_cache_context():
+    """Browser-use LLM calls must not read or write provider demo-cache."""
     sse_body = _openai_sse(
         [
             {
@@ -2223,13 +2224,13 @@ async def test_complete_browser_use_bypasses_fast_cache_context():
         url = str(req.url)
         captured.append(url)
         if "fast-cache" in url:
-            return httpx.Response(500, text="browser-use should bypass fast-cache")
+            return httpx.Response(500, text="browser-use should bypass demo-cache")
         if "api.cerebras.ai" in url:
             return httpx.Response(200, text=sse_body, headers={"Content-Type": "text/event-stream"})
         return httpx.Response(500, text="unexpected endpoint")
 
     set_mock_handler(handler)
-    token = set_context(FastCacheContext(enabled=True, goal="click submit", write_enabled=True))
+    token = set_context(DemoCacheContext(enabled=True, goal="click submit", write_enabled=True))
     try:
         client = RoseClient(openrouter_key="ork-x")
         with patch.dict(os.environ, {"CEREBRAS_API_KEY": "csk-test"}, clear=False):
@@ -2240,7 +2241,7 @@ async def test_complete_browser_use_bypasses_fast_cache_context():
                 available_actions=["click", "click_coordinates"],
                 include_screenshot=False,
                 gpt_auth=gpt_auth_from_token("good-gpt-token", "acct_123"),
-                agent_id="agent-fast-cache-bypass",
+                agent_id="agent-demo-cache-bypass",
                 call_site="browser_use_step_1",
             )
     finally:
@@ -2376,7 +2377,7 @@ async def test_complete_browser_use_runs_on_spawning_agents_pool():
         url = str(req.url)
         captured.append(url)
         if "fast-cache" in url:
-            return httpx.Response(500, text="browser-use should bypass fast-cache")
+            return httpx.Response(500, text="browser-use should bypass demo-cache")
         if "api.anthropic.com" in url:
             anthropic_bodies.append(json.loads(req.content.decode()))
             return httpx.Response(
@@ -2388,7 +2389,7 @@ async def test_complete_browser_use_runs_on_spawning_agents_pool():
     dump_root = ROOT.parent / ".llm-dumps" / "unbound"
     for path in dump_root.glob("*write_lock_notification_fork_3.json"):
         path.unlink()
-    token = set_context(FastCacheContext(enabled=True, goal="click submit", write_enabled=True))
+    token = set_context(DemoCacheContext(enabled=True, goal="click submit", write_enabled=True))
     try:
         with patch.dict(os.environ, {"CEREBRAS_API_KEY": "csk-test", "GPT_API_KEY": ""}, clear=False):
             result = await RoseClient(openrouter_key="ork-x").complete_browser_use(
@@ -2444,9 +2445,62 @@ async def test_complete_browser_use_runs_on_spawning_agents_pool():
 # =====================================================================
 
 
+
+async def test_completed_browser_output_validation_is_not_transport_or_completion():
+    from providers.rose.errors import BrowserModelOutputValidationError, RoseStallError
+    from providers.rose.types import RoseResponse
+    from browser_tools.schemas import BrowserToolArgsValidationError
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from helpers import observability
+    client = RoseClient(openrouter_key="offline-fake")
+    kwargs = dict(task="Read the visible heading", browser_state=_browser_state(), action_history=[], available_actions=["wait", "request_user_assistance_for_authentication"])
+    outputs = []
+    with patch.object(observability, "dump_llm_context", side_effect=lambda **kw: outputs.append(kw)):
+        for content in ("The page is finished.", '{"action": []}'):
+            response = RoseResponse(content=content, actual_model="offline-model", request_id="actual-response", usage={"prompt_tokens": 7, "completion_tokens": 3})
+            client.collect = AsyncMock(return_value=response)
+            try:
+                await client.complete_browser_use(**kwargs)
+                raise AssertionError("invalid output must not be accepted as completion")
+            except BrowserModelOutputValidationError as error:
+                assert error.response is response and error.response.usage == response.usage
+            assert outputs[-1]["output"]["content"] == content
+            assert outputs[-1]["output"]["request_id"] == "actual-response"
+            assert outputs[-1]["config"]["tool_choice"] == "auto"
+        with patch.object(observability, "dump_llm_context", side_effect=OSError("offline capture failure")):
+            response = RoseResponse(content="Invalid completed answer", request_id="actual-failed-capture")
+            client.collect = AsyncMock(return_value=response)
+            try:
+                await client.complete_browser_use(**kwargs)
+                raise AssertionError("capture failure must not accept invalid output")
+            except BrowserModelOutputValidationError as error:
+                assert error.response is response
+        for original in (RoseStallError("empty stream"), ValueError("unrelated transport wrapper"), asyncio.CancelledError(), WorkflowGenerationSealed("sealed")):
+            client.collect = AsyncMock(side_effect=original)
+            try:
+                await client.complete_browser_use(**kwargs)
+                raise AssertionError("expected original transport/control error")
+            except BaseException as error:
+                assert error is original and not isinstance(error, BrowserModelOutputValidationError)
+        typed = RoseResponse(tool_calls=[{"id": "real-tool", "name": "wait", "arguments": '{"time_ms": "not-a-number"}'}])
+        client.collect = AsyncMock(return_value=typed)
+        try:
+            await client.complete_browser_use(**kwargs)
+            raise AssertionError("invalid typed arguments must retain existing error")
+        except BrowserToolArgsValidationError:
+            pass
+        for response in (RoseResponse(content='{"action": [{"wait": {"time_ms": 1}}]}'), RoseResponse(tool_calls=[{"id": "real-wait", "name": "wait", "arguments": '{"time_ms": 1}'}])):
+            client.collect = AsyncMock(return_value=response)
+            result = await client.complete_browser_use(**kwargs)
+            assert result["action"]["action"] == "wait"
+
+
 async def run_all_tests():
     print("rose_browser_use blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("declared tool admission preserves aliases and batches", test_declared_tool_admission_keeps_aliases_and_batch_semantics)
+    await r.record_async("advertised coordinate-only action remains admissible", test_advertised_coordinate_only_action_is_admitted)
+    await r.record_async("completed_browser_output_validation_is_not_transport_or_completion", test_completed_browser_output_validation_is_not_transport_or_completion)
 
     r.record("browser_use_pool_registered", test_browser_use_pool_registered)
 
@@ -2558,6 +2612,8 @@ async def run_all_tests():
     await r.record_async("native_autofill_actual_enabled_request", test_native_autofill_preference_reaches_actual_enabled_request)
     r.record("native_autofill_fixture_current_dto", test_native_autofill_control_fixture_matches_current_backend_dto)
     await r.record_async("native_autofill_fixture_real_history", test_native_autofill_control_history_matches_real_serializer)
+    await r.record_async("native_autofill_control_production_transcript", test_native_autofill_control_transcript_matches_production_shape)
+    await r.record_async("native_autofill_control_attempt_turns", test_native_autofill_control_scenarios_record_saved_credential_attempts_as_turns)
     await r.record_async("native_autofill_real_model_controls", test_native_autofill_real_model_synthetic_controls)
     r.record("phone_off_matches_prephone_bytes", test_phone_off_matches_prephone_bytes)
     await r.record_async("phone_off_actual_rose_request", test_phone_off_actual_rose_request)
@@ -2644,7 +2700,7 @@ async def run_all_tests():
         "complete_browser_use_cancellation_no_capture", test_complete_browser_use_cancellation_skips_failure_capture
     )
     await r.record_async(
-        "complete_browser_use_bypasses_fast_cache", test_complete_browser_use_bypasses_fast_cache_context
+        "complete_browser_use_bypasses_demo_cache", test_complete_browser_use_bypasses_demo_cache_context
     )
     await r.record_async(
         "complete_browser_use_cerebras_failure_preserves_tools",
@@ -2842,19 +2898,27 @@ async def test_phone_setup_actual_provider_observation():
 
 
 def test_phone_off_matches_prephone_bytes():
-    """Golden SHA256s generated from e62c44b75, not the current implementation."""
+    """Phone-off tools/system/messages must equal the pre-Phone prompt, byte for byte.
+
+    Golden SHA256s were captured from canonical c28f801be before the Phone proposal.
+    Re-pinned at 042d82196 for exactly one deliberate, mode-independent change:
+    a05e1beb7 (Q3b, approved) added the shared browser_auth_contract line "Sign in or
+    sign up only with identities listed in Auth Options. ..." to both modes. The tools
+    hashes are unchanged; no Phone text entered the phone-off prompt. Re-pin only for
+    reviewed text that also reaches phone-on mode, and record the commit here.
+    Re-pinned for the approved read_tool_output browser action (Polar item 16, approved
+    by Andy 2026-10-26): only the tools hash changed in both modes, and excluding that
+    one action reproduces the previous tools hash exactly; system/messages are unchanged.
+    """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {
-        "0": ("bfd0ab9e801c28b2292d46fd2c3955d5752f598b9e674e0ba827d6a66a45f929", "3d33ddfc5f0ef0a29c8f0f4a52ab4f9f5cbb97dfffe37edd76e0902448fff27b", "2f7793efec46d3164063efd783ef0db37ae28690958bf62d8c94d93563fd4146"),
-        "1": ("bfce5951fa8b2c5d3335d41eebd4f716f4dbceea714ceff756692598e2e657a9", "7901736480107e01a7dd44519160214deb01e7b651f88a5880befda85e550752", "3ee42e331028621c89c9a0a81a55755e09c81ac1aa41785ec0feb1ab963d0e04"),
-    }
+    expected = {'0': ('2c9fdf3a97705cd018c06dce4c08d4981d0524889a46cfb03b5286bbf9c84515', 'e8d1ee04f73c9a08380b8e4573109ffc9ce1bf757b2120fc556ee975657bbf89', '4c0d0eb65703bdae2065193f937bf2035e919102dc5e4652916cf771a0f5527c'), '1': ('2de1338897c8e1a3749b7f5fa9a3b0a03015d50aaf779f5cd67f3a697710afa9', '5661e2684efeaf877a48c64a6f240cd0889e30517342fb0a4de5baa9823d12fa', '1dc1c6088a8ab2bb8539271e93ce1f43af4ac7ed543ce1fb624b2b4a01d3d44a')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):
             values = [build_browser_use_tools(actions), build_browser_use_system_prompt(actions), build_browser_use_messages(task="Preserve original task", browser_state={"timestamp": "2026-10-01T00:00:00Z", "url": "https://example.test", "title": "Page", "dom_tree": "[1] button", "viewport": {"width": 800, "height": 600}}, action_history=[], available_actions=actions, dynamic_system_context="Original context", turn_messages=[])]
         actual = tuple(hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest() for value in values)
-        assert actual == hashes, "Phone-off provider tools/system/messages changed from prephone e62c44b75"
+        assert actual == hashes, "Phone-off provider tools/system/messages changed from canonical c28f801be+a05e1beb7"
 
 
 async def test_phone_off_actual_rose_request():
@@ -2953,10 +3017,232 @@ def test_native_autofill_control_fixture_matches_current_backend_dto():
     assert view["lastOperation"]["errorCode"] is None
 
 
-async def _native_autofill_record_read(history, chosen, receipt):
+async def _native_autofill_record_read(history, chosen, receipt, *, turn_messages=None, model_result=None):
     import copy
     from types import SimpleNamespace
-    await history.record_action(SimpleNamespace(), action=chosen["action"], thinking=chosen.get("thinking"), params=copy.deepcopy(chosen.get("params")), result={"success": True, "operation": copy.deepcopy(receipt)})
+    from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages, _browser_action_tool_call_id
+    result = {"success": True, "operation": copy.deepcopy(receipt)}
+    await history.record_action(SimpleNamespace(), action=chosen["action"], thinking=chosen.get("thinking"), params=copy.deepcopy(chosen.get("params")), result=result)
+    if turn_messages is not None:
+        _append_browser_turn_messages(turn_messages, unified_action=chosen, result=result,
+                                      tool_call_id=_browser_action_tool_call_id(model_result or {}))
+
+
+_NATIVE_AUTOFILL_CONTROL_TASK = "Continue my authorized Apple Account sign-in. Use my already available matching saved credential if possible; ask me for the protected step only when needed."
+_NATIVE_AUTOFILL_FILL_SAVED = {"action": "phone", "thinking": None, "params": {"mode": "operation", "operation": "credentials.fill_saved", "args": {}}}
+_NATIVE_AUTOFILL_UNAVAILABLE_RESULT = {"success": False, "error": "phone_credential_unavailable", "operation": {"operation": "credentials.fill_saved", "status": "FAILED", "errorCode": "phone_credential_unavailable", "result": None}}
+_NATIVE_AUTOFILL_SCREEN_TEXT = {"action": "phone", "thinking": None, "params": {"mode": "operation", "operation": "screen.text", "args": {"min_confidence": 0.3}}}
+# The backend's public receipt for a SUCCEEDED fill (`publicOperation` +
+# `redactResult`; cemented by back-end iphone-control.saved-credential cases):
+# a private acknowledgment that the shared saved password was typed, never
+# sign-in proof. The backend cannot observe Apple's verdict, so no "rejected"
+# receipt exists; the model learns of a rejection only from the next read.
+_NATIVE_AUTOFILL_FILLED_RESULT = {"success": True, "operation": {"id": "synthetic-fill-saved", "cursor": 2, "operation": "credentials.fill_saved", "status": "SUCCEEDED", "errorCode": None, "result": {"success": True, "private": True, "credentialStatus": "filled"}}}
+
+
+def _native_autofill_control_history():
+    """Both stores the production loop keeps: durable ActionHistory + next-turn transcript."""
+    from browser_tools.dom_service import ActionHistory
+    return ActionHistory(), []
+
+
+async def _native_autofill_control_record(history, turn_messages, *, chosen, result, tool_call_id):
+    """Record one executed phone action exactly as the production loop does.
+
+    `_call_browser_use_with_rotation` passes both `action_history` (durable resume
+    state) and `turn_messages` (the assistant tool call + tool result the next model
+    turn actually reads). A control that records only one of them shows the model a
+    different transcript than production.
+    """
+    import copy
+    from types import SimpleNamespace
+    from domains.spawn_browser_agent_v3 import handler as h
+    await history.record_action(SimpleNamespace(), action=chosen["action"], thinking=chosen.get("thinking"), params=copy.deepcopy(chosen.get("params")), result=copy.deepcopy(result))
+    h._append_browser_turn_messages(turn_messages, unified_action=copy.deepcopy(chosen), result=copy.deepcopy(result), tool_call_id=tool_call_id)
+
+
+async def _native_autofill_control_request(client, *, name, state, history, turn_messages, **overrides):
+    """The one browser-use request every Native AutoFill control sends (live or mocked)."""
+    from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
+    # Production (`_call_browser_use_with_rotation`) passes both stores; the
+    # message builder renders `turn_messages`, so the model sees the executed
+    # `phone` operation and its receipt instead of the lossy legacy summary.
+    request = dict(task=_NATIVE_AUTOFILL_CONTROL_TASK, browser_state={**_browser_state(), "phone": state}, dynamic_system_context=PHONE_GUIDANCE, action_history=history.get_entries(), turn_messages=turn_messages, available_actions=["phone", "request_user_assistance_for_authentication"], include_screenshot=False, call_site="test-native-autofill-" + name, deadline_s=90, skip_cache_write=True)
+    request.update(overrides)
+    return await client.complete_browser_use(**request)
+
+
+def _native_autofill_read_receipt(state, observation_round):
+    """The synthetic host answers a read with the same screen under a new cursor/receipt id."""
+    import copy
+    receipt = copy.deepcopy(state["interaction"]["lastOperation"])
+    receipt.update(id="synthetic-read-" + str(observation_round + 2), cursor=state["interaction"]["cursor"] + 1)
+    return receipt
+
+
+_NATIVE_AUTOFILL_CONTROL_SCREENS = {
+    "available": "Apple Account synthetic@example.invalid. Password field is masked. A matching native AutoFill suggestion for synthetic@example.invalid is already visible: Use Saved Password button at center (100, 200).",
+    "server_available": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
+    "missing": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
+    "presence": "Apple Account synthetic@example.invalid. Saved password selected. Face ID authentication required to use this saved password. Only the account owner can approve Face ID. No alternative autonomous approval is available.",
+    # Only what a screen shows. Which credential was rejected is carried by the
+    # recorded `credentials.fill_saved` -> `filled` tool turn, as in production;
+    # the earlier OCR narration of a *native* AutoFill rejection left the
+    # skill's "backend catalog is separate; fill_saved once before password
+    # help" rule applicable, so the verdict was undetermined by the input.
+    "rejected": "Apple Account synthetic@example.invalid. Alert: Incorrect password. The masked password field is empty again. No matching native AutoFill suggestion is available. Password is still required to continue.",
+}
+# Which saved-credential attempt each control verdict presupposes. Production
+# shows the model that attempt as its own `phone` tool call plus the backend
+# receipt in `turn_messages`; an OCR sentence claiming it happened is not a
+# shape production can send.
+_NATIVE_AUTOFILL_CONTROL_ATTEMPTS = {"available": None, "server_available": None, "presence": None, "missing": "unavailable", "rejected": "filled"}
+
+
+async def _native_autofill_control_scenario(name, setup_projection=None):
+    """Build one control arm exactly as the production loop would have reached it.
+
+    Returns `(state, history, turns)`: the observed phone state the decision sees
+    plus both production stores (durable ActionHistory and the next-turn
+    transcript) holding every action the arm's verdict depends on.
+    """
+    state = _native_autofill_control_state(_NATIVE_AUTOFILL_CONTROL_SCREENS[name], setup_projection)
+    history, turns = _native_autofill_control_history()
+    if name == "missing":
+        await _native_autofill_control_record(history, turns, chosen=_NATIVE_AUTOFILL_FILL_SAVED, result=_NATIVE_AUTOFILL_UNAVAILABLE_RESULT, tool_call_id="control-fill-saved")
+    if name == "rejected":
+        # Production reaches a rejection as: observe the form (cursor 1) ->
+        # backend `credentials.fill_saved` reports `filled` (cursor 2) -> observe
+        # again (cursor 3) and read the rejection. Record all three through the
+        # production recorder so the transcript, not the OCR, says which
+        # credential was tried.
+        before = _native_autofill_control_state(_NATIVE_AUTOFILL_CONTROL_SCREENS["server_available"], setup_projection)["interaction"]["lastOperation"]
+        before.update(id="synthetic-read-before-fill", cursor=1)
+        await _native_autofill_control_record(history, turns, chosen=_NATIVE_AUTOFILL_SCREEN_TEXT, result={"success": True, "operation": before}, tool_call_id="control-read-before-fill")
+        await _native_autofill_control_record(history, turns, chosen=_NATIVE_AUTOFILL_FILL_SAVED, result=_NATIVE_AUTOFILL_FILLED_RESULT, tool_call_id="control-fill-saved")
+        await _native_autofill_control_record(history, turns, chosen=_NATIVE_AUTOFILL_SCREEN_TEXT, result={"success": True, "operation": state["interaction"]["lastOperation"]}, tool_call_id="control-read-after-fill")
+    return state, history, turns
+
+
+async def test_native_autofill_control_scenarios_record_saved_credential_attempts_as_turns():
+    """Every saved-credential attempt a control verdict presupposes must be a real tool turn.
+
+    Production (`_call_browser_use_with_rotation` + `_append_browser_turn_messages`)
+    shows the model its own `phone(credentials.fill_saved)` call and the backend
+    receipt (`credentialStatus: filled|unavailable`). The backend never emits a
+    "rejected" receipt: a rejection is only visible in the next `screen.text`
+    observation, and *which* credential was rejected is visible only through
+    the prior tool turn. The 2026-10-31 00:28Z deploy-lane failure: the
+    `rejected` arm sent no turns at all and narrated a *native* AutoFill
+    rejection in OCR, so the model (correctly, per the skill's "native and
+    backend stores are separate; fill_saved once before password help") chose
+    `credentials.fill_saved` instead of requesting the protected step.
+    """
+    from domains.spawn_browser_agent_v3 import handler as h
+    captured = []
+    def provider(request):
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, text=_openai_sse([{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "assist", "type": "function", "function": {"name": "request_user_assistance_for_authentication", "arguments": '{"targetKind":"iphone","criticalReason":"password"}'}}]}, "finish_reason": "tool_calls"}]}]), headers={"Content-Type": "text/event-stream"})
+    set_mock_handler(provider)
+    try:
+        setup_projection = _native_autofill_server_setup_projection()
+        client = RoseClient(openrouter_key="synthetic")
+        for name, attempt in _NATIVE_AUTOFILL_CONTROL_ATTEMPTS.items():
+            state, history, turns = await _native_autofill_control_scenario(name, setup_projection)
+            expected = []
+            for entry, (call, receipt) in zip(history.get_entries(), zip(turns[::2], turns[1::2])):
+                h._append_browser_turn_messages(expected, unified_action={"action": entry["action"], "thinking": entry.get("thinking"), "params": entry["params"]}, result=json.loads(receipt["content"]), tool_call_id=call["tool_calls"][0]["id"])
+            assert turns == expected and len(turns) == 2 * len(history.get_entries()), (name, "control bypasses the production turn recorder")
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
+                result = await _native_autofill_control_request(client, name=name, state=state, history=history, turn_messages=turns)
+            assert result["action"]["action"] == "request_user_assistance_for_authentication", (name, result["action"])
+            transcript = [m for m in captured[-1]["messages"] if m.get("role") != "system"]
+            assert transcript[0] == {"role": "user", "content": _NATIVE_AUTOFILL_CONTROL_TASK}, (name, transcript[0])
+            assert transcript[-1]["role"] == "user" and transcript[-1]["content"].startswith("<observed_phone_state>"), (name, transcript[-1])
+            observed = json.loads(transcript[-1]["content"][len("<observed_phone_state>"):-len("</observed_phone_state>")])
+            assert observed["interaction"]["lastOperation"] == state["interaction"]["lastOperation"], name
+            calls = [m for m in transcript if m.get("role") == "assistant" and m.get("tool_calls")]
+            receipts = [m for m in transcript if m.get("role") == "tool"]
+            operations = [(json.loads(c["tool_calls"][0]["function"]["arguments"]).get("operation"), json.loads(r["content"])) for c, r in zip(calls, receipts)]
+            fills = [receipt for operation, receipt in operations if operation == "credentials.fill_saved"]
+            if attempt is None:
+                assert fills == [], (name, "verdict presupposes no saved-credential attempt", fills)
+                continue
+            assert len(fills) == 1, (name, "control narrates a saved-credential attempt instead of recording the production tool turn", [op for op, _ in operations])
+            receipt = fills[0]
+            assert receipt["operation"]["operation"] == "credentials.fill_saved", (name, receipt)
+            if attempt == "unavailable":
+                assert receipt["success"] is False and receipt["operation"]["status"] == "FAILED" and receipt["operation"]["errorCode"] == "phone_credential_unavailable", (name, receipt)
+                continue
+            # A rejection is observable only after the backend reports `filled`
+            # (back-end iphone-control.saved-credential: `{success, private, credentialStatus: 'filled'}`)
+            # and the model then re-observes the screen under a later cursor.
+            assert receipt["success"] is True and receipt["operation"]["status"] == "SUCCEEDED" and receipt["operation"]["errorCode"] is None, (name, receipt)
+            assert receipt["operation"]["result"] == {"success": True, "private": True, "credentialStatus": "filled"}, (name, receipt)
+            fill_index = operations.index(("credentials.fill_saved", receipt))
+            later_reads = [r for op, r in operations[fill_index + 1:] if op == "screen.text"]
+            assert later_reads and later_reads[-1]["operation"] == state["interaction"]["lastOperation"], (name, "rejection must be observed by a read recorded after the fill", [op for op, _ in operations])
+            assert receipt["operation"]["cursor"] < later_reads[-1]["operation"]["cursor"], (name, receipt["operation"]["cursor"], later_reads[-1]["operation"]["cursor"])
+            earlier_reads = [r for op, r in operations[:fill_index] if op == "screen.text"]
+            assert earlier_reads and earlier_reads[-1]["operation"]["cursor"] < receipt["operation"]["cursor"], (name, "credentials.fill_saved requires a current screen.text observation before it")
+    finally:
+        teardown_mock()
+
+
+async def test_native_autofill_control_transcript_matches_production_shape():
+    """The control must show the model the executed-action transcript production sends.
+
+    Production passes `turn_messages`: the assistant `phone` tool call with its
+    `operation` argument and the `tool` result carrying the receipt. The legacy
+    `Previous Actions` summary (`Step 1: phone ✗ Error: phone_credential_unavailable`)
+    drops the operation name, so the `missing` control (fill_saved already failed)
+    read exactly like `server_available` (fill_saved not yet tried) apart from an
+    opaque error code — the 2026-10-30 22:42Z deploy-lane failure retried fill_saved.
+    """
+    from domains.spawn_browser_agent_v3 import handler as h
+    captured = []
+    def provider(request):
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, text=_openai_sse([{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "observe", "type": "function", "function": {"name": "phone", "arguments": '{"mode":"operation","operation":"screen.text","args":{"min_confidence":0.3}}'}}]}, "finish_reason": "tool_calls"}]}]), headers={"Content-Type": "text/event-stream"})
+    set_mock_handler(provider)
+    try:
+        state = _native_autofill_control_state("Synthetic current password screen")
+        history, turns = _native_autofill_control_history()
+        await _native_autofill_control_record(history, turns, chosen=_NATIVE_AUTOFILL_FILL_SAVED, result=_NATIVE_AUTOFILL_UNAVAILABLE_RESULT, tool_call_id="control-fill-saved")
+        expected = []
+        h._append_browser_turn_messages(expected, unified_action=_NATIVE_AUTOFILL_FILL_SAVED, result=_NATIVE_AUTOFILL_UNAVAILABLE_RESULT, tool_call_id="control-fill-saved")
+        assert turns == expected, "Control bypasses the production turn recorder"
+        assert history.get_entries()[0]["params"]["operation"] == "credentials.fill_saved"
+        client = RoseClient(openrouter_key="synthetic")
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
+            result = await _native_autofill_control_request(client, name="transcript", state=state, history=history, turn_messages=turns)
+        transcript = [m for m in captured[-1]["messages"] if m.get("role") != "system"]
+        assert transcript[0] == {"role": "user", "content": _NATIVE_AUTOFILL_CONTROL_TASK}, ("legacy lossy history suffix", transcript[0])
+        calls = [m for m in transcript if m.get("role") == "assistant" and m.get("tool_calls")]
+        assert [(c["tool_calls"][0]["function"]["name"], json.loads(c["tool_calls"][0]["function"]["arguments"])) for c in calls] == [("phone", _NATIVE_AUTOFILL_FILL_SAVED["params"])], transcript
+        tool_results = [m for m in transcript if m.get("role") == "tool"]
+        assert len(tool_results) == 1 and tool_results[0]["tool_call_id"] == calls[0]["tool_calls"][0]["id"] == "control-fill-saved", transcript
+        receipt = json.loads(tool_results[0]["content"])
+        assert receipt["success"] is False and receipt["error"] == "phone_credential_unavailable"
+        assert receipt["operation"] == _NATIVE_AUTOFILL_UNAVAILABLE_RESULT["operation"]
+        assert transcript[-1]["content"].startswith("<observed_phone_state>") and '"cursor": 3' in transcript[-1]["content"]
+        # The model asked for a read: the synthetic host's receipt must reach the next
+        # request the same way, without rewriting the earlier fill_saved turn.
+        chosen = result["action"]
+        assert chosen["action"] == "phone" and chosen["params"]["operation"] == "screen.text", chosen
+        read = _native_autofill_read_receipt(state, 0)
+        await _native_autofill_control_record(history, turns, chosen=chosen, result={"success": True, "operation": read}, tool_call_id="control-read-1")
+        state["interaction"]["cursor"] = read["cursor"]
+        state["interaction"]["lastOperation"] = read
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
+            await _native_autofill_control_request(client, name="transcript", state=state, history=history, turn_messages=turns)
+        transcript = [m for m in captured[-1]["messages"] if m.get("role") != "system"]
+        names = [(m["role"], json.loads(m["tool_calls"][0]["function"]["arguments"])["operation"] if m.get("tool_calls") else json.loads(m["content"])["operation"]["operation"]) for m in transcript if m.get("role") in ("assistant", "tool")]
+        assert names == [("assistant", "credentials.fill_saved"), ("tool", "credentials.fill_saved"), ("assistant", "screen.text"), ("tool", "screen.text")], names
+        assert json.loads(transcript[-2]["content"])["operation"]["id"] == "synthetic-read-2" and '"cursor": 4' in transcript[-1]["content"]
+        assert transcript[0] == {"role": "user", "content": _NATIVE_AUTOFILL_CONTROL_TASK}
+    finally:
+        teardown_mock()
 
 
 async def test_native_autofill_control_history_matches_real_serializer():
@@ -2966,7 +3252,8 @@ async def test_native_autofill_control_history_matches_real_serializer():
     chosen = {"action": "phone", "thinking": None, "params": {"mode": "operation", "operation": "screen.text", "args": {}}}
     receipt = {"id": "read-1", "cursor": 1, "operation": "screen.text", "status": "SUCCEEDED", "result": [{"text": "Synthetic"}]}
     history = ActionHistory()
-    await _native_autofill_record_read(history, chosen, receipt)
+    turn_messages = []
+    await _native_autofill_record_read(history, chosen, receipt, turn_messages=turn_messages, model_result={"tool_call_id": "read-tool-1"})
     actual = ActionHistory()
     from types import SimpleNamespace
     await actual.record_action(SimpleNamespace(), action="phone", thinking=None, params=chosen["params"], result={"success": True, "operation": copy.deepcopy(receipt)})
@@ -2975,58 +3262,53 @@ async def test_native_autofill_control_history_matches_real_serializer():
     assert history.get_entries()[0]["result"]["operation"]["id"] == "read-1", "Prior receipt mutated with current observation"
     rendered = _format_action_history(history.get_entries())
     assert "Step 1: phone" in rendered and "Step None" not in rendered
+    assert turn_messages[0]["tool_calls"][0]["id"] == turn_messages[1]["tool_call_id"] == "read-tool-1"
+    assert json.loads(turn_messages[0]["tool_calls"][0]["function"]["arguments"]) == chosen["params"]
+    assert json.loads(turn_messages[1]["content"])["operation"] == history.get_entries()[0]["result"]["operation"]
+    assert json.loads(turn_messages[1]["content"])["operation"]["id"] == "read-1"
 
 
 async def test_native_autofill_real_model_synthetic_controls():
     """Real canonical decisions on synthetic OCR; no device execution or secrets."""
     from _test_utils import live_funded_azure
-    from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
-    scenarios = {
-        "available": "Apple Account synthetic@example.invalid. Password field is masked. A matching native AutoFill suggestion for synthetic@example.invalid is already visible: Use Saved Password button at center (100, 200).",
-        "server_available": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
-        "missing": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
-        "presence": "Apple Account synthetic@example.invalid. Saved password selected. Face ID authentication required to use this saved password. Only the account owner can approve Face ID. No alternative autonomous approval is available.",
-        "rejected": "Apple Account synthetic@example.invalid. The matching saved password was already selected once using native AutoFill. Apple Account rejected it: Incorrect password. Password is still required to continue.",
-    }
-    from browser_tools.dom_service import ActionHistory
-    from types import SimpleNamespace
-    import copy
     setup_projection = _native_autofill_server_setup_projection()
-    async def decide(name, screen):
-        state = _native_autofill_control_state(screen, setup_projection)
-        history = ActionHistory()
-        if name == "missing":
-            await history.record_action(SimpleNamespace(), action="phone", params={"mode": "operation", "operation": "credentials.fill_saved", "args": {}}, result={"success": False, "error": "phone_credential_unavailable", "operation": {"operation": "credentials.fill_saved", "status": "FAILED", "errorCode": "phone_credential_unavailable", "result": None}})
+    async def decide(name):
+        state, history, turns = await _native_autofill_control_scenario(name, setup_projection)
+        served = {}
         for observation_round in range(3):
-            result = await RoseClient().complete_browser_use(task="Continue my authorized Apple Account sign-in. Use my already available matching saved credential if possible; ask me for the protected step only when needed.", browser_state={**_browser_state(), "phone": state}, dynamic_system_context=PHONE_GUIDANCE, action_history=history.get_entries(), available_actions=["phone", "request_user_assistance_for_authentication"], include_screenshot=False, call_site="test-native-autofill-" + name, deadline_s=90, skip_cache_write=True)
+            result = await _native_autofill_control_request(RoseClient(), name=name, state=state, history=history, turn_messages=turns)
+            # Bind the verdict to the leg that actually answered: the pool's primary
+            # legs (Cerebras, Foundry) are unavailable in coverage, so every control
+            # is answered by the OpenRouter waterfall and the failure must say so.
+            served = {"actual_model": result.get("actual_model"), "mode": result.get("mode"), "request_id": result.get("request_id")}
             chosen = result.get("action", {})
-            print("Native AutoFill actual choice:", name, observation_round, json.dumps(chosen), flush=True)
+            print("Native AutoFill actual choice:", name, observation_round, json.dumps(served), json.dumps(chosen), flush=True)
             if chosen.get("action") != "phone" or chosen.get("params", {}).get("operation") != "screen.text":
                 break
             # The real model requested a read; the synthetic host exposes the same
             # screen. Preserve its chosen action and returned observation, never
             # substitute a desired tap/attention decision.
-            receipt = copy.deepcopy(state["interaction"]["lastOperation"])
-            receipt.update(id="synthetic-read-" + str(observation_round + 2), cursor=state["interaction"]["cursor"] + 1)
-            await _native_autofill_record_read(history, chosen, receipt)
+            receipt = _native_autofill_read_receipt(state, observation_round)
+            await _native_autofill_control_record(history, turns, chosen=chosen, result={"success": True, "operation": receipt}, tool_call_id="control-read-" + str(observation_round + 1))
             state["interaction"]["cursor"] = receipt["cursor"]
             state["interaction"]["lastOperation"] = receipt
         action = result.get("action", {})
         params = action.get("params", {})
-        assert not (action.get("action") == "phone" and params.get("operation") == "input.text"), (name, action)
+        verdict = (name, served, action)
+        assert not (action.get("action") == "phone" and params.get("operation") == "input.text"), verdict
         if name == "server_available":
-            assert action.get("action") == "phone" and params.get("operation") == "credentials.fill_saved" and params.get("args") == {}, (name, action)
+            assert action.get("action") == "phone" and params.get("operation") == "credentials.fill_saved" and params.get("args") == {}, verdict
         elif name == "available":
-            assert action.get("action") == "phone" and params.get("operation") == "input.tap", (name, action)
-            assert params.get("args") == {"x": 100, "y": 200}, (name, action)
+            assert action.get("action") == "phone" and params.get("operation") == "input.tap", verdict
+            assert params.get("args") == {"x": 100, "y": 200}, verdict
         else:
-            assert action.get("action") == "request_user_assistance_for_authentication" and params.get("targetKind") == "iphone", (name, action)
-            assert params.get("criticalReason") == ("manual_verification" if name == "presence" else "password"), (name, action)
+            assert action.get("action") == "request_user_assistance_for_authentication" and params.get("targetKind") == "iphone", verdict
+            assert params.get("criticalReason") == ("manual_verification" if name == "presence" else "password"), verdict
         usage = result.get("usage", {})
         print("Native AutoFill real synthetic control:", name, "model:", result.get("actual_model"), "usage:", json.dumps(usage), flush=True)
     teardown_mock()
     with live_funded_azure():
-        outcomes = await asyncio.wait_for(asyncio.gather(*(decide(name, screen) for name, screen in scenarios.items()), return_exceptions=True), timeout=120)
+        outcomes = await asyncio.wait_for(asyncio.gather(*(decide(name) for name in _NATIVE_AUTOFILL_CONTROL_SCREENS), return_exceptions=True), timeout=120)
         errors = [str(value) for value in outcomes if isinstance(value, BaseException)]
         assert not errors, errors
 
@@ -3155,3 +3437,55 @@ async def test_phone_setup_settings_actual_handler_observation():
 
 if __name__ == "__main__":
     asyncio.run(run_all_tests())
+
+
+async def test_advertised_coordinate_only_action_is_admitted():
+    from providers.rose.types import RoseResponse
+    from providers.rose.errors import BrowserModelOutputValidationError
+    from helpers import observability
+    responses = [
+        RoseResponse(tool_calls=[{"id": "coordinate-call", "name": "click_coordinates", "arguments": '{"x": 12, "y": 34}'}]),
+        RoseResponse(content='{"action": [{"click_coordinates": {"x": 12, "y": 34}}]}'),
+    ]
+    client = RoseClient(openrouter_key="offline-unused")
+    with patch.object(observability, "dump_llm_context"):
+        for response in responses:
+            client.collect = AsyncMock(return_value=response)
+            try:
+                result = await client.complete_browser_use(task="Click the visible target", browser_state=_browser_state(), action_history=[], available_actions=["click_coordinates"])
+            except BrowserModelOutputValidationError as error:
+                raise AssertionError("the advertised coordinate-only action was rejected after normalization") from error
+            advertised = client.collect.await_args.kwargs["tools"]
+            assert [tool["name"] for tool in advertised] == ["click_coordinates"]
+            assert result["action"]["action"] == "click"
+            assert result["action"]["coordinates"] == {"x": 12, "y": 34}
+
+
+async def test_declared_tool_admission_keeps_aliases_and_batch_semantics():
+    from providers.rose.types import RoseResponse
+    from providers.rose.errors import BrowserModelOutputValidationError
+    from helpers import observability
+    client = RoseClient(openrouter_key="offline-unused")
+    async def complete(response, available):
+        client.collect = AsyncMock(return_value=response)
+        return await client.complete_browser_use(task="Use the offered action", browser_state=_browser_state(), action_history=[], available_actions=available)
+    with patch.object(observability, "dump_llm_context"):
+        for response in (
+            RoseResponse(tool_calls=[{"id": "hidden", "name": "screenshot", "arguments": "{}"}]),
+            RoseResponse(content='{"action": [{"screenshot": {}}]}'),
+            RoseResponse(tool_calls=[{"id": "unoffered-index", "name": "click", "arguments": '{"index": 3}'}]),
+            RoseResponse(content='{"action": [{"click": {"index": 3}}]}'),
+        ):
+            try:
+                await complete(response, ["click_coordinates"])
+            except BrowserModelOutputValidationError:
+                pass
+            else:
+                raise AssertionError("an action absent from the request grammar was admitted")
+        result = await complete(RoseResponse(tool_calls=[{"id": "nested", "function": {"name": "click_coordinates", "arguments": '{"x": 12, "y": 34}'}}]), ["click_coordinates"])
+        assert result["action"]["coordinates"] == {"x": 12, "y": 34}
+        result = await complete(RoseResponse(content='{"action": [{"done": {"text": "Finished"}}]}'), ["attempt_completion"])
+        assert result["action"]["action"] == "attempt_completion"
+        result = await complete(RoseResponse(tool_calls=[{"id": "key-" + key, "name": "press_key", "arguments": json.dumps({"key": key})} for key in "ab"]), ["press_key"])
+        assert result["action"]["action"] == "input_text"
+        assert result["action"]["params"]["text"] == "ab"

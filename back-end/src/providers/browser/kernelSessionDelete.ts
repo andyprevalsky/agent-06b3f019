@@ -1,5 +1,17 @@
 import https from 'node:https';
+import { createLogger } from '../logger';
 import { retryWithBackoff } from '../retry';
+import { releaseKernelProfileWriter } from './kernelProfileWriter';
+
+const log = createLogger('KernelSessionDelete');
+
+/**
+ * Per-attempt budget for DELETE /browsers/:id. Matches the Kernel SDK's own
+ * request default (Kernel.DEFAULT_TIMEOUT, 60s). On 2026-10-26 Kernel answered
+ * single-browser GET/DELETE in ~10.6s (even 404s), so the former 10s budget
+ * failed every release attempt and left sessions running.
+ */
+export const KERNEL_SESSION_DELETE_TIMEOUT_MS = 60_000;
 
 export async function releaseKernelRemoteSession(sessionId: string): Promise<void> {
   await retryWithBackoff(
@@ -20,7 +32,7 @@ export async function releaseKernelRemoteSession(sessionId: string): Promise<voi
             response.once('end', () => resolve(response.statusCode ?? 0));
           }
         );
-        request.setTimeout(10_000, () => {
+        request.setTimeout(KERNEL_SESSION_DELETE_TIMEOUT_MS, () => {
           request.destroy(new Error('Kernel session delete timed out'));
         });
         request.once('error', reject);
@@ -36,5 +48,14 @@ export async function releaseKernelRemoteSession(sessionId: string): Promise<voi
       isRetryable: () => true,
       component: 'Kernel session delete',
     }
+  );
+  // Kernel saved the profile during the DELETE above; only now may another browser write it.
+  // The browser is gone either way: a bookkeeping failure must not report the delete as
+  // failed (the next claim's liveness check takes over a row left behind).
+  await releaseKernelProfileWriter(sessionId).catch((error: unknown) =>
+    log.warn('Kernel profile writer release failed after delete', {
+      sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    })
   );
 }

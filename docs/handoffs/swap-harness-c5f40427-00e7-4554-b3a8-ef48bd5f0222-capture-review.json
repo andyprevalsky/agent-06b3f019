@@ -1,0 +1,60 @@
+{
+  "schema": "original-volume-independent-source-review-v1",
+  "reviewer_thread": "ph71gtg4ntdz4sd4xkzp8qqn2n8g7nss",
+  "reviewer_devbox": "cc964e89-00d3-4dc6-acb2-37077cbce788",
+  "review_utc": "2026-10-13T00:30:12.881716+00:00",
+  "original_checkpoint": "e6c4a2d1906581011729584d8695aa1a935ae9f7",
+  "reviewed_commit": "7d535c0440fb22543dc50818a6423d502e22742e",
+  "reviewed_branch": "fix/original-volume-capture-custody-review",
+  "exact_original_to_candidate_diff_sha256": "9c10940ea5eaae51a5e8a5cf3242918f5eff0048fe8d250dd70676f7cd167c9f",
+  "source_sha256": {
+    "scripts/cloudbench-original-volume-capture.py": "48fff0bd3e2288125ded4ae6ee25c8502dd1477b25692624c8155272a9c8cd8e",
+    "agents/benchmarks/cloudbench_dependency_sync_test.py": "d2e8d9f22392c289117fb2c79cc1bd0ea86c51128232ae5ce3d0f21ae1461acc",
+    "agents/tests/blackbox/benchmark.blackbox.py": "9be6c292379ce90b294cb5e959a1b38aba96e6026fb992b752b8a7024cdb89d5"
+  },
+  "source_review_result": "accepted for one exact original same-host inert capture with explicit service isolation; no new-host identity adapter or new task authority",
+  "owning_checks": {
+    "author_baseline_red": {
+      "registration": "1 failed, 26 passed; missing actual owning capture targets",
+      "services": "5 failed on original checkpoint helper; same service-isolation assertions"
+    },
+    "author_focused_green": "...........................................                              [100%]\n43 passed, 884 deselected in 31.45s",
+    "actual_permanent_terminal_evidence_gate": "PASS: actual permanent terminal-evidence gate; elapsed_seconds= 60.603\ngate_source_sha256= 9be6c292379ce90b294cb5e959a1b38aba96e6026fb992b752b8a7024cdb89d5",
+    "independent_parent_focused_command": "python -m pytest agents/benchmarks/cloudbench_dependency_sync_test.py -k original_volume -q",
+    "independent_parent_result": "43 passed,884 deselected,29.97 seconds",
+    "independent_parent_log_sha256": "fd8e805e47efdb458f53e7276a4f5022e184d02a6e4d8e384ab939eedb061f79"
+  },
+  "review_findings": {
+    "default_services_foreign_host_live_owner_and_unknown_config_refusals_preserved": true,
+    "opt_in_service_config_removed_only_from_copied_inert_variant": true,
+    "complete_original_config_saved_privately_and_restored_exactly_without_start": true,
+    "same_owner_registry_recovery_lock_and_original_run_task_machine_volume_binding_preserved": true,
+    "guest_driver_absence_and_archive_member_hashes_verified_before_capture_publication": true,
+    "capture_has_zero_credit_and_never_reaps": true,
+    "interruption_restoration_and_restore_only_controls_pass": true,
+    "normal_deadlines_budgets_and_tasks_unchanged": true
+  },
+  "exact_action_scope": {
+    "old_devbox": "c5f40427-00e7-4554-b3a8-ef48bd5f0222",
+    "app": "navi-whisper-lux-bench",
+    "owner": "38970c3c5c824638a2e1ccc90e6dcd4f",
+    "run": "20261012-202210-3280999",
+    "task": "minted-agent-accounts-x",
+    "machine": "81245db9215698",
+    "volume": "vol_4ql7650wx9yqlqwr",
+    "original_guest_ref": "a7ee1649bcc152199bc893f7985c41cb8fed79ad",
+    "source_paths_must_remain_original": true,
+    "old_host_absence_receipt_sha256": "18c21036c6f2247ffa5fcc4c84cecb7ec17dc5d1b5df8b5ce22c09061ade8859",
+    "permitted_sequence": [
+      "read-only exact preflight with --isolate-services",
+      "one inert original-volume capture with same option",
+      "canonical interrupted archive builder preserving originals",
+      "canonical exact-owner recovery through native resource audit and registry retirement",
+      "encrypted final delta plus EVERY original member hash for replacement verification"
+    ],
+    "unexpected_refusal": "preserve latch/config/originals and report exact boundary; never waive the failing validator",
+    "native_recovery_and_final_resource_release_not_yet_claimed": true
+  },
+  "freedom_preserved": true,
+  "paid_trial_authorized_by_this_review": false
+}

@@ -12,11 +12,22 @@ import type { ClientSource } from '@/lib/clientSource';
  * The staged transition is synchronous. Agent creation, canonical detail,
  * and the sidebar refresh happen after the new conversation is visible. Fast
  * Mode and Simulator Mode are captured in the create request for that agent.
+ *
+ * NEW-AGENT LOCATION (Rose Desktop project/folder "+"):
+ *   [PROJECT] --setNewAgentFolderId(id)--> [FOLDER] --create ok--> [HOME]
+ *   [FOLDER] --create fails--> [FOLDER] (kept for retry)
+ *   [FOLDER] --setNewAgentProjectId(id|null)--> [PROJECT|HOME] (folder cleared)
+ *   [HOME] --setNewAgentProjectId(id)--> [IN PROJECT id] --create ok--> [HOME]
+ *   [IN PROJECT id] --create fails--> [IN PROJECT id] (kept for the retry)
+ *   [IN PROJECT id] --setNewAgentProjectId(null) (New Super Agent)--> [HOME]
+ * While IN PROJECT, the create request carries project_id; Home omits it.
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import * as amplitude from '@amplitude/analytics-browser';
 
+import { useQueryPreference } from '@/hooks/useQueryPreference';
+import { readQueryPreferences } from '@/lib/queryPreferences';
 import { useToast } from '@/hooks/use-toast';
 import { canUseFastMode, defaultsFastModeOn } from '@/lib/fastModeAccounts';
 import { getFastModeSessionOverride, setFastModeSessionOverride } from '@/lib/fastModeSession';
@@ -25,7 +36,13 @@ import { getItem, removeItem } from '@/lib/storage';
 
 import { DEFAULT_MODEL, DEFAULT_PRICE_LIMIT_CENTS } from '../config';
 import { createAgent, postMessage, checkAndRespondToAttention } from '../api';
-import type { FilePointer, AgentDetail, PendingAgentCreationInput, TerminalView } from '../types';
+import type {
+  FilePointer,
+  AgentDetail,
+  MessageTarget,
+  PendingAgentCreationInput,
+  TerminalView,
+} from '../types';
 
 export interface UseMessageSendingArgs {
   selectedAgentId: string | null;
@@ -71,15 +88,40 @@ export function useMessageSending({
     return '';
   });
   const [isSendingMessage, setIsSendingMessage] = useState(false);
-  const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
-  const [pendingPriceLimitCents, setPendingPriceLimitCents] = useState(DEFAULT_PRICE_LIMIT_CENTS);
-  // Fast Mode aggressive cache — session-only; defaults on for allowlisted accounts.
+  const [selectedModel, syncSelectedModel] = useState(
+    () => readQueryPreferences(userId).model ?? DEFAULT_MODEL,
+  );
+  const [, rememberModel] = useQueryPreference(userId, 'model', DEFAULT_MODEL);
+  const [savedPriceLimitCents, setPendingPriceLimitCents] = useQueryPreference(
+    userId,
+    'priceLimitCents',
+    DEFAULT_PRICE_LIMIT_CENTS,
+  );
+  const pendingPriceLimitCents = savedPriceLimitCents ?? DEFAULT_PRICE_LIMIT_CENTS;
+  const [rememberedFastMode, rememberFastMode] = useQueryPreference(userId, 'fastMode', undefined);
+  const setSelectedModel = useCallback(
+    (model: string) => {
+      syncSelectedModel(model);
+      rememberModel(model);
+    },
+    [rememberModel],
+  );
+  // Provider speed defaults are remembered per account; actual agents remain authoritative.
   const [fastMode, setFastModeState] = useState(true);
   // World Model simulator — session-only, account-scoped, default off, never persisted client-side.
   const [simulatorMode, setSimulatorModeState] = useState(false);
+  // Project the next new agent is created in (Rose Desktop project "+"); null = Home.
+  const [newAgentProjectId, setNewAgentProjectIdState] = useState<string | null>(null);
+  const [newAgentFolderId, setNewAgentFolderId] = useState<string | null>(null);
+  const setNewAgentProjectId = useCallback((projectId: string | null) => {
+    setNewAgentProjectIdState(projectId);
+    setNewAgentFolderId(null);
+  }, []);
 
   const messageInputRef = useRef<string>('');
   const pendingSubmitRef = useRef(false);
+  // A send replayed after login keeps its destination (Browser-composer target).
+  const pendingTargetRef = useRef<MessageTarget | undefined>(undefined);
   const autoSubmitRef = useRef(false);
   const fastModeUserOverrideRef = useRef(false);
   const resolvedUser = user ?? (userId != null && userId !== '' ? { id: userId } : null);
@@ -91,6 +133,10 @@ export function useMessageSending({
   useEffect(() => {
     messageInputRef.current = messageInput;
   }, [messageInput]);
+
+  useEffect(() => {
+    fastModeUserOverrideRef.current = false;
+  }, [userId]);
 
   useEffect(() => {
     if (!userCanUseFastMode) {
@@ -121,8 +167,13 @@ export function useMessageSending({
       return;
     }
 
-    if (selectedAgentId !== null || fastModeUserOverrideRef.current) return;
-    const sessionOverride = getFastModeSessionOverride();
+    if (selectedAgentId !== null) return;
+    if (rememberedFastMode !== undefined) {
+      setFastModeState(rememberedFastMode);
+      return;
+    }
+    if (fastModeUserOverrideRef.current) return;
+    const sessionOverride = userId ? null : getFastModeSessionOverride();
     if (sessionOverride !== null) {
       setFastModeState(sessionOverride);
       return;
@@ -137,15 +188,20 @@ export function useMessageSending({
     user?.phone,
     userCanUseFastMode,
     userDefaultsFastModeOn,
+    rememberedFastMode,
     userId,
   ]);
 
-  const setFastMode = useCallback((enabled: boolean) => {
-    fastModeUserOverrideRef.current = true;
-    setFastModeSessionOverride(enabled);
-    setFastModeState(enabled);
-    if (enabled) setSimulatorModeState(false);
-  }, []);
+  const setFastMode = useCallback(
+    (enabled: boolean) => {
+      fastModeUserOverrideRef.current = true;
+      rememberFastMode(enabled);
+      setFastModeSessionOverride(enabled);
+      setFastModeState(enabled);
+      if (enabled) setSimulatorModeState(false);
+    },
+    [rememberFastMode],
+  );
 
   useEffect(() => {
     if (!userCanUseSimulator) {
@@ -167,11 +223,11 @@ export function useMessageSending({
 
   // Sync model from agent detail
   useEffect(() => {
-    if (agentDetail?.model) setSelectedModel(agentDetail.model);
+    if (agentDetail?.model) syncSelectedModel(agentDetail.model);
   }, [agentDetail?.model]);
 
   const handleSendMessage = useCallback(
-    async (attachments?: FilePointer[]) => {
+    async (attachments?: FilePointer[], target?: MessageTarget) => {
       const trimmed = messageInput.trim();
       if (!trimmed && (!attachments || attachments.length === 0)) return;
 
@@ -185,6 +241,7 @@ export function useMessageSending({
 
       if (!canSubmitGoals) {
         pendingSubmitRef.current = true;
+        pendingTargetRef.current = target;
         setLoginModalOpen(true);
         toast({ title: 'Authentication required', description: 'Please log in to continue' });
         return;
@@ -215,13 +272,26 @@ export function useMessageSending({
               attachments: attachments && attachments.length > 0 ? attachments : undefined,
               price_limit_cents: pendingPriceLimitCents,
               ...(userCanUseFastMode ? { fast_mode_cache_enabled: fastMode } : {}),
+              // Off → standard; Fast vs Ultrafast (speedLevel.ts; defaults to Ultrafast).
+              ...(userCanUseFastMode
+                ? {
+                    speed: !fastMode
+                      ? 'standard'
+                      : readQueryPreferences(userId).ultraPreferred === false
+                        ? 'fast'
+                        : 'ultrafast',
+                  }
+                : {}),
               ...(userCanUseSimulator
                 ? { world_model_mode: simulatorMode ? 'simulate' : 'real' }
                 : {}),
+              ...(newAgentProjectId !== null ? { project_id: newAgentProjectId } : {}),
+              ...(newAgentFolderId !== null ? { folder_id: newAgentFolderId } : {}),
             });
             if (newAgent.agent_id !== agentId) {
               throw new Error('Created agent ID did not match the requested agent ID');
             }
+            setNewAgentProjectId(null);
             await reconcilePendingAgentCreation(agentId);
             void loadAgents();
           } catch (error) {
@@ -235,7 +305,10 @@ export function useMessageSending({
           return;
         }
 
-        const responded = await checkAndRespondToAttention(selectedAgentId, messageInput);
+        // A Browser-composer message is the browser's input, never the owner's
+        // answer to a pending question.
+        const responded =
+          target === undefined && (await checkAndRespondToAttention(selectedAgentId, messageInput));
         if (responded) {
           toast({
             title: 'Response sent',
@@ -247,9 +320,11 @@ export function useMessageSending({
 
         // The backend lifts a user pause after delivering the message, so the
         // woken workflow always has it; resuming here first would not.
-        await postMessage(selectedAgentId, messageInput, attachments);
+        // A Browser-composer target goes straight to that browser task.
+        await postMessage(selectedAgentId, messageInput, attachments, target);
         setMessageInput('');
-        if (agentDetail?.status === 'PAUSED') {
+        // Only a message to the agent itself lifts its pause.
+        if (target === undefined && agentDetail?.status === 'PAUSED') {
           toast({
             title: 'Agent resuming',
             description: 'The agent will continue with your message',
@@ -275,11 +350,15 @@ export function useMessageSending({
       messageInput,
       selectedAgentId,
       selectedModel,
+      userId,
       fastMode,
       simulatorMode,
       canSubmitGoals,
       clientSource,
       pendingPriceLimitCents,
+      newAgentProjectId,
+      newAgentFolderId,
+      setNewAgentProjectId,
       agentDetail,
       userCanUseFastMode,
       userCanUseSimulator,
@@ -305,7 +384,9 @@ export function useMessageSending({
 
     pendingSubmitRef.current = false;
     autoSubmitRef.current = true;
-    void handleSendMessage()
+    const target = pendingTargetRef.current;
+    pendingTargetRef.current = undefined;
+    void handleSendMessage(undefined, target)
       .catch((e) => console.error('[Auth] Auto-submit failed', e))
       .finally(() => {
         autoSubmitRef.current = false;
@@ -319,12 +400,17 @@ export function useMessageSending({
     setIsSendingMessage,
     selectedModel,
     setSelectedModel,
+    syncSelectedModel,
     pendingPriceLimitCents,
     setPendingPriceLimitCents,
     fastMode,
     setFastMode,
     simulatorMode,
     setSimulatorMode,
+    newAgentProjectId,
+    newAgentFolderId,
+    setNewAgentFolderId,
+    setNewAgentProjectId,
     handleSendMessage,
   };
 }

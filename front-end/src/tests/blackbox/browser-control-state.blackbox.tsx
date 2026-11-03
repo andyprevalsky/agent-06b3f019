@@ -1,6 +1,6 @@
 /**
  * Blackbox coverage for browser-control state priority on the live browser
- * surface (BrowserStatusBarFullscreen, rendered by BrowserStatusBar).
+ * surface (BrowserAgentPane, portaled by BrowserStatusBar into the Browser drawer).
  */
 import { describe, expect, it, vi } from 'vitest';
 import { screen } from '@testing-library/react';
@@ -16,16 +16,18 @@ vi.mock('@/features/terminal-component-group/components/BrowserBorderGlow', () =
   default: () => <div data-testid="browser-border-glow" />,
 }));
 vi.mock('@/features/terminal-component-group/components/BrowserCursorOverlay', () => ({
-  default: () => <div data-testid="browser-cursor-overlay" />,
+  default: ({ visible = true }: { visible?: boolean }) => (
+    <div data-testid="browser-cursor-overlay" data-visible={String(visible)} />
+  ),
 }));
 
-import { BrowserStatusBarFullscreen } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarFullscreen';
+import { BrowserAgentPane } from '@/features/terminal-component-group/components/browser-status-bar/BrowserAgentPane';
 
 const browserUseUrl = 'https://live.browser-use.com/session/browser-use-test';
 
 function fullscreen(overrides: { isDisconnected?: boolean; isWaitingForAuthAssistance?: boolean }) {
   return (
-    <BrowserStatusBarFullscreen
+    <BrowserAgentPane
       agentId="agent-1"
       taskId="task-1"
       browserUrl={browserUseUrl}
@@ -38,7 +40,6 @@ function fullscreen(overrides: { isDisconnected?: boolean; isWaitingForAuthAssis
       isResuming={false}
       isUserControlling={false}
       pendingWriteLockApproval={null}
-      onClose={vi.fn()}
       onResume={vi.fn()}
     />
   );
@@ -69,6 +70,6 @@ describe('browser control state', () => {
     expect(screen.getByRole('button', { name: 'Take Control' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Start Agent' })).not.toBeInTheDocument();
     expect(screen.queryByTestId('browser-border-glow')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('browser-cursor-overlay')).not.toBeInTheDocument();
+    expect(screen.getByTestId('browser-cursor-overlay')).toHaveAttribute('data-visible', 'false');
   });
 });

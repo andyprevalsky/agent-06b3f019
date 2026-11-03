@@ -2,12 +2,15 @@
 
 import json
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
 from pydantic import BaseModel, Field
 from temporalio import activity
+
+from utils.secret_text_redaction import redact_sensitive_text as _redact_sensitive_text
 
 logger = structlog.get_logger()
 
@@ -38,6 +41,7 @@ class WebFetchHaikuResponse(BaseModel):
         ),
     )
 
+
 # Minimum number of recent TOOL/ASSISTANT/USER messages kept verbatim in
 # head/tail-protected compaction. The primary boundary is token-budget based,
 # following OpenClaw's `keepRecentTokens` and Hermes' `_find_tail_cut_by_tokens`.
@@ -55,10 +59,6 @@ SUMMARY_MESSAGE_CHAR_BUDGET = 7_500
 SUMMARY_FIELD_CHAR_BUDGET = 5_000
 SUMMARY_TOOL_ARGS_CHAR_BUDGET = 2_000
 
-_SECRET_PATTERNS = [
-    re.compile(r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret)\s*[:=]\s*([^\s,;]+)"),
-    re.compile(r"(?i)(bearer\s+)[a-z0-9._~+/=-]{12,}"),
-]
 
 
 NO_TOOLS_PREAMBLE = """CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
@@ -276,14 +276,6 @@ def _build_tool_pair_maps(
     return asst_by_id, tools_by_id
 
 
-def _redact_sensitive_text(text: str) -> str:
-    redacted = text
-    for pattern in _SECRET_PATTERNS:
-        if pattern.groups >= 2:
-            redacted = pattern.sub(lambda m: f"{m.group(1)}=[REDACTED]", redacted)
-        else:
-            redacted = pattern.sub(lambda m: f"{m.group(1)}[REDACTED]", redacted)
-    return redacted
 
 
 def _truncate_middle(value: str, limit: int) -> str:
@@ -311,10 +303,7 @@ def hard_cap_tool_result_text(
         tool_result_text = str(tool_result_text)
     if limit <= 0 or len(tool_result_text) <= limit:
         return tool_result_text
-    return (
-        tool_result_text[:limit]
-        + f"\n\n...[truncated, original_len={len(tool_result_text)}]"
-    )
+    return tool_result_text[:limit] + f"\n\n...[truncated, original_len={len(tool_result_text)}]"
 
 
 def _json_dumps_safe(value: Any, *, limit: int = SUMMARY_FIELD_CHAR_BUDGET) -> str:
@@ -384,11 +373,7 @@ def estimate_context_tokens(context: List[Dict[str, Any]]) -> int:
     ``loop.context_utils.filter_internal_subagent_messages`` strips them before
     the context is ever sent to the model.
     """
-    return sum(
-        _message_summary_weight(msg)
-        for msg in context
-        if not (msg.get("metadata") or {}).get("subAgentId")
-    )
+    return sum(_message_summary_weight(msg) for msg in context if not (msg.get("metadata") or {}).get("subAgentId"))
 
 
 def compaction_saved_ratio(original_tokens: int, compressed_tokens: int) -> float:
@@ -596,7 +581,7 @@ async def compress_context(
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
 ) -> Dict:
     """Head/tail-protected context compaction.
 
@@ -650,7 +635,7 @@ Write only the summary, starting with "{COMPACTION_SUMMARY_PREFIX}" prefix.
             gpt_token_pool_id=gpt_token_pool_id,
             gpt_token_user_id=gpt_token_user_id,
             compute_token_lineage_key=compute_token_lineage_key,
-            compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+            compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
             skip_cache_write=True,
             call_site="context_compression",
             agent_id=agent_id,
@@ -674,11 +659,7 @@ Write only the summary, starting with "{COMPACTION_SUMMARY_PREFIX}" prefix.
             "metadata": {"compactionSummary": True},
         }
 
-        new_context = (
-            [context[i] for i in head_indices]
-            + [synthetic_summary_msg]
-            + [context[i] for i in tail_indices]
-        )
+        new_context = [context[i] for i in head_indices] + [synthetic_summary_msg] + [context[i] for i in tail_indices]
 
         # A compaction that does not shrink the context is a failed compaction.
         # Handing it back would replace the context with a LARGER one and then
@@ -729,6 +710,17 @@ Write only the summary, starting with "{COMPACTION_SUMMARY_PREFIX}" prefix.
         return {"context": None, "usage": {}, "success": False, "error": str(e)}
 
 
+async def _retained_or_stated_cut(text: str, *, user_id: str, agent_id: str, session_id: str, limit: int, tool_name: str) -> str:
+    """Bounded summarizer input; a retention storage failure keeps the hard-cap fallback."""
+    from helpers.tool_output import RetentionError, preview_tool_text, stated_cut
+
+    try:
+        return await preview_tool_text(text, user_id=user_id, agent_id=agent_id, session_id=session_id, limit=limit)
+    except RetentionError as error:
+        logger.warning("Tool-result retention failed; summarizing a stated cut", tool_name=tool_name, error=str(error))
+        return stated_cut(text, limit=limit, reason="retained readback unavailable after a storage failure")
+
+
 @activity.defn
 async def summarize_tool_result(
     tool_name: str,
@@ -746,6 +738,7 @@ async def summarize_tool_result(
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     cache_sequence_id: Optional[str] = None,
+    session_id: str = "",
 ) -> Dict[str, Any]:
     """Summarize a verbose tool result (e.g. web_fetch body) before it lands in context.
 
@@ -761,6 +754,13 @@ async def summarize_tool_result(
         On failure: summary is the raw text hard-capped to TOOL_RESULT_HARD_CAP_CHARS
         with a marker, and summarized=False.
     """
+    from helpers.tool_output import retained_marker
+
+    retained = await _retained_or_stated_cut(
+        tool_result_text, user_id=claude_token_user_id or gpt_token_user_id or "", agent_id=agent_id or "",
+        session_id=session_id, limit=TOOL_RESULT_HARD_CAP_CHARS, tool_name=tool_name,
+    )
+    marker = retained_marker(retained)
     try:
         activity.heartbeat(f"Summarizing {tool_name} result ({len(tool_result_text)} chars)")
 
@@ -773,7 +773,7 @@ The agent is trying to: {parent_objective}
 
 Web page contents:
 ---
-{tool_result_text}
+{retained}
 ---
 
 Produce a concise summary (target 1,500 tokens, hard cap 2,000) that:
@@ -820,7 +820,7 @@ Output the summary only — no preamble."""
             tokens_used=usage.get("total_tokens", 0),
         )
 
-        return {"summary": summary, "usage": usage, "summarized": True}
+        return {"summary": summary + marker, "usage": usage, "summarized": True}
 
     except Exception as e:
         logger.warning(
@@ -828,15 +828,104 @@ Output the summary only — no preamble."""
             tool_name=tool_name,
             error=str(e),
         )
-        original_len = len(tool_result_text)
-        if original_len > TOOL_RESULT_HARD_CAP_CHARS:
-            truncated = (
-                tool_result_text[:TOOL_RESULT_HARD_CAP_CHARS]
-                + f"\n\n...[truncated, original_len={original_len}]"
-            )
-        else:
-            truncated = tool_result_text
+        truncated = retained
         return {"summary": truncated, "usage": {}, "summarized": False, "error": str(e)}
+
+
+# Named page facts the web_fetch summarizer receives from scrape metadata.
+# Main-content markdown can omit facts a page declares only in its <head>
+# (the RFC Editor states a publication date only in citation_publication_date).
+# Like Hermes and OpenClaw, keep an explicit allowlist: the title, then one
+# validated publication date. Every other provider key (og:*, citation_reference
+# lists, extract/session IDs) is dropped.
+# Lookups are case-insensitive because HTML meta names are; earlier names win.
+_PAGE_TITLE_KEYS = ("title",)
+_PAGE_PUBLISHED_KEYS = (
+    "citation_publication_date",
+    "citation_date",
+    "article:published_time",
+    "datePublished",
+    "dc.date",
+    "DC.date.issued",
+    "publishedTime",
+    "publish_date",  # Parallel Extract
+)
+# OpenClaw web_fetch bounds (src/agents/tools/web-fetch.ts:75-76): 256 chars
+# per field, 512 for all metadata.
+_PAGE_METADATA_VALUE_CHARS = 256
+_PAGE_METADATA_BLOCK_CHARS = 512
+# ISO dates plus slash dates: citation_publication_date uses YYYY/MM/DD (or YYYY).
+_PAGE_DATE_RE = re.compile(
+    r"^(?P<year>\d{4})(?:(?P<sep>[-/])(?P<month>\d{1,2})(?:(?P=sep)(?P<day>\d{1,2})(?P<time>[T ][\d:.+Z-]{1,20})?)?)?$"
+)
+
+
+def _clean_page_metadata_text(value: Any) -> str:
+    """One line of untrusted page text: no control characters, collapsed spaces."""
+    if not isinstance(value, str):
+        return ""
+    printable = "".join(" " if unicodedata.category(ch) == "Cc" else ch for ch in value)
+    return " ".join(printable.split())
+
+
+def _is_page_metadata_date(value: str) -> bool:
+    match = _PAGE_DATE_RE.match(value)
+    if match is None:
+        return False
+    try:
+        if match.group("time"):
+            # Hyphenate and zero-pad slash dates (2024/3/1 12:00) so ISO parsing accepts them.
+            month, day = int(match.group("month")), int(match.group("day"))
+            datetime.fromisoformat(f"{match.group('year')}-{month:02d}-{day:02d}{match.group('time')}")
+        else:
+            datetime(int(match.group("year")), int(match.group("month") or 1), int(match.group("day") or 1))
+    except ValueError:
+        return False
+    return True
+
+
+def select_page_metadata(metadata: Any) -> Dict[str, str]:
+    """The allowlisted page facts from scrape metadata, title first.
+
+    Returns at most ``title`` and one publication date, keyed by the
+    matching allowlist name. Dates must parse; values are
+    sanitized to one line and bounded to the OpenClaw-like caps.
+    """
+    if not isinstance(metadata, dict):
+        return {}
+    by_name: Dict[str, List[Any]] = {}
+    for key in sorted(k for k in metadata if isinstance(k, str)):
+        raw = metadata[key]
+        by_name.setdefault(key.lower(), []).extend(raw if isinstance(raw, list) else [raw])
+
+    def first(names: Tuple[str, ...], accept) -> Optional[Tuple[str, str]]:
+        for name in names:
+            for raw in by_name.get(name.lower(), []):
+                value = _clean_page_metadata_text(raw)
+                if value and accept(value):
+                    return name, value[:_PAGE_METADATA_VALUE_CHARS]
+        return None
+
+    selected: Dict[str, str] = {}
+    size = 0
+    for found in (
+        first(_PAGE_TITLE_KEYS, lambda _value: True),
+        first(_PAGE_PUBLISHED_KEYS, _is_page_metadata_date),
+    ):
+        if found is None:
+            continue
+        name, value = found
+        line_chars = len(name) + 2 + len(value) + 1
+        if size + line_chars > _PAGE_METADATA_BLOCK_CHARS:
+            continue
+        selected[name] = value
+        size += line_chars
+    return selected
+
+
+def format_page_metadata(metadata: Any) -> str:
+    """The allowlisted page facts as ``key: value`` lines (empty when none)."""
+    return "\n".join(f"{key}: {value}" for key, value in select_page_metadata(metadata).items())
 
 
 @activity.defn
@@ -858,6 +947,9 @@ async def summarize_and_filter_links(
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     cache_sequence_id: Optional[str] = None,
+    compute_token_lineage_key: Optional[str] = None,
+    page_metadata: Optional[Dict[str, Any]] = None,
+    session_id: str = "",
 ) -> Dict[str, Any]:
     """Run one Haiku call that summarizes a fetched web page and curates which
     of the page's links are worth downloading.
@@ -880,23 +972,33 @@ async def summarize_and_filter_links(
     """
     import json
 
+    from helpers.tool_output import retained_marker
+
+    retained = await _retained_or_stated_cut(
+        markdown, user_id=claude_token_user_id or gpt_token_user_id or "", agent_id=agent_id or "",
+        session_id=session_id, limit=max_markdown_length, tool_name="web_fetch",
+    )
+    marker = retained_marker(retained)
     try:
         activity.heartbeat(f"Summarizing web_fetch result ({len(markdown)} chars, {len(links)} links)")
 
         from helpers.llm import call_llm
 
-        truncation_marker = "\n\n[Content truncated due to length...]"
-        if len(markdown) > max_markdown_length:
-            markdown_for_prompt = markdown[: max_markdown_length - len(truncation_marker)] + truncation_marker
-        else:
-            markdown_for_prompt = markdown
+        markdown_for_prompt = retained
+
+        metadata_text = format_page_metadata(page_metadata)
+        metadata_section = (
+            f"PAGE METADATA (declared by the page, e.g. <meta> tags):\n---\n{metadata_text}\n---\n\n"
+            if metadata_text
+            else ""
+        )
 
         prompt = f"""You are filtering a fetched web page for an autonomous agent.
 
 The agent is trying to: {objective}
 
 PAGE URL: {url}
-PAGE CONTENT (markdown):
+{metadata_section}PAGE CONTENT (markdown):
 ---
 {markdown_for_prompt}
 ---
@@ -911,8 +1013,7 @@ Rules for summary:
   relevant to the objective.
 - Start with the source URL and page title (if known).
 - Omit nav, ads, related-articles, and boilerplate.
-- If the input ended with "[Content truncated due to length...]", note that
-  the page was truncated.
+- If the input contains a retained-output marker, note that this is a preview.
 
 Rules for files_to_download:
 - Only URLs the objective explicitly requires. Empty list is the default.
@@ -939,6 +1040,7 @@ Rules for files_to_download:
             agent_id=agent_id,
             user_id=claude_token_user_id or gpt_token_user_id,
             cache_sequence_id=cache_sequence_id,
+            compute_token_lineage_key=compute_token_lineage_key,
         )
 
         content_str = (result.get("content") or "").strip()
@@ -965,7 +1067,7 @@ Rules for files_to_download:
         )
 
         return {
-            "summary": summary,
+            "summary": summary + marker,
             "files_to_download": files_to_download,
             "usage": usage,
             "summarized": True,
@@ -977,14 +1079,7 @@ Rules for files_to_download:
             url=url,
             error=str(e),
         )
-        original_len = len(markdown)
-        if original_len > TOOL_RESULT_HARD_CAP_CHARS:
-            truncated = (
-                markdown[:TOOL_RESULT_HARD_CAP_CHARS]
-                + f"\n\n...[truncated, original_len={original_len}]"
-            )
-        else:
-            truncated = markdown
+        truncated = retained
         return {
             "summary": truncated,
             "files_to_download": [],
@@ -1013,7 +1108,7 @@ async def generate_completion_summary(
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_step: int = 0,
 ) -> Dict[str, Any]:
@@ -1037,17 +1132,23 @@ async def generate_completion_summary(
             - usage: Token usage stats
             - tool_counts: Merged tool counts (for parent aggregation)
     """
+    # The Fast Cache context is task-scoped state: restore it on every exit so
+    # a summary never leaks its cache identity into later work on this task.
+    demo_cache_token = None
     try:
         activity.heartbeat("Generating completion summary")
 
         # Import here to avoid circular dependency
-        from helpers.llm import call_llm, convert_context_to_messages
-        from providers.fast_cache.context import (
-            FastCacheContext,
+        from helpers.llm import call_llm, convert_context_to_messages, resolve_context_attachments
+        from providers.demo_cache.context import (
+            DemoCacheContext,
             write_through_enabled_for_user,
         )
-        from providers.fast_cache.context import (
-            set_context as set_fast_cache_context,
+        from providers.demo_cache.context import (
+            reset_context as reset_demo_cache_context,
+        )
+        from providers.demo_cache.context import (
+            set_context as set_demo_cache_context,
         )
         from utils.user_facing_writing_prompt import USER_FACING_WRITING_STYLE
 
@@ -1078,7 +1179,14 @@ Just write plain text describing what was done."""
         # Convert context to messages (exclude system messages like blueprints)
         # Summarization needs assistant messages to see what the agent accomplished
         messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(convert_context_to_messages(context, include_system=False, include_assistant=True))
+        messages.extend(
+            convert_context_to_messages(
+                context,
+                include_system=False,
+                include_assistant=True,
+                attachments=await resolve_context_attachments(context),
+            )
+        )
         messages.append(
             {
                 "role": "user",
@@ -1089,11 +1197,11 @@ Just write plain text describing what was done."""
         cache_user_id = claude_token_user_id or gpt_token_user_id
         write_through_enabled = write_through_enabled_for_user(cache_user_id)
         if goal and (fast_mode_cache_enabled or write_through_enabled):
-            from providers.fast_cache.client import resolve_soft_complete_root_goal
+            from providers.demo_cache.client import resolve_soft_complete_root_goal
 
             root_goal = await resolve_soft_complete_root_goal(agent_id, goal)
-            set_fast_cache_context(
-                FastCacheContext(
+            demo_cache_token = set_demo_cache_context(
+                DemoCacheContext(
                     enabled=fast_mode_cache_enabled,
                     goal=goal,
                     base_step=fast_mode_step,
@@ -1124,7 +1232,7 @@ Just write plain text describing what was done."""
                 gpt_token_pool_id=gpt_token_pool_id,
                 gpt_token_user_id=gpt_token_user_id,
                 compute_token_lineage_key=compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                 skip_cache_write=True,  # One-shot call — no cache reuse
                 call_site="completion_summary",
                 agent_id=agent_id,
@@ -1191,3 +1299,6 @@ Just write plain text describing what was done."""
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             "tool_counts": {},
         }
+    finally:
+        if demo_cache_token is not None:
+            reset_demo_cache_context(demo_cache_token)

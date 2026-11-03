@@ -250,12 +250,12 @@ expect_eq "$(bash -c ". '$HELPER_SRC'; cloud_env_stamp '$boot_only_env' agent-id
   fake_store="$TMP_ROOT/agent-store"
   mkdir -p "$fake_store"
   printf 'bc-live' >"$fake_store/self-store-id"
-  bash -c 'exec -a cursor-agent-store-fuse sleep 60' &
+  printf 'import signal\nsignal.pause()\n' >"$fake_store/cursor-agent-store-fuse"
+  python3 "$fake_store/cursor-agent-store-fuse" &
   store_pid=$!
-  # The real daemon writes ready once it runs. Until exec completes, /proc shows the
-  # forked test shell's cmdline (or none mid-exec), so publish the pid only after that.
+  # Publish ready after the daemon command is visible on Linux and macOS.
   for _ in $(seq 1 100); do
-    tr '\0' ' ' <"/proc/$store_pid/cmdline" 2>/dev/null | grep -q '^cursor-agent-store-fuse ' && break
+    ps -p "$store_pid" -o command= 2>/dev/null | grep -q 'cursor-agent-store-fuse' && break
     sleep 0.05
   done
   printf 'pid=%s\n' "$store_pid" >"$fake_store/ready"
@@ -483,6 +483,13 @@ expect_venv_check 0 "venv check: a marker that excludes this interpreter is skip
 expect_venv_check 0 "venv check: a direct URL requirement is satisfied by the installed distribution" \
   "pip @ git+https://example.invalid/pip.git@0000000000000000000000000000000000000000"
 expect_venv_check 1 "venv check: pip option lines are never treated as satisfied" "-e ./somewhere"
+# A package-location hint names no distribution (#1471 vendors wheels this way);
+# flagging it made every provisioner reinstall agents/venv on every start.
+expect_venv_check 0 "venv check: a --find-links location hint is skipped" "--find-links ./vendor
+pip>=1"
+expect_venv_check 1 "venv check: requirements after a location hint are still checked" "--find-links ./vendor
+pip>=9999"
+expect_venv_check 1 "venv check: an included requirements file is never treated as satisfied" "-r other.txt"
 
 for venv_provisioner in scripts/cloud-build.sh scripts/run.sh scripts/prepare-deploy-worktree.sh; do
   if ! grep -q 'scripts/lib/agents_venv_satisfied.py agents/requirements.txt' "$ROOT_DIR/$venv_provisioner"; then
@@ -549,6 +556,15 @@ mkdir -p "$pg_root/bin" "$pg_root/scripts"
 for tool in pg_isready pg_ctlcluster service su dpkg-query apt-cache; do
   printf '#!/bin/sh\nexit 0\n' >"$pg_root/bin/$tool"
 done
+cat >"$pg_root/bin/ls" <<'SH'
+#!/bin/sh
+if [ "$1" = /usr/lib/postgresql ]; then
+  # Own the absent-extension precondition independently of installed host majors.
+  printf '99999\n'
+else
+  /bin/ls "$@"
+fi
+SH
 printf '#!/bin/sh\nexit 1\n' >"$pg_root/bin/docker"
 printf '#!/bin/sh\nexit 0\n' >"$pg_root/bin/find"
 printf '#!/bin/sh\necho "16 main 5432 online postgres /var/lib/postgresql/16/main log"\n' \
@@ -574,6 +590,12 @@ pg_out="$(run_pg_fallback 1 1)" || { echo "FAIL: an unavailable pgvector aborted
 [[ "$pg_out" != *"System Postgres running"* ]] \
   || { echo "FAIL: a fallback without pgvector was reported ready" >&2; exit 1; }
 echo "PASS: an unavailable pgvector marks the fallback unusable without aborting provisioning"
+pg_out="$(run_pg_fallback 1 1)" \
+  || { echo "FAIL: unavailable package metadata aborted dependency provisioning" >&2; exit 1; }
+[[ "$pg_out" == *"Could not refresh package metadata"* && "$pg_out" == *"fallback unusable: pgvector unavailable"* && "$pg_out" == *PROVISIONING_CONTINUES* ]] \
+  || { echo "FAIL: missing metadata did not preserve the honest database failure through provisioning" >&2; exit 1; }
+echo "PASS: missing package metadata preserves provisioning and reports the database failure"
+
 # The npm/venv results print first; only then does the missing extension fail the build.
 build_tail="$TMP_ROOT/cloud-build-tail.sh"
 awk '/^\[ \$JS_RC -eq 0 \]/{on=1} on{print}' "$cloud_build_script" >"$build_tail"
@@ -589,9 +611,32 @@ tail_out="$(JS_RC=0 PY_RC=0 bash -c 'set -eu; . "$1"' _ "$build_tail" 2>&1)" \
   || { echo "FAIL: cloud-build.sh did not report completion" >&2; exit 1; }
 echo "PASS: cloud-build.sh fails after provisioning when the system Postgres fallback is unusable"
 run_pg_fallback 0 0 >/dev/null || { echo "FAIL: a successful pinned pgvector build failed the fallback" >&2; exit 1; }
-[ ! -s "$pg_root/apt-calls" ] \
+grep -qx 'update -qq' "$pg_root/apt-calls" \
+  || { echo "FAIL: the missing-extension fixture did not exercise package metadata refresh" >&2; exit 1; }
+! grep -Eq '^install .*postgresql-[0-9]+-pgvector$' "$pg_root/apt-calls" \
   || { echo "FAIL: a successful pinned pgvector build still installed the distro package" >&2; exit 1; }
 echo "PASS: a successful pinned pgvector build skips the distro package"
+
+# Sandbox-reachable backend base: tunnel when public, untouched otherwise.
+sandbox_base() {
+  (
+    unset ROSE_UI_PUBLISH_BASE_URL USERCONTENT_BASE_URL
+    # shellcheck source=/dev/null
+    . "$HELPER_SRC"
+    export BACKEND_URL="http://localhost:24740" "$@"
+    export_sandbox_backend_base_url
+    printf '%s|%s' "${ROSE_UI_PUBLISH_BASE_URL:-}" "${USERCONTENT_BASE_URL:-}"
+  )
+}
+expect_eq "$(sandbox_base PUBLIC_BASE_URL=https://rose-w4.ngrok.app/)" \
+  "https://rose-w4.ngrok.app|http://localhost:24740" "sandboxes reach the backend through the public tunnel"
+expect_eq "$(sandbox_base PUBLIC_BASE_URL=http://localhost:24741)" "|" \
+  "a loopback PUBLIC_BASE_URL is never handed to sandboxes"
+expect_eq "$(sandbox_base PUBLIC_BASE_URL=https://t.example ROSE_UI_PUBLISH_BASE_URL=https://explicit.example)" \
+  "https://explicit.example|" "an explicit ROSE_UI_PUBLISH_BASE_URL wins"
+grep -qx 'export_sandbox_backend_base_url' "$ROOT_DIR/scripts/run.sh" \
+  || { echo "FAIL: run.sh does not export the sandbox backend base after the tunnel" >&2; exit 1; }
+echo "PASS: run.sh exports the sandbox backend base"
 
 # cloud-init.sh's injected-secret -> .env sync has no /deploy gate of its own;
 # this already-gated environment suite runs it so a regression fails Step 4s.

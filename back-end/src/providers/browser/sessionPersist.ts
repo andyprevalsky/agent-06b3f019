@@ -10,6 +10,35 @@ import { Prisma as PrismaRuntime, type BrowserSession } from '@prisma/client';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
+import type { BrowserSessionHealth } from './types';
+
+/** Only an explicit provider terminal observation can reconcile a logical native. */
+export function isConfirmedBrowserEnd(status: string | null): boolean {
+  return (
+    status !== null &&
+    ['released', 'deleted', 'stopped', 'closed', 'expired', 'terminated'].includes(
+      status.toLowerCase()
+    )
+  );
+}
+
+export async function recordEndedLogicalBrowser(
+  taskId: string,
+  sessionId: string,
+  health: Pick<BrowserSessionHealth, 'sessionId' | 'status'>
+): Promise<boolean> {
+  if (health.sessionId !== sessionId || !isConfirmedBrowserEnd(health.status)) return false;
+  const changed = await prisma.browserSession.updateMany({
+    where: {
+      id: taskId,
+      sessionId,
+      logicalOwnerKey: { not: null },
+      status: { in: ['ACTIVE', 'ERROR'] },
+    },
+    data: { status: 'PAUSED', closedAt: null },
+  });
+  return changed.count === 1;
+}
 
 const log = createLogger('BrowserSessionPersist');
 
@@ -37,9 +66,9 @@ export type BrowserSessionPersistInput = {
 export class BrowserSessionReclaimConflictError extends Error {
   readonly taskId: string;
   readonly attemptedSessionId: string;
-  readonly winningSessionId: string;
+  readonly winningSessionId: string | null;
 
-  constructor(taskId: string, attemptedSessionId: string, winningSessionId: string) {
+  constructor(taskId: string, attemptedSessionId: string, winningSessionId: string | null) {
     super(
       `Browser session ${taskId} was reclaimed concurrently: ${attemptedSessionId} lost to ${winningSessionId}`
     );
@@ -74,10 +103,10 @@ export function isIdUniqueConstraint(error: unknown): boolean {
 
 async function releaseRemote(
   release: ((sessionId: string) => Promise<void>) | undefined,
-  sessionId: string,
+  sessionId: string | null,
   context: string
 ): Promise<void> {
-  if (release === undefined || sessionId === '') return;
+  if (release === undefined || sessionId === null || sessionId === '') return;
   try {
     await release(sessionId);
   } catch (releaseError) {
@@ -101,7 +130,7 @@ export async function persistBrowserSessionRow(
     sessionId: input.sessionId,
     debugUrl: input.debugUrl ?? undefined,
     wsUrl: input.wsUrl ?? undefined,
-    status: 'ACTIVE' as const,
+    status: 'ACTIVE' as BrowserSession['status'],
     startUrl: input.startUrl,
     provider: input.provider,
     providerProfileId: input.providerProfileId ?? null,
@@ -133,6 +162,10 @@ export async function persistBrowserSessionRow(
   if (previous === null) {
     return prisma.browserSession.create({ data: { id: taskId, ...shared } });
   }
+
+  // A persistent logical binding is not usable until its owner has completed
+  // preparation. Initialization and resume publish ACTIVE at their commit.
+  if (previous.logicalOwnerKey !== null) shared.status = 'PAUSED';
 
   if (previous.sessionId === input.sessionId) {
     if (previous.status === 'ACTIVE' && previous.closedAt === null) {

@@ -7,6 +7,8 @@ interface BillingTabProps {
   loadingBillingPortal: boolean;
   onOpenBillingPortal: () => void;
   subscribeUrl: string | null;
+  /** Optional content below the Current Plan block (Rose Desktop payments UI). */
+  extra?: React.ReactNode;
 }
 
 export default function BillingTab({
@@ -14,6 +16,7 @@ export default function BillingTab({
   loadingBillingPortal,
   onOpenBillingPortal,
   subscribeUrl,
+  extra,
 }: BillingTabProps) {
   return (
     <Card>
@@ -53,6 +56,8 @@ export default function BillingTab({
             )}
           </div>
         </div>
+
+        {extra}
 
         <p className="text-sm text-muted-foreground">
           {subscriptionTier

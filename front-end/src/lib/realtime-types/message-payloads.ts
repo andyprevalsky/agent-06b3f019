@@ -23,12 +23,14 @@ export interface InsertMessagePayload {
 /**
  * Typed TOOL message payload with discriminated union on toolName.
  */
-export interface ToolMessagePayload<T extends ToolMessageMetadata = ToolMessageMetadata> {
+export interface ToolMessagePayload<
+  T extends ToolMessageMetadata = ToolMessageMetadata,
+> extends InsertMessagePayload {
   id: string;
   timestamp: string;
   text: string;
   role: 'TOOL';
-  metadata: T;
+  metadata: T & MessageMetadata;
 }
 
 // -----------------------------------------------------------------------------
@@ -45,6 +47,9 @@ export interface UpdateAgentPayload {
   agentId?: string;
   title?: string | null;
   progress?: number;
+  progressEstimate?: import('../api/types').ProgressEstimate | null;
+  taskId?: string;
+  taskProgressEstimates?: Record<string, import('../api/types').ProgressEstimate>;
   status?: Agent['status'];
   statusMessage?: string | null;
   model?: string;
@@ -56,6 +61,24 @@ export interface UpdateAgentPayload {
   treeCostCents?: number; // Real-time tree cost updates (for price limit feature)
   updatedAt?: string;
   temporalWorkflowId?: string | null;
+}
+
+/**
+ * INSERT_DEFERRED event payload - a committed message that is not streamed in
+ * full: its frame was refused (e.g. by an edge WAF rule), or it is larger than
+ * the backend's 8 KB live cap. It never carries the full `text`. `reason` (plus
+ * `preview`, the opening characters of an oversized row) stands in for the body
+ * until the client reads the row by ID from the API. Oversized notices keep the
+ * small metadata fields; refused ones keep only the tool lifecycle.
+ */
+export interface InsertDeferredPayload {
+  agentId: string;
+  id: string;
+  timestamp: string;
+  role: MessageRole;
+  reason: string;
+  preview?: string;
+  metadata?: MessageMetadata;
 }
 
 // -----------------------------------------------------------------------------

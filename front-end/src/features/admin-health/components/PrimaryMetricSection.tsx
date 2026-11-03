@@ -2,21 +2,13 @@
  * STATE MACHINE: PrimaryMetricSection
  * [READY] -> Stripe revenue value, comparison, and time series
  * [UNAVAILABLE] -> explicit unavailable value with the same stable layout
+ * Chart: shared MetricAreaChart (also the secondary metric hover charts)
  */
 
 import { DollarSign } from 'lucide-react';
-import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
-
 import type { AdminHealthData } from '../types';
 import { MetricChange } from './MetricChange';
+import { MetricAreaChart } from './MetricAreaChart';
 import { seriesMetricChange } from './metricComparison';
 
 function formatCurrency(cents: number | null): string {
@@ -71,36 +63,13 @@ export default function PrimaryMetricSection({ data }: { data: AdminHealthData }
             <p className="text-xs text-muted-foreground">Bucketed by the selected time slice</p>
           </div>
           <div className="h-[250px] w-full min-w-0">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={data.series} margin={{ top: 12, right: 12, left: 0, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="revenueGradient" x1="0" x2="0" y1="0" y2="1">
-                    <stop offset="0%" stopColor="#111827" stopOpacity={0.24} />
-                    <stop offset="100%" stopColor="#111827" stopOpacity={0.02} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid
-                  strokeDasharray="3 3"
-                  vertical={false}
-                  stroke="rgba(148,163,184,0.32)"
-                />
-                <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={12} />
-                <YAxis tickFormatter={moneyTick} tickLine={false} axisLine={false} fontSize={12} />
-                <Tooltip
-                  formatter={(value) =>
-                    formatCurrency(value === null || value === undefined ? null : Number(value))
-                  }
-                />
-                <Area
-                  type="monotone"
-                  dataKey="revenueCents"
-                  name="Revenue"
-                  stroke="#111827"
-                  strokeWidth={2}
-                  fill="url(#revenueGradient)"
-                />
-              </AreaChart>
-            </ResponsiveContainer>
+            <MetricAreaChart
+              series={data.series}
+              dataKey="revenueCents"
+              name="Revenue"
+              formatValue={formatCurrency}
+              formatTick={moneyTick}
+            />
           </div>
         </div>
       </div>

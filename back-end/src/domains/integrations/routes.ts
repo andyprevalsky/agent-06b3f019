@@ -1,13 +1,14 @@
 /**
  * Integrations domain routes — main router + CRUD + mounts sub-routers.
  * Sub-routers: routes.upload.ts, routes.browser.ts, routes.email.ts, routes.claude.ts,
- * routes.compute.ts, routes.plaid.ts
+ * routes.compute.ts, routes.plaid.ts, routes.accounts.ts (sync progress + delete alias)
  */
 
 import { type Response, Router } from 'express';
 import { type AuthRequest, authenticate } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
 import * as service from './service';
+import * as accountService from './service.accounts';
 
 import uploadRoutes from './routes.upload';
 import browserRoutes from './routes.browser';
@@ -18,6 +19,8 @@ import computeRoutes from './routes.compute';
 import plaidRoutes from './routes.plaid';
 import documentRoutes from './routes.documents';
 import lanternRoutes from './routes.lantern';
+import linkedinRoutes from './routes.linkedin';
+import accountRoutes from './routes.accounts';
 
 const router = Router();
 
@@ -31,12 +34,14 @@ router.use(computeRoutes);
 router.use(plaidRoutes);
 router.use(documentRoutes);
 router.use(lanternRoutes);
+router.use(linkedinRoutes);
+router.use(accountRoutes);
 
 // ---------------------------------------------------------------------------
 // CRUD routes
 // ---------------------------------------------------------------------------
 
-/** GET /api/integrations */
+/** GET /api/integrations — rows plus `accounts` per row and `accountsByProvider`. */
 router.get(
   '/',
   authenticate,
@@ -47,7 +52,7 @@ router.get(
       return res.status(401).json({ error: 'User not authenticated' });
     }
 
-    const result = await service.getIntegrations(userId);
+    const result = await accountService.getIntegrationsWithAccounts(userId);
     return res.json(result);
   })
 );
@@ -114,7 +119,7 @@ router.patch(
   })
 );
 
-/** DELETE /api/integrations/:name */
+/** DELETE /api/integrations/:name — legacy whole-row delete (accountId ''). */
 router.delete(
   '/:name',
   authenticate,
@@ -123,7 +128,7 @@ router.delete(
     const { name } = req.params;
 
     try {
-      await service.deleteIntegration(userId, name);
+      await accountService.deleteLegacyIntegration(userId, name);
       return res.json({ message: 'Integration deleted successfully' });
     } catch (error: unknown) {
       if (error instanceof service.LanternCredentialError)

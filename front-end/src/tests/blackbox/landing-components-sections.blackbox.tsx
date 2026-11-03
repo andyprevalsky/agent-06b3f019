@@ -523,9 +523,7 @@ describe('features/index/hooks', () => {
       });
       expect(onSuccess).toHaveBeenCalled();
       // email trimmed + lowercased; name trimmed
-      expect(captured?.email).toBe('ada@example.com');
-      expect(captured?.name).toBe('Ada');
-      expect(captured?.variant).toBe('custom');
+      expect(captured).toMatchObject({ email: 'ada@example.com', name: 'Ada', variant: 'custom' });
     });
 
     it('handleSubmit surfaces submit error on API failure', async () => {

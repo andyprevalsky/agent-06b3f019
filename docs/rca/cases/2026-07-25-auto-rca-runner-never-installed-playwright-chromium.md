@@ -18,11 +18,12 @@ tags:
   - deploy-gate
   - environment-hydration
 sources:
+  - plan:.context/deploy-rejected-caps-20261015/rca-group4-browser/result.json
   - PR #896
   - commit cd83b5101
   - memory:project_agent_failure_alerting
 repro: none-recorded
-status: fixed
+status: open
 ---
 
 ## Problem
@@ -68,3 +69,11 @@ None recorded.
 Before declaring a CI gate architecturally unrunnable, enumerate what each suite
 actually launches — a missing `playwright install` looks identical to "this
 environment can never run browsers".
+
+## October 15 deployment recurrence
+
+A new owned deployment guest repeated the missing consumer-browser hydration failure. Setup installed Chromium through Node Playwright 1.64, whose registry expects revision 1248, but the Python agents consumer used Playwright 1.63 and required revision 1243. Presence of the Node browser did not satisfy the Python consumer; the original canonical smoke canary failed with the missing Python executable and remains preserved.
+
+Read-only consumer registry/package evidence established the mismatch; this was not a product-source defect or a Node version cause. The parent subsequently ran the normal pinned Python browser installation on the new owned guest. Its separate launch-check receipt reports Node browser launch with 0 contexts and Python browser launch with 0 pages. These launches ran in a network namespace and performed no task or payment interaction. They establish browser availability, not the unchanged smoke's success. Exact unchanged smoke PASS remains OPEN.
+
+Append this recurrence to the hydration case rather than creating a new incident. Keep the original historical CI success and its cost figures above intact; do not attribute those old costs or timings to this guest. Current case status is reopened until the actual normal owning smoke and remaining deployment gates pass.

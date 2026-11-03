@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "private/whm-e9afcffd/run17-continued-offline-and-agent-dumps-20261014.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "287dfcfe0f70d0d0494253cc69a4b12e2cab2f9a6fc7de1c49a90cce2cef967d",
+  "gzip_sha256": "297c87e070c04021b8b88ec61b54ab227fb1fcf1ff8fcc6b81de7d403e7552b1",
+  "stored_bytes": 10980386,
+  "frames": 2,
+  "files": 381,
+  "original_bytes": 30960778,
+  "manifest_sha256": "e91053607ddc3cd5cd99561b0bbf1cf0c20988b889195ebd72c99e730ad379c0",
+  "full_readback_verified": true
+}

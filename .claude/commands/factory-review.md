@@ -9,9 +9,41 @@ Generate the factory workflow review from local Conductor history and the
 checked-in `/descend` factory-event ledger:
 
 ```bash
+git fetch -q origin main || true
 python3 scripts/factory_review.py --self-test
 python3 scripts/factory_review.py --open $ARGUMENTS
 ```
+
+Without a Conductor database (boxes.dev and other Linux machines), `--source auto`
+rebuilds /deploy and /RCA from the tracked
+`agents/benchmarks/history/factory_events.jsonl`, in both the working tree and
+`origin/main`, plus this machine's unpublished `.context` telemetry. Every
+`/deploy`, completed or blocked, runs `python3 scripts/factory_ledger.py publish`.
+That appends the machine's `/deploy`, `/RCA` and `/update-prompts` timestamps, and
+any missing `/descend` rows, straight to `main`. Add archived telemetry with
+`--telemetry-root DIR`, or publish it with `factory_ledger.py publish --source-root
+DIR`.
+boxes.dev thread reads carry no message timestamps, so they are not a timing
+source. A run without stage records or a final outcome event stays out of the
+tables; missing measurements render as `—`, never as zero. On boxes.dev, publish
+the HTML with the `boxes-inline-visualizations` skill instead of `--open`.
+
+Add a deploy-path benchmark trajectory section from the checked-in predeploy
+ledger (`task_attempts.jsonl`, `suite: predeploy`): per trajectory, its share of
+predeploy agent time, deploys, runs per deploy, median duration, cost per deploy,
+pass rate and failed deploys. Group deploys by the branch-named span ledgers and
+fall back to time gaps. List same-category trajectories as combination
+candidates with the product of member pass rates, the expected pass rate of one
+merged trajectory.
+
+The "Failures, reruns and gaps" section (`scripts/factory_diagnostics.py`) reads
+each stage/event `detail`: per-gate failure classes and first failing names,
+rerun causes (new commit, worktree edit, unchanged rerun), exact-reuse hits and
+miss reasons, setup/queue/exec medians with host load and memory, idle gaps
+attributed to fixes, approval/review/external-deploy waits, RCA repro attempts
+and per-run benchmark/`/descend` counts. Rows recorded before detail existed
+count toward attempts and gaps only; its coverage line states how many rows
+carry detail.
 
 The report must keep each gate family separate and show exactly these columns:
 
@@ -94,3 +126,14 @@ Artifacts:
 
 - `.context/factory-review/factory-review.html`
 - `.context/factory-review/factory-review.json`
+
+## Required factory execution metadata
+
+Follow `docs/factory-telemetry.md` for every new factory run. Record exact
+model/provider, effort, speed/service tier, harness/version, scoped token/cache
+usage and cost, worker attribution, resource/concurrency context, disjoint wait
+times and validation provenance. Every known value requires a timestamped source;
+unavailable values stay explicitly unknown. Never guess historical settings or
+publish raw transcripts, secrets or signed URLs. Set `FACTORY_METADATA_FILE`
+before collection, append snapshots for changes and publish the ledger. Final
+scorecards report model/effort/tier and collection gaps alongside timings.

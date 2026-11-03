@@ -1,6 +1,14 @@
+import { hydrateProgressEstimate } from '../progressEstimate';
 import { API_BASE_WITH_PATH, getAuthHeaders } from './client';
 import { getAdminAccessToken } from '../impersonation';
-import type { Agent, AgentDetail, AgentDetailResponse, CreateAgentPayload, Tool } from './types';
+import type {
+  Agent,
+  AgentDetail,
+  AgentDetailResponse,
+  CreateAgentPayload,
+  Message,
+  Tool,
+} from './types';
 import { hydrateAgentDetail } from './hydrateAgentDetail';
 import { benchmarkShareToken } from '../benchmarkShare';
 
@@ -33,7 +41,7 @@ export async function getAllAgents(): Promise<Agent[]> {
   }
 
   const data = await response.json();
-  return data.agents;
+  return data.agents.map(hydrateProgressEstimate);
 }
 
 /** Search active chats by title, goal, or message content. */
@@ -50,7 +58,7 @@ export async function searchAgents(query: string, signal?: AbortSignal): Promise
   }
 
   const data = await response.json();
-  return data.agents;
+  return data.agents.map(hydrateProgressEstimate);
 }
 
 // Get agent details with messages
@@ -74,6 +82,24 @@ export async function getAgent(
   }
 
   return assertAgentDetailIdentity(agentId, hydrateAgentDetail(await response.json()));
+}
+
+/** Read one committed message by ID (bounded hydration of a deferred realtime INSERT). */
+export async function getAgentMessage(
+  agentId: string,
+  messageId: string,
+  signal?: AbortSignal,
+): Promise<Message> {
+  const response = await fetch(
+    `${API_BASE_WITH_PATH}/agents/${agentId}/messages/${encodeURIComponent(messageId)}`,
+    { headers: getAuthHeaders(), signal },
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch message (${response.status})`);
+  }
+  const { message } = (await response.json()) as { message: Message };
+  if (message.message_id !== messageId) throw new Error('Fetched message identity mismatch');
+  return message;
 }
 
 export async function getBenchmarkAgentPreview(
@@ -123,7 +149,7 @@ export async function createAgent(payload: CreateAgentPayload): Promise<Agent> {
   });
 
   if (!response.ok) {
-    const error = await response.json();
+    const error = (await response.json()) as { error?: string };
     throw new Error(error.error || 'Failed to create agent');
   }
 
@@ -162,7 +188,7 @@ export async function getArchivedAgents(): Promise<Agent[]> {
   }
 
   const data = await response.json();
-  return data.agents;
+  return data.agents.map(hydrateProgressEstimate);
 }
 
 // Restore an archived agent (does not resume its run)

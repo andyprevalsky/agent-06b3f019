@@ -6,18 +6,16 @@
 import { IntegrationType, IntegrationStatus, type Prisma } from './types';
 import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
+import type { ContactWithMessages } from '../../services/integrations/iMessageParser';
+import type { WhatsAppContactWithMessages } from '../../services/integrations/whatsappParser';
+import type { TelegramContactWithMessages } from '../../services/integrations/telegramParser';
 import {
-  type ContactWithMessages,
-  parseIMessageData,
-} from '../../services/integrations/iMessageParser';
-import {
-  type WhatsAppContactWithMessages,
-  parseWhatsAppData,
-} from '../../services/integrations/whatsappParser';
-import {
-  type TelegramContactWithMessages,
-  parseTelegramData,
-} from '../../services/integrations/telegramParser';
+  enqueueMessagingUpload,
+  kickMessagingUploadJobs,
+  type MessagingPlatform,
+} from './uploadService.messagingJobs';
+
+export { runMessagingUploadJobs } from './uploadService.messagingJobs';
 
 // Re-export types needed by routes
 export type { ContactWithMessages } from '../../services/integrations/iMessageParser';
@@ -26,144 +24,76 @@ export type { TelegramContactWithMessages } from '../../services/integrations/te
 
 const log = createLogger('Integrations');
 
-/** Update integration after successful messaging import. */
-async function updateMessagingIntegration(
-  integrationId: string,
-  existingConfig: Record<string, unknown>,
-  contacts: { length: number },
-  totalMessages: number,
-  jobId: string,
-  accessedAt: string | undefined
-) {
-  await repo.updateIntegration(integrationId, {
-    status: IntegrationStatus.CONNECTED,
-    isActive: true,
-    lastSyncAt: new Date(),
-    lastSuccessfulSyncAt: new Date(),
-    config: {
-      ...existingConfig,
-      contacts: contacts.length,
-      messages: totalMessages,
-      lastJobId: jobId,
-      lastUploadedAt: new Date().toISOString(),
-      lastFrontendAccessAt:
-        accessedAt ??
-        (typeof existingConfig.lastFrontendAccessAt === 'string'
-          ? existingConfig.lastFrontendAccessAt
-          : new Date().toISOString()),
-    },
-  });
-}
-
-/** Handle failed messaging import. */
-async function handleMessagingFailure(integrationId: string, error: unknown, platform: string) {
-  log.error(`Error processing ${platform} payload`, {
-    error: error instanceof Error ? error.message : String(error),
-  });
-  await repo.updateIntegrationStatus(integrationId, IntegrationStatus.SYNC_FAILED, {
-    lastSyncAt: new Date(),
-    lastFailedSyncAt: new Date(),
-    failureReason: error instanceof Error ? error.message : 'Unknown error',
-  });
-}
-
 /**
- * Process iMessage upload (async background processing).
+ * Accept a messaging history upload: record it on the integration and store it
+ * as durable parts (see uploadService.messagingJobs). Parsing never runs inside
+ * the request, so the acknowledgement survives a deploy, crash or OOM.
+ *
+ * `syncComplete: false` marks a non-final request of a chunked client sync: it
+ * keeps the previous incremental-read cursor until the final request arrives.
  */
+async function acceptMessagingUpload(
+  platform: MessagingPlatform,
+  userId: string,
+  contacts: Array<{ messages?: unknown[] }>,
+  accessedAt: string | undefined,
+  syncComplete: boolean
+) {
+  const totalMessages = contacts.reduce((sum, contact) => sum + (contact.messages?.length ?? 0), 0);
+  log.info(`Received ${platform} payload`, {
+    userId,
+    contacts: contacts.length,
+    messages: totalMessages,
+    syncComplete,
+  });
+
+  const existing = await repo.findIntegrationByUserAndName(userId, platform);
+  const existingConfig = (existing?.config as Prisma.JsonObject | null) ?? {};
+  const config = {
+    ...existingConfig,
+    contacts: contacts.length,
+    messages: totalMessages,
+    uploadedAt: new Date().toISOString(),
+  };
+  // The parts are written before the integration is marked SYNCING. A drain
+  // finalizing in between must not see SYNCING without them, or it would mark
+  // the sync CONNECTED from the earlier parts and never revisit the final one.
+  // The cursor (lastFrontendAccessAt) is not touched here: it advances only
+  // once every part of the client's sync is processed (see finalizeIntegration).
+  const integrationId =
+    existing?.id ?? (await repo.upsertIntegrationForUpload({ userId, name: platform, config })).id;
+  const jobId = await enqueueMessagingUpload({
+    userId,
+    integrationId,
+    platform,
+    contacts,
+    totalMessages,
+    accessedAt: accessedAt ?? null,
+    syncComplete,
+  });
+  const integration = await repo.upsertIntegrationForUpload({ userId, name: platform, config });
+  kickMessagingUploadJobs();
+  return { integration, jobId };
+}
+
+/** Process an iMessage upload (durable background processing). */
 export async function processIMessageUpload(
   userId: string,
   contacts: ContactWithMessages[],
-  accessedAt?: string
+  accessedAt?: string,
+  syncComplete = true
 ) {
-  const totalMessages = contacts.reduce((sum, contact) => sum + (contact.messages?.length ?? 0), 0);
-
-  log.info('Received iMessage payload', {
-    userId,
-    contacts: contacts.length,
-    messages: totalMessages,
-  });
-
-  const integration = await repo.upsertIntegrationForUpload({
-    userId,
-    name: 'imessage',
-    config: {
-      contacts: contacts.length,
-      messages: totalMessages,
-      uploadedAt: new Date().toISOString(),
-      lastFrontendAccessAt: accessedAt ?? new Date().toISOString(),
-    },
-  });
-
-  const jobId = `imessage-upload-${userId}-${Date.now()}`;
-
-  // Background processing
-  void (async () => {
-    try {
-      await parseIMessageData(userId, contacts, jobId);
-      const existingConfig = (integration.config as Record<string, unknown> | null) ?? {};
-      await updateMessagingIntegration(
-        integration.id,
-        existingConfig,
-        contacts,
-        totalMessages,
-        jobId,
-        accessedAt
-      );
-    } catch (error: unknown) {
-      await handleMessagingFailure(integration.id, error, 'iMessage');
-    }
-  })();
-
-  return { integration, jobId };
+  return acceptMessagingUpload('imessage', userId, contacts, accessedAt, syncComplete);
 }
 
-/**
- * Process WhatsApp upload (async background processing).
- */
+/** Process a WhatsApp upload (durable background processing). */
 export async function processWhatsAppUpload(
   userId: string,
   contacts: WhatsAppContactWithMessages[],
-  accessedAt?: string
+  accessedAt?: string,
+  syncComplete = true
 ) {
-  const totalMessages = contacts.reduce((sum, contact) => sum + (contact.messages?.length ?? 0), 0);
-
-  log.info('Received WhatsApp payload', {
-    userId,
-    contacts: contacts.length,
-    messages: totalMessages,
-  });
-
-  const integration = await repo.upsertIntegrationForUpload({
-    userId,
-    name: 'whatsapp',
-    config: {
-      contacts: contacts.length,
-      messages: totalMessages,
-      uploadedAt: new Date().toISOString(),
-      lastFrontendAccessAt: accessedAt ?? new Date().toISOString(),
-    },
-  });
-
-  const jobId = `whatsapp-upload-${userId}-${Date.now()}`;
-
-  void (async () => {
-    try {
-      await parseWhatsAppData(userId, contacts, jobId);
-      const existingConfig = (integration.config as Record<string, unknown> | null) ?? {};
-      await updateMessagingIntegration(
-        integration.id,
-        existingConfig,
-        contacts,
-        totalMessages,
-        jobId,
-        accessedAt
-      );
-    } catch (error: unknown) {
-      await handleMessagingFailure(integration.id, error, 'WhatsApp');
-    }
-  })();
-
-  return { integration, jobId };
+  return acceptMessagingUpload('whatsapp', userId, contacts, accessedAt, syncComplete);
 }
 
 /**
@@ -217,51 +147,12 @@ export async function processTelegramConnect(userId: string) {
   });
 }
 
-/**
- * Process Telegram upload (async background processing).
- */
+/** Process a Telegram upload (durable background processing). */
 export async function processTelegramUpload(
   userId: string,
   contacts: TelegramContactWithMessages[],
-  accessedAt?: string
+  accessedAt?: string,
+  syncComplete = true
 ) {
-  const totalMessages = contacts.reduce((sum, contact) => sum + (contact.messages?.length ?? 0), 0);
-
-  log.info('Received Telegram payload', {
-    userId,
-    contacts: contacts.length,
-    messages: totalMessages,
-  });
-
-  const integration = await repo.upsertIntegrationForUpload({
-    userId,
-    name: 'telegram',
-    config: {
-      contacts: contacts.length,
-      messages: totalMessages,
-      uploadedAt: new Date().toISOString(),
-      lastFrontendAccessAt: accessedAt ?? new Date().toISOString(),
-    },
-  });
-
-  const jobId = `telegram-upload-${userId}-${Date.now()}`;
-
-  void (async () => {
-    try {
-      await parseTelegramData(userId, contacts, jobId);
-      const existingConfig = (integration.config as Record<string, unknown> | null) ?? {};
-      await updateMessagingIntegration(
-        integration.id,
-        existingConfig,
-        contacts,
-        totalMessages,
-        jobId,
-        accessedAt
-      );
-    } catch (error: unknown) {
-      await handleMessagingFailure(integration.id, error, 'Telegram');
-    }
-  })();
-
-  return { integration, jobId };
+  return acceptMessagingUpload('telegram', userId, contacts, accessedAt, syncComplete);
 }

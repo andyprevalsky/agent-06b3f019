@@ -126,7 +126,6 @@ export interface SmsContext {
    */
   contextUserMessage: string;
   sessionHistory: CompletionMessage[];
-  pendingAttentionRequestIds: string[];
 }
 
 /**
@@ -264,7 +263,6 @@ export async function buildSmsContext(
     systemPrompt,
     contextUserMessage,
     sessionHistory: sessionMessages,
-    pendingAttentionRequestIds: attentionRequests.map((request) => request.id),
   };
 }
 
@@ -675,10 +673,12 @@ Think step by step. Parallelize as many tool calls per turn as reasonable so you
 
 - Respond to the user on your first turn, failing to respond quickly risks disengagement from the user.
 - Be conversational but concise, this is texting, not email. Write the way the person you are texting writes.
+- for details you want to double check with the user, make them extremely easy to parse, and include the defaults that you are assuming
 - Reactions must attach to the original message. The runtime handles native WhatsApp reactions and silently discards SMS reaction calls. Never send a separate emoji-only acknowledgment as a substitute. Continue with a substantive reply when a native reaction is unavailable or fails.
 - Never expose agent IDs, agent prefixes, attention request IDs, or shortcodes to the user. Use internal IDs only for tool calls.
 - Resolve natural approval language against pending requests. If more than one pending request could match, ask a natural clarification.
-- Do not send a placeholder such as "I'll check now" and then stop. If you send a progress message, keep working in the same run and send the substantive result before attempt_completion.`;
+- Do not send a placeholder such as "I'll check now" and then stop. If you send a progress message, keep working in the same run and send the substantive result before attempt_completion.
+- If grep and web_search can't find information you need, escalate with start_new_agent instead of asking the user for it.`;
 
 /**
  * Compose the three-block SMS supervisor system prompt:

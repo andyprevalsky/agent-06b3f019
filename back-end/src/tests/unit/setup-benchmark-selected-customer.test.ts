@@ -8,6 +8,13 @@ async function main(): Promise<void> {
   let customer: Record<string, unknown> = {};
   let requests = 0;
   const server = createServer((request, response) => {
+    // Host port detectors probe new listeners with `HEAD /`; the Stripe SDK
+    // only issues GETs here, so count and assert only those.
+    if (request.method === 'HEAD') {
+      response.statusCode = 405;
+      response.end();
+      return;
+    }
     requests += 1;
     assert.equal(request.method, 'GET');
     assert.equal(request.url, '/v1/customers/cus_selected');

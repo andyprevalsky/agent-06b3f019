@@ -1,8 +1,25 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert';
+import { retryWithBackoff } from '../../providers/retry';
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * The dedupe slot is DB-backed (SharedEphemeralState), so under coverage load
+ * an expected alert can land after a fixed 30 ms sleep. Wait (bounded) for it.
+ */
+const waitForCalls = (calls: unknown[], expected: number): Promise<void> =>
+  retryWithBackoff(
+    async () => {
+      if (calls.length < expected) throw new Error(`waiting for ${expected} alert(s)`);
+    },
+    {
+      maxRetries: 40,
+      getBackoffDelayMs: () => 50,
+      isRetryable: () => true,
+      component: 'ErrorAlertTest',
+    }
+  ).catch(() => undefined);
 
 interface Captured {
   url: string;
@@ -16,7 +33,6 @@ async function run(): Promise<void> {
   const oldChannel = process.env.SLACK_ERROR_CHANNEL_ID;
   const oldRca = process.env.AUTO_RCA_ENABLED;
   const oldToken = process.env.GITHUB_DISPATCH_TOKEN;
-  const oldRepo = process.env.GITHUB_DISPATCH_REPO;
 
   // The bot-token path resolves through the Slack Web API; every other suite runs
   // through the webhook path, so keep the bot env unset unless a case opts in.
@@ -54,7 +70,7 @@ async function run(): Promise<void> {
     // --- 1. Posts to Slack when webhook is configured ---
     process.env.SLACK_ERROR_WEBHOOK_URL = 'https://hooks.slack.test/xxx';
     delete process.env.AUTO_RCA_ENABLED;
-    __resetAlertThrottleForTests();
+    await __resetAlertThrottleForTests();
     calls.length = 0;
 
     alertError({
@@ -65,6 +81,7 @@ async function run(): Promise<void> {
       context: { reason: 'pool exhausted', attempts: 3 },
     });
     await sleep(30);
+    await waitForCalls(calls, 1);
     assert.strictEqual(calls.length, 1, 'should post exactly one Slack alert');
     assert.strictEqual(calls[0].url, 'https://hooks.slack.test/xxx', 'posts to the webhook url');
     const payload = calls[0].body as { text: string; blocks: unknown[] };
@@ -99,11 +116,12 @@ async function run(): Promise<void> {
     calls.length = 0;
     alertError({ source: 'sms', message: 'totally different failure', userId: 'u1' });
     await sleep(30);
+    await waitForCalls(calls, 1);
     assert.strictEqual(calls.length, 1, 'distinct signature should alert');
 
     // --- 4. No webhook configured → no fetch, no throw ---
     delete process.env.SLACK_ERROR_WEBHOOK_URL;
-    __resetAlertThrottleForTests();
+    await __resetAlertThrottleForTests();
     calls.length = 0;
     alertError({ source: 'chat', message: 'no webhook here', agentId: 'a' });
     await sleep(30);
@@ -111,87 +129,55 @@ async function run(): Promise<void> {
     process.env.SLACK_ERROR_WEBHOOK_URL = 'https://hooks.slack.test/xxx';
     alertError({ source: 'chat', message: 'no webhook here', agentId: 'a' });
     await sleep(30);
+    await waitForCalls(calls, 1);
     assert.strictEqual(calls.length, 1, 'a missing sink must not spend the throttle slot');
 
     // --- 5. Never throws even when fetch rejects ---
     process.env.SLACK_ERROR_WEBHOOK_URL = 'https://hooks.slack.test/xxx';
-    __resetAlertThrottleForTests();
+    await __resetAlertThrottleForTests();
     calls.length = 0;
     failNext = true;
     alertError({ source: 'chat', message: 'fetch will reject', agentId: 'a' });
     await sleep(30); // if this throws unhandled, the process crashes → test fails
     alertError({ source: 'chat', message: 'fetch will reject', agentId: 'a' });
     await sleep(30);
+    await waitForCalls(calls, 1);
     assert.strictEqual(calls.length, 1, 'a rejected transport remains immediately retryable');
 
-    // --- 6. AUTO_RCA_ENABLED=1 with an agentId fires the GitHub dispatch ---
+    // --- 6. AUTO_RCA_ENABLED=1 never dispatches to GitHub: RCA runs on Rose,
+    //         driven by the Slack card this alert posts. ---
     process.env.AUTO_RCA_ENABLED = '1';
     process.env.GITHUB_DISPATCH_TOKEN = 'ghp_test';
-    process.env.GITHUB_DISPATCH_REPO = 'Rose-Ai-Labs/rose';
-    __resetAlertThrottleForTests();
+    await __resetAlertThrottleForTests();
     calls.length = 0;
     alertError({ source: 'agent_workflow', message: 'rca please', agentId: 'agent-rca' });
     await sleep(30);
-    const dispatch = calls.find((c) => c.url.includes('api.github.com'));
-    assert.ok(dispatch !== undefined, 'AUTO_RCA_ENABLED should fire a repository_dispatch');
-    const dispatchBody = dispatch.body as {
-      event_type: string;
-      client_payload: { agent_id: string };
-    };
-    assert.strictEqual(
-      dispatchBody.event_type,
-      'agent-failure',
-      'dispatch uses agent-failure event'
-    );
-    assert.strictEqual(
-      dispatchBody.client_payload.agent_id,
-      'agent-rca',
-      'dispatch carries the agent id'
-    );
+    await waitForCalls(calls, 1);
+    assert.strictEqual(calls.length, 1, 'Auto RCA still posts exactly one Slack card');
+    assert.strictEqual(calls[0].url, 'https://hooks.slack.test/xxx', 'card goes to Slack');
     assert.ok(
-      !('source' in dispatchBody.client_payload) && !('title' in dispatchBody.client_payload),
-      'dispatch keeps failure-controlled free text out of the privileged workflow'
+      calls.every((c) => !c.url.includes('api.github.com')),
+      'Auto RCA must not fire a GitHub repository_dispatch'
     );
 
-    // A broad incident still alerts every affected agent, but its normalized
-    // signature may launch only one RCA workflow per throttle window.
-    process.env.SLACK_ERROR_WEBHOOK_URL = 'https://hooks.slack.test/xxx';
+    // --- 7. A broad incident alerts every affected agent; the auto-RCA webhook
+    //         (not this emitter) collapses one signature into one RCA agent. ---
     calls.length = 0;
     alertError({ source: 'sms', message: 'provider outage 42', agentId: 'incident-agent-a' });
     await sleep(30);
     alertError({ source: 'sms', message: 'provider outage 99', agentId: 'incident-agent-b' });
     await sleep(30);
     assert.strictEqual(
-      calls.filter((c) => c.url.includes('api.github.com')).length,
-      1,
-      'one normalized incident signature must launch one RCA'
-    );
-    assert.strictEqual(
       calls.filter((c) => c.url === 'https://hooks.slack.test/xxx').length,
-      1,
-      'the other affected agent must retain its ordinary Slack fallback'
+      2,
+      'each affected agent keeps its own Slack card'
     );
-
-    // --- 7. Flag off → never dispatches RCA ---
-    delete process.env.AUTO_RCA_ENABLED;
-    __resetAlertThrottleForTests();
-    calls.length = 0;
-    alertError({ source: 'agent_workflow', message: 'no rca', agentId: 'agent-x' });
-    await sleep(30);
     assert.ok(
       calls.every((c) => !c.url.includes('api.github.com')),
-      'flag off → no RCA dispatch'
+      'no GitHub dispatch'
     );
-
-    // --- 8. RCA flag on but no token → Slack still sent, no GitHub dispatch, no throw ---
-    process.env.AUTO_RCA_ENABLED = '1';
+    delete process.env.AUTO_RCA_ENABLED;
     delete process.env.GITHUB_DISPATCH_TOKEN;
-    __resetAlertThrottleForTests();
-    calls.length = 0;
-    alertError({ source: 'agent_workflow', message: 'rca but no token', agentId: 'agent-y' });
-    await sleep(30);
-    assert.strictEqual(calls.length, 1, 'Slack alert still fires without a dispatch token');
-    assert.ok(!calls[0].url.includes('api.github.com'), 'missing token → no repository_dispatch');
 
     // --- 9. Slack non-2xx is handled without throwing ---
     let non2xxCalls = 0;
@@ -200,7 +186,7 @@ async function run(): Promise<void> {
       return new Response('nope', { status: 500 });
     }) as typeof fetch;
     delete process.env.AUTO_RCA_ENABLED;
-    __resetAlertThrottleForTests();
+    await __resetAlertThrottleForTests();
     alertError({ source: 'sms', message: 'slack rejects this one', userId: 'u2' });
     await sleep(30); // must not throw despite the 500
     alertError({ source: 'sms', message: 'slack rejects this one', userId: 'u2' });
@@ -223,44 +209,35 @@ async function run(): Promise<void> {
       return new Response('ok', { status: 200 });
     }) as typeof fetch;
 
-    // --- 10. Auto RCA dispatch owns Slack creation. The backend sends only the
-    //         stable agent + target channel and never creates a duplicate card. ---
+    // --- 10. With the bot token, Auto RCA posts the card through the Web API to
+    //         the configured channel. That top-level bot card is the event the
+    //         Slack auto-RCA webhook turns into a Rose RCA agent. ---
     delete process.env.SLACK_ERROR_WEBHOOK_URL;
     process.env.SLACK_BOT_TOKEN = 'xoxb-test';
     process.env.SLACK_ERROR_CHANNEL_ID = 'C_INPUT';
     process.env.AUTO_RCA_ENABLED = '1';
-    process.env.GITHUB_DISPATCH_TOKEN = 'ghp_test';
-    __resetAlertThrottleForTests();
+    await __resetAlertThrottleForTests();
     calls.length = 0;
     alertError({ source: 'agent_workflow', message: 'bot token path', agentId: 'agent-bot' });
     await sleep(30);
-    const slackPost = calls.find((c) => c.url.includes('slack.com/api/chat.postMessage'));
-    assert.strictEqual(slackPost, undefined, 'Auto RCA must not pre-create a Slack card');
-    const botDispatch = calls.find((c) => c.url.includes('api.github.com'));
-    assert.ok(botDispatch !== undefined, 'flag on → dispatch fires');
-    const botPayload = (botDispatch.body as { client_payload: Record<string, string> })
-      .client_payload;
-    assert.ok(!('slack_ts' in botPayload), 'dispatch must not carry an unstable message handle');
-    assert.strictEqual(
-      botPayload.slack_channel,
-      'C_INPUT',
-      'dispatch carries the configured lifecycle channel'
+    const slackPosts = calls.filter((c) => c.url.includes('slack.com/api/chat.postMessage'));
+    assert.strictEqual(slackPosts.length, 1, 'Auto RCA posts one bot card');
+    const card = slackPosts[0].body as { channel: string; thread_ts?: string; text: string };
+    assert.strictEqual(card.channel, 'C_INPUT', 'card goes to the configured error channel');
+    assert.strictEqual(card.thread_ts, undefined, 'the alert card is top-level, not a reply');
+    assert.ok(card.text.includes('bot token path'), 'card fallback text carries the error');
+    assert.ok(
+      calls.every((c) => !c.url.includes('api.github.com')),
+      'no GitHub dispatch'
     );
 
-    // --- 11. A process replay can duplicate dispatch, but it still cannot
-    //         duplicate Slack; the workflow reconciles by agent ID. ---
-    __resetAlertThrottleForTests();
+    // --- 11. Within the throttle window the same agent+signature posts nothing. ---
     alertError({ source: 'agent_workflow', message: 'bot token path', agentId: 'agent-bot' });
     await sleep(30);
     assert.strictEqual(
-      calls.filter((c) => c.url.includes('api.github.com')).length,
-      2,
-      'replay is allowed to produce a duplicate idempotent dispatch'
-    );
-    assert.strictEqual(
       calls.filter((c) => c.url.includes('slack.com/api/chat.postMessage')).length,
-      0,
-      'replay must not produce a backend-owned Slack card'
+      1,
+      'a repeat inside the throttle window must not post a second card'
     );
 
     // --- 12. Bot token unset but webhook set → still uses the webhook path ---
@@ -268,10 +245,11 @@ async function run(): Promise<void> {
     delete process.env.SLACK_ERROR_CHANNEL_ID;
     delete process.env.AUTO_RCA_ENABLED;
     process.env.SLACK_ERROR_WEBHOOK_URL = 'https://hooks.slack.test/xxx';
-    __resetAlertThrottleForTests();
+    await __resetAlertThrottleForTests();
     calls.length = 0;
     alertError({ source: 'chat', message: 'webhook fallback still works', agentId: 'w' });
     await sleep(30);
+    await waitForCalls(calls, 1);
     assert.strictEqual(calls.length, 1, 'webhook fallback posts one alert');
     assert.strictEqual(
       calls[0].url,
@@ -290,8 +268,6 @@ async function run(): Promise<void> {
     else process.env.AUTO_RCA_ENABLED = oldRca;
     if (oldToken === undefined) delete process.env.GITHUB_DISPATCH_TOKEN;
     else process.env.GITHUB_DISPATCH_TOKEN = oldToken;
-    if (oldRepo === undefined) delete process.env.GITHUB_DISPATCH_REPO;
-    else process.env.GITHUB_DISPATCH_REPO = oldRepo;
   }
 
   process.stdout.write('error alert emitter test passed\n');

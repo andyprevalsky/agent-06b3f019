@@ -15,9 +15,14 @@ import type { Request, Response, NextFunction } from 'express';
 import type jwt from 'jsonwebtoken';
 import { prisma } from './database';
 import { createInitialCredit } from './credits';
-import { syncJwtUser, type JwtUserStore } from './hybridAuthUser';
+import { PhoneAccountExistsError, syncJwtUser, type JwtUserStore } from './hybridAuthUser';
 import { createLogger } from './logger';
-import { impersonatorFromPayload, verifySupabaseAccessToken } from './supabaseJwt';
+import { OLDEST_ACCOUNT_FIRST, phoneLookupVariants } from './phoneAccountLookup';
+import {
+  impersonatorFromPayload,
+  sessionMethodFromPayload,
+  verifySupabaseAccessToken,
+} from './supabaseJwt';
 
 const log = createLogger('HybridAuth');
 
@@ -43,6 +48,16 @@ const jwtUserStore: JwtUserStore = {
       data: { phone },
     });
   },
+  async findPhoneOwner(phone) {
+    const variants = phoneLookupVariants(phone);
+    if (variants === null) return null;
+    const owner = await prisma.user.findFirst({
+      where: { phone: { in: variants } },
+      orderBy: OLDEST_ACCOUNT_FIRST,
+      select: { userId: true },
+    });
+    return owner?.userId ?? null;
+  },
   isUniqueViolation(error) {
     return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
   },
@@ -60,6 +75,8 @@ export interface HybridAuthRequest extends Request {
     phone?: string;
     /** Operator acting on behalf of `id` (RFC 8693 `act`), else undefined. */
     impersonatedBy?: string;
+    /** First `amr` method of the session (`otp`, `preview_handoff`, ...). */
+    authMethod?: string;
   };
 }
 
@@ -71,17 +88,23 @@ interface X402Payment {
 async function getOrCreateWalletUser(walletAddress: string) {
   const userId = walletAddress.toLowerCase();
 
-  let user = await prisma.user.findUnique({
+  const existing = await prisma.user.findUnique({
     where: { userId },
   });
+  if (existing !== null) return existing;
 
-  if (user === null) {
-    user = await prisma.user.create({
-      data: { userId },
-    });
-    log.info('Created x402 user for wallet', { userId });
+  // Concurrent first payments (possibly on different instances) race to create
+  // the same wallet user: the loser reads the winner's row instead of failing.
+  let user;
+  try {
+    user = await prisma.user.create({ data: { userId } });
+  } catch (error: unknown) {
+    if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+      throw error;
+    }
+    user = await prisma.user.findUniqueOrThrow({ where: { userId } });
   }
-
+  log.info('Resolved x402 user for wallet', { userId });
   return user;
 }
 
@@ -186,17 +209,26 @@ async function handleJwtAuth(
     email: payload.email,
     phone: payload.phone,
     impersonatedBy: impersonatorFromPayload(payload),
+    authMethod: sessionMethodFromPayload(payload),
   };
   req.isInternal = false;
   req.isX402 = false;
   req.isRoseApiKey = false;
   req.isAnonymous = isAnonymous;
 
-  const isNewUser = await syncJwtUser(jwtUserStore, {
-    userId,
-    isAnonymous,
-    phone: typeof payload.phone === 'string' ? payload.phone : null,
-  });
+  let isNewUser: boolean;
+  try {
+    isNewUser = await syncJwtUser(jwtUserStore, {
+      userId,
+      isAnonymous,
+      phone: typeof payload.phone === 'string' ? payload.phone : null,
+    });
+  } catch (error) {
+    if (!(error instanceof PhoneAccountExistsError)) throw error;
+    log.warn('Rejected token for a phone owned by another account', { userId });
+    res.status(401).json({ error: error.message, code: error.code });
+    return;
+  }
 
   if (isNewUser) {
     log.info('Created user record', { userId, isAnonymous });

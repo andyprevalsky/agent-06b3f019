@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { requireCredentialMintSession } from '../../providers/credentialMintAuth';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { authenticate, type AuthRequest } from '../../providers/auth';
 import { createLogger } from '../../providers/logger';
@@ -40,6 +41,7 @@ router.get(
 router.post(
   '/',
   authenticate,
+  requireCredentialMintSession,
   asyncHandler<AuthRequest>(async (req, res) => {
     try {
       if (!req.user) {

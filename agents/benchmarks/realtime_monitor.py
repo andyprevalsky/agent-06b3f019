@@ -126,6 +126,21 @@ class NoHangingToolCallsInvariant:
 
         if role != "ASSISTANT" or not self._open_tools:
             return
+        # Child output files are attached to the parent transcript as empty
+        # ASSISTANT rows. They are artifacts, not a resumed model turn. Require
+        # the file pointer and empty text as well as the explicit marker so an
+        # authored assistant message cannot hide an unresolved tool call.
+        if metadata.get("artifactOnly") is True and record.get("filePointer") and not record.get("text"):
+            return
+        # A Display row (including a running code agent's mirror into this
+        # conversation) shows a file to the user; the caller's model gets the
+        # tool result instead, so it can land while that tool is still open.
+        if (
+            metadata.get("source") == "display"
+            and metadata.get("excludeFromModel") is True
+            and record.get("filePointer")
+        ):
+            return
         if _is_dag_stream_assistant(metadata):
             return
 
@@ -153,7 +168,9 @@ class NoHangingToolCallsInvariant:
         return self._sequence > tool.sequence
 
     def handle_broadcast(self, event: str, payload: Any) -> None:
-        if event == "INSERT":
+        # Rows over the backend's 8 KB live cap arrive as INSERT_DEFERRED notices that
+        # keep the tool lifecycle (and small) metadata, but never the full text.
+        if event in ("INSERT", "INSERT_DEFERRED"):
             self.handle_insert(_record_from_broadcast(payload))
 
     def reconcile_snapshot(self, messages: list[dict[str, Any]]) -> Optional[str]:
@@ -165,6 +182,12 @@ class NoHangingToolCallsInvariant:
                 record["agentId"] = self.agent_id
             if "timestamp" not in record and "created_at" in record:
                 record["timestamp"] = record["created_at"]
+            # The agent detail API names these `message` / `file_pointer`;
+            # realtime INSERT records use `text` / `filePointer`.
+            if "text" not in record and "message" in record:
+                record["text"] = record["message"]
+            if "filePointer" not in record and "file_pointer" in record:
+                record["filePointer"] = record["file_pointer"]
             snapshot.handle_insert(record)
 
         self._open_tools = snapshot._open_tools
@@ -231,7 +254,7 @@ class SupabaseRealtimeSmokeMonitor:
                 {"config": {"private": self.private}},
             )
 
-            for event_name in ("INSERT", "UPDATE", "DELETE", "ASSISTANT_STREAM", "TOOL_STREAM"):
+            for event_name in ("INSERT", "INSERT_DEFERRED", "UPDATE", "DELETE", "ASSISTANT_STREAM", "TOOL_STREAM"):
                 channel.on_broadcast(
                     event_name,
                     lambda payload, name=event_name: self.invariant.handle_broadcast(name, payload),

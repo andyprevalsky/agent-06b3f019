@@ -16,11 +16,18 @@ from urllib.parse import urlparse
 import structlog
 
 from browser_tools.schemas import AVAILABLE_ACTIONS
+from domains.spawn_browser_agent_v3 import tilion_worker as tilion_files
 from domains.spawn_browser_agent_v3.config import (
     BROWSER_USE_COST_CENTS_PER_MS,
     BROWSER_USE_PRICING_POOL,
     KERNEL_COST_CENTS_PER_MS,
     STEEL_COST_CENTS_PER_MS,
+    TILION_ACTION_CREDITS,
+    TILION_CAPTCHA_CREDITS,
+    TILION_CENTS_PER_CREDIT,
+    TILION_COST_CENTS_PER_MS,
+    TILION_DIRECT_CREDITS_PER_MB,
+    TILION_PREMIUM_CREDITS_PER_MB,
 )
 from domains.spawn_browser_agent_v3.repo import (
     download_session_file,
@@ -358,6 +365,7 @@ async def build_browser_verifier_context(
     payment_card_evidence: Optional[Dict[str, Any]] = None,
     browser_checkpoints: Optional[List[Dict[str, Any]]] = None,
     user_instruction_messages: Optional[List[Dict[str, str]]] = None,
+    verification_goal: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Assemble the verifier context from final-state browser ground truth.
 
@@ -368,22 +376,31 @@ async def build_browser_verifier_context(
     effects on the caller.
     """
     all_action_entries = action_history.get_entries()
-    action_entries = all_action_entries[-30:]
-    # The card request can predate many form-fill actions. Keep its actual
-    # recorded result in the verifier's bounded history when it ages out.
-    if not any(
-        entry.get("action") == "request_payment_card"
-        and (entry.get("result") or {}).get("status") == "approved"
-        for entry in action_entries
-    ):
-        card_request = next(
-            (entry for entry in reversed(all_action_entries[:-30])
-             if entry.get("action") == "request_payment_card"
-             and (entry.get("result") or {}).get("status") == "approved"),
-            None,
-        )
-        if card_request is not None:
-            action_entries = [card_request, *action_entries[-29:]]
+    window, older = all_action_entries[-30:], all_action_entries[:-30]
+
+    def approved_card(entry: Dict[str, Any]) -> bool:
+        return entry.get("action") == "request_payment_card" and (entry.get("result") or {}).get("status") == "approved"
+
+    def has_auth_context(entry: Dict[str, Any]) -> bool:
+        return "auth_context" in (entry.get("result") or {})
+
+    # Some receipts prove a fact that later receipts do not repeat: the approved
+    # card request, and the observed sign-in options (stored only when they
+    # change). Carry the latest older one forward when it ages out of the
+    # verifier's bounded history, keeping the same 30-receipt size.
+    carried = []
+    for proves in (approved_card, has_auth_context):
+        if not any(proves(entry) for entry in window):
+            carrier = next((entry for entry in reversed(older) if proves(entry)), None)
+            if carrier is not None and carrier not in carried:
+                carried.append(carrier)
+    carried.sort(key=lambda entry: entry.get("step", 0))
+    # Make room by dropping the oldest receipts that prove neither fact.
+    drop = {
+        id(entry)
+        for entry in [e for e in window if not (approved_card(e) or has_auth_context(e))][: len(carried)]
+    }
+    action_entries = [*carried, *(entry for entry in window if id(entry) not in drop)]
     action_details_lines = []
     for entry in action_entries:
         step = entry.get("step", "?")
@@ -398,17 +415,45 @@ async def build_browser_verifier_context(
         line = f"Step {step}: {ea} - {estatus}"
         if ea == "screenshot" and esuccess:
             line += " (visible viewport capture)"
+        # Native target mechanics live outside params. Preserve the already
+        # privacy-projected, step-owned attempt; a failed action proves no effect.
+        if type(step) is int and ea in AVAILABLE_ACTIONS:
+            target = {}
+            if type(entry.get("index")) is int and entry["index"] >= 0:
+                target["index"] = entry["index"]
+            coords = entry.get("coordinates")
+            if isinstance(coords, dict) and set(coords) == {"x", "y"} and all(
+                type(v) in (int, float) and float("-inf") < v < float("inf") for v in coords.values()
+            ):
+                target["coordinates"] = coords
+            if target:
+                if isinstance(entry.get("element_description"), str):
+                    target["element_description"] = entry["element_description"]
+                line += f"\n  Recorded target attempt (page data): {target}"
         eparams = entry.get("params", {})
         if eparams:
             display_params = {k: v for k, v in eparams.items() if k not in ["screenshot", "dom_tree"]}
             if display_params:
                 line += f"\n  Params: {display_params}"
-        display_result = {k: v for k, v in er.items() if k not in ["success", "error", "screenshot", "dom_tree"]}
+        display_result = {k: v for k, v in er.items() if k not in ["success", "error", "screenshot", "dom_tree", "formatted_state"]}
         if display_result:
             line += f"\n  Result: {display_result}"
         action_details_lines.append(line)
 
     actions_text = "\n\n".join(action_details_lines)
+    # Each delivered native observation keeps its own receipt identity and
+    # existing per-tool/aggregate verifier admission. Do not bury many DOM
+    # observations inside the single compact action-history TOOL_RESULT.
+    observation_evidence = [
+        {"role": "TOOL", "text": "",
+         "metadata": {"toolName": entry["action"], "toolStatus": "FINISHED", "browser_action_step": entry["step"],
+                      "structured_response": {"step": entry["step"], "formatted_state": entry["result"]["formatted_state"]}}}
+        for entry in reversed(all_action_entries)
+        if type(entry.get("step")) is int and entry.get("action") == "read_browser_state"
+        and isinstance((entry.get("result") or {}).get("formatted_state"), str)
+        and entry["result"]["formatted_state"]
+    ]
+
 
     page_stats = browser_state.get("page_stats", {})
     scroll_pos = browser_state.get("scroll_position", {})
@@ -417,9 +462,9 @@ async def build_browser_verifier_context(
 
     # C10: Browser verifier infers from action_history + final-state
     # ground truth. Multi-step browser tasks would balloon if we
-    # stuffed every step's DOM into the verifier prompt; instead
-    # we pass the action history (which logs URL transitions and
-    # tool inputs/outputs), the final-state DOM, and the final-state
+    # duplicated every raw step DOM inside compact history. Delivered native
+    # read observations now have separate exact-step evidence under the same
+    # verifier admission budgets; we retain final-state DOM and final-state
     # screenshot reference. The verifier reconstructs the journey
     # from action_history and grounds the answer in the FINAL state.
     #
@@ -431,7 +476,7 @@ async def build_browser_verifier_context(
     dom_tree = browser_state.get("dom_tree", "") or ""
     # A blank placeholder frame (capture failed) is not rendered-page evidence.
     final_screenshot_b64 = None if browser_state.get("screenshot_placeholder") else browser_state.get("screenshot")
-    session_files = await list_session_files(config, session_id)
+    session_files = await _session_files_for_listing(config, session_id)
     files_text = "Downloaded Files in Session:\n"
     if session_files:
         for f in session_files:
@@ -492,7 +537,9 @@ async def build_browser_verifier_context(
         )
 
     user_prompt = (
-        f"Goal: {goal}\n\n"
+        f"Goal: {verification_goal or goal}\n\n"
+        + (f"Original browser task: {goal}\n\n" if verification_goal else "")
+        +
         "## Browser Ground Truth (FINAL STATE)\n"
         "Read the DOM independently and decide whether the goal is satisfied. "
         "Do NOT rely on what the agent reported - only on what the page actually shows. "
@@ -558,7 +605,7 @@ async def build_browser_verifier_context(
                 "screenshot_b64": final_screenshot_b64 or "",
             },
         },
-    ]
+    ] + observation_evidence
 
 
 def append_completion_evidence(
@@ -597,6 +644,19 @@ def append_completion_evidence(
 # ========================================
 
 
+async def _session_files_for_listing(config: Any, session_id: str) -> List[Dict[str, Any]]:
+    """Session downloads: Tilion's live in the worker ledger (its file routes
+    fail while the worker holds CDP); other providers list via the backend.
+
+    After a Tilion -> Kernel/Steel switch the ledger moved to the new session
+    while new downloads land in the new provider's files, so list both.
+    """
+    ledger = tilion_files.list_downloads(session_id) if tilion_files.owns_download_session(session_id) else []
+    if tilion_files.is_tilion_session(session_id):
+        return ledger
+    return [*ledger, *(await list_session_files(config, session_id) or [])]
+
+
 async def extract_session_files(
     session_id: str, user_id: str, config: Any, exclude_paths: Optional[List[str]] = None
 ) -> List[Dict[str, Any]]:
@@ -609,7 +669,7 @@ async def extract_session_files(
     """
     from helpers.attachments import upload_to_storage
 
-    session_files = await list_session_files(config, session_id)
+    session_files = await _session_files_for_listing(config, session_id)
     if not session_files:
         logger.info("No files to extract from session", session_id=session_id)
         return []
@@ -632,7 +692,20 @@ async def extract_session_files(
 
         logger.info(f"[Extract] Processing: {file_path}")
 
-        downloaded = await download_session_file(config, session_id, file_path)
+        # Route by ledger membership: Tilion paths are absolute like other providers'.
+        in_ledger = tilion_files.has_download(session_id, file_path)
+        if in_ledger:
+            # Already durable in attachment storage when it landed: reuse it.
+            stored_pointer = tilion_files.download_file_pointer(session_id, file_path)
+            if stored_pointer is not None:
+                output_files.append(stored_pointer)
+                continue
+
+        downloaded = (
+            tilion_files.read_download(session_id, file_path)
+            if in_ledger
+            else await download_session_file(config, session_id, file_path)
+        )
         if not downloaded:
             logger.warning(f"[Extract] Failed to download: {file_path}")
             continue
@@ -741,7 +814,7 @@ def build_browser_task_prompt(goal: str) -> str:
 # Internal-only suffix that splits a model's Fast-Mode replays from its paid
 # calls in the usage ledger. It contains NUL so it can never collide with a real
 # model name, and it must NEVER escape into an emitted usage row.
-_FAST_CACHE_LEDGER_MARKER = "\x00fast_cache"
+_DEMO_CACHE_LEDGER_MARKER = "\x00fast_cache"
 _CACHE_SEQUENCE_LEDGER_MARKER = "\x00cache_sequence:"
 
 
@@ -781,7 +854,7 @@ def accumulate_model_usage(
     model = str(actual_model or "")
     # NUL can never occur in a model name, so this cannot collide with a real
     # model whose name happens to end in the marker text.
-    key = f"{model}{_FAST_CACHE_LEDGER_MARKER}" if from_fast_cache else model
+    key = f"{model}{_DEMO_CACHE_LEDGER_MARKER}" if from_fast_cache else model
     sequence_id = str(cache_sequence_id or "").strip()
     if sequence_id:
         key = (
@@ -851,7 +924,7 @@ def build_browser_llm_usage_items(
             # Strip internal markers defensively so they can never reach a
             # usage row, even when a test or legacy caller constructs the
             # ledger without going through `accumulate_model_usage`.
-            model = str(ledger_key).split(_FAST_CACHE_LEDGER_MARKER, 1)[0]
+            model = str(ledger_key).split(_DEMO_CACHE_LEDGER_MARKER, 1)[0]
             model = model.split(_CACHE_SEQUENCE_LEDGER_MARKER, 1)[0]
         else:
             model = str(raw_model)
@@ -894,6 +967,12 @@ def build_usage_items(
     fast_mode_cache_enabled: bool = False,
     provider: Optional[str] = None,
     pricing_pool: str = BROWSER_USE_PRICING_POOL,
+    session_creates: int = 1,
+    tilion_premium_bytes: int = 0,
+    tilion_direct_bytes: int = 0,
+    tilion_page_proxy_bytes: Optional[int] = None,
+    tilion_actions: int = 0,
+    tilion_captcha_solves: int = 0,
 ) -> List[Dict[str, Any]]:
     """Build standardized usage items for cost tracking.
 
@@ -909,6 +988,13 @@ def build_usage_items(
     row so OAi-demo warm paths stay ~$0. Mixed ledgers (soft + mislabeled live
     rows) previously still billed wall-clock cents under the live-LLM check
     alone (verify19 ~4.5¢ Kernel on child d24898d1).
+
+    Tilion also bills a fixed 2 credits per session create; ``session_creates``
+    counts the creates this browser activity is charged for. Its bytes dominate
+    spend: CDP bytes relayed to the worker bill per MB at the direct or premium
+    (residential/ISP/mobile) rate, and premium sessions also bill the pages' own
+    proxy traffic (``tilion_page_proxy_bytes``; None while unobserved, so the
+    row is then a floor).
     """
     browser_provider = (provider or os.getenv("BROWSER_PROVIDER", "kernel")).strip().lower()
     if browser_provider == "kernel":
@@ -917,6 +1003,8 @@ def build_usage_items(
         service_provider, cost_per_ms = "Steel.dev Browser", STEEL_COST_CENTS_PER_MS
     elif browser_provider == "browser-use":
         service_provider, cost_per_ms = "Browser Use Browser", BROWSER_USE_COST_CENTS_PER_MS
+    elif browser_provider == "tilion":
+        service_provider, cost_per_ms = "Tilion Browser", TILION_COST_CENTS_PER_MS
     else:
         raise ValueError(f"Unsupported browser provider for usage: {browser_provider}")
     llm_items = build_browser_llm_usage_items(
@@ -931,7 +1019,20 @@ def build_usage_items(
     # demos otherwise pick up residual wall-clock cents.
     has_live_llm = any(not bool(item.get("from_fast_cache")) for item in llm_items)
     zero_service = bool(fast_mode_cache_enabled) or not has_live_llm
-    service_cost = 0.0 if zero_service else round(execution_time_ms * cost_per_ms, 4)
+    fixed_cost = 0.0
+    if browser_provider == "tilion":
+        megabyte = 1_048_576
+        credits = (
+            2 * max(session_creates, 0)
+            + TILION_DIRECT_CREDITS_PER_MB * max(tilion_direct_bytes, 0) / megabyte
+            + TILION_PREMIUM_CREDITS_PER_MB
+            * (max(tilion_premium_bytes, 0) + max(tilion_page_proxy_bytes or 0, 0))
+            / megabyte
+            + TILION_ACTION_CREDITS * max(tilion_actions, 0)
+            + TILION_CAPTCHA_CREDITS * max(tilion_captcha_solves, 0)
+        )
+        fixed_cost = credits * TILION_CENTS_PER_CREDIT
+    service_cost = 0.0 if zero_service else round(execution_time_ms * cost_per_ms + fixed_cost, 4)
     return [
         *llm_items,
         {
@@ -960,7 +1061,7 @@ def browser_usage_items_to_tool_usage(usage_items: Optional[List[Dict[str, Any]]
                     "provider": item.get("provider", ""),
                     "cache_read_input_tokens": item.get("cache_read_input_tokens", 0),
                     "cache_creation_input_tokens": item.get("cache_creation_input_tokens", 0),
-                    # Propagate fast-cache replay so replayed browser
+                    # Propagate demo-cache replay so replayed browser
                     # steps bill $0 instead of their replayed tokens.
                     "from_fast_cache": item.get("from_fast_cache", False),
                     **(

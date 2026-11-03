@@ -21,6 +21,10 @@ export const closeSessionSchema = z.object({
   session_id: z.string(),
   pause: z.boolean().optional().default(false),
   current_url: z.string().optional(), // Save current page URL for resume
+  // Sites (registrable domains) where the agent signed in with a saved
+  // credential during this task: the sign-in evidence the Root world-state
+  // merge requires before a site with no prior login can merge into Root.
+  signed_in_sites: z.array(z.string().min(1).max(253)).max(64).optional(),
 });
 
 export const resumeSessionSchema = z.object({

@@ -264,10 +264,56 @@ async function testHangingEndpointIsBounded(): Promise<void> {
   assert.equal(code, 1, 'timed-out cache lookup must fail closed');
 }
 
+// The sharded --check refuses a missing canonical base from this probe before any
+// Machine. A transport failure must stay distinguishable from a definite absence.
+async function headExitFor(status: number, contentLength: number): Promise<number | null> {
+  const requests: string[] = [];
+  const server = createServer((request, response) => {
+    requests.push(`${request.method} ${request.url}`);
+    response.writeHead(status, { 'Content-Length': String(contentLength) });
+    response.end();
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert(address && typeof address !== 'string');
+  const script = path.resolve(__dirname, '../../../scripts/seed-dump-cache.ts');
+  const child = spawn(process.execPath, [tsxCli, script, 'head', 'tok-head'], {
+    env: {
+      ...process.env,
+      R2_BUCKET_TRACE_ARCHIVE: 'test-bucket',
+      R2_ACCOUNT_ID: 'test-account',
+      R2_ACCESS_KEY_ID: 'test-access',
+      R2_SECRET_ACCESS_KEY: 'test-secret',
+      R2_ENDPOINT: `http://127.0.0.1:${address.port}`,
+      SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS: '10000',
+    },
+    stdio: 'pipe',
+  });
+  const [code] = (await once(child, 'close')) as [number | null];
+  server.closeAllConnections();
+  server.close();
+  assert.deepEqual(
+    requests.filter((line) => !line.endsWith(' /')),
+    ['HEAD /test-bucket/benchmark-seed-dumps/tok-head.dump'],
+    'head reads only the object metadata, never the body'
+  );
+  return code;
+}
+
+async function testHeadDistinguishesAbsentFromUnreadable(): Promise<void> {
+  assert.equal(await headExitFor(200, 4096), 0, 'a present object reports exit 0');
+  assert.equal(await headExitFor(404, 0), 3, 'a definite absence reports exit 3');
+  assert.equal(await headExitFor(200, 0), 3, 'an empty object is as unusable as a missing one');
+  assert.equal(await headExitFor(500, 0), 1, 'an unreadable cache is not reported as a miss');
+}
+
 testHangingEndpointIsBounded()
   .then(() => process.stdout.write('  ✅ hanging R2 endpoint respects request deadline\n'))
+  .then(() => testHeadDistinguishesAbsentFromUnreadable())
+  .then(() => process.stdout.write('  ✅ head separates present, absent and unreadable objects\n'))
   .then(() => process.stdout.write('seed-dump-cache: all tests passed\n'))
   .catch((error: unknown) => {
-    process.stderr.write(`  ❌ hanging R2 endpoint respects request deadline\n${String(error)}\n`);
+    process.stderr.write(`  ❌ seed-dump-cache async controls\n${String(error)}\n`);
     process.exit(1);
   });

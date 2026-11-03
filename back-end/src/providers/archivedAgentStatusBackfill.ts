@@ -1,0 +1,94 @@
+/**
+ * Settle archived agents that kept a non-terminal status.
+ *
+ * Before 2026-10-27 the soft delete set only `deletedAt`, so archived agents
+ * stayed STARTING_UP/ACTIVE/PAUSED forever (~16k rows in prod). This applies
+ * the same FAILED/"Archived by user" status the delete path now writes.
+ *
+ * Excluded: benchmark-hub ancestor skeletons (breadcrumb mirrors with no
+ * workflow), isBenchmark agents (benchmark workflow cleanup has its own owner),
+ * and agents holding a spend that cleanup would close or reclaim.
+ *
+ * Idempotent and bounded: each batch is its own short transaction with
+ * lock_timeout/statement_timeout, touches at most `batchSize` rows selected by
+ * primary key, and only rows that are archived AND non-terminal.
+ */
+import { prisma, runTransactionWithRetry } from './database';
+import { ARCHIVED_AGENT_STATUS_MESSAGE } from './agentKill';
+import { HUB_ANCESTOR_SKELETON_USER_ID } from './benchmarkHubAncestors';
+
+// Spend states that terminal-status purchase cleanup acts on (card close +
+// funding reclaim), plus money still in flight. Their agents are left alone so
+// the backfill never moves money; humans decide those separately.
+const MONEY_IN_FLIGHT_SPEND_STATUSES = [
+  'HELD',
+  'FUNDING_PENDING',
+  'FUNDING_ABANDONED',
+  'CHARGING',
+  'PENDING_APPROVAL',
+];
+const PREDICATE = `"deletedAt" IS NOT NULL
+  AND status IN ('STARTING_UP', 'ACTIVE', 'PAUSED')
+  AND "userId" <> '${HUB_ANCESTOR_SKELETON_USER_ID}'
+  AND "isBenchmark" = false
+  AND NOT EXISTS (
+    SELECT 1 FROM "PurchaseSpend" ps
+    WHERE ps."agentId" = "Agent".id
+      AND ps.status::text IN (${MONEY_IN_FLIGHT_SPEND_STATUSES.map((value) => `'${value}'`).join(', ')})
+  )`;
+
+export interface ArchivedStatusBackfillOptions {
+  execute: boolean;
+  batchSize?: number;
+  lockTimeoutMs?: number;
+  statementTimeoutMs?: number;
+  maxBatches?: number;
+}
+
+export interface ArchivedStatusBackfillResult {
+  pendingBefore: number;
+  updated: number;
+  batches: number;
+}
+
+async function countPending(): Promise<number> {
+  const rows = await prisma.$queryRawUnsafe<Array<{ count: bigint }>>(
+    `SELECT count(*)::bigint AS count FROM "Agent" WHERE ${PREDICATE}`
+  );
+  return Number(rows[0]?.count ?? 0);
+}
+
+export async function backfillArchivedAgentStatus(
+  options: ArchivedStatusBackfillOptions
+): Promise<ArchivedStatusBackfillResult> {
+  const batchSize = options.batchSize ?? 1000;
+  const lockTimeoutMs = options.lockTimeoutMs ?? 2000;
+  const statementTimeoutMs = options.statementTimeoutMs ?? 15000;
+  const maxBatches = options.maxBatches ?? 1000;
+  const pendingBefore = await countPending();
+  if (!options.execute || pendingBefore === 0) {
+    return { pendingBefore, updated: 0, batches: 0 };
+  }
+  let updated = 0;
+  let batches = 0;
+  while (batches < maxBatches) {
+    const changed = await runTransactionWithRetry(
+      async (tx) => {
+        await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${lockTimeoutMs}ms'`);
+        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '${statementTimeoutMs}ms'`);
+        return tx.$executeRawUnsafe(
+          `UPDATE "Agent" SET status = 'FAILED', "statusMessage" = $1, "updatedAt" = now()
+         WHERE id IN (SELECT id FROM "Agent" WHERE ${PREDICATE} ORDER BY id LIMIT $2)
+           AND ${PREDICATE}`,
+          ARCHIVED_AGENT_STATUS_MESSAGE,
+          batchSize
+        );
+      },
+      { timeout: statementTimeoutMs + 5000 }
+    );
+    batches += 1;
+    updated += changed;
+    if (changed < batchSize) break;
+  }
+  return { pendingBefore, updated, batches };
+}

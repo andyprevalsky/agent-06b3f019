@@ -37,7 +37,7 @@ from domains.web_fetch.service import (
 )
 from domains.web_fetch.types import ExecuteActivityCallable
 from helpers.handle_tool_event import handle_tool_event
-from helpers.summarize import summarize_and_filter_links
+from helpers.summarize import select_page_metadata, summarize_and_filter_links
 from helpers.tracing import traced
 from helpers.world_model_runtime import (
     WorldModelToolExecutionAdapter,
@@ -56,7 +56,7 @@ def _safe_time() -> float:
 
 
 logger = structlog.get_logger()
-FAST_CACHE_HIT_FIELD = "_fast_cache_hit"
+DEMO_CACHE_HIT_FIELD = "_fast_cache_hit"
 
 
 def _truncate_display(value: str, max_len: int = 100) -> str:
@@ -117,6 +117,7 @@ class WebFetchManager(ToolManager):
         fast_mode_goal: Optional[str] = None,
         fast_mode_cache_write_enabled: bool = False,
         world_model_mode: str = "real",
+        compute_token_lineage_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Execute web fetch and post events via handle_tool_event."""
         url = tool_call.get("url", "")
@@ -152,7 +153,7 @@ class WebFetchManager(ToolManager):
 
             logger.info("Calling web_fetch_activity", url=url, objective_len=len(objective))
 
-            # 1) Firecrawl scrape (Fast Mode caches the scrape by normalized URL)
+            # 1) Firecrawl scrape (DEMO caches the scrape by normalized URL)
             scrape_args = [
                 url,
                 fast_mode_cache_enabled,
@@ -182,7 +183,7 @@ class WebFetchManager(ToolManager):
             scrape_metadata: Dict[str, Any] = (
                 scrape_result.get("metadata", {}) if isinstance(scrape_result, dict) else {}
             )
-            scrape_cache_hit = isinstance(scrape_result, dict) and bool(scrape_result.get(FAST_CACHE_HIT_FIELD))
+            scrape_cache_hit = isinstance(scrape_result, dict) and bool(scrape_result.get(DEMO_CACHE_HIT_FIELD))
             scrape_simulated = isinstance(scrape_result, dict) and bool(scrape_result.get("world_model_simulated"))
             service_provider = scrape_metadata.get("provider") or "Firecrawl scrape"
             service_cost_cents = (
@@ -212,6 +213,10 @@ class WebFetchManager(ToolManager):
                     user_id,  # gpt_token_user_id
                     agent_id,
                     f"agent:{agent_id}:tool:{tool_call_id}:call:summarize_web_fetch",
+                    compute_token_lineage_key,
+                    # Allowlisted head-only facts (title and one publication
+                    # date) that main-content markdown can drop.
+                    select_page_metadata(scrape_metadata),
                 ],
                 start_to_close_timeout=timedelta(seconds=90),
                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -269,7 +274,7 @@ class WebFetchManager(ToolManager):
                     "provider": "Rose (summarize_web_fetch)",
                     "cache_read_input_tokens": haiku_usage.get("cache_read_input_tokens", 0),
                     "cache_creation_input_tokens": haiku_usage.get("cache_creation_input_tokens", 0),
-                    # Propagate fast-cache replay so the workflow cost aggregator
+                    # Propagate demo-cache replay so the workflow cost aggregator
                     # zeroes a replayed summarize call instead of billing the
                     # replayed output tokens (mirrors the planner fix).
                     "from_fast_cache": haiku_usage.get("from_fast_cache", False),
@@ -374,6 +379,7 @@ async def web_fetch(
     fast_mode_goal: Optional[str] = None,
     fast_mode_cache_write_enabled: bool = False,
     world_model_mode: str = "real",
+    compute_token_lineage_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute web fetch tool."""
     manager = get_manager()
@@ -394,7 +400,13 @@ async def web_fetch(
         fast_mode_goal=fast_mode_goal,
         fast_mode_cache_write_enabled=fast_mode_cache_write_enabled,
         world_model_mode=world_model_mode,
+        compute_token_lineage_key=compute_token_lineage_key,
     )
+
+
+# A DEMO web_fetch row holding this field records a scrape that failed; its
+# value is the WebFetchProvidersFailed message the agent saw.
+CACHED_PROVIDER_ERROR_FIELD = "provider_error"
 
 
 # ── Temporal activities ──
@@ -409,7 +421,7 @@ async def web_fetch_activity(
     fast_mode_cache_write_enabled: bool = False,
     agent_id: Optional[str] = None,
     world_model_mode: Optional[str] = None,
-    fast_cache_agent_id: Optional[str] = None,
+    demo_cache_agent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Activity: Firecrawl scrape (JS rendering, main-content extraction).
 
@@ -420,47 +432,48 @@ async def web_fetch_activity(
     Allowlisted write-through mode stores live Firecrawl responses without first
     reading from cache.
     """
-    from providers.fast_cache import client as fast_cache_client
-    from providers.fast_cache import normalize as fast_cache_normalize
+    from providers.demo_cache import client as demo_cache_client
+    from providers.demo_cache import normalize as demo_cache_normalize
 
     read_cache = fast_mode_cache_enabled and bool(fast_mode_goal)
     write_cache = (fast_mode_cache_enabled or fast_mode_cache_write_enabled) and bool(fast_mode_goal)
-    cache_key = fast_cache_normalize.web_fetch_key(fast_mode_goal, url) if write_cache else None
+    cache_key = demo_cache_normalize.web_fetch_key(fast_mode_goal, url) if write_cache else None
     if cache_key is not None and read_cache:
-        stored = await fast_cache_client.cache_get(cache_key)
+        stored = await demo_cache_client.cache_get(cache_key)
+        if isinstance(stored, dict) and CACHED_PROVIDER_ERROR_FIELD in stored:
+            # A recorded failed fetch replays as the same tool error, not a live retry.
+            logger.info("demo_cache.web_fetch_error_hit", key=cache_key, url=url)
+            raise ApplicationError(
+                str(stored[CACHED_PROVIDER_ERROR_FIELD]), type="WebFetchProvidersFailed", non_retryable=True
+            )
         if stored is not None:
             if wmh_fallback_on_unavailable_enabled() and wmh_result_unavailable(stored):
-                logger.info("fast_cache.web_fetch_unavailable_ignored", key=cache_key, url=url)
+                logger.info("demo_cache.web_fetch_unavailable_ignored", key=cache_key, url=url)
             else:
-                logger.info("fast_cache.web_fetch_hit", key=cache_key, url=url)
+                logger.info("demo_cache.web_fetch_hit", key=cache_key, url=url)
                 if isinstance(stored, dict):
-                    return {**stored, FAST_CACHE_HIT_FIELD: True}
+                    return {**stored, DEMO_CACHE_HIT_FIELD: True}
                 return stored
         if stored is None:
             # Fast Mode read miss: soft-complete instead of live Firecrawl /
-            # Parallel Extract. Restricted to exact-match fast_cache:on benches.
-            if not await fast_cache_client.soft_complete_allowed_for_agent(
-                agent_id, fast_mode_goal
-            ):
+            # Parallel Extract. Restricted to exact-match demo_cache:on benches.
+            if not await demo_cache_client.soft_complete_allowed_for_agent(agent_id, fast_mode_goal):
                 logger.info(
-                    "fast_cache.web_fetch_miss_live",
+                    "demo_cache.web_fetch_miss_live",
                     key=cache_key,
                     url=url[:120],
                     reason="soft_complete_not_allowlisted",
                 )
             else:
-                logger.info("fast_cache.web_fetch_soft_complete", key=cache_key, url=url[:120])
+                logger.info("demo_cache.web_fetch_soft_complete", key=cache_key, url=url[:120])
                 return {
-                    "markdown": (
-                        "Fast Mode cache miss for this web fetch. Returning without a "
-                        "live scrape."
-                    ),
+                    "markdown": ("Fast Mode cache miss for this web fetch. Returning without a live scrape."),
                     "links": [],
                     "metadata": {"provider": "fast-mode-soft-complete"},
-                    FAST_CACHE_HIT_FIELD: True,
+                    DEMO_CACHE_HIT_FIELD: True,
                 }
     elif cache_key is not None:
-        logger.info("fast_cache.web_fetch_write_only", key=cache_key, url=url)
+        logger.info("demo_cache.web_fetch_write_only", key=cache_key, url=url)
 
     async def real_executor(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
         return await scrape_url(url)
@@ -489,12 +502,12 @@ async def web_fetch_activity(
     if (
         cache_key is not None
         and write_cache
-        and await fast_cache_client.cache_write_allowed_for_agent(fast_cache_agent_id or agent_id, fast_mode_goal)
+        and await demo_cache_client.cache_write_allowed_for_agent(demo_cache_agent_id or agent_id, fast_mode_goal)
     ):
-        await fast_cache_client.cache_set(
-            cache_key, "web_fetch", fast_cache_normalize.goal_hash(fast_mode_goal), result, goal=fast_mode_goal
+        await demo_cache_client.cache_set(
+            cache_key, "web_fetch", demo_cache_normalize.goal_hash(fast_mode_goal), result, goal=fast_mode_goal
         )
-        logger.info("fast_cache.web_fetch_stored", key=cache_key, url=url)
+        logger.info("demo_cache.web_fetch_stored", key=cache_key, url=url)
     return result
 
 
@@ -508,7 +521,7 @@ async def web_fetch_download_activity(
     fast_mode_cache_write_enabled: bool = False,
     agent_id: Optional[str] = None,
     world_model_mode: Optional[str] = None,
-    fast_cache_agent_id: Optional[str] = None,
+    demo_cache_agent_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Activity: download Haiku-curated file URLs and upload to Supabase storage.
 
@@ -527,7 +540,7 @@ async def web_fetch_download_activity(
             fast_mode_cache_enabled=fast_mode_cache_enabled,
             fast_mode_goal=fast_mode_goal,
             fast_mode_cache_write_enabled=fast_mode_cache_write_enabled,
-            agent_id=fast_cache_agent_id or agent_id,
+            agent_id=demo_cache_agent_id or agent_id,
         )
         return {"files": files}
 

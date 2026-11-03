@@ -1,0 +1,33 @@
+{
+  "schema": "root-cr-stabilization-source-review-v1",
+  "reviewed_epoch": 1791938357.4454806,
+  "source_ref": "2380a74e16b889b11a4286ee88d13f4b27cdc0e2",
+  "base": "ecaed61aab753da5f8c11e1c2c17565513198410",
+  "source_packet": "/home/boxes/rose-deploy-review-stabilization/.context/review-stabilization/review.safe.json",
+  "source_packet_sha256": "75bc88e0ca6cafc88aa8ae17e372d2d2f5e26b2992ce32b4ba825f6173bde90b",
+  "patch_sha256": "3eac19f9ff25e843279ce81d26710e67525b1c2d12f866f657b111b0e8d632e9",
+  "independent_controls": "4 PASS 9.01s, 971 deselected; actual shared Bash/Python inode/successor/unsafe-link controls, skip_launch CREATED exact restored config, service opt-in recovery hint, competing snapshot retry",
+  "owning_log_sha256": "93f615f4859666ac0020725999f5ae10822dd038af99005484255ef9f387a392",
+  "actual_recipe_receipt": "/home/boxes/rose/.context/cr-stabilization-root/actual-recipe.safe.json",
+  "source_review_fingerprint": "57cd3b921a4f5aca70048f02ab0c0caddfb882d932f8a41d58eb95d4a4b59561",
+  "actual_transitive_recipe_independently_verified": true,
+  "source_approved": true,
+  "existing_phase_scope_preserved": true,
+  "native_task_profile_floor_timeout_or_guard_budget_changed": false,
+  "source_policy_entry_added_by_root": false,
+  "production_deploy_requires_qualified_600_and_normal_gates": true,
+  "current_benchmark_source_unchanged": true,
+  "findings_resolved": [
+    "same persistent regular kernel-lock inode coordinates updated capture+fleet recoverers across metadata replacement",
+    "release checks exact recorded host/PID/native birth before deleting own lock metadata",
+    "idle CREATED after exact skip_launch config update accepted and reported honestly; initial stopped admission unchanged",
+    "restore-only command retains explicit service-isolation opt-in",
+    "snapshot scheduling retry excludes positively predating peer records without expanding normal time/skew bounds"
+  ],
+  "limitations": [
+    "mixed old/new recovery consumers on the same exact owner are not safe; require updated-consumer custody for this owner",
+    "snapshot seconds precision and provider clock ambiguity are not independently solved",
+    "no actual native allocation/capacity/release or benchmark acceptance inferred from offline review",
+    "no archival context original was modified"
+  ]
+}

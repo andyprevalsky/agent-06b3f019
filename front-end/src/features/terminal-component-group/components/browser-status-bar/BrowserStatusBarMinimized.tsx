@@ -1,7 +1,13 @@
 /**
  * BrowserStatusBarMinimized — collapsed row showing the last browser action
  * title + a scaled thumbnail. Clicking the row expands; clicking the
- * thumbnail opens the fullscreen view. Suppressed when forceMinimized.
+ * thumbnail opens the Browser drawer on this agent's tab. Suppressed when
+ * forceMinimized.
+ *
+ * STATE MACHINE:
+ * [WITH_THUMBNAIL] showThumbnail: live thumbnail iframe at the left
+ * [IN_DRAWER]      showThumbnail=false: the drawer already streams this session,
+ *                  so the row drops its thumbnail (one live iframe per session)
  */
 
 import type { ComponentType, MouseEvent } from 'react';
@@ -16,7 +22,11 @@ import type { BrowserSessionMetadata, OutputSchemaRef } from './types';
 interface MinimizedProps {
   browserUrl: string;
   browserLive?: boolean;
+  /** The owning agent finished: show a terminal "session ended" state, never "Connecting…". */
+  browserEnded?: boolean;
   forceMinimized: boolean;
+  /** False while the session is shown in the Browser drawer. */
+  showThumbnail?: boolean;
   lastActionType: string | undefined;
   lastActionTitle: string;
   controlState: BrowserControlState;
@@ -50,7 +60,9 @@ function LastActionRow({
 export function BrowserStatusBarMinimized({
   browserUrl,
   browserLive = true,
+  browserEnded = false,
   forceMinimized,
+  showThumbnail = true,
   lastActionType,
   lastActionTitle,
   controlState,
@@ -66,16 +78,21 @@ export function BrowserStatusBarMinimized({
 
   return (
     <div onClick={forceMinimized ? undefined : onExpand} className={`w-full ${cursorClass}`}>
-      <div className="relative flex items-center gap-3 p-2 pr-3 pl-3 sm:pl-36 rounded-xl border border-border bg-card/50 backdrop-blur-sm hover:bg-card/80 transition-colors">
-        <BrowserThumbnail
-          browserUrl={browserUrl}
-          live={browserLive}
-          width={128}
-          height={80}
-          wrapperClassName={thumbnailWrapperClass}
-          onClick={onThumbnailClick}
-          disabled={forceMinimized}
-        />
+      <div
+        className={`relative flex items-center gap-3 p-2 pr-3 pl-3 ${showThumbnail ? 'sm:pl-36' : ''} rounded-xl border border-border bg-card/50 backdrop-blur-sm hover:bg-card/80 transition-colors`}
+      >
+        {showThumbnail && (
+          <BrowserThumbnail
+            browserUrl={browserUrl}
+            live={browserLive}
+            ended={browserEnded}
+            width={128}
+            height={80}
+            wrapperClassName={thumbnailWrapperClass}
+            onClick={onThumbnailClick}
+            disabled={forceMinimized}
+          />
+        )}
         <LastActionRow lastActionType={lastActionType} lastActionTitle={lastActionTitle} />
         {controlState === 'waiting' && !forceMinimized && (
           <button

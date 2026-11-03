@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "timestamp_utc": "2026-10-18T20:35:48.270956+00:00",
+  "requested_change": "Run FILL benchmark as Tamy using her account/profile instead of default Andy user",
+  "previous_source": "172564c7c48e7fb5e300e4b7a3745317722ae88c",
+  "task": "sms-supervisor-fill-form-searches-then-delegates",
+  "existing_fixture": "live-tamy-account-snapshot",
+  "canonical_cached_base_contains_Tamy_user": false,
+  "cached_base_readback_method": "Read-only pg_restore User table inspection; no database restored or production writes",
+  "task_environment_changed_only": true,
+  "task_prompt_sms_script_evaluators_models_timeouts_unchanged": true,
+  "SMS_dispatch_applies_declared_fixture_before_driver": true,
+  "SMS_dispatch_uses_task_scoped_identity": true,
+  "fixture_task_serialized_with_other_exclusive_tasks": true,
+  "verification": {
+    "suite": "benchmarks/sms_runner_test.py benchmarks/benchmark_tasks_policy_test.py",
+    "passed": 153,
+    "seconds": 3.44,
+    "includes_fixture_failure_driver_failure_scope_restoration": true
+  },
+  "actual_Tamy_benchmark_run_performed": false,
+  "prior_runs_remain_Andy_identity_results": true,
+  "production_deployed": false
+}

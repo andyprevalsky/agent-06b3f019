@@ -31,6 +31,8 @@ import json
 import re
 from typing import Any, Awaitable, Callable, Optional
 
+from benchmarks.completion_evidence import completion_card, completion_card_text as _completion_card_text, completion_messages
+
 # ---------------------------------------------------------------------------
 # Odysseys-exact judge contract (do not paraphrase).
 # Source: https://github.com/ljang0/Odysseys
@@ -217,10 +219,14 @@ def build_polar_trajectory(
     screenshots: list[dict[str, str]] = []
     step_number = 0
 
-    for message in _iter_trajectory_messages(data):
+    trajectory = _iter_trajectory_messages(data)
+    final_ids = {id(message) for message in completion_messages(trajectory)}
+    for message in trajectory:
         role = str(message.get("role") or "").upper()
         text = _message_text(message)
         metadata = _message_metadata(message)
+        if completion_card(metadata) is not None and id(message) not in final_ids:
+            continue
         tool_name = str(
             metadata.get("toolName")
             or metadata.get("tool_name")
@@ -239,7 +245,14 @@ def build_polar_trajectory(
             screenshots.append({"b64": shot[0], "mime": shot[1]})
 
         parts: list[str] = []
-        if role == "ASSISTANT" and text:
+        final_answer = _completion_card_text(metadata) if id(message) in final_ids else ""
+        if final_answer:
+            final_ids.discard(id(message))
+            parts.append(f"Response: {final_answer}")
+        if role == "ASSISTANT" and text and text not in (
+            final_answer,
+            (completion_card(metadata) or {}).get("summary"),
+        ):
             parts.append(f"Response: {text}")
         if role in {"TOOL", "TOOL_RESULT"} or tool_name:
             action_bits = []
@@ -247,7 +260,7 @@ def build_polar_trajectory(
                 action_bits.append(tool_name)
             if tool_status:
                 action_bits.append(f"status={tool_status}")
-            if text:
+            if text and text not in (final_answer, metadata.get("completionSummary", {}).get("summary") if isinstance(metadata.get("completionSummary"), dict) else None):
                 clipped = text if len(text) <= 4000 else text[:4000] + "…"
                 action_bits.append(clipped)
             if action_bits:

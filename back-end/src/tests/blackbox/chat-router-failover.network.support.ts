@@ -1,8 +1,8 @@
 /**
  * Network boundary for chat-router-failover: replays the provider streams
  * recorded on the e8f2279b router request at their recorded offsets, stalls
- * what a scenario stalls, passes live requests through, and records every
- * request the chat turn makes.
+ * what a scenario stalls, passes live requests through, answers the turn's
+ * web searches with no results, and records every request the chat turn makes.
  */
 
 import assert from 'node:assert/strict';
@@ -13,7 +13,11 @@ import { fileURLToPath } from 'node:url';
 import { prisma } from '../../providers/database';
 import { OPENROUTER_FAST_CHAT_MODEL } from '../../providers/rose/openrouterFastRoute';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
-import { type LiveObservation, observedLiveFetch } from './chat-router-failover.live.support';
+import {
+  groupDecisionRounds,
+  type LiveObservation,
+  observedLiveFetch,
+} from './chat-router-failover.live.support';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -55,6 +59,8 @@ export const SLOWEST_GLM_DELAY_MS = 8_583 - 3_073;
 
 /** Live requests also record the OpenRouter host that served, and when. */
 export interface ProviderRequest extends LiveObservation {
+  /** Fetch-order position among the turn's provider and search requests. */
+  seq: number;
   provider: 'cerebras' | 'openrouter';
   model: string;
   schema: string;
@@ -139,11 +145,44 @@ function transcriptChars(messages: Array<{ role?: string; content?: unknown }>):
 
 const ALERT_HOSTS = new Set(['slack.com', 'hooks.slack.com', 'api.github.com']);
 
+/**
+ * The chat turn's web-search dependency (chatTools.ts `fetchParallelSearch`).
+ * The router may search and fan out queries before it decides again
+ * (bcee7f02c), so each POST here is answered in-process with no results: this
+ * probe tests routing failover, not search, and the live router then decides
+ * on "No results found." Any other method or path at this host is still a
+ * stray outbound call.
+ */
+export const PARALLEL_SEARCH_URL = 'https://api.parallel.ai/v1/search';
+
+export interface SearchRequest {
+  /** Fetch-order position among the turn's provider and search requests. */
+  seq: number;
+  atMs: number;
+  objective: string;
+  queries: string[];
+  /** Same objective already sent in this batch: the product's 1.5s hedge duplicate (or a retry). */
+  hedgeDuplicate: boolean;
+}
+
+function describeSearchRequests(searches: readonly SearchRequest[]): string {
+  return searches
+    .map((search) => {
+      const hedge = search.hedgeDuplicate ? ' (hedge duplicate)' : '';
+      return `  web search at ${search.atMs}ms${hedge}: ${search.objective}\n`;
+    })
+    .join('');
+}
+
 export function installNetwork(scenario: Scenario, startedAt: number) {
   const realFetch = globalThis.fetch;
   const requests: ProviderRequest[] = [];
+  const searchRequests: SearchRequest[] = [];
   const unexpected: string[] = [];
   const alerts: string[] = [];
+  let seq = 0;
+  /** Index in `searchRequests` where the current batch of consecutive searches began. */
+  let searchBatchStart: number | undefined;
   let cerebrasRouterRequests = 0;
   let glmRouterRequests = 0;
 
@@ -156,10 +195,35 @@ export function installNetwork(scenario: Scenario, startedAt: number) {
       alerts.push(url);
       return new Response('{"ok":false}', { status: 503 });
     }
+    const method = (
+      init?.method ?? (input instanceof Request ? input.method : 'GET')
+    ).toUpperCase();
+    if (url === PARALLEL_SEARCH_URL && method === 'POST') {
+      const search = JSON.parse(String(init?.body)) as {
+        objective?: string;
+        search_queries?: string[];
+      };
+      const objective = String(search.objective ?? '');
+      searchBatchStart ??= searchRequests.length;
+      searchRequests.push({
+        seq: seq++,
+        atMs: Date.now() - startedAt,
+        objective,
+        queries: search.search_queries ?? [],
+        hedgeDuplicate: searchRequests
+          .slice(searchBatchStart)
+          .some((earlier) => earlier.objective === objective),
+      });
+      return new Response('{"results":[]}', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
     if (url !== CEREBRAS_API_URL && url !== OPENROUTER_API_URL) {
       unexpected.push(url);
       throw new Error(`chat-router-failover: unexpected outbound ${url}`);
     }
+    searchBatchStart = undefined;
     const body = JSON.parse(String(init?.body)) as {
       model: string;
       messages: Array<{ role?: string; content?: unknown }>;
@@ -173,6 +237,7 @@ export function installNetwork(scenario: Scenario, startedAt: number) {
     assert.match(String(runtimeClock?.content), /^<system-reminder>\nCurrent UTC time:/);
     const provider = url === CEREBRAS_API_URL ? 'cerebras' : 'openrouter';
     const request: ProviderRequest = {
+      seq: seq++,
       provider,
       model: body.model,
       schema,
@@ -232,8 +297,12 @@ export function installNetwork(scenario: Scenario, startedAt: number) {
 
   return {
     requests,
+    searchRequests,
     unexpected,
     alerts,
+    /** The turn's router decisions in order, each with its attempts and the search batch that closed it. */
+    decisionRounds: () => groupDecisionRounds(requests, searchRequests, OPENROUTER_FAST_CHAT_MODEL),
+    describeSearches: () => describeSearchRequests(searchRequests),
     routerRequests: (provider: ProviderRequest['provider'], model?: string) =>
       requests.filter(
         (request) =>

@@ -12,6 +12,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+class OwnedStackStoppedError(RuntimeError):
+    """The owned local stack went down before cleanup could be verified: the
+    verifier could not run, which says nothing about the task's resources."""
+
+
 def contract() -> tuple[Path, str] | None:
     if os.environ.get("BENCHMARK_CLOUD_BATCH_CLEANUP") != "true":
         return None
@@ -41,6 +46,10 @@ def exact_root_sessions(base_url: str, root_id: str, *, require_deleted: bool = 
     ports = manifest.get("ports") or {}
     name = database.get("name")
     port = database.get("port") or (5432 if database.get("use_system_postgres") else ports.get("local_db"))
+    if manifest.get("status") in {"failed", "stopped"}:
+        # The owned stack itself went down (e.g. its backend was killed) before cleanup
+        # finished: its database can no longer serve as release evidence.
+        raise OwnedStackStoppedError(f"owned local stack is {manifest.get('status')} before provider verification")
     if (
         Path(manifest.get("worktree", "")).resolve() != REPO_ROOT
         or manifest.get("benchmark_mode") is not True
@@ -77,7 +86,7 @@ def exact_root_sessions(base_url: str, root_id: str, *, require_deleted: bool = 
         if (
             not isinstance(row, dict)
             or row.get("agent_id") not in tree
-            or row.get("provider") not in {"kernel", "steel"}
+            or row.get("provider") not in {"kernel", "steel", "tilion"}
             or not isinstance(row.get("session_id"), str)
             or re.fullmatch(r"[A-Za-z0-9_-]{8,128}", row["session_id"]) is None
         ):

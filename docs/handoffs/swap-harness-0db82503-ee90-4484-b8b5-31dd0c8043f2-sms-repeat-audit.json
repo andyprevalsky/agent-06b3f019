@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-10-14T18:36:15.630883+00:00",
+  "tested_source_head": "87032ebe60b9187f7086c5067258ebe7c4cfa0e3",
+  "original_checkpoint_and_warning_commit_remain_ancestors": true,
+  "user_request": "Show exact test input and investigate possible flakiness; then Continue",
+  "unchanged_closed_case_repeats": {
+    "source_head": "87032ebe60b9187f7086c5067258ebe7c4cfa0e3",
+    "catalog_sha256": "330f865234e1472aa899fff95940499490f05dcf278afe89ac7e0c6e86b6aee9",
+    "catalog_matches_trigger": true,
+    "catalog_or_prompt_changes": false,
+    "timeouts_changed": false,
+    "model_changed": false,
+    "trials": [
+      {
+        "trial": 1,
+        "run_id": "2baf633b-0c0d-4bc0-a2e4-f71cb65f548e",
+        "actual_result_sha256": "5ebdb2adf3bbaa979c68adc0f3d2f3b1584a31e3a31f90727a8d556469f66a9d",
+        "recorded_result_sha256_matches": true,
+        "passed": false,
+        "duration_seconds": 30.6,
+        "failed_evaluator_kind": "static_check",
+        "declared_evaluators_executed": 1,
+        "budget_delta_cents": 200,
+        "root_agent_starts": 2,
+        "start_goal_count": 2,
+        "distinct_start_goals": 1,
+        "web_search_count": 13,
+        "unique_search_result_contents": 1,
+        "web_result_sha256": "c9ff946c075c5f404a033200e3c5227f7849f84a6af0df68d42bc96f8b1f742d",
+        "cleanup_verified_by_runner": true
+      },
+      {
+        "trial": 2,
+        "run_id": "c56443a3-202e-40a2-ad86-88a4513e2937",
+        "actual_result_sha256": "1c8066961ee774956a45b466a6e0533dd44542e5c1f0d03cb01e9e9b5d0d6296",
+        "recorded_result_sha256_matches": true,
+        "passed": false,
+        "duration_seconds": 27.4,
+        "failed_evaluator_kind": "static_check",
+        "declared_evaluators_executed": 1,
+        "budget_delta_cents": 100,
+        "root_agent_starts": 1,
+        "start_goal_count": 1,
+        "distinct_start_goals": 1,
+        "web_search_count": 5,
+        "unique_search_result_contents": 1,
+        "web_result_sha256": "c9ff946c075c5f404a033200e3c5227f7849f84a6af0df68d42bc96f8b1f742d",
+        "cleanup_verified_by_runner": true
+      }
+    ],
+    "captured_decisions": 15,
+    "recorded_models": [
+      "qwen-3.8-27b"
+    ],
+    "provider_pools": [
+      "cerebras-direct"
+    ],
+    "tool_schema_fingerprints": [
+      "859b08d45fc7a7e428f08369b8a5efe941d56a043bf3687f539320cad38c7d31"
+    ],
+    "native_output_ids_count": 26,
+    "native_output_ids_unique": true,
+    "provider_errors": 0,
+    "data_privacy": "No raw transcript, task capture, output, environment value, or personal field stored in this audit."
+  },
+  "private_archive_readback": {
+    "recorded_at_utc": "2026-10-14T18:33:06.869491+00:00",
+    "private_archive": "/project/tamy-supervisor-continuation/acc001c9-41fa-46c7-8e16-04bb9d3223bd/closed-repeats-20261014/owned-captures.tar.gz",
+    "archive_sha256": "1366a7247a40a7ecd0508687b5d30b3ad4a7634b7ec0723064bcb411a6103c9c",
+    "manifest_sha256": "a7d2719a0f2105ef5c9e6084a2121d7f23bd3a42fd886e391c26f1c249f33cb5",
+    "files": 78,
+    "matched_files": 78,
+    "decision_dump_count": 15,
+    "known_committed_roots": 3,
+    "descendant_completeness": "NOT_INDEPENDENTLY_ESTABLISHED",
+    "raw_data_published": false,
+    "archive_readback": "PASS",
+    "detailed_results_archive": {
+      "private_archive": "/project/tamy-supervisor-continuation/acc001c9-41fa-46c7-8e16-04bb9d3223bd/closed-repeats-20261014/detailed-results.tar.gz",
+      "archive_sha256": "91f1d71d7cdcc3e273b50bbbba0ac8b331b74fbde97f33e2f6c76736a4b49839",
+      "manifest_sha256": "27bc5a754fce4b7caa10fbaea7c99a6340484caa2a5fa8cb814f6a14dd6a7de0",
+      "files": 2,
+      "matched_files": 2,
+      "archive_readback": "PASS"
+    },
+    "all_explicit_detailed_results_preserved": true,
+    "updated_at_utc": "2026-10-14T18:33:41.125205+00:00"
+  },
+  "observed_model_interpretation": "Recorded model reasoning treated August 15 closure information as stale relative to October 14 and delegated current-status verification. Date necessity or sufficiency is not yet proved by a controlled live counterfactual.",
+  "withdrawn_product_prompt": "TAMY-CONDITION-1 remains WITHDRAWN_NOT_APPLIED; exact inbound contains no explicit action condition.",
+  "closed_fixture_candidate": {
+    "approval_id": "TAMY-FIXTURE-DATE-1",
+    "status": "PRIVATE_UNAPPLIED_NOT_APPROVED",
+    "proposal_sha256": "3f24860060f62316472d30a431ed434a0c677ff73828e037bb9b84d08e1788a3",
+    "only_llm_visible_phrase": {
+      "before": "closed for kitchen renovations through August 15",
+      "after": "closed for kitchen renovations with no reopening date announced"
+    },
+    "inbound_prompt_tools_schemas_models_timeouts_criteria_unchanged": true,
+    "owning_regression": {
+      "same_command": "cd agents && venv/bin/python -m pytest -q benchmarks/sms_runner_test.py::test_closed_fixture_is_closed_regardless_of_when_it_runs",
+      "red_exit": 1,
+      "red_seconds": 0.594,
+      "red_assertion": "Original fixture contains time-dependent phrasing: through ",
+      "green_exit": 0,
+      "green_seconds": 0.516,
+      "green_assertion": "Updated fixture has neither a closure deadline nor conditional operating hours",
+      "does_not_prove_live_model_outcome": true
+    },
+    "owning_suite": {
+      "command": "cd agents && venv/bin/python -m pytest -q benchmarks/sms_runner_test.py",
+      "exit_code": 0,
+      "seconds": 0.946,
+      "private_candidate_only": true,
+      "does_not_prove_live_model_outcome": true
+    },
+    "real_model_postfix": "NOT_RUN_PENDING_APPROVAL"
+  },
+  "fill_form_findings": {
+    "cohort_run_id": "65f3f4d0-3490-4793-b314-eb03a7c52586",
+    "task_name": "sms-supervisor-fill-form-searches-then-delegates",
+    "duration_seconds": 45.7,
+    "static_owning_contract_passed": true,
+    "semantic_judge_passed": false,
+    "root_agents_started": 1,
+    "full_outgoing_decision_message_count": 43,
+    "outgoing_request_email_literals": 0,
+    "profile_email_field_present": false,
+    "profile_full_name_field_present": true,
+    "profile_phone_field_present": true,
+    "profile_delivery_address_nonempty_lines": 5,
+    "delegated_goal_contains_literal_profile_address": true,
+    "reply_asks_address_confirmation": true,
+    "reply_asks_email_confirmation_destination_preference": true,
+    "entire_sms_script_email_literal_count": 0,
+    "judge_scenario_source_injects_actual_user_profile": false,
+    "conclusion": "Judge claim that email was already available is not grounded by actual full request or script. Address was available and forwarded; requesting confirmation is not clearly a repeated unknown-fact question. No prompt, schema, model, catalog, timeout or source modification made.",
+    "privacy": "No raw transcript, task capture, response, reasoning, environment value, or personal field stored."
+  },
+  "PR_merged": false,
+  "deployment_complete": false,
+  "raw_transcripts_task_captures_and_values": "PRIVATE_ONLY",
+  "fill_form_judge_candidate": {
+    "approval_id": "TAMY-JUDGE-PROFILE-1",
+    "status": "PRIVATE_UNAPPLIED_NOT_APPROVED",
+    "proposal_sha256": "2f6029ab3502bb4e161d6799541db02e40a97c1d2a1a37e9d35edd7349cdfc43",
+    "llm_visible_control_diff_sha256": "a16a358ec2ef9184f5d58f494ce40666d7b4812c4e8da3b3e1137f9e15d1c788",
+    "before_after_owning_assertions": {
+      "red": [
+        "11 failed, 66 passed in 0.74s"
+      ],
+      "green": [
+        "77 passed in 0.49s"
+      ]
+    },
+    "product_prompt_tools_schemas_models_timeouts_static_criteria_unchanged": true,
+    "real_task_postfix": "NOT_RUN_PENDING_APPROVAL"
+  },
+  "private_proposal_preservation": {
+    "files": 24,
+    "hash_matches": 24,
+    "archive_sha256": "69dafbeee0b91da4aaec4018c0d323e80a412783882cc3424e51675a17ce795f",
+    "manifest_sha256": "db2a3c975fcc81b3d1fbdb65ba63db37b4ecbfae5670f67d0309ae6bad633b67",
+    "archive_readback": "PASS",
+    "private_archive": "/project/tamy-supervisor-continuation/acc001c9-41fa-46c7-8e16-04bb9d3223bd/sms-test-proposals-20261014/private-proposals.tar.gz",
+    "raw_publication": false,
+    "proposals_applied": false
+  }
+}

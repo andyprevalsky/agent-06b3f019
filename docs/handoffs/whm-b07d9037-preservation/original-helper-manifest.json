@@ -1,0 +1,92 @@
+[
+  {
+    "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/build.sh",
+    "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/build.sh",
+    "sha256": "bcf769c8591f77eb53698da5868ce985bdc64cf6e16a0036906289a96f63181c",
+    "bytes": 668
+  },
+  {
+    "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/handoff-realistic-draft.md",
+    "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/handoff-realistic-draft.md",
+    "sha256": "ff535c8c744c2bcaee16a1431a48c6d58f654d3a952f842b19f70016a5d54484",
+    "bytes": 3427
+  },
+  {
+    "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/handoff-section-draft.md",
+    "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/handoff-section-draft.md",
+    "sha256": "8e493f7bb96a667f759360a3708e5c4d5685df7c6d4183fd8aa611edc2284ae7",
+    "bytes": 3908
+  },
+  {
+    "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/history_prefix_contract_test.py",
+    "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/history_prefix_contract_test.py",
+    "sha256": "756d77041d036f49e39578552051fd912cc46c787c639c6b33543bb3c80d3295",
+    "bytes": 3901
+  },
+  {
+    "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/launch-fundraiser-merged.sh",
+    "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/launch-fundraiser-merged.sh",
+    "sha256": "de5776539427474a2c15fb24d464f6be861672054cd7a552d1bc6897a156b4e5",
+    "bytes": 2537
+  },
+  {
+    "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/launch.sh",
+    "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/launch.sh",
+    "sha256": "a66816d1c176f05bfaf368c7d40470401b22a5b9f788849772f14c3178012d94",
+    "bytes": 2403
+  },
+  {
+    "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/measure.py",
+    "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/measure.py",
+    "sha256": "d5872a62ada7484f3343caec41284fbd76daea6d6db1f56857238c9495999626",
+    "bytes": 4826
+  },
+  {
+    "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/native-build.sh",
+    "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/native-build.sh",
+    "sha256": "3ea62c2941cb1a3d0993880d5e3633b9194017c0b31e62c166fc066ab7b8295e",
+    "bytes": 571
+  },
+  {
+    "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/run-condition.sh",
+    "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/run-condition.sh",
+    "sha256": "1af07e2b23272892fce70f53af5b4642152e27c0483e96fbe65d4325c8596e91",
+    "bytes": 3178
+  },
+  {
+    "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/run-fundraiser.sh",
+    "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/run-fundraiser.sh",
+    "sha256": "22aeb5a850e76152384761bf1faa80df8157c62c7af5b4d08bb8706eb780ecc5",
+    "bytes": 2879
+  },
+  {
+    "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/serve-test.sh",
+    "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/serve-test.sh",
+    "sha256": "2682d23e0df1e257aee26c0bf7210369a65f981c52a2e699ef69e6ee2517b051",
+    "bytes": 1720
+  },
+  {
+    "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/wmh-serve-merged.sh",
+    "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/wmh-serve-merged.sh",
+    "sha256": "93b0e2d73bcf26c12ed47f48d7ca2ef6ade212e64878005a5ed325fa2b452291",
+    "bytes": 1110
+  },
+  {
+    "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/wmh-serve.sh",
+    "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/wmh-serve.sh",
+    "sha256": "1c8d79d29098e0c1871c42e94d0cabd9f75d632dd43bff45eb6bacda0ad3f265",
+    "bytes": 1091
+  },
+  {
+    "original": "/home/boxes/rose-wmh-resume/.context/wmh-resume-20261009/fundraiser/progress.sh",
+    "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-resume/.context/wmh-resume-20261009/fundraiser/progress.sh",
+    "sha256": "9b270d3020e7b9d27009f386037dff8b9187d113c4144ab9d0eb85ea444bba12",
+    "bytes": 1683
+  },
+  {
+    "original": "/home/boxes/rose-wmh-merge/.context/run-named-bb.py",
+    "saved": "docs/handoffs/whm-b07d9037-preservation/original-helpers/rose-wmh-merge/.context/run-named-bb.py",
+    "sha256": "86d94eeb036bf011870a0ff8567b8b78571fc2f0cc3e43bfaf092115a6db8fa5",
+    "bytes": 1057
+  }
+]

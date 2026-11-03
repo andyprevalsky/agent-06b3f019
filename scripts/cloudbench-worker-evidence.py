@@ -47,6 +47,15 @@ def authority(run_token, machine_id):
     return {"version": 1, "run_token": run_token, "machine_id": machine_id}
 
 
+def state_directory(data, run_token):
+    """Borrowed workers retain previous launch evidence at its original path."""
+    scope = os.environ.get("CLOUDBENCH_WORKER_EVIDENCE_SCOPE", "legacy")
+    require(scope in ("legacy", "run"), "invalid worker evidence scope")
+    require(SAFE.fullmatch(run_token), "invalid worker evidence run token")
+    return data / ("cloudbench-worker-evidence-" + run_token if scope == "run"
+                   else "cloudbench-worker-evidence")
+
+
 def bound(value, expected):
     require(
         isinstance(value, dict) and all(value.get(k) == v for k, v in expected.items()),
@@ -215,7 +224,7 @@ def run(args):
     agents = Path(args.agents_dir).absolute()
     no_symlink(data)
     no_symlink(agents)
-    state = data / "cloudbench-worker-evidence"
+    state = state_directory(data, args.run_token)
     state.mkdir(mode=0o700)  # Immutable single-launch admission; never replace.
     enable_subreaper()
     primary = Path(os.environ.get("NAVI_WORKER_LOG_FILE", "navi-worker-log.txt"))
@@ -401,7 +410,7 @@ def capture_owned(args):
         "native worker identity mismatch",
     )
     data = Path(args.data_dir).absolute()
-    state = data / "cloudbench-worker-evidence"
+    state = state_directory(data, args.run_token)
     owner = read_json(state / "owner.json")
     bound(owner, expected)
     terminal_path = state / "terminal.json"

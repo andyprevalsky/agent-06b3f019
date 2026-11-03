@@ -26,6 +26,7 @@ export function phoneSmsPlan(ctx: {
     savedPasswords: [],
     ladder: null,
     minted: 'none' as const,
+    mintedLogin: null,
     savedSession: null,
     passkeyEmail: null,
     expectedSignInEmail: member.email,

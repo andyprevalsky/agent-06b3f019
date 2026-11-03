@@ -17,7 +17,7 @@ logger = structlog.get_logger()
 
 async def _persist_output_derived_root_title(agent_id: str, structured_response: Dict) -> None:
     """Name an untitled root from its verified output before terminal snapshotting."""
-    from providers.fast_cache.rose_cache import meaningful_response_schema_title
+    from providers.demo_cache.rose_cache import meaningful_response_schema_title
 
     schema = {
         "fields": [

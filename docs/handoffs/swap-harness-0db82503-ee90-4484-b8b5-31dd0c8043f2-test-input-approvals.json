@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-10-14T19:18:39.812352+00:00",
+  "base_checkpoint": "161dd1a97aa533162ad94c74529ca536bbd2d5f9",
+  "user_reply": "approved",
+  "approved_snapshots": [
+    {
+      "id": "TAMY-FIXTURE-DATE-1",
+      "proposal_sha256": "3f24860060f62316472d30a431ed434a0c677ff73828e037bb9b84d08e1788a3",
+      "status": "USER_APPROVED_APPLIED_EXACTLY"
+    },
+    {
+      "id": "TAMY-JUDGE-PROFILE-1",
+      "proposal_sha256": "2f6029ab3502bb4e161d6799541db02e40a97c1d2a1a37e9d35edd7349cdfc43",
+      "status": "USER_APPROVED_APPLIED_EXACTLY"
+    }
+  ],
+  "native_argument_decoder_changed": false,
+  "production_prompt_tools_models_timeouts_changed": false,
+  "real_SMS_postfix_outcome": "NOT_YET_RUN",
+  "raw_captures_values": "PRIVATE",
+  "owning_suite": {
+    "command": "cd agents && source venv/bin/activate && python -m pytest -q benchmarks/sms_runner_test.py",
+    "exit_code": 0,
+    "passed": 77,
+    "pytest_elapsed_seconds": 0.71
+  },
+  "unchanged_Rose_projection_files": [
+    "back-end/src/providers/rose/cerebrasRoute.ts",
+    "back-end/src/providers/rose/transforms.ts",
+    "back-end/src/providers/rose/types.ts"
+  ]
+}

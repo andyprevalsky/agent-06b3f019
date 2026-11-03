@@ -19,6 +19,7 @@ with workflow.unsafe.imports_passed_through():
     from domains.request_user_signup.handler import request_user_signup
     from domains.wait_seconds.handler import wait_seconds
     from helpers.generation_handoff import GenerationHandoffRequested, should_handoff_to_generation
+    from helpers.wait_condition_or_handoff import GENERATION_HANDOFF_SIGNAL, note_generation_handoff
 
 
 def _event_payload(event: Any, tool_call_id: str, tool_name: str) -> dict[str, str]:
@@ -46,6 +47,17 @@ class InToolCutoverWorkflow:
         self.is_paused = False
         self.world_model_mode = "real"
         self.events: list[dict[str, str]] = []
+        self._generation_handoff_hint: str | None = None
+        self._generation_handoff_hint_seq = 0
+
+    @workflow.signal(name=GENERATION_HANDOFF_SIGNAL)
+    def generation_handoff_available(self, task_queue: str) -> None:
+        """Same contract as AgentWorkflow.generation_handoff_available."""
+        note_generation_handoff(self, task_queue)
+
+    @workflow.query
+    def tool_event_count(self) -> int:
+        return len(self.events)
 
     async def _check_generation_handoff(self) -> str | None:
         """Same contract as AgentWorkflow._check_generation_handoff."""
@@ -91,8 +103,10 @@ class InToolCutoverWorkflow:
                 "failed": False,
                 "park": spec.get("park"),
                 "events": list(spec.get("events") or []),
+                "handoff_after_seconds": spec.get("handoff_after_seconds"),
             }
 
+        started = workflow.time()
         try:
             await self._run_park(spec)
         except GenerationHandoffRequested as exc:
@@ -102,6 +116,7 @@ class InToolCutoverWorkflow:
                         **spec,
                         "already_handed_off": True,
                         "events": list(self.events),
+                        "handoff_after_seconds": workflow.time() - started,
                     }
                 ],
                 task_queue=exc.task_queue,

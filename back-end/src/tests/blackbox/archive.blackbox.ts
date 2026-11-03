@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert';
+import { runCurationPoolControls } from './archive-curation-pool.controls';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -31,6 +32,8 @@ import {
   trackSeededRootAgent,
 } from './archive-planner-memory.helper';
 import { ids, jsonRoundTrip, request, runTest, type TestResult } from './archive-blackbox.support';
+import { runCostCases } from './archive-run-cost.helper';
+import { testSmsKillDoesNotAwaitRootArchiveFinalization } from './archive-kill-finalize.helper';
 
 config();
 
@@ -114,6 +117,7 @@ async function seedRun(): Promise<SeededRun> {
   await prisma.messageRecord.create({
     data: {
       personId,
+      userId,
       channel: 'IMESSAGE',
       from: '+10000000000',
       to: '+10000000001',
@@ -154,6 +158,7 @@ async function seedRun(): Promise<SeededRun> {
 }
 
 async function cleanup(seed: SeededRun): Promise<void> {
+  await prisma.agentTrajectorySearch.deleteMany({ where: { rootAgentId: seed.rootAgentId } });
   await prisma.message.deleteMany({ where: { id: { in: [seed.messageId, seed.staleMessageId] } } });
   await prisma.toolSideEffect.deleteMany({
     where: { operationKey: { contains: seed.rootAgentId } },
@@ -176,9 +181,13 @@ async function testFixtureScopeAndRestore(): Promise<void> {
     );
     assert(ids(fixture.rows.Agent).includes(seed.rootAgentId));
     assert(ids(fixture.rows.Agent).includes(seed.childAgentId));
-    assert(ids(fixture.rows.Person).includes(seed.personId));
-    assert(!ids(fixture.rows.Person).includes(seed.otherPersonId));
-    assert.strictEqual(fixture.rows.Cookie.length, 1);
+    // Lifetime user history (Person, Cookie, ...) belongs to the base image;
+    // see testFixtureExcludesUserLifetimeHistory.
+    assert.strictEqual(fixture.user_id, seed.userId);
+    assert.deepStrictEqual(
+      fixture.rows.User.map((row) => (row as { userId?: unknown }).userId),
+      [seed.userId]
+    );
 
     await prisma.agent.update({ where: { id: seed.rootAgentId }, data: { goal: 'stale goal' } });
     await prisma.message.create({
@@ -203,6 +212,11 @@ async function testFixtureScopeAndRestore(): Promise<void> {
   } finally {
     await cleanup(seed);
   }
+}
+
+async function withSeededRun(fn: (seed: SeededRun) => Promise<void>): Promise<void> {
+  const seed = await seedRun();
+  await fn(seed).finally(() => cleanup(seed));
 }
 
 async function testStartFixtureSnapshotExcludesPostReadyWrites(): Promise<void> {
@@ -557,7 +571,15 @@ async function testEmailProviderBoundaryArchivedWithAgentCorrelation(): Promise<
 
 async function runAll(): Promise<void> {
   const tests = [
+    {
+      name: 'curation pool stops claims and joins in-flight work before rejecting',
+      fn: runCurationPoolControls,
+    },
     { name: 'fixture scope and restore replacement', fn: testFixtureScopeAndRestore },
+    ...runCostCases(BASE_URL, API_KEY).map((runCase) => ({
+      name: runCase.name,
+      fn: () => withSeededRun(runCase.fn),
+    })),
     {
       name: 'start fixture snapshot excludes post-ready writes',
       fn: testStartFixtureSnapshotExcludesPostReadyWrites,
@@ -569,6 +591,10 @@ async function runAll(): Promise<void> {
     {
       name: 'email provider boundary archived with agent correlation',
       fn: testEmailProviderBoundaryArchivedWithAgentCorrelation,
+    },
+    {
+      name: 'SMS kill_agent does not await root archive finalization',
+      fn: testSmsKillDoesNotAwaitRootArchiveFinalization,
     },
     {
       name: 'cleanup leaves no planner-memory history rows',

@@ -37,10 +37,7 @@ def test_build_system_prompt_execute():
     assert "You are a Rose Labs Agent" in result
     assert "EXECUTE phase" in result
     assert "attempt_completion" in result
-    assert (
-        "The beginning of your context might have information generated from the PLAN phase"
-        in result
-    )
+    assert "The beginning of your context might have information generated from the PLAN phase" in result
     assert "real-world, long-horizon task execution" in result
     assert "no further actions required from the user" in result
 
@@ -87,6 +84,27 @@ def test_user_facing_style_is_attached_only_to_user_visible_outputs():
     assert "USER_FACING_WRITING_STYLE" in inspect.getsource(generate_completion_summary)
 
 
+def test_result_scorecards_are_in_both_root_prompt_phases():
+    from utils.prompts import build_system_prompt
+
+    for phase in ("PLAN", "EXECUTE"):
+        prompt = build_system_prompt(phase=phase, enabled_tools=[])
+        assert "# Presenting results as Rose scorecards" in prompt
+        for reference in ("Linear", "Vercel", "Stripe", "Mercury", "Ramp"):
+            assert reference in prompt
+        # Presentation guidance must be complete inline. A URL here becomes
+        # fetch work: a root once added the repo style files to its explore
+        # goal, the explore spent its turns on them and the task timed out.
+        section = prompt.split("# Presenting results as Rose scorecards", 1)[1].split("\n# ", 1)[0]
+        assert "http" not in section and "github.com" not in section
+        assert "Never fetch style\nreferences or add presentation work to a sub-agent's goal" in section
+        for token in ("Geist", "#ecece8", "0.75rem"):
+            assert token in section
+        assert "Never invent scores, metrics, trends or completed checks" in prompt
+        assert "Brief acknowledgements and clarification questions can remain plain text" in prompt
+        assert "Never paste HTML source into a chat message" in prompt
+
+
 def test_build_system_prompt_with_user_context():
     """build_system_prompt includes user context when provided."""
     from utils.prompts import build_system_prompt
@@ -130,6 +148,54 @@ def test_build_verifier_prompt_with_schema():
     assert "2 total" in result or "2" in result
 
 
+def test_schema_contracts_render_nested_field_descriptions():
+    """Every structured-output filler sees nested field requirements and descriptions."""
+    from domains.spawn_browser_agent_v3.service import format_required_output_schema_system_section
+    from utils.prompts import build_system_prompt, build_verifier_prompt
+
+    schema = {
+        "fields": [
+            {
+                "name": "rounds",
+                "type": "list[object]",
+                "required": True,
+                "minItems": 2,
+                "description": "One entry per funding round",
+                "properties": [
+                    {
+                        "name": "company",
+                        "type": "str",
+                        "required": True,
+                        "description": "Startup that raised the round",
+                    },
+                    {
+                        "name": "summary",
+                        "type": "str",
+                        "required": True,
+                        "description": "One-sentence summary of the round",
+                    },
+                    {"name": "lead", "type": "str", "required": False},
+                ],
+            }
+        ]
+    }
+    expected = (
+        "properties={company (str, required): Startup that raised the round; "
+        "summary (str, required): One-sentence summary of the round; lead (str, optional)}"
+    )
+    assert expected in build_verifier_prompt(schema)
+    assert expected in build_system_prompt(phase="EXECUTE", enabled_tools=[], response_schema=schema)
+    assert expected in format_required_output_schema_system_section(schema)
+    # A stale description never outranks the user's later correction (tree-feedback-routing 8f344422).
+    flat = " ".join(build_verifier_prompt(schema).split())
+    assert "when a later user message changes a requirement, the later message wins." in flat
+    # Authored results and parent-agent task updates (tree-feedback-routing b056f571).
+    static = " ".join(build_verifier_prompt().split())
+    assert 'Its `result` (TOOL[attempt_completion] "Authored result") is the agent\'s own writing' in static
+    assert "`TASK_UPDATE_FROM_PARENT_AGENT` lines are instructions from an agent above this one" in static
+    assert "They are never evidence." in static
+
+
 async def run_all_tests():
     print("prompts blackbox tests:")
     r = BlackboxResult()
@@ -139,9 +205,14 @@ async def run_all_tests():
         "user_facing_style_is_attached_only_to_user_visible_outputs",
         test_user_facing_style_is_attached_only_to_user_visible_outputs,
     )
+    r.record("result_scorecards", test_result_scorecards_are_in_both_root_prompt_phases)
     r.record("build_system_prompt_with_user_context", test_build_system_prompt_with_user_context)
     r.record("build_verifier_prompt", test_build_verifier_prompt)
     r.record("build_verifier_prompt_with_schema", test_build_verifier_prompt_with_schema)
+    r.record(
+        "schema_contracts_render_nested_field_descriptions",
+        test_schema_contracts_render_nested_field_descriptions,
+    )
     teardown_mock()
     return r.all_passed
 

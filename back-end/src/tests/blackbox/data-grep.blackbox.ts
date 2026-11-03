@@ -1,519 +1,31 @@
 #!/usr/bin/env tsx
-/* eslint-disable max-lines */
 /**
  * Black-box tests for the DB-backed Grep contract.
  */
 
-import { randomUUID } from 'crypto';
-import { config } from 'dotenv';
-import { z } from 'zod';
 import { prisma } from '../../providers/database';
-config();
-
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
-const API_KEY = process.env.BACKEND_API_KEY || '';
-
-const GrepMatch = z.object({
-  source: z.enum(['messages', 'network', 'agent_network', 'transactions', 'documents']),
-  path: z.string(),
-  pointer: z.string(),
-  timestamp: z.string(),
-  role: z.enum(['SYSTEM', 'ASSISTANT', 'USER', 'TOOL']).optional(),
-  location: z.object({
-    source: z.enum(['messages', 'network', 'agent_network', 'transactions', 'documents']),
-    path: z.string(),
-    agent_id: z.string().optional(),
-    message_id: z.string().optional(),
-    transaction_id: z.string().optional(),
-    account_id: z.string().optional(),
-    document_id: z.string().optional(),
-    source_name: z.string().optional(),
-    role: z.enum(['SYSTEM', 'ASSISTANT', 'USER', 'TOOL']).optional(),
-    thread: z.string().optional(),
-    contact_id: z.string().optional(),
-    field: z.string().optional(),
-  }),
-  content: z.string(),
-  records: z
-    .array(
-      z.object({
-        message_id: z.string(),
-        channel: z.string(),
-        from: z.string(),
-        to: z.string(),
-        timestamp: z.string(),
-        message: z.string(),
-        relation: z.enum(['before', 'match', 'after']),
-      })
-    )
-    .optional(),
-});
-
-const GrepResponse = z.object({
-  matches: z.array(GrepMatch),
-  total_matches: z.number(),
-  truncated: z.boolean(),
-  pattern: z.string(),
-  sources: z.array(
-    z.enum([
-      'messages',
-      'gmail',
-      'email',
-      'imessage',
-      'whatsapp',
-      'network',
-      'agent_network',
-      'transactions',
-      'documents',
-    ])
-  ),
-  applied_limit: z.number(),
-  applied_offset: z.number(),
-  returned: z.number(),
-  has_more: z.boolean(),
-  next_offset: z.number().nullable(),
-  display_order: z.enum(['oldest_first', 'newest_first']),
-  context_unit: z.enum(['message_record', 'logical_line', 'mixed']),
-  summaries: z
-    .object({
-      transactions: z
-        .object({
-          totals_include_pending: z.boolean(),
-          currencies: z.array(
-            z.object({
-              currency: z.string(),
-              outflow: z.string(),
-              inflow: z.string(),
-              net: z.string(),
-              count: z.number(),
-            })
-          ),
-        })
-        .optional(),
-    })
-    .optional(),
-  message: z.string().optional(),
-});
-
-const SummaryResponse = z.object({
-  sources: z.object({
-    transactions: z
-      .object({
-        total_transactions: z.number(),
-        account_count: z.number(),
-        institutions: z.array(z.string()),
-        date_range: z.object({ from: z.string().nullable(), to: z.string().nullable() }),
-      })
-      .optional(),
-    documents: z
-      .object({
-        total_documents: z.number(),
-        sources: z.record(z.number()),
-        date_range: z.object({ from: z.string().nullable(), to: z.string().nullable() }),
-      })
-      .optional(),
-  }),
-});
-
-type GrepBody = z.infer<typeof GrepResponse>;
-
-function apiHeaders(userId: string): Record<string, string> {
-  return {
-    'Content-Type': 'application/json',
-    'X-API-Key': API_KEY,
-    'X-User-Id': userId,
-  };
-}
-
-async function requestGrep(userId: string, body: Record<string, unknown>) {
-  const response = await fetch(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: apiHeaders(userId),
-    body: JSON.stringify(body),
-  });
-  const data = await response.json();
-  return { status: response.status, data };
-}
-
-async function requestSummary(userId: string) {
-  const response = await fetch(`${BASE_URL}/api/data/summary`, {
-    headers: apiHeaders(userId),
-  });
-  const data = await response.json();
-  return { status: response.status, data };
-}
-
-async function requestSourceStatus(userId: string, sources: string) {
-  const response = await fetch(
-    `${BASE_URL}/api/data/source-status?sources=${encodeURIComponent(sources)}`,
-    { headers: apiHeaders(userId) }
-  );
-  const data = await response.json();
-  return { status: response.status, data };
-}
-
-function assertStatus(actual: number, expected: number, data: unknown): void {
-  if (actual !== expected) {
-    throw new Error(`Expected HTTP ${expected}, got ${actual}: ${JSON.stringify(data)}`);
-  }
-}
-
-function assertBody(data: unknown): GrepBody {
-  return GrepResponse.parse(data);
-}
-
-function requireContent(body: GrepBody, expected: string): void {
-  if (!body.matches.some((match) => match.content.includes(expected))) {
-    throw new Error(`Expected grep result containing ${expected}, got ${JSON.stringify(body)}`);
-  }
-}
-
-function requireInvalidGrepParam(data: unknown, label: string): void {
-  if ((data as { error?: string }).error !== 'INVALID_GREP_PARAM') {
-    throw new Error(`Expected INVALID_GREP_PARAM for ${label}, got ${JSON.stringify(data)}`);
-  }
-}
-
-function forbidLineNumbers(body: GrepBody): void {
-  for (const match of body.matches) {
-    if (/^\d+:/m.test(match.content)) {
-      throw new Error(`Expected no line numbers, got ${match.content}`);
-    }
-  }
-}
-
-async function cleanup(userId: string): Promise<void> {
-  await prisma.plaidTransaction.deleteMany({ where: { userId } });
-  await prisma.plaidAccount.deleteMany({ where: { userId } });
-  await prisma.plaidItem.deleteMany({ where: { userId } });
-  // Defensive: clear any Integration / email-credential rows for this user.
-  // (source-status no longer mints a Gmail OAuth URL at probe time.)
-  await prisma.emailIntegrationCredential.deleteMany({ where: { userId } });
-  await prisma.integration.deleteMany({ where: { userId } });
-  await prisma.userDataDocument.deleteMany({ where: { userId } });
-  await prisma.agent.deleteMany({ where: { userId } });
-  await prisma.person.deleteMany({ where: { userId } });
-  await prisma.user.deleteMany({ where: { userId } });
-}
-
-async function seedFixture() {
-  const userId = `grep-contract-${randomUUID()}`;
-  await cleanup(userId);
-  await prisma.user.create({ data: { userId, isAnonymous: true } });
-
-  const lighthouse = await prisma.person.create({
-    data: {
-      userId,
-      firstName: 'Lighthouse',
-      lastName: 'Archive',
-      email: `lighthouse-${randomUUID()}@grep-benchmark.local`,
-      messagesExchanged: 40,
-    },
-  });
-  await prisma.messageRecord.createMany({
-    data: [
-      {
-        personId: lighthouse.id,
-        channel: 'EMAIL',
-        from: 'lighthouse@example.com',
-        to: 'benchmark@example.com',
-        timestamp: new Date('2026-01-01T09:00:00Z'),
-        externalId: `before-context-${randomUUID()}`,
-        message: 'Before-context evidence: finance owner noted',
-      },
-      {
-        personId: lighthouse.id,
-        channel: 'EMAIL',
-        from: 'lighthouse@example.com',
-        to: 'benchmark@example.com',
-        timestamp: new Date('2026-01-01T10:00:00Z'),
-        externalId: `quarterly-${randomUUID()}`,
-        message: 'Aurora budget: phase-17 approved',
-      },
-      {
-        personId: lighthouse.id,
-        channel: 'EMAIL',
-        from: 'lighthouse@example.com',
-        to: 'benchmark@example.com',
-        timestamp: new Date('2026-01-01T11:00:00Z'),
-        externalId: `after-context-${randomUUID()}`,
-        message: 'After-context evidence: forecast packet delivered',
-      },
-      {
-        personId: lighthouse.id,
-        channel: 'EMAIL',
-        from: 'lighthouse@example.com',
-        to: 'benchmark@example.com',
-        timestamp: new Date('2026-01-02T10:00:00Z'),
-        externalId: `multiline-${randomUUID()}`,
-        message: [
-          'Multiline incident START',
-          'requires cross-line search',
-          'incident END',
-          'MiXeDcAsE Beacon',
-        ].join('\n'),
-      },
-      ...Array.from({ length: 30 }, (_, idx) => ({
-        personId: lighthouse.id,
-        channel: 'EMAIL' as const,
-        from: 'ledger@example.com',
-        to: 'benchmark@example.com',
-        timestamp: new Date(`2026-01-03T10:${String(idx).padStart(2, '0')}:00Z`),
-        externalId: `ledger-${idx + 1}-${randomUUID()}`,
-        message: `Ledger entry ${idx + 1}: ${idx + 1 === 21 ? 'offset target confirmed' : 'ordinary ledger row'}`,
-      })),
-    ],
-  });
-
-  await prisma.person.create({
-    data: {
-      userId,
-      firstName: 'Mara',
-      lastName: 'Voss',
-      email: `mara-${randomUUID()}@grep-benchmark.local`,
-      company: 'Northstar Calibration Group',
-      title: 'Principal Signal Cartographer',
-      relation: 'benchmark verification contact',
-      communicationFrequency: 'quarterly lighthouse cadence',
-      messagesExchanged: 90,
-    },
-  });
-
-  const root = await prisma.agent.create({
-    data: {
-      userId,
-      goal: 'grep contract root',
-      status: 'COMPLETED',
-      depth: 0,
-    },
-  });
-  const child = await prisma.agent.create({
-    data: {
-      userId,
-      goal: 'grep contract child',
-      status: 'COMPLETED',
-      parentAgentId: root.id,
-      depth: 1,
-    },
-  });
-  await prisma.message.createMany({
-    data: [
-      {
-        agentId: root.id,
-        role: 'USER',
-        text: 'Atlas handoff was confirmed by the user.',
-        metadata: { benchmark: 'grep', roleCase: 'user' },
-        createdAt: new Date('2026-01-04T10:00:00Z'),
-      },
-      {
-        agentId: child.id,
-        role: 'ASSISTANT',
-        text: 'Atlas handoff confirmed in assistant response.',
-        metadata: { benchmark: 'grep', roleCase: 'assistant' },
-        createdAt: new Date('2026-01-04T10:01:00Z'),
-      },
-      {
-        agentId: child.id,
-        role: 'TOOL',
-        text: 'Grep tool returned Atlas handoff tool evidence.',
-        metadata: { benchmark: 'grep', roleCase: 'tool', toolStatus: 'FINISHED' },
-        createdAt: new Date('2026-01-04T10:02:00Z'),
-      },
-      {
-        agentId: child.id,
-        role: 'SYSTEM',
-        text: 'Atlas handoff system breadcrumb.',
-        metadata: { benchmark: 'grep', roleCase: 'system' },
-        createdAt: new Date('2026-01-04T10:03:00Z'),
-      },
-    ],
-  });
-
-  await seedPlaidFixture(userId);
-  await seedDocumentFixture(userId);
-
-  return { userId, agentId: child.id };
-}
-
-async function seedDocumentFixture(userId: string): Promise<void> {
-  await prisma.integration.create({
-    data: {
-      userId,
-      type: 'DATA_SOURCE',
-      name: 'chatgpt',
-      status: 'CONNECTED',
-      isActive: true,
-      config: { documentCount: 2 },
-    },
-  });
-  await prisma.userDataDocument.createMany({
-    data: [
-      {
-        userId,
-        source: 'chatgpt',
-        externalId: `chatgpt-${randomUUID()}`,
-        title: 'Launch planning conversation',
-        content: 'The user prefers concise launch memos with Nimbus milestone details.',
-        contentHash: `hash-${randomUUID()}`,
-        sourceUpdatedAt: new Date('2026-01-06T10:00:00Z'),
-        metadata: { provider: 'chatgpt', conversationId: 'conv-launch', tags: ['llm-export'] },
-      },
-      {
-        userId,
-        source: 'claude',
-        externalId: `claude-${randomUUID()}`,
-        title: 'Research memory conversation',
-        content: 'Claude export: Meridian research preference should stay searchable.',
-        contentHash: `hash-${randomUUID()}`,
-        sourceUpdatedAt: new Date('2026-01-06T11:00:00Z'),
-        metadata: { provider: 'claude', chatId: 'claude-meridian', tags: ['llm-export'] },
-      },
-      {
-        userId,
-        source: 'apple_notes',
-        externalId: `apple-notes-${randomUUID()}`,
-        title: 'Connector checklist',
-        content: 'Apple Notes entry: Solstice notebook keeps provider sync reminders.',
-        contentHash: `hash-${randomUUID()}`,
-        sourceUpdatedAt: new Date('2026-01-07T09:00:00Z'),
-        metadata: { folder: 'Product', tags: ['connector'] },
-      },
-      {
-        userId,
-        source: 'obsidian',
-        externalId: `obsidian-${randomUUID()}`,
-        title: 'Project notes',
-        content: 'Obsidian note: Calypso archive includes vendor follow-ups.',
-        contentHash: `hash-${randomUUID()}`,
-        sourceUpdatedAt: new Date('2026-01-08T10:00:00Z'),
-        metadata: { vault: 'main', path: 'Projects/Calypso.md', tags: ['vendor'] },
-      },
-    ],
-  });
-}
-
-async function seedPlaidFixture(userId: string): Promise<void> {
-  const integration = await prisma.integration.create({
-    data: {
-      userId,
-      type: 'DATA_SOURCE',
-      name: 'plaid',
-      status: 'CONNECTED',
-      isActive: true,
-    },
-  });
-  const item = await prisma.plaidItem.create({
-    data: {
-      userId,
-      integrationId: integration.id,
-      plaidItemId: `item-${randomUUID()}`,
-      plaidInstitutionId: 'ins_109508',
-      institutionName: 'First Platypus Bank',
-      encryptedAccessToken: 'encrypted-test-token',
-      status: 'ACTIVE',
-      products: ['transactions'],
-      cursor: 'cursor-test',
-      lastSyncAt: new Date('2026-01-05T00:00:00Z'),
-    },
-  });
-  const checking = await prisma.plaidAccount.create({
-    data: {
-      userId,
-      plaidItemId: item.id,
-      plaidAccountId: `account-checking-${randomUUID()}`,
-      name: 'Main Checking',
-      officialName: 'Plaid Gold Standard Checking',
-      mask: '0000',
-      type: 'depository',
-      subtype: 'checking',
-    },
-  });
-  const credit = await prisma.plaidAccount.create({
-    data: {
-      userId,
-      plaidItemId: item.id,
-      plaidAccountId: `account-credit-${randomUUID()}`,
-      name: 'Rewards Card',
-      officialName: 'Plaid Rewards Credit Card',
-      mask: '1111',
-      type: 'credit',
-      subtype: 'credit card',
-    },
-  });
-  await prisma.plaidTransaction.createMany({
-    data: [
-      {
-        userId,
-        plaidItemId: item.id,
-        plaidAccountId: checking.id,
-        plaidTransactionId: `tx-posted-${randomUUID()}`,
-        plaidAccountExternalId: checking.plaidAccountId,
-        date: new Date('2025-01-10T00:00:00Z'),
-        name: 'Starbucks Coffee',
-        merchantName: 'Starbucks',
-        amount: '5.25',
-        absoluteAmount: '5.25',
-        direction: 'OUTFLOW',
-        isoCurrencyCode: 'USD',
-        category: ['Food and Drink', 'Coffee Shop'],
-        paymentChannel: 'in store',
-        locationSummary: 'Seattle, WA',
-        pending: false,
-      },
-      {
-        userId,
-        plaidItemId: item.id,
-        plaidAccountId: checking.id,
-        plaidTransactionId: `tx-pending-${randomUUID()}`,
-        plaidAccountExternalId: checking.plaidAccountId,
-        date: new Date('2025-01-11T00:00:00Z'),
-        name: 'Starbucks Pending Latte',
-        merchantName: 'Starbucks',
-        amount: '7.00',
-        absoluteAmount: '7.00',
-        direction: 'OUTFLOW',
-        isoCurrencyCode: 'USD',
-        category: ['Food and Drink', 'Coffee Shop'],
-        paymentChannel: 'in store',
-        pending: true,
-      },
-      {
-        userId,
-        plaidItemId: item.id,
-        plaidAccountId: checking.id,
-        plaidTransactionId: `tx-payroll-${randomUUID()}`,
-        plaidAccountExternalId: checking.plaidAccountId,
-        date: new Date('2025-01-15T00:00:00Z'),
-        name: 'Payroll Deposit',
-        merchantName: 'Acme Payroll',
-        amount: '-1000.00',
-        absoluteAmount: '1000.00',
-        direction: 'INFLOW',
-        isoCurrencyCode: 'USD',
-        category: ['Payroll'],
-        paymentChannel: 'other',
-        pending: false,
-      },
-      {
-        userId,
-        plaidItemId: item.id,
-        plaidAccountId: credit.id,
-        plaidTransactionId: `tx-card-${randomUUID()}`,
-        plaidAccountExternalId: credit.plaidAccountId,
-        date: new Date('2025-01-20T00:00:00Z'),
-        name: 'Coffee Supplies Warehouse',
-        merchantName: 'Coffee Supplies',
-        amount: '125.00',
-        absoluteAmount: '125.00',
-        direction: 'OUTFLOW',
-        isoCurrencyCode: 'USD',
-        category: ['Shops'],
-        paymentChannel: 'online',
-        pending: false,
-      },
-    ],
-  });
-}
+import {
+  requestGrep,
+  assertStatus,
+  assertBody,
+  requireContent,
+  requireInvalidGrepParam,
+  forbidLineNumbers,
+  cleanup,
+  seedFixture,
+  WORD_BOUNDARY_MESSAGES,
+} from './data-grep.helpers';
+import {
+  testSourceSpecificFilterValidation,
+  testTransactionFiltersAndAggregates,
+  testTransactionTenantIsolation,
+  testTransactionSummary,
+  testDocumentSummary,
+  testDocumentReturnsEveryMatchingLine,
+  testMultiSourceGrep,
+  testSourceStatus,
+  testSnapshotEndpoint,
+} from './data-grep-sources.cases';
 
 async function testSchemaAndRemovedParams(userId: string): Promise<void> {
   for (const param of [
@@ -772,6 +284,54 @@ async function testDialectNormalization(userId: string): Promise<void> {
   res = await requestGrep(userId, { pattern: '(?i)aurora budget', source: 'messages' });
   assertStatus(res.status, 200, res.data);
   requireContent(assertBody(res.data), 'Aurora budget');
+
+  // JS word boundaries must keep JS meaning in Postgres, where `\b` is a
+  // backspace: a valid-looking `\bpassport\b` used to match nothing at all.
+  res = await requestGrep(userId, { pattern: '\\bphase-17\\b', source: 'messages' });
+  assertStatus(res.status, 200, res.data);
+  requireContent(assertBody(res.data), 'phase-17 approved');
+
+  res = await requestGrep(userId, { pattern: '\\bsolstice\\b', source: 'documents', '-i': true });
+  assertStatus(res.status, 200, res.data);
+  requireContent(assertBody(res.data), 'Solstice notebook');
+
+  res = await requestGrep(userId, { pattern: '\\Bolstice', source: 'documents' });
+  assertStatus(res.status, 200, res.data);
+  requireContent(assertBody(res.data), 'Solstice notebook');
+
+  res = await requestGrep(userId, { pattern: '\\bolstice', source: 'documents' });
+  assertStatus(res.status, 200, res.data);
+  if (assertBody(res.data).total_matches !== 0) {
+    throw new Error(`\\bolstice must not match inside "Solstice": ${JSON.stringify(res.data)}`);
+  }
+}
+
+async function testAsciiWordBoundaries(userId: string): Promise<void> {
+  for (const pattern of ['\\bpassport\\b', '\\Bpassport', 'passport\\B']) {
+    for (const caseInsensitive of [false, true]) {
+      const expected = WORD_BOUNDARY_MESSAGES.filter((message) =>
+        new RegExp(pattern, caseInsensitive ? 'i' : '').test(message)
+      );
+      const res = await requestGrep(userId, {
+        pattern,
+        source: 'messages',
+        '-i': caseInsensitive,
+      });
+      assertStatus(res.status, 200, res.data);
+      const body = assertBody(res.data);
+      const actual = body.matches.flatMap((match) =>
+        (match.records ?? [])
+          .filter((record) => record.relation === 'match')
+          .map((record) => record.message)
+      );
+      if (
+        body.total_matches !== expected.length ||
+        JSON.stringify(actual.sort()) !== JSON.stringify(expected.sort())
+      ) {
+        throw new Error(`ASCII JS boundary mismatch for ${pattern}, -i=${caseInsensitive}`);
+      }
+    }
+  }
 }
 
 // Realistic, safe (degree ≤ 2) regexes the model actually emits must NOT be
@@ -983,399 +543,6 @@ async function testEmittedPathRoundTrips(userId: string): Promise<void> {
   requireInvalidGrepParam(res.data, 'non-grep path');
 }
 
-async function testSourceSpecificFilterValidation(userId: string): Promise<void> {
-  let res = await requestGrep(userId, {
-    pattern: 'Starbucks',
-    source: 'transactions',
-    filters: { person: 'Lighthouse Archive' },
-  });
-  assertStatus(res.status, 400, res.data);
-  requireInvalidGrepParam(res.data, 'unsupported transaction filter');
-
-  res = await requestGrep(userId, {
-    pattern: 'Ledger entry',
-    source: 'messages',
-    filters: { person: 'Lighthouse Archive', min_amount: 1 },
-  });
-  assertStatus(res.status, 400, res.data);
-  requireInvalidGrepParam(res.data, 'unsupported message filter');
-
-  // Filters against a purely-local `sources` selection (no filterable family)
-  // must be rejected, not silently dropped — the multi-source path had bypassed
-  // rejectUnsupportedFilters entirely.
-  res = await requestGrep(userId, {
-    pattern: 'anything',
-    sources: ['network'],
-    filters: { min_amount: 1 },
-  });
-  assertStatus(res.status, 400, res.data);
-  requireInvalidGrepParam(res.data, 'unsupported local-source filter');
-
-  res = await requestGrep(userId, {
-    pattern: 'Starbucks',
-    source: 'transactions',
-    filters: ['status'],
-  });
-  assertStatus(res.status, 400, res.data);
-  requireInvalidGrepParam(res.data, 'non-object filters');
-
-  for (const [label, filters] of [
-    ['invalid transaction min_amount', { min_amount: '1' }],
-    ['invalid transaction status', { status: 'settled' }],
-    ['invalid transaction since', { since: 'not-a-date' }],
-    ['invalid transaction include_pending_in_totals', { include_pending_in_totals: 'true' }],
-    ['invalid message person', { person: ['Lighthouse Archive'] }],
-    ['invalid message since', { since: 'not-a-date' }],
-  ] as const) {
-    res = await requestGrep(userId, {
-      pattern: label.includes('message') ? 'Ledger entry' : 'Starbucks',
-      source: label.includes('message') ? 'messages' : 'transactions',
-      filters,
-    });
-    assertStatus(res.status, 400, res.data);
-    requireInvalidGrepParam(res.data, label);
-  }
-
-  res = await requestGrep(userId, {
-    pattern: 'Nimbus',
-    source: 'documents',
-    filters: { tag: 123 },
-  });
-  assertStatus(res.status, 400, res.data);
-  requireInvalidGrepParam(res.data, 'invalid document tag');
-}
-
-async function testTransactionFiltersAndAggregates(userId: string): Promise<void> {
-  let res = await requestGrep(userId, {
-    pattern: 'starbucks|coffee',
-    source: 'transactions',
-    '-i': true,
-    filters: {
-      since: '2025-01-01',
-      until: '2025-12-31',
-      account: 'checking',
-      min_amount: 0,
-      max_amount: 10,
-      status: 'all',
-      include_pending_in_totals: false,
-    },
-    head_limit: 1,
-  });
-  assertStatus(res.status, 200, res.data);
-  const defaultTotals = assertBody(res.data);
-  if (defaultTotals.total_matches !== 2 || defaultTotals.matches.length !== 1) {
-    throw new Error(
-      `Expected full transaction total with one returned row, got ${JSON.stringify(defaultTotals)}`
-    );
-  }
-  const currency = defaultTotals.summaries?.transactions?.currencies.find(
-    (row) => row.currency === 'USD'
-  );
-  if (
-    defaultTotals.summaries?.transactions?.totals_include_pending !== false ||
-    currency?.count !== 1 ||
-    currency.outflow !== '5.25'
-  ) {
-    throw new Error(
-      `Expected posted-only aggregate over full filtered set, got ${JSON.stringify(defaultTotals)}`
-    );
-  }
-  requireContent(defaultTotals, 'Starbucks');
-
-  res = await requestGrep(userId, {
-    pattern: 'starbucks|coffee',
-    source: 'transactions',
-    '-i': true,
-    filters: {
-      since: '2025-01-01',
-      until: '2025-12-31',
-      account: 'checking',
-      min_amount: 0,
-      max_amount: 10,
-      status: 'all',
-      include_pending_in_totals: true,
-    },
-    head_limit: 1,
-  });
-  assertStatus(res.status, 200, res.data);
-  const withPendingTotals = assertBody(res.data);
-  const withPendingCurrency = withPendingTotals.summaries?.transactions?.currencies.find(
-    (row) => row.currency === 'USD'
-  );
-  if (
-    withPendingTotals.summaries?.transactions?.totals_include_pending !== true ||
-    withPendingCurrency?.count !== 2 ||
-    withPendingCurrency.outflow !== '12.25'
-  ) {
-    throw new Error(
-      `Expected pending-inclusive aggregate, got ${JSON.stringify(withPendingTotals)}`
-    );
-  }
-
-  res = await requestGrep(userId, {
-    pattern: 'starbucks|coffee',
-    source: 'transactions',
-    '-i': true,
-    filters: { status: 'posted' },
-  });
-  assertStatus(res.status, 200, res.data);
-  const postedOnly = assertBody(res.data);
-  if (postedOnly.matches.some((match) => match.content.includes('status: pending'))) {
-    throw new Error(
-      `Expected posted filter to hide pending rows, got ${JSON.stringify(postedOnly)}`
-    );
-  }
-  const postedStarbucks = postedOnly.matches.find((match) => match.content.includes('Starbucks'));
-  if (
-    postedStarbucks === undefined ||
-    !postedStarbucks.content.includes('date: 2025-01-10') ||
-    !postedStarbucks.content.includes('amount: 5.25 USD')
-  ) {
-    throw new Error(
-      `Expected default transaction row snippet to include core date/amount fields, got ${JSON.stringify(postedOnly)}`
-    );
-  }
-}
-
-async function testTransactionTenantIsolation(userId: string): Promise<void> {
-  const otherUserId = `grep-other-${randomUUID()}`;
-  await cleanup(otherUserId);
-  await prisma.user.create({ data: { userId: otherUserId, isAnonymous: true } });
-  await seedPlaidFixture(otherUserId);
-  try {
-    const res = await requestGrep(userId, {
-      pattern: 'Payroll|Coffee Supplies',
-      source: 'transactions',
-      '-i': true,
-    });
-    assertStatus(res.status, 200, res.data);
-    const body = assertBody(res.data);
-    if (body.total_matches !== 2) {
-      throw new Error(
-        `Expected only current user's transaction matches, got ${JSON.stringify(body)}`
-      );
-    }
-  } finally {
-    await cleanup(otherUserId);
-  }
-}
-
-async function testTransactionSummary(userId: string): Promise<void> {
-  const res = await requestSummary(userId);
-  assertStatus(res.status, 200, res.data);
-  const body = SummaryResponse.parse(res.data);
-  const transactions = body.sources.transactions;
-  if (
-    transactions === undefined ||
-    transactions.total_transactions !== 4 ||
-    transactions.account_count !== 2 ||
-    !transactions.institutions.includes('First Platypus Bank') ||
-    transactions.date_range.from?.slice(0, 10) !== '2025-01-10' ||
-    transactions.date_range.to?.slice(0, 10) !== '2025-01-20'
-  ) {
-    throw new Error(`Expected transaction summary, got ${JSON.stringify(body)}`);
-  }
-}
-
-async function testDocumentSummary(userId: string): Promise<void> {
-  const res = await requestSummary(userId);
-  assertStatus(res.status, 200, res.data);
-  const body = SummaryResponse.parse(res.data);
-  const documents = body.sources.documents;
-  if (
-    documents === undefined ||
-    documents.total_documents !== 4 ||
-    documents.sources.chatgpt !== 1 ||
-    documents.sources.claude !== 1 ||
-    documents.sources.apple_notes !== 1 ||
-    documents.sources.obsidian !== 1 ||
-    documents.date_range.from?.slice(0, 10) !== '2026-01-06' ||
-    documents.date_range.to?.slice(0, 10) !== '2026-01-08'
-  ) {
-    throw new Error(`Expected document summary, got ${JSON.stringify(body)}`);
-  }
-}
-
-const SourceStatusResponse = z.object({
-  statuses: z.array(
-    z.object({
-      source: z.string(),
-      connector: z.string().nullable(),
-      connected: z.boolean(),
-      connectUrl: z.string().nullable(),
-    })
-  ),
-});
-
-// Multi-source grep: `sources:['email','imessage']` searches MessageRecord and
-// returns 200. The seeded fixture only has EMAIL-channel rows, so email matches
-// (channel-filtered) while imessage returns nothing — proving channel routing.
-async function testMultiSourceGrep(userId: string): Promise<void> {
-  let res = await requestGrep(userId, {
-    pattern: 'Aurora budget',
-    sources: ['email', 'imessage'],
-  });
-  assertStatus(res.status, 200, res.data);
-  const body = assertBody(res.data);
-  if (body.sources.join(',') !== 'email,imessage') {
-    throw new Error(`Expected echoed sources email,imessage, got ${body.sources.join(',')}`);
-  }
-  requireContent(body, 'Aurora budget');
-
-  // imessage alone must find nothing (no IMESSAGE-channel rows in the fixture),
-  // confirming the channel WHERE clause actually restricts the search.
-  res = await requestGrep(userId, { pattern: 'Aurora budget', source: 'imessage' });
-  assertStatus(res.status, 200, res.data);
-  if (assertBody(res.data).total_matches !== 0) {
-    throw new Error(
-      `Expected imessage-only grep to find 0 EMAIL rows, got ${JSON.stringify(res.data)}`
-    );
-  }
-
-  // email alone must find the same EMAIL row that `messages` finds.
-  res = await requestGrep(userId, { pattern: 'Aurora budget', source: 'email' });
-  assertStatus(res.status, 200, res.data);
-  requireContent(assertBody(res.data), 'Aurora budget');
-
-  // unknown source in the array → 400 SOURCE_NOT_FOUND (not a 500).
-  res = await requestGrep(userId, { pattern: 'x', sources: ['email', 'not_a_source'] });
-  assertStatus(res.status, 400, res.data);
-  if ((res.data as { error?: string }).error !== 'SOURCE_NOT_FOUND') {
-    throw new Error(
-      `Expected SOURCE_NOT_FOUND for bad sources entry, got ${JSON.stringify(res.data)}`
-    );
-  }
-}
-
-// Per-source connectivity: local source (network) is always connected with no
-// connectUrl; a connector-backed source with no Integration row (email→gmail)
-// is disconnected with a mintable connectUrl.
-async function testSourceStatus(userId: string): Promise<void> {
-  const res = await requestSourceStatus(userId, 'email,network');
-  assertStatus(res.status, 200, res.data);
-  const body = SourceStatusResponse.parse(res.data);
-
-  const email = body.statuses.find((s) => s.source === 'email');
-  if (
-    email === undefined ||
-    email.connector !== 'gmail' ||
-    email.connected !== false ||
-    email.connectUrl === null ||
-    !email.connectUrl.startsWith('http')
-  ) {
-    throw new Error(`Expected disconnected email with connectUrl, got ${JSON.stringify(body)}`);
-  }
-
-  const network = body.statuses.find((s) => s.source === 'network');
-  if (
-    network === undefined ||
-    network.connector !== null ||
-    network.connected !== true ||
-    network.connectUrl !== null
-  ) {
-    throw new Error(
-      `Expected local network connected with no connectUrl, got ${JSON.stringify(body)}`
-    );
-  }
-
-  // A non-gmail connector-backed source returns the stub connect URL.
-  const whatsappRes = await requestSourceStatus(userId, 'whatsapp');
-  assertStatus(whatsappRes.status, 200, whatsappRes.data);
-  const whatsappBody = SourceStatusResponse.parse(whatsappRes.data);
-  const whatsapp = whatsappBody.statuses[0];
-  if (
-    whatsapp?.connectUrl !== 'https://roselabs.ai/connect/whatsapp' ||
-    whatsapp.connected !== false
-  ) {
-    throw new Error(`Expected whatsapp stub connect URL, got ${JSON.stringify(whatsappBody)}`);
-  }
-
-  // sms is not a grep source (Mac SMS is ingested via imessage / IMESSAGE).
-  const smsRes = await requestSourceStatus(userId, 'sms');
-  assertStatus(smsRes.status, 400, smsRes.data);
-
-  // Documents is an umbrella grep source; concrete document providers are
-  // separate connector keys for source-connect gates.
-  const notesRes = await requestSourceStatus(userId, 'apple_notes');
-  assertStatus(notesRes.status, 200, notesRes.data);
-  const notesBody = SourceStatusResponse.parse(notesRes.data);
-  const notes = notesBody.statuses[0];
-  if (
-    notes?.source !== 'apple_notes' ||
-    notes.connector !== 'apple_notes' ||
-    notes.connected !== false ||
-    notes.connectUrl !== 'https://roselabs.ai/connect/apple_notes'
-  ) {
-    throw new Error(
-      `Expected apple_notes provider source status, got ${JSON.stringify(notesBody)}`
-    );
-  }
-
-  // Unknown source key → 400, not 500.
-  const badRes = await requestSourceStatus(userId, 'not_a_source');
-  assertStatus(badRes.status, 400, badRes.data);
-  if ((badRes.data as { error?: string }).error !== 'SOURCE_NOT_FOUND') {
-    throw new Error(`Expected SOURCE_NOT_FOUND, got ${JSON.stringify(badRes.data)}`);
-  }
-}
-
-async function requestSnapshot(userId: string) {
-  const response = await fetch(`${BASE_URL}/api/data/snapshot`, {
-    headers: apiHeaders(userId),
-  });
-  const data = await response.json();
-  return { status: response.status, data };
-}
-
-// GET /api/data/snapshot returns the distilled user snapshot plus its recent
-// revision ledger (repo.getUserSnapshot). Seed a snapshot + one revision, then
-// read it back through the authenticated route.
-async function testSnapshotEndpoint(userId: string): Promise<void> {
-  const snapshot = await prisma.userSnapshot.create({
-    data: {
-      userId,
-      content: { headline: 'Lighthouse archive lead', focus: ['signal', 'cartography'] },
-      version: 3,
-    },
-  });
-  await prisma.userSnapshotRevision.create({
-    data: {
-      userId,
-      snapshotId: snapshot.id,
-      source: 'grep-blackbox',
-      changes: { added: ['focus'] },
-      model: 'rose-1-flash',
-      promptKey: 'snapshot.distill',
-    },
-  });
-
-  const res = await requestSnapshot(userId);
-  assertStatus(res.status, 200, res.data);
-  const body = res.data as {
-    snapshot: {
-      content?: { headline?: string };
-      version?: number;
-      revisions?: Array<{ source?: string; model?: string }>;
-    } | null;
-  };
-  if (body.snapshot === null) {
-    throw new Error(`Expected a snapshot, got null: ${JSON.stringify(res.data)}`);
-  }
-  if (
-    body.snapshot.version !== 3 ||
-    body.snapshot.content?.headline !== 'Lighthouse archive lead'
-  ) {
-    throw new Error(`Unexpected snapshot content/version: ${JSON.stringify(body.snapshot)}`);
-  }
-  if (
-    !body.snapshot.revisions?.some(
-      (r) => r.source === 'grep-blackbox' && r.model === 'rose-1-flash'
-    )
-  ) {
-    throw new Error(`Expected the seeded revision in the ledger: ${JSON.stringify(body.snapshot)}`);
-  }
-}
-
 async function runAll(): Promise<void> {
   const { userId, agentId } = await seedFixture();
   const tests = [
@@ -1386,11 +553,16 @@ async function runAll(): Promise<void> {
     ['invalid regex returns 400', () => testInvalidRegex(userId)],
     ['ReDoS-catastrophic patterns rejected with 400', () => testRedosGuardRejects(userId)],
     ['dialect patterns normalized and succeed', () => testDialectNormalization(userId)],
+    [
+      'word boundaries preserve ASCII JS semantics beside Unicode',
+      () => testAsciiWordBoundaries(userId),
+    ],
     ['realistic safe patterns are allowed', () => testRealisticPatternsAllowed(userId)],
     ['person and since narrow messages', () => testPersonAndSinceFilters(userId)],
     ['source-specific filters are validated', () => testSourceSpecificFilterValidation(userId)],
     ['emitted path round-trips as filters.path', () => testEmittedPathRoundTrips(userId)],
     ['documents filters work', () => testDocumentFilters(userId)],
+    ['documents return every matching line', () => testDocumentReturnsEveryMatchingLine(userId)],
     ['transactions filters and aggregates work', () => testTransactionFiltersAndAggregates(userId)],
     ['transaction grep is tenant isolated', () => testTransactionTenantIsolation(userId)],
     ['summary includes transactions', () => testTransactionSummary(userId)],

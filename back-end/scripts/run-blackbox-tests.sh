@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/blackbox-phone-env.sh"
 ROOT_DIR="$(cd "$BACKEND_DIR/.." && pwd)"
 
 # Returns 0 when a funded OpenAI key (GPT_API_KEY / OPENAI_API_KEY) fallback is
@@ -73,6 +74,17 @@ case "${TRACE_ARCHIVE_BACKEND:-}" in
     ;;
 esac
 export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
+
+# rose_user_ui versions are stored hermetically on local disk for tests (the
+# user-ui blackbox reads back published bytes); prod uses Supabase Storage.
+export USER_UI_STORAGE_BACKEND=local
+export USER_UI_STORAGE_LOCAL_DIR="${USER_UI_STORAGE_LOCAL_DIR:-$ARTIFACT_DIR/user-ui-storage}"
+# display-tool media (domains/display) uses the same hermetic local store.
+export DISPLAY_STORAGE_BACKEND=local
+export DISPLAY_STORAGE_LOCAL_DIR="${DISPLAY_STORAGE_LOCAL_DIR:-$ARTIFACT_DIR/display-storage}"
+# User-tool handlers (POST /api/user-ui/tools/run) run in a local code-session
+# HOME instead of E2B; the backend refuses this mode in production.
+export USER_TOOLS_SESSION_SANDBOX=local
 export BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES="${BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES:-weekly}"
 export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
 
@@ -160,6 +172,7 @@ DB_CONTAINER="victoria-db-${WORKSPACE_HINT}"
 DB_FOUND=false
 STACK_DB_EXPECTED=false
 SELECTED_DB_URL=""
+ENSURE_SYSTEM_DB_NAME=""
 ISOLATED_DB_RESOLVED=false
 
 # Managed callers (for example, run-coverage.sh) may know the exact isolated
@@ -221,6 +234,16 @@ if ! $STACK_DB_EXPECTED && [[ "$USE_EXISTING_BACKEND" == "1" && -f "$STACK_MANIF
   fi
 fi
 # Try Docker container first
+# An isolated deploy worktree prepared for system Postgres owns no container
+# by design (deploy-worktree-preflight marker .context/deploy-system-pg.db):
+# its tests take this workspace's own victoria_<hint> on the marker's server
+# whatever other workspaces' containers are doing. Follow-up y (2026-10-30):
+# the live probes and the coverage lane's trailing teardown test found no
+# database on such a worktree because the fallback below was refused.
+DEPLOY_WORKTREE_SYSTEM_PG=false
+if ! $STACK_DB_EXPECTED && deploy_worktree_system_pg_prepared "$ROOT_DIR"; then
+  DEPLOY_WORKTREE_SYSTEM_PG=true
+fi
 if ! $STACK_DB_EXPECTED && docker_info_quick; then
   # Prefer the workspace-named container; fall back to the only running
   # victoria-db-* container if there's exactly one (covers cases where the
@@ -228,6 +251,8 @@ if ! $STACK_DB_EXPECTED && docker_info_quick; then
   if RESOLVED_CONTAINER="$(resolve_local_db_container "$WORKSPACE_HINT" "$WORKTREE_HINT")"; then
     DB_CONTAINER="$RESOLVED_CONTAINER"
     ISOLATED_DB_RESOLVED=true
+  elif $DEPLOY_WORKTREE_SYSTEM_PG; then
+    echo "Isolated deploy worktree on system Postgres: using its own victoria_$WORKSPACE_HINT database on localhost:5432"
   else
     if ! system_db_fallback_is_safe; then
       echo "❌ No ready Postgres container owned by this worktree." >&2
@@ -242,8 +267,15 @@ if ! $STACK_DB_EXPECTED && docker_info_quick; then
     LOCAL_DB_PORT="$ACTUAL_PORT"
   fi
   if [[ -n "$LOCAL_DB_PORT" ]] && docker_quick exec "$DB_CONTAINER" pg_isready -U postgres -q >/dev/null; then
+    # The container's `victoria` is the dev stack's seeded database (run.sh):
+    # tests get this workspace's own database there, as on system Postgres.
+    if ! ENSURE_SYSTEM_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT")"; then
+      echo "❌ Workspace name '$WORKSPACE_HINT' cannot name a test database (letters, digits, - and _ only)." >&2
+      exit 1
+    fi
+    SELECTED_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$ENSURE_SYSTEM_DB_NAME"
     DB_FOUND=true
-    echo "Using local Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT"
+    echo "Using local Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT, database $ENSURE_SYSTEM_DB_NAME"
   fi
   if $ISOLATED_DB_RESOLVED && ! $DB_FOUND; then
     echo "❌ Owned Postgres container $DB_CONTAINER is not reachable on a mapped port." >&2
@@ -256,15 +288,28 @@ fi
 # port layout are found before the generic 5432 default.
 if ! $STACK_DB_EXPECTED && ! $DB_FOUND; then
   SYSTEM_PG_CANDIDATES=()
-  if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
-    SYSTEM_PG_CANDIDATES+=("$((CONDUCTOR_PORT + 5))")
+  if $DEPLOY_WORKTREE_SYSTEM_PG; then
+    # The prepared marker names a database on localhost:5432: same server only.
+    SYSTEM_PG_CANDIDATES+=(5432)
+  else
+    if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
+      SYSTEM_PG_CANDIDATES+=("$((CONDUCTOR_PORT + 5))")
+    fi
+    SYSTEM_PG_CANDIDATES+=(5432)
   fi
-  SYSTEM_PG_CANDIDATES+=(5432)
   for SYSTEM_PG_PORT in "${SYSTEM_PG_CANDIDATES[@]}"; do
     if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
+      # Never the shared `victoria`: this workspace's own database only.
+      if ! SYSTEM_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT")"; then
+        echo "❌ Workspace name '$WORKSPACE_HINT' cannot name a test database (letters, digits, - and _ only)." >&2
+        exit 1
+      fi
+      # Created after the Prisma freshness check: stale deps touch no DB.
+      ENSURE_SYSTEM_DB_NAME="$SYSTEM_DB_NAME"
       LOCAL_DB_PORT="$SYSTEM_PG_PORT"
+      SELECTED_DB_URL="postgresql://postgres:postgres@localhost:$SYSTEM_PG_PORT/$SYSTEM_DB_NAME"
       DB_FOUND=true
-      echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT"
+      echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT, database $SYSTEM_DB_NAME"
       break
     fi
   done
@@ -287,9 +332,28 @@ if $DB_FOUND; then
       echo "❌ BLACKBOX_TEST_SKIP_DB_SYNC is only valid with an existing backend." >&2
       exit 1
     fi
-    echo "Skipping local DB schema sync; existing backend caller prepared the test database."
+    # Skipping the sync does not make the database ours: a second runner's
+    # schema sync would still deadlock these cases. Only coverage's own child
+    # runs under its parent's lock (explicitly handed down); any other
+    # skip-sync run holds the lock itself.
+    source "$SCRIPT_DIR/test-db-run-lock.sh"
+    if test_db_run_lock_inherited "$LOCAL_DB_URL"; then
+      echo "Skipping local DB schema sync; running under the parent coverage run's database lock."
+    else
+      acquire_test_db_run_lock "$LOCAL_DB_URL" "run-blackbox-tests.sh $*" || exit 1
+      echo "Skipping local DB schema sync; existing backend caller prepared the test database."
+    fi
   else
+    # Hold this database for the whole run: a concurrent runner's schema sync
+    # deadlocks live cases (40P01).
+    source "$SCRIPT_DIR/test-db-run-lock.sh"
+    acquire_test_db_run_lock "$LOCAL_DB_URL" "run-blackbox-tests.sh $*" || exit 1
     node "$SCRIPT_DIR/assert-prisma-client-current.mjs"
+    if [[ -n "${ENSURE_SYSTEM_DB_NAME:-}" ]] &&
+      ! ensure_workspace_system_db "$LOCAL_DB_PORT" "$ENSURE_SYSTEM_DB_NAME"; then
+      echo "❌ Could not create the test database $ENSURE_SYSTEM_DB_NAME on localhost:$LOCAL_DB_PORT." >&2
+      exit 1
+    fi
     if command -v psql >/dev/null 2>&1; then
       psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 DO $$
@@ -315,8 +379,11 @@ END $$;
 SQL
     fi
     echo "Syncing Prisma schema to local test database..."
-    npx prisma db push --skip-generate --accept-data-loss >/dev/null
+    bash "$SCRIPT_DIR/normalize-local-user-phones.sh" "$LOCAL_DB_URL" >/dev/null
+    bash "$SCRIPT_DIR/backfill-local-message-record-owner.sh" "$LOCAL_DB_URL" >/dev/null
+    PRISMA_CLI_DATABASE_URL="$DIRECT_URL" npx prisma db push --skip-generate --accept-data-loss >/dev/null
     bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
+    bash "$SCRIPT_DIR/apply-local-message-record-trgm-index.sh" "$LOCAL_DB_URL" >/dev/null
     # Credential seeding and smoke execution are separate controls. A caller may
     # pre-seed a valid production credential without disabling the real Codex
     # black-box test that consumes it.
@@ -406,6 +473,7 @@ BACKEND_PID=""
 # npm/tsx can leave the server below a launcher process. Snapshot and drain
 # the owned descendants before terminating that launcher, then join its PID.
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+source "$ROOT_DIR/scripts/lib/port-probe.sh"
 cleanup() {
   local result=$? cleaned=1
   trap - EXIT INT TERM
@@ -438,7 +506,7 @@ reserve_port() {
   while true; do
     local lock_dir="$PORT_LOCK_ROOT/$candidate"
     if mkdir "$lock_dir" 2>/dev/null; then
-      if lsof -ti :"$candidate" >/dev/null 2>&1; then
+      if local_port_in_use "$candidate"; then
         rmdir "$lock_dir" >/dev/null 2>&1 || true
       else
         PORT_LOCK_DIR="$lock_dir"
@@ -483,40 +551,63 @@ source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"
 # a test of unrelated local Fast Mode infrastructure. Explicit BLACKBOX_*
 # overrides remain available for proxy-specific blackbox runs.
 export FAST_MODE_ANTHROPIC_PROXY_URL="${BLACKBOX_FAST_MODE_ANTHROPIC_PROXY_URL:-}"
-export FAST_MODE_CODEX_PROXY_URL="${BLACKBOX_FAST_MODE_CODEX_PROXY_URL:-}"
 
-cat >"$MANIFEST_PATH" <<EOF
+launch_backend() {
+  cat >"$MANIFEST_PATH" <<EOF
 {"run_id":"$RUN_ID","mode":"isolated-blackbox-backend","base_url":"$TEST_BASE_URL","port":$PORT,"artifact_dir":"$ARTIFACT_DIR","backend_log":"$BACKEND_LOG","runner_log":"$RUNNER_LOG","disable_gmail_sync":true}
 EOF
 
-echo "Starting isolated backend for black-box tests on port $PORT"
-echo "Backend log: $BACKEND_LOG"
-echo "Artifacts: $ARTIFACT_DIR"
+  echo "Starting isolated backend for black-box tests on port $PORT"
+  echo "Backend log: $BACKEND_LOG"
+  echo "Artifacts: $ARTIFACT_DIR"
 
-# Defer cancellation only across the background-child ownership handoff.
-BACKEND_PENDING_SIGNAL=0
-trap 'BACKEND_PENDING_SIGNAL=130' INT
-trap 'BACKEND_PENDING_SIGNAL=143' TERM
+  # Defer cancellation only across the background-child ownership handoff.
+  BACKEND_PENDING_SIGNAL=0
+  trap 'BACKEND_PENDING_SIGNAL=130' INT
+  trap 'BACKEND_PENDING_SIGNAL=143' TERM
 
-PORT="$PORT" \
-DISABLE_GMAIL_SYNC=1 \
-npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
-BACKEND_PID=$!
-trap 'exit 130' INT
-trap 'exit 143' TERM
-if [[ "$BACKEND_PENDING_SIGNAL" != 0 ]]; then
-  exit "$BACKEND_PENDING_SIGNAL"
-fi
+  PORT="$PORT" \
+  DISABLE_GMAIL_SYNC=1 \
+  npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
+  BACKEND_PID=$!
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if [[ "$BACKEND_PENDING_SIGNAL" != 0 ]]; then
+    exit "$BACKEND_PENDING_SIGNAL"
+  fi
+}
+launch_backend
 
 
 READY=0
+BIND_RETRIES=0
 for _ in $(seq 1 120); do
-  if curl -fsS -m 2 "$TEST_BASE_URL/health" >/dev/null 2>&1; then
+  # Port locks are per worktree, so another worktree's isolated backend can
+  # take the same port between the free-port probe and our bind. /health alone
+  # would then pass against THAT backend and every test would run against the
+  # wrong code. Ready means our own process logged that it serves this port.
+  if curl -fsS -m 2 "$TEST_BASE_URL/health" >/dev/null 2>&1 &&
+    grep -Eq "Server started.*port[\"=:]+ ?${PORT}([^0-9]|$)" "$BACKEND_LOG" 2>/dev/null; then
     READY=1
     break
   fi
 
   if ! kill -0 "$BACKEND_PID" >/dev/null 2>&1; then
+    # Another worktree's runner took this port between our free-port probe and
+    # the bind. Without an explicitly requested port, move to the next free one.
+    if [[ -z "${BLACKBOX_TEST_BACKEND_PORT:-${CONTRACT_TEST_BACKEND_PORT:-}}" ]] &&
+      [[ "$BIND_RETRIES" -lt 5 ]] && grep -q "EADDRINUSE" "$BACKEND_LOG" 2>/dev/null; then
+      BIND_RETRIES=$((BIND_RETRIES + 1))
+      echo "⚠️  Port $PORT was taken before the isolated backend bound it; retrying on the next free port"
+      wait "$BACKEND_PID" >/dev/null 2>&1 || true
+      BACKEND_PID=""
+      rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
+      PORT_LOCK_DIR=""
+      reserve_port "$((PORT + 1))"
+      export TEST_BASE_URL="http://localhost:$PORT"
+      launch_backend
+      continue
+    fi
     echo "❌ Backend process exited before becoming ready"
     echo "Last backend log lines:"
     tail -n 80 "$BACKEND_LOG" || true

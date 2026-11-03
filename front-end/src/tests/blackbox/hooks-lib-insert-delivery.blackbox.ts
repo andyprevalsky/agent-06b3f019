@@ -2,12 +2,18 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import type { Message } from '@/lib/api';
-import type { StreamingBubble } from '@/features/agent-context/types';
+import type { StreamingBubble, StreamingTool } from '@/features/agent-context/types';
 import type { InsertMessagePayload } from '@/lib/realtime';
 import { useRealtimeSubscription } from '@/features/agent-context/hooks/useRealtimeSubscription';
 import { deduplicateToolMessages } from '@/features/terminal-component-group/hooks/deduplicateToolMessages';
 import { server } from './msw/server';
-import { API_BASE, agentDetailJson, fakeChannel, makeDeps } from './realtime-subscription.fixtures';
+import {
+  API_BASE,
+  agentDetailJson,
+  fakeChannel,
+  makeDeps,
+  mockSession,
+} from './realtime-subscription.fixtures';
 import * as realtime from '@/lib/realtime';
 
 vi.mock('@/lib/realtime', async (importOriginal) => ({
@@ -46,7 +52,7 @@ describe('committed INSERT delivery', () => {
     const hook = renderHook(() => useRealtimeSubscription(deps));
     await waitFor(() => expect(realtime.subscribeToAgent).toHaveBeenCalledOnce());
     act(() => handlers.onInsert?.(insert));
-    deps.setStreamingPlan.mockClear();
+    vi.mocked(deps.setStreamingPlan).mockClear();
     act(() => handlers.onInsert?.(insert));
     expect(deps.dispatchMessage).toHaveBeenCalledOnce();
     expect(deps.setStreamingPlan).not.toHaveBeenCalled();
@@ -227,6 +233,185 @@ describe('committed INSERT delivery', () => {
     expect(messages).toHaveLength(2);
     expect(deps.dispatchMessage).toHaveBeenCalledTimes(2);
     expect(deduplicateToolMessages(messages)[0][0]?.metadata?.toolStatus).toBe('FINISHED');
+    hook.unmount();
+  });
+
+  it('INSERTs broadcast from two backend instances render in timestamp order, not arrival order', async () => {
+    let handlers: Handlers = {};
+    vi.mocked(realtime.subscribeToAgent).mockImplementation(async (_, next) => {
+      handlers = next;
+      return fakeChannel();
+    });
+    let messages: Message[] = [];
+    const deps = makeDeps({
+      setMessages: (action) => {
+        messages = typeof action === 'function' ? action(messages) : action;
+      },
+    });
+    const hook = renderHook(() => useRealtimeSubscription(deps));
+    await waitFor(() => expect(realtime.subscribeToAgent).toHaveBeenCalledOnce());
+    const assistant = (id: string, timestamp: string, text: string): InsertMessagePayload => ({
+      agentId: 'agent-1',
+      id,
+      timestamp,
+      text,
+      role: 'ASSISTANT',
+      metadata: {},
+    });
+    // Instance B's broadcast of the later message reaches the client first.
+    act(() => {
+      handlers.onInsert?.(assistant('second', '2026-10-28T01:00:00.200Z', 'second'));
+      handlers.onInsert?.(assistant('first', '2026-10-28T01:00:00.100Z', 'first'));
+    });
+    expect(messages.map((m) => m.message_id)).toEqual(['second', 'first']);
+    const [rendered] = deduplicateToolMessages(messages);
+    expect(rendered.map((m) => m.message_id)).toEqual(['first', 'second']);
+    hook.unmount();
+  });
+
+  const blockedRow: Message = {
+    message_id: '75e5af12-8b66-4b72-b061-3be30ce4308d',
+    timestamp: '2026-10-23T23:18:43.499Z',
+    text: `Code-agent SDK event JSON:\n${'x'.repeat(158_000)}`,
+    role: 'TOOL',
+    metadata: {
+      toolName: 'spawn_claude_code_agent',
+      toolStatus: 'FINISHED',
+      toolCallId: 'call_530ea3ca9bf640358d491ade206558b2',
+    },
+  };
+  const reason = 'This message contained content that was blocked from live streaming to the app.';
+  const deferred = {
+    agentId: 'agent-1',
+    id: blockedRow.message_id,
+    timestamp: blockedRow.timestamp,
+    role: 'TOOL' as const,
+    reason,
+    metadata: {
+      toolName: 'spawn_claude_code_agent',
+      toolStatus: 'FINISHED' as const,
+      toolCallId: 'call_530ea3ca9bf640358d491ade206558b2',
+      success: true,
+    },
+  };
+  async function renderDeferred(statuses: number | number[]) {
+    const sequence = Array.isArray(statuses) ? [...statuses] : [statuses];
+    let handlers: Handlers = {};
+    vi.mocked(realtime.subscribeToAgent).mockImplementation(async (_, next) => {
+      handlers = next;
+      return fakeChannel();
+    });
+    mockSession();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const reads: string[] = [];
+    server.use(
+      http.get(`${API_BASE}/agents/:agentId/messages/:messageId`, async ({ params }) => {
+        reads.push(`${String(params.agentId)}/${String(params.messageId)}`);
+        await gate;
+        const status = sequence.length > 1 ? sequence.shift()! : sequence[0];
+        return status === 200
+          ? HttpResponse.json({ message: blockedRow })
+          : HttpResponse.json({ error: 'nope' }, { status });
+      }),
+      http.get(`${API_BASE}/agents/:agentId`, ({ params }) => {
+        reads.push(`detail:${String(params.agentId)}`);
+        return HttpResponse.json(agentDetailJson([]));
+      }),
+    );
+    const state = {
+      messages: [] as Message[],
+      tools: new Map<string, StreamingTool>([
+        ['call_530ea3ca9bf640358d491ade206558b2', {} as StreamingTool],
+      ]),
+    };
+    const deps = makeDeps({
+      setMessages: (action) => {
+        state.messages = typeof action === 'function' ? action(state.messages) : action;
+      },
+      setStreamingTools: (action) => {
+        state.tools = typeof action === 'function' ? action(state.tools) : action;
+      },
+    });
+    const hook = renderHook(() => useRealtimeSubscription(deps));
+    await waitFor(() => expect(realtime.subscribeToAgent).toHaveBeenCalledOnce());
+    reads.length = 0;
+    return { handlers, deps, hook, reads, state, release };
+  }
+
+  it('a deferred INSERT shows its reason at once, then swaps in only that fetched row', async () => {
+    // descend-full69 r004-j0049: the edge WAF refused the 158 KB
+    // spawn_claude_code_agent FINISHED frame twice; only ids and a reason arrived.
+    const { handlers, deps, hook, reads, state, release } = await renderDeferred(200);
+    act(() => handlers.onInsertDeferred?.(deferred));
+    // Before the row arrives: the tool card closes and the reason is the body.
+    expect(state.tools.size).toBe(0);
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0]).toMatchObject({
+      message_id: blockedRow.message_id,
+      text: reason,
+      metadata: { toolStatus: 'FINISHED', success: true, liveStreamBlocked: true },
+    });
+    expect(deps.dispatchMessage).toHaveBeenCalledOnce();
+    release();
+    await waitFor(() => expect(state.messages[0]?.text).toBe(blockedRow.text));
+    expect(state.messages).toEqual([blockedRow]);
+    expect(reads).toEqual([`agent-1/${blockedRow.message_id}`]);
+
+    // A later duplicate notice or another agent's notice is a no-op.
+    act(() => handlers.onInsertDeferred?.(deferred));
+    act(() => handlers.onInsertDeferred?.({ ...deferred, agentId: 'other-agent', id: 'other' }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(reads).toHaveLength(1);
+    expect(deps.dispatchMessage).toHaveBeenCalledOnce();
+    hook.unmount();
+  });
+
+  it('an oversized notice shows its preview and reason, then swaps in the fetched row', async () => {
+    // Rows over the backend's 8 KB live cap arrive as a bounded notice: a text
+    // preview plus the small metadata, never the full text.
+    const { handlers, hook, reads, state, release } = await renderDeferred(200);
+    const oversize = 'This message is too large to stream live; loading it from the server.';
+    const preview = 'Code-agent SDK event JSON:\n' + 'x'.repeat(973);
+    act(() =>
+      handlers.onInsertDeferred?.({
+        ...deferred,
+        reason: oversize,
+        preview,
+        metadata: { ...deferred.metadata, title: 'Run the code agent' },
+      }),
+    );
+    expect(state.messages[0]).toMatchObject({
+      message_id: blockedRow.message_id,
+      text: `${preview}\n\n${oversize}`,
+      metadata: { toolStatus: 'FINISHED', title: 'Run the code agent', liveStreamBlocked: true },
+    });
+    release();
+    await waitFor(() => expect(state.messages).toEqual([blockedRow]));
+    expect(reads).toEqual([`agent-1/${blockedRow.message_id}`]);
+    hook.unmount();
+  });
+
+  it('a deferred INSERT retries a failed row read and swaps in the row once it succeeds', async () => {
+    const { handlers, hook, reads, state, release } = await renderDeferred([503, 200]);
+    act(() => handlers.onInsertDeferred?.(deferred));
+    release();
+    await waitFor(() => expect(state.messages).toEqual([blockedRow]), { timeout: 3000 });
+    expect(reads).toEqual([`agent-1/${blockedRow.message_id}`, `agent-1/${blockedRow.message_id}`]);
+    hook.unmount();
+  });
+
+  it('a deferred INSERT keeps its visible reason when every bounded row read fails', async () => {
+    const { handlers, hook, reads, state, release } = await renderDeferred(500);
+    act(() => handlers.onInsertDeferred?.(deferred));
+    release();
+    await waitFor(() => expect(reads).toHaveLength(3), { timeout: 3000 });
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(reads).toHaveLength(3);
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0]?.text).toBe(reason);
     hook.unmount();
   });
 });

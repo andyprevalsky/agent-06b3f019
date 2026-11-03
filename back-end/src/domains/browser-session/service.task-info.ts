@@ -8,14 +8,23 @@ import { canonicalAuthRealm } from '../../providers/authRealm';
 import { BROWSER_SESSION_MIN_REMAINING_MS } from '../../providers/steel/sessionLifetime';
 import { steelPublicCdpUrl } from '../../providers/steel/urls';
 import { storedBrowserProvider } from '../../providers/browser/types';
+import { refreshTilionConnectUrl, tilionExitCountry } from '../../providers/browser/tilion';
+import { resolveExitGeoLocale, type ExitGeoLocale } from '../../providers/browser/exitGeoLocale';
+
+type GeoFingerprintPayload = {
+  timezone: string | null;
+  userAgentOverride?: { acceptLanguage?: string };
+};
+import { DEFAULT_GEOLOCATION } from '../../providers/geoip';
 import * as repo from './repo';
+import { recordEndedLogicalBrowser } from '../../providers/browser/sessionPersist';
 import { serializePasskeys, serializePasswords, toUserSettings } from './service.serializers';
 
 const log = createLogger('BrowserSession');
 
 type TaskInfoResponse = {
   task_id: string;
-  session_id: string;
+  session_id: string | null;
   debug_url: string | null;
   ws_url: string | null;
   status: string;
@@ -31,6 +40,8 @@ type TaskInfoResponse = {
     profile_id: string | null;
     steel_profile_id?: string | null;
   };
+  /** Tilion only: timezone/locale of the exit country (Tilion does not localise its exit). */
+  exit_geo_locale?: ExitGeoLocale | null;
   same_session_available?: boolean;
   same_session_unavailable_reason?: string;
   browser_session_health?: BrowserSessionHealth;
@@ -39,7 +50,8 @@ type TaskInfoResponse = {
 
 export function isLiveBrowserStatus(status: string | null): boolean {
   if (status === null) return false;
-  return ['live', 'active', 'running'].includes(status.toLowerCase());
+  // Tilion reports a drivable session as `ready`; ended ones are `closed`/`expired`.
+  return ['live', 'active', 'running', 'ready'].includes(status.toLowerCase());
 }
 
 /**
@@ -141,7 +153,7 @@ function buildTaskInfoResponse(
     passkeys: injection.passkeys,
     user_settings: injection.userSettings,
     browser_session_metadata: {
-      provider: session.sessionId.startsWith('local-') ? 'local' : provider,
+      provider: session.sessionId?.startsWith('local-') === true ? 'local' : provider,
       profile_id: profileId,
       ...(provider === 'steel' ? { steel_profile_id: profileId } : {}),
     },
@@ -178,7 +190,10 @@ async function applyLiveSessionAvailability(
   session: NonNullable<Awaited<ReturnType<typeof repo.findSessionByTaskId>>>
 ) {
   const legacySteelResponse = session.provider === 'steel';
-  if (session.status !== 'ACTIVE') {
+  if (
+    session.status !== 'ACTIVE' &&
+    !(session.logicalOwnerKey !== null && session.status === 'ERROR')
+  ) {
     response.same_session_available = false;
     response.same_session_unavailable_reason = `db_status_${session.status.toLowerCase()}`;
     return response;
@@ -189,6 +204,11 @@ async function applyLiveSessionAvailability(
     return response;
   }
 
+  if (session.sessionId === null) {
+    response.same_session_available = false;
+    response.same_session_unavailable_reason = 'unmaterialized';
+    return response;
+  }
   let health: BrowserSessionHealth;
   try {
     health = await getBrowserSessionHealth(session.sessionId);
@@ -209,7 +229,37 @@ async function applyLiveSessionAvailability(
   response.same_session_available = availability.available;
   if (!availability.available) response.same_session_unavailable_reason = availability.reason;
 
+  if (
+    session.logicalOwnerKey !== null &&
+    (await recordEndedLogicalBrowser(session.id, session.sessionId, health))
+  ) {
+    const current = await repo.findSessionByTaskId(session.id);
+    if (current?.sessionId === session.sessionId) response.status = current.status;
+  }
+  if (response.status !== 'ACTIVE') {
+    response.same_session_available = false;
+    response.same_session_unavailable_reason = `db_status_${response.status.toLowerCase()}`;
+  }
+
   return response;
+}
+
+/**
+ * Tilion connect tokens expire after 1800 s, so the stored wsUrl of a run
+ * longer than 30 minutes is stale. Task info is how the worker reattaches to an
+ * existing session, so it mints a fresh connect URL (and persists it). A failed
+ * mint keeps the stored URL; the worker's attach then reports the real error.
+ */
+async function freshTilionConnectUrl(sessionId: string, stored: string): Promise<string> {
+  try {
+    return await refreshTilionConnectUrl(sessionId);
+  } catch (error) {
+    log.warn('Tilion connect URL refresh failed', {
+      sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return stored;
+  }
 }
 
 export async function getTaskInfo(taskId: string, options: { validateLive?: boolean } = {}) {
@@ -224,6 +274,30 @@ export async function getTaskInfo(taskId: string, options: { validateLive?: bool
   const authRealm = canonicalAuthRealm(currentUrl ?? startUrl ?? '');
   const injection = await collectUserInjectionData(session.context?.userId, authRealm, taskId);
   const response = buildTaskInfoResponse(session, currentUrl, startUrl, authRealm, injection);
+  if (
+    session.provider === 'tilion' &&
+    session.status === 'ACTIVE' &&
+    session.sessionId !== null &&
+    response.ws_url !== null
+  ) {
+    response.ws_url = await freshTilionConnectUrl(session.sessionId, response.ws_url);
+  }
+  if (session.provider === 'tilion') {
+    // Same country initSession placed the exit in (agent proxy, else the default).
+    const agent = await repo.findAgentProxy(session.agentId);
+    const country = agent?.proxyCountry;
+    const resolved = resolveExitGeoLocale(
+      response.fingerprint_injection as GeoFingerprintPayload | null,
+      tilionExitCountry(
+        session.kernelProxySource,
+        country !== null && country !== undefined && country !== ''
+          ? country
+          : DEFAULT_GEOLOCATION.country
+      )
+    );
+    response.exit_geo_locale = resolved.exitGeoLocale;
+    response.fingerprint_injection = resolved.fingerprint;
+  }
 
   return options.validateLive === true ? applyLiveSessionAvailability(response, session) : response;
 }

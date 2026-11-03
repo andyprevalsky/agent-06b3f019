@@ -10,13 +10,24 @@
  * [DISMISSED] --> Sonner timeout / action removes toast
  */
 
-import { useTheme } from 'next-themes';
+import { useSyncExternalStore } from 'react';
 import { Toaster as Sonner } from 'sonner';
 
 type ToasterProps = React.ComponentProps<typeof Sonner>;
 
+// Toasts mount outside RoseThemeProvider; follow its document class directly.
+const documentTheme = () =>
+  typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
+    ? 'dark'
+    : 'light';
+const observeTheme = (notify: () => void) => {
+  const observer = new MutationObserver(notify);
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+  return () => observer.disconnect();
+};
+
 const Toaster = ({ ...props }: ToasterProps) => {
-  const { theme = 'system' } = useTheme();
+  const theme = useSyncExternalStore(observeTheme, documentTheme, () => 'light');
 
   return (
     <Sonner

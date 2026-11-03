@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "originalThreadUrl": "https://boxes.dev/thread/thr_8b123724f677458da61d5e215786a405",
+  "originalPublicThreadId": "thr_8b123724f677458da61d5e215786a405",
+  "originalInternalThreadId": "ph7dvh51k0atw7myrk0jk1bynx8fy2kj",
+  "originalNativeThreadId": "4f2f012f-6f90-478e-8068-2b9474d4e5da",
+  "originalDevboxId": null,
+  "originalDevboxIdReason": "Installed scoped thread reads omit instance identity; start requires devbox instance ID and exposes no known-thread target.",
+  "replacementThreadUrl": "https://boxes.dev/thread/thr_6b7399082f994d0ea12b70e1002dc763",
+  "replacementPublicThreadId": "thr_6b7399082f994d0ea12b70e1002dc763",
+  "replacementInternalThreadId": "ph7c227aym08mq92ryd0pajzs18g5gtq",
+  "replacementDevboxId": "09712616-018b-454a-bbf2-d38ff23dd1e5",
+  "replacementBoxIdentitySource": "Committed coordinator launch receipt in migration handoff; current box status exposes role only.",
+  "harness": "codex",
+  "checkpointSha": "029932dade3a99a56826a5d294da074a4ac175be",
+  "checkedOutSha": "08a094e26d66da91405520dd9f3aa22c94419eff",
+  "handoffPath": "docs/handoffs/swap-harness-thr_8b123724f677458da61d5e215786a405.md",
+  "utcTime": "2026-10-12T23:19:05.235837+00:00",
+  "firstContinuationAction": {
+    "action": "Audit full-history fixture source and run metadata, execute existing owning offline seed memory ratchet test and launcher syntax check.",
+    "checkedSourceFiles": [
+      "back-end/scripts/seed-local.ts",
+      "back-end/src/tests/unit/seed-memory-ratchet.test.ts",
+      ".claude/skills/instantiate-whm/scripts/run-trajectory.sh"
+    ],
+    "result": "All 8 seed-memory-ratchet assertions PASS; bash -n launcher PASS. SEED_MESSAGE_LIMIT default remains 10000, overrides add pages; launcher records fixture source and limit. Initial test executable lookup failed; corrected to existing root tsx and passed.",
+    "skillInstall": "Exact b4d97fd6a folder extracted only; standalone install completed for both home harness discovery paths."
+  },
+  "ownershipBlocker": "run12-messaging60m controller/run/root/session receipts and private artifacts remain on unreachable original box; latest scoped replies are quota stops. No exact durable run12 identity yet recovered. Do not duplicate paid run or signal resources.",
+  "preservation": "partial; pushed source recovered, old unpushed/local/ignored state UNKNOWN",
+  "oldBoxPreserved": true,
+  "archiveStatus": "pending exact ownership and complete preservation; no archive requested",
+  "deployed": false,
+  "merged": false,
+  "replacementNativeThreadId": "01a13267-f29a-74c0-a5de-272887587744",
+  "allFilesPreservationStatus": "INCOMPLETE / OLD BOX RETAINED",
+  "migrationComplete": false,
+  "lastReconciledUtc": "2026-10-12T23:20:47.156140+00:00",
+  "routingAudit": {
+    "projectThreadListing": "Complete, 10 threads; no box IDs. Relevant opposite-harness threads are coordinator, this replacement and Google reauth; none proven co-located with original.",
+    "delegatedThreadListing": "Complete; empty on replacement.",
+    "installedKnownThreadRoute": "Absent. Supported start targets current-devbox, new-devbox, devbox:<instance-id>; no thread target.",
+    "originalLatestSuccessfulTurns": "claude:47 WMH healthy after854s, benchmark stack starting; claude:48 stack booting, no agents. Later replies quota stop.",
+    "canonicalArtifactReader": "hub_upload.verify_run_visible requires exact run_id. Launcher generates run_id after WMH health and writes old local run.env; no run12 ID/root/session available in bounded successful history. Cannot use fresh localhost progress reader as old-box evidence."
+  },
+  "freshOfflineChecks": {
+    "seedMemoryRatchet": "8 passed",
+    "launcherSyntax": "passed",
+    "worldClockAndWireStream": "26 passed in0.24s under Python3.11.9; confirmed registered in WMH blackbox",
+    "diffCheck": "passed",
+    "providerInitialStateCost": "155 passed in12.62s under Python3.11.9"
+  },
+  "remainingUnpreserved": [
+    "old staged/unstaged/untracked source and unpushed commits",
+    "stashes, other worktrees and nested repositories",
+    "important ignored model/RAG/fixtures and local memory",
+    "run12 logs, receipts, prediction state and initial-state override",
+    "raw quality A/B artifacts and exact resource ownership"
+  ]
+}

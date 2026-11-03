@@ -98,6 +98,81 @@ async def test_queue_imessage_activity_waits_for_delivery_confirmation():
     assert status_headers["x-user-id"] == "user-42"
 
 
+async def test_simulated_imessage_send_carries_approved_write_to_wmh():
+    """A send after approval must not look unapproved to the replacement environment."""
+    from domains.message_person.repo import queue_imessage_activity
+
+    observed_actions = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/world_models/rose-golden/sessions/session-approved/step"):
+            observed_actions.append(json.loads(request.content.decode("utf-8"))["action"])
+            return httpx.Response(
+                200,
+                json={
+                    "observation": {
+                        "content": '{"success":true,"queue_id":"queue-sim","status":"queued","relay_connected":false}',
+                        "tool_result": {
+                            "success": True,
+                            "queue_id": "queue-sim",
+                            "status": "queued",
+                            "relay_connected": False,
+                        },
+                    }
+                },
+            )
+        return httpx.Response(404, json={"error": "unexpected route"})
+
+    setup_mock_fn(handler)
+    with patch.dict(
+        "os.environ",
+        {
+            "WMH_BASE_URL": "https://wmh.example.test",
+            "WMH_MODEL_NAME": "rose-golden",
+            "WMH_SESSION_ID": "session-approved",
+        },
+    ):
+        result = await queue_imessage_activity(
+            "user-42",
+            "agent-42",
+            "call-approved",
+            "+19729777432",
+            "Approved message",
+            "simulate",
+            "root-42",
+            True,
+        )
+    assert result["success"] is True
+    assert len(observed_actions) == 1
+    assert observed_actions[0]["arguments"]["arguments"]["approval_granted"] is True
+    teardown_mock()
+
+
+async def test_post_approval_message_dispatch_passes_approval_to_wmh_activity():
+    from domains.message_person.handler import MessagePersonManager
+
+    receipt = {"success": True, "queue_id": "queue-sim", "status": "queued", "relay_connected": False}
+    with patch(
+        "domains.message_person.handler.workflow.execute_activity",
+        new_callable=AsyncMock,
+        return_value=receipt,
+    ) as execute_activity:
+        result = await MessagePersonManager._deliver_message(
+            channel="imessage",
+            user_id="user-42",
+            agent_id="agent-42",
+            tool_call_id="call-approved",
+            context=[],
+            person_phone="+19729777432",
+            generated_message="Approved message",
+            person_display="Andy",
+            world_model_mode="simulate",
+            world_model_session_scope_id="root-42",
+        )
+    assert result["status"] == "queued"
+    assert execute_activity.call_args.kwargs["args"][-1] is True
+
+
 async def test_queue_imessage_activity_waits_through_pending_status():
     """A pending queue state is polled until the Mac reports success."""
     status_calls = 0
@@ -1985,6 +2060,14 @@ async def run_all_tests():
     await r.record_async(
         "queue_imessage_activity_offline_queued_without_polling",
         test_queue_imessage_activity_offline_returns_durable_queued_receipt_without_polling,
+    )
+    await r.record_async(
+        "simulated_imessage_send_carries_approved_write_to_wmh",
+        test_simulated_imessage_send_carries_approved_write_to_wmh,
+    )
+    await r.record_async(
+        "post_approval_message_dispatch_passes_approval_to_wmh_activity",
+        test_post_approval_message_dispatch_passes_approval_to_wmh_activity,
     )
     await r.record_async(
         "queue_imessage_activity_online_timeout_stays_queued",

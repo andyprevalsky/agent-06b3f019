@@ -27,7 +27,7 @@ def spawn_group_id(tool_call_id: Optional[str], explicit_group_id: Optional[str]
     by the aggregate and all children.
 
     Broadcast/display metadata only — never enters the LLM context or the
-    fast-cache key (which strips routing ids via
+    demo-cache key (which strips routing ids via
     ``_VOLATILE_OBJECT_FIELDS``), so it cannot affect trajectory cache hits.
     """
     if isinstance(explicit_group_id, str) and explicit_group_id:

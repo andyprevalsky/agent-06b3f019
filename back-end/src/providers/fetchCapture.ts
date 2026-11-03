@@ -25,6 +25,8 @@
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
+import { isPhoneHarnessExchange, credentialMetadataUrl } from './fetchCapturePrivacy';
+import { responseFromSerialized, type SerializedResponse } from './fetchCaptureResponse';
 import { resolve } from 'path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
@@ -70,15 +72,6 @@ export interface CapturedCall {
   error: string | null;
   cached: boolean;
   captureToken: string | null;
-}
-
-interface SerializedResponse {
-  status: number;
-  statusText: string;
-  body: string;
-  headers: Record<string, string>;
-  /** Private capture metadata — never store this in upstream HTTP headers. */
-  bodyEncoding?: 'base64';
 }
 
 /**
@@ -162,42 +155,6 @@ function isCredentialExchange(url: string): boolean {
   } catch {
     return false;
   }
-}
-
-/** Phone grants and text input are private, stateful operations, including screen reads. */
-function isPhoneHarnessExchange(value: string): boolean {
-  try {
-    const url = new URL(value);
-    const path = url.pathname.toLowerCase();
-    if (
-      (url.protocol === 'https:' || url.protocol === 'http:') &&
-      (path === '/api/iphone' || path.startsWith('/api/iphone/'))
-    )
-      return true;
-    const configured = process.env.PHONE_HARNESS_API_URL ?? 'https://api.phone-harness.com';
-    return url.protocol === 'https:' && url.origin === new URL(configured).origin;
-  } catch {
-    return false;
-  }
-}
-
-function credentialMetadataUrl(url: string): string {
-  const parsed = new URL(url);
-  if (isPhoneHarnessExchange(url)) return `${parsed.origin}/phone-harness-private`;
-  for (const field of ['search', 'hash', 'username', 'password'] as const) parsed[field] = '';
-  return parsed.toString();
-}
-
-function responseFromSerialized(serialized: SerializedResponse): globalThis.Response {
-  const headers: Record<string, string> = { ...serialized.headers };
-  const body =
-    serialized.bodyEncoding === 'base64' ? Buffer.from(serialized.body, 'base64') : serialized.body;
-
-  return new globalThis.Response(body, {
-    status: serialized.status,
-    statusText: serialized.statusText,
-    headers,
-  });
 }
 
 class NonReplayableResponseError extends Error {
@@ -301,16 +258,37 @@ function publishCapture(entry: Omit<CapturedCall, 'id'>): void {
   captures.push({ ...entry, id: nextId++ });
 }
 
+/**
+ * Tilion's API, including a TILION_BASE_URL override (staging, local fake). The
+ * override matches its whole authority (host and port): a local fake on
+ * 127.0.0.1:<port> must not exempt every other local service from replay.
+ */
+function isTilionApi(target: URL): boolean {
+  if (target.hostname.toLowerCase() === 'back.tilion.dev') return true;
+  const configured = process.env.TILION_BASE_URL?.trim();
+  if (!configured) return false;
+  try {
+    const base = new URL(configured);
+    return (
+      base.protocol === target.protocol && base.host.toLowerCase() === target.host.toLowerCase()
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Control-plane calls create mutable remote resources and must never be replayed. */
 export function shouldBypassOutboundReplay(url: string): boolean {
   if (isCredentialExchange(url)) return true;
   try {
-    const hostname = new URL(url).hostname.toLowerCase();
+    const target = new URL(url);
+    const hostname = target.hostname.toLowerCase();
     return (
       hostname === 'e2b.app' ||
       hostname.endsWith('.e2b.app') ||
       hostname === 'api.onkernel.com' ||
       hostname === 'api.browser-use.com' ||
+      isTilionApi(target) ||
       hostname === 'amplitude.com' ||
       hostname === 'analytics.eu.amplitude.com'
     );
@@ -533,6 +511,40 @@ export function installFetchCapture(): Router {
       return new globalThis.Response(body, {
         status,
         statusText: unavailable ? 'Service Unavailable' : 'OK',
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+
+    if (
+      process.env.BLACKBOX_TEST_FAKE_SLACK === '1' &&
+      new URL(url).hostname === 'slack.com' &&
+      new URL(url).pathname.startsWith('/api/') &&
+      method.toUpperCase() === 'POST'
+    ) {
+      // Slack Web API writes (chat.postMessage, reactions.add) answer like Slack:
+      // HTTP 200 with `ok`, plus a message handle for posts. Tests assert the
+      // captured request bodies; no call leaves the machine.
+      let channel = 'C0BLACKBOX0';
+      try {
+        const parsed: unknown = JSON.parse(requestBody ?? '{}');
+        if (parsed !== null && typeof parsed === 'object' && 'channel' in parsed) {
+          channel = String((parsed as { channel: unknown }).channel);
+        }
+      } catch {
+        // Non-JSON bodies keep the placeholder channel.
+      }
+      const body = JSON.stringify({
+        ok: true,
+        channel,
+        ts: `1800000000.${String(id % 1_000_000).padStart(6, '0')}`,
+      });
+      entry.durationMs = Date.now() - start;
+      entry.responseStatus = 200;
+      entry.responseBody = body;
+      publishCapture(entry);
+      return new globalThis.Response(body, {
+        status: 200,
+        statusText: 'OK',
         headers: { 'content-type': 'application/json' },
       });
     }

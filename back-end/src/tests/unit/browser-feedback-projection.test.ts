@@ -22,6 +22,7 @@ async function main(): Promise<void> {
           },
         },
         toolUsage: { findMany: async () => [] },
+        agentTaskProgressEstimate: { findMany: async () => [] },
         message: {
           findMany: async (args: Prisma.MessageFindManyArgs) => {
             query = args;
@@ -43,7 +44,25 @@ async function main(): Promise<void> {
     {
       where: {
         agentId: 'parent',
-        timestamp: { gt: floor },
+        AND: [
+          {
+            OR: [
+              { timestamp: { gt: floor } },
+              {
+                role: 'TOOL',
+                AND: [
+                  { metadata: { path: ['userPause', 'reason'], equals: 'user' } },
+                  {
+                    metadata: {
+                      path: ['userPause', 'recordedAt'],
+                      gt: '2026-10-14T23:55:00.000Z',
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
         OR: [
           { role: 'USER' },
           {
@@ -64,10 +83,31 @@ async function main(): Promise<void> {
   assert.deepEqual(
     query,
     {
-      where: { agentId: 'parent', timestamp: { gt: floor } },
+      where: {
+        agentId: 'parent',
+        AND: [
+          {
+            OR: [
+              { timestamp: { gt: floor } },
+              {
+                role: 'TOOL',
+                AND: [
+                  { metadata: { path: ['userPause', 'reason'], equals: 'user' } },
+                  {
+                    metadata: {
+                      path: ['userPause', 'recordedAt'],
+                      gt: '2026-10-14T23:55:00.000Z',
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
       orderBy: { timestamp: 'asc' },
     },
-    'ordinary GET retains its existing query'
+    'ordinary GET includes in-place pause annotations while retaining producer timestamps'
   );
   await mock.module('../../providers/benchmarkHubStore', {
     namedExports: {

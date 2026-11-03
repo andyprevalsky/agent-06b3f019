@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { summarizeKernelCaptchaEvents, type BrowserCaptchaTelemetry } from './captchaTelemetry';
 import { kernelClient } from './kernelClient';
-import type { BrowserFileInfo, BrowserViewport } from './types';
+import type { BrowserFileInfo, BrowserViewport, BrowserSessionHealth } from './types';
 
 export async function getKernelCaptchaTelemetry(
   sessionId: string
@@ -107,4 +107,21 @@ export async function pressKernelKeys(sessionId: string, keys: string[]): Promis
     { keys },
     { timeout: KERNEL_COMPUTER_INPUT_TIMEOUT_MS, maxRetries: 0 }
   );
+}
+
+export async function getKernelSessionHealth(sessionId: string): Promise<BrowserSessionHealth> {
+  const session = await kernelClient().browsers.retrieve(sessionId, {
+    include_deleted: true,
+  });
+  return {
+    provider: 'kernel',
+    sessionId,
+    status: session.deleted_at ? 'deleted' : 'active',
+    createdAt: session.created_at,
+    timeoutMs: session.timeout_seconds * 1000,
+    expiresAt: null,
+    ttlMs: null,
+    profileId: session.profile?.id ?? null,
+    uptimeMs: session.usage?.uptime_ms ?? null,
+  };
 }

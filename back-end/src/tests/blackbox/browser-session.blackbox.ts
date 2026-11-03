@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+import { request, runTest, type TestResult } from './browser-session-test-support';
 /**
  * Black-box tests for /api/browser-session
  *
@@ -19,22 +20,14 @@
  *   - idempotency: GET endpoints return same shape on repeated calls
  *   - concurrency: 10 parallel auth-check requests return consistent results
  *   - same-input reproducibility: three sequential 404s return identical status
- *   - cleanup: read-only tests (no real Steel sessions created), no state mutations
+ *   - cleanup: fixture-owned DB/browser state is retired; no paid provider sessions
  *   - harness independence: no background jobs involved
  *   - observability: covered by runner manifest and artifact directory
  *
- * Invariants not applicable:
- *   - read-after-write: cannot test without real Steel session (requires Steel SDK/billing)
- *   - state-transition: session lifecycle requires real Steel sessions
- *   - ordering/pagination: no list-all endpoint
- *   - atomicity: Steel SDK operations
- *   - referential integrity: FK relations to BrowserContext/BrowserSession
- *   - event/job cardinality: no events emitted
- *   - duplication prevention: sessions are unique by design
- *   - tenant isolation: context scoped by userId
- *   - time/clock: no timestamps in error responses
- *   - boundary param: Steel SDK calls happen inside init/close/resume (untestable without real sessions)
- *   - call ordering: Steel SDK calls are sequential
+ * Real approval E2E covers activity -> close API -> encrypted checkpoint ->
+ * destroyed Chromium -> resume API -> restored checkout -> resumed activity.
+ * Prisma, browser storage and checkpoint/restore stay real; paid native provider
+ * allocation/release and the merchant/model are local deterministic fixtures.
  *
  * Usage:
  *   npx tsx src/tests/blackbox/browser-session.blackbox.ts
@@ -45,7 +38,19 @@ import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
+import { runBrowserColdImportCases } from './browser-session-cold-import.cases';
+import { testReproducibility_threeSequential } from './browser-session-route-invariants.cases';
 import { runBrowserInitDisconnectCases } from './browser-session-init-disconnect.cases';
+import { runBrowserPauseCheckpointCases } from './browser-session-pause-checkpoint.cases';
+import { runBrowserPrivateRestoreCases } from './browser-session-private-restore.cases';
+import { runBrowserApprovalE2ECases } from './browser-session-approval-e2e.cases';
+import { runBrowserProviderLifecycleCases } from './browser-session-provider-lifecycle.cases';
+import {
+  runBrowserRootTeardownSavesStateCases,
+  runBrowserTerminalPauseCases,
+} from './browser-session-terminal-pause.cases';
+import { runBrowserResumeCustodyCases } from './browser-session-resume-custody.cases';
+import { runLogicalBrowserCases } from './browser-session-logical.cases';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -60,13 +65,6 @@ const ErrorResponse = z.object({ error: z.string() });
 
 // ==================== TEST INFRASTRUCTURE ====================
 
-interface TestResult {
-  name: string;
-  passed: boolean;
-  error?: string;
-  duration: number;
-}
-
 interface TestContext {
   accessToken?: string;
   userId?: string;
@@ -74,42 +72,7 @@ interface TestContext {
 
 const ctx: TestContext = {};
 
-async function request(
-  url: string,
-  options: RequestInit = {}
-): Promise<{ status: number; data: unknown; headers: Headers }> {
-  const response = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-  });
-  let data: unknown;
-  const ct = response.headers.get('content-type');
-  if (ct?.includes('application/json')) {
-    data = await response.json();
-  } else {
-    data = await response.text();
-  }
-  return { status: response.status, data, headers: response.headers };
-}
-
-function apiKeyHeaders(): Record<string, string> {
-  return { 'X-API-Key': API_KEY };
-}
-
-async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
-  const start = Date.now();
-  try {
-    await fn();
-    return { name, passed: true, duration: Date.now() - start };
-  } catch (error) {
-    return {
-      name,
-      passed: false,
-      error: error instanceof Error ? error.message : String(error),
-      duration: Date.now() - start,
-    };
-  }
-}
+const apiKeyHeaders = (): Record<string, string> => ({ 'X-API-Key': API_KEY });
 
 function assertStatus(actual: number, expected: number, data: unknown): void {
   if (actual !== expected) {
@@ -600,24 +563,45 @@ async function testConcurrency_parallelAuthChecks() {
   }
 }
 
-async function testReproducibility_threeSequential() {
-  const statuses: number[] = [];
-  for (let i = 0; i < 3; i++) {
-    const res = await request(`${BASE_URL}/api/browser-session/task/nonexistent`, {
-      headers: apiKeyHeaders(),
-    });
-    statuses.push(res.status);
-  }
-  if (new Set(statuses).size !== 1) {
-    throw new Error(`Three sequential: ${statuses.join(', ')}`);
-  }
-}
-
 // ==================== RUN ====================
 
 async function runAll() {
+  const focusedCases = [
+    ['--cold-import-only', runBrowserColdImportCases],
+    ['--provider-lifecycle-only', runBrowserProviderLifecycleCases],
+    ['--approval-e2e-only', runBrowserApprovalE2ECases],
+    ['--private-restore-only', runBrowserPrivateRestoreCases],
+    ['--logical-browser-only', runLogicalBrowserCases],
+    ['--resume-custody-only', runBrowserResumeCustodyCases],
+  ] as const;
+  for (const [flag, run] of focusedCases) {
+    if (!process.argv.includes(flag)) continue;
+    await run();
+    await prisma.$disconnect();
+    return;
+  }
+  if (process.argv.includes('--pause-checkpoint-only')) {
+    await runBrowserApprovalE2ECases();
+    await runBrowserPauseCheckpointCases();
+    await runBrowserPrivateRestoreCases();
+    await runBrowserTerminalPauseCases();
+    await runBrowserRootTeardownSavesStateCases();
+    console.log(
+      'PASS browser-session pause checkpoint/terminal release (8 cases; fixture provider)'
+    );
+    return;
+  }
+  await runBrowserColdImportCases();
   await runBrowserInitDisconnectCases();
   if (process.argv.includes('--init-disconnect-only')) return;
+  await runBrowserPauseCheckpointCases();
+  await runBrowserPrivateRestoreCases();
+  await runBrowserApprovalE2ECases();
+  await runBrowserTerminalPauseCases();
+  await runBrowserProviderLifecycleCases();
+  await runBrowserRootTeardownSavesStateCases();
+  await runBrowserResumeCustodyCases();
+  await runLogicalBrowserCases();
   console.log('Browser Session Black-box Tests\n');
   console.log(`Testing against: ${BASE_URL}`);
   console.log(`Case concurrency: ${CASE_CONCURRENCY}\n`);
@@ -709,7 +693,7 @@ async function runAll() {
     },
     {
       name: 'reproducibility -- 3 sequential identical status',
-      fn: testReproducibility_threeSequential,
+      fn: () => testReproducibility_threeSequential(BASE_URL, apiKeyHeaders),
     },
   ];
 

@@ -5,28 +5,27 @@
 import { deliverUserMessageToWorkflow, signalUserResponse } from '../../providers/agentResume';
 import { handleChatMessage } from '../../providers/chat';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
-import { createMessage, createWorkflowMessageGroup } from '../../providers/messages';
 import {
-  type FilePointer,
-  processUploadedFile,
-  validateTotalSize,
-  getSignedUrl,
-} from '../../providers/storage';
-import {
-  generateResponseSchema,
-  type ResponseSchemaDirectAuth,
-} from '../../providers/setResponseSchema';
-import { createLogger } from '../../providers/logger';
+  broadcastCreatedMessage,
+  createMessage,
+  createMessageOnce,
+  createUserMessageInTransaction,
+  createWorkflowMessageGroup,
+} from '../../providers/messages';
+import { type FilePointer, validateTotalSize } from '../../providers/storage';
 import type { PostMessageBody } from './types';
 import * as repo from './repo';
-
-const log = createLogger('Agents');
+import { withActiveBrowserSessionShareLock } from './repoBrowserTargetedMessages';
+import { readTaskInboxMessages } from './agentToAgentService';
+import { buildUserMessageSignalValue } from './agentMessageSignal';
+export { buildUserMessageSignalValue } from './agentMessageSignal';
+import { broadcastChatReactivation } from './agentMessageReactivation';
 
 /**
  * Agent statuses whose Temporal workflow has already ended. A follow-up message
  * to any of these must resume chat mode, not signal a dead/paused workflow.
  */
-const TERMINAL_STATUSES: ReadonlyArray<string> = [
+export const TERMINAL_STATUSES: ReadonlyArray<string> = [
   'COMPLETED',
   'FAILED',
   'OUT_OF_CREDITS',
@@ -54,18 +53,13 @@ function resolveRole(
   return { role: 'USER' };
 }
 
-export function buildUserMessageSignalValue(
-  messageText: string,
-  metadata: Record<string, unknown> | undefined
-): string {
-  const idempotencyKey = metadata?.idempotencyKey;
-  if (metadata?.isResponseSchemaUpdate === true && typeof idempotencyKey === 'string') {
-    return JSON.stringify({
-      internal_type: 'response_schema_update',
-      idempotency_key: idempotencyKey,
-    });
-  }
-  return messageText;
+/** USER rows written by agents rather than people (metadata flags, never text). */
+function isAgentAuthoredRow(metadata: PostMessageBody['metadata']): boolean {
+  return (
+    metadata?.agentNotification === true ||
+    metadata?.agentMessage === true ||
+    metadata?.environmentContext === true
+  );
 }
 
 /** Handle user message routing — signal workflow or run chat handler. */
@@ -95,6 +89,9 @@ async function routeUserMessage(
     if (count > 0) {
       agentForChat.temporalWorkflowId = null;
       agentForChat.status = 'ACTIVE';
+      // Clients still hold the finished run's status; tell them before the chat
+      // turn streams (the chat Start agent button is gated on ACTIVE).
+      await broadcastChatReactivation(agentId, agentForChat.busId ?? undefined);
     } else {
       const fresh = await repo.findAgentUnique(agentId);
       if (fresh !== null) {
@@ -140,9 +137,112 @@ async function deliverUserMessage(
   await routeUserMessage(agentId, signalValue, authoredByWorkflow);
 }
 
+/**
+ * One agent-graph (A2A) USER row from another agent: written once per
+ * idempotency key and delivered only by the call that wrote it, so a retried
+ * or racing send never signals the workflow twice. An agent's message is not
+ * the user's instruction to continue, so it never lifts a user pause (the
+ * paused agent reads it when the user resumes it). A finished agent still
+ * resumes in chat mode, as for any message.
+ */
+export async function deliverAgentGraphMessage(
+  agentId: string,
+  body: { message: string; metadata: Record<string, unknown> }
+): Promise<{ created: boolean }> {
+  const { created } = await createMessageOnce({
+    agentId,
+    text: body.message,
+    role: 'USER',
+    metadata: body.metadata,
+  });
+  if (created) {
+    await routeUserMessage(agentId, buildUserMessageSignalValue(body.message, body.metadata), true);
+  }
+  return { created };
+}
+
 // ---------------------------------------------------------------------------
 // Post message
 // ---------------------------------------------------------------------------
+
+/** The agent exists (and is the caller's, for user writes) and attachments fit. */
+async function validatePostTarget(
+  agentId: string,
+  body: PostMessageBody,
+  isInternal: boolean,
+  userId?: string
+): Promise<{ error: string; status: number } | null> {
+  const agent = isInternal
+    ? await repo.findAgentById(agentId)
+    : await repo.findAgent(agentId, userId);
+  if (!agent) return { error: 'Agent not found', status: 404 };
+  if (body.attachments !== undefined && body.attachments.length > 0) {
+    try {
+      validateTotalSize(body.attachments as FilePointer[]);
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : 'Invalid attachments',
+        status: 400,
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * `browser_task_id` (user Browser composer) addresses one running browser task
+ * of this agent. Only an ACTIVE session is reading its instructions; then the
+ * stored row carries `browserTaskId` (the tag the browser's instruction read
+ * already filters on) and `excludeFromModel` (the owner's model and loop skip
+ * it). A paused/ended session (run over, or pause-closed after its last step)
+ * would never read it, so the message is delivered to the owner as before.
+ * Files only reach models through the owner, so a target with files is a 400.
+ * The ACTIVE check and the insert share one row lock (see
+ * createBrowserTargetedMessage), so a pause-close cannot slip between them.
+ */
+async function resolveBrowserTarget(
+  agentId: string,
+  body: PostMessageBody,
+  role: string,
+  isInternal: boolean
+): Promise<{ browserTaskId: string } | { error: string; status: number } | null> {
+  const browserTaskId = body.browser_task_id;
+  if (browserTaskId === undefined) return null;
+  if (isInternal || role !== 'USER') {
+    return { error: 'browser_task_id is only valid on user messages', status: 400 };
+  }
+  if ((body.attachments?.length ?? 0) > 0 || body.file_pointer !== undefined) {
+    return { error: 'browser_task_id cannot carry files; send files to the agent', status: 400 };
+  }
+  const task = await repo.findAgentBrowserTask(agentId, browserTaskId);
+  if (task === null) return { error: 'Browser task not found', status: 404 };
+  return { browserTaskId };
+}
+
+/**
+ * Store a Browser-composer message only while its session is ACTIVE, under a
+ * FOR SHARE lock on that BrowserSession row. The browser's pause-close UPDATE
+ * waits for this insert (so its post-close read sees the row), or commits
+ * first (so the message falls back to the owner, returning null). One row
+ * lock and one insert per message; broadcast after commit.
+ */
+async function createBrowserTargetedMessage(
+  agentId: string,
+  body: PostMessageBody,
+  browserTaskId: string
+) {
+  const message = await withActiveBrowserSessionShareLock(agentId, browserTaskId, (tx) =>
+    createUserMessageInTransaction(tx, {
+      agentId,
+      text: body.message,
+      metadata: { ...(body.metadata ?? {}), browserTaskId, excludeFromModel: true },
+    })
+  );
+  if (message !== null) {
+    broadcastCreatedMessage({ agentId, text: message.text, role: 'USER' }, message);
+  }
+  return message;
+}
 
 /**
  * A stale TOOL write must TELL the worker it is dead.
@@ -164,6 +264,21 @@ function staleWorkerRejection(): { error: string; status: number } {
   return { error: 'Workflow generation is no longer current', status: 409 };
 }
 
+/**
+ * Explore progress posts carry their task's inbox read (one bounded indexed
+ * query) instead of a separate per-step GET /:id/agent-inbox.
+ */
+async function withPiggybackedInbox<T extends object>(
+  agentId: string,
+  body: PostMessageBody,
+  isInternal: boolean,
+  posted: T
+): Promise<T & { pending_inbox?: Awaited<ReturnType<typeof readTaskInboxMessages>> }> {
+  if (!isInternal || body.inbox === undefined) return posted;
+  const pending = await readTaskInboxMessages(agentId, body.inbox.task_id, body.inbox.since);
+  return { ...posted, pending_inbox: pending };
+}
+
 /** Post a message to an agent (user or internal). */
 export async function postMessage(
   agentId: string,
@@ -179,30 +294,15 @@ export async function postMessage(
   }
   const { role } = roleResult;
 
-  // Verify agent exists
-  if (isInternal) {
-    const agent = await repo.findAgentById(agentId);
-    if (!agent) {
-      return { error: 'Agent not found', status: 404 };
-    }
-  } else {
-    const agent = await repo.findAgent(agentId, userId);
-    if (!agent) {
-      return { error: 'Agent not found', status: 404 };
-    }
-  }
+  const invalid = await validatePostTarget(agentId, body, isInternal, userId);
+  if (invalid !== null) return invalid;
 
-  // Validate attachments if provided
-  if (body.attachments !== undefined && body.attachments.length > 0) {
-    try {
-      validateTotalSize(body.attachments as FilePointer[]);
-    } catch (error) {
-      return {
-        error: error instanceof Error ? error.message : 'Invalid attachments',
-        status: 400,
-      };
-    }
-  }
+  const browserTarget = await resolveBrowserTarget(agentId, body, role, isInternal);
+  if (browserTarget !== null && 'error' in browserTarget) return browserTarget;
+  const targeted =
+    browserTarget === null
+      ? null
+      : await createBrowserTargetedMessage(agentId, body, browserTarget.browserTaskId);
 
   const messageParams = {
     agentId,
@@ -212,7 +312,9 @@ export async function postMessage(
     filePointer: body.file_pointer as Record<string, unknown> | undefined,
   };
   let message;
-  if (isInternal) {
+  if (targeted !== null) {
+    message = targeted;
+  } else if (isInternal) {
     // An internal write with no X-Agent-Workflow-Generation header is
     // UNATTRIBUTED, not "generation 1". Defaulting it to the agent id
     // fabricated a real-but-wrong generation, because generation 1's Temporal
@@ -252,131 +354,19 @@ export async function postMessage(
     }
   }
 
-  if (role === 'USER') {
+  // Agent-authored USER rows (background-agent notifications, agent-to-agent
+  // messages) are polled by the owning workflow, which already woke itself;
+  // echoing them back as receive_user_response would read as user feedback.
+  // A Browser-composer message belongs to that browser task: the browser reads
+  // it at its next step, so the owner's loop is never signalled for it.
+  if (role === 'USER' && targeted === null && !(isInternal && isAgentAuthoredRow(body.metadata))) {
     await deliverUserMessage(agentId, body, isInternal && workflowGeneration !== undefined);
   }
 
-  return {
+  return withPiggybackedInbox(agentId, body, isInternal, {
     message_id: message.id,
     timestamp: message.timestamp,
     text: message.text,
     role: message.role,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// File uploads (deprecated - use /api/upload)
-// ---------------------------------------------------------------------------
-
-/** Upload a file attachment for an agent. */
-export async function uploadAttachment(
-  userId: string,
-  agentId: string,
-  file: { buffer: Buffer; originalname: string; mimetype: string }
-) {
-  const filePointer = await processUploadedFile(
-    userId,
-    file.buffer,
-    file.originalname,
-    file.mimetype
-  );
-
-  log.info('Uploaded file', {
-    user_id: userId,
-    filename: filePointer.original_filename,
-    size_bytes: filePointer.size_bytes,
-    agent_id: agentId,
   });
-
-  return { file_pointer: filePointer };
-}
-
-/** True when the requester may mint a signed URL for this storage path. */
-export function canAccessAttachmentPath(args: {
-  requesterUserId: string;
-  storagePath: string;
-  agentOwnerUserId?: string;
-  isAdmin: boolean;
-}): boolean {
-  if (args.storagePath.startsWith(`${args.requesterUserId}/`)) {
-    return true;
-  }
-  // Admins can inspect other users' agents (same as GET /agents/:id) but may
-  // only sign files stored under that agent's owner — not arbitrary prefixes.
-  return (
-    args.isAdmin &&
-    typeof args.agentOwnerUserId === 'string' &&
-    args.agentOwnerUserId.length > 0 &&
-    args.storagePath.startsWith(`${args.agentOwnerUserId}/`)
-  );
-}
-
-/** Get a signed URL for a file attachment. */
-export async function getAttachmentSignedUrl(
-  userId: string,
-  storagePath: string,
-  access: { agentId?: string; isAdmin?: boolean } = {}
-) {
-  let agentOwnerUserId: string | undefined;
-  if (access.isAdmin === true && typeof access.agentId === 'string' && access.agentId.length > 0) {
-    const agent = await repo.findAgentById(access.agentId);
-    agentOwnerUserId = agent?.userId;
-  }
-  if (
-    !canAccessAttachmentPath({
-      requesterUserId: userId,
-      storagePath,
-      agentOwnerUserId,
-      isAdmin: access.isAdmin === true,
-    })
-  ) {
-    return { error: 'Access denied to this file', status: 403 };
-  }
-
-  // Generate signed URL (1 hour expiry)
-  const signedUrl = await getSignedUrl(storagePath, 3600);
-
-  return {
-    signed_url: signedUrl,
-    expires_in: 3600,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Batch message lookup (context pointer resolution)
-// ---------------------------------------------------------------------------
-
-const MAX_BATCH_SIZE = 50;
-
-/** Fetch messages by IDs for context pointer resolution. Scoped to user's agents. */
-export async function getMessagesBatch(ids: unknown, userId: string) {
-  if (!Array.isArray(ids) || ids.length === 0) {
-    return { error: 'ids must be a non-empty array', status: 400 };
-  }
-
-  if (ids.length > MAX_BATCH_SIZE) {
-    return { error: `Maximum ${MAX_BATCH_SIZE} IDs per batch request`, status: 400 };
-  }
-
-  const messages = await repo.findMessagesByIds(ids as string[], userId);
-  return { messages };
-}
-
-// ---------------------------------------------------------------------------
-// Generate response schema
-// ---------------------------------------------------------------------------
-
-/** Generate response schema for a goal (used by browser agent). */
-export async function generateSchema(goal: string, directAuth?: ResponseSchemaDirectAuth) {
-  return generateResponseSchema(goal, { directAuth });
-}
-
-// ---------------------------------------------------------------------------
-// Batch fetch messages
-// ---------------------------------------------------------------------------
-
-/** Fetch messages by IDs, scoped to the requesting user. */
-export async function batchFetchMessages(ids: string[], userId: string) {
-  const messages = await repo.findMessagesByIds(ids, userId);
-  return { messages };
 }

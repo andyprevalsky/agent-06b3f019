@@ -16,6 +16,7 @@
 
 import { prisma } from '../database';
 import { CompletionMessage, ContentBlock, markCacheable } from '../rose';
+import { withSerializedLock } from '../sharedState';
 import { sendOnChannel, type SupervisorChannel } from './channelDelivery';
 import { processInboundAttachments, type InboundMediaAttachment } from './inboundMedia';
 import {
@@ -35,13 +36,7 @@ import {
   dispatchToolSafely,
   buildToolFailureMessage,
 } from './supervisorResilience';
-import {
-  absorbPendingOpKind,
-  emptySmsRunSideEffectEvidence,
-  purchaseIntentCompletionError,
-  resolveSendUserMessage,
-  sameSmsBody,
-} from './messageGrounding';
+import { resolveSendUserMessage, sameSmsBody } from './messageGrounding';
 import { callSupervisorLlm, type SupervisorResponse } from './supervisorLlm';
 import { reactToInboundMessage } from './inboundReaction';
 import { redactTraceEntry, type SupervisorToolTraceEntry } from './toolTrace';
@@ -80,34 +75,28 @@ export const SUPERVISOR_FALLBACK_MESSAGE =
 /**
  * Per-user commit lock. Held while a run flushes pendingWrites + sends SMS +
  * persists transcript so two near-simultaneous attempt_completions cannot
- * interleave their side effects.
+ * interleave their side effects, even when the two inbound messages are
+ * handled by different backend instances (Postgres advisory lock per user).
  *
  * The seq gate (inside the locked region) is what actually decides whether to
  * commit — the lock just serializes ordering.
  */
-const commitLocksByUser = new Map<string, Promise<void>>();
-async function withCommitLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
-  const prev = commitLocksByUser.get(userId) ?? Promise.resolve();
-  let release!: () => void;
-  const released = new Promise<void>((resolve) => {
-    release = resolve;
+export async function withCommitLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
+  return withSerializedLock(`sms-commit:${userId}`, fn);
+}
+
+/**
+ * True while no newer inbound SMS (or /clear, which also advances the
+ * sequence) has arrived since the run captured `mySeq`. This is the
+ * cross-instance supersede signal: the in-process AbortController only
+ * reaches runs on the instance that received the newer message.
+ */
+export async function inboundSeqStillCurrent(userId: string, mySeq: number): Promise<boolean> {
+  const current = await prisma.smsSession.findUnique({
+    where: { userId },
+    select: { lastInboundSeq: true },
   });
-  // Anyone arriving after us awaits BOTH the previous holder AND our own
-  // release. Storing the chained promise (prev → released) is what keeps
-  // the queue strictly ordered.
-  const myTurn = prev.then(() => released);
-  commitLocksByUser.set(userId, myTurn);
-  try {
-    await prev;
-    return await fn();
-  } finally {
-    release();
-    // If no one queued behind us, clear the slot. Otherwise leave the latest
-    // entry in place so the next holder's queue remains intact.
-    if (commitLocksByUser.get(userId) === myTurn) {
-      commitLocksByUser.delete(userId);
-    }
-  }
+  return (current?.lastInboundSeq ?? 0) <= mySeq;
 }
 
 export interface SmsSupervisorResult {
@@ -190,10 +179,9 @@ export async function handleSmsSupervisorMessage(config: {
   const smsContext = await environment.prepareSmsEnvironment(
     userId,
     mySeq,
-    inboundAlreadyPersisted,
-    inboundText
+    inboundAlreadyPersisted
   );
-  const { systemPrompt, contextUserMessage, sessionHistory, invocationContext } = smsContext;
+  const { systemPrompt, contextUserMessage, sessionHistory } = smsContext;
 
   log.info('[SmsSupervisor] Context built', {
     userId,
@@ -224,7 +212,6 @@ export async function handleSmsSupervisorMessage(config: {
   const pendingWrites: PendingOp[] = [];
   const sentMessages: string[] = [];
   const sentMessageCalls: Array<{ message: string; replyToMessageId?: unknown }> = [];
-  let sideEffectEvidence = emptySmsRunSideEffectEvidence();
   let completionAccepted = false;
   let consecutiveEmptyRounds = 0;
   let inboundStoredForRun = inboundAlreadyPersisted;
@@ -252,11 +239,7 @@ export async function handleSmsSupervisorMessage(config: {
 
   const runStillOwnsReply = async (): Promise<boolean> => {
     if (abortSignal?.aborted) return false;
-    const current = await prisma.smsSession.findUnique({
-      where: { userId },
-      select: { lastInboundSeq: true },
-    });
-    if ((current?.lastInboundSeq ?? 0) > mySeq) return false;
+    if (!(await inboundSeqStillCurrent(userId, mySeq))) return false;
     return commitGuard === undefined || (await commitGuard());
   };
 
@@ -274,9 +257,16 @@ export async function handleSmsSupervisorMessage(config: {
         return [superseded];
       }
       const queued = pendingWrites.splice(0, pendingWrites.length);
-      const results = await commitPendingWrites(queued, userId, channel, media.filePointers);
-      results.forEach((result, index) => {
-        const operation = queued[index];
+      const results: ToolResult[] = [];
+      for (const operation of queued) {
+        const [result] = await commitPendingWrites(
+          [operation],
+          userId,
+          channel,
+          media.filePointers,
+          (agentId) => log.info('[SmsSupervisor] ROOT_ALLOCATED', { userId, mySeq, agentId })
+        );
+        results.push(result);
         recordToolTrace(
           round,
           {
@@ -286,7 +276,16 @@ export async function handleSmsSupervisorMessage(config: {
           result,
           'commit'
         );
-      });
+        // Publish custody before another write or LLM round can stall. The final
+        // TOOL_TRACE remains unchanged; this record carries no user content.
+        if (operation.kind === 'start_new_agent' && result.success) {
+          log.info('[SmsSupervisor] ROOT_COMMITTED', {
+            userId,
+            mySeq,
+            agentId: operation.provisionalId,
+          });
+        }
+      }
       return results;
     });
   };
@@ -363,7 +362,9 @@ export async function handleSmsSupervisorMessage(config: {
   // the first poll picks up anything that landed after the context was composed.
   let threadWatermark = new Date().toISOString();
 
-  for (let round = 0; round < environment.MAX_TOOL_ROUNDS; round++) {
+  // The work budget is followed by one closing turn; queued writes retain their commit gates.
+  for (let round = 0; round <= environment.MAX_TOOL_ROUNDS; round++) {
+    const finalResponseRound = round === environment.MAX_TOOL_ROUNDS;
     // Catch the model's view of the thread up to the user's phone. Anything
     // that landed since the last round — an agent announcing itself, a sibling
     // finishing — is replayed verbatim, in order, with the role it was stored
@@ -394,6 +395,13 @@ export async function handleSmsSupervisorMessage(config: {
         round,
         error: error instanceof Error ? error.message : String(error),
       });
+    }
+
+    if (finalResponseRound) {
+      const lastToolResult = [...messages].reverse().find((message) => message.role === 'tool');
+      if (!lastToolResult || typeof lastToolResult.content !== 'string') break;
+      lastToolResult.content +=
+        '\n\nYou have reached the maximum number of tool-calling rounds. Use the results already available to send one final message with send_user_message and call argument-free attempt_completion. Include both tool calls in this response, in that order. Do not call any other tools.';
     }
 
     log.info('[SmsSupervisor] LLM call round', {
@@ -451,9 +459,48 @@ export async function handleSmsSupervisorMessage(config: {
     const sendCalls = realToolCalls.filter((tc) => tc.tool === 'send_user_message');
     const dispatchCalls = realToolCalls.filter((tc) => tc.tool !== 'send_user_message');
 
+    if (
+      finalResponseRound &&
+      (llmResponse.tool_calls.some(
+        (tc) => tc.tool !== 'send_user_message' && tc.tool !== 'attempt_completion'
+      ) ||
+        sendCalls.length > 1)
+    ) {
+      const error =
+        'Rejected: the final response may only send one user message and attempt completion';
+      for (const toolCall of llmResponse.tool_calls) {
+        recordToolTrace(
+          round,
+          toolCall,
+          { tool: toolCall.tool, success: false, result: '', error },
+          'dispatch'
+        );
+      }
+      log.warn('[SmsSupervisor] Final response attempted extra work or multiple replies');
+      break;
+    }
+
     // Resolve reads/writes before user delivery. A same-round tool failure must
     // not allow an ungrounded success message to escape first.
     const toolResults: ToolResult[] = [];
+    // Each result is replayed on the tool call that produced it (native tool
+    // history); results owned by no single call ride on the last one.
+    const resultsByCall = new Map<ToolCall, ToolResult[]>();
+    const recordResult = (toolCall: ToolCall, result: ToolResult): void => {
+      toolResults.push(result);
+      resultsByCall.set(toolCall, [...(resultsByCall.get(toolCall) ?? []), result]);
+    };
+    const respondedCalls = llmResponse.tool_calls;
+    const nativeFeedback = (guidance: string) => {
+      const owned = new Set([...resultsByCall.values()].flat());
+      return environment.buildNativeToolFeedbackMessages({
+        round,
+        toolCalls: respondedCalls,
+        resultsByCall,
+        roundResults: toolResults.filter((result) => !owned.has(result)),
+        guidance,
+      });
+    };
     let terminalFailureReported = false;
     for (const toolCall of dispatchCalls) {
       const toolStart = Date.now();
@@ -470,9 +517,9 @@ export async function handleSmsSupervisorMessage(config: {
                 inboundAlreadyPersisted ? mySeq : undefined
               ),
             }
-          : await dispatchToolCall(toolCall, userId, pendingWrites, invocationContext)
+          : await dispatchToolCall(toolCall, userId, pendingWrites)
       );
-      toolResults.push(result);
+      recordResult(toolCall, result);
       allToolsExecuted.push(toolCall.tool);
       recordToolTrace(round, toolCall, result, 'dispatch');
 
@@ -486,22 +533,11 @@ export async function handleSmsSupervisorMessage(config: {
       });
     }
 
-    // Track write tools queued this round so send_user_message grounding can
-    // see start_new_agent / kill_agent even before the commit flush below.
-    for (const op of pendingWrites) {
-      sideEffectEvidence = absorbPendingOpKind(sideEffectEvidence, op.kind);
-    }
-
     const dispatchFailures = toolResults.filter((result) => !result.success);
     if (sendCalls.length > 0 && dispatchFailures.length === 0) {
       const commitResults = await flushPendingWrites(round);
       const commitFailures = commitResults.filter((result) => !result.success);
       toolResults.push(...commitResults);
-      for (const committed of commitResults) {
-        if (committed.success) {
-          sideEffectEvidence = absorbPendingOpKind(sideEffectEvidence, committed.tool);
-        }
-      }
       if (commitFailures.length > 0) {
         const delivery = await deliverUserMessage(
           buildToolFailureMessage(commitFailures, 'commit')
@@ -510,14 +546,10 @@ export async function handleSmsSupervisorMessage(config: {
         terminalFailureReported = delivery.success;
       } else {
         for (const toolCall of sendCalls) {
-          const resolved = resolveSendUserMessage(toolCall.arguments?.message, sideEffectEvidence);
+          const resolved = resolveSendUserMessage(toolCall.arguments?.message);
           let sendResult: ToolResult;
           if (!resolved.ok) {
-            log.warn('[SmsSupervisor] Blocked ungrounded send_user_message', {
-              round,
-              error: resolved.error,
-              sideEffectEvidence,
-            });
+            log.warn('[SmsSupervisor] Invalid send_user_message', { round, error: resolved.error });
             sendResult = {
               tool: 'send_user_message',
               success: false,
@@ -545,7 +577,7 @@ export async function handleSmsSupervisorMessage(config: {
               toolCall.arguments?.reply_to_message_id
             );
           }
-          toolResults.push(sendResult);
+          recordResult(toolCall, sendResult);
           allToolsExecuted.push(toolCall.tool);
           recordToolTrace(round, toolCall, sendResult, 'dispatch');
         }
@@ -558,14 +590,13 @@ export async function handleSmsSupervisorMessage(config: {
           result: '',
           error: 'Not sent because another tool in this response failed',
         };
-        toolResults.push(result);
+        recordResult(toolCall, result);
         allToolsExecuted.push(toolCall.tool);
         recordToolTrace(round, toolCall, result, 'dispatch');
       }
     }
 
     const failedToolResults = toolResults.filter((result) => !result.success);
-    const blockingFailures = failedToolResults;
 
     // attempt_completion sends nothing. It is a valid stop signal only after
     // this run has successfully delivered at least one user message.
@@ -584,22 +615,17 @@ export async function handleSmsSupervisorMessage(config: {
         );
         break;
       }
-      const purchaseCompletionError = purchaseIntentCompletionError(
-        inboundText,
-        sideEffectEvidence
-      );
-      if (sentMessages.length === 0 || blockingFailures.length > 0 || purchaseCompletionError) {
+      if (sentMessages.length === 0 || failedToolResults.length > 0) {
         const completionFailure: ToolResult = {
           tool: 'attempt_completion',
           success: false,
           result: '',
           error:
-            purchaseCompletionError ??
-            (sentMessages.length === 0
+            sentMessages.length === 0
               ? 'Rejected: this run has not successfully called send_user_message'
-              : 'Rejected: at least one tool failed'),
+              : 'Rejected: at least one tool failed',
         };
-        toolResults.push(completionFailure);
+        recordResult(completionCall, completionFailure);
         recordToolTrace(round, completionCall, completionFailure, 'completion');
         log.warn('[SmsSupervisor] attempt_completion rejected', {
           round,
@@ -610,21 +636,10 @@ export async function handleSmsSupervisorMessage(config: {
           })),
         });
 
-        const toolResultSummary = toolResults
-          .map((r) => `[${r.tool}] ${r.success ? 'OK' : 'ERROR'}: ${r.result || r.error}`)
-          .join('\n');
-
         messages.push(
-          ...environment.buildToolFeedbackMessages({
-            round,
-            assistantPayload: JSON.stringify({
-              reasoning: llmResponse.reasoning,
-              tool_calls: llmResponse.tool_calls,
-            }),
-            toolResultSummary: `Tool results:\n${toolResultSummary}\n[attempt_completion] ERROR: ${completionFailure.error}`,
-            guidance:
-              'Correct the failed call. Use send_user_message for anything the user should see. attempt_completion accepts no information and can only stop after a successful send_user_message in this run.',
-          })
+          ...nativeFeedback(
+            'Correct the failed call. Use send_user_message for anything the user should see. attempt_completion accepts no information and can only stop after a successful send_user_message in this run.'
+          )
         );
         continue;
       }
@@ -635,28 +650,18 @@ export async function handleSmsSupervisorMessage(config: {
         const failureMessage = buildToolFailureMessage(commitFailures, 'commit');
         const delivery = await deliverUserMessage(failureMessage);
         toolResults.push(...commitResults, delivery);
-        recordToolTrace(
-          round,
-          completionCall,
-          {
-            tool: 'attempt_completion',
-            success: false,
-            result: '',
-            error: 'Rejected: at least one pending write failed to commit',
-          },
-          'completion'
-        );
+        const commitRejection: ToolResult = {
+          tool: 'attempt_completion',
+          success: false,
+          result: '',
+          error: 'Rejected: at least one pending write failed to commit',
+        };
+        recordResult(completionCall, commitRejection);
+        recordToolTrace(round, completionCall, commitRejection, 'completion');
         messages.push(
-          ...environment.buildToolFeedbackMessages({
-            round,
-            assistantPayload: JSON.stringify({
-              reasoning: llmResponse.reasoning,
-              tool_calls: llmResponse.tool_calls,
-            }),
-            toolResultSummary: `Tool results:\n${toolResults.map((r) => `[${r.tool}] ${r.success ? 'OK' : 'ERROR'}: ${r.result || r.error}`).join('\n')}`,
-            guidance:
-              'The write did not complete. Continue only if it can be corrected; otherwise call attempt_completion because the failure was sent to the user.',
-          })
+          ...nativeFeedback(
+            'The write did not complete. Continue only if it can be corrected; otherwise call attempt_completion because the failure was sent to the user.'
+          )
         );
         continue;
       }
@@ -714,22 +719,11 @@ export async function handleSmsSupervisorMessage(config: {
     }
     consecutiveEmptyRounds = 0;
 
-    // Append tool results to messages for next LLM call
-    const toolResultSummary = toolResults
-      .map((r) => `[${r.tool}] ${r.success ? 'OK' : 'ERROR'}: ${r.result || r.error}`)
-      .join('\n');
-
+    // Append this round's tool calls and their results for the next LLM call.
     messages.push(
-      ...environment.buildToolFeedbackMessages({
-        round,
-        assistantPayload: JSON.stringify({
-          reasoning: llmResponse.reasoning,
-          tool_calls: llmResponse.tool_calls,
-        }),
-        toolResultSummary: `Tool results:\n${toolResultSummary}`,
-        guidance:
-          'Incorporate these results. Use send_user_message only for text the user still needs, and call argument-free attempt_completion as soon as the run is complete.',
-      })
+      ...nativeFeedback(
+        'Incorporate these results. Use send_user_message only for text the user still needs, and call argument-free attempt_completion as soon as the run is complete.'
+      )
     );
 
     if (round === environment.MAX_TOOL_ROUNDS - 1) {

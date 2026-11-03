@@ -26,7 +26,8 @@ const ToastViewport = React.forwardRef<
   <ToastPrimitives.Viewport
     ref={ref}
     className={cn(
-      'fixed right-0 top-0 flex max-h-screen w-full flex-col p-4 md:max-w-[420px]',
+      // Installed iOS PWAs draw the status bar over the page: drop toasts below it.
+      'fixed right-0 top-0 flex max-h-screen w-full flex-col p-4 pt-[calc(1rem+var(--safe-area-inset-top))] md:max-w-[420px]',
       className,
     )}
     style={{ ...style, zIndex: style?.zIndex || 2147483647 }}
@@ -40,9 +41,8 @@ const toastVariants = cva(
   {
     variants: {
       variant: {
-        default: 'border-border bg-white dark:bg-white dark:text-black text-foreground',
-        destructive:
-          'destructive group border-border bg-white dark:bg-white dark:text-black text-foreground',
+        default: 'border-border bg-background text-foreground',
+        destructive: 'destructive group border-destructive/50 bg-background text-foreground',
       },
     },
     defaultVariants: {

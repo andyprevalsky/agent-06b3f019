@@ -1,5 +1,10 @@
 import { type Response, type Router } from 'express';
 import { type AuthRequest, authenticate } from '../../providers/auth';
+import { BrowserOperationWorkerOwnedError } from '../../providers/browser';
+import {
+  TilionInsufficientCreditsError,
+  TilionSessionBusyError,
+} from '../../providers/browser/tilion';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { isValidBrowserKeySymbols } from './service.browser-input';
 import {
@@ -9,6 +14,40 @@ import {
   SessionNotFoundError,
   takeScreenshot,
 } from './service';
+
+/**
+ * Typed provider refusals instead of a 500: 409 `worker_owned` for an
+ * operation only the worker can do (Tilion upload), 409 when a CDP client (the agent)
+ * holds a Tilion session so REST drive calls are refused, 402 when the Tilion
+ * wallet is exhausted.
+ */
+export function respondToTilionRefusal(error: unknown, res: Response): boolean {
+  if (error instanceof BrowserOperationWorkerOwnedError) {
+    res.status(409).json({
+      error: 'worker_owned',
+      provider: error.provider,
+      operation: error.operation,
+      message: error.message,
+    });
+    return true;
+  }
+  if (error instanceof TilionSessionBusyError) {
+    res.status(409).json({
+      error: 'session_driven_by_client',
+      provider: 'tilion',
+      retryable_after_detach: true,
+      message: error.message,
+    });
+    return true;
+  }
+  if (error instanceof TilionInsufficientCreditsError) {
+    res
+      .status(402)
+      .json({ error: 'insufficient_credits', provider: 'tilion', message: error.message });
+    return true;
+  }
+  return false;
+}
 
 function userIdForSessionAccess(req: AuthRequest): string | undefined {
   return req.isInternal === true ? undefined : req.user?.id;
@@ -40,6 +79,7 @@ async function handlePressKey(req: AuthRequest, res: Response): Promise<void> {
       res.status(404).json({ error: error.message });
       return;
     }
+    if (respondToTilionRefusal(error, res)) return;
     throw error;
   }
 }
@@ -75,6 +115,7 @@ export function registerBrowserDataRoutes(router: Router): void {
           res.status(404).json({ error: error.message });
           return;
         }
+        if (respondToTilionRefusal(error, res)) return;
         throw error;
       }
     })
@@ -95,6 +136,7 @@ export function registerBrowserDataRoutes(router: Router): void {
           res.status(404).json({ error: error.message });
           return;
         }
+        if (respondToTilionRefusal(error, res)) return;
         throw error;
       }
     })

@@ -9,7 +9,7 @@
  *   GET  /login/methods   every sign-in method for that email
  *   POST /login           ok ? cookie, 303 landing : second factor ? 303 /login/verify : form + error
  *   GET  /login/verify    second-factor code form;  POST verifies, POST /resend re-sends
- *   GET  /account         signed in ? member details : 303 /login
+ *   GET  /account         signed in ? member details and orders : 303 /login
  *   GET  /guest           guest page on sites that have one
  *   POST /logout          end session, 303 /
  *
@@ -39,8 +39,8 @@ import {
   nextQuery,
 } from './servicePages';
 import { renderCodeEntryPage } from './servicePagesCodes';
-import { renderShopPage } from './servicePagesShop';
-import { cartLines } from './serviceShop';
+import { renderOrderHistory, renderShopPage } from './servicePagesShop';
+import { cartLines, ordersFor } from './serviceShop';
 import {
   cartToken,
   completeSignIn,
@@ -51,12 +51,14 @@ import {
   sendPage,
   sessionOf,
   setSessionCookie,
+  setAppApprovalCookie,
   siteOf,
   type SiteRequest,
 } from './routesShared';
 import { signInMethodsRouter } from './routesSignInMethods';
 import { signUpRouter } from './routesSignUp';
 import { shopRouter } from './routesShop';
+import { appApprovalRouter } from './routesAppApproval';
 import type { RejectionReason } from './types';
 
 export const pagesRouter = Router();
@@ -168,6 +170,11 @@ pagesRouter.post(
       );
       return;
     }
+    if (result.ok === 'app_approval') {
+      setAppApprovalCookie(res, site, result.challengeToken);
+      res.redirect(303, `${siteUrl(site, '/login/approve')}${nextQuery(next)}`);
+      return;
+    }
     const error = passwordError(result.reason);
     sendPage(
       res,
@@ -225,9 +232,16 @@ pagesRouter.get('/:siteId/account', (req: Request, res: Response) => {
     return;
   }
   const account = findAccount(site, session.email);
+  const orders = site.behavior.shop ? ordersFor(site, { session, cartToken: null }) : [];
   sendPage(
     res,
-    renderAccountPage(site, session, memberNumberFor(site, session.email), account?.name ?? null)
+    renderAccountPage(
+      site,
+      session,
+      memberNumberFor(site, session.email),
+      account?.name ?? null,
+      renderOrderHistory(site, orders)
+    )
   );
 });
 
@@ -253,5 +267,6 @@ pagesRouter.post('/:siteId/logout', (req: Request, res: Response) => {
 });
 
 pagesRouter.use(signInMethodsRouter);
+pagesRouter.use(appApprovalRouter);
 pagesRouter.use(signUpRouter);
 pagesRouter.use(shopRouter);

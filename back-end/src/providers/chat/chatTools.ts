@@ -4,9 +4,9 @@
  */
 
 import { createLogger } from '../logger';
-import { cacheGet, cacheSet } from '../fastCacheStore';
-import { goalHash } from '../fastCacheNormalizeCore';
-import { webSearchKey } from '../fastCacheNormalizeKeys';
+import { cacheGet, cacheSet } from '../demoCacheStore';
+import { goalHash } from '../demoCacheNormalizeCore';
+import { webSearchKey } from '../demoCacheNormalizeKeys';
 import { retryWithBackoff } from '../retry';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
 
@@ -169,12 +169,12 @@ export async function executeWebSearch(
   if (cacheKey !== null && fastModeReadEnabled) {
     const hit = await cacheGet(cacheKey);
     if (hit.hit && hit.value) {
-      log.info('fast_cache.chat_web_search_hit', { key: cacheKey });
+      log.info('demo_cache.chat_web_search_hit', { key: cacheKey });
       return hit.value as WebSearchResult;
     }
-    log.info('fast_cache.chat_web_search_miss', { key: cacheKey });
+    log.info('demo_cache.chat_web_search_miss', { key: cacheKey });
   } else if (cacheKey !== null) {
-    log.info('fast_cache.chat_web_search_write_only', { key: cacheKey });
+    log.info('demo_cache.chat_web_search_write_only', { key: cacheKey });
   }
 
   try {
@@ -214,9 +214,9 @@ export async function executeWebSearch(
             goalHash: goalHash(fastModeGoal),
             value: result,
           }),
-        () => log.info('fast_cache.chat_web_search_stored', { key: cacheKey }),
+        () => log.info('demo_cache.chat_web_search_stored', { key: cacheKey }),
         (error) =>
-          log.warn('fast_cache.chat_web_search_store_failed', {
+          log.warn('demo_cache.chat_web_search_store_failed', {
             key: cacheKey,
             error: error instanceof Error ? error.message : String(error),
           })

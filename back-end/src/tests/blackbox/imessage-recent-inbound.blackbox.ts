@@ -92,6 +92,7 @@ async function seedMessage(
   await prisma.messageRecord.create({
     data: {
       personId: person.id,
+      userId,
       channel: opts.channel,
       from: opts.from,
       to: opts.to,

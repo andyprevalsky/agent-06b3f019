@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "timestamp_utc": "2026-10-13T03:15:14.002040+00:00",
+  "baseline_head": "6775233a7e09f2995aca218830f70f13fc821c4e",
+  "conditional_user_authority": "if this preserecs the behaviorr we already dervied correctly in Rose.complete, then this is fine",
+  "failure_run": "6c33c1f9-7208-42e0-8d2c-235d6eec9349",
+  "focused_live_result_before": "0/3 passed; zero spawned agents; reported cost 0",
+  "root_cause": "Native provider emitted numbers and objects as strings; SMS dispatcher bypassed existing Zod argument validation, so feedback lacked authored type errors.",
+  "wire_type_preservation_offline": "PASS; request schemas contain numeric/object types; parser preserves valid numeric/object/boolean values",
+  "change": "Validate known tools using unchanged SmsSupervisorToolCallSchema before dispatcher execution; replay generated type errors through existing native tool feedback; keep unknown-tool diagnostics.",
+  "static_llm_text_changed": false,
+  "schemas_models_timeouts_round_limits_changed": false,
+  "coercion_added": false,
+  "owning_regression": "RED baseline / GREEN current; existing sms-supervisor-stream domain 16 cases",
+  "other_checks": {
+    "native_contract_unit": "PASS",
+    "tool_feedback_unit": "PASS"
+  },
+  "live_after": "pending",
+  "private_evidence_paths": [
+    ".context/tamy-resumed/tamy-native-validation-rca/owning-before.log",
+    ".context/tamy-resumed/tamy-native-validation-rca/owning-after.log",
+    ".context/tamy-resumed/tamy-native-validation-rca/wire.log",
+    ".context/tamy-resumed/tamy-native-validation-rca/schema-summary.json"
+  ],
+  "original_source_preserved": true,
+  "compatibility_followup": {
+    "original_coverage_attempt": "failed two owning unit files; owning stage interrupted exit143 after preserving failures",
+    "correction": "Reject supplied non-null wrong types using existing Zod issues; preserve omitted/null defaults and existing enum/value diagnostics",
+    "owning_checks": "sms-supervisor-stream16 cases, phase3 cases, budget2 cases and lint PASS",
+    "full_coverage": "pending rerun",
+    "validation_only_no_exported_schema_change": true
+  }
+}

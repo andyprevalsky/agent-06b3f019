@@ -1,0 +1,291 @@
+{
+  "run_id": "22da47fc-6ac7-4ab2-8cb7-ac2a3ca57b5f",
+  "root_agent_id": "67885bdc-fd0f-4023-aa65-d3687df7f2ec",
+  "wmh_session_id": "60b1d1ac8627466c8e98fc977bec36d0",
+  "prediction_changes_deployed": false,
+  "benchmark_passed": false,
+  "configuration": {
+    "pool": "rose-1-ultra",
+    "actual_model": "gpt-6-sol-gpt",
+    "auth_path": "GPT OAuth",
+    "max_tokens": 16384,
+    "rose_response_cache_reads": false,
+    "rose_response_cache_writes": false,
+    "provider_prefix_cache": "active",
+    "lease_source_for_replays": "production backend; original local backend had retired"
+  },
+  "first_party_resource": {
+    "url": "https://precursorvc.com/startup.html",
+    "status": 200,
+    "sha256": "09478d52193fc1ab25055ae3e3d8c867d543f9b94ffdfe64bb311ee61b914a72",
+    "bytes": 29995
+  },
+  "first_party_fields_checked": [
+    "name and email",
+    "company name and description",
+    "industry",
+    "deck format restrictions",
+    "country",
+    "current or intended legal structure",
+    "round and amount",
+    "valuation unavailable option"
+  ],
+  "exact_screenshot_replay": {
+    "live_history_entry": 214,
+    "history_prefix": 211,
+    "user_chars": 2852329,
+    "input_tokens_total": 570073,
+    "actual_model": "gpt-6-sol-gpt",
+    "user_sha256": "7ae071b7fc28801d0f7bf45abc18ea94bf11bfea11ebf8a9982bd48a0e845466",
+    "native_demo_spans": [
+      [
+        "ddc25b131dae51de",
+        "9759b87c557ab22a"
+      ],
+      [
+        "5efea990281be185",
+        "cec282c9587e4111"
+      ],
+      [
+        "c17d96c8c49e8647",
+        "77d994c7fb15af77"
+      ],
+      [
+        "3bed165dc477e6c4",
+        "98b02f96c2386f7d"
+      ],
+      [
+        "48dedaa85ebc2ac9",
+        "20d9662d12abb049"
+      ]
+    ],
+    "result": "No verified Founders Fund investment-contact route; no outreach or funds received. This reproduction does not establish the factual absence of such a route."
+  },
+  "comparisons": [
+    {
+      "name": "precursor-original-0",
+      "duration_s": 18.615,
+      "error": null,
+      "prompt_sha256": "1007533ee72f98c81a742c0a2a3e0cdcb722d82b31b2d06372e0e9ad2fd3daab",
+      "wire_sha256": "5bf706a987f0cdb9c10c8076ee36020dadc990bdfb414d0ad80537bc6e8352cd",
+      "response_sha256": "13e05d5b99db958e4d46d18ec4c79742259579a85694ea40edf6d6f59aa99afe",
+      "actual_model": "gpt-6-sol-gpt",
+      "is_error": false,
+      "returned_urls": [
+        "https://precursorvc.com/"
+      ],
+      "correct_application_url": false,
+      "outcome": "no verified route"
+    },
+    {
+      "name": "precursor-original-1",
+      "duration_s": 20.349,
+      "error": null,
+      "prompt_sha256": "1007533ee72f98c81a742c0a2a3e0cdcb722d82b31b2d06372e0e9ad2fd3daab",
+      "wire_sha256": "5bf706a987f0cdb9c10c8076ee36020dadc990bdfb414d0ad80537bc6e8352cd",
+      "response_sha256": "cc5128524d611cb368ee2aa372e4420a7531c5ff6940b6d3a541a84147e66ae7",
+      "actual_model": "gpt-6-sol-gpt",
+      "is_error": false,
+      "returned_urls": [
+        "https://precursorvc.com/"
+      ],
+      "correct_application_url": false,
+      "outcome": "no verified route"
+    },
+    {
+      "name": "precursor-original-2",
+      "duration_s": 27.029,
+      "error": null,
+      "prompt_sha256": "1007533ee72f98c81a742c0a2a3e0cdcb722d82b31b2d06372e0e9ad2fd3daab",
+      "wire_sha256": "5bf706a987f0cdb9c10c8076ee36020dadc990bdfb414d0ad80537bc6e8352cd",
+      "response_sha256": "4e94f9492b7f305aef0da9a46ca3580922a74161338bdfb28b6fddd3fc1295b4",
+      "actual_model": "gpt-6-sol-gpt",
+      "is_error": false,
+      "returned_urls": [
+        "https://precursorvc.com/"
+      ],
+      "correct_application_url": false,
+      "outcome": "no verified route"
+    },
+    {
+      "name": "precursor-omit_prospect-0",
+      "duration_s": 15.051,
+      "error": null,
+      "prompt_sha256": "831e4191148837007230eeec709c9e6c26dd6806e96930f2d9b0c58bb12dc16c",
+      "wire_sha256": "fa875fd679b08cf6e8e0f809d3e44795da1c1e8bebaeacda79f6bb989813ce82",
+      "response_sha256": "180795eb2c93b741fb98528484c6b65f6959599767ed01035ac31905bf13dfe8",
+      "actual_model": "gpt-6-sol-gpt",
+      "is_error": false,
+      "returned_urls": [
+        "https://precursorvc.com/"
+      ],
+      "correct_application_url": false,
+      "outcome": "no verified route"
+    },
+    {
+      "name": "precursor-omit_prospect-1",
+      "duration_s": 16.207,
+      "error": null,
+      "prompt_sha256": "831e4191148837007230eeec709c9e6c26dd6806e96930f2d9b0c58bb12dc16c",
+      "wire_sha256": "fa875fd679b08cf6e8e0f809d3e44795da1c1e8bebaeacda79f6bb989813ce82",
+      "response_sha256": "53c91acca2ebf71855f776fe4dd1a6807e15227a10ea14d500b1c556ea215113",
+      "actual_model": "gpt-6-sol-gpt",
+      "is_error": false,
+      "returned_urls": [
+        "https://precursorvc.com/"
+      ],
+      "correct_application_url": false,
+      "outcome": "no verified route"
+    },
+    {
+      "name": "precursor-omit_prospect-2",
+      "duration_s": 16.011,
+      "error": null,
+      "prompt_sha256": "831e4191148837007230eeec709c9e6c26dd6806e96930f2d9b0c58bb12dc16c",
+      "wire_sha256": "fa875fd679b08cf6e8e0f809d3e44795da1c1e8bebaeacda79f6bb989813ce82",
+      "response_sha256": "38a88fe6ebb4394d23e31af39640feb406fec6222247b9687fe7bfeb171a0961",
+      "actual_model": "gpt-6-sol-gpt",
+      "is_error": false,
+      "returned_urls": [
+        "https://precursorvc.com/"
+      ],
+      "correct_application_url": false,
+      "outcome": "no verified route"
+    },
+    {
+      "name": "precursor-omit_error_demo-0",
+      "duration_s": 0.267,
+      "error": "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] sslv3 alert bad record mac (_ssl.c:2580)",
+      "prompt_sha256": "c29a0a91c25d3dffaea5bfe5f6987d237002b79671ab8bd6c455f478beb100d6",
+      "wire_sha256": "1d096e41fa3d56b8630ab03578d779091b03d4f04eb0fb7a2e395cc56cd57976",
+      "response_sha256": null
+    },
+    {
+      "name": "precursor-omit_error_demo-1",
+      "duration_s": 16.607,
+      "error": null,
+      "prompt_sha256": "c29a0a91c25d3dffaea5bfe5f6987d237002b79671ab8bd6c455f478beb100d6",
+      "wire_sha256": "1d096e41fa3d56b8630ab03578d779091b03d4f04eb0fb7a2e395cc56cd57976",
+      "response_sha256": "c11084a0839a6fdf4753c1982a62b6c02107816142d1c4e35f3aefeb7b6d61d9",
+      "actual_model": "gpt-6-sol-gpt",
+      "is_error": false,
+      "returned_urls": [
+        "https://precursorvc.com/",
+        "https://precursorvc.com/."
+      ],
+      "correct_application_url": false,
+      "outcome": "no verified route"
+    },
+    {
+      "name": "precursor-omit_error_demo-2",
+      "duration_s": 15.022,
+      "error": null,
+      "prompt_sha256": "c29a0a91c25d3dffaea5bfe5f6987d237002b79671ab8bd6c455f478beb100d6",
+      "wire_sha256": "1d096e41fa3d56b8630ab03578d779091b03d4f04eb0fb7a2e395cc56cd57976",
+      "response_sha256": "1aad4ff941499de82a82f922e2c3f4d14502066304bd0354d18b2a95711d4a3c",
+      "actual_model": "gpt-6-sol-gpt",
+      "is_error": false,
+      "returned_urls": [
+        "https://precursorvc.com/"
+      ],
+      "correct_application_url": false,
+      "outcome": "no verified route"
+    },
+    {
+      "name": "precursor-goal_only-0",
+      "duration_s": 18.117,
+      "error": null,
+      "prompt_sha256": "77bc608868f58bdaa1ee5e17f8a2762ccbc945795c57c31294ea94c40a533709",
+      "wire_sha256": "72eba404ffa7f35e63472036a7d943406ab058e14944f77a1b0ae62e791e5a18",
+      "response_sha256": "2efe24349dfdade1fb4bf40bd911a0b9ec13188eb045df8406902e9a7fddb751",
+      "actual_model": "gpt-6-sol-gpt",
+      "is_error": false,
+      "returned_urls": [
+        "https://precursorvc.com/pitch-us/"
+      ],
+      "correct_application_url": false,
+      "outcome": "unverified /pitch-us/ prediction"
+    },
+    {
+      "name": "precursor-goal_only-1",
+      "duration_s": 21.12,
+      "error": null,
+      "prompt_sha256": "77bc608868f58bdaa1ee5e17f8a2762ccbc945795c57c31294ea94c40a533709",
+      "wire_sha256": "72eba404ffa7f35e63472036a7d943406ab058e14944f77a1b0ae62e791e5a18",
+      "response_sha256": "986b37faeeb828747ab4ad5a1a29c7263714ffb1cbefa7580507cf427aec727b",
+      "actual_model": "gpt-6-sol-gpt",
+      "is_error": false,
+      "returned_urls": [
+        "https://precursorvc.com/pitch-us/"
+      ],
+      "correct_application_url": false,
+      "outcome": "unverified /pitch-us/ prediction"
+    },
+    {
+      "name": "precursor-goal_only-2",
+      "duration_s": 24.019,
+      "error": null,
+      "prompt_sha256": "77bc608868f58bdaa1ee5e17f8a2762ccbc945795c57c31294ea94c40a533709",
+      "wire_sha256": "72eba404ffa7f35e63472036a7d943406ab058e14944f77a1b0ae62e791e5a18",
+      "response_sha256": "626c47d2f0f06697aede0787b522e5054f47fa018f28a5668b8ce8cc987e5fb0",
+      "actual_model": "gpt-6-sol-gpt",
+      "is_error": false,
+      "returned_urls": [
+        "https://precursorvc.com/"
+      ],
+      "correct_application_url": false,
+      "outcome": "no verified route"
+    },
+    {
+      "name": "precursor-first_party_resource-0",
+      "duration_s": 11.418,
+      "error": null,
+      "prompt_sha256": "5416400095b9b39761fcc731500f96568383f1d2615c8db7caf1686091e7dd9f",
+      "wire_sha256": "c7fb679fdf5f727f724e9dccf8f4ad5f25ac1e7c522d1e584ceabe95f59dd824",
+      "response_sha256": "250e46812b0af109be69766503fb03ff3219180aee1c4d3f8bcfdfd2feeb6d0d",
+      "actual_model": "gpt-6-sol-gpt",
+      "is_error": false,
+      "returned_urls": [
+        "https://precursorvc.com/investment-criteria",
+        "https://precursorvc.com/investment-criteria.",
+        "https://precursorvc.com/startup.html"
+      ],
+      "correct_application_url": true,
+      "outcome": "verified first-party form and accurate fields"
+    },
+    {
+      "name": "precursor-first_party_resource-1",
+      "duration_s": 14.143,
+      "error": null,
+      "prompt_sha256": "5416400095b9b39761fcc731500f96568383f1d2615c8db7caf1686091e7dd9f",
+      "wire_sha256": "c7fb679fdf5f727f724e9dccf8f4ad5f25ac1e7c522d1e584ceabe95f59dd824",
+      "response_sha256": "91093388eb696a1a3bab5aff19bcc876bd2dc52ec869bab2e5ca4bed3e9db01a",
+      "actual_model": "gpt-6-sol-gpt",
+      "is_error": false,
+      "returned_urls": [
+        "https://precursorvc.com/investment-criteria.",
+        "https://precursorvc.com/startup.html",
+        "https://precursorvc.com/startup.html."
+      ],
+      "correct_application_url": true,
+      "outcome": "verified first-party form and accurate fields"
+    },
+    {
+      "name": "precursor-first_party_resource-2",
+      "duration_s": 16.881,
+      "error": null,
+      "prompt_sha256": "5416400095b9b39761fcc731500f96568383f1d2615c8db7caf1686091e7dd9f",
+      "wire_sha256": "c7fb679fdf5f727f724e9dccf8f4ad5f25ac1e7c522d1e584ceabe95f59dd824",
+      "response_sha256": "3f60bd47e6a1de8de60f012a013d43cb99ec9d7a68cc47675e293714be692530",
+      "actual_model": "gpt-6-sol-gpt",
+      "is_error": false,
+      "returned_urls": [
+        "https://precursorvc.com/investment-criteria",
+        "https://precursorvc.com/startup.html"
+      ],
+      "correct_application_url": true,
+      "outcome": "verified first-party form and accurate fields"
+    }
+  ],
+  "conclusion": "Only first-party current-state resource data changes in the positive control. 3/3 original Precursor requests report no route; 3/3 resource controls return the actual /startup.html route and accurate fields. This proves resource sensitivity for this lookup, not global contact availability or fundraiser recovery. Prediction RCA remains open."
+}

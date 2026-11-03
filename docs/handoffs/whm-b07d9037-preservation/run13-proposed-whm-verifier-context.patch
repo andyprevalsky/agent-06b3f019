@@ -1,0 +1,384 @@
+--- a/agents/helpers/llm.py
++++ b/agents/helpers/llm.py
+@@ -1424,7 +1424,9 @@
+     return False
+ 
+ 
+-def _filter_context_for_execute_verifier(context: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
++def _filter_context_for_execute_verifier(
++    context: List[Dict[str, Any]], *, preserve_user_requests: bool = False
++) -> List[Dict[str, Any]]:
+     """Return only execute-phase context for final-task verification.
+ 
+     The main workflow can have an earlier PLAN/RESEARCH phase with explore
+@@ -1451,10 +1453,11 @@
+         first_execute_idx = boundary_idx + 1
+ 
+     execute_context: List[Dict[str, Any]] = []
+-    for msg in sorted_context[first_execute_idx:]:
+-        if _message_phase(msg) in ("PLAN", "RESEARCH"):
+-            continue
+-        execute_context.append(msg)
++    for idx, msg in enumerate(sorted_context):
++        if preserve_user_requests and msg.get("role") == "USER":
++            execute_context.append(msg)
++        elif idx >= first_execute_idx and _message_phase(msg) not in ("PLAN", "RESEARCH"):
++            execute_context.append(msg)
+     return execute_context
+ 
+ 
+@@ -5649,6 +5652,7 @@
+     fast_mode_cache_enabled: bool = False,
+     fast_mode_goal: Optional[str] = None,
+     fast_mode_step: int = 0,
++    world_model_mode: str = "real",
+ ) -> Dict[str, Any]:
+     """
+     Use LLM judge to check progress toward goal. Canonical entry point — all
+@@ -5780,7 +5784,8 @@
+ 
+         original_context_len = len(context) if context else 0
+         if call_site in ("verifier_execute", "verifier_post_dag"):
+-            context = _filter_context_for_execute_verifier(context)
++            scope_kwargs = {"preserve_user_requests": True} if world_model_mode in {"simulate", "shadow"} else {}
++            context = _filter_context_for_execute_verifier(context, **scope_kwargs)
+             if len(context) != original_context_len:
+                 logger.info(
+                     "Filtered verifier context to execute phase",
+--- a/agents/loop/run_agent.py
++++ b/agents/loop/run_agent.py
+@@ -254,6 +254,7 @@
+     # namespace (exact-match). Both flow from the workflow; default off = no-op.
+     fast_mode_cache_enabled: bool = False,
+     goal_text: Optional[str] = None,
++    world_model_mode: str = "real",
+ ) -> Dict[str, Any]:
+     """
+     Run the unified agent loop.
+@@ -2233,6 +2234,7 @@
+                     fast_mode_cache_enabled=fast_mode_cache_enabled,
+                     fast_mode_goal=goal_text,
+                     fast_mode_step=fast_cache_step,
++                    **({"world_model_mode": world_model_mode} if world_model_mode != "real" else {}),
+                 )
+ 
+                 # Track verifier tokens
+@@ -2486,6 +2488,7 @@
+                 # Distinct step so the final (max-iterations) verifier never collides
+                 # with the per-iteration verifier cache entry.
+                 fast_mode_step=999_999,
++                **({"world_model_mode": world_model_mode} if world_model_mode != "real" else {}),
+             )
+ 
+             # Track final verifier tokens
+@@ -2707,6 +2710,7 @@
+     fast_mode_cache_enabled: bool = False,
+     fast_mode_goal: Optional[str] = None,
+     fast_mode_step: int = 0,
++    world_model_mode: str = "real",
+ ) -> Dict:
+     """Run verifier to check completion."""
+     verifier_call_id = tool_call_id or str(_safe_uuid4())
+@@ -2768,6 +2772,7 @@
+             fast_mode_cache_enabled,
+             fast_mode_goal,
+             fast_mode_step,
++            *([world_model_mode] if world_model_mode != "real" else []),
+         ],
+         start_to_close_timeout=timedelta(seconds=VERIFIER_ACTIVITY_TIMEOUT_SECONDS),
+         retry_policy=RetryPolicy(maximum_attempts=3),
+--- a/agents/workflows/agent_workflow.py
++++ b/agents/workflows/agent_workflow.py
+@@ -2462,6 +2462,7 @@
+                 fast_mode_cache_enabled=self.fast_mode_cache_enabled,
+                 fast_mode_goal=self.fast_cache_goal,
+                 fast_mode_step=0,
++                **({"world_model_mode": self.world_model_mode} if self.world_model_mode != "real" else {}),
+             )
+ 
+             # Route verifier cost through _on_tokens so this LLM call doesn't
+@@ -2983,6 +2984,8 @@
+                     "handoff_task_queue": handoff_queue,
+                     "context": list(self.context),
+                 }
++            if self.world_model_mode != "real":
++                run_agent_kwargs["world_model_mode"] = self.world_model_mode
+             return await run_agent(**run_agent_kwargs)
+         finally:
+             self._tool_parking_enabled = False
+--- a/agents/tests/blackbox/llm.blackbox.py
++++ b/agents/tests/blackbox/llm.blackbox.py
+@@ -4335,6 +4335,51 @@
+     assert "plan explore result" not in rendered
+     assert "set_plan" not in rendered
+ 
++
++
++async def test_check_progress_whm_keeps_user_requests_without_changing_real_scope():
++    """WHM workflow mode retains genuine USER requests in execute judging."""
++    import workflows.agent_workflow as workflow_module
++    from helpers.llm import check_progress
++
++    original_goal = "Inspect the assigned source. If unavailable, report the blocker."
++    follow_up = "Keep the inspection read-only."
++    context = [
++        {"role": "USER", "text": original_goal, "timestamp": "2026-01-01T00:00:00Z"},
++        {"role": "TOOL", "text": "Initialized", "timestamp": "2026-01-01T00:00:01Z",
++         "metadata": {"toolName": "agent_init", "toolStatus": "FINISHED"}},
++        {"role": "USER", "text": follow_up, "timestamp": "2026-01-01T00:00:02Z",
++         "metadata": {"phase": "PLAN"}},
++        {"role": "TOOL", "text": "Source unavailable", "timestamp": "2026-01-01T00:00:03Z",
++         "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED", "phase": "EXECUTE"}},
++        {"role": "TOOL", "text": "Planning-only result", "timestamp": "2026-01-01T00:00:04Z",
++         "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED", "phase": "PLAN"}},
++    ]
++    for mode in ("real", "simulate", "shadow"):
++        captured_messages = []
++
++        async def capture(messages, *_args, **_kwargs):
++            captured_messages.extend(messages)
++            return {"score": 0.5, "reasoning": "partial"}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
++
++        async def run_phase(**kwargs):
++            return await check_progress(
++                context=context, verifier_system_prompt="VERIFY", call_site="verifier_execute", **kwargs
++            )
++
++        instance = workflow_module.AgentWorkflow()
++        instance.world_model_mode = mode
++        instance._resume_pending_tools = AsyncMock(return_value=None)
++        with patch("temporalio.activity.heartbeat"), patch("helpers.llm._call_llm_verifier", capture), patch.object(workflow_module, "run_agent", run_phase):
++            result = await instance._run_agent_turns()
++
++        rendered = "\n".join(m["content"] for m in captured_messages if isinstance(m.get("content"), str))
++        assert rendered.count(original_goal) == (0 if mode == "real" else 1)
++        assert rendered.count(follow_up) == (0 if mode == "real" else 1)
++        assert "Source unavailable" in rendered
++        assert "Initialized" not in rendered
++        assert "Planning-only result" not in rendered
++        assert result["score"] == 0.5
+ 
+ 
+ def _soft_complete_bench_goal() -> str:
+@@ -9083,6 +9128,10 @@
+         "filter_context_for_execute_verifier_boundary", test_filter_context_for_execute_verifier_uses_execute_boundary
+     )
+     await r.record_async(
++        "check_progress_whm_keeps_user_requests",
++        test_check_progress_whm_keeps_user_requests_without_changing_real_scope,
++    )
++    await r.record_async(
+         "check_progress_execute_filters_plan_context",
+         test_check_progress_execute_filters_plan_context_before_llm,
+     )
+--- a/agents/tests/blackbox/run_agent.blackbox.py
++++ b/agents/tests/blackbox/run_agent.blackbox.py
+@@ -56,6 +56,8 @@
+     gpt_token=None,
+     gpt_account_id=None,
+     iteration_offset=0,
++    world_model_mode="real",
++    verifier_modes=None,
+ ):
+     from loop.run_agent import run_agent
+ 
+@@ -139,6 +141,8 @@
+         )
+ 
+     async def mock_check_progress(*args, **kwargs):
++        if verifier_modes is not None:
++            verifier_modes.append(args[21] if len(args) > 21 else "real")
+         return {
+             "score": verifier_score,
+             "reasoning": verifier_reasoning,
+@@ -189,6 +193,7 @@
+             check_aborted=check_aborted_override,
+             gpt_token=gpt_token,
+             gpt_account_id=gpt_account_id,
++            **({"world_model_mode": world_model_mode} if world_model_mode != "real" else {}),
+         )
+ 
+     return result, posted_messages, executed_tools
+@@ -1723,6 +1728,60 @@
+     # Structured output rendered as Extracted Output
+     assert "Extracted Output" in finished["text"]
+     assert "42" in finished["text"]
++
++
++async def test_run_verifier_world_mode_keeps_real_temporal_payload_unchanged():
++    """Only non-real modes append the trailing optional activity argument."""
++    import inspect
++    from temporalio.converter import DefaultPayloadConverter
++    from helpers.llm import check_progress
++    from loop.run_agent import _run_verifier
++
++    context = [{"role": "USER", "text": "Inspect source"}]
++    expected_real_args = [context, "VERIFY", "rose-flash", None, None, "verifier_execute", "a",
++                          None, None, None, None, None, None, None, None, None, None, None, False, None, 0]
++    converter = DefaultPayloadConverter()
++    expected_real_payloads = converter.to_payloads(expected_real_args)
++    for mode in ("real", "simulate", "shadow"):
++        calls = []
++
++        async def execute_activity(_fn, args=None, **_kwargs):
++            calls.append(args)
++            return {"score": 0.5, "reasoning": "partial", "structured_response": None, "usage": {}}
++
++        async def prompt():
++            return "VERIFY"
++
++        await _run_verifier(
++            execute_activity=execute_activity, context=context, verifier_prompt_generator=prompt,
++            model="rose-flash", agent_id="a", task_id=None, post_message=None,
++            **({"world_model_mode": mode} if mode != "real" else {}),
++        )
++        args = calls[0]
++        assert args == expected_real_args + ([] if mode == "real" else [mode])
++        payloads = converter.to_payloads(args)
++        assert [p.SerializeToString(deterministic=True) for p in payloads[:21]] == [
++            p.SerializeToString(deterministic=True) for p in expected_real_payloads
++        ]
++        bound = inspect.signature(check_progress).bind(*args)
++        bound.apply_defaults()
++        assert bound.arguments["world_model_mode"] == mode
++
++
++async def test_run_agent_world_mode_reaches_completion_and_final_cap_verifiers():
++    """Both verifier paths inherit mode without changing step or verdict policy."""
++    for mode in ("real", "simulate", "shadow"):
++        for name in ("attempt_completion", "web_search"):
++            modes = []
++            result, _, _ = await _run_single_iteration(
++                [{"tool": name, **({"query": "source"} if name == "web_search" else {})}],
++                [(name, "tc-mode", 1.0)], skip_verification=False, max_iterations=1,
++                verifier_score=0.5, verifier_reasoning="partial", world_model_mode=mode,
++                verifier_modes=modes,
++            )
++            assert modes == [mode] * (2 if name == "attempt_completion" else 1)
++            assert result["status"] == "max_iterations"
++            assert result["verifier_progress"] == 0.5
+ 
+ 
+ async def test_run_verifier_dynamic_schema_getter():
+@@ -2597,6 +2656,14 @@
+     )
+     await r.record_async("run_verifier_dynamic_schema_getter", test_run_verifier_dynamic_schema_getter)
+     await r.record_async(
++        "run_verifier_world_mode_real_payload_parity",
++        test_run_verifier_world_mode_keeps_real_temporal_payload_unchanged,
++    )
++    await r.record_async(
++        "run_agent_world_mode_completion_and_cap",
++        test_run_agent_world_mode_reaches_completion_and_final_cap_verifiers,
++    )
++    await r.record_async(
+         "completed_browser_output_forces_parent_completion",
+         test_completed_browser_output_forces_parent_completion_instead_of_second_browser,
+     )
+--- a/agents/tests/blackbox/workflow.blackbox.py
++++ b/agents/tests/blackbox/workflow.blackbox.py
+@@ -6849,6 +6849,93 @@
+     assert result["score"] == 1.0
+     assert token_calls[0]["kwargs"]["cache_sequence_id"] == "post-dag-verifier-sequence"
+ 
++async def test_workflow_post_dag_completion_preserves_explicit_world_mode():
++    """Post-DAG mode is explicit only for simulate and shadow."""
++    for mode in ("real", "simulate", "shadow"):
++        import workflows.agent_workflow as workflow_module
++    
++        wf = _bare_workflow_instance()
++        wf.agent_id = "agent-1"
++        wf.user_id = "user-1"
++        wf.current_phase = "EXECUTE"
++        wf.world_model_mode = mode
++        wf.output_schema = {"fields": []}
++        wf.fast_mode_cache_enabled = False
++        wf.fast_cache_goal = "goal"
++        wf.compute_token_lineage_key = None
++        wf.compute_token_fast_cache_affinity_key = None
++    
++        dispatched_tools = []
++        verifier_kwargs = {}
++        token_calls = []
++    
++        async def fake_execute_tool(tool_name, tool_args, tool_call_id):
++            dispatched_tools.append((tool_name, tool_args, tool_call_id))
++            return {"success": True}
++    
++        async def fake_refresh_compute_token(user_id):
++            return None
++    
++        async def fake_run_verifier(**kwargs):
++            verifier_kwargs.update(kwargs)
++            return {
++                "score": 1.0,
++                "reasoning": "Complete",
++                "structured_response": {"done": True},
++                "usage": {
++                    "prompt_tokens": 5,
++                    "completion_tokens": 2,
++                    "total_tokens": 7,
++                    "cache_sequence_id": "post-dag-verifier-sequence",
++                },
++            }
++    
++        async def fake_on_tokens(*args, **kwargs):
++            token_calls.append({"args": args, "kwargs": kwargs})
++    
++        wf._execute_tool = fake_execute_tool
++        wf._refresh_compute_token = fake_refresh_compute_token
++        wf._on_tokens = fake_on_tokens
++    
++        fake = _FakeWorkflowModule()
++        fake.activity_returns["poll_new_messages"] = [
++            {
++                "role": "TOOL",
++                "text": "dag result",
++                "timestamp": "2025-01-01T00:00:00+00:00",
++                "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
++            }
++        ]
++        original_workflow = _patch_workflow(fake)
++        original_run_verifier = workflow_module._run_verifier
++        workflow_module._run_verifier = fake_run_verifier
++        try:
++            result = await wf._attempt_post_dag_completion(
++                agent_id="agent-1",
++                user_id="user-1",
++                model="rose-labs/rose-1-flash",
++            )
++        finally:
++            workflow_module._run_verifier = original_run_verifier
++            _restore_workflow(original_workflow)
++    
++        expected_tool_call_id = "post-dag-attempt-completion-00000000-0000-0000-0000-000000000001"
++        assert dispatched_tools == [
++            (
++                "attempt_completion",
++                {"_verification_pending": True},
++                expected_tool_call_id,
++            )
++        ]
++        assert verifier_kwargs.get("world_model_mode", "real") == mode
++        assert ("world_model_mode" in verifier_kwargs) is (mode != "real")
++        assert verifier_kwargs["tool_call_id"] == expected_tool_call_id
++        assert verifier_kwargs["post_message"] == wf._post_message
++        assert result["score"] == 1.0
++        assert token_calls[0]["kwargs"]["cache_sequence_id"] == "post-dag-verifier-sequence"
++
++
++
+ 
+ async def test_workflow_post_dag_completion_verifier_error_closes_attempt_tool():
+     """Verifier failure after post-DAG attempt_completion must close the tool row."""
+@@ -9576,6 +9663,10 @@
+         test_workflow_post_dag_completion_dispatches_attempt_completion_tool,
+     )
+     await r.record_async(
++        "wf_post_dag_completion_preserves_world_mode",
++        test_workflow_post_dag_completion_preserves_explicit_world_mode,
++    )
++    await r.record_async(
+         "wf_post_dag_completion_error_closes_attempt",
+         test_workflow_post_dag_completion_verifier_error_closes_attempt_tool,
+     )

@@ -1,0 +1,219 @@
+<!doctype html>
+<!--
+  rose-ui preview host. Served by `rose-ui dev|screenshot|record|perf|check` on its own
+  origin; your files load from a second origin in <iframe sandbox="allow-scripts">, with the
+  production usercontent CSP and the same postMessage bridge as the Rose app
+  (rose:ready → rose:props, rose:resize → height clamped to 60..900 px).
+
+  It is NOT the Rose app: the chrome around your slots is a static approximation, there is no
+  login, no real agents and no rose.* data API. Theme tokens are applied exactly like the app
+  (validated, set on <html>, read as hsl(var(--token))).
+
+  Routes: /  /agent  /inline/<view>  /slot/<name>  /shell  /file/<path>   (?safe=1 = stock)
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Rose preview</title>
+<style>
+  :root {
+    --background: 240 15% 98%; --foreground: 240 15% 8%; --surface: 240 10% 96%;
+    --surface-elevated: 0 0% 100%; --primary: 240 15% 8%; --primary-foreground: 240 15% 98%;
+    --card: 0 0% 100%; --card-foreground: 240 15% 8%; --secondary: 240 10% 96%;
+    --secondary-foreground: 240 15% 8%; --muted: 240 8% 92%; --muted-foreground: 240 8% 45%;
+    --accent: 240 15% 8%; --accent-foreground: 240 15% 98%; --border: 240 8% 88%;
+    --input: 240 8% 94%; --ring: 240 15% 8%; --radius: 0.75rem;
+    --sidebar-background: 0 0% 98%; --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%; --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%; --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%; --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; color: hsl(var(--foreground)); background: hsl(var(--background)); overflow: hidden; }
+  iframe { border: 0; display: block; width: 100%; color-scheme: normal; }
+  .full { position: fixed; inset: 0; width: 100vw; height: 100dvh; }
+  #bg { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+  #bg img { width: 100%; height: 100%; object-fit: cover; }
+  #bg iframe { position: absolute; inset: 0; height: 100%; }
+  #app { position: relative; z-index: 1; display: flex; height: 100dvh; }
+  #backdrop { position: absolute; inset: 0; background: hsl(var(--background)); transition: opacity 600ms ease; pointer-events: none; }
+  aside { position: relative; width: 272px; flex: none; display: flex; flex-direction: column; gap: 8px; padding: 14px 12px; background: hsl(var(--sidebar-background)); color: hsl(var(--sidebar-foreground)); border-right: 1px solid hsl(var(--sidebar-border)); }
+  aside .brand { font-weight: 650; font-size: 17px; color: hsl(var(--sidebar-primary)); padding: 4px 6px; }
+  aside .agent { padding: 8px 10px; border-radius: calc(var(--radius) - 4px); font-size: 14px; }
+  aside .agent.active { background: hsl(var(--sidebar-accent)); color: hsl(var(--sidebar-accent-foreground)); font-weight: 600; }
+  main { position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .scroll { flex: 1; overflow: auto; padding: 32px 24px 16px; }
+  .column { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 28px; font-weight: 600; margin: 9vh 0 20px; text-align: center; }
+  .composer { margin: 0 auto 20px; width: min(760px, calc(100% - 32px)); display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: calc(var(--radius) + 8px); background: hsl(var(--card)); border: 1px solid hsl(var(--border)); box-shadow: 0 10px 30px -10px hsl(240 15% 8% / 0.15); }
+  .composer span { flex: 1; color: hsl(var(--muted-foreground)); }
+  .composer b { width: 32px; height: 32px; border-radius: 999px; background: hsl(var(--primary)); }
+  .msg { margin: 12px 0; }
+  .msg.user { margin-left: auto; width: fit-content; max-width: 80%; padding: 10px 14px; border-radius: calc(var(--radius) + 4px); background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+  .msg.assistant { color: hsl(var(--foreground)); }
+  .inline { position: relative; margin: 8px 0; overflow: hidden; border-radius: 12px; border: 1px solid hsl(var(--border)); background: #fff; }
+  .panel { width: 340px; flex: none; border-left: 1px solid hsl(var(--border)); background: hsl(var(--card)); }
+  .slot-auto iframe { height: 60px; }
+  @media (max-width: 767px) { aside, .panel { display: none; } .scroll { padding: 20px 14px 12px; } }
+</style>
+</head>
+<body>
+<script>
+(async () => {
+  const HOST = (window.__roseHost = { frames: [], settled: false, error: null });
+  const FORBIDDEN = ['url(', 'src(', 'image(', 'image-set(', 'element(', 'expression', 'javascript:', '@import', ';', '{', '}', '<', '\\'];
+  const clamp = (h) => Math.min(900, Math.max(60, Math.round(h)));
+  const el = (tag, attrs = {}, kids = []) => {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) if (k === 'text') node.textContent = v; else node.setAttribute(k, v);
+    for (const kid of kids) node.append(kid);
+    return node;
+  };
+  let state;
+  try {
+    const res = await fetch('/__rose/state', { cache: 'no-store' });
+    state = await res.json();
+    if (!res.ok) throw new Error(state.error || res.status);
+  } catch (err) {
+    HOST.error = `state: ${err.message}`;
+    HOST.settled = true;
+    document.body.textContent = HOST.error;
+    return;
+  }
+  function contentBase() {
+    if (state.source === 'published') return state.contentBase;
+    const m = /^(\d+)-(.*)$/.exec(location.hostname);
+    if (m && m[1] === String(state.hostPort)) return `${location.protocol}//${state.contentPort}-${m[2]}${state.contentPath}`;
+    return `${location.protocol}//${location.hostname}:${state.contentPort}${state.contentPath}`;
+  }
+  const base = contentBase();
+  const contentOrigin = new URL(base).origin;
+  const safe = new URLSearchParams(location.search).get('safe') === '1';
+  const manifest = safe ? { version: 1 } : state.manifest || { version: 1 };
+  const theme = safe ? null : state.theme;
+  const fileUrl = (p) => base + String(p).split('/').map(encodeURIComponent).join('/');
+
+  for (const [name, value] of Object.entries((theme && theme.tokens) || {})) {
+    const ok = /^--[a-z0-9-]+$/.test(name) && typeof value === 'string' && value.length > 0 && value.length <= 256 && !FORBIDDEN.some((p) => value.toLowerCase().includes(p));
+    if (ok) document.documentElement.style.setProperty(name, value);
+    else console.warn('[rose-ui preview] rejected theme token', name);
+  }
+
+  function frame(kind, name, entry, { props = null, auto = false, query = '' } = {}) {
+    const iframe = el('iframe', { src: fileUrl(entry) + query, title: `${kind} ${name}`, sandbox: 'allow-scripts', referrerpolicy: 'no-referrer', 'data-user-ui-frame': kind });
+    const rec = { kind, name, src: iframe.src, iframe, props, auto, loaded: false, ready: false };
+    iframe.addEventListener('load', () => { rec.loaded = true; maybeSettle(); });
+    HOST.frames.push(rec);
+    return iframe;
+  }
+  window.addEventListener('message', (event) => {
+    const rec = HOST.frames.find((f) => f.iframe.contentWindow === event.source);
+    if (!rec || (event.origin !== 'null' && event.origin !== contentOrigin)) return;
+    const msg = event.data;
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'rose:ready') {
+      rec.ready = true;
+      rec.iframe.contentWindow.postMessage({ type: 'rose:props', props: rec.props ?? null }, '*');
+      maybeSettle();
+    } else if (msg.type === 'rose:resize' && typeof msg.height === 'number' && Number.isFinite(msg.height) && rec.auto) {
+      rec.iframe.style.height = `${clamp(msg.height)}px`;
+    }
+  });
+  let allLoadedAt = 0;
+  function maybeSettle() {
+    if (HOST.settled || !HOST.frames.every((f) => f.loaded)) return;
+    if (!allLoadedAt) { allLoadedAt = performance.now(); setTimeout(maybeSettle, 2500); }
+    if (HOST.frames.every((f) => f.ready) || performance.now() - allLoadedAt >= 2400) {
+      requestAnimationFrame(() => requestAnimationFrame(() => { HOST.settled = true; }));
+    }
+  }
+
+  const path = decodeURIComponent(location.pathname);
+  const fullFrame = (kind, name, entry, props, query = '') => { const f = frame(kind, name, entry, { props, query }); f.className = 'full'; document.body.append(f); };
+  const slots = manifest.slots || {};
+  const inline = manifest.inline || {};
+  const missing = (what) => { HOST.error = `${what} is not in rose-ui.json`; HOST.settled = true; document.body.textContent = HOST.error; };
+
+  if (path === '/__rose/blank') fullFrame('blank', 'blank', '.rose-blank.html');
+  else if (path.startsWith('/file/')) {
+    const entry = path.slice('/file/'.length);
+    const params = new URLSearchParams(location.search);
+    const props = params.get('props');
+    params.delete('props');
+    params.delete('safe');
+    const query = params.toString() ? `?${params}` : ''; // other params reach the view
+    fullFrame('file', entry, entry, props ? JSON.parse(props) : (state.props || {})[Object.keys(inline).find((v) => inline[v].entry === entry)] ?? null, query);
+  } else if (path.startsWith('/slot/')) {
+    const name = path.slice('/slot/'.length);
+    if (!slots[name]) missing(`slot ${name}`); else fullFrame('slot', name, slots[name].entry);
+  } else if (path === '/shell') {
+    if (!manifest.shell) missing('shell'); else fullFrame('shell', 'shell', manifest.shell.entry);
+  } else if (manifest.shell && (path === '/' || path === '/home' || path === '/agent')) {
+    fullFrame('shell', 'shell', manifest.shell.entry);
+  } else {
+    const isAgent = path === '/agent' || path.startsWith('/inline/');
+    const bgImage = theme && theme.background && theme.background.image;
+    if (bgImage || slots.background) {
+      const bg = el('div', { id: 'bg', 'aria-hidden': 'true' });
+      if (bgImage) bg.append(el('img', { src: fileUrl(bgImage), alt: '' }));
+      if (slots.background) bg.append(frame('slot', 'background', slots.background.entry));
+      document.body.append(bg);
+    }
+    const fade = theme && theme.background && typeof theme.background.fadeAfterFirstMessage === 'number' ? Math.min(1, Math.max(0, theme.background.fadeAfterFirstMessage)) : 0.8;
+    const app = el('div', { id: 'app' });
+    const backdrop = el('div', { id: 'backdrop' });
+    backdrop.style.opacity = bgImage || slots.background ? String(isAgent ? fade : 1) : '1';
+    app.append(backdrop);
+    const autoSlot = (name) => { const f = frame('slot', name, slots[name].entry, { auto: true }); f.style.height = '60px'; return el('div', { class: 'slot-auto', 'data-slot': name }, [f]); };
+    if (!path.startsWith('/inline/')) {
+      const aside = el('aside', {}, [el('div', { class: 'brand', text: 'Rose' })]);
+      if (slots['sidebar.header']) aside.append(autoSlot('sidebar.header'));
+      for (const [i, name] of ['Plan a weekend in Big Sur', 'Reply to the Lisbon offsite thread', 'Book dinner for Friday'].entries()) aside.append(el('div', { class: `agent${isAgent && i === 0 ? ' active' : ''}`, text: name }));
+      if (slots.menu) aside.append(autoSlot('menu'));
+      app.append(aside);
+    }
+    const main = el('main');
+    const scroll = el('div', { class: 'scroll' });
+    const column = el('div', { class: 'column' });
+    if (!isAgent) {
+      column.append(el('h1', { text: 'What can I do for you?' }));
+      if (slots['home.dashboard']) column.append(autoSlot('home.dashboard'));
+    } else {
+      column.append(el('div', { class: 'msg user', text: 'Plan a weekend in Big Sur' }));
+      column.append(el('div', { class: 'msg assistant', text: 'Here is what I found. I can book any of these.' }));
+      const views = path.startsWith('/inline/') ? [path.slice('/inline/'.length)] : Object.keys(inline);
+      for (const view of views) {
+        if (!inline[view]) { missing(`inline view ${view}`); return; }
+        const f = frame('inline', view, inline[view].entry, { props: (state.props || {})[view] ?? null, auto: true });
+        f.style.height = '240px';
+        column.append(el('div', { class: 'inline', 'data-inline-view': view }, [f]));
+      }
+    }
+    scroll.append(column);
+    main.append(scroll);
+    if (!path.startsWith('/inline/')) main.append(el('div', { class: 'composer' }, [el('span', { text: 'Ask Rose anything' }), el('b')]));
+    app.append(main);
+    if (isAgent && slots['agent.panel'] && !path.startsWith('/inline/')) {
+      const panel = el('div', { class: 'panel' }, [frame('slot', 'agent.panel', slots['agent.panel'].entry)]);
+      panel.firstChild.style.height = '100%';
+      app.append(panel);
+    }
+    document.body.append(app);
+  }
+  if (HOST.frames.length === 0 && !HOST.error) requestAnimationFrame(() => requestAnimationFrame(() => { HOST.settled = true; }));
+  if (state.live) {
+    let last = null;
+    setInterval(async () => {
+      try {
+        const { fingerprint } = await (await fetch('/__rose/fingerprint', { cache: 'no-store' })).json();
+        if (last !== null && fingerprint !== last) location.reload();
+        last = fingerprint;
+      } catch { /* server stopped */ }
+    }, 1000);
+  }
+})();
+</script>
+</body>
+</html>

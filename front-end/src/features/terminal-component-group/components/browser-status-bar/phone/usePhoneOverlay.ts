@@ -26,6 +26,7 @@ export function usePhoneOverlay(
   trigger: string,
   readOnly: boolean,
   attention?: PhoneAttention | null,
+  expectedAgentId?: string,
 ) {
   const attentionRef = useRef(attention);
   attentionRef.current = attention;
@@ -58,7 +59,11 @@ export function usePhoneOverlay(
       scope.attention = attentionRef.current;
       const snapshot = await readPhoneInteraction(scope.taskId, scope.controller.signal);
       if (scope.controller.signal.aborted) return;
-      if (snapshot.lease && snapshot.lease.browserTaskId !== scope.taskId) {
+      if (
+        snapshot.lease &&
+        (snapshot.lease.browserTaskId !== scope.taskId ||
+          (expectedAgentId !== undefined && snapshot.lease.agentId !== expectedAgentId))
+      ) {
         scope.blocked = true;
         throw new Error('Phone task mismatch');
       }
@@ -87,7 +92,7 @@ export function usePhoneOverlay(
         scope.operation = snapshot.pendingOperation;
       publish(scope);
     },
-    [publish],
+    [expectedAgentId, publish],
   );
   const operation = useCallback(
     (scope: Scope, name: string, args: Record<string, unknown>) =>

@@ -1,0 +1,12 @@
+{
+  "id": "TAMY-CEREBRAS-1",
+  "status": "APPROVED_APPLIED",
+  "user_reply": "Approvex",
+  "decision_observed_at_utc": "2026-10-14T01:51:56.293840+00:00",
+  "runtime_patch_sha256": "69f8742a0139b126707e506e59217a735211b1daf1caba276ca72eeb352b9741",
+  "full_candidate_sha256": "0295c285434102ac15ae10dc27be271a7344a93d23aa4dff38bbac5a4c3ba219",
+  "runtime_applied_exactly": true,
+  "additional_test": "Additive owning native-schema regression from previously reviewed private candidate",
+  "new_decoder": false,
+  "models_prompts_catalog_timeouts_retry_limits_changed": false
+}

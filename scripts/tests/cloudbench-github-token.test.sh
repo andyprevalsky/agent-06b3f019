@@ -142,10 +142,12 @@ import time
 root = Path(os.environ["ENV_RACE_ROOT"])
 dest = Path(os.environ["ENV_RACE_DEST"]).resolve()
 role = os.environ.get("ENV_RACE_ROLE", "")
-read_text, open_file, flock = Path.read_text, io.open, fcntl.flock
+read_text, write_text, open_file, flock = Path.read_text, Path.write_text, io.open, fcntl.flock
 
 def mark(name):
-    (root / name).write_text(str(os.getpid()))
+    temporary = root / (name + ".tmp")
+    temporary.write_text(str(os.getpid()))
+    os.replace(temporary, root / name)
 
 def await_file(name):
     deadline = time.monotonic() + 15
@@ -176,7 +178,16 @@ def controlled_flock(fd, operation):
         mark("second-lock-attempt")
     return flock(fd, operation)
 
-Path.read_text, io.open, fcntl.flock = controlled_read, controlled_open, controlled_flock
+def controlled_write_text(path, text, *args, **kwargs):
+    # Hold the marker's write open so exists() cannot stand in for publication.
+    if root.name == "canceled-writer" and path.parent == root and role == "first" and path.name in {"first-read", "first-read.tmp"}:
+        with open_file(path, "w") as handle:
+            write_text(root / "marker-body-open", "ready")
+            await_file("release-marker-body")
+            return handle.write(text)
+    return write_text(path, text, *args, **kwargs)
+
+Path.read_text, Path.write_text, io.open, fcntl.flock = controlled_read, controlled_write_text, controlled_open, controlled_flock
 ''')
 processes = []
 
@@ -239,6 +250,9 @@ try:
 
     canceled = case("canceled-writer")
     first = start(canceled, "first")
+    wait_for(lambda: (canceled / "marker-body-open").exists())
+    assert not (canceled / "first-read").exists(), "PID marker exposed an incomplete payload"
+    (canceled / "release-marker-body").touch()
     wait_for(lambda: (canceled / "first-read").exists())
     # The barrier records only the exact Python child created by this fixture.
     os.kill(int((canceled / "first-read").read_text()), signal.SIGTERM)

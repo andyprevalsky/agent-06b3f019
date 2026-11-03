@@ -1,0 +1,13 @@
+{
+  "id": "refactor-shipping-rates",
+  "kind": "refactor preserving behaviour",
+  "language": "python",
+  "task": "Refactor shipping/quotes.py. The zone rate table (base fee and per-kilogram rate for domestic, canada and international) is copied into all three quote functions. Define it exactly once, as a module-level dict named ZONE_RATES that maps each zone name to a (base_cents, per_kg_cents) tuple, and make every quote function use it. This is a pure refactor: public function names and signatures, return values for every input, and the type and message of every raised error (including which error wins when several inputs are invalid) must stay exactly the same. Keep the existing tests passing.",
+  "hidden_tests": {
+    "dir": "hidden",
+    "commands": [
+      ["python3", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+      ["python3", "-m", "unittest", "discover", "-s", "_hidden_tests", "-t", "."]
+    ]
+  }
+}

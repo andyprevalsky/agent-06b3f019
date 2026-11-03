@@ -1,0 +1,27 @@
+{
+  "old_devbox_id": "c5f40427-00e7-4554-b3a8-ef48bd5f0222",
+  "observed_utc": "2026-10-12T23:55:15Z",
+  "owners": [
+    {
+      "owner": "cf682c265d574835995c4afc2c334104",
+      "machine": "85137da4416108",
+      "volume": "vol_r1jgnp6j1dx93lzr",
+      "canonical_recovery_exit": 0,
+      "audit_status": "provider-teardown-verified",
+      "registry_removed": true,
+      "guest_cleanup_ack": true,
+      "hub_publication": true,
+      "local_hub_obligation": "retained"
+    },
+    {
+      "owner": "38970c3c5c824638a2e1ccc90e6dcd4f",
+      "machine": "81245db9215698",
+      "volume": "vol_4ql7650wx9yqlqwr",
+      "canonical_recovery_exit": 1,
+      "native_state": "stopped",
+      "resource_cleanup": "pending original-volume runtime archive",
+      "capture_preflight": "refused inherited services; no mutation"
+    }
+  ],
+  "archive_requested": false
+}

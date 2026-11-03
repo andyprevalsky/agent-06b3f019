@@ -1,3 +1,10 @@
+import {
+  isTerminalStatus,
+  isProgressEstimateUpdate,
+  applyProgressEstimateUpdate,
+  mergeProgressEstimate,
+  mergeTaskProgressEstimates,
+} from '@/lib/progressEstimate';
 import { type RealtimeChannel } from '@supabase/supabase-js';
 import {
   unsubscribe,
@@ -59,12 +66,36 @@ export function handleUpdateAgent(
   setIsChatMode: RealtimeSetters['setIsChatMode'],
   onLoadAgents?: () => void,
 ) {
+  const predictionOnly = isProgressEstimateUpdate(updated);
   setAgent((prev) => {
-    if (!prev) return prev;
+    if (!prev || (updated.agentId && updated.agentId !== prev.agent_id)) return prev;
+    if (predictionOnly) return applyProgressEstimateUpdate(prev, updated);
+    if (updated.updatedAt && Date.parse(updated.updatedAt) < Date.parse(prev.updated_at))
+      return prev;
+    if (
+      isTerminalStatus(prev.status) &&
+      updated.progressEstimate &&
+      (!updated.updatedAt || Date.parse(updated.updatedAt) <= Date.parse(prev.updated_at))
+    )
+      return prev;
+    const generationChanged =
+      updated.temporalWorkflowId !== undefined &&
+      updated.temporalWorkflowId !== prev.temporal_workflow_id;
     return {
       ...prev,
       title: updated.title !== undefined ? updated.title : prev.title,
       progress: updated.progress ?? prev.progress,
+      task_progress_estimates: mergeTaskProgressEstimates(
+        generationChanged ? undefined : prev.task_progress_estimates,
+        updated.taskProgressEstimates,
+      ),
+      progress_estimate: mergeProgressEstimate(
+        generationChanged ? undefined : prev.progress_estimate,
+        updated.progressEstimate,
+        prev.agent_id,
+        updated.status ?? prev.status,
+        updated.taskId ?? prev.task_id,
+      ),
       status: updated.status ?? prev.status,
       status_message: updated.statusMessage ?? prev.status_message,
       model: updated.model ?? prev.model,
@@ -90,6 +121,8 @@ export function handleUpdateAgent(
           : prev.temporal_workflow_id,
     };
   });
+
+  if (predictionOnly) return;
 
   if (shouldRestoreChatMode(updated)) {
     setIsChatMode(true);

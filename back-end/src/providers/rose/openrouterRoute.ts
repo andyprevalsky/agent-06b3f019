@@ -32,6 +32,7 @@ export function exclusiveOpenRouterWaterfall(params: {
     reasoningEffort: params.options.effort,
     abortSignal: params.options.abort_signal,
     tools: params.options.tools,
+    anthropicTools: params.options.anthropic_tools,
     toolChoice: params.options.tool_choice,
   });
 }

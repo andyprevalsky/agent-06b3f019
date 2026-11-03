@@ -26,8 +26,8 @@ from concurrent.futures import Future
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Mapping, Optional
-from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse
+from typing import Any, Callable, Dict, List, Mapping, Optional
+from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse, urlsplit
 
 import httpx
 import structlog
@@ -35,6 +35,7 @@ import structlog
 import helpers.trace_archive as trace_archive
 from helpers.trace_archive import archive_bytes, archive_enabled, archive_files
 from helpers.tracing import current_root_agent_id
+from utils.url_redaction import redact_url_secrets
 
 logger = structlog.get_logger()
 
@@ -48,10 +49,53 @@ _BACKGROUND_RECORDING_ARCHIVE_SLOTS = threading.BoundedSemaphore(4)
 
 _CLOSED_RECORDING_LOCK = threading.Lock()
 _CLOSED_RECORDING_FILES: dict[tuple[str, str, str], dict[str, Future[Optional[dict[str, str]]]]] = {}
-_CLOSED_RECORDING_WAITING: dict[tuple[str, str, str], list[tuple[str, tuple[str, Path, str, Optional[bool]], int]]] = {}
+_CLOSED_RECORDING_WAITING: dict[tuple[str, str, str], list[tuple[str, tuple[str, Path, str, Optional[bool]], int, Any]]] = {}
 
 
-def _queue_closed_recording_file(output_dir: Path, root_agent_id: str, task_id: str, file_path: Path) -> None:
+def _initialize_archive_owner(recorder: Any) -> None:
+    recorder._local_abort = threading.Event()
+    recorder._archive_owner_token = object()
+    recorder._archive_tasks = set()
+    recorder._archive_futures = {}
+    recorder._archive_waiting_keys = set()
+
+
+def _archive_owner_aborted(recorder: Any) -> bool:
+    event = getattr(recorder, "_local_abort", None)
+    return event is not None and event.is_set()
+
+
+async def _abort_recording_local(recorder: Any, tasks: list[Any], *, settle_timeout: float) -> bool:
+    """Fence new owner work and settle cancellable work without provider writes."""
+    with _CLOSED_RECORDING_LOCK:
+        recorder._local_abort.set()
+        recorder._closed = True
+        for key in recorder._archive_waiting_keys:
+            waiting = _CLOSED_RECORDING_WAITING.get(key)
+            if waiting is not None:
+                waiting[:] = [item for item in waiting if item[3] is not recorder]
+                if not waiting:
+                    _CLOSED_RECORDING_WAITING.pop(key, None)
+        recorder._archive_waiting_keys.clear()
+        exclusive_futures = [future for future, owners in recorder._archive_futures.items()
+                             if owners == frozenset({recorder._archive_owner_token})]
+    # Running transfers cannot be rolled back; cancel() only removes queued work.
+    for future in exclusive_futures:
+        future.cancel()
+    owned_tasks = {task for task in [*tasks, *recorder._archive_tasks]
+                   if isinstance(task, asyncio.Task) and task is not asyncio.current_task()}
+    for task in owned_tasks:
+        task.cancel()
+        task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+    if not owned_tasks:
+        return True
+    _, pending = await asyncio.wait(owned_tasks, timeout=settle_timeout)
+    return not pending
+
+
+def _queue_closed_recording_file(
+    output_dir: Path, root_agent_id: str, task_id: str, file_path: Path, *, owner: Any = None
+) -> None:
     """Publish native batches during capture without queuing any source bodies."""
     if not archive_enabled():
         return
@@ -70,21 +114,31 @@ def _queue_closed_recording_file(output_dir: Path, root_agent_id: str, task_id: 
             False if content_type.startswith(("image/", "video/", "audio/")) else None,
         )
         with _CLOSED_RECORDING_LOCK:
+            if owner is not None and _archive_owner_aborted(owner):
+                return
             waiting = _CLOSED_RECORDING_WAITING.setdefault(key, [])
 
             def flush_waiting() -> None:
                 batch = list(waiting)
                 waiting.clear()
+                for item in batch:
+                    if item[3] is not None:
+                        item[3]._archive_waiting_keys.discard(key)
                 future = trace_archive.archive_closed_files_in_background(
                     root_agent_id=root_agent_id, artifacts=[item[1] for item in batch]
                 )
                 if future is not None:
+                    owners = frozenset(getattr(item[3], "_archive_owner_token", None) for item in batch)
                     for item in batch:
                         _CLOSED_RECORDING_FILES.setdefault(key, {})[item[0]] = future
+                        if item[3] is not None:
+                            item[3]._archive_futures[future] = owners
 
             if waiting and sum(item[2] for item in waiting) + reservation > trace_archive._BATCH_MAX_BYTES:
                 flush_waiting()
-            waiting.append((relative, descriptor, reservation))
+            waiting.append((relative, descriptor, reservation, owner))
+            if owner is not None:
+                owner._archive_waiting_keys.add(key)
             if len(waiting) >= trace_archive._BATCH_MAX_RECORDS:
                 flush_waiting()
     except Exception:
@@ -100,11 +154,16 @@ def _closed_recording_hash(file_path: Path) -> str:
     return digest.hexdigest()
 
 
-def _archive_recording_directory(output_dir: Path, root_agent_id: str, task_id: str) -> bool:
+def _archive_recording_directory(output_dir: Path, root_agent_id: str, task_id: str, *, owner: Any = None) -> bool:
+    if owner is not None and _archive_owner_aborted(owner):
+        return False
     key = (str(output_dir.resolve()), root_agent_id, task_id)
     with _CLOSED_RECORDING_LOCK:
         closed = dict(_CLOSED_RECORDING_FILES.get(key, {}))
-        _CLOSED_RECORDING_WAITING.pop(key, None)
+        removed_waiting = _CLOSED_RECORDING_WAITING.pop(key, [])
+        for item in removed_waiting:
+            if item[3] is not None:
+                item[3]._archive_waiting_keys.discard(key)
     acknowledged = {}
     for relative, future in closed.items():
         try:
@@ -116,6 +175,8 @@ def _archive_recording_directory(output_dir: Path, root_agent_id: str, task_id: 
 
     def artifacts():
         for file_path in output_dir.rglob("*"):
+            if owner is not None and _archive_owner_aborted(owner):
+                return
             if file_path.is_file():
                 relative = file_path.relative_to(output_dir).as_posix()
                 if relative in acknowledged and acknowledged[relative] == _closed_recording_hash(file_path):
@@ -142,6 +203,10 @@ def _archive_recording_directory(output_dir: Path, root_agent_id: str, task_id: 
 
 def _schedule_background_recording_archive(recorder: Any, *, cleanup_after: bool) -> bool:
     """Bound recording archive work without queueing thousands of filesystem walks."""
+    if not hasattr(recorder, "_local_abort"):
+        _initialize_archive_owner(recorder)
+    if _archive_owner_aborted(recorder):
+        return False
     if not _BACKGROUND_RECORDING_ARCHIVE_SLOTS.acquire(blocking=False):
         logger.warning(
             "Browser recording archive queue saturated",
@@ -151,16 +216,19 @@ def _schedule_background_recording_archive(recorder: Any, *, cleanup_after: bool
         return False
 
     async def _run() -> bool:
-        try:
-            return await recorder._archive_recording_artifacts()
-        finally:
-            _BACKGROUND_RECORDING_ARCHIVE_SLOTS.release()
+        if _archive_owner_aborted(recorder):
+            return False
+        return await recorder._archive_recording_artifacts()
 
     task = asyncio.create_task(_run())
     _BACKGROUND_RECORDING_ARCHIVE_TASKS.add(task)
+    recorder._archive_tasks.add(task)
 
     def _finished(completed: asyncio.Task[Any]) -> None:
+        # A cancelled coroutine may never enter its body.
+        _BACKGROUND_RECORDING_ARCHIVE_SLOTS.release()
         _BACKGROUND_RECORDING_ARCHIVE_TASKS.discard(completed)
+        recorder._archive_tasks.discard(completed)
         if completed.cancelled():
             return
         try:
@@ -213,6 +281,14 @@ def kernel_replay_enabled() -> bool:
 
 def _kernel_api_base() -> str:
     return (os.getenv("KERNEL_API_BASE_URL") or "https://api.onkernel.com").rstrip("/")
+
+
+def _kernel_response_body(response: Any) -> str:
+    """Bounded provider error text for a failed Kernel replay request."""
+    content = getattr(response, "content", b"") or b""
+    if isinstance(content, bytes):
+        return content[:300].decode("utf-8", "replace")
+    return str(content)[:300]
 
 
 def _kernel_replay_headers() -> Optional[Dict[str, str]]:
@@ -903,6 +979,7 @@ class BrowserAgentRecorder:
         self.started_at = datetime.now(timezone.utc).isoformat()
         self._frame_index = 0
         self._closed = False
+        _initialize_archive_owner(self)
         self._consecutive_failures = 0
         # Capture-health summary for the manifest/close log: idle screenshot
         # failures are otherwise silent, so a replay with a multi-minute hole
@@ -923,6 +1000,12 @@ class BrowserAgentRecorder:
         self.interval_seconds = max(1 / 30, float(os.getenv("BROWSER_AGENT_RECORDING_INTERVAL_SECONDS", "2")))
         self.render_fps = max(1, int(os.getenv("BROWSER_AGENT_RECORDING_RENDER_FPS", "30")))
         self.max_frames = max(1, int(os.getenv("BROWSER_AGENT_RECORDING_MAX_FRAMES", "900")))
+
+    async def abort_local(self, *, settle_timeout: float) -> bool:
+        """Stop only this recorder's local work; never finalize provider media."""
+        return await _abort_recording_local(
+            self, [self._loop_task, *self._mark_tasks], settle_timeout=settle_timeout
+        )
 
     def set_cursor(self, x: int, y: int) -> None:
         """Update replay cursor position without forcing a screenshot capture."""
@@ -948,6 +1031,7 @@ class BrowserAgentRecorder:
         session_id: Optional[str],
         browser_url: Optional[str],
         session_metadata: Optional[Dict[str, Any]] = None,
+        register_local_owner: Optional[Callable[[Any], None]] = None,
     ) -> Optional["BrowserAgentRecorder"]:
         if not task_id or not session_id:
             return None
@@ -969,6 +1053,8 @@ class BrowserAgentRecorder:
             browser_url=browser_url or "",
             session_metadata=session_metadata,
         )
+        if register_local_owner is not None:
+            register_local_owner(recorder)
         try:
             await recorder.start()
         except Exception as exc:
@@ -1281,12 +1367,23 @@ class BrowserAgentRecorder:
                             f"{base}/browsers/{self.session_id}/replays/{self._kernel_replay_id}/stop",
                             headers=headers,
                         )
-                        stop_response.raise_for_status()
+                        if stop_response.status_code >= 400:
+                            # Keep Kernel's error body: the status line alone cannot
+                            # tell an already-stopped replay from a closed session.
+                            logger.warning(
+                                "Kernel replay stop failed; reading persisted replay anyway",
+                                agent_id=self.agent_id,
+                                task_id=self.task_id,
+                                replay_id=self._kernel_replay_id,
+                                status_code=stop_response.status_code,
+                                error=_kernel_response_body(stop_response),
+                            )
                     except Exception as exc:  # noqa: BLE001 — best-effort stop
                         logger.warning(
                             "Kernel replay stop failed; reading persisted replay anyway",
                             agent_id=self.agent_id,
                             task_id=self.task_id,
+                            replay_id=self._kernel_replay_id,
                             error=str(exc)[:300],
                         )
                 response = await client.get(f"{base}/browsers/{self.session_id}/replays", headers=headers)
@@ -1600,7 +1697,7 @@ class BrowserAgentRecorder:
                     "agent_id": self.agent_id,
                     "task_id": self.task_id,
                     "session_id": self.session_id,
-                    "browser_url": self.browser_url,
+                    "browser_url": redact_url_secrets(self.browser_url),
                     "browser_session_metadata": self.session_metadata,
                     "recording_source": recording_source,
                     "steel_recording": steel_media,
@@ -1669,6 +1766,8 @@ class BrowserAgentRecorder:
             return None
 
     async def _archive_recording_artifacts(self) -> bool:
+        if _archive_owner_aborted(self):
+            return False
         if not archive_enabled():
             return True
         archive_root_agent_id = current_root_agent_id() or self.agent_id
@@ -1676,7 +1775,7 @@ class BrowserAgentRecorder:
 
     def _archive_recording_artifacts_sync(self, archive_root_agent_id: str) -> bool:
         try:
-            return _archive_recording_directory(self.output_dir, archive_root_agent_id, self.task_id)
+            return _archive_recording_directory(self.output_dir, archive_root_agent_id, self.task_id, owner=self)
         except Exception as exc:  # noqa: BLE001 - archive is best-effort
             logger.warning(
                 "Browser agent recording archive failed",
@@ -2327,6 +2426,15 @@ _FIRST_PARTY_TUNNEL_FAILURE_MARKERS = (
     "err_proxy_connection_failed",
     "err_proxy_connection_refused",
 )
+# Response header Kernel's managed proxy sets on pages it generates itself
+# (upstream_connect_failed, ...). Origins never send it.
+_KERNEL_PROXY_ERROR_HEADER = "x-kernel-proxy-error"
+
+
+def _document_url_key(url: str) -> tuple[str, str, str, str]:
+    """Compare navigation URLs the way Chromium requests them (``/`` path, no fragment)."""
+    parts = urlsplit(str(url or "").strip())
+    return (parts.scheme.lower(), parts.netloc.lower(), parts.path or "/", parts.query)
 
 
 def _host_looks_like_script_cdn(url: str) -> bool:
@@ -2706,6 +2814,7 @@ class BrowserNetworkRecorder:
         self._active_request_ids: set[str] = set()
         self._started_at = time.monotonic()
         self._closed = False
+        _initialize_archive_owner(self)
         self._tasks: set[asyncio.Task] = set()
         self._provider_exit_rejections: List[Dict[str, Any]] = []
         self._rejected_network_generations: set[int] = set()
@@ -2765,6 +2874,7 @@ class BrowserNetworkRecorder:
         task_id: Optional[str],
         session_id: Optional[str],
         output_dir: Path,
+        register_local_owner: Optional[Callable[[Any], None]] = None,
     ) -> Optional["BrowserNetworkRecorder"]:
         persist_network_log = browser_network_recording_enabled()
         if (not persist_network_log and not provider_exit_monitoring_enabled()) or not task_id or not session_id:
@@ -2785,6 +2895,8 @@ class BrowserNetworkRecorder:
             output_dir=output_dir,
             persist_network_log=persist_network_log,
         )
+        if register_local_owner is not None:
+            register_local_owner(recorder)
         try:
             await recorder.start()
         except Exception as exc:
@@ -3847,7 +3959,7 @@ class BrowserNetworkRecorder:
                 body_path = self.network_dir / f"{index:04d}_{request_id.replace('.', '_')}{extension}"
                 body_path.write_bytes(body_bytes)
                 _queue_closed_recording_file(
-                    self.output_dir, current_root_agent_id() or self.agent_id, self.task_id, body_path
+                    self.output_dir, current_root_agent_id() or self.agent_id, self.task_id, body_path, owner=self
                 )
                 entry["body_file"] = body_path.name
                 logger.info(
@@ -3978,6 +4090,39 @@ class BrowserNetworkRecorder:
             url=_redact_url_query(url),
             cleared=cleared,
         )
+
+    def network_clock_ms(self) -> int:
+        """Recorder clock used by ``request_ts_ms``/``response_ts_ms``."""
+        return int((time.monotonic() - self._started_at) * 1000)
+
+    def provider_proxy_error_document(self, url: str, *, since_ms: int | None = None) -> Optional[Dict[str, Any]]:
+        """Latest Document response for ``url``, when the provider's proxy generated it.
+
+        Returns None when the newest matching document response came from the
+        origin (any status), so a later real load supersedes an earlier proxy page.
+        """
+        target = _document_url_key(url)
+        generation = getattr(self, "_network_generation", 0)
+        for entry in reversed(list(self.entries.values())):
+            if str(entry.get("resource_type") or "").lower() != "document" or entry.get("status") is None:
+                continue
+            if (entry.get("browser_generation") or 0) != (generation or 0):
+                continue
+            if since_ms is not None and int(entry.get("response_ts_ms") or 0) < since_ms:
+                continue
+            chain = [str(hop.get("url") or "") for hop in entry.get("redirects") or []]
+            chain.append(str(entry.get("url") or ""))
+            if target not in {_document_url_key(hop) for hop in chain if hop}:
+                continue
+            proxy_error = (entry.get("response_headers") or {}).get(_KERNEL_PROXY_ERROR_HEADER)
+            if not proxy_error:
+                return None
+            return {
+                "url": str(entry.get("url") or ""),
+                "status": entry.get("status"),
+                "proxy_error": str(proxy_error),
+            }
+        return None
 
     def pop_provider_exit_rejection(self) -> Optional[Dict[str, Any]]:
         """Consume one explicit rejection verdict for the active browser exit.
@@ -4336,7 +4481,7 @@ class BrowserNetworkRecorder:
 
     async def archive_diagnostics_artifacts(self) -> Dict[str, str]:
         """Archive each redacted index and return stable trace references."""
-        if not archive_enabled():
+        if _archive_owner_aborted(self) or not archive_enabled():
             return {}
         root_agent_id = current_root_agent_id() or self.agent_id
         refs: Dict[str, str] = {}
@@ -4345,6 +4490,8 @@ class BrowserNetworkRecorder:
             ("network", self.network_index_path, network_payload),
             ("console", self.console_index_path, console_payload),
         ):
+            if _archive_owner_aborted(self):
+                break
             if not path.exists():
                 continue
             result = archive_bytes(
@@ -4356,6 +4503,10 @@ class BrowserNetworkRecorder:
             if isinstance(result, dict) and isinstance(result.get("ref"), str):
                 refs[kind] = result["ref"]
         return refs
+
+    async def abort_local(self, *, settle_timeout: float) -> bool:
+        """Fence only this instance's capture/archive work and settle its tasks."""
+        return await _abort_recording_local(self, list(self._tasks), settle_timeout=settle_timeout)
 
     async def close(self) -> Optional[Path]:
         if self._closed:

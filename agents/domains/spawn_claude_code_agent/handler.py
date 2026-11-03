@@ -7,30 +7,45 @@ dispatches to the activity, and yields ToolEvents for the workflow.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict, Optional
 
 import structlog
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import ActivityError, ApplicationError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from domains.spawn_claude_code_agent.config import (
     CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S,
+    CODE_AGENT_ACTIVITY_NO_DEADLINE,
     CODE_AGENT_DRAIN_YIELD_STATUS,
+    CODE_AGENT_PAUSED_STATUS,
+    CODE_AGENT_USAGE_LIMIT_STATUS,
     CODE_SESSION_HEARTBEAT_KEY,
+    CODE_TARGET_LOCAL,
+    E2B_CAPACITY_EXHAUSTED_CODE,
+    LOCAL_TARGET_UNAVAILABLE_CODE,
 )
 from domains.spawn_claude_code_agent.service import (
     close_detached_code_session_activity,
     code_session_record,
+    iso_utc,
     resolve_code_agent_provider_activity,
     spawn_claude_code_activity,
+)
+from domains.spawn_claude_code_agent.service_target import (
+    cloud_target,
+    code_agent_metadata,
+    normalize_code_target,
+    resolve_code_agent_target_activity,
 )
 from helpers.activity_generation_drain import GENERATION_SUPERSEDED
 from helpers.attachments import extract_attachments_from_context
 from helpers.generation_handoff import GenerationHandoffRequested, park_pending_tool, take_tool_resume
+from helpers.tool_interrupts import tool_stop_requested
 from helpers.tracing import span
 from helpers.wait_condition_or_handoff import live_handoff_queue
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
@@ -49,9 +64,7 @@ def _is_recoverable_github_clone_denial(error: BaseException) -> bool:
     benches that only needed metadata discovery.
     """
     text = extract_error_message(error).upper()
-    return "GITHUB_ACCESS_DENIED" in text or (
-        "PERMISSION TO CLONE" in text and "GITHUB" in text
-    )
+    return "GITHUB_ACCESS_DENIED" in text or ("PERMISSION TO CLONE" in text and "GITHUB" in text)
 
 
 def _is_recoverable_sandbox_infra_failure(error: BaseException) -> bool:
@@ -93,7 +106,6 @@ def _is_recoverable_sandbox_infra_failure(error: BaseException) -> bool:
         "FAILED TO RUN RESERVE SCRIPT",
         "THE SANDBOX WAS NOT FOUND",
         "SANDBOX TIMEOUT",
-        "FAILED TO CREATE CODE SESSION",
         # Proxy/gateway capacity (cuda-kernel k=3 r10 agent1 @ ~30m): HTTP 500
         # wrapping ``503: no healthy upstream`` — soft-fail after Temporal
         # retries so no_tool_failures stays green while the agent can re-spawn.
@@ -103,7 +115,11 @@ def _is_recoverable_sandbox_infra_failure(error: BaseException) -> bool:
         "CONNECTTIMEOUT",
         "POOLTIMEOUT",
     )
-    return any(m in text for m in markers)
+    if any(m in text for m in markers):
+        return True
+    # A bare session-create failure is a capacity flake only when the backend
+    # failed (HTTP 5xx). A 4xx rejected our request; retrying cannot heal it.
+    return "FAILED TO CREATE CODE SESSION" in text and "HTTP 5" in text
 
 
 def _is_recoverable_claude_billing_failure(error: BaseException) -> bool:
@@ -129,9 +145,7 @@ def _is_recoverable_claude_billing_failure(error: BaseException) -> bool:
     return any(m in text for m in markers)
 
 
-def _soft_fail_github_clone_denial_result(
-    *, code_provider: Optional[str], error: BaseException
-) -> Dict[str, Any]:
+def _soft_fail_github_clone_denial_result(*, code_provider: Optional[str], error: BaseException) -> Dict[str, Any]:
     detail = extract_error_message(error)
     return {
         "success": False,
@@ -145,9 +159,7 @@ def _soft_fail_github_clone_denial_result(
     }
 
 
-def _soft_fail_sandbox_infra_result(
-    *, code_provider: Optional[str], error: BaseException
-) -> Dict[str, Any]:
+def _soft_fail_sandbox_infra_result(*, code_provider: Optional[str], error: BaseException) -> Dict[str, Any]:
     detail = extract_error_message(error)
     return {
         "success": False,
@@ -161,9 +173,7 @@ def _soft_fail_sandbox_infra_result(
     }
 
 
-def _soft_fail_claude_billing_result(
-    *, code_provider: Optional[str], error: BaseException
-) -> Dict[str, Any]:
+def _soft_fail_claude_billing_result(*, code_provider: Optional[str], error: BaseException) -> Dict[str, Any]:
     detail = extract_error_message(error)
     return {
         "success": False,
@@ -183,26 +193,94 @@ def _maybe_soft_fail_session_create_result(
 ) -> Optional[Dict[str, Any]]:
     """Map recoverable session-create failures to soft-fail tool results."""
     if _is_recoverable_github_clone_denial(error):
-        return _soft_fail_github_clone_denial_result(
-            code_provider=code_provider, error=error
-        )
+        return _soft_fail_github_clone_denial_result(code_provider=code_provider, error=error)
     # Billing markers must win over the broad sandbox "FAILED TO CREATE CODE
     # SESSION" substring — otherwise Anthropic payment blocks are mislabeled as
     # capacity flakes (cuda-kernel k=3 r13).
     if _is_recoverable_claude_billing_failure(error):
-        return _soft_fail_claude_billing_result(
-            code_provider=code_provider, error=error
-        )
+        return _soft_fail_claude_billing_result(code_provider=code_provider, error=error)
     if _is_recoverable_sandbox_infra_failure(error):
-        return _soft_fail_sandbox_infra_result(
-            code_provider=code_provider, error=error
-        )
+        return _soft_fail_sandbox_infra_result(code_provider=code_provider, error=error)
     return None
 
 
-def _drained_code_session(
-    result: Dict[str, Any], prior_session: Optional[Dict[str, Any]]
+def _typed_application_error(error: BaseException, error_type: str) -> Optional[ApplicationError]:
+    """The backend's typed non-retryable ApplicationError in ``error``'s cause chain, if any."""
+    cur: Optional[BaseException] = error
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, ApplicationError) and cur.type == error_type:
+            return cur
+        cur = getattr(cur, "cause", None) or cur.__cause__
+    return None
+
+
+def _local_target_unavailable(error: BaseException) -> Optional[ApplicationError]:
+    """The backend's non-retryable "Mac unavailable" error, if that is what failed."""
+    return _typed_application_error(error, LOCAL_TARGET_UNAVAILABLE_CODE)
+
+
+def _e2b_capacity_exhausted(error: BaseException) -> Optional[ApplicationError]:
+    """E2B's concurrent-sandbox limit refusal: a hard failure, never a soft retry hint."""
+    return _typed_application_error(error, E2B_CAPACITY_EXHAUSTED_CODE)
+
+
+def _failed_code_agent(target_info: Optional[Dict[str, Any]], message: str) -> Dict[str, Any]:
+    """``metadata.code_agent`` for a run that failed before or outside the activity result."""
+    return {**code_agent_metadata(target_info), "state": "failed", "failure_message": message}
+
+
+def _paused_code_agent(
+    target_info: Optional[Dict[str, Any]],
+    result: Optional[Dict[str, Any]],
+    code_session: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    """``metadata.code_agent`` for a user pause: resumable, never failed.
+
+    The activity's own block when it returned one; otherwise (cancelled while
+    detached, or before an attempt took over) the detached session's identity.
+    """
+    block: Dict[str, Any] = dict(code_agent_metadata(target_info))
+    activity_block = (result or {}).get("code_agent")
+    if isinstance(activity_block, dict):
+        block.update(activity_block)
+    else:
+        session = code_session or {}
+        provider = (result or {}).get("code_provider") or session.get("code_provider")
+        started_at = session.get("started_at")
+        block.update(
+            {
+                "task_id": (result or {}).get("task_id") or session.get("task_id"),
+                "provider": "codex" if provider == "codex" else "claude",
+                "branch": session.get("branch"),
+                "base_branch": session.get("merge_target"),
+                "started_at": iso_utc(started_at) if isinstance(started_at, (int, float)) else None,
+            }
+        )
+    block["state"] = "paused"
+    if not block.get("ended_at"):
+        # workflow.now() keeps the timestamp deterministic on replay.
+        block["ended_at"] = iso_utc(workflow.now().timestamp())
+    return block
+
+
+def _resumed_target(code_session: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Target recorded on a parked/drained session, so a reattach keeps its Mac."""
+    if not code_session or code_session.get("target") != CODE_TARGET_LOCAL:
+        return None
+    return {
+        "target": CODE_TARGET_LOCAL,
+        "available": True,
+        "reason": None,
+        "device_id": code_session.get("device_id"),
+        "device_name": code_session.get("device_name"),
+        "error": None,
+        "folder": code_session.get("folder"),
+    }
+
+
+def _drained_code_session(result: Dict[str, Any], prior_session: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Session that reattaches the next activity to the drained sandbox."""
     prior = prior_session or {}
     session = dict(result.get("code_session") or prior)
@@ -249,6 +327,38 @@ class SpawnClaudeCodeAgentManager(ToolManager):
         output_schema = tool_call.get("output_schema")
         requested_attachments = tool_call.get("attachments")
         github_repo_url = tool_call.get("github_repo_link")
+        # Resume a specific persistent code session; omitted, the backend resumes
+        # this agent's latest session for the repo (or starts its own branch).
+        requested_code_session_id = tool_call.get("code_session_id")
+        if isinstance(requested_code_session_id, str) and requested_code_session_id:
+            try:
+                uuid.UUID(requested_code_session_id)
+            except ValueError:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Task Incomplete",
+                    message=(
+                        f"code_session_id {requested_code_session_id!r} is not a code session id. Pass the "
+                        "code_session_id (a UUID) that a previous code-agent result reported, or omit "
+                        "code_session_id to start or resume your own latest session."
+                    ),
+                    status=MessageStatus.FINISHED,
+                    metadata={
+                        "toolName": "spawn_claude_code_agent",
+                        "action_type": "task_complete",
+                        "success": False,
+                    },
+                )
+                return
+        code_session_request = (
+            {"code_session_id": requested_code_session_id}
+            if isinstance(requested_code_session_id, str) and requested_code_session_id
+            else None
+        )
+        if tool_call.get("_fresh_conversation") is True:
+            # continue_conversation=false resume: same session and sandbox, new CLI conversation.
+            code_session_request = {**(code_session_request or {}), "fresh_conversation": True}
+        requested_target = normalize_code_target(tool_call.get("target"))
         user_id = workflow_instance.user_id
         agent_id = workflow_instance.agent_id
 
@@ -271,25 +381,92 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             num_attachments=len(attachments),
             github_repo_url=github_repo_url,
             resumed_task_id=(code_session or {}).get("task_id"),
+            target=requested_target,
         )
 
+        code_provider = "unknown"
+        target_info: Dict[str, Any] = dict(_resumed_target(code_session) or cloud_target())
+        if code_session is None and requested_target == CODE_TARGET_LOCAL:
+            # Local runs only on the Mac that started this agent tree, and only
+            # while its Rose Mac app is connected. Never wait, never fall back.
+            try:
+                target_info = dict(
+                    await workflow.execute_activity(
+                        resolve_code_agent_target_activity,
+                        args=[agent_id, requested_target],
+                        start_to_close_timeout=timedelta(seconds=20),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                )
+            except ActivityError as lookup_error:
+                logger.error(
+                    "[ClaudeCode] Local target lookup failed",
+                    agent_id=agent_id,
+                    error=extract_error_message(lookup_error),
+                )
+                lookup_message = extract_error_message(lookup_error)
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Code session failed",
+                    message=lookup_message,
+                    status=MessageStatus.ERROR,
+                    metadata={
+                        "toolName": "spawn_claude_code_agent",
+                        "code_agent": _failed_code_agent({"target": CODE_TARGET_LOCAL}, lookup_message),
+                    },
+                )
+                return
+            if not target_info.get("available"):
+                logger.warning(
+                    "[ClaudeCode] Local target unavailable; failing the tool call",
+                    agent_id=agent_id,
+                    reason=target_info.get("reason"),
+                    device_id=target_info.get("device_id"),
+                )
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Code session failed",
+                    message=target_info.get("error") or "",
+                    status=MessageStatus.ERROR,
+                    metadata={
+                        "toolName": "spawn_claude_code_agent",
+                        "error_code": LOCAL_TARGET_UNAVAILABLE_CODE,
+                        "code_agent": _failed_code_agent(target_info, target_info.get("error") or ""),
+                    },
+                )
+                return
+
         if code_session is None:
+            local_device_name = target_info.get("device_name")
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="Starting Claude Code sandbox",
+                title=(
+                    f"Starting code agent on {local_device_name}"
+                    if target_info.get("target") == CODE_TARGET_LOCAL and local_device_name
+                    else "Starting Claude Code sandbox"
+                ),
                 message="",
                 status=MessageStatus.IN_PROGRESS,
-                metadata={"toolName": "spawn_claude_code_agent"},
+                metadata={
+                    "toolName": "spawn_claude_code_agent",
+                    "code_agent": {
+                        "task_id": None,
+                        "provider": None,
+                        "branch": None,
+                        "state": "spinning_up",
+                        # workflow.now() keeps the timestamp deterministic on replay.
+                        "started_at": workflow.now().isoformat(),
+                        # target / device_name / folder (cloud unless a Mac was resolved).
+                        **code_agent_metadata(target_info),
+                    },
+                },
             )
 
-        code_provider = "unknown"
         try:
             model = getattr(workflow_instance, "model", "rose-labs/rose-1-flash")
             active_gpt_token = getattr(workflow_instance, "_active_gpt_token", None)
             gpt_token = (
-                active_gpt_token()
-                if callable(active_gpt_token)
-                else getattr(workflow_instance, "gpt_code_token", None)
+                active_gpt_token() if callable(active_gpt_token) else getattr(workflow_instance, "gpt_code_token", None)
             )
             active_gpt_account_id = getattr(workflow_instance, "_active_gpt_account_id", None)
             gpt_account_id = (
@@ -356,8 +533,17 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                             gpt_token_pool_id,
                             fast_mode_cache_enabled,
                             code_session,
+                            code_session_request,
+                            # A cloud run schedules exactly the pre-C14 arguments.
+                            *(
+                                [CODE_TARGET_LOCAL, target_info.get("device_id"), target_info.get("device_name")]
+                                if target_info.get("target") == CODE_TARGET_LOCAL
+                                else []
+                            ),
                         ],
-                        start_to_close_timeout=timedelta(minutes=50),
+                        # No runtime limit (C11): Temporal needs a value, so this is
+                        # effectively infinite; liveness is heartbeat_timeout only.
+                        start_to_close_timeout=CODE_AGENT_ACTIVITY_NO_DEADLINE,
                         heartbeat_timeout=timedelta(seconds=CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S),
                         # WAIT so pause cancel receives the activity's cancelled
                         # result (includes task_id). TRY_CANCEL races the workflow
@@ -365,22 +551,24 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         # leaving ClaudeCodeChip stuck on "Spinning up..." on the
                         # durable hub FE (agent 094f1085 / task 1d92a4db).
                         cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-                        # Capacity flakes (redis pool / 503 no healthy upstream) often
-                        # clear within a minute. Prefer in-activity Temporal retries
-                        # over soft-failing the tool early — soft-fail lets the DAG
-                        # advance into attempt_completion with incomplete CC work
-                        # (cuda-kernel k=3 r10 agent1: soft-fail @~30m → verifier
-                        # 50% → redo CC → 4200s task timeout). Keep soft-fail as the
-                        # post-exhaustion path for no_tool_failures.
-                        retry_policy=RetryPolicy(maximum_attempts=5),
+                        # Unlimited attempts: a worker crash or deploy never ends a code
+                        # session (each retry reattaches/resumes it). Errors the
+                        # activity raises itself become non-retryable after
+                        # CODE_AGENT_ERROR_RETRY_LIMIT attempts, so capacity flakes
+                        # still get in-activity retries before the soft-fail path
+                        # (cuda-kernel k=3 r10 agent1) and nothing loops forever.
+                        retry_policy=RetryPolicy(maximum_attempts=0),
                     )
 
                     # Wait for activity completion or pause signal
                     was_cancelled = False
                     # cutover-class: activity-bound — the activity detaches at a deploy drain and returns its session
-                    await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)
-                    if workflow_instance.is_paused and not activity_handle.done():
-                        logger.info("[ClaudeCode] Cancelling due to pause", agent_id=agent_id)
+                    await workflow.wait_condition(
+                        lambda: activity_handle.done() or tool_stop_requested(workflow_instance, tool_call_id)
+                    )
+                    # Pause, or a kill_agent of this agent (helpers/tool_interrupts.py).
+                    if tool_stop_requested(workflow_instance, tool_call_id) and not activity_handle.done():
+                        logger.info("[ClaudeCode] Cancelling due to pause or interrupt", agent_id=agent_id)
                         activity_handle.cancel()
                         was_cancelled = True
 
@@ -407,8 +595,10 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                                         task_id=abandoned.get("task_id"),
                                         error=extract_error_message(close_error),
                                     )
-                            soft = _maybe_soft_fail_session_create_result(
-                                code_provider=code_provider, error=e
+                            soft = (
+                                None
+                                if _local_target_unavailable(e) is not None or _e2b_capacity_exhausted(e) is not None
+                                else _maybe_soft_fail_session_create_result(code_provider=code_provider, error=e)
                             )
                             if soft is not None:
                                 logger.warning(
@@ -488,10 +678,13 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 # Chip terminality requires action_type=task_complete + task_id.
                 # session_cancelled without task_id leaves ClaudeCodeChip stuck on
                 # "Spinning up..." after pause (hub agent 182cf2ab / task 45ce853d).
+                # A user pause is resumable (W5b contract): FINISHED + paused.
                 cancel_metadata = {
                     "toolName": "spawn_claude_code_agent",
                     "action_type": "task_complete",
                     "success": False,
+                    "session_paused": True,
+                    "code_agent": _paused_code_agent(target_info, result, code_session),
                 }
                 if result:
                     if result.get("task_id"):
@@ -507,9 +700,9 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     )
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title="Claude Code Session Cancelled",
+                    title="Code session paused",
                     message="User paused the agent",
-                    status=MessageStatus.ERROR,
+                    status=MessageStatus.FINISHED,
                     metadata=cancel_metadata,
                 )
                 return
@@ -538,20 +731,46 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             code_provider = result.get("code_provider") or code_provider
             success = result.get("success") is True
             output_files = result.get("output_files", [])
+            paused = result.get("status") == CODE_AGENT_PAUSED_STATUS
+            completed_metadata: Dict[str, Any] = {
+                "toolName": "spawn_claude_code_agent",
+                "task_id": result.get("task_id"),
+                "action_type": "task_complete",
+                "success": success,
+                "structured_response": result.get("structured_response"),
+                "code_provider": code_provider,
+                "completed_turns": result.get("completed_turns"),
+            }
+            if isinstance(result.get("code_session"), dict):
+                completed_metadata["code_session"] = result["code_session"]
+            completed_metadata["code_agent"] = {
+                **code_agent_metadata(target_info),
+                **(result.get("code_agent") if isinstance(result.get("code_agent"), dict) else {}),
+            }
+            if paused:
+                completed_metadata["session_paused"] = True
+            usage_limited = result.get("status") == CODE_AGENT_USAGE_LIMIT_STATUS
+            if usage_limited:
+                # C15: structured, retryable error; the message has the exact retry.
+                # The session is saved and paused, so the chip reads resumable.
+                completed_metadata["session_paused"] = True
+                completed_metadata["failure_kind"] = "usage_limit"
+                completed_metadata["retryable"] = True
+                completed_metadata["usage_limit"] = result.get("usage_limit")
+                completed_metadata["retry"] = result.get("retry")
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="✓ Task Completed" if success else "Task Incomplete",
+                # An idle session is paused and resumable, never a failure (C11).
+                title=(
+                    "Code agent hit a usage limit"
+                    if usage_limited
+                    else "Code session paused"
+                    if paused
+                    else ("✓ Task Completed" if success else "Task Incomplete")
+                ),
                 message=result.get("message", ""),
                 status=MessageStatus.FINISHED,
-                metadata={
-                    "toolName": "spawn_claude_code_agent",
-                    "task_id": result.get("task_id"),
-                    "action_type": "task_complete",
-                    "success": success,
-                    "structured_response": result.get("structured_response"),
-                    "code_provider": code_provider,
-                    "completed_turns": result.get("completed_turns"),
-                },
+                metadata=completed_metadata,
                 data={"usage": tool_usage},
             )
 
@@ -574,9 +793,53 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             if isinstance(e, asyncio.CancelledError):
                 raise
 
-            soft = _maybe_soft_fail_session_create_result(
-                code_provider=code_provider, error=e
-            )
+            local_unavailable = _local_target_unavailable(e)
+            if local_unavailable is not None:
+                # The Mac went away between the target check and session create:
+                # same exact tool error, no retry, no cloud fallback.
+                details = local_unavailable.details[0] if local_unavailable.details else {}
+                device_name = details.get("device_name") if isinstance(details, dict) else None
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Code session failed",
+                    message=local_unavailable.message,
+                    status=MessageStatus.ERROR,
+                    metadata={
+                        "toolName": "spawn_claude_code_agent",
+                        "code_provider": code_provider,
+                        "error_code": LOCAL_TARGET_UNAVAILABLE_CODE,
+                        "code_agent": _failed_code_agent(
+                            {**target_info, "device_name": device_name or target_info.get("device_name")},
+                            local_unavailable.message,
+                        ),
+                    },
+                )
+                return
+
+            capacity = _e2b_capacity_exhausted(e)
+            if capacity is not None:
+                # E2B's plan is full: fail the tool now with the backend's exact
+                # message so the shortage is visible and the plan gets scaled.
+                logger.error(
+                    "[ClaudeCode] E2B concurrent-sandbox limit reached; failing the tool call",
+                    agent_id=agent_id,
+                    code_provider=code_provider,
+                )
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Code session failed",
+                    message=capacity.message,
+                    status=MessageStatus.ERROR,
+                    metadata={
+                        "toolName": "spawn_claude_code_agent",
+                        "code_provider": code_provider,
+                        "error_code": E2B_CAPACITY_EXHAUSTED_CODE,
+                        "code_agent": _failed_code_agent(target_info, capacity.message),
+                    },
+                )
+                return
+
+            soft = _maybe_soft_fail_session_create_result(code_provider=code_provider, error=e)
             if soft is not None:
                 logger.warning(
                     "[ClaudeCode] Recoverable session-create failure; soft-failing tool",
@@ -607,12 +870,17 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 error_type=type(e).__name__,
             )
 
+            failure_message = extract_error_message(e)
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Code session failed",
-                message=extract_error_message(e),
+                message=failure_message,
                 status=MessageStatus.ERROR,
-                metadata={"toolName": "spawn_claude_code_agent", "code_provider": code_provider},
+                metadata={
+                    "toolName": "spawn_claude_code_agent",
+                    "code_provider": code_provider,
+                    "code_agent": _failed_code_agent(target_info, failure_message),
+                },
             )
 
 

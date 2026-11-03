@@ -157,6 +157,7 @@ async def test_populate_raises_on_unknown_tool():
             tool_name="totally_not_a_tool",
             goal="x",
             agent_id="agent-1",
+            model="rose-fast",
         )
     except ValueError as e:
         assert "Unknown tool" in str(e)
@@ -164,17 +165,56 @@ async def test_populate_raises_on_unknown_tool():
         raise AssertionError("Expected ValueError for unknown tool")
 
 
-async def test_populate_forces_ultra_model():
-    """Param populator always calls rose-1-ultra, ignoring the unused activity model arg."""
-    from domains.param_populator.config import PARAM_POPULATOR_MODEL
+async def test_populate_uses_agent_model():
+    """Param populator uses the model selected for the agent."""
     from domains.param_populator.service import populate_tool_params
     import domains.param_populator.service as svc
 
-    assert PARAM_POPULATOR_MODEL == "rose-labs/rose-1-ultra"
     seen: dict = {}
 
     async def fake_fetch_agent_context(agent_id: str):
         return []
+
+    async def fake_call_llm_structured_streaming(**kwargs):
+        seen.update(kwargs)
+        return _FakePydanticResult([_FakeToolCall({"tool": "web_search", "query": "q"})]), {"total_tokens": 1}, []
+
+    async def fake_model_context(model):
+        seen["budget_model"] = model
+        return 200000
+
+    original_window = svc.get_model_context_window
+    svc.get_model_context_window = fake_model_context
+    original_fetch = svc.fetch_agent_context
+    original_call = svc.call_llm_structured_streaming
+    svc.fetch_agent_context = fake_fetch_agent_context
+    svc.call_llm_structured_streaming = fake_call_llm_structured_streaming
+    try:
+        await populate_tool_params(tool_name="web_search", goal="Find AI news", agent_id="agent-1", model="rose-fast")
+    finally:
+        svc.get_model_context_window = original_window
+        svc.fetch_agent_context = original_fetch
+        svc.call_llm_structured_streaming = original_call
+
+    assert seen["budget_model"] == seen["model"] == "rose-fast"
+    assert seen["call_site"] == "dag_param_populator"
+
+
+async def test_populate_keeps_metadata_for_unadmitted_attachments():
+    """An unrelated unreadable or oversized upload must not block parameter population."""
+    from domains.param_populator.service import populate_tool_params
+    import domains.param_populator.service as svc
+
+    seen: dict = {}
+    context = [
+        {"role": "USER", "text": "earlier upload", "file_pointer": {
+            "id": "unrelated-zip", "storage_path": "fixture/archive.zip", "original_filename": "archive.zip",
+            "mime_type": "application/zip", "size_bytes": 2048}},
+        {"role": "USER", "text": "find AI news"},
+    ]
+
+    async def fake_fetch_agent_context(agent_id: str):
+        return context
 
     async def fake_call_llm_structured_streaming(**kwargs):
         seen.update(kwargs)
@@ -185,13 +225,13 @@ async def test_populate_forces_ultra_model():
     svc.fetch_agent_context = fake_fetch_agent_context
     svc.call_llm_structured_streaming = fake_call_llm_structured_streaming
     try:
-        await populate_tool_params(tool_name="web_search", goal="Find AI news", agent_id="agent-1")
+        await populate_tool_params(tool_name="web_search", goal="Find AI news", agent_id="agent-1", model="rose-fast")
     finally:
         svc.fetch_agent_context = original_fetch
         svc.call_llm_structured_streaming = original_call
 
-    assert seen["model"] == "rose-labs/rose-1-ultra"
-    assert seen["call_site"] == "dag_param_populator"
+    rendered = "\n".join(str(message.get("content")) for message in seen["messages"])
+    assert "archive.zip" in rendered
 
 
 async def test_populate_happy_path_returns_params_and_usage():
@@ -209,6 +249,7 @@ async def test_populate_happy_path_returns_params_and_usage():
             tool_name="web_search",
             goal="Find AI news",
             agent_id="agent-1",
+            model="rose-fast",
         )
     finally:
         _restore_populate_mocks(mp)
@@ -239,6 +280,7 @@ async def test_populate_fallback_to_first_tool_call_on_mismatch():
             tool_name="web_search",
             goal="g",
             agent_id="agent-1",
+            model="rose-fast",
         )
     finally:
         _restore_populate_mocks(mp)
@@ -259,6 +301,7 @@ async def test_populate_raises_when_no_tool_calls():
                 tool_name="web_search",
                 goal="g",
                 agent_id="agent-1",
+                model="rose-fast",
             )
         except ValueError as e:
             assert "did not call any tools" in str(e)
@@ -283,6 +326,7 @@ async def test_populate_raises_on_empty_required_field():
                 tool_name="web_search",
                 goal="Some goal",
                 agent_id="agent-1",
+                model="rose-fast",
             )
         except ValueError as e:
             assert "Required field" in str(e)
@@ -309,6 +353,7 @@ async def test_populate_prefers_matching_tool_call():
             tool_name="web_search",
             goal="g",
             agent_id="agent-1",
+            model="rose-fast",
         )
     finally:
         _restore_populate_mocks(mp)
@@ -330,6 +375,7 @@ async def test_populate_skips_none_tool_call_entries():
             tool_name="web_search",
             goal="g",
             agent_id="agent-1",
+            model="rose-fast",
         )
     finally:
         _restore_populate_mocks(mp)
@@ -356,6 +402,7 @@ async def test_populate_heartbeat_is_invoked():
             tool_name="web_search",
             goal="g",
             agent_id="agent-1",
+            model="rose-fast",
             heartbeat=hb,
         )
     finally:
@@ -400,7 +447,10 @@ async def test_handler_returns_service_result():
     """populate_tool_params_activity returns the service result on success."""
     from domains.param_populator import handler as handler_mod
 
+    received: dict = {}
+
     async def fake_populate(**kwargs):
+        received.update(kwargs)
         return {"params": {"query": "ok"}, "usage": {"total_tokens": 1}}
 
     original = handler_mod.populate_tool_params
@@ -410,12 +460,73 @@ async def test_handler_returns_service_result():
             tool_name="web_search",
             goal="g",
             agent_id="agent-1",
-            model="unused",
+            model="rose-fast",
         )
     finally:
         handler_mod.populate_tool_params = original
 
     assert result == {"params": {"query": "ok"}, "usage": {"total_tokens": 1}}
+    assert received["model"] == "rose-fast"
+
+
+async def test_populate_explore_keeps_runtime_nullable_output_schema():
+    """Real structured-result validation accepts explore omission/null before population."""
+    import os
+    from unittest.mock import AsyncMock, patch
+    import domains.param_populator.service as svc
+    from utils.tool_schemas import SpawnAgentTool, SpawnAgentToolNoGP
+
+    failures = []
+    explicit = {"fields": [{"name": "result", "type": "str", "required": True}]}
+    for disabled, expected_model in (("false", SpawnAgentTool), ("true", SpawnAgentToolNoGP)):
+        for extra in ({}, {"output_schema": None}, {"output_schema": explicit}):
+            payload = {"tool": "spawn_agent", "type": "explore", "task_name": "research",
+                       "goal": "Read public sources", **extra}
+            async def structured_result(**kwargs):
+                result = kwargs["response_model"].model_validate({"response": "ok", "tool_calls": [payload]})
+                assert isinstance(result.tool_calls[0], expected_model)
+                assert result.tool_calls[0].output_schema is None
+                return result, {"total_tokens": 10}, []
+            with patch.dict(os.environ, {"ROSE_DISABLE_GENERAL_PURPOSE_AGENT": disabled}), \
+                 patch.object(svc, "fetch_agent_context", AsyncMock(return_value=[])), \
+                 patch.object(svc, "get_model_context_window", AsyncMock(return_value=200000)), \
+                 patch.object(svc, "call_llm_structured_streaming", structured_result):
+                try:
+                    result = await svc.populate_tool_params("spawn_agent", "Read public sources", "agent-1", "rose-fast")
+                except ValueError as error:
+                    failures.append((disabled, extra, str(error)))
+                    continue
+            assert result["params"]["type"] == "explore"
+            assert result["params"]["output_schema"] is None
+            assert result["usage"] == {"total_tokens": 10}
+    assert not failures, failures
+
+
+async def test_populate_nonexplore_still_requires_output_schema():
+    """The structured-result boundary rejects browser/code omission and null."""
+    import os
+    from pydantic import ValidationError
+    from unittest.mock import AsyncMock, patch
+    import domains.param_populator.service as svc
+
+    for disabled in ("false", "true"):
+        for kind in ("browser", "code"):
+            for extra in ({}, {"output_schema": None}):
+                payload = {"tool": "spawn_agent", "type": kind, "task_name": "work",
+                           "goal": "Read https://example.test", "start_url": "https://example.test", **extra}
+                async def structured_result(**kwargs):
+                    result = kwargs["response_model"].model_validate({"response": "ok", "tool_calls": [payload]})
+                    return result, {"total_tokens": 10}, []
+                with patch.dict(os.environ, {"ROSE_DISABLE_GENERAL_PURPOSE_AGENT": disabled}), \
+                     patch.object(svc, "fetch_agent_context", AsyncMock(return_value=[])), \
+                     patch.object(svc, "get_model_context_window", AsyncMock(return_value=200000)), \
+                     patch.object(svc, "call_llm_structured_streaming", structured_result):
+                    try:
+                        await svc.populate_tool_params("spawn_agent", "Read public sources", "agent-1", "rose-fast")
+                    except ValidationError as error:
+                        assert "output_schema is required" in str(error)
+                    else:
+                        raise AssertionError("Non-explore output_schema omission/null became valid")
 
 
 async def run_all_tests():
@@ -430,7 +541,10 @@ async def run_all_tests():
     r.record("build_prompt_non_spawn_tool_no_ephemeral_warning", test_build_prompt_non_spawn_tool_no_ephemeral_warning)
     r.record("build_prompt_file_attachment_rules_included", test_build_prompt_file_attachment_rules_included)
     await r.record_async("populate_raises_on_unknown_tool", test_populate_raises_on_unknown_tool)
-    await r.record_async("populate_forces_ultra_model", test_populate_forces_ultra_model)
+    await r.record_async("populate_explore_nullable_output", test_populate_explore_keeps_runtime_nullable_output_schema)
+    await r.record_async("populate_nonexplore_requires_output", test_populate_nonexplore_still_requires_output_schema)
+    await r.record_async("populate_uses_agent_model", test_populate_uses_agent_model)
+    await r.record_async("populate_keeps_metadata_for_unadmitted_attachments", test_populate_keeps_metadata_for_unadmitted_attachments)
     await r.record_async("populate_happy_path", test_populate_happy_path_returns_params_and_usage)
     await r.record_async("populate_fallback_first_tool_call", test_populate_fallback_to_first_tool_call_on_mismatch)
     await r.record_async("populate_raises_no_tool_calls", test_populate_raises_when_no_tool_calls)

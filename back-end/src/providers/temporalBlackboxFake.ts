@@ -36,6 +36,7 @@ export function blackboxTemporalSignals(
 }
 
 interface BlackboxTemporalEnv {
+  [key: string]: string | undefined;
   BLACKBOX_TEST_CAPTURE_OUTBOUND?: string;
   BLACKBOX_TEST_FAKE_TEMPORAL?: string;
   NODE_ENV?: string;

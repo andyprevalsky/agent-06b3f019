@@ -4,12 +4,23 @@
 
 import multer from 'multer';
 
+/** Account-wide repair-agent tools remain off until their explicit rollout. */
+export function accountAgentsEnabled(): boolean {
+  return process.env.ROSE_ACCOUNT_AGENTS_ENABLED === 'true';
+}
+
 /** Report Bug screenshots: one image per request, held in memory for upload. */
 export const MAX_BUG_REPORT_SCREENSHOT_BYTES = 10 * 1024 * 1024;
 
 export const bugReportScreenshotUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_BUG_REPORT_SCREENSHOT_BYTES, files: 1 },
+});
+
+/** Index 01 webhook: "Both" / "Recording" modes post multipart audio + text fields. */
+export const index01WebhookUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 },
 });
 
 /** Read a {{VAR_NAME}} prompt secret from its PROMPT_SECRET_* env var. */

@@ -1,0 +1,389 @@
+{
+  "draft": false,
+  "prepared_at": "2026-10-18T22:27:48.058994+00:00",
+  "source_git_sha": "2a7c873fdb18f33997562630dda51e58d83d20fa",
+  "overall_status": "PREDEPLOY_TESTS_PASSED_WITH_APPROVED_AGENTCARD_SKIP; REVIEW_AND_PRODUCTION_PENDING",
+  "integration": {
+    "previous_source": "93758534f421b7580ac13a7e4fd24286df3f1000",
+    "incoming_main": "ecf1b650561ee1a28ac1b5001030bd53bfbfd0a6",
+    "changed_paths": 12,
+    "changed_scope": "Backend phone-account ownership and owning tests",
+    "supervisor_prompt_model_schema_changes": false
+  },
+  "completed_static": {
+    "source": "2a7c873fdb18f33997562630dda51e58d83d20fa",
+    "prettier_check": "PASS",
+    "eslint": "PASS",
+    "typescript": "PASS",
+    "backend_structural": "PASS",
+    "prompt_approval": "PASS on existing approved changes; unchanged by integration",
+    "behavior_approval": "PASS",
+    "trajectory_approval": "PASS"
+  },
+  "completed_coverage": {
+    "backend": {
+      "execution_source": "2a7c873fdb18f33997562630dda51e58d83d20fa",
+      "blackbox_domains_passed": 201,
+      "blackbox_failed": 0,
+      "unit_files_passed": 299,
+      "separate_analyzer_files_passed": 1,
+      "line_coverage_pct": 89.61,
+      "branch_coverage_pct": 81.51,
+      "thresholds": "PASS",
+      "normal_and_SIGTERM_teardown": "PASS"
+    },
+    "frontend": {
+      "execution_source": "cfe39a79b18b783c67138619edea89db778be94b",
+      "qualified_current_by_unchanged_component": true,
+      "files_passed": 166,
+      "tests_passed": 2806,
+      "tests_skipped": 3,
+      "line_coverage_pct": 83.62,
+      "thresholds": "PASS"
+    },
+    "agents": {
+      "execution_source": "1f6dccb78221e7758c4319b0c7c8c8178b5e29a5",
+      "qualified_at": "93758534f421b7580ac13a7e4fd24286df3f1000",
+      "qualified_current_by_unchanged_runtime_and_owning_fixture_rechecks": true,
+      "blackbox_domains_passed": 110,
+      "cache_regressions_passed": 196,
+      "unit_tests_passed": 152,
+      "reported_total_coverage_pct": 83,
+      "thresholds": "PASS"
+    }
+  },
+  "completed_controller_and_commands": {
+    "execution_source": "93758534f421b7580ac13a7e4fd24286df3f1000",
+    "qualified_current_by_unchanged_component": true,
+    "controller_commands_passed": 12,
+    "selected_controller_tests_passed": 505,
+    "wall_clock_tests_passed": 21,
+    "command_structural_suites_passed": 47,
+    "all_exit0": true,
+    "initial_fixture_failures_preserved": true,
+    "repaired_only_offline_test_fixtures": "forensic15, recovery consumer2, bootstrap32 passed; final47-suite registry passed"
+  },
+  "completed_seed": {
+    "execution_source": "ad31cfc394fb53bd75b684ce09a788ac2a4a0324",
+    "qualified_at": "93758534f421b7580ac13a7e4fd24286df3f1000",
+    "qualified_current_by_unchanged_seed_sources": true,
+    "fidelity_checks_passed": 5,
+    "peak_MB": [
+      181,
+      179,
+      179,
+      179,
+      177
+    ],
+    "budget_MB": 228,
+    "owned_source_target_DB_absent_after_cleanup": true
+  },
+  "completed_live": {
+    "execution_source": "2a7c873fdb18f33997562630dda51e58d83d20fa",
+    "credential_health": "PASS",
+    "amplitude": "PASS",
+    "chat_router_failover": "PASS",
+    "warning": "Anthropic API credits exhausted; credential-health policy warning retained",
+    "coverage_limitation": "Fast backend descendants were not continuously captured; canonical exit and final listener/lock absence verified"
+  },
+  "completed_first_wave": {
+    "execution_source": "2a7c873fdb18f33997562630dda51e58d83d20fa",
+    "semantic_UI_passed": 8,
+    "semantic_UI_failed": 0,
+    "latency_tests_passed": 5,
+    "latency_samples": 20,
+    "latency_path_p50_ms": {
+      "direct_answer": 933,
+      "web_search": 2416,
+      "agent_plan": 796,
+      "agent_execute": 800
+    },
+    "E2B_tests_passed": 56,
+    "E2B_skipped": 0,
+    "E2B_real_CLI_and_file_assertions": true,
+    "E2B_actual_domain_log_authoritative": true,
+    "E2B_wrapper_summary_markers_did_not_capture_domain_markers": true,
+    "E2B_native_sandboxes_confirmed_absent": 3
+  },
+  "first_wave_final_closure": {
+    "completed_at": "2026-10-18T22:02:07.288407+00:00",
+    "all_three_lane_sessions_joined_exit0": true,
+    "all28agents_soft_deleted": true,
+    "exact_native_generations_terminal": 15,
+    "initial_terminal_outbox_obligations": 15,
+    "canonical_exact_owned_obligations_settled": 15,
+    "all_owned_outboxes_empty": true,
+    "semantic_real_browser_allocations": 0,
+    "semantic_real_code_sessions": 1,
+    "semantic_code_session_closed_native_absent": true,
+    "stack_manifest_stopped": true,
+    "stack_exit_code": -15,
+    "exact_root_TERM_and_canonical_cleanup": "verified",
+    "observed_births_absent": 874,
+    "listed_ports_free": true,
+    "complete_descendant_capture_claimed": false
+  },
+  "retained_operator_failures": [
+    {
+      "failure": "Optional psycopg2 unavailable during local admission preflight",
+      "resolution": "Use existing psql for the concrete check",
+      "benchmark_gate_pass_invented": false
+    },
+    {
+      "failure": "Stack launcher rejected absent actual root admission",
+      "app_stack_started": false,
+      "failed_attempt_preserved": true
+    },
+    {
+      "failure": "Wrong guessed structural entrypoint returned MODULE_NOT_FOUND",
+      "resolution": "Canonical required npm structural suite passed; no product fix implied"
+    }
+  ],
+  "financial_obligations": {
+    "treasury_TEST": {
+      "amount_cents": 1300,
+      "livemode": false,
+      "status": "consumed; released0 in saved native receipt",
+      "recorded_at": "2026-10-18T21:40:02.836Z",
+      "canonical_pending_ledger_retained": true,
+      "reclamation_observed": false,
+      "policy": "24-hour later-run reclamation check remains pending; distinct from historical allocation"
+    },
+    "original_production": {
+      "standing_release_stall_waiver": "VALID: explicit October15 all-future-runs instruction verified, including production",
+      "newer_live_Stripe_assertion": "Still independently false for original test-mode PaymentIntent",
+      "MODE1": "WITHDRAWN_INSUFFICIENT_SCOPE",
+      "MODE2": "AWAITING_DECISION",
+      "override_applied": false,
+      "historical_provider_counts": 1,
+      "current_extra2": "Exact observed native pairs map to later different benchmark roots; no cleanup ownership adopted",
+      "current_classifier_result": false
+    }
+  },
+  "second_wave_snapshot": {
+    "smoke": {
+      "passed": 10,
+      "failed": 0,
+      "test_results_terminal": true,
+      "command_exit": 0,
+      "seconds": 1383.5472729206085
+    },
+    "sandbox_AgentCard": {
+      "passed": 3,
+      "failed": 0,
+      "skipped": 1,
+      "skip_reason": "Standing approved closed-card / consumed-transfer / zero-release stall",
+      "test_results_terminal": true,
+      "command_exit": 0,
+      "payment_finalization_running": false,
+      "seconds": 1470.1506288051605,
+      "observed_births_absent": 1527
+    }
+  },
+  "not_claimed": [
+    "Pre-stop persistence outboxes drained in the smoke or AgentCard isolated databases; native execution and provider effects verified separately",
+    "Production deploy completion",
+    "Unapproved production-mode override",
+    "Treasury TEST funds returned",
+    "Fresh execution of unchanged components merely because source HEAD advanced"
+  ],
+  "evidence_sha256": {
+    "component-equivalence.safe.json": "f3415cad3c76df5180f78ef5667e538cde09f8d78aa368bd79c8eba8eeeba813",
+    "integrated-component-qualification.safe.json": "b51e2953e2a66a25ddcdb68da35385db4d115ca61dbbe7ae1a5e5720152dfe4b",
+    "integrated-root-static.safe.json": "d4105f2aee7e655951041edd1fcd085c87b46d96528d4b84f178dfcfb1758a05",
+    "integrated-backend-coverage.safe.json": "de04b62af26771586e0534baef4416133c30bd6be23c4433edd36a4f51f0dd04",
+    "controller-12.safe.json": "4d105f8bfd643b66d966c35078d3410ecaa16ca418eb9d8c942d7b900d03fee7",
+    "command-structural-final.safe.json": "77c46387c7e69c5f61bb419ee512a04fd12cd261d8bc569082107dd04cfdea12",
+    "seed-memory.safe.json": "0f92f69061d7f989206e42022eadb20995435d7f51bd077e4eccac85b9b04261",
+    "integrated-live-probes.safe.json": "05c88bd23858b1cef29467c3bb62b01b5894f210c3d250e578ea75f823e2e897",
+    "firstwave-results.safe.json": "b05f5738be86456802799a812000137ff8e30ef61b92d288971d3b7e0e280348",
+    "semantic-e2b-prepared/closure.safe.json": "8075c14b7da60f77bad851c16551a9118ce0c0cfe37f7b854bd4d6adce25b7f3",
+    "semantic-e2b-prepared/semantic-custody-audit/root-stop-proof.private.json": "eec93285b22cd4b38a1159dc414b003bc03233a97e2b955dd76068ad53f2ad5f",
+    "semantic-e2b-prepared/e2b/verification.private.json": "ec9dbc250e571c46a9afd7801ac9d150d48c29e56b2fedfa0e249ecd8685fd12",
+    "operator-preflight-attempts.safe.json": "096fbe46501c3ed7f95f4824729636df9cc70ea0fa89291e0e0a1cdac1913e55",
+    "integrated-treasury-pending.private.json": "ef451f6d14c03b1d63f37ee38bdeeb6574da9234a2bdc3407276749f2055dc7b",
+    "production-mode-2-approval-request.safe.json": "0d9aa288d44547471ef2738a6718e42af0a45af00307778a780911b34665a77f",
+    "production-mode-approval-request.safe.json": "5195c56d16c87d768c3cb15bd97600fc8324e5cc1751a633f8322bc9a394a6f7",
+    "production-waiver-independent-review.safe.json": "57b7daa61527aa99f4497a312106a2a7723045cba622b199e1368113aeda5b42",
+    "production-lifecycle-current/provider-count-adjudication.safe.json": "2b35c2fdc454f6e9b640fc4c7341115a94194d74659f4c523e9693e4ef0c08f7",
+    "agents-coverage-post-fixture.private.log": "126c2cb540f2e02d7bc05f63a233819cdd2ed9f02fee8394ec363d513fe0ef4e",
+    "frontend-coverage.private.log": "cbcf8fd249e264ac641ddc0da601ef063e3fd4d1396fef41b6fb11c8181a0a36",
+    "final-prompt-approval.private.log": "6d2ae6e2d0c4550a03f14c3ad7bf8da55e906894e9b269ed170d45090f3add05",
+    "final-behavior-approval.private.log": "dc8bb2089e21c95f1dacf2be3336cf92fd3cbde379077986b9a16276c0e2241e",
+    "final-trajectory-approval.private.log": "55646426c9d6b670150c410a21c5bf26c615b87271cee620f91bdfacd1b86abb",
+    "smoke-independent-closure/closure-summary.safe.json": "1a28a95c329dd2048b705683d5ecbd6763317785dd262641901d9faede808a1f",
+    "smoke-independent-closure/payment-summary.safe.json": "2494fcc2ed505e5915f50b8a83c3fa9c11a14513921a41ace25a9ff978a639eb",
+    "smoke-prepared/result.private.json": "f623c9db885b604fecec1f38e1012c11fc7f82b3e52a278ffb1d250f67c98748",
+    "agentcard-prepared/result.private.json": "3c40dc6d0c42c065b20d42059bd5d7f9eea84d46990b9531e6a56b931273492f",
+    "agentcard-prepared/independent-closure.private.json": "904e40bb796e26d815e944a902ea3ec1777ef864073b0bad82dd5af0ced7b679",
+    "production-mode-2-integrated-equivalence.safe.json": "dd0957ed6468bdb1b05e3e54ec49727aae1a303599bf3fb16ba8f5e0c3d25753"
+  },
+  "smoke_native_closure": {
+    "observed_at": "2026-10-18T22:26:10.966976+00:00",
+    "source_git_sha": "2a7c873fdb18f33997562630dda51e58d83d20fa",
+    "scope": "Independent read-only current-run native workflow/browser/code closure; no historical, fake or transcript-only allocation IDs admitted. Cached-response workflows included only with actual current producer bindings.",
+    "canonical_smoke_tasks_passed": 10,
+    "canonical_roots": 10,
+    "canonical_tree_agents": 62,
+    "native_workflows": {
+      "count": 61,
+      "completed": 61,
+      "exact_first_run_matches": 61,
+      "exact_queue_matches": 61
+    },
+    "synchronous_chat_roots": {
+      "count": 1,
+      "native_generation_claimed": false
+    },
+    "native_browsers": {
+      "count": 5,
+      "provider_deleted_at_present": 5,
+      "exact_returned_session_id_matches": 5
+    },
+    "native_code_sandboxes": {
+      "count": 1,
+      "exact_native_not_found": 1
+    },
+    "provider_replays": {
+      "sessions": 5,
+      "finished_replays": 8,
+      "playback_tested": false
+    },
+    "owned_local_processes": {
+      "observed_births": 1510,
+      "remaining_exact_births": 0,
+      "observer_joined": true,
+      "both_stack_cleanup_receipts_clean": true
+    },
+    "native_execution_resources_closed": true,
+    "all_persistence_outboxes_drained_proved": false,
+    "outbox_limits": [
+      {
+        "context": "/home/boxes/rose/.context/benchmarks/1792360943-758028-42471",
+        "last_pre_stop_observed_at": "2026-10-18T22:19:22.517544+00:00",
+        "terminal_cleanup_rows": 10,
+        "archive_finalization_rows": 8,
+        "queue_empty_proved": false,
+        "meaning": "Positive native completion/deletion is proved independently; no zero-row claim from DB disappearance."
+      },
+      {
+        "context": "/home/boxes/rose/.context/benchmarks/1792361964-1039825-51473",
+        "last_pre_stop_observed_at": "2026-10-18T22:25:18.956034+00:00",
+        "terminal_cleanup_rows": 51,
+        "archive_finalization_rows": 1,
+        "queue_empty_proved": false,
+        "meaning": "Positive native completion/deletion is proved independently; no zero-row claim from DB disappearance."
+      }
+    ],
+    "observer_errors": {
+      "count": 65,
+      "classification": "expected post-stop snapshot rejection",
+      "retained": true,
+      "not_claimed_zero": true
+    },
+    "payments_independently_read": false,
+    "no_mutating_provider_methods_or_benchmark_launches": true,
+    "raw_artifact_hashes": {
+      "0-proof.private.json": "a5b880feb2ef0cce91e3be287c4f85f599422a126d243dbc759ff3d0ad920580",
+      "0-provider-response.private.json": "360da262f227d5b79a33e005cb112ebc223d5acbebf867e51514414f0c2db739",
+      "0-request.private.json": "ac4f220cc1a44ea9adbfb43f6b41fad32ae5d85671aeec77780d3e3a2e26a62a",
+      "0-workflow-input.private.json": "ceaedda412a6874d22742974623a4f2c6e2e327194c1bb428462d5a5c0b03e68",
+      "0-workflow-response.private.json": "56e8b25a1d4c4a4563ee1664cf3d6b690430e5cfe1b494d5e63c326a8ea44c9d",
+      "1-proof.private.json": "92492eda09576630ebc10ce020c30a1e596fc4f0d636c38556b843e356526a34",
+      "1-request.private.json": "688aac916e931ea9b6639fc22ded09d945aa069af66e105a6879765d6bcf5573",
+      "1-workflow-input.private.json": "d4642ca9bb3673c2570ed49fd367130783e3628965e3c42fc06e0a877a67085f",
+      "1-workflow-response.private.json": "b95a19b5076330627c317dec7220cfead4c71ef9ed7e50858828b790463d1ffa",
+      "prepared.private.json": "2d128737e721679250a8afced31a2ca5b6cfda3d19b74d0a52ddb918e67173de",
+      "reader-provenance.private.json": "71431ad272bee4e1754fedc8275d95d4165c8683f246903a7efa412f5c9dd3da"
+    }
+  },
+  "smoke_payment_readback": {
+    "read_only": true,
+    "exact_current_purchases": 3,
+    "owning_native_workflows_completed": 3,
+    "agentcard_mode": {
+      "value": "sandbox",
+      "source": "actual native whoami response through the same organization runtime",
+      "not_inferred_from_stripe": true
+    },
+    "cards_closed": 3,
+    "stripe_mode": "test, independently from each saved stripeLivemode and native PI",
+    "stripe_intents_succeeded": 3,
+    "stripe_captured_cents": 8479,
+    "stripe_refunded_cents": 0,
+    "refund_pages_complete": 3,
+    "interpretation": "All three canonical purchases are CLEARED and fundings CONSUMED. Consumed mint transfers and unrefunded settled test captures are not classified as leaked funds or required refunds. Partial provider releases are recorded exactly; no full-return claim.",
+    "unknowns": [
+      "No global transfer-list completeness or unrelated balance claim. All three exact owned IDs were found on the consumed status page.",
+      "Provider settlement semantics beyond returned exact transfer fields were not independently re-evaluated."
+    ],
+    "new_benchmarks_or_financial_mutations": false,
+    "reader_exit_code": 0,
+    "artifact_sha256": {
+      "payment-request.private.json": "e7ff7f4d7929501110f24dba842ea7bb651daf0b7ed5e554e3360f54475e2f0f",
+      "payment-response.private.json": "6a4882bfa0ef2407238c8a17ff3e77eec9825ccc08c27c4b707bc4e151d65721",
+      "native-payment-readonly.ts": "9f89ce15b5bc1d8243fe018710902fa176f6b0f27d5489cc9c94ba36d9d89593"
+    },
+    "exact_transfer_aggregate": {
+      "consumed": 3,
+      "partial_release": 3,
+      "full_return_proved": 0,
+      "canonical_purchases_CLEARED": 3
+    }
+  },
+  "card_execution_retry_warning": {
+    "call_site": "execute_loop",
+    "path": "General AgentWorkflow, not SMS supervisor",
+    "errors": [
+      "120 second idle timeout",
+      "Plain text response rejected by AgentAction JSON parsing"
+    ],
+    "canonical_retry_only": true,
+    "request_model_schema_timeouts_unchanged": true,
+    "final_outcome": "approved release-stall SKIP"
+  },
+  "bounded_review": {
+    "initial_cycle_completed": true,
+    "incremental_cycle": "not yet started"
+  },
+  "PR_merged": false,
+  "production_deployed": false,
+  "ready_to_close": false,
+  "agentcard_native_closure": {
+    "source": "2a7c873fdb18f33997562630dda51e58d83d20fa",
+    "command_exit": 0,
+    "native_original_generations": {
+      "count": 4,
+      "all_terminal": true,
+      "all_first_run_queue_match": true
+    },
+    "kernel_readback": {
+      "count": 5,
+      "all_deleted_at_present": true,
+      "exact_session_ids_match": true,
+      "include_deleted_means_tombstone_not_live": true
+    },
+    "recording_and_archive_root_count": 4,
+    "observed_births_absent": 1527,
+    "all_own_ports_free": true,
+    "canonical_stack_status": "stopped",
+    "canonical_cleanup_state": "clean",
+    "durable_obligation_caveat": {
+      "last_pre_drop_terminal_rows": 4,
+      "last_pre_drop_archive_rows": 4,
+      "db_drop_does_not_prove_empty_outboxes": true
+    },
+    "financial_exception": "Final abandonment card CLOSED with4396c transfer still consumed/released0; purchaseHELD/fundingRECLAIMING/refundpending; standingapprovedskip, not fullyfinanciallysettled.",
+    "private_receipt_sha256": "904e40bb796e26d815e944a902ea3ec1777ef864073b0bad82dd5af0ced7b679"
+  },
+  "scorecard": {
+    "all_attempt_count": 498,
+    "original_attempts": 31,
+    "resumed_attempts": 467,
+    "attempt_statuses": {
+      "failed": 97,
+      "passed": 401
+    },
+    "previous_attempt_prefix_preserved_count": 447
+  }
+}

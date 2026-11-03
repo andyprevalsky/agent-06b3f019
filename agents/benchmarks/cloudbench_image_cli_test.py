@@ -805,6 +805,9 @@ def test_cold_image_build_skips_repository_auth_export(tmp_path, mode):
     for path in env_files:
         path.parent.mkdir()
         path.write_text("PRESERVED=fixture-value\n")
+    registry = root / "agents/providers/rose/pools.py"
+    registry.parent.mkdir(parents=True)
+    shutil.copyfile(ROOT / "agents/providers/rose/pools.py", registry)
     (root / "Dockerfile.cloudbench-warm").write_text("FROM fixture-source\n")
     (root / "fly.cloudbench-warm.toml").write_text('app = "fixture-source"\n')
     binaries = tmp_path / "bin"
@@ -1055,5 +1058,199 @@ def test_cold_image_published_tag_completion_prevents_only_proven_rebuild(
         assert bool(receipt["publication_metadata_warning"]) is (scenario == "postpush")
         assert receipt["build_attempts"] == 1
     assert "fixture-private-line-not-human" not in result.stdout + result.stderr
+    for private in output.glob("*.private.log"):
+        assert private.stat().st_mode & 0o777 == 0o600
+
+
+_STALLED_PUBLISHER = r'''
+import hashlib, json, os, sys, time
+from pathlib import Path
+
+args = sys.argv[1:]
+state = Path(os.environ["IMAGE_TEST_STATE"])
+scenario = os.environ["IMAGE_TEST_SCENARIO"]
+attempt = len(list(state.glob("attempt-*.json"))) + 1
+label = args[args.index("--image-label") + 1]
+app = args[args.index("-a") + 1]
+(state / f"attempt-{attempt}.json").write_text(json.dumps({"label": label, "pid": os.getpid()}))
+image = f"registry.fly.io/{app}:{label}"
+manifest = json.dumps({
+    "schemaVersion": 2,
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
+               "digest": "sha256:" + str(attempt) * 64, "size": 2},
+    "layers": [],
+}).encode()
+digest = "sha256:" + hashlib.sha256(manifest).hexdigest()
+
+def remote_manifest_put():
+    registry = state / "registry"
+    registry.mkdir(exist_ok=True)
+    sequence = len(list(registry.iterdir()))
+    (registry / f"{sequence:03d}.json").write_text(
+        json.dumps({"tag": label, "digest": digest, "manifest": manifest.decode()}))
+
+def say(line):
+    print(line, flush=True)
+
+say("==> Building image with Depot")
+say(f"#25 pushing layers for {image}@{digest}")
+if attempt == 1 and scenario in ("remote-eof", "silent-stall"):
+    # The remote builder finishes its push, but its BuildKit status stream never
+    # reaches this client again (trial 2: manifest 81a55a3f exists in the registry
+    # although the client's last line was a pending "pushing layer").
+    remote_manifest_put()
+    if scenario == "silent-stall":
+        time.sleep(3600)
+    time.sleep(1)
+    say("Error: failed to fetch an image or build from source: error building: failed to receive "
+        "status: rpc error: code = Unavailable desc = error reading from server: EOF")
+    sys.exit(1)
+if scenario == "slow-progress":
+    for tick in range(8):
+        say(f"#22 {tick * 0.5:.2f} Installing collected packages")
+        time.sleep(0.5)
+remote_manifest_put()
+say(f"#25 pushing manifest for {image}@{digest} 0.3s done")
+say("--> Building image done")
+'''
+
+_HANDOFF_VERIFIER = r'''
+import json, os, runpy, sys, tempfile
+
+out, app, label, log, registry_py, origin = sys.argv[1:]
+helper = runpy.run_path(registry_py)
+image = f"registry.fly.io/{app}:{label}"
+receipt = {"registry_handoff_verified": False}
+try:
+    expected = helper["publisher_digest"](log, image)
+    private = tempfile.mkdtemp(dir=os.path.dirname(out), suffix=".private")
+    receipt = helper["RegistryHandoff"](
+        "fixture-token", private, app, registry_origin=origin, graphql_origin=origin + "/graphql"
+    ).verify(image, expected)
+except helper["HandoffError"] as error:
+    receipt["registry_handoff_error"] = str(error)
+with open(out, "w") as output:
+    json.dump(receipt, output)
+if not receipt["registry_handoff_verified"]:
+    print(receipt["registry_handoff_error"])
+    raise SystemExit(74)
+'''
+
+
+@pytest.mark.parametrize("scenario", ["remote-eof", "silent-stall", "slow-progress", "invalid-bound"])
+def test_cold_image_stalled_publisher_attempt_retries_under_its_own_tag(tmp_path, scenario):
+    """A dead Depot status stream ends its attempt; the retry never reads that attempt's tag.
+
+    Trial 2 (2026-10-12): attempt 1's client printed nothing for 973 s until a remote
+    EOF, while its remote builder still published manifest 81a55a3f under the shared
+    label. Attempt 2 reused that label, and three seconds after its own manifest PUT
+    the registry still returned attempt 1's manifest, so the handoff failed with 74.
+    """
+    source = (ROOT / "scripts/run-bench-cloud").read_text()
+    start = source.index("build_warm_image() {")
+    end = source.index("# MODE: --setup", start)
+    context = tmp_path / "selected checkout"
+    context.mkdir()
+    (context / "Dockerfile.cloudbench-warm").write_text("FROM fixture\n")
+    (context / "fly.cloudbench-warm.toml").write_text('app = "fixture"\n')
+    output = tmp_path / "receipt"
+    output.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    publisher = tmp_path / "publisher.py"
+    publisher.write_text(f"#!{sys.executable}\n" + _STALLED_PUBLISHER)
+    publisher.chmod(0o700)
+    verifier = tmp_path / "verify.py"
+    verifier.write_text(_HANDOFF_VERIFIER)
+
+    def writes():
+        registry = state / "registry"
+        return [json.loads(path.read_text()) for path in sorted(registry.iterdir())] if registry.is_dir() else []
+
+    def response(method, path, _body):
+        if method != "GET":
+            return 404, b'{"errors":[{"code":"UNSUPPORTED"}]}', {}
+        ref = path.rsplit("/manifests/", 1)[1]
+        if ref.startswith("sha256:"):
+            matches = [write for write in writes() if write["digest"] == ref]
+        else:
+            # Read-after-write lag observed at 22:17:53Z: the tag still served the
+            # earlier manifest three seconds after the retry's own manifest PUT.
+            matches = [write for write in writes() if write["tag"] == ref][:1]
+        if not matches:
+            return 404, b'{"errors":[{"code":"MANIFEST_UNKNOWN"}]}', {}
+        return 200, matches[0]["manifest"].encode(), {"Docker-Content-Digest": matches[0]["digest"]}
+
+    with _manifest_registry(response) as (origin, _requests):
+        harness = tmp_path / "build.sh"
+        harness.write_text(
+            "set -e\nAPP=owned-benchmark-app\nMODE=build-image\n"
+            f"ROOT_DIR={shlex.quote(str(ROOT))}\n"
+            f"IMAGE_BUILD_CONTEXT={shlex.quote(str(context))}\n"
+            f"OUT_DIR={shlex.quote(str(output))}\nIMAGE_BUILD_NO_CACHE=1\nWARM_IMAGE_REF=''\n"
+            "IMAGE_BUILD_BUILDER=depot\n"
+            f"source {shlex.quote(str(ROOT / 'scripts/lib/cloudbench-env.sh'))}\n"
+            f"source {shlex.quote(str(PUBLISHER_LIB))}\n"
+            f"cloudbench_image_publisher_client() {{ printf '%s\\n' {shlex.quote(str(publisher))}; }}\n"
+            "cloudbench_image_verify_handoff() {\n"
+            f'  python3 {shlex.quote(str(verifier))} "$2.handoff.json" "$3" "$4" '
+            f'"$CLOUDBENCH_IMAGE_PUBLISHER_LOG" {shlex.quote(str(ROOT / "scripts/lib/cloudbench-image-registry.py"))} '
+            f"{shlex.quote(origin)}\n}}\n"
+            "sleep() { :; }\n" + source[start:end]
+        )
+        env = {
+            **os.environ,
+            "IMAGE_TEST_STATE": str(state),
+            "IMAGE_TEST_SCENARIO": scenario,
+            "CLOUDBENCH_IMAGE_PUBLISH_IDLE_SECONDS": {"remote-eof": "30", "invalid-bound": "0"}.get(scenario, "2"),
+        }
+        process = subprocess.Popen(
+            [BASH, str(harness)],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=90)
+        except subprocess.TimeoutExpired:
+            # Fixture-owned session only: the harness started its own process group.
+            os.killpg(process.pid, 9)
+            process.communicate(timeout=30)
+            pytest.fail("A publisher attempt without output held the image build until the fixture deadline")
+
+    attempts = [json.loads(path.read_text()) for path in sorted(state.glob("attempt-*.json"))]
+    if scenario == "invalid-bound":
+        assert process.returncode != 0
+        assert attempts == [], "An invalid no-output bound must fail before launching the provider"
+        return
+    assert process.returncode == 0, stdout + stderr
+    receipt = json.loads((output / "cloudbench-image-build.json").read_text())
+    assert receipt["publication_verified"] is True
+    final = writes()[-1]
+    assert receipt["image_ref"] == f"registry.fly.io/owned-benchmark-app:{attempts[-1]['label']}@{final['digest']}"
+    labels = [attempt["label"] for attempt in attempts]
+    assert len(set(labels)) == len(labels), f"retries reused a mutable registry tag: {labels}"
+    for attempt in attempts:
+        try:
+            os.kill(attempt["pid"], 0)
+        except ProcessLookupError:
+            continue
+        state_letter = subprocess.run(
+            ["ps", "-p", str(attempt["pid"]), "-o", "stat="], capture_output=True, text=True
+        ).stdout.strip()
+        assert state_letter.startswith("Z") or not state_letter, f"attempt process survived: {attempt}"
+    if scenario == "slow-progress":
+        assert receipt["build_attempts"] == 1, "Continuing output must never be treated as a stall"
+        return
+    assert receipt["build_attempts"] == 2
+    if scenario == "silent-stall":
+        assert "no output for 2s" in stderr
+        first_log = next(
+            path for path in output.glob("*.private.log") if labels[0] in path.read_text()
+        )
+        assert first_log.read_text().rstrip().endswith("ending this attempt for the normal retry.")
     for private in output.glob("*.private.log"):
         assert private.stat().st_mode & 0o777 == 0o600

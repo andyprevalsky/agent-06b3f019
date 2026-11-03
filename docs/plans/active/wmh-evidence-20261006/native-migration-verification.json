@@ -1,0 +1,789 @@
+{
+  "branch": "codex/wmh-experiential-parallel-20261006",
+  "cloud_controller_fixture_repair": {
+    "additional_current_main_fixture": "fleet-post-child isolated fixture expected obsolete terminalcapacity rejection; currentmain a849df3f12 intentionally settles unused terminaldemand. Test-onlyfix preservesinflight3sec/malformedfailure/actualchildexit17; runtimeunchanged.",
+    "final_formatting_lint_and_source_qualification": "focused four-file AST/assertion preservation plus Ruff lint/format PASS; final all-source deploy qualification pending",
+    "independent_root_result": "7 passed,703 deselected in4.29seconds",
+    "local_receipt_hashes": {
+      ".context/native-benchmark-live-results-post-fix.log": "34d6e2304cf99c5daa34fd033a2698f31d36c46927e95978f6266de8ee17d21d",
+      ".context/native-cloud-lifecycle-five-proof.json": "cd949b142e30b1bada154acda5ae48413d852cc58f4f2428b68cdb229d952f6e",
+      ".context/native-controller-final-format-proof.json": "adfaad8822d1166056122b13dd3372c731690d25408f53ba5bd96593f148286a",
+      ".context/native-fleet-post-child-fixture-diagnosis.json": "900b4021356e1033164c25df150ef8f1d7db856d45de0488882b59a975e44b63"
+    },
+    "post_fix_compact_owning_gate": "273passed859deselected109.61seconds; all actual selected benchmark-live-results cases passed",
+    "receipt": ".context/native-cloud-lifecycle-five-proof.json",
+    "scope": "test-only; runtime controller/bounds/oldworker and absence safety assertions unchanged",
+    "status": "five owning cases reproduced failures and passed seven configurations; broad run red retained"
+  },
+  "cloud_status_shutdown_dispatch": {
+    "qualification": "focused owning proof, not full factory or production deployment credit",
+    "receipt": ".context/native-status-shutdown-final-proof.json",
+    "receipt_sha256": "62ee40b316d5f4d979e456dcd5da2ecda0200adb9719b971c8eb3cfc07d1448f",
+    "resources": "fullstatus and restrictiveexporter exactowner/image/3readonlymounts verified, exported, stopped/removed and independently absent",
+    "scope": "testinfra only; originalLinuxfixture body and productionstatus ownership unchanged",
+    "status": "full actual Linux shutdown suite passed via standard Mac entry; dispatcher16passed34.861s"
+  },
+  "continuation_receipts": {
+    ".context/native-ascii-conversion-owner.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-ascii-conversion-owner.json",
+      "sha256": "dc89186f137ea9e3597dfd4abb39d824ba0647a223eedc33e1fe9e7bc8d63b7b"
+    },
+    ".context/native-ascii-jsonl-final-blackbox-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-ascii-jsonl-final-blackbox-green.log",
+      "sha256": "59aa64b36b17c313b4ed913fa2d43c3598f5ae5945dc8131711134ebc911e1b0"
+    },
+    ".context/native-ascii-jsonl-final-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-ascii-jsonl-final-green.log",
+      "sha256": "2c14b158c6954bed8f662db6fc5a2600cce1e6fa26e9cc0e072cef26bd1c2a44"
+    },
+    ".context/native-ascii-publication-receipt.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-ascii-publication-receipt.json",
+      "sha256": "63e34dc706d759e6672288047bb03a08f0219328942b8f074ca87bc568482dff"
+    },
+    ".context/native-ascii-rag-publication-observation.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-ascii-rag-publication-observation.json",
+      "sha256": "314a2f05d7a28694be4c41ab70ec8881eb03e39e87675baee0c87e81f53d52fe"
+    },
+    ".context/native-ascii-resource-observations.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-ascii-resource-observations.json",
+      "sha256": "edffea591e418b2eb27fa678f896500af550cda3ad5598fea00da7f47d9edcf7"
+    },
+    ".context/native-full-ascii.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-full-ascii.log",
+      "sha256": "4877f7ed6815b454e4affcea411949111b9662298dd8732536f94372303d6d1b"
+    },
+    ".context/native-full-bind.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-full-bind.log",
+      "sha256": "674794a3dfab95bb32648e81729036494e3082aa1f828717e69bb14bf7933621"
+    },
+    ".context/native-full-bind.sample.txt": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-full-bind.sample.txt",
+      "sha256": "d3690e45890c8b3a06349e22b6729af0c0f8660989c3c3dbb4acefd7815ec632"
+    },
+    ".context/native-full-startup.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-full-startup.json",
+      "sha256": "b35eb6b7dda9679b5811c1c7c28b4d626288e8e58caa04c5835d7c529a243d1c"
+    },
+    ".context/native-launch-cloud-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-launch-cloud-green.log",
+      "sha256": "76f229f309bbb9205bdd3ca240bcf3b2ab3cb55f5c07f85bcaf4e011e863ea79"
+    },
+    ".context/native-launch-serving-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-launch-serving-green.log",
+      "sha256": "05a6b1f27795b135448f7451e651259385dfd9d952b15f52839f382fa865f349"
+    },
+    ".context/native-prompt-approval-classification.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-prompt-approval-classification.json",
+      "sha256": "72ae417fa3e8631f11c4575aa576dbd91fae178e9c1cd1fa270e8e57a54ae302"
+    },
+    ".context/native-wmh-main-acceptance.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-wmh-main-acceptance.log",
+      "sha256": "2a391e8b9dd83094ba6717e28d62b238fb93829d3b995a017afc2cb3a7a6344d"
+    },
+    ".context/workspace-env-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/workspace-env-green.log",
+      "sha256": "362a885d4d6177e3f06ff2c28ee34625a90c7c1b9ac33c3871e64c692a1216e4"
+    }
+  },
+  "deploy_preliminary_gates": {
+    "agents": {
+      "coverage_percent": 82,
+      "domains_failed": 0,
+      "domains_passed": 109,
+      "fast_cache_tests_passed": 181,
+      "unit_tests_passed": 131
+    },
+    "backend_coverage": {
+      "branch_coverage_percent": 80.46,
+      "domains_failed": 0,
+      "domains_passed": 186,
+      "function_coverage_percent": 91.47,
+      "line_coverage_percent": 89.4,
+      "owned_backend_cleanup": "normal exit and SIGTERM verified",
+      "unit_files_passed": 255
+    },
+    "backend_static": "lint, TypeScript and structural passed",
+    "cold_seed_memory": {
+      "maximum_mb": 183,
+      "runs": 5,
+      "status": "passed",
+      "unchanged_budget_mb": 228
+    },
+    "deploy_structural": "Workspace suite passes after resolving the host GNU timeout before the hermetic PATH; full registry rerun remains required.",
+    "frontend": {
+      "branch_coverage_percent": 72.99,
+      "files_passed": 149,
+      "function_coverage_percent": 80.98,
+      "line_coverage_percent": 83.21,
+      "skipped": 3,
+      "statement_coverage_percent": 80.85,
+      "tests_passed": 2629
+    },
+    "live_probes": {
+      "amplitude": "passed",
+      "chat_router_failover": "failed: first response missing required goal/mode; isolated schema proposal unapplied",
+      "credential_health": "passed with one provider warning"
+    },
+    "qualification": "Preliminary passes; native code is still changing, final frozen-source gates remain required.",
+    "workspace_timeout_fix": {
+      "boundary": "scripts/tests/cloud-init-env.test.sh env -i PATH omits macOS GNU tool location",
+      "deadline_seconds": 60,
+      "failure": "env: timeout: No such file or directory",
+      "owning_command": "bash scripts/tests/workspace-env.test.sh",
+      "owning_status": "passed"
+    }
+  },
+  "engine_selection": "WMH_ENGINE=experiential",
+  "execution_policy_proposal": {
+    "approval_id": "wmh-policy-20261007",
+    "candidate_patch_sha256": "930865b2738b3344b452a6e7258109686eb17bc373e2f43b30378b7693fd3218",
+    "candidate_sources": "16files108hunks ignored copies; no policy active-source edit",
+    "capacity_limit": "unchanged publicpacker counts appended system tokens; optionaldemo admission may differ at capacity",
+    "design_sha256": "ad32e32eaafd05d60bb6d29ec1d3a58c9beddcb92b0efd3727616f6d10fb53f8",
+    "independent_review_sha256": "d613a29d01f86bfdda2625042ed950eb9f10d824c8cd6bb693367f39d249824e",
+    "offline_checks": "31native58provider3Pythoncache24TScache75independentparity; onecanonical realchildtest required",
+    "open": "candidate100conformance,unchangedfull fundraiser,newjoined timeout receipt,viewer and frozen-source deploy acceptance",
+    "policy_sha256": "49d9d1f0430a5d8ee6aaaff9dd8783075a857b9c171e76ebe620a22e9ec7ba79",
+    "status": "unapplied; required snapshot approval pending"
+  },
+  "form_policy_diagnostics": {
+    "accepted_counts": {
+      "candidate": {
+        "sent": 3,
+        "trials": 3
+      },
+      "original": {
+        "sent": 0,
+        "trials": 3
+      }
+    },
+    "actual_model": "openai/gpt-6-sol",
+    "benchmark_outcome_not_inferred_from_control": true,
+    "candidate_system_sha256": "fcb2596385c9456e62d6e21f3fe1ac6b64b693e833c3e4bb0a78e1f4fe21007f",
+    "captured_call": "Conviction whole browser spawn",
+    "limits": [
+      "Six independent samples of one captured Conviction tool invocation; full fundraiser, other sites, missing routes, required unknown private fields and error cases are not validated by this set.",
+      "Credential leasing is bypassed in both arms to hold the funded route constant. This does not reproduce preceding failed GPTAuth attempts or normal leased production routing.",
+      "No extra model calls, replacement retries, production prompt changes or artifact loads. Native public parser used for all actual outputs.",
+      "DEMO response-cache read/write disabled inside collect; provider prefix caching and funded waterfall left unchanged.",
+      "Each call is an independent counterfactual from the same captured state; no real browser, email or form operation ran, and no new Hub benchmark/continuation was generated.",
+      "The three candidate forms used already established identities and simple name/email/message/company/website fields; unknown required private-company-field blockers and real unavailable routes remain untested."
+    ],
+    "metered_cost_usd": 0.423856,
+    "native_parser_valid": 6,
+    "negative_controls": {
+      "actual_call_phase_wall_seconds": 50.129,
+      "actual_model": "openai/gpt-6-sol",
+      "case_results": {
+        "observed_absence": {
+          "passed": 2,
+          "trials": 2
+        },
+        "recorded_submission_service_error": {
+          "passed": 2,
+          "trials": 2
+        },
+        "unknown_private_required_fields": {
+          "passed": 2,
+          "trials": 2
+        }
+      },
+      "constraint_pass_count": 6,
+      "initial_analyzer_scope_mismatch_preserved": {
+        "correction": "Service-error evidence may list the exact POST endpoint already supplied by observed_public_pages[url].forms[0].action; this is a recorded response source, not an alternate navigation or new operation. Exact-page-only source scope remains unchanged in absence and required-private-fields cases.",
+        "initial_analyzer_sha256": "d2869d2b66d0c3eb1bc79ea7ec4b3b8a611c7114384013ba7dc69b3835b32b4f",
+        "initial_review_sha256": "63955a6cb37e7baac95a69b7f20be267f6b0745b38ae4a62138bfc270868aa79",
+        "model_calls_after_correction": 0,
+        "model_responses_modified": false
+      },
+      "limits": [
+        "Candidate-only diagnostics modify declared state/action constraints; not exact original-input or original-policy paired comparisons.",
+        "Two samples per explicit case on the captured funded route; does not validate all site, privacy, error or full fundraiser trajectories.",
+        "All virtual effects remain simulation. No real form, messaging, browser, investment or funds movement occurred.",
+        "No replacement model calls or production source/policy edits. DEMO response-cache reads/writes disabled, provider prefix cache remains normal."
+      ],
+      "metered_cost_usd": 0.271156,
+      "review": "native-form-policy-negative-review.json",
+      "trial_count": 6
+    },
+    "policy_applied": false,
+    "review": "native-form-policy-controlled-review.json",
+    "same_full_request_except_system_append": true
+  },
+  "full_native_load": {
+    "ascii_service_startup": {
+      "health": {
+        "engine": "experiential",
+        "protocol": "text-world-model-v3",
+        "status": "ok",
+        "world_model_id": "grounded-world-model-a41208d8c48f810b60d1",
+        "world_model_manifest_sha256": "ba1d5bd5c061a57615f9a6a7bfe7154923128d95db7216f8f524e60d613e2b6b",
+        "world_model_name": "rose-archive"
+      },
+      "health_timeout_seconds": 180,
+      "model_name": "rose-archive",
+      "parent_birth": "Tue Oct  6 17:58:50 2026",
+      "parent_pid": 31548,
+      "ready_seconds": 161.71782770904247,
+      "started_at": 1791334730.941191,
+      "status": "ready",
+      "url": "http://127.0.0.1:56006"
+    },
+    "bind_maximum_rss_bytes": 17551622144,
+    "bind_peak_footprint_bytes": 38737181560,
+    "bind_system_seconds": 39.17,
+    "bind_user_seconds": 143.03,
+    "bind_wall_seconds": 241.62,
+    "next": "Run 100 live cases with unchanged thresholds and the actual same-root parallel proof.",
+    "service_startup": {
+      "elapsed_seconds": 180.69639304094017,
+      "exit_code": 143,
+      "health_timeout_seconds": 180,
+      "model_name": "rose-archive",
+      "parent_birth": "Tue Oct  6 17:03:13 2026",
+      "parent_pid": 15276,
+      "retired_at": 1791331576.088096,
+      "started_at": 1791331393.807876,
+      "status": "startup-timeout",
+      "url": "http://127.0.0.1:56006"
+    },
+    "status": "ascii_startup_and_100_live_predictions_passed"
+  },
+  "fundraiser": {
+    "latest_native_run": {
+      "acceptance": "failed; new retirement code and candidate policy have not yet been exercised by the full fundraiser",
+      "all_owned_stack_resources_retired": true,
+      "authorized_timeout_seconds": 1800,
+      "cost_limits": "Logged completed usage with existing model pricing is not an invoice; partial failures may omit usage. Report-card cost was frozen before native provider work stopped.",
+      "lifecycle_review": "native-fundraiser-timeout-cleanup-review.json",
+      "logged_completed_provider_usage": {
+        "calls": 334,
+        "cost_usd": "19.376132",
+        "input_tokens": 981,
+        "output_tokens": 1956504
+      },
+      "passed": false,
+      "raised_cents": 0,
+      "reported_task_cost_usd": 0.85,
+      "reported_wmh_cost_usd": 16.215,
+      "root_agent_id": "29064cc2-3266-4605-8e63-eda79e48a0cc",
+      "run_id": "f5e4f83d-386a-4af1-84f5-7745216b6f27",
+      "saved_run": {
+        "path": "agents/benchmarks/runs/20261007_014630_f5e4f83d-386a-4af1-84f5-7745216b6f27_raise-5m-rose-labs-brex.json",
+        "result": {
+          "audit_revision": 47,
+          "cleanup_errors": [],
+          "failure_reason": "Timeout after 1801s (dynamic cap=1800s) | Investigate: python agents/benchmarks/agent_latency.py 29064cc2-3266-4605-8e63-eda79e48a0cc | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
+          "passed": false,
+          "root_deleted": true,
+          "status": "ACTIVE",
+          "tree_agent_count": 9,
+          "unsealed_agents": []
+        },
+        "sha256": "c2ca9e988eaa7898dd3888e63cb29912b8aa9e9266b4255044b1badc1c8ba4dc",
+        "written_at_utc": "2026-10-07T01:46:30.711855+00:00"
+      },
+      "session_id": "a392f54882e84d24ad259260b6966cf5",
+      "source_head": "b0c4d185a03318222dba5e4c60f654a69fc12cfb"
+    },
+    "prior_statement": "pending"
+  },
+  "hub_evidence_availability": {
+    "diagnosis_sha256": "c8c866b961775940b10864e3c608ed1c8502cdb9c628dfca75af1fcb6feee308",
+    "existing_Render_only_observation": "live a3585a7bd since01:19UTC; not a WMH production deployment result",
+    "observed_failure": "exactPOST500/GETvisibility503 from S3SDKInternalError; SQLlocksucceeded",
+    "recovery": "registeredpublisherPASS,all9views200,actual latestLuxdump200; no productionmutation",
+    "restored_verification_sha256": "bcf179535e4ae975becd5dae3f98c3bc9841edf00096648102155d3736aaef8b"
+  },
+  "integrated_main": "a3585a7bdb424f16ebd4a997b223d4b058bcfa91",
+  "latest_integration_head": "f647c1c8be39a54ba1f97747fbd2a5456c69f431",
+  "live_conformance": {
+    "by_category": {
+      "auth_approval": {
+        "content_accuracy": 1.0,
+        "examples": 1,
+        "mean_score": 1.0
+      },
+      "browser": {
+        "content_accuracy": 0.7565104444135164,
+        "examples": 42,
+        "mean_score": 0.9513020888827034
+      },
+      "code": {
+        "content_accuracy": 0.7832099727308142,
+        "examples": 2,
+        "mean_score": 0.9566419945461628
+      },
+      "explore": {
+        "content_accuracy": 0.43907147224416876,
+        "examples": 7,
+        "mean_score": 0.8592428658774052
+      },
+      "for_each": {
+        "content_accuracy": 1.0,
+        "examples": 1,
+        "mean_score": 1.0
+      },
+      "grep": {
+        "content_accuracy": 0.2193546047775907,
+        "examples": 3,
+        "mean_score": 0.7772042542888515
+      },
+      "message": {
+        "content_accuracy": 0.5836883749239197,
+        "examples": 2,
+        "mean_score": 0.916737674984784
+      },
+      "payment": {
+        "content_accuracy": 0.9807692307692307,
+        "examples": 1,
+        "mean_score": 0.9961538461538462
+      },
+      "tool": {
+        "content_accuracy": 0.5042951181268989,
+        "examples": 40,
+        "mean_score": 0.7908590236253799
+      },
+      "vapi": {
+        "content_accuracy": 0.45132743362831856,
+        "examples": 1,
+        "mean_score": 0.8902654867256636
+      }
+    },
+    "cold_start_ready_seconds": 161.71782770904247,
+    "concurrency": 8,
+    "dimensions": {
+      "artifact_refs": 0.81,
+      "content_accuracy": 0.6184270087019259,
+      "error_behavior": 0.95,
+      "schema_validity": 1.0,
+      "state_transition_correctness": 1.0
+    },
+    "elapsed_seconds": 255.48,
+    "exact_model_identity_verified_by": "fresh health preflight and suite bindings; public result redactor masks SHA",
+    "examples": 100,
+    "mean_score": 0.8756854017403856,
+    "min_content_accuracy": 0.25,
+    "min_mean_score": 0.7,
+    "native_world_model_id": "grounded-world-model-a41208d8c48f810b60d1",
+    "native_world_model_manifest_sha256": "ba1d5bd5c061a57615f9a6a7bfe7154923128d95db7216f8f524e60d613e2b6b",
+    "prediction_errors": 0,
+    "qualification": "Thresholds and call count passed; aggregate score variation is not a causal TLS-fix performance claim.",
+    "schema": "rose.wmh_prediction_conformance.v1",
+    "source_head": "efdabc408eeb50643fdcc76e6b591758347b102b",
+    "status": "passed",
+    "successful_calls": 100,
+    "world_model": "rose-archive"
+  },
+  "live_conformance_initial_failure": {
+    "concurrency": 8,
+    "content_accuracy": 0.5914038631692994,
+    "examples": 100,
+    "failure": {
+      "actual_exception": "SSLV3_ALERT_BAD_RECORD_MAC",
+      "case_index": 83,
+      "first_bad_boundary": "Raw ssl.SSLError while reading response headers bypasses pre-output provider fallback classification",
+      "native_http_status": 500,
+      "native_session": "726d3ad5d0a445309ab992a7cedc1426",
+      "provider_output_before_failure": false,
+      "root_agent_id": "e0cbfbcb-ea98-4a76-a398-40b8f8acb802",
+      "rose_request_id": "a9b752dfce18",
+      "underlying_tls_cause": "unresolved"
+    },
+    "manifest_sha256": "ba1d5bd5c061a57615f9a6a7bfe7154923128d95db7216f8f524e60d613e2b6b",
+    "mean_score": 0.8482807726338605,
+    "min_content_accuracy": 0.25,
+    "min_mean_score": 0.7,
+    "model_id": "grounded-world-model-a41208d8c48f810b60d1",
+    "original_result_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-first-live-conformance/native-live-conformance.json",
+    "prediction_errors": 1,
+    "rerun": "pending after owning pre-output fallback fix and fresh cold startup",
+    "status": "failed",
+    "successful_calls": 99
+  },
+  "logs": {
+    "native-artifact-match-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-artifact-match-green.log",
+      "sha256": "ffdc49ba785a59e615566d8d74401f8e48eb5fd6eed0a594ae40cfc3575e714f"
+    },
+    "native-artifact-match-red.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-artifact-match-red.log",
+      "sha256": "473193241057fa2b72c1bd0210013bf603aec9b6592197d6b58eeb962521aae0"
+    },
+    "native-cache-id-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-cache-id-green.log",
+      "sha256": "6931bddfddab02dec950e9903ead9beab4968e254b85248891b49323acf97f4f"
+    },
+    "native-cache-id-red.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-cache-id-red.log",
+      "sha256": "bfe74b41c1efbc3fddc1df1caebb516ba69cb98a513ee774301102816414d69f"
+    },
+    "native-delta-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-delta-green.log",
+      "sha256": "0ac412a703e5306d79cb34510271b4cf81ba64721e662cf77a9b936c54e41ee6"
+    },
+    "native-evaluator-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-evaluator-green.log",
+      "sha256": "1cfdfba88964b3dd0bd3fc139f3aa5aca02d8f2ef8219772e974b3d350c6acca"
+    },
+    "native-evaluator-red.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-evaluator-red.log",
+      "sha256": "3e631e357e70f43ba129545ceee18c3db159fcc7d197fac06ba087ade421af6e"
+    },
+    "native-first-live-conformance/native-full-serve.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-first-live-conformance/native-full-serve.log",
+      "sha256": "40d6e2995035b36e0491649da443f7cb6d478c0a49efed70ade76b6b4b0c1285"
+    },
+    "native-first-live-conformance/native-full-startup.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-first-live-conformance/native-full-startup.json",
+      "sha256": "8f6585f848f33ba9abf13a2d0cf9e4f1bc58fe1cb594a15000feaeedb961349a"
+    },
+    "native-first-live-conformance/native-live-conformance.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-first-live-conformance/native-live-conformance.json",
+      "sha256": "08d38e99e975668341748cb38685fa0c2a30e6b0cce24b49b74feb80c7790eb6"
+    },
+    "native-first-live-conformance/native-live-conformance.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-first-live-conformance/native-live-conformance.log",
+      "sha256": "b262f16f41eaae8281939cf6049526d1da12af87372cb930908fd340e851a4a7"
+    },
+    "native-focused-acceptance.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-focused-acceptance.log",
+      "sha256": "9c6f346e014c03718e1d9497d23fb6c9201a77571bc78f3276b1ddac594910ff"
+    },
+    "native-live-conformance.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-live-conformance.json",
+      "sha256": "0892828d39e8b0c641e1b7a9ca5c67255d46823fa3a72d6221a3f827a3fbdecf"
+    },
+    "native-live-conformance.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-live-conformance.log",
+      "sha256": "7ccd89c2e6d393d0fb0cf5358a420a609d8632cd7e46a44651f279538921e40c"
+    },
+    "native-live-parallel-proof.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-live-parallel-proof.json",
+      "sha256": "17757ee5be615428452440e04227bc4cdfa61f4ee3bee1a191fa4591ac3a58e2"
+    },
+    "native-live-parallel-proof.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-live-parallel-proof.log",
+      "sha256": "5c3d8a87e38b2fbe8a2ed19c4a4f1ed7b60b1f093a83bcc9936be85cb3411ab9"
+    },
+    "native-provider-cache-final.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-provider-cache-final.log",
+      "sha256": "8177df1a8cf8f450eea9ba515a42dadc88a7513201945ec99fa4fd67e39d7313"
+    },
+    "native-snapshot-read-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-snapshot-read-green.log",
+      "sha256": "6a9c2f355ec8e85b6f84786ae0554d58ed225239350f696846b31f2cd89942f7"
+    },
+    "native-snapshot-read-red.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-snapshot-read-red.log",
+      "sha256": "e727a3ba5e28411015c89a6608b00f7c607641146545a630e13338872b3bf390"
+    },
+    "native-tls-owning-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-tls-owning-green.log",
+      "sha256": "0789a2f6de877c32ec807047fbc234c40d2e0f573de55591d5e18d9cf066fd48"
+    },
+    "native-tls-owning-red-stream.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-tls-owning-red-stream.log",
+      "sha256": "eeb4d0b33b54f9648918ffd363622b8ac578ace2cdbd282fd12f749b5eb04ac1"
+    },
+    "native-tls-rose-blackbox-full.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-tls-rose-blackbox-full.log",
+      "sha256": "7aa34f6cadf13964f5e2e4b0bedbd77a509d5ca5fb4ecdff5eedca81fc73bb2d"
+    },
+    "native-tls-wmh-blackbox.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-tls-wmh-blackbox.log",
+      "sha256": "915ff80d7d9210da243afb437459c097567816dae5c6e4ef7e19795d1363c295"
+    },
+    "native-trace-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-trace-green.log",
+      "sha256": "42a441decbe4506d8435c1279af9feb5b00a3636d2e5e76a415d02ddfa8f2300"
+    },
+    "native-trace-red.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-trace-red.log",
+      "sha256": "ff229d6482956935cde7fa38a26c8060f3cb6dc44d484e112e2d66b55ab1dccd"
+    },
+    "native-wmh-blackbox-acceptance.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-wmh-blackbox-acceptance.log",
+      "sha256": "454642c27f46134967ca9e1a6e98297bddb964009f6bb11280c0d1a397e7cfac"
+    }
+  },
+  "merged_head": "a1142bc14e632dacc2e6a1579c9d9e487ec6753f",
+  "native_ascii_republication": {
+    "child_pid": 41252,
+    "conformance_binding": {
+      "all_bound": true,
+      "examples": 100,
+      "manifest_matches": true,
+      "model_matches": true,
+      "requested_examples": 100,
+      "status": "passed"
+    },
+    "embedding_calls": 0,
+    "model": {
+      "adapter_contract": "rose-native-canonical-export-v1",
+      "observations": 179150,
+      "pool": "rose-1-ultra",
+      "pool_sha256": "b784005066c6d0ac3355d8915619ecf4288f8a3ad9e8dd51b17d9cb1d3bf9af8",
+      "republished_from_world_model_id": "grounded-world-model-f66ba7ebaf70116fd423",
+      "storage_encoding": "ascii-jsonl-v1",
+      "trajectories": 12510,
+      "upstream_revision": "bf75987eac5e8c984d8f3868249f84e4095d1733",
+      "world_model_id": "grounded-world-model-a41208d8c48f810b60d1",
+      "world_model_manifest_sha256": "ba1d5bd5c061a57615f9a6a7bfe7154923128d95db7216f8f524e60d613e2b6b"
+    },
+    "new_model_pointer_promoted": true,
+    "original_artifacts_preserved": true,
+    "original_model_pointer_backup_preserved": true,
+    "original_pointer_backup_path": ".context/native-unicode-original/model-pointer.json",
+    "original_record_reimport": false,
+    "owner_pid": 41233,
+    "published_rag_artifact": "trace-rag-71aa4160d086e717b2dd",
+    "published_source_artifact": "rose-real-traces-11e55f652486f0bea4bd",
+    "published_source_bytes": 3092573958,
+    "published_source_sha256": "c01eada41595d286325c2e5eed7f296d61c0778dffd56f0ac98f3b8256c24d87",
+    "qualification": "Equivalent immutable publication; conversion includes original Unicode validation. Fresh full-corpus cold startup and all100 live predictions passed; shared-world proof and fundraiser pending.",
+    "status": "passed",
+    "timing": {
+      "maximum_rss_bytes": 16347693056,
+      "peak_footprint_bytes": 38917015632,
+      "system_seconds": 167.72,
+      "user_seconds": 685.43,
+      "wall_seconds": 1688.83
+    }
+  },
+  "native_cache_identity": {
+    "candidate_envelope_timestamp_ignored": true,
+    "exact_call_ids_preserved": true,
+    "state_history_clocks_preserved": true
+  },
+  "native_cloud_launch": {
+    "build_serve_pool_agreement": true,
+    "checksum_capability": "sha256sum or shasum",
+    "default_engine": "legacy",
+    "full_cloud_native_artifact_startup": "not verified",
+    "local_interpreter_paths_not_forwarded": true,
+    "portable_engine_pool_context_forwarded": true,
+    "provisioning_auth_memory_artifact_transfer": "still requires qualification before native cloud use",
+    "status": "owning tests passed"
+  },
+  "native_joined_retirement": {
+    "behavior": "exact benchmark-owned native root closes admission, joins actual native/provider tasks, freezes state/history/revision/shared-provider usage before evaluator/cost/archive; transient waiter loss preserves admitted operation",
+    "failure": "durable ERROR retains original/retirement exceptions, marks numeric0cost unsettled, skips evaluator/settled-cost credit, independently attempts exact-root/archive/fixture cleanup",
+    "first_bad_boundary": "benchmark finalization treated root pause/archive as native provider retirement",
+    "focused_checks": {
+      "actual_http_client_receipt": 1,
+      "benchmark_cleanup_wallclock": 79,
+      "initial_state_cost": 22,
+      "native": 30,
+      "provider": 54
+    },
+    "live_parallel_limit": "four actual concurrent baseline predictions already passed; no candidate live8way/10k claim",
+    "local_receipts": {
+      ".context/native-benchmark-retirement-final-proof.json": "ea871261e12560b0d9a19f2fc488ce9dc80ecc2f6efcd23adc085571cc15f553",
+      ".context/native-lifecycle-fix-design.json": "f78c138b12b58d6bb3ce53bb02f251b1faa484f850463fb321c4c8b34a097988",
+      ".context/native-retirement-initial-state-cost-final.log": "14ce38f755c5d198b8eb21cdcf81a93920b72c71c8e962ee016146c55441c8b0",
+      ".context/native-retirement-runtime-client-final.log": "fc4efa05ec8ff7ed11c8f5fb2578bb82b5de5a8d34ed02c3e116981f5db95c2e"
+    },
+    "original_failure": "native admitted predictions/rebases continued after root pause and archive; original saved report has an earlier usage cutoff",
+    "original_run": "f5e4f83d-386a-4af1-84f5-7745216b6f27",
+    "ownership": "cached BenchmarkTask shallow-copied per execution; caller-owned native sessions never automatically retired; admission recovery only exact generated seed-root UUID",
+    "retirement_limits": "compact admission fences bounded16384/failclosed; ordinary resumable UI pause is not retirement; no nativecloud8GiB qualification",
+    "source_snapshot_limit": "counts refer to documented owning receipts before formatting; final source qualification still required",
+    "status": "implemented; focused owning checks passed; new live timeout proof and final frozen-source deploy checks pending",
+    "usage_limit": "frozen usage is shared provider process aggregate, not per-root billing"
+  },
+  "original_native_build": {
+    "bound_original_cases": 100,
+    "encoding": "native canonical Unicode JSONL",
+    "observations": 179150,
+    "status": "published",
+    "trajectory_count": 12510,
+    "world_model_id": "grounded-world-model-f66ba7ebaf70116fd423",
+    "world_model_manifest_sha256": "12363c2cad83895433d07794faeeae0c7ef4bd4e567ae30e1167a08f97c1b143"
+  },
+  "parallel_boundary": {
+    "actual_full_corpus_proof": {
+      "committed_revisions": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "exact_receipt_replays": 2,
+      "example_indices": [
+        14,
+        20,
+        26,
+        34
+      ],
+      "finished_at": 1791335298.800506,
+      "health": {
+        "engine": "experiential",
+        "protocol": "text-world-model-v3",
+        "status": "ok",
+        "world_model_id": "grounded-world-model-a41208d8c48f810b60d1",
+        "world_model_manifest_sha256": "ba1d5bd5c061a57615f9a6a7bfe7154923128d95db7216f8f524e60d613e2b6b",
+        "world_model_name": "rose-archive"
+      },
+      "peak_provider_overlap": 4,
+      "rebased_actions": 3,
+      "schema": "rose.native_live_parallel_proof.v1",
+      "session_id": "ab83f6c40e8d4a70ae3a4127927778e8",
+      "session_retirement_status": 200,
+      "source_root": "308c7437-b205-45ca-aa47-0a9c6a5c5f0a",
+      "started_at": 1791335162.108886,
+      "status": "passed",
+      "step_deadline_seconds": 600,
+      "suite_sha256": "b26c9381950dd9708f92dacb940ab4d26c2e6a1b126881f742298268d701b379",
+      "unique_actions": 4
+    },
+    "committed_effects": 8,
+    "overlapping_calls": 8,
+    "qualification": "Four real archived operations against one served full-corpus world: provider overlap4, three stale-state rebases, four unique commits, two exact duplicate receipts, own lineage excluded, top5 unique traces; no eight-way or10k live claim.",
+    "ten_thousand_agent_load_verified": false,
+    "worst_case_predictions": 36
+  },
+  "production": "not_deployed",
+  "schema": "rose.wmh_native_migration_verification.v1",
+  "scoped_artifact_reads": {
+    "dataset": 1,
+    "fresh_load_revalidates": true,
+    "full_corpus_startup_verified": true,
+    "rag": 1,
+    "snapshot_released": true,
+    "world_model": 1
+  },
+  "source_import": {
+    "embedding_checkpoints_committed": true,
+    "excluded_demo_observations": 19,
+    "excluded_demo_trajectories": 9,
+    "index_construction": "published; full cold startup exceeded unchanged180s bound; ASCII republication pending",
+    "observations": 179150,
+    "remote_checksum_exclusions_unresolved": 97
+  },
+  "tests": {
+    "focused_suites": 60,
+    "native_checks": 27,
+    "provider_checks": 52,
+    "wmh_blackbox_all_passed": true
+  },
+  "tls_fallback_fix": {
+    "behavior": "Raw TLS error before output uses existing next provider route; after output preserves exact original error without replay",
+    "deadlines_changed": false,
+    "freedom_changed": false,
+    "independent_review": "deploy_failover_diagnosis: approved minimal shared pre-output classification; no lower-layer same-token replay",
+    "owning_green": "native-tls-owning-green.log",
+    "owning_red": "native-tls-owning-red-stream.log",
+    "source": "agents/providers/rose/client.py",
+    "tls_settings_changed": false
+  },
+  "upstream_revision": "bf75987eac5e8c984d8f3868249f84e4095d1733",
+  "version": "0.7.158",
+  "viewer_replay": {
+    "latest_native_run": {
+      "actual_root_and_all_children_opened": true,
+      "durable_fe_url": "https://www.roselabs.ai/?agent-id=29064cc2-3266-4605-8e63-eda79e48a0cc#benchmark-share=f5e4f83d-386a-4af1-84f5-7745216b6f27.1793929641.0d6c34bfb7b11db196f3b67ff04e47fbd010dba8edecfd8ccfcc9969a90bd393",
+      "limits": "Actual browser transcript replay, including interrupted child rows; no allocated browser/code film playback. Its recorded dump link was root-only; approval evidence separately selects the entire trajectory latest call.",
+      "receipt": "native-fundraiser-viewer-review.json",
+      "recording_boundary": {
+        "actual_claude_code_sessions_uploaded": 0,
+        "allocated_browser_sessions_before": [],
+        "allocated_browser_sessions_final": [],
+        "code_row_render": "Claude Code Completed Successfully row is visually clean in narrative-code-row.png; no duplicate error/completion text observed in that row",
+        "real_browser_recording_playback_performed": false,
+        "reason": "Whole-boundary WMH simulation: completed/failed browser result text is replayable; no actual browser session or real film allocated. Incomplete simulated requests remain visible at cutoff.",
+        "simulated_claude_code_completion_visible": true
+      },
+      "root_agent_id": "29064cc2-3266-4605-8e63-eda79e48a0cc",
+      "run_id": "f5e4f83d-386a-4af1-84f5-7745216b6f27",
+      "simulated_code_chip_observed_clean": true
+    },
+    "prior_statement": "pending"
+  },
+  "local_policy_implementation_20261007": {
+    "user_authorized_local_prompt_changes_until_deployment": true,
+    "deployment_explicitly_held": true,
+    "policy_id": "rose-virtual-public-affordances-v1",
+    "policy_sha256": "49d9d1f0430a5d8ee6aaaff9dd8783075a857b9c171e76ebe620a22e9ec7ba79",
+    "native_owning_passed": 31,
+    "provider_owning_passed": 59,
+    "registered_wmh_blackbox": "PASS",
+    "backend_cache_controls_passed": 24,
+    "benchmark_retirement_controls_passed": 102,
+    "registered_rose_offline_passed": 213,
+    "first_policy_live100": "FAILED99+1pre-headerTLSerror; report retained",
+    "first_live100_mean_fidelity": 0.851895599578659,
+    "first_live100_content_accuracy": 0.589477997893291,
+    "tls_fix": "Only add raw ssl.SSLError to existing waterfall connect/read classifier, preserving existing next-model and partial-output guards; owning3red->3green",
+    "second_full100": {
+      "status": "PASS",
+      "successful_predictions": 100,
+      "prediction_errors": 0,
+      "native_attempts": 101,
+      "mean_fidelity": 0.8609351795633334,
+      "content_accuracy": 0.584675897816665,
+      "independent_official_rescore_matches": 100,
+      "exact_sessions_joined_and_retired": 100,
+      "qualification_path": "docs/plans/active/wmh-evidence-20261006/native-policy-conformance-qualification.json",
+      "qualification_sha256": "375f1a64ae4f4f7da83e447bed228be34fec73ad80c6693439177a1680e7c588",
+      "scope": "Fixed-suite open-loop qualification; no full-loop fundraiser success claim."
+    },
+    "exact_fundraiser_rerun": {
+      "status": "CANCELLED diagnostic after private-history contamination",
+      "run_id": "3730e4ca-2226-48bf-8434-78d56092b593",
+      "root_agent_id": "1670690f-5245-4815-be93-fc15e1426629",
+      "session_id": "7e7dd8b00d844bf9bade46b51e49269d",
+      "timeout_seconds": 1800,
+      "source_commit": "64f856257b6dcdd4783296c76a13e7967c4fe875",
+      "task": "raise-5m-rose-labs-brex",
+      "acceptance": "failed private-prior-history contract before contact-submission test; no accepted benchmark pass",
+      "duration_seconds": 583.5,
+      "full_1800_second_acceptance": false,
+      "report_sha256": "374f200676ca2da2242b6379e5727389fa0e68cc4da21e0a9e69aa1a7b463193",
+      "earliest_invalid_commit_revision": 3,
+      "earliest_invalid_call_id": "93557448-5142-41ba-bf70-53c99fce92da",
+      "earliest_committed_capture_sha256": "35cb516f6c2b0c701a8f85acb986893cd27b51c1734f149fd63ae794aed45343",
+      "join_verified": true,
+      "frozen_revision": 6,
+      "retirement_sha256": "6cc15cf2a1a63927ae9b3a7430ab1e16a431cd97ec4acb5e52b62b13af2e4a77",
+      "retirement_usage": {
+        "total_cost_usd": 0.73468,
+        "calls": 10,
+        "input_tokens": 30,
+        "output_tokens": 73462
+      },
+      "usage_scope": "process aggregate, not settled task cost or invoice",
+      "owned_processes_and_db_retired": true,
+      "actual_investor_form_submission_count": 0,
+      "funds_raised_cents": 0,
+      "viewer": "durable root transcript verified through registered publisher; actual Chrome root renders; final child inspection pending"
+    },
+    "native_cloud_qualification": "still unqualified",
+    "production": "no rollout",
+    "next_local_policy": {
+      "id": "rose-virtual-public-affordances-v2",
+      "version": "2",
+      "text_sha256": "5dd9924e9a1ff4c54a95ee53c78414961f83ae62deec84b1ed7a670d0d3083c4",
+      "effective_system_sha256": "f344676e946d2b2fe435dcb81df353cd94aee8ec87394b39d69ca5ff9b2caac9",
+      "purpose": "Preserve public route/form generation while prohibiting fabricated pre-existing private history and unknown company facts, and permitting causally subsequent new replies/effects.",
+      "controls": {
+        "status": "reviewed local saved-request controls",
+        "review": "docs/plans/active/wmh-evidence-20261006/native-policy-v2-local-review.json",
+        "review_sha256": "33d068b1e8804775a9264cc8fe2605a9b325f0c255653a565dfbeec29a6faaf3",
+        "private_v1_offending": "1/2",
+        "private_v2_offending": "0/2",
+        "simple_virtual_forms": "2/2submitted",
+        "unknown_legal_field_forms": "2/2blocked",
+        "new_reply_positive_capability": "INCONCLUSIVE;0/2replies",
+        "all10model_and_parser_match": true
+      },
+      "fresh_matching_live100": "pending",
+      "deployment": "explicitly held",
+      "native_owning_passed": 32,
+      "provider_owning_passed": 66,
+      "cache_backend_passed": 24,
+      "cache_python_passed": 7,
+      "cloud_configuration_launch_controls_passed": 11
+    }
+  }
+}

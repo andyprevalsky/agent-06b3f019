@@ -53,7 +53,7 @@ resolved="$(cloudbench_resolve_controller_github_token "$ROOT_DIR")" \
   || fail "resolver must find the controller git credential despite a dead GITHUB_TOKEN"
 [ "$resolved" != "$GITHUB_TOKEN" ] || fail "resolver must not return the dead injected GITHUB_TOKEN"
 case "$resolved" in
-  ghs_*|gho_*|github_pat_*|ghp_*) ;;
+  ghs_*|gho_*|ghu_*|github_pat_*|ghp_*) ;;
   *) fail "resolver returned an unexpected token shape: ${resolved:0:8}…" ;;
 esac
 # Prove the resolved token authenticates to the private repo (the missing
@@ -67,6 +67,9 @@ http_code="$(curl -s -o /tmp/cloudbench-token-check.json -w '%{http_code}' \
 pass "resolver prefers live git credential over dead GITHUB_TOKEN (API 200)"
 
 # ── 5. refresh-deps / fleet source wiring (cemented in the consistently-run path)
+# The warm git-sync no longer embeds a base64 token in the remote snippet: the
+# controller resolves an auth header (fail-closed) and delivers it over ssh
+# stdin as AUTH_HDR, and the on-box snippet refuses to fetch without it.
 require_text() {
   local file="$1" needle="$2" msg="$3"
   grep -Fq "$needle" "$file" || fail "$msg"
@@ -104,6 +107,6 @@ fetch_at = helper.find("bash /data/cloudbench-fetch-ref.sh")
 if min(resolve_at, export_at, fetch_at) < 0 or not resolve_at < export_at < fetch_at:
     raise SystemExit("request-scoped controller token must be resolved and exported before fetch-ref")
 PY
-pass "refresh-deps and fleet source wiring pass the controller token into warm git-sync"
+pass "refresh-deps and fleet source wiring deliver the controller token into warm git-sync fail-closed"
 
 echo "ALL CHECKS PASSED"

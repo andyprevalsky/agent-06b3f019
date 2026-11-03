@@ -1,0 +1,30 @@
+🧪 EXPERIMENT #2 · 🟠 INCOMPLETE
+polar4 · 4 scheduled · cloud · src 126b82622
+Triggered Oct 18, 12:28:52 PM PDT
+4.9 experiments/day · 2 launches / 0.41 d · warming 9h53m
+Since last benchmark ended: 26m40s (polar4)
+QUEUED 0 · IN_PROGRESS 0 · COMPLETED 4/4
+PASS 2 · HARNESS FAILURE 0 · INFRA FAILURE 0
+AGENT FAILURE 2
+Pass rate 50.0% (2/4 scored)
+Infra attempts 0/4
+Stop at 1/4 unique infra-failed jobs (5%)
+     2 AGENT FAIL: reason UNRECORDED
+Cost $0.25 metered (1/4) · infra/wmh_grounding UNMETERED
+Cache agent demo-cache avg 80% (1/4) · LLM latency UNMEASURED
+Lifecycle
+  ✅ Global start barrier released · Oct 18, 12:38:52 PM PDT
+  ✅ Guests released (native audit) · Oct 18, 1:03:52 PM PDT: none present of 2 owned guests + 1 controllers
+  🟠 Lifecycle verified · 3/4 terminal jobs
+  ✅ Controllers released · 2/2 CONTROLLER_RELEASE_VERIFIED
+  ✅ Evidence exports verified · 2/2 controller exports
+  ✅ Results recorded · result.json
+  ✅ Hub group publication · final group published
+LAST 3 EXPERIMENTS
+  #2 🟠 INCOMPLETE polar4 · Oct 18, 12:28:52 PM PDT → 1:02:12 PM PDT · PASS 2/4 · INFRA 0/4
+  #1 🔴 FAILED run600c · Oct 18, 3:35:32 AM PDT → 4:58:52 AM PDT · PASS 90/574 · INFRA 14/600
+ACTIVE SUB-AGENTS / PARENT
+  No active agents
+ISSUES / NEXT ACTION
+  • Lifecycle verified: 3/4 terminal jobs. Owner parent → reconcile from the recorded receipts before the next launch
+🟠 INCOMPLETE · ended; open: Lifecycle verified

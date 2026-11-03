@@ -1,0 +1,28 @@
+{
+  "gepa_budget": 0,
+  "metrics": {
+    "held_out_accuracy": 0.0,
+    "judge_agreement": null,
+    "rollouts_used": 0
+  },
+  "model": "claude-opus-4-8",
+  "model_root": "/home/vercel-sandbox/rose/.context/world-model/models/rose-archive",
+  "name": "rose-archive",
+  "provider": "anthropic",
+  "provider_abstraction": {
+    "default": "upstream",
+    "rose_role": "trace_provenance_costs_and_attempt_trails",
+    "route": "upstream",
+    "schema": "rose.wmh_provider_abstraction.v1",
+    "upstream_providers": [
+      "anthropic",
+      "bedrock",
+      "azure",
+      "openai",
+      "openai_responses"
+    ]
+  },
+  "schema": "rose.wmh_build_manifest.v1",
+  "trace_file": "/home/vercel-sandbox/rose/.context/world-model/traces.otel.jsonl",
+  "train_split": 0.8
+}

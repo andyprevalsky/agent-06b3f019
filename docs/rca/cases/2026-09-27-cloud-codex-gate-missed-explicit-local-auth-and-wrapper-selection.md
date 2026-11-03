@@ -91,6 +91,26 @@ seed overlay; the local controller import does not propagate to that path.
 condition. Full backend coverage and the 100-run fleet proof remain pending;
 this domain pass supplies no fleet acceptance credit.
 
+## October 6 local continuation
+
+The WMH continuation's backend coverage selected an older connected Codex
+integration and the native sandbox reported revoked OAuth. Its funded-key
+fallback had no credits. The hard failure classification was retained.
+The local database also contained a newly synced integration for another
+account, so the default user's accumulated rows were not a deterministic
+credential fixture. These observations do not prove a production selection bug.
+
+Use the existing `CODEX_TOKEN_USER_ID` and `CODEX_BLACKBOX_USER_ID` controls with
+one task-owned identity and the authoritative local `CODEX_AUTH_PATH`. No old
+integration or shared auth file was deleted, replaced, or rotated. The unchanged
+`npm run test:blackbox -- codex-code` passed **27 checks, zero failures, zero
+skips**, including ChatGPT OAuth sandbox execution and native session cleanup.
+The complete backend coverage command subsequently passed all 184 domains and
+253 unit files, with 89.23% lines and 80.34% branches, plus both teardown checks.
+Evidence is retained in `.context/wmh-codex-isolated-identity.log` and
+`.context/wmh-backend-coverage-complete.log`. The private task environment file
+is ignored and contains only the scoped identity and auth-file path.
+
 ## Human feedback
 
 The user required infrastructure-only readiness without changing benchmark

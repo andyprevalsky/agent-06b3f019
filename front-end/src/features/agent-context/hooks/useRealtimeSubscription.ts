@@ -1,3 +1,15 @@
+/**
+ * Selected-agent realtime subscription.
+ *
+ *   idle --select--> subscribing --SUBSCRIBED--> live --disconnect--> reconnecting
+ *                         ^                       |                      |
+ *                         +-------- resubscribe --+---------<------------+
+ *
+ *   live, INSERT {row}            -> claim id -> apply row (messages, streams, mode)
+ *   live, INSERT_DEFERRED {id}    -> GET /agents/:id/messages/:messageId
+ *                                    -> same INSERT path (claim id, apply row)
+ *   live, fetch fails / times out -> keep live; the next subscribe reconcile reads the snapshot
+ */
 import { useEffect, useRef } from 'react';
 import { type RealtimeChannel } from '@supabase/supabase-js';
 import {
@@ -12,12 +24,13 @@ import {
 } from '@/lib/realtime';
 import type { AgentDetail, Message } from '@/lib/api';
 import { publishBrowserSessionBinding } from '@/lib/browserSessionBindings';
+import { publishCodeResources } from '@/lib/codeResources';
+import { notifyOpenAgentActivity, userUiActiveChangedHandler } from '@/lib/openAgentActivity';
 
 import type { StreamingBubble, StreamingPlan, StreamingAttention, StreamingTool } from '../types';
 import { createReconnectScheduler } from './agentReconnectScheduler';
 import { createCompletionBackfillOwner, type CompletionBackfillLease } from './agentBackfill';
 import {
-  handleInsertMessage,
   handleUpdateAgent,
   handleAssistantStream,
   handlePlanStream,
@@ -25,9 +38,9 @@ import {
   handleToolStream,
   cleanupSubscription,
 } from './realtimeHandlers';
+import { createInsertHandlers } from './realtimeInsertHandlers';
 import { useDisconnectedAgentBackfill } from './useDisconnectedAgentBackfill';
 import { useReceivedInserts, type ReceivedInserts } from './useReceivedInserts';
-import { endsCloudAgentMode, startsCloudAgentMode } from './cloudAgentMode';
 import {
   isAgentScopeActive,
   isAgentScopeCurrent,
@@ -81,33 +94,30 @@ function createRealtimeHandlers(
   const setMessages = scopedSetter(deps.setMessages, active, current);
   const setAgent = scopedSetter(deps.setAgent, active, current);
   const setIsChatMode = scopedSetter(deps.setIsChatMode, active, current);
-  return {
-    onInsert: (data: InsertMessagePayload) => {
-      if (!active() || data.agentId !== scope.agentId) return;
-      // A timed-out publisher can have delivered successfully. Claim the ID
-      // before any side effects, including the cloud-mode and stream setters.
-      if (receivedRef.current.ids.has(data.id)) return;
-      receivedRef.current.ids.add(data.id);
-      if (startsCloudAgentMode(data, scope.agentId)) setIsChatMode(false);
-      if (endsCloudAgentMode(data, scope.agentId)) setIsChatMode(true);
-      handleInsertMessage(data, scope.agentId, {
-        ...deps,
-        setStreamingBubbles,
-        setStreamingPlan,
-        setStreamingAttention,
-        setStreamingTools,
-        setMessages,
-        dispatchMessage: (message) => {
-          if (active()) deps.dispatchMessage(message);
-        },
-      });
-      if (data.agentId === scope.agentId && data.metadata?.toolName === 'spawn_browser_agent') {
-        onBrowserMessage(data);
-      }
+  const { onInsert, onInsertDeferred } = createInsertHandlers(
+    deps,
+    scope.agentId,
+    active,
+    receivedRef,
+    {
+      setStreamingBubbles,
+      setStreamingPlan,
+      setStreamingAttention,
+      setStreamingTools,
+      setMessages,
+      setIsChatMode,
     },
+    onBrowserMessage,
+  );
+  return {
+    onInsert,
+    onInsertDeferred,
     onUpdate: (updated: UpdateAgentPayload) => {
       if (!active()) return;
       handleUpdateAgent(updated, setAgent, setIsChatMode, deps.onLoadAgents);
+      if (updated.status !== undefined) {
+        notifyOpenAgentActivity({ agentId: scope.agentId, kind: 'status' });
+      }
     },
     onAssistantStream: (chunk: AssistantStreamPayload) => {
       if (!active()) return;
@@ -132,9 +142,13 @@ function createRealtimeHandlers(
     onAgentModeStarted: (data) => {
       if (active() && data.agentId === scope.agentId) setIsChatMode(false);
     },
+    onUserUiActiveChanged: userUiActiveChangedHandler(active, scope.agentId),
     // Live views follow the backend binding, not the lagging transcript URL.
     onBrowserSession: (binding) => {
       if (active()) publishBrowserSessionBinding(binding);
+    },
+    onCodeResources: ({ taskId, resources }) => {
+      if (active()) publishCodeResources(taskId, resources);
     },
     onDisconnect: () => {
       if (!active()) return;

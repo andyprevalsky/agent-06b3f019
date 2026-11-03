@@ -1,0 +1,17 @@
+{
+  "schema": "rose.wmh_verification_checkpoint.v1",
+  "registered_wmh_blackbox": {
+    "provider": 89,
+    "native": 37,
+    "passed": true,
+    "seconds": 7.4
+  },
+  "pricing": {
+    "passed": 7
+  },
+  "ruff": "All 8 currently changed Python files pass with ASDF_PYTHON_VERSION=3.11.9",
+  "rca_archive": "776 cases valid after handoff and RCA updates",
+  "git_diff_check": "passed after packaging",
+  "prepared_patch_guards": "Sequential patches applied only to temporary copies: original five reproduction controls plus expanded 11 guards pass for both iterations (16 each); runtime source unchanged. Live measurements pending.",
+  "acceptance": "Full corpus/conformance/fundraiser and deployment gates remain pending."
+}

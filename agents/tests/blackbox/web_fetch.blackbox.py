@@ -703,7 +703,7 @@ async def test_download_and_attach_skips_failed_downloads():
     assert "bad.pdf" not in names
 
 
-async def test_download_and_attach_fast_cache_hit_skips_external_download():
+async def test_download_and_attach_demo_cache_hit_skips_external_download():
     """Fast Mode reuses cached file bytes instead of hitting the original file URL."""
     uploaded: list[dict] = []
 
@@ -720,10 +720,10 @@ async def test_download_and_attach_fast_cache_hit_skips_external_download():
     with (
         patch("temporalio.activity.heartbeat"),
         patch(
-            "providers.fast_cache.client.cache_get_record",
+            "providers.demo_cache.client.cache_get_record",
             new=AsyncMock(return_value={"hit": True, "value": {"size_bytes": 12}, "blobPath": "cache/file"}),
         ) as get_record,
-        patch("providers.fast_cache.blob_store.download_blob", new=AsyncMock(return_value=b"CACHED-BYTES")),
+        patch("providers.demo_cache.blob_store.download_blob", new=AsyncMock(return_value=b"CACHED-BYTES")),
         patch(
             "domains.web_fetch.service.download_files_batch",
             new=AsyncMock(side_effect=AssertionError("external download should be skipped")),
@@ -745,7 +745,7 @@ async def test_download_and_attach_fast_cache_hit_skips_external_download():
     get_record.assert_awaited_once()
 
 
-async def test_download_and_attach_fast_cache_miss_stores_downloaded_bytes():
+async def test_download_and_attach_demo_cache_miss_stores_downloaded_bytes():
     """Fast Mode stores downloaded file bytes in blob storage and writes a file cache row."""
 
     async def fake_download(urls):
@@ -764,11 +764,11 @@ async def test_download_and_attach_fast_cache_miss_stores_downloaded_bytes():
     with (
         patch("temporalio.activity.heartbeat"),
         patch(
-            "providers.fast_cache.client.cache_get_record",
+            "providers.demo_cache.client.cache_get_record",
             new=AsyncMock(return_value={"hit": False, "value": None, "blobPath": None}),
         ),
-        patch("providers.fast_cache.client.cache_set", new=cache_set),
-        patch("providers.fast_cache.blob_store.upload_blob", new=AsyncMock(return_value=True)) as upload_blob,
+        patch("providers.demo_cache.client.cache_set", new=cache_set),
+        patch("providers.demo_cache.blob_store.upload_blob", new=AsyncMock(return_value=True)) as upload_blob,
         patch("domains.web_fetch.service.download_files_batch", new=AsyncMock(side_effect=fake_download)),
         patch("domains.web_fetch.repo.upload_to_storage", side_effect=fake_upload),
     ):
@@ -865,6 +865,7 @@ async def test_handler_execute_tool_happy_path():
         tool_call_id="tc-wf",
         agent_id="a-1",
         user_id="u-1",
+        compute_token_lineage_key="agent:lineage-1",
         fast_mode_cache_enabled=True,
         fast_mode_goal="root goal",
     )
@@ -876,7 +877,16 @@ async def test_handler_execute_tool_happy_path():
     scrape_call = next(call for call in calls if call["activity"] == "web_fetch_activity")
     assert scrape_call["kwargs"]["retry_policy"].maximum_attempts == 2
     summary_call = next(call for call in calls if call["activity"] == "summarize_and_filter_links")
-    assert summary_call["args"][-1] == "agent:a-1:tool:tc-wf:call:summarize_web_fetch"
+    assert summary_call["args"][-3] == "agent:a-1:tool:tc-wf:call:summarize_web_fetch"
+    assert summary_call["args"][-2] == "agent:lineage-1"
+    assert summary_call["args"][-1] == {}
+    # The activity wrapper appends its task ID after these explicit arguments.
+    # Keep the page facts bound to page_metadata, not session_id.
+    import inspect
+    from helpers.summarize import summarize_and_filter_links
+    bound = inspect.signature(summarize_and_filter_links).bind(*summary_call["args"], "task-1")
+    assert bound.arguments["page_metadata"] == {}
+    assert bound.arguments["session_id"] == "task-1"
     download_call = next(call for call in calls if call["activity"] == "web_fetch_download_activity")
     assert download_call["args"] == [
         ["https://example.com/file.pdf"],
@@ -905,6 +915,99 @@ async def test_handler_execute_tool_happy_path():
     ]
     assert tool_titles[0] == "Fetching https://example.com/a for download the PDF"
     assert tool_titles[-1] == "Fetched https://example.com/a for download the PDF"
+
+
+async def test_handler_forwards_page_declared_metadata_to_summarizer():
+    """RCA 2026-10-26 background-agent-message-smoke timeout.
+
+    The RFC Editor page for RFC 9110 declares its publication date only in
+    ``<meta name="citation_publication_date">``; its main-content markdown has
+    no "June 2022". Firecrawl returns that tag in ``metadata``, but web_fetch
+    dropped it before the summarizer, so the explore agent reported the month
+    as unverifiable and the root spent a second explore run re-fetching it.
+    """
+    from domains.web_fetch.handler import WebFetchManager
+
+    page_metadata = {
+        "title": "RFC 9110: HTTP Semantics | RFC Editor",
+        "citation_title": ["HTTP Semantics", "HTTP Semantics"],
+        "citation_publication_date": ["2022/06/06", "2022/06/06"],
+        "provider": "Firecrawl scrape",
+        "scrapeId": "scrape-1",
+    }
+    calls = []
+
+    async def fake_execute_activity(fn, args=None, **kwargs):
+        name = getattr(fn, "__name__", "")
+        calls.append({"activity": name, "args": args})
+        if name == "web_fetch_activity":
+            return {"markdown": "# RFC9110: HTTP Semantics\nInternet Standard", "links": [], "metadata": page_metadata}
+        if name == "summarize_and_filter_links":
+            return {"summary": "RFC 9110, published June 2022.", "files_to_download": [], "usage": {}}
+        return None
+
+    out = await WebFetchManager().execute_tool(
+        execute_activity=fake_execute_activity,
+        tool_call={"url": "https://www.rfc-editor.org/rfc/rfc9110", "objective": "publication month and year"},
+        tool_call_id="tc-meta",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+
+    summary_call = next(call for call in calls if call["activity"] == "summarize_and_filter_links")
+    # Only the allowlisted, bounded subset crosses the activity boundary.
+    assert summary_call["args"][-1] == {
+        "title": "RFC 9110: HTTP Semantics | RFC Editor",
+        "citation_publication_date": "2022/06/06",
+    }
+    assert out["result"]["content"].startswith("RFC 9110, published June 2022.")
+
+
+async def test_handler_passes_no_parallel_extract_ids_to_summarizer():
+    """Review finding 2026-10-26: Parallel Extract fallback IDs stay out of the summarizer.
+
+    ``extract_parallel`` returns extract_id, session_id, warnings and errors
+    beside the page's title and publish_date; only those page facts may reach
+    the summarize activity's arguments.
+    """
+    from domains.web_fetch.handler import WebFetchManager
+
+    calls = []
+
+    async def fake_execute_activity(fn, args=None, **kwargs):
+        name = getattr(fn, "__name__", "")
+        calls.append({"activity": name, "args": args})
+        if name == "web_fetch_activity":
+            return {
+                "markdown": "# RFC9110: HTTP Semantics\nInternet Standard",
+                "links": [],
+                "metadata": {
+                    "provider": "Parallel Extract",
+                    "title": "RFC 9110: HTTP Semantics",
+                    "publish_date": "2022-06-06",
+                    "url": "https://www.rfc-editor.org/rfc/rfc9110",
+                    "extract_id": "extract_8c1f2b",
+                    "session_id": "session_93ad7e",
+                    "warnings": ["full_content truncated"],
+                    "errors": [],
+                },
+            }
+        if name == "summarize_and_filter_links":
+            return {"summary": "RFC 9110, published June 2022.", "files_to_download": [], "usage": {}}
+        return None
+
+    await WebFetchManager().execute_tool(
+        execute_activity=fake_execute_activity,
+        tool_call={"url": "https://www.rfc-editor.org/rfc/rfc9110", "objective": "publication month and year"},
+        tool_call_id="tc-parallel",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+
+    summary_call = next(call for call in calls if call["activity"] == "summarize_and_filter_links")
+    assert summary_call["args"][-1] == {"title": "RFC 9110: HTTP Semantics", "publish_date": "2022-06-06"}
+    assert "extract_8c1f2b" not in repr(summary_call["args"])
+    assert "session_93ad7e" not in repr(summary_call["args"])
 
 
 async def test_handler_simulator_appends_mode_only_to_boundary_activities():
@@ -994,9 +1097,9 @@ async def test_handler_reports_parallel_provider_when_fallback_succeeds():
     assert out["usage"]["service"][0]["provider"] == "Parallel Extract"
 
 
-async def test_handler_fast_cache_scrape_hit_has_no_service_cost():
+async def test_handler_demo_cache_scrape_hit_has_no_service_cost():
     """Fast Mode scrape cache hits should not be billed as live scrape/extract calls."""
-    from domains.web_fetch.handler import FAST_CACHE_HIT_FIELD, WebFetchManager
+    from domains.web_fetch.handler import DEMO_CACHE_HIT_FIELD, WebFetchManager
 
     calls = []
 
@@ -1008,7 +1111,7 @@ async def test_handler_fast_cache_scrape_hit_has_no_service_cost():
                 "markdown": "cached page text",
                 "links": [],
                 "metadata": {"provider": "Firecrawl scrape"},
-                FAST_CACHE_HIT_FIELD: True,
+                DEMO_CACHE_HIT_FIELD: True,
             }
         if name == "summarize_and_filter_links":
             return {"summary": "Cached summary.", "files_to_download": [], "usage": {}, "summarized": True}
@@ -1026,12 +1129,12 @@ async def test_handler_fast_cache_scrape_hit_has_no_service_cost():
     assert out["usage"]["service"] == []
     finished = [call for call in calls if call["activity"] == "post_agent_message"][-1]
     assert "**Cost:** $0.0000" in finished["args"][1]
-    assert FAST_CACHE_HIT_FIELD not in finished["args"][1]
+    assert DEMO_CACHE_HIT_FIELD not in finished["args"][1]
 
 
-async def test_web_fetch_activity_ignores_unavailable_fast_cache_when_fallback_enabled():
+async def test_web_fetch_activity_ignores_unavailable_demo_cache_when_fallback_enabled():
     """Benchmark fallback mode treats unavailable WMH scrape observations as cache misses."""
-    from domains.web_fetch.handler import FAST_CACHE_HIT_FIELD, web_fetch_activity
+    from domains.web_fetch.handler import DEMO_CACHE_HIT_FIELD, web_fetch_activity
 
     cached = {
         "markdown": '{"result_unavailable": true}',
@@ -1051,8 +1154,8 @@ async def test_web_fetch_activity_ignores_unavailable_fast_cache_when_fallback_e
         },
         clear=False,
     ):
-        with patch("providers.fast_cache.client.cache_get", new=AsyncMock(return_value=cached)):
-            with patch("providers.fast_cache.client.cache_set", new=AsyncMock(return_value=True)) as set_cache:
+        with patch("providers.demo_cache.client.cache_get", new=AsyncMock(return_value=cached)):
+            with patch("providers.demo_cache.client.cache_set", new=AsyncMock(return_value=True)) as set_cache:
                 with patch("domains.web_fetch.handler.scrape_url", new=AsyncMock(return_value=live)) as scrape:
                     result = await web_fetch_activity(
                         url="https://example.com/a",
@@ -1062,8 +1165,41 @@ async def test_web_fetch_activity_ignores_unavailable_fast_cache_when_fallback_e
 
     scrape.assert_awaited_once_with("https://example.com/a")
     assert result == live
-    assert FAST_CACHE_HIT_FIELD not in result
+    assert DEMO_CACHE_HIT_FIELD not in result
     assert set_cache.await_count == 1
+
+
+async def test_web_fetch_activity_replays_a_cached_provider_error_without_a_live_scrape():
+    """descend-full69 MA: a DEMO row can record a fetch that failed.
+
+    test-mass-agent-run-0's Justin Welsh GP fetches a page whose scrape fails
+    (Firecrawl 500 / Parallel connect_error). Failures had no cache shape, so
+    every replay scraped live. A ``provider_error`` row replays the same
+    non-retryable WebFetchProvidersFailed tool error with no scrape.
+    """
+    from temporalio.exceptions import ApplicationError
+
+    from domains.web_fetch.handler import CACHED_PROVIDER_ERROR_FIELD, web_fetch_activity
+
+    recorded = "web_fetch failed with Firecrawl and Parallel Extract. Firecrawl error: 500"
+    cached = {CACHED_PROVIDER_ERROR_FIELD: recorded}
+    with patch("providers.demo_cache.client.cache_get", new=AsyncMock(return_value=cached)):
+        with patch("domains.web_fetch.handler.scrape_url", new=AsyncMock()) as scrape:
+            try:
+                await web_fetch_activity(
+                    url="https://example.com/a",
+                    fast_mode_cache_enabled=True,
+                    fast_mode_goal="goal",
+                )
+            except ApplicationError as error:
+                raised = error
+            else:
+                raise AssertionError("a recorded provider error must replay as a tool error")
+
+    scrape.assert_not_awaited()
+    assert raised.message == recorded
+    assert raised.type == "WebFetchProvidersFailed"
+    assert raised.non_retryable is True
 
 
 async def test_handler_skips_download_when_haiku_returns_no_files():
@@ -1229,9 +1365,9 @@ async def run_all_tests() -> bool:
     await r.record_async("download_no_user_returns_empty", test_download_and_attach_no_user_id_returns_empty)
     await r.record_async("download_happy_path", test_download_and_attach_happy_path)
     await r.record_async("download_skips_failed", test_download_and_attach_skips_failed_downloads)
-    await r.record_async("download_fast_cache_hit", test_download_and_attach_fast_cache_hit_skips_external_download)
+    await r.record_async("download_fast_cache_hit", test_download_and_attach_demo_cache_hit_skips_external_download)
     await r.record_async(
-        "download_fast_cache_miss_stores", test_download_and_attach_fast_cache_miss_stores_downloaded_bytes
+        "download_demo_cache_miss_stores", test_download_and_attach_demo_cache_miss_stores_downloaded_bytes
     )
 
     # Handler
@@ -1240,16 +1376,28 @@ async def run_all_tests() -> bool:
     r.record("handler_get_manager_singleton", test_handler_get_manager_singleton)
     await r.record_async("handler_exec_happy", test_handler_execute_tool_happy_path)
     await r.record_async(
+        "handler_forwards_page_declared_metadata_to_summarizer",
+        test_handler_forwards_page_declared_metadata_to_summarizer,
+    )
+    await r.record_async(
+        "handler_passes_no_parallel_extract_ids_to_summarizer",
+        test_handler_passes_no_parallel_extract_ids_to_summarizer,
+    )
+    await r.record_async(
         "handler_simulator_appends_mode_only_to_boundaries",
         test_handler_simulator_appends_mode_only_to_boundary_activities,
     )
     await r.record_async(
         "handler_reports_parallel_provider", test_handler_reports_parallel_provider_when_fallback_succeeds
     )
-    await r.record_async("handler_fast_cache_scrape_no_cost", test_handler_fast_cache_scrape_hit_has_no_service_cost)
+    await r.record_async("handler_demo_cache_scrape_no_cost", test_handler_demo_cache_scrape_hit_has_no_service_cost)
     await r.record_async(
-        "activity_fast_cache_ignores_unavailable",
-        test_web_fetch_activity_ignores_unavailable_fast_cache_when_fallback_enabled,
+        "activity_demo_cache_ignores_unavailable",
+        test_web_fetch_activity_ignores_unavailable_demo_cache_when_fallback_enabled,
+    )
+    await r.record_async(
+        "web_fetch_activity_replays_a_cached_provider_error_without_a_live_scrape",
+        test_web_fetch_activity_replays_a_cached_provider_error_without_a_live_scrape,
     )
     await r.record_async(
         "handler_skips_download_when_no_files", test_handler_skips_download_when_haiku_returns_no_files

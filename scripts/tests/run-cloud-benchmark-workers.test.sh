@@ -73,4 +73,72 @@ if 'connection_limit=${LOCAL_DB_CONNECTION_LIMIT}' not in text:
 print("structural pool: OK")
 PY
 
+# run600c (2026-10-18): 600 guests each ran the worker's 1 Hz queue observation
+# (CountWorkflowExecutions + 2 DescribeTaskQueue, all Temporal Cloud Visibility
+# API calls) on the production namespace. ~90% of guest AND prod autoscaler
+# cycles were rejected with "namespace rate limit exceeded" for 35 minutes.
+# Guests must share one fleet-wide visibility budget; clones must not observe.
+(
+  set -euo pipefail
+  # shellcheck source=/dev/null
+  . "$ROOT/scripts/lib/cloudbench-env.sh"
+  unset CLOUDBENCH_TEMPORAL_VISIBILITY_CALLS_PER_SECOND
+  check() {  # <expected> <guests> [budget] [floor]
+    local got; got="$(cloudbench_guest_autoscaler_poll_seconds "${@:2}")"
+    [ "$got" = "$1" ] || { echo "FAIL: guest poll seconds($*) = $got" >&2; exit 1; }
+  }
+  check 90 600 "" 10      # unsharded 600-wide campaign within the 20 calls/s default
+  check 90 30 1.0 10      # one of 20 shard hosts: 30 guests within 1/20 of the budget
+  check 10 1 "" 10        # never faster than the controller's 10 s read cadence
+  check 10 50 "" 10       # width fifty: 7.5 s rounds up to the read cadence
+  check 90 600 abc 10     # malformed budget falls back to the default
+  check 10 "" "" 10       # malformed width counts as one guest
+  CLOUDBENCH_TEMPORAL_VISIBILITY_CALLS_PER_SECOND=60 check 30 600 "" 10
+  for guests in 1 2 7 29 30 31 50 99 300 600 601 1000; do
+    for budget in 0.5 1.0 1.5 20 60; do
+      seconds="$(cloudbench_guest_autoscaler_poll_seconds "$guests" "$budget" 10)"
+      awk -v g="$guests" -v b="$budget" -v s="$seconds" 'BEGIN { exit !(3 * g / s <= b + 1e-9) }' \
+        || { echo "FAIL: $guests guests every ${seconds}s exceed $budget visibility calls/s" >&2; exit 1; }
+    done
+  done
+)
+
+python3 - <<'PY' "$ROOT"
+import pathlib, re, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+def read(rel): return (root / rel).read_text()
+fleet = read("scripts/run-bench-fleet")
+call = ('CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS="$(cloudbench_guest_autoscaler_poll_seconds \\\n'
+        '    "${CLOUDBENCH_CAMPAIGN_CONCURRENT_GUESTS:-${#BENCHES[@]}}" "" "$AUTOSCALE_POLL")" || exit 1\n'
+        'export CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS\n')
+if call not in fleet:
+    sys.exit("FAIL: run-bench-fleet must budget guest observation by campaign width and export it")
+if '"CLOUDBENCH_CAMPAIGN_CONCURRENT_GUESTS": str(args.concurrency)' not in read("scripts/run-bench-campaign.py"):
+    sys.exit("FAIL: campaign children must report the campaign's concurrent guest count")
+cloud = read("scripts/run-bench-cloud")
+for needle in ('--env "CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS=${CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS:-}"',
+               'echo "export CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS=$(printf \'%q\' "${CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS:-}")"'):
+    if needle not in cloud:
+        sys.exit(f"FAIL: run-bench-cloud must forward the guest cadence on both launch paths: {needle}")
+worker = read("scripts/cloudbench-worker.sh")
+if "export AUTOSCALER_QUEUE_METRICS=0" not in worker or "    AUTOSCALER_QUEUE_METRICS=0 \\\n" not in worker:
+    sys.exit("FAIL: worker-only clones must disable unread queue observation in env and exec env")
+if '${WMH_BASE_URL:+${WMH_EXECUTION_POLICY:+WMH_EXECUTION_POLICY="$WMH_EXECUTION_POLICY"}}' not in worker:
+    sys.exit("FAIL: autoscaled workers must run with the primary's WMH execution policy (demo-cache partition)")
+if 'echo "export WMH_EXECUTION_POLICY=$(printf \'%q\' "$WMH_EXECUTION_POLICY")"' not in read("scripts/run-bench-fleet"):
+    sys.exit("FAIL: the fleet must hand autoscaled workers its WMH execution policy")
+run = read("scripts/cloudbench-run.sh")
+block = re.search(r'case "\$\{CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS:-\}" in\n.*?\nesac\n', run, re.S)
+probe = 'if [ "${CLOUDBENCH_INFRA_PROBE:-0}" = "1" ]; then\n    # The probe executes'
+if not block or run.index(block.group(0)) > run.index(probe) or run.index("STACK_ENV=(") > run.index(block.group(0)):
+    sys.exit("FAIL: cloudbench-run.sh must pass the budgeted cadence into the isolated stack env")
+for value, expected in (("90", "AUTOSCALER_POLL_INTERVAL_SECONDS=90"), ("", ""), ("0", ""), ("9x", "")):
+    out = subprocess.run(["bash", "-c", 'STACK_ENV=(); ' + block.group(0) + 'printf "%s" "${STACK_ENV[*]:-}"'],
+                         env={"CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS": value, "PATH": "/usr/bin:/bin"},
+                         capture_output=True, text=True, check=True).stdout
+    if out != expected:
+        sys.exit(f"FAIL: guest cadence {value!r} produced stack env {out!r}")
+print("guest temporal visibility budget: OK")
+PY
+
 echo "run-cloud-benchmark-workers: OK"

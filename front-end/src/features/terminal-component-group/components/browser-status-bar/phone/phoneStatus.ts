@@ -5,7 +5,10 @@
  */
 import type { PhoneOperation, PhoneSetupStatus } from '@/lib/api/iphone';
 import type { PhoneOverlayModel } from './usePhoneOverlay';
-import type { PhoneHeaderStatus } from '../BrowserFullscreenHeaders';
+interface PhoneHeaderStatus {
+  label: string;
+  active: boolean;
+}
 function setupLabel(setup?: PhoneSetupStatus): string | undefined {
   if (setup?.required !== true) return;
   switch (setup.state) {

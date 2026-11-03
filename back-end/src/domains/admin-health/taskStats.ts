@@ -10,8 +10,27 @@ export function tasksIssuedPerUser(tasks: RootTaskRecord[], userCount: number): 
   return Number((tasks.length / userCount).toFixed(4));
 }
 
-export function taskCompletionRate(tasks: Array<Pick<RootTaskRecord, 'status'>>): number {
-  if (tasks.length === 0) return 0;
-  const completed = tasks.filter((task) => task.status === 'COMPLETED').length;
-  return Number((completed / tasks.length).toFixed(4));
+const UNRESOLVED_STATUSES: ReadonlySet<RootTaskRecord['status']> = new Set([
+  'STARTING_UP',
+  'ACTIVE',
+  'PAUSED',
+]);
+
+type OutcomeTask = Pick<RootTaskRecord, 'status'> & { archivedBeforeOutcome?: boolean };
+
+/** Has an outcome: not still running, and not archived before it finished. */
+export function isResolvedTask(task: OutcomeTask): boolean {
+  return !UNRESOLVED_STATUSES.has(task.status) && task.archivedBeforeOutcome !== true;
+}
+
+/**
+ * Completed / resolved root tasks. Tasks still running (or archived while
+ * running) have no outcome, so counting them as failures dragged every period
+ * down. Null (not 0%) when nothing resolved: no evidence is not 0% success.
+ */
+export function taskCompletionRate(tasks: OutcomeTask[]): number | null {
+  const resolved = tasks.filter(isResolvedTask);
+  if (resolved.length === 0) return null;
+  const completed = resolved.filter((task) => task.status === 'COMPLETED').length;
+  return Number((completed / resolved.length).toFixed(4));
 }

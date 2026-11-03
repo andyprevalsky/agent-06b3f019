@@ -24,6 +24,10 @@
  *
  * SUB-AGENT TREE MERGING (see useSubAgentTreeMerge):
  * All spawn_sub_agent messages sharing a busId collapse to one.
+ *
+ * BACKGROUND SPAWNS: rows render with main's spawn UI (SubAgentTree / explore /
+ * browser bubbles); the hidden "Started…" row is dropped by the hidden filter.
+ * The live tree of every running agent is also in the query-box dock.
  */
 
 import { useMemo, useRef } from 'react';
@@ -86,7 +90,7 @@ function computeChatModeActionsVisible({
 
 export function MessageList({
   subAgentId,
-  containerClassName = 'w-full min-w-0 max-w-4xl mx-auto flex flex-col gap-1.5 pb-32 relative z-20',
+  containerClassName = 'w-full min-w-0 max-w-4xl mx-auto flex flex-col gap-4 pb-32 relative z-20',
   showStatusBanners = true,
   showThinkingIndicator = true,
   compact = false,

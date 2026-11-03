@@ -10,6 +10,13 @@
  *   Router DONE + clear_on_done -> frontend removes bubble
  *   Generator RESPONSE -> ATTENTION_STREAM accumulated frames -> keyed TOOL INSERT
  *   Python worker stream payloads -> unchanged; drain priority is never serialized
+ *   Committed INSERT refused with a non-retryable 4xx (e.g. edge WAF 403)
+ *     -> INSERT_ENCODED (same record, base64 content) -> INSERT_DEFERRED
+ *        (ids + tool lifecycle + visible reason; client reads the row by id)
+ *   Committed INSERT larger than LIVE_INSERT_MAX_BYTES (8 KB) -> INSERT_DEFERRED
+ *        with a text preview and the small metadata (largest keys dropped until it
+ *        fits); the client shows the preview, then reads the row by id
+ *   INSERT_DEFERRED refused -> INSERT_DEFERRED without preview (blocked reason)
  */
 
 import { v4 as uuidv4 } from 'uuid';
@@ -59,7 +66,39 @@ interface QueuedBroadcast {
   };
 }
 
-const initialDispatcher = new InitialBroadcastDispatcher<QueuedBroadcast>();
+/**
+ * Folds a stream delta into the previous unsent delta of the same stream. The
+ * client appends `delta` and keeps the highest `sequence` (realtimeHandlers
+ * handleAssistantStream), so one merged frame renders the same text as many.
+ */
+export function coalesceAssistantStream(
+  queued: QueuedBroadcast,
+  next: QueuedBroadcast
+): QueuedBroadcast | undefined {
+  if (queued.event !== 'ASSISTANT_STREAM' || next.event !== 'ASSISTANT_STREAM') return undefined;
+  if (queued.committedCohort !== undefined || next.committedCohort !== undefined) return undefined;
+  const previous = queued.payload;
+  const latest = next.payload;
+  if (previous.stream_id !== latest.stream_id || previous.done === true) return undefined;
+  // The stream-start frame (sequence 0) stays its own event so the client opens
+  // the bubble at the LLM start, before any token.
+  if (typeof previous.sequence !== 'number' || previous.sequence <= 0) return undefined;
+  if (typeof previous.delta !== 'string' || typeof latest.delta !== 'string') return undefined;
+  return {
+    ...next,
+    trace: queued.trace,
+    enqueuedAt: queued.enqueuedAt,
+    payload: {
+      ...latest,
+      delta: previous.delta + latest.delta,
+      ...(latest.llm_started_at_ms === undefined && previous.llm_started_at_ms !== undefined
+        ? { llm_started_at_ms: previous.llm_started_at_ms }
+        : {}),
+    },
+  };
+}
+
+const initialDispatcher = new InitialBroadcastDispatcher<QueuedBroadcast>(coalesceAssistantStream);
 let flushTimer: NodeJS.Timeout | null = null;
 const inFlightBatches = new Set<Promise<void>>();
 const MAX_IN_FLIGHT_BATCHES = 64;
@@ -74,8 +113,116 @@ const committedDelivery = new CommittedMessageDelivery<QueuedBroadcast>(
   },
   (items) => sendBroadcastBatch(items),
   BROADCAST_BATCH_SIZE,
-  (topic) => initialDispatcher.admissionBudget(topic)
+  (topic) => initialDispatcher.admissionBudget(topic),
+  [
+    { name: 'INSERT_ENCODED', map: encodedInsert },
+    { name: 'INSERT_DEFERRED', map: (item) => deferredInsert(item, BLOCKED_STREAM_REASON) },
+  ],
+  (item) => deferredInsert(item, OVERSIZE_STREAM_REASON)
 );
+
+/** Shown in place of a row whose live frame was refused, until the client reads it. */
+export const BLOCKED_STREAM_REASON =
+  'This message contained content that was blocked from live streaming to the app.';
+export const OVERSIZE_STREAM_REASON =
+  'This message is too large to stream live; loading it from the server.';
+
+/**
+ * Largest committed INSERT frame sent live. Supabase Realtime caps a project at
+ * 1 MB/s; rows above 8 KB are 5.7% of messages but 58% of INSERT bytes
+ * (prod, 7 days to 2026-10-27), so they stream as bounded notices instead.
+ */
+export const LIVE_INSERT_MAX_BYTES = Math.max(
+  1024,
+  Math.floor(finiteEnvNumber(process.env.SUPABASE_BROADCAST_LIVE_INSERT_MAX_BYTES, 8 * 1024))
+);
+/** Characters of `text` a bounded notice previews before the client hydrates. */
+export const LIVE_INSERT_PREVIEW_CHARS = 1000;
+/** Longest lifecycle string a content-free notice repeats. */
+const LIFECYCLE_VALUE_MAX_CHARS = 256;
+/** Control fields every bounded notice keeps (each fits its own notice). */
+const LIFECYCLE_METADATA_KEYS = new Set(['toolName', 'toolStatus', 'toolCallId', 'success']);
+
+/** Bytes of the exact message `sendBroadcastBatch` puts on the wire for this item. */
+const wireBytes = (
+  item: Pick<QueuedBroadcast, 'topic' | 'event' | 'payload' | 'private'>
+): number =>
+  Buffer.byteLength(
+    JSON.stringify({
+      topic: item.topic,
+      event: item.event,
+      payload: { record: item.payload },
+      private: item.private,
+    })
+  );
+
+/**
+ * A committed row too large to stream live: ids, a text preview, filePointer and
+ * the metadata that fits, dropping the largest non-lifecycle keys first. The
+ * frame never carries `text`, so every client treats it as a notice to hydrate.
+ * If it still exceeds the cap with an empty preview (a huge filePointer or
+ * lifecycle string), the minimal content-free notice is sent instead.
+ */
+function boundedInsert(item: QueuedBroadcast): QueuedBroadcast {
+  const { agentId, id, timestamp, role, text, metadata, filePointer } = item.payload;
+  const kept: Record<string, unknown> = { ...((metadata ?? {}) as Record<string, unknown>) };
+  let preview = typeof text === 'string' ? text.slice(0, LIVE_INSERT_PREVIEW_CHARS) : '';
+  const build = (): Record<string, unknown> => ({
+    agentId,
+    id,
+    timestamp,
+    role,
+    reason: OVERSIZE_STREAM_REASON,
+    preview,
+    metadata: kept,
+    filePointer: filePointer ?? null,
+  });
+  const fits = () =>
+    wireBytes({ ...item, event: 'INSERT_DEFERRED', payload: build() }) <= LIVE_INSERT_MAX_BYTES;
+  const droppable = Object.keys(kept)
+    .filter((key) => !LIFECYCLE_METADATA_KEYS.has(key))
+    .sort((a, b) => JSON.stringify(kept[b]).length - JSON.stringify(kept[a]).length);
+  for (const key of droppable) {
+    if (fits()) break;
+    delete kept[key];
+  }
+  while (preview.length > 0 && !fits()) {
+    preview = preview.slice(0, Math.floor(preview.length / 2));
+  }
+  if (!fits()) return deferredInsert(item, OVERSIZE_STREAM_REASON);
+  return { ...item, event: 'INSERT_DEFERRED', payload: build() };
+}
+
+/** The identical record with its content fields as one base64 JSON blob. */
+function encodedInsert(item: QueuedBroadcast): QueuedBroadcast {
+  // A refused bounded notice has no full record to re-encode; drop its preview.
+  if (item.event === 'INSERT_DEFERRED') return deferredInsert(item, BLOCKED_STREAM_REASON);
+  const { agentId, id, timestamp, role, text, metadata, filePointer } = item.payload;
+  const data = Buffer.from(JSON.stringify({ text, metadata, filePointer }), 'utf8');
+  return {
+    ...item,
+    event: 'INSERT_ENCODED',
+    payload: { agentId, id, timestamp, role, encoding: 'base64', data: data.toString('base64') },
+  };
+}
+
+/** Identifiers, tool lifecycle scalars and a visible reason; no row content. */
+function deferredInsert(item: QueuedBroadcast, reason: string): QueuedBroadcast {
+  const { agentId, id, timestamp, role, metadata } = item.payload;
+  const source = (metadata ?? {}) as Record<string, unknown>;
+  const lifecycle: Record<string, unknown> = {};
+  for (const key of ['toolName', 'toolStatus', 'toolCallId']) {
+    // Bounded so a notice always fits both the live cap and the agent lane.
+    if (typeof source[key] === 'string')
+      lifecycle[key] = source[key].slice(0, LIFECYCLE_VALUE_MAX_CHARS);
+  }
+  if (typeof source.success === 'boolean') lifecycle.success = source.success;
+  return {
+    ...item,
+    event: 'INSERT_DEFERRED',
+    payload: { agentId, id, timestamp, role, reason, metadata: lifecycle },
+  };
+}
 
 interface AssistantStreamOptions {
   /** Remove a purely ephemeral stream at its terminal event. */
@@ -238,6 +385,23 @@ export async function broadcastAgentModeStarted(agentId: string): Promise<void> 
 }
 
 /**
+ * USER_UI_ACTIVE_CHANGED — a code agent published (and activated) a new
+ * rose_user_ui version. Sent on the publishing agent's channel and its root's
+ * so an open Rose tab refetches /api/user-ui/active without a reload.
+ */
+export async function broadcastUserUiActiveChanged(
+  agentIds: string[],
+  payload: { versionId: string; agentId: string }
+): Promise<void> {
+  log.info('[Broadcast] USER_UI_ACTIVE_CHANGED', { ...payload, channels: agentIds.length });
+  await Promise.all(
+    agentIds.map((id) =>
+      broadcast({ topic: `agent:${id}`, event: 'USER_UI_ACTIVE_CHANGED', payload })
+    )
+  );
+}
+
+/**
  * Broadcast agent UPDATE event - notifies frontend of agent state changes
  * Use this for tree_cost_cents, context_size, and other agent-level updates
  *
@@ -251,6 +415,8 @@ export async function broadcastAgentUpdate(
     treeCostCents?: number;
     contextSize?: number;
     progress?: number;
+    progressEstimate?: import('../../utils/progressEstimate').ProgressEstimate | null;
+    taskProgressEstimates?: Record<string, import('../../utils/progressEstimate').ProgressEstimate>;
     status?: string;
     statusMessage?: string;
     tokenCount?: number;
@@ -258,17 +424,17 @@ export async function broadcastAgentUpdate(
     tokensOut?: number;
     messageCount?: number;
     temporalWorkflowId?: string | null;
-  }
+    updatedAt?: string;
+  },
+  busId?: string
 ): Promise<void> {
   log.info('[Broadcast] UPDATE', { agentId, ...updates });
-  await broadcast({
-    topic: `agent:${agentId}`,
-    event: 'UPDATE',
-    payload: {
-      agentId,
-      ...updates,
-    },
-  });
+  const payload = { agentId, ...updates };
+  // Reuse the batched realtime transport and existing tree subscription. No per-row channels.
+  await Promise.all([
+    broadcast({ topic: `agent:${agentId}`, event: 'UPDATE', payload }),
+    ...(busId ? [broadcast({ topic: `bus:${busId}`, event: 'UPDATE', payload })] : []),
+  ]);
 }
 
 /**
@@ -301,6 +467,23 @@ export async function broadcastBrowserSessionBinding(
       live: binding.status === 'ACTIVE',
       asOf,
     },
+  });
+}
+
+/**
+ * Broadcast CODE_RESOURCES - the latest CPU / memory / disk sample of a code
+ * agent's sandbox (codeSessions/sandboxResources.ts), sent on the owning
+ * agent's channel once per keepalive of a running session.
+ */
+export async function broadcastCodeResources(
+  agentId: string,
+  taskId: string,
+  resources: import('../codeSessions/sandboxResources').CodeResourceSample
+): Promise<void> {
+  await broadcast({
+    topic: `agent:${agentId}`,
+    event: 'CODE_RESOURCES',
+    payload: { agentId, taskId, resources },
   });
 }
 
@@ -378,7 +561,21 @@ async function broadcast(
     // Freeze caller-owned metadata so an uncertain send retries identical bytes.
     const serialized = JSON.stringify(item.payload);
     item.payload = JSON.parse(serialized) as Record<string, unknown>;
-    committedDelivery.enqueue(item, Buffer.byteLength(serialized) + Buffer.byteLength(item.topic));
+    const bytes = Buffer.byteLength(serialized) + Buffer.byteLength(item.topic);
+    if (wireBytes(item) <= LIVE_INSERT_MAX_BYTES) {
+      committedDelivery.enqueue(item, bytes);
+      return;
+    }
+    const bounded = boundedInsert(item);
+    const boundedBytes =
+      Buffer.byteLength(JSON.stringify(bounded.payload)) + Buffer.byteLength(bounded.topic);
+    log.info('[Broadcast] INSERT bounded to a live notice', {
+      topic: item.topic,
+      message_id: item.payload.id,
+      bytes,
+      bounded_bytes: boundedBytes,
+    });
+    committedDelivery.enqueue(bounded, boundedBytes);
     return;
   }
   if (!initialDispatcher.enqueue(item)) return;

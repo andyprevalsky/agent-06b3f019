@@ -1,3 +1,4 @@
+import { fenceEmptyRetainedSource, routeMismatchRecords } from './workerDeploymentRetention';
 /**
  * Current-generation agent task-queue pointer for zero-downtime cutover.
  *
@@ -27,7 +28,7 @@ import {
 } from './workflowQueueAdmission';
 import { WORKFLOW_DEPLOYMENT_LEASE_KEY } from './workflowDeploymentLease';
 import { managedQueue, MANAGED_PRODUCER_PROTOCOL } from './workflowManagedQueue';
-import { workerDeploymentQueueName } from './workerDeploymentQueue';
+import { workerDeploymentQueueName, type WorkerDeploymentJob } from './workerDeploymentQueue';
 
 const SINGLETON_ID = 'singleton';
 
@@ -85,6 +86,7 @@ export async function setCurrentAgentQueue(
     throw new Error('Managed queue publication requires its deployment job and lease owner');
   await runTransactionWithRetry(async (tx) => {
     let managedSource: string | undefined;
+    let retainedJob: WorkerDeploymentJob | undefined;
     if (options?.deploymentOwnerId) {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${WORKFLOW_DEPLOYMENT_LEASE_KEY}))`;
       const lease = await tx.toolSideEffect.findUnique({
@@ -140,6 +142,14 @@ export async function setCurrentAgentQueue(
       )
         throw new Error('Managed queue publication requires the exact ready candidate bank');
       managedSource = job.identity.sourceCommit;
+      const fullJob = row.request as unknown as WorkerDeploymentJob;
+      if (
+        routeMismatchRecords(fullJob.evidence.PREPARING as Record<string, unknown> | undefined)
+          .length
+      ) {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'deployment:worker-queue:' + fullJob.identity.app}))`;
+        retainedJob = fullJob;
+      }
     }
     await lockQueueAdmission(tx);
     if (options) {
@@ -195,6 +205,10 @@ export async function setCurrentAgentQueue(
           request: state as unknown as Prisma.InputJsonObject,
         },
       });
+    }
+    if (retainedJob) {
+      const current = await tx.agentQueuePointer.findUniqueOrThrow({ where: { id: SINGLETON_ID } });
+      await fenceEmptyRetainedSource(tx, retainedJob, current, taskQueue);
     }
     await tx.agentQueuePointer.upsert({
       where: { id: SINGLETON_ID },

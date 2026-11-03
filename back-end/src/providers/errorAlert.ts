@@ -1,28 +1,45 @@
 /**
  * Direct-to-Slack failure alerting.
  *
- * DESIGN — this path deliberately does NOT route through our own backend/DB.
+ * DESIGN — delivery deliberately does NOT route through our own backend/DB.
  * The failures we most want to hear about are exactly the ones where the
  * backend or DB is unhealthy, so an alert that depends on our infra can't
  * fire when it matters. `alertError` posts straight to a Slack incoming
- * webhook (external), and — only when AUTO_RCA_ENABLED=1 — fires a GitHub
- * `repository_dispatch` straight to GitHub's API. No Prisma, no internal route.
+ * webhook or bot (external), never through an internal route.
  *
- * With Auto RCA enabled, GitHub owns the one-PR/one-Slack-card lifecycle. This
- * process dispatches the stable agent ID before creating any Slack side effect;
- * duplicate dispatches are reconciled downstream. The in-memory throttle is
- * best-effort noise control, never a correctness boundary. At 10k agents this
- * stays O(1) per failure with a bounded map.
+ * Dedupe spans instances: a signature already alerted by another backend
+ * instance within the window (a shared TTL lease in sharedState) is skipped.
+ * That check fails OPEN — if the database is slow or down, the alert is sent
+ * anyway, so a DB outage can at worst double an alert, never silence one.
+ *
+ * Auto RCA runs on Rose: Slack delivers the bot's card to
+ * `/api/webhooks/slack/auto-rca`, which creates (or appends to) one Rose RCA
+ * root agent per error signature window and replies in the card's thread.
+ * The in-memory throttle is the first, free filter (one shared-lease query per
+ * signature per window per instance); both are noise control, never a
+ * correctness boundary. At 10k agents this stays O(1) per failure.
  *
  * `alertError` is fire-and-forget and NEVER throws — it lives in callers' error
  * paths and must not turn a handled failure into an unhandled one.
  */
 import { createLogger } from './logger';
+import { acquireLease, releaseLease } from './sharedState';
 
 const log = createLogger('ErrorAlert');
 
+const SHARED_DEDUPE_NAMESPACE = 'error-alert';
+// The shared check must never hold an alert hostage to a slow database.
+const SHARED_DEDUPE_TIMEOUT_MS = 1500;
+
 export type FailureSource =
-  'chat' | 'sms' | 'whatsapp' | 'agent_workflow' | 'backend_crash' | 'agent_watchdog';
+  | 'chat'
+  | 'sms'
+  | 'whatsapp'
+  | 'agent_workflow'
+  | 'backend_crash'
+  | 'agent_watchdog'
+  | 'schema_drift'
+  | 'e2b_capacity';
 
 const SOURCE_LABEL: Record<FailureSource, string> = {
   chat: '🔴 Chat loop failed',
@@ -31,6 +48,8 @@ const SOURCE_LABEL: Record<FailureSource, string> = {
   agent_workflow: '🔴 Agent failed',
   backend_crash: '🔴 Backend crashing',
   agent_watchdog: '🔴 Agent stuck / silently died',
+  schema_drift: '🔴 Production schema drift (RLS / indexes / policies)',
+  e2b_capacity: '🔴 E2B concurrent-sandbox limit reached — scale the E2B plan',
 };
 
 const OUTBOUND_TIMEOUT_MS = 4000;
@@ -40,7 +59,7 @@ const MAX_THROTTLE_ENTRIES = 5000;
 const FE_BASE = process.env.PUBLIC_FRONTEND_URL ?? 'https://roselabs.ai';
 const PROD_BACKEND = 'https://navi-j9a9.onrender.com';
 
-// signature -> last-sent epoch ms. Per-process only, by design (see file header).
+// signature -> last-sent epoch ms in this process; the shared lease covers other instances.
 const lastSentAt = new Map<string, number>();
 const inFlight = new Set<string>();
 
@@ -96,7 +115,8 @@ function slackCodeBlock(value: string, limit: number): string {
   return value.replace(/```/g, "''' ").slice(0, limit);
 }
 
-function buildSlackPayload(input: AlertErrorInput): Record<string, unknown> {
+/** The #errors card. Exported so the auto-RCA blackbox replays this exact shape. */
+export function buildSlackPayload(input: AlertErrorInput): Record<string, unknown> {
   const feLink = input.agentId ? `${FE_BASE}/?agent-id=${input.agentId}` : null;
   const diag = input.agentId
     ? `cd agents && python benchmarks/agent_logs.py ${input.agentId} --url ${PROD_BACKEND} --tree --diagnostics`
@@ -175,10 +195,9 @@ async function postSlackWebhook(
 
 /**
  * Post the initial failure card via the Slack Web API (bot token) and return the
- * message handle (`ts` + resolved channel). Unlike an incoming webhook, a
- * bot-token post can be EDITED later (`chat.update`) — that handle is what lets
- * the RCA workflow evolve one message through the failure→PR→ready lifecycle.
- * Returns `{}` if the post didn't land (logged, never throws).
+ * message handle (`ts` + resolved channel). Unlike an incoming-webhook post, the
+ * bot's card carries a `bot_id` the auto-RCA webhook allowlists, and its thread
+ * receives the RCA agent's link and outcome. Returns `{}` if the post didn't land (logged, never throws).
  */
 async function postSlackBot(
   token: string,
@@ -215,87 +234,56 @@ async function postSlackBot(
 }
 
 /**
- * Fire the GitHub repository_dispatch that launches the auto-RCA lifecycle.
- * GitHub owns Slack creation so a retry after a lost completion cannot repeat a
- * backend-created message.
+ * Claim this signature's alert window across instances. Returns the lease token
+ * when this instance should send, 'held' when another instance already alerted
+ * it within the window, or 'unavailable' when the shared store could not be
+ * reached in time (fail open: send).
  */
-async function dispatchRca(input: AlertErrorInput, slackChannel?: string): Promise<boolean> {
-  const token = process.env.GITHUB_DISPATCH_TOKEN;
-  const repo = process.env.GITHUB_DISPATCH_REPO ?? 'Rose-Ai-Labs/rose';
-  if (token === undefined || token === '') {
-    log.warn('AUTO_RCA_ENABLED but GITHUB_DISPATCH_TOKEN unset — RCA not dispatched');
-    return false;
-  }
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), OUTBOUND_TIMEOUT_MS);
+async function claimSharedAlertWindow(key: string): Promise<string | 'held' | 'unavailable'> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const res = await fetch(`https://api.github.com/repos/${repo}/dispatches`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/vnd.github+json',
-        'Content-Type': 'application/json',
-        'User-Agent': 'rose-error-alert',
-      },
-      body: JSON.stringify({
-        event_type: 'agent-failure',
-        client_payload: {
-          agent_id: input.agentId ?? '',
-          slack_channel: slackChannel ?? '',
-        },
+    const token = await Promise.race([
+      acquireLease(SHARED_DEDUPE_NAMESPACE, key, THROTTLE_WINDOW_MS),
+      new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), SHARED_DEDUPE_TIMEOUT_MS);
       }),
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      log.warn('RCA dispatch failed', {
-        status: res.status,
-        body: (await res.text()).slice(0, 200),
-      });
-      return false;
+    ]);
+    if (token === 'timeout') {
+      log.warn('Shared alert dedupe timed out; sending without it', { key: key.slice(0, 120) });
+      return 'unavailable';
     }
-    log.info('RCA agent dispatched', { source: input.source, agentId: input.agentId });
-    return true;
+    return token ?? 'held';
+  } catch (err: unknown) {
+    log.warn('Shared alert dedupe unavailable; sending without it', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return 'unavailable';
   } finally {
-    clearTimeout(timeout);
+    clearTimeout(timer);
   }
 }
 
 async function sendAlert(input: AlertErrorInput): Promise<void> {
-  // Keep ordinary alerts agent-scoped, but cap auto-RCA dispatches by incident
-  // signature so one provider outage cannot launch one workflow per agent.
   const signature = fingerprint(input.source, input.message);
   const key = `alert:${input.agentId ?? '-'}:${signature}`;
   if (!acquireAlertSlot(key, Date.now())) return;
 
-  const rcaKey = `rca:${signature}`;
-  let rcaAcquired = false;
+  const shared = await claimSharedAlertWindow(key);
+  if (shared === 'held') {
+    // Another instance posted this signature within the window.
+    finishAlertSlot(key, true, Date.now());
+    return;
+  }
+
   let delivered = false;
   try {
     const botToken = process.env.SLACK_BOT_TOKEN;
     const channelId = process.env.SLACK_ERROR_CHANNEL_ID;
     const webhook = process.env.SLACK_ERROR_WEBHOOK_URL;
-
-    if (
-      process.env.AUTO_RCA_ENABLED === '1' &&
-      input.agentId !== undefined &&
-      input.agentId !== ''
-    ) {
-      rcaAcquired = acquireAlertSlot(rcaKey, Date.now());
-      if (rcaAcquired) {
-        const dispatched = await dispatchRca(input, channelId);
-        finishAlertSlot(rcaKey, dispatched, Date.now());
-        rcaAcquired = false;
-        if (dispatched) {
-          delivered = true;
-          return;
-        }
-      }
-    }
-
     const payload = buildSlackPayload(input);
 
-    // Prefer the bot token: it yields an editable message handle for the lifecycle
-    // card. Fall back to an incoming webhook (post-only, no lifecycle edits).
+    // Prefer the bot token: its top-level card is the event the Slack auto-RCA
+    // webhook turns into a Rose RCA agent, and its thread hosts the outcome.
     if (botToken !== undefined && botToken !== '' && channelId !== undefined && channelId !== '') {
       const posted = await postSlackBot(botToken, channelId, payload);
       delivered = posted.ts !== undefined && posted.ts !== '';
@@ -309,19 +297,19 @@ async function sendAlert(input: AlertErrorInput): Promise<void> {
       });
     }
   } finally {
-    if (rcaAcquired) {
-      // Exceptions during dispatch must not suppress the incident retry.
-      finishAlertSlot(rcaKey, false, Date.now());
-    }
     // Failed transports remain eligible for the next occurrence to retry.
     finishAlertSlot(key, delivered, Date.now());
+    if (!delivered && shared !== 'unavailable') {
+      await releaseLease(SHARED_DEDUPE_NAMESPACE, key, shared).catch(() => undefined);
+    }
   }
 }
 
 /**
- * Report a production failure to #errors (and, when AUTO_RCA_ENABLED=1, launch an
- * RCA agent). Fire-and-forget: safe to call from any catch block; never throws,
- * never blocks the caller.
+ * Report a production failure to #errors. With AUTO_RCA_ENABLED=1 the Slack
+ * auto-RCA webhook turns the posted card into a Rose RCA agent.
+ * Fire-and-forget: safe to call from any catch block; never throws, never
+ * blocks the caller.
  */
 export function alertError(input: AlertErrorInput): void {
   try {
@@ -338,8 +326,10 @@ export function alertError(input: AlertErrorInput): void {
   }
 }
 
-/** Test-only: reset the in-memory throttle between cases. */
-export function __resetAlertThrottleForTests(): void {
+/** Test-only: reset the in-memory throttle and the shared dedupe window between cases. */
+export async function __resetAlertThrottleForTests(): Promise<void> {
   lastSentAt.clear();
   inFlight.clear();
+  const { prisma } = await import('./database');
+  await prisma.$executeRaw`DELETE FROM "SharedEphemeralState" WHERE namespace = ${SHARED_DEDUPE_NAMESPACE}`;
 }

@@ -100,6 +100,7 @@ describe('Integrations connected-state treatment', () => {
         <IntegrationHandlersProvider handlers={browserHandlers()}>
           <Integrations />
         </IntegrationHandlersProvider>,
+        { roseDesktop: false },
       );
 
       await expandSection(user, 'Browser Cookies');
@@ -119,6 +120,7 @@ describe('Integrations connected-state treatment', () => {
         <IntegrationHandlersProvider handlers={browserHandlers()}>
           <Integrations />
         </IntegrationHandlersProvider>,
+        { roseDesktop: false },
       );
 
       await expandSection(user, 'Browser Cookies');
@@ -142,6 +144,7 @@ describe('Integrations connected-state treatment', () => {
         <IntegrationHandlersProvider handlers={browserHandlers()}>
           <Integrations />
         </IntegrationHandlersProvider>,
+        { roseDesktop: false },
       );
 
       await expandSection(user, 'Passwords');
@@ -173,6 +176,7 @@ describe('Integrations connected-state treatment', () => {
         <IntegrationHandlersProvider handlers={handlers}>
           <Integrations />
         </IntegrationHandlersProvider>,
+        { roseDesktop: false },
       );
 
       await expandSection(user, 'Messages');
@@ -200,6 +204,7 @@ describe('Integrations connected-state treatment', () => {
         <IntegrationHandlersProvider handlers={handlers}>
           <Integrations />
         </IntegrationHandlersProvider>,
+        { roseDesktop: false },
       );
 
       await expandSection(user, 'Messages');
@@ -220,7 +225,7 @@ describe('Integrations connected-state treatment', () => {
     it('still shows the download fallback on web, where no desktop handler exists', async () => {
       const user = userEvent.setup();
 
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await expandSection(user, 'Messages');
 
@@ -249,6 +254,7 @@ describe('Integrations connected-state treatment', () => {
         <IntegrationHandlersProvider handlers={handlers}>
           <Integrations />
         </IntegrationHandlersProvider>,
+        { roseDesktop: false },
       );
 
       await expandSection(user, 'Messages');
@@ -289,7 +295,7 @@ describe('Integrations connected-state treatment', () => {
         whatsApp: { isAvailable: true, connect: whatsAppConnect },
       } as unknown as Parameters<typeof useMessagesSync>[0];
 
-      const { result } = renderHook(() => useMessagesSync(handlers, async () => {}));
+      const { result } = renderHook(() => useMessagesSync(handlers, async () => {}, null));
 
       let iMessagePending: Promise<void> | undefined;
       act(() => {

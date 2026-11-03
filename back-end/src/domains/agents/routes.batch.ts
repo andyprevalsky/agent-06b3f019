@@ -8,6 +8,7 @@
  * agentBatchService.createAgentsBatch for the full design.
  */
 
+import { TaskPathConflictError } from './agentTaskPath';
 import { type Response, Router } from 'express';
 import { z } from 'zod';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
@@ -17,6 +18,7 @@ import { createLogger } from '../../providers/logger';
 import { StaleParentWorkflowGenerationError } from '../../providers/workflowGeneration';
 import * as batchService from './agentBatchService';
 import { WorldModelModeAccessError } from './agentExecutionMode';
+import { AgentProjectNotFoundError, AgentPlacementConflictError } from './agentProject';
 import { batchCreateAgentsSchema } from './types';
 import { rejectAnonymousCreate, rejectGatedCreate } from './routes.guards';
 
@@ -33,8 +35,20 @@ function handleRouteError(res: Response, error: unknown, msg: string): void {
     res.status(409).json({ error: error.message });
     return;
   }
+  if (error instanceof TaskPathConflictError) {
+    res.status(409).json({ error: error.message, task_path: error.taskPath });
+    return;
+  }
   if (error instanceof WorldModelModeAccessError) {
     res.status(403).json({ error: error.message });
+    return;
+  }
+  if (error instanceof AgentPlacementConflictError) {
+    res.status(400).json({ error: error.message });
+    return;
+  }
+  if (error instanceof AgentProjectNotFoundError) {
+    res.status(404).json({ error: error.message });
     return;
   }
   log.error(msg, { error: error instanceof Error ? error.message : String(error) });

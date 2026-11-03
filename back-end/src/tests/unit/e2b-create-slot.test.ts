@@ -13,16 +13,20 @@ test('withClaudeCodeCreateSlot runs creates one at a time', async () => {
     releaseFirst = resolve;
   });
 
+  let firstEntered!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    firstEntered = resolve;
+  });
   const first = withClaudeCodeCreateSlot(async () => {
     events.push('first-enter');
+    firstEntered();
     await firstGate;
     events.push('first-exit');
     return 1;
   });
 
-  // Let the first slot claim the chain before starting the second.
-  await Promise.resolve();
-  await Promise.resolve();
+  // The slot is a cross-instance lock (a DB lease), so wait for the real entry.
+  await entered;
 
   const second = withClaudeCodeCreateSlot(async () => {
     events.push('second-enter');
@@ -31,8 +35,7 @@ test('withClaudeCodeCreateSlot runs creates one at a time', async () => {
   });
 
   // Second must not enter while first is held.
-  await Promise.resolve();
-  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 300));
   assert.deepEqual(events, ['first-enter']);
 
   releaseFirst();

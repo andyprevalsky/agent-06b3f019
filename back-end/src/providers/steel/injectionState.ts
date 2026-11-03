@@ -16,7 +16,7 @@ type CacheStorageOriginState = OriginPayloadRef | { origin: string; caches: unkn
  * that loss. Partitioned third-party keys (`<origin>/^0<top-level-site>`) and
  * extension/internal schemes have no first-party document to restore into.
  */
-function restorableLocalStorageOrigin(storageKey: string): string | null {
+export function restorableLocalStorageOrigin(storageKey: string): string | null {
   const candidate = /^ttps?:\/\//.test(storageKey) ? `h${storageKey}` : storageKey;
   try {
     const url = new URL(candidate);

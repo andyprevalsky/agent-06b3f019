@@ -213,14 +213,54 @@ WORKFLOW="$ROOT/.github/workflows/deploy-agents.yml"
 COOP="$ROOT/scripts/deploy-agents-cooperative-cutover.sh"
 WORKER="$ROOT/agents/worker.py"
 python3 - "$WORKFLOW" <<'PY'
+import fnmatch
 import os
 import re
 import subprocess
 import sys
 import textwrap
 
+import yaml
+
 with open(sys.argv[1]) as source:
     workflow = source.read()
+# BaseLoader keeps the YAML key "on" a string instead of YAML 1.1's boolean.
+config = yaml.load(workflow, Loader=yaml.BaseLoader)
+path_filters = config["on"]["push"]["paths"]
+assert isinstance(path_filters, list) and all(isinstance(value, str) for value in path_filters)
+assert "agents/**" in path_filters, "worker runtime changes must trigger deployment"
+last_runtime_include = max(i for i, value in enumerate(path_filters) if value == "agents/**")
+for excluded in ("!agents/tests/**", "!agents/benchmarks/**"):
+    assert excluded in path_filters, f"additive worker inputs must be excluded: {excluded}"
+    assert path_filters.index(excluded) > last_runtime_include, excluded
+
+patterns = path_filters
+
+def triggers_worker_deploy(path):
+    included = False
+    for pattern in patterns:
+        if fnmatch.fnmatchcase(path, pattern.lstrip("!")):
+            included = not pattern.startswith("!")
+    return included
+
+for path in (
+    "scripts/worker_pool_cutover.py",
+    "scripts/agents-image-context.sh",
+    "scripts/worker_pool_runtime.py",
+    "scripts/retained_agent_machine.py",
+    "back-end/src/providers/workerDeploymentQueue.ts",
+    "back-end/src/providers/workerDeploymentRetention.ts",
+    "back-end/src/providers/workerDeploymentMachineAdmission.ts",
+    "back-end/src/providers/workerDeploymentPollers.ts",
+):
+    assert triggers_worker_deploy(path), f"worker runtime change is not deployed: {path}"
+for path in (
+    "scripts/tests/worker-pool-cutover.test.py",
+    "back-end/src/tests/unit/worker-deployment-pollers.test.ts",
+    "agents/tests/blackbox/worker.blackbox.py",
+    "docs/rca/cases/worker-routing.md",
+):
+    assert not triggers_worker_deploy(path), f"non-runtime change deploys workers: {path}"
 dispatch = re.search(r"(?ms)^  workflow_dispatch:\n(.*?)^  push:", workflow)
 assert dispatch, "worker deployment needs a manual recovery entry point"
 assert "      expected_sha:" in dispatch[1] and "        required: true" in dispatch[1]
@@ -267,8 +307,6 @@ fi
 require_text "$COOP" 'agents/fly.toml' "cutover script must fall back to fly.toml when APP is unset"
 require_text "$WORKFLOW" 'Cooperative Fly deploy + generation cutover' "agent deploy workflow must hold serialization through cooperative cutover"
 require_text "$WORKFLOW" 'RELEASE_CONTEXT: agent-cutover/${{ github.run_id }}-${{ github.run_attempt }}' "deploy lock release must be scoped to the exact run attempt"
-require_text "$WORKFLOW" '!agents/tests/**' "additive agent tests must not trigger a production worker replacement"
-require_text "$WORKFLOW" '!agents/benchmarks/**' "benchmarks must not trigger a production worker replacement"
 DOCKERIGNORE="$ROOT/agents/.dockerignore"
 require_text "$DOCKERIGNORE" $'\nbenchmarks/\n' "Fly build context must exclude benchmarks/ (ledger history blew past 100MB and timed out Depot)"
 require_text "$DOCKERIGNORE" $'\ntests/\n' "Fly build context must exclude tests/ (not shipped in the Temporal worker image)"

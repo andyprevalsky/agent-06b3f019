@@ -158,14 +158,32 @@ async function case5InitialAdmissionHasAnOwner(): Promise<void> {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
   }).outputText;
 
-  for (const mode of ['transient', 'success', 'permanent', 'auth', 'missing'] as const) {
+  for (const mode of [
+    'transient',
+    'success',
+    'permanent',
+    'auth',
+    'missing',
+    'existing',
+  ] as const) {
     let requests = 0;
     let userReads = 0;
     let credentialPasses = 0;
     let rejected = false;
     const userId = 'selected-seed-user';
     const foreign = { id: 'foreign-local-row', userId: 'foreign-user' };
-    const users = new Map<string, { id: string; userId: string }>([[foreign.userId, foreign]]);
+    const users = new Map<
+      string,
+      { id: string; userId: string; phone?: string | null; name?: string }
+    >([[foreign.userId, foreign]]);
+    if (mode === 'existing') {
+      users.set(userId, {
+        id: 'frozen-local-row',
+        userId,
+        phone: '+15555550123',
+        name: 'Frozen User',
+      });
+    }
     const admit = async () => {
       requests += 1;
       if (mode === 'permanent' || (mode === 'transient' && requests === 1)) {
@@ -195,7 +213,9 @@ async function case5InitialAdmissionHasAnOwner(): Promise<void> {
             userReads += 1;
             if (where.userId !== userId) throw new Error('foreign remote identity read');
             await admit();
-            return mode === 'missing' ? null : { id: 'remote-user-row', userId };
+            return mode === 'missing'
+              ? null
+              : { id: 'remote-user-row', userId, phone: null, name: 'Remote User' };
           },
         },
       },
@@ -231,8 +251,9 @@ async function case5InitialAdmissionHasAnOwner(): Promise<void> {
     } catch {
       rejected = true;
     }
-    const shouldSucceed = mode === 'transient' || mode === 'success';
-    const expectedReads = mode === 'success' ? 1 : mode === 'transient' ? 2 : 3;
+    const shouldSucceed = mode === 'transient' || mode === 'success' || mode === 'existing';
+    const expectedReads =
+      mode === 'success' || mode === 'existing' ? 1 : mode === 'transient' ? 2 : 3;
     check(
       `case 5 ${mode}: initial admission completes or fails closed within the identity owner`,
       rejected !== shouldSucceed &&
@@ -240,7 +261,11 @@ async function case5InitialAdmissionHasAnOwner(): Promise<void> {
         requests === expectedReads &&
         credentialPasses === Number(shouldSucceed) &&
         users.has(userId) === shouldSucceed &&
-        users.get(foreign.userId) === foreign,
+        users.get(foreign.userId) === foreign &&
+        (mode !== 'existing' ||
+          (users.get(userId)?.id === 'frozen-local-row' &&
+            users.get(userId)?.phone === '+15555550123' &&
+            users.get(userId)?.name === 'Frozen User')),
       `rejected=${rejected} requests=${requests} userReads=${userReads} credentialPasses=${credentialPasses}`
     );
   }

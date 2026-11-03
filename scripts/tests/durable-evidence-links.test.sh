@@ -143,6 +143,144 @@ with tempfile.TemporaryDirectory() as tmp:
 print("ok publisher HTTPS dump URL")
 PY
 
+# 2c) Each agent keeps its rendered copy beside its evidence. A previous
+#     publication's shared basename must not be overwritten (or block this one).
+"$PYTHON_BIN" - <<'PY' || fail "publisher artifact isolation"
+import importlib.util
+import subprocess
+import tempfile
+from pathlib import Path
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, Path(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+publisher = load("isolated_publisher", "scripts/publish_evidence_links.py")
+renderer = load("isolated_renderer", "scripts/render_llm_dump.py")
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    shared = root / "shared-artifacts"
+    shared.mkdir()
+    foreign = shared / "last_llm_call.html"
+    foreign.write_text("retained publication from another agent")
+    renderer.DEFAULT_ARTIFACTS_DIR = shared
+    publisher.ARTIFACTS_ROOT = root / "evidence"
+    dump = root / "actual-call.json"
+    dump.write_text("{}")
+    copied = []
+
+    def render_locally(cmd, **kwargs):
+        output = Path(cmd[cmd.index("-o") + 1])
+        output.write_text("<html>this agent's actual call</html>")
+        artifacts = (
+            Path(cmd[cmd.index("--artifacts-dir") + 1])
+            if "--artifacts-dir" in cmd else renderer.DEFAULT_ARTIFACTS_DIR
+        )
+        copied.append(renderer.publish_rendered_dump(output, artifacts))
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout="https://example.r2.dev/this-agent.html\n", stderr=""
+        )
+
+    publisher.subprocess.run = render_locally
+    html, url = publisher.publish_llm_dump(dump, "agent-1")
+    assert foreign.read_text() == "retained publication from another agent"
+    assert copied == [publisher.ARTIFACTS_ROOT / "agent-1" / "last_llm_call.html"]
+    assert html.read_text() == "<html>this agent's actual call</html>"
+    assert url == "https://example.r2.dev/this-agent.html"
+print("ok publisher keeps other agents' artifacts intact")
+PY
+
+# 2d) A production run may have only archived dumps. The ordinary publisher
+#     recovers them, checks the returned path/hash, and exposes recovery errors.
+"$PYTHON_BIN" - <<'PY' || fail "publisher archived dump recovery"
+import hashlib
+import importlib.util
+import io
+import json
+import os
+import subprocess
+import tempfile
+from contextlib import redirect_stderr
+from pathlib import Path
+from types import SimpleNamespace
+
+spec = importlib.util.spec_from_file_location("archive_publisher", Path("scripts/publish_evidence_links.py"))
+publisher = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(publisher)
+agent = "00000000-0000-4000-8000-000000000001"
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    publisher.REPO_ROOT = root
+    publisher.ARTIFACTS_ROOT = root / "artifacts"
+    (root / "back-end").mkdir()
+    (root / "back-end" / ".env").write_text(
+        "PUBLISHER_CLI_TEST_DEFAULT=from-file\nPUBLISHER_CLI_TEST_OVERRIDE=from-file\n"
+    )
+    os.environ.pop("PUBLISHER_CLI_TEST_DEFAULT", None)
+    os.environ["PUBLISHER_CLI_TEST_OVERRIDE"] = "from-caller"
+    publisher._load_cli_environment()
+    assert os.environ["PUBLISHER_CLI_TEST_DEFAULT"] == "from-file"
+    assert os.environ["PUBLISHER_CLI_TEST_OVERRIDE"] == "from-caller"
+    calls = []
+    failure = None
+    corrupt = False
+    escape = False
+
+    def recover(cmd, **kwargs):
+        calls.append(cmd)
+        assert kwargs["cwd"] == str(root / "back-end")
+        if failure:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=failure)
+        directory = Path(cmd[cmd.index("--output-dir") + 1])
+        recovered = root / "outside.json" if escape else directory / "latest.json"
+        recovered.write_text(json.dumps({"agent_id": agent, "root_agent_id": agent, "messages": []}))
+        digest = hashlib.sha256(recovered.read_bytes()).hexdigest()
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({
+            "rootAgentId": agent,
+            "latest": {"path": str(recovered), "sha256": "wrong" if corrupt else digest},
+        }), stderr="")
+
+    publisher.subprocess.run = recover
+    recovered = publisher.latest_dump_for_agent(agent)
+    assert recovered.is_file()
+    assert calls[0][:2] == ["node", "--import"] and calls[0][-1] == "--json"
+    assert str(recovered).startswith(str(publisher.ARTIFACTS_ROOT / agent))
+    local = root / ".llm-dumps" / agent / "123-existing.json"
+    local.parent.mkdir(parents=True)
+    local.write_text("{}")
+    count = len(calls)
+    assert publisher.latest_dump_for_agent(agent) == local
+    assert len(calls) == count
+    local.unlink()
+    for flag in ("corrupt", "escape"):
+        corrupt, escape = flag == "corrupt", flag == "escape"
+        try:
+            publisher.latest_dump_for_agent(agent)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(f"archive {flag} must fail closed")
+    corrupt = escape = False
+    failure = "archive ciphertext failed integrity validation"
+    publisher.parse_args = lambda: SimpleNamespace(agent_id=agent, dump=None, run_json=None)
+    error = io.StringIO()
+    with redirect_stderr(error):
+        try:
+            publisher.main()
+        except SystemExit as exc:
+            assert "archive" in str(exc).lower()
+        else:
+            raise AssertionError("failed recovery must stop before Hub upload")
+    assert failure in error.getvalue()
+print("ok publisher recovers and verifies archived dumps before upload")
+PY
+
+# Exercise the real Python -> TypeScript CLI contract against encrypted local
+# archive files, with network access forbidden in every Node child.
+"$PYTHON_BIN" "$ROOT/scripts/tests/publisher-archive-integration.test.py" || fail "publisher archive CLI integration"
+
 # 3) Approval format still demands durable FE + no invalid recordings.
 FORMAT="$ROOT/.claude/shared/approval-format.md"
 grep -Fq 'https://roselabs.ai/?agent-id=' "$FORMAT" || fail "approval format missing durable FE"

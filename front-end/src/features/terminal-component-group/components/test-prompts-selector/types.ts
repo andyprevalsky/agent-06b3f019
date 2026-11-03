@@ -21,4 +21,6 @@ export interface TestPromptsSelectorProps {
   onSelectPrompt: (prompt: string, files?: File[]) => void;
   /** Live guard for the dev-only automatic default; manual selections ignore it. */
   shouldAutoLoadDefaultPrompt?: () => boolean;
+  /** 'nub' = bare white trigger on the Rose Desktop query-box tab. */
+  variant?: 'chip' | 'nub';
 }

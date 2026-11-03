@@ -1,0 +1,112 @@
+{
+  "schema": "rose.wmh.static_network_prefix.v1",
+  "utc": "2026-10-13T09:50:27.306162+00:00",
+  "user_requirement": "Full actual network is static and loaded into the WHM prefix at run start; no query-reader replacement.",
+  "runtime_source_sha": "833bbf09ffa034a395bbc0f38714e912aeb61c69",
+  "prepared_override": "/home/boxes/rose-wmh-resumed/.context/whm-migration/rca-20261013/grounding/static-prefix-user-review/candidate-initial-state.private.json",
+  "existing_launch_selector": "--wmh-initial-state-file <prepared_override>; for a future explicitly authorized run only",
+  "private_preservation_receipt": "docs/handoffs/whm-b07d9037-preservation/run13-user-actions-private-receipt.json",
+  "independent_review": {
+    "verdict": "PASS_DATA_ONLY_PREPARATION",
+    "receipt": ".context/whm-migration/rca-20261013/user-decisions-20261013/static-prefix-review.json",
+    "launch_ready": false
+  },
+  "source": {
+    "database": "whm_gen1_e9afcffd_fixture_20261012",
+    "Person_rows": 2225,
+    "Person_columns": 33,
+    "read_only": true
+  },
+  "lossless_representation": {
+    "shared_columns": 23,
+    "varying_columns": 10,
+    "full_source_bytes": 1717493,
+    "packet_bytes": 357134,
+    "decoded_rows_equal": true,
+    "null_cells_preserved": 46725,
+    "dropped_rows": 0,
+    "dropped_columns": [],
+    "inferred_edges": 0,
+    "inferred_warmness": false
+  },
+  "artifacts": {
+    "full-person-rows.private.json": {
+      "bytes": 1717493,
+      "sha256": "6f8dab384521f685fdc4cdd5faafc43227a7d2e036fbaba6812fa14cfa10fb9e"
+    },
+    "full-network-columnar.private.json": {
+      "bytes": 357134,
+      "sha256": "1a6e64c041b4f7c3b5fa08166d58fc2fe52776685d1b5a919726f13e588a0b72"
+    },
+    "candidate-initial-state.private.json": {
+      "bytes": 367308,
+      "sha256": "009394a4fc293c14230d15d4fc70b798876fb2d8ec4489ba3b4db560343ba5d1"
+    }
+  },
+  "seed_change": "Only structured.network.static_full_network is added; all other original seed values preserved.",
+  "offline_native_proof": {
+    "owning_path": "ParallelWorldModel.new_session -> TaskCase.initial_context -> build_world_model_request -> policy -> required-context packer",
+    "requests": 2,
+    "all_source_rows_decoded_equal": true,
+    "source_rows": 2225,
+    "source_columns": 33,
+    "committed_steps": 0,
+    "provider_calls": 0,
+    "native_artifact_rebuilt": false,
+    "qualification": "Exact prepared source data reach the required native request; callbacks stop before model generation. Not a paid benchmark or outcome proof."
+  },
+  "offline_wire_proof": {
+    "all_rows_columns_reachable": true,
+    "prefix_identical": true,
+    "cache_boundary": true,
+    "prefix_sha256": "7bd19e17f71dcf322f1fb29461d913bc0dd0a28e2eae3373a05eb7ef04d0135b"
+  },
+  "context_limits": {
+    "measurement": "tiktoken0.14.0/o200k_base local estimate; no exact provider metering or live admission probe",
+    "startup_input_estimate": 367788,
+    "largest_five_recorded_input_estimate": 694843,
+    "documented_primary_input_limit": 922000,
+    "unpacked_startup_exceeds_limit": true,
+    "fallback": "Cerebras paid shared context128k is smaller than this prepared input; actual route admission and fallback remain unverified.",
+    "future_history_growth": "Five largest preserved canonical probes are not a bound for every future trajectory."
+  },
+  "full_message_history": {
+    "frozen_Tamy_messages": 42910,
+    "message_bodies_in_static_network_prefix": false,
+    "original_private_history_preserved": true,
+    "qualification": "Network means the complete actual Person source table. Raw message bodies remain in the separate original history export."
+  },
+  "status": "Data-only startup override prepared and proven through existing native/wire prefix paths; next funded run not launched.",
+  "boundaries": {
+    "provider_calls": 0,
+    "world_commits": 0,
+    "native_artifact_rebuilt": false,
+    "original_policy_changed": false,
+    "new_reader": false,
+    "ordinary_agent_harness_changed": false,
+    "task_prompt_evaluator_changed": false,
+    "paid_run": false,
+    "PR_merge": false,
+    "deploy": false
+  },
+  "owning_baseline_candidate_proof": {
+    "baseline_seed_sha256": "cdf955f29336eb54f70e3779bc8c07b79db6bf2c4a80f7d5bf0c61ba5e183c49",
+    "baseline_exit": 1,
+    "baseline_seconds": 0.7635053630001494,
+    "candidate_seed_sha256": "009394a4fc293c14230d15d4fc70b798876fb2d8ec4489ba3b4db560343ba5d1",
+    "candidate_exit": 0,
+    "candidate_seconds": 1.0196415169993998,
+    "identical_test_files_sha256": {
+      "full_prefix_owning_assertion.py": "970b2c457b4b35c39bc05a633870686b568f5d7b7fd80024bfd802983597893f",
+      "full_prefix_wire_assertion.py": "292fd206e8947d43a9acaf64772175b50c035f177fa8c880c8ccf5365aea40e4"
+    },
+    "later_dynamic_world_changed": true,
+    "later_recorded_history_messages": 822,
+    "full_source_rows": 2225,
+    "full_source_columns": 33,
+    "provider_calls": 0,
+    "committed_steps": 0,
+    "native_model_rebuild": false,
+    "scope": "Original seed lacks full Person payload; candidate data-only override passes native and real wire owning assertions. Source prefix stable after actual recorded dynamic state/history replacement; no generation/outcome proof."
+  }
+}

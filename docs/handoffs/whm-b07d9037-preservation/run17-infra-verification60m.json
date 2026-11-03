@@ -1,0 +1,331 @@
+{
+  "schema": "rose.whm.run17.continuation.v1",
+  "recorded_at_utc": "2026-10-14T18:15:27.660422+00:00",
+  "replacement_devbox": "e9afcffd-7ba9-4bfd-8703-d770952fe1c3",
+  "replacement_thread": "ph7cc73xma14jdg6chxpnhbgth8g7c1a",
+  "thread_url": "https://boxes.dev/thread/thr_d2e1b555d6314abe8d9f74da7dd979aa",
+  "run_id": "wmh-run17-retry1-e9afcffd-1791943658",
+  "hub_run_id": "0ce897aa-b6a8-409f-9351-20cd016ee340",
+  "root_agent_id": "bb938dbe-1cc2-437c-80e7-faf31f300ce2",
+  "native_session_id": "c5bd3ae53d354a19b5efaacf6d120a64",
+  "executed_source_sha": "180358508093e2ce983f986333a10b42def24a41",
+  "original_checkpoint_sha": "677068533e050195c62afc8118f3d35a8511f5ea",
+  "original_logical_slice_trigger": "2026-10-13T23:09:43.135058Z",
+  "actual_workflow_start": "2026-10-14T02:20:37.546332Z",
+  "configured_execution_limit_seconds": 3600,
+  "canonical_duration_seconds": 3780.2,
+  "canonical_task_verdict": "FAILED",
+  "canonical_original_agent_status": "ACTIVE",
+  "failure_reason": "Timeout after 3603s (task timeout=3600s) | Investigate: python agents/benchmarks/agent_latency.py bb938dbe-1cc2-437c-80e7-faf31f300ce2 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
+  "canonical_result_path": "agents/benchmarks/runs/20261014_032316_0ce897aa-b6a8-409f-9351-20cd016ee340_raise-5m-rose-labs-brex.json",
+  "canonical_original_sha256": "93809331eca93a299105e7836357c1d098e970d91786d9502c8b01331138ae16",
+  "native_retirement": {
+    "join_verified": true,
+    "revision": 251,
+    "history_count": 251,
+    "sha256": "8dfc16433309a40a15c973c46862e407986dfa12ce0f797a80db957dacee8d54",
+    "bytes": 232996234,
+    "all251_body_callID_requestSHA_draw_joins": true
+  },
+  "trajectory": {
+    "approximate_progress_percent": 26,
+    "confidence": "Low uncalibrated initial-outreach band25\u201326; final251 joins/census independently reviewed",
+    "verified_midrun_commit_coverage": 142,
+    "midrun_native_email_actions": 10,
+    "midrun_literal_addresses": 13,
+    "midrun_native_form_claims": 9,
+    "final_phone_calls": 19,
+    "final_distinct_reported_phone_numbers": 1,
+    "verified_new_meetings": 0,
+    "final_native_commitments": 0,
+    "final_native_signed_instruments": 0,
+    "final_native_pending_wires": 0,
+    "final_native_settled_proceeds_cents": 0,
+    "delivery_qualification": "Native simulated receipts; external delivery not independently proven",
+    "scheduled_events_qualification": "One sent-email event and two conditional possible replies, not scheduled meetings",
+    "final_native_email_actions": 13,
+    "final_literal_email_addresses": 15,
+    "final_native_form_actions": 14,
+    "final_distinct_form_organizations": 13
+  },
+  "fixture": {
+    "source_database": "whm_gen1_e9afcffd_fixture_20261012",
+    "seed_message_limit": 100000,
+    "people": 2225,
+    "message_records": 42910,
+    "approved_initial_state_sha256": "009394a4fc293c14230d15d4fc70b798876fb2d8ec4489ba3b4db560343ba5d1",
+    "prefix_qualification": "First two completed captures preserve both full2225x33 network copies; all42910 rawbodies admitted percall not proven"
+  },
+  "metrics": {
+    "utc": "2026-10-14T03:28:09.883047+00:00",
+    "run_id": "wmh-run17-retry1-e9afcffd-1791943658",
+    "scope": "Logged final metering only; estimates conditional, not invoice; partial failures and infrastructure unpriced. Cached-input denominator is original inclusive prompt_tokens, DEMO replay separate.",
+    "roles": {
+      "Agent": {
+        "metered_calls": 305,
+        "inclusive_prompt": 3933122,
+        "cached_input": 2819805,
+        "output": 212419,
+        "cache_write": 1084082,
+        "azure_estimate": 5.456825999999998,
+        "other_conditional_estimate": 0.0,
+        "models": {
+          "gpt-6-sol-foundry": 305
+        },
+        "unpriced_models": {},
+        "demo_hits": 1,
+        "demo_lookups": 306,
+        "demo_stores": 305,
+        "prompt_cache_percent": 71.69380965045072,
+        "demo_percent": 0.32679738562091504,
+        "raw_Rose_latency": {
+          "n": 305,
+          "avg": 6.92610515081967,
+          "p95": 21.275371,
+          "p99": 37.809395
+        }
+      },
+      "WMH": {
+        "metered_calls": 347,
+        "inclusive_prompt": 187795889,
+        "cached_input": 174619485,
+        "output": 369068,
+        "cache_write": 52125874,
+        "azure_estimate": 10.830266819999997,
+        "other_conditional_estimate": 34.651786641399994,
+        "models": {
+          "google/gemini-3.8-flash": 67,
+          "gpt-5.6-luna-foundry": 259,
+          "qwen/qwen3.8-27b": 21
+        },
+        "unpriced_models": {},
+        "demo_hits": 0,
+        "demo_lookups": 270,
+        "demo_stores": 251,
+        "prompt_cache_percent": 92.98365684671617,
+        "demo_percent": 0.0,
+        "raw_Rose_latency": {
+          "n": 347,
+          "avg": 38.71469740634006,
+          "p95": 123.0,
+          "p99": 290.0
+        }
+      }
+    },
+    "total_estimate": 50.93887946139999,
+    "direct_Azure_estimate": 16.287092819999994,
+    "other_conditional_estimate": 34.651786641399994,
+    "DEMO_hits": 1,
+    "DEMO_lookups": 576,
+    "DEMO_percent": 0.1736111111111111
+  },
+  "billing_qualification": "Conditional logged rates/cache-write assumptions, not invoice; partial/provider failures and infrastructure/storage/tool charges incomplete. Direct Azure excludes unknown Azure allocation behind OpenRouter.",
+  "cleanup": {
+    "controller_exit_code": 1,
+    "controller_finished_at": "2026-10-14T03:23:56.614069Z",
+    "exact_recorded_owner_count": 21,
+    "all_recorded_owners_absent": true,
+    "scope": "inactive",
+    "both_exact_cleanup_owner_receipts": "clean and token/identity verified",
+    "owned_fixture_database": "verified absent by exact readonly query; dumps are MVCC snapshots not finaldeletedbytes",
+    "root_signals_sent": 0
+  },
+  "publication": {
+    "status": "VERIFIED_AFTER_ARCHIVE_BOUND_PROJECTION",
+    "attempted_viewer": "https://www.roselabs.ai/?agent-id=bb938dbe-1cc2-437c-80e7-faf31f300ce2",
+    "viewer_browser_verified": true,
+    "prepared_compact_http_bytes": 107214710,
+    "owned_http_limit_bytes": 94371840,
+    "whole_original_preserved": true,
+    "message_count": 175,
+    "repaired_prepared_http_bytes": 6605816,
+    "publisher_exit_code": 0,
+    "publisher_finished_at": "2026-10-14T18:28:13.422144Z",
+    "every1160_original_members_authenticated_again_before_projection": true,
+    "source_change_infrastructure_authorization": "User explicitly auto-approved infrastructure; independently reviewed optional evidence transport projection leaves WHM context/runtime acquisition unchanged",
+    "approval_refresh": {
+      "publisher_exit_code": 0,
+      "finished_at": "2026-10-14T19:21:45.340022+00:00",
+      "fresh_browser_messages": 175,
+      "full1160_archive_authentication_repeated": true,
+      "last_call_is_latest_of305_owned_Agent_dumps": true,
+      "last_call_site": "1791947898555-facf7b17477d-execute_loop",
+      "last_call_viewer": "https://boxes.dev/visuals/vis_88c8ce5f654fdde7371767549b4ded67",
+      "sharing": "Current thread and publishing user",
+      "original_call_content_preserved": true,
+      "viewer_presentation_changes": "Dark/mobile CSS and legacy renderer denominator qualification note only; no source/runtime context changes",
+      "all_preview_console_errors_and_blocked_loads": 0
+    }
+  },
+  "source_approvals": {
+    "infra_autoapproved": true,
+    "WHM_context_and_runtime_context_acquisition_changes_require_approval": true,
+    "unapplied_HTTP_semantic_candidate": true,
+    "no_merge_deploy": true,
+    "no_new_paid_trial": true
+  },
+  "tests": {
+    "applied_infra_native_cases_passed": 68,
+    "applied_infra_agents_reliability_clock_wire_cleanup_cases_passed": 162,
+    "applied_infra_provider_cases_passed": 115,
+    "registered_native_blackbox_passed": 68,
+    "actual_run_retirement_join_passed": true,
+    "fundraising_benchmark_passed": false,
+    "private_HTTP_candidate_isolation_exception": "One private local service/fixture-build test executed before TCPguard rejected;114othercontrols passed; no fullsuitepass/lifecyclezero claim",
+    "publication_owning_cases_passed": 46,
+    "publication_adversarial_extra_controls_passed": 6,
+    "publication_browser_validation_and_composite_checks": "PASS",
+    "registered_projection_blackbox_callback": "PASS",
+    "registered_phone_domain_passed": 28
+  },
+  "archives": [
+    {
+      "receipt_path": "docs/handoffs/whm-b07d9037-preservation/run17-midrun-private-receipt.json",
+      "members": 64,
+      "manifest_sha256": "0adea9190d3eb884b96b63330f93e4e99688dc751497d6dde0b287ab1b94b620",
+      "full_authenticated_decrypted_member_readback": true
+    },
+    {
+      "receipt_path": "docs/handoffs/whm-b07d9037-preservation/run17-second-midrun-private-receipt.json",
+      "members": 326,
+      "manifest_sha256": "86a0f144b322a1ecbc2a3e793d9b2193ef5ba3a8c91980d1110d9e5f37f58639",
+      "full_authenticated_decrypted_member_readback": true
+    },
+    {
+      "receipt_path": "docs/handoffs/whm-b07d9037-preservation/run17-http-integration-and-midrun-db-private-receipt.json",
+      "members": 63,
+      "manifest_sha256": "cab20b4819c3f13779910e1dd982fdfb6a6c59cc6ef9801ced3084d2457d2410",
+      "full_authenticated_decrypted_member_readback": true
+    },
+    {
+      "receipt_path": "docs/handoffs/whm-b07d9037-preservation/run17-protocol-midrun-private-receipt.json",
+      "members": 19,
+      "manifest_sha256": "82228d4bb05d9c581d52ec592ea1b91ad9a51cab270c12ddc6a61928a7b9e26e",
+      "full_authenticated_decrypted_member_readback": true
+    },
+    {
+      "receipt_path": "docs/handoffs/whm-b07d9037-preservation/run17-final-core-private-receipt.json",
+      "members": 1160,
+      "manifest_sha256": "332830ba82c1c75ac8b3457ef1fb0268b51d52780c311200c8f3a96c860561c8",
+      "full_authenticated_decrypted_member_readback": true
+    },
+    {
+      "receipt_path": "docs/handoffs/whm-b07d9037-preservation/run17-closeout-analysis-private-receipt.json",
+      "members": 40,
+      "manifest_sha256": "a2c15b77b00541c1a0d336e111fe3efd6bdc2da1bca0c22e4ced2d88c9e92c6b",
+      "full_authenticated_decrypted_member_readback": true
+    },
+    {
+      "receipt_path": "docs/handoffs/whm-b07d9037-preservation/run17-publication-infrastructure-private-receipt.json",
+      "members": 525,
+      "manifest_sha256": "f7ec65da25f41b5e1899513209833ccfaa998a50c8df7ece3d88ccaaddf3a150",
+      "full_authenticated_decrypted_member_readback": true
+    },
+    {
+      "receipt_path": "docs/handoffs/whm-b07d9037-preservation/run17-final-reviewed-packets-private-receipt.json",
+      "members": 43,
+      "manifest_sha256": "2d709fcae09a5384c9327ffe8437d0125b1da464c74a937a0e3471d434f5fe24",
+      "full_authenticated_decrypted_member_readback": true
+    },
+    {
+      "receipt_path": "docs/handoffs/whm-b07d9037-preservation/run17-phone-delivery-infrastructure-private-receipt.json",
+      "members": 42,
+      "manifest_sha256": "2fdf6ee9118916217ef92a710981eb4f9ceadf77193e71e1a2f3069c0d230e2e",
+      "full_authenticated_decrypted_member_readback": true
+    },
+    {
+      "receipt_path": "docs/handoffs/whm-b07d9037-preservation/run17-continued-offline-private-receipt.json",
+      "members": 381,
+      "manifest_sha256": "e91053607ddc3cd5cd99561b0bbf1cf0c20988b889195ebd72c99e730ad379c0",
+      "full_authenticated_decrypted_member_readback": true
+    },
+    {
+      "receipt_path": "docs/handoffs/whm-b07d9037-preservation/run17-approval-evidence-private-receipt.json",
+      "members": 16,
+      "manifest_sha256": "7d7a70094aa23a32d049510af1a519c019f818f2550498331486aeb4ef7e82ca",
+      "full_authenticated_decrypted_member_readback": true
+    }
+  ],
+  "next_work": "Publication infrastructure repair within autoapproval; context/hierarchy proposals remain held; original round remains unfinished",
+  "publication_repair_scope": "Only outgoing duplicated native diagnostic projection, after actual full encrypted archive verification; ordinary publication without option unchanged; no WHM context or runtime acquisition changes",
+  "remaining_issue": "Fundraising outcome unverified afterdeliveryrepair; Azure model-visible system-policy placement candidate remains unapplied; nextslice gate retains1/2 infra failures",
+  "slice_attempts_cost_estimate": 93.7668367262,
+  "slice_attempts_direct_Azure_estimate": 32.48759164,
+  "phone_delivery_repair": {
+    "scope": "Only already selected simulated tool completion transport through existing correlated terminal event",
+    "world_model_context_acquisition_changed": false,
+    "real_shadow_completion_owner_changed": false,
+    "normal_approval_requirement_unchanged": true,
+    "user_authority": "Explicit infrastructure autoapproval, verified by independent exact source/consumer scope review",
+    "original_owning_assertion": "FAIL lenterminal0 on180358508; PASS unchanged assertions afterrepair",
+    "full_mocked_registered_phone_domain_passed": 28,
+    "private_exact_original_repro_preserved": true,
+    "permanent_test_sanitized": true,
+    "post_repair_paid_benchmark_executed": false,
+    "nineteen_repeat_prevention_proved": false,
+    "ambiguous_repeated_invocation_exactly_once_proved": false
+  },
+  "continued_offline_at_utc": "2026-10-14T19:17:45.169291+00:00",
+  "continued_offline": {
+    "source_snapshot": "ca26e9eae727b1def05852f2ed4929f7a69a000e",
+    "source_changes_applied": false,
+    "paid_trials_started": 0,
+    "remote_prior_receipt_byte_match": true,
+    "native_python_verified": "3.12.3",
+    "agents_python_verified": "3.11.9",
+    "storage": {
+      "frozen_history_pairs_preserved": 57,
+      "recovered_bytes": 1429741568,
+      "free_after_bytes": 2549342208,
+      "all_original_paths_and_contents_preserved": true,
+      "permissions_owners_unchanged": true,
+      "distinct_restore_mtimes_recorded_privately": true,
+      "usable_native_runtime_and_protected_instructions_unchanged": true
+    },
+    "retained_cache": {
+      "owner_database": "victoria_wmh_recording_e9afcffd_20261013",
+      "oid": 69016,
+      "rows": 1659,
+      "all1103_prior_fullrows_unchanged": true,
+      "new_agent_rows": 305,
+      "new_native_rows": 251,
+      "all556_source_payload_key_projection_matches": true,
+      "nineteen_native_error_keys_absent": true,
+      "readonly_query_only": true,
+      "review_result_sha256": "825b9cb601dc064d3072c4a1189557aec57388db1c742a8c8bd8e651736ee011"
+    },
+    "agent_dumps_preserved": {
+      "additional_original_files": 305,
+      "original_bytes": 25882368,
+      "all_authenticated_decrypted_per_member_in_supplement": true,
+      "core1160_did_not_cover_these_files": true
+    },
+    "context_proposal": {
+      "applied": false,
+      "bounded_offline_review_pass": true,
+      "diff_path": "docs/handoffs/whm-b07d9037-preservation/run17-foundry-instruction-proposal.diff",
+      "diff_sha256": "499131b3b8f76d6b5668e49ebffb44af51e7429c40516dd45bf82771a64fdcf6",
+      "result_sha256": "df8a54ddb558db2e37e942d14fc3eef0388a927196965f5a10eccf5110b5fac4",
+      "root_same_registered_test_sha256": "f0499e92d9ff772f0f50661e79cfed833741223bb34cf6a0967909d750c26494",
+      "root_baseline_exit": 1,
+      "root_private_candidate_exit": 0,
+      "model_visible_change": "Move existing exact aggregated instructions once from top instructions to first system input; no synthetic text, no context trimming or acquisition change",
+      "ordinary_default_false_nonJSON_samebody": true,
+      "mocked_foundry_cases": 14,
+      "pure_serializer_controls": 2,
+      "requires_user_context_approval": true,
+      "live_Azure_cache_behavior_and_benchmark_PASS_open": true,
+      "approval_id": "R17-FOUNDRY-INPUT-1",
+      "decision": "AWAITING_USER; no source application"
+    },
+    "next_slice": {
+      "pending_decision": "R17-NEXT-SLICE-1",
+      "infra_failed": 1,
+      "terminal_attempts": 2,
+      "held_by_original_policy": true,
+      "resource_preflight_complete": false,
+      "original_verdict_preserved": true
+    }
+  },
+  "last_checkpoint_update_utc": "2026-10-14T19:34:35.390069+00:00"
+}

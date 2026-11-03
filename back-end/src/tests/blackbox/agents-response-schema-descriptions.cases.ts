@@ -1,0 +1,142 @@
+import { deepStrictEqual, strictEqual } from 'node:assert';
+import {
+  createAgentSchema,
+  updateAgentSchema,
+  ResponseSchemaSchema,
+} from '../../domains/agents/types';
+
+const annotationSchema = {
+  fields: [
+    {
+      name: 'result',
+      type: 'str' as const,
+      required: true,
+      description: 'Preserve the supplied criteria verbatim.\nRésumé ∑ — line two.',
+      minLength: 1,
+      maxLength: 80,
+    },
+    {
+      name: 'details',
+      type: 'object' as const,
+      required: true,
+      description: 'Preserve explicit nested criteria.',
+      properties: [
+        {
+          name: 'receipt',
+          type: 'str' as const,
+          required: false,
+          description: 'Return the source receipt exactly.\nDo not infer a substitute.',
+          minLength: 1,
+          maxLength: 100,
+        },
+        { name: 'note', type: 'str' as const, description: '' },
+      ],
+    },
+  ],
+};
+
+export const schemaDescriptionCases = [
+  {
+    name: 'response-schema annotations — create preserves exact top-level and nested descriptions in every execution mode',
+    fn: async () => {
+      for (const world_model_mode of ['real', 'simulate', 'shadow'] as const) {
+        const parsed = createAgentSchema.parse({
+          goal: 'Schema contract',
+          response_schema: annotationSchema,
+          world_model_mode,
+        });
+        deepStrictEqual(parsed.response_schema, annotationSchema);
+        strictEqual(parsed.world_model_mode, world_model_mode);
+      }
+    },
+  },
+  {
+    name: 'response-schema annotations — update preserves exact supplied descriptions',
+    fn: async () => {
+      deepStrictEqual(
+        updateAgentSchema.parse({ response_schema: annotationSchema }).response_schema,
+        annotationSchema
+      );
+    },
+  },
+  {
+    name: 'response-schema annotations — descriptions remain optional without changing old payloads',
+    fn: async () => {
+      const schema = {
+        fields: [{ name: 'result', type: 'str' as const, required: true }],
+      };
+      deepStrictEqual(ResponseSchemaSchema.parse(schema), schema);
+    },
+  },
+  {
+    name: 'response-schema annotations — rejects non-string top-level descriptions',
+    fn: async () => {
+      strictEqual(
+        ResponseSchemaSchema.safeParse({
+          fields: [{ name: 'result', type: 'str', required: true, description: 17 }],
+        }).success,
+        false
+      );
+    },
+  },
+  {
+    name: 'response-schema annotations — rejects non-string nested descriptions',
+    fn: async () => {
+      strictEqual(
+        ResponseSchemaSchema.safeParse({
+          fields: [
+            {
+              name: 'details',
+              type: 'object',
+              required: true,
+              properties: [{ name: 'receipt', type: 'str', description: {} }],
+            },
+          ],
+        }).success,
+        false
+      );
+    },
+  },
+  {
+    name: 'response-schema annotations — unknown metadata still follows the existing strip policy',
+    fn: async () => {
+      const schema = {
+        fields: [{ name: 'result', type: 'str' as const, required: true }],
+      };
+      deepStrictEqual(
+        ResponseSchemaSchema.parse({
+          ...schema,
+          unknownTop: true,
+          fields: [{ ...schema.fields[0], unknownField: true }],
+        }),
+        schema
+      );
+    },
+  },
+  {
+    name: 'response-schema annotations — type, required, object-properties and bounds contracts stay strict',
+    fn: async () => {
+      for (const field of [
+        { name: 'result', type: 'str' },
+        { name: 'result', type: 'unsupported', required: true },
+        { name: 'result', type: 'object', required: true },
+        {
+          name: 'result',
+          type: 'str',
+          required: true,
+          minLength: 4,
+          maxLength: 3,
+        },
+        { name: 'result', type: 'int', required: true, minLength: 1 },
+        {
+          name: 'result',
+          type: 'list[str]',
+          required: true,
+          minItems: 2,
+          maxItems: 1,
+        },
+      ])
+        strictEqual(ResponseSchemaSchema.safeParse({ fields: [field] }).success, false);
+    },
+  },
+];

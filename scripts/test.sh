@@ -315,28 +315,73 @@ else
 fi
 run_suite "Agent Behavior Guard Unit Tests" bash scripts/tests/check-agent-behavior-approval.test.sh
 run_suite "LLM Trajectory Injection Guard Unit Tests" bash scripts/tests/check-llm-trajectory-injection-approval.test.sh
+run_suite "Factory Metadata" python3 scripts/tests/factory-metadata.test.py
 run_suite "Factory Review Telemetry" python3 scripts/tests/factory-review.test.py
+run_suite "Biz Review Card" python3 scripts/biz_review.py self-test
 run_suite "Deploy Stage Telemetry" bash scripts/tests/run-deploy-stage.test.sh
+run_suite "run.sh Process Tree Reaper" bash scripts/tests/run-sh-kill-tree.test.sh
+run_suite "Fleet Post-Child Autoscaler Settle" bash scripts/tests/fleet-post-child-settle.test.sh
 run_suite "RCA Model Intelligence Contract" bash scripts/tests/rca-model-intelligence-category.test.sh
 run_suite "RCA Prompt-Edit Abstraction Contract" bash scripts/tests/rca-prompt-edit-abstraction.test.sh
 run_suite "RCA Archive New Command" bash scripts/tests/rca-archive-new.test.sh
 run_suite "Claude Review Fallback" bash scripts/tests/claude-review-fallback.test.sh
-run_suite "Auto RCA Workflow Contract" bash scripts/tests/auto-rca-workflow.test.sh
-run_suite "Auto RCA Lifecycle Blackbox" bash scripts/tests/auto-rca-lifecycle.blackbox.test.sh
 run_suite "Semantic Deploy Gate" bash scripts/tests/semantic-deploy-gate.test.sh
 run_suite "Descend Command" bash scripts/tests/descend-command.test.sh
 run_suite "Benchmark Live Results" python3 scripts/tests/benchmark-live-results.test.py
+run_suite "Benchmark Scorecard" python3 scripts/tests/cloudbench-scorecard.test.py
 run_suite "Benchmark Campaign Grouping" bash scripts/tests/campaign-hub-grouping.test.sh
 run_suite "Benchmark Successful LLM Evidence" python3 scripts/tests/verify-successful-llm-queries.test.py
+run_suite "Original600 Portable Operator" python3 scripts/tests/original600-portable-operator.test.py
+run_suite "Benchmark Provider Rate-Limit Concurrency Cap" python3 scripts/tests/cloudbench-provider-capacity.test.py
+run_suite "Sharded Benchmark Controllers" python3 scripts/tests/cloudbench-shard-coordinator.test.py
+run_suite "Original600 Bulk Controller Transfer" python3 scripts/tests/cloudbench-controller-bulk-transfer.test.py
+run_suite "Original600 Existing Controller Payload Recovery" python3 scripts/tests/cloudbench-resume-controller-payload.test.py
+run_suite "Original600 Recovered Controller Finalization" python3 scripts/tests/cloudbench-controller-payload-finalization.test.py
+run_suite "Original600 Pre-Supervisor Finalization" python3 scripts/tests/cloudbench-startup-finalization.test.py
+run_suite "Cloud Benchmark Campaign Environment" python3 scripts/tests/cloudbench-campaign-env.test.py
+run_suite "Original600 Public Status" python3 scripts/tests/original600-status.test.py
+run_suite "Cloud Benchmark Stdlib Startup" python3 scripts/tests/cloudbench-site-startup.test.py
+run_suite "Cloud Benchmark Hub Admission Stdlib Startup" python3 scripts/tests/cloudbench-hub-admission-site-startup.test.py
+run_suite "Cloud Benchmark Persistent Aggregator" python3 scripts/tests/cloudbench-persistent-aggregator.test.py
+run_suite "Cloud Benchmark Fleet Card Stdlib Startup" python3 scripts/tests/cloudbench-fleet-card-site-startup.test.py
+run_suite "Cloud Benchmark Native Stdlib Startup" python3 scripts/tests/cloudbench-native-site-startup.test.py
+run_suite "Cloud Benchmark Start Accounting" python3 scripts/tests/cloudbench-start-accounting.test.py
+run_suite "Cloud Benchmark Archived Machine Reuse" python3 scripts/tests/cloudbench-archived-machine-reuse.test.py
+run_suite "Cloud Benchmark Unused Reservations" python3 scripts/tests/cloudbench-unused-reservations.test.py
+run_suite "Cloud Benchmark Parked Reservations" python3 scripts/tests/cloudbench-parked-reservations.test.py
+run_suite "Cloud Benchmark Reservation Reconciliation" python3 scripts/tests/cloudbench-reconcile-reservations.test.py
+run_suite "Cloud Benchmark Incomplete Reservations" python3 scripts/tests/cloudbench-incomplete-reservations.test.py
+run_suite "Cloud Benchmark Recovered Reservations" python3 scripts/tests/cloudbench-recovered-reservations.test.py
+run_suite "Cloud Benchmark Closed Transition Reservations" python3 scripts/tests/cloudbench-closed-transition-reservations.test.py
+run_suite "Cloud Benchmark Pre-Reservation Preparation" python3 scripts/tests/cloudbench-prepare-admission.test.py
+run_suite "Cloud Benchmark Reuse Index" python3 scripts/tests/cloudbench-reuse-index.test.py
+run_suite "Cloud Benchmark Guest pidfd Interpreter" python3 scripts/tests/pidfd-interpreter.test.py
+run_suite "Cloud Benchmark Registered Orphan Drain" python3 scripts/tests/cloudbench-controller-orphan-drain.test.py
+run_suite "Cloud Benchmark Relay Bootstrap Retirement" python3 scripts/tests/cloudbench-controller-relay-retire.test.py
+run_suite "Cloud Benchmark Recovered Controller Export" python3 scripts/tests/cloudbench-resume-controller-export.test.py
+run_suite "Cloud Benchmark Archived Cloud Transport" python3 scripts/tests/cloudbench-archived-transport.test.py
+run_suite "Cloud Benchmark Archived Reuse Stream Transport" python3 scripts/tests/cloudbench-archived-reuse-transport.test.py
+run_suite "Cloud Benchmark Isolated Generation" python3 scripts/tests/cloudbench-isolated-generation.test.py
+run_suite "Cloud Benchmark Archived Owner Stop" python3 scripts/tests/cloudbench-archived-owner-stop.test.py
+run_suite "Cloud Benchmark Status Readiness Observability" python3 scripts/tests/cloudbench-status-readiness-observability.test.py
+run_suite "Cloud Benchmark Pre-Terminal Infra Release" python3 scripts/tests/cloudbench-preterminal-infra-release.test.py
+run_suite "Controller Operator Preflight" python3 scripts/tests/cloudbench-operator-preflight.test.py
+run_suite "Playwright Browser Bootstrap" python3 scripts/tests/playwright-browser-bootstrap.test.py
+run_suite "Cloud Benchmark Inventory Stdlib Startup" python3 scripts/tests/cloudbench-inventory-site-startup.test.py
+run_suite "Cloud Benchmark Poll Stdlib Startup" python3 scripts/tests/cloudbench-poll-site-startup.test.py
 run_suite "Cloud Benchmark Composite Root Cleanup" python3 scripts/tests/cloudbench-exact-session-multi-root.test.py
 run_suite "Cloud Benchmark Quiesced Forensic Retirement" python3 scripts/tests/cloudbench-forensic-quiesced.test.py
+run_suite "Cloud Benchmark Staged Boot" python3 scripts/tests/cloudbench-staged-boot.test.py
+run_suite "Cloud Benchmark Static Service Observation" python3 scripts/tests/cloudbench-static-service-observation.test.py
 run_suite "Cloud Benchmark Native Linux Runner" python3 scripts/tests/cloudbench-controller-linux.test.py
 run_suite "Existing Backend Replay Gate" bash scripts/tests/blackbox-existing-replay-gate.test.sh
 run_suite "Blackbox Backend Teardown" bash scripts/tests/blackbox-backend-teardown.test.sh
 run_suite "Agent Workflow Surface Hash" bash scripts/tests/agent-surface-hash.test.sh
 run_suite "Fly Cutover Clone Recovery" bash scripts/tests/deploy-agent-clone-recovery.test.sh
 run_suite "Mac App Release Drift" bash scripts/tests/mac-app-release-drift.test.sh
-if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-|tests/cloudbench-)|agents/benchmarks/(cloud_batch_cleanup_test|cloudbench_(dependency_sync|recovery_review|codex_auth)_test|run_benchmark|wall_clock_backstop_test)\.py)'; then
+run_suite "CAPTCHA Probe Verdicts" agents/venv/bin/python -m pytest -q agents/benchmarks/run_captcha_probe_test.py
+run_suite "Benchmark Run Merge" agents/venv/bin/python -m pytest -q agents/benchmarks/merge_run_contexts_test.py
+if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench|run-bench-cloud|run-bench-fleet|run-cloudbench-controller-gate|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-|tests/cloudbench-)|agents/benchmarks/(cloud_batch_cleanup_test|cloudbench_(dependency_sync|recovery_review|codex_auth)_test|run_benchmark|wall_clock_backstop_test)\.py)'; then
   run_suite "Cloud Benchmark Environment" bash scripts/tests/cloudbench-env.test.sh
   run_suite "Cloud Benchmark Controller GitHub Token" bash scripts/tests/cloudbench-controller-github-token.test.sh
   run_suite "Cloud Benchmark Mandatory Autoscale" bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
@@ -344,6 +389,35 @@ if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench|run-ben
   run_suite "Cloud Benchmark Lifecycle" agents/venv/bin/python -m pytest -q agents/benchmarks/cloud_batch_cleanup_test.py agents/benchmarks/cloudbench_dependency_sync_test.py agents/benchmarks/cloudbench_recovery_review_test.py agents/benchmarks/cloudbench_codex_auth_test.py
   run_suite "Cloud Benchmark Git Fetch" bash scripts/tests/cloudbench-fetch-ref.test.sh
   run_suite "Cloud Benchmark GitHub Token" bash scripts/tests/cloudbench-github-token.test.sh
+  run_suite "Cloud Benchmark Explicit Idle Admission" python3 scripts/tests/cloudbench-explicit-idle-admission.test.py
+  run_suite "Cloud Benchmark Fixed Native Worker" python3 scripts/tests/cloudbench-fixed-native-worker.test.py
+  run_suite "Cloud Benchmark Cleanup Admission Scans" python3 scripts/tests/cloudbench-cleanup-admission-scans.test.py
+  run_suite "Cloud Benchmark Cleanup Admission Parallel" python3 scripts/tests/cloudbench-cleanup-admission-parallel.test.py
+  run_suite "Cloud Benchmark Cleanup Admission Tickets" python3 scripts/tests/cloudbench-cleanup-admission-tickets.test.py
+  run_suite "Cloud Benchmark Cohort Stale Reconciliation" python3 scripts/tests/cloudbench-cohort-reconcile.test.py
+  run_suite "Cloud Benchmark Shared Relay" python3 scripts/tests/cloudbench-shared-transport-integration.test.py
+  run_suite "Cloud Benchmark Cleanup Ticket Campaign" python3 scripts/tests/cloudbench-cleanup-ticket-campaign.test.py
+  run_suite "Cloud Benchmark Clone Rate Response" python3 scripts/tests/cloudbench-clone-rate-response.test.py
+  run_suite "Cloud Benchmark Controller Client" python3 scripts/tests/cloudbench-controller-client-path.test.py
+  run_suite "Cloud Benchmark Controller Gate flyctl Bounds" python3 scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py
+  run_suite "Cloud Benchmark Disposable Hub Finalization" python3 scripts/tests/cloudbench-disposable-hub-finalize.test.py
+  run_suite "Cloud Benchmark Disposable Controller" python3 scripts/tests/cloudbench-disposable-controller.test.py
+  run_suite "Cloud Benchmark Disposable Volume Backups" python3 scripts/tests/cloudbench-disposable-volume.test.py
+  run_suite "Cloud Benchmark Parallel Mutation Admission" python3 scripts/tests/cloudbench-parallel-mutation.test.py
+  run_suite "Cloud Benchmark Disposable Volume CLI" python3 scripts/tests/cloudbench-disposable-volume-cli.test.py
+  run_suite "Cloud Benchmark Original 600 Supervisor" python3 scripts/tests/cloudbench-original600-supervisor.test.py
+  run_suite "Cloud Benchmark Disposable Recovery" python3 scripts/tests/cloudbench-disposable-recovery.test.py
+  run_suite "Cloud Benchmark Disposable Decisions" python3 scripts/tests/cloudbench-disposable-lifecycle.test.py
+  run_suite "Cloud Benchmark Retained Successor Completion" python3 scripts/tests/cloudbench-retained-successor.test.py
+  run_suite "Cloud Benchmark Disposable Outer Lifecycle" env CLOUDBENCH_TEST_DISPOSABLE_ONLY=1 bash scripts/tests/cloudbench-multi-workstream.test.sh
+  run_suite "Cloud Benchmark App Stop All" python3 scripts/tests/cloudbench-stop-all.test.py
+  run_suite "Cloud Benchmark Reclaim Stopped Machines" python3 scripts/tests/cloudbench-reclaim-stopped.test.py
+  run_suite "Cloud Benchmark Unstaged Worker Recovery" python3 scripts/tests/cloudbench-unstaged-worker-recovery.test.py
+  run_suite "Cloud Benchmark Protected Resource Union" python3 scripts/tests/cloudbench-protected-resources.test.py
+  run_suite "Cloud Benchmark Pool Run Token" python3 scripts/tests/cloudbench-pool-run-token.test.py
+  run_suite "Cloud Benchmark Live Primary Return" python3 scripts/tests/cloudbench-live-primary-return.test.py
+  run_suite "Cloud Benchmark Exact Shape Reuse" python3 scripts/tests/cloudbench-primary-exact-shape-reuse.test.py
+  run_suite "Cloud Benchmark Maintenance Env" python3 scripts/tests/cloudbench-maintenance-env.test.py
   run_suite "Cloud Benchmark Multi-Workstream" bash scripts/tests/cloudbench-multi-workstream.test.sh
   run_suite "Fleet Infra Canary" bash scripts/tests/fleet-infra-canary.test.sh
   run_suite "Cloud Benchmark App-Env Lock" bash scripts/tests/cloudbench-app-env-lock.test.sh
@@ -363,6 +437,7 @@ fi
 if auto_rca_changed '^scripts/run\.sh$'; then
   run_suite "System Postgres Pool Budget" bash scripts/tests/run-system-pg-pool-budget.test.sh
 fi
+run_suite "Local Port Probe Without lsof" bash scripts/tests/port-probe.test.sh
 run_suite "Workspace Dependency Preflight" bash scripts/tests/workspace-dependencies.test.sh
 
 # ── Build checks (run in parallel with blackbox tests) ──

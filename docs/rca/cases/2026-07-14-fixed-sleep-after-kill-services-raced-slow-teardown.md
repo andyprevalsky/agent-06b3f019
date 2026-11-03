@@ -149,3 +149,46 @@ None recorded.
 
 Gate asynchronous assertions and fixture lifetimes on owned readiness or
 lifecycle signals, never on a guessed amount of elapsed wall-clock time.
+
+## 2026-10-16 recurrence: retry readiness was inferred from enqueue time
+
+The WHM deploy C6 backend gate on
+`1a573eb69c6b0950f579b752deb1794058dff5e9` failed the existing
+`committed-message-broadcast` case at “the fixture must have retry settlements
+in flight”, before its independent initial-slot isolation assertion. Original
+142,711-byte backend log SHA256
+`dc6613c937e2e6c80eabd976fb949a8807e696e62f43c3f48b20ec8c43096fbc`
+is retained. The callback replaces fetch; its calls do not reach Supabase or
+the separate backend server. No provider or host-load cause is inferred.
+
+The fixture waited 150 ms from enqueue, although initial dispatch and response
+settlement precede the unchanged 100 ms retry backoff. Captured ordering puts
+the readiness assertion before retry entry. The fixture and owning runtime
+are byte-identical in the old branch, upstream main `a59f19b1`, and merged C6.
+Archive searches for the retry-settlement symptom and fixed-sleep readiness
+found this owned-completion family and the separate committed-delivery case.
+The latter's production retry policy is unchanged.
+
+The complete existing ten-case owning artifact reproduces the same readiness
+assertion when the mock's first response takes a controlled 80 ms: 9/10, exit 1.
+Awaiting the mock's first-retry event instead passes 10/10 with the same mock
+latency and all 27 original assertions unchanged. The controlled latency stays
+in the permanent existing callback. The original 50 ms healthy-agent isolation
+check, two-second attempt deadline, three-send policy and concurrency caps are
+unchanged. A beforeExit rejection prevents a missing retry from silently
+finishing an unresolved readiness promise; the listener and held gate are
+released in finally.
+
+An adversarial runtime retaining the initial request slots still fails the
+unchanged isolation assertion. A mock that never produces a retry fails closed.
+Independent parent execution passed the full candidate in 3.403 s and rejected
+the slot-retention mutant in 3.335 s. Network, sockets and DNS were denied; the
+existing mocked publisher was the only request boundary. The production
+delivery sources remain byte-identical. At 10,000 production agents this
+test-only synchronization adds no runtime work or context.
+
+Permanent reproduction remains the canonical
+`npx tsx src/tests/blackbox/run.ts committed-message-broadcast` domain. The local
+causal proof does not rewrite the original C6 backend or aggregate FAIL. Full
+post-integration deploy qualification is recorded separately under the same
+original deployment clock.

@@ -26,6 +26,7 @@ from helpers.generation_handoff import (
     GenerationHandoffRequested,
 )
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
+from helpers.wait_on_world_clock import hold_on_children, release_children
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
 from utils.oai_demo import is_oai_demo_mass_agent_task
@@ -35,9 +36,9 @@ logger = structlog.get_logger()
 
 USER_FACING_TOOL_NAME = "spawn_general_purpose_agent"
 CHILD_FAILURE_STATUSES = {"failed", "error", "max_iterations"}
-def _with_for_each_child_marker(
-    metadata: Dict[str, Any], *, for_each_child: bool
-) -> Dict[str, Any]:
+
+
+def _with_for_each_child_marker(metadata: Dict[str, Any], *, for_each_child: bool) -> Dict[str, Any]:
     """Stamp ``forEachChild`` from the known spawn origin (never infer from toolCallId)."""
     if for_each_child:
         metadata["forEachChild"] = True
@@ -155,8 +156,7 @@ class SpawnSubAgentManager(ToolManager):
                     type=EventType.POST_MESSAGE,
                     title="Sub-agent complete",
                     message=(
-                        "Research already gathered; skipping nested general-purpose "
-                        "spawn so this sub-agent handles it."
+                        "Research already gathered; skipping nested general-purpose spawn so this sub-agent handles it."
                     ),
                     status=MessageStatus.FINISHED,
                     metadata={"skippedNestedSpawn": True},
@@ -186,7 +186,10 @@ class SpawnSubAgentManager(ToolManager):
 
             parent_model = getattr(workflow_instance, "model", "rose-labs/rose-1-flash")
             parent_source = getattr(workflow_instance, "agent_source", "WEB")
-            child_agent_id = str(workflow.uuid4())
+            # A background spawn minted the child id when it started so the
+            # parent's "started" result could already name the address.
+            preassigned = getattr(workflow_instance, "_preassigned_child_agent_id", None)
+            child_agent_id = (preassigned(tool_call_id) if callable(preassigned) else None) or str(workflow.uuid4())
 
             result = await workflow.execute_activity(
                 spawn_sub_agent_activity,
@@ -339,20 +342,32 @@ class SpawnSubAgentManager(ToolManager):
         )
 
         logger.info(f"⏳ Waiting for sub-agent {child_agent_id} to complete...")
-        while child_agent_id not in workflow_instance.child_results:
-            if await self._reconcile_terminal_child_result(workflow_instance, child_agent_id):
-                break
-            try:
-                await wait_condition_or_generation_handoff(
-                    lambda cid=child_agent_id: cid in workflow_instance.child_results,
-                    workflow_instance,
-                    timeout=timedelta(seconds=30),
-                    workflow_mod=workflow,
-                )
-            except GenerationHandoffRequested:
-                raise
-            except (asyncio.TimeoutError, TimeoutError):
-                continue
+        # Simulate mode: while blocked here the parent holds on its children on
+        # the world clock; on return it receives this child's finish time.
+        hold_id = f"{child_tool_id}:{child_agent_id}"
+        try:
+            await hold_on_children(workflow_instance, hold_id)
+            while child_agent_id not in workflow_instance.child_results:
+                if await self._reconcile_terminal_child_result(workflow_instance, child_agent_id):
+                    break
+                try:
+                    await wait_condition_or_generation_handoff(
+                        lambda cid=child_agent_id: cid in workflow_instance.child_results,
+                        workflow_instance,
+                        timeout=timedelta(seconds=30),
+                        workflow_mod=workflow,
+                    )
+                except GenerationHandoffRequested:
+                    raise
+                except (asyncio.TimeoutError, TimeoutError):
+                    continue
+        except BaseException:  # includes cancellation and GenerationHandoffRequested
+            # Leaving without the result: stop holding (a next generation that
+            # re-enters this wait holds again under the same hold id). The
+            # original exception, including a cancellation, is re-raised.
+            await release_children(workflow_instance, hold_id, [])
+            raise
+        await release_children(workflow_instance, hold_id, [child_agent_id])
 
         child_result = workflow_instance.child_results.get(child_agent_id, {})
         if _child_result_is_failure(child_result):

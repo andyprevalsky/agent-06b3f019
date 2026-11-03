@@ -20,7 +20,11 @@ const payloadCalls = animationFiles.map(
 const fixtureDirectories: string[] = [];
 const invalidUnicodeComment = String.raw`// JSON.parse('\u{xyz}')`;
 
-function runGuard(calls: readonly string[], incidentalText = '') {
+function runGuard(
+  calls: readonly string[],
+  incidentalText = '',
+  startup: 'dynamic' | 'static' | 'missing-manifest' = 'dynamic',
+) {
   const outputDirectory = mkdtempSync(join(tmpdir(), 'rose-production-bundle-'));
   fixtureDirectories.push(outputDirectory);
   mkdirSync(join(outputDirectory, 'assets'));
@@ -31,10 +35,41 @@ function runGuard(calls: readonly string[], incidentalText = '') {
   });
   expect(syntax.status, syntax.stderr).toBe(0);
   writeFileSync(join(outputDirectory, 'assets', 'animation-fixture.js'), source);
+  writeFileSync(join(outputDirectory, 'assets', 'main.js'), 'export {};');
+  writeFileSync(
+    join(outputDirectory, 'index.html'),
+    '<script type="module" src="/assets/main.js"></script>',
+  );
+  if (startup !== 'missing-manifest') {
+    mkdirSync(join(outputDirectory, '.vite'));
+    writeFileSync(
+      join(outputDirectory, '.vite', 'manifest.json'),
+      JSON.stringify({
+        'src/main.tsx': {
+          file: 'assets/main.js',
+          isEntry: true,
+          [startup === 'static' ? 'imports' : 'dynamicImports']: ['animations'],
+        },
+        animations: { file: 'assets/animation-fixture.js', isDynamicEntry: true },
+      }),
+    );
+  }
+
   return spawnSync(process.execPath, [guard, outputDirectory], { encoding: 'utf8' });
 }
 
 describe('production bundle validation', () => {
+  it('keeps desktop animation payloads out of the synchronous app startup graph', () => {
+    const result = runGuard(payloadCalls, '', 'static');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Desktop animation payload must be deferred from app startup');
+  });
+  it('requires the manifest needed to verify startup dependencies', () => {
+    const result = runGuard(payloadCalls, '', 'missing-manifest');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Production startup manifest is required');
+  });
+
   afterEach(() => {
     for (const directory of fixtureDirectories.splice(0)) {
       rmSync(directory, { recursive: true, force: true });

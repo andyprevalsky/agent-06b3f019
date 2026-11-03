@@ -28,7 +28,10 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { installIpcMock, clearIpcMock } from './ipc-mock';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import type { IPC, QuickQueryToggleState, QuickQueryPayload } from '../../shared/types/ipc';
+import { MIRRORED_THEME_KEY, mirrorDocumentTheme } from '../../ui/shared/theme-sync';
 
 // --- capture what the entry file tries to render --------------------------
 //
@@ -544,6 +547,7 @@ describe('launcher blackbox', () => {
     expect(payload.attachments?.[0]?.name).toBe('brief.md');
     expect(payload.attachments?.[0]?.mimeType).toBe('text/markdown');
     expect(payload.attachments?.[0]?.data.byteLength).toBeGreaterThan(0);
+    expect(payload.attachments?.[0]).not.toHaveProperty('autoCaptured');
   });
 
   it('allows submit with attachments only (no typed query)', async () => {
@@ -598,6 +602,166 @@ describe('launcher blackbox', () => {
 
     await waitFor(() => {
       expect(screen.queryByTestId('launcher-attachment-chip')).not.toBeInTheDocument();
+    });
+  });
+
+  it('holds the open-time screenshot in place of earlier files and submits its bytes', async () => {
+    const ipc = installLauncherIpc();
+    const tree = await loadLauncherTree();
+    const user = userEvent.setup();
+    render(<>{tree}</>);
+
+    dropFilesOnLauncher([makeDropFile('stale.txt', 'from-last-open')]);
+    await screen.findByTestId('launcher-attachment-chip');
+
+    const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    await act(async () => {
+      ipc.toggleCallbacks[0]?.({
+        open: true,
+        screenshot: {
+          name: 'Screenshot 2026-10-24 at 15.04.09.png',
+          mimeType: 'image/png',
+          size: pngBytes.byteLength,
+          data: pngBytes.buffer,
+          autoCaptured: true,
+        },
+      });
+    });
+
+    const chips = await screen.findAllByTestId('launcher-attachment-chip');
+    expect(chips).toHaveLength(1);
+    expect(chips[0]).toHaveTextContent('Screenshot 2026-10-24 at 15.04.09.png');
+
+    await user.type(screen.getByPlaceholderText('Enter any desire'), 'what is this error');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      expect(ipc.submitQuickQuery).toHaveBeenCalledTimes(1);
+    });
+    const payload = ipc.submitQuickQuery.mock.calls[0]?.[0] as QuickQueryPayload;
+    expect(payload.query).toBe('what is this error');
+    expect(payload.attachments).toHaveLength(1);
+    expect(payload.attachments?.[0]?.name).toBe('Screenshot 2026-10-24 at 15.04.09.png');
+    expect(payload.attachments?.[0]?.mimeType).toBe('image/png');
+    expect(payload.attachments?.[0]?.autoCaptured).toBe(true);
+    expect(
+      Array.from(new Uint8Array(payload.attachments?.[0]?.data ?? new ArrayBuffer(0)))
+    ).toEqual(Array.from(pngBytes));
+    expect(capturedRequests).toHaveLength(0);
+  });
+
+  it('submits without the screenshot once its chip is removed', async () => {
+    const ipc = installLauncherIpc();
+    const tree = await loadLauncherTree();
+    const user = userEvent.setup();
+    render(<>{tree}</>);
+
+    const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    await act(async () => {
+      ipc.toggleCallbacks[0]?.({
+        open: true,
+        screenshot: {
+          name: 'Screenshot.png',
+          mimeType: 'image/png',
+          size: pngBytes.byteLength,
+          data: pngBytes.buffer,
+        },
+      });
+    });
+    await screen.findByTestId('launcher-attachment-chip');
+
+    await user.click(screen.getByRole('button', { name: 'Remove Screenshot.png' }));
+    expect(screen.queryByTestId('launcher-attachment-chip')).not.toBeInTheDocument();
+
+    await user.type(screen.getByPlaceholderText('Enter any desire'), 'no screenshot');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      expect(ipc.submitQuickQuery).toHaveBeenCalledTimes(1);
+    });
+    const payload = ipc.submitQuickQuery.mock.calls[0]?.[0] as QuickQueryPayload;
+    expect(payload.query).toBe('no screenshot');
+    expect(payload.attachments).toBeUndefined();
+  });
+
+  describe('dark mode (follows the main window theme)', () => {
+    afterEach(() => {
+      localStorage.removeItem(MIRRORED_THEME_KEY);
+      document.documentElement.classList.remove('dark');
+      document.head.innerHTML = '';
+    });
+
+    it('main window mirrors html.dark into shared storage, and ui/main.tsx installs the mirror', async () => {
+      const dispose = mirrorDocumentTheme();
+      expect(localStorage.getItem(MIRRORED_THEME_KEY)).toBe('light');
+      document.documentElement.classList.add('dark');
+      await waitFor(() => expect(localStorage.getItem(MIRRORED_THEME_KEY)).toBe('dark'));
+      document.documentElement.classList.remove('dark');
+      await waitFor(() => expect(localStorage.getItem(MIRRORED_THEME_KEY)).toBe('light'));
+      dispose();
+
+      // Startup before sign-in applies html.dark keeps the last mirrored value.
+      localStorage.setItem(MIRRORED_THEME_KEY, 'dark');
+      mirrorDocumentTheme()();
+      expect(localStorage.getItem(MIRRORED_THEME_KEY)).toBe('dark');
+
+      const mainSource = readFileSync(path.resolve(__dirname, '../../ui/main.tsx'), 'utf8');
+      expect(mainSource).toMatch(/^mirrorDocumentTheme\(\);$/m);
+    });
+
+    it('launcher window adopts the mirrored dark theme on load and live via storage events', async () => {
+      localStorage.setItem(MIRRORED_THEME_KEY, 'dark');
+      installLauncherIpc();
+      await loadLauncherTree();
+      expect(document.documentElement.classList.contains('dark')).toBe(true);
+
+      localStorage.setItem(MIRRORED_THEME_KEY, 'light');
+      act(() => {
+        window.dispatchEvent(new StorageEvent('storage', { key: MIRRORED_THEME_KEY }));
+      });
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
+
+      localStorage.setItem(MIRRORED_THEME_KEY, 'dark');
+      act(() => {
+        window.dispatchEvent(new Event('focus'));
+      });
+      expect(document.documentElement.classList.contains('dark')).toBe(true);
+    });
+
+    it('pill, text, chips and send button read the palette vars that html.dark redefines', async () => {
+      installLauncherIpc();
+      const tree = await loadLauncherTree();
+      render(<>{tree}</>);
+
+      const css = Array.from(document.head.querySelectorAll('style'))
+        .map((node) => node.textContent ?? '')
+        .join('\n');
+      const darkBlock = css.slice(css.indexOf('html.dark {'));
+      for (const name of [
+        '--launcher-fill',
+        '--launcher-text',
+        '--launcher-muted',
+        '--launcher-placeholder',
+        '--launcher-chip-bg',
+        '--launcher-drop-bg',
+        '--launcher-submit-bg',
+        '--launcher-submit-icon',
+        '--launcher-shadow',
+      ]) {
+        expect(darkBlock).toContain(`${name}:`);
+      }
+
+      const fill = screen.getByTestId('launcher-drop-target');
+      expect(fill.style.backgroundColor).toBe('var(--launcher-fill)');
+      expect(fill.style.color).toBe('var(--launcher-text)');
+      expect(screen.getByPlaceholderText('Enter any desire').style.color).toBe(
+        'var(--launcher-text)'
+      );
+      expect(screen.getByTestId('submit-button').style.background).toBe(
+        'var(--launcher-submit-bg)'
+      );
+      expect(screen.getByTestId('attach-button').style.color).toBe('var(--launcher-muted)');
+      expect(screen.getByTestId('liquid-metal-ring')).toBeInTheDocument();
     });
   });
 });

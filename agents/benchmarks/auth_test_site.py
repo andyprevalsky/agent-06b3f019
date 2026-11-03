@@ -49,17 +49,18 @@ SCENARIO_LADDERS: dict[str, tuple[int, bool, int, int]] = {
     "saved_logins_fail": (3, False, 0, 0),
     "user_signs_in": (3, False, 0, 0),
     "all_fail": (3, False, 1, 1),
-    "minted_otp": (0, True, 0, 0),
+    "minted_otp": (1, False, 0, 0),
     "saved_session": (1, False, 0, 1),
     "stale_session": (1, False, 0, 1),
     "passkey": (1, False, 1, 0),
     "passkey_rejected": (1, False, 1, 0),
     "password_email_2fa": (1, False, 0, 0),
+    "password_app_approval": (1, False, 0, 0),
     "account_locked": (1, False, 0, 0),
-    "code_never_arrives": (0, True, 0, 0),
-    "expired_code": (0, True, 0, 0),
-    "minted_sms_otp": (0, True, 0, 0),
-    "magic_link": (0, True, 0, 0),
+    "code_never_arrives": (1, False, 0, 0),
+    "expired_code": (1, False, 0, 0),
+    "minted_sms_otp": (1, False, 0, 0),
+    "magic_link": (1, False, 0, 0),
     "email_otp": (0, True, 0, 0),
     "signup": (0, True, 0, 0),
     "signup_already_registered": (0, True, 0, 0),
@@ -87,13 +88,14 @@ NO_SESSION_SCENARIOS = (
     "member_discount_signup_fails_purchase",
     "paid_membership_purchase",
 )
-USER_RESPONSES = ("sign_in", "decline")
+USER_RESPONSES = ("sign_in", "decline", "approve_app")
 # Scenarios whose manifest carries the password only the user knows.
 USER_SIGN_IN_SCENARIOS = ("user_signs_in",)
 OUTCOME_EXPECTATIONS = ("signed_in", "no_session", "any")
 SIGN_IN_METHODS = (
     "password",
     "password_email_2fa",
+    "password_app_approval",
     "email_code",
     "sms_code",
     "magic_link",
@@ -112,6 +114,7 @@ ATTEMPT_KINDS = (
     "passkey",
     "session",
     "second_factor",
+    "app_approval",
     "signup",
     "signup_verify",
     "guest",
@@ -144,6 +147,15 @@ class AuthTestSiteFixtureError(RuntimeError):
     """The hosted site could not be prepared exactly as the scenario requires."""
 
 
+class AuthTestSiteFirstRunFailed(AuthTestSiteFixtureError):
+    """The task's own first-run agent finished without completing its goal.
+
+    That is the agent's outcome on this task (a graded failure), not a fixture
+    or infrastructure fault: the graded run would score the same agent result
+    FAILED, so the first run must not be reported as a retryable ERROR.
+    """
+
+
 # Parallel lanes share one BenchmarkTask object per name (k=3 runs of the same
 # task are concurrent), so the per-run manifest lives in the lane's asyncio
 # context rather than on the task.
@@ -163,7 +175,8 @@ def declared_block(environment: Optional[dict]) -> Optional[dict]:
 
     ``scenario`` picks the fixture. ``user_response`` makes the harness play the
     user when the agent asks for sign-in help (``sign_in`` through the live
-    browser, or ``decline``). ``first_run_prompt`` runs one agent to completion
+    browser, ``approve_app`` on a separate device, or ``decline``).
+    ``first_run_prompt`` runs one agent to completion
     on the site before the graded run, for behavior that spans two runs.
     """
     block = (environment or {}).get("auth_test_site")
@@ -175,9 +188,7 @@ def declared_block(environment: Optional[dict]) -> Optional[dict]:
     if unknown:
         raise ValueError(f"environment.auth_test_site has unknown keys {sorted(unknown)}")
     if block.get("scenario") not in AUTH_TEST_SITE_SCENARIOS:
-        raise ValueError(
-            f"environment.auth_test_site.scenario must be one of {list(AUTH_TEST_SITE_SCENARIOS)}"
-        )
+        raise ValueError(f"environment.auth_test_site.scenario must be one of {list(AUTH_TEST_SITE_SCENARIOS)}")
     response = block.get("user_response")
     if response is not None and response not in USER_RESPONSES:
         raise ValueError(f"environment.auth_test_site.user_response must be one of {list(USER_RESPONSES)}")
@@ -186,13 +197,11 @@ def declared_block(environment: Optional[dict]) -> Optional[dict]:
             "environment.auth_test_site.user_response=sign_in needs a scenario where the user "
             f"knows a working password: {list(USER_SIGN_IN_SCENARIOS)}"
         )
+    if response == "approve_app" and block["scenario"] != "password_app_approval":
+        raise ValueError("environment.auth_test_site.user_response=approve_app needs scenario password_app_approval")
     first_run = block.get("first_run_prompt")
-    if first_run is not None and (
-        not isinstance(first_run, str) or AUTH_TEST_SITE_URL_PLACEHOLDER not in first_run
-    ):
-        raise ValueError(
-            f"environment.auth_test_site.first_run_prompt must contain {AUTH_TEST_SITE_URL_PLACEHOLDER}"
-        )
+    if first_run is not None and (not isinstance(first_run, str) or AUTH_TEST_SITE_URL_PLACEHOLDER not in first_run):
+        raise ValueError(f"environment.auth_test_site.first_run_prompt must contain {AUTH_TEST_SITE_URL_PLACEHOLDER}")
     return block
 
 
@@ -302,9 +311,7 @@ def validate_manifest(scenario: str, manifest: dict) -> None:
             "guest-checkout kill-switch"
         )
     if len(saved) != passwords:
-        raise AuthTestSiteFixtureError(
-            f"auth test site seeded {len(saved)} saved passwords; expected {passwords}"
-        )
+        raise AuthTestSiteFixtureError(f"auth test site seeded {len(saved)} saved passwords; expected {passwords}")
     if preview_passwords != saved:
         raise AuthTestSiteFixtureError(
             f"auth options would offer passwords {preview_passwords}, expected {saved} (freshest first)"
@@ -334,6 +341,15 @@ def validate_manifest(scenario: str, manifest: dict) -> None:
                 f"auth options must list the connected inbox {inbox!r} for email OTP, "
                 f"got {preview.get('emailOtpInboxes')}"
             )
+    if scenario == "password_app_approval":
+        approval = manifest.get("appApprovalUser")
+        if not isinstance(approval, dict) or not str(approval.get("deviceUrl") or ""):
+            raise AuthTestSiteFixtureError("password_app_approval needs the stand-in user's deviceUrl")
+        if not re.fullmatch(r"[0-9]{2}", str(approval.get("expectedNumber") or "")):
+            raise AuthTestSiteFixtureError("password_app_approval needs a two-digit expectedNumber")
+        lifetime = approval.get("challengeLifetimeSeconds")
+        if isinstance(lifetime, bool) or not isinstance(lifetime, int) or lifetime <= 0:
+            raise AuthTestSiteFixtureError("password_app_approval needs positive challengeLifetimeSeconds")
     if scenario in NO_SESSION_SCENARIOS:
         if manifest.get("expectedSignInEmail") is not None or manifest.get("expectedMemberNumber"):
             raise AuthTestSiteFixtureError(f"{scenario} must not have a reachable member account")
@@ -382,9 +398,7 @@ async def create_site(
             json={"userId": user_id, "scenario": scenario, "publicBaseUrl": public_base_url},
         )
     if response.status_code != 201:
-        raise AuthTestSiteFixtureError(
-            f"auth test site create failed {response.status_code}: {response.text[:300]}"
-        )
+        raise AuthTestSiteFixtureError(f"auth test site create failed {response.status_code}: {response.text[:300]}")
     manifest = response.json()
     validate_manifest(scenario, manifest)
     return manifest
@@ -392,13 +406,9 @@ async def create_site(
 
 async def fetch_report(base_url: str, headers: dict, site_id: str) -> dict:
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.get(
-            f"{base_url.rstrip('/')}{FIXTURES_PATH}/{site_id}/report", headers=headers
-        )
+        response = await client.get(f"{base_url.rstrip('/')}{FIXTURES_PATH}/{site_id}/report", headers=headers)
     if response.status_code != 200:
-        raise AuthTestSiteFixtureError(
-            f"auth test site report failed {response.status_code}: {response.text[:300]}"
-        )
+        raise AuthTestSiteFixtureError(f"auth test site report failed {response.status_code}: {response.text[:300]}")
     return response.json()
 
 
@@ -409,9 +419,7 @@ async def mark_run(base_url: str, headers: dict, site_id: str, label: str) -> No
             f"{base_url.rstrip('/')}{FIXTURES_PATH}/{site_id}/mark", headers=headers, json={"label": label}
         )
     if response.status_code != 201:
-        raise AuthTestSiteFixtureError(
-            f"auth test site mark failed {response.status_code}: {response.text[:300]}"
-        )
+        raise AuthTestSiteFixtureError(f"auth test site mark failed {response.status_code}: {response.text[:300]}")
 
 
 async def delete_site(base_url: str, headers: dict, site_id: str, user_id: str | None = None) -> None:
@@ -427,9 +435,7 @@ async def delete_site(base_url: str, headers: dict, site_id: str, user_id: str |
             f"{base_url.rstrip('/')}{FIXTURES_PATH}/{site_id}", headers=headers, params=params
         )
     if response.status_code not in (200, 204, 404):
-        raise AuthTestSiteFixtureError(
-            f"auth test site delete failed {response.status_code}: {response.text[:300]}"
-        )
+        raise AuthTestSiteFixtureError(f"auth test site delete failed {response.status_code}: {response.text[:300]}")
 
 
 def summarize_attempts(attempts: list[dict]) -> str:
@@ -608,6 +614,10 @@ def _check_duplicate_submissions(attempts: list[dict]) -> Optional[str]:
         at = _attempt_time(attempt)
         if kind not in _SUBMIT_KINDS or at is None:
             continue
+        # An app challenge is first recorded as pending, then completed by the
+        # task browser's status poll. Those are lifecycle events, not two submits.
+        if kind == "second_factor" and attempt.get("outcome") == "pending":
+            continue
         key = (kind, str(attempt.get("email") or "").casefold())
         previous = last_seen.get(key)
         last_seen[key] = at
@@ -664,7 +674,10 @@ def evaluate_outcome(check: dict, evidence: Any, deliverable: str) -> tuple[bool
         else:
             problem = _check_event_rules(check["after_marker"], attempts[marker + 1 :], manifest, " in the second run")
     if problem is None and check.get("left_on_sign_in_form"):
-        last_page = str(report.get("lastPagePath") or "")
+        observation = evidence.get("browser_page_observation")
+        if not isinstance(observation, dict) or observation.get("phase") != "park_time":
+            return failed("Native PARK-TIME browser page observation is unavailable")
+        last_page = str(observation.get("path") or "")
         if not last_page.startswith("/login"):
             problem = f"The browser was left on {last_page or 'no page'}, not on the sign-in form"
     if problem is None and "accounts_created" in check:

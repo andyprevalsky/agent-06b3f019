@@ -22,6 +22,7 @@ import {
 } from './errors';
 import { OPENROUTER_CHAT_LATENCY_PROVIDER } from './openrouterFastRoute';
 import { parseOpenAISSE } from './streaming';
+import { openAiChatToolChoice, openAiChatTools } from './toolContract';
 import { postOpenRouterStream } from './transport';
 import { coerceLeadingOnlySystemMessages, normalizeOpenAiToolCalls } from './transforms';
 import type { CompletionOptions, RoseStreamChunk } from './types';
@@ -34,6 +35,7 @@ export function buildOpenRouterCerebrasBody(
   options: CompletionOptions,
   opts: { allowProviderFallback?: boolean } = {}
 ): Record<string, unknown> {
+  const tools = openAiChatTools(options.tools);
   return {
     model: OPENROUTER_CEREBRAS_MODEL,
     messages: coerceLeadingOnlySystemMessages(normalizeOpenAiToolCalls(options.messages)),
@@ -51,8 +53,10 @@ export function buildOpenRouterCerebrasBody(
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.max_tokens !== undefined ? { max_tokens: options.max_tokens } : {}),
     ...(options.response_format ? { response_format: options.response_format } : {}),
-    ...(options.tools ? { tools: options.tools } : {}),
-    ...(options.tool_choice !== undefined ? { tool_choice: options.tool_choice } : {}),
+    ...(tools ? { tools } : {}),
+    ...(tools && options.tool_choice !== undefined
+      ? { tool_choice: openAiChatToolChoice(options.tool_choice, OPENROUTER_CEREBRAS_MODEL) }
+      : {}),
   };
 }
 

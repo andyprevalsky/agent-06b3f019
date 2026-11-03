@@ -9,14 +9,41 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
-import { renderWithProviders } from './test-wrapper';
 import { server } from './msw/server';
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
 import {
   SIDEBAR_WIDTH_EXPANDED,
   SIDEBAR_WIDTH_STORAGE_KEY,
 } from '@/features/terminal-component-group/config';
-import { defaultProps, makeAgent, mockSession, openRowMenu } from './app-sidebar.fixtures';
+import {
+  defaultProps,
+  makeAgent,
+  mockSession,
+  openRowMenu,
+  renderStockSidebar,
+} from './app-sidebar.fixtures';
+
+/** Fixed light surface/text colours that are unreadable under html.dark text. */
+const LIGHT_ONLY_COLOUR =
+  /^((?:[\w-]+:)*)(bg|text)-(white|navi-white[\w-]*|(?:gray|neutral|zinc|slate|stone)-[12]\d\d)$/;
+
+/**
+ * Every fixed light colour on `el` must carry a `dark:` override of the same
+ * state and property (e.g. `hover:bg-navi-white-dark` needs `dark:hover:bg-*`),
+ * so a highlighted row is never near-white under the dark theme's light text.
+ */
+function expectDarkOverrideForLightColours(el: Element) {
+  const tokens = el.className.toString().split(/\s+/).filter(Boolean);
+  for (const token of tokens) {
+    const match = LIGHT_ONLY_COLOUR.exec(token);
+    if (match === null) continue;
+    const [, states, property] = match;
+    expect(
+      tokens.some((t) => t.startsWith(`dark:${states}${property}-`)),
+      `${token} has no dark:${states}${property}-* override`,
+    ).toBe(true);
+  }
+}
 
 describe('AppSidebar rows', () => {
   beforeEach(() => {
@@ -38,7 +65,7 @@ describe('AppSidebar rows', () => {
       }),
       makeAgent({ agent_id: 'untitled', goal: 'Short raw goal', title: null }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     expect(await screen.findByText('Soho Sushi Reservation')).toBeInTheDocument();
     // The long goal is not rendered as the label...
@@ -53,7 +80,7 @@ describe('AppSidebar rows', () => {
   it('preserves the full fallback goal and lets the row truncate only at its real edge', async () => {
     const longGoal =
       'Order another conditioner from Purador on Amazon and confirm the total and delivery date';
-    renderWithProviders(
+    renderStockSidebar(
       <AppSidebar
         {...defaultProps({
           agents: [makeAgent({ agent_id: 'long-fallback', goal: longGoal, title: null })],
@@ -85,7 +112,7 @@ describe('AppSidebar rows', () => {
         pinned_at: '2026-01-01T00:00:00Z',
       }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     const nodes = await screen.findAllByRole('heading', { level: 3 });
     expect(nodes.map((n) => n.textContent)[0]).toBe('Older but pinned');
@@ -100,7 +127,7 @@ describe('AppSidebar rows', () => {
       makeAgent({ agent_id: 'a1', goal: 'Unselected row', status: 'ACTIVE' }),
       makeAgent({ agent_id: 'a2', goal: 'Selected row', status: 'ACTIVE' }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents, selectedAgentId: 'a2' })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents, selectedAgentId: 'a2' })} />);
 
     const row = (text: string) =>
       screen.getByText(text).closest('div[class*="group/row"]') as HTMLElement;
@@ -117,11 +144,18 @@ describe('AppSidebar rows', () => {
     // Selection keeps a persistent fill so the current agent stays identifiable
     // once the pointer moves away.
     expect(row('Selected row').className).toMatch(/(^|\s)bg-navi-white-dark/);
+
+    // Dark mode swaps both fills to the theme's accent hover token; the fixed
+    // light grey under dark-theme text was unreadable.
+    expect(idle).toMatch(/(^|\s)dark:hover:bg-accent(\s|$)/);
+    expect(row('Selected row').className).toMatch(/(^|\s)dark:bg-accent(\s|$)/);
+    expectDarkOverrideForLightColours(row('Unselected row'));
+    expectDarkOverrideForLightColours(row('Selected row'));
   });
 
   it('keeps expanded agent rows compact', async () => {
     const agents = [makeAgent({ agent_id: 'a1', goal: 'Compact row', status: 'ACTIVE' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     const row = (await screen.findByText('Compact row')).closest(
       'div[class*="group/row"]',
@@ -142,7 +176,7 @@ describe('AppSidebar rows', () => {
       makeAgent({ agent_id: 'finished', goal: 'Finished now', status: 'COMPLETED' }),
       makeAgent({ agent_id: 'broken', goal: 'Broken now', status: 'FAILED' }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     // The indicator carries the state; the name must not. A title that changes
     // colour or weight as a run progresses makes the list feel unstable.
@@ -166,7 +200,7 @@ describe('AppSidebar rows', () => {
         created_at: new Date(Date.now() - 4 * 60_000).toISOString(),
       }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     // The active row carries its elapsed label; a finished row must not, since a
     // frozen timer reads as a stalled agent.
@@ -184,7 +218,7 @@ describe('AppSidebar rows', () => {
         created_at: new Date(Date.now() - 4 * 60_000).toISOString(),
       }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     const elapsed = await screen.findByText('4m');
     const archive = screen.getByLabelText('Archive Running now');
@@ -206,7 +240,7 @@ describe('AppSidebar rows', () => {
 
   it('keeps row actions focusable for keyboard users', async () => {
     const agents = [makeAgent({ agent_id: 'a1', goal: 'Keyboard row', status: 'ACTIVE' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     const archive = await screen.findByLabelText('Archive Keyboard row');
     // Hidden by opacity, never by `hidden`/display:none — the latter would drop
@@ -227,7 +261,7 @@ describe('AppSidebar rows', () => {
       }),
       makeAgent({ agent_id: 'plain', goal: 'Plain row', status: 'COMPLETED' }),
     ];
-    const { container } = renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    const { container } = renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
     await screen.findByText('Pinned row');
 
     // A resting pin marker, distinct from the hover-only pin BUTTON — without it
@@ -246,7 +280,7 @@ describe('AppSidebar rows', () => {
         created_at: new Date(Date.now() - (2 * 24 * 60 + 4 * 60) * 60_000).toISOString(),
       }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
     expect(await screen.findByText('2d 4h')).toBeInTheDocument();
   });
 
@@ -266,7 +300,7 @@ describe('AppSidebar rows', () => {
         created_at: '2024-01-01T00:00:00Z',
       }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     const nodes = await screen.findAllByRole('heading', { level: 3 });
     // Older, but blocked on the user — a needs-help row buried under active runs
@@ -283,7 +317,7 @@ describe('AppSidebar rows', () => {
         temporal_workflow_id: null,
       }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     expect(await screen.findByText('20g to floz')).toBeInTheDocument();
     expect(screen.getByLabelText('Completed')).toBeInTheDocument();
@@ -300,7 +334,7 @@ describe('AppSidebar rows', () => {
       }),
       makeAgent({ agent_id: 'u1', goal: 'Unpinned one', status: 'ACTIVE' }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     expect(await screen.findByText('Pinned')).toBeInTheDocument();
     const headings = screen.getAllByRole('heading', { level: 3 }).map((n) => n.textContent);
@@ -309,7 +343,7 @@ describe('AppSidebar rows', () => {
 
   it('hides the Pinned header when nothing is pinned', async () => {
     const agents = [makeAgent({ agent_id: 'u1', goal: 'Unpinned one', status: 'ACTIVE' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
     await screen.findByText('Unpinned one');
     // An empty "Pinned" label is just a wasted row.
     expect(screen.queryByText('Pinned')).not.toBeInTheDocument();
@@ -321,7 +355,7 @@ describe('AppSidebar rows', () => {
       makeAgent({ agent_id: 'a1', goal: 'Book a flight to Tokyo', title: 'Tokyo trip' }),
       makeAgent({ agent_id: 'a2', goal: 'Order groceries', title: 'Grocery run' }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
     await screen.findByText('Tokyo trip');
 
     await u.type(screen.getByLabelText('Search agents'), 'grocer');
@@ -350,7 +384,7 @@ describe('AppSidebar rows', () => {
         return HttpResponse.json({ agents: [contentMatch] });
       }),
     );
-    renderWithProviders(
+    renderStockSidebar(
       <AppSidebar
         {...defaultProps({
           agents: [makeAgent({ agent_id: 'other', goal: 'Order groceries' })],
@@ -368,7 +402,7 @@ describe('AppSidebar rows', () => {
   it('tells the user when a search matches nothing', async () => {
     const u = userEvent.setup();
     const agents = [makeAgent({ agent_id: 'a1', goal: 'Book a flight' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
     await screen.findByText('Book a flight');
 
     await u.type(screen.getByLabelText('Search agents'), 'zzzz');
@@ -377,14 +411,14 @@ describe('AppSidebar rows', () => {
   });
 
   it('advertises no keyboard shortcut it does not bind', async () => {
-    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    renderStockSidebar(<AppSidebar {...defaultProps()} />);
     const search = await screen.findByLabelText('Search agents');
     expect(search).toBeInTheDocument();
     expect(screen.queryByText(/⌘K|Ctrl\+K/i)).not.toBeInTheDocument();
   });
 
   it('opens a row context menu with Rename, Copy Link, Pin and Archive', async () => {
-    renderWithProviders(
+    renderStockSidebar(
       <AppSidebar {...defaultProps({ agents: [makeAgent({ goal: 'Row A' })] })} />,
     );
 
@@ -397,7 +431,7 @@ describe('AppSidebar rows', () => {
 
   it('offers Unpin for an already-pinned row', async () => {
     const agents = [makeAgent({ goal: 'Row A', pinned_at: '2026-01-01T00:00:00Z' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     const menu = await openRowMenu('Row A');
     expect(within(menu).getByText('Unpin')).toBeInTheDocument();
@@ -406,7 +440,7 @@ describe('AppSidebar rows', () => {
 
   it('labels the pin hover action with a tooltip', async () => {
     const u = userEvent.setup();
-    renderWithProviders(
+    renderStockSidebar(
       <AppSidebar {...defaultProps({ agents: [makeAgent({ goal: 'Row A' })] })} />,
     );
 
@@ -416,7 +450,7 @@ describe('AppSidebar rows', () => {
 
   it('labels the archive hover action with a tooltip', async () => {
     const u = userEvent.setup();
-    renderWithProviders(
+    renderStockSidebar(
       <AppSidebar {...defaultProps({ agents: [makeAgent({ goal: 'Row A' })] })} />,
     );
 
@@ -438,7 +472,7 @@ describe('AppSidebar rows', () => {
     );
     const onRefreshAgents = vi.fn().mockResolvedValue(undefined);
     const agents = [makeAgent({ agent_id: 'a1', goal: 'Row A' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents, onRefreshAgents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents, onRefreshAgents })} />);
 
     const menu = await openRowMenu('Row A');
     await u.click(within(menu).getByText('Rename'));
@@ -464,7 +498,7 @@ describe('AppSidebar rows', () => {
         return HttpResponse.json({ agent: makeAgent() });
       }),
     );
-    renderWithProviders(
+    renderStockSidebar(
       <AppSidebar {...defaultProps({ agents: [makeAgent({ goal: 'Row A' })] })} />,
     );
 
@@ -478,7 +512,7 @@ describe('AppSidebar rows', () => {
     const u = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
-    renderWithProviders(
+    renderStockSidebar(
       <AppSidebar {...defaultProps({ agents: [makeAgent({ agent_id: 'a1', goal: 'Row A' })] })} />,
     );
 
@@ -502,7 +536,7 @@ describe('AppSidebar rows', () => {
     );
     const onRefreshAgents = vi.fn().mockResolvedValue(undefined);
     const agents = [makeAgent({ agent_id: 'a1', goal: 'Row A' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents, onRefreshAgents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents, onRefreshAgents })} />);
 
     await u.click(await screen.findByLabelText('Archive Row A'));
 
@@ -515,7 +549,7 @@ describe('AppSidebar rows', () => {
     server.use(http.delete('*/api/agents/:agentId', () => new HttpResponse(null, { status: 204 })));
     const onSelectAgent = vi.fn();
     const agents = [makeAgent({ agent_id: 'a1', goal: 'Row A' })];
-    renderWithProviders(
+    renderStockSidebar(
       <AppSidebar {...defaultProps({ agents, onSelectAgent, selectedAgentId: 'a1' })} />,
     );
 
@@ -535,7 +569,7 @@ describe('AppSidebar rows', () => {
       }),
     );
     const agents = [makeAgent({ agent_id: 'a1', goal: 'Row A' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     const menu = await openRowMenu('Row A');
     await u.click(within(menu).getByText('Archive'));
@@ -563,7 +597,7 @@ describe('AppSidebar rows', () => {
         return HttpResponse.json({ success: true });
       }),
     );
-    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    renderStockSidebar(<AppSidebar {...defaultProps()} />);
 
     await u.click(screen.getByLabelText('Show archived agents'));
 
@@ -573,10 +607,56 @@ describe('AppSidebar rows', () => {
     await waitFor(() => expect(unarchivedId).toBe('gone'));
   });
 
+  it('keeps a long archived title inside the dialog, ellipsized, with its full goal on hover', async () => {
+    const u = userEvent.setup();
+    const longGoal =
+      'im trying to use herdr, i ran the cli and ran my codex session in it, i thought the whole ' +
+      'point is the agents continue working, but when I closed the terminal everything stopped';
+    server.use(
+      http.get('*/api/agents/archived', () =>
+        HttpResponse.json({
+          agents: [
+            makeAgent({ agent_id: 'long', goal: longGoal, archived_at: '2026-02-02T00:00:00Z' }),
+          ],
+        }),
+      ),
+    );
+    renderStockSidebar(<AppSidebar {...defaultProps()} />);
+
+    await u.click(screen.getByLabelText('Show archived agents'));
+    const dialog = await screen.findByRole('dialog');
+    const title = await within(dialog).findByText(longGoal);
+    const row = title.closest('div[class*="group/row"]') as HTMLElement;
+
+    // DialogContent is a CSS grid: its list item must opt out of min-width:auto,
+    // or a nowrap title widens the track and the row paints past the dialog.
+    const gridItem = [...dialog.children].find((child) => child.contains(row)) as HTMLElement;
+    expect(gridItem.className).toMatch(/(^|\s)min-w-0(\s|$)/);
+    // Nothing between the dialog and the title sizes to its content's width.
+    for (let el: Element | null = title; el !== null && el !== dialog; el = el.parentElement) {
+      expect(el.className.toString()).not.toMatch(/(^|\s)(min-)?w-(max|fit)(\s|$)/);
+    }
+    // The title ellipsizes at the row's real edge inside a shrinkable flex line.
+    expect(title.className).toMatch(/(^|\s)min-w-0(\s|$)/);
+    expect(title.className).toMatch(/(^|\s)truncate(\s|$)/);
+    expect((title.parentElement as HTMLElement).className).toMatch(/(^|\s)min-w-0(\s|$)/);
+
+    // Not over-truncated: the complete goal is rendered and offered as a tooltip.
+    expect(title.textContent).toBe(longGoal);
+    expect(title).toHaveAttribute('title', longGoal);
+
+    // The hovered row and its action overlay stay readable in dark mode.
+    expect(row.className).toMatch(/(^|\s)dark:hover:bg-accent(\s|$)/);
+    expectDarkOverrideForLightColours(row);
+    const restore = within(dialog).getByLabelText(`Restore ${longGoal}`);
+    expectDarkOverrideForLightColours(restore);
+    expectDarkOverrideForLightColours(restore.closest('span[class*="absolute"]') as HTMLElement);
+  });
+
   it('shows an empty state when nothing is archived', async () => {
     const u = userEvent.setup();
     server.use(http.get('*/api/agents/archived', () => HttpResponse.json({ agents: [] })));
-    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    renderStockSidebar(<AppSidebar {...defaultProps()} />);
 
     await u.click(screen.getByLabelText('Show archived agents'));
 
@@ -591,7 +671,7 @@ describe('AppSidebar rows', () => {
       makeAgent({ agent_id: 'c', goal: 'Out of credits', status: 'OUT_OF_CREDITS' }),
       makeAgent({ agent_id: 'l', goal: 'Cost limited', status: 'COST_LIMIT_REACHED' }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     await screen.findByText('In progress');
     expect(screen.queryByText('42%')).not.toBeInTheDocument();
@@ -605,7 +685,7 @@ describe('AppSidebar rows', () => {
 
   it('offers no pause/resume control, even for a paused agent', async () => {
     const agents = [makeAgent({ agent_id: 'a1', goal: 'Paused row', status: 'PAUSED' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     // Run control belongs to the agent view. A play button in a navigation list
     // sat right where you scan and invited mis-clicks.

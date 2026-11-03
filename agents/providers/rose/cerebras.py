@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import ssl
 import time
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
@@ -19,16 +20,16 @@ import httpx
 import structlog
 
 from config import load_config
-from providers.rose.cerebras_schema import project_cerebras_tool_schema
+from providers.rose.cerebras_schema import collapse_omittable_nulls, project_cerebras_tool_schema
 from providers.rose.errors import RoseError, RoseRateLimitError
 from providers.rose.streaming import parse_openai_sse
 from providers.rose.transforms import transform_messages_for_openai
 from providers.rose.transport import post_cerebras_stream
+from providers.rose.types import StreamChunk
 from providers.rose.waterfall import _openrouter_tool_choice, _openrouter_tools
 
 if TYPE_CHECKING:
     from providers.rose.pools import PoolSpec
-    from providers.rose.types import StreamChunk
 
 logger = structlog.get_logger()
 
@@ -201,6 +202,8 @@ def build_cerebras_body(
     effort: Optional[str],
 ) -> Dict[str, Any]:
     openrouter_tools = _openrouter_tools(tools)
+    for tool in openrouter_tools or []:
+        tool["function"]["parameters"] = collapse_omittable_nulls(tool["function"].get("parameters"))
     projections = [project_cerebras_tool_schema(tool["function"].get("parameters")) for tool in openrouter_tools or []]
     strict_toolset = all(projected is not None for projected, _ in projections)
     for tool, (projected, reason) in zip(openrouter_tools or [], projections, strict=True):
@@ -243,6 +246,33 @@ def build_cerebras_body(
     return body
 
 
+def _limit_reached_as_length(
+    chunk: StreamChunk, max_tokens: Optional[int], *, request_id: str, call_site: Optional[str]
+) -> StreamChunk:
+    """Report a reply that spent the whole output limit as ``finish_reason="length"``.
+
+    With strict tool grammars Cerebras can stop at ``max_completion_tokens``
+    yet report ``tool_calls`` for a call whose arguments were closed early, so
+    the cut-off reply would be accepted as complete. The used token count is
+    the provider's own evidence that the limit, not the model, ended the reply.
+    """
+    if chunk.kind != "usage" or not max_tokens:
+        return chunk
+    completion_tokens = int(chunk.data.get("completion_tokens") or 0)
+    reported = str(chunk.data.get("finish_reason") or "")
+    if completion_tokens < max_tokens or reported == "length":
+        return chunk
+    logger.warning(
+        "rose.cerebras.output_limit_reached",
+        request_id=request_id,
+        call_site=call_site,
+        reported_finish_reason=reported,
+        completion_tokens=completion_tokens,
+        max_tokens=max_tokens,
+    )
+    return StreamChunk(kind="usage", data={**chunk.data, "finish_reason": "length"})
+
+
 async def cerebras_complete(
     *,
     pool_spec: PoolSpec,
@@ -264,6 +294,9 @@ async def cerebras_complete(
         raise RoseError(f"pool {pool_spec.name} has no cerebras_model")
     scope, backend_key = _cooldown_scope(cerebras_key, model)
     if await _cerebras_on_cooldown(scope, backend_key):
+        from providers.rose.whm_retry_observation import observe_cooldown
+
+        observe_cooldown(model, max(0.0, _cooldowns.get(scope, (0.0, 0.0))[0] - time.monotonic()))
         logger.info("rose.cerebras.cooldown_skip", request_id=request_id, model=model)
         raise RoseRateLimitError("Cerebras route is on its reported quota cooldown", status=429)
     body = build_cerebras_body(
@@ -308,6 +341,9 @@ async def cerebras_complete(
                     until = (datetime.now(timezone.utc) + timedelta(seconds=cooldown_s)).isoformat()
                     cooldown_mark = asyncio.create_task(_publish_cerebras_cooldown(scope, backend_key, until))
             if status >= 400:
+                from providers.rose.whm_retry_observation import observe_http_failure
+
+                await observe_http_failure(model, response, cooldown_seconds=cooldown_s)
                 raise RoseError(
                     f"Cerebras {model} returned {status}",
                     status=status,
@@ -319,9 +355,10 @@ async def cerebras_complete(
                 request_id=request_id,
                 idle_timeout_s=idle_timeout_s,
             ):
-                yield chunk
+                yield _limit_reached_as_length(chunk, max_tokens, request_id=request_id, call_site=call_site)
             stream_completed = True
-    except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
+    # TLS record alerts can escape httpx as raw SSLError while reading headers.
+    except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError, ssl.SSLError) as exc:
         raise RoseError(f"Cerebras {model} connect/read error: {exc}") from exc
     finally:
         if cooldown_mark is not None:

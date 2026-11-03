@@ -1,0 +1,88 @@
+{
+  "actual_captured_checkout_recipe_receipt": "/home/boxes/rose/.context/stress600-root/refresh5c-actual-recipe.safe.json",
+  "actual_captured_checkout_recipe_receipt_sha256": "01b5e523de95af6d13694ad91d2b2776724efac819175d438962ad5df67d9b42",
+  "actual_recipe_input_count": 25,
+  "actual_recipe_input_hashes": {
+    "back-end/package.json": "2b466d4362ccb48ae00a7d3f043ce49f3ed423a27c7bcbe6a207b7c3da72d2d1",
+    "back-end/scripts/apply-local-workflow-ddl.sh": "b349eb7350578aca283969360749e094b6f78b4b64b9707d74ac13ab47d96f36",
+    "back-end/scripts/ensure-agent-network-grep-indexes.ts": "653de4f229b9ea3bb71f8f6d2cc5de113d63e37e85899efb239f559d42edd709",
+    "back-end/scripts/ensure-fast-mode-cache-schema.ts": "085230371c95de56845ceb3bd4eef4948144cfab31231d4e06ac527320463f8f",
+    "front-end/package.json": "ac5d4c244d39877641ed9753cb18511ba958df94d0887d574ca189207c75a3c1",
+    "package.json": "fd89d0959d0217634caa3ea4757ff1bd5a040d602fd86b727574621663a2a219",
+    "scripts/cloudbench-campaign-mutation.py": "0dbafc9513c13e75e7ac18b172b2a41e9e053c835ea8d6dfb26e7161b3c3a2ad",
+    "scripts/cloudbench-guest-recovery.py": "d5c0a36d9eb903998fa156ee0d22fa78c8cdedba73d0798d28fc6613c890905b",
+    "scripts/cloudbench-port-lease.py": "183116af91e2044a91c3d497d4229db78caa8c867af408a3448fb15c58b021e1",
+    "scripts/cloudbench-run.sh": "55d4faec82afa676ecd6dde64dc5685508bc0f3c4ad42e466709b1a95a53635f",
+    "scripts/cloudbench-script-snapshot.py": "fc6fabcdf8724d28d5bedbf5c87019ca92d930beafbf817b489cc405d186bfbd",
+    "scripts/cloudbench-status-server.py": "6901d035b4b0ac76fff8faafa0fa015e69671c12ea3793d423277e79d05eadc3",
+    "scripts/ensure-workspace-dependencies.sh": "c5c13af190c43ec8dc88f743ed481c8c1121ad390c68bdfa9e98b89eb3970cb1",
+    "scripts/lib/fast-mode-cache-schema.sh": "154637d61a8728bbfb3dfe286b5202c9e89f5fdee8a2b168ffb76e715612590a",
+    "scripts/lib/local-pg-image.sh": "a5a3b3f57eaa4fc2fe1c2a32b65c830bd2a4d619bc2ec040608e2d02b23bb889",
+    "scripts/lib/ngrok-tunnel.sh": "d53a51a4e43e956ccd36f997fcfa15ffef2bcb9d33e3533e8c1673eda11e561e",
+    "scripts/lib/run-context.sh": "0be5db39d87319d11e3d2afc4ccea97581f46754021bee0f3020939788a0d22a",
+    "scripts/lib/run-process-cleanup.sh": "ecc491254ef4e0e7b1712215757045ddf797ca3414c2185e55e09e346690a338",
+    "scripts/lib/run-service-readiness.sh": "3b8a264ea7a785219faea9fcd1cf2ab37a53060a37951f95d4c0a00688d819b6",
+    "scripts/lib/seed-cache.sh": "87a4b83a73c58f67513b2e3402eeb27005a7c9bf7ef78dae039aa4161244e65e",
+    "scripts/lib/workspace-env.sh": "ea649a1212dab724c16f3da995c796ff099caa5dabbcb106c6a359260b5bc9d2",
+    "scripts/run-bench-campaign.py": "4a81113129734fcf3e13457472e204b6f40316230da3e61afadc58e3778a8a60",
+    "scripts/run-bench-cloud": "279aa310b9dda8e9ecdca5e1370657cb03f58790685b01cbb359c84b9facbabe",
+    "scripts/run-bench-fleet": "de19c4e3a4f532fc17b7a0ee9f1c6acdedf6d81027555e609cc7b73e78f0aaaf",
+    "scripts/run.sh": "dc24bbb33bd7913e7f206ae2a148f09f387399cc3e9fbd7bfbaf97c7ebc676cc"
+  },
+  "author_owning_result": "19 PASS / 0.59s",
+  "base_source": "6e8e2a4a793a8009226c8c98c0ffa367d2356ec9",
+  "exact_full_delta_read": true,
+  "full_component_paths_and_hashes": {
+    "agents/benchmarks/cloudbench_campaign_inventory_test.py": {
+      "git_sha256": "8900b8ca01d22369e8eff939e3e343a68cbe54240ce815922419e829e1ec2719",
+      "materialized_sha256": "8900b8ca01d22369e8eff939e3e343a68cbe54240ce815922419e829e1ec2719"
+    },
+    "scripts/run-bench-fleet": {
+      "git_sha256": "de19c4e3a4f532fc17b7a0ee9f1c6acdedf6d81027555e609cc7b73e78f0aaaf",
+      "materialized_sha256": "de19c4e3a4f532fc17b7a0ee9f1c6acdedf6d81027555e609cc7b73e78f0aaaf"
+    }
+  },
+  "independent_checks": [
+    {
+      "command": "/home/boxes/rose/agents/venv/bin/python3 -m pytest agents/benchmarks/cloudbench_campaign_inventory_test.py -q -k 'empty_pool_avoids_native_reads or reconciliation_refresh_contract or pool_reconciliation_borrows_compact_owned_feed or reconciliation_mutation_flags_are_parent_owned' --basetemp /home/boxes/rose/.context/stress600-root/refresh5c-independent-fixtures",
+      "exit": 0,
+      "reported_in_tool_output": true,
+      "result": "19 passed,153 deselected in0.85s",
+      "scope": "exact frozen19 owning cases"
+    }
+  ],
+  "limitations": [
+    "Historical underlying nativeMachine-list142 cause remainsUNKNOWN; observed redundancy and unnecessary forced refresh are independently reproduced source boundaries.",
+    "Source approval is not account capacity,600ready/release/execution,task grades or financial/native release proof.",
+    "Original823600physical flags58TRUE542UNKNOWN and all epochs retained."
+  ],
+  "observed_epoch": 1792012160.1337292,
+  "original_control": "15 FAIL / 4 PASS / 1.22s; baseline has no mutation flags, so those controls are contract coverage, not historical cause reproduction",
+  "packet_sha256": "52f60c0cb997cdb77cb87cd8ca61adfa28ffeb9495ceb35710ca82913a5a33ad",
+  "patch_sha256": "ace7df86fe51963ed49bbe63a1f4de461160168354c575a2843bd35f82e210b7",
+  "pre_service_boundaries": [
+    "before-stack-launch",
+    "agent-network-index-bootstrap"
+  ],
+  "provider_native_model_calls": 0,
+  "reviewed": true,
+  "reviewer": "root",
+  "schema": "full600-inventory-reconciliation-source-root-review-v1",
+  "scope": "Skip no-ID pool reads; bound compact owned campaign pool reads without raw fallback; mark possible native recovery/resize before writes in parent shell; force post-reconciliation refresh unless both actual reconciliation paths prove no mutation; preserve standalone fresh/native post-mutation reads and empty shape hints.",
+  "source_recipe_sha256": "149f84a076bd263fd7f309e5c3098bc0af62a6cdf4a9b9320dcadffa35202dd7",
+  "source_ref": "5c39ca7757fcabf7693f84b4f0f7ac9632f4b5e8",
+  "unchanged_contract": {
+    "clone_rate_per_second": 1,
+    "concurrency": 600,
+    "controller_shape": "performance16/131072MiB/rootfs50/encrypted256GiBORD",
+    "distinct_tasks": 200,
+    "native_clone_rpc_seconds": 240,
+    "native_identity_recovery_teardown_guards": "preserved",
+    "native_refresh_seconds": 30,
+    "refresh_wait_seconds": 95,
+    "runs": 3,
+    "task_evaluator_app_agent_bytes": "unchanged",
+    "task_seconds": 1200,
+    "whole_experiment_seconds": 5400
+  }
+}

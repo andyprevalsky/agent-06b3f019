@@ -125,7 +125,12 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
   };
   const originalLoad = loader._load;
   let recordFixtureError: (message: unknown, details: unknown) => void = () => undefined;
-  let init = async (): Promise<{ session_id: string; task_id: string }> => {
+  let init = async (): Promise<{
+    session_id: string;
+    task_id: string;
+    same_session_available?: boolean;
+    releaseOnDisconnect?: () => Promise<unknown>;
+  }> => {
     throw new Error('fixture not selected');
   };
   let close = async (_sessionId: string, _pause: boolean): Promise<void> => {
@@ -149,6 +154,11 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
       if (id.endsWith('/auth') || id.endsWith('/hybridAuth'))
         return {
           authenticate: (_req: unknown, _res: unknown, next: () => void) => next(),
+          // The fixture plays the agent worker on the internal-only routes.
+          authenticateInternal: (req: { isInternal: boolean }, _res: unknown, next: () => void) => {
+            req.isInternal = true;
+            next();
+          },
           hybridAuth: async (req: { isInternal: boolean }, _res: unknown, next: () => void) => {
             req.isInternal = true;
             next();
@@ -201,14 +211,19 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
     start_url: 'https://example.com',
   });
   let settlePending: (() => void) | undefined;
+  let removeRequestObserver = () => {};
   try {
     for (const scenario of [
       'disconnect-during-preparation',
       'disconnect-before-allocation',
+      'disconnect-existing',
       'success',
+      'success-existing',
       'close-failure',
       'init-error',
     ] as const) {
+      const existing = scenario.endsWith('-existing');
+      const succeeds = scenario === 'success' || scenario === 'success-existing';
       const started = deferred<void>();
       const settle = deferred<void>();
       settlePending = () => settle.resolve();
@@ -266,7 +281,10 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
           responseClosed,
           intentionalDestroy,
         }));
-      server.once('request', (_req, res) => {
+      const observeInitRequest = (_req: IncomingMessage, res: ServerResponse) => {
+        const requestPath = (_req as express.Request).originalUrl ?? _req.url;
+        if (_req.method !== 'POST' || requestPath !== '/api/browser-session/init') return;
+        server.off('request', observeInitRequest);
         recordRequest('request-event', { req: _req, res });
         mark('server-request');
         res.once('close', () => {
@@ -275,7 +293,9 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
           responseClosed = true;
           disconnected.resolve();
         });
-      });
+      };
+      removeRequestObserver = () => server.off('request', observeInitRequest);
+      server.on('request', observeInitRequest);
       init = async () => {
         if (scenario !== 'disconnect-before-allocation' && scenario !== 'init-error')
           sessions.set(ownedSessionId, 'ACTIVE');
@@ -292,7 +312,12 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
         sessions.set(ownedSessionId, 'ACTIVE');
         mark('init-settled');
         settled.resolve();
-        return { session_id: ownedSessionId, task_id: '22222222-2222-4222-8222-222222222222' };
+        return {
+          session_id: ownedSessionId,
+          task_id: '22222222-2222-4222-8222-222222222222',
+          ...(existing ? { same_session_available: true } : {}),
+          ...(!existing ? { releaseOnDisconnect: () => close(ownedSessionId, false) } : {}),
+        };
       };
       close = async (sessionId, pause) => {
         retain(closeAttempts, { sessionId, expectedSessionId: ownedSessionId, pause }, 4);
@@ -304,6 +329,22 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
         closeObserved.resolve();
         if (scenario === 'close-failure') throw new Error('fixture provider close unavailable');
       };
+      // An unrelated native request must not satisfy this scenario's close observation.
+      await observed(
+        new Promise<void>((resolve, reject) => {
+          const unrelated = httpRequest(
+            { hostname: '127.0.0.1', port: address.port, path: '/', method: 'HEAD' },
+            (response) => {
+              response.resume();
+              response.once('end', resolve);
+              response.once('error', reject);
+            }
+          );
+          unrelated.once('error', reject);
+          unrelated.end();
+        }),
+        'unrelated-head'
+      );
       const client = httpRequest({
         hostname: '127.0.0.1',
         port: address.port,
@@ -328,7 +369,7 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
       });
       client.end(body);
       await observed(started.promise, 'started');
-      if (scenario !== 'success') {
+      if (!succeeds) {
         intentionalDestroy = true;
         mark('client-destroy-requested');
         client.destroy();
@@ -336,7 +377,7 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
       }
       settle.resolve();
       await observed(settled.promise, 'settled');
-      if (scenario === 'success') {
+      if (succeeds) {
         const response = await observed(success.promise, 'success');
         assert.equal(response.status, 200);
         assert.equal(JSON.parse(response.body).session_id, ownedSessionId);
@@ -344,15 +385,18 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
       }
       // A disconnected allocation must reach its exact close; wait for that
       // observation within the fixture bound instead of one event-loop turn.
-      if (scenario !== 'success' && scenario !== 'init-error')
+      if (!succeeds && !existing && scenario !== 'init-error')
         await observed(closeObserved.promise, 'closeObserved');
       // Let the real async route consume the settled preparation.
       await new Promise<void>((resolve) => setImmediate(resolve));
       assert(responseClosed, 'native response close was not observed');
       assert.equal(sessions.get('foreign-session'), 'ACTIVE');
-      if (scenario === 'success' || scenario === 'init-error') {
-        assert.deepEqual(closed, [], 'successful acknowledgment was spuriously cleaned up');
-        assert.equal(sessions.get(ownedSessionId), scenario === 'success' ? 'ACTIVE' : undefined);
+      if (succeeds || existing || scenario === 'init-error') {
+        assert.deepEqual(closed, [], 'an acknowledged or existing browser was spuriously closed');
+        assert.equal(
+          sessions.get(ownedSessionId),
+          scenario === 'init-error' ? undefined : 'ACTIVE'
+        );
       } else {
         assert.deepEqual(
           closed,
@@ -367,6 +411,7 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
       console.log(`PASS browser-session init ${scenario}: exact owner, foreign unchanged`);
     }
   } finally {
+    removeRequestObserver();
     settlePending?.();
     await new Promise<void>((resolve) => setImmediate(resolve));
     server.closeAllConnections();

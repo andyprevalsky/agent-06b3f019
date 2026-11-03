@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "private/whm-e9afcffd/run16-retirement-v3-controls-20261014.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "5464d7f420135a70def9be27598ede90b9e3ff719e1b98d82942e05a2f64a895",
+  "gzip_sha256": "1c3808907bfd7ce678c4c0d523096f196cbcbc95206a62b727550e4cfb9f4b7f",
+  "stored_bytes": 92952,
+  "frames": 1,
+  "files": 40,
+  "original_bytes": 329749,
+  "manifest_sha256": "48a41bbf7dbbe6deb44f014f676cc79a578e5c4b44affd0f7aa6c8158a9ea26c",
+  "full_readback_verified": true
+}

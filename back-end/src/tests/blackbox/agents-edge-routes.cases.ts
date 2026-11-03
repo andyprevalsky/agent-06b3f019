@@ -1,3 +1,4 @@
+import { deepStrictEqual } from 'node:assert';
 import {
   BASE_URL,
   API_KEY,
@@ -82,7 +83,13 @@ test('POST / — with response_schema parameter', async () => {
         maxItems: 2,
         description: 'Rows with label and count',
         properties: [
-          { name: 'label', type: 'str', minLength: 2, maxLength: 40 },
+          {
+            name: 'label',
+            type: 'str',
+            minLength: 2,
+            maxLength: 40,
+            description: 'Preserve the submitted row label.\nRésumé ∑.',
+          },
           { name: 'count', type: 'int', required: false },
           { name: 'asset', type: 'file_pointer' },
           { name: 'remote_asset', type: 'session_file_pointer' },
@@ -117,6 +124,9 @@ test('POST / — with response_schema parameter', async () => {
   assertStatus(detail.status, 200, detail.data);
   const detailBody = assertSchema(GetAgentResponse, detail.data, 'response_schema detail');
   assert(detailBody.agent.response_schema !== null, 'response_schema should be persisted');
+  deepStrictEqual(detailBody.agent.response_schema, schema);
+  const stored = await prisma.agent.findUniqueOrThrow({ where: { id: body.agent_id } });
+  deepStrictEqual(stored.responseSchema, schema);
   const storedFields = (detailBody.agent.response_schema as { fields: Record<string, unknown>[] })
     .fields;
   assert(
@@ -130,6 +140,28 @@ test('POST / — with response_schema parameter', async () => {
       (storedFields[4].properties as Record<string, unknown>[])[1].required === false &&
       (storedFields[4].properties as Record<string, unknown>[])[4].nullable === true,
     'response_schema bounds, optional flags, and legacy nullable flags should round-trip through the API'
+  );
+
+  const updatedSchema = structuredClone(schema);
+  updatedSchema.fields[0].description = 'Updated caller criteria.\nNo inferred replacement.';
+  const update = await request(`${BASE_URL}/api/agents/${body.agent_id}`, {
+    method: 'PATCH',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({ response_schema: updatedSchema }),
+  });
+  assertStatus(update.status, 200, update.data);
+  const afterUpdate = await request(`${BASE_URL}/api/agents/${body.agent_id}`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(afterUpdate.status, 200, afterUpdate.data);
+  deepStrictEqual(
+    assertSchema(GetAgentResponse, afterUpdate.data, 'updated response_schema detail').agent
+      .response_schema,
+    updatedSchema
+  );
+  deepStrictEqual(
+    (await prisma.agent.findUniqueOrThrow({ where: { id: body.agent_id } })).responseSchema,
+    updatedSchema
   );
 
   await deleteTestAgent(body.agent_id, session.user.id);

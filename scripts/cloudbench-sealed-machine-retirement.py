@@ -157,7 +157,8 @@ def binding(registry, machine, app, *, completed_original=False, native_config=N
     assert services["status"] == "stopped" and type(count) is int and 1 <= count <= 1024
     cleanup_name = f"cloudbench-stack-cleanup-{token}.status"
     expected = {"services.json", "run.json", "stack.log", cleanup_name, "logs/backend.log", "logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
-    assert set(manifest["files"]) == expected
+    # The served WMH log (simulated runs) and guest diagnostics are optional.
+    assert set(manifest["files"]) - {"wmh-serve-log.txt", "guest-diagnostics.jsonl"} == expected
     cleanup = fields(root / cleanup_name)
     assert cleanup["state"] == "clean" and cleanup["token"] == token
     total = 0

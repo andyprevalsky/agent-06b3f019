@@ -134,14 +134,16 @@ STRUCTURAL_GATE = "scripts/tests/agents-structural.test.sh"
 def test_every_structural_suite_runs_in_test_sh_and_deploy():
     """Every structural suite runs wherever the agents structural gate runs.
 
-    `/deploy` Step 4s and both scripts/test.sh paths (serial and background)
-    run the one gate script, and the gate must run every suite file: a suite
-    named by hand in only some of those places silently never runs there.
+    `/deploy` Step 4s and every scripts/test.sh "Agents Structural" suite run
+    the one gate script, and the gate must run every suite file: a suite named
+    by hand in only some of those places silently never runs there.
     """
     repo_root = AGENTS_ROOT.parent
     test_sh = (repo_root / "scripts" / "test.sh").read_text()
-    assert test_sh.count(f"bash {STRUCTURAL_GATE}") >= 2, (
-        f'both the run_suite and bg_suite "Agents Structural" lines of scripts/test.sh must run {STRUCTURAL_GATE}'
+    structural_lines = [line for line in test_sh.splitlines() if '"Agents Structural"' in line]
+    assert structural_lines, 'scripts/test.sh must register an "Agents Structural" suite'
+    assert all(f"bash {STRUCTURAL_GATE}" in line for line in structural_lines), (
+        f'every "Agents Structural" line of scripts/test.sh must run {STRUCTURAL_GATE}: {structural_lines}'
     )
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -162,6 +164,26 @@ def test_every_structural_suite_runs_in_test_sh_and_deploy():
     assert sorted(ran) == expected, f"{STRUCTURAL_GATE} ran {ran}, expected every suite {expected}"
 
 
+def missing_test_sh_suite_paths(test_sh: str, repo_root: Path) -> list[str]:
+    """scripts/tests paths named by run_suite/bg_suite lines that do not exist."""
+    import re
+
+    lines = [line for line in test_sh.splitlines() if re.match(r"\s*(run_suite|bg_suite) ", line)]
+    paths = {m for line in lines for m in re.findall(r"scripts/tests/[A-Za-z0-9_./-]+\.(?:py|sh|ts|js|mjs)\b", line)}
+    return sorted(path for path in paths if not (repo_root / path).is_file())
+
+
+def test_every_test_sh_suite_path_exists():
+    """A run_suite naming a missing file fails every run instead of testing anything."""
+    repo_root = AGENTS_ROOT.parent
+    test_sh = (repo_root / "scripts" / "test.sh").read_text()
+    assert missing_test_sh_suite_paths('  run_suite "X" python3 scripts/tests/absent-fixture.test.py\n', repo_root) == [
+        "scripts/tests/absent-fixture.test.py"
+    ]
+    missing = missing_test_sh_suite_paths(test_sh, repo_root)
+    assert not missing, f"scripts/test.sh registers missing suite files: {missing}"
+
+
 async def run_all_tests():
     print("structural-test-registration tests:")
     r = BlackboxResult()
@@ -170,6 +192,7 @@ async def run_all_tests():
     r.record(
         "every_structural_suite_runs_in_test_sh_and_deploy", test_every_structural_suite_runs_in_test_sh_and_deploy
     )
+    r.record("every_test_sh_suite_path_exists", test_every_test_sh_suite_path_exists)
     return r.all_passed
 
 

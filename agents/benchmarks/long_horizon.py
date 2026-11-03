@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -41,11 +42,20 @@ from benchmarks.auth_test_site import (
     validate_outcome_check as validate_auth_test_site_outcome_check,
 )
 from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES
+from benchmarks.tree_feedback_routing import validate_mid_run_feedback
 
 CATALOG_VERSION = "0.1"
-EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge", "polar"}
-RUNTIME_EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge", "polar"}
+EVALUATION_METHODS = {
+    "static_check",
+    "single_turn_llm_judge",
+    "agentic_llm_judge",
+    "polar",
+    "code_bench_screenshot_judge",
+}
+RUNTIME_EVALUATION_METHODS = set(EVALUATION_METHODS)
 RUNTIME_STATIC_CHECK_TYPES = {
+    "process_trace",
+    "kill_agent_subtree",
     "lantern_people_trace",
     "agent_status",
     "approval_request_count",
@@ -55,6 +65,7 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "browser_agent_session_count",
     "completion_sms_event",
     "completion_summary_length",
+    "completion_structured_output_schema",
     "completion_summary_file_outputs",
     "response_schema_has_file_pointer",
     "first_level_gp_count",
@@ -62,6 +73,7 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "first_level_gp_july_trajectories",
     "fully_cached_agent",
     "general_purpose_explore_spawn_limit",
+    "explore_spawn_count",
     "google_oauth_demo_trace",
     "zero_live_spend",
     "no_nested_general_purpose",
@@ -72,6 +84,14 @@ RUNTIME_STATIC_CHECK_TYPES = {
     AUTH_TEST_SITE_OUTCOME_CHECK,
     "root_deliverable_markers",
     "tree_agent_status",
+    # tree-feedback-routing — implemented in benchmarks/tree_feedback_routing.py.
+    "mid_run_feedback_active_layers",
+    "agent_message_routed_to_subtree",
+    "agent_message_not_routed_to_subtree",
+    "structured_output_signature",
+    "list_agents_listed",
+    "mid_run_feedback_background_task_active",
+    "background_task_message_routed",
     "expected_gate",
     "expected_payment_receipt",
     "attention_kind_sequence",
@@ -81,6 +101,12 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "no_tool_failures",
     "phone_call_parked_on_hold",
     "claude_code_session_output",
+    # Agent Display — implemented in benchmarks/display_check.py.
+    "display_media_shown",
+    "display_artifact_figures",
+    "final_answer_figures",
+    # code-bench fixtures: run hidden tests on the returned repo (benchmarks/code_bench.py).
+    "code_bench_hidden_tests",
     "explore_research_not_reject_loop",
     "explore_completion_summary",
     "google_oauth_demo_trace",
@@ -91,6 +117,7 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "sms_no_repeated_outbound",
     "sms_no_unrequested_spend",
     "sms_agents_started",
+    "sms_agent_goal_contains",
     "sms_completion_accepted",
     "sms_lifecycle_announced",
     "sms_outbound_budget",
@@ -248,8 +275,16 @@ def _validate_evaluator(evaluator: dict[str, Any], item_id: str, index: int) -> 
             check_type = check.get("type")
             if not isinstance(check_type, str) or not check_type.strip():
                 raise ValueError(f"{item_id}: evaluators[{index}].checks[{check_index}].type must be a string")
-    if method in {"single_turn_llm_judge", "agentic_llm_judge"} and not evaluator.get("judge_prompt"):
+    if method in {"single_turn_llm_judge", "agentic_llm_judge", "code_bench_screenshot_judge"} and not evaluator.get(
+        "judge_prompt"
+    ):
         raise ValueError(f"{item_id}: LLM judges must include judge_prompt")
+    if method == "code_bench_screenshot_judge" and not evaluator.get("fixture"):
+        raise ValueError(f"{item_id}: code_bench_screenshot_judge evaluators must name their fixture")
+    if method == "static_check":
+        for check in evaluator.get("checks") or []:
+            if isinstance(check, dict) and check.get("type") == "code_bench_hidden_tests" and not check.get("fixture"):
+                raise ValueError(f"{item_id}: code_bench_hidden_tests checks must name their fixture")
     if method == "polar":
         # Odysseys-faithful judge: rubrics[] preferred; criteria-only allowed as
         # a synthesized fallback (BU Bench). Fixed system prompt lives in
@@ -285,6 +320,32 @@ def _validate_evaluators(evaluators: list[Any], item_id: str) -> list[dict[str, 
     return parsed
 
 
+def validate_wmh_initial_state(value: Any, item_id: str) -> dict[str, Any]:
+    """Validate the benchmark-facing portion of upstream WHM's EnvState."""
+    if not isinstance(value, dict) or set(value) != {"structured", "scratchpad"}:
+        raise ValueError(f"{item_id}: wmh_initial_state must contain structured and scratchpad")
+    structured = value["structured"]
+    if not isinstance(structured, dict) or not isinstance(structured.get("schema"), str):
+        raise ValueError(f"{item_id}: wmh_initial_state.structured requires a schema string")
+    if not structured["schema"].strip() or "root_agent_id" in structured or "root_goal" in structured:
+        raise ValueError(f"{item_id}: wmh_initial_state must have a schema and omit runtime root fields")
+    if not isinstance(value["scratchpad"], str):
+        raise ValueError(f"{item_id}: wmh_initial_state.scratchpad must be a string")
+    # The world clock starts here, so every seeded world pins an ISO UTC date.
+    as_of = structured.get("as_of_utc")
+    try:
+        pinned = datetime.fromisoformat(as_of.replace("Z", "+00:00")) if isinstance(as_of, str) else None
+    except ValueError:
+        pinned = None
+    if pinned is None or pinned.utcoffset() is None:
+        raise ValueError(f"{item_id}: wmh_initial_state.structured.as_of_utc must pin an ISO UTC start date")
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{item_id}: wmh_initial_state must contain finite JSON values") from exc
+    return value
+
+
 def _validate_auth_test_site_contract(raw: dict[str, Any], item_id: str) -> None:
     """A hosted-site task must send the agent to its site and judge the site's own record."""
     scenario = declared_auth_test_site_scenario(raw.get("environment"))
@@ -315,6 +376,9 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
     Base BenchmarkTask fields are enforced by the dataclass loader in
     benchmark_tasks.py; this validates the unified-catalog extensions.
     """
+    from benchmarks.process_bench import validate_task_process
+
+    validate_task_process(raw)
     item_id = _require_non_empty_string(raw, "name", "<task>")
     status = raw.get("status", "ready")
     if status not in TASK_STATUSES:
@@ -383,6 +447,11 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
     world_model_mode = raw.get("world_model_mode")
     if world_model_mode is not None and world_model_mode not in WORLD_MODEL_MODES:
         raise ValueError(f"{item_id}: world_model_mode must be one of {sorted(WORLD_MODEL_MODES)}")
+    wmh_initial_state = raw.get("wmh_initial_state")
+    if wmh_initial_state is not None:
+        validate_wmh_initial_state(wmh_initial_state, item_id)
+        if world_model_mode != "simulate":
+            raise ValueError(f"{item_id}: wmh_initial_state requires world_model_mode=simulate")
     description = raw.get("description")
     if description is not None and (not isinstance(description, str) or not description.strip()):
         raise ValueError(f"{item_id}: description must be a non-empty string when present")
@@ -408,6 +477,7 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
             raise ValueError(
                 f"{item_id}: incomplete synthetic evals must declare the fixtures/services they are missing"
             )
+    validate_mid_run_feedback(raw.get("mid_run_feedback"), item_id)
     evaluators = raw.get("evaluators")
     if evaluators:
         _validate_evaluators(evaluators, item_id)

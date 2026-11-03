@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "trace-archive/private/whm/e9afcffd-7ba9-4bfd-8703-d770952fe1c3/run15-precutoff-immutable-evidence-20261013.private.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "62155da0b2846744878eac764a4959398261f0b253a1418e782169e8459ade6f",
+  "gzip_sha256": "2506d5be55a1e3a273d03e13bce1c0e6e31e3ca240cf8241bc3eb6313eb53a33",
+  "stored_bytes": 834299521,
+  "frames": 100,
+  "files": 19556,
+  "original_bytes": 5236036228,
+  "manifest_sha256": "9209ccf9d085b8493e370253aee43307ccee95bc0e83c0f9c6889455d7ac4284",
+  "full_readback_verified": true
+}

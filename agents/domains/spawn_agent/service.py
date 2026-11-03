@@ -8,14 +8,16 @@ import hashlib
 import io
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import structlog
 import structlog.contextvars
 from temporalio import activity
+from temporalio.common import RetryPolicy
 
 from domains.spawn_agent.config import (
+    EXPLORE_COMPLETION_DEFERRED_FOR_MESSAGE,
     EXPLORE_MESSAGE_TRUNCATE_LEN,
     EXPLORE_WINDDOWN_WINDOW,
     explore_limits_for_depth,
@@ -36,9 +38,15 @@ from domains.spawn_agent.repo import (
 )
 from domains.spawn_agent.types import VALID_AGENT_TYPES
 from helpers.activity_heartbeat import heartbeat_resume_details
+from helpers.agent_addressing import task_name_error
+from helpers.attachment_context import AttachmentContextLimitError
+from helpers.attachments import FilePointer
+from helpers.model_info import get_model_context_window
+from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS
 from helpers.tracing import span, traced
 from helpers.workflow_generation import WorkflowGenerationSealed
 from tools.base import MessageStatus
+from utils.grep_result_budget import fit_grep_result_to_budget
 from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
 from utils.tool_schemas import get_explore_agent_tools
 
@@ -47,6 +55,26 @@ logger = structlog.get_logger()
 # Return gathered tool evidence just before the depth's activity timeout.
 # Leave room to drain pending FE posts and persist the final explore chip.
 LIVE_EXPLORE_DRAIN_SLACK_SECONDS = 15
+# Background FE progress posts are best-effort UI writes, treated like Claude
+# Code's event uploader (claude-code-src/src/cli/transports/HybridTransport.ts):
+# each attempt is bounded at 15 s (:13-15), retried with a 500 ms delay
+# doubling to an 8 s cap (:86-87), and dropped once its attempts run out
+# (SerialBatchEventUploader.ts:172-177) rather than retried forever. Three
+# attempts is the existing in-activity default (loop/activity_helper.py:76).
+# The attempt bound wraps the whole post, including httpx pool/connection-lock
+# acquisition, which httpx's own timeouts do not cover (RCA P9: a leaked lock
+# pinned the explore activity and the worker shutdown drain). A drain waits at
+# most one post's full schedule, then drops what is left; delivery is not
+# guaranteed under a degraded backend (HybridTransport.ts:16-17).
+EXPLORE_FE_POST_ATTEMPT_TIMEOUT_S = 15.0
+EXPLORE_FE_POST_RETRY = RetryPolicy(
+    initial_interval=timedelta(milliseconds=500),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=8),
+    maximum_attempts=3,
+)
+EXPLORE_FE_POST_BUDGET_S = 3 * EXPLORE_FE_POST_ATTEMPT_TIMEOUT_S + 0.5 + 1.0
+EXPLORE_FE_DRAIN_TIMEOUT_S = EXPLORE_FE_POST_BUDGET_S
 
 COMMON_CSV_HEADER_NAMES = {
     "address",
@@ -143,9 +171,15 @@ def _render_explore_tool_result(tool_name: str, value: Any) -> str:
                 details["url"] = value["url"]
             detail_text = json.dumps(details, ensure_ascii=False, default=str) if details else ""
             return "\n\n".join(part for part in (source_text, body.strip(), detail_text) if part)
-    if isinstance(value, str) and tool_name in {"web_search", "web_fetch"}:
+    if isinstance(value, str) and tool_name in {"web_search", "web_fetch", "inspect_code", "list_agents"}:
         return value
-    return json.dumps(value, ensure_ascii=tool_name not in {"web_search", "web_fetch"}, default=str)
+
+    def render(item: Any) -> str:
+        return json.dumps(item, ensure_ascii=tool_name not in {"web_search", "web_fetch"}, default=str)
+
+    if tool_name == "grep" and isinstance(value, dict):
+        value = fit_grep_result_to_budget(value, TOOL_RESULT_HARD_CAP_CHARS, render)
+    return render(value)
 
 
 def _fallback_trace_text(item: Any) -> str:
@@ -209,7 +243,7 @@ def compile_explore_wrap_up(
     final_response: Any = "",
     tool_call_results: Optional[List[Any]] = None,
     *,
-    budget: int = EXPLORE_FALLBACK_PAYLOAD_BUDGET,
+    budget: Optional[int] = EXPLORE_FALLBACK_PAYLOAD_BUDGET,
 ) -> str:
     """Build the user-facing explore chip from a completion or tool evidence.
 
@@ -217,6 +251,8 @@ def compile_explore_wrap_up(
     as empty so the parent chip gets synthesized research, not Thinking... /
     Research started. Used by the explore activity return path and by Fast
     Mode drain when the activity times out after tools already ran.
+    ``budget=None`` keeps complete evidence for retention; callers must still
+    bound the presentation before publishing it to the model.
     """
     text = str(final_response or "").strip()
     lowered = text.lower()
@@ -225,16 +261,13 @@ def compile_explore_wrap_up(
     if text:
         return text
     parts = [_fallback_trace_text(item) for item in tool_call_results or []]
-    return _bounded_explore_parts([part for part in parts if part], budget)
+    parts = [part for part in parts if part]
+    return "\n\n".join(parts) if budget is None else _bounded_explore_parts(parts, budget)
 
 
 def compile_explore_grep_evidence(tool_call_results: List[Any], *, budget: int = 6_000) -> str:
     """Keep bounded, original grep results beside an explore agent's summary."""
-    grep_results = [
-        str(item).strip()
-        for item in tool_call_results
-        if str(item).lstrip().startswith("[grep]")
-    ]
+    grep_results = [str(item).strip() for item in tool_call_results if str(item).lstrip().startswith("[grep]")]
     return _bounded_explore_parts(list(dict.fromkeys(grep_results))[-3:], budget)
 
 
@@ -247,6 +280,12 @@ _SOURCE_GOAL_TERMS = {
     "transactions": ("transaction", "transactions", "plaid", "bank"),
     "documents": ("document", "documents", "file", "files", "notes"),
 }
+
+
+# Tree navigation, not research: a successful listing never satisfies the
+# completion guard, whose rejection names the evidence tools. The listing still
+# stays a readable trace in tool_call_results (wait_for's judge reads them).
+_NON_EVIDENCE_EXPLORE_TOOLS = frozenset({"list_agents"})
 
 
 def _has_usable_tool_evidence(value: Any) -> bool:
@@ -368,6 +407,14 @@ def validate_spawn_params(tool_call: dict) -> None:
             "Explore agents return free-form research summaries."
         )
 
+    # task_name is required of the model by the SpawnAgentTool schema (validated
+    # before dispatch); internal callers (DAG, for_each items) fill it. Here a
+    # supplied name must be a valid slug.
+    if tool_call.get("task_name") is not None:
+        task_name_problem = task_name_error(tool_call.get("task_name"))
+        if task_name_problem:
+            raise ValueError(task_name_problem)
+
 
 def resolve_start_phase(tool_call: Dict[str, Any]) -> str:
     """Resolve public start_phase names to internal phase names."""
@@ -448,15 +495,31 @@ def build_for_each_goal(base_goal: str, item: Any) -> str:
     insertion-order dumps diverge from the Jul 2026 OAi-demo namespaces and from
     any later replay that re-materializes items from cached JSON.
     """
-    item_text = (
-        json.dumps(item, ensure_ascii=True, sort_keys=True) if isinstance(item, dict) else str(item)
-    )
+    item_text = json.dumps(item, ensure_ascii=True, sort_keys=True) if isinstance(item, dict) else str(item)
     return f"{base_goal}\n\nUse this row context for the task below.\nRow item:\n{item_text}"
 
 
 # =============================================================================
 # EXPLORE AGENT ACTIVITY
 # =============================================================================
+
+
+# A message can only target an explore task after its spawn posted the address,
+# which precedes the activity's schedule time; the margin absorbs clock skew.
+EXPLORE_INBOX_SINCE_MARGIN_SECONDS = 60
+
+
+def _explore_inbox_since_floor() -> Optional[str]:
+    """Initial inbox cursor: the activity's schedule time minus a margin (None outside an activity)."""
+    try:
+        scheduled = activity.info().scheduled_time
+    except Exception:
+        return None
+    if not isinstance(scheduled, datetime):
+        return None
+    if scheduled.tzinfo is None:
+        scheduled = scheduled.replace(tzinfo=timezone.utc)
+    return (scheduled - timedelta(seconds=EXPLORE_INBOX_SINCE_MARGIN_SECONDS)).isoformat()
 
 
 @activity.defn
@@ -480,22 +543,30 @@ async def spawn_explore_agent_activity(
     world_model_mode: str = "real",
     local_data_summary: str = "",
     oai_demo: Optional[bool] = None,
+    inbox_address: Optional[str] = None,
+    task_name: Optional[str] = None,
+    attachment_pointers: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Run the explore agent loop inside a Temporal activity.
 
     Uses run_agent with is_inside_temporal_activity=True and read-only tools
-    (web_search, web_fetch, grep, attempt_completion_with_result).
+    (web_search, web_fetch, grep, list_agents, attempt_completion_with_result).
+    ``task_name`` names this explore task under its owner (``<owner path>/<task_name>``,
+    the list_agents YOU ARE HERE node).
 
     Returns:
         Dict with status, accumulated_usage, tokens_in, tokens_out
     """
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
 
+    from helpers.agent_inbox import AgentInbox, agent_message_metadata, format_agent_message
     from loop.activity_helper import call_temporal_activity_from_activity
     from loop.run_agent import run_agent
-    from providers.fast_cache.client import resolve_agent_fast_mode
+    from providers.demo_cache.client import resolve_agent_fast_mode
     from tools.api_request import ApiRequestManager
     from tools.grep import GrepManager
+    from tools.inspect_code import InspectCodeManager
+    from tools.list_agents import explore_list_agents
     from tools.people_search import PeopleSearchManager
     from tools.web_fetch import WebFetchManager
     from tools.web_search import WebSearchManager
@@ -524,6 +595,18 @@ async def spawn_explore_agent_activity(
     # timeout using workflow_instance.fast_mode_cache_enabled. Re-resolving here
     # from resolve_agent_fast_mode can bump iterations to deep while the caller
     # still holds the quick timeout.
+
+    # Reject unreadable required sources before any background work starts:
+    # nothing below this point may leak if the activity fails here.
+    text_attachment_pointers: List[Dict[str, Any]] = []
+    for pointer in attachment_pointers or []:
+        fp = FilePointer.from_dict(pointer)
+        if fp.is_text():
+            text_attachment_pointers.append(pointer)
+        else:
+            raise AttachmentContextLimitError(
+                f"Explore cannot access required nontext attachment: {fp.original_filename}"
+            )
 
     activity.heartbeat(f"Starting explore agent: {goal[:100]}...")
     _heartbeat_stop = asyncio.Event()
@@ -554,8 +637,9 @@ async def spawn_explore_agent_activity(
     resume_details: Dict[str, Any] = {}
 
     def _heartbeat_payload() -> Dict[str, Any]:
-        compiled = compile_explore_wrap_up("", tool_call_results)
-        resume_details.update(result=compiled, tool_call_results=list(tool_call_results[-8:]))
+        # Do not hard-cut a speculative fallback on every heartbeat. The raw
+        # evidence travels to the parent, which can retain it in its root scope.
+        resume_details.update(result="", evidence_fallback=True, tool_call_results=list(tool_call_results[-8:]))
         return dict(resume_details)
 
     async def _heartbeat_loop() -> None:
@@ -630,7 +714,7 @@ async def spawn_explore_agent_activity(
             if previous is not None:
                 # Order only; a failed predecessor must not cancel its successor.
                 await asyncio.gather(previous, return_exceptions=True)
-            return await coro_factory()
+            return await asyncio.wait_for(coro_factory(), timeout=EXPLORE_FE_POST_BUDGET_S)
 
         task = asyncio.create_task(_ordered())
         if chain_key:
@@ -643,6 +727,8 @@ async def spawn_explore_agent_activity(
         post_agent_message is dispatched in the background (create_task) so the tool
         call returns immediately; every other activity is awaited as before.
         """
+        if activity_fn.__name__ == "summarize_and_filter_links" and args:
+            args = [*args, task_id or ""]
         if activity_fn.__name__ == "post_agent_message" and args and len(args) >= 4:
             metadata = args[3]
             chain_key: Optional[str] = None
@@ -657,7 +743,15 @@ async def spawn_explore_agent_activity(
                 chain_key = str(chain_id) if chain_id else None
             _dispatch_fe_post(
                 chain_key,
-                lambda: call_temporal_activity_from_activity(activity_fn, args=args, **kwargs),
+                lambda: call_temporal_activity_from_activity(
+                    activity_fn,
+                    args=args,
+                    **{
+                        **kwargs,
+                        "start_to_close_timeout": timedelta(seconds=EXPLORE_FE_POST_ATTEMPT_TIMEOUT_S),
+                        "retry_policy": EXPLORE_FE_POST_RETRY,
+                    },
+                ),
             )
             return None
         return await call_temporal_activity_from_activity(activity_fn, args=args, **kwargs)
@@ -677,6 +771,17 @@ async def spawn_explore_agent_activity(
                 task_id=task_id,
                 pending_count=len(pending),
             ):
+                _, overdue = await asyncio.wait(pending, timeout=EXPLORE_FE_DRAIN_TIMEOUT_S)
+                if overdue:
+                    logger.warning(
+                        "Explore FE posts dropped after drain deadline",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        dropped=len(overdue),
+                        deadline_s=EXPLORE_FE_DRAIN_TIMEOUT_S,
+                    )
+                    for task in overdue:
+                        task.cancel()
                 results = await asyncio.gather(*pending, return_exceptions=True)
             # Only NOW drop the chain tails, and only those still pointing at a
             # task we just drained. Clearing them before the gather would publish
@@ -721,6 +826,30 @@ async def spawn_explore_agent_activity(
     async def explore_system_prompt():
         return system_prompt
 
+    # Agent-to-agent messages addressed to this explore task (the spawning tool
+    # call id). The parent owns the inbox rows; explore shares its agent_id.
+    # Read piggybacks on the per-step progress post (helpers/agent_inbox.py);
+    # the cursor starts at the activity's schedule time so the backend read
+    # stays a bounded (agentId, timestamp > since) range.
+    agent_inbox = AgentInbox.create(agent_id, inbox_address, {"since": _explore_inbox_since_floor()})
+
+    async def explore_poll_inbox() -> List[Dict[str, Any]]:
+        if agent_inbox is None:
+            return []
+        rows: List[Dict[str, Any]] = []
+        for message in await agent_inbox.next_step_messages():
+            # Stored like a backend agent-message row: raw payload + metadata;
+            # build_llm_messages renders it as an inter-agent (assistant) message.
+            rows.append(
+                {
+                    "role": "USER",
+                    "text": str(message.get("text") or ""),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "metadata": {**agent_message_metadata(message), "inboxAddress": inbox_address},
+                }
+            )
+        return rows
+
     async def explore_verifier_prompt():
         return "Verify the research is complete and the summary addresses the original goal."
 
@@ -731,7 +860,12 @@ async def spawn_explore_agent_activity(
 
         tool_call_dict = {"tool": tool_name, **tool_args}
 
-        if tool_name == "web_search":
+        if tool_name == "read_tool_output":
+            from tools.read_tool_output import format_read_tool_output, read_tool_output_activity
+
+            result = await read_tool_output_activity(user_id, agent_id, task_id or "", tool_args)
+            return {"success": True, "message": format_read_tool_output(result)}
+        elif tool_name == "web_search":
             manager = WebSearchManager()
             result = await manager.execute_tool(
                 execute_activity=tagged_execute_activity,
@@ -743,6 +877,7 @@ async def spawn_explore_agent_activity(
                 fast_mode_goal=_explore_fast_mode_goal,
                 fast_mode_cache_write_enabled=_explore_fast_mode_write_enabled,
                 world_model_mode=world_model_mode,
+                session_id=task_id or "",
             )
         elif tool_name == "people_search":
             manager = PeopleSearchManager()
@@ -797,14 +932,33 @@ async def spawn_explore_agent_activity(
                     if (
                         source
                         and normalized
-                        and _unavailable_source_is_required(
-                            source, goal, tool_args.get("require_source_access")
-                        )
-                        and not any(
-                            u.get("source") == source for u in unavailable_sources_collected
-                        )
+                        and _unavailable_source_is_required(source, goal, tool_args.get("require_source_access"))
+                        and not any(u.get("source") == source for u in unavailable_sources_collected)
                     ):
                         unavailable_sources_collected.append(normalized)
+        elif tool_name == "inspect_code":
+            result = await InspectCodeManager().execute_tool(
+                execute_activity=tagged_execute_activity,
+                tool_call=tool_call_dict,
+                tool_call_id=tool_call_id,
+                agent_id=agent_id,
+                user_id=user_id,
+            )
+            if result.get("error"):
+                return {"error": True, "message": str(result["error"])}
+        elif tool_name == "list_agents":
+            result = await explore_list_agents(
+                execute_activity=tagged_execute_activity,
+                tool_call=tool_call_dict,
+                tool_call_id=tool_call_id,
+                owner_agent_id=agent_id,
+                user_id=user_id,
+                explore_task_id=inbox_address or task_id,
+                explore_task_name=task_name,
+                explore_goal=goal,
+            )
+            if result.get("error"):
+                return result
         elif tool_name == "api_request":
             from utils.kill_switches import api_request_disabled
 
@@ -822,7 +976,7 @@ async def spawn_explore_agent_activity(
                 user_id=user_id,
             )
         elif tool_name in ("attempt_completion", "attempt_completion_with_result"):
-            if not attachment_texts and not has_usable_tool_evidence:
+            if not (attachment_texts or attachment_pointers) and not has_usable_tool_evidence:
                 completion_no_evidence_rejects += 1
                 # Fast Mode cold stubs replay attempt_completion_with_result
                 # forever. One reject is enough signal; accepting the next
@@ -833,9 +987,7 @@ async def spawn_explore_agent_activity(
 
                 evidence_tools = "web_search, people_search, web_fetch, or grep"
                 if not api_request_disabled():
-                    evidence_tools = (
-                        "web_search, people_search, web_fetch, grep, or api_request"
-                    )
+                    evidence_tools = "web_search, people_search, web_fetch, grep, or api_request"
                 return {
                     "error": True,
                     "message": (
@@ -843,6 +995,8 @@ async def spawn_explore_agent_activity(
                         f"Call {evidence_tools} successfully before completing."
                     ),
                 }
+            if agent_inbox is not None and await agent_inbox.unread_before_finish():
+                return {"error": True, "message": EXPLORE_COMPLETION_DEFERRED_FOR_MESSAGE}
             return {"success": True, "message": "Completion accepted"}
         else:
             return {"error": True, "message": f"Unknown tool: {tool_name}"}
@@ -858,7 +1012,7 @@ async def spawn_explore_agent_activity(
         if failure:
             return {"error": True, "message": failure}
 
-        if _has_usable_tool_evidence(actual_result):
+        if tool_name not in _NON_EVIDENCE_EXPLORE_TOOLS and _has_usable_tool_evidence(actual_result):
             has_usable_tool_evidence = True
         result_str = _render_explore_tool_result(tool_name, actual_result)
 
@@ -890,9 +1044,10 @@ async def spawn_explore_agent_activity(
         ):
             # Same chain as the tool managers' posts: both writers can target one
             # toolCallId, so both must respect that chip's ordering invariant.
-            _dispatch_fe_post(
-                tool_call_id,
-                lambda: (
+            async def _post_and_stash_inbox() -> None:
+                # Fire-and-forget like every FE post; its piggybacked inbox read
+                # is delivered at the next step.
+                pending = await asyncio.wait_for(
                     save_explore_message(
                         agent_id=agent_id,
                         title=title,
@@ -901,9 +1056,14 @@ async def spawn_explore_agent_activity(
                         task_id=task_id,
                         tool_call_id=tool_call_id,
                         tool_name=tool_name,
-                    )
-                ),
-            )
+                        inbox=agent_inbox.read_request() if agent_inbox is not None else None,
+                    ),
+                    timeout=EXPLORE_FE_POST_ATTEMPT_TIMEOUT_S,
+                )
+                if agent_inbox is not None:
+                    agent_inbox.stash(pending)
+
+            _dispatch_fe_post(tool_call_id, _post_and_stash_inbox)
         await _maybe_drain_pending_fe_posts()
 
     # Build initial context with goal + any resolved attachment content.
@@ -932,16 +1092,26 @@ async def spawn_explore_agent_activity(
     initial_user_text = f"{state_line}\n\n{goal}"
     if local_data_summary:
         initial_user_text = (
-            initial_user_text
-            + "\n\nLOCAL DATA SUMMARY (aggregate facts from the user's connected data; "
+            initial_user_text + "\n\nLOCAL DATA SUMMARY (aggregate facts from the user's connected data; "
             "use these directly and use grep only for missing message-level details). "
             "A thread label is a valid contact identifier. If it contains only a phone number, "
             "report that identifier exactly; do not guess or use unrelated web, email, or document "
-            "searches to invent a person's identity. Search only sources relevant to the goal:\n"
-            + local_data_summary
+            "searches to invent a person's identity. Search only sources relevant to the goal:\n" + local_data_summary
         )
-    if attachment_texts:
-        initial_user_text = initial_user_text + "\n\n" + "\n\n".join(attachment_texts)
+    # Legacy activity payloads already contain resolved strings. New payloads
+    # keep text sources as pointers until admission against the complete request.
+    # Explore remains text-only; image/PDF/binary files retain metadata labels.
+    metadata_texts = list(attachment_texts or [])
+    if metadata_texts:
+        initial_user_text += "\n\n" + "\n\n".join(metadata_texts)
+    initial_user_message: Dict[str, Any] = {"role": "USER", "text": initial_user_text}
+    if text_attachment_pointers:
+        initial_user_message["metadata"] = {"attachments": text_attachment_pointers}
+
+    async def completion_handoff() -> Optional[str]:
+        if agent_inbox is not None and await agent_inbox.settle_for_handoff():
+            return EXPLORE_COMPLETION_DEFERRED_FOR_MESSAGE
+        return None
 
     # Run the agent loop. Wrap in try/finally so backgrounded FE posts are always
     # drained — if run_agent raises, the already-scheduled _pending_fe_posts tasks
@@ -951,6 +1121,7 @@ async def spawn_explore_agent_activity(
     result: Dict[str, Any] = {}
     try:
         with heartbeat_resume_details(resume_details):
+            selected_context_window = await get_model_context_window(model)
             run_agent_coro = run_agent(
                 agent_id=agent_id,
                 user_id=user_id,
@@ -958,14 +1129,17 @@ async def spawn_explore_agent_activity(
                 verifier_prompt_generator=explore_verifier_prompt,
                 model=model,
                 tools=get_explore_agent_tools(),
-                initial_context=[{"role": "USER", "text": initial_user_text}],
+                initial_context=[initial_user_message],
                 task_id=task_id,
                 is_inside_temporal_activity=True,
                 execute_tool=explore_execute_tool,
                 post_message=explore_post_message,
+                poll_inbox=explore_poll_inbox if agent_inbox is not None else None,
+                completion_handoff=completion_handoff if agent_inbox is not None else None,
                 max_iterations=resolved_max_iterations,
                 winddown_window=EXPLORE_WINDDOWN_WINDOW,
-                max_context_tokens=max_context_tokens,
+                max_context_tokens=min(max_context_tokens, selected_context_window),
+                require_inline_attachments=True,
                 skip_verification=True,
                 skip_blueprint_query=True,
                 skip_status_updates=True,
@@ -976,6 +1150,7 @@ async def spawn_explore_agent_activity(
                 get_gpt_token_pool_id=(lambda: gpt_token_pool_id),
                 on_tokens=on_tokens,
                 call_site_override="explore_agent",
+                jev_goal=goal,
                 cache_sequence_id=explore_cache_sequence_id,
                 # Fast Mode: key this explore agent by ITS OWN goal (not the shared parent
                 # agent_id), so the N parallel explore agents under one sub-agent don't all
@@ -991,8 +1166,7 @@ async def spawn_explore_agent_activity(
                     # The parent waits this depth's whole activity timeout
                     # (quick/medium 600s, deep 1800s); wrap up just inside it.
                     async with asyncio.timeout(
-                        explore_limits_for_depth(effective_depth)[1].total_seconds()
-                        - LIVE_EXPLORE_DRAIN_SLACK_SECONDS
+                        explore_limits_for_depth(effective_depth)[1].total_seconds() - LIVE_EXPLORE_DRAIN_SLACK_SECONDS
                     ) as deadline:
                         result = await run_agent_coro
                 except asyncio.TimeoutError:
@@ -1016,9 +1190,7 @@ async def spawn_explore_agent_activity(
         # shielded posts must finish before a final drain or activity return.
         drain_error: BaseException | None = None
         if _inflight_fe_drains:
-            results = await asyncio.shield(
-                asyncio.gather(*_inflight_fe_drains, return_exceptions=True)
-            )
+            results = await asyncio.shield(asyncio.gather(*_inflight_fe_drains, return_exceptions=True))
             drain_error = next((item for item in results if isinstance(item, BaseException)), None)
         # Flush posts queued after the last threshold drain as well.
         try:
@@ -1031,10 +1203,38 @@ async def spawn_explore_agent_activity(
     # but leaves result empty, the parent receives no evidence. Synthesize a
     # payload from accumulated tool results so the parent always has grounded data
     # to act on instead of hallucinating or re-spawning sub-agents.
-    final_response = compile_explore_wrap_up(
-        result.get("final_response", "") or "",
-        tool_call_results,
-    )
+    final_response = compile_explore_wrap_up(result.get("final_response", "") or "", [])
+    evidence_fallback = not bool(final_response)
+    if evidence_fallback:
+        from helpers.tool_output import preview_tool_text
+
+        complete_evidence = compile_explore_wrap_up("", tool_call_results, budget=None)
+        # Explore shares the parent's agent ID; the empty/root session is what
+        # the parent's existing read_tool_output dispatcher authorizes.
+        if len(complete_evidence) <= EXPLORE_FALLBACK_PAYLOAD_BUDGET:
+            final_response = complete_evidence
+        else:
+            readback = await preview_tool_text(
+                complete_evidence, user_id=user_id, agent_id=agent_id, session_id="", limit=512,
+            )
+            # Preserve the fair head/tail presentation and late sources. Keep
+            # the complete native preview suffix so protocol authentication can
+            # validate its source prefix when the parent re-projects it.
+            presentation = compile_explore_wrap_up(
+                "", tool_call_results, budget=EXPLORE_FALLBACK_PAYLOAD_BUDGET - len(readback) - 2,
+            )
+            final_response = f"{presentation}\n\n{readback}"
+
+    # Messages that reached this explore after its last model turn (a background
+    # read landing late) were never acknowledged; hand them to the parent with
+    # the result instead of dropping them.
+    undelivered_agent_messages = await agent_inbox.finish() if agent_inbox is not None else []
+    if undelivered_agent_messages:
+        late = "\n".join(f"- {format_agent_message(message)}" for message in undelivered_agent_messages)
+        final_response = (
+            f"{(final_response or '').rstrip()}\n\n"
+            f"Agent messages sent to this explore agent that arrived after it finished:\n{late}"
+        )
 
     # Disconnected sources are a gap notice, not a hard explore failure. Grep
     # already skipped them and the parent still raises source_connect gates;
@@ -1061,12 +1261,13 @@ async def spawn_explore_agent_activity(
     completed_without_tool_evidence = (
         result.get("status") == "completed"
         and not has_usable_tool_evidence
-        and not attachment_texts
+        and not (attachment_texts or attachment_pointers)
         and not local_data_summary
     )
     run_completed = result.get("status") == "completed" and not completed_without_tool_evidence
     result_payload = {
         "status": "completed" if run_completed else "error",
+        "evidence_fallback": evidence_fallback,
         "result": final_response,
         "summary": final_response,
         "final_response": final_response,
@@ -1077,6 +1278,7 @@ async def spawn_explore_agent_activity(
             else (None if run_completed else (result.get("message") or result.get("status")))
         ),
         "unavailable_sources": unavailable_sources_collected,
+        "undelivered_agent_messages": undelivered_agent_messages,
         "partial_structured_response": result.get("partial_structured_response"),
         "structured_response": result.get("structured_response") or result.get("partial_structured_response"),
         "tokens_in": result.get("tokens_in", 0),

@@ -11,8 +11,10 @@ export function buildAgentTrajectoryMatch(
   const toolStatus = /^(?:\*\*Goal\*\*:[\s\S]*?\n\n)?\*\*Status\*\*:[^\S\n]*(.+)/i.exec(
     row.searchText
   )?.[1];
+  const agentPath = row.agentPath;
   const heading = [
     `trace_path: ${path}`,
+    ...(agentPath !== null ? [`agent_path: ${agentPath}`] : []),
     `message_role: ${row.role}`,
     `agent_title: ${row.agentTitle !== null && row.agentTitle !== '' ? row.agentTitle : row.agentGoal}`,
     `record_kind: ${row.traceKind}`,
@@ -40,6 +42,7 @@ export function buildAgentTrajectoryMatch(
       path,
       root_agent_id: row.rootAgentId,
       agent_id: row.agentId,
+      ...(agentPath !== null ? { agent_path: agentPath } : {}),
       message_id: row.messageId,
       role: row.role,
       surface: row.surface,

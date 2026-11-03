@@ -6,7 +6,7 @@
  */
 
 import { DEFAULT_CONTEXT_WINDOW, PAUSED_STATUSES } from '../config';
-import type { Agent, AgentDetail, Message, Model, PendingApproval, PendingGate } from '../types';
+import type { Agent, AgentDetail, Message, Model, PendingGate } from '../types';
 
 // ── Context window helpers ────────────────────────────────────────────────
 
@@ -107,40 +107,7 @@ export { computeActiveBrowserPanels } from '@/lib/browserPanelLifecycle';
 
 // ── Approval derivation ──────────────────────────────────────────────────
 
-export function derivePendingApproval(messages: Message[]): PendingApproval | null {
-  const attentionByToolCallId = new Map<string, Message>();
-
-  for (const m of messages) {
-    if (!m.metadata?.isUserAttentionMessage) continue;
-    const toolCallId = m.metadata?.toolCallId;
-    if (!toolCallId) continue;
-
-    const existing = attentionByToolCallId.get(toolCallId);
-    if (!existing || new Date(m.timestamp) > new Date(existing.timestamp)) {
-      attentionByToolCallId.set(toolCallId, m);
-    }
-  }
-
-  const activeApproval = Array.from(attentionByToolCallId.values()).find(
-    (m) =>
-      m.metadata?.toolStatus === 'IN_PROGRESS' && m.metadata?.requestUserApproval?.toolApproval,
-  );
-
-  if (!activeApproval) return null;
-
-  const attentionRequestId = activeApproval.metadata?.requestUserApproval?.attentionRequestId;
-  if (!attentionRequestId) {
-    console.warn('Active approval found but missing attentionRequestId:', activeApproval.metadata);
-    return null;
-  }
-
-  return {
-    attentionRequestId,
-    question: activeApproval.text || '',
-    imageUrl: activeApproval.metadata?.imageUrl || null,
-    requestPaymentCard: activeApproval.metadata?.requestUserApproval?.requestPaymentCard,
-  };
-}
+export { derivePendingApproval } from '@/lib/pendingApproval';
 
 export function deriveHasActiveAttentionRequest(messages: Message[]): boolean {
   const attentionByToolCallId = new Map<string, Message>();

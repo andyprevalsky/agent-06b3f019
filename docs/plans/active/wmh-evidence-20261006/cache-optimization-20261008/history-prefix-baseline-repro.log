@@ -1,0 +1,36 @@
+FF...                                                                    [100%]
+=================================== FAILURES ===================================
+_________ test_native_cache_reuses_completed_batch_when_history_grows __________
+
+    def test_native_cache_reuses_completed_batch_when_history_grows():
+        history = _native_history_batch("a", "b") + _native_history_batch("c")
+        first = _native_history_cache_request(history)
+        second = _native_history_cache_request(history + _native_history_batch("d", "e"))
+        second["environment_state"]["structured"]["clock"] = 11
+        second["candidate_response"]["tool_calls"][0]["call_id"] = "different-next"
+        old = _marked_native_prefixes(first)
+        new = _marked_native_prefixes(second)
+        assert old[-1] in new
+>       assert old[-1].endswith('"content":"result c"}')
+E       assert False
+E        +  where False = <built-in method endswith of str object at 0x10ac1f870>('"content":"result c"}')
+E        +    where <built-in method endswith of str object at 0x10ac1f870> = '{"task":{"initial_context":{"company":"unchanged"},"instruction":"Inspect","task_id":"scope"'.endswith
+
+.context/wmh-cache-optimization-20261008/history_prefix_contract_test.py:64: AssertionError
+_______ test_native_cache_does_not_mark_incomplete_parallel_result_batch _______
+
+    def test_native_cache_does_not_mark_incomplete_parallel_result_batch():
+        complete = _native_history_batch("a", "b")
+        incomplete = _marked_native_prefixes(_native_history_cache_request(complete[:-1]))
+        finished = _marked_native_prefixes(_native_history_cache_request(complete))
+        assert not any('"content":"result a"' in prefix for prefix in incomplete)
+>       assert finished[-1].endswith('"content":"result b"}')
+E       assert False
+E        +  where False = <built-in method endswith of str object at 0x10e51d230>('"content":"result b"}')
+E        +    where <built-in method endswith of str object at 0x10e51d230> = '{"task":{"initial_context":{"company":"unchanged"},"instruction":"Inspect","task_id":"scope"'.endswith
+
+.context/wmh-cache-optimization-20261008/history_prefix_contract_test.py:74: AssertionError
+=========================== short test summary info ============================
+FAILED .context/wmh-cache-optimization-20261008/history_prefix_contract_test.py::test_native_cache_reuses_completed_batch_when_history_grows
+FAILED .context/wmh-cache-optimization-20261008/history_prefix_contract_test.py::test_native_cache_does_not_mark_incomplete_parallel_result_batch
+2 failed, 3 passed in 0.50s

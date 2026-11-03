@@ -48,11 +48,11 @@ fi
 # inside a bounded worker pool, then merge their parallel coverage files before
 # the focused pytest suites append their data.
 rm -f .coverage .coverage.*
-COVERAGE_BIN="$COVERAGE_BIN" "$PYTHON_BIN" scripts/run_coverage_blackbox_parallel.py
+AGENTS_BLACKBOX_DOMAINS="" COVERAGE_BIN="$COVERAGE_BIN" "$PYTHON_BIN" scripts/run_coverage_blackbox_parallel.py
 "$COVERAGE_BIN" combine
 
-if [ -d tests/fast_cache ]; then
-    "$COVERAGE_BIN" run --append -m pytest tests/fast_cache -q
+if [ -d tests/demo_cache ]; then
+    "$COVERAGE_BIN" run --append -m pytest tests/demo_cache -q
 fi
 
 if [ -d tests/unit ]; then

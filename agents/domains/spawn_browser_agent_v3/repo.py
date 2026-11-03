@@ -29,6 +29,7 @@ from helpers.workflow_generation import (
 )
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
+from utils.url_redaction import redact_url_secrets
 
 logger = structlog.get_logger()
 
@@ -178,7 +179,7 @@ async def save_browser_action_message(
             "toolStatus": status.value,
             "title": title,
             "task_id": task_id,
-            "browser_url": browser_url,
+            "browser_url": redact_url_secrets(browser_url),
             "action_type": action_type,
             "auxiliary": auxiliary or {},
         }
@@ -307,7 +308,7 @@ async def save_browser_credential_ref_message(
             "credential_ref": credential_ref,
         }
         if browser_url:
-            metadata["browser_url"] = browser_url
+            metadata["browser_url"] = redact_url_secrets(browser_url)
         if role == "TOOL":
             metadata.update(
                 {
@@ -571,8 +572,17 @@ async def resume_browser_session(
     task_id: str,
     *,
     force_fresh_profile: bool = False,
+    storage_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Resume a paused browser session by asking backend/Steel for a fresh session."""
+    """Resume a paused browser session by asking backend/Steel for a fresh session.
+
+    ``storage_state`` (cookies, origins with localStorage/IndexedDB, current_url)
+    is the worker's own capture of a LIVE single-CDP-client (Tilion) session:
+    the backend cannot connect to that browser while the worker holds CDP.
+    """
+    body: Dict[str, Any] = {"task_id": task_id, "force_fresh_profile": force_fresh_profile}
+    if storage_state is not None:
+        body["storage_state"] = storage_state
     async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/resume",
@@ -581,7 +591,7 @@ async def resume_browser_session(
                 "Content-Type": "application/json",
                 **workflow_generation_headers(),
             },
-            json={"task_id": task_id, "force_fresh_profile": force_fresh_profile},
+            json=body,
         )
     if response.status_code in [200, 201]:
         return response.json()
@@ -816,7 +826,9 @@ async def create_user_auth_assistance_request(
         "authRealm": auth_realm,
         "browserSessionId": browser_session_id,
         "steelSessionId": steel_session_id,
-        "browserUrl": browser_url,
+        # Tilion: the backend mints the handoff live view server-side (A2), so
+        # the worker never sends the live-view token.
+        "browserUrl": redact_url_secrets(browser_url),
         "currentUrl": current_url,
         "mode": mode,
     }
@@ -897,22 +909,91 @@ async def save_minted_account_password(config: Any, user_id: str, origin: str) -
     return bool(response.json().get("saved"))
 
 
-async def close_browser_session(config: Any, session_id: str, pause: bool = False, current_url: str = "") -> None:
-    """Close or pause a browser session."""
+class BrowserSessionCloseError(RuntimeError):
+    """A failed exact-session cleanup request; no successor authority is implied."""
+
+    def __init__(self, session_id: str, pause: bool, status_code: Optional[int] = None):
+        self.session_id = session_id
+        self.pause = pause
+        self.status_code = status_code
+        super().__init__(
+            f"Browser session cleanup failed: session={session_id}, pause={pause}, HTTP={status_code}"
+        )
+
+    def receipt(self) -> Dict[str, Any]:
+        return {
+            "status": "failed",
+            "session_id": self.session_id,
+            "pause": self.pause,
+            "http_status": self.status_code,
+        }
+
+
+async def close_browser_session(
+    config: Any,
+    session_id: str,
+    pause: bool = False,
+    current_url: str = "",
+    signed_in_sites: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Close only the named browser; propagate an unacknowledged cleanup request.
+
+    The backend merges every credential in the closing browser into the user's
+    browser template. ``signed_in_sites`` are the sites where this task typed a
+    saved password or asserted a passkey: sign-in evidence that marks those
+    logins as validated, which wins the template's keep-best rule. Returns the
+    backend's merge receipt (``world_state``); a retried close reaches the same
+    decisions without writing again.
+    """
     payload: Dict[str, Any] = {"session_id": session_id, "pause": pause}
     if current_url:
         payload["current_url"] = current_url
+    if signed_in_sites:
+        payload["signed_in_sites"] = sorted(set(signed_in_sites))
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(
+        # A logical-browser pause checkpoints state before releasing the native
+        # session; live checkpoint + provider cleanup can exceed ten seconds.
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
                 f"{config.backend.api_url}/api/browser-session/close",
                 headers={"x-api-key": config.backend.api_key or ""},
                 json=payload,
             )
-    except WorkflowGenerationSealed:
-        raise  # a replaced generation must stop, never be swallowed
+            if response.status_code != 200:
+                raise BrowserSessionCloseError(session_id, pause, response.status_code)
+    except (WorkflowGenerationSealed, BrowserSessionCloseError):
+        raise
     except Exception as e:
-        logger.warning(f"Failed to close/pause session: {e}")
+        raise BrowserSessionCloseError(session_id, pause) from e
+    # The receipt is observability only: an acknowledged close stays a success
+    # even when its body is empty or unreadable.
+    try:
+        body = response.json()
+    except Exception:
+        return None
+    world_state = body.get("world_state") if isinstance(body, dict) else None
+    return world_state if isinstance(world_state, dict) else None
+
+
+def world_state_receipt_summary(receipt: Any) -> Dict[str, str]:
+    """``site [account]`` -> ``outcome/rule`` for the close log (observability only).
+
+    The default template account (``""``) is left out of the key, and entries
+    the backend did not shape as sites are skipped.
+    """
+    sites = receipt.get("sites") if isinstance(receipt, dict) else None
+    if not isinstance(sites, list):
+        return {}
+    summary: Dict[str, str] = {}
+    for entry in sites:
+        if not isinstance(entry, dict) or not isinstance(entry.get("site"), str):
+            continue
+        account = entry.get("account")
+        key = f"{entry['site']} [{account}]" if isinstance(account, str) and account else entry["site"]
+        rule = entry.get("rule")
+        outcome = str(entry.get("outcome"))
+        summary[key] = f"{outcome}/{rule}" if isinstance(rule, str) and rule else outcome
+    return summary
 
 
 async def inject_local_storage(config: Any, session_id: str, origin: str) -> Optional[Dict[str, Any]]:

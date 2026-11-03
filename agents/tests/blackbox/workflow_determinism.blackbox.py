@@ -25,6 +25,9 @@ WORKFLOW_SCOPE_MODULES = [
     "workflows/agent_workflow.py",
     "loop/run_agent.py",
     "loop/dag_executor.py",
+    "workflows/background_agents.py",
+    "helpers/background_agents.py",
+    "domains/agent_messaging/handler.py",
 ]
 
 # (module_attr, method) pairs that are non-deterministic in workflow scope,
@@ -114,6 +117,12 @@ def test_dag_executor_deterministic():
     _assert_module_clean("loop/dag_executor.py")
 
 
+def test_background_agent_modules_deterministic():
+    """Background spawn + agent-messaging code runs in workflow scope too."""
+    for rel_path in WORKFLOW_SCOPE_MODULES[3:]:
+        _assert_module_clean(rel_path)
+
+
 def test_tool_manager_workflow_paths_deterministic():
     """Check direct ToolManager bodies, including handlers that also define activities."""
     hits = [
@@ -144,12 +153,50 @@ def test_scanner_detects_a_planted_violation():
         tmp.unlink(missing_ok=True)
 
 
+def test_sandbox_instance_does_not_reload_dotenv():
+    """Every cache-miss workflow task builds a fresh sandbox and re-imports workflow modules.
+
+    Activity modules on AgentWorkflow's import graph call load_config() at
+    import. A re-imported config module re-ran load_dotenv per instance, copying
+    os.environ through the sandbox proxy once per .env line (~0.4s per workflow
+    task), which made full-history replays time out under load. config must be
+    a passthrough module so a sandbox instance never imports dotenv.
+    """
+    import builtins
+    import importlib
+    import sys
+
+    # Host import first, as the worker does before it builds sandbox instances.
+    importlib.import_module("workflows.agent_workflow")
+    from helpers.workflow_sandbox import workflow_sandbox_restrictions
+    from temporalio.worker.workflow_sandbox._importer import Importer
+    from temporalio.worker.workflow_sandbox._restrictions import RestrictionContext
+
+    importer = Importer(workflow_sandbox_restrictions(), RestrictionContext())
+    with importer.applied():
+        builtins.__import__("workflows.agent_workflow")
+        # Shared activity imports may no longer pull config into the sandbox.
+        # Exercise its passthrough policy directly instead of relying on that side effect.
+        builtins.__import__("config")
+    sandbox_modules = importer.new_modules
+    assert sandbox_modules.get("workflows.agent_workflow") is not sys.modules["workflows.agent_workflow"], (
+        "sandbox did not re-import the workflow module"
+    )
+    assert sandbox_modules.get("config") is sys.modules["config"], (
+        "sandbox re-imported config instead of passing it through"
+    )
+    reloaded = sorted(name for name in sandbox_modules if name == "dotenv" or name.startswith("dotenv."))
+    assert not reloaded, f"sandbox instance re-imported dotenv: {reloaded}"
+
+
 async def run_all_tests():
     print("workflow-determinism blackbox tests:")
     r = BlackboxResult()
     r.record("agent_workflow_deterministic", test_agent_workflow_deterministic)
     r.record("run_agent_deterministic", test_run_agent_deterministic)
     r.record("dag_executor_deterministic", test_dag_executor_deterministic)
+    r.record("background_agent_modules_deterministic", test_background_agent_modules_deterministic)
     r.record("tool_manager_workflow_paths_deterministic", test_tool_manager_workflow_paths_deterministic)
     r.record("scanner_detects_planted_violation", test_scanner_detects_a_planted_violation)
+    r.record("sandbox_instance_does_not_reload_dotenv", test_sandbox_instance_does_not_reload_dotenv)
     return r.summary() if hasattr(r, "summary") else r.all_passed

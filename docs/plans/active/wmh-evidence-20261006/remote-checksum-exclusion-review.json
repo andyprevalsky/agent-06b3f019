@@ -1,0 +1,625 @@
+{
+  "schema": "rose.wmh_remote_checksum_exclusion_review.v1",
+  "date": "2026-10-06",
+  "status": "producer_race_reproduced_historical_recovery_and_admissibility_open",
+  "scope": {
+    "source_edits": 0,
+    "models_called": 0,
+    "hashes_waived": false,
+    "large_corpus_redownload": false,
+    "full_fixture_ciphertext_bodies_read": 2,
+    "full_fixture_ciphertext_bytes": 1886929,
+    "active_native_builder_untouched": true,
+    "source_plaintext_or_credentials_published": false
+  },
+  "source_report": {
+    "report_sha256": "2de0fc6987a4651574332c642000e3b68dc3e7132f77f5349ad37c1f4ed24cfb",
+    "failed_root_ids": [
+      "006fd16e-64ed-44af-9e9d-84366f4ce1df",
+      "03454b32-4ac0-423f-866b-76103a355f82",
+      "03d77bf3-29e7-45ee-8092-e63128a85bbc",
+      "064b5bdd-3ce9-4152-a7df-b1e048ee79d7",
+      "06b5cfdc-fa55-44fc-8b17-7f881bffd236",
+      "06ea7b9f-1ad8-4891-96bd-e1cb83d8c066",
+      "07b8d071-4193-493e-b95b-778fb11704ce",
+      "082bc30f-673a-4dbc-8d0b-8a7e1bafd3c6",
+      "0b597a45-0685-43ba-828a-e5abd85abc58",
+      "103d6329-6b1a-4e44-ad13-b29c13785d3c",
+      "11cd2104-b896-4fb6-95d4-53f39bc43d2d",
+      "123546a2-75f8-43da-b21c-36ca57fff58d",
+      "12563e5f-96d0-4a57-a9bf-19b889089ac0",
+      "192129be-0390-4724-a114-183f2d9070e2",
+      "1e418dbe-a4f4-478c-b7c3-899c6ae91767",
+      "219df1c9-4cdc-4208-afb9-7a8fd1e4a95a",
+      "21deb17a-6b97-489a-9566-6df55b1427c2",
+      "2756641a-c31a-4e47-ace7-9309944b280a",
+      "2d9f1590-bfee-44c4-a7b3-2123353dd1d8",
+      "2dfebbfb-5daf-4e49-834a-4a7c8aa3cc2c",
+      "373c3c73-5756-4611-b505-9836c1c02e4e",
+      "37a2350b-e6b5-4041-9d9a-c186648d4e2a",
+      "3a9d79e5-8566-4489-b392-509f7b45add9",
+      "3d767f43-8854-4f23-89f9-3d957f871661",
+      "3ff4d31e-f252-4287-995c-84dbf8878a4a",
+      "40caa0d2-e3fd-4251-bc3e-11752da22dc1",
+      "40df082c-e577-42fe-a742-ac745aaaf862",
+      "40e02fb4-f79d-4918-8e6f-8e92a23daa1c",
+      "443e28f6-45e0-40d8-8f8f-cf22d4a98c4e",
+      "455f381e-f394-4f6f-ad43-bf5139397723",
+      "4624c988-e779-4864-86ea-f54da705b236",
+      "49d333ee-4468-4cb7-9fb9-1d965453e207",
+      "4b08146f-533c-4181-bfd6-90fd9328a06a",
+      "4b7d5b62-a8e4-4807-b411-ebc0a2cdc8db",
+      "4cd5d01f-9300-4430-ac5e-40e4bcaf773e",
+      "4ddcaf05-ec0b-492d-afea-2cb3fe48a98f",
+      "4e26c313-fef6-4228-ae30-dd6ac751d32e",
+      "51352a1b-1d65-4f2b-b7c8-038b2dae5b8e",
+      "523390eb-eb0c-425c-a464-8d2d26122501",
+      "544ef884-9520-4847-8c9a-4dc6d4dce5b4",
+      "59adfea9-1969-40fa-8354-4fcc3c6da765",
+      "5a71f583-862c-40ea-9a52-9023c3f13f65",
+      "5c9bde42-494d-41ce-a702-c570ae6a08e9",
+      "61d4b9d4-9833-42d0-b47e-992d46a87a72",
+      "67f01e09-54ae-42b4-9f62-e7861d6170b2",
+      "67ff5c2a-a8c3-40c2-9dca-765150e85c43",
+      "6a48740a-a14d-44e3-9236-8c0c34914739",
+      "6b6d210e-0632-435c-ad62-1bb285615349",
+      "6c0ab8f4-0055-4cfb-8b12-b3c9bbbc7395",
+      "7361e354-b940-4e4f-b02c-7c649a5b6b7a",
+      "78e5d2c1-a6d3-406f-97dc-5422551d2b32",
+      "7d7639d0-85c5-4f23-ad03-c354ee3dbe59",
+      "800e4d61-0228-4b9c-abe9-b5b548323b62",
+      "83710024-92f8-4ae4-b3ca-caa2c540e0c9",
+      "86049301-43f0-41bf-a95f-d8dcc5083e49",
+      "8829a800-8c58-4657-b135-ab09c28c9545",
+      "891398cc-7d5b-4e70-938b-81d9c34ad675",
+      "8955c27b-1943-47ec-87e6-cbcf8feaf7c6",
+      "898ffd7e-d2b8-468d-b246-8662ee85dab7",
+      "8a42d1b6-b2fb-4a98-8130-1f350df36f59",
+      "902986e7-e9ec-4209-9c8e-a8f7672637d2",
+      "93450818-c2c9-4bbf-9294-1777fc559624",
+      "94966e49-b4b3-4697-ba8a-3f8da68d9f54",
+      "9fc08f54-cbb9-43f6-a75d-101017bea5da",
+      "a1aceca3-7df5-4695-a8de-56c0ad22d0fb",
+      "a3c2c664-e8ba-4d3a-959b-ed8e0b866bb8",
+      "a65e1cdd-5b2c-4cf7-884f-6e5085fe854e",
+      "a91f53d1-09a7-477d-abd8-cc06adc4cc15",
+      "a9962774-fa76-470e-b40c-71f0aa090f50",
+      "aa262312-d3ad-42dc-8592-2c2f962da876",
+      "b0b450e1-bf31-46e4-910b-07a08d713c4d",
+      "b254b195-1341-4718-b667-56524664c37f",
+      "b62687e8-fe36-4629-ad5f-2845d7c99092",
+      "b77ecba7-d62e-4350-b1d0-d60e9eed0aa2",
+      "bbff61da-5b4e-4068-a728-785ec089cbee",
+      "bc4c1ab2-bb7d-4187-8b07-24569a56adea",
+      "bd35b44b-b745-4847-bc99-0a8ac5da725b",
+      "c181633a-db37-4bc8-b075-730e4aec2dbc",
+      "c5ad3f37-ad3e-48d5-a210-b5e2635623f0",
+      "c8e3e011-843a-4bd5-a52e-1cd35eb5fd52",
+      "c993d6bb-566d-448d-aaa9-9f4a20fbca43",
+      "d03e734c-e594-4963-964a-a3bd2017455f",
+      "d3210ca4-780a-46c7-ac7d-887c9b0969fb",
+      "d327b21e-89c9-4a1f-8d68-af9e94f69590",
+      "d720edef-9854-4337-adde-74cfb2640f2c",
+      "dbd89957-8636-4e2b-b3cf-4362c041113e",
+      "e2681fe6-478d-431d-aa9c-f63d8ab1554b",
+      "e4a20834-cbf6-4bf2-9afe-2d373d8f921c",
+      "e943ba9b-6eec-4f2f-a54d-2f5b8b12eb28",
+      "eddfb1d0-b7a6-4d17-9aca-61fced20b72d",
+      "ee01c6ad-0ff7-42b5-82ad-b7c0d37f19be",
+      "f019b1da-4d38-4566-88e0-1d404401af78",
+      "f66bc37a-8398-4991-8ab6-929910c9139d",
+      "f8651b29-350c-42d0-b9fb-bdceed757f8b",
+      "f87d0ad4-77b1-40c1-b6ab-9ad71fffe65b",
+      "f968f2bf-d029-4224-b9dd-78d09d7722d6",
+      "fa01f667-48a3-48d1-b09f-1d3a2efcb49d"
+    ],
+    "failed_count": 97,
+    "all_failed_screened_eligible": true,
+    "failed_indexed": 0,
+    "policy": "real-results-v6",
+    "source_sha256": "cff41fca0b7edf9aae91787602ed1d2169be38af691a85b20910729a8b4d4fa4"
+  },
+  "archive_searches": [
+    {
+      "query": "ciphertext checksum mismatch archive encrypted hash remote checksum",
+      "cases": [
+        "2026-09-03-finalize-snapshots-before-async-trace-writes-settle",
+        "2026-09-28-cross-root-trace-outbox-retry-storm"
+      ]
+    },
+    {
+      "query": "sha256 mismatch sidecar outbox atomic archive nonce generation",
+      "cases": [
+        "2026-09-11-archive-retry-adopted-retired-root-backlog",
+        "2026-09-11-recording-archive-serial-publication-outlived-worker-drain",
+        "2026-10-03-blackbox-runners-inherited-injected-r2-archive-backend"
+      ]
+    }
+  ],
+  "feedback_read": "docs/rca/process-feedback.md: pre-existing is not a diagnosis; surface errors are not root causes; correlation and theory do not close an RCA.",
+  "remote_metadata_audit": {
+    "roots": 97,
+    "verified_small_encrypted_manifests": 97,
+    "remote_errors": 0,
+    "effective_manifest_modes": {
+      "real": 97
+    },
+    "mode_limit": "The audit uses the existing screening rule: a missing/empty mode defaults to real. Corrupted required start snapshots prevent proving the authoritative launch mode for every root.",
+    "legacy_markers": 0,
+    "root_goal_demo_markers": 0,
+    "root_statuses": {
+      "COMPLETED": 50,
+      "PAUSED": 30,
+      "ACTIVE": 17
+    },
+    "named_benchmark_roots": 94,
+    "roots_without_benchmark_task_name": 3,
+    "fixture_sizes": {
+      "start": {
+        "mismatched": 71,
+        "matched": 26,
+        "missing": 0,
+        "min": 1828,
+        "max": 5066926
+      },
+      "end": {
+        "mismatched": 3,
+        "matched": 94,
+        "missing": 0,
+        "min": 5780,
+        "max": 5127079
+      }
+    },
+    "roots_with_fixture_size_mismatch": 74,
+    "roots_with_no_fixture_size_mismatch": 23,
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "limits": "Fixture size mismatch proves invalid object/sidecar pairing without downloading the fixture. Equal size does not prove a matching SHA-256. All 97 original exact export failures remain recorded; the 23 same-size roots were not fully rehashed here. Benchmark provenance is eligible real signal under the corpus policy and is not itself a synthetic/DEMO classification.",
+    "explicit_incremental_traces": {
+      "roots_listed": 97,
+      "roots_with_trace_prefix_objects": 0
+    }
+  },
+  "real_validator_probe": {
+    "root": "03d77bf3-29e7-45ee-8092-e63128a85bbc",
+    "path": "db/start.fixture.json.gz.enc",
+    "stored_bytes": 937955,
+    "metadata_bytes": 937957,
+    "actual_sha256": "6c9a055f102e994f2b7f82f9be2787d38101ede004215f6c42c309842c5e196d",
+    "expected_sha256": "bb45c77dd665379100f1845e723b5088ebcf65747bbf242ddf2b76e5c6a3834e",
+    "unchanged_production_validator": "helpers.trace_archive.decrypt_and_validate_artifact",
+    "result": "ValueError: Archive ciphertext SHA-256 mismatch"
+  },
+  "sample_generation_and_verified_observations": {
+    "finalized": true,
+    "manifest_generated_at": "2026-09-03T14:45:35.096Z",
+    "manifest_mode": "real",
+    "message_collector_diagnostic": {
+      "categories": {
+        "browser": 18,
+        "tool": 1
+      },
+      "completed_pairs": 19,
+      "end_fixture_valid": true,
+      "error_pairs": 0,
+      "no_result_unavailable": true,
+      "state_scope": "Diagnostic minimal manifest task context only; original starting fixture remains corrupted, so these are proven completed observations rather than a full corpus-admission or replay proof."
+    },
+    "objects": {
+      "db/end.fixture.json.gz.enc": {
+        "metadata_ciphertext_bytes": 948974,
+        "metadata_ciphertext_sha256": "4311fe810f43764c3f9aae22759ce76021058b52c1de6f8f693256af3ffcb732",
+        "metadata_created_at": "2026-09-03T14:45:34.227000+00:00",
+        "metadata_last_modified": "2026-09-03T14:45:34+00:00",
+        "metadata_plaintext_sha256": "c80dfd92818e01720aed8414654c776c9e30bea8ed45fc5c98ddb9aa7c137c96",
+        "object_last_modified": "2026-09-03T14:45:34+00:00",
+        "stored_bytes": 948974,
+        "version_id_present": false
+      },
+      "db/start.fixture.json.gz.enc": {
+        "metadata_ciphertext_bytes": 937957,
+        "metadata_ciphertext_sha256": "bb45c77dd665379100f1845e723b5088ebcf65747bbf242ddf2b76e5c6a3834e",
+        "metadata_created_at": "2026-09-03T14:42:47.603000+00:00",
+        "metadata_last_modified": "2026-09-03T14:42:48+00:00",
+        "metadata_plaintext_sha256": "e0e59d3912401c6868831195803e6a02cd7d265955cde9b4911d00ec0ef72482",
+        "object_last_modified": "2026-09-03T14:42:48+00:00",
+        "stored_bytes": 937955,
+        "version_id_present": false
+      },
+      "manifest.json.gz.enc": {
+        "metadata_ciphertext_bytes": 2945,
+        "metadata_ciphertext_sha256": "1bfd85a2eb1aef9368fc4e3d3110a184ab898fd9536271e3f876cef602bab20d",
+        "metadata_created_at": "2026-09-03T14:45:35.096000+00:00",
+        "metadata_last_modified": "2026-09-03T14:45:35+00:00",
+        "metadata_plaintext_sha256": "d76cda5a13897cdf3ad4806764bbf39fbda9769916e9c8277755495df0d16741",
+        "object_last_modified": "2026-09-03T14:45:35+00:00",
+        "stored_bytes": 2945,
+        "version_id_present": false
+      }
+    },
+    "root": "03d77bf3-29e7-45ee-8092-e63128a85bbc",
+    "task": "browser-biometrics-webdecoy",
+    "verified_end": {
+      "root_goal_demo_marker": false,
+      "root_goal_matches_verified_manifest": true,
+      "root_message_count": 62,
+      "root_mode": "real",
+      "root_status": "COMPLETED"
+    }
+  },
+  "hub_recovery_check": {
+    "metadata_heads": {
+      "head_errors": 0,
+      "hub_matches": 39,
+      "smallest": [
+        {
+          "bytes": 305528,
+          "last_modified": "2026-09-29T20:07:52+00:00",
+          "roots": [
+            "898ffd7e-d2b8-468d-b246-8662ee85dab7"
+          ],
+          "run": "09b72eee-9ca1-4418-a3f1-86a846bf7161"
+        },
+        {
+          "bytes": 386719,
+          "last_modified": "2026-09-29T20:07:18+00:00",
+          "roots": [
+            "373c3c73-5756-4611-b505-9836c1c02e4e"
+          ],
+          "run": "d350ca33-b881-4dfa-b30e-6aa485e8ad2f"
+        },
+        {
+          "bytes": 1236316,
+          "last_modified": "2026-10-06T05:13:24+00:00",
+          "roots": [
+            "94966e49-b4b3-4697-ba8a-3f8da68d9f54"
+          ],
+          "run": "3adc5856-a4a5-486f-80a5-65d07a274376"
+        },
+        {
+          "bytes": 1590708,
+          "last_modified": "2026-10-06T07:51:03+00:00",
+          "roots": [
+            "5c9bde42-494d-41ce-a702-c570ae6a08e9"
+          ],
+          "run": "0815cdb5-cf07-4855-8125-c73a8f8094c3"
+        },
+        {
+          "bytes": 2975918,
+          "last_modified": "2026-09-11T16:40:00+00:00",
+          "roots": [
+            "c993d6bb-566d-448d-aaa9-9f4a20fbca43"
+          ],
+          "run": "1c2ce7eb-9bad-458c-8e13-58b636df9e23"
+        }
+      ],
+      "unique_runs": 38
+    },
+    "body_receipts": [
+      {
+        "bytes": 305528,
+        "etag_matches_body_md5": true,
+        "hub_run_id": "09b72eee-9ca1-4418-a3f1-86a846bf7161",
+        "last_modified": "2026-09-29T20:07:52+00:00",
+        "manifest_generated_at": "2026-09-29T20:01:07.259Z",
+        "matching_tasks": 1,
+        "root": "898ffd7e-d2b8-468d-b246-8662ee85dab7",
+        "run": "09b72eee-9ca1-4418-a3f1-86a846bf7161",
+        "run_timestamp": "2026-09-29T19:57:55.912346+00:00",
+        "sha256": "2f44b0981e984fdced2c4a69ec9218b40ab0422f4134074348543887b5695845",
+        "task_count": 1,
+        "tasks": [
+          {
+            "benchmark_passed": false,
+            "canonical_observation_marker_count": 0,
+            "first_message_keys": [
+              "created_at",
+              "message",
+              "role"
+            ],
+            "goal_matches_manifest": false,
+            "logs_keys": [
+              "backend_logs",
+              "cloud_cleanup_evidence",
+              "cloud_payment_cleanup",
+              "cloud_provider_cleanup",
+              "messages",
+              "realtime_logs",
+              "research_logs",
+              "tree",
+              "worker_logs"
+            ],
+            "messages": 24,
+            "name": "polar-bu-065",
+            "status": "COMPLETED",
+            "task_keys": [
+              "agent_id",
+              "approvals_resolved",
+              "approvals_triggered",
+              "archive_manifest_ref",
+              "benchmark_status",
+              "cache_creation_input_tokens",
+              "cache_hit_pct",
+              "cache_read_input_tokens",
+              "context_violations",
+              "cost_cents",
+              "duration_seconds",
+              "execution_provenance",
+              "failure_reason",
+              "fast_mode_cache_enabled",
+              "llm_call_count",
+              "llm_usage_by_provider",
+              "logs",
+              "message_count",
+              "name",
+              "passed",
+              "payment_lifecycle",
+              "progress_score",
+              "repeatable_cache_creation_input_tokens",
+              "repeatable_cache_hit_pct",
+              "repeatable_cache_read_input_tokens",
+              "status",
+              "stop_metadata",
+              "tokens_in",
+              "tokens_out",
+              "tree_agent_count",
+              "world_model_fidelity",
+              "world_model_mode"
+            ],
+            "terminal_tool_status_count": 0,
+            "tree_nodes": 1,
+            "wmh_mode": "real"
+          }
+        ],
+        "top_keys": [
+          "base_url",
+          "execution_provenance",
+          "memory_summary",
+          "run_id",
+          "source",
+          "suite",
+          "summary",
+          "tasks",
+          "timestamp",
+          "world_model_retrieval_audit"
+        ],
+        "verified_manifest_mode": "real"
+      },
+      {
+        "bytes": 386719,
+        "etag_matches_body_md5": true,
+        "hub_run_id": "d350ca33-b881-4dfa-b30e-6aa485e8ad2f",
+        "last_modified": "2026-09-29T20:07:18+00:00",
+        "manifest_generated_at": "2026-09-29T19:59:06.711Z",
+        "matching_tasks": 1,
+        "root": "373c3c73-5756-4611-b505-9836c1c02e4e",
+        "run": "d350ca33-b881-4dfa-b30e-6aa485e8ad2f",
+        "run_timestamp": "2026-09-29T19:58:04.031746+00:00",
+        "sha256": "f6ba36220712a4b4c3401a1c31820d09eaa6dc1a62406531221383760b911fff",
+        "task_count": 1,
+        "tasks": [
+          {
+            "benchmark_passed": false,
+            "canonical_observation_marker_count": 0,
+            "first_message_keys": [
+              "created_at",
+              "message",
+              "role"
+            ],
+            "goal_matches_manifest": false,
+            "logs_keys": [
+              "backend_logs",
+              "cloud_cleanup_evidence",
+              "cloud_payment_cleanup",
+              "cloud_provider_cleanup",
+              "declared_evaluators",
+              "messages",
+              "realtime_logs",
+              "research_logs",
+              "tree",
+              "worker_logs"
+            ],
+            "messages": 13,
+            "name": "planner-memory-blue-bottle-on",
+            "status": "ACTIVE",
+            "task_keys": [
+              "agent_id",
+              "approvals_resolved",
+              "approvals_triggered",
+              "archive_manifest_ref",
+              "benchmark_status",
+              "cache_creation_input_tokens",
+              "cache_hit_pct",
+              "cache_read_input_tokens",
+              "context_violations",
+              "cost_cents",
+              "duration_seconds",
+              "execution_provenance",
+              "failure_reason",
+              "fast_mode_cache_enabled",
+              "llm_call_count",
+              "llm_usage_by_provider",
+              "logs",
+              "message_count",
+              "name",
+              "passed",
+              "payment_lifecycle",
+              "progress_score",
+              "repeatable_cache_creation_input_tokens",
+              "repeatable_cache_hit_pct",
+              "repeatable_cache_read_input_tokens",
+              "status",
+              "stop_metadata",
+              "tokens_in",
+              "tokens_out",
+              "tree_agent_count",
+              "world_model_fidelity",
+              "world_model_mode"
+            ],
+            "terminal_tool_status_count": 0,
+            "tree_nodes": 1,
+            "wmh_mode": "real"
+          }
+        ],
+        "top_keys": [
+          "base_url",
+          "execution_provenance",
+          "memory_summary",
+          "run_id",
+          "source",
+          "suite",
+          "summary",
+          "tasks",
+          "timestamp",
+          "world_model_retrieval_audit"
+        ],
+        "verified_manifest_mode": "real"
+      }
+    ],
+    "tree_projection_receipts": [
+      {
+        "canonical_observation_markers": 0,
+        "first_tree_message_keys": [
+          "agentId",
+          "createdAt",
+          "created_at",
+          "message",
+          "role",
+          "text",
+          "toolCallId"
+        ],
+        "message_collector_diagnostic": {
+          "errors": 0,
+          "scope": "Only a structural diagnostic over Hub message projection. No original start fixture recovered, no production exporter change or corpus admission.",
+          "terminal_pairs": 2,
+          "tool_names": {
+            "attempt_completion": 1,
+            "spawn_claude_code_agent": 1
+          }
+        },
+        "metadata_statuses": {
+          "None": 24
+        },
+        "node_keys": [
+          "context_size",
+          "goal",
+          "messages",
+          "parent_agent_id",
+          "response_schema",
+          "status",
+          "structured_output",
+          "tokens_in",
+          "tokens_out"
+        ],
+        "root": "898ffd7e-d2b8-468d-b246-8662ee85dab7",
+        "root_goal_matches_manifest": false,
+        "root_goal_present_in_tree": true,
+        "tree_message_count": 24
+      },
+      {
+        "canonical_observation_markers": 0,
+        "first_tree_message_keys": [
+          "agentId",
+          "createdAt",
+          "created_at",
+          "message",
+          "role",
+          "text",
+          "toolCallId"
+        ],
+        "message_collector_diagnostic": {
+          "errors": 0,
+          "scope": "Only a structural diagnostic over Hub message projection. No original start fixture recovered, no production exporter change or corpus admission.",
+          "terminal_pairs": 1,
+          "tool_names": {
+            "set_plan": 1
+          }
+        },
+        "metadata_statuses": {
+          "None": 13
+        },
+        "node_keys": [
+          "context_size",
+          "goal",
+          "messages",
+          "parent_agent_id",
+          "response_schema",
+          "status",
+          "structured_output",
+          "tokens_in",
+          "tokens_out"
+        ],
+        "root": "373c3c73-5756-4611-b505-9836c1c02e4e",
+        "root_goal_matches_manifest": false,
+        "root_goal_present_in_tree": true,
+        "tree_message_count": 13
+      }
+    ],
+    "limits": "Only the two smallest Hub bodies were read (692247 bytes each pass); their body MD5 matched the returned ETag and SHA-256 was recorded. This proves read fidelity of the separate Hub object, not restoration of the original start fixture. Their tree goals differ from the verified archive manifest goals, and their projected messages lack canonical observation envelopes. Structural collector counts (2 and 1) are not corpus-admission proof. No Hub fallback exists in the current exporter. The remaining 37 matched roots were not body-audited."
+  },
+  "producer_boundary": {
+    "revision_reviewed": "a1142bc14e632dacc2e6a1579c9d9e487ec6753f",
+    "source_path": "back-end/src/providers/traceArchive.ts",
+    "body_put_line": 269,
+    "sidecar_put_line": 282,
+    "source_sha256": "cff41fca0b7edf9aae91787602ed1d2169be38af691a85b20910729a8b4d4fa4",
+    "command_cwd": "back-end",
+    "command": "node --import tsx --input-type=module - <<'JS'\nimport assert from 'node:assert/strict';\nimport { S3Client } from '@aws-sdk/client-s3';\nimport { encryptArtifact, storeEncryptedArtifact, decryptAndValidateArtifact } from './src/providers/traceArchive.ts';\nObject.assign(process.env, {NODE_ENV:'production', ENVIRONMENT:'production', TRACE_ARCHIVE_ENABLED:'1', TRACE_ARCHIVE_BACKEND:'r2', TRACE_ARCHIVE_ENCRYPTION_KEY_B64:Buffer.alloc(32,9).toString('base64'), R2_ACCOUNT_ID:'review-fixture',R2_ACCESS_KEY_ID:'review-fixture',R2_SECRET_ACCESS_KEY:'review-fixture',R2_BUCKET_TRACE_ARCHIVE:'review-fixture'});\nconst path='db/start.fixture.json.gz.enc';\nconst a=encryptArtifact(path,Buffer.from('{\"generation\":\"A\"}'),'application/json');\nconst b=encryptArtifact(path,Buffer.from('{\"generation\":\"B\"}'),'application/json');\nconst objects=new Map();const order=[];\nlet releaseA, markA;\nconst gate=new Promise(r=>releaseA=r);const firstStored=new Promise(r=>markA=r);\nconst original=S3Client.prototype.send;\nS3Client.prototype.send=async function(command) {\n assert.equal(command.constructor.name,'PutObjectCommand');\n const input=command.input; const body=Buffer.from(input.Body);const key=input.Key;\n const generation=key.endsWith('.meta.json')?(JSON.parse(body.toString()).ciphertext_sha256===a.metadata.ciphertext_sha256?'A':'B'):(body.equals(a.ciphertext)?'A':'B');\n objects.set(key,body);order.push(generation+(key.endsWith('.meta.json')?':metadata':':ciphertext'));\n if(generation==='A'&&!key.endsWith('.meta.json')) {markA();await gate;}\n return {};\n};\ntry {\n const pa=storeEncryptedArtifact({rootAgentId:'review-fixture-root',objectPath:path,...a});await firstStored;\n const rb=await storeEncryptedArtifact({rootAgentId:'review-fixture-root',objectPath:path,...b});releaseA();const ra=await pa;\n const key='trace-archive/review-fixture-root/'+path;\n const ciphertext=objects.get(key);const metadata=JSON.parse(objects.get(key+'.meta.json').toString());\n let rejected;\n try {decryptAndValidateArtifact({ciphertext,metadata});rejected='unexpected success';}catch(e){rejected=e.message;}\n assert.equal(rejected,'Archive ciphertext SHA-256 mismatch');\n assert.ok(ra&&rb);\n console.log(JSON.stringify({producer:'unchanged storeEncryptedArtifact -> putR2',schedule:order,both_publishers_returned_success:true,final_pair:'B ciphertext with A metadata',unchanged_reader_result:rejected,network_requests:0,model_calls:0,scope:'Reproduced producer concurrency class; not proof this schedule caused every historical excluded archive.'}));\n} finally {S3Client.prototype.send=original;}\nJS",
+    "output": {
+      "producer": "unchanged storeEncryptedArtifact -> putR2",
+      "schedule": [
+        "A:ciphertext",
+        "B:ciphertext",
+        "B:metadata",
+        "A:metadata"
+      ],
+      "both_publishers_returned_success": true,
+      "final_pair": "B ciphertext with A metadata",
+      "unchanged_reader_result": "Archive ciphertext SHA-256 mismatch",
+      "network_requests": 0,
+      "model_calls": 0
+    },
+    "causal_limit": "This deterministic unchanged production path proves a current producer defect in overlapping same-object publications. Historical object timestamps and size/hash disagreement do not prove this exact schedule caused every excluded root.",
+    "existing_fix": {
+      "commit": "10657db63",
+      "date_utc": "2026-09-03T09:43:38Z",
+      "purpose": "Reconcile late finalized R2 artifact references under manifest ownership.",
+      "limit": "The current producer still executes two independent object PUTs, so the manifest fix does not repair this publication boundary. R2 metadata does not expose the deployed producer source revision for the historical sample."
+    },
+    "reusable_patterns": [
+      {
+        "path": "agents/helpers/trace_archive.py:204",
+        "pattern": "Existing complete ciphertext+metadata transaction envelope; exact pair can be represented in one generation rather than two mutable independently overwritten objects."
+      },
+      {
+        "path": "exp/common/project/artifact_files.py:58 (pinned native upstream bf75987e)",
+        "pattern": "Digest-addressed immutable payload publication before committing its manifest reference; reject a differing existing payload."
+      }
+    ],
+    "conditional_put_search": "No existing IfMatch/IfNoneMatch helper found in the searched agents and back-end Python/TypeScript paths.",
+    "owning_gates": [
+      "back-end/src/tests/unit/trace-archive.test.ts (actual S3 command-boundary cases already exist)",
+      "back-end/src/tests/blackbox/archive.blackbox.ts via bash scripts/run-blackbox-tests.sh archive"
+    ]
+  },
+  "next_repair": {
+    "producer": "Add an unchanged owning regression for overlapping same logical artifact writers, then publish a complete immutable generation and atomically bind its logical reference. Preserve metadata-only reads, legacy read compatibility, strict digest/AES-GCM/plaintext checks and independent object parallelism. A per-process mutex or global archive serialization cannot satisfy the cross-instance boundary.",
+    "historical": "Keep the 97 quarantined. Recover an exact authenticated matching original start pair from an original capture/outbox/backup if available; none of the 97 roots has a matching local archive or outbox in these worktrees. Treat intact end/Hub evidence as separately bound sources with explicit context/provenance limits, not replacements for the corrupted original hashes. An exporter change requires owning tests proving the recovered original goal/context and real terminal action/result correlation.",
+    "count": "The bounded audit proves 19 completed observed pairs in one independently intact real end fixture. It does not establish a concrete fully admissible transition total for all 97; that total remains unknown. No fully recovered/admitted trajectory is claimed.",
+    "acceptance": "Producer prevention and historical recovery are separate work. This review gives no fundraising benchmark, full corpus completeness, replay, production result or capacity credit.",
+    "producer_options": [
+      {
+        "option": "Single complete generation",
+        "existing_pattern": "agents/helpers/trace_archive.py:204-225 encodes/decodes ciphertext and metadata in one ROSE-TRACE-PAIR-V1 transaction payload.",
+        "benefit": "A writer publishes the complete pair as one object, so overlapping same-logical-object writes cannot leave one generation's ciphertext with another generation's metadata.",
+        "required_proofs": "Design reader compatibility and metadata-only indexing before rollout. Preserve strict ciphertext SHA, AES-GCM authentication, plaintext SHA and original start-snapshot ownership. Test concurrent publishers and a crash between publication/reference steps at the actual S3 boundary. Reusing the local transaction envelope is a format/API change, not a drop-in producer-only edit."
+      },
+      {
+        "option": "Immutable generation paths plus one reference",
+        "existing_pattern": "Pinned upstream exp/common/project/artifact_files.py:58 publishes digest-addressed immutable bytes before committing their reference.",
+        "benefit": "Write each ciphertext/metadata pair to generation-qualified immutable paths, then atomically select that exact complete generation. Independent writers never overwrite the other writer's pair. Metadata-only reads can follow the exact selected generation.",
+        "required_proofs": "Define one atomic logical-reference/manifest operation and enforce original start-snapshot winner semantics across instances, including retries and finalized manifests. Verify storage replay/collision behavior and legacy reads; do not emulate atomicity with check-then-put or a process-local lock. No existing reusable conditional-put helper was found."
+      }
+    ],
+    "priority": "Deferred source/storage changes until native artifact acceptance. These are design options requiring owning regressions and compatibility proof, not implemented production repairs."
+  }
+}

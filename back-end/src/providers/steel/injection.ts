@@ -10,6 +10,7 @@ import { playwrightCookiesFromRows, storedCookieIsLive } from './injectionCookie
 import { benchmarkSavedBrowserAuthDisabled } from '../benchmarkBrowserAuth';
 import { type FingerprintData, log } from './types';
 import { steelCdpConnectionUrl } from './urls';
+import type { InjectedCookieBundle } from '../browser/worldStateKeepBest';
 import { createOriginPayloadWriter } from './injectionOriginPage';
 import {
   injectCacheStorageState,
@@ -279,7 +280,20 @@ export async function injectUserData(
   sessionId: string,
   userId: string,
   startUrl: string,
-  options?: { browser?: import('playwright').Browser }
+  options?: {
+    browser?: import('playwright').Browser;
+    /**
+     * Runs on this same connection once the realm's cookies are in place, so a
+     * caller can snapshot the jar the session actually starts from (the
+     * browser-template fork) without a second CDP handshake, together with the
+     * one CookieBundle (account) injected for the realm, or null. Its failure
+     * is logged and never fails credential preparation.
+     */
+    onCookiesReady?: (
+      context: import('playwright').BrowserContext,
+      injectedBundle: InjectedCookieBundle | null
+    ) => Promise<void>;
+  }
 ): Promise<{
   cookies: {
     injected: boolean;
@@ -371,9 +385,6 @@ export async function injectUserData(
   log.info(`  [1/9] DB fetch complete (${Date.now() - startTime}ms)`);
 
   if (!dbSession?.wsUrl) {
-    if (options?.browser) {
-      await options.browser.close().catch(() => {});
-    }
     throw new Error('No WebSocket URL found for session');
   }
 
@@ -441,9 +452,6 @@ export async function injectUserData(
       },
     });
     if (cookies.length === 0) {
-      if (options?.browser) {
-        await options.browser.close().catch(() => {});
-      }
       throw new Error(
         `Cookie bundle ${authSource.id} was selected for ${authRealm} but contains no cookie rows`
       );
@@ -549,6 +557,20 @@ export async function injectUserData(
           ],
           'Browser credential injection failed'
         );
+      }
+    }
+
+    if (options?.onCookiesReady !== undefined) {
+      try {
+        await options.onCookiesReady(
+          context,
+          authSource.kind === 'cookie_bundle' && hasCookies ? authSource : null
+        );
+      } catch (error) {
+        log.warn('  [cookies] Post-injection snapshot failed; continuing', {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
 

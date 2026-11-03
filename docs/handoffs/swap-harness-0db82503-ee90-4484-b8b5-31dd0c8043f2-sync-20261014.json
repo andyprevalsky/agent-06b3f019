@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "action": "user /sync and approval presentation",
+  "recorded_at_utc": "2026-10-14T01:17:59.687952+00:00",
+  "branch": "sms-supervisor-native-tools",
+  "merge_commit": "18f07ee0475e12ba8a01fdc6f4d854daa6980518",
+  "previous_task_head": "dd8d9c5f84c2a46bcd15ed68df902e252c44021d",
+  "integrated_main": "9e36c9f1fe1dd7573fac246a8d25282fdfefd90f",
+  "incoming_main_commits": 10,
+  "local_main_updated": true,
+  "conflicts_resolved": [
+    "agents/benchmarks/run_benchmark.py",
+    "docs/rca/cases/2026-10-06-prestack-recovery-pinned-one-source-recipe.md",
+    "scripts/cloudbench-prestack-source-reviews.json"
+  ],
+  "preservation": {
+    "original_warning_244a961d_ancestor": true,
+    "checkpoint_c8e72ed8_ancestor": true,
+    "both_RCA_sections_retained": true,
+    "all_reviewed_source_fingerprints_retained": true,
+    "fingerprint_count": 44
+  },
+  "verification": {
+    "python_compile": "PASS",
+    "diff_check": "PASS",
+    "RCA_archive": "PASS 855 cases; generated index refreshed",
+    "semantic_deploy_gate": "PASS exit 0; existing documentation-wiring skip retained",
+    "workspace_database_refresh": {
+      "command": "bash scripts/setup-db.sh",
+      "exit_code": 0,
+      "completion_marker_verified": true,
+      "production_sync_and_local_seed_publication_complete": true,
+      "values_and_records": "PRIVATE"
+    },
+    "candidate_owning_regression": {
+      "production_source": "FAIL exit 1, expected unchanged source without candidate projection",
+      "production_seconds": 1.988,
+      "private_candidate": "PASS exit 0; mocked transport, no paid calls",
+      "candidate_seconds": 1.964,
+      "same_assertions": true
+    }
+  },
+  "approval": {
+    "id": "TAMY-CEREBRAS-1",
+    "status": "PENDING_NOT_APPLIED",
+    "runtime_patch_sha256": "69f8742a0139b126707e506e59217a735211b1daf1caba276ca72eeb352b9741",
+    "applies_cleanly_to_merged_source": true,
+    "new_decoder": "WITHDRAWN_NOT_APPLIED",
+    "human_card_setup": "NOT_PENDING"
+  },
+  "private_log_archive_readback": {
+    "files": 3,
+    "sha256_matches": 3
+  },
+  "limits": {
+    "live_SMS_candidate_pass": "NOT_ESTABLISHED; current historical focused SMS result remains 0/3",
+    "full_changed_runtime_deploy_gates": "NOT_RERUN_BY_SYNC",
+    "merge_or_production_deploy": "NOT_PERFORMED"
+  }
+}

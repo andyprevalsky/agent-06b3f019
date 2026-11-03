@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "private/whm-e9afcffd/run17-midrun-rca-20261014.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "e8c0c21e8851c52523ea322a82b32bc4fdfbd6244f3b94e81b11a59667c1d17a",
+  "gzip_sha256": "de409962303e04cbee23c1e13072d1e5c55c3353e1d0ae4507630145449430ed",
+  "stored_bytes": 11575480,
+  "frames": 2,
+  "files": 64,
+  "original_bytes": 32822945,
+  "manifest_sha256": "0adea9190d3eb884b96b63330f93e4e99688dc751497d6dde0b287ab1b94b620",
+  "full_readback_verified": true
+}

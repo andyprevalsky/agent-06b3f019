@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "utc": "2026-10-15T21:44:11.469915+00:00",
+  "source_parent_sha": "fac7bb4f1c1440ff9194bfd14aef37d31e9a169c",
+  "integrated_main_sha": "a94120e17f0ed2acaa4f91aa783a9179f49bce2e",
+  "private_archive": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "whm-preservation/e9afcffd/deploy-20261015-review-cycle1-fixes-20261015T2144.tar.gz.aesgcm",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "c1ea27ffa033513aea70915527c0ef06136bc39165099a257498b2529bb0f37c",
+    "gzip_sha256": "49a7115f8b44403d090039dbd2201382613c2b94844e796d6907ec2b5f29e23a",
+    "stored_bytes": 6225430,
+    "frames": 1,
+    "files": 574,
+    "original_bytes": 25560161,
+    "manifest_sha256": "c92c08ab7643b256f2efbe363ea87e717b7401aca7481e71cc8e8e64cf02eea4",
+    "full_readback_verified": true
+  },
+  "archive_helper_sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4",
+  "verification": "Original streaming helper authenticated/decrypted every tar member and drained authenticated ciphertext/compressed stream during full upload readback",
+  "review_id": 5539467570,
+  "bounded_results": {
+    "clock_and_wire": "40 passed",
+    "transport": "21 passed",
+    "native_setup": "5 passed",
+    "benchmark_merged_callbacks": "6 passed",
+    "frontend_chip": "6 passed",
+    "prettier": "passed",
+    "eslint_fix": "passed",
+    "rca_archive": "901 cases validated"
+  },
+  "held_unapplied": [
+    "R18-SCHEMA-STANDARD-2",
+    "WHM-PLANNER-CLOCK-AUTHORITY-1 real UTC fallback pending user decision",
+    "Gold/DEMO membership policy extension"
+  ],
+  "rejected_global_context_caps": "remain withdrawn; no replacement caps introduced",
+  "next_gates": "Full Group3 on committed integrated source, incremental review, all Group4 and production checks remain open",
+  "preservation": "Original runtime, source, native data, fixture, retained cache and protected instructions remain preserved; original C1 failure is unchanged"
+}

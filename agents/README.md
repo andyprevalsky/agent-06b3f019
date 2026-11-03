@@ -298,17 +298,18 @@ Built-in adaptive autoscaling (no separate autoscaler machine needed):
 - Minimum machines: `2`, maximum: `10`
 - Signal: Temporal task queue backlog (real-time demand)
 - Actuation: Fly Machines API (start/stop pre-provisioned machines)
-- Leader election: lowest IPv6 via Fly internal DNS — only the leader actuates
+- Leader election: per generation, the lowest-IPv6 live worker — only the leader observes Temporal and actuates
 - Why not CPU? CPU is a terrible proxy for Temporal worker load. A worker can be at 0% CPU but saturated with paused workflows, and a transient LLM retry storm can spike CPU without needing more machines.
 
 **How the adaptive controller works** (see `poll_queue_metrics` in `worker.py`):
 
-Every worker polls Temporal every **1 second** and computes `desired_machine_count`:
+The elected leader polls Temporal every **1 second** and computes `desired_machine_count`:
 
 - **Scale up (eager):** When `task_queue_backlog / observed_capacity >= 0.2`, add `ceil(backlog / observed_capacity)` machines. `observed_capacity` is read in real-time from the SDK's resource-based tuner (`slots_used + slots_available`) — no hardcoded magic number. The tuner dynamically adjusts available slots based on actual CPU/memory pressure, so capacity reflects what this machine can truly handle. Transient blips below 20% are absorbed by the threshold; `ceil()` ensures we add enough machines once crossed (0.2→+1, 1.2→+2, 2.2→+3).
 - **Scale down (gradual probe):** When backlog stays at 0 for 60 consecutive seconds, remove 1 machine and reset the timer. This probes downward — if removing the machine causes backlog to reappear, we detect it within 1s and immediately scale back up. If not, we probe again after 60s. This converges to the minimum fleet size without predicting capacity.
 - **Machine count:** Observed in real-time via Fly internal DNS (`<app>.internal` AAAA records), no API tokens needed.
-- **Leader election:** All workers compute `desired_machine_count` (exposed via `/metrics`), but only the leader (lowest IPv6 from DNS) calls the Fly Machines API to start/stop machines. If the leader dies, the next-lowest IP takes over within 1 poll cycle.
+- **Leader election:** Each generation (`TEMPORAL_WORKER_SURFACE_HASH`) elects its lowest-IPv6 live worker from Fly DNS plus each lower peer's `/autoscaler/peer` view (generation, eligibility, local-reading heartbeat). Only the leader spends the three Temporal visibility calls (CountWorkflowExecutions + 2 DescribeTaskQueue), reads its generation's peer views, and calls the Fly Machines API. Followers spend no Temporal calls; they publish their own memory/admission/slot readings every second and mirror the leader's observation. If a lower peer, DNS or the worker's own address cannot be verified, the role is `unknown`: it observes every 15–30 s and never actuates, so a generation always keeps an observer and never gets two actuators. A dead leader leaves DNS (or stops heartbeating) and the next live worker takes over within one cycle. Compute-only workers (`AUTOSCALER_ACTUATE=0`, e.g. benchmark guests) keep observing at their own cadence.
+- **Unknown is not zero:** a failed or skipped observation publishes `task_queue_backlog`/`running_workflow_count` as NaN with `task_queue_metrics_present 0`, and never counts toward the 60-second zero-backlog scale-down window.
 - **Resource-based tuner:** The Temporal SDK's `WorkerTuner.create_resource_based(target_cpu=0.8, target_memory=0.8)` dynamically manages slot counts. Instead of hardcoded `max_concurrent_activities`, the tuner expands slots when idle and contracts under load. The autoscaler reads `worker_task_slots_used` + `worker_task_slots_available` from the SDK's Prometheus endpoint (port 9090) to derive real capacity.
 
 Scaling examples (assuming observed_capacity=80 under moderate load):

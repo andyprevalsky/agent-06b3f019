@@ -1,0 +1,20 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "trace-archive/private/whm/e9afcffd-7ba9-4bfd-8703-d770952fe1c3/run13-rca-20261013-full-results.private.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "8a1a72f15653946ce1168302de77a9f6b4c605b6b9cfe36c694de54d39177d71",
+  "gzip_sha256": "3a7c0d653871871d777d91a3a1bebd55763afe56e75f576aa1f276a0918ef2db",
+  "stored_bytes": 28552669,
+  "frames": 4,
+  "files": 180,
+  "original_bytes": 102435206,
+  "manifest_sha256": "aedde7b84d2e6037f0161cc9374e6e70a9350a56058735b9d243ee0e1cb3122d",
+  "full_readback_verified": true,
+  "authenticated_original_members": 180,
+  "verification": "All AES-GCM frames, ciphertext and compressed stream hashes, manifest hash, member sizes and every member SHA256 verified by private_archive.py upload full readback.",
+  "verified_utc": "2026-10-13T07:57:05.756318+00:00",
+  "file_list_sha256": "0cff4294517ddd526e40781c0aa8d2143fb781a11667dcfe690f150b40deaa99",
+  "private_file_list_location": "/home/boxes/rose-wmh-resumed/.context/whm-migration/rca-20261013/private-archive-file-list.json",
+  "supplements_original_six_archives": true
+}

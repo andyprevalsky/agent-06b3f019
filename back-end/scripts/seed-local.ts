@@ -1252,7 +1252,12 @@ function throwBrowserAuthSyncFailures(failures: Error[]): void {
  * for the passkey rows, or later at `POST /api/browser-session/init`.
  */
 async function ensureSeedUserExists(): Promise<void> {
-  const synced = await syncUserRecord(remote.user, local.user, SEED_USER_ID);
+  const synced = await syncUserRecord(
+    remote.user,
+    local.user,
+    SEED_USER_ID,
+    COMPUTE_TOKENS_ONLY || PASSKEYS_ONLY || CREDENTIALS_ONLY || EMAIL_CREDENTIALS_ONLY
+  );
   if (synced === 0) {
     throw new Error(
       `User ${SEED_USER_ID} not found in the remote database; cannot seed credentials for an identity that does not exist upstream`
@@ -1403,7 +1408,9 @@ async function sync() {
     if (personIds.length === 0) return 0;
 
     // Cap at the latest 10k messages across all contacts to keep seed fast and
-    // local DB lean; older history isn't needed for dev/testing.
+    // local DB lean; older history isn't needed for dev/testing. A fixture that
+    // must hold a user's whole history raises SEED_MESSAGE_LIMIT; peak heap stays
+    // bounded by the page size either way.
     //
     // PAGED, not materialised. `findMany({ take: 10_000 })` held every row AND
     // its message body in one array before the first write; on a 4GB fleet
@@ -1411,12 +1418,13 @@ async function sync() {
     // SIGKILL (rc=137) which dropped a box from the 2026-07-29 fleet run before
     // its start barrier. Peak heap is now bounded by PAGE x row size, not by the
     // whole table. Enforced by src/tests/unit/seed-memory-ratchet.test.ts.
-    const MESSAGE_LIMIT = 10_000;
+    const MESSAGE_LIMIT = positivePageSize('SEED_MESSAGE_LIMIT', 10_000);
     let messagesSynced = 0;
     for (let skip = 0; skip < MESSAGE_LIMIT; skip += MESSAGE_PAGE_SIZE) {
       const page = await remote.messageRecord.findMany({
         where: { personId: { in: personIds } },
-        orderBy: { timestamp: 'desc' },
+        // id breaks timestamp ties so offset pages never repeat or skip a row.
+        orderBy: [{ timestamp: 'desc' }, { id: 'desc' }],
         skip,
         take: Math.min(MESSAGE_PAGE_SIZE, MESSAGE_LIMIT - skip),
         // Production may still be on the previous schema during a deploy.
@@ -1443,11 +1451,12 @@ async function sync() {
         page,
         25,
         (m) => {
+          // Every synced person belongs to SEED_USER_ID, so it owns each message.
           const { id, ...rest } = m;
           return local.messageRecord.upsert({
             where: { id },
-            create: m as any,
-            update: rest as any,
+            create: { ...m, userId: SEED_USER_ID },
+            update: { ...rest, userId: SEED_USER_ID },
           });
         },
         (completed) => {

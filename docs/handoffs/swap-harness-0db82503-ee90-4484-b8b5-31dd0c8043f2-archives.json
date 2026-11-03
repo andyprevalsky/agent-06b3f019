@@ -1,0 +1,29 @@
+{
+  "old_devbox_id": "0db82503-ee90-4484-b8b5-31dd0c8043f2",
+  "verified_utc": "2026-10-12T23:44:09.368488+00:00",
+  "storage": "mounted persistent /project; survives old devbox destruction",
+  "files": [
+    {
+      "path": "/project/swap-harness/0db82503-ee90-4484-b8b5-31dd0c8043f2/original-claude-task-session.tar.gz",
+      "bytes": 6208390,
+      "sha256": "b17dd5fb38ffd2fcf04a61f7e5bdfd5faee2dc6c1ec44115b11000766911e487"
+    },
+    {
+      "path": "/project/swap-harness/0db82503-ee90-4484-b8b5-31dd0c8043f2/original-local-refs.bundle",
+      "bytes": 1395108,
+      "sha256": "57f3d1c161bacb3ea80c57a1406043bff54b36c054225eeb2df52d84e626209f"
+    },
+    {
+      "path": "/project/swap-harness/0db82503-ee90-4484-b8b5-31dd0c8043f2/original-local-refs.txt",
+      "bytes": 52581,
+      "sha256": "48129c45384c79128190b593a3305f5e6d3373c54ca6d709706ce1c7fa95e971"
+    },
+    {
+      "path": "/project/swap-harness/0db82503-ee90-4484-b8b5-31dd0c8043f2/task-evidence.tar.gz",
+      "bytes": 363989243,
+      "sha256": "26f7d059191dfad899e7b389028ab6836e4af1200756bbf321be72eb8c59ec35"
+    }
+  ],
+  "verification": "archive streams listed successfully and Git bundle prerequisites verified against original repository",
+  "privacy": "original evidence and transcript stay private; no raw content or secret values are committed"
+}

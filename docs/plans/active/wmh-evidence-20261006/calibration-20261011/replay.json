@@ -1,0 +1,681 @@
+{
+ "session": "4196b92e0dc74ccda69b41c87662aa4c",
+ "cases": [
+  {
+   "record": "d4a32571",
+   "tool": "rose.browser.spawn_browser_agent",
+   "goal": "{\"agent_id\": \"a43c759c-3e64-4e2a-ab4b-cb59cbb8afad\", \"arguments\": {\"attachments\": null, \"context_gates\": null, \"depth\": \"quick\", \"github_repo_link\": null, \"goal\": \"You own only Decibel investor lane for Tamara Chayo/Rose Labs. Verify Decibel's official private founder submission/contact route and current eligibility from its own site, using browser DOM and source URLs, dated 2026-10-10. Do not guess a partner email or use public post, mass solicitation, or apply to a program unless demonstrably eligible. If an open general founder contact route exists, make a personalized private factual techn",
+   "recorded_as_run": [
+    {
+     "id": "private_email_sent",
+     "probability": 0.6,
+     "description": "A deeper browser inspection can plausibly reveal a general contact address that the earlier quick research did not verify. Successful sending without an observed human response is the largest branch: "
+    },
+    {
+     "id": "cold_email_receives_reply",
+     "probability": 0.07,
+     "description": "This assigns the configured 0.07 probability to a cold first-touch investor reply; no warm introduction exists. The branch requires newly discovering an official contact address and successfully sendi"
+    },
+    {
+     "id": "no_open_contact_route",
+     "probability": 0.25,
+     "description": "The earlier official-source research did not establish a founder intake endpoint, making a genuinely absent or undiscoverable general route a substantial alternative to successful outreach. A bounded "
+    },
+    {
+     "id": "founder_form_validation_block",
+     "probability": 0.08,
+     "description": "An official intake can exist yet require a pitch deck and issuer details that the repeated record searches did not establish. This is less likely than either a usable general email or no discoverable "
+    }
+   ],
+   "control_no_calibration": {
+    "actual_model": "gpt-6.1-sol-foundry",
+    "outcomes": [
+     {
+      "id": "contact_form_ack",
+      "probability": 0.36,
+      "description": "A deeper DOM inspection could reveal a private contact form missed by the earlier quick research. Connected sessions and granted execution approvals favor completing a form requiring only known contac"
+     },
+     {
+      "id": "published_inbox_sent",
+      "probability": 0.12,
+      "description": "An explicitly published general inquiry inbox is another plausible route that the earlier quick pass could have missed. It receives less weight than a form or continued absence because no email was pr"
+     },
+     {
+      "id": "no_general_route",
+      "probability": 0.32,
+      "description": "The earlier official-source research found no verified general founder endpoint, so continued absence in the reachable site UI deserves substantial weight. This is a route-discovery limitation rather "
+     },
+     {
+      "id": "required_fields_block",
+      "probability": 0.16,
+      "description": "A founder contact intake could exist yet require a company location or pitch deck that the reviewed evidence cannot truthfully supply. That creates a concrete data-validation blocker despite granted a"
+     },
+     {
+      "id": "dom_read_failure",
+      "probability": 0.04,
+      "description": "A residual browser-state or DOM fault remains possible even with connected, authenticated services. It receives the least weight because the official entry point is known and there is no explicit conn"
+     }
+    ]
+   },
+   "treatment_researched_examples": {
+    "actual_model": "gpt-6.1-sol-foundry",
+    "outcomes": [
+     {
+      "id": "form_accepted",
+      "probability": 0.25,
+      "description": "An open form remains plausible despite the earlier quick pass's contact-research gap. The 30% reference rate is reduced to 25% given that history. Live DOM inspection can newly establish the route, an"
+     },
+     {
+      "id": "official_email_sent",
+      "probability": 0.245,
+      "description": "A publicly displayed founder-inquiry mailbox is consistent with the 25% email-only reference and was not ruled out by the earlier search. This allocates 98% of that route's probability to a successful"
+     },
+     {
+      "id": "no_qualifying_route",
+      "probability": 0.4,
+      "description": "The reference assigns 40% collectively to general-contact-only or warm-introduction-only sites, and the previous Decibel review specifically left the direct-route gap unresolved. A readable site witho"
+     },
+     {
+      "id": "required_deck_blocks",
+      "probability": 0.07,
+      "description": "A minority of discoverable founder forms require material beyond a general message. The earlier record search and newly created internal package establish no suitable authorized pitch deck, so a manda"
+     },
+     {
+      "id": "browser_dom_failure",
+      "probability": 0.03,
+      "description": "The site's earlier readability lowers the 5% site/error reference to 3%, but browser DOM acquisition can still fail independently of authentication or approvals, as illustrated by the automation-error"
+     },
+     {
+      "id": "official_email_bounced",
+      "probability": 0.005,
+      "description": "This is the 2% bounce reference applied to the 25% official-email-route alternative. A live public mailto link can be stale or point to a mailbox that rejects inbound messages, so public availability "
+     }
+    ]
+   }
+  },
+  {
+   "record": "d7664dd5",
+   "tool": "rose.browser.spawn_browser_agent",
+   "goal": "{\"agent_id\": \"e9be65d8-68af-48b4-96f3-16f7cf83c043\", \"arguments\": {\"attachments\": null, \"context_gates\": null, \"depth\": \"quick\", \"github_repo_link\": null, \"goal\": \"For single cold prospect Wing Venture Capital, inspect the firm's OFFICIAL site in authenticated browser for a private founder pitch/submission/contact route and current eligibility. Check home, team/Peter Wagner, investment thesis, stage/check, and contact pages accessible via site. If official private route exists, proceed to a factual tailored technical introduction for Rose Labs only, with no financing offer or unverified terms,",
+   "recorded_as_run": [
+    {
+     "id": "official_inbox_sent",
+     "probability": 0.558,
+     "description": "The earlier quick pass did not verify a Wing contact route, but did not establish that none exists. A deeper official-site inspection plausibly exposes a general inbox suitable for a research introduc"
+    },
+    {
+     "id": "official_inbox_reply",
+     "probability": 0.042,
+     "description": "This is the same 0.60 verified-route-and-send path multiplied by the specified 0.07 cold first-touch reply probability. A short research clarification is plausible without inventing financing interest"
+    },
+    {
+     "id": "no_suitable_private_route",
+     "probability": 0.25,
+     "description": "The previous official-source pass specifically left Wing's founder contact route unresolved, so a thorough inspection finding no suitable published route remains substantial. This is less likely than "
+    },
+    {
+     "id": "funding_intake_not_completed",
+     "probability": 0.15,
+     "description": "An official funding intake may be discoverable even when no unrestricted research-contact channel is available. This is plausible but less common than an ordinary inbox or no verified route. Mandatory"
+    }
+   ],
+   "control_no_calibration": {
+    "actual_model": "gpt-6.1-sol-foundry",
+    "outcomes": [
+     {
+      "id": "no_private_route_found",
+      "probability": 0.33,
+      "description": "The earlier public review did not verify a Wing intake channel, making another unsuccessful route search the largest single possibility. That review was not exhaustive, so discovering a usable route r"
+     },
+     {
+      "id": "general_inquiry_accepted",
+      "probability": 0.29,
+      "description": "A deeper footer/contact-page inspection could uncover a general inquiry form missed by the quick review. A form accepting ordinary contact details can support the authorized research-only introduction"
+     },
+     {
+      "id": "official_email_sent",
+      "probability": 0.2,
+      "description": "An official footer mailto link is a plausible route that a quick thesis/team review could miss. This is less likely than the combined form possibilities but permits a complete browser-based send throu"
+     },
+     {
+      "id": "pitch_form_requires_missing_facts",
+      "probability": 0.11,
+      "description": "A private route can exist while requiring a conventional investment pitch rather than a technical inquiry. The known package is an internal draft, and issuer, stage and offering facts remain missing, "
+     },
+     {
+      "id": "inquiry_submission_rejected",
+      "probability": 0.04,
+      "description": "A usable inquiry form can still fail at its backend after the final click. This receives a small probability because no outage is stated and authentication is available, but connectivity does not guar"
+     },
+     {
+      "id": "browser_state_failure",
+      "probability": 0.03,
+      "description": "A small residual probability covers an automation-state failure independent of authenticated connectivity. The examples establish that this tool can encounter browser-state exceptions, not their frequ"
+     }
+    ]
+   },
+   "treatment_researched_examples": {
+    "actual_model": "gpt-6.1-sol-foundry",
+    "outcomes": [
+     {
+      "id": "wing_no_route",
+      "probability": 0.43,
+      "description": "The earlier official-source review found no clear Wing intake endpoint, making another unsuccessful route search more likely than either sending branch. This raises the generic no-actionable-contact b"
+     },
+     {
+      "id": "wing_form_received",
+      "probability": 0.19,
+      "description": "A rendered general inquiry form is plausible despite the earlier quick search: the form reference rate is 30% and text-only reviews undercount dynamic forms. This branch is below that baseline because"
+     },
+     {
+      "id": "wing_public_email_sent",
+      "probability": 0.18,
+      "description": "An official general-inquiry mailbox is a plausible new discovery relative to the 25% public-email reference rate, discounted by the prior negative route search. Successful immediate sending is support"
+     },
+     {
+      "id": "wing_required_deck",
+      "probability": 0.1,
+      "description": "Some of the roughly 30% form-discovery mass plausibly leads to investment-specific intake rather than a minimal inquiry form. Rose Labs has no verified pitch deck or commercial-stage evidence, so an e"
+     },
+     {
+      "id": "wing_intro_policy",
+      "probability": 0.06,
+      "description": "The introductions-only reference rate is 10%, but there was no evidence of such a policy in the prior Wing review, so this receives less weight than generic route absence. Newly inspected official rou"
+     },
+     {
+      "id": "wing_browser_failure",
+      "probability": 0.04,
+      "description": "A small technical-failure branch remains consistent with the 5% site-error reference and observed browser DOM-handler failures. Authentication is already available, so missing login and approval refus"
+     }
+    ]
+   }
+  },
+  {
+   "record": "6b0078e2",
+   "tool": "rose.browser.spawn_browser_agent",
+   "goal": "{\"agent_id\": \"fea4f67e-f26c-4387-be60-464c4cc33b95\", \"arguments\": {\"attachments\": null, \"context_gates\": null, \"depth\": \"quick\", \"github_repo_link\": null, \"goal\": \"Own only Uncork Capital cold investor lane for Tamara Chayo/Rose Labs. Verify through official site a private founder submission/contact route and current eligibility. Do not guess partner email, use public post, or program application unless eligible. If official site provides verified private general founder intro form or email, submit a single individually tailored factual technical intro to the firm via that route, WITHOUT finan",
+   "recorded_as_run": [
+    {
+     "id": "no_verified_founder_route",
+     "probability": 0.45,
+     "description": "Earlier official-source research verified Uncork's relevance but did not verify founder intake, making another no-route finding the largest individual possibility. A fuller browser inspection can neve"
+    },
+    {
+     "id": "official_email_sent",
+     "probability": 0.279,
+     "description": "Assigning 0.30 to discovery and use of an official founder email leaves 0.30 \u00d7 0.93 = 0.279 for a sent message without an observed reply. This applies the specified 7% cold-first-touch reply rate with"
+    },
+    {
+     "id": "official_email_reply_no_meeting",
+     "probability": 0.01155,
+     "description": "This is 0.30 for a verified email route \u00d7 0.07 for a cold reply \u00d7 0.55 for no agreement to schedule a pitch. A research acknowledgement or qualification request is more likely than a meeting agreement"
+    },
+    {
+     "id": "official_email_reply_schedule",
+     "probability": 0.00945,
+     "description": "This is 0.30 for discovery of an official email route \u00d7 the specified 0.07 cold-reply probability \u00d7 the specified 0.45 scheduling-agreement probability for a replying seed investor. Agreement to find "
+    },
+    {
+     "id": "private_form_acknowledged",
+     "probability": 0.15,
+     "description": "A private general-contact form is a plausible discovery on fuller official-site inspection, although earlier research did not verify one. Its immediate on-page acknowledgement is more plausible than a"
+    },
+    {
+     "id": "investment_intake_not_suitable",
+     "probability": 0.1,
+     "description": "A smaller possibility is that browser inspection finds a private founder intake, but only as a financing application with mandatory fields incompatible with this research-only delegation. This differs"
+    }
+   ],
+   "control_no_calibration": {
+    "actual_model": "gpt-6.1-sol-foundry",
+    "outcomes": [
+     {
+      "id": "no_route",
+      "probability": 0.4,
+      "description": "The earlier official-site review found no verified founder intake route, making a completed inspection without sending the largest single possibility. That review was explicitly limited, so it does no"
+     },
+     {
+      "id": "form_ack",
+      "probability": 0.27,
+      "description": "A deeper browser inspection can uncover an ordinary inbound form missed by the earlier quick research pass. A minimal research introduction can satisfy such a form using known identity and public mate"
+     },
+     {
+      "id": "email_sent",
+      "probability": 0.17,
+      "description": "A published firm-level inbox is another plausible discovery on a closer official-site inspection, though the prior failure to verify any route makes it less likely than no-send or a visible form. Auth"
+     },
+     {
+      "id": "intake_gate",
+      "probability": 0.11,
+      "description": "A founder intake can exist yet be unsuitable for the narrowly authorized research introduction because it requires a deck and commercial/company qualifications not established in repeated record searc"
+     },
+     {
+      "id": "dom_error",
+      "probability": 0.05,
+      "description": "The prior public homepage was readable and the workspace is authenticated, so a technical failure is a small residual possibility rather than the default. Browser automation examples establish that DO"
+     }
+    ]
+   },
+   "treatment_researched_examples": {
+    "actual_model": "gpt-6.1-sol-foundry",
+    "outcomes": [
+     {
+      "id": "no_qualifying_route",
+      "probability": 0.45,
+      "description": "The earlier quick pass verified neither an Uncork intake nor an email, and the reference distribution frequently yields only general or social contacts. A further browser inspection therefore has the "
+     },
+     {
+      "id": "official_email_sent",
+      "probability": 0.245,
+      "description": "A footer email missed in the quick research pass remains plausible, close to the 25% public-email reference. This is 98% of the email-route probability, consistent with the 2% bounce reference. Multi-"
+     },
+     {
+      "id": "general_form_accepted",
+      "probability": 0.22,
+      "description": "A rendered contact drawer could reveal a general inquiry form that the earlier quick pass missed; the reference notes that text-only site checks undercount forms. This probability is below the 30% for"
+     },
+     {
+      "id": "published_email_bounced",
+      "probability": 0.005,
+      "description": "This is the remaining 2% of the 25% email-route probability, matching the supplied bounce reference. An officially published address can still reject mail. The failure occurs after sending, so it leav"
+     },
+     {
+      "id": "specialized_intake_no_send",
+      "probability": 0.04,
+      "description": "A small subset of newly discovered forms may be investment-pitch intake rather than general introductions. Required deck, stage and raise fields cannot be supplied consistently with the research-only "
+     },
+     {
+      "id": "official_site_unavailable",
+      "probability": 0.04,
+      "description": "A transient site failure remains plausible near the 5% website-error reference despite authenticated connectivity. This is lower than the route-discovery alternatives because the official site was rec"
+     }
+    ]
+   }
+  },
+  {
+   "record": "a405067c",
+   "tool": "rose.browser.spawn_browser_agent",
+   "goal": "{\"agent_id\": \"110d468d-d601-4329-a1de-dd032aaf580e\", \"arguments\": {\"attachments\": null, \"context_gates\": null, \"depth\": \"quick\", \"github_repo_link\": null, \"goal\": \"Own the Pear VC lane only. Inspect the firm's official website https://pear.vc/ and verify its current private founder pitch/contact route and eligibility before any outreach. PearX is program-specific at https://pear.vc/pearx/; do not apply unless Rose Labs is demonstrably eligible, given unknown legal entity, jurisdiction, stage and program conditions. If an official general private founder contact or pitch form exists and is suit",
+   "recorded_as_run": [
+    {
+     "id": "general_inquiry_accepted",
+     "probability": 0.46,
+     "description": "The earlier quick research verified PearX but did not rule out a separate general inquiry form. A deeper official-site inspection can plausibly uncover a low-information contact route suitable for thi"
+    },
+    {
+     "id": "program_route_only",
+     "probability": 0.32,
+     "description": "This has substantial weight because the existing official-source research established only PearX as a usable founder route. A targeted inspection may confirm program intake without finding a suitable "
+    },
+    {
+     "id": "general_pitch_requires_evidence",
+     "probability": 0.18,
+     "description": "A general pitch route can exist yet be unsuitable for a research-only introduction because it requires a deck and substantive company attestations. This is distinct from program-only availability and "
+    },
+    {
+     "id": "browser_state_failure",
+     "probability": 0.04,
+     "description": "A small residual remains for browser-state extraction failure during otherwise authenticated navigation. Such failures are technically plausible, but the unrelated retrieved failures do not establish "
+    }
+   ],
+   "control_no_calibration": {
+    "actual_model": "gpt-6.1-sol-foundry",
+    "outcomes": [
+     {
+      "id": "general_inquiry_acknowledged",
+      "probability": 0.38,
+      "description": "The earlier quick pass did not establish that Pear lacks a general contact route. A closer browser inspection could discover an unrestricted informational inquiry form, for which unknown financing fac"
+     },
+     {
+      "id": "program_route_only",
+      "probability": 0.4,
+      "description": "The strongest existing route evidence is specifically PearX, while no unrestricted Pear founder intake was verified. A live inspection confirming only that program route is therefore slightly more lik"
+     },
+     {
+      "id": "general_pitch_requires_materials",
+      "probability": 0.18,
+      "description": "An additional official route could be a substantive investment-intake form rather than an unrestricted contact form. Required deck, stage or location answers would then matter, and the repeated search"
+     },
+     {
+      "id": "navigation_timeout",
+      "probability": 0.04,
+      "description": "A transient navigation failure remains possible even with connected, authenticated services. It receives substantially less weight than substantive website findings because there is no current outage "
+     }
+    ]
+   },
+   "treatment_researched_examples": {
+    "actual_model": "gpt-6.1-sol-foundry",
+    "outcomes": [
+     {
+      "id": "pearx_only",
+      "probability": 0.45,
+      "description": "The prior Pear review verified only a program-specific route, making another inspection without a usable general founder form the most likely result. This also reflects the reference frequency of cont"
+     },
+     {
+      "id": "general_intro_received",
+      "probability": 0.32,
+      "description": "A newly discovered general form is plausible because the earlier quick pass did not establish the absence of one, and the reference notes that public text inspection undercounts rendered forms. If it "
+     },
+     {
+      "id": "mandatory_fields_unresolved",
+      "probability": 0.14,
+      "description": "A founder form may exist but require company stage, jurisdiction, a deck or financial information. Those facts remain missing despite repeated searches, so this is a meaningful alternative to the unre"
+     },
+     {
+      "id": "form_rejected",
+      "probability": 0.05,
+      "description": "Even a suitable authenticated form can reject a request through a transient server or anti-abuse limit. This is less likely than receipt after granted approvals, but distinct from both missing-informa"
+     },
+     {
+      "id": "browser_timeout",
+      "probability": 0.04,
+      "description": "A navigation or browser-state failure remains plausible at approximately the supplied site-error reference rate, slightly reduced by connected authenticated defaults. The retrieved browser failures il"
+     }
+    ]
+   }
+  },
+  {
+   "record": "75cdc042",
+   "tool": "rose.browser.spawn_browser_agent",
+   "goal": "{\"agent_id\": \"daa41079-c99f-45a9-9940-4062a1ccdcaa\", \"arguments\": {\"attachments\": null, \"context_gates\": null, \"depth\": \"quick\", \"github_repo_link\": null, \"goal\": \"For Conviction only, inspect the official site in an authenticated browser to verify current private founder contact/submission route and eligibility, investment thesis, especially whether 'Get in touch' leads to a general private contact form or specific program application. Do not submit yet. Return precise URLs, visible fields, exact conditions, and evidence about suitability for Rose Labs, a research-oriented AI agent company. N",
+   "recorded_as_run": [
+    {
+     "id": "general_founder_form",
+     "probability": 0.45,
+     "description": "The earlier public review verified a Get in touch entry and characterized it as an inquiry channel, making a general founder form the leading possibility, although its destination was not recorded. No"
+    },
+    {
+     "id": "published_email_route",
+     "probability": 0.35,
+     "description": "An official email link is almost as plausible as a form because the previous report recorded only a contact entry, not fields or a destination URL. This preserves its general-inquiry characterization "
+    },
+    {
+     "id": "embed_program_route",
+     "probability": 0.15,
+     "description": "A program-specific route remains plausible for an AI-focused firm with founder-building activities, but is less likely because the earlier review described a general inquiry channel. Direct browser in"
+    },
+    {
+     "id": "contact_form_unavailable",
+     "probability": 0.05,
+     "description": "A small residual probability covers a live public intake component failing despite an accessible official site. This is less likely than successful route inspection and does not imply disconnected aut"
+    }
+   ],
+   "control_no_calibration": {
+    "actual_model": "gpt-6.1-sol-foundry",
+    "outcomes": [
+     {
+      "id": "general_email_route",
+      "probability": 0.45,
+      "description": "The earlier same-day report verified an official inquiry link without resolving its destination. A public email inbox is a plausible low-friction intake route for an early-stage VC firm, weighted slig"
+     },
+     {
+      "id": "general_founder_form",
+      "probability": 0.32,
+      "description": "A general founder inquiry form is also consistent with the previously verified Get in touch link and would directly answer the delegated route-inspection goal. It receives less weight than an email ro"
+     },
+     {
+      "id": "program_specific_intake",
+      "probability": 0.18,
+      "description": "An early-company AI program is a plausible destination on Conviction's site. This is weighted below both general-contact alternatives because the earlier report described Conviction's route as an inqu"
+     },
+     {
+      "id": "browser_state_failure",
+      "probability": 0.05,
+      "description": "The official site was readable in the earlier same-day research, so a technical interruption is a small residual possibility rather than the main expectation. Browser-state extraction can fail indepen"
+     }
+    ]
+   },
+   "treatment_researched_examples": {
+    "actual_model": "gpt-6.1-sol-foundry",
+    "outcomes": [
+     {
+      "id": "general_email",
+      "probability": 0.43,
+      "description": "The earlier research verified a Get in touch inquiry link but not its destination. That makes an actionable general channel more likely than a program-only route or failure; a published email is a com"
+     },
+     {
+      "id": "general_contact_form",
+      "probability": 0.33,
+      "description": "A general form remains nearly as plausible as email because the earlier report established an inquiry link and this action renders the live browser UI, which can reveal forms missed by text research. "
+     },
+     {
+      "id": "embed_application_open",
+      "probability": 0.15,
+      "description": "The delegated question explicitly leaves a program destination unresolved, and a first-party AI founder program could explain the previously observed inquiry link. It is less likely than a general cha"
+     },
+     {
+      "id": "embed_closed_waitlist",
+      "probability": 0.06,
+      "description": "A program-only route may be outside its application window because no cohort timing was established previously. This smaller branch captures a meaningful eligibility and availability blocker without i"
+     },
+     {
+      "id": "temporary_site_error",
+      "probability": 0.03,
+      "description": "The previously readable official site makes failure less likely than the 5% unconditional site-error reference, but a transient upstream error remains possible. A login failure is omitted because auth"
+     }
+    ]
+   }
+  },
+  {
+   "record": "951d11b0",
+   "tool": "rose.browser.spawn_browser_agent",
+   "goal": "{\"agent_id\": \"f9d80a6f-c332-448c-bebb-8c72b2604522\", \"arguments\": {\"attachments\": null, \"context_gates\": null, \"depth\": \"quick\", \"github_repo_link\": null, \"goal\": \"Act ONLY for assigned investor 2048 Ventures, https://2048.vc/, cold public prospect for Tamara Chayo/Rose Labs. Verify official private founder pitch/contact route and eligibility afresh using firm's website. Target ask planning figure $1.5m, NOT an authorized offering. Rose Labs first-party public research is https://www.roselabs.ai/research/task-decomposer, describing context-independent, parallelizable task decomposition and Ros",
+   "recorded_as_run": [
+    {
+     "id": "intro_accepted",
+     "probability": 0.56,
+     "description": "The earlier research verified an official pitch route, making an accepted introduction the most likely result. This branch discovers a general company-introduction form whose required fields can be co"
+    },
+    {
+     "id": "pitch_only_requirements",
+     "probability": 0.36,
+     "description": "An official pitch route was previously verified, but its required fields and suitability for a research-only introduction were not. A financing-specific intake requiring a deck and round details is th"
+    },
+    {
+     "id": "intake_temporarily_unavailable",
+     "probability": 0.08,
+     "description": "A temporary failure of the linked intake is possible despite authenticated, connected services, but is less likely than either usable or financing-specific form content given the earlier route verific"
+    }
+   ],
+   "control_no_calibration": {
+    "actual_model": "gpt-6.1-sol-foundry",
+    "outcomes": [
+     {
+      "id": "technical_form_received",
+      "probability": 0.52,
+      "description": "The earlier same-day research verified an official Pitch us entry, making a usable inbound route more likely than its disappearance. A narrow technical introduction requires little company substantiat"
+     },
+     {
+      "id": "funding_intake_blocked",
+      "probability": 0.28,
+      "description": "An official Pitch us route commonly serves investment evaluation rather than general technical correspondence. Prior research established the entry but not its mandatory fields, while repeated searche"
+     },
+     {
+      "id": "official_email_sent",
+      "probability": 0.15,
+      "description": "The previous report cited the firm's Pitch us entry without resolving its endpoint. A firm-published mailto route is therefore a plausible, though less likely, alternative to an embedded form. Connect"
+     },
+     {
+      "id": "browser_state_failure",
+      "probability": 0.05,
+      "description": "Browser automation can fail independently of connected accounts, granted approvals or investor eligibility. The demonstrations establish a realistic browser-state error format, not its frequency; noth"
+     }
+    ]
+   },
+   "treatment_researched_examples": {
+    "actual_model": "gpt-6.1-sol-foundry",
+    "outcomes": [
+     {
+      "id": "general_intro_received",
+      "probability": 0.5,
+      "description": "The prior official Pitch us discovery makes a usable route substantially more likely than the generic website-search baseline. A general inquiry form accepting a research-only message is plausible des"
+     },
+     {
+      "id": "investment_application_required",
+      "probability": 0.31,
+      "description": "A founder Pitch us route often means a financing application rather than an unrestricted contact form. The previously verified link makes this more plausible than finding no route, while the repeated "
+     },
+     {
+      "id": "official_inbox_email_sent",
+      "probability": 0.11,
+      "description": "The prior report verified a Pitch us link but did not record its final mechanism, leaving a smaller email-only possibility. A connected Gmail send to a newly verified official inbox is likely to be ac"
+     },
+     {
+      "id": "form_submission_rejected",
+      "probability": 0.05,
+      "description": "Even with an appropriate form and granted approvals, a transient submission-service failure remains plausible. It receives less weight than route-content uncertainty because connectivity is establishe"
+     },
+     {
+      "id": "site_navigation_failed",
+      "probability": 0.03,
+      "description": "A short-lived public-site or browser navigation failure remains possible despite authenticated, connected workspaces. Its low weight reflects the prior successful official-site research. It is not a l"
+     }
+    ]
+   }
+  },
+  {
+   "record": "e4ed57b3",
+   "tool": "rose.browser.spawn_browser_agent",
+   "goal": "{\"agent_id\": \"c46f3d0a-666f-4bdd-9151-82e712ae7c0e\", \"arguments\": {\"attachments\": null, \"context_gates\": null, \"depth\": \"quick\", \"github_repo_link\": null, \"goal\": \"For ONLY Afore Capital, inspect authenticated browser on official site https://www.afore.vc/ and verify current official private founder submission/contact route and eligibility before any action. Look for pitch form, founder submission, stage, check range, exclusions. Do not submit yet; report exact URL, form fields and eligibility wording, any source quotes, and whether private one-to-one technical introduction is available. Do no",
+   "recorded_as_run": [
+    {
+     "id": "flexible_founder_intake",
+     "probability": 0.58,
+     "description": "The earlier official-source review identified a founder pitch form and a $500k\u2013$2m envelope, making a working intake the leading possibility. Optional financing fields could allow a narrow technical n"
+    },
+    {
+     "id": "financing_only_intake",
+     "probability": 0.32,
+     "description": "A working investment form is strongly supported by the prior review, but mandatory fundraising and deck fields are a substantial alternative to a flexible inquiry route. This would block an honest res"
+    },
+    {
+     "id": "broken_public_route",
+     "probability": 0.07,
+     "description": "The previous review makes a missing route less likely than either working-form branch, but a stale or broken public pitch link remains plausible. This possibility concerns public-page availability, no"
+    },
+    {
+     "id": "browser_state_failure",
+     "probability": 0.03,
+     "description": "A browser automation failure is possible but receives little weight because connectivity and authentication are explicitly available and the task is a small read-only inspection. Login, approval and u"
+    }
+   ],
+   "control_no_calibration": {
+    "actual_model": "gpt-6.1-sol-foundry",
+    "outcomes": [
+     {
+      "id": "investment_intake_only",
+      "probability": 0.52,
+      "description": "Earlier public research verified an official Afore pitch route and a pre-seed mandate, making successful inspection more likely than a technical blocker. The unresolved question is whether its current"
+     },
+     {
+      "id": "flexible_private_intake",
+      "probability": 0.4,
+      "description": "The previously verified official pitch route strongly supports an accessible intake, and pre-seed firms often accept short descriptions without complete financing materials. This branch models that pl"
+     },
+     {
+      "id": "intake_render_blocker",
+      "probability": 0.08,
+      "description": "Prior verification and default authenticated connectivity make route failure substantially less likely than either accessible-form result, but they do not guarantee that a live form renders. A fronten"
+     }
+    ]
+   },
+   "treatment_researched_examples": {
+    "actual_model": "gpt-6.1-sol-foundry",
+    "outcomes": [
+     {
+      "id": "research_capable_intake",
+      "probability": 0.55,
+      "description": "The earlier official-source review already found an Afore pitch form, making an accessible intake substantially more likely than the generic website-search base rate. A short form with optional fundra"
+     },
+     {
+      "id": "financing_specific_intake",
+      "probability": 0.32,
+      "description": "Prior verification makes finding a form likely, but many founder pitch portals require a deck and round information rather than accepting a standalone research note. This branch gives substantial weig"
+     },
+     {
+      "id": "published_email_route",
+      "probability": 0.09,
+      "description": "A changed or redirected contact interface can explain why direct inspection differs from the earlier summary, but that is less likely than reproducing a form on the same review date. A newly published"
+     },
+     {
+      "id": "browser_state_failure",
+      "probability": 0.04,
+      "description": "The authenticated workspace and successful earlier public research make a technical failure less likely than usable route evidence, but the grounded browser examples establish that page-state automati"
+     }
+    ]
+   }
+  },
+  {
+   "record": "a224ec10",
+   "tool": "rose.browser.spawn_browser_agent",
+   "goal": "{\"agent_id\": \"c6b2ed2a-5b99-40e4-88d2-f222b6ba463a\", \"arguments\": {\"attachments\": null, \"context_gates\": null, \"depth\": \"quick\", \"github_repo_link\": null, \"goal\": \"Work only the NFX cold investor prospect for Tamara Chayo / Rose Labs. Verify on official NFX site the current private founder submission or contact route, eligibility, check size and thematic fit. User supplied https://www.nfx.com/, partner James Currier, target $2m. Rose Labs has public first-party research at https://www.roselabs.ai/research/task-decomposer on recursive task decomposition and Rose-Decompose; those are first-party",
+   "recorded_as_run": [
+    {
+     "id": "nfx_intro_received",
+     "probability": 0.5,
+     "description": "The previously verified official founder-intake route and connected browser make a minimal contact-and-description submission plausible without resolving all issuer facts. This branch assumes those ex"
+    },
+    {
+     "id": "nfx_required_fields_block",
+     "probability": 0.46,
+     "description": "A general investment-pitch intake may require a company location and deck even though its public entry is open. The repeated searches have not established those inputs, and the delegation forbids inve"
+    },
+    {
+     "id": "nfx_browser_runtime_error",
+     "probability": 0.04,
+     "description": "A small residual automation-failure probability remains despite connected sessions, as browser runtime errors are possible independently of authentication. It is much less likely than either form-cont"
+    }
+   ],
+   "control_no_calibration": {
+    "actual_model": "gpt-6.1-sol-foundry",
+    "outcomes": [
+     {
+      "id": "intro_confirmed",
+      "probability": 0.41,
+      "description": "Prior official research supports an existing NFX founder-submission route, and authentication and execution approvals are available. A lightweight intake could accept a sourced technical introduction "
+     },
+     {
+      "id": "required_facts_block",
+      "probability": 0.47,
+      "description": "The prior report verified a submission route but not its field requirements. Investor intakes commonly require company location and pitch material, neither of which the repeated connected-record searc"
+     },
+     {
+      "id": "intake_server_error",
+      "probability": 0.07,
+      "description": "Even a valid, authenticated intake with sufficient factual fields can fail at its final server request. There is no present outage evidence, so this receives much less weight than either field-layout "
+     },
+     {
+      "id": "browser_runtime_failure",
+      "probability": 0.05,
+      "description": "A browser-state or automation failure remains possible independently of connected services and available approvals, but there is no current malfunction evidence, so its weight is small. Missing-login,"
+     }
+    ]
+   },
+   "treatment_researched_examples": {
+    "actual_model": "gpt-6.1-sol-foundry",
+    "outcomes": [
+     {
+      "id": "intro_received",
+      "probability": 0.43,
+      "description": "Prior research already identified an official NFX founder-submission route, making access substantially more likely than the generic website-discovery baseline. If a deck and company location are opti"
+     },
+     {
+      "id": "required_pitch_facts",
+      "probability": 0.49,
+      "description": "A general pitch route is already evidenced, but its detailed requirements have not been checked. Required company location and pitch-deck fields are common in substantive founder intakes, and neither "
+     },
+     {
+      "id": "submit_service_error",
+      "probability": 0.05,
+      "description": "The form can be permissive enough to submit the supported introduction yet fail at its submission endpoint. A low single-digit probability is consistent with the supplied website-error reference, redu"
+     },
+     {
+      "id": "browser_state_error",
+      "probability": 0.03,
+      "description": "The demonstrations establish that browser-state automation can fail independently of a site's availability, but they do not establish its frequency in this world. A small residual probability covers t"
+     }
+    ]
+   }
+  }
+ ]
+}

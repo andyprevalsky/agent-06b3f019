@@ -1,0 +1,105 @@
+/**
+ * IntegrationSyncProgress persistence: one row per (userId, provider, accountId),
+ * i.e. per existing Integration row.
+ *
+ * Every write runs inside a per-account advisory lock so the read → judge →
+ * write sequence is serialized for that account only (10k rule: no lock or row
+ * is shared across accounts or users).
+ */
+
+import type { IntegrationSyncProgress, Prisma } from '@prisma/client';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
+
+export type ProgressRow = IntegrationSyncProgress;
+export type Tx = Prisma.TransactionClient;
+
+export interface ProgressKey {
+  userId: string;
+  provider: string;
+  accountId: string;
+}
+
+/**
+ * Columns a judged write sets. `updatedAt` is the judging clock, written
+ * explicitly so the coalescing window and the delta cursor use one time source.
+ */
+export type ProgressRowData = Omit<
+  Prisma.IntegrationSyncProgressUncheckedCreateInput,
+  'id' | 'userId' | 'provider' | 'accountId' | 'createdAt'
+> & { updatedAt: Date };
+
+const keyOf = (key: ProgressKey) => ({
+  userId_provider_accountId: {
+    userId: key.userId,
+    provider: key.provider,
+    accountId: key.accountId,
+  },
+});
+
+/** Take the account's progress lock inside `tx` (released at commit). */
+export async function lockAccountProgress(tx: Tx, key: ProgressKey): Promise<void> {
+  await tx.$queryRaw`
+    WITH acquired AS MATERIALIZED (
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${`${key.userId}:${key.provider}:${key.accountId}`}, 907311)
+      )
+    )
+    SELECT 1::int AS locked FROM acquired
+  `;
+}
+
+/** Run `fn` holding the account's progress lock (released at commit). */
+export async function withAccountProgressLock<T>(
+  key: ProgressKey,
+  fn: (tx: Tx) => Promise<T>
+): Promise<T> {
+  return runTransactionWithRetry(async (tx) => {
+    await lockAccountProgress(tx, key);
+    return fn(tx);
+  });
+}
+
+export async function findProgress(tx: Tx, key: ProgressKey): Promise<ProgressRow | null> {
+  return tx.integrationSyncProgress.findUnique({ where: keyOf(key) });
+}
+
+export async function countProgressRowsForUser(tx: Tx, userId: string): Promise<number> {
+  return tx.integrationSyncProgress.count({ where: { userId } });
+}
+
+export async function createProgress(
+  tx: Tx,
+  key: ProgressKey,
+  data: ProgressRowData
+): Promise<ProgressRow> {
+  return tx.integrationSyncProgress.create({ data: { ...key, ...data } });
+}
+
+export async function updateProgress(tx: Tx, id: string, data: ProgressRowData) {
+  return tx.integrationSyncProgress.update({ where: { id }, data });
+}
+
+/** The stored run state of one user's `accountId` rows of `providers` (one indexed read). */
+export async function listProgressStates(
+  userId: string,
+  providers: string[],
+  accountId: string
+): Promise<Array<{ provider: string; state: string }>> {
+  return prisma.integrationSyncProgress.findMany({
+    where: { userId, accountId, provider: { in: providers } },
+    select: { provider: true, state: true },
+  });
+}
+
+/** All progress rows of one user: one indexed range read, bounded by accounts. */
+export async function listProgressForUser(userId: string): Promise<ProgressRow[]> {
+  return prisma.integrationSyncProgress.findMany({
+    where: { userId },
+    orderBy: [{ provider: 'asc' }, { createdAt: 'asc' }],
+  });
+}
+
+export async function deleteProgress(key: ProgressKey): Promise<number> {
+  const { count } = await prisma.integrationSyncProgress.deleteMany({ where: key });
+  return count;
+}

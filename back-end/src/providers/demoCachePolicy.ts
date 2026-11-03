@@ -1,18 +1,18 @@
 /**
- * DEMO-tag fast-cache policy.
+ * DEMO-tag demo-cache policy.
  *
  * Cache replay is gated by matching the agent (or tree-root) goal against a
  * tasks.json entry tagged DEMO — not by the Fast Mode button. The button only
  * controls LLM provider_fast_mode (Anthropic speed / OpenAI priority).
  *
  * Keep the OAi prefix fallback in sync with
- * agents/providers/fast_cache/normalize.py::demo_cache_allowed.
+ * agents/providers/demo_cache/normalize.py::demo_cache_allowed.
  */
 
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { isOaiDemoGoal, canonicalizeOaiDemoGoalForHash } from './fastCacheNormalizeOaiDemo';
+import { isOaiDemoGoal, canonicalizeOaiDemoGoalForHash } from './demoCacheNormalizeOaiDemo';
 
 export const OAI_DEMO_ROOT_GOAL_HASH = '4ae3193053ac1d8f';
 
@@ -23,7 +23,7 @@ function sha16(text: string): string {
   return createHash('sha256').update(text).digest('hex').slice(0, 16);
 }
 
-/** Mirror agents/providers/fast_cache/normalize.py::goal_hash for catalog prompts. */
+/** Mirror agents/providers/demo_cache/normalize.py::goal_hash for catalog prompts. */
 export function demoGoalHash(goal: string): string {
   const canonical = canonicalizeOaiDemoGoalForHash(
     goal.replace(/@ref:message:[0-9a-f-]{36}/gi, '@ref:message:<uuid>')
@@ -57,11 +57,11 @@ export function demoCacheGoalHashes(): ReadonlySet<string> {
       for (const task of tasks) {
         if (task === null || typeof task !== 'object') continue;
         const row = task as Record<string, unknown>;
-        const fastCacheOn =
-          String(row.fast_cache ?? '')
+        const demoCacheOn =
+          String(row.demo_cache ?? row.fast_cache ?? '')
             .trim()
             .toLowerCase() === 'on';
-        if (!taskHasDemoTag(row) && !fastCacheOn) continue;
+        if (!taskHasDemoTag(row) && !demoCacheOn) continue;
         const prompt = row.prompt;
         if (typeof prompt === 'string' && prompt.trim()) {
           hashes.add(demoGoalHash(prompt));

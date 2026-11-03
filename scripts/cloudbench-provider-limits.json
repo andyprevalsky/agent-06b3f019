@@ -1,0 +1,95 @@
+{
+  "schema": "cloudbench-provider-limits-v1",
+  "production_reserve_fraction": 0.2,
+  "production_reserve_note": "Benchmark guests use the same provider keys as production; this fraction of every limit stays reserved for production traffic.",
+  "measurement": {
+    "id": "run600c",
+    "date": "2026-10-18",
+    "concurrent_benches": 600,
+    "source": "run600c: 600 concurrent REAL cloud benches; peak per-provider demand from the run600c provider census (rl600)."
+  },
+  "enforced": [
+    {
+      "id": "parallel-search-extract",
+      "name": "Parallel Search+Extract API",
+      "limit": 600,
+      "limit_unit": "requests/min per key",
+      "limit_qualifier": null,
+      "credential_env": "PARRALLEL_API_KEY",
+      "per_bench_peak": 6.83,
+      "per_bench_peak_unit": "requests/min per bench",
+      "limit_source": "docs.parallel.ai/getting-started/rate-limits: 600 requests/min per API key, shared by Search and Extract.",
+      "demand_source": "run600c peak demand >=4,100 requests/min at 600 concurrent benches.",
+      "exhaustion": "Task-visible rate-limit errors; no unlimited fallback."
+    },
+    {
+      "id": "kernel-browser-sessions",
+      "name": "Kernel browser sessions",
+      "limit": 150,
+      "limit_unit": "concurrent sessions",
+      "limit_qualifier": "Start-up plan",
+      "credential_env": "KERNEL_API_KEY",
+      "per_bench_peak": 0.884,
+      "per_bench_peak_unit": "sessions per bench",
+      "limit_source": "kernel.sh/pricing Start-up plan; provider error unified_concurrent_sessions: limit=150.",
+      "demand_source": "run600c peak demand ~530 concurrent sessions at 600 concurrent benches.",
+      "exhaustion": "Browser session creation fails; no unlimited fallback."
+    },
+    {
+      "id": "tilion-browser-sessions",
+      "name": "Tilion browser sessions",
+      "limit": 20,
+      "limit_unit": "concurrent browsers",
+      "limit_qualifier": "pilot plan",
+      "credential_env": "TILION_API_KEY",
+      "per_bench_peak": 1,
+      "per_bench_peak_unit": "sessions per bench",
+      "limit_source": "Tilion pilot: 20 concurrent browsers on one account shared by prod, dev and benchmarks; a 21st create answers 429 concurrency_limit.",
+      "demand_source": "Not yet measured on Tilion; one live session per bench assumed until a Tilion fleet census exists.",
+      "exhaustion": "Browser session creation fails with a typed 429; no unlimited fallback.",
+      "browser_provider": "tilion",
+      "demand_measurement": "assumed, not yet measured on Tilion"
+    }
+  ],
+  "informational": [
+    {
+      "id": "azure-foundry-gpt-6-sol",
+      "name": "Azure Foundry gpt-6-sol",
+      "limit": 13330000,
+      "limit_unit": "tokens/min",
+      "limit_qualifier": "westus3 10,000,000 + westus 1,665,000 + southcentralus 1,665,000",
+      "credential_env": "AZURE_FOUNDRY_*",
+      "per_bench_peak": 175000,
+      "per_bench_peak_unit": "tokens/min per bench",
+      "limit_source": "Live x-ratelimit-limit-tokens response headers per regional deployment, 2026-10-18.",
+      "demand_source": "run600c peak 105,000,000 tokens/min at 600 concurrent benches.",
+      "fallback": "overflow is served by OpenRouter (no rate limit, credit-bound)"
+    },
+    {
+      "id": "cerebras-qwen-3.8-27b",
+      "name": "Cerebras qwen-3.8-27b",
+      "limit": 300,
+      "limit_unit": "requests/min",
+      "limit_qualifier": null,
+      "credential_env": "CEREBRAS_API_KEY",
+      "per_bench_peak": 2.8,
+      "per_bench_peak_unit": "requests/min per bench",
+      "limit_source": "Cerebras model rate limit, 300 requests/min.",
+      "demand_source": "run600c peak ~2.8 requests/min per bench.",
+      "fallback": "overflow falls through to Azure Foundry"
+    },
+    {
+      "id": "firecrawl",
+      "name": "Firecrawl",
+      "limit": 500,
+      "limit_unit": "requests/min",
+      "limit_qualifier": null,
+      "credential_env": "FIRECRAWL_API_KEY",
+      "per_bench_peak": 1.53,
+      "per_bench_peak_unit": "requests/min per bench",
+      "limit_source": "Firecrawl plan rate limit, 500 requests/min.",
+      "demand_source": "run600c peak ~1.53 requests/min per bench.",
+      "fallback": "overflow falls back to Parallel Extract"
+    }
+  ]
+}

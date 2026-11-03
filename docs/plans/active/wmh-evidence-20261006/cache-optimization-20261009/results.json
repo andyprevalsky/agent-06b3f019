@@ -1,0 +1,222 @@
+{
+ "schema": "rose.wmh_cache_experiment.v2",
+ "date": "2026-10-09/10 UTC",
+ "status": "completed_cache_diagnostic; fundraiser not passing",
+ "host": "boxes.dev Linux devbox, 8 vCPU, 15.6 GB RAM; workload cgroup capped at 15.17 GB with a SIGTERM memory watchdog",
+ "memory_protocol": "Native build and each WMH ran in a sudo systemd-run scope outside the workload slice (MemoryHigh 10-11.5 GiB, unlimited swap) with 44+10 GB swapfiles and lzo/zbud zswap; the watchdog never fired after this protocol.",
+ "model": {
+  "world_model_id": "grounded-world-model-785e30597233ee43e354",
+  "world_model_manifest_sha256": "cdc82bf8b55b35309c5e6925659fd7e74e51825dbccf2dc338b5777fbdffe703",
+  "rag_id": "trace-rag-5e34d90680843a762f86",
+  "trajectories": 13857,
+  "observations": 201546,
+  "demo_exclusions": 9,
+  "roots_with_redactions": 257,
+  "export_failures": {
+   "ciphertext_sha256_mismatch": 108
+  },
+  "corpus_conformance": "passed: 100 sampled, 13866 trajectories, 201565 eligible, 10 categories, 47 tools, 0 invalid",
+  "native_suite": "conformance.native.json: 100/100 cases bound to native source transitions",
+  "pool": "rose-wmh-gpt61 (openai/gpt-6.1-sol, xhigh, 16384 output)",
+  "policy": "rose-outcome-distribution-v2 (sha 23feae12..., effective system d76abcd5...)",
+  "build_wall_seconds": 7785,
+  "build_peak_rss_bytes_in_scope": 11659812864
+ },
+ "infrastructure_identical_across_conditions": {
+  "task": "raise-5m-rose-labs-brex, unchanged prompt/evaluator, --simulate --timeout-seconds 300",
+  "fixture": "canonical PG16 base fc9dc500...-pg16-victoria-prod-sync-v1-whatsapp-v2 plus a frozen read-only prod sync of Tamy's account rows (local source DB dump sha256 d84ce812...)",
+  "demo_cache": "fresh per run: the run's own victoria_bench_<run> DB (canonical base has 0 FastModeCacheEntry rows)",
+  "temporal": "Temporal Cloud, per-run task queue",
+  "wmh_serving": "external WMH per condition (WMH_EXTERNAL_BASE_URL) started from the exact run commit with run.sh-equivalent env (run backend for DEMO traffic, simulate cache scope, write-through disabled); cold load 728-797 s exceeds run.sh's 600 s WMH bound",
+  "provider_cache_isolation": "each condition's WMH loaded >12 min after the previous condition's last call (5-minute prompt-cache TTL)"
+ },
+ "baseline_note": "The October 8 Mac baseline (8.37%, provider source 6996f338...) used a different host, corpus and fixture and its source is not recoverable from Git; i0 here differs from i1 only by the full-task marker.",
+ "conditions": [
+  {
+   "iteration": 0,
+   "layout": "stable-task marker only",
+   "condition_commit": "dceea3f14",
+   "run_commit": "440028235",
+   "provider_sha256": "9186ce1777a1bc0b9980a1030949441a16b283b431e32e3264a67a87b565993e",
+   "stack_run_id": "wmh-cache-20261009-i0-1791591194",
+   "wmh_ready_seconds": 797,
+   "provider": {
+    "provider_cached_input_tokens": 5468,
+    "provider_total_input_tokens": 56331,
+    "provider_token_hit_pct": 9.706911,
+    "provider_metered_requests": 5,
+    "provider_requests_with_cached_input": 4,
+    "provider_output_tokens": 40607,
+    "provider_cache_write_tokens": 50848
+   },
+   "provider_cached_reads_per_request": [
+    0,
+    1367,
+    1367,
+    1367,
+    1367
+   ],
+   "native_attempts": 6,
+   "native_errors_by_type": {
+    "CancelledError": 1
+   },
+   "demo": {
+    "demo_hits": 0,
+    "demo_lookups": 6,
+    "demo_stores": 5
+   },
+   "fe_url": "https://www.roselabs.ai/?agent-id=df2c1cc5-f866-4ee0-91ba-559aa811452b#benchmark-share=5eca501b-2c21-4d57-be1d-eb40676fe58c.1794183780.3347a776f649a878ac761f8be0d230a65f18ed43e923335888b20705a2909de1",
+   "fe_verified_messages": 20,
+   "stack_cleanup": "clean",
+   "benchmark_cleanup": "clean",
+   "benchmark_run_id": "5eca501b-2c21-4d57-be1d-eb40676fe58c",
+   "root_agent_id": "df2c1cc5-f866-4ee0-91ba-559aa811452b",
+   "native_session_id": "6d4014f8b556489c99cea7fa5cde2f20",
+   "joined_revision": 3,
+   "join_verified": true,
+   "settled_proceeds_cents": 0,
+   "agent_loop_cost_cents": 9.0,
+   "outcome": "FAIL: Timeout after 304s (authorized 300s cache-diagnostic cap)"
+  },
+  {
+   "iteration": 1,
+   "layout": "+ full-task marker",
+   "condition_commit": "cd6292196",
+   "run_commit": "302905845",
+   "provider_sha256": "f4f37226b8a4bcb351e8a4a62d01a7269f8f43e76f173dfa588f12a6a44bcbe4",
+   "stack_run_id": "wmh-cache-20261009-i1-1791593247",
+   "wmh_ready_seconds": 762,
+   "provider": {
+    "provider_cached_input_tokens": 2879,
+    "provider_total_input_tokens": 31073,
+    "provider_token_hit_pct": 9.265279,
+    "provider_metered_requests": 3,
+    "provider_requests_with_cached_input": 2,
+    "provider_output_tokens": 20332,
+    "provider_cache_write_tokens": 28185
+   },
+   "provider_cached_reads_per_request": [
+    0,
+    1368,
+    1511
+   ],
+   "native_attempts": 4,
+   "native_errors_by_type": {
+    "CancelledError": 1
+   },
+   "demo": {
+    "demo_hits": 0,
+    "demo_lookups": 4,
+    "demo_stores": 3
+   },
+   "fe_url": "https://www.roselabs.ai/?agent-id=4cb095f0-ac4d-4e46-b9a7-a876bbf6770e#benchmark-share=87ba0357-cab8-4ebe-9d22-f0071a6ba1d5.1794185654.3c2f686fdf00234a2ab94e95c4072a41cbb50864bbfa4285bb00c3d33d6e473d",
+   "fe_verified_messages": 17,
+   "stack_cleanup": "clean",
+   "benchmark_cleanup": "clean",
+   "benchmark_run_id": "87ba0357-cab8-4ebe-9d22-f0071a6ba1d5",
+   "root_agent_id": "4cb095f0-ac4d-4e46-b9a7-a876bbf6770e",
+   "native_session_id": "1779b982c59a4962bafe605654e93671",
+   "joined_revision": 2,
+   "join_verified": true,
+   "settled_proceeds_cents": 0,
+   "agent_loop_cost_cents": 7.0,
+   "outcome": "FAIL: Timeout after 304s (authorized 300s cache-diagnostic cap)"
+  },
+  {
+   "iteration": 2,
+   "layout": "+ last two complete history batches; history before state",
+   "condition_commit": "58b889713",
+   "run_commit": "ef58395a8",
+   "provider_sha256": "9cb7804354512c2224340f97e6247a4b7ce7e834c50188c66414148835660375",
+   "stack_run_id": "wmh-cache-20261009-i2-1791594429",
+   "wmh_ready_seconds": 793,
+   "provider": {
+    "provider_cached_input_tokens": 7119,
+    "provider_total_input_tokens": 57247,
+    "provider_token_hit_pct": 12.435586,
+    "provider_metered_requests": 5,
+    "provider_requests_with_cached_input": 4,
+    "provider_output_tokens": 36788,
+    "provider_cache_write_tokens": 50113
+   },
+   "provider_cached_reads_per_request": [
+    0,
+    1918,
+    1365,
+    1918,
+    1918
+   ],
+   "native_attempts": 6,
+   "native_errors_by_type": {
+    "CancelledError": 1
+   },
+   "demo": {
+    "demo_hits": 0,
+    "demo_lookups": 6,
+    "demo_stores": 5
+   },
+   "fe_url": "https://www.roselabs.ai/?agent-id=76cc9168-d966-4dfe-a395-f87cb9fe74e6#benchmark-share=579229d4-9f77-4b56-9d2c-73adba29685f.1794186873.22f01ea2e301cefff06910580a49f74dc7b29824ee60553a52cc8b6b298bc956",
+   "fe_verified_messages": 20,
+   "stack_cleanup": "clean",
+   "benchmark_cleanup": "clean",
+   "benchmark_run_id": "579229d4-9f77-4b56-9d2c-73adba29685f",
+   "root_agent_id": "76cc9168-d966-4dfe-a395-f87cb9fe74e6",
+   "native_session_id": "97d3813d749f4fddab19d71a054803d9",
+   "joined_revision": 3,
+   "join_verified": true,
+   "settled_proceeds_cents": 0,
+   "agent_loop_cost_cents": 9.0,
+   "outcome": "FAIL: Timeout after 304s (authorized 300s cache-diagnostic cap)"
+  },
+  {
+   "iteration": 3,
+   "layout": "retrieval before history; retrieval replaces full-task marker",
+   "condition_commit": "44f60d04e",
+   "run_commit": "fffd8714c",
+   "provider_sha256": "424415aafecb49a16ea4ca03bece17928f5dbc2b86df6e79bcbabe84613d8adc",
+   "stack_run_id": "wmh-cache-20261009-i3-1791595582",
+   "wmh_ready_seconds": 728,
+   "provider": {
+    "provider_cached_input_tokens": 2726,
+    "provider_total_input_tokens": 27092,
+    "provider_token_hit_pct": 10.062011,
+    "provider_metered_requests": 3,
+    "provider_requests_with_cached_input": 2,
+    "provider_output_tokens": 22074,
+    "provider_cache_write_tokens": 24357
+   },
+   "provider_cached_reads_per_request": [
+    0,
+    1363,
+    1363
+   ],
+   "native_attempts": 4,
+   "native_errors_by_type": {
+    "CancelledError": 1
+   },
+   "demo": {
+    "demo_hits": 0,
+    "demo_lookups": 4,
+    "demo_stores": 3
+   },
+   "fe_url": "https://www.roselabs.ai/?agent-id=351f7070-3973-45fb-9e47-a5950cfcd956#benchmark-share=b7316143-c756-462b-a835-111e4c379f76.1794188005.eceee994b1af49bf836725975c3509b946117a12527bc6ca0a4038c9db20ede6",
+   "fe_verified_messages": 17,
+   "stack_cleanup": "clean",
+   "benchmark_cleanup": "clean",
+   "benchmark_run_id": "b7316143-c756-462b-a835-111e4c379f76",
+   "root_agent_id": "351f7070-3973-45fb-9e47-a5950cfcd956",
+   "native_session_id": "e1541aa203e14ac89a68dc444f60553f",
+   "joined_revision": 2,
+   "join_verified": true,
+   "settled_proceeds_cents": 0,
+   "agent_loop_cost_cents": 7.0,
+   "outcome": "FAIL: Timeout after 304s (authorized 300s cache-diagnostic cap)"
+  }
+ ],
+ "interpretation": [
+  "Each 300-second window produced only 3-5 metered WMH calls (one cancelled call per run had no final usage), so the rates are single-sample diagnostics, not calibrated estimates.",
+  "Every first call is cold. Later calls mostly read only the ~1,363-1,368-token stable task prefix; i1 read 1,511 once and i2 read 1,918 three times.",
+  "Observed provider token hit rates: i0 9.71%, i1 9.27%, i2 12.44%, i3 10.06%. The differences are within what a handful of calls can produce; none approaches the offline 31-57% opportunity estimates, which assumed the long 75-call history of a 30-minute run.",
+  "DEMO response cache: 0 hits in every condition (fresh caches; distinct full requests are expected to miss)."
+ ]
+}

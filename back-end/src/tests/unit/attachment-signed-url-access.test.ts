@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert/strict';
-import { canAccessAttachmentPath } from '../../domains/agents/agentMessageService';
+import { canAccessAttachmentPath } from '../../domains/agents/agentAttachmentService';
 
 const OWNER = '00000000-0000-4000-8000-000000000107';
 const ANDY = '1f85ff25-6e29-4c1b-8739-f917bd101a30';

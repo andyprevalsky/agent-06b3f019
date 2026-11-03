@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-10-15T20:55:45.016305+00:00",
+  "source_commit": "7e5505b671cc1ae04734c52462b1916268b2b6c4",
+  "PR": 1473,
+  "original_warning_skip_commit": "244a961d25558d4df563636ef3f8cc74d7894b89",
+  "original_preservation_checkpoint": "c8e72ed8821f5cc219c616b6454afee729c837a1",
+  "original_source_manifest_and32_snapshots_unchanged": true,
+  "repair_since_9a": {
+    "production_changes": false,
+    "unit_test": "Remove undeclared fourth invocation argument and assert existing structured invalid_type at arguments.notification_message, expected string/received number; all4 behavioral cases retained",
+    "RCA_index": "Canonical regeneration,868 cases"
+  },
+  "fresh_backend": {
+    "exit_code": 0,
+    "blackbox": {
+      "passed": 200,
+      "total": 200
+    },
+    "unit_files": {
+      "passed": 272,
+      "total": 272
+    },
+    "coverage_percent": {
+      "lines": 89.7,
+      "statements": 89.7,
+      "functions": 92.75,
+      "branches": 81.2
+    },
+    "normal_exit_and_SIGTERM_teardown": "PASS",
+    "frozen_source_bindings": 2923
+  },
+  "fresh_static": "PASS: changed unit lint, full tsc, all21 backend structural checks",
+  "fresh_live": {
+    "credential_health": "6PASS/1 existing Anthropic credit WARN, exit0",
+    "Amplitude": "PASS",
+    "chat_router_failover": "PASS",
+    "initial_private_launcher_None_port_failures": "Both failed attempts retained; failed before backend startup; only two failed probes rerun after using actual canonical coverage port"
+  },
+  "qualified_prior_results_not_fresh_full_executions": {
+    "agents_coverage": "Actual full cea52 pass;794 unchanged inputs; fresh inventory owner45/45 at9a unchanged by test/index repair",
+    "frontend_coverage_and_build": "Actual full d1b pass;1192 unchanged inputs",
+    "deploy_structural": "Actual46/46 at9a; operational inputs unchanged",
+    "cold_seed_memory": "Actual5/5 at539; seed/schema/dependency inputs unchanged"
+  },
+  "current_positive_native_resource_readback": {
+    "Kernel_browsers_deleted": 7,
+    "Steel_sessions_released": 3,
+    "E2B_sandboxes_absent": 3,
+    "Kernel_profile_references_404_not_exclusive_ownership_claim": 2,
+    "current_treasury_mints_closed_zero_and_exact_full_return": 1,
+    "older_owned_treasury_full_return": "UNPROVED, not waived or claimed settled"
+  },
+  "owned_database_retirement": {
+    "post_live_snapshot_and_private_archive_verified": true,
+    "connections_before_drop": 0,
+    "drop_without_force_or_signals": true,
+    "database_absence_verified": true,
+    "synthetic_fakeTemporal_cleanup_outboxes_archived": 82,
+    "synthetic_archive_outboxes_archived": 32,
+    "synthetic_ACTIVE_browser_fixture_rows_archived": 2,
+    "fake_outboxes_claimed_drained_or_adopted_as_cloud_workflows": false,
+    "retirement_receipt_sha256": "2d7e7e5f699e1c3c008bc83cf4703774691fe1389cd687c83ba1ea70de730124"
+  },
+  "latest_SMS3": "2FAIL/1PASS; workflow, zero browser allocation, terminal archives, empty outboxes and exact stack teardown verified; failures remain unresolved",
+  "pending_Menu_fixture": "UNAPPLIED, original human approval request remains pending",
+  "deployment_complete": false,
+  "merge_or_production_claimed": false
+}

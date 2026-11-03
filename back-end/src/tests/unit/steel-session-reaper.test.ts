@@ -11,9 +11,11 @@ import assert from 'node:assert';
 import { buildSteelRecoveryBrowserOptions } from '../../providers/steel/sessionRecovery';
 import {
   inFlightSteelSessionIds,
+  localInFlightSteelSessionIds,
   isOwnedSteelSessionId,
   newOwnedSteelSessionId,
   registerInFlightSteelSession,
+  unregisterInFlightSteelSession,
   steelEnvironmentIdentity,
   steelOwnershipMarker,
 } from '../../providers/steel/sessionIdentity';
@@ -38,14 +40,16 @@ async function test(name: string, fn: () => void | Promise<void>): Promise<void>
 async function main(): Promise<void> {
   const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
-  await test('an in-flight registration only has to outlive setup', () => {
+  await test('an in-flight registration only has to outlive setup', async () => {
     const sessionId = newOwnedSteelSessionId();
-    registerInFlightSteelSession(sessionId);
-    assert.ok(inFlightSteelSessionIds().has(sessionId));
-    assert.ok(inFlightSteelSessionIds(Date.now() + 19 * 60 * 1000).has(sessionId));
+    await registerInFlightSteelSession(sessionId);
+    assert.ok((await inFlightSteelSessionIds([sessionId])).has(sessionId));
+    assert.ok(localInFlightSteelSessionIds(Date.now() + 19 * 60 * 1000).has(sessionId));
     // A committed BrowserSession row holds the session from then on; a stale
     // entry must not keep growing the map or shield the session from the reaper.
-    assert.ok(!inFlightSteelSessionIds(Date.now() + 21 * 60 * 1000).has(sessionId));
+    assert.ok(!localInFlightSteelSessionIds(Date.now() + 21 * 60 * 1000).has(sessionId));
+    await unregisterInFlightSteelSession(sessionId);
+    assert.ok(!(await inFlightSteelSessionIds([sessionId])).has(sessionId));
   });
 
   await test('a stack with no distinct identity never reaps', async () => {
@@ -215,6 +219,7 @@ async function main(): Promise<void> {
     process.stdout.write(`${failures.length} failure(s):\n${failures.join('\n')}\n`);
     process.exit(1);
   }
+  process.exit(0);
 }
 
 void main();

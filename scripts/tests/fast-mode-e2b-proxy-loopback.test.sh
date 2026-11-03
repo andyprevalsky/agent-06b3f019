@@ -23,8 +23,12 @@ WINDOW="$(
 )"
 grep -Fq 'FAST_MODE_ANTHROPIC_PROXY_URL=""' <<<"$WINDOW" \
   || fail "E2B-unreachable branch must clear FAST_MODE_ANTHROPIC_PROXY_URL"
-grep -Fq 'FAST_MODE_CODEX_PROXY_URL=""' <<<"$WINDOW" \
-  || fail "E2B-unreachable branch must clear FAST_MODE_CODEX_PROXY_URL"
+# Codex never routes through a Rose proxy (S30): run.sh must not point it at one.
+if grep -Eq 'export FAST_MODE_CODEX_PROXY_URL=.+|/codex-proxy' "$RUN_SH"; then
+  fail "run.sh must never export a Codex proxy URL"
+fi
+grep -q '^unset FAST_MODE_CODEX_PROXY_URL' "$RUN_SH" \
+  || fail "run.sh must clear any inherited FAST_MODE_CODEX_PROXY_URL"
 grep -Fq 'http://localhost:*' <<<"$WINDOW" \
   || fail "E2B-unreachable branch must match localhost PUBLIC_BASE_URL"
 

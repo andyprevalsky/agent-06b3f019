@@ -1,0 +1,709 @@
+{
+  "status": "original failure retained; fresh unchanged required live gate passed; no product/router/schema fix claimed",
+  "investigated_source": "a1142bc14e632dacc2e6a1579c9d9e487ec6753f",
+  "scope": "Independent diagnosis of the unchanged /deploy live chat-router-failover gate. No live gate rerun, model request, prompt/schema/routing change, credential mutation, or external resource allocation.",
+  "symptom": "the live GLM failover must serve inside the first router attempt's bounds: 2 !== 1",
+  "actual_gate": {
+    "domain": "chat-router-failover",
+    "exit_code": 1,
+    "elapsed_ms": 30645,
+    "root_agent_id": "719356a3-f17d-4a5f-aec3-4a8d04719a64",
+    "outcome": "escalated on second router attempt",
+    "turn_escalation_ms": 30015,
+    "router_stream_ms": 29917,
+    "error_alerts": 0
+  },
+  "archive_searches": [
+    "live GLM failover first router attempt bounds",
+    "chat router failover Morph two attempts hedge schema"
+  ],
+  "archive_relationship": "Relative of the original fixed empty-stream failure and recurrence of its explicitly unresolved model-output inefficiency. The prior record is a lead, not causal proof.",
+  "request": {
+    "messages": 30,
+    "transcript_characters": 82649,
+    "same_retry_request_sha256": "183d3ba9650d370784e5cb9dbd6a17cd1380afec68053489954068d4ab5754b5",
+    "actual_model": "z-ai/glm-5.3-flash",
+    "upstream_provider": "Morph",
+    "requested_pool": "rose-labs/rose-1-flash",
+    "requested_provider_route": "direct-cerebras",
+    "temperature": 0,
+    "max_tokens": 1024,
+    "requested_effort": "minimal",
+    "glm_effective_effort": "low",
+    "schema_properties_in_order": [
+      "reasoning",
+      "action",
+      "query",
+      "goal",
+      "mode"
+    ],
+    "provider_sort": "latency",
+    "preferred_min_throughput_p50": 80,
+    "ignored_provider": [
+      "friendli"
+    ],
+    "strict_schema": true,
+    "identity_scope": "Complete messages and config.requested_params only; excludes actual-model/pool/finish_reason response metadata and captured output/error. Full dump/config bytes are not identical."
+  },
+  "attempts": [
+    {
+      "request_id": "2c249d74179c",
+      "router_attempt_deadline_ms": 15000,
+      "direct_cerebras_guard_ms": 8000,
+      "hedge_ms": 800,
+      "glm_connected_ms": 191,
+      "glm_headers_ms": 2397,
+      "glm_first_content_ms": 2398,
+      "glm_end_ms": 14197,
+      "end": "caller_aborted",
+      "abort_reason": "Chat router completion exceeded 15000ms",
+      "captured_response": {
+        "attempt": 1,
+        "path": ".llm-dumps/719356a3-f17d-4a5f-aec3-4a8d04719a64/1791332170143-aaced0925b40-chat_router.json",
+        "capture_sha256": "7fb2a3403032b2929f58218d7a9c9771035c42192089b0cb5728f0873cc81b19",
+        "request_sha256": "183d3ba9650d370784e5cb9dbd6a17cd1380afec68053489954068d4ab5754b5",
+        "model": "z-ai/glm-5.3-flash",
+        "message_count": 30,
+        "output_characters": 2055,
+        "complete_fields": [
+          "reasoning",
+          "action"
+        ],
+        "reasoning_characters": 1237,
+        "query_characters": 753,
+        "goal_characters": 0,
+        "typed_miss": "Chat router completion expired",
+        "decision_action": null
+      }
+    },
+    {
+      "request_id": "ccb79493daae",
+      "router_attempt_deadline_ms": 15000,
+      "glm_headers_ms": 2587,
+      "glm_first_content_ms": 2588,
+      "glm_end_ms": 14098,
+      "end": "completed",
+      "completion_tokens": 488,
+      "captured_response": {
+        "attempt": 2,
+        "path": ".llm-dumps/719356a3-f17d-4a5f-aec3-4a8d04719a64/1791332185142-7dc2b47a48a5-chat_router.json",
+        "capture_sha256": "7bc89e0d309c0ad559df193e4b595c66148a11606465132f5f27da62ef25bb1e",
+        "request_sha256": "183d3ba9650d370784e5cb9dbd6a17cd1380afec68053489954068d4ab5754b5",
+        "model": "z-ai/glm-5.3-flash",
+        "message_count": 30,
+        "output_characters": 2032,
+        "complete_fields": [
+          "reasoning",
+          "action",
+          "query",
+          "goal",
+          "mode"
+        ],
+        "reasoning_characters": 1010,
+        "query_characters": 762,
+        "goal_characters": 162,
+        "typed_miss": null,
+        "decision_action": "start_superintelligence"
+      }
+    }
+  ],
+  "observed_first_incomplete_boundary": "The delivered first response has only closed reasoning and action fields; it ends inside an unused query before goal and mode. Existing action-specific finalization correctly rejects missing goal/mode and performs the configured regenerate.",
+  "broadcast_check": {
+    "observed_spans": 65,
+    "max_send_duration_ms": 7,
+    "max_queue_delay_ms": 13,
+    "implementation": "broadcastAssistantStream awaits local enqueue only; network drain occurs asynchronously",
+    "finding": "No evidence supports a broadcast wait as the cause of this deadline."
+  },
+  "local_response_replay": {
+    "red_command": "back-end/node_modules/.bin/tsx .context/chat-router-failover-live-replay.ts --assert-first-attempt",
+    "red_exit_code": 1,
+    "red_wall_seconds": 0.332970959,
+    "red_assertion": "captured first-attempt response cannot produce a complete router decision",
+    "control_command": "back-end/node_modules/.bin/tsx .context/chat-router-failover-live-replay.ts",
+    "control_exit_code": 0,
+    "control_wall_seconds": 0.377773959,
+    "control_assertions": [
+      "captured retry request hash is identical",
+      "captured first response produces typed deadline miss",
+      "captured complete second response validates as start_superintelligence"
+    ],
+    "limitation": "Control checks correct existing parser behavior. It is a different captured response, not an unchanged-repro post-fix PASS, and proves no product fix."
+  },
+  "existing_verdict_unit": {
+    "command": "cd back-end && node_modules/.bin/tsx src/tests/unit/chat-router-failover-live-verdict.test.ts",
+    "exit_code": 0,
+    "wall_seconds": 0.731512709,
+    "summary": "11 samples and 24 goals; the observed timely-content/no-complete-decision shape remains a terminal live-gate rejection"
+  },
+  "remaining_proof": "Raw full SSE chunk arrival times and provider-versus-consumer output counts were not captured; no exact local provider replay or controlled model-only comparison was executed. Do not classify this as a proven model-intelligence limitation or completed RCA.",
+  "next_check": "Capture the complete SSE arrival sequence at the existing live observation boundary and replay the exact request through the same client with non-model variables fixed; compare wire arrival against router consumption. The existing note also identifies action-specific unused query and long reasoning preceding required goal/mode as an LLM-visible contract optimization, which is outside this task's allowed prompt/schema/routing changes. Preserve current deadlines and first-attempt assertion.",
+  "receipts": [
+    {
+      "path": ".context/native-deploy-live-probes.log",
+      "sha256": "a6c746307deadfb98c5a890f200d10a376bc074f67ae1bd0f486f7abb690c62a",
+      "bytes": 315788
+    },
+    {
+      "path": ".context/test-runs/1791332162-29153-10237/runner.log",
+      "sha256": "5e1a0e196ef8e21f888bef39145edfeec50d652bff728ef43254ca2359cb1b78",
+      "bytes": 310901
+    },
+    {
+      "path": ".context/test-runs/1791332162-29153-10237/backend.log",
+      "sha256": "bc1f7c761a1331d151e5d11415d299e07266a8d9da3d6df3491280104e192166",
+      "bytes": 83051
+    },
+    {
+      "path": ".context/chat-router-failover-live-replay.ts",
+      "sha256": "8b1604294d5576a627d395b23a281728ec64de3459bdfa203c0d834b2b4aa47b",
+      "bytes": 3184
+    },
+    {
+      "path": ".context/chat-router-failover-live-replay-red.log",
+      "sha256": "4be9d6e2c3cf6e83e2c22157f92a5f578d8d7a968946888034310e5e08afcb4f",
+      "bytes": 3760
+    },
+    {
+      "path": ".context/chat-router-failover-live-replay-contract.log",
+      "sha256": "cb3b3039cdde11414d19ffd73ce84eedadbe5f7fe308602a8de66787ceaaf813",
+      "bytes": 2651
+    },
+    {
+      "path": "back-end/src/providers/chat/routerDecision.ts",
+      "sha256": "a30e5d3d9866c2eef0c163819c198bfa591887c9be79aa9593cdacf94771adc3",
+      "bytes": 6996
+    },
+    {
+      "path": "back-end/src/providers/chat/routerDecisionJsonSchema.ts",
+      "sha256": "54e60fbf9fef4745739aeb2718a227cf783d1d6cb8e93093d88418a387d75dc1",
+      "bytes": 1359
+    },
+    {
+      "path": "back-end/src/providers/rose/openrouterFastRoute.ts",
+      "sha256": "88f024b281b6c64aa87555dd17508210e2a5bf8e7fa6a959d7b8a71958c6a1d1",
+      "bytes": 9495
+    },
+    {
+      "path": "back-end/src/providers/chat/supabaseBroadcast.ts",
+      "sha256": "5c9c0b479299611d09de4dbe01543e2298a8f6586f29ecbfb42c8c62b80dacdd",
+      "bytes": 11964
+    },
+    {
+      "path": "back-end/src/tests/blackbox/chat-router-failover.live.support.ts",
+      "sha256": "12bf6db7b442a72e5635fd9097c7422fc1e49a888cc2729801659fd91e01efcc",
+      "bytes": 12410
+    },
+    {
+      "path": ".context/chat-router-union-proposal/last-dump-publication.json",
+      "sha256": "5e6031fb5cc5cd3fcbffe62b919865a83c0154c22008754ad7d52300f768e8f7",
+      "bytes": 915
+    },
+    {
+      "path": ".context/chat-router-union-proposal/last-dump-render.log",
+      "sha256": "f6bb239e6920d39ee985e4633933c5abff0887e2494ec80d61543db95a217941",
+      "bytes": 442
+    },
+    {
+      "path": ".context/chat-router-union-proposal/publisher-attempt.log",
+      "sha256": "0f7abfcf04d6d91dfd454acc3de85aeeaeb3a2f06aba6e81ec677c3c59324933",
+      "bytes": 71
+    },
+    {
+      "path": ".context/chat-router-union-proposal/approval-request.txt",
+      "sha256": "4578c9973aa286382e28ec86ff6eb9867f446e279cf4b6158fc1b52df7aa2a8b",
+      "bytes": 15644
+    },
+    {
+      "path": ".context/chat-router-union-proposal/approval-request-status.json",
+      "sha256": "289df24bf863ce2b14dca57405b8e2d9ec19e13ebcd42ba0d38c4a258a875054",
+      "bytes": 814
+    },
+    {
+      "path": ".context/chat-router-union-proposal/unchanged-live-evidence-capture.patch",
+      "sha256": "7f4711375c0d57cb24d760083c5bdabb4690d57bcaa40e1a620a5044eb5590ef",
+      "bytes": 11752
+    },
+    {
+      "path": ".context/chat-router-union-proposal/evidence-capture-contract.test.ts",
+      "sha256": "324a46e4c04d04ac89bc429c789c441c655b687f1b6e8cfab499fbff90acea35",
+      "bytes": 4405
+    },
+    {
+      "path": ".context/chat-router-union-proposal/evidence-capture-contract.log",
+      "sha256": "f041285e0f6139edf35920b3fb41492a73399659a237d8f31470542a3ece37ee",
+      "bytes": 176
+    },
+    {
+      "path": ".context/chat-router-union-proposal/evidence-capture-validation.json",
+      "sha256": "b053948a46bf4c0c63e0fadaf1cd7333115f975e1d5b535a27a171a2c911cce2",
+      "bytes": 300
+    },
+    {
+      "path": ".context/chat-router-union-proposal/schema-size.json",
+      "sha256": "45b585b6f4bbb5f81619f76b86cadb36f65e37073c1d2b078789cd9e7e81d94c",
+      "bytes": 348
+    },
+    {
+      "path": ".context/chat-router-union-proposal/llm-visible-schema.patch",
+      "sha256": "5039fd381f8b1397e041f49749b1c3fc4728b6364dc4ac5eae6b64c471f0f9b0",
+      "bytes": 3172
+    },
+    {
+      "path": ".context/chat-router-union-proposal/proposal-impact.json",
+      "sha256": "070c029334dfa6c79068050df2b58fd61bcb0092f4c3c6f46e632cf077c41380",
+      "bytes": 6494
+    },
+    {
+      "path": ".context/chat-router-union-proposal/captured-prefixes.json",
+      "sha256": "59369716c1b9f1b0e83b10cd8ce90e55fa1630985d1b4368331111f47e024bd5",
+      "bytes": 4859
+    },
+    {
+      "path": ".context/chat-router-union-proposal/schema-contract-red.log",
+      "sha256": "0020e7771a37695d0af94960def748cf982668d3ddeaaecaa6ed8a4e79586fee",
+      "bytes": 1349
+    },
+    {
+      "path": ".context/chat-router-union-proposal/schema-contract-green-final.log",
+      "sha256": "86e34984dd3eb6ded40f81f345c919a991b924dae7f29eb2cfdc18c832b18ad9",
+      "bytes": 110
+    }
+  ],
+  "independent_review": {
+    "reviewer": "root",
+    "status": "accepted mechanism, no performance improvement claim",
+    "notes": "Root independently verified output byte hashes and missing/present goal/mode; messages/response_format identical; response finish_reason differs None/stop. No parser defect and no prompt/schema edit applied."
+  },
+  "schema_proposal": {
+    "path": ".context/chat-router-union-proposal/proposed.patch",
+    "sha256": "0e4dd1aba19836b9eed294e3f5f05a1cf4fd265cb33c17ab11e2b80a149b5042",
+    "status": "parked and unapplied; original live gate passed unchanged; candidate performance still unproven",
+    "llm_visible_schema_diff_path": ".context/chat-router-union-proposal/llm-visible-schema.patch",
+    "llm_visible_schema_diff_sha256": "5039fd381f8b1397e041f49749b1c3fc4728b6364dc4ac5eae6b64c471f0f9b0",
+    "impact_path": ".context/chat-router-union-proposal/proposal-impact.json",
+    "candidate_base_sha": "7717cfce4e2b3bfa6d901b8a1834ca348b90107a"
+  },
+  "evidence_publication": {
+    "original_agent_id": "719356a3-f17d-4a5f-aec3-4a8d04719a64",
+    "original_fe_status": "unavailable/unverified; do not cite as restored evidence",
+    "publisher_attempt": {
+      "command": "agents/venv/bin/python scripts/publish_evidence_links.py --agent-id 719356a3-f17d-4a5f-aec3-4a8d04719a64 --dump .llm-dumps/719356a3-f17d-4a5f-aec3-4a8d04719a64/1791332185142-7dc2b47a48a5-chat_router.json",
+      "exit_code": 1,
+      "wall_seconds": 0.811,
+      "error": "a UUID run_id from --run-json or --run-id is required for a share link",
+      "log": ".context/chat-router-union-proposal/publisher-attempt.log"
+    },
+    "missing_dependency": "Original blackbox persisted only numeric runner manifests/logs and LLM dumps, then directly deleted actual fixture agent/message/user rows. No actual Hub UUID run bundle/full DB transcript was captured. Starting a backend cannot recover missing archive rows. No retroactive bundle/UUID or historical sub-agent provenance was fabricated.",
+    "last_full_trajectory_dump": {
+      "url": "https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/719356a3-f17d-4a5f-aec3-4a8d04719a64/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261007%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261007T003638Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=941ef75134cef889242ee3636178a5d29cb17f2d8068b420887b0716bddc65a6",
+      "verified_at": "2026-10-07T00:38:59.237235+00:00",
+      "expires_at": "2026-10-14T00:36:38Z",
+      "status": 200,
+      "bytes": 139365,
+      "sha256": "824bb56647a514d78d29320cd32069f2b318e184b5960276e3fdbab1d4aaa83f",
+      "local_sha256": "824bb56647a514d78d29320cd32069f2b318e184b5960276e3fdbab1d4aaa83f",
+      "matches_local": true,
+      "file_uri_occurrences": 0,
+      "raw_dump": ".llm-dumps/719356a3-f17d-4a5f-aec3-4a8d04719a64/1791332185142-7dc2b47a48a5-chat_router.json"
+    },
+    "trajectory_provenance": "Actual live probe uses in-memory blackbox Temporal and creates no worker child trajectory. Dump directory has actual generator, first router, second router calls; second router is latest. Historical seeded tool messages are not newly executed children/browser sessions."
+  },
+  "approval_draft": {
+    "status": "parked; prior private draft superseded by fresh unchanged live PASS; not a current approval request",
+    "approval_id": "CHAT-ROUTER-UNION-20261006-1",
+    "git_sha": "7717cfce4e2b3bfa6d901b8a1834ca348b90107a",
+    "proposal_sha256": "0e4dd1aba19836b9eed294e3f5f05a1cf4fd265cb33c17ab11e2b80a149b5042",
+    "llm_visible_schema_patch_sha256": "5039fd381f8b1397e041f49749b1c3fc4728b6364dc4ac5eae6b64c471f0f9b0",
+    "draft_sha256": "4578c9973aa286382e28ec86ff6eb9867f446e279cf4b6158fc1b52df7aa2a8b",
+    "production_applied": false,
+    "candidate_model_calls": 0,
+    "required_before_presentation": "No router schema approval is needed to clear the current gate. If proposing this protocol simplification later, refresh complete six-section snapshot/evidence and retain all real-performance/legacy-decoder/seeded-browser limits before asking; no candidate model calls have been made.",
+    "path": ".context/chat-router-union-proposal/approval-request.txt",
+    "required_format": ".claude/shared/approval-format.md read fully; exact six sections and every LLM-visible diff line are prepared",
+    "source_schema_size": {
+      "before_bytes": 789,
+      "after_bytes": 1098,
+      "before_sha256": "bb5ee20b88ae5d7febeb23cd9cbb1faa706c1dd5e19a272f419c95645739e3fb",
+      "after_sha256": "c1ed6a56325935d9edcbd35df45f322eef7988f7ebb8e3350b341909eb14a721",
+      "no_token_or_dollar_claim": "Provider tokenizer and billing not measured on the candidate schema; no paid candidate calls"
+    },
+    "simpler_non_prompt_fix": "None supported by current trace. Parser cannot invent goal/mode; first-content timing and asynchronous broadcast enqueue do not establish a timer/parser/broadcast stall. Full SSE arrival/consumption comparison remains absent.",
+    "current_verified_manifest": {
+      "agent_id": "d47dfb72-ff50-4b3e-a9ee-69387313d5b3",
+      "run_id": "20080dfd-6b59-4fc7-9870-48d86b49b3ab",
+      "fe_url": "https://www.roselabs.ai/?agent-id=d47dfb72-ff50-4b3e-a9ee-69387313d5b3#benchmark-share=20080dfd-6b59-4fc7-9870-48d86b49b3ab.1793926323.4c42fbfb1349a5b49fbbe004c95cc75e76a4837fd5cad346ca947ea19405e6d1",
+      "fe_verified": "verified in fresh browser",
+      "message_count": 41,
+      "llm_dump_artifact": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/chat-router-live-capture-original-20261006/20080dfd-6b59-4fc7-9870-48d86b49b3ab/published/d47dfb72-ff50-4b3e-a9ee-69387313d5b3/last_llm_call.html",
+      "llm_dump_https_url": "https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/d47dfb72-ff50-4b3e-a9ee-69387313d5b3/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261007%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261007T005204Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=3bec7b729fc2157ed88cb5ed52e4e6983d2df5594ab8d5720619710ea125681d",
+      "source_dump": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.llm-dumps/d47dfb72-ff50-4b3e-a9ee-69387313d5b3/1791334313010-86be52cdc688-chat_router.json",
+      "call_site": "1791334313010-86be52cdc688-chat_router"
+    }
+  },
+  "unchanged_live_evidence_capture_proposal": {
+    "path": ".context/chat-router-union-proposal/unchanged-live-evidence-capture.patch",
+    "sha256": "b93ab961db80c9cbce3eab83251164e83b436042522ee20963824008bf349b1f",
+    "status": "applied authorized opt-in test-only capture/error preservation; actual unchanged live gate+publisher passed",
+    "scope": [
+      "back-end/src/tests/blackbox/chat-router-failover.blackbox.ts",
+      "back-end/src/tests/blackbox/chat-router-failover.live.support.ts: export existing assertion without changing its content",
+      "new back-end/src/tests/blackbox/chat-router-failover.evidence.support.ts",
+      "new back-end/src/tests/unit/chat-router-failover-evidence.test.ts"
+    ],
+    "behavior": "With CHAT_ROUTER_FAILOVER_CAPTURE_DIR set, allocates/writes fresh UUID capture-start before each live sample. Copies actual owned DB root/descendants/message IDs/timestamps/content/metadata/file pointers and browser session rows immediately before original cleanup; retains explicit seeded-fixture provenance and observed sample, never claims gate passed. Optional CHAT_ROUTER_FAILOVER_PUBLISH_EVIDENCE=1 executes existing publish_evidence_links.py on actual Hub-compatible bundle plus newest actual dump across captured tree ids before deletion. Existing cleanup runs in finally even if capture/publication fails; evidence failure fails closed.",
+    "unchanged": [
+      "LLM messages/schema/model/generation/routing/hedging/clock bounds/retries",
+      "all existing first-attempt/address/alert/outbound/context assertions",
+      "original fixture data and original DB cleanup"
+    ],
+    "offline_validation": {
+      "command": [
+        "back-end/node_modules/.bin/tsx",
+        ".context/chat-router-union-proposal/evidence-capture-contract.test.ts"
+      ],
+      "exit_code": 0,
+      "wall_seconds": 0.40631862496957183,
+      "network": "none; fake database only; capture fixture data is explicitly offline, no publisher called"
+    },
+    "typescript": "Candidate helper passes tsc --strict --noEmit with target ES2022, commonjs, node resolution; patch passes git apply --check. Private candidate import path is normalized to @prisma/client in production-target patch.",
+    "limits": [
+      "No actual DB/publisher integration was run; offline fake DB controls are not viewer/live acceptance.",
+      "Capture hunk does not itself add full wire SSE capture; provider-versus-consumer timing remains a separate missing observation.",
+      "A fresh captured sample is new evidence, never a recovery of the deleted original root or historical child sessions.",
+      "No extra stack may start while full native conversion runs."
+    ],
+    "error_preservation": "withEvidenceCleanup retains original request/gate assertion and evidence/cleanup failure together in AggregateError with original cause; existing outer verdict/reprobe path remains untouched on normal cleanup",
+    "secret_preflight": "Captured live_sample is checked recursively for credential/header fields and configured API-key/token/secret/password values before publisher invocation; none are printed",
+    "publisher_offline_review": {
+      "hub_prepare": "unchanged existing prepare_run_bundle_for_upload preserves all39 exact seeded rows/tree; no upload",
+      "publisher_existing_browser_validator": "not skipped or modified; synthetic actual lifecycle without terminal/recording yields2 failures",
+      "historical_browser_rows": 6,
+      "historical_browser_missing_fields": [
+        "task_id",
+        "action_type",
+        "toolCallId",
+        "subAgentId",
+        "recording_view_url",
+        "recording_file_pointer"
+      ],
+      "existing_publisher_seed_verdict": [],
+      "limit": "Empty publisher verdict for metadata-free historical tool rows is not proof of historical recording availability; history retained and no fabricated identity/recording introduced.",
+      "source_fixture_sha256": "8f74323ee75dbd76c7cb5c556150ef5ef37aabbdef190aace8dbb750201ac1a7",
+      "network_calls": 0
+    },
+    "owning_offline_verification": {
+      "commands": [
+        "cd back-end && node_modules/.bin/tsx src/tests/unit/chat-router-failover-evidence.test.ts",
+        "cd back-end && node_modules/.bin/tsc --noEmit --skipLibCheck --target ES2022 --module commonjs --moduleResolution node --esModuleInterop --strict src/tests/blackbox/chat-router-failover.evidence.support.ts",
+        "cd back-end && node_modules/.bin/tsx src/tests/unit/chat-router-failover-live-verdict.test.ts",
+        "back-end/node_modules/.bin/tsx .context/chat-router-failover-live-replay.ts"
+      ],
+      "all_exit_codes": 0,
+      "existing_verdict_samples": 11,
+      "existing_verdict_goals": 24,
+      "scope": "Actual evidence unit checks preserved IDs/content/status/metadata/files, ownership/historical child isolation, no auth/header/credential leakage, and original plus publisher failure retention; no original outer verdict behavior changes on successful cleanup."
+    },
+    "actual_source_sha256": [
+      {
+        "path": "back-end/src/tests/blackbox/chat-router-failover.blackbox.ts",
+        "sha256": "71607815622d4ae8edc62c49feed2cf16e1afa0b86e5758f0dffd60c0d59c403"
+      },
+      {
+        "path": "back-end/src/tests/blackbox/chat-router-failover.live.support.ts",
+        "sha256": "4099d19d0c56247cb3d444d20c3a13b250ece28f4ee49350843588640b2ee3c3"
+      },
+      {
+        "path": "back-end/src/tests/blackbox/chat-router-failover.evidence.support.ts",
+        "sha256": "a1b6fb14ae72664b7d6789d69c5a4ec99a98d0b73d43d355be804b5f5eed1a74"
+      },
+      {
+        "path": "back-end/src/tests/unit/chat-router-failover-evidence.test.ts",
+        "sha256": "6358bd19889485288e4aef0250623a21ef5c297776df335714d488eb095c5d9f"
+      }
+    ]
+  },
+  "approval_snapshot_sources": [
+    {
+      "path": "back-end/src/providers/chat/routerDecisionJsonSchema.ts",
+      "sha256": "54e60fbf9fef4745739aeb2718a227cf783d1d6cb8e93093d88418a387d75dc1",
+      "bytes": 1359
+    },
+    {
+      "path": "back-end/src/providers/chat/routerDecision.ts",
+      "sha256": "a30e5d3d9866c2eef0c163819c198bfa591887c9be79aa9593cdacf94771adc3",
+      "bytes": 6996
+    },
+    {
+      "path": "back-end/src/providers/chat/routerJsonStream.ts",
+      "sha256": "4241dad0782c3ef5cb7444a2c569e89d104100fe28bc17ddf2794524daa6237a",
+      "bytes": 4452
+    },
+    {
+      "path": "back-end/src/tests/blackbox/chat-router-phase-sync.blackbox.ts",
+      "sha256": "15b215aa3b145c493488e4f9f418c2390c7d8d80741ce9e9f182def6b4e30a32",
+      "bytes": 4522
+    },
+    {
+      "path": "back-end/src/tests/blackbox/chat-router-stream.blackbox.ts",
+      "sha256": "ba10969603bbb2764d619728bb850853003ffc6fe8d269776d68d49965fe289f",
+      "bytes": 16932
+    },
+    {
+      "path": "back-end/src/tests/blackbox/chat-router-failover.blackbox.ts",
+      "sha256": "8ec6f26e163188aa2afb41b6a8c3df4d3fc1298bb5278e05a50be8766cc8e901",
+      "bytes": 27594
+    },
+    {
+      "path": "back-end/src/tests/fixtures/chat-router-failover-prod-e8f2279b.json",
+      "sha256": "8f74323ee75dbd76c7cb5c556150ef5ef37aabbdef190aace8dbb750201ac1a7",
+      "bytes": 90326
+    }
+  ],
+  "fresh_original_live_gate": {
+    "status": "passed",
+    "exit_code": 0,
+    "source_sha": "7717cfce4e2b3bfa6d901b8a1834ca348b90107a",
+    "source_files_unchanged": [
+      {
+        "path": "back-end/src/providers/chat/routerDecisionJsonSchema.ts",
+        "sha256": "54e60fbf9fef4745739aeb2718a227cf783d1d6cb8e93093d88418a387d75dc1"
+      },
+      {
+        "path": "back-end/src/providers/chat/routerDecision.ts",
+        "sha256": "a30e5d3d9866c2eef0c163819c198bfa591887c9be79aa9593cdacf94771adc3"
+      },
+      {
+        "path": "back-end/src/providers/chat/routerJsonStream.ts",
+        "sha256": "4241dad0782c3ef5cb7444a2c569e89d104100fe28bc17ddf2794524daa6237a"
+      },
+      {
+        "path": "back-end/src/providers/chat/routerLlm.ts",
+        "sha256": "dcaf1a78d863a8ad104103799e060d5caa783fe58cc3b3c19af00d2730cde458"
+      },
+      {
+        "path": "back-end/src/providers/chat/chatPrompts.ts",
+        "sha256": "6ba650951a832b120db0b66b1b0030b120f1cdb49219cf7061a640254e45a07b"
+      },
+      {
+        "path": "back-end/src/providers/rose/openrouterFastRoute.ts",
+        "sha256": "88f024b281b6c64aa87555dd17508210e2a5bf8e7fa6a959d7b8a71958c6a1d1"
+      },
+      {
+        "path": "back-end/src/tests/fixtures/chat-router-failover-prod-e8f2279b.json",
+        "sha256": "8f74323ee75dbd76c7cb5c556150ef5ef37aabbdef190aace8dbb750201ac1a7"
+      }
+    ],
+    "run_id": "20080dfd-6b59-4fc7-9870-48d86b49b3ab",
+    "root_agent_id": "d47dfb72-ff50-4b3e-a9ee-69387313d5b3",
+    "live_sample": {
+      "outcome": {
+        "kind": "escalated",
+        "atMs": 7555,
+        "reasoning": "The user explicitly corrected the location anchor to 88 Harlow St, San Francisco, CA 94105. The prior research anchored on Irving, TX and is now invalid. This requires fresh multi-step research: finding hot yoga studios near downtown SF, checking official weekend schedules for Oct 3-4, 2026, verifying heat, pricing, and availability. Multi-step research with dependencies \u2192 plan mode."
+      },
+      "attempts": 1,
+      "glm": [
+        {
+          "provider": "openrouter",
+          "model": "z-ai/glm-5.3-flash",
+          "schema": "router_decision",
+          "messageCount": 30,
+          "transcriptChars": 82649,
+          "sessionId": "rose-fast-chat-bd5a075b27b3",
+          "atMs": 838,
+          "connectStartMs": 3,
+          "connectedMs": 63,
+          "status": 200,
+          "headersMs": 1741,
+          "firstEventMs": 1741,
+          "upstreamProvider": "Modal",
+          "firstContentMs": 2679
+        }
+      ],
+      "alerts": [],
+      "goal": "Find the best hot yoga class the user can take this weekend (Saturday Oct 3 or Sunday Oct 4, 2026) near 88 Harlow St, Apt 1000, San Francisco, CA 94105. The user has confirmed this is the correct location anchor (not Irving, TX). Research hot yoga studios within a practical radius of downtown SF 94105, verify official weekend schedules for Oct 3-4, 2026 (America/Los_Angeles), confirm class names, times, heated-room evidence, addresses, drop-in prices, and registration status from official studio pages. Do not book anything. Return one best verified class with full details and direct official URL, plus runner-up options."
+    },
+    "actual_tree_ids": [
+      "d47dfb72-ff50-4b3e-a9ee-69387313d5b3"
+    ],
+    "actual_messages": 41,
+    "actual_browser_sessions": [],
+    "same_exact_request_as_original_failed_attempt": true,
+    "request_sha256": "183d3ba9650d370784e5cb9dbd6a17cd1380afec68053489954068d4ab5754b5",
+    "request_identity_scope": "Original JS JSON.stringify recipe over complete messages and config.requested_params only; excludes response metadata, output/error",
+    "provider_change": "Old captured miss/retry came from Morph; fresh unchanged successful call came from Modal. No request/source routing change. Output order changed from reasoning/action/query/goal/mode to action/goal/mode/query/reasoning; this is observation, not a proven provider cause or candidate performance qualification.",
+    "router_output_characters": 1273,
+    "router_output_fields": {
+      "action": 23,
+      "goal": 627,
+      "mode": 4,
+      "query": 174,
+      "reasoning": 386
+    },
+    "output_sha256": "d099770edbd2d9be9f792e163fdbc1108fee2132bf2a96dcafe0e8b46d679f1f",
+    "dump_records": [
+      {
+        "path": ".llm-dumps/d47dfb72-ff50-4b3e-a9ee-69387313d5b3/1791334313008-1abafdccf501-chat_generator.json",
+        "sha256": "78bdd78bbfc1d4e72038bd3af2e37238a21daf3d5ba68847bbc06ef81ee36379",
+        "call_site": "chat_generator",
+        "request_sha256": "a5e9947c245ea2bd5c59a9d22dbf53feecc8a3d829cb051dc4861398da414005",
+        "config_model": null,
+        "output_characters": 0,
+        "output": null,
+        "error": {
+          "name": "AbortError",
+          "message": "This operation was aborted",
+          "stack": "AbortError: This operation was aborted\n    at new DOMException (node:internal/per_context/domexception:53:5)\n    at AbortController.abort (node:internal/abort_controller:465:18)\n    at Object.discard (/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/back-end/src/providers/chat/earlyDirectGenerator.ts:166:23)\n    at onActionDetected (/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/back-end/src/providers/chat/chatHandler.ts:126:67)\n    at <anonymous> (/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/back-end/src/providers/chat/routerJsonStream.ts:150:5)\n    at Object.attempt (/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/back-end/src/providers/chat/routerLlm.ts:428:13)\n    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)\n    at async regenerateOnChatStructuredMiss (/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/back-end/src/providers/chat/chatStructuredRetry.ts:60:14)\n    at async callRouterLlm (/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/back-end/src/providers/chat/routerLlm.ts:295:21)\n    at async handleChatMessage (/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/back-end/src/providers/chat/chatHandler.ts:119:22)"
+        }
+      },
+      {
+        "path": ".llm-dumps/d47dfb72-ff50-4b3e-a9ee-69387313d5b3/1791334313010-86be52cdc688-chat_router.json",
+        "sha256": "dfd9066e5a4e6f195cec72a59e36d12bf319a805d72fa161134ccf696d099029",
+        "call_site": "chat_router",
+        "request_sha256": "183d3ba9650d370784e5cb9dbd6a17cd1380afec68053489954068d4ab5754b5",
+        "config_model": "z-ai/glm-5.3-flash",
+        "output_characters": 1273,
+        "output": "{\"action\":\"start_superintelligence\",\"goal\":\"Find the best hot yoga class the user can take this weekend (Saturday Oct 3 or Sunday Oct 4, 2026) near 88 Harlow St, Apt 1000, San Francisco, CA 94105. The user has confirmed this is the correct location anchor (not Irving, TX). Research hot yoga studios within a practical radius of downtown SF 94105, verify official weekend schedules for Oct 3-4, 2026 (America/Los_Angeles), confirm class names, times, heated-room evidence, addresses, drop-in prices, and registration status from official studio pages. Do not book anything. Return one best verified class with full details and direct official URL, plus runner-up options.\",\"mode\":\"plan\",\"query\":\"find me the best hot yoga class I can take this weekend near me \u2014 location confirmed as 88 Harlow St, Apt 1000, San Francisco, CA 94105 (previous Irving, TX anchor was wrong)\",\"reasoning\":\"The user explicitly corrected the location anchor to 88 Harlow St, San Francisco, CA 94105. The prior research anchored on Irving, TX and is now invalid. This requires fresh multi-step research: finding hot yoga studios near downtown SF, checking official weekend schedules for Oct 3-4, 2026, verifying heat, pricing, and availability. Multi-step research with dependencies \u2192 plan mode.\"}",
+        "error": null,
+        "request_identity_scope": "Complete messages and config.requested_params serialized with original JS JSON.stringify recipe; excludes response metadata/output/error",
+        "output_key_order": [
+          "action",
+          "goal",
+          "mode",
+          "query",
+          "reasoning"
+        ],
+        "output_sha256": "d099770edbd2d9be9f792e163fdbc1108fee2132bf2a96dcafe0e8b46d679f1f"
+      }
+    ],
+    "gate_stage": {
+      "schema_version": 1,
+      "run_id": "wmh-native-20261006",
+      "stage": "chat-router-failover-live",
+      "started_at": "2026-10-07T00:51:44Z",
+      "finished_at": "2026-10-07T00:52:09Z",
+      "started_epoch": 1791334304.2007308,
+      "finished_epoch": 1791334329.669942,
+      "duration_seconds": 25.5,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/chat-router-failover-live-20261007-005144-31919.log"
+    },
+    "domain_duration_ms": 16059,
+    "publisher_manifest": {
+      "agent_id": "d47dfb72-ff50-4b3e-a9ee-69387313d5b3",
+      "run_id": "20080dfd-6b59-4fc7-9870-48d86b49b3ab",
+      "fe_url": "https://www.roselabs.ai/?agent-id=d47dfb72-ff50-4b3e-a9ee-69387313d5b3#benchmark-share=20080dfd-6b59-4fc7-9870-48d86b49b3ab.1793926323.4c42fbfb1349a5b49fbbe004c95cc75e76a4837fd5cad346ca947ea19405e6d1",
+      "fe_verified": "verified in fresh browser",
+      "message_count": 41,
+      "llm_dump_artifact": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/chat-router-live-capture-original-20261006/20080dfd-6b59-4fc7-9870-48d86b49b3ab/published/d47dfb72-ff50-4b3e-a9ee-69387313d5b3/last_llm_call.html",
+      "llm_dump_https_url": "https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/d47dfb72-ff50-4b3e-a9ee-69387313d5b3/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261007%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261007T005204Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=3bec7b729fc2157ed88cb5ed52e4e6983d2df5594ab8d5720619710ea125681d",
+      "source_dump": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.llm-dumps/d47dfb72-ff50-4b3e-a9ee-69387313d5b3/1791334313010-86be52cdc688-chat_router.json",
+      "call_site": "1791334313010-86be52cdc688-chat_router"
+    },
+    "completion_receipt": {
+      "completed_at": "2026-10-07T00:52:59.060281+00:00",
+      "exit_code": 0,
+      "dump_readback": {
+        "status": 200,
+        "bytes": 138858,
+        "sha256": "7dddb2ba319dfc5896e9b02b79b00e247650ca06cc56fc31a3f7984f4221fa3c",
+        "matches_local": true,
+        "file_uri_occurrences": 0,
+        "verified_at": "2026-10-07T00:52:58.939750+00:00"
+      },
+      "remaining_owned_processes": [],
+      "exact_local_fixture_row_counts_after_cleanup": {
+        "Agent": 0,
+        "Message": 0,
+        "ToolUsage": 0,
+        "User": 0
+      },
+      "preserved_database_container": "victoria-db-rose-wmh-experiential-parallel-de98ca7cda59",
+      "backend_port": 56100,
+      "other_worktrees_resources_touched": false,
+      "Freedom_touched": false,
+      "fe_manifest": {
+        "agent_id": "d47dfb72-ff50-4b3e-a9ee-69387313d5b3",
+        "run_id": "20080dfd-6b59-4fc7-9870-48d86b49b3ab",
+        "fe_url": "https://www.roselabs.ai/?agent-id=d47dfb72-ff50-4b3e-a9ee-69387313d5b3#benchmark-share=20080dfd-6b59-4fc7-9870-48d86b49b3ab.1793926323.4c42fbfb1349a5b49fbbe004c95cc75e76a4837fd5cad346ca947ea19405e6d1",
+        "fe_verified": "verified in fresh browser",
+        "message_count": 41,
+        "llm_dump_artifact": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/chat-router-live-capture-original-20261006/20080dfd-6b59-4fc7-9870-48d86b49b3ab/published/d47dfb72-ff50-4b3e-a9ee-69387313d5b3/last_llm_call.html",
+        "llm_dump_https_url": "https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/d47dfb72-ff50-4b3e-a9ee-69387313d5b3/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261007%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261007T005204Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=3bec7b729fc2157ed88cb5ed52e4e6983d2df5594ab8d5720619710ea125681d",
+        "source_dump": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.llm-dumps/d47dfb72-ff50-4b3e-a9ee-69387313d5b3/1791334313010-86be52cdc688-chat_router.json",
+        "call_site": "1791334313010-86be52cdc688-chat_router"
+      }
+    },
+    "artifact_directory": ".context/chat-router-live-capture-original-20261006",
+    "full_raw_db_snapshot": ".context/chat-router-live-capture-original-20261006/20080dfd-6b59-4fc7-9870-48d86b49b3ab/actual-db-rows.json",
+    "actual_hub_bundle": ".context/chat-router-live-capture-original-20261006/20080dfd-6b59-4fc7-9870-48d86b49b3ab/run.json",
+    "production_router_schema_changed": false,
+    "candidate_schema_model_calls": 0,
+    "historical_browser_limit": "Empty publisher verdict for metadata-free historical tool rows is not proof of historical recording availability; history retained and no fabricated identity/recording introduced.",
+    "conclusion": "The original unchanged gate is now cleared on this snapshot. Keep action-specific schema proposal unapplied; live improvement remains unqualified and no prompt approval/change is needed for this gate. Original deadline miss remains an honest recorded outcome, not claimed fixed.",
+    "artifact_receipts": [
+      {
+        "path": ".context/chat-router-live-capture-original-20261006/launch-receipt.json",
+        "sha256": "eced4287f8113ad6b0cfd7c7c7bfe42d05ec92ee27fc113b726b71e19d534637",
+        "bytes": 2365
+      },
+      {
+        "path": ".context/chat-router-live-capture-original-20261006/process-ownership.json",
+        "sha256": "19eefccbc9d6400fde21a4357ec995e436d4d2c337a050b3c4138fe13d79a109",
+        "bytes": 2015
+      },
+      {
+        "path": ".context/chat-router-live-capture-original-20261006/completion-receipt.json",
+        "sha256": "ab8f57df8b993151d74b705279411f37c9d7b8afaf8f504b59ceef800213ac36",
+        "bytes": 2061
+      },
+      {
+        "path": ".context/chat-router-live-capture-original-20261006/captured-result.json",
+        "sha256": "a9306096f0a45c51ef47a4eb6bd04e9dc02a13bbabe370a396395b2174d7b33c",
+        "bytes": 7272
+      },
+      {
+        "path": ".context/chat-router-live-capture-original-20261006/gate.log",
+        "sha256": "f3ffa15432c558b065eb632a7960a60212d91ab48341d59b00b213ed65124cd0",
+        "bytes": 1810
+      },
+      {
+        "path": ".context/chat-router-live-capture-original-20261006/20080dfd-6b59-4fc7-9870-48d86b49b3ab/capture-start.json",
+        "sha256": "80b41cd0e978fef16ec8580fb5439b261b58fd2bdbf5f00f20459a64b94c9032",
+        "bytes": 1604
+      },
+      {
+        "path": ".context/chat-router-live-capture-original-20261006/20080dfd-6b59-4fc7-9870-48d86b49b3ab/run.json",
+        "sha256": "ba3d7ccee363741159924fef3bafdf2ba24c226d1374fc5e0b4247ca4e3ddf95",
+        "bytes": 206460
+      },
+      {
+        "path": ".context/chat-router-live-capture-original-20261006/20080dfd-6b59-4fc7-9870-48d86b49b3ab/actual-db-rows.json",
+        "sha256": "4e054001bc505cb64b0b202ab38096530e30535e4893b1310077daf37fed29b9",
+        "bytes": 99443
+      },
+      {
+        "path": ".context/chat-router-live-capture-original-20261006/20080dfd-6b59-4fc7-9870-48d86b49b3ab/publisher.log",
+        "sha256": "3dd53996228b44e04250f277180a447477985fc1f3b6f1f5dfc8260796af56a1",
+        "bytes": 1129
+      },
+      {
+        "path": ".context/test-runs/chat-failover-capture-20261007-0058/chat-router-failover.log",
+        "sha256": "741a2eadc91e2d5e81537245ec59f8d962192122ad35ed3c5cfdb3cba1888bd7",
+        "bytes": 84291
+      },
+      {
+        "path": ".context/test-runs/chat-failover-capture-20261007-0058/backend.log",
+        "sha256": "a02f8d231a052d53062b33f32998674b21dfc6960548b2ccc2f4bb21e4bd2375",
+        "bytes": 84954
+      },
+      {
+        "path": ".context/test-runs/chat-failover-capture-20261007-0058/summary.json",
+        "sha256": "b364ce379b8fbb12d9aa2d296f8668f9d624bd6acb572336ac1449a680369a11",
+        "bytes": 511
+      }
+    ]
+  }
+}

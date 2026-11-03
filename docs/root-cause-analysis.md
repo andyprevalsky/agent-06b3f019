@@ -191,9 +191,11 @@ surface that a repository rule explicitly says requires user approval.
   verification steps below, write and validate the RCA case, and invoke
   `/deploy` without an intermediate user handoff. Own the deploy through every
   test, review, merge, rollout, and production verification loop.
-- If the correct fix is approval-gated, stop at the narrowest approval boundary
-  and request approval using `.claude/shared/approval-format.md`. After approval,
-  resume the same fix-and-deploy flow without another discretionary pause.
+- If the correct fix is approval-gated, run the Golden-reference adversarial
+  review in `.claude/shared/approval-format.md`; a `GROUNDED` verdict clears the
+  gate. Otherwise stop at the narrowest approval boundary and request approval
+  using that format. After approval, resume the same fix-and-deploy flow without
+  another discretionary pause.
 - Never choose a weaker point fix, fallback, test change, or wrong-layer
   workaround merely to keep the diff approval-free. Approval status determines
   whether to pause, not which technical solution is correct.
@@ -406,9 +408,16 @@ compatible patch whenever the simplification removes the bug class outright.
 
 ### Step 6b: Check the golden references before choosing the fix
 
+Run this step only when the fix changes an approval-gated surface: LLM-visible
+prompt or instruction text, agent recovery/terminal behavior, runtime
+trajectory injection, Zod schemas, or another harness-fix approval hunk. An
+ordinary code, test or UI fix skips it and records `Golden reference: not
+applicable (no approval-gated hunk)` in the case file.
+
 The reference harnesses are heavily tested in production; this repo is not yet.
 Before settling on a fix, find how they handle the same problem:
-`claude-code-src/` (vendored), `openclaw/`, `hermes-agent/`, and `codex/` (run
+`claude-code-src/` (vendored), `openclaw/`, `hermes-agent/`, `codex/`, and
+`kimi-code/` (run
 `bash scripts/sync-reference-repos.sh` when a clone is missing).
 
 1. Search each repo for the mechanism in question (tool-output limits, retries,
@@ -419,6 +428,8 @@ Before settling on a fix, find how they handle the same problem:
    moves away from all of them needs a stated reason their approach does not fit.
 4. Put the citations in the case file and in any approval request (the
    `**Golden reference:**` Evidence field in `.claude/shared/approval-format.md`).
+   Well-grounded citations let an approval-gated fix clear its human gate
+   through that file's Golden-reference adversarial review.
 
 Do this before designing the fix, so the references shape it rather than
 decorate it. When no reference repo has an analog, say which repos you searched
@@ -486,6 +497,8 @@ completeness, and index freshness on every deploy.
 ## Anti-patterns (never do these)
 
 1. **"Pre-existing, I'll skip it"** — "Pre-existing" is NEVER an acceptable diagnosis. Just because an error exists in code you didn't touch doesn't mean you aren't responsible for fixing it. This codebase is maintained by multiple agents working in parallel, each of which will naturally produce some amount of uncaught errors. If nobody owns the errors they encounter, the codebase degrades with every commit. You are the immune system — every bug you encounter and walk past is a bug that compounds. If you find it, you fix it. No exceptions.
+
+   **Deploy-only exception:** `.claude/shared/deploy-failure-policy.md` controls attribution, independent repair handoffs and external-provider exceptions. Preserve evidence; a deploy waiver does not close the repair or relax its causal-proof requirements. Outside `/deploy`, this anti-pattern is unchanged.
 
 2. **Defensive fallback** — Wrapping a broken call in try/catch with a default value. This hides the bug and makes it harder to find later. The system should fail loudly when something is wrong.
 

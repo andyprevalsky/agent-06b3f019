@@ -119,7 +119,8 @@ async function gpChildNamespaces(
   // general-purpose child path used by the OAi demo / mass-agent-0 warm cache.
   const ns = await prisma.$queryRawUnsafe<
     Array<{ goalHash: string; n: number; execN: number; first: Date }>
-  >(`
+  >(
+    `
     SELECT
       "goalHash",
       count(*)::int AS n,
@@ -134,12 +135,11 @@ async function gpChildNamespaces(
     GROUP BY 1
     HAVING count(*) FILTER (WHERE key LIKE '%:execute_loop:%') >= 2
     ORDER BY "execN" DESC, n DESC, first ASC
-  `, ROOT_GOAL_HASH);
+  `,
+    ROOT_GOAL_HASH
+  );
 
-  const best = new Map<
-    string,
-    { goalHash: string; n: number; execN: number; first: string }
-  >();
+  const best = new Map<string, { goalHash: string; n: number; execN: number; first: string }>();
   for (const row of ns) {
     // Skip explore-dominant namespaces that also happen to mention a creator.
     const exploreN = await prisma.$queryRawUnsafe<Array<{ n: number }>>(
@@ -169,9 +169,8 @@ async function gpChildNamespaces(
       name = textHits[0];
     } else if (textHits.length > 1) {
       name =
-        textHits
-          .map((n) => ({ n, c: text.split(n).length - 1 }))
-          .sort((a, b) => b.c - a.c)[0]?.n ?? null;
+        textHits.map((n) => ({ n, c: text.split(n).length - 1 })).sort((a, b) => b.c - a.c)[0]?.n ??
+        null;
     }
     if (!name) continue;
     const prev = best.get(name);
@@ -188,7 +187,9 @@ async function gpChildNamespaces(
 }
 
 async function main() {
-  const url = process.env.FAST_MODE_CACHE_DATABASE_URL || process.env.DATABASE_URL;
+  const url =
+    (process.env.FAST_MODE_CACHE_DATABASE_URL ?? process.env.DEMO_CACHE_DATABASE_URL) ||
+    process.env.DATABASE_URL;
   if (!url) throw new Error('FAST_MODE_CACHE_DATABASE_URL or DATABASE_URL required');
   const prisma = new PrismaClient({ datasources: { db: { url } } });
   try {

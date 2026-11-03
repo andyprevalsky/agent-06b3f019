@@ -98,6 +98,8 @@ cd mac-app && bash scripts/run-blackbox-tests.sh
 
 **ALL domains must pass — 0 failures.** Same rule as the backend blackbox: pre-existing is not an excuse, fix every failure.
 
+When invoked by `/deploy`, apply that workflow's exact qualified exceptions under `.claude/shared/deploy-failure-policy.md`; preserve native failures and never report exceptions as PASS. Standalone `/push` requirements are unchanged.
+
 ### 2k. Research lint + structural (skip if no research/ changes)
 
 Runs deno fmt/lint (base + strict overlay), structural invariants (file/function length), and ruff for Python:
@@ -113,7 +115,7 @@ cd research && bash scripts/lint-check.sh --fix
 cd research && bash scripts/lint-check.sh
 ```
 
-If any step fails, fix the issue and re-run from the top.
+If any step fails, fix the issue and re-run from the top. Qualified exceptions when invoked by `/deploy` follow `.claude/shared/deploy-failure-policy.md`; they do not change rerun requirements after a code fix.
 
 Stage and commit any auto-fix changes (prettier, eslint) before proceeding.
 
@@ -132,6 +134,12 @@ If on main already (linear commits), just push:
 git push origin main
 ```
 
+Immediately after either successful push above, capture the exact pushed
+`HEAD` and bind it in the canonical source workspace's
+`.context/deploy-scorecard-latest.json` under the controlling scorecard-freshness
+rule. Do this before Step 4 fetches/switches branches; do not infer this
+workspace's shipped SHA from a later global `origin/main`.
+
 ## Step 4: New branch
 
 Run `/new_branch_with_context` to sync with main and create a fresh branch for the next task.
@@ -139,3 +147,21 @@ Run `/new_branch_with_context` to sync with main and create a fresh branch for t
 ## Step 5: Done
 
 Report what was pushed (files changed, commit summary) and the new branch name.
+
+Before publishing a scorecard, follow **Scorecard freshness: latest merge from
+this workspace** in `.claude/shared/deploy-failure-policy.md`. Bind the just-merged
+change in `.context/deploy-scorecard-latest.json` and use its own scope and
+recorded timing, even for small rule or reporting updates. Distinguish this
+merge/publish delivery from a production-service rollout; never reuse the
+previous full deploy's title, clock or gate results.
+
+## Required factory execution metadata
+
+Follow `docs/factory-telemetry.md` for every new factory run. Record exact
+model/provider, effort, speed/service tier, harness/version, scoped token/cache
+usage and cost, worker attribution, resource/concurrency context, disjoint wait
+times and validation provenance. Every known value requires a timestamped source;
+unavailable values stay explicitly unknown. Never guess historical settings or
+publish raw transcripts, secrets or signed URLs. Set `FACTORY_METADATA_FILE`
+before collection, append snapshots for changes and publish the ledger. Final
+scorecards report model/effort/tier and collection gaps alongside timings.

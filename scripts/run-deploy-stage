@@ -10,10 +10,11 @@ CURRENT_RUN_FILE="$RUN_ROOT/current"
 
 usage() {
     echo "usage: scripts/run-deploy-stage --start [--run-id ID]" >&2
-    echo "       scripts/run-deploy-stage STAGE [--reuse-passed] -- COMMAND [ARG ...]" >&2
+    echo "       scripts/run-deploy-stage STAGE [--reuse-passed] [--lane-scoped-reuse] -- COMMAND [ARG ...]" >&2
     echo "       scripts/run-deploy-stage --summary" >&2
     echo "       scripts/run-deploy-stage --finish" >&2
     echo "       scripts/run-deploy-stage --history" >&2
+    echo "       scripts/run-deploy-stage --wait --since EPOCH [--timeout S] [--stall-seconds S] STAGE [STAGE ...]" >&2
 }
 
 if [ "${1:-}" = "--start" ]; then
@@ -51,6 +52,13 @@ if [ "${1:-}" = "--history" ]; then
     exit $?
 fi
 
+if [ "${1:-}" = "--wait" ]; then
+    # Event wake: block until the named stages write their finish receipts.
+    shift
+    [ "$#" -gt 0 ] || { usage; exit 2; }
+    exec python3 "$ROOT_DIR/scripts/deploy_stage_wait.py" --run-root "$RUN_ROOT" "$@"
+fi
+
 if [ ! -f "$CURRENT_RUN_FILE" ]; then
     echo "no active deploy timing run; start one with: bash scripts/run-deploy-stage --start" >&2
     exit 2
@@ -86,14 +94,16 @@ STAGE="${1:-}"
 [[ "$STAGE" =~ ^[A-Za-z0-9._-]+$ ]] || { usage; exit 2; }
 shift
 REUSE_PASSED=""
-if [ "${1:-}" = "--reuse-passed" ]; then
-    REUSE_PASSED="--reuse-passed"
-    shift
-fi
+LANE_SCOPED_REUSE=""
+# Either flag, in any order, before the `--` separator.
+while :; do
+    case "${1:-}" in
+        --reuse-passed) REUSE_PASSED="--reuse-passed"; shift ;;
+        --lane-scoped-reuse) LANE_SCOPED_REUSE="--lane-scoped-reuse"; shift ;;
+        *) break ;;
+    esac
+done
 [ "${1:-}" = "--" ] || { usage; exit 2; }
 shift
 [ "$#" -gt 0 ] || { usage; exit 2; }
-if [ -n "$REUSE_PASSED" ]; then
-    exec python3 "$STAGE_RUNNER" --run-root "$RUN_ROOT" "$REUSE_PASSED" "$STAGE" -- "$@"
-fi
-exec python3 "$STAGE_RUNNER" --run-root "$RUN_ROOT" "$STAGE" -- "$@"
+exec python3 "$STAGE_RUNNER" --run-root "$RUN_ROOT" $REUSE_PASSED $LANE_SCOPED_REUSE "$STAGE" -- "$@"

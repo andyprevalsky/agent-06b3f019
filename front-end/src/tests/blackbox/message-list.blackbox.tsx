@@ -22,6 +22,7 @@ import { AgentContext } from '@/features/agent-context';
 import type { AgentContextValue } from '@/features/agent-context';
 import { MessageList } from '@/features/terminal-component-group/components/MessageList';
 import type { Message, AgentDetail } from '@/lib/api';
+import { makeCtx } from './browser-agent-chip.fixtures';
 
 const attemptMacAppHandoffMock = vi.hoisted(() => vi.fn());
 

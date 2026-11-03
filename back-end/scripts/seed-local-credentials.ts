@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import type {
   BrowserPassword,
   BrowserPermission,
@@ -8,7 +9,6 @@ import type {
   Integration,
   LocalStorageOrigin,
   PasskeyCredential,
-  Prisma,
   SteelSessionAuth,
 } from '@prisma/client';
 
@@ -280,8 +280,13 @@ export async function syncIntegrationCredentials(
   }
   const syncedIds: string[] = [];
   for (const integration of integrations) {
-    const { id: remoteId, ...updateData } = integration;
+    const { id: remoteId, config, ...rest } = integration;
     void remoteId;
+    // Prisma writes a SQL NULL into a Json? column only as DbNull, never a bare null.
+    const updateData = {
+      ...rest,
+      config: config === null ? Prisma.DbNull : (config as Prisma.InputJsonValue),
+    };
     const synced = await localIntegration.upsert({
       where: {
         userId_name_accountId: {

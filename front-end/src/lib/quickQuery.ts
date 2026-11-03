@@ -7,6 +7,8 @@ export interface QuickLauncherAttachment {
   size: number;
   /** Raw file bytes — structured-clone / Electron-IPC safe. */
   data: ArrayBuffer;
+  /** The screenshot the launcher captured on open, not a file the user chose. */
+  autoCaptured?: boolean;
 }
 
 export interface QuickLauncherPayload {

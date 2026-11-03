@@ -29,5 +29,7 @@
   "src/features/integrations/components/IntegrationSections.tsx",
   "src/features/integrations/components/IntegrationModals.tsx",
   "src/features/integrations/components/FileInputs.tsx",
-  "src/features/integrations/components/index.ts"
+  "src/features/integrations/components/index.ts",
+  "src/features/integrations/hooks/useLinkedInAccountSync.ts",
+  "src/features/integrations/hooks/useWhatsAppAccounts.ts"
 ]

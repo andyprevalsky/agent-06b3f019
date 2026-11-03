@@ -19,13 +19,43 @@ for raw in Path(path).read_text().splitlines():
     if not line or line.startswith("#") or "=" not in line:
         continue
     key, value = line.split("=", 1)
-    if key.strip() != wanted:
+    key = key.strip()
+    if key.startswith("export") and key[6:7].isspace():  # dotenv's `export KEY=value`
+        key = key[6:].strip()
+    if key != wanted:
         continue
     value = value.strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
         value = value[1:-1]
     print(value)
     break
+PY
+}
+
+# Number of distinct values assigned to <key> in a dotenv file (`KEY=` or
+# `export KEY=`). Repeated identical assignments count once.
+cloudbench_env_distinct_value_count() {  # <path> <key>
+  python3 - "$1" "$2" <<'PY'
+from pathlib import Path
+import sys
+
+path, wanted = sys.argv[1:3]
+values = set()
+for raw in Path(path).read_text().splitlines():
+    line = raw.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    key = key.strip()
+    if key.startswith("export") and key[6:7].isspace():
+        key = key[6:].strip()
+    if key != wanted:
+        continue
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    values.add(value)
+print(len(values))
 PY
 }
 
@@ -84,13 +114,13 @@ cloudbench_prepare_workspace_patch() {  # <repo-root> <base-ref> <out-file> [gen
 cloudbench_central_hub_runs_root() {  # <port>
   curl --noproxy '*' -fsS --max-time 2 \
     "http://127.0.0.1:$1/hub-meta.json" 2>/dev/null \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("hub_runs_dir", ""))' \
+    | python3 -S -c 'import json,sys; print(json.load(sys.stdin).get("hub_runs_dir", ""))' \
       2>/dev/null
 }
 
 cloudbench_central_hub_matches() {  # <port> <expected-runs-root>
   local actual_root expected_root
-  expected_root="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$2")"
+  expected_root="$(python3 -S -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$2")"
   actual_root="$(cloudbench_central_hub_runs_root "$1" || true)"
   [ -n "$actual_root" ] && [ "$actual_root" = "$expected_root" ]
 }
@@ -101,7 +131,7 @@ cloudbench_central_hub_owner_matches() {  # <port> <runs-root> <repo-root> <owne
   [ -f "$owner_file" ] || return 1
   metadata="$(curl --noproxy '*' -fsS --max-time 2 \
     "http://127.0.0.1:$port/hub-meta.json" 2>/dev/null)" || return 1
-  HUB_METADATA_JSON="$metadata" python3 - "$owner_file" "$port" \
+  HUB_METADATA_JSON="$metadata" python3 -S - "$owner_file" "$port" \
     "$runs_root" "$repo_root" <<'PY' || return 1
 import json
 import os
@@ -286,7 +316,7 @@ cloudbench_tcp_listener_present() {  # <port>
   #   1 — no listener (port free)
   #   2 — bad argument
   #   3 — probe failed (timeout / python / unexpected); callers must fail closed
-  python3 - "$1" <<'PY'
+  python3 -S - "$1" <<'PY'
 import errno
 import socket
 import sys
@@ -350,6 +380,187 @@ cloudbench_select_central_hub_port() {  # <preferred-port> <expected-runs-root>
   return 1
 }
 
+# Benchmark guests may use their own Temporal Cloud namespace so their workers,
+# autoscaler queue observations and stale-workflow sweeps never spend the
+# production namespace's action and Visibility API budgets.
+#
+#   controller agents/.env + back-end/.env ──(unchanged, prod settings)──┐
+#   private override (.env.benchmark-temporal, 0600) ──► guest copies only ─┴─► AGENTS_ENV_B64/BACKEND_ENV_B64
+#
+# The override file holds exactly CLOUDBENCH_GUEST_TEMPORAL_ADDRESS,
+# CLOUDBENCH_GUEST_TEMPORAL_NAMESPACE and CLOUDBENCH_GUEST_TEMPORAL_API_KEY.
+# Default location: beside the real (symlink-resolved) agents/.env, else the
+# main checkout's agents/.env.benchmark-temporal for a linked Git worktree. Set
+# CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE=<path> to choose another file (which must
+# then exist) or =off to stage the controller's settings unchanged. No file (or
+# =off) stages the controller's bytes, which
+# cloudbench_require_staged_guest_temporal_namespace refuses for any app with a
+# committed guest namespace unless they already carry it.
+cloudbench_guest_temporal_override_file() {  # [agents-env]; prints path or nothing
+  local explicit="${CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE-}" agents_env="${1:-agents/.env}" candidate common
+  [ "$explicit" = off ] && return 0
+  if [ -n "$explicit" ]; then
+    [ -f "$explicit" ] || {
+      echo "❌ CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE=$explicit does not exist." >&2
+      return 1
+    }
+    printf '%s\n' "$explicit"
+    return 0
+  fi
+  candidate="$(python3 -c 'import os, sys; print(os.path.join(os.path.dirname(os.path.realpath(sys.argv[1])), ".env.benchmark-temporal"))' "$agents_env")" || return 1
+  if [ ! -e "$candidate" ] && [ ! -L "$candidate" ]; then
+    common="$(git -C "$(dirname "$agents_env")" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || common=""
+    candidate=""
+    if [ "$(basename "${common:-x}")" = .git ]; then
+      candidate="$(dirname "$common")/agents/.env.benchmark-temporal"
+    fi
+  fi
+  if [ -n "$candidate" ] && { [ -e "$candidate" ] || [ -L "$candidate" ]; }; then
+    printf '%s\n' "$candidate"
+  fi
+  return 0
+}
+
+# cloudbench_write_guest_temporal_env_files <agents-env> <backend-env> <override> <private-out-dir>
+# Writes <out>/agents.env and <out>/backend.env: byte copies of the sources with
+# only TEMPORAL_ADDRESS/TEMPORAL_NAMESPACE/TEMPORAL_API_KEY replaced (appended
+# when absent). Never modifies the sources. Prints the guest namespace.
+cloudbench_write_guest_temporal_env_files() {
+  python3 - "$@" <<'PY'
+import os, re, stat, sys
+
+agents_env, backend_env, override, out_dir = sys.argv[1:5]
+REQUIRED = {
+    "CLOUDBENCH_GUEST_TEMPORAL_ADDRESS": "TEMPORAL_ADDRESS",
+    "CLOUDBENCH_GUEST_TEMPORAL_NAMESPACE": "TEMPORAL_NAMESPACE",
+    "CLOUDBENCH_GUEST_TEMPORAL_API_KEY": "TEMPORAL_API_KEY",
+}
+
+def die(message):
+    print("❌ guest Temporal override: " + message, file=sys.stderr)
+    raise SystemExit(1)
+
+info = os.stat(override)
+if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+    die("%s must be a regular file owned by this user with mode 0600" % override)
+values = {}
+with open(override, encoding="utf-8") as handle:
+    for number, line in enumerate(handle, 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = re.fullmatch(r"(?:export\s+)?([A-Z0-9_]+)=(.*)", line)
+        if not match or match.group(1) not in REQUIRED:
+            die("%s line %d is not one of %s" % (override, number, ", ".join(sorted(REQUIRED))))
+        value = match.group(2).strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if not value or re.search(r"[\s\"'#]", value):
+            die("%s has an empty or unquotable %s" % (override, match.group(1)))
+        if match.group(1) in values:
+            die("%s repeats %s" % (override, match.group(1)))
+        values[match.group(1)] = value
+missing = sorted(set(REQUIRED) - set(values))
+if missing:
+    die("%s is missing %s" % (override, ", ".join(missing)))
+if not re.fullmatch(r"[A-Za-z0-9.-]+:[0-9]+", values["CLOUDBENCH_GUEST_TEMPORAL_ADDRESS"]):
+    die("CLOUDBENCH_GUEST_TEMPORAL_ADDRESS must be host:port")
+replacements = {target: values[source] for source, target in REQUIRED.items()}
+pattern = re.compile(rb"^(\s*(?:export\s+)?)(" + b"|".join(k.encode() for k in replacements) + rb")\s*=")
+
+info = os.lstat(out_dir)
+if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+    die("output directory must be a private directory")
+
+for source, name in ((agents_env, "agents.env"), (backend_env, "backend.env")):
+    with open(source, "rb") as handle:
+        raw = handle.read()
+    lines = raw.splitlines(keepends=True)
+    seen = set()
+    rendered = []
+    for line in lines:
+        match = pattern.match(line)
+        if match:
+            key = match.group(2).decode()
+            seen.add(key)
+            ending = line[len(line.rstrip(b"\r\n")):]
+            line = match.group(1) + match.group(2) + b"=" + replacements[key].encode() + ending
+        rendered.append(line)
+    body = b"".join(rendered)
+    absent = [key for key in replacements if key not in seen]
+    if absent and body and not body.endswith(b"\n"):
+        body += b"\n"
+    for key in absent:
+        body += key.encode() + b"=" + replacements[key].encode() + b"\n"
+    fd = os.open(os.path.join(out_dir, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(body)
+print(replacements["TEMPORAL_NAMESPACE"])
+PY
+}
+
+# Committed guest Temporal namespace per bench app. The namespace name is not a
+# secret (the address and API key stay in the private override), so every host
+# and fresh checkout agrees on what the shared bench-app secrets must carry.
+# 2026-10-19: a host without the override restaged the bench app with the
+# production namespace and the next launch's guests refused to start.
+cloudbench_expected_guest_temporal_namespace() {  # <app>; prints namespace or nothing
+  case "${1:-}" in
+    navi-whisper-lux-bench) printf '%s\n' rose-labs-bench.tch2n ;;
+  esac
+}
+
+# cloudbench_require_staged_guest_temporal_namespace <app> <override-or-empty> <agents-env> <backend-env>
+# Refuses, before any secret is staged, guest copies whose TEMPORAL_NAMESPACE is
+# not the app's committed guest namespace. Apps without one are unchecked.
+cloudbench_require_staged_guest_temporal_namespace() {
+  local app="$1" override="$2" agents_env="$3" backend_env="$4" expected path actual count
+  expected="$(cloudbench_expected_guest_temporal_namespace "$app")"
+  [ -n "$expected" ] || return 0
+  for path in "$agents_env" "$backend_env"; do
+    # cloudbench_env_value reads the first assignment while guest dotenv loaders
+    # apply the last, so conflicting repeats could pass this check and still run
+    # the guest on another namespace. Identical repeats are harmless.
+    count="$(cloudbench_env_distinct_value_count "$path" TEMPORAL_NAMESPACE 2>/dev/null)" || count=""
+    if [ "$count" != 0 ] && [ "$count" != 1 ]; then
+      echo "❌ Refusing to stage $app guest secrets: $(basename "$path") assigns ${count:-an unreadable number of} different TEMPORAL_NAMESPACE values; keep one value, then retry." >&2
+      return 1
+    fi
+    actual="$(cloudbench_env_value "$path" TEMPORAL_NAMESPACE 2>/dev/null)" || actual=""
+    [ "$actual" = "$expected" ] && continue
+    if [ -z "$override" ]; then
+      echo "❌ Refusing to stage $app guest secrets: guests must use Temporal namespace $expected, but no guest Temporal override was found, so they would get this controller's TEMPORAL_NAMESPACE=${actual:-<unset>}. Install the private 0600 agents/.env.benchmark-temporal (CLOUDBENCH_GUEST_TEMPORAL_ADDRESS/_NAMESPACE/_API_KEY) beside the real agents/.env, or point CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE at it, then retry." >&2
+    else
+      echo "❌ Refusing to stage $app guest secrets: the guest Temporal override $override yields TEMPORAL_NAMESPACE=${actual:-<unset>} in $(basename "$path"), but $app guests must use $expected. Fix CLOUDBENCH_GUEST_TEMPORAL_NAMESPACE in that file, then retry." >&2
+    fi
+    return 1
+  done
+}
+
+# cloudbench_require_guest_temporal_namespace <agents-env> <backend-env> <expected>
+# A guest decodes the shared bench-app AGENTS_ENV_B64/BACKEND_ENV_B64 secrets,
+# which only a maintenance op (--refresh-secrets/--setup/--refresh-wmh) stages.
+# run-bench-cloud binds the app's committed guest namespace by default (a
+# launcher such as the original600 operator may bind its own), so stale secrets
+# fail before any Temporal worker instead of silently running every guest on the
+# controller/production namespace. Empty = no check (apps without one).
+cloudbench_require_guest_temporal_namespace() {
+  local agents_env="$1" backend_env="$2" expected="${3:-}" path actual count
+  [ -n "$expected" ] || return 0
+  for path in "$agents_env" "$backend_env"; do
+    count="$(cloudbench_env_distinct_value_count "$path" TEMPORAL_NAMESPACE 2>/dev/null)" || count=""
+    if [ "$count" != 0 ] && [ "$count" != 1 ]; then
+      echo "FATAL: guest $(basename "$path") assigns ${count:-an unreadable number of} different TEMPORAL_NAMESPACE values; the loaded value is ambiguous. Restage the bench app secrets with one value." >&2
+      return 1
+    fi
+    actual="$(cloudbench_env_value "$path" TEMPORAL_NAMESPACE 2>/dev/null)" || actual=""
+    if [ "$actual" != "$expected" ]; then
+      echo "FATAL: guest $(basename "$path") TEMPORAL_NAMESPACE=${actual:-<unset>} differs from the launcher's guest namespace $expected; the bench app secrets predate the guest override. Restage them: bash scripts/run-bench-cloud --refresh-secrets" >&2
+      return 1
+    fi
+  done
+}
+
 cloudbench_verify_env_file() {
   local path="$1" expected="$2" label="$3" actual
   [ -n "$expected" ] || {
@@ -388,17 +599,63 @@ cloudbench_require_agentcard_org_oauth() {
   echo "agentcard org oauth verified: id_len=${#client_id} secret_len=${#client_secret}"
 }
 
+# Benchmark guests restore their own database, so without a shared authority
+# every guest runs its own compute-token lease semaphore and cooldowns on the
+# same real credentials (70 copies held ~80 live leases on one GPT token whose
+# capacity is 16 and drew 429s). back-end routes.compute.ts already delegates
+# internal /compute-code/* requests to COMPUTE_TOKEN_AUTHORITY_URL; this points
+# a guest's backend at production's single lease store. The guest's internal
+# BACKEND_API_KEY is production's, so it authenticates the delegation.
+# CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL selects another origin; =off keeps the
+# guest-local semaphore. An authority already in the env file is left as is.
+CLOUDBENCH_DEFAULT_COMPUTE_TOKEN_AUTHORITY_URL=https://navi-j9a9.onrender.com
+cloudbench_apply_compute_token_authority() {  # <backend-env>
+  local backend_env="$1" url api_key existing
+  url="${CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL-$CLOUDBENCH_DEFAULT_COMPUTE_TOKEN_AUTHORITY_URL}"
+  if [ "$url" = off ]; then
+    echo "compute-token authority: off (guest-local leases)"
+    return 0
+  fi
+  existing="$(cloudbench_env_value "$backend_env" COMPUTE_TOKEN_AUTHORITY_URL)" || return 1
+  if [ -n "$existing" ]; then
+    [ -n "$(cloudbench_env_value "$backend_env" COMPUTE_TOKEN_AUTHORITY_API_KEY)" ] || {
+      echo "FATAL: back-end/.env sets COMPUTE_TOKEN_AUTHORITY_URL without COMPUTE_TOKEN_AUTHORITY_API_KEY" >&2
+      return 1
+    }
+    echo "compute-token authority: $existing (from back-end/.env)"
+    return 0
+  fi
+  case "$url" in
+    https://*) ;;
+    *) echo "FATAL: compute-token authority must be an https origin, got ${url:-<empty>}" >&2; return 1 ;;
+  esac
+  url="${url%/}"
+  case "${url#https://}" in
+    ''|*/*|*@*|*\?*|*\#*) echo "FATAL: compute-token authority must be a bare https origin, got $url" >&2; return 1 ;;
+  esac
+  api_key="$(cloudbench_env_value "$backend_env" BACKEND_API_KEY)" || return 1
+  [ -n "$api_key" ] || {
+    echo "FATAL: back-end/.env has no BACKEND_API_KEY to authenticate the compute-token authority" >&2
+    return 1
+  }
+  if [ -s "$backend_env" ] && [ "$(tail -c 1 "$backend_env")" != "" ]; then
+    printf '\n' >> "$backend_env"
+  fi
+  printf 'COMPUTE_TOKEN_AUTHORITY_URL=%s\nCOMPUTE_TOKEN_AUTHORITY_API_KEY=%s\n' "$url" "$api_key" >> "$backend_env"
+  echo "compute-token authority: $url"
+}
+
 cloudbench_validate_browser_provider_contract() {
   local agents_env="$1" backend_env="$2" prod_backend="$3" prod_worker="$4"
   local agents_provider backend_provider
   agents_provider="$(cloudbench_env_value "$agents_env" BROWSER_PROVIDER)"
   backend_provider="$(cloudbench_env_value "$backend_env" BROWSER_PROVIDER)"
 
-  case "$prod_backend" in kernel|steel|browser-use) ;; *)
+  case "$prod_backend" in tilion|kernel|steel|browser-use) ;; *)
     echo "FATAL: production backend BROWSER_PROVIDER is invalid: ${prod_backend:-<unset>}" >&2
     return 1
   esac
-  case "$prod_worker" in kernel|steel|browser-use) ;; *)
+  case "$prod_worker" in tilion|kernel|steel|browser-use) ;; *)
     echo "FATAL: production worker BROWSER_PROVIDER is invalid: ${prod_worker:-<unset>}" >&2
     return 1
   esac
@@ -413,6 +670,18 @@ cloudbench_validate_browser_provider_contract() {
   if [ "$agents_provider" != "$prod_worker" ]; then
     echo "FATAL: benchmark worker env does not match production: local=${agents_provider:-<unset>} prod=$prod_worker" >&2
     return 1
+  fi
+  # Guests get provider keys only through the whole-file env blobs (the same
+  # way KERNEL_API_KEY arrives). A Tilion contract without its key would fail
+  # every browser /init on the guest; stop before staging or booting.
+  if [ "$prod_backend" = tilion ]; then
+    local tilion_key
+    tilion_key="$(cloudbench_env_value "$backend_env" TILION_API_KEY)"
+    if [ -z "$tilion_key" ]; then
+      echo "FATAL: back-end/.env has no TILION_API_KEY for BROWSER_PROVIDER=tilion." >&2
+      echo "   Add it to back-end/.env, then: bash scripts/run-bench-cloud --refresh-secrets" >&2
+      return 1
+    fi
   fi
   echo "browser provider contract verified: backend=$prod_backend worker=$prod_worker"
 }
@@ -990,23 +1259,59 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
   return "$status"
 }
 
-cloudbench_fleet_workspace_name() {  # <bench-name> <controller-id> <ordinal>
-  # Temporal task queues inherit this workspace name and cap it at 48 chars.
-  # Truncate only the human-readable bench segment: the controller + ordinal
-  # suffix is the isolation boundary and must remain complete for every name.
-  local bench="$1" controller_id="$2" ordinal="$3"
-  local suffix sanitized max_bench_length
-  case "$controller_id:$ordinal" in
-    *[!0-9:]*)
-      echo "FATAL: fleet workspace controller and ordinal must be numeric" >&2
-      return 1
-      ;;
-    :*|*:)
-      echo "FATAL: fleet workspace controller and ordinal must be non-empty" >&2
+cloudbench_guest_autoscaler_poll_seconds() {  # <concurrent-guests> [calls-per-second] [floor-seconds]
+  # Every guest worker's queue observation spends three Temporal Cloud Visibility
+  # API calls (CountWorkflowExecutions + two DescribeTaskQueue). Production shares
+  # that namespace budget, so this host's concurrent guests together spend at most
+  # the configured calls/s. Never poll faster than the controller reads the
+  # result; a malformed input falls back to the conservative production-safe value.
+  local guests="$1" budget="${2:-${CLOUDBENCH_TEMPORAL_VISIBILITY_CALLS_PER_SECOND:-20}}" floor="${3:-10}"
+  awk -v guests="$guests" -v budget="$budget" -v floor="$floor" 'BEGIN {
+    if (guests !~ /^[0-9]+$/ || guests < 1) guests = 1
+    if (floor !~ /^[0-9]+$/ || floor < 1) floor = 10
+    if (budget !~ /^[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$/ || budget <= 0) budget = 20
+    seconds = 3 * guests / budget
+    whole = int(seconds); if (whole < seconds) whole++
+    if (whole < floor) whole = floor
+    print whole
+  }'
+}
+
+cloudbench_fleet_guest_identity() {  # <fleet-owner-token>
+  # Guest identities reach shared services: the Temporal Cloud namespace shared
+  # with production, the guest's queue-scoped stale-workflow termination and its
+  # Steel ownership marker. A controller PID is not globally unique: identical
+  # disposable controllers reuse PIDs and seconds across hosts. Derive the
+  # identity from the fleet's random owner token instead, so exact-owner
+  # recovery re-derives it while the raw ownership token stays out of names.
+  local owner="$1"
+  case "$owner" in
+    *[!0-9a-f]*|'')
+      echo "FATAL: fleet guest identity requires the 32-hex fleet owner token" >&2
       return 1
       ;;
   esac
-  suffix="-$controller_id-$ordinal"
+  [ "${#owner}" -eq 32 ] || {
+    echo "FATAL: fleet guest identity requires the 32-hex fleet owner token" >&2
+    return 1
+  }
+  python3 -c 'import hashlib, sys; print(hashlib.sha256(b"cloudbench-fleet-guest-identity-v1\0" + sys.argv[1].encode()).hexdigest()[:12])' "$owner"
+}
+
+cloudbench_fleet_workspace_name() {  # <bench-name> <fleet-owner-token> <ordinal>
+  # Temporal task queues inherit this workspace name and cap it at 48 chars.
+  # Truncate only the human-readable bench segment: the owner identity +
+  # ordinal suffix is the isolation boundary and must remain complete.
+  local bench="$1" owner="$2" ordinal="$3"
+  local identity suffix sanitized max_bench_length
+  case "$ordinal" in
+    *[!0-9]*|'')
+      echo "FATAL: fleet workspace ordinal must be numeric" >&2
+      return 1
+      ;;
+  esac
+  identity="$(cloudbench_fleet_guest_identity "$owner")" || return 1
+  suffix="-$identity-$ordinal"
   max_bench_length=$((48 - 4 - ${#suffix}))
   [ "$max_bench_length" -ge 1 ] || {
     echo "FATAL: fleet workspace uniqueness suffix exceeds the 48-character limit" >&2
@@ -1154,8 +1459,10 @@ cloudbench_git_insteadof_github_token() {
 }
 
 cloudbench_resolve_controller_github_token() {
-  local token="" dotenv
+  local token="" dotenv backend_env agents_env
   local workspace_root="${1:-${CLOUDBENCH_FLEET_ROOT:-.}}"
+  backend_env="${2:-$workspace_root/back-end/.env}"
+  agents_env="${3:-$workspace_root/agents/.env}"
   if [ -n "${CLOUDBENCH_GITHUB_TOKEN_B64:-}" ]; then
     token="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
     [ -n "$token" ] && { printf '%s' "$token"; return 0; }
@@ -1171,7 +1478,7 @@ cloudbench_resolve_controller_github_token() {
   fi
   token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
   if [ -z "$token" ]; then
-    for dotenv in "$workspace_root/back-end/.env" "$workspace_root/agents/.env"; do
+    for dotenv in "$backend_env" "$agents_env"; do
       [ -f "$dotenv" ] || continue
       token="$(cloudbench_env_value "$dotenv" GITHUB_TOKEN 2>/dev/null || true)"
       [ -z "$token" ] || break
@@ -1330,15 +1637,176 @@ cloudbench_status_proxy_lifecycle_response_accepted() {
   esac
 }
 
+# Campaign transports use keyed broker leases, never a shared PID sentinel.
+cloudbench_shared_relay_enabled() {
+  [ -n "${CLOUDBENCH_SHARED_RELAY_AUTHORITY:-}${CLOUDBENCH_SHARED_RELAY_DIRECTORY:-}" ]
+}
+cloudbench_shared_relay_request() {  # action token [route arguments]
+  local action="$1" token="$2" start
+  shift 2
+  start="$(cloudbench_pid_start_time "$$")" || return 1
+  [ -n "$start" ] || return 1
+  python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-${CLOUDBENCH_RUNTIME_SCRIPT_ROOT:-$ROOT_DIR/scripts}}/cloudbench-shared-relay.py" \
+    "$action" --authority "${CLOUDBENCH_SHARED_RELAY_AUTHORITY:?}" \
+    --directory "${CLOUDBENCH_SHARED_RELAY_DIRECTORY:?}" \
+    --owner-pid "$$" --owner-start "$start" --token "$token" "$@"
+}
+cloudbench_proxy_alive() {  # PID variable name; shared mode has no route PID
+  local name="$1" lease_name="${1}_LEASE" live_name="${1}_LIVE" observed="" marker
+  if cloudbench_shared_relay_enabled; then
+    [ -n "${!lease_name:-}" ] && [ -n "${!live_name:-}" ] || return 1
+    cloudbench_pid_matches_start "${CLOUDBENCH_SHARED_RELAY_PID:?}" "${CLOUDBENCH_SHARED_RELAY_BIRTH:?}" || return 1
+    cloudbench_pid_matches_start "${CLOUDBENCH_SHARED_RELAY_AGENT_PID:?}" "${CLOUDBENCH_SHARED_RELAY_AGENT_BIRTH:?}" || return 1
+    [ -S "$CLOUDBENCH_SHARED_RELAY_DIRECTORY/control.sock" ] && [ ! -L "$CLOUDBENCH_SHARED_RELAY_DIRECTORY/control.sock" ] || return 1
+    marker="$CLOUDBENCH_SHARED_RELAY_DIRECTORY/leases/${!lease_name}.live"
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    IFS= read -r observed < "$marker" || return 1
+    [ "$observed" = "${!live_name}" ]
+  else
+    [ -n "${!name:-}" ] && kill -0 "${!name}" 2>/dev/null
+  fi
+}
+cloudbench_proxy_stop() {  # exact route only; never signal the broker
+  local name="$1" lease_name="${1}_LEASE" token_name="${1}_TOKEN"
+  if cloudbench_shared_relay_enabled; then
+    if [ -n "${!lease_name:-}" ]; then
+      cloudbench_shared_relay_request release "${!token_name:-}" --lease "${!lease_name}" >/dev/null || return 1
+      printf -v "$lease_name" '%s' ''
+    fi
+  else
+    cloudbench_terminate_and_wait 5 "${!name:-}"
+  fi
+  printf -v "$name" '%s' ''
+}
+cloudbench_shared_proxy_start() {  # same signature as data-plane proxy
+  local port="$1" remote="$2" host="$3" log="$4" name="$5" label="$6"
+  local timeout="${7:-${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}}" result lease started health live_path live_value rc
+  local lease_name="${5}_LEASE" token_name="${5}_TOKEN" live_name="${5}_LIVE"
+  local last_http=not_probed curl_exit=not_probed proxy_alive=not_checked readiness_reason=deadline
+  local token="${RUN_LOG_TOKEN:-${RUN_ID:?}}-$label-$port"
+  started="$(date +%s)"
+  while :; do
+    rc=0
+    result="$(cloudbench_shared_relay_request acquire "$token" \
+      --mid "${mid:-${CLOUDBENCH_RELAY_MACHINE_ID:?}}" --remote-ip "$host" \
+      --remote-port "$remote" --local-port "$port")" || rc=$?
+    [ "$rc" != 0 ] || break
+    [ "$rc" != 98 ] || return 98
+    [ $(( $(date +%s) - started )) -lt "$timeout" ] || return 1
+    sleep 1
+  done
+  # Extract a well-formed granted lease even when the rest is unusable, so a
+  # rejected response releases it instead of leaking the broker's route.
+  # A non-whitespace separator keeps empty fields positional.
+  IFS="$(printf '\037')" read -r lease live_path live_value <<< "$(printf '%s' "$result" | python3 -c 'import json,re,sys;v=json.load(sys.stdin);v=v if isinstance(v,dict) else {};s=v.get("lease");s=s if isinstance(s,str) and re.fullmatch(r"[a-f0-9-]{32,36}",s) else "";print(s,v.get("live_path",""),v.get("live_value",""),sep="\037")' 2>/dev/null)"
+  if ! { [ -n "$lease" ] && [ "$live_path" = "$CLOUDBENCH_SHARED_RELAY_DIRECTORY/leases/$lease.live" ] && [ -n "$live_value" ]; }; then
+    [ -z "$lease" ] || cloudbench_shared_relay_request release "$token" --lease "$lease" >/dev/null || true
+    return 1
+  fi
+  printf -v "$name" '%s' ''
+  printf -v "$lease_name" '%s' "$lease"
+  printf -v "$token_name" '%s' "$token"
+  printf -v "$live_name" '%s' "$live_value"
+  printf 'shared relay lease %s: localhost:%s -> %s:%s\n' "$lease" "$port" "$host" "$remote" >> "$log"
+  [ "$label" = status ] || return 0
+  while [ $(( $(date +%s) - started )) -lt "$timeout" ]; do
+    if cloudbench_proxy_alive "$name"; then
+      proxy_alive=true
+    else
+      proxy_alive=false
+      readiness_reason=proxy_not_alive
+      break
+    fi
+    curl_exit=0
+    health="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/driver-health" 2>/dev/null)" || curl_exit=$?
+    case "$health" in
+      [0-9][0-9][0-9]) last_http="$health" ;;
+      *) last_http=invalid_code ;;
+    esac
+    if cloudbench_status_proxy_lifecycle_response_accepted "$health"; then return 0; fi
+    sleep 1
+  done
+  # Keep only observations already made by the readiness loop, never response bodies.
+  printf 'status readiness failed: reason=%s last_http=%s curl_exit=%s proxy_alive=%s\n' \
+    "$readiness_reason" "$last_http" "$curl_exit" "$proxy_alive" >> "$log" || true
+  cloudbench_proxy_stop "$name" || return 1
+  return 1
+}
+
+# Charge one bounded controller step to a readiness budget. Every step of the
+# proxy launcher has a fixed ceiling (curl --max-time, settle, terminate grace,
+# fixed sleeps), so wall-clock time past that ceiling is a host stall (VM pause,
+# laptop sleep, cgroup freeze), not evidence about the tunnel. Production replay
+# 20261028-181310-2300577: the devbox VM paused 537 s (kernel audit seq
+# 73645→73646, 18:33:12→18:42:09Z) while six status proxies were retrying
+# through Fly GraphQL 503s; the wall-clock budget expired during the pause and
+# six healthy guests were failed closed without one post-thaw attempt, while
+# the three already-established tunnels recovered in 20 s. The stall is logged
+# and excluded; the budget keeps counting only bounded controller work.
+#   cloudbench_charge_bounded_step <charged-var> <stalled-var> <step-started-epoch> <ceiling-s> <log> <label> [minimum-s]
+cloudbench_charge_bounded_step() {
+  local charged_var="$1" stalled_var="$2" step_started="$3" ceiling="$4" log_file="$5" label="$6"
+  # Subsecond failed probes still consume a bounded budget unit when requested.
+  local elapsed excess minimum="${7:-0}"
+  elapsed=$(( $(date +%s) - step_started ))
+  [ "$elapsed" -ge "$minimum" ] || elapsed="$minimum"
+  if [ "$elapsed" -gt "$ceiling" ]; then
+    excess=$(( elapsed - ceiling ))
+    printf '[%s] %s: host stall %ss during a %ss-bounded step (excluded from the readiness budget)\n' \
+      "$(date -u +%H:%M:%S)" "$label" "$excess" "$ceiling" >> "$log_file"
+    printf -v "$stalled_var" '%s' "$(( ${!stalled_var} + excess ))"
+    elapsed="$ceiling"
+  fi
+  printf -v "$charged_var" '%s' "$(( ${!charged_var} + elapsed ))"
+}
+
 cloudbench_start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log> <pid-var> <label> [timeout]
   local local_port="$1" remote_port="$2" host="$3" log_file="$4"
   local pid_var="$5" label="$6" timeout="${7:-${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}}"
-  local started_at pid attempt=0 probe_path="/" health_code
-  started_at="$(date +%s)"
-  : > "$log_file"
+  local settle="${CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS:-3}" settle_whole
+  # Bound decimal parsing before shell comparisons/arithmetic or any launch.
+  if [[ ! "$timeout" =~ ^[0-9]+$ ]]; then
+    printf 'Invalid proxy readiness timeout: expected a positive decimal integer\n' >&2
+    return 2
+  fi
+  timeout="${timeout#"${timeout%%[!0]*}"}"
+  if [ -z "$timeout" ] || [ "${#timeout}" -gt 18 ]; then
+    printf 'Invalid proxy readiness timeout: outside supported positive integer range\n' >&2
+    return 2
+  fi
+  if [[ ! "$settle" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || [ "${#settle}" -gt 32 ]; then
+    settle=3
+  fi
+  if cloudbench_shared_relay_enabled; then
+    cloudbench_shared_proxy_start "$local_port" "$remote_port" "$host" "$log_file" "$pid_var" "$label" "$timeout"
+    return $?
+  fi
+  local pid attempt=0 probe_path="/" health_code attempt_first_line
+  # Budget accounting: only bounded controller work is charged (see
+  # cloudbench_charge_bounded_step). Ceilings are the sum of each segment's
+  # fixed limits plus slack for a loaded host.
+  local charged=0 stalled=0 step_started attempt_ceiling wait_ceiling=15 retire_ceiling=15
+  local wait_budget probe_budget sleep_budget fresh_budget probe_elapsed thaw_probe_used=0 did_thaw_probe
+  settle_whole="${settle%%.*}"
+  case "$settle_whole" in ''|*[!0-9]*) settle_whole=3 ;; esac
+  settle_whole="${settle_whole#"${settle_whole%%[!0]*}"}"
+  [ -n "$settle_whole" ] || settle_whole=0
+  if [ "${#settle_whole}" -gt 18 ]; then settle=3; settle_whole=3; fi
+  attempt_ceiling=$(( 30 + settle_whole ))
+  # Retain earlier attempts: ensure_status_proxy re-enters this launcher after a
+  # transport loss, and truncating here erased the original readiness evidence
+  # of every guest that later passed (replay above).
+  if [ -s "$log_file" ]; then
+    printf '[%s] %s proxy (re)start: earlier attempts retained above\n' \
+      "$(date -u +%H:%M:%S)" "$label" >> "$log_file"
+  else
+    : > "$log_file"
+  fi
   [ "$label" = "status" ] && probe_path="/driver-health"
-  while [ $(( $(date +%s) - started_at )) -lt "$timeout" ]; do
+  while [ "$charged" -lt "$timeout" ]; do
     attempt=$((attempt + 1))
+    step_started="$(date +%s)"
+    attempt_first_line=$(( $(wc -l < "$log_file" 2>/dev/null || echo 0) + 1 ))
     printf '[%s] %s proxy attempt %s: localhost:%s -> %s:%s\n' \
       "$(date -u +%H:%M:%S)" "$label" "$attempt" "$local_port" "$host" "$remote_port" \
       >> "$log_file"
@@ -1350,35 +1818,91 @@ cloudbench_start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log>
     sleep 0.5
     curl --noproxy '*' -sS --max-time 2 -o /dev/null \
       "http://127.0.0.1:$local_port$probe_path" 2>/dev/null || true
-    if grep -Eiq 'listen tcp .*bind: address already in use|address already in use' "$log_file"; then
+    # Only this attempt's output may classify a collision: the retained log can
+    # still hold an earlier port's collision that the caller already rotated away.
+    if tail -n +"$attempt_first_line" "$log_file" 2>/dev/null \
+      | grep -Eiq 'listen tcp .*bind: address already in use|address already in use'; then
       wait "$pid" 2>/dev/null || true
       printf -v "$pid_var" '%s' ""
       return 98
     fi
     # Require a short post-probe survival window for asynchronous lazy-DNS failures.
-    sleep "${CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS:-3}"
+    sleep "$settle"
+    cloudbench_charge_bounded_step charged stalled "$step_started" "$attempt_ceiling" \
+      "$log_file" "$label proxy attempt $attempt"
     if kill -0 "$pid" 2>/dev/null; then
       if [ "$label" != "status" ]; then
         printf -v "$pid_var" '%s' "$pid"
         return 0
       fi
-      health_code="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
-        "http://127.0.0.1:$local_port/driver-health" 2>/dev/null || true)"
-      if cloudbench_status_proxy_lifecycle_response_accepted "$health_code" \
-        && kill -0 "$pid" 2>/dev/null; then
-        printf -v "$pid_var" '%s' "$pid"
-        return 0
-      fi
-      printf '[%s] status proxy lifecycle HTTP %s not accepted; restarting pid %s\n' \
-        "$(date -u +%H:%M:%S)" "${health_code:-000}" "$pid" >> "$log_file"
+      # HTTP unavailability is not process failure: a live flyctl can still be
+      # initializing WireGuard or waiting for the guest status service. Keep its
+      # progress within the original readiness deadline; restart only on exit.
+      while kill -0 "$pid" 2>/dev/null && [ "$charged" -lt "$timeout" ]; do
+        step_started="$(date +%s)"
+        wait_budget=$((timeout - charged))
+        [ "$wait_budget" -le "$wait_ceiling" ] || wait_budget="$wait_ceiling"
+        # Reserve a sleep second when available; the last second still gets
+        # one bounded observation of this same live proxy.
+        sleep_budget=0
+        [ "$wait_budget" -le 1 ] || sleep_budget=1
+        probe_budget=$((wait_budget - sleep_budget))
+        [ "$probe_budget" -le 3 ] || probe_budget=3
+        fresh_budget=0
+        did_thaw_probe=0
+        health_code="$(curl --noproxy '*' -sS --max-time "$probe_budget" -o /dev/null -w '%{http_code}' \
+          "http://127.0.0.1:$local_port/driver-health" 2>/dev/null || true)"
+        if ! cloudbench_status_proxy_lifecycle_response_accepted "$health_code" && [ "$sleep_budget" -gt 0 ]; then
+          sleep "$sleep_budget"
+        fi
+        probe_elapsed=$(( $(date +%s) - step_started ))
+        if ! cloudbench_status_proxy_lifecycle_response_accepted "$health_code" \
+          && [ "$probe_elapsed" -gt "$wait_budget" ] && [ "$thaw_probe_used" -eq 0 ]; then
+          # Reserve the first probe's fixed bound and optional sleep before one fresh
+          # observation. Both probes stay inside this one existing wait step.
+          fresh_budget=$((wait_budget - probe_budget - sleep_budget))
+          [ "$fresh_budget" -le 3 ] || fresh_budget=3
+          if [ "$fresh_budget" -gt 0 ]; then
+            thaw_probe_used=1
+            did_thaw_probe=1
+            health_code="$(curl --noproxy '*' -sS --max-time "$fresh_budget" -o /dev/null -w '%{http_code}' \
+              "http://127.0.0.1:$local_port/driver-health" 2>/dev/null || true)"
+          else
+            fresh_budget=0
+          fi
+        fi
+        if ! cloudbench_status_proxy_lifecycle_response_accepted "$health_code"; then
+          printf '[%s] status proxy lifecycle HTTP %s not accepted; waiting on pid %s\n' \
+            "$(date -u +%H:%M:%S)" "${health_code:-000}" "$pid" >> "$log_file"
+        fi
+        cloudbench_charge_bounded_step charged stalled "$step_started" "$wait_budget" \
+          "$log_file" "$label proxy attempt $attempt wait" 1
+        if [ "$did_thaw_probe" -eq 1 ]; then
+          printf 'status proxy: post-thaw probe charged=%s timeout=%s\n' "$charged" "$timeout" >> "$log_file"
+        fi
+        if cloudbench_status_proxy_lifecycle_response_accepted "$health_code" \
+          && kill -0 "$pid" 2>/dev/null; then
+          printf -v "$pid_var" '%s' "$pid"
+          return 0
+        fi
+      done
+      step_started="$(date +%s)"
       cloudbench_terminate_and_wait 5 "$pid"
     else
+      step_started="$(date +%s)"
       wait "$pid" 2>/dev/null || true
     fi
+    # Reaping makes a late lazy-start bind failure visible for port rotation.
+    if tail -n +"$attempt_first_line" "$log_file" 2>/dev/null | grep -Eiq 'listen tcp .*bind: address already in use|address already in use'; then
+      printf -v "$pid_var" '%s' ""
+      return 98
+    fi
     sleep 2
+    cloudbench_charge_bounded_step charged stalled "$step_started" "$retire_ceiling" \
+      "$log_file" "$label proxy attempt $attempt retire"
   done
   printf -v "$pid_var" '%s' ""
-  echo "❌ $label data-plane proxy did not become ready within ${timeout}s" >&2
+  echo "❌ $label data-plane proxy did not become ready within ${timeout}s (charged ${charged}s of bounded work; ${stalled}s of host stall excluded)" >&2
   tail -20 "$log_file" 2>/dev/null | sed 's/^/   /' >&2 || true
   # Ordinary remote readiness failures retain the bounded same-host retry
   # behavior above; only local ownership collisions ask the caller to rotate.
@@ -1983,6 +2507,45 @@ raise SystemExit(1)
 ' "$1" "$2" "$3" "$4" "$5" "$key"
 }
 
+# Print "node python epoch snapshot" of the NEWEST dependency proof published on
+# the donor (stdin: `machines list --json`). Every dependency refresh installs
+# its trees on the one donor volume and publishes with its snapshot epoch, so
+# the newest proof names the trees the volume currently holds — whichever
+# checkout or devbox wrote it. Snapshot-only maintenance (--refresh-wmh) must
+# republish under exactly these fingerprints, never a checkout's local receipt.
+cloudbench_warm_deps_latest_proof() {  # <app> <machine-id> <volume-id>
+  python3 -c '
+import json, re, sys
+
+app, machine_id, volume_id = sys.argv[1:]
+try:
+    machines = [m for m in json.load(sys.stdin) if isinstance(m, dict) and m.get("id") == machine_id]
+    if len(machines) != 1:
+        raise ValueError("ambiguous donor")
+    config = machines[0]["config"]
+    if not any(m.get("volume") == volume_id for m in config.get("mounts", [])):
+        raise ValueError("donor volume changed")
+    best = None
+    for key, value in (config.get("metadata") or {}).items():
+        if not key.startswith("rose_cloudbench_deps_") or not isinstance(value, str):
+            continue
+        fields = value.split()
+        if len(fields) != 7 or fields[4:] != [volume_id, machine_id, app]:
+            continue
+        if not all(re.fullmatch(r"[0-9a-f]{64}", fp) for fp in fields[:2]):
+            continue
+        if not re.fullmatch(r"[1-9][0-9]*", fields[2]) or not re.fullmatch(r"[A-Za-z0-9_-]+", fields[3]):
+            continue
+        if best is None or int(fields[2]) > int(best[2]):
+            best = fields
+    if best is None:
+        raise ValueError("no dependency proof")
+    print(" ".join(best[:4]))
+except (KeyError, TypeError, ValueError, AttributeError):
+    raise SystemExit(1)
+' "$1" "$2" "$3"
+}
+
 cloudbench_manifest_fingerprint() {
     local root="$1"
     shift
@@ -2083,6 +2646,21 @@ cloudbench_controller_lock_acquire() {
     fi
     status=0
     flock -n "$CLOUDBENCH_CONTROLLER_LOCK_FD" || status=$?
+    if [ "$status" -eq 1 ]; then
+      owner="$(cat "$path" 2>/dev/null || true)"
+      if { ! [[ "$owner" =~ ^[0-9]+$ ]] || ! kill -0 "$owner" 2>/dev/null; } &&
+         [ "$path" -ef "/dev/fd/$CLOUDBENCH_CONTROLLER_LOCK_FD" ]; then
+        # PID metadata can disappear after contention. Trust only a fresh
+        # kernel lock on the same inode; never replace a stale-looking path.
+        status=0
+        flock -n "$CLOUDBENCH_CONTROLLER_LOCK_FD" || status=$?
+        if [ "$status" -eq 0 ] &&
+           [ ! "$path" -ef "/dev/fd/$CLOUDBENCH_CONTROLLER_LOCK_FD" ]; then
+          flock -u "$CLOUDBENCH_CONTROLLER_LOCK_FD" 2>/dev/null || true
+          status=1
+        fi
+      fi
+    fi
     if [ "$status" -ne 0 ]; then
       exec {CLOUDBENCH_CONTROLLER_LOCK_FD}>&-
       unset CLOUDBENCH_CONTROLLER_LOCK_FD
@@ -2167,4 +2745,116 @@ cloudbench_git_auth_header_from_tokens() {
   fi
   [ -n "$token" ] || return 1
   printf 'Authorization: Basic %s' "$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+}
+
+# Checked bytes are executed directly, so an altered authority cannot run its
+# own verification code (or change between verification and interpretation).
+cloudbench_mutation_launch_code() {
+  cat <<'PY'
+import hashlib, json, os, sys
+from pathlib import Path
+helper = Path(sys.argv[1])
+code = helper.read_bytes()
+expected = json.loads(os.environ['CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY'])['source']['sha256']['cloudbench-campaign-mutation.py']
+if hashlib.sha256(code).hexdigest() != expected:
+    raise ValueError('native mutation authority changed before execution')
+sys.argv = sys.argv[1:]
+exec(compile(code, str(helper), 'exec'), {'__name__': '__main__', '__file__': str(helper)})
+PY
+}
+
+cloudbench_mutation_admission() {
+  python3 -S -c "$(cloudbench_mutation_launch_code)" "$@"
+}
+
+# Central Rose credential broker: the same origin production worker plans bind
+# (scripts/production_worker_process.py).
+CLOUDBENCH_PEOPLE_CREDENTIAL_BROKER_ORIGIN="https://navi-j9a9.onrender.com"
+
+# Prints the people credential broker a benchmark stack's worker must use, or
+# nothing when the operator configured one explicitly. Benchmark stacks route
+# BACKEND_API_URL to their own isolated backend, whose seeded database never
+# holds a rotating Lantern grant, so without an explicit bearer or broker every
+# people_search fails with LANTERN_NOT_CONNECTED. A nonblank value in the
+# process environment or the agents env file counts as explicit.
+cloudbench_people_credential_broker_default() {  # <agents-env-file>
+  local env_file="$1" key value
+  for key in PEOPLE_CREDENTIAL_BROKER_URL PEOPLE_API_TOKEN; do
+    value="${!key:-}"
+    if [ -z "$value" ] && [ -f "$env_file" ]; then
+      value="$(cloudbench_env_value "$env_file" "$key")"
+    fi
+    [ -n "${value//[[:space:]]/}" ] && return 0
+  done
+  printf '%s\n' "$CLOUDBENCH_PEOPLE_CREDENTIAL_BROKER_ORIGIN"
+}
+
+# Compute-token authority for benchmark guests (A1, approved 2026-10-20).
+# Each guest restores its own database with copies of the same real compute
+# tokens, so lease capacity, rate-limit marks and the shared Foundry cooldown
+# are only correct when every guest delegates them to one backend
+# (RCA 2026-10-20-bench-guests-ran-independent-compute-token-semaphores).
+# Prints the authority URL, or nothing for BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off
+# (diagnostics only: the guest then keeps its own copied token state).
+CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_ORIGIN="https://navi-j9a9.onrender.com"
+cloudbench_compute_token_authority_url() {
+  case "${BENCHMARK_COMPUTE_TOKEN_AUTHORITY:-on}" in
+    off|OFF|Off|0|false|no) return 0 ;;
+  esac
+  printf '%s\n' "${CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL-$CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_ORIGIN}"
+}
+
+# Production Temporal namespace (mirror of agents/temporal_connection.py and
+# back-end/src/providers/temporalNamespaceIsolation.ts). Not a secret.
+ROSE_PRODUCTION_TEMPORAL_NAMESPACE=rose-labs-us-east-1.tch2n
+
+# stack_bench_temporal_exports [agents-env]
+# Prints `export TEMPORAL_ADDRESS=… TEMPORAL_NAMESPACE=… TEMPORAL_API_KEY=…`
+# lines that move a dev/benchmark stack (scripts/run.sh) off the production
+# namespace onto the benchmark namespace from the private guest override
+# (agents/.env.benchmark-temporal), or prints nothing when the stack already
+# targets a loopback dev server or another namespace. Fails when the stack
+# would otherwise use production's namespace: its per-stack queue is orphaned
+# when the stack stops (4,094 Running workflows on 2026-10-27).
+stack_bench_temporal_exports() {
+  local agents_env="${1:-agents/.env}" address namespace override
+  address="${TEMPORAL_ADDRESS-}"
+  [ -n "$address" ] || [ ! -f "$agents_env" ] || address="$(cloudbench_env_value "$agents_env" TEMPORAL_ADDRESS)"
+  namespace="${TEMPORAL_NAMESPACE-}"
+  [ -n "$namespace" ] || [ ! -f "$agents_env" ] || namespace="$(cloudbench_env_value "$agents_env" TEMPORAL_NAMESPACE)"
+  case "${address%:*}" in localhost|127.0.0.1|::1|\[::1\]) return 0 ;; esac
+  [ "$namespace" = "$ROSE_PRODUCTION_TEMPORAL_NAMESPACE" ] || return 0
+  override="$(cloudbench_guest_temporal_override_file "$agents_env")" || return 1
+  if [ -z "$override" ]; then
+    echo "❌ This stack would run in the production Temporal namespace $ROSE_PRODUCTION_TEMPORAL_NAMESPACE. Install the private 0600 agents/.env.benchmark-temporal (CLOUDBENCH_GUEST_TEMPORAL_ADDRESS/_NAMESPACE/_API_KEY; boxes.dev managed env provides it), or export TEMPORAL_ADDRESS/TEMPORAL_NAMESPACE/TEMPORAL_API_KEY for a non-production namespace." >&2
+    return 1
+  fi
+  python3 - "$override" "$ROSE_PRODUCTION_TEMPORAL_NAMESPACE" <<'PY'
+import os, re, shlex, stat, sys
+
+override, production = sys.argv[1:3]
+keys = {
+    "CLOUDBENCH_GUEST_TEMPORAL_ADDRESS": "TEMPORAL_ADDRESS",
+    "CLOUDBENCH_GUEST_TEMPORAL_NAMESPACE": "TEMPORAL_NAMESPACE",
+    "CLOUDBENCH_GUEST_TEMPORAL_API_KEY": "TEMPORAL_API_KEY",
+}
+info = os.stat(override)
+if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+    sys.exit("❌ %s must be a regular file owned by this user with mode 0600" % override)
+values = {}
+for line in open(override, encoding="utf-8"):
+    match = re.fullmatch(r"\s*(?:export\s+)?([A-Z0-9_]+)=(.*?)\s*", line.rstrip("\r\n"))
+    if match and match.group(1) in keys:
+        value = match.group(2)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[keys[match.group(1)]] = value
+missing = sorted(source for source, target in keys.items() if not values.get(target))
+if missing:
+    sys.exit("❌ %s is missing %s" % (override, ", ".join(missing)))
+if values["TEMPORAL_NAMESPACE"] == production:
+    sys.exit("❌ %s names the production Temporal namespace; dev and benchmark stacks need the benchmark namespace" % override)
+for name in ("TEMPORAL_ADDRESS", "TEMPORAL_NAMESPACE", "TEMPORAL_API_KEY"):
+    print("export %s=%s" % (name, shlex.quote(values[name])))
+PY
 }

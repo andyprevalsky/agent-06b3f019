@@ -10,28 +10,12 @@ import { Toaster } from '@/components/ui/toaster';
 import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
 import { useMessagesSync } from '@/features/integrations/hooks/useMessagesSync';
 import type { IntegrationHandlers } from '@/features/integration-handlers-context';
+import { mockTerminalHookSession as mockSession } from './terminal-hooks.fixtures';
 
 const API_BASE = 'http://localhost:3001/api';
 
 function sectionFor(name: string): HTMLElement {
   return screen.getByText(name).closest<HTMLElement>('.rounded-lg')!;
-}
-
-/**
- * Sets up a fully-signed-in session in localStorage so useAuth resolves
- * as authenticated with isFullySignedIn = true.
- */
-function mockSession() {
-  const session = {
-    access_token: 'test-token',
-    refresh_token: 'test-refresh',
-    expires_in: 3600,
-    expires_at: Math.floor(Date.now() / 1000) + 3600,
-    token_type: 'bearer',
-    user: { id: 'test-user', is_anonymous: false },
-  };
-  localStorage.setItem('rose-session', JSON.stringify(session));
-  localStorage.setItem('app-user', JSON.stringify({ id: 'test-user', is_anonymous: false }));
 }
 
 /**
@@ -61,7 +45,7 @@ describe('Integrations page', () => {
 
   describe('rendering', () => {
     it('renders the main integration sections', async () => {
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       // Wait for loading to finish and sections to appear
       await waitFor(() => {
@@ -75,7 +59,7 @@ describe('Integrations page', () => {
     });
 
     it('shows "Desktop Only" badge for Browser Cookies on web (no handler)', async () => {
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Browser Cookies')).toBeInTheDocument();
@@ -89,7 +73,7 @@ describe('Integrations page', () => {
     });
 
     it('shows Passwords section with subtitle', async () => {
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Passwords')).toBeInTheDocument();
@@ -99,7 +83,7 @@ describe('Integrations page', () => {
     });
 
     it('shows Messages section with subtitle', async () => {
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Messages')).toBeInTheDocument();
@@ -109,7 +93,7 @@ describe('Integrations page', () => {
     });
 
     it('renders the Messages icon inside its viewBox', async () => {
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Messages')).toBeInTheDocument();
@@ -124,7 +108,7 @@ describe('Integrations page', () => {
     });
 
     it('shows Socials section with subtitle', async () => {
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Socials')).toBeInTheDocument();
@@ -134,7 +118,7 @@ describe('Integrations page', () => {
     });
 
     it('shows File System as Desktop Only with Download for Mac on the website', async () => {
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('File System')).toBeInTheDocument();
@@ -153,7 +137,7 @@ describe('Integrations page', () => {
 
     it('shows the File System connect plus in the Mac app', async () => {
       window.api = { isElectron: true };
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('File System')).toBeInTheDocument();
@@ -170,7 +154,7 @@ describe('Integrations page', () => {
     it('does nothing when File System connect is clicked in the Mac app', async () => {
       window.api = { isElectron: true };
       const user = userEvent.setup();
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('File System')).toBeInTheDocument();
@@ -190,7 +174,7 @@ describe('Integrations page', () => {
     });
 
     it('shows Compute section for fully signed-in users', async () => {
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       // Compute only shows when isFullySignedIn=true (non-anonymous + invite code check passes)
       await waitFor(() => {
@@ -209,7 +193,7 @@ describe('Integrations page', () => {
         }),
       );
 
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       // The page should show a loading spinner initially
       // Loader2 renders as an SVG with animate-spin class
@@ -236,7 +220,7 @@ describe('Integrations page', () => {
         ]),
       );
 
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       // Wait for the page to load
       await waitFor(() => {
@@ -259,7 +243,7 @@ describe('Integrations page', () => {
         ]),
       );
 
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Messages')).toBeInTheDocument();
@@ -273,7 +257,7 @@ describe('Integrations page', () => {
         expect(screen.getByText('WhatsApp')).toBeInTheDocument();
       });
 
-      const whatsAppRow = screen.getByText('WhatsApp').closest('div.px-4')!;
+      const whatsAppRow = screen.getByText('WhatsApp').closest<HTMLElement>('div.px-4')!;
       expect(within(whatsAppRow as HTMLElement).getByText('Synced')).toBeInTheDocument();
       // Connected state replaces the Desktop-Only download affordance.
       expect(
@@ -305,6 +289,7 @@ describe('Integrations page', () => {
         <IntegrationHandlersProvider handlers={handlers}>
           <Integrations />
         </IntegrationHandlersProvider>,
+        { roseDesktop: false },
       );
 
       await waitFor(() => {
@@ -329,7 +314,7 @@ describe('Integrations page', () => {
   describe('expanding sections', () => {
     it('expands Passwords section and shows sub-items', async () => {
       const user = userEvent.setup();
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Passwords')).toBeInTheDocument();
@@ -348,7 +333,7 @@ describe('Integrations page', () => {
 
     it('expands Messages section and shows messaging clients', async () => {
       const user = userEvent.setup();
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Messages')).toBeInTheDocument();
@@ -371,7 +356,7 @@ describe('Integrations page', () => {
 
     it('expands Socials section and shows social media items', async () => {
       const user = userEvent.setup();
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Socials')).toBeInTheDocument();
@@ -391,7 +376,7 @@ describe('Integrations page', () => {
 
     it('only one section is expanded at a time (accordion behavior)', async () => {
       const user = userEvent.setup();
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Passwords')).toBeInTheDocument();
@@ -421,7 +406,7 @@ describe('Integrations page', () => {
 
     it('shows "Coming Soon" badges for Telegram and Messenger (not WhatsApp)', async () => {
       const user = userEvent.setup();
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Messages')).toBeInTheDocument();
@@ -443,7 +428,7 @@ describe('Integrations page', () => {
 
     it('shows WhatsApp as "Desktop Only" with a Download link when not connected', async () => {
       const user = userEvent.setup();
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Messages')).toBeInTheDocument();
@@ -458,14 +443,14 @@ describe('Integrations page', () => {
       });
 
       // WhatsApp pairs only in the Mac app, so on web it reads "Desktop Only".
-      const whatsAppRow = screen.getByText('WhatsApp').closest('div.px-4')!;
+      const whatsAppRow = screen.getByText('WhatsApp').closest<HTMLElement>('div.px-4')!;
       expect(within(whatsAppRow as HTMLElement).getByText('Desktop Only')).toBeInTheDocument();
       expect(within(whatsAppRow as HTMLElement).getByText('Download for Mac')).toBeInTheDocument();
     });
 
     it('shows "Coming Soon" badges for X and Instagram in Socials', async () => {
       const user = userEvent.setup();
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Socials')).toBeInTheDocument();
@@ -499,7 +484,7 @@ describe('Integrations page', () => {
         }),
       );
 
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Messages')).toBeInTheDocument();
@@ -550,7 +535,7 @@ describe('Integrations page', () => {
         ]),
       );
 
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Messages')).toBeInTheDocument();
@@ -593,7 +578,7 @@ describe('Integrations page', () => {
         }),
       );
 
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Messages')).toBeInTheDocument();
@@ -623,7 +608,7 @@ describe('Integrations page', () => {
   describe('password request bar', () => {
     it('does not show the removed password client request bar', async () => {
       const user = userEvent.setup();
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Passwords')).toBeInTheDocument();
@@ -648,7 +633,7 @@ describe('Integrations page', () => {
   describe('API boundary capture', () => {
     it('fetches /api/integrations on page load', async () => {
       clearCaptures();
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Browser Cookies')).toBeInTheDocument();
@@ -663,7 +648,7 @@ describe('Integrations page', () => {
 
     it('fetches /api/invite-codes/check on page load (via useAuth)', async () => {
       clearCaptures();
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Browser Cookies')).toBeInTheDocument();
@@ -675,7 +660,7 @@ describe('Integrations page', () => {
 
     it('sends Authorization header on integrations fetch', async () => {
       clearCaptures();
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Browser Cookies')).toBeInTheDocument();
@@ -702,7 +687,7 @@ describe('Integrations page', () => {
         }),
       );
 
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       // The page should still render sections even if the fetch failed
       await waitFor(() => {
@@ -719,7 +704,7 @@ describe('Integrations page', () => {
         }),
       );
 
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Messages')).toBeInTheDocument();
@@ -763,7 +748,7 @@ describe('Integrations page', () => {
         ]),
       );
 
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Passwords')).toBeInTheDocument();
@@ -796,7 +781,7 @@ describe('Integrations page', () => {
         ]),
       );
 
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       await waitFor(() => {
         expect(screen.getByText('Messages')).toBeInTheDocument();

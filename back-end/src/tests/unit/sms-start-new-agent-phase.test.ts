@@ -5,13 +5,7 @@
 
 import assert from 'node:assert/strict';
 
-import {
-  dispatchToolCall,
-  type PendingOp,
-  type ToolInvocationContext,
-} from '../../providers/smsSupervisor/supervisorTools';
-
-const emptyContext = {} as ToolInvocationContext;
+import { dispatchToolCall, type PendingOp } from '../../providers/smsSupervisor/supervisorTools';
 
 async function testInvalidPhaseRejected(): Promise<void> {
   const pending: PendingOp[] = [];
@@ -21,8 +15,7 @@ async function testInvalidPhaseRejected(): Promise<void> {
       arguments: { goal: 'Order oat milk from Whole Foods', start_phase: 'chat' },
     },
     'unit-test-user',
-    pending,
-    emptyContext
+    pending
   );
   assert.equal(result.success, false);
   assert.match(result.error ?? '', /start_phase must be 'plan' or 'execute'/);
@@ -41,8 +34,7 @@ async function testExecutePhaseQueued(): Promise<void> {
       },
     },
     'unit-test-user',
-    pending,
-    emptyContext
+    pending
   );
   assert.equal(result.success, true);
   assert.equal(pending.length, 1);
@@ -63,12 +55,25 @@ async function testInvalidNotificationRejected(): Promise<void> {
       arguments: { goal: 'Order oat milk', notification_message: 42 },
     },
     'unit-test-user',
-    pending,
-    emptyContext
+    pending
   );
   assert.equal(result.success, false);
   assert.equal(pending.length, 0);
-  assert.match(result.error ?? '', /notification_message must be a string or null/);
+  const issues = JSON.parse(result.error ?? '[]') as Array<{
+    code?: string;
+    path?: unknown[];
+    expected?: string;
+    received?: string;
+  }>;
+  assert.ok(
+    issues.some(
+      (issue) =>
+        issue.code === 'invalid_type' &&
+        JSON.stringify(issue.path) === JSON.stringify(['arguments', 'notification_message']) &&
+        issue.expected === 'string' &&
+        issue.received === 'number'
+    )
+  );
 }
 
 async function testNullPhaseQueued(): Promise<void> {
@@ -79,8 +84,7 @@ async function testNullPhaseQueued(): Promise<void> {
       arguments: { goal: 'Research standing desks', start_phase: null },
     },
     'unit-test-user',
-    pending,
-    emptyContext
+    pending
   );
   assert.equal(result.success, true);
   assert.equal(pending.length, 1);

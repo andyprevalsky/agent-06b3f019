@@ -201,6 +201,23 @@ class PreServiceArchiveTest(unittest.TestCase):
                                "original-native-config.json": config,
                                "original-capture-manifest.json": json.dumps(capture).encode(),
                                "original-capture-receipt.json": json.dumps(receipt).encode()})
+        # Archive tests provide their own reviewed fixture recipe, without
+        # adding the current checkout to the production approval registry.
+        helper = ROOT / "scripts/cloudbench-prestack-recovery.py"
+        run_path = retirement.runpy.run_path
+        source = run_path(str(helper))
+        _, _, fingerprint = source["native_recipe"](self.meta, json.loads(config))
+        self.reviewed_sources = {fingerprint: ["before-stack-launch"]}
+        source["trusted_source_review_policy"] = lambda: self.reviewed_sources
+
+        def fixture_source(path, *args, **kwargs):
+            if Path(path).resolve() == helper:
+                return source
+            return run_path(path, *args, **kwargs)
+
+        policy = patch.object(retirement.runpy, "run_path", side_effect=fixture_source)
+        policy.start()
+        self.addCleanup(policy.stop)
 
     def verify(self):
         retirement.verify_pre_service_archive(self.meta, self.row, self.originals)

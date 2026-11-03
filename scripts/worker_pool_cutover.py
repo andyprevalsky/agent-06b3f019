@@ -11,18 +11,52 @@ import sys
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import retained_agent_machine as pool
+from worker_pool_runtime import RUNTIME_QUEUE_PROBE, WorkerRuntime, machine_identity, previous_route_mismatches
+from worker_pool_runtime import runtime_queue_matches as _runtime_queue_matches
 
 
 ROOT = Path(__file__).resolve().parents[1]
 QUEUE_CLI = ROOT / "back-end/scripts/worker-deployment-queue.ts"
 DRAIN_TIMEOUT_SECONDS = 2700
 MACHINE_STOP_TIMEOUT_SECONDS = 120
+# Each bank Machine is prepared or retired under its own native lease and its own
+# durable ownership checks, so independent Machines never wait for each other.
+# Observed serial cost (run 40615048427): ~59s prepare and ~36s retire per Machine.
+MACHINE_OPERATION_CONCURRENCY = 8
+# Recheck serving health before admitting each bounded retirement wave.
+MACHINE_RETIRE_WAVE_SIZE = 4
+
+
+def for_each_machine(operation, records):
+    """Apply one independent per-Machine operation to every record concurrently.
+
+    Every started operation runs to completion before this returns, so no native
+    mutation outlives the controller. Results keep input order. A hard failure
+    outranks capacity-pending, and the stage stays unadvanced either way, so the
+    resumable state machine retries exactly as it would after a serial failure.
+    """
+    records = list(records)
+    if not records:
+        return []
+    with ThreadPoolExecutor(max_workers=min(MACHINE_OPERATION_CONCURRENCY, len(records))) as executor:
+        futures = [executor.submit(operation, record) for record in records]
+        wait(futures)
+    errors = [future.exception() for future in futures if future.exception() is not None]
+    hard = [error for error in errors if not isinstance(error, PoolCapacityPending)]
+    if errors:
+        raise (hard or errors)[0]
+    return [future.result() for future in futures]
+
+
+def runtime_queue_matches(health, identity, job_id, expected_queue=None, pool_queue=None):
+    return _runtime_queue_matches(health, identity, expected_queue or deployment_queue(identity, job_id), pool_queue)
 
 
 class PoolCapacityPending(Exception):
@@ -57,6 +91,15 @@ class Ledger:
     def assert_owned(self):
         self.call("assert")
 
+    def assert_mutable(self, machine_id):
+        return self.call("assert-mutable", machine_id=machine_id)
+
+    def verify_native_pollers(self, identities, machine_records):
+        return self.call("verify-native-pollers", {"identities": identities, "machineRecords": machine_records})
+
+    def retained_status(self):
+        return self.call("retained-status")
+
     def prepare(self, pointer, ids, evidence):
         return self.call(
             "prepare",
@@ -84,32 +127,46 @@ class Ledger:
         return self.call("abandon", {"machineRecords": machines, "reason": "Explicit unpublished candidate retirement"})
 
 
-def machine_identity(machine):
-    return {
-        "id": machine["id"],
-        "instanceId": machine["instance_id"],
-        "configSHA256": pool.config_digest(machine["config"]),
-    }
-
-
 def deployment_queue(identity, job_id):
     suffix = hashlib.sha256(job_id.encode()).hexdigest()[:12]
     return f"navi-agent-tasks-pool-{suffix}@{identity['surfaceHash']}"
 
 
-class NativePool:
+def config_available(machine):
+    # The config itself or a nested section (env/init/metadata) may be null when its host is unreachable.
+    config = machine.get("config")
+    return isinstance(config, dict) and all(
+        isinstance(config.get(section, {}), dict) for section in ("env", "init", "metadata")
+    )
+
+
+class NativePool(WorkerRuntime):
     def __init__(self, identity, ledger):
         self.identity = identity
         self.ledger = ledger
         self.app = identity["app"]
+        self.runtime_observations = {}
+
+    def runtime_queue(self):
+        return deployment_queue(self.identity, self.ledger.job_id)
 
     def client(self, machine_id):
         ledger = self.ledger
 
         class OwnedFly(pool.Fly):
+            def assert_managed_mutable(self):
+                ledger.assert_owned()
+                ledger.assert_mutable(machine_id)
+
             def request(self, method, suffix="", data=None):
                 if method != "GET":
                     ledger.assert_owned()
+                    if not (
+                        method == "POST"
+                        and suffix == "/exec"
+                        and data == {"command": ["python", "-I", "-B", "-c", RUNTIME_QUEUE_PROBE], "timeout": 10}
+                    ):
+                        ledger.assert_mutable(machine_id)
                 return super().request(method, suffix, data)
 
         return OwnedFly(self.app, machine_id)
@@ -149,6 +206,9 @@ class NativePool:
         pool.operate(arguments, machine, self.client(machine["id"]))
 
     def target(self, machine, draining=False):
+        # A Machine on an unreachable host is returned with "config": null.
+        if not config_available(machine):
+            return False
         marker = pool.metadata(machine, pool.POOL_KEY)
         env = machine["config"].get("env", {})
         return (
@@ -160,6 +220,8 @@ class NativePool:
             and env.get("TEMPORAL_WORKER_BUILD_ID") == self.identity["buildId"]
             and env.get("TEMPORAL_WORKER_DEPLOYMENT_TOKEN") == self.identity["attempt"]
             and env.get("TEMPORAL_WORKER_POOL_QUEUE") == deployment_queue(self.identity, self.ledger.job_id)
+            and machine["config"].get("init", {}).get("exec")
+            == pool.managed_worker_command(deployment_queue(self.identity, self.ledger.job_id))
             and env.get("AUTOSCALER_ACTUATE") == "0"
             and env.get("PEOPLE_CREDENTIAL_BROKER_URL") == "https://navi-j9a9.onrender.com"
             and machine["config"].get("image") == self.identity["imageRef"]
@@ -168,6 +230,8 @@ class NativePool:
 
     def prepare(self, expected, previous, start=True):
         machine = self.get(expected["id"])
+        if not config_available(machine):
+            raise ValueError("Reserved Machine config is unavailable; its host may be unreachable")
         if not self.target(machine):
             if pool.metadata(machine, pool.CUSTODY_KEY).get("rootfs_disposition") != "stateless":
                 raise ValueError("Managed banks require renewable stateless custody before image changes")
@@ -214,35 +278,18 @@ class NativePool:
             elif current["state"] not in ("started", "starting"):
                 raise ValueError("Prepared Machine is in an unresolved native state")
 
-    def healthy(self, machine_id):
-        machine = self.get(machine_id)
-        if machine["state"] != "started" or not self.target(machine):
-            return False
-        script = (
-            "import json,urllib.request; "
-            "print(urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=5).read().decode())"
-        )
-        reply = self.client(machine_id).request(
-            "POST",
-            "/exec",
-            {
-                "command": ["python", "-I", "-B", "-c", script],
-                "timeout": 10,
-            },
-        )
-        if reply.get("exit_code") != 0 or reply.get("exit_signal"):
-            return False
-        health = json.loads(reply["stdout"])
-        return (
-            health.get("healthy") is True
-            and health.get("phase") == "running"
-            and health.get("build_id") == self.identity["buildId"]
-            and machine_identity(self.get(machine_id)) == machine_identity(machine)
-        )
-
     def retire(self, expected, previous, live=None):
-        client = self.client(expected["id"])
+        self.ledger.assert_mutable(expected["id"])
+        before = self.get(expected["id"])
         allow_created = live is not None
+        if allow_created:
+            self.certify_unpublished_retirement(expected, previous, live, before, backend_command)
+        elif (
+            before["state"] == "started"
+            and self.observe_route(expected, previous["taskQueue"])["actualQueue"] != previous["taskQueue"]
+        ):
+            raise ValueError("Old bank serves a different actual queue and cannot be retired")
+        client = self.client(expected["id"])
         live = live or {
             "taskQueue": deployment_queue(self.identity, self.ledger.job_id),
             "surfaceHash": self.identity["surfaceHash"],
@@ -262,13 +309,20 @@ class NativePool:
                 and pool.eligible(current, self.app, live["surfaceHash"], destination)
             ):
                 return machine_identity(current)
+            try:
+                current_identity = machine_identity(current)
+                current_queue = current["config"].get("env", {}).get("TEMPORAL_WORKER_POOL_QUEUE")
+                reuse_protected = current["config"].get("metadata", {}).get("rose_worker_reuse_protected")
+            except (AttributeError, KeyError, TypeError):
+                # A null or malformed config (unreachable host) is an unverifiable bank.
+                raise ValueError("Old bank changed before its certified retirement") from None
             if (
-                machine_identity(current) != {k: expected[k] for k in ("id", "instanceId", "configSHA256")}
+                current_identity != {k: expected[k] for k in ("id", "instanceId", "configSHA256")}
                 or marker.get("job") != expected["managedJobId"]
                 or marker.get("phase") not in ("active", "draining")
                 or (marker.get("phase") == "draining" and marker.get("retiringBy") != self.ledger.job_id)
-                or current["config"].get("env", {}).get("TEMPORAL_WORKER_POOL_QUEUE") != previous["taskQueue"]
-                or current["config"].get("metadata", {}).get("rose_worker_reuse_protected")
+                or current_queue != previous["taskQueue"]
+                or reuse_protected
             ):
                 raise ValueError("Old bank changed before its certified retirement")
             draining = {**marker, "phase": "draining", "retiringBy": self.ledger.job_id}
@@ -343,16 +397,43 @@ class NativePool:
         return self.retire(prior, destination, previous)
 
 
-def backend_command(script, *arguments):
+def backend_command(script, *arguments, timeout=60):
     result = subprocess.run(
         ["node", "--import", "tsx", "scripts/" + script, *arguments],
         cwd=ROOT / "back-end",
         check=True,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=timeout,
     )
     return result.stdout
+
+
+def broadcast_generation_handoff(previous_queue, live_queue):
+    """Push the pointer flip to workflows idling on the old queue; never blocks the deploy.
+
+    Idle parks no longer poll the pointer every 30s; this signal wakes them
+    (agents/helpers/wait_condition_or_handoff.py). Re-running it on a resumed
+    DRAINING stage is harmless: the workflow signal handler is idempotent.
+    """
+    if not previous_queue or previous_queue == live_queue:
+        return
+    try:
+        # 200 signals/s for up to 120s covers 24k workflows (10k-agent target).
+        output = backend_command(
+            "broadcast-generation-handoff.ts",
+            "--from-queue",
+            previous_queue,
+            "--live-queue",
+            live_queue,
+            "--deadline-ms",
+            "120000",
+            timeout=180,
+        )
+        lines = output.strip().splitlines()
+        print(f"Generation handoff broadcast: {lines[-1] if lines else '{}'}", flush=True)
+    except Exception as error:  # best-effort: agents still hand off at their next re-check
+        print(f"Generation handoff broadcast failed; agents hand off at their next re-check: {error}", flush=True)
 
 
 def prepare_bank(job, ledger, native, minimum):
@@ -403,12 +484,14 @@ def prepare_bank(job, ledger, native, minimum):
             or any(record.get("managedJobId") != pointer["updatedBy"] for record in previous)
         ):
             raise ValueError("Current managed bank does not match its complete native ownership set")
+    mismatch_records = previous_route_mismatches(native, previous, machines, pointer, minimum)
     return ledger.prepare(
         {key: pointer[key] for key in ("taskQueue", "surfaceHash")},
         [m["id"] for m in selected],
         {
             "candidateRecords": selected,
             "previousRecords": previous,
+            "retainedRouteMismatchRecords": mismatch_records,
         },
     )
 
@@ -439,10 +522,15 @@ def run(ledger=None, native_factory=NativePool):
         job = prepare_bank(job, ledger, native, minimum=8)
     if job["stage"] == "PREPARING":
         initialize_queue(job, ledger)
-        for expected in job["evidence"]["PREPARING"]["candidateRecords"]:
-            native.prepare(expected, job["priorPointer"])
+        for_each_machine(
+            lambda expected: native.prepare(expected, job["priorPointer"]),
+            job["evidence"]["PREPARING"]["candidateRecords"],
+        )
         deadline = time.monotonic() + 300
-        while not all(native.healthy(mid) for mid in job["candidateMachineIds"]):
+        while not (
+            all(native.healthy(mid) for mid in job["candidateMachineIds"])
+            and native.native_pollers_ready(job["candidateMachineIds"])
+        ):
             ledger.assert_owned()
             if time.monotonic() >= deadline:
                 raise TimeoutError("The complete reserved bank did not become healthy")
@@ -452,6 +540,8 @@ def run(ledger=None, native_factory=NativePool):
         ledger.assert_owned()
         if not all(native.healthy(mid) for mid in job["candidateMachineIds"]):
             raise ValueError("The reserved bank changed before pointer publication")
+        if not native.native_pollers_ready(job["candidateMachineIds"]):
+            raise PoolCapacityPending("Native candidate pollers are not ready for pointer publication")
         identity = job["identity"]
         backend_command(
             "set-agent-queue-pointer.ts",
@@ -469,15 +559,20 @@ def run(ledger=None, native_factory=NativePool):
         job = ledger.stage("ACTIVATED", "DRAINING", {})
     if job["stage"] == "DRAINING":
         previous = job["priorPointer"]
+        broadcast_generation_handoff(previous["taskQueue"], deployment_queue(job["identity"], ledger.job_id))
         prior_records = job["evidence"]["PREPARING"]["previousRecords"]
-        managed = [record for record in prior_records if record.get("managedJobId")]
+        mismatch_records = job["evidence"]["PREPARING"].get("retainedRouteMismatchRecords", [])
+        held_ids = {record["id"] for record in mismatch_records}
+        managed = [record for record in prior_records if record.get("managedJobId") and record["id"] not in held_ids]
         retained = [record["id"] for record in prior_records if not record.get("managedJobId")]
         retired = []
-        for expected in job["evidence"]["PREPARING"]["candidateRecords"]:
-            native.prepare(expected, previous)
+        for_each_machine(
+            lambda expected: native.prepare(expected, previous),
+            job["evidence"]["PREPARING"]["candidateRecords"],
+        )
         if not all(native.healthy(mid) for mid in job["candidateMachineIds"]):
             raise PoolCapacityPending("Serving bank is not ready; every old worker is retained")
-        if managed:
+        if managed or mismatch_records:
             backend_command(
                 "retire-agent-queue.ts", "--begin", "--queue", previous["taskQueue"], "--owner", ledger.job_id
             )
@@ -500,10 +595,11 @@ def run(ledger=None, native_factory=NativePool):
                     raise PoolCapacityPending("Old bank remains served until its queue is certified retired")
                 print("Old bank is still draining; retaining every Machine", flush=True)
                 time.sleep(30)
-            for record in managed:
+            for offset in range(0, len(managed), MACHINE_RETIRE_WAVE_SIZE):
                 if not all(native.healthy(mid) for mid in job["candidateMachineIds"]):
                     raise PoolCapacityPending("Serving bank lost health; remaining old workers are retained")
-                retired.append(native.retire(record, previous))
+                wave = managed[offset:offset + MACHINE_RETIRE_WAVE_SIZE]
+                retired.extend(for_each_machine(lambda record: native.retire(record, previous), wave))
             for owner in {record["managedJobId"] for record in managed}:
                 ids = [record["id"] for record in managed if record["managedJobId"] == owner]
                 ledger.release(
@@ -520,8 +616,12 @@ def run(ledger=None, native_factory=NativePool):
                         if row["id"] in ids
                     },
                 )
-        if not all(native.healthy(mid) for mid in job["candidateMachineIds"]):
-            raise ValueError("New bank lost health before deployment completion")
+        if not all(native.healthy(mid) for mid in job["candidateMachineIds"]) or not native.native_pollers_ready(
+            job["candidateMachineIds"]
+        ):
+            raise ValueError("New bank lost health or native pollers before deployment completion")
+        if mismatch_records:
+            native.revalidate_retained_routes(mismatch_records)
         job = ledger.stage(
             "DRAINING",
             "SUCCEEDED",
@@ -530,7 +630,10 @@ def run(ledger=None, native_factory=NativePool):
                 "retiredMachines": retired,
                 "activeMachineIds": job["candidateMachineIds"],
                 "candidateHealthy": True,
-                "priorDisposition": "RETIRED" if managed else "RETAINED_LEGACY",
+                "priorDisposition": "RETAINED_ROUTE_MISMATCH"
+                if mismatch_records
+                else ("RETIRED" if managed else "RETAINED_LEGACY"),
+                "retainedRouteMismatchMachineIds": sorted(held_ids),
             },
         )
     return job

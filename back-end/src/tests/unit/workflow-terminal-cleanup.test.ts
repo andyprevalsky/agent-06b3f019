@@ -1,6 +1,16 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import {
+  finalizeOwnedSmsCleanup,
+  ownedSmsDatabaseTarget,
+  SMS_CLEANUP_REPO_ROOT,
+  type SmsCleanupDependencies,
+} from '../../../scripts/finalize-sms-owned-cleanup';
 import { randomUUID } from 'node:crypto';
 import { type AgentStatus } from '@prisma/client';
 import { WorkflowNotFoundError } from '@temporalio/client';
@@ -368,6 +378,203 @@ async function main(): Promise<void> {
       await deleteRun(runId);
     }
   });
+
+  for (const failure of [
+    null,
+    'consumer',
+    'unknown-obligation',
+    'foreign-archive',
+    'wrong-first',
+    'wrong-queue',
+    'running',
+    'start-pending',
+    'archive',
+    'live-lease',
+    'foreign-pointer',
+    'empty-archive-outbox',
+    'force-archive',
+    'error-metadata',
+  ]) {
+    await test(`SMS exact canonical obligation bridge: ${failure ?? 'pending-to-sealed-native-terminal'}`, async () => {
+      const context = mkdtempSync(join(tmpdir(), 'sms-exact-obligations-'));
+      const root = randomUUID(),
+        owner = randomUUID(),
+        first = randomUUID();
+      const queue = 'sms-owning-queue',
+        url = 'postgresql://postgres:postgres@localhost:5432/victoria_sms_adapter_test';
+      const oldDatabase = process.env.DATABASE_URL,
+        oldDirect = process.env.DIRECT_URL;
+      process.env.DATABASE_URL = url;
+      process.env.DIRECT_URL = url;
+      const receipt = join(context, 'receipt.json');
+      const request = {
+        context_dir: context,
+        receipt_path: receipt,
+        base_url: 'http://localhost:39999',
+        user_id: owner,
+        owned_agent_ids: [root],
+        root_agent_ids: [root],
+        queue,
+        bindings: [{ agent_id: root, workflow_id: root, first_run_id: first }],
+        deadline_at_ms: Date.now() + 15000,
+        outcome: {
+          name: 'fixture',
+          passed: failure !== 'error-metadata',
+          failure_reason: failure === 'error-metadata' ? 'captured execution error' : null,
+          benchmark_status: failure === 'error-metadata' ? 'ERROR' : 'PASSED',
+        },
+        world_model_mode: failure === 'error-metadata' ? 'shadow' : 'real',
+      };
+      writeFileSync(
+        join(context, 'services.json'),
+        JSON.stringify({
+          status: 'running',
+          benchmark_mode: true,
+          worktree: SMS_CLEANUP_REPO_ROOT,
+          run_sh_pid: process.pid,
+          temporal_task_queue: queue,
+          ports: { backend: 39999 },
+          database: { name: 'victoria_sms_adapter_test', use_system_postgres: true },
+        })
+      );
+      writeFileSync(
+        join(context, 'local-stack-owner.json'),
+        JSON.stringify({
+          pid: process.pid,
+          native_identity: execFileSync(
+            'python3',
+            [join(SMS_CLEANUP_REPO_ROOT, 'scripts/process-identity.py'), String(process.pid)],
+            { encoding: 'utf8' }
+          ).trim(),
+          token: 'exact-test-token',
+        })
+      );
+      const row = {
+        id: root,
+        userId: owner,
+        parentAgentId: null,
+        deletedAt: new Date(),
+        temporalWorkflowId: root as string | null,
+        temporalFirstExecutionRunId: first as string | null,
+        workflowTaskQueue: null,
+        temporalWorkflowStartPending: failure === 'start-pending',
+        temporalCleanupPending: true,
+        staleTemporalWorkflowId: null,
+        staleTemporalFirstExecutionRunId: null,
+      };
+      let obligations = [
+        {
+          agentId: root,
+          workflowId: failure === 'unknown-obligation' ? 'unknown-workflow' : root,
+          firstExecutionRunId: first,
+        },
+      ];
+      let archives =
+        failure === 'empty-archive-outbox'
+          ? []
+          : [{ rootAgentId: failure === 'foreign-archive' ? owner : root }];
+      const events: string[] = [],
+        descriptions: string[] = [];
+      const deps = {
+        prisma: {
+          agent: { findMany: async () => [structuredClone(row)] },
+          temporalWorkflowCleanup: { findMany: async () => structuredClone(obligations) },
+          traceArchiveFinalization: { findMany: async () => structuredClone(archives) },
+        },
+        describe: async (binding: { workflow_id: string }) => {
+          descriptions.push(binding.workflow_id);
+          return {
+            taskQueue: failure === 'wrong-queue' ? 'foreign' : queue,
+            raw: {
+              workflowExecutionInfo: {
+                firstRunId: failure === 'wrong-first' ? 'foreign-first' : first,
+              },
+            },
+            status: { name: failure === 'running' ? 'RUNNING' : 'TERMINATED' },
+          };
+        },
+        consume: async (_: unknown, options: { agentIds: string[]; ignoreGrace: boolean }) => {
+          events.push('consume');
+          assert.deepStrictEqual(options.agentIds, [root]);
+          assert.strictEqual(options.ignoreGrace, true);
+          if (failure === 'consumer') throw new Error('consumer failed');
+          if (failure === 'live-lease') return { discovered: 0, sealed: 0 };
+          obligations = [];
+          row.temporalCleanupPending = false;
+          row.temporalFirstExecutionRunId = null;
+          row.temporalWorkflowId =
+            failure === 'foreign-pointer'
+              ? 'unknown-after-pointer'
+              : `${root}:deployment-sealed:${randomUUID()}`;
+          return { discovered: 1, sealed: 1 };
+        },
+        assertNoPending: async (ids: string[]) => {
+          assert.deepStrictEqual(ids, [root]);
+          if (obligations.length) throw new Error('obligations remain');
+        },
+        archive: async (options: { rootAgentIds: string[]; ignoreGrace: boolean }) => {
+          events.push('archive');
+          assert.deepStrictEqual(options.rootAgentIds, [root]);
+          assert.strictEqual(options.ignoreGrace, true);
+          if (failure === 'archive') throw new Error('archive failed');
+          archives = [];
+          return { discovered: 1, finalized: 1 };
+        },
+        finalize: async (options: {
+          rootAgentId: string;
+          force: boolean;
+          benchmarkTaskName: string;
+          benchmarkStatus: string;
+          failureReason: string | null;
+          worldModelMode: string;
+        }) => {
+          events.push('force-finalize');
+          assert.strictEqual(options.rootAgentId, root);
+          assert.strictEqual(options.force, true);
+          assert.strictEqual(options.benchmarkTaskName, 'fixture');
+          assert.strictEqual(options.benchmarkStatus, request.outcome.benchmark_status);
+          assert.strictEqual(options.failureReason, request.outcome.failure_reason);
+          assert.strictEqual(options.worldModelMode, request.world_model_mode);
+          if (failure === 'force-archive') throw new Error('force final archive failed');
+          return { manifest: { ref: 'private-fixture-manifest' }, publicManifestRef: null };
+        },
+      } as unknown as SmsCleanupDependencies;
+      try {
+        assert.strictEqual(ownedSmsDatabaseTarget(request), url);
+        if (failure && !['empty-archive-outbox', 'error-metadata'].includes(failure)) {
+          await assert.rejects(() => finalizeOwnedSmsCleanup(request, deps));
+          const saved = JSON.parse(readFileSync(receipt, 'utf8'));
+          assert.strictEqual(saved.verified, false);
+          assert.deepStrictEqual(saved.owned_agent_ids, [root]);
+          if (
+            [
+              'unknown-obligation',
+              'foreign-archive',
+              'wrong-first',
+              'wrong-queue',
+              'start-pending',
+            ].includes(failure)
+          )
+            assert.deepStrictEqual(events, []);
+        } else {
+          const saved = await finalizeOwnedSmsCleanup(request, deps);
+          assert.strictEqual(saved.verified, true);
+          assert.deepStrictEqual(events, ['consume', 'archive', 'force-finalize']);
+          assert.deepStrictEqual(descriptions, [root, root]);
+          assert.strictEqual(row.temporalFirstExecutionRunId, null);
+          assert.strictEqual(obligations.length, 0);
+          assert.strictEqual(archives.length, 0);
+          assert.strictEqual(JSON.parse(readFileSync(receipt, 'utf8')).verified, true);
+        }
+      } finally {
+        if (oldDatabase === undefined) delete process.env.DATABASE_URL;
+        else process.env.DATABASE_URL = oldDatabase;
+        if (oldDirect === undefined) delete process.env.DIRECT_URL;
+        else process.env.DIRECT_URL = oldDirect;
+        rmSync(context, { recursive: true, force: true });
+      }
+    });
+  }
 
   await finish();
 }

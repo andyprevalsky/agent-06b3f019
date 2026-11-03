@@ -1,0 +1,23 @@
+{
+  "utc": "2026-10-15T18:48:07.871653+00:00",
+  "prior_source": "3b0719a52516b25dd7cff790914f33cbfea2c7ca",
+  "repair": "Unit success fixture supplies actual existing JSON cache-write acknowledgment; runtime unchanged",
+  "candidate_sha256": "d2cee96d5a2f3529f7912d3cfe633a95fd3fdae5f625e170655636c7b7e28d76",
+  "same_owning_assertion": "baseline FAIL 0.693724879s -> candidate PASS 0.615908740s",
+  "fast_cache_suite": "196 PASS 4.453720660s; archive transport explicitly mocked; 429 assertion AST nodes unchanged",
+  "cycle2": {
+    "all_called_lanes_terminal": true,
+    "agents_blackbox": "110/110PASS",
+    "agents_fast_cache": "195PASS1fixtureFAIL; threshold/unit tail not reached",
+    "backend_blackbox": "196/197PASS; live Kernel proxy-creation returned HTTP400 containing Byteful TCP reset",
+    "backend_unit_files": "272PASS",
+    "frontend": "163files/2752testsPASS3stockSKIP; thresholdsPASS",
+    "deploy_structural": "47/47PASS",
+    "other_static": "lint/typescript/backendstructural/seedcache PASS"
+  },
+  "isolated_seed_preflight": "Actual new loopback-only namespace and realPG16 SELECT1/shutdown PASS; five cold seeds not yet run",
+  "worker_output_isolation": "Initial offline RCA archive sidechannel queued local W outbox files; ownership census preserved, no cleanup or real provider IO claimed; final private suite declared MockTransport/own archive root",
+  "production_changed": false,
+  "rejected_global_caps": "remain withdrawn; no reapproval",
+  "next": "Full Step0-verifier rerun on committed fixture repair; normal provider retry cadence; complete remaining deploy gates before rollout"
+}

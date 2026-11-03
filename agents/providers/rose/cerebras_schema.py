@@ -78,7 +78,9 @@ class _SchemaProjection:
         self.properties_count += len(props)
         self.counted_text += sum(len(key) for key in props)
         # Cerebras supports omitted optional properties. Preserve required
-        # and nullable fields rather than introducing null into non-null types.
+        # fields and never introduce null into non-null types; omittable
+        # non-string Optional[X] = None fields arrive here already collapsed
+        # to X (see collapse_omittable_nulls).
         return {
             "properties": {key: self.walk(value, depth + 1) for key, value in props.items()},
             "required": list(required),
@@ -142,3 +144,58 @@ def project_cerebras_tool_schema(schema: Any) -> tuple[dict | None, str | None]:
         return projected, None
     except ValueError as exc:
         return None, str(exc)
+
+
+_NULL_BRANCH = {"type": "null"}
+
+
+def _collapse_node(node: Any) -> Any:
+    if isinstance(node, list):
+        return [_collapse_node(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    result = {key: _collapse_node(value) for key, value in node.items()}
+    props = result.get("properties")
+    if isinstance(props, dict):
+        required = node.get("required") if isinstance(node.get("required"), list) else []
+        for key, prop in props.items():
+            branches = prop.get("anyOf") if isinstance(prop, dict) else None
+            if (
+                key in required
+                or "default" not in prop
+                or prop["default"] is not None
+                or not isinstance(branches, list)
+                or len(branches) != 2
+                or _NULL_BRANCH not in branches
+            ):
+                continue
+            (kept,) = [branch for branch in branches if branch != _NULL_BRANCH]
+            if not isinstance(kept, dict):
+                continue
+            if kept.get("type") == "string":
+                # A string-typed (or string-enum) slot has no way to say "absent"
+                # once the null branch is gone, so qwen fills it with the literal
+                # text "null" (prod root 942d8562: start_phase, condition,
+                # until_timestamp, items_csv, start_url). Keep the null branch
+                # here; only arrays/integers/objects, which qwen string-encodes
+                # inside the union, are collapsed.
+                continue
+            # The field's own description/title win over a nested model's docstring.
+            props[key] = {**kept, **{name: value for name, value in prop.items() if name not in ("anyOf", "default")}}
+    return result
+
+
+def collapse_omittable_nulls(schema: Any) -> Any:
+    """Send an omittable non-string ``Optional[X] = None`` property as plain ``X``.
+
+    qwen on Cerebras serializes arrays and integers inside ``anyOf[X, null]``
+    as JSON strings, with or without strict decoding. Omission already
+    validates to None, so the null branch adds nothing for these properties.
+
+    String properties (including enums) keep ``anyOf[string, null]``. Encoding
+    a string value as a string is harmless, and when qwen fills every optional
+    field a plain ``string`` leaves no way to write "no value": it sends the
+    string ``"null"`` instead (list_agents cursor/query, grep page_after/role).
+    Required or non-null-default properties keep their union.
+    """
+    return _collapse_node(deepcopy(schema))

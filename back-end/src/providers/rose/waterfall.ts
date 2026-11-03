@@ -14,6 +14,7 @@ import { RoseAllFailed, RoseError, RoseStallError, type RoseStepError } from './
 import type { PoolSpec } from './pools';
 import { parseOpenAISSE } from './streaming';
 import { postOpenRouterStream } from './transport';
+import { openAiChatToolChoice, openAiChatTools } from './toolContract';
 import { normalizeOpenAiToolCalls } from './transforms';
 import type { CompletionMessage, ResponseFormat, RoseStreamChunk } from './types';
 
@@ -36,6 +37,7 @@ interface WaterfallOptions {
   providerFastMode?: boolean;
   reasoningEffort?: string;
   tools?: Array<Record<string, unknown>>;
+  anthropicTools?: Array<Record<string, unknown>>;
   toolChoice?: unknown;
 }
 
@@ -48,6 +50,7 @@ export function buildOpenRouterBody(opts: {
   providerFastMode?: boolean;
   reasoningEffort?: string;
   tools?: Array<Record<string, unknown>>;
+  anthropicTools?: Array<Record<string, unknown>>;
   toolChoice?: unknown;
 }): Record<string, unknown> {
   const body: Record<string, unknown> = {
@@ -71,8 +74,17 @@ export function buildOpenRouterBody(opts: {
   if (opts.temperature !== undefined) body.temperature = opts.temperature;
   if (opts.maxTokens !== undefined) body.max_tokens = opts.maxTokens;
   if (opts.providerFastMode === true) body.speed = 'fast';
-  if (opts.tools) body.tools = opts.tools;
-  if (opts.toolChoice !== undefined) body.tool_choice = opts.toolChoice;
+  // OpenAI chat function shape, whichever shape the caller supplied; tool_choice
+  // only accompanies declared tools (mirrors build_openrouter_body).
+  const modelTools =
+    opts.model.startsWith('anthropic/') && opts.anthropicTools ? opts.anthropicTools : opts.tools;
+  const tools = openAiChatTools(modelTools);
+  if (tools) {
+    body.tools = tools;
+    if (opts.toolChoice !== undefined) {
+      body.tool_choice = openAiChatToolChoice(opts.toolChoice, opts.model);
+    }
+  }
   return body;
 }
 
@@ -105,6 +117,7 @@ export async function* waterfallComplete(opts: WaterfallOptions): AsyncIterable<
       providerFastMode: opts.providerFastMode,
       reasoningEffort,
       tools: opts.tools,
+      anthropicTools: opts.anthropicTools,
       toolChoice: opts.toolChoice,
     });
 

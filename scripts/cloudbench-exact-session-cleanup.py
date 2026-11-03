@@ -10,6 +10,7 @@ import os
 import re
 import stat
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -30,6 +31,30 @@ RUNNER_STATES = {"pending", "clean", "failed"}
 SCHEMA = "cloudbench-guest-cleanup-recovery-v1"
 ZERO_QUERY_SCHEMA = "cloudbench-guest-zero-allocation-v1"
 LEGACY_SMS_CLEANUP_SHA = "3b91d36b9b884feedaa34c0d2c16ae3341fcaec7"
+# Release order. Manifests always carry kernel and steel; tilion appears only
+# when it has sessions, so Kernel/Steel-only manifests stay byte-identical.
+PROVIDERS = ("kernel", "steel", "tilion")
+ALWAYS_LISTED_PROVIDERS = ("kernel", "steel")
+RELEASED_STATUSES = {"kernel": {204, 404}, "steel": {200, 404}, "tilion": {204, 404, 410}}
+# Tilion answers 503 "session worker unavailable; retry cleanup" when the
+# browser is not confirmed gone, and its gateway answers 502/504 when it could
+# not reach the API (a local run's release failed on one 502 while the session
+# was already gone). DELETE is idempotent and 204/404/410 all count as released,
+# so retry these a bounded number of times, then fail. Other statuses (401, 500)
+# are not transient and fail on the first answer.
+TILION_RELEASE_ATTEMPTS = 4
+TILION_RELEASE_RETRY_SECONDS = 2.0
+TILION_RETRYABLE_STATUSES = frozenset({502, 503, 504})
+TILION_SESSION_MARKERS = (
+    # Logged right after every POST /v1/session response, before validation.
+    "Tilion session allocated",
+    "Tilion exit placed at country level; narrower targeting unavailable",
+    "Created Tilion browser session",
+    "Tilion geo pin unsupported; keeping country exit",
+    "Tilion geo unsupported; recreating with a wider pin",
+    "Tilion session failed validation; creating another",
+    "Failed to release Tilion session",
+)
 
 
 class CleanupEvidenceError(RuntimeError):
@@ -226,6 +251,23 @@ def parse_run_identity(path: Path, bench: str) -> tuple[str, str]:
     return root_agent_id.lower(), sha256_bytes(payload)
 
 
+def empty_sessions() -> dict[str, set[str]]:
+    return {provider: set() for provider in PROVIDERS}
+
+
+def manifest_sessions(sessions: dict[str, Any]) -> dict[str, list[str]]:
+    listed = {provider: sorted(sessions.get(provider) or ()) for provider in PROVIDERS}
+    return {
+        provider: values
+        for provider, values in listed.items()
+        if values or provider in ALWAYS_LISTED_PROVIDERS
+    }
+
+
+def manifest_provider_sessions(manifest: dict[str, Any], provider: str) -> list[str]:
+    return list(manifest["sessions"].get(provider, []))
+
+
 def add_session(sessions: dict[str, set[str]], provider: str, session_id: str) -> None:
     if SAFE_SESSION.fullmatch(session_id) is None:
         raise CleanupEvidenceError(f"unsafe {provider} session identifier in evidence")
@@ -317,7 +359,7 @@ def read_backend_evidence(path: Path, root_agent_id: str) -> tuple[str, str]:
 def collect_session_evidence(
     text: str,
 ) -> tuple[dict[str, list[str]], int, int]:
-    sessions: dict[str, set[str]] = {"kernel": set(), "steel": set()}
+    sessions = empty_sessions()
     allocation_event_count = 0
     kernel_markers = (
         "Created Kernel browser session",
@@ -361,10 +403,9 @@ def collect_session_evidence(
         )
     )
 
-    parsed = {
-        provider: sorted(provider_sessions)
-        for provider, provider_sessions in sessions.items()
-    }
+    allocation_event_count += collect_tilion_session_evidence(text, sessions)
+
+    parsed = manifest_sessions(sessions)
     mutation_count = len(
         re.findall(
             r"\bmodel=BrowserSession\b[^\n]*\boperation="
@@ -373,6 +414,69 @@ def collect_session_evidence(
         )
     )
     return parsed, allocation_event_count, mutation_count
+
+
+def tilion_create_requests(text: str) -> tuple[int, int]:
+    """Count Tilion POST /v1/session request logs: (all attempts, may-have-created).
+
+    A 2xx create or a create that failed before any response may own a remote
+    browser; 4xx/5xx answers did not create one.
+    """
+    attempts = 0
+    possibly_created = 0
+    for line in text.splitlines():
+        if "Tilion request" not in line:
+            continue
+        entry = json_log_entry(line)
+        if entry is not None:
+            message = str(entry.get("message", ""))
+            method, path, status = entry.get("method"), entry.get("path"), entry.get("status")
+        else:
+            message = line
+            method_match = re.search(r"\bmethod=(\S+)", line)
+            path_match = re.search(r"\bpath=(\S+)", line)
+            status_match = re.search(r"\bstatus=(\d+)", line)
+            method = method_match.group(1) if method_match else None
+            path = path_match.group(1) if path_match else None
+            status = int(status_match.group(1)) if status_match else None
+        if method != "POST" or path != "/v1/session":
+            continue
+        if "Tilion request failed before a response" in message:
+            attempts += 1
+            possibly_created += 1
+        elif "Tilion request" in message:
+            attempts += 1
+            if isinstance(status, int) and 200 <= status < 300:
+                possibly_created += 1
+    return attempts, possibly_created
+
+
+def collect_tilion_session_evidence(text: str, sessions: dict[str, set[str]]) -> int:
+    """Record exact Tilion session ids; return allocation events.
+
+    One Tilion account is shared by prod, dev and benchmarks, so ownership comes
+    only from this guest's exact adapter logs, never an account listing. A create
+    that may have allocated a browser without any recorded id fails closed.
+    """
+    events = 0
+    for marker in TILION_SESSION_MARKERS:
+        marker_sessions = kernel_marker_sessions(text, marker)
+        events += len(marker_sessions)
+        for session_id in marker_sessions:
+            add_session(sessions, "tilion", session_id)
+    failures = list(
+        re.finditer(
+            r"Tilion session ([A-Za-z0-9_-]+) failed (?:CDP validation|validation and cleanup)",
+            text,
+        )
+    )
+    events += len(failures)
+    for match in failures:
+        add_session(sessions, "tilion", match.group(1))
+    attempts, possibly_created = tilion_create_requests(text)
+    if possibly_created and not sessions["tilion"]:
+        raise CleanupEvidenceError("Tilion create evidence omitted an exact session id")
+    return events + attempts
 
 
 def parse_active_root_agent(text: str) -> str:
@@ -471,7 +575,7 @@ def root_snapshot_sessions(path: Path, root_agent_id: str, run_sha: str) -> dict
     if not isinstance(logs, dict):
         raise CleanupEvidenceError("malformed run logs for provider ownership")
     evidence = logs.get("cloud_cleanup_evidence")
-    sessions: dict[str, set[str]] = {"kernel": set(), "steel": set()}
+    sessions = empty_sessions()
     if "cloud_cleanup_evidence" not in logs:
         return sessions
     if not isinstance(evidence, dict) or evidence.get("root_agent_id") != root_agent_id:
@@ -571,7 +675,12 @@ def provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
     text, backend_sha = read_backend_evidence(Path(args.backend_log), root_agent_id)
     logged_sessions, _, _ = collect_session_evidence(text)
     snapshots = root_snapshot_sessions(Path(args.run_json), root_agent_id, run_sha)
-    sessions = {provider: sorted(set(logged_sessions[provider]) | snapshots[provider]) for provider in snapshots}
+    sessions = manifest_sessions(
+        {
+            provider: set(logged_sessions.get(provider, ())) | snapshots[provider]
+            for provider in snapshots
+        }
+    )
     if not any(sessions.values()):
         if not sealed_zero_session_run(Path(args.run_json), root_agent_id, run_sha):
             raise CleanupEvidenceError("durable evidence contains no exact provider session identity")
@@ -692,9 +801,139 @@ def publish_manifest(args: argparse.Namespace) -> dict[str, Any]:
     return manifest
 
 
+UNDELIVERED_CAPTURE_POINTER = "guest-cleanup.undelivered-capture.json"
+# Every file the guest stack writes. A capture proving pre-stack absence must
+# list all of them as missing; any present one means services may have run.
+PRESTACK_ABSENT = (
+    "cloudbench-driver.pid",
+    "repo/.context/cloudbench/services.json",
+    "repo/.context/cloudbench/stack.log",
+    "repo/.context/cloudbench/run.json",
+    "repo/.context/cloudbench/logs/backend.log",
+    "repo/.context/cloudbench/logs/worker.log",
+)
+PRESTACK_FORBIDDEN_LOG = (
+    "launching stack",
+    "waiting for stack",
+    "stack healthy",
+    "running benchmark",
+)
+
+
+def undelivered_native_stop_sha(args: argparse.Namespace, volume_id: str | None = None) -> tuple[str, str]:
+    """The controller's exact verified native stop of a never-delivered guest."""
+    payload = read_bytes(Path(args.output_dir) / "guest-native-stop.json", maximum=65536)
+    record = parse_json_object(payload, Path(args.output_dir) / "guest-native-stop.json")
+    expected = {
+        "version": 1, "kind": "guest-native-stop", "fleet_owner_token": args.owner,
+        "run_id": args.fleet_run_id, "bench": args.bench, "machine_id": args.machine_id,
+        "ownership": "fresh", "delivery_receipt": "absent", "stop_requested": True,
+        "verified": True, "verified_state": "stopped", "destroyed": False,
+    }
+    volume = record.get("volume_id")
+    if (
+        any(record.get(key) != value or type(record.get(key)) is not type(value)
+            for key, value in expected.items())
+        or not isinstance(volume, str) or re.fullmatch(r"vol_[A-Za-z0-9]+", volume) is None
+        or (volume_id is not None and volume != volume_id)
+    ):
+        raise CleanupEvidenceError("guest-native-stop.json is not an exact verified undelivered stop")
+    return sha256_bytes(payload), volume
+
+
+def undelivered_prestack_zero_manifest(args: argparse.Namespace) -> dict[str, Any]:
+    """Zero provider sessions for a guest natively stopped before its stack started.
+
+    The authenticated shutdown was never delivered, so no guest-side receipt
+    exists. The original-volume capture is the evidence: the driver was still
+    booting and none of the files the stack writes exists, so no backend ever
+    ran and no browser session could have been allocated.
+    """
+    import io
+    import tarfile
+
+    exact_identity = identity(args)
+    native_sha, volume = undelivered_native_stop_sha(args)
+    pointer_path = Path(args.output_dir) / UNDELIVERED_CAPTURE_POINTER
+    pointer = read_json_object(pointer_path, maximum=65536)
+    capture_dir = Path(str(pointer.get("capture_dir", "")))
+    if (
+        set(pointer) != {"version", "capture_dir", "archive_sha256"} or pointer.get("version") != 1
+        or not capture_dir.is_absolute() or capture_dir.resolve() != capture_dir
+        or not plain_directory(capture_dir)
+    ):
+        raise CleanupEvidenceError("undelivered capture pointer is unsafe")
+    archive = read_bytes(capture_dir / f"{args.machine_id}.tar.gz")
+    provenance_payload = read_bytes(capture_dir / f"{args.machine_id}.provenance.json", maximum=1024 * 1024)
+    provenance = parse_json_object(provenance_payload, capture_dir)
+    archive_sha = sha256_bytes(archive)
+    if (
+        pointer.get("archive_sha256") != archive_sha
+        or provenance.get("schema") != "cloudbench-original-volume-capture-v1"
+        or provenance.get("kind") != "original-volume-inert-capture"
+        or provenance.get("admission") != "undelivered-native-stop"
+        or provenance.get("direct_original_volume") is not True
+        or provenance.get("proof_credit") != 0
+        or provenance.get("guest_native_stop_sha256") != native_sha
+        or provenance.get("fleet_owner_token") != args.owner
+        or provenance.get("run_id") != args.fleet_run_id
+        or provenance.get("bench") != args.bench
+        or provenance.get("machine_id") != args.machine_id
+        or provenance.get("volume_id") != volume
+        or provenance.get("guest_run_token") != args.guest_run_token
+        or provenance.get("archive_sha256") != archive_sha
+        or provenance.get("archive_bytes") != len(archive)
+        or provenance.get("native_final_state") != "stopped"
+    ):
+        raise CleanupEvidenceError("undelivered capture provenance is not exact for this guest")
+    originals: dict[str, bytes] = {}
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as stream:
+        for member in stream:
+            if not member.isfile() or member.name in originals:
+                raise CleanupEvidenceError("unsafe undelivered capture member")
+            reader = stream.extractfile(member)
+            originals[member.name] = reader.read(member.size + 1) if reader else b""
+            if len(originals[member.name]) != member.size:
+                raise CleanupEvidenceError("truncated undelivered capture member")
+    files, missing = provenance.get("files"), provenance.get("missing")
+    bench_log = originals.get("bench.log", b"").decode("utf-8", "replace")
+    if (
+        not isinstance(files, dict) or not isinstance(missing, list)
+        or files != {name: {"bytes": len(data), "sha256": sha256_bytes(data)}
+                     for name, data in originals.items()}
+        or set(originals) != {"bench.log", "cloudbench-driver.state"}
+        or not set(PRESTACK_ABSENT) <= set(missing)
+        or originals["cloudbench-driver.state"] != b"booting\n"
+        or not bench_log.startswith(f"RUNSTAMP-{args.guest_run_token}\n")
+        or any(marker in bench_log for marker in PRESTACK_FORBIDDEN_LOG)
+    ):
+        raise CleanupEvidenceError("undelivered capture does not prove the stack never started")
+    return {
+        "schema_version": SCHEMA,
+        "version": 1,
+        "kind": "provider-undelivered-prestack-zero-manifest",
+        **exact_identity,
+        "root_agent_id": None,
+        "sessions": {"kernel": [], "steel": []},
+        "evidence": {
+            "guest_native_stop_sha256": native_sha,
+            "capture_archive_sha256": archive_sha,
+            "capture_provenance_sha256": sha256_bytes(provenance_payload),
+            "driver_state": "booting",
+            "allocation_event_count": 0,
+        },
+    }
+
+
 def active_provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
     exact_identity = identity(args)
-    payload = read_bytes(Path(args.backend_log))
+    backend_path = Path(args.backend_log)
+    if (
+        not backend_path.exists() and not backend_path.is_symlink()
+        and (Path(args.output_dir) / UNDELIVERED_CAPTURE_POINTER).exists()
+    ):
+        return undelivered_prestack_zero_manifest(args)
+    payload = read_bytes(backend_path)
     try:
         text = ANSI.sub("", payload.decode("utf-8"))
     except UnicodeDecodeError as error:
@@ -757,7 +996,7 @@ def active_provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
         rf"\[HTTP\] DELETE /api/agents/{re.escape(root_agent_id)} -> 204\b",
         text,
     )
-    if not sessions["kernel"] and not sessions["steel"]:
+    if not any(sessions.values()):
         # An interrupted runner can exit after evaluating a task but before it
         # saves run.json. A task that never opened a browser has no positive
         # provider identity to release. Accept that case only from the complete
@@ -786,7 +1025,7 @@ def active_provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "kind": "provider-active-exact-manifest",
         **exact_identity,
         "root_agent_id": root_agent_id,
-        "sessions": sessions,
+        "sessions": manifest_sessions(sessions),
         "evidence": {
             "backend_log_sha256": sha256_bytes(payload),
             "allocation_event_count": allocation_event_count,
@@ -1020,7 +1259,7 @@ def zero_provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
     text, backend_sha = read_backend_evidence(Path(args.backend_log), root_agent_id)
     validate_complete_backend_lifecycle(text)
     sessions, allocation_event_count, mutation_count = collect_session_evidence(text)
-    if sessions["kernel"] or sessions["steel"] or allocation_event_count != 0:
+    if any(sessions.values()) or allocation_event_count != 0:
         raise CleanupEvidenceError(
             "complete backend evidence contains provider allocation events"
         )
@@ -1110,6 +1349,13 @@ def provider_request(provider: str, session_id: str, env_paths: tuple[Path, ...]
             "Content-Type": "application/json",
         }
         body = b"{}"
+    elif provider == "tilion":
+        api_key = load_env_value("TILION_API_KEY", env_paths)
+        base_url = load_env_value("TILION_BASE_URL", env_paths) or "https://back.tilion.dev"
+        method = "DELETE"
+        url = f"{base_url.rstrip('/')}/v1/session/{urllib.parse.quote(session_id, safe='')}"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        body = None
     else:
         raise CleanupEvidenceError(f"unsupported exact cleanup provider: {provider}")
     if not api_key:
@@ -1119,19 +1365,31 @@ def provider_request(provider: str, session_id: str, env_paths: tuple[Path, ...]
     # rejects urllib's default identity with Cloudflare 1010 before API auth.
     headers.update({"User-Agent": "rose-cloudbench/1.0", "Accept": "application/json"})
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            status = int(response.status)
-            response_body = response.read(65_537)
-    except urllib.error.HTTPError as error:
-        status = int(error.code)
-        response_body = error.read(65_537)
-    except (OSError, urllib.error.URLError) as error:
-        raise CleanupEvidenceError(
-            f"{provider} exact session cleanup transport failed for {session_id}"
-        ) from error
-    if len(response_body) > 65_536:
-        raise CleanupEvidenceError(f"{provider} cleanup response is oversized")
+    attempts = TILION_RELEASE_ATTEMPTS if provider == "tilion" else 1
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                status = int(response.status)
+                response_body = response.read(65_537)
+        except urllib.error.HTTPError as error:
+            status = int(error.code)
+            response_body = error.read(65_537)
+        except (OSError, urllib.error.URLError) as error:
+            raise CleanupEvidenceError(
+                f"{provider} exact session cleanup transport failed for {session_id}"
+            ) from error
+        if len(response_body) > 65_536:
+            raise CleanupEvidenceError(f"{provider} cleanup response is oversized")
+        if status not in TILION_RETRYABLE_STATUSES or attempt == attempts:
+            break
+        time.sleep(TILION_RELEASE_RETRY_SECONDS)
+
+    if provider == "tilion":
+        if status not in RELEASED_STATUSES["tilion"]:
+            raise CleanupEvidenceError(
+                f"Tilion exact session cleanup failed for {session_id}: HTTP {status}"
+            )
+        return status, sha256_bytes(response_body)
 
     if provider == "kernel":
         if status not in {204, 404}:
@@ -1202,8 +1460,8 @@ def validate_provider_receipt(
             return False
     expected = [
         (provider, session_id)
-        for provider in ("kernel", "steel")
-        for session_id in manifest["sessions"][provider]
+        for provider in PROVIDERS
+        for session_id in manifest_provider_sessions(manifest, provider)
     ]
     results = receipt.get("results")
     if not isinstance(results, list) or len(results) != len(expected):
@@ -1217,13 +1475,12 @@ def validate_provider_receipt(
         status = result.get("http_status")
         body_sha = result.get("response_sha256")
         if (
-            provider not in {"kernel", "steel"}
+            provider not in RELEASED_STATUSES
             or not isinstance(session_id, str)
             or not isinstance(status, int)
             or not isinstance(body_sha, str)
             or re.fullmatch(r"[0-9a-f]{64}", body_sha) is None
-            or (provider == "kernel" and status not in {204, 404})
-            or (provider == "steel" and status not in {200, 404})
+            or status not in RELEASED_STATUSES[provider]
         ):
             return False
         observed.append((provider, session_id))
@@ -1249,8 +1506,8 @@ def cleanup_manifest_sessions(
 
     env_paths = (Path(args.backend_env), Path(args.agents_env))
     results: list[dict[str, Any]] = []
-    for provider in ("kernel", "steel"):
-        for session_id in manifest["sessions"][provider]:
+    for provider in PROVIDERS:
+        for session_id in manifest_provider_sessions(manifest, provider):
             status, response_sha = provider_request(provider, session_id, env_paths)
             results.append(
                 {
@@ -1459,7 +1716,8 @@ def validate_recovery_receipt(args: argparse.Namespace) -> int:
                 "provider manifest no longer matches exact durable evidence"
             )
     elif manifest.get("kind") in {
-        "provider-active-exact-manifest", "provider-prestart-zero-manifest"
+        "provider-active-exact-manifest", "provider-prestart-zero-manifest",
+        "provider-undelivered-prestack-zero-manifest",
     }:
         if not all(
             (

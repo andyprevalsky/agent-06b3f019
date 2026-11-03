@@ -2,12 +2,18 @@
 import assert from 'node:assert/strict';
 import { mock } from 'node:test';
 import type { CompletionMessage } from '../../providers/rose';
+import type { PendingOp } from '../../providers/smsSupervisor/supervisorTools';
 
 async function main(): Promise<void> {
   const events: string[] = [];
   let channel: 'SMS' | 'WHATSAPP' = 'SMS';
   let reactionFails = false;
   let completionOnly = false;
+  let cappedMode = '';
+  let finalReplyCalls = 0;
+  let cancelFinal: (() => void) | undefined;
+  let lastInboundSeq = 1;
+  const traces: Array<{ tool: string; round: number; success: boolean }> = [];
   let selectedEmoji = '🎉';
   let replyTarget: string | undefined;
   let cancelSelection: (() => void) | undefined;
@@ -15,11 +21,31 @@ async function main(): Promise<void> {
   let llmMessages: CompletionMessage[] = [];
   const persisted: string[] = [];
 
+  await mock.module('../../providers/logger', {
+    namedExports: {
+      createLogger: () => ({
+        info: (message: string, data?: { toolTrace?: string }) => {
+          if (message.includes('TOOL_TRACE') && data?.toolTrace)
+            traces.push(...JSON.parse(data.toolTrace));
+        },
+        warn: () => undefined,
+        error: () => undefined,
+        debug: () => undefined,
+      }),
+    },
+  });
   await mock.module('../../providers/database', {
     namedExports: {
       prisma: {
-        smsSession: { findUnique: async () => ({ lastInboundSeq: 1 }) },
+        smsSession: { findUnique: async () => ({ lastInboundSeq }) },
       },
+    },
+  });
+  // Cross-instance locking is covered by multi-instance.blackbox.ts; here the
+  // commit lock only needs to run its critical section.
+  await mock.module('../../providers/sharedState', {
+    namedExports: {
+      withSerializedLock: async <T>(_key: string, fn: () => Promise<T>) => fn(),
     },
   });
   await mock.module('../../providers/rose', {
@@ -39,7 +65,9 @@ async function main(): Promise<void> {
         assert.equal(_channel, channel);
         if (body === 'Here is the answer.') assert.equal(options?.replyToMessageId, replyTarget);
         return {
-          success: !reactionFails || body !== selectedEmoji,
+          success:
+            (!reactionFails || body !== selectedEmoji) &&
+            !(cappedMode === 'delivery-failed' && body.startsWith('The store')),
           messageSid: 'sent-id',
         };
       },
@@ -77,10 +105,31 @@ async function main(): Promise<void> {
   });
   await mock.module('../../providers/smsSupervisor/supervisorTools', {
     namedExports: {
-      commitPendingWrites: async () => [],
-      dispatchToolCall: async ({ tool }: { tool: string }) => {
+      commitPendingWrites: async (operations: PendingOp[]) =>
+        operations.map((operation) => {
+          events.push(`commit:${operation.kind}`);
+          return {
+            tool: operation.kind,
+            success: cappedMode !== 'queued-failure',
+            result: '',
+            ...(cappedMode === 'queued-failure' ? { error: 'fixture write failed' } : {}),
+          };
+        }),
+      dispatchToolCall: async ({ tool }: { tool: string }, _user: string, pending: PendingOp[]) => {
         events.push(`tool:${tool}`);
-        return { tool, success: true, result: 'done' };
+        if (tool === 'kill_agent')
+          pending.push({
+            kind: 'kill_agent',
+            args: { agent_id_or_prefix: 'queued-agent' },
+            agentId: 'queued-agent',
+          });
+        return {
+          tool,
+          success: true,
+          result: cappedMode
+            ? 'Store is TEMPORARILY CLOSED and not accepting pickup orders.'
+            : 'done',
+        };
       },
     },
   });
@@ -122,6 +171,76 @@ async function main(): Promise<void> {
         }
         events.push('llm');
         llmMessages = [...messages];
+        if (cappedMode) {
+          const finalInstruction = messages.some(
+            (message) =>
+              message.role === 'tool' &&
+              String(message.content).includes('maximum number of tool-calling rounds')
+          );
+          if (!finalInstruction)
+            return {
+              reasoning: '',
+              tool_calls: [
+                {
+                  tool:
+                    cappedMode.startsWith('queued-') &&
+                    events.filter((event) => event === 'llm').length === 10
+                      ? 'kill_agent'
+                      : 'web_search',
+                  arguments: { query: 'pickup' },
+                  id: `search-${events.filter((event) => event === 'llm').length}`,
+                },
+              ],
+            };
+          finalReplyCalls += 1;
+          assert.equal(
+            messages.filter(
+              (message) =>
+                message.role === 'tool' &&
+                String(message.content).includes('Store is TEMPORARILY CLOSED')
+            ).length,
+            10,
+            'final response retains every actual work result'
+          );
+          cancelFinal?.();
+          if (cappedMode === 'superseded') lastInboundSeq = 2;
+          if (cappedMode === 'empty-final') return { reasoning: '', tool_calls: [] };
+          if (cappedMode === 'completion-only')
+            return { reasoning: '', tool_calls: [{ tool: 'attempt_completion', arguments: {} }] };
+          return {
+            reasoning: '',
+            tool_calls:
+              cappedMode === 'more-work'
+                ? [
+                    {
+                      tool: 'start_new_agent',
+                      arguments: { goal: 'unrequested extra work' },
+                    },
+                  ]
+                : [
+                    {
+                      tool: 'send_user_message',
+                      arguments: {
+                        message: 'The store is closed, so I could not place your pickup order.',
+                      },
+                      id: 'final-send',
+                    },
+                    ...(cappedMode === 'multiple-replies'
+                      ? [
+                          {
+                            tool: 'send_user_message',
+                            arguments: { message: 'A duplicate final reply.' },
+                          },
+                        ]
+                      : []),
+                    {
+                      tool: 'attempt_completion',
+                      arguments: {},
+                      id: 'final-stop',
+                    },
+                  ],
+          };
+        }
         return {
           reasoning: '',
           tool_calls: completionOnly
@@ -170,7 +289,7 @@ async function main(): Promise<void> {
     );
     assert.equal(reaction.toolCall.tool, 'react_to_message');
     assert.equal(reaction.result.success, false);
-    assert.equal(reaction.messages[0].tool_calls?.[0].function.name, 'react_to_message');
+    assert.equal(reaction.messages[0].tool_calls?.[0].function?.name, 'react_to_message');
     assert.equal(JSON.parse(String(reaction.messages[1].content)).success, false);
     assert.equal(
       events.some((event) => event.startsWith('react:') || event.startsWith('send:')),
@@ -208,8 +327,10 @@ async function main(): Promise<void> {
           false
         );
         const firstTool = llmMessages.flatMap((message) => message.tool_calls ?? [])[0];
+        assert.ok(firstTool.function);
+        assert.equal(typeof firstTool.function.arguments, 'string');
         assert.equal(firstTool.function.name, 'react_to_message');
-        assert.equal(JSON.parse(firstTool.function.arguments).emoji, selectedEmoji);
+        assert.equal(JSON.parse(String(firstTool.function.arguments)).emoji, selectedEmoji);
         const feedback = llmMessages.find((message) => message.tool_call_id === firstTool.id);
         assert.ok(feedback);
         assert.equal(JSON.parse(String(feedback.content)).success, !reactionFails);
@@ -288,8 +409,10 @@ async function main(): Promise<void> {
     assert.equal(sms.responseText, 'Here is the answer.');
     assert.equal(sms.committed, true);
     const firstTool = llmMessages.flatMap((message) => message.tool_calls ?? [])[0];
+    assert.ok(firstTool.function);
+    assert.equal(typeof firstTool.function.arguments, 'string');
     assert.equal(firstTool.function.name, 'react_to_message');
-    assert.equal(JSON.parse(firstTool.function.arguments).emoji, selectedEmoji);
+    assert.equal(JSON.parse(String(firstTool.function.arguments)).emoji, selectedEmoji);
     const feedback = llmMessages.find((message) => message.tool_call_id === firstTool.id);
     assert.ok(feedback);
     const reactionFeedback = JSON.parse(String(feedback.content));
@@ -350,8 +473,91 @@ async function main(): Promise<void> {
       channel === 'WHATSAPP' ? 1 : 0
     );
   }
+  completionOnly = false;
+  channel = 'SMS';
+  for (const mode of [
+    'final-answer',
+    'more-work',
+    'multiple-replies',
+    'cancelled',
+    'queued-success',
+    'queued-failure',
+    'superseded',
+    'guard-denied',
+    'delivery-failed',
+    'empty-final',
+    'completion-only',
+  ]) {
+    cappedMode = mode;
+    events.length = 0;
+    persisted.length = 0;
+    finalReplyCalls = 0;
+    lastInboundSeq = 1;
+    traces.length = 0;
+    const controller = new AbortController();
+    cancelFinal = mode === 'cancelled' ? () => controller.abort() : undefined;
+    const result = await handleSmsSupervisorMessage({
+      userId: 'reaction-test',
+      phoneNumber: '+15551234567',
+      inboundMessage: 'hello',
+      mySeq: 1,
+      inboundAlreadyPersisted: true,
+      channel,
+      abortSignal: controller.signal,
+      commitGuard: async () => !(mode === 'guard-denied' && finalReplyCalls > 0),
+    });
+    assert.equal(
+      finalReplyCalls,
+      1,
+      `${mode}: one contextual final response opportunity after the cap`
+    );
+    assert.equal(
+      events.filter((event) => event === 'llm').length,
+      11,
+      'ten work rounds plus one bounded final response'
+    );
+    assert.equal(
+      events.filter((event) => event === 'tool:web_search').length,
+      mode.startsWith('queued-') ? 9 : 10,
+      'the final response cannot execute extra work'
+    );
+    assert.equal(events.includes('tool:start_new_agent'), false);
+    if (mode.startsWith('queued-')) {
+      assert.equal(
+        events.filter((event) => event === 'commit:kill_agent').length,
+        1,
+        'previously queued work commits once through the existing gate'
+      );
+    }
+    if (mode === 'more-work' || mode === 'multiple-replies') {
+      const rejected = traces.filter((entry) => entry.round === 10);
+      assert.equal(rejected.length, mode === 'more-work' ? 1 : 3);
+      assert.ok(
+        rejected.every((entry) => !entry.success),
+        'rejected final calls remain auditable'
+      );
+    }
+    if (mode === 'final-answer' || mode === 'queued-success') {
+      assert.equal(
+        result.responseText,
+        'The store is closed, so I could not place your pickup order.'
+      );
+      assert.deepEqual(persisted, [result.responseText]);
+      assert.ok(result.toolsExecuted.includes('send_user_message'));
+    } else if (['cancelled', 'superseded', 'guard-denied'].includes(mode)) {
+      assert.equal(result.committed, false);
+      assert.deepEqual(persisted, []);
+    } else if (mode === 'queued-failure') {
+      assert.ok(result.responseText.includes('fixture write failed'));
+      assert.ok(!result.responseText.includes('The store is closed'));
+      assert.deepEqual(persisted, [result.responseText]);
+    } else {
+      assert.equal(result.responseText, SUPERVISOR_FALLBACK_MESSAGE);
+      assert.deepEqual(persisted, [SUPERVISOR_FALLBACK_MESSAGE]);
+    }
+  }
   process.stdout.write(
-    'PASS first reaction ordering, swallowed SMS delivery, and substantive reply requirement\n'
+    'PASS existing reaction cases and bounded contextual cap response, queued writes, rejection traces, ownership guards and failure boundaries\n'
   );
 }
 

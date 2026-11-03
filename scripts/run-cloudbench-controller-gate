@@ -20,11 +20,208 @@
 #   bash scripts/run-cloudbench-controller-gate            # the Step 4cb suites
 #   bash scripts/run-cloudbench-controller-gate -- bash scripts/tests/cloudbench-env.test.sh
 #   CLOUDBENCH_GATE_REF=<sha> bash scripts/run-cloudbench-controller-gate
+#   bash scripts/run-cloudbench-controller-gate --disposable-controller AUTHORITY -- COMMAND
+# The explicit disposable mode requires a live caller which joins, exports and
+# destroys the exact owned controller/workspace; see docs/cloudbench-disposable-controller.md.
 # Env: CLOUDBENCH_GATE_TIMEOUT_S (default 5400), WARM_IMAGE_REF (default: newest
 # cloudbench-warm image on the fleet), CLOUDBENCH_GATE_VM_SIZE / _VM_MEMORY.
+# Opt-in: CLOUDBENCH_GATE_EXPORT_HOST=1 captures and verifies originals (no release credit).
+# CLOUDBENCH_GATE_ROOTFS_SIZE_GB=<positive integer> and
+# CLOUDBENCH_GATE_RETAIN_HOST=1 retain the host for explicit evidence/owner closure.
 set -euo pipefail
+umask 077
 ROOT_DIR="${CLOUDBENCH_GATE_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 cd "$ROOT_DIR"
+# Optional CLOUDBENCH_GATE_NAME_SUFFIX keeps controller names distinct when several
+# gates start in the same second (sharded controllers). Validated before any effect.
+GATE_NAME_SUFFIX="${CLOUDBENCH_GATE_NAME_SUFFIX:-}"
+if [ -n "$GATE_NAME_SUFFIX" ] && ! [[ "$GATE_NAME_SUFFIX" =~ ^[a-z0-9-]{1,12}$ ]]; then
+  echo "invalid CLOUDBENCH_GATE_NAME_SUFFIX: expected [a-z0-9-]{1,12}" >&2; exit 2
+fi
+gate_machine_name() { printf 'cloudbench-gate-%s-%s%s\n' "${GATE_REF:0:8}" "$STAMP" "${GATE_NAME_SUFFIX:+-$GATE_NAME_SUFFIX}"; }
+# Every flyctl call here is bounded. On 2026-10-20 a detached `flyctl machine
+# run` sat in futex_wait for 17 min after printing "Machine started" while the
+# Machine itself was healthy. On a deadline only the exact flyctl child this
+# shell started is signalled: TERM, then KILL after 5 s.
+FLY_CHILD_PID=""
+fly_stop_exact() {
+  local pid="$1" _
+  kill -TERM "$pid" 2>/dev/null || return 0
+  for _ in $(seq 1 25); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.2; done
+  kill -KILL "$pid" 2>/dev/null || true
+}
+# fly_bounded <seconds> <flyctl args...>: flyctl's own status, or 124 when the
+# deadline stopped it. Callers keep their existing failure handling.
+fly_bounded() {
+  local deadline=$((SECONDS + $1 + 1)) pid rc=0; shift
+  flyctl "$@" &
+  pid=$!; FLY_CHILD_PID=$pid
+  if [ "$BASH_SUBSHELL" -gt 0 ]; then
+    # In a command substitution or pipeline the parent's EXIT cleanup cannot see
+    # FLY_CHILD_PID and its traps are not inherited, while the background flyctl
+    # ignores SIGINT. This subshell stops its own exact child on any exit.
+    trap 'if [ -n "$FLY_CHILD_PID" ]; then fly_stop_exact "$FLY_CHILD_PID"; fi' EXIT
+    trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+  fi
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "⚠️  flyctl $1 exceeded its bound; stopped exact pid $pid" >&2
+      fly_stop_exact "$pid"; rc=124; break
+    fi
+    sleep 0.2
+  done
+  if [ "$rc" = 124 ]; then wait "$pid" 2>/dev/null || true; else wait "$pid" || rc=$?; fi
+  FLY_CHILD_PID=""
+  return "$rc"
+}
+# fly_machine_run_bounded <log> <machine run args...>: streams flyctl's output
+# and keeps it in <log>, where the caller reads the Machine ID. Before the ID
+# line flyctl gets CLOUDBENCH_GATE_RUN_BEFORE_ID_S (default 900); a Machine it
+# may have created is then found by its unique name (fly_machine_id_from_run_log)
+# so cleanup still destroys or retains it. Once the ID is printed the Machine
+# exists, so flyctl gets CLOUDBENCH_GATE_RUN_AFTER_ID_S (default 600) to finish
+# its start wait, and CLOUDBENCH_GATE_RUN_AFTER_START_S (default 30) once it
+# reports "Machine started". SECONDS ticks once a second, so each deadline adds
+# one to give the full window. The caller already tolerates a non-zero exit.
+fly_machine_run_bounded() {
+  local log="$1" pid rc=0 printed=0 complete id_deadline="" start_deadline=""; shift
+  local before_id="${CLOUDBENCH_GATE_RUN_BEFORE_ID_S:-900}"
+  local after_id="${CLOUDBENCH_GATE_RUN_AFTER_ID_S:-600}" after_start="${CLOUDBENCH_GATE_RUN_AFTER_START_S:-30}"
+  local pre_id_deadline=$((SECONDS + before_id + 1))
+  flyctl machine run "$@" > "$log" 2>&1 &
+  pid=$!; FLY_CHILD_PID=$pid
+  while kill -0 "$pid" 2>/dev/null; do
+    complete="$(wc -l < "$log" | tr -d ' ')"
+    if [ "$complete" -gt "$printed" ]; then sed -n "$((printed + 1)),${complete}p" "$log"; printed="$complete"; fi
+    if [ -z "$id_deadline" ] && grep -qiE 'Machine ID: [0-9a-f]+' "$log"; then id_deadline=$((SECONDS + after_id + 1)); fi
+    if [ -z "$id_deadline" ] && [ "$SECONDS" -ge "$pre_id_deadline" ]; then
+      echo "⚠️  flyctl machine run printed no Machine ID within ${before_id}s; stopped exact pid $pid" >&2
+      fly_stop_exact "$pid"; rc=124; break
+    fi
+    if [ -z "$start_deadline" ] && [ -n "$id_deadline" ] && grep -q 'Machine started' "$log"; then start_deadline=$((SECONDS + after_start + 1)); fi
+    if { [ -n "$id_deadline" ] && [ "$SECONDS" -ge "$id_deadline" ]; } || { [ -n "$start_deadline" ] && [ "$SECONDS" -ge "$start_deadline" ]; }; then
+      echo "⚠️  flyctl machine run still running after it reported the Machine ID; stopped exact pid $pid" >&2
+      fly_stop_exact "$pid"; rc=124; break
+    fi
+    sleep 0.2
+  done
+  if [ "$rc" = 124 ]; then wait "$pid" 2>/dev/null || true; else wait "$pid" || rc=$?; fi
+  FLY_CHILD_PID=""
+  tail -n +"$((printed + 1))" "$log"
+  return "$rc"
+}
+# fly_machine_id_from_run_log <log> <machine-name>: the Machine ID flyctl
+# printed, else the ID of the one Machine with this run's unique name (flyctl
+# can stop or fail before printing it). Prints nothing when neither exists.
+fly_machine_id_from_run_log() {
+  local log="$1" name="$2" id=""
+  [ -n "$log" ] && [ -f "$log" ] && id="$(grep -oiE 'Machine ID: [0-9a-f]+' "$log" | tail -1 | awk '{print $3}' || true)"
+  if [ -z "$id" ] && [ -n "$name" ]; then
+    id="$(fly_bounded 60 machines list -a "$APP" --json 2>/dev/null | NAME="$name" python3 -c '
+import json, os, sys
+try:
+    rows = json.load(sys.stdin)
+except ValueError:
+    rows = []
+ids = [m.get("id", "") for m in rows if isinstance(m, dict) and m.get("name") == os.environ["NAME"]]
+if len(ids) == 1:
+    print(ids[0])
+' || true)"
+  fi
+  printf '%s' "$id"
+}
+python3 -I -B "$ROOT_DIR/scripts/cloudbench-operator-preflight.py" --require-flyctl
+DISPOSABLE_AUTHORITY=""
+if [ "${1:-}" = "--disposable-controller" ]; then
+  [ "$#" -ge 4 ] && [ "${3:-}" = -- ] || { echo "usage: --disposable-controller AUTHORITY -- COMMAND" >&2; exit 2; }
+  DISPOSABLE_AUTHORITY="$2"; shift 2
+fi
+disposable_controller() {
+  python3 -I -B - "$ROOT_DIR" "$@" <<'PY_DISPOSABLE_CHECKED'
+import os,subprocess,sys
+from pathlib import Path
+root=Path(sys.argv[1]);args=sys.argv[2:];path=root/'scripts/cloudbench-disposable-controller.py'
+ref=subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()
+expected=subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',ref+':scripts/cloudbench-disposable-controller.py'])
+with os.fdopen(os.open(path,os.O_RDONLY|os.O_NOFOLLOW),'rb')as stream:actual=stream.read()
+if actual!=expected:raise SystemExit('disposable controller authority source changed')
+sys.argv=[str(path),*args,'--root',str(root)]
+exec(compile(expected,str(path),'exec'),{'__name__':'__main__','__file__':str(path)})
+PY_DISPOSABLE_CHECKED
+}
+controller_machine_creation_admission() {
+  if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+    if [ -n "${WORKSPACE_VOLUME_ID:-}" ]; then
+      disposable_controller continue-allocation --authority "$DISPOSABLE_AUTHORITY" --driver-pid "$$" --directory "$GATE_EXPORT_LOCAL_DIR" --workspace "$GATE_EXPORT_LOCAL_DIR/workspace-volume.ownership.json"
+      return $?
+    fi
+    disposable_controller admit --authority "$DISPOSABLE_AUTHORITY" || return $?
+    disposable_controller reserve --authority "$DISPOSABLE_AUTHORITY" --driver-pid "$$"
+    return $?
+  fi
+  echo "Controller capacity gap: reuse an existing retained controller; new Machine creation requires measured admission, which this entrypoint does not provide." >&2
+  return 78
+}
+# The typed no-effect receipt lets an external cleanup owner end without a
+# provider audit. It is provable only before the first custody directory,
+# workspace-volume or Machine intent; that section clears this flag for good.
+GATE_NO_EFFECT_PROVABLE=1
+gate_no_effect_receipt() {
+  [ -n "${CLOUDBENCH_GATE_NO_EFFECT_RECEIPT:-}" ] || return 0
+  [ "$GATE_NO_EFFECT_PROVABLE" = 1 ] || { echo "no-effect receipt refused: allocation intents may exist" >&2; return 1; }
+  python3 -I -B - "$CLOUDBENCH_GATE_NO_EFFECT_RECEIPT" "$1" "$2" "$$" "${CLOUDBENCH_GATE_EXPORT_DIR:-}" <<'PY_NO_EFFECT'
+import json, os
+from pathlib import Path
+import sys
+path=Path(sys.argv[1]).absolute();reason=sys.argv[2]
+assert reason in ('github-token-missing','controller-admission-refused','source-ref-not-fetchable')
+assert path.parent.resolve(strict=True)==path.parent
+info=path.parent.stat()
+assert info.st_uid==os.getuid() and not info.st_mode&0o077
+# Intents live in the export directory; once it exists no-effect is unprovable.
+assert not sys.argv[5] or not os.path.lexists(sys.argv[5])
+value=dict(schema='original600-gate-preallocation-failure-v1',
+           reason=reason,source_ref=sys.argv[3],gate_pid=int(sys.argv[4]),
+           allocation_attempted=False)
+fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+with os.fdopen(fd,'w') as stream:
+    json.dump(value,stream,sort_keys=True);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+try:os.fsync(fd)
+finally:os.close(fd)
+PY_NO_EFFECT
+}
+# Admission only reads the provider and writes local reservation markers, so a
+# refusal at these early sites is a typed pre-provider failure.
+early_controller_admission() {
+  local status=0
+  controller_machine_creation_admission || status=$?
+  [ "$status" = 0 ] && return 0
+  gate_no_effect_receipt controller-admission-refused "${CLOUDBENCH_GATE_REF:-$(git rev-parse HEAD)}" || true
+  exit "$status"
+}
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  sed -n '2,27p' "${BASH_SOURCE[0]}"; exit 0
+fi
+# The payload travels as a file, never as a large argv/env string. Validate
+# before admission or any provider effect, including after the private self-copy.
+GATE_PAYLOAD_FILES=()
+if [ -n "${CLOUDBENCH_GATE_PAYLOAD_FILE:-}${CLOUDBENCH_GATE_PAYLOAD_SHA256:-}" ]; then
+  python3 -I -B - "$CLOUDBENCH_GATE_PAYLOAD_FILE" "$CLOUDBENCH_GATE_PAYLOAD_SHA256" <<'PY_LAUNCH_PAYLOAD'
+import hashlib,os,re,stat,sys
+from pathlib import Path
+p=Path(sys.argv[1]);assert p.is_absolute() and p.resolve(strict=True)==p
+assert re.fullmatch('[0-9a-f]{64}',sys.argv[2])
+with os.fdopen(os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK),'rb') as f:
+ s=os.fstat(f.fileno())
+ assert stat.S_ISREG(s.st_mode) and s.st_uid==os.geteuid() and not s.st_mode&0o077 and s.st_nlink==1 and 0<s.st_size<256*1024
+ raw=f.read(s.st_size+1);after=os.fstat(f.fileno())
+ stable=lambda value:(value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_gid,value.st_nlink,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+ assert stable(s)==stable(after) and len(raw)==s.st_size and hashlib.sha256(raw).hexdigest()==sys.argv[2]
+PY_LAUNCH_PAYLOAD
+  GATE_PAYLOAD_FILES=(--file-local "/tmp/controller-launch-payload.json.gz=$CLOUDBENCH_GATE_PAYLOAD_FILE")
+fi
+early_controller_admission
 # Bash reads a script incrementally. A fix landing in this file while a gate is
 # running (2026-10-06) made the running controller resume at a shifted offset
 # and die with a syntax error after GATE_RESULT, before it could fetch the
@@ -33,6 +230,7 @@ if [ -z "${CLOUDBENCH_GATE_SELF_COPY:-}" ]; then
   CLOUDBENCH_GATE_SELF_COPY="$(mktemp -t cloudbench-gate-self.XXXXXX)"
   cat "${BASH_SOURCE[0]}" > "$CLOUDBENCH_GATE_SELF_COPY"
   export CLOUDBENCH_GATE_SELF_COPY CLOUDBENCH_GATE_ROOT_DIR="$ROOT_DIR"
+  if [ -n "$DISPOSABLE_AUTHORITY" ]; then exec bash "$CLOUDBENCH_GATE_SELF_COPY" --disposable-controller "$DISPOSABLE_AUTHORITY" "$@"; fi
   exec bash "$CLOUDBENCH_GATE_SELF_COPY" "$@"
 fi
 
@@ -40,9 +238,46 @@ APP="${CLOUDBENCH_APP:-navi-whisper-lux-bench}"
 REGION="${CLOUDBENCH_REGION:-iad}"
 VM_SIZE="${CLOUDBENCH_GATE_VM_SIZE:-shared-cpu-4x}"
 VM_MEMORY="${CLOUDBENCH_GATE_VM_MEMORY:-8192}"
+ROOTFS_SIZE_GB="${CLOUDBENCH_GATE_ROOTFS_SIZE_GB:-}"
+RETAIN_HOST="${CLOUDBENCH_GATE_RETAIN_HOST:-0}"
+EXPORT_HOST="${CLOUDBENCH_GATE_EXPORT_HOST:-0}"
+KEEP_FIXTURE_ON_FAILURE="${CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE:-0}"
+WORKSPACE_VOLUME_SIZE_GB="${CLOUDBENCH_GATE_WORKSPACE_VOLUME_SIZE_GB:-}"
+WORKSPACE_VOLUME_ID=""; WORKSPACE_VOLUME_INTENT=""
+WORKSPACE_VOLUME_ARGS=()
+if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+  [ "$APP" = navi-whisper-lux-bench ] && [ "$REGION" = iad ] || { echo "disposable controller app/region mismatch" >&2; exit 2; }
+  VM_SIZE=performance-8x; VM_MEMORY=32768; WORKSPACE_VOLUME_SIZE_GB=256
+  RETAIN_HOST=1; EXPORT_HOST=1
+  [ -z "$ROOTFS_SIZE_GB" ] || [ "$ROOTFS_SIZE_GB" -le 50 ] || exit 2
+fi
+case "$EXPORT_HOST" in 0|1) ;; *) echo "invalid CLOUDBENCH_GATE_EXPORT_HOST" >&2; exit 2 ;; esac
+case "$KEEP_FIXTURE_ON_FAILURE" in 0|1) ;; *) echo "invalid CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE" >&2; exit 2 ;; esac
+[ "$EXPORT_HOST" != 1 ] || [ "$RETAIN_HOST" = 1 ] || { echo "controller export requires retain-host mode" >&2; exit 2; }
+case "$RETAIN_HOST" in 0|1) ;; *) echo "invalid CLOUDBENCH_GATE_RETAIN_HOST" >&2; exit 2 ;; esac
+MACHINE_LIFETIME_ARGS=(--rm)
+if [ "$RETAIN_HOST" = 1 ]; then
+  MACHINE_LIFETIME_ARGS=(--rootfs-persist always)
+fi
+MACHINE_STORAGE_ARGS=()
+if [ -n "$ROOTFS_SIZE_GB" ]; then
+  case "$ROOTFS_SIZE_GB" in *[!0-9]*) echo "invalid CLOUDBENCH_GATE_ROOTFS_SIZE_GB" >&2; exit 2 ;; esac
+  [ "$ROOTFS_SIZE_GB" -ge 1 ] 2>/dev/null || { echo "invalid CLOUDBENCH_GATE_ROOTFS_SIZE_GB" >&2; exit 2; }
+  MACHINE_STORAGE_ARGS=(--rootfs-size "${ROOTFS_SIZE_GB}gb")
+fi
+if [ -n "$WORKSPACE_VOLUME_SIZE_GB" ]; then
+  [ "$RETAIN_HOST" = 1 ] && [ "$EXPORT_HOST" = 1 ] || { echo "workspace volume requires retain-host and export" >&2; exit 2; }
+  case "$WORKSPACE_VOLUME_SIZE_GB" in *[!0-9]*) echo "invalid workspace volume size" >&2; exit 2 ;; esac
+  [ "$WORKSPACE_VOLUME_SIZE_GB" -ge 1 ] || { echo "invalid workspace volume size" >&2; exit 2; }
+  [ -z "$ROOTFS_SIZE_GB" ] || [ "$ROOTFS_SIZE_GB" -le 50 ] || { echo "workspace mode rootfs must not exceed native 50 GiB limit" >&2; exit 2; }
+fi
 # The multi-workstream suite alone took 30–42 min on shared-cpu-4x (2026-10-06),
 # so the ten suites need more than the former 40 min; 2400s timed out mid-suite.
 TIMEOUT_S="${CLOUDBENCH_GATE_TIMEOUT_S:-5400}"
+case "$TIMEOUT_S" in ''|*[!0-9]*) echo "invalid CLOUDBENCH_GATE_TIMEOUT_S" >&2; exit 2 ;; esac
+# Export-mode guest idle bound after GATE_RESULT (see the gate script below).
+GATE_EXPORT_LAUNCH_GRACE_S=900
+GATE_EXPORT_RECOVERY_S=3600
 REPO_URL="${CLOUDBENCH_GATE_REPO_URL:-https://github.com/Rose-Ai-Labs/rose.git}"
 
 # shellcheck disable=SC2016  # the pytest -k expression is quoted for the remote shell
@@ -67,7 +302,9 @@ CONTROLLER_IMAGE_SUITES=(
 )
 
 SUITES=()
-if [ "${1:-}" = "--" ]; then
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  sed -n '2,27p' "${BASH_SOURCE[0]}"; exit 0
+elif [ "${1:-}" = "--" ]; then
   shift
   [ "$#" -gt 0 ] || { echo "usage: scripts/run-cloudbench-controller-gate -- <command to run in the repo on the machine>" >&2; exit 2; }
   # One remote command; each argument stays a separate word on the machine.
@@ -80,6 +317,10 @@ else
   RUN_CONTROLLER_IMAGE_SUITES=1
 fi
 
+# This public route always allocates a controller. Existing-controller reuse
+# requires the separately verified retained-host caller, never an implicit run.
+early_controller_admission
+
 if [ -z "${FLY_API_TOKEN:-}" ]; then
   FLY_API_TOKEN="$(grep -E '^FLY_API_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' || true)"
 fi
@@ -87,13 +328,20 @@ fi
 export FLY_API_TOKEN
 
 GATE_REF="${CLOUDBENCH_GATE_REF:-$(git rev-parse HEAD)}"
-# The machine fetches GATE_REF from REPO_URL. For the default repository that is
-# origin, so check containment here (after refreshing stale tracking refs) and
-# fail early; a fork URL is checked by the machine's own fetch (exit 90).
+# The machine fetches the exact GATE_REF from REPO_URL. For the default
+# repository that is origin: admit a commit on an origin branch or an exact
+# branch/tag tip origin advertises (the same rule run-bench's sharded admission
+# applies), and fail early otherwise; a fork URL is checked by the machine's
+# own fetch (exit 90). The refusal precedes any custody or Machine intent, so
+# it writes the typed no-effect receipt that lets the external owner end.
+gate_ref_advertised() {
+  git ls-remote --heads --tags origin 2>/dev/null | awk -v ref="$1" '$1 == ref { found = 1 } END { exit !found }'
+}
 if [ "$REPO_URL" = "https://github.com/Rose-Ai-Labs/rose.git" ]; then
   git fetch -q origin 2>/dev/null || true
-  if [ -z "$(git branch -r --contains "$GATE_REF" 2>/dev/null)" ]; then
-    echo "❌ $GATE_REF is not on any origin branch; push it first (the machine fetches from GitHub)." >&2
+  if [ -z "$(git branch -r --contains "$GATE_REF" 2>/dev/null)" ] && ! gate_ref_advertised "$GATE_REF"; then
+    echo "❌ $GATE_REF is not on any origin branch or advertised tag; push it first (the machine fetches from GitHub)." >&2
+    gate_no_effect_receipt source-ref-not-fetchable "$GATE_REF" || true
     exit 1
   fi
 fi
@@ -105,11 +353,15 @@ fi
 if [ -z "$GITHUB_TOKEN_VALUE" ]; then
   GITHUB_TOKEN_VALUE="$(grep -E '^GITHUB_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' || true)"
 fi
-[ -n "$GITHUB_TOKEN_VALUE" ] || { echo "❌ No GitHub token (gh auth, GITHUB_TOKEN, back-end/.env)" >&2; exit 1; }
+if [ -z "$GITHUB_TOKEN_VALUE" ]; then
+  echo "❌ No GitHub token (gh auth, GITHUB_TOKEN, back-end/.env)" >&2
+  gate_no_effect_receipt github-token-missing "$GATE_REF" || true
+  exit 1
+fi
 
 IMAGE_REF="${WARM_IMAGE_REF:-}"
 if [ -z "$IMAGE_REF" ]; then
-  IMAGE_REF="$(flyctl machines list -a "$APP" --json 2>/dev/null | python3 -c '
+  IMAGE_REF="$(fly_bounded 120 machines list -a "$APP" --json 2>/dev/null | python3 -c '
 import json, sys, re
 images = {m["config"]["image"] for m in json.load(sys.stdin) if "cloudbench-warm" in m["config"].get("image", "")}
 # Tags are cloudbench-warm[-local]-YYYYMMDD-HHMMSS; the newest date wins.
@@ -134,24 +386,39 @@ except Exception:
 GATE_NODE_VERSION="${GATE_NODE_VERSION:-v24.21.0}"
 
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
-MACHINE_NAME="cloudbench-gate-${GATE_REF:0:8}-${STAMP}"
+MACHINE_NAME="$(gate_machine_name)"
 # Repeated log pulls overlap; drop repeats but keep arrival order so each
 # suite's GATE_FAIL_TAIL section stays readable (sort -u interleaved them).
 dedupe_machine_log() {
   awk '!seen[$0]++' "$MACHINE_LOG" > "$MACHINE_LOG.dedupe" && mv "$MACHINE_LOG.dedupe" "$MACHINE_LOG"
 }
 
+GATE_EXPORT_HELPER=""; GATE_EXPORT_CALLER=""
+GATE_EXPORT_FILES=()
 GATE_SCRIPT="$(mktemp -t cloudbench-gate.XXXXXX)"
 MACHINE_ID=""
+RUN_LOG=""
 cleanup() {
-  rm -f "$GATE_SCRIPT" "${GATE_TOKEN_FILE:-}" "${CLOUDBENCH_GATE_SELF_COPY:-}"
+  if [ -n "$FLY_CHILD_PID" ]; then fly_stop_exact "$FLY_CHILD_PID"; fi
+  # Interrupted inside the post-ID window: the Machine exists and its ID is only
+  # in RUN_LOG. Recover it so the Machine is destroyed or reported retained.
+  if [ -z "$MACHINE_ID" ] && [ -n "$RUN_LOG" ] && [ -f "$RUN_LOG" ]; then
+    MACHINE_ID="$(fly_machine_id_from_run_log "$RUN_LOG" "${MACHINE_NAME:-}")"
+  fi
+  rm -f "$GATE_SCRIPT" "$RUN_LOG" "${GATE_TOKEN_FILE:-}" "${CLOUDBENCH_GATE_SELF_COPY:-}" "${GATE_EXPORT_HELPER:-}"
+  if [ -n "$WORKSPACE_VOLUME_INTENT" ]; then
+    echo "GATE_WORKSPACE_VOLUME_RETAINED id=${WORKSPACE_VOLUME_ID:-unresolved} intent=$WORKSPACE_VOLUME_INTENT" >&2
+  fi
+  if [ -n "$MACHINE_ID" ] && [ "$RETAIN_HOST" = 1 ]; then
+    # Command completion/timeout is not proof of benchmark owner or evidence
+    # closure. Retain this exact host until the caller completes those checks.
+    echo "GATE_HOST_RETAINED machine=$MACHINE_ID app=$APP ref=$GATE_REF" >&2
+    return
+  fi
   if [ -n "$MACHINE_ID" ]; then
     # A destroy of a machine still pulling its image can hang; bound it so an
     # interrupted gate exits promptly (the machine is --rm and times out anyway).
-    flyctl machine destroy "$MACHINE_ID" -a "$APP" --force >/dev/null 2>&1 &
-    local destroy_pid=$!
-    for _ in $(seq 1 45); do kill -0 "$destroy_pid" 2>/dev/null || break; sleep 1; done
-    kill "$destroy_pid" 2>/dev/null || true
+    fly_bounded 45 machine destroy "$MACHINE_ID" -a "$APP" --force >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -159,15 +426,63 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# Custody, workspace-volume and Machine intents may exist from here on.
+GATE_NO_EFFECT_PROVABLE=0
+if [ "$EXPORT_HOST" = 1 ]; then
+  case "$IMAGE_REF" in *@sha256:*) ;; *) echo "controller export requires a pinned image digest" >&2; exit 2 ;; esac
+  GATE_EXPORT_HELPER="$(mktemp -t cloudbench-export-helper.XXXXXX)"
+  mkdir -p "$ROOT_DIR/.context"
+  GATE_EXPORT_LOCAL_DIR="${CLOUDBENCH_GATE_EXPORT_DIR:-$(mktemp -d "$ROOT_DIR/.context/controller-host-custody.$STAMP.XXXXXX")}"
+  if [ -n "${CLOUDBENCH_GATE_EXPORT_DIR:-}" ]; then mkdir -m 700 "$GATE_EXPORT_LOCAL_DIR"; fi
+  GATE_EXPORT_CALLER="$GATE_EXPORT_LOCAL_DIR/caller.json"
+  python3 -I -B - "$ROOT_DIR" "$GATE_REF" "$GATE_EXPORT_HELPER" <<'PY_EXPORT_PIN'
+import os,sys,subprocess
+from pathlib import Path
+root,ref,target=Path(sys.argv[1]),sys.argv[2],Path(sys.argv[3])
+source=root/'scripts/cloudbench-controller-export.py'
+with os.fdopen(os.open(source,os.O_RDONLY|os.O_NOFOLLOW),'rb') as handle: actual=handle.read()
+expected=subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',ref+':scripts/cloudbench-controller-export.py'])
+if actual!=expected: raise SystemExit('controller export authority differs from immutable source')
+with target.open('wb') as out: out.write(expected);out.flush();os.fsync(out.fileno())
+PY_EXPORT_PIN
+  python3 -I -B - "$ROOT_DIR" "$GATE_REF" "$GATE_EXPORT_HELPER" caller --record "$GATE_EXPORT_CALLER" --driver-pid "$$" <<'PY_EXPORT_CALLER'
+import hashlib,sys,subprocess
+root,ref,path=sys.argv[1:4];args=sys.argv[4:]
+expected=subprocess.check_output(['git','--no-replace-objects','-C',root,'show',ref+':scripts/cloudbench-controller-export.py'])
+sys.argv=[path,*args]
+exec(compile(expected,path,'exec'),{'__name__':'__main__','__file__':path,'CHECKED_COLLECTOR_SHA256':hashlib.sha256(expected).hexdigest()})
+PY_EXPORT_CALLER
+  GATE_EXPORT_DIGEST="$(python3 -I -B - "$ROOT_DIR" "$GATE_REF" <<'PY_EXPORT_DIGEST'
+import hashlib,subprocess,sys
+value=subprocess.check_output(['git','--no-replace-objects','-C',sys.argv[1],'show',sys.argv[2]+':scripts/cloudbench-controller-export.py'])
+print(hashlib.sha256(value).hexdigest())
+PY_EXPORT_DIGEST
+)"
+  GATE_EXPORT_FILES=(-e "GATE_EXPORT_HELPER_SHA256=$GATE_EXPORT_DIGEST" -e "GATE_IMAGE_REF=$IMAGE_REF" --file-local "/tmp/controller-host-export.py=$GATE_EXPORT_HELPER" --file-local "/tmp/controller-host-caller.json=$GATE_EXPORT_CALLER")
+  if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+    disposable_controller env-files --authority "$DISPOSABLE_AUTHORITY" --directory "$GATE_EXPORT_LOCAL_DIR"
+    for component in agents backend; do
+      digest="$(sha256sum "$GATE_EXPORT_LOCAL_DIR/current-$component.private.env" | awk '{print $1}')"
+      GATE_EXPORT_FILES+=(--file-local "/tmp/controller-current-$component.env=$GATE_EXPORT_LOCAL_DIR/current-$component.private.env" -e "GATE_CURRENT_${component^^}_SHA256=$digest")
+    done
+    GATE_EXPORT_FILES+=(-e GATE_DISPOSABLE_CONTROLLER=1)
+  fi
+fi
+
 {
   echo '#!/usr/bin/env bash'
   echo 'set -uo pipefail'
+  if [ -n "${CLOUDBENCH_GATE_PAYLOAD_FILE:-}" ]; then
+    echo 'chown rose /tmp/controller-launch-payload.json.gz && chmod 600 /tmp/controller-launch-payload.json.gz || { echo "GATE_RESULT exit=94 payload_permissions"; exit 94; }'
+  fi
   echo 'echo "GATE_START $(date -u +%FT%TZ) $(uname -srm)"'
   echo 'token="$(cat /tmp/gate-github-token)"; rm -f /tmp/gate-github-token'
+  echo '[ -z "${GATE_WORKSPACE_VOLUME_ID:-}" ] || mountpoint -q /tmp/gate || { echo "GATE_RESULT exit=93 workspace_not_mounted"; exit 93; }'
   echo 'mkdir -p /tmp/gate && cd /tmp/gate'
   echo 'git init -q repo && cd repo'
-  echo 'git -c http.extraheader="AUTHORIZATION: basic $(printf "x-access-token:%s" "$token" | base64 -w0)" fetch -q --depth 1 "$GATE_REPO_URL" "$GATE_REF" || { echo "GATE_RESULT exit=90 fetch_failed"; exit 90; }'
-  echo 'git checkout -q FETCH_HEAD'
+  echo 'git remote add origin "$GATE_REPO_URL"'
+  echo 'git -c http.extraheader="AUTHORIZATION: basic $(printf "x-access-token:%s" "$token" | base64 -w0)" fetch -q origin +refs/heads/main:refs/remotes/origin/main "$GATE_REF" || { echo "GATE_RESULT exit=90 fetch_failed"; exit 90; }'
+  echo 'git checkout -q "$GATE_REF"'
   echo '# Dependencies are baked into the warm image; the suites only need the paths.'
   echo 'ln -s /app/node_modules node_modules; ln -s /app/back-end/node_modules back-end/node_modules'
   echo 'ln -s /app/agents/venv agents/venv; [ -d /app/front-end/node_modules ] && ln -s /app/front-end/node_modules front-end/node_modules'
@@ -182,24 +497,139 @@ trap 'exit 143' TERM
   echo '# provider settings from those files exactly as they do on a developer host.'
   echo '[ -z "${BACKEND_ENV_B64:-}" ] || printf "%s" "$BACKEND_ENV_B64" | base64 -d > back-end/.env'
   echo '[ -z "${AGENTS_ENV_B64:-}" ] || printf "%s" "$AGENTS_ENV_B64" | base64 -d > agents/.env'
+  if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+    cat <<'REMOTE_CURRENT_ENV'
+python3 -I -B - <<'PY_CURRENT_ENV'
+import hashlib,os
+from pathlib import Path
+for component,target in [('agents','agents/.env'),('backend','back-end/.env')]:
+    source=Path('/tmp/controller-current-'+component+'.env')
+    with os.fdopen(os.open(source,os.O_RDONLY|os.O_NOFOLLOW),'rb')as stream:raw=stream.read()
+    if hashlib.sha256(raw).hexdigest()!=os.environ['GATE_CURRENT_'+component.upper()+'_SHA256']:raise SystemExit('complete current environment changed')
+    Path(target).write_bytes(raw);Path(target).chmod(0o600);source.unlink()
+PY_CURRENT_ENV
+[ "$?" = 0 ] || { echo "GATE_RESULT exit=94 current_env_failed"; exit 94; }
+REMOTE_CURRENT_ENV
+  fi
   echo 'echo "GATE_ENV backend_env=$([ -s back-end/.env ] && echo yes || echo no) agents_env=$([ -s agents/.env ] && echo yes || echo no)"'
   echo 'chown -R rose:rose /tmp/gate 2>/dev/null || true'
-  echo 'export PATH="/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:$PATH" HOME=/home/rose'
+  echo 'export PATH="/tmp/gate/bin:/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:$PATH" HOME=/home/rose'
+  if [ "$EXPORT_HOST" = 1 ]; then
+    echo 'mkdir -m 700 /tmp/gate/controller-host-custody'
+    cat <<'REMOTE_BOUND_EXPORT'
+bound_controller_export() {
+  python3 -I -B - /tmp/controller-host-export.py "$GATE_REF" "$@" <<'PY_BOUND_EXPORT'
+import hashlib,os,subprocess,sys
+path,ref=sys.argv[1:3];args=sys.argv[3:]
+expected=subprocess.check_output(['git','-c','safe.directory=/tmp/gate/repo','--no-replace-objects','-C','/tmp/gate/repo','show',ref+':scripts/cloudbench-controller-export.py'])
+with os.fdopen(os.open(path,os.O_RDONLY|os.O_NOFOLLOW),'rb') as source: actual=source.read()
+if actual!=expected or hashlib.sha256(expected).hexdigest()!=os.environ['GATE_EXPORT_HELPER_SHA256']: raise SystemExit('controller export authority differs from immutable source')
+sys.argv=[path,*args]
+exec(compile(expected,path,'exec'),{'__name__':'__main__','__file__':path,'CHECKED_COLLECTOR_SHA256':hashlib.sha256(expected).hexdigest()})
+PY_BOUND_EXPORT
+}
+REMOTE_BOUND_EXPORT
+    cat <<'REMOTE_WORKSPACE_CUSTODY'
+if [ -n "${GATE_WORKSPACE_VOLUME_ID:-}" ]; then
+  python3 -I -B - <<'PY_WORKSPACE_CUSTODY'
+import hashlib,json,os
+from pathlib import Path
+with os.fdopen(os.open('/tmp/controller-host-workspace.json',os.O_RDONLY|os.O_NOFOLLOW),'rb') as source: raw=source.read()
+value=json.loads(raw)
+if hashlib.sha256(raw).hexdigest()!=os.environ['GATE_WORKSPACE_VOLUME_SHA256'] or value['volume_id']!=os.environ['GATE_WORKSPACE_VOLUME_ID'] or value['source_ref']!=os.environ['GATE_REF'] or value['app']!=os.environ['FLY_APP_NAME'] or value['mount_path']!='/tmp/gate': raise SystemExit('workspace ownership binding refused')
+# Runs as root after /tmp/gate was handed to the runtime user, whose controller
+# writes its supervisor files under repo/.context: only the custody directory stays root's.
+# Every step after the open is relative to directory fds, so a runtime-user
+# rename or symlink cannot redirect the root-owned custody writes.
+repo=Path('/tmp/gate/repo');context=repo/'.context'
+try: os.mkdir(context)
+except FileExistsError: pass
+try: cfd=os.open(context,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+except OSError: raise SystemExit('workspace context must be a directory')
+owner=repo.stat();os.fchown(cfd,owner.st_uid,owner.st_gid)
+os.mkdir('controller-workspace-volume',0o700,dir_fd=cfd)
+pfd=os.open('controller-workspace-volume',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=cfd)
+fd=os.open('ownership.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=pfd)
+with os.fdopen(fd,'wb') as output: output.write(raw);output.flush();os.fsync(output.fileno())
+os.fsync(pfd);os.close(pfd);os.fsync(cfd);os.close(cfd)
+PY_WORKSPACE_CUSTODY
+  [ "$?" = 0 ] || { echo "GATE_RESULT exit=93 workspace_custody_failed"; exit 93; }
+fi
+REMOTE_WORKSPACE_CUSTODY
+    echo 'bound_controller_export launch --repo /tmp/gate/repo --record /tmp/gate/controller-host-custody/launch.json --caller /tmp/controller-host-caller.json --driver-pid "$$" --ref "$GATE_REF" --image "$GATE_IMAGE_REF" || { echo "GATE_EXPORT_PENDING launch"; echo "GATE_RESULT exit=92"; exit 92; }'
+  fi
   echo 'overall=0'
   echo 'failed_steps=""'
   echo 'n=0'
   for suite in "${SUITES[@]}"; do
-    printf 'n=$((n+1)); echo "GATE_STEP_START #$n %s"\n' "$suite"
+    printf 'n=$((n+1)); printf "GATE_STEP_START #%%s %%s\\n" "$n" %q\n' "$suite"
     # bash -l re-reads the profile and resets PATH, so the gate's Node and venv go on PATH inside the command.
-    printf 'gosu rose bash -lc %q > "/tmp/gate/step-$n.log" 2>&1; rc=$?\n' "export PATH=/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:\$PATH; cd /tmp/gate/repo && node --version && $suite"
-    printf 'echo "GATE_STEP %s exit=$rc"; [ $rc -eq 0 ] || { overall=1; failed_steps="$failed_steps $n"; echo "GATE_STEP_FAILED $n"; echo "GATE_FAIL_TAIL_START $n"; tail -n 60 "/tmp/gate/step-$n.log"; echo "GATE_FAIL_TAIL_END $n"; }\n' "$suite"
+    if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+      printf 'gosu rose bash -lc %q > "/tmp/gate/step-$n.log" 2>&1 & command_pid=$!\n' "export PATH=/tmp/gate/bin:/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:\$PATH; cd /tmp/gate/repo && node --version && python3 -I -B scripts/cloudbench-install-controller-client.py --directory /tmp/gate/bin && $suite"
+      cat <<'REMOTE_COMMAND_IDENTITY'
+python3 -I -B - "$command_pid" <<'PY_COMMAND_IDENTITY'
+import json,os,sys,time
+from pathlib import Path
+pid=int(sys.argv[1]);assert pid>1
+try:
+    fields=Path(f'/proc/{pid}/stat').read_text().rsplit(') ',1)[1].split()
+    value=dict(pid=pid,birth='proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+fields[19],machine_id=os.environ['FLY_MACHINE_ID'],source_ref=os.environ['GATE_REF'],epoch=time.time())
+except FileNotFoundError:value=dict(pid=pid,already_joined=True,machine_id=os.environ['FLY_MACHINE_ID'],source_ref=os.environ['GATE_REF'],epoch=time.time())
+with os.fdopen(os.open('/tmp/gate/controller-command.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w')as stream:json.dump(value,stream);stream.flush();os.fsync(stream.fileno())
+PY_COMMAND_IDENTITY
+wait "$command_pid"; rc=$?
+python3 -I -B - "$$" "$rc" <<'PY_COMMAND_JOINED'
+import hashlib,json,os,sys
+from pathlib import Path
+pid=int(sys.argv[1]);fields=Path(f'/proc/{pid}/stat').read_text().rsplit(') ',1)[1].split()
+value=dict(driver_pid=pid,driver_birth='proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+fields[19],exit_code=int(sys.argv[2]),command_sha256=hashlib.sha256(Path('/tmp/gate/controller-command.json').read_bytes()).hexdigest())
+with os.fdopen(os.open('/tmp/gate/controller-command.joined.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w')as stream:json.dump(value,stream);stream.flush();os.fsync(stream.fileno())
+PY_COMMAND_JOINED
+REMOTE_COMMAND_IDENTITY
+    else
+    printf 'gosu rose bash -lc %q > "/tmp/gate/step-$n.log" 2>&1; rc=$?\n' "export PATH=/tmp/gate/bin:/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:\$PATH; cd /tmp/gate/repo && node --version && $suite"
+    fi
+    printf 'printf "GATE_STEP %%s exit=%%s\\n" %q "$rc"; [ $rc -eq 0 ] || { overall=1; failed_steps="$failed_steps $n"; echo "GATE_STEP_FAILED $n"; echo "GATE_FAIL_TAIL_START $n"; tail -n 60 "/tmp/gate/step-$n.log"; echo "GATE_FAIL_TAIL_END $n"; }\n' "$suite"
   done
   echo 'echo "GATE_FAILED_STEPS${failed_steps}"'
+  if [ "$EXPORT_HOST" = 1 ]; then
+    finalize_hubs=""
+    [ -z "$DISPOSABLE_AUTHORITY" ] || finalize_hubs=" --finalize-disposable-hubs"
+    printf '%s\n' 'bound_controller_export export'"$finalize_hubs"' --record /tmp/gate/controller-host-custody/launch.json --archive /tmp/gate/controller-host-custody/originals.tar.gz --manifest /tmp/gate/controller-host-custody/manifest.json --pending /tmp/gate/controller-host-custody/pending.json; export_rc=$?; echo "GATE_EXPORT exit=$export_rc"'
+    # The guest custody (and its pending.json) can be destroyed before anyone reads it;
+    # keep the refusal reason and writer identities (pid, state, parent, comm) in the log.
+    cat <<'REMOTE_EXPORT_PENDING'
+[ "$export_rc" -eq 0 ] || python3 -I -B - /tmp/gate/controller-host-custody/pending.json <<'PY_EXPORT_PENDING' || true
+import json,os,sys
+try: value=json.load(open(sys.argv[1]))
+except (OSError,ValueError): print('GATE_EXPORT_PENDING_DETAIL unreadable'); raise SystemExit
+keys=('pid','state','ppid','comm','threads')
+row=lambda w:dict({k:w[k] for k in keys if k in w},**({'registry':os.path.basename(str(w['registry']))[:40]} if w.get('registry') else {}))
+seen=[dict(elapsed_s=o.get('elapsed_s'),writers=[row(w) for w in o.get('writers',[])]) for o in value.get('writer_observations',[])[-8:]]
+print('GATE_EXPORT_PENDING_DETAIL '+json.dumps(dict(reason=str(value.get('reason'))[:200],writers=[w.get('pid') for w in value.get('writers',[])],writer_observations=seen,snapshot_attempts=len(value.get('snapshot_attempts',[])),changed=sum(a.get('changed_count',0) for a in value.get('snapshot_attempts',[]))),sort_keys=True))
+PY_EXPORT_PENDING
+REMOTE_EXPORT_PENDING
+  fi
   echo 'echo "GATE_RESULT exit=$overall"'
   echo '# Fly returns ~100 log lines per read, so a failed suite'"'"'s tail is lost in the'
   echo '# stream. Stay alive until the controller has copied the full step logs out'
   echo '# (it touches /tmp/gate/fetched); --rm destroys the machine on exit.'
-  echo 'if [ "$overall" -ne 0 ]; then for _ in $(seq 1 900); do [ -e /tmp/gate/fetched ] && break; sleep 1; done; fi'
+  if [ "$EXPORT_HOST" = 1 ]; then
+    # Export mode keeps the guest up for the host's export downloads and for
+    # cloudbench-resume-controller-export.py after a dead host, but never
+    # forever: 2026-10-20 two sharded gates idled ~8.5 h after their host died.
+    # Every host download is bounded by its own deadline (TIMEOUT_S after
+    # `machine run`; the guest started within 6 s of it in both measured shard
+    # launches), so TIMEOUT_S + 900 s never shortens a healthy export. A command
+    # that outlives that still leaves a dead-host recovery hour after its result.
+    printf 'gate_idle_until=$((%s + %s)); [ $((SECONDS + %s)) -le "$gate_idle_until" ] || gate_idle_until=$((SECONDS + %s))\n' \
+      "$TIMEOUT_S" "$GATE_EXPORT_LAUNCH_GRACE_S" "$GATE_EXPORT_RECOVERY_S" "$GATE_EXPORT_RECOVERY_S"
+    echo 'echo "GATE_EXPORT_IDLE_UNTIL elapsed_s=$gate_idle_until"'
+    echo 'while [ "$SECONDS" -lt "$gate_idle_until" ]; do sleep 30; done'
+    echo 'echo "GATE_EXPORT_IDLE_EXPIRED elapsed_s=$SECONDS"'
+  else
+    echo 'if [ "$overall" -ne 0 ]; then for _ in $(seq 1 900); do [ -e /tmp/gate/fetched ] && break; sleep 1; done; fi'
+  fi
   echo 'exit $overall'
 } > "$GATE_SCRIPT"
 
@@ -209,24 +639,84 @@ echo "🖥️  Gate machine: $MACHINE_NAME  image: ${IMAGE_REF##*/}  ref: $GATE_
 GATE_TOKEN_FILE="$(mktemp -t cloudbench-gate-token.XXXXXX)"
 chmod 600 "$GATE_TOKEN_FILE"
 printf '%s' "$GITHUB_TOKEN_VALUE" > "$GATE_TOKEN_FILE"
+if [ -n "$WORKSPACE_VOLUME_SIZE_GB" ]; then
+  WORKSPACE_VOLUME_INTENT="$GATE_EXPORT_LOCAL_DIR/workspace-volume.intent.json"
+  WORKSPACE_VOLUME_NAME="$(python3 -I -B - "$WORKSPACE_VOLUME_INTENT" "$GATE_EXPORT_CALLER" "$GATE_REF" "$APP" "$REGION" "$WORKSPACE_VOLUME_SIZE_GB" "$VM_SIZE" "$VM_MEMORY" <<'PY_WORKSPACE_INTENT'
+from pathlib import Path
+import hashlib,json,os,secrets,sys
+path,caller,ref,app,region,size,vm,memory=sys.argv[1:];name='cbgate_'+secrets.token_hex(8)
+value={'schema':'cloudbench-controller-workspace-intent-v1','name':name,'app':app,'region':region,'size_gb':int(size),'mount_path':'/tmp/gate','source_ref':ref,'vm_size':vm,'memory_mib':int(memory),'caller_sha256':hashlib.sha256(Path(caller).read_bytes()).hexdigest(),'caller':json.loads(Path(caller).read_bytes()),'resource_release_verified':False}
+fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,'w') as out:json.dump(value,out,sort_keys=True);out.write('\n');out.flush();os.fsync(out.fileno())
+fd=os.open(Path(path).parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd);print(name)
+PY_WORKSPACE_INTENT
+)"
+  VOLUME_CREATE_STATUS=0
+  controller_machine_creation_admission || exit $?
+  fly_bounded 300 volumes create "$WORKSPACE_VOLUME_NAME" --app "$APP" --region "$REGION" --size "$WORKSPACE_VOLUME_SIZE_GB" --vm-size "$VM_SIZE" --vm-memory "$VM_MEMORY" --json --yes > "$GATE_EXPORT_LOCAL_DIR/workspace-volume-create.private.json" 2> "$GATE_EXPORT_LOCAL_DIR/workspace-volume-create.stderr.private.log" || VOLUME_CREATE_STATUS=$?
+  python3 -I -B - "$GATE_EXPORT_LOCAL_DIR/workspace-volume-create.private.json" "$GATE_EXPORT_LOCAL_DIR/workspace-volume-create.stderr.private.log" <<'PY_SYNC_NATIVE'
+import os,sys
+for path in sys.argv[1:]:
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW);os.fsync(fd);os.close(fd)
+fd=os.open(os.path.dirname(sys.argv[1]),os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+PY_SYNC_NATIVE
+  [ "$VOLUME_CREATE_STATUS" = 0 ] || { echo "workspace volume creation failed; original intent/result retained" >&2; exit 1; }
+  WORKSPACE_VOLUME_ID="$(python3 -I -B - "$WORKSPACE_VOLUME_INTENT" "$GATE_EXPORT_LOCAL_DIR/workspace-volume-create.private.json" "$GATE_EXPORT_LOCAL_DIR/workspace-volume.ownership.json" <<'PY_WORKSPACE_SEAL'
+from pathlib import Path
+import hashlib,json,os,re,sys
+intent_path,native_path,output=map(Path,sys.argv[1:]);intent_raw=intent_path.read_bytes();native_raw=native_path.read_bytes();intent=json.loads(intent_raw);native=json.loads(native_raw)
+if not isinstance(native,dict) or not re.fullmatch(r'vol_[a-zA-Z0-9]+',native.get('id','')) or native.get('name')!=intent['name'] or native.get('region')!=intent['region'] or type(native.get('size_gb')) is not int or native['size_gb']!=intent['size_gb'] or native.get('encrypted') is not True or 'attached_machine_id' not in native or native['attached_machine_id'] is not None:
+    raise SystemExit('workspace volume native ownership/region/size/encryption/attachment refused; retain original intent and result')
+value={**intent,'schema':'cloudbench-controller-workspace-ownership-v1','volume_id':native['id'],'intent_sha256':hashlib.sha256(intent_raw).hexdigest(),'native_create_sha256':hashlib.sha256(native_raw).hexdigest(),'native_create':native}
+fd=os.open(output,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,'w') as out:json.dump(value,out,sort_keys=True);out.write('\n');out.flush();os.fsync(out.fileno())
+fd=os.open(output.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd);print(native['id'])
+PY_WORKSPACE_SEAL
+)"
+  if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+    disposable_controller backup-off --authority "$DISPOSABLE_AUTHORITY" --directory "$GATE_EXPORT_LOCAL_DIR" --workspace "$GATE_EXPORT_LOCAL_DIR/workspace-volume.ownership.json"
+  fi
+  WORKSPACE_VOLUME_ARGS=(--volume "$WORKSPACE_VOLUME_ID:/tmp/gate")
+  WORKSPACE_VOLUME_SHA="$(sha256sum "$GATE_EXPORT_LOCAL_DIR/workspace-volume.ownership.json" | awk '{print $1}')"
+  GATE_EXPORT_FILES+=(-e "GATE_WORKSPACE_VOLUME_ID=$WORKSPACE_VOLUME_ID" -e "GATE_WORKSPACE_VOLUME_SHA256=$WORKSPACE_VOLUME_SHA" --file-local "/tmp/controller-host-workspace.json=$GATE_EXPORT_LOCAL_DIR/workspace-volume.ownership.json")
+fi
+controller_machine_creation_admission || exit $?
+if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+  disposable_controller create-intent --authority "$DISPOSABLE_AUTHORITY" --directory "$GATE_EXPORT_LOCAL_DIR" --workspace "$GATE_EXPORT_LOCAL_DIR/workspace-volume.ownership.json" --name "$MACHINE_NAME" --image "$IMAGE_REF"
+fi
 RUN_LOG="$(mktemp -t cloudbench-gate-run.XXXXXX)"
 # flyctl's own start wait is shorter than a cold 2 GB image pull and then exits
 # non-zero even though the machine comes up; the machine id in its output is
 # what matters, and the loop below is the real wait.
-set +e
-flyctl machine run "$IMAGE_REF" \
+fly_machine_run_bounded "$RUN_LOG" "$IMAGE_REF" \
   -a "$APP" --region "$REGION" --name "$MACHINE_NAME" \
   --vm-size "$VM_SIZE" --vm-memory "$VM_MEMORY" \
-  --restart no --rm --detach \
-  --entrypoint "/bin/bash" \
+  --restart no "${MACHINE_LIFETIME_ARGS[@]}" "${MACHINE_STORAGE_ARGS[@]}" "${WORKSPACE_VOLUME_ARGS[@]}" --detach \
+  --entrypoint "/bin/bash" "${GATE_EXPORT_FILES[@]}" "${GATE_PAYLOAD_FILES[@]}" \
   --file-local "/tmp/gate.sh=$GATE_SCRIPT" \
   --file-local "/tmp/gate-github-token=$GATE_TOKEN_FILE" \
   -e "GATE_REF=$GATE_REF" -e "GATE_REPO_URL=$REPO_URL" -e "GATE_NODE_VERSION=$GATE_NODE_VERSION" \
-  "/tmp/gate.sh" 2>&1 | tee "$RUN_LOG"
-set -e
-MACHINE_ID="$(grep -oiE 'Machine ID: [0-9a-f]+' "$RUN_LOG" | tail -1 | awk '{print $3}')"
+  -e "CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE=$KEEP_FIXTURE_ON_FAILURE" \
+  "/tmp/gate.sh" || true
+MACHINE_ID="$(fly_machine_id_from_run_log "$RUN_LOG" "$MACHINE_NAME")"
+MACHINE_ID_FROM_NAME=0
+if [ -n "$MACHINE_ID" ] && ! grep -qiE 'Machine ID: [0-9a-f]+' "$RUN_LOG"; then MACHINE_ID_FROM_NAME=1; fi
+if [ "$EXPORT_HOST" = 1 ]; then
+  cp "$RUN_LOG" "$GATE_EXPORT_LOCAL_DIR/create.private.log"
+  python3 -I -B - "$GATE_EXPORT_LOCAL_DIR/host-identity.private.json" "$MACHINE_ID" "$APP" "$GATE_REF" "$IMAGE_REF" <<'PY_EXPORT_ID'
+import json,os,sys
+with open(sys.argv[1],'x') as out:
+    json.dump(dict(machine_id=sys.argv[2],app=sys.argv[3],source_ref=sys.argv[4],image=sys.argv[5]),out)
+    out.flush();os.fsync(out.fileno())
+PY_EXPORT_ID
+fi
 rm -f "$RUN_LOG" "$GATE_TOKEN_FILE"
 [ -n "$MACHINE_ID" ] || { echo "❌ Could not read the gate machine id" >&2; exit 1; }
+# flyctl never reported this Machine; fail closed so cleanup destroys or retains it.
+[ "$MACHINE_ID_FROM_NAME" = 0 ] || { echo "❌ flyctl machine run reported no Machine ID; found Machine $MACHINE_ID by its exact name and cleaning it up" >&2; exit 1; }
+if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+  disposable_controller seal --authority "$DISPOSABLE_AUTHORITY" --directory "$GATE_EXPORT_LOCAL_DIR" --workspace "$GATE_EXPORT_LOCAL_DIR/workspace-volume.ownership.json" --machine "$MACHINE_ID" --name "$MACHINE_NAME" --image "$IMAGE_REF"
+fi
 echo "✅ machine $MACHINE_ID started; waiting up to ${TIMEOUT_S}s"
 
 deadline=$((SECONDS + TIMEOUT_S))
@@ -239,7 +729,7 @@ echo "📄 full machine log: $MACHINE_LOG"
 while [ $SECONDS -lt $deadline ]; do
   sleep 20
   # Fly returns about the last 100 lines per call; merge every poll into one file.
-  flyctl logs -a "$APP" --machine "$MACHINE_ID" --no-tail 2>/dev/null >> "$MACHINE_LOG" || true
+  fly_bounded 120 logs -a "$APP" --machine "$MACHINE_ID" --no-tail 2>/dev/null >> "$MACHINE_LOG" || true
   dedupe_machine_log
   logs="$(cat "$MACHINE_LOG")"
   steps="$(printf '%s\n' "$logs" | grep -oE 'GATE_(START|STEP|STEP_START|RESULT)[^"]*' | sed 's/\\n$//' || true)"
@@ -250,7 +740,7 @@ while [ $SECONDS -lt $deadline ]; do
   fi
   result="$(printf '%s\n' "$steps" | grep -oE 'GATE_RESULT exit=[0-9]+' | tail -1 || true)"
   [ -n "$result" ] && break
-  state="$(flyctl machines list -a "$APP" --json 2>/dev/null | MID="$MACHINE_ID" python3 -c '
+  state="$(fly_bounded 60 machines list -a "$APP" --json 2>/dev/null | MID="$MACHINE_ID" python3 -c '
 import json, os, sys
 machines = json.load(sys.stdin)
 print(next((m.get("state", "") for m in machines if m.get("id") == os.environ["MID"]), "destroyed"))
@@ -259,7 +749,7 @@ print(next((m.get("state", "") for m in machines if m.get("id") == os.environ["M
   if [ "$state" = "destroyed" ] || [ "$state" = "stopped" ]; then
     # The command exited before its result line reached the log stream; read once more.
     sleep 10
-    flyctl logs -a "$APP" --machine "$MACHINE_ID" --no-tail 2>/dev/null >> "$MACHINE_LOG" || true
+    fly_bounded 120 logs -a "$APP" --machine "$MACHINE_ID" --no-tail 2>/dev/null >> "$MACHINE_LOG" || true
     dedupe_machine_log
     logs="$(cat "$MACHINE_LOG")"
     result="$(printf '%s\n' "$logs" | grep -oE 'GATE_RESULT exit=[0-9]+' | tail -1 || true)"
@@ -283,12 +773,16 @@ if [ -z "$result" ]; then
   running_step="$(gate_running_step "$MACHINE_LOG")"
   if [ "$running_step" -gt 0 ]; then
     step_log="${MACHINE_LOG%.log}-step-$running_step.partial.log"
-    if flyctl ssh sftp get -a "$APP" --machine "$MACHINE_ID" "/tmp/gate/step-$running_step.log" "$step_log" >/dev/null 2>&1 \
+    if fly_bounded 300 ssh sftp get -a "$APP" --machine "$MACHINE_ID" "/tmp/gate/step-$running_step.log" "$step_log" >/dev/null 2>&1 \
       && [ -s "$step_log" ]; then
       echo "   suite #$running_step was still running; its partial output: $step_log ($(wc -l < "$step_log") lines)" >&2
     fi
   fi
-  echo "❌ gate timed out after ${TIMEOUT_S}s; destroying $MACHINE_ID" >&2
+  if [ "$RETAIN_HOST" = 1 ]; then
+    echo "❌ gate timed out after ${TIMEOUT_S}s; retaining $MACHINE_ID for exact closure" >&2
+  else
+    echo "❌ gate timed out after ${TIMEOUT_S}s; destroying $MACHINE_ID" >&2
+  fi
   exit 1
 fi
 code="${result##*=}"
@@ -333,13 +827,62 @@ else
   for n in $(printf '%s\n' $failed_steps | sort -un); do
     step_log="${MACHINE_LOG%.log}-step-$n.log"
     rm -f "$step_log"
-    if flyctl ssh sftp get -a "$APP" --machine "$MACHINE_ID" "/tmp/gate/step-$n.log" "$step_log" >/dev/null 2>&1 \
+    if fly_bounded 300 ssh sftp get -a "$APP" --machine "$MACHINE_ID" "/tmp/gate/step-$n.log" "$step_log" >/dev/null 2>&1 \
       && [ -s "$step_log" ]; then
       echo "   failed suite #$n full output: $step_log ($(wc -l < "$step_log") lines)" >&2
     else
       echo "   failed suite #$n: could not copy /tmp/gate/step-$n.log; its last 60 lines are in $MACHINE_LOG between GATE_FAIL_TAIL_START/END $n" >&2
     fi
   done
-  flyctl ssh console -a "$APP" --machine "$MACHINE_ID" -C "touch /tmp/gate/fetched" >/dev/null 2>&1 || true
+  if [ "$EXPORT_HOST" != 1 ]; then
+    fly_bounded 120 ssh console -a "$APP" --machine "$MACHINE_ID" -C "touch /tmp/gate/fetched" >/dev/null 2>&1 || true
+  fi
+fi
+if [ "$EXPORT_HOST" = 1 ]; then
+  export_dir="$GATE_EXPORT_LOCAL_DIR"
+  export_ok=1
+  for member in launch.json manifest.json originals.tar.gz; do
+    remaining=$((deadline - SECONDS))
+    if [ -e "$export_dir/$member" ] || [ -L "$export_dir/$member" ] || [ "$remaining" -le 0 ] || ! python3 -I -B - "$remaining" "$APP" "$MACHINE_ID" "$member" "$export_dir/$member" <<'PY_EXPORT_GET'
+import json,os,subprocess,sys,time
+budget,app,machine,member,target=int(sys.argv[1]),*sys.argv[2:6]
+end=time.monotonic()+budget;attempts=[];code=75
+# A verified remote export must not be retained for one transient transfer loss:
+# bounded attempts inside the gate deadline, each attempt's output retained.
+for attempt in range(1,4):
+    left=int(end-time.monotonic())
+    if left<=0:break
+    try:
+        result=subprocess.run(['flyctl','ssh','sftp','get','-a',app,'--machine',machine,'/tmp/gate/controller-host-custody/'+member,target],timeout=left,capture_output=True)
+        code=result.returncode;attempts.append(dict(attempt=attempt,exit_code=code,stdout=result.stdout.decode(errors='replace')[-4096:],stderr=result.stderr.decode(errors='replace')[-4096:]))
+    except subprocess.TimeoutExpired:
+        code=75;attempts.append(dict(attempt=attempt,exit_code=None,timeout_s=left))
+    if code==0 and os.path.isfile(target) and not os.path.islink(target):break
+    code=code or 75
+    # The caller proved the destination absent; only this owned attempt wrote it.
+    if os.path.lexists(target):os.unlink(target)
+    if attempt<3:time.sleep(max(0,min(5,end-time.monotonic())))
+fd=os.open(os.path.join(os.path.dirname(target),'export-download-'+member+'.attempts.private.json'),os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,'w') as out:json.dump(dict(member=member,attempts=attempts),out,sort_keys=True);out.flush();os.fsync(out.fileno())
+raise SystemExit(code)
+PY_EXPORT_GET
+    then export_ok=0; break; fi
+  done
+  if [ "$export_ok" = 1 ] && python3 -I -B - "$ROOT_DIR" "$GATE_REF" "$GATE_EXPORT_HELPER" verify --archive "$export_dir/originals.tar.gz" --manifest "$export_dir/manifest.json" --record "$export_dir/launch.json" --caller "$GATE_EXPORT_CALLER" --ref "$GATE_REF" --image "$IMAGE_REF" --machine "$MACHINE_ID" --app "$APP" <<'PY_EXPORT_VERIFY'
+import hashlib,subprocess,sys
+root,ref,path=sys.argv[1:4];args=sys.argv[4:]
+expected=subprocess.check_output(['git','--no-replace-objects','-C',root,'show',ref+':scripts/cloudbench-controller-export.py'])
+sys.argv=[path,*args]
+exec(compile(expected,path,'exec'),{'__name__':'__main__','__file__':path,'CHECKED_COLLECTOR_SHA256':hashlib.sha256(expected).hexdigest()})
+PY_EXPORT_VERIFY
+  then
+    if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+      disposable_controller export-ready --authority "$DISPOSABLE_AUTHORITY" --directory "$export_dir" --machine "$MACHINE_ID" --image "$IMAGE_REF"
+    fi
+    echo "GATE_EXPORT_VERIFIED machine=$MACHINE_ID directory=$export_dir resource_release_verified=false"
+  else
+    echo "GATE_EXPORT_PENDING machine=$MACHINE_ID; host retained, no release credit" >&2
+    exit 1
+  fi
 fi
 exit "$code"

@@ -46,9 +46,12 @@
  * Cerebras-wide outage (direct Cerebras and every other OpenRouter route
  * stalled), and the real OpenRouter GLM failover as the only path that can
  * serve. It runs on the OpenRouter account back-end/.env configures, must
- * serve inside the first router attempt with the corrected address in the
- * re-plan goal, and reports which host served. A miss OpenRouter caused is
- * re-probed once a minute later; any other failure, or a second miss, fails.
+ * serve every router decision inside its first attempt with the corrected
+ * address in the re-plan goal, and reports which host served. The router may
+ * search before it escalates (bcee7f02c); those Parallel POSTs are answered
+ * in-process with no results and close one decision round. A miss OpenRouter
+ * caused is re-probed once a minute later; any other failure, or a second
+ * miss, fails.
  * /deploy runs it in scripts/run_deploy_live_probes.py.
  */
 
@@ -71,13 +74,23 @@ import { OPENROUTER_CEREBRAS_MODEL } from '../../providers/rose/openrouterCerebr
 import { OPENROUTER_FAST_CHAT_MODEL } from '../../providers/rose/openrouterFastRoute';
 import {
   assertProbesConfiguredOpenRouterAccount,
-  describeLiveRequests,
+  assertServedOnFirstAttempt,
+  describeLiveSample,
   type GoalAnchor,
   goalAnchorFailure,
   type LiveSample,
+  liveSampleOf,
   probeLiveFailover,
   startedWorkflowGoal,
 } from './chat-router-failover.live.support';
+import {
+  beginLiveEvidenceCapture,
+  cleanupLiveEvidence,
+  type LiveEvidenceCapture,
+  type LiveSeededAgent as SeededAgent,
+  recordLiveEvidenceSample,
+  withEvidenceCleanup,
+} from './chat-router-failover.evidence.support';
 import {
   type FailoverNetwork,
   firstContentDt,
@@ -146,12 +159,7 @@ const OLD_CEREBRAS_GUARD_MS = 1_200;
 
 // ── prod-shaped agent ────────────────────────────────────────────────────────
 
-interface SeededAgent {
-  userId: string;
-  agentId: string;
-}
-
-async function seedProdAgent(): Promise<SeededAgent> {
+async function seedProdAgent(evidence?: LiveEvidenceCapture): Promise<SeededAgent> {
   const userId = randomUUID();
   const agentId = randomUUID();
   await prisma.user.create({ data: { userId, isAnonymous: true } });
@@ -179,14 +187,10 @@ async function seedProdAgent(): Promise<SeededAgent> {
       timestamp: new Date(base + index * 1_000),
     })),
   });
-  return { userId, agentId };
+  return { userId, agentId, evidence };
 }
 
-async function cleanup(seeded: SeededAgent): Promise<void> {
-  await prisma.toolUsage.deleteMany({ where: { agentId: seeded.agentId } });
-  await prisma.agent.deleteMany({ where: { id: seeded.agentId } });
-  await prisma.user.deleteMany({ where: { userId: seeded.userId } });
-}
+const cleanup = (seeded: SeededAgent): Promise<void> => cleanupLiveEvidence(prisma, seeded);
 
 type Outcome =
   | { kind: 'escalated'; atMs: number; reasoning: string }
@@ -228,7 +232,8 @@ async function waitForTurn(
 async function sendFollowUp(
   scenario: Scenario,
   timeoutMs: number,
-  routerObservation?: 'measure' | 'hold-persistence'
+  routerObservation?: 'measure' | 'hold-persistence',
+  evidence?: LiveEvidenceCapture
 ): Promise<{
   outcome: Outcome;
   network: FailoverNetwork;
@@ -238,7 +243,7 @@ async function sendFollowUp(
   routerDurationMs?: number;
   turnElapsedMs: number;
 }> {
-  const seeded = await seedProdAgent();
+  const seeded = await seedProdAgent(evidence);
   const since = new Date();
   const startedAt = Date.now();
   const network = installNetwork(scenario, startedAt);
@@ -250,39 +255,42 @@ async function sendFollowUp(
       )
     : undefined;
   let returned = false;
-  try {
-    const posted = await postMessage(
-      seeded.agentId,
-      { message: FOLLOW_UP.text },
-      false,
-      seeded.userId
-    );
-    assert.ok(!('error' in posted), `postMessage failed: ${JSON.stringify(posted)}`);
-    const outcome = await waitForTurn(seeded, since, startedAt, timeoutMs);
-    // Let any losing provider branches observe their abort before restoring fetch.
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    const agent = await prisma.agent.findUniqueOrThrow({
-      where: { id: seeded.agentId },
-      select: { status: true, temporalWorkflowId: true },
-    });
-    const goal =
-      outcome.kind === 'escalated' ? await startedWorkflowGoal(seeded.agentId) : undefined;
-    const result = {
-      outcome,
-      network,
-      seeded,
-      agent,
-      goal,
-      routerDurationMs: router?.durationMs(),
-      turnElapsedMs: Date.now() - startedAt,
-    };
-    returned = true;
-    return result;
-  } finally {
-    await router?.restore();
-    network.restore();
-    if (!returned) await cleanup(seeded);
-  }
+  return withEvidenceCleanup(
+    async () => {
+      const posted = await postMessage(
+        seeded.agentId,
+        { message: FOLLOW_UP.text },
+        false,
+        seeded.userId
+      );
+      assert.ok(!('error' in posted), `postMessage failed: ${JSON.stringify(posted)}`);
+      const outcome = await waitForTurn(seeded, since, startedAt, timeoutMs);
+      // Let any losing provider branches observe their abort before restoring fetch.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const agent = await prisma.agent.findUniqueOrThrow({
+        where: { id: seeded.agentId },
+        select: { status: true, temporalWorkflowId: true },
+      });
+      const goal =
+        outcome.kind === 'escalated' ? await startedWorkflowGoal(seeded.agentId) : undefined;
+      const result = {
+        outcome,
+        network,
+        seeded,
+        agent,
+        goal,
+        routerDurationMs: router?.durationMs(),
+        turnElapsedMs: Date.now() - startedAt,
+      };
+      returned = true;
+      return result;
+    },
+    async () => {
+      await router?.restore();
+      network.restore();
+      if (!returned) await cleanup(seeded);
+    }
+  );
 }
 
 function assertExactProdRouterContext(network: FailoverNetwork): void {
@@ -568,29 +576,30 @@ async function testExhaustedBudgetSurfacesOneNotice(): Promise<void> {
 }
 
 async function runLiveSample(label: string): Promise<LiveSample> {
+  const evidence = beginLiveEvidenceCapture(label);
   const { outcome, network, seeded, goal } = await sendFollowUp(
     { cerebras: () => 'stall', glm: () => 'live', openrouterOther: 'stall' },
-    45_000
+    45_000,
+    undefined,
+    evidence
   );
-  try {
-    assertExactProdRouterContext(network);
-    assertNoStrayOutbound(network);
-    assert.ok(
-      network.routerRequests('openrouter', OPENROUTER_CEREBRAS_MODEL).length > 0,
-      'the OpenRouter race must still start its Qwen branch (stalled here)'
-    );
-    const attempts = network.routerRequests('cerebras').length;
-    const glm = network.routerRequests('openrouter', OPENROUTER_FAST_CHAT_MODEL);
-    assert.equal(glm.length, attempts, 'every router attempt must reach the real GLM failover');
-    process.stdout.write(
-      `  live GLM failover (${label}): ${outcome.kind} at ${outcome.atMs}ms; ` +
-        `${describeLiveRequests(glm)}\n`
-    );
-    if (goal !== undefined) process.stdout.write(`  escalation goal: ${goal}\n`);
-    return { outcome, attempts, glm, alerts: network.alerts, goal };
-  } finally {
-    await cleanup(seeded);
-  }
+  recordLiveEvidenceSample(evidence, { outcome, network, goal });
+  return withEvidenceCleanup(
+    async () => {
+      assertExactProdRouterContext(network);
+      assertNoStrayOutbound(network);
+      assert.ok(
+        network.routerRequests('openrouter', OPENROUTER_CEREBRAS_MODEL).length > 0,
+        'the OpenRouter race must still start its Qwen branch (stalled here)'
+      );
+      const sample = liveSampleOf(network, { outcome, goal });
+      process.stdout.write(describeLiveSample(label, sample) + network.describeSearches());
+      if (goal !== undefined) process.stdout.write(`  escalation goal: ${goal}\n`);
+      return sample;
+    },
+    () => cleanup(seeded),
+    (sample) => assertServedOnFirstAttempt(sample, CORRECTED_GOAL)
+  );
 }
 
 async function testLiveFailoverEscalates(): Promise<void> {

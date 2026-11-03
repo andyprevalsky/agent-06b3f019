@@ -54,8 +54,9 @@ function parseGptCodeEnvelope(credentialsJson: string) {
     if (parsed.auth_mode !== 'chatgpt') return null;
     const tokens = parsed.tokens as Record<string, unknown> | undefined;
     const accessToken = typeof tokens?.access_token === 'string' ? tokens.access_token : '';
-    const refreshToken = typeof tokens?.refresh_token === 'string' ? tokens.refresh_token : '';
-    if (accessToken.length === 0 || refreshToken.length === 0) return null;
+    // Access-only grants (cloud-minted, or already sandbox-shaped) are valid:
+    // no consumer of this envelope may refresh it.
+    if (accessToken.length === 0) return null;
     const accountId = typeof tokens?.account_id === 'string' ? tokens.account_id : undefined;
     return { accessToken, accountId };
   } catch {
@@ -63,8 +64,63 @@ function parseGptCodeEnvelope(credentialsJson: string) {
   }
 }
 
-function hasUsableGptCodeEnvelope(credentialsJson: string): boolean {
-  return parseGptCodeEnvelope(credentialsJson) !== null;
+/** Codex refreshes an access token this close to its JWT `exp` (manager.rs). */
+const CODEX_ACCESS_TOKEN_REFRESH_WINDOW_MS = 5 * 60 * 1000;
+
+/**
+ * Access-token expiry from the ChatGPT JWT `exp` claim: a number of epoch ms,
+ * `null` when the token is not a JWT or carries no `exp` (Codex then falls back
+ * to `last_refresh`), or `'malformed'` for a non-numeric `exp`.
+ */
+function codexAccessTokenExpiry(accessToken: string): number | null | 'malformed' {
+  const payload = accessToken.split('.')[1];
+  if (accessToken.split('.').length !== 3 || !payload) return null;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as Record<
+      string,
+      unknown
+    >;
+    if (claims.exp === undefined) return null;
+    return typeof claims.exp === 'number' && Number.isFinite(claims.exp)
+      ? claims.exp * 1000
+      : 'malformed';
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The auth.json a Codex CLI sandbox or local device receives: the access token
+ * only, never the refresh token.
+ *
+ * A `gpt_code` Integration is a copy of a grant the user's own Codex CLI
+ * (`~/.codex/auth.json`) still holds. OpenAI rotates the refresh token on every
+ * refresh, so a sandbox that refreshed it signed the user's own Codex out
+ * (`refresh_token_reused` / `refresh_token_invalidated`) and rotated the grant
+ * under every concurrent sandbox. The owning device refreshes and re-uploads;
+ * the server and its sandboxes never do. An access token inside Codex's 5-minute
+ * refresh window (or with a malformed `exp`) is not served at all, so selection
+ * falls through to the pool or the funded key instead of a doomed refresh.
+ */
+function toSandboxCodexAuthJson(credentialsJson: string): string | null {
+  if (!parseGptCodeEnvelope(credentialsJson)) return null;
+  const parsed = JSON.parse(credentialsJson) as Record<string, unknown>;
+  const tokens = parsed.tokens as Record<string, unknown>;
+  const expiresAt = codexAccessTokenExpiry(tokens.access_token as string);
+  if (
+    expiresAt === 'malformed' ||
+    (expiresAt !== null && expiresAt <= Date.now() + CODEX_ACCESS_TOKEN_REFRESH_WINDOW_MS)
+  ) {
+    return null;
+  }
+  // `last_refresh` only drives Codex's refresh schedule for a token without a
+  // JWT `exp`; stamping the serve time keeps the CLI from attempting a refresh
+  // that cannot succeed and would read as a revoked grant (oauth_refresh_invalid).
+  return JSON.stringify({
+    ...parsed,
+    tokens: { ...tokens, refresh_token: '' },
+    last_refresh: new Date().toISOString(),
+  });
 }
 
 function resolveRateLimitedUntil(rateLimitedUntil?: string | Date | null): Date {
@@ -152,7 +208,8 @@ export async function fetchGptCodeCredentialsWithMeta(
   if (userIntegration) {
     const decrypted = decryptIntegrationCredentials(userIntegration, decryptionKey);
     const parsed = decrypted ? parseGptCodeEnvelope(decrypted) : null;
-    if (decrypted && parsed) {
+    const sandboxAuthJson = decrypted ? toSandboxCodexAuthJson(decrypted) : null;
+    if (parsed && sandboxAuthJson) {
       await prisma.integration.update({
         where: { id: userIntegration.id },
         data: { lastUsedAt: now },
@@ -162,7 +219,7 @@ export async function fetchGptCodeCredentialsWithMeta(
         integrationId: userIntegration.id,
       });
       return {
-        credentials: decrypted,
+        credentials: sandboxAuthJson,
         accessToken: parsed.accessToken,
         accountId: parsed.accountId,
         source: 'user',
@@ -185,7 +242,8 @@ export async function fetchGptCodeCredentialsWithMeta(
   for (const poolIntegration of poolIntegrations) {
     const decrypted = decryptIntegrationCredentials(poolIntegration, decryptionKey);
     const parsed = decrypted ? parseGptCodeEnvelope(decrypted) : null;
-    if (!decrypted || !parsed || !hasUsableGptCodeEnvelope(decrypted)) continue;
+    const sandboxAuthJson = decrypted ? toSandboxCodexAuthJson(decrypted) : null;
+    if (!parsed || !sandboxAuthJson) continue;
 
     await prisma.integration.update({
       where: { id: poolIntegration.id },
@@ -196,7 +254,7 @@ export async function fetchGptCodeCredentialsWithMeta(
       userId: poolIntegration.userId,
     });
     return {
-      credentials: decrypted,
+      credentials: sandboxAuthJson,
       accessToken: parsed.accessToken,
       accountId: parsed.accountId,
       source: 'pool',
@@ -376,6 +434,20 @@ export async function markGptUserTokenRateLimited(
       ...(options?.integrationId ? { id: options.integrationId } : {}),
       ...(options?.accountId ? { accountId: options.accountId } : {}),
     };
+    // S33: an auth failure must name the credential that failed. Without an
+    // integration or account id it cannot tell a user's accounts apart, so it
+    // never expires more than one row (one bad token expired every healthy
+    // sibling subscription).
+    if (!options?.integrationId && !options?.accountId) {
+      const candidates = await prisma.integration.count({ where: scopedWhere });
+      if (candidates > 1) {
+        log.warn(`GPT user token auth failure for ${userId} names no credential; not expiring`, {
+          candidates,
+          failureReason: options?.failureReason,
+        });
+        return;
+      }
+    }
     const updated = await prisma.integration.updateMany({
       where: scopedWhere,
       data: {
@@ -426,6 +498,9 @@ export async function markGptUserTokenRateLimited(
         return;
       }
     }
+    // An integration-scoped failure without an account identity must not fall
+    // into the legacy user-wide branch, which would flag sibling accounts.
+    if (resolvedAccountId === '' && options?.integrationId) return;
     await markConnectionNeedsReconnectFromIntegrationFailure({
       userId,
       integrationName: 'gpt_code',

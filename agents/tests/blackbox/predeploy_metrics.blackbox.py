@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -486,7 +487,13 @@ def test_deploy_summary_separates_parallel_overlap_from_gaps() -> None:
     spec = importlib.util.spec_from_file_location("deploy_stage_under_test", repo_root / "scripts/deploy_stage.py")
     assert spec is not None and spec.loader is not None
     deploy_stage = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(deploy_stage)
+    # A file-spec import does not add its sibling scripts directory to sys.path.
+    # The production CLI does, so give this fixture the same import context.
+    sys.path.insert(0, str(repo_root / "scripts"))
+    try:
+        spec.loader.exec_module(deploy_stage)
+    finally:
+        sys.path.pop(0)
 
     with tempfile.TemporaryDirectory() as raw_dir:
         run_dir = Path(raw_dir) / "interval-run"
@@ -525,6 +532,15 @@ def test_deploy_summary_separates_parallel_overlap_from_gaps() -> None:
     assert "Summed stage time: 30.0s" in rendered
     assert "Parallel overlap: 10.0s" in rendered
     assert "Unrecorded/gap time: 100.0s" in rendered
+
+
+def test_resource_exhaustion_receipt_policy() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    completed = subprocess.run(
+        [sys.executable, str(repo_root / "scripts/tests/predeploy-receipts.test.py")],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 async def run_all_tests():
@@ -566,6 +582,7 @@ async def run_all_tests():
         "live_log_streaming",
         test_logged_command_streams_output_before_child_exit,
     )
+    result.record("resource_exhaustion_receipts", test_resource_exhaustion_receipt_policy)
     teardown_mock()
     return result.all_passed
 

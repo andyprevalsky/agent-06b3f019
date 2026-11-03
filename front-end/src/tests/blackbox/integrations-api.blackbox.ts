@@ -8,7 +8,7 @@
  *   - startGmailOAuthApi         — returns { authUrl } or throws
  *   - sendPasswordRequestApi     — void on 200; throws on 500
  *   - uploadApplePasswordsApi    — posts CSV FormData; throws on error
- *   - createLinkedInSyncAgentApi — posts /agents with goal + throws on error
+ *   - createLinkedInSyncAgentApi — creates a normal agent, records it as the LinkedIn sync, throws on error
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
@@ -267,18 +267,38 @@ describe('integrations/api', () => {
   });
 
   describe('createLinkedInSyncAgentApi', () => {
-    it('posts a LinkedIn sync goal to /api/agents and resolves on success', async () => {
+    it('creates a normal agent, then records it as the LinkedIn sync', async () => {
       let body: Record<string, unknown> = null;
+      let recorded: Record<string, unknown> = null;
       server.use(
         http.post(`${API_BASE}/agents`, async ({ request }) => {
           body = (await request.json()) as Record<string, unknown>;
           return HttpResponse.json({ agent_id: 'a-1' }, { status: 201 });
         }),
+        http.post(`${API_BASE}/integrations/linkedin/sync`, async ({ request }) => {
+          recorded = (await request.json()) as Record<string, unknown>;
+          return HttpResponse.json({ status: 'SYNCING', agent_id: 'a-1' });
+        }),
       );
-      await createLinkedInSyncAgentApi();
-      expect(body.goal).toMatch(/LinkedIn/);
-      expect(body.source).toBe('MAC_APP');
-      expect(body.price_limit_cents).toBe(500);
+      await expect(createLinkedInSyncAgentApi()).resolves.toBe('a-1');
+      expect(body).toMatchObject({
+        goal: expect.stringMatching(/LinkedIn/),
+        source: 'WEB',
+        start_phase: 'execute',
+      });
+      expect(body).not.toHaveProperty('depth');
+      expect(body).not.toHaveProperty('price_limit_cents');
+      expect(recorded).toEqual({ agent_id: 'a-1' });
+    });
+
+    it('surfaces a failed sync record', async () => {
+      server.use(
+        http.post(`${API_BASE}/agents`, () => HttpResponse.json({ agent_id: 'a-1' })),
+        http.post(`${API_BASE}/integrations/linkedin/sync`, () =>
+          HttpResponse.json({ error: 'LinkedIn sync already running' }, { status: 409 }),
+        ),
+      );
+      await expect(createLinkedInSyncAgentApi()).rejects.toThrow('LinkedIn sync already running');
     });
 
     it('throws payload error on non-OK', async () => {

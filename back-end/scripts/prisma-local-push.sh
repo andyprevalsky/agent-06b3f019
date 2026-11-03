@@ -11,6 +11,8 @@ validate_local_database_url() {
   node -e '
     const parsed = new URL(process.argv[1]);
     if (!["localhost", "127.0.0.1", "::1"].includes(parsed.hostname)) process.exit(1);
+    // libpq/Prisma prefer a `host`/`hostaddr` query parameter over the authority.
+    if (["host", "hostaddr"].some((key) => parsed.searchParams.has(key))) process.exit(1);
   ' "$value" || {
     echo "Refusing Prisma push: $variable_name is not a localhost database" >&2
     exit 2
@@ -27,4 +29,29 @@ if [ "${PRISMA_LOCAL_PUSH_DRY_RUN:-0}" = "1" ]; then
   exit 0
 fi
 
-exec npx prisma db push "$@"
+# Long-lived local databases can hold blank or duplicated phones that would
+# block the unique User.phone index; normalize them on this same local target.
+bash "$(dirname "${BASH_SOURCE[0]}")/normalize-local-user-phones.sh" "$DIRECT_URL" >/dev/null
+bash "$(dirname "${BASH_SOURCE[0]}")/backfill-local-message-record-owner.sh" "$DIRECT_URL" >/dev/null
+
+if [ "${1:-}" = "--migrate-dev" ]; then
+  shift
+  PRISMA_CLI_DATABASE_URL="$DIRECT_URL" npx prisma migrate dev "$@"
+else
+  PRISMA_CLI_DATABASE_URL="$DIRECT_URL" npx prisma db push "$@"
+fi
+# Push cannot model the gin_trgm_ops index; restore it from its migration.
+bash "$(dirname "${BASH_SOURCE[0]}")/apply-local-message-record-trgm-index.sh" "$DIRECT_URL" >/dev/null
+
+# db push ignores the hand-written workflow/trajectory functions and triggers
+# that migrations install, so a database built only by this wrapper silently
+# diverges from prod (workflow-terminal-cleanup failed on such a database).
+# Apply them to the exact target just pushed: host psql on DIRECT_URL, never a
+# DB_CONTAINER from the caller's environment that may hold another database.
+if ! command -v psql >/dev/null 2>&1; then
+  echo "Prisma push succeeded, but host psql is required to apply the workflow DDL to $(
+    node -e 'const u=new URL(process.argv[1]);process.stdout.write(u.host+u.pathname)' "$DIRECT_URL")" >&2
+  exit 1
+fi
+env -u DB_CONTAINER ROSE_USE_SYSTEM_PG=true DATABASE_URL="$DIRECT_URL" DIRECT_URL="$DIRECT_URL" \
+  bash "$(dirname "${BASH_SOURCE[0]}")/apply-local-workflow-ddl.sh"

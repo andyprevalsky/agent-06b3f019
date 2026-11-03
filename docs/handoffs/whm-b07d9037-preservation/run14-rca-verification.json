@@ -1,0 +1,98 @@
+{
+  "schema": 1,
+  "utc": "2026-10-13T21:10:54.196677+00:00",
+  "run14_source": "c3a575907c3f8f3969307c9165c56ffb999fba13",
+  "cache_fix_source": "c165c2983b67c287ac22e111e8a7be742f9f34b9",
+  "private_rca_archive": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "trace-archive/private/whm/e9afcffd-7ba9-4bfd-8703-d770952fe1c3/run14-rca-package-20261013.private.aesgcm",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "87b2fc19360ce0594363330c2d8c28806ab8280d67ad411f725de1b00fd03bb3",
+    "gzip_sha256": "02efb133b5a1a96459521c23837cbaa114073c3720a02fb99f05e3c1f7beff62",
+    "stored_bytes": 25109388,
+    "frames": 3,
+    "files": 1537,
+    "original_bytes": 120403251,
+    "manifest_sha256": "588897bf4a1bd5fdc6fad9b0e20d3b2d31821949a7c2d0cc947ac1fc233a7392",
+    "full_readback_verified": true
+  },
+  "archive_verification": "Full remote download/authentication/decryption, every embedded member SHA256 and ciphertext/compressed-stream hashes verified; no upload acknowledgement substituted.",
+  "original_run_unchanged": true,
+  "owning_checks": {
+    "registered_backend_fast_cache": {
+      "pass": true,
+      "reported_domain_s": 5.882,
+      "controller_exit": 0
+    },
+    "registered_agents_fast_cache_client_and_world_model_harness": {
+      "pass": true,
+      "elapsed_s": 32.5,
+      "domains": 2
+    },
+    "new_registered_owner_cases": {
+      "pass": true,
+      "cases": 13,
+      "pytest_s": 0.14
+    },
+    "applied_python_lint": "PASS"
+  },
+  "cache_integration": {
+    "database": "victoria_wmh_recording_e9afcffd_20261013",
+    "database_oid": 69016,
+    "genuine_original_rows": 1,
+    "synthetic_or_invalid_rows": 0,
+    "original_key_match": true,
+    "original_completion_content_byte_equal": true,
+    "native_source_sha256": "470f64be88a76103943a0f3dcc5d3138f87de413349523ff150d716db3b6cbe4",
+    "native_completion_content_sha256": "ab2801a06f0bd5ecae783b850f702a8580bd18a447327df984bd65c63b65f707",
+    "real_http_prisma_persistence": true,
+    "fresh_process_native_replay": true,
+    "two_fixture_reset_cleanup_cycles_retained_data": true,
+    "native_invalid_prediction_rejected_before_write": true,
+    "external_provider_calls": 0,
+    "remaining": "Full-stack admission and actual unchanged fundraiser outcome are observed in the next authorized run."
+  },
+  "rca_workers": {
+    "cache": {
+      "thread": "ph77kpe0hjwfdk1djgww32xx598g76zv",
+      "turn": "01a13707-31ce-7000-8838-522daf106ee2",
+      "terminal": "completed",
+      "integration_result_sha256": "71cb818c11deddd099c12eec188f640be854f2f50e8ac11ea9d31ed4367ff533"
+    },
+    "protocol": {
+      "thread": "ph74rydmef2pz96ts3xq5ddmz58g72s1",
+      "turn": "01a136f6-1c17-73f3-b62f-107ce3d0a548",
+      "terminal": "completed",
+      "result": "OPEN generating cause; no proved validation/recovery code defect"
+    },
+    "progress": {
+      "thread": "ph7fzrvpxvg81gkrz93n23x6w58g6qhv",
+      "turn": "01a136f6-2097-70f0-9701-837ed6298998",
+      "terminal": "completed",
+      "result": "Initial outreach20\u201325% band, no new later fundraising milestone; eight offline controls pass"
+    },
+    "transport": {
+      "thread": "ph73t9666702rhpqvnr4qfc55h8g7ffa",
+      "turn": "01a1370b-538b-72a1-897f-744379896bc9",
+      "terminal": "completed",
+      "result": "Original HTTP causes OPEN; passive same-store capture proposal QUALIFIED but UNAPPLIED",
+      "approval_id": "R14-HTTP-CAPTURE-2",
+      "patch_sha256": "3f143ddec55ac3256717e600f93c12fbd61b2e726e18d668ce3dd71d75f70da0",
+      "qualification_controls": 13,
+      "registered_reliability_cases": 70
+    }
+  },
+  "user_cycle": "60min DEMO-on; cluster failures; managed /RCA subagent per cluster; communicate only scorecard or RCA approval",
+  "next_trial": "run15-owned-recording60m, unchanged raise-5m-rose-labs-brex, fixed retained owner, no forced/remapped hits",
+  "boundary": {
+    "no_merge_deploy": true,
+    "no_paid_model_rca_replay": true,
+    "protected_instructions_sha256": {
+      "CLAUDE.md": "2a6348f3ad1701aeb496e10e98da271fb38db5709e2abb9adbe65b7c5ad0d322",
+      "AGENTS.md": "57cbb4821915f3e477996ffde6ef7ee4c9d57fab64b6f57421968e3d0e9d0eca"
+    },
+    "freedom_preserved": true,
+    "excluded_main_untouched": true
+  }
+}

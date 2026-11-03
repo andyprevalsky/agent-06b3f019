@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -67,6 +69,7 @@ class TaskCard:
     duration_s: Optional[float] = None
     cost_usd: Optional[float] = None
     agent_url: Optional[str] = None
+    agent_id: Optional[str] = None
     outcome_sha256: Optional[str] = None
     llm_call_count: Optional[int] = None
     tree_agent_count: Optional[int] = None
@@ -109,8 +112,13 @@ class RunState:
       tokens_out        – tree/run output token count. If None, derived by
                           summing per_task[*].tokens_out.
       wmh_grounding_usd – WMH grounding cost in USD (OPTIONAL; None local).
-      fast_cache_hit_rate – 0..1 fast-cache hit rate (OPTIONAL; None if unknown).
+      fast_cache_hit_rate – 0..1 demo-cache hit rate (OPTIONAL; None if unknown).
       infra             – optional Infra block (None for local runs).
+      source_sha        – git HEAD the run executed from (None if unknown or the
+                          tracked tree was dirty, so a card never claims it).
+      started_at        – wall-clock epoch when the run started.
+      finished_at       – wall-clock epoch when every task reached a verdict
+                          (None while any task is still queued/running).
     """
 
     run_id: str
@@ -135,6 +143,9 @@ class RunState:
     infra_usd: Optional[float] = None
     fast_cache_hit_rate: Optional[float] = None
     infra: Optional["Infra"] = None
+    source_sha: Optional[str] = None
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
 
 
 @dataclass
@@ -147,6 +158,22 @@ class Infra:
     queue_depth: Optional[int] = None
 
 
+def clean_source_sha(repo: Union[str, Path]) -> Optional[str]:
+    """HEAD of `repo` when its tracked files are clean; None otherwise or on any error.
+
+    A dirty checkout did not run HEAD's bytes, so the card records no source
+    rather than a misleading one.
+    """
+    try:
+        git = ["git", "-C", str(repo)]
+        sha = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+        dirty = subprocess.run([*git, "status", "--porcelain", "--untracked-files=no"],
+                               capture_output=True, text=True, timeout=30, check=True).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return sha if re.fullmatch(r"[0-9a-f]{40}", sha) and not dirty else None
+
+
 def _is_running(status: str) -> bool:
     return status in {"running"}
 
@@ -156,7 +183,22 @@ def _is_queued(status: str) -> bool:
 
 
 def _is_completed(status: str) -> bool:
-    return status in {"passed", "failed", "transient", "skipped", "error"}
+    return status in {"passed", "failed", "transient", "skipped", "error", "cancelled"}
+
+
+def card_status(benchmark_status: Optional[str], passed: bool) -> str:
+    """Per-task card status from the harness verdict.
+
+    A task the run interrupted (benchmark_status CANCELLED: never started, or stopped
+    mid-flight by a run stop) has no task verdict; it is ``cancelled``, never an agent
+    ``failed``.
+    """
+    verdict = str(benchmark_status or "").upper()
+    if verdict == "SKIPPED":
+        return "skipped"
+    if verdict == "CANCELLED" and not passed:
+        return "cancelled"
+    return "passed" if passed else "failed"
 
 
 def build_report_card(state: RunState) -> dict:
@@ -194,6 +236,7 @@ def build_report_card(state: RunState) -> dict:
     passed = sum(1 for t in per_task if t.status == "passed")
     failed = sum(1 for t in per_task if t.status == "failed" or t.status == "error")
     transient = sum(1 for t in per_task if t.status == "transient")
+    cancelled = sum(1 for t in per_task if t.status == "cancelled")
     decided = passed + failed
     success_rate = round(passed / decided, 3) if decided > 0 else 0.0
 
@@ -252,6 +295,9 @@ def build_report_card(state: RunState) -> dict:
 
     return {
         "run_id": state.run_id,
+        "source_sha": state.source_sha,
+        "started_at": state.started_at,
+        "finished_at": state.finished_at,
         "elapsed_s": round(state.elapsed_s, 1),
         "world_model_mode": state.world_model_mode,
         "tasks": {
@@ -264,6 +310,7 @@ def build_report_card(state: RunState) -> dict:
             "passed": passed,
             "failed": failed,
             "transient": transient,
+            "cancelled": cancelled,
             "success_rate": success_rate,
         },
         "cost": cost,
@@ -276,6 +323,7 @@ def build_report_card(state: RunState) -> dict:
                 "duration_s": round(t.duration_s, 1) if t.duration_s is not None else None,
                 "cost_usd": round(t.cost_usd, 4) if t.cost_usd is not None else None,
                 "agent_url": t.agent_url,
+                "agent_id": t.agent_id,
                 "outcome_sha256": t.outcome_sha256,
                 "tokens_in": int(t.tokens_in or 0),
                 "tokens_out": int(t.tokens_out or 0),

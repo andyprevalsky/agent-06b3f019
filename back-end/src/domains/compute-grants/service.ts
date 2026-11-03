@@ -15,7 +15,12 @@
 
 import { reconcileConnectionStatesFromIntegrations } from '../../providers/integrationConnectionSync';
 import { createLogger } from '../../providers/logger';
-import { ComputeGrantReminter, type GrantMinter } from '../../providers/computeGrantRemint';
+import {
+  ComputeGrantReminter,
+  type GrantMinter,
+  type RemintCoordination,
+} from '../../providers/computeGrantRemint';
+import { getEphemeral, putEphemeral, withSerializedLock } from '../../providers/sharedState';
 import { registerGrantRecovery, type GrantRecoveryHook } from '../../providers/rose/grantRecovery';
 import {
   createPrismaGrantStore,
@@ -47,6 +52,17 @@ export const unavailableMinter: GrantMinter = {
   },
 };
 
+const REMINT_LOCK_WAIT_MS = 5 * 60_000;
+
+/** Re-mints are single-flight and cooled down per account across every instance. */
+const sharedRemintCoordination: RemintCoordination = {
+  serialize: (key, fn) => withSerializedLock(key, fn, { waitMs: REMINT_LOCK_WAIT_MS }),
+  cooldownUntil: async (key) =>
+    (await getEphemeral<{ until: number }>('compute-grant-cooldown', key))?.until,
+  startCooldown: (key, until, ttlMs) =>
+    putEphemeral('compute-grant-cooldown', key, { until }, ttlMs),
+};
+
 export interface InstallRecoveryOptions {
   /** Mints a grant from an account session. Production supplies a Steel-backed one. */
   minter?: GrantMinter;
@@ -64,6 +80,7 @@ export function installGrantRecovery(opts: InstallRecoveryOptions = {}): GrantRe
   const reminter = new ComputeGrantReminter({
     store,
     minter,
+    coordination: sharedRemintCoordination,
     log: (event, fields) => log.info(event, fields),
   });
 

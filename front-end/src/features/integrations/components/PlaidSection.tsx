@@ -17,7 +17,14 @@ import { Loader2, Plus, Wrench } from 'lucide-react';
 import ConnectedAccountChip from './ConnectedAccountChip';
 import DropdownIconFrame, { DropdownIconPreset } from './DropdownIconFrame';
 import PlaidLogoIcon from './PlaidLogoIcon';
-import type { PlaidItem, PlaidSyncState } from '../types';
+import {
+  chipToneForState,
+  itemChipLabel,
+  itemChipTitle,
+  itemNeedsUpdate,
+  visibleInstitutionItems,
+} from './plaidItemView';
+import type { PlaidItem } from '../types';
 
 interface PlaidSectionProps {
   items: PlaidItem[];
@@ -59,10 +66,6 @@ function PlaidActionButton({
   );
 }
 
-function itemNeedsUpdate(item: PlaidItem): boolean {
-  return item.status === 'REQUIRES_REAUTH' || item.status === 'ERROR';
-}
-
 /**
  * Repair affordance for a broken connection.
  *
@@ -102,48 +105,6 @@ function PlaidRepairButton({
       <span className="truncate">Reconnect</span>
     </button>
   );
-}
-
-function chipToneForState(state: PlaidSyncState): 'synced' | 'syncing' | 'warning' | 'error' {
-  if (state === 'synced') return 'synced';
-  if (state === 'syncing') return 'syncing';
-  if (state === 'needs_repair') return 'warning';
-  return 'error';
-}
-
-function itemChipLabel(item: PlaidItem): string {
-  return item.institutionName ?? 'Financial institution';
-}
-
-function itemChipTitle(item: PlaidItem): string {
-  const accountNames = item.accounts.map((account) => account.name).join(', ');
-  const lastSynced = item.lastSyncAt ?? 'not yet synced';
-  return accountNames === ''
-    ? `Last synced: ${lastSynced}`
-    : `Accounts: ${accountNames}. Last synced: ${lastSynced}`;
-}
-
-function itemDisplayKey(item: PlaidItem): string {
-  return (item.institutionId ?? item.institutionName ?? item.id).trim().toLowerCase();
-}
-
-function itemDisplayRank(item: PlaidItem): number {
-  if (item.status === 'ACTIVE' && item.sync.state === 'synced') return 0;
-  if (item.status === 'ACTIVE') return 1;
-  if (!itemNeedsUpdate(item)) return 2;
-  return 3;
-}
-
-function visibleInstitutionItems(items: PlaidItem[]): PlaidItem[] {
-  const byInstitution = new Map<string, PlaidItem>();
-  for (const item of items) {
-    const key = itemDisplayKey(item);
-    const existing = byInstitution.get(key);
-    if (existing === undefined || itemDisplayRank(item) < itemDisplayRank(existing)) {
-      byInstitution.set(key, item);
-    }
-  }
-  return [...byInstitution.values()];
 }
 
 export default function PlaidSection({

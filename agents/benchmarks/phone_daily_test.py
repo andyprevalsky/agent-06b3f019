@@ -108,7 +108,7 @@ def test_daily_catalog_additive_and_discovered():
     for name in TASK_KINDS:
         task = get_task_by_name(name)
         assert task.group == 'daily' and task.status == 'ready'
-        assert task.fast_cache == 'off' and 'LIVE' in task.tags
+        assert task.demo_cache == 'off' and 'LIVE' in task.tags
     assert get_task_by_name('phone-daily-sms-challenge').environment['auth_test_site']['scenario'] == 'phone_sms_otp'
     assert get_task_by_name('browser-cloud-iphone-settings').group == 'incomplete'
 
@@ -128,10 +128,10 @@ def test_existing_catalog_rows_unchanged():
     import subprocess
     from pathlib import Path
     root = Path(__file__).resolve().parents[2]
-    old = json.loads(subprocess.check_output(['git', 'show', 'HEAD:agents/benchmarks/tasks.json'], cwd=root, text=True))
+    old = json.loads(subprocess.check_output(['git', 'show', '713f9cbf7:agents/benchmarks/tasks.json'], cwd=root, text=True))
     current = json.loads((root / 'agents/benchmarks/tasks.json').read_text())
-    # Only the user-requested reset/boot protocol is revised in this change.
-    assert [t for t in current[:len(old)] if t['name'] != 'phone-daily-full-boot'] == [t for t in old if t['name'] != 'phone-daily-full-boot']
+    # Sync retains every row from the reviewed main snapshot; phone tasks append only.
+    assert current[:len(old)] == old
 
 
 def test_private_boot_collector_rejects_production_before_subprocess(monkeypatch):
@@ -272,7 +272,9 @@ def test_batch_cleanup_accepts_only_proven_precreation_failure():
 
     def result(metadata):
         return TaskResult(name='browser-auth-doordash-cloud-iphone', passed=False, agent_id='', status='ERROR', progress_score=0, duration_seconds=0, cost_cents=0, message_count=0, failure_reason='fixture failed', stop_metadata=metadata)
-    asyncio.run(runner._finalize_owned_cloud_batch('http://127.0.0.1:3100', [result({'root_creation_attempted': False})], {}))
+    proven = result({'root_creation_attempted': False})
+    proven.graded_root_creation_outcome = 'not_started'
+    asyncio.run(runner._finalize_owned_cloud_batch('http://127.0.0.1:3100', [proven], {}))
     for metadata in ({}, {'root_creation_attempted': True}):
         with pytest.raises(RuntimeError, match='unknown root creation'):
             asyncio.run(runner._finalize_owned_cloud_batch('http://127.0.0.1:3100', [result(metadata)], {}))

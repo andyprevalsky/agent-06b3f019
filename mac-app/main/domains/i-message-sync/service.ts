@@ -1,5 +1,5 @@
 import { MessageTransformer } from '../../services/messaging/MessageTransformer';
-import { STALE_SYNC_THRESHOLD_MS } from './config';
+import { STALE_SYNC_THRESHOLD_MS, UPLOAD_CHUNK_MESSAGES } from './config';
 import {
   checkIMessageAccess,
   getIntegration,
@@ -8,12 +8,20 @@ import {
   isIntegrationConnected,
   readIMessages,
   readIMessagesSinceRowId,
+  startImessageProgressRun,
   toNormalizedMessages,
   uploadImessagePayload,
 } from './repo';
 import type { IntegrationConfig, NormalizedMessage, SyncEvent } from './types';
 
 const INTEGRATION_NAME = 'imessage';
+
+/** Largest ROWID in a batch. A loop, not Math.max(...ids): spreading ~125k+ ids overflows the stack. */
+function maxRowId(ids: Iterable<number>, floor: number): number {
+  let max = floor;
+  for (const id of ids) if (id > max) max = id;
+  return max;
+}
 
 /**
  * True if the iMessage integration is currently marked connected in cache.
@@ -53,12 +61,10 @@ export async function fetchNewMessagesSinceRowId(
 ): Promise<{ messages: NormalizedMessage[]; newMaxRowId: number }> {
   const rawMessages = await readIMessagesSinceRowId(lastSyncRowId);
 
-  let newMaxRowId = lastSyncRowId;
-  if (rawMessages.length > 0) {
-    const maxId = Math.max(...rawMessages.map((m) => m.id));
-    if (maxId > newMaxRowId) newMaxRowId = maxId;
-  }
-
+  const newMaxRowId = maxRowId(
+    rawMessages.map((m) => m.id),
+    lastSyncRowId
+  );
   return { messages: toNormalizedMessages(rawMessages), newMaxRowId };
 }
 
@@ -163,6 +169,8 @@ export async function runFullSync(): Promise<SyncResult> {
     return { uploaded: false, newMaxRowId: null };
   }
 
+  // Sync progress: messages uploaded of the messages read from chat.db this run.
+  let progress: ReturnType<typeof startImessageProgressRun> | null = null;
   try {
     const integration = await getIntegration(INTEGRATION_NAME);
     const skipReason = shouldSkipScheduledSync(integration);
@@ -178,6 +186,7 @@ export async function runFullSync(): Promise<SyncResult> {
     console.log(
       `[IMessageSync] Reading messages${isIncrementalSync ? ` since ${lastAccessedAt}` : ' (full sync)'}`
     );
+    const syncStartedAt = new Date().toISOString();
     const messages = await readIMessages(lastAccessedAt, isIncrementalSync);
 
     if (messages.length === 0) {
@@ -186,18 +195,38 @@ export async function runFullSync(): Promise<SyncResult> {
     }
 
     console.log(`[IMessageSync] Found ${messages.length} new messages, uploading...`);
-    const result = await uploadImessagePayload(messages, session.access_token);
-
-    if (!result.success) {
-      console.error('[IMessageSync] Sync failed:', result.message);
-      return { uploaded: false, newMaxRowId: null };
+    progress = startImessageProgressRun();
+    const total = messages.length;
+    const token = session.access_token;
+    await progress.report({ state: 'syncing', unit: 'messages', done: 0, total }, token);
+    // Bounded requests; every one carries the sync start as its cursor and only
+    // the last marks the sync complete, so a failure part-way resumes from the
+    // previous cursor instead of skipping the history that was never sent.
+    const accessedAt = syncStartedAt;
+    for (let start = 0; start < total; start += UPLOAD_CHUNK_MESSAGES) {
+      const end = Math.min(start + UPLOAD_CHUNK_MESSAGES, total);
+      const result = await uploadImessagePayload(messages.slice(start, end), token, {
+        accessedAt,
+        syncComplete: end === total,
+      });
+      if (!result.success) {
+        console.error('[IMessageSync] Sync failed:', result.message);
+        await progress.report({ state: 'failed', error: result.message ?? 'Upload failed' }, token);
+        return { uploaded: false, newMaxRowId: null };
+      }
+      if (end < total) await progress.report({ state: 'syncing', done: end }, token);
     }
 
+    await progress.report({ state: 'synced', done: total }, token);
     console.log('[IMessageSync] Sync complete');
-    const newMaxRowId = Math.max(...messages.map((m) => m.id));
+    const newMaxRowId = maxRowId(
+      messages.map((m) => m.id),
+      0
+    );
     return { uploaded: true, newMaxRowId };
   } catch (error) {
     console.error('[IMessageSync] Error during sync:', error);
+    await progress?.report({ state: 'failed', error: String(error) }, session.access_token);
     return { uploaded: false, newMaxRowId: null };
   }
 }

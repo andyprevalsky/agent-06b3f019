@@ -1,8 +1,8 @@
 /** Shared message creation for API routes, workers, and chat handlers. */
 
 import { Prisma, type Message } from '@prisma/client';
-import { createHash } from 'node:crypto';
 import { broadcastMessageInsert } from './chat/supabaseBroadcast';
+import { idempotentMessageId } from './messageIdempotency';
 import { prisma, runTransactionWithRetry } from './database';
 import { createLogger } from './logger';
 import {
@@ -15,26 +15,11 @@ import {
 } from './toolLifecycleMessages';
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
 import { scheduleMessageGmvCapture } from './messageGmvCapture';
+import { type CreateMessageParams, storableMessageParams, withoutNulJson } from './messageParams';
 
 const log = createLogger('Messages');
 
-export interface CreateMessageParams {
-  agentId: string;
-  text: string;
-  role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
-  metadata?: Record<string, unknown> | null;
-  filePointer?: object | null;
-  /** The caller generated a unique toolCallId inside a non-retried request. */
-  skipDuplicateToolCheck?: boolean;
-  /** Finalize lifecycle writes that do not belong to the Agent's current workflow. */
-  enforceCurrentWorkflowGeneration?: boolean;
-  /** Server-only authority to create a deployment fence. */
-  allowDeploymentFinalizer?: boolean;
-  /** Immutable Temporal Workflow ID that produced an internal message. */
-  workflowGeneration?: string;
-  /** Test/internal batch control; persistence semantics are unchanged. */
-  skipBroadcast?: boolean;
-}
+export type { CreateMessageParams };
 
 async function findDuplicateToolMessage(params: CreateMessageParams) {
   if (params.role !== 'TOOL' || (params.filePointer !== undefined && params.filePointer !== null)) {
@@ -65,15 +50,6 @@ async function findDuplicateToolMessage(params: CreateMessageParams) {
   return (
     candidates.find((candidate) => metadataEquals(params.metadata, candidate.metadata)) ?? null
   );
-}
-
-function idempotentMessageId(params: CreateMessageParams): string | null {
-  if (params.role !== 'USER' || params.metadata?.isResponseSchemaUpdate !== true) return null;
-  const key = stringMetadataValue(params.metadata, 'idempotencyKey');
-  if (key === null) return null;
-  const hex = createHash('sha256').update(`${params.agentId}:${key}`).digest('hex').slice(0, 32);
-  const variant = ((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20)}`;
 }
 
 async function findIdempotentMessage(params: CreateMessageParams) {
@@ -181,14 +157,24 @@ export async function createUserMessageInTransaction(
   tx: Prisma.TransactionClient,
   params: Pick<CreateMessageParams, 'agentId' | 'text' | 'metadata'>
 ): Promise<Message> {
-  return (await persistOrdinaryMessage({ ...params, role: 'USER' }, null, tx)).message;
+  return (
+    await persistOrdinaryMessage(storableMessageParams({ ...params, role: 'USER' }), null, tx)
+  ).message;
 }
 
 /** Create, deduplicate, fence, persist, and broadcast one message. */
 export async function createMessage(params: CreateMessageParams): Promise<Message> {
+  return (await createMessageOnce(params)).message;
+}
+
+/** Persist once after canonical authored-input normalization; signal only on creation. */
+export async function createMessageOnce(
+  input: CreateMessageParams
+): Promise<{ message: Message; created: boolean }> {
+  const params = storableMessageParams(input);
   const idempotentId = idempotentMessageId(params);
   const idempotentDuplicate = await findIdempotentMessage(params);
-  if (idempotentDuplicate !== null) return idempotentDuplicate;
+  if (idempotentDuplicate !== null) return { message: idempotentDuplicate, created: false };
 
   const lifecycle = toolLifecycleIdentity(params);
   const result =
@@ -196,14 +182,16 @@ export async function createMessage(params: CreateMessageParams): Promise<Messag
       ? await persistOrdinaryMessage(params, idempotentId)
       : await persistToolLifecycleMessage(params, lifecycle);
   if (!result.created) {
+    if ('updated' in result && result.updated === true && params.skipBroadcast !== true)
+      broadcastCreatedMessage(params, result.message);
     logUncreatedMessageWrite(params, result.message);
-    return result.message;
+    return { message: result.message, created: false };
   }
   if (params.skipBroadcast !== true) broadcastCreatedMessage(params, result.message);
   // Browser (and other tool) completions carry structured_response on the FINISHED
   // TOOL row — harvest paid-order GMV when amount + confirmation id are both present.
   scheduleMessageGmvCapture(params);
-  return result.message;
+  return { message: result.message, created: true };
 }
 
 export interface WorkflowMessageGroupResult {
@@ -215,6 +203,7 @@ interface PersistedWorkflowMessage {
   message: Message;
   created: boolean;
   accepted: boolean;
+  updated?: boolean;
 }
 
 interface PersistedWorkflowMessageGroup {
@@ -281,7 +270,7 @@ function broadcastWorkflowMessageGroup(
   result: PersistedWorkflowMessageGroup
 ): void {
   if (params.skipBroadcast === true) return;
-  if (result.main !== null && result.main.created) {
+  if (result.main !== null && (result.main.created || result.main.updated === true)) {
     broadcastCreatedMessage(params, result.main.message);
   }
   for (const attachment of result.attachments) {
@@ -306,10 +295,12 @@ function broadcastWorkflowMessageGroup(
  * createMessage and are deliberately not generation-fenced.
  */
 export async function createWorkflowMessageGroup(
-  params: CreateMessageParams,
-  attachments: Array<Record<string, unknown>>,
+  input: CreateMessageParams,
+  inputAttachments: Array<Record<string, unknown>>,
   workflowGeneration: string
 ): Promise<WorkflowMessageGroupResult> {
+  const params = storableMessageParams(input);
+  const attachments = withoutNulJson(inputAttachments);
   const stampedParams: CreateMessageParams = {
     ...params,
     workflowGeneration,

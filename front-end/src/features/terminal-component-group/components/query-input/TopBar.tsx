@@ -2,7 +2,8 @@
  * STATE MACHINE: TopBar
  *
  * VISIBILITY STATE:
- * [BASE_CONTROLS] --> always renders write-lock (far left), toolset (wrench, left of fast mode), cost, context, settings
+ * [BASE_CONTROLS] --> always renders write-lock (far left), toolset (wrench, left of fast mode), cost, context,
+ *                     report bug (admin only, its own icon left of the gear), settings
  *     |
  *     +--> [TEST_PROMPTS_VISIBLE] when parent says viewport is desktop and account is dev/admin
  *     |      (doc icon, right after write-lock)
@@ -11,6 +12,9 @@
  *            (admin id, verified admin phone, or live impersonation)
  *     |
  *     +--> [SIMULATOR_VISIBLE] when parent says the account is simulator-allow-listed
+ *
+ * Stock UI only: Rose Desktop accounts get NubToolbar on the tab behind the
+ * query box instead (see QueryInput / ToolbarNub.tsx).
  *
  * TopBar owns layout only; account and viewport gating stay in QueryInputBody.
  */
@@ -21,12 +25,13 @@ import SimulatorToggle from '../SimulatorToggle';
 import RoseToolSetChip from '../RoseToolSetChip';
 import TestPromptsSelector from '../TestPromptsSelector';
 import AgentSettingsDialog from '../AgentSettingsDialog';
+import ReportBugDialog from '../ReportBugDialog';
 import { CostIndicator } from './CostIndicator';
 import { ContextMeter } from './ContextMeter';
 import type { AgentDetail } from '../../hooks';
 import type { UsePriceLimitResult } from './usePriceLimit';
 
-interface TopBarProps {
+export interface TopBarProps {
   agentDetail?: AgentDetail | null;
   onAgentUpdate?: () => void;
   onAgentDelete?: () => void;
@@ -100,6 +105,7 @@ export function TopBar({
           contextSize={contextSize}
           restartThreshold={restartThreshold}
         />
+        <ReportBugDialog agent={agentDetail ?? null} />
         <AgentSettingsDialog
           agent={agentDetail}
           onUpdate={onAgentUpdate}

@@ -1,6 +1,6 @@
 /** Parse agent-specific grep selectors. */
 import { InvalidGrepParamError } from './errors';
-import { parseGrepPath } from './path';
+import { agentTaskPathParam, parseGrepPath } from './path';
 import type {
   AgentNetworkGrepFilters,
   AgentTrajectoryGrepFilters,
@@ -48,6 +48,7 @@ export function parseAgentPaging(
 
 export function parseAgentNetworkFilters(params: GrepParams): AgentNetworkGrepFilters | undefined {
   const raw = { ...requireFilterObject(params) };
+  const taskPath = agentTaskPathParam(params.trace_path);
   if (params.role !== undefined) {
     if (
       raw.role !== undefined &&
@@ -57,7 +58,7 @@ export function parseAgentNetworkFilters(params: GrepParams): AgentNetworkGrepFi
     }
     raw.role = params.role;
   }
-  if (Object.keys(raw).length === 0) return undefined;
+  if (Object.keys(raw).length === 0) return taskPath === undefined ? undefined : { taskPath };
   rejectUnsupportedFilters('agent_network', raw);
   const rawPath = parseFilterString(raw, 'path');
   const parsed = rawPath === undefined ? undefined : parseGrepPath(rawPath);
@@ -71,6 +72,7 @@ export function parseAgentNetworkFilters(params: GrepParams): AgentNetworkGrepFi
   const path = parsed?.source === 'agent_network' ? parsed : undefined;
   if (path?.role === 'SYSTEM') throw new InvalidGrepParamError('filters.path');
   return {
+    taskPath,
     pathAgentId: path?.agentId,
     pathRole: path?.role,
     pathMessageId: path?.messageId,
@@ -100,15 +102,16 @@ export function parseAgentTrajectoryFilters(
   if (Object.keys(raw).length === 0) return undefined;
   rejectUnsupportedFilters('agent_trajectories', raw);
   const rawPath = parseFilterString(raw, 'path');
+  const taskPath = agentTaskPathParam(rawPath);
   const parsed =
-    rawPath === undefined
+    rawPath === undefined || taskPath !== undefined
       ? undefined
       : parseGrepPath(
           /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(rawPath)
             ? `agent_trajectories/${rawPath}`
             : rawPath
         );
-  if (rawPath !== undefined && parsed?.source !== 'agent_trajectories') {
+  if (rawPath !== undefined && taskPath === undefined && parsed?.source !== 'agent_trajectories') {
     throw new InvalidGrepParamError('filters.path');
   }
   const path = parsed?.source === 'agent_trajectories' ? parsed : undefined;
@@ -126,11 +129,12 @@ export function parseAgentTrajectoryFilters(
   }
   if (
     recordKind !== undefined &&
-    !['all', 'message', 'llm_output', 'llm_context'].includes(recordKind)
+    !['all', 'message', 'llm_output', 'llm_context', 'code_event'].includes(recordKind)
   ) {
     throw new InvalidGrepParamError('filters.record_kind');
   }
   return {
+    taskPath,
     pathRootAgentId: path?.rootAgentId,
     pathAgentId: path?.agentId,
     pathRole: path?.role,

@@ -1,0 +1,70 @@
+{
+  "recorded_at_utc": "2026-10-15T21:03:50.936154+00:00",
+  "source_commit": "7e5505b671cc1ae04734c52462b1916268b2b6c4",
+  "normal_pool_model_observed": "qwen-3.8-27b",
+  "fixture_prompt_or_criteria_edits": false,
+  "exit_code": 1,
+  "wall_seconds": 141.9001367,
+  "tasks": [
+    {
+      "task": "sms-supervisor-closed-no-spawn",
+      "status": "FAILED",
+      "passed": false,
+      "duration_seconds": 24.2,
+      "suite": "predeploy",
+      "counts_for_deploy_eligibility": false
+    },
+    {
+      "task": "sms-supervisor-fill-form-searches-then-delegates",
+      "status": "FAILED",
+      "passed": false,
+      "duration_seconds": 45.1,
+      "suite": "predeploy",
+      "counts_for_deploy_eligibility": false
+    },
+    {
+      "task": "sms-supervisor-open-spawns-agent",
+      "status": "COMPLETED",
+      "passed": true,
+      "duration_seconds": 38.7,
+      "suite": "predeploy",
+      "counts_for_deploy_eligibility": false
+    }
+  ],
+  "failures": {
+    "closed": "Search round limit without attempt_completion; static completion failed; semantic judge not reached",
+    "fill_form": "Expected1 delegated agent, observed0; no grep or web search emitted"
+  },
+  "canonical_cleanup_verified_tasks": 3,
+  "positive_workflow_generations_SDK_terminal": 1,
+  "positive_browser_profile_allocations": 0,
+  "Hub_manifest_refs": 2,
+  "both_outbox_counts": 0,
+  "diagnostic_exits": [
+    0,
+    0,
+    0,
+    1,
+    0,
+    0
+  ],
+  "failed_diagnostic_retained": true,
+  "sealed_source_inputs": 281,
+  "private_LLM_dumps": 17,
+  "new_span_rows": 790,
+  "new_span_sha256": "ece7626afcce3ba7338a4fb30bc4b4761bc4e0b89fa20f8a8796feb0e8a03f72",
+  "original_history_prefixes_unchanged": true,
+  "exact_owned_teardown_verified": true,
+  "observed_births_absent": 240,
+  "initial_daemon_failure_and_exact_root_retirement_retained": true,
+  "complete_descendant_capture_proved": false,
+  "global_clean_claimed": false,
+  "retirement_proof_sha256": "b17e91f3029ac7cb7fb63a38b6254d4254b903fd2f6ab30c593b39ef43a227dd",
+  "private_archive_sha256": "e52c63bc5b87fbcd8c50a5883fd8ab4da15fe184ce9428de463cdbfe577f4620",
+  "private_archive_members_verified": 720,
+  "Menu_approval": "Pending/unapplied, original clock preserved",
+  "retrieval_proposal": "Withdrawn/unapplied, not reactivated",
+  "SMS_hardcoded_cost0_is_provider_billing": false,
+  "actual_provider_billing": "UNKNOWN",
+  "deployment_complete": false
+}
