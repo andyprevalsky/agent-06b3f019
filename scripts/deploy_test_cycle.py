@@ -273,6 +273,7 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
                            and gate.get("worker_transport") in {"local-isolated", "boxes-thread"}))
     lifecycle = "native-producer" if native_producer else "owned"
     native_cleanup_reference = None
+    worker_cleanup_owner = None
     with (folder / "output.log").open("wb") as output, (folder / 'stderr.log').open('wb') as stderr:
         try:
             code, timed_out, cancelled, lingering = run_command(gate["command"],
@@ -300,6 +301,10 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
             if result_path.stat().st_size > MAX_RECEIPT_BYTES:
                 raise ValueError('worker receipt exceeds transport limit')
             result = read(result_path)
+            if isinstance(result.get('cleanup_owner'), dict):
+                # A remote turn still owns the worker (boxes-thread cancel/expiry/no usable result).
+                # Capture it BEFORE validation can reject the receipt (finding 4449994487).
+                worker_cleanup_owner = result['cleanup_owner']
             if lifecycle == 'native-producer':
                 native_cleanup_reference = {
                     'result': str(result_path), 'native_directory': result.get('fleet_directory'),
@@ -321,6 +326,13 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
         complete = True
     else:
         reason = "missing complete case receipt"
+    if worker_cleanup_owner is not None:
+        # The remote owner must be reconciled before any other token may use that worker
+        # thread/root: no credit, and the existing resume guard refuses on lingering_group.
+        lingering = True
+        valid = False
+        complete = False
+        reason = reason or 'worker reported a retained remote cleanup owner'
     if native_producer and (not valid or not complete):
         # Native producers can intentionally retain recovery resources. Unknown
         # native cleanup must be reconciled before another attempt can resume.
@@ -339,7 +351,10 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
               "stderr_log": str(folder / 'stderr.log'), "token": token}
     result['lifecycle'] = lifecycle
     result['native_cleanup_reference'] = native_cleanup_reference
-    if native_producer and (timed_out or cancelled or lingering):
+    if worker_cleanup_owner is not None:
+        result['cleanup_owner'] = {'request_token': token, 'worker_cleanup_owner': worker_cleanup_owner,
+                                   'native_cleanup_reference': native_cleanup_reference}
+    elif native_producer and (timed_out or cancelled or lingering):
         result['cleanup_owner'] = {'request_token': token, 'worker_root': str(root / gate.get('cwd', '.')),
                                    'native_cleanup_reference': native_cleanup_reference}
     result['worker_evidence'] = worker_evidence

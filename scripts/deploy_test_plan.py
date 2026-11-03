@@ -17,6 +17,9 @@ from deploy_test_cycle import ROOT, QUICK, source, validate_plan, write
 from select_affected_tests import Selector, changed_files
 from deploy_test_bindings import generate as generate_bindings
 
+PLANNING_TIMEOUT_SECONDS = 300
+
+
 GRAPH_LANES = {
     'backend-coverage-blackbox': ['backend-unit', 'backend-blackbox'],
     'frontend-coverage-blackbox': ['frontend-vitest'],
@@ -65,7 +68,9 @@ def select(template: dict, changed: list[str], result: dict, binding: dict, base
         if result['all']:
             evidence.extend(result['reasons'] or ['dependency graph fallback ALL'])
         for lane in GRAPH_LANES.get(category, []):
-            if result['lanes'].get(lane):
+            if lane not in result['lanes']:
+                raise ValueError(f"{gate['name']}: graph lane {lane!r} is not defined by select_affected_tests")
+            if result['lanes'][lane]:
                 evidence.append(f"dependency graph {lane}: {len(result['lanes'][lane])} affected test units")
         if any(fnmatchcase(path, pattern) for path in changed for pattern in PATHS.get(category, [])):
             evidence.append('runtime/contract path trigger')
@@ -119,7 +124,7 @@ def standard_template() -> dict:
     result = subprocess.run([sys.executable, str(ROOT / "scripts/run_deploy_pipeline.py"),
         "plan", "--group", "all", "--backend", "--frontend", "--agents", "--smoke", "cloud",
         "--agentcard", "--live-probes", "--semantic-stack", "--e2b-smoke"],
-        cwd=ROOT, check=True, capture_output=True, text=True)
+        cwd=ROOT, check=True, capture_output=True, text=True, timeout=PLANNING_TIMEOUT_SECONDS)
     lanes = json.loads(result.stdout)["lanes"]
     gates = [{"name": lane["name"], "category": lane["name"], "command": lane["command"],
               "cwd": lane.get("cwd", "."), "env": lane.get("env", {}), "checks": [lane["name"]]}
@@ -134,7 +139,8 @@ def standard_template() -> dict:
                         command=[sys.executable, str(ROOT / 'scripts/deploy_test_backend.py')])
         if gate['name'] == 'smoke':
             tasks = subprocess.run(['bash', 'scripts/run-predeploy-cloud', '--list'], cwd=ROOT,
-                                   check=True, capture_output=True, text=True).stdout.splitlines()
+                                   check=True, capture_output=True, text=True,
+                                   timeout=PLANNING_TIMEOUT_SECONDS).stdout.splitlines()
             if not tasks or len(set(tasks)) != len(tasks):
                 raise ValueError('cloud smoke selector did not return an exact task inventory')
             gate.update(checks=tasks, native_cloud=True, case_protocol=True,

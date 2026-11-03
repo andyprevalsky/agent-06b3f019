@@ -32,7 +32,9 @@ class Selection(unittest.TestCase):
                          for i,n in enumerate(['be','fe','smoke'])}
         self.bindings['smoke'].update(transport='benchmark-cloud-cli',
                                      command=['bash','scripts/run-predeploy-cloud'])
-        self.result = {'all':False,'reasons':[], 'lanes':{'backend-unit':['test-one'],'frontend-vitest':[]}}
+        self.result = {'all':False,'reasons':[],
+                       'lanes':{lane: [] for lanes in p.GRAPH_LANES.values() for lane in lanes}}
+        self.result['lanes']['backend-unit'] = ['test-one']
         self.mock = patch.object(p,'source',return_value={'head':'fixed','digest':'fixed'});self.mock.start()
 
     def tearDown(self):
@@ -54,6 +56,32 @@ class Selection(unittest.TestCase):
         self.result.update(all=True,reasons=['unmapped source'])
         plan=p.select(self.template,['new-language/source'],self.result,self.bindings)
         self.assertEqual(7,len(plan['gates']))
+
+    def test_unknown_graph_lane_refuses_selection_instead_of_silently_omitting_coverage(self):
+        del self.result['lanes']['backend-blackbox']
+        for all_lanes in (False, True):
+            with self.subTest(all_lanes=all_lanes):
+                self.result['all'] = all_lanes
+                with self.assertRaisesRegex(ValueError, "be: graph lane 'backend-blackbox' is not defined"):
+                    p.select(self.template, ['docs/guide.md'], self.result, self.bindings)
+
+    def test_both_native_planning_children_have_a_finite_observation_bound(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); scripts = root / 'scripts'; scripts.mkdir()
+            pipeline = scripts / 'run_deploy_pipeline.py'
+            smoke = scripts / 'run-predeploy-cloud'
+            for blocked_child in ('plan', 'smoke'):
+                with self.subTest(blocked_child=blocked_child):
+                    pipeline.write_text(
+                        'import json,time\n' + ('time.sleep(2)\n' if blocked_child == 'plan' else '')
+                        + 'print(json.dumps({"lanes":[{"name":"smoke","command":["original-smoke"]}]}))\n')
+                    smoke.write_text(
+                        'exec ' + sys.executable + " -c 'import time; time.sleep(2); print(\"original-task\")'\n"
+                        if blocked_child == 'smoke' else "printf 'original-task\\n'\n")
+                    with patch.object(p, 'ROOT', root), patch.object(
+                            p, 'PLANNING_TIMEOUT_SECONDS', 0.05, create=True):
+                        with self.assertRaises(subprocess.TimeoutExpired):
+                            p.standard_template()
 
     def test_documentation_only_keeps_quick_phase(self):
         self.result['lanes']['backend-unit']=[]
@@ -167,7 +195,9 @@ class Selection(unittest.TestCase):
         folder = Path(self.workers.name)
         tpl, bindings, output = (folder / name for name in ('template.json', 'workers.json', 'plan.json'))
         tpl.write_text(json.dumps(template)); bindings.write_text(json.dumps(self.bindings))
-        selected = SimpleNamespace(all_lanes=False, reasons=[], selected={'backend-unit': {'one'}})
+        selected_lanes = {lane: set() for lanes in p.GRAPH_LANES.values() for lane in lanes}
+        selected_lanes['backend-unit'] = {'one'}
+        selected = SimpleNamespace(all_lanes=False, reasons=[], selected=selected_lanes)
         with patch.object(p, 'ROOT', root), patch.object(selector, 'ROOT', root), \
                 patch.object(quick, 'ROOT', root), patch.object(p, 'Selector') as factory, \
                 patch.dict(os.environ, {'DEPLOY_BASE_REF': 'origin/main',

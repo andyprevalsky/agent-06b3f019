@@ -55,6 +55,60 @@ class Worker(unittest.TestCase):
         self.coordinator_temp.cleanup()
         self.temp.cleanup()
 
+    def test_remote_cleanup_owner_in_an_otherwise_passing_result_is_unverified_and_blocks_resume(self):
+        # CodeRabbit 4449994487: a boxes-thread (native-backend) gate is not a native producer; the adapter's
+        # cleanup_owner must survive validate_result's rejection and mark the occurrence lingering.
+        gate = {'name': 'backend-coverage-blackbox', 'checks': ['first'], 'command': ['adapter'], 'case_protocol': True, 'cwd': '.',
+                'category': 'backend-coverage-blackbox', 'worker_transport': 'boxes-thread', 'native_backend': True,
+                'worker_thread': 'ph-worker', 'worker_root': '/prepared/root', 'worker_recipe': {'cases': {'first': {'command': ['true']}}}}
+        state = {'phase': 'initial', 'round': 0, 'skips': {}, 'source': {'head': 'a' * 40, 'digest': 'b' * 64},
+                 'input_fingerprints': {'backend-coverage-blackbox': 'fp'}}
+        owner = {'worker_thread': 'ph-worker', 'worker_host': 'devbox-a', 'worker_root': '/prepared/root',
+                 'request_token': None, 'message_id': 'peer_1', 'turn_id': 'turn-7', 'remote_dir': '/prepared/root/.context/deploy-boxes/t', 'pgid': 4242}
+        def launch(_argv, **kwargs):
+            self.assertTrue(kwargs['owned_lifecycle'])
+            request = cycle.read(Path(kwargs['env']['DEPLOY_GATE_REQUEST']))
+            owner['request_token'] = request['token']
+            result = {key: request[key] for key in ('token', 'source', 'gate')}
+            # otherwise-passing case map, but the remote turn still owns the worker: cleanup not complete
+            result.update(cases={'first': 'PASS'}, complete=True, cleanup_complete=False, reused=False,
+                          reason='original deadline passed before a terminal turn', cleanup_owner=dict(owner))
+            cycle.write(Path(kwargs['env']['DEPLOY_GATE_RESULT']), result)
+            return 0, False, False, False
+        with patch.object(cycle, 'run_command', side_effect=launch):
+            result = cycle.execute(gate, state, self.coordinator / '.context/remote-owner', self.coordinator)
+        self.assertEqual({'first': 'UNVERIFIED'}, result['cases']); self.assertFalse(result['complete'])
+        self.assertTrue(result['lingering_group']); self.assertEqual('owned', result['lifecycle'])
+        self.assertEqual(result['token'], result['cleanup_owner']['request_token'])
+        self.assertEqual(owner, result['cleanup_owner']['worker_cleanup_owner'])
+        for field in ('worker_thread', 'turn_id', 'pgid', 'worker_root'):
+            self.assertEqual(owner[field], result['cleanup_owner']['worker_cleanup_owner'][field])
+        # the existing resume guard refuses another token on that worker thread/root while the owner is retained
+        plan = {'source': state['source'], 'gates': [gate]}
+        saved = {**state, 'plan': plan, 'plan_digest': cycle.digest(plan), 'phase': 'interrupted', 'resume_phase': 'initial',
+                 'ready': False, 'attempts': [{'phase': 'initial', 'results': [result], 'interrupted': True}],
+                 'failures': [], 'repair_gates': [], 'environment': cycle.environment_digest()}
+        directory = self.coordinator / '.context/remote-owner-state'; cycle.write(directory / 'cycle.json', saved)
+        cycle.write(directory / 'plan.json', plan)
+        with patch.object(cycle, 'validate_plan'), patch.object(cycle, 'run_phase') as run_phase:
+            code = cycle.main(['resume', '--plan', str(directory / 'plan.json'), '--state-dir', str(directory), '--root', str(self.coordinator)])
+        self.assertEqual(2, code); run_phase.assert_not_called()
+
+    def test_clean_generic_result_without_remote_owner_still_passes(self):
+        gate = {'name': 'generic', 'checks': ['first'], 'command': ['fixture'], 'case_protocol': True, 'category': 'generic'}
+        state = {'phase': 'initial', 'round': 0, 'skips': {}, 'source': {'head': 'a' * 40, 'digest': 'b' * 64},
+                 'input_fingerprints': {'generic': 'fp'}}
+        def launch(_argv, **kwargs):
+            request = cycle.read(Path(kwargs['env']['DEPLOY_GATE_REQUEST']))
+            result = {key: request[key] for key in ('token', 'source', 'gate')}
+            result.update(cases={'first': 'PASS'}, complete=True, cleanup_complete=True, reused=False)
+            cycle.write(Path(kwargs['env']['DEPLOY_GATE_RESULT']), result)
+            return 0, False, False, False
+        with patch.object(cycle, 'run_command', side_effect=launch):
+            result = cycle.execute(gate, state, self.coordinator / '.context/clean-generic', self.coordinator)
+        self.assertEqual(('PASS', True, False, 'owned'), (result['status'], result['complete'], result['lingering_group'], result['lifecycle']))
+        self.assertNotIn('cleanup_owner', result)
+
     def test_native_producer_and_generic_use_their_declared_cleanup_authority(self):
         for kind in ('generic', 'cloud', 'agentcard'):
             native = kind in {'cloud', 'agentcard'}
