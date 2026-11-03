@@ -4885,27 +4885,54 @@ async def _run_with_agent_execution_backstop(
     started_at = asyncio.get_running_loop().time() if started_at is None else started_at
     deadline = started_at + seconds
     execution = asyncio.create_task(execute(snapshot))
+    original_error = None
     try:
         finished, _ = await asyncio.wait({execution}, timeout=max(0.0, deadline - asyncio.get_running_loop().time()))
         if finished:
             return await execution
+    except BaseException as error:
+        original_error = error
+    if original_error is None:
         print(f"    ⏰ Agent execution deadline reached after {seconds}s; cancelling poll")
-        # asyncio.timeout_at waits for cancellation to propagate. A provider
-        # coroutine can absorb that cancellation during reconnect/close and
-        # keep the entire benchmark alive. Retry within a separate finite
-        # grace period, then surface INFRA if it still owns execution.
+
+    # Both deadline expiry and external cancellation own the same finite drain.
+    # Repeated caller cancellation must neither abandon it nor restart its grace.
+    grace_end = asyncio.get_running_loop().time() + 5.0
+
+    async def drain_execution():
         for _ in range(5):
+            remaining = grace_end - asyncio.get_running_loop().time()
+            if execution.done() or remaining <= 0:
+                break
             execution.cancel()
-            finished, _ = await asyncio.wait({execution}, timeout=1.0)
+            finished, _ = await asyncio.wait({execution}, timeout=min(1.0, remaining))
             if finished:
                 break
         if not execution.done():
-            raise RuntimeError(f"Agent execution did not stop after {seconds}s wall-clock backstop")
-        await asyncio.gather(execution, return_exceptions=True)
-    except BaseException:
-        if not execution.done():
-            execution.cancel()
-        raise
+            raise RuntimeError("Agent execution did not stop after bounded cancellation")
+
+    cleanup = asyncio.create_task(drain_execution())
+    while True:
+        try:
+            await asyncio.shield(cleanup)
+            break
+        except asyncio.CancelledError as error:
+            if original_error is None:
+                original_error = error
+            if cleanup.cancelled():
+                raise RuntimeError("Agent execution cleanup was cancelled before joining") from error
+        except BaseException as cleanup_error:
+            raise cleanup_error from original_error
+    try:
+        execution.result()
+    except asyncio.CancelledError:
+        pass
+    except BaseException as execution_error:
+        if execution_error is original_error:
+            raise
+        raise execution_error from original_error
+    if original_error is not None:
+        raise original_error
     # Stop paid work before diagnostics; the normal task path subsequently
     # waits for terminal browser evidence and performs payment/agent cleanup.
     if not await pause_agent(base_url, agent_id):
@@ -15273,41 +15300,53 @@ async def _run_single_task_as_run_user(
                     await post_attachment_message(base_url, agent_id, file_pointers)
                     print(f"    📎 Posted {len(file_pointers)} file(s) as agent message")
             await post_world_model_update_events(base_url, agent_id)
-            start_fixture_ref = await archive_agent_start(base_url, agent_id)
+
+            async def observe_agent():
+                if checkpoint_source_index is not None:
+                    if checkpoint_source_out is None:
+                        raise ValueError("checkpoint_source_out is required in checkpoint source mode")
+                    data = await poll_agent_until_message_index(
+                        base_url,
+                        agent_id,
+                        task,
+                        checkpoint_source_index,
+                        checkpoint_source_boundary,
+                    )
+                    messages = data.get("messages", []) or []
+                    export_checkpoint_source_from_local_db(
+                        agent_id,
+                        source_out=checkpoint_source_out,
+                        tree_out=checkpoint_tree_out,
+                    )
+                    duration = time.time() - start
+                    return TaskResult(
+                        name=task.name,
+                        passed=True,
+                        agent_id=agent_id,
+                        status=(data.get("agent") or {}).get("status", "PAUSED"),
+                        benchmark_status="PASSED",
+                        progress_score=(data.get("agent") or {}).get("progress", 0),
+                        duration_seconds=round(duration, 1),
+                        cost_cents=0,
+                        message_count=len(messages),
+                        failure_reason=None,
+                    )
+
+                return await _poll_agent(base_url, agent_id, task, realtime_monitor, snapshot)
+
+            # Archival is required, but must not hide a short-lived feedback trigger.
+            archive = asyncio.create_task(archive_agent_start(base_url, agent_id))
+            observation = asyncio.create_task(observe_agent())
+            try:
+                start_fixture_ref, result = await asyncio.gather(archive, observation)
+            finally:
+                for pending in (archive, observation):
+                    if not pending.done():
+                        pending.cancel()
+                await asyncio.gather(archive, observation, return_exceptions=True)
             if start_fixture_ref:
                 print(f"    🧊 Trace archive start fixture: {start_fixture_ref}")
-
-            if checkpoint_source_index is not None:
-                if checkpoint_source_out is None:
-                    raise ValueError("checkpoint_source_out is required in checkpoint source mode")
-                data = await poll_agent_until_message_index(
-                    base_url,
-                    agent_id,
-                    task,
-                    checkpoint_source_index,
-                    checkpoint_source_boundary,
-                )
-                messages = data.get("messages", []) or []
-                export_checkpoint_source_from_local_db(
-                    agent_id,
-                    source_out=checkpoint_source_out,
-                    tree_out=checkpoint_tree_out,
-                )
-                duration = time.time() - start
-                return TaskResult(
-                    name=task.name,
-                    passed=True,
-                    agent_id=agent_id,
-                    status=(data.get("agent") or {}).get("status", "PAUSED"),
-                    benchmark_status="PASSED",
-                    progress_score=(data.get("agent") or {}).get("progress", 0),
-                    duration_seconds=round(duration, 1),
-                    cost_cents=0,
-                    message_count=len(messages),
-                    failure_reason=None,
-                )
-
-            return await _poll_agent(base_url, agent_id, task, realtime_monitor, snapshot)
+            return result
 
         try:
             execution_result = await _run_with_agent_execution_backstop(

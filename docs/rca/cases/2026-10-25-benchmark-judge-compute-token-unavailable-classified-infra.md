@@ -93,3 +93,24 @@ proposal and the cooldown-policy changes were dropped.
 ## Reusable lesson
 
 When a benchmark consumer cannot obtain a shared compute token because the pool is exhausted or cooling down, raise a typed error that maps to the existing SKIPPED status with the exact reason, never an untyped error the campaign counts as infra.
+
+
+## November3 c492 availability qualification
+
+The native mass-agent task completed but its declared T7 GPT judge was not
+executed: local credential404 at03:52:07.774 UTC and production-authority
+404 at03:52:08.079-080 UTC produced the native SKIPPED row. Native artifact
+SHA2566e19790e83953002ee2a2f300d8447551cd327bfd15b25964bfd3c519ea50ac2
+remains immutable. Production read-only aggregates at01:05,04:12 and04:23
+recorded the sole CONNECTED pooled GPT token cooling until
+2026-11-04T07:59:37Z with no eligible CONNECTED alternative. Its updatedAt
+02:08:49.785 UTC predates the failed judge request; expired rows were last
+updated in October. The unchanged resolver correctly rejects that pool state.
+
+Gate: NOT_INTRODUCED for unavailable shared compute quota/cooldown. The exact
+native receipt and reason are qualified as SKIPPED_WITH_WARNING using
+compute_quota_exhausted; no billing-credit exhaustion, successful judge
+verdict, provider reset or repair delegation is claimed. Original outer FAIL
+and inner SKIPPED remain retained, with unverified judge coverage. Exact
+provider usage history and the originating reset event were not reconstructed.
+The closure packet is SHA2569c677fbd2343a5cfe739f9cf8ae4da1a4936d29ca06a2cffe6ec2f8894b05a45.

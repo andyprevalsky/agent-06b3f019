@@ -108,3 +108,34 @@ covers a fake 502, redaction, an environment change during fetch, one request
 only and an invalid URL. This is observation hardening, not a repair claim:
 the two original native failures and whole-task UNKNOWN attribution remain.
 A new unchanged task execution must supply the next result.
+
+
+## c492 recurrence: occurrence-bound external service qualification
+
+The later unchanged tasks retained their original failures: OTP agent
+3a51a2f8-6915-4dc9-b1e9-8a57feb3d525 timed out at the original900-second
+budget; member agentdf42da90-be6b-4769-a9e0-8243d4090fa5 failed
+subtotal1350-vs1500 before approval. All four native mail-send errors now
+recorded requestOrigin=https://api.primitive.dev, at03:46:11.883,
+03:48:03.582,03:57:40.494 and03:59:25.392 UTC. The unchanged documented
+request construction and the actual guest input-construction chain exclude
+an inherited Primitive key or full-base override: saved donor configuration,
+image ENV, boot environment, shared secret names and both guest script hashes
+lead to the verified serialized backend blob. No raw credential was exposed.
+A read-only ordinary-client probe with that same credential returned200,
+data.ready=true and the sendable sender domain at04:16:57 UTC. A separate
+Python-client Cloudflare1010 response was preserved as a client-signature
+refusal, not misclassified as credential rejection.
+
+This closes the new occurrence's configuration gap. Gate: NOT_INTRODUCED for
+the observed external outbound-mail operation failure. The controlling policy
+qualifies these exact two failed checks as external-provider warnings, never
+PASS, without claiming a service-wide outage, internal upstream root cause
+or that the full task would succeed if delivery were available. Earlier
+historical whole-task gaps remain unchanged. No source/provider change, send
+retry, budget or price-assertion change was used to obtain this disposition.
+
+Immutable closure packet SHA256:
+9c677fbd2343a5cfe739f9cf8ae4da1a4936d29ca06a2cffe6ec2f8894b05a45.
+Native OTP artifact SHA2562e3abef8aa76e9704e4b0ed519215c821428fe0f8080c9369e4fd9034c7dd316;
+native member artifact SHA2567d92d31d24d41cb799fe769a44f3d4f4a04d6933c3f3dc71d52d8c3f15c3aaa0.

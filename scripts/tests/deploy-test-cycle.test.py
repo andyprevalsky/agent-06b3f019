@@ -878,6 +878,71 @@ class Cycle(unittest.TestCase):
                                   'source': state['source'], 'log': 'y'}]})
         self.assertEqual(['cloudbench-controller'], c.retained_owners(state, ['cloudbench-controller']))
 
+    def missing_identity_recon_state(self):
+        state, plan, gate, occurrence, paths, shas, proof = self.recon_state()
+        original = {**proof['owner'], 'turn_id': None, 'message_id': None}
+        adapter = c.read(paths['adapter']); adapter['cleanup_owner'] = original
+        adapter['transport_receipt'].update(turn_id=None, message_id=None)
+        c.write(paths['adapter'], adapter)
+        receipt = state['attempts'][-1]['results'][0]
+        receipt.update(lingering_group=True, cleanup_owner={
+            'request_token': proof['request_token'], 'worker_cleanup_owner': original})
+        c.write(paths['receipt'], receipt)
+        proof.update(owner=original, receipt_sha256=c.sha_file(paths['receipt']),
+                     worker_result_sha256=c.sha_file(paths['adapter']))
+        send = paths['receipt'].parent / 'cached-send.json'
+        c.write(send, {'schemaVersion': 1, 'ok': True, 'operation': 'send',
+            'threadId': original['worker_thread'], 'disposition': 'started',
+            'turnId': 'fake-turn-id', 'messageId': 'fake-message-id'})
+        proof['send_receipt'] = {'path': str(send), 'sha256': c.sha_file(send)}
+        return state, occurrence, paths, proof
+
+    def test_missing_owner_identity_reconciles_only_hash_bound_same_turn_without_credit(self):
+        state, occurrence, paths, proof = self.missing_identity_recon_state()
+        before = copy.deepcopy(state['attempts'])
+        original_files = {k: p.read_bytes() for k, p in paths.items()}
+        c.reconcile(state, occurrence['id'], proof)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertEqual(proof['owner'], entry['owner'])
+        self.assertIsNone(entry['owner']['turn_id']); self.assertIsNone(entry['owner']['message_id'])
+        self.assertEqual('fake-turn-id', entry['resolved_owner']['turn_id'])
+        self.assertEqual('fake-message-id', entry['resolved_owner']['message_id'])
+        self.assertEqual(proof['send_receipt'], entry['proof']['send_receipt'])
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual([], c.retained_owners(state, ['cloudbench-controller']))
+        self.assertEqual(before, state['attempts'])
+        self.assertEqual(original_files, {k: p.read_bytes() for k, p in paths.items()})
+        self.assertEqual('UNVERIFIED', state['attempts'][-1]['results'][0]['cases']['cloudbench-controller'])
+
+    def test_missing_owner_identity_send_proof_refusals_are_atomic(self):
+        state, occurrence, paths, proof = self.missing_identity_recon_state()
+        before = copy.deepcopy(state)
+        variants = [dict(proof, send_receipt={'path': proof['send_receipt']['path'], 'sha256': '0' * 64}),
+                    {k: v for k, v in proof.items() if k != 'send_receipt'}]
+        native = c.read(Path(proof['send_receipt']['path']))
+        for key, value in [('ok', False), ('operation', 'read'), ('threadId', 'other'),
+                           ('disposition', 'rejected'), ('turnId', 'other'), ('turnId', None),
+                           ('messageId', None)]:
+            path = paths['receipt'].parent / f'bad-{key}-{value}.json'
+            c.write(path, {**native, key: value})
+            variants.append({**proof, 'send_receipt': {'path': str(path), 'sha256': c.sha_file(path)}})
+        for variant in variants:
+            with self.subTest(proof=variant['send_receipt'] if 'send_receipt' in variant else None):
+                with self.assertRaises(ValueError):
+                    c.reconcile(state, occurrence['id'], variant)
+                self.assertEqual(before, state)
+        # A known identity is never replaced by a new platform send receipt.
+        owner = {**proof['owner'], 'message_id': 'known-other'}
+        adapter = c.read(paths['adapter']); adapter['cleanup_owner'] = owner; c.write(paths['adapter'], adapter)
+        receipt = state['attempts'][-1]['results'][0]
+        receipt['cleanup_owner']['worker_cleanup_owner'] = owner; c.write(paths['receipt'], receipt)
+        known = {**proof, 'owner': owner, 'receipt_sha256': c.sha_file(paths['receipt']),
+                 'worker_result_sha256': c.sha_file(paths['adapter'])}
+        before = copy.deepcopy(state)
+        with self.assertRaises(ValueError):
+            c.reconcile(state, occurrence['id'], known)
+        self.assertEqual(before, state)
+
     def test_reconciliation_refusals_are_atomic(self):
         state, plan, gate, occurrence, paths, shas, proof = self.recon_state()
         before = copy.deepcopy(state)

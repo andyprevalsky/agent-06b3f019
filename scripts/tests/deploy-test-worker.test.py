@@ -903,6 +903,81 @@ class Boxes(unittest.TestCase):
         result = self.run_adapter()
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual([], self.calls_of('send'))
 
+    def nested_assignment(self):
+        return {'schemaVersion': 1, 'ok': True, 'data': {
+            'thread': {'executionInstanceId': self.host, 'clientThreadId': 'ph-worker'},
+            'transcript': {'messages': [{'role': 'user', 'turnId': 'turn-1',
+                'text': self.boxes.build_prompt(self.request, self.binding)}]}}}
+
+    def test_initial_send_slice_timeout_adopts_nested_read_without_second_send(self):
+        self.configure(reply=self.reply(), send={'sleep': .6}, read=[
+            {'sleep': .6}, {'rc': 0, 'stdout': self.nested_assignment()}])
+        started = time.time()
+        with patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
+            result = self.run_adapter(deadline=5)
+        self.assertEqual({'first': 'PASS', 'second': 'PASS'}, result['cases'])
+        self.assertTrue(result['complete']); self.assertTrue(result['cleanup_complete'])
+        self.assertEqual(1, len(self.calls_of('send')))
+        self.assertEqual(2, len(self.calls_of('read')))
+        send = self.calls_of('send')[0]
+        self.assertEqual('tok-1', send[send.index('--idempotency-key') + 1])
+        self.assertEqual('turn-1', result['transport_receipt']['turn_id'])
+        directory = self.coordinator / '.context/deploy-boxes' / __import__('hashlib').sha256(b'tok-1').hexdigest()
+        state = cycle.read(directory / 'state.json')
+        self.assertGreaterEqual(state['deadline_at'], started + 5)
+        self.assertLess(state['deadline_at'], started + 5.2)
+        self.assertEqual('turn-1', state['turn_id'])
+
+    def test_initial_send_adoption_read_error_fails_closed_without_resending(self):
+        self.configure(reply=self.reply(), send={'sleep': .6}, read={'rc': 2, 'stderr': 'denied'})
+        with patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
+            result = self.run_adapter(deadline=5)
+        self.assertEqual('threads read exited 2', result['reason'])
+        self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+        self.assertEqual('tok-1', result['cleanup_owner']['request_token'])
+        self.assertEqual(1, len(self.calls_of('send'))); self.assertEqual(1, len(self.calls_of('read')))
+        self.assertEqual([], self.calls_of('wait')); self.assertEqual([], self.calls_of('result'))
+
+    def test_nested_read_host_accepts_only_consistent_bound_identities(self):
+        data = self.nested_assignment()['data']
+        self.assertIs(data, self.boxes._same_host(data, self.binding))
+        self.assertIsNotNone(self.boxes._same_host({'executionInstanceId': self.host}, self.binding))
+        self.assertIsNotNone(self.boxes._same_host({**data, 'executionInstanceId': self.host}, self.binding))
+        for changed in ({**data, 'executionInstanceId': 'other'},
+                        {**data, 'thread': {**data['thread'], 'executionInstanceId': 'other'}},
+                        {**data, 'thread': {**data['thread'], 'clientThreadId': 'other'}},
+                        {**data, 'thread': None}, {}):
+            with self.subTest(data=changed), self.assertRaises(ValueError):
+                self.boxes._same_host(changed, self.binding)
+
+    def test_initial_send_adoption_respects_original_deadline_without_resending(self):
+        self.configure(reply=self.reply(), send={'sleep': 3})
+        started = time.monotonic()
+        with patch.object(self.boxes, 'CLI_MAX_SECONDS', .15):
+            result = self.run_adapter(deadline=.6)
+        self.assertLess(time.monotonic() - started, .8)
+        self.assertEqual('send_indeterminate_unadopted', result['reason'])
+        self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+        self.assertEqual('tok-1', result['cleanup_owner']['request_token'])
+        self.assertEqual(1, len(self.calls_of('send')))
+        self.assertTrue(self.calls_of('read')); self.assertEqual([], self.calls_of('wait'))
+
+    def test_initial_send_adoption_cancel_retains_owner_without_resending(self):
+        self.configure(reply=self.reply(), send={'sleep': 3})
+        timer = threading.Timer(.35, self.boxes.CANCEL.set); timer.start()
+        started = time.monotonic()
+        try:
+            with patch.object(self.boxes, 'CLI_MAX_SECONDS', .15):
+                result = self.run_adapter(deadline=5)
+        finally:
+            timer.cancel(); timer.join()
+        self.assertLess(time.monotonic() - started, .8)
+        self.assertEqual('send_indeterminate_unadopted', result['reason'])
+        self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+        self.assertEqual('tok-1', result['cleanup_owner']['request_token'])
+        self.assertEqual(1, len(self.calls_of('send')))
+        self.assertEqual([], self.calls_of('wait')); self.assertEqual([], self.calls_of('result'))
+
     def test_missing_deadline_refuses_before_any_send(self):
         with self.assertRaisesRegex(ValueError, 'existing gate deadline'):
             self.boxes.execute(self.request, self.coordinator, self.binding, None)

@@ -205,7 +205,13 @@ def _send_envelope(stdout, binding):
 
 
 def _same_host(data, binding):
-    if data.get('executionInstanceId') != binding['worker_host']:
+    hosts = [data['executionInstanceId']] if 'executionInstanceId' in data else []
+    if 'thread' in data:
+        thread = data['thread']
+        if not isinstance(thread, dict) or thread.get('clientThreadId') != binding['worker_thread']:
+            raise ValueError('platform reports a different thread than the isolation binding')
+        hosts.append(thread.get('executionInstanceId'))
+    if not hosts or any(host != binding['worker_host'] for host in hosts):
         raise ValueError('platform reports a different devbox than the isolation binding')
     return data
 
@@ -421,6 +427,25 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
                           f'(canonical request {sizes["request_bytes"]} B, compressed {sizes["compressed"]})')
     def remaining():
         return state['deadline_at'] - state.get('completion_reserve_seconds', 0) - time.time()
+    def adopt_turn():
+        # A send may be accepted before its CLI receipt arrives. Read only; never resend.
+        while state.get('turn_id') is None:
+            if CANCEL.is_set() or remaining() <= 0:
+                raise subprocess.TimeoutExpired('threads read adoption', 0)
+            try:
+                code, out, _ = _cli(['threads', 'read', '--thread', thread, '--turns', '100', '--json'],
+                                    state, log, max(1, remaining()))
+            except subprocess.TimeoutExpired:
+                if CANCEL.is_set() or remaining() <= 0:
+                    raise
+            else:
+                if code != 0:
+                    raise ValueError(f'threads read exited {code}')
+                state['turn_id'] = _find_turn(_same_host(_envelope(out), binding), token)
+                write(state_path, state)
+            if state.get('turn_id') is None:
+                time.sleep(min(poll, max(0, remaining())))
+
     try:
         if state.get('turn_id') is None:
             code, out, err = _cli(LIST_ARGV, state, log, max(1, remaining()))
@@ -433,45 +458,41 @@ def _drive(request, binding, state, state_path, prompt, prompt_sha, log, poll, d
                 # Never resolve a host from a partial page: an old worker thread may sit on page 2.
                 return unverified(request, binding, state, 'thread_inventory_incomplete')
             resolve_host(inventory, binding)
-        while state.get('turn_id') is None and state.get('sent_attempted_at') is not None:
-            # Indeterminate earlier send: only adopt the existing turn; never start another attempt.
-            code, out, _ = _cli(['threads', 'read', '--thread', thread, '--turns', '100', '--json'],
-                                state, log, max(1, remaining()))
-            if code == 0:
-                state['turn_id'] = _find_turn(_same_host(_envelope(out), binding), token)
-                write(state_path, state)
-            if state.get('turn_id') is None:
-                if CANCEL.is_set() or remaining() <= 0:
-                    return unverified(request, binding, state, 'send_indeterminate_unadopted', cleanup_owner=True)
-                time.sleep(min(poll, max(0, remaining())))
+        if state.get('turn_id') is None and state.get('sent_attempted_at') is not None:
+            adopt_turn()
         if state.get('turn_id') is None:
             if state.get('sent_attempted_at') is None:
                 state['sent_attempted_at'] = time.time()
                 write(state_path, state)  # persisted BEFORE the CLI call
-            code, out, err = _cli(['threads', 'send', '--thread', thread, '--prompt-file',
-                                   str(directory / 'prompt.txt'), '--delivery', 'next',
-                                   '--idempotency-key', state['idempotency_key'], '--json'],
-                                  state, log, max(1, remaining()))
-            if code != 0:
-                typed, text = cli_error(out, err)
-                denied = any(word in typed.lower() for word in PERMISSION_CODES)
-                result = unverified(request, binding, state,
-                                    'transport_permission_denied' if denied else f'threads send exited {code}',
-                                    stderr=err.decode(errors='replace'))
-                result['transport_receipt']['cli_error'] = {'code': typed, 'text': text}
-                return result
-            payload = _send_envelope(out, binding)
-            state['message_id'] = payload.get('messageId') or payload.get('requestId')
-            state['turn_id'] = _turn(payload)
-            write(state_path, state)
-            if state['turn_id'] is None:
-                code, out, _ = _cli(['threads', 'read', '--thread', thread, '--turns', '100', '--json'],
-                                    state, log, max(1, remaining()))
-                state['turn_id'] = _find_turn(_same_host(_envelope(out), binding), token) if code == 0 else None
+            try:
+                code, out, err = _cli(['threads', 'send', '--thread', thread, '--prompt-file',
+                                       str(directory / 'prompt.txt'), '--delivery', 'next',
+                                       '--idempotency-key', state['idempotency_key'], '--json'],
+                                      state, log, max(1, remaining()))
+            except subprocess.TimeoutExpired:
+                log.write(b'native send slice expired; adopting the saved request token\n')
+                adopt_turn()
+            else:
+                if code != 0:
+                    typed, text = cli_error(out, err)
+                    denied = any(word in typed.lower() for word in PERMISSION_CODES)
+                    result = unverified(request, binding, state,
+                                        'transport_permission_denied' if denied else f'threads send exited {code}',
+                                        stderr=err.decode(errors='replace'))
+                    result['transport_receipt']['cli_error'] = {'code': typed, 'text': text}
+                    return result
+                payload = _send_envelope(out, binding)
+                state['message_id'] = payload.get('messageId') or payload.get('requestId')
+                state['turn_id'] = _turn(payload)
                 write(state_path, state)
-            if state['turn_id'] is None:
-                return unverified(request, binding, state, 'delivered send has no locatable turn',
-                                  cleanup_owner=True)
+                if state['turn_id'] is None:
+                    code, out, _ = _cli(['threads', 'read', '--thread', thread, '--turns', '100', '--json'],
+                                        state, log, max(1, remaining()))
+                    state['turn_id'] = _find_turn(_same_host(_envelope(out), binding), token) if code == 0 else None
+                    write(state_path, state)
+                if state['turn_id'] is None:
+                    return unverified(request, binding, state, 'delivered send has no locatable turn',
+                                      cleanup_owner=True)
         while True:
             if CANCEL.is_set():
                 return unverified(request, binding, state, 'adapter cancelled while the turn ran',

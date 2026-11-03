@@ -120,3 +120,26 @@ The private before/after proof is retained under
 The transport repair remains awaiting terminal-boundary source integration
 and a fresh qualified outer execution; no provider or benchmark assertion,
 timeout, concurrency or task command changes.
+
+
+## November3 accepted-send observation recurrence
+
+Source c492 requestff9d2c470d054772aa917ea34fdd0002 reached the remote
+worker, but its first20-second send slice expired before the acknowledgment
+was observed. The adapter retained an UNVERIFIED receipt with null turn and
+message identities. Same-key durable recovery identified the accepted turn;
+the original worker completed normally with a same-turn full platform result
+and clean native audit. No second task was sent and the original outcome was
+not changed into PASS.
+
+The transport now adopts the persisted token after that initial slice expires,
+inside the same original deadline and cancellation. Native nested read-host
+identity is accepted only with the bound thread, and conflicting claims fail
+closed. A SHA-bound native send receipt may resolve null identities for
+cleanup reconciliation only; all known original owner fields remain exact,
+the original owner stays immutable and resolved identity is recorded separately.
+The actual canonical reconciliation accepted the terminal audit and preserved
+the original adapter/coordinator bytes; legitimate execution recovery remains
+required. Integrated controls passed35 Boxes and77 Cycle tests once.
+Reviewed combined patch SHA256:
+6785313de8e2b5c30d2181c08af7fdde9e18e0486425dab6e5185a96e3a863e9.

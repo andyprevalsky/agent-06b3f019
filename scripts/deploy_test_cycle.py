@@ -700,7 +700,10 @@ def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
             or failure.get("native_result") != "UNVERIFIED" or failure.get("complete")):
         raise ValueError(f"{gate}: occurrence is not the gate's latest incomplete UNVERIFIED receipt")
     owner = receipt_owner(gate, receipt)
-    if not isinstance(owner, dict) or not all(isinstance(owner.get(k), str) and owner[k] for k in OWNER_IDENTITY):
+    if (not isinstance(owner, dict)
+            or not all(isinstance(owner.get(k), str) and owner[k] for k in OWNER_IDENTITY if k != "turn_id")
+            or not (isinstance(owner.get("turn_id"), str) and owner["turn_id"]
+                    or owner.get("turn_id") is None and "send_receipt" in proof)):
         raise ValueError(f"{gate}: no retained boxes-thread owner to reconcile (reconcile supports boxes-thread owners only)")
     receipt_path = Path(receipt.get("log", "")).parent / "receipt.json"
     adapter_path = Path(receipt.get("worker_result") or "")
@@ -724,11 +727,31 @@ def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
     if proof["platform_result"].get("sha256") != platform_sha or proof["native_audit"].get("sha256") != audit_sha \
             or proof["process"].get("sha256") != process_sha:
         raise ValueError("reconcile proof file hashes do not match the files on disk")
+    resolved_owner, send_proof = dict(owner), None
+    if "send_receipt" in proof:
+        try:
+            send_proof = proof["send_receipt"]
+            send = bounded_read(send_proof["path"], "send receipt")
+            if send_proof["sha256"] != sha_file(send_proof["path"]):
+                raise ValueError("send receipt hash mismatch")
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            raise ValueError(f"invalid send receipt proof: {error}")
+        if (send.get("ok") is not True or send.get("operation") != "send"
+                or send.get("threadId") != owner["worker_thread"]
+                or send.get("disposition") not in {"started", "queued"}
+                or not isinstance(owner.get("remote_dir"), str) or not owner["remote_dir"]
+                or not any(owner.get(k) is None for k in ("turn_id", "message_id"))):
+            raise ValueError("send receipt does not resolve a missing identity for the original worker")
+        for key, native_key in (("turn_id", "turnId"), ("message_id", "messageId")):
+            value = send.get(native_key)
+            if not isinstance(value, str) or not value or owner.get(key) not in (None, value):
+                raise ValueError("send receipt identity is missing or conflicts with the original owner")
+            resolved_owner[key] = value
     data = platform.get("data") if isinstance(platform.get("data"), dict) else {}
     text = (data.get("output") or {}).get("text") if isinstance(data.get("output"), dict) else None
     completed = data.get("completedAt")
     if (platform.get("ok") is not True or data.get("status") != "completed" or data.get("executionInstanceId") != owner["worker_host"]
-            or data.get("turnId") != owner["turn_id"] or not _finite(completed) or not isinstance(text, str)):
+            or data.get("turnId") != resolved_owner["turn_id"] or not _finite(completed) or not isinstance(text, str)):
         raise ValueError("platform result is not a completed same-turn terminal result for the owner's host and turn")
     lines = text.split("\n")
     if (f"DEPLOY_GATE_RESULT_SHA256 {audit_sha}" not in lines or RESULT_BEGIN not in lines or RESULT_END not in lines
@@ -763,6 +786,10 @@ def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
                   "native_audit": {"path": proof["native_audit"]["path"], "sha256": audit_sha},
                   "process": {"path": proof["process"]["path"], "sha256": process_sha}},
         "confirmed_at": proof["confirmed_at"], "observed_by": proof["observed_by"], "credit_granted": False}
+    if send_proof is not None:
+        entry = state["reconciled_owners"][receipt_sha]
+        entry["resolved_owner"] = {k: resolved_owner.get(k) for k in OWNER_FIELDS}
+        entry["proof"]["send_receipt"] = {"path": send_proof["path"], "sha256": send_proof["sha256"]}
 
 
 def reexecute(state: dict, occurrence_id: str) -> None:
