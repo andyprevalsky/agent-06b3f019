@@ -1113,6 +1113,11 @@ def load_waves(run_dir: Path, deep: bool = True) -> dict:
             exp["rows"] += [{"status": "queued", "task_status": None, "infra_failure": None, "attempts": 0,
                              "terminal_attempts": 0, "infra_attempts": 0, "synthetic": True}] * (wave.get("copies") or 0)
     exp["native_audit"] = bool(wave_proofs) and all(sub.get("native_audit") for _, sub in wave_proofs)
+    exp["release_evidence_complete"] = bool(wave_proofs) and all(
+        sub.get("native_audit") or sub.get("physical_closure_asof") for _, sub in wave_proofs)
+    exp["physical_closure_waves"] = [
+        {"index": index, "evidence": sub["physical_closure_asof"]}
+        for index, sub in wave_proofs if sub.get("physical_closure_asof")]
     if wave_proofs and all(sub.get("physical_closure_asof") for _, sub in wave_proofs):
         exp["physical_closure_asof"] = {
             "observed_at": min(sub["physical_closure_asof"]["observed_at"] for _, sub in wave_proofs),
@@ -1504,11 +1509,12 @@ def _issues(exp: dict) -> list[dict]:
         out.append({"severity": "amber", "text": "No recorded task result: "
                     + ", ".join(job or "job ID UNRECORDED" for job in exp["unknown_jobs"]) + ".",
                     "owner": "parent", "action": "/RCA from the job log and controller receipts"})
-    if exp.get("unreleased_jobs") and not exp.get("native_audit") and not exp.get("physical_closure_asof"):
+    if (exp.get("unreleased_jobs") and not exp.get("native_audit")
+            and not exp.get("physical_closure_asof") and not exp.get("release_evidence_complete")):
         out.append({"severity": "amber", "text": "Release unverified: "
                     + ", ".join(job or "job ID UNRECORDED" for job in exp["unreleased_jobs"]) + ".",
                     "owner": "parent", "action": "native exact-owner audit before the next launch"})
-    if exp.get("physical_closure_asof"):
+    if exp.get("physical_closure_asof") or exp.get("physical_closure_waves"):
         out.append({"severity": "amber", "text": "Historical release/runtime evidence remains incomplete; separate physical closure is recorded as of its observation clock.",
                     "owner": "parent", "action": "retain original INFRA, runtime capture gaps and historical release counts; no historical success credit"})
     for item in exp["lifecycle"]:

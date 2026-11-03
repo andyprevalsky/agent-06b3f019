@@ -1104,11 +1104,11 @@ def test_does_not_persist_python_fingerprint_when_relocation_fails(
     assert not (repo / "agents/venv/.cloudbench-deps-fingerprint").exists()
 
 
-@pytest.mark.parametrize('case', ['disposable', 'cold-pool', 'warm-pool', 'reuse-only', 'pool-with-disposable-flag', 'snapshot', 'snapshot-primary', 'bad-receipt'])
+@pytest.mark.parametrize('case', ['disposable', 'cold-pool', 'warm-pool', 'reuse-only', 'pool-with-disposable-flag', 'snapshot', 'snapshot-primary', 'bad-receipt', 'pool-with-bad-receipt'])
 def test_fresh_image_preflight_only_checks_fresh_primary_consumers(tmp_path: Path, case: str) -> None:
     function = _extract_fleet_function(fleet_source_text(), 'fresh_image_deps_preflight() {')
     pool = tmp_path / 'pool.ids'
-    if case in {'cold-pool', 'warm-pool', 'reuse-only', 'pool-with-disposable-flag'}:
+    if case in {'cold-pool', 'warm-pool', 'reuse-only', 'pool-with-disposable-flag', 'pool-with-bad-receipt'}:
         pool.write_text('exact-pool-member\n')
     calls = tmp_path / 'calls'
     result = subprocess.run(['bash', '-c', f'''set -u
@@ -1126,13 +1126,13 @@ cloudbench_node_dependency_fingerprint() {{ printf node; }}
 cloudbench_manifest_fingerprint() {{ printf python; }}
 campaign_inventory_capture() {{ printf -v "$1" '%s' '[]'; }}
 fleet_admission_machines_json() {{ return 99; }}
-cloudbench_verify_image_dependency_receipt() {{ cat >/dev/null; printf '%s\n' "$*" >> {shlex.quote(str(calls))}; return {1 if case == 'bad-receipt' else 0}; }}
+cloudbench_verify_image_dependency_receipt() {{ cat >/dev/null; printf '%s\n' "$*" >> {shlex.quote(str(calls))}; return {1 if case in {'bad-receipt', 'pool-with-bad-receipt'} else 0}; }}
 {function}
 fresh_image_deps_preflight
 '''], text=True, capture_output=True, timeout=10)
-    required = case in {'disposable', 'cold-pool', 'bad-receipt'}
+    required = case in {'disposable', 'cold-pool', 'bad-receipt', 'pool-with-disposable-flag', 'pool-with-bad-receipt'}
     assert calls.exists() == required, result.stdout + result.stderr
-    assert (result.returncode == 0) == (case != 'bad-receipt'), result.stdout + result.stderr
+    assert (result.returncode == 0) == (case not in {'bad-receipt', 'pool-with-bad-receipt'}), result.stdout + result.stderr
 
 
 def test_rejects_branch_whose_manifests_do_not_match_donor_image(tmp_path: Path) -> None:

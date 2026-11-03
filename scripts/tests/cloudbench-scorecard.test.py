@@ -1937,6 +1937,18 @@ class WaveReleaseEvidence(unittest.TestCase):
         incomplete = self.load([{"physical_closure_asof": first}, {}])
         self.assertFalse(incomplete.get("physical_closure_asof"))
 
+    def test_mixed_terminal_proofs_do_not_require_another_release_audit(self):
+        closure = {"observed_at": T0, "subjects": 1, "all_resources_absent": False}
+        complete = self.load([{"native_audit": True}, {"physical_closure_asof": closure}])
+        self.assertFalse(complete.get("native_audit"))
+        self.assertFalse(complete.get("physical_closure_asof"))
+        self.assertFalse(any(i["text"].startswith("Release unverified") for i in CARD["_issues"](complete)))
+        self.assertTrue(complete["unreleased_jobs"], "physical closure must not rewrite historical release")
+        self.assertEqual(complete["physical_closure_waves"], [{"index": 1, "evidence": closure}])
+        self.assertTrue(any(i["text"].startswith("Historical release/runtime") for i in CARD["_issues"](complete)))
+        incomplete = self.load([{"native_audit": True}, {"physical_closure_asof": closure}, {}])
+        self.assertTrue(any(i["text"].startswith("Release unverified") for i in CARD["_issues"](incomplete)))
+
     def test_wave_prefix_does_not_duplicate_the_release_warning(self):
         exp = self.load([{}, {}])
         self.assertFalse(any("Wave 1: Guests released" in i["text"] for i in CARD["_issues"](exp)))
