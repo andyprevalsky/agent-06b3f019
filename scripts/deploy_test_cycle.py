@@ -662,6 +662,9 @@ def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
         return False
     try:
         entry = state.get("reconciled_owners", {}).get(sha_file(Path(log).parent / "receipt.json"))
+        if entry and entry.get("kind") == "native-cloud-cleanup-v1":
+            from deploy_test_native_cleanup import still_bound
+            return still_bound(entry, receipt, owner)
         return bool(entry) and entry.get("token") == receipt.get("token") and receipt.get("worker_result") \
             and entry.get("worker_result_sha256") == sha_file(receipt["worker_result"]) \
             and entry.get("owner") == {k: owner.get(k) for k in OWNER_FIELDS}
@@ -687,6 +690,10 @@ def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
     purposes only. Original receipt, adapter result, cases and outcome stay immutable; no test credit."""
     if not isinstance(proof, dict) or any(k in proof for k in RECONCILE_EXCLUSIVE):
         raise ValueError("reconcile input is a cleanup proof only; waivers, links, packets and flags are refused")
+    if proof.get("kind") == "native-cloud-cleanup-v1":
+        from deploy_test_native_cleanup import reconcile as reconcile_native
+        reconcile_native(state, occurrence_id, proof)
+        return
     required = ("receipt_sha256", "worker_result_sha256", "request_token", "owner", "platform_result", "native_audit",
                 "process", "confirmed_at", "observed_by")
     if any(k not in proof for k in required) or not isinstance(proof.get("observed_by"), str) or not proof["observed_by"].strip():

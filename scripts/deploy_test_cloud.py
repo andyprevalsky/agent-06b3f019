@@ -193,12 +193,11 @@ def execute(request, root):
     width = campaign_width(checks)
     if width < 1:
         raise ValueError('provider capacity cannot admit one smoke task')
-    use_campaign = width < len(checks)
     campaign = directory / 'campaigns' / ('deploy-' + directory.name)
     env = {**os.environ, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_SKIP_LOCAL_PATCH': '1',
            'RUN_BENCH_CAMPAIGN_ROOT': str(campaign.parent), 'RUN_BENCH_CAMPAIGN_ID': campaign.name,
            'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1'}
-    scheduling = ['--runs', '1', '--concurrency', str(width)] if use_campaign else ['--wait']
+    scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']
     argv = ['bash', 'scripts/run-bench', *checks, *scheduling, '--ref', request['source']['head']]
     started = time.time()
     with cancellation_handlers(), (directory / 'cli.log').open('wb') as log:
@@ -207,11 +206,8 @@ def execute(request, root):
     try:
         if timed_out or cancelled or lingering or source(root) != request['source']:
             raise ValueError('cloud command interrupted or source changed')
-        if use_campaign:
-            cases, details, cleaned, fleet = collect_campaign(
-                request, root, runs, campaign, started, code, width)
-        else:
-            cases, details, cleaned, fleet = collect(request, root, runs, started, code)
+        cases, details, cleaned, fleet = collect_campaign(
+            request, root, runs, campaign, started, code, width)
     except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
         cases, details, cleaned, fleet = dict.fromkeys(checks, 'UNVERIFIED'), {}, False, None
         reason = str(error)

@@ -943,6 +943,132 @@ class Cycle(unittest.TestCase):
             c.reconcile(state, occurrence['id'], known)
         self.assertEqual(before, state)
 
+    def native_recon_state(self):
+        import hashlib
+        import shutil
+        import time
+        from cloudbench_execution_provenance import build_config, build_task_matrix
+        state, plan, gate, occurrence, paths, shas, old_proof = self.recon_state()
+        gate['native_cloud'] = True
+        token, source = old_proof['request_token'], state['source']
+        runs = self.root / '.context/deploy-cloud' / hashlib.sha256(token.encode()).hexdigest() / 'runs'
+        runs.mkdir(parents=True)
+        hub = runs / '_hub/agent-link-server.8770.hub.owner'; hub.parent.mkdir()
+        hub_owner = dict(version='1', status='live-transfer-required', pid='1234', pgid='1234',
+            pid_start='proc-start:fixture:99', owner_token='hub', argv_sha256='c' * 64,
+            root=str(runs), runs_root=str(runs), repo_root=str(self.root), context_dir=str(hub.parent),
+            command=str(self.root / 'agents/benchmarks/agent_link_server.py'))
+        def text_fields(path, values):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(''.join(f'{k}={v}\n' for k, v in values.items()))
+        text_fields(hub, hub_owner)
+        def tree_hash(folder):
+            h = hashlib.sha256()
+            for file in sorted(folder.rglob('*'), key=lambda p: str(p.relative_to(folder))):
+                if file.is_file() and file.name != 'source-audit':
+                    for value in (str(file.relative_to(folder)).encode(), file.read_bytes()):
+                        h.update(len(value).to_bytes(8, 'big')); h.update(value)
+            return h.hexdigest()
+        files = [hub]
+        fleets = []
+        for ordinal, role in enumerate(('parent', 'canary')):
+            fleet = runs / role; fleets.append(fleet)
+            names = [gate['name']] if role == 'parent' else ['infra-probe']
+            owner = str(ordinal + 1) * 32
+            audit = fleet / 'teardown-ownership'; audit.mkdir(parents=True)
+            meta = dict(version='1', fleet_owner_token=owner, run_id=role, app='fixture',
+                workspace_root=str(self.root), status='provider-teardown-verified',
+                hub_disposition='retained-exact-owner-transfer-required', hub_owner_file=str(hub),
+                hub_owner_token='hub', hub_pid='1234', hub_pid_start=hub_owner['pid_start'], hub_argv_sha256='c' * 64)
+            text_fields(audit / 'meta', meta)
+            (audit / 'provider-teardown-verified.epoch').write_text('1793665721\n')
+            (audit / 'owned-clones.ids').write_text('machine1\n' if ordinal else '')
+            (audit / 'owned-clones.names').write_text('clone1\n' if ordinal else '')
+            if ordinal:
+                text_fields(audit / 'fresh/clone1', dict(fleet_owner_token=owner, run_id=role, app='fixture',
+                    source='fresh-clone', disposition='destroyed-provider-retained', machine_id='machine1',
+                    volume_id='vol_fixture', clone_name='clone1'))
+            for scaffold in ('pool', 'pool-handoffs', 'volume-migrations'):
+                (audit / scaffold).mkdir()
+            canonical = self.root / '.git/cloudbench-fleet-audits' / owner
+            shutil.copytree(audit, canonical)
+            seal = tree_hash(audit)
+            text_fields(audit / 'source-audit', dict(path=str(canonical), sha256=seal))
+            c.write(fleet / '_batch/lifecycle.json', dict(version=1, fleet_owner_token=owner, run_id=role,
+                workspace_root=str(self.root), status='failed' if not ordinal else 'verified',
+                controller_exit_code=1 if not ordinal else 0, audit_sha256=seal, hub_publication_failed=False))
+            c.write(fleet / '_batch/run.json', dict(tasks=[], status='failed' if not ordinal else 'passed'))
+            c.write(fleet / '_batch/disposable-cleanup.json', dict(schema='disposable-cleanup-v1', owner=owner,
+                guest_cleanup_missing=False, runtime_evidence_missing=False, successful_runtime_inferred=False))
+            matrix = build_task_matrix([name + '=real' for name in names])
+            config = build_config('cloudbench-fleet-config-v1', ['task_count=1', 'task_matrix_sha256=' + matrix['sha256']])
+            c.write(fleet / 'execution-task-matrix.json', matrix)
+            c.write(fleet / 'execution-provenance.json', dict(schema_version='cloudbench-execution-provenance-v1',
+                base_sha=source['head'], workspace_patch_sha256='none', config=config,
+                controller_snapshot=dict(schema_version='cloudbench-controller-snapshot-v1', sha256='d' * 64)))
+            (fleet / '_batch/benches.json').write_text(json.dumps([dict(name=name, mode='REAL') for name in names]))
+            files.extend(p for p in fleet.rglob('*') if p.is_file())
+            files.extend(p for p in canonical.rglob('*') if p.is_file())
+        log, status = runs / 'detached-fixture.log', runs / 'detached-fixture.status'
+        log.write_text(''.join(f'{self.root}/scripts/run-bench monitor {fleet} --controller-status {status}\n' for fleet in fleets))
+        status.write_text('1\n')
+        cli = runs.parent / 'cli.log'; cli.write_text(f'log: tail -f {log}\ncontroller exit marker: {status}\n')
+        receipt = state['attempts'][-1]['results'][0]
+        adapter = c.read(paths['adapter']); adapter.update(runner_log=str(cli), native_exit=1, started_at=1793664471.0)
+        c.write(paths['adapter'], adapter)
+        reference = dict(result=str(paths['adapter']), result_sha256=c.sha_file(paths['adapter']),
+                         native_directory=None, cleanup_complete=False, native_evidence={})
+        owner = dict(request_token=token, worker_root=str(self.root), native_cleanup_reference=reference)
+        receipt.update(lifecycle='native-producer', native_cleanup_reference=reference, cleanup_owner=owner, lingering_group=True)
+        c.write(paths['receipt'], receipt)
+        request = paths['receipt'].parent / 'request.json'
+        c.write(request, dict(token=token, source=source, gate=gate['name'], checks=[gate['name']]))
+        files.extend([request, log, status, cli])
+        proof = dict(kind='native-cloud-cleanup-v1', receipt_sha256=c.sha_file(paths['receipt']),
+            worker_result_sha256=c.sha_file(paths['adapter']), owner=copy.deepcopy(owner), request_token=token,
+            source=source, controller_log=str(log), confirmed_at=time.time(), observed_by='private-fixture',
+            files={str(p): c.sha_file(p) for p in files})
+        return state, occurrence, paths, proof, hub
+
+    def test_native_cloud_cleanup_overlay_preserves_failed_execution_and_retained_hub(self):
+        state, occurrence, paths, proof, hub = self.native_recon_state()
+        before = copy.deepcopy(state['attempts'])
+        original = {str(p): p.read_bytes() for p in [*paths.values(), *map(Path, proof['files'])]}
+        c.reconcile(state, occurrence['id'], proof)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted']); self.assertEqual(proof['owner'], entry['owner'])
+        self.assertEqual([], c.retained_owners(state, [occurrence['gate']]))
+        self.assertEqual('live-transfer-required', entry['retained_services'][0]['owner']['status'])
+        self.assertEqual(str(hub), entry['retained_services'][0]['path'])
+        self.assertEqual('triage', state['phase']); self.assertEqual(before, state['attempts'])
+        self.assertEqual(original, {str(p): p.read_bytes() for p in map(Path, original)})
+        changed_owner = {**proof['owner'], 'native_cleanup_reference': {'changed': True}}
+        self.assertFalse(c._reconciled(state, state['attempts'][-1]['results'][0], changed_owner))
+        hub.write_text(hub.read_text().replace('pid=1234', 'pid=9999'))
+        self.assertEqual([occurrence['gate']], c.retained_owners(state, [occurrence['gate']]))
+
+    def test_native_cloud_cleanup_proof_refusals_are_atomic(self):
+        state, occurrence, paths, proof, hub = self.native_recon_state()
+        before = copy.deepcopy(state)
+        variants = [{**proof, 'receipt_sha256': '0' * 64}, {**proof, 'worker_result_sha256': '0' * 64},
+            {**proof, 'request_token': 'other'}, {**proof, 'source': {}},
+            {**proof, 'owner': {**proof['owner'], 'native_cleanup_reference': {}}},
+            {**proof, 'files': {k: v for k, v in proof['files'].items() if k != str(hub)}},
+            {**proof, 'confirmed_at': 1}, {**proof, 'confirmed_at': float('inf')},
+            {**proof, 'controller_log': str(self.root / 'foreign.log')}]
+        for variant in variants:
+            with self.subTest(proof=variant), self.assertRaises(ValueError):
+                c.reconcile(state, occurrence['id'], variant)
+            self.assertEqual(before, state)
+        unsupported = copy.deepcopy(state)
+        next(g for g in unsupported['plan']['gates'] if g['name'] == occurrence['gate']).pop('native_cloud')
+        with self.assertRaises(ValueError): c.reconcile(unsupported, occurrence['id'], proof)
+        self.assertEqual(before, state)
+        runs = Path(proof['controller_log']).parent
+        (runs / 'unrecorded').mkdir()
+        with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual(before, state)
+
     def test_reconciliation_refusals_are_atomic(self):
         state, plan, gate, occurrence, paths, shas, proof = self.recon_state()
         before = copy.deepcopy(state)

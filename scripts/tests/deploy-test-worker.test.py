@@ -505,10 +505,10 @@ class Cloud(unittest.TestCase):
         self.request.update(checks=['passing'],skips={'failing':{'disposition':'external / waived'}})
         with patch.object(self.cloud,'source',return_value=self.request['source']), \
              patch.object(self.cloud,'run_command',return_value=(0,False,False,False)) as launch, \
-             patch.object(self.cloud,'collect',return_value=({'passing':'PASS'},{},True,'native-run')):
+             patch.object(self.cloud,'collect_campaign',return_value=({'passing':'PASS'},{},True,'native-run')):
             result=self.cloud.execute(self.request,self.root)
         argv=launch.call_args.args[0]
-        self.assertEqual(['bash','scripts/run-bench','passing','--wait','--ref','a'*40],argv)
+        self.assertEqual(['bash','scripts/run-bench','passing','--runs','1','--concurrency','1','--retry-infra','0','--ref','a'*40],argv)
         self.assertNotIn('failing',argv)
         self.assertEqual('1',launch.call_args.kwargs['env']['CLOUDBENCH_SKIP_LOCAL_PATCH'])
         self.assertTrue(result['complete'])
@@ -634,6 +634,84 @@ class CloudCampaign(unittest.TestCase):
         self.assertEqual(dict.fromkeys(self.request['checks'],'PASS'),result['cases'])
         self.assertTrue(result['complete']);self.assertTrue(result['cleanup_complete'])
 
+    def execute_below_cap_campaign(self, count):
+        import runpy
+        import socket
+        capacity=runpy.run_path(str(ROOT/'scripts/cloudbench-provider-capacity.py'))
+        self.request['checks']=self.request['checks'][:count]
+        excluded=('browser-auth-member-discount-purchase','email-otp-signin')
+        self.request['skips']={name:{'disposition':'external / waived'} for name in excluded}
+        self.summary.update(task_count=count,total_jobs=count,concurrency=count,peak_concurrency=count,
+                            jobs=self.summary['jobs'][:count])
+        reservation_source=(ROOT/'scripts/run-bench-fleet').read_text()
+        start=reservation_source.index('capacity_reserve_slots() {')
+        body=reservation_source[reservation_source.index("<<'PY'\n",start)+len("<<'PY'\n"):].split('\nPY\n',1)[0]
+        commands=[]
+
+        def launch(argv, **kwargs):
+            commands.append(argv)
+            campaign='--runs' in argv
+            width=int(argv[argv.index('--concurrency')+1]) if campaign else count
+            self.assertEqual(0,capacity['check'](width,browser_provider='tilion'))
+            self.assertFalse(set(excluded)&set(argv))
+            slots=1 if campaign else count
+            ledger=self.root/('capacity-'+str(slots));ledger.mkdir()
+            # Execute the real admission predicate with native38/56 pressure;
+            # isolate machine count (sharedCPU0) in an empty private ledger.
+            admitted=subprocess.run([sys.executable,'-S','-c',body,str(ledger),'f'*32+'-test',
+                'private-fixture',socket.gethostname(),str(os.getpid()),'fixture-owner-birth',
+                'fixture-run','f'*32,str(ledger/'ownership'),str(slots+min(4,slots)),
+                '0','56','140','38','0','private-control'],capture_output=True,text=True)
+            if not campaign:
+                self.assertEqual(1,admitted.returncode,admitted.stdout+admitted.stderr)
+                self.assertIn('DENY_MACHINE',admitted.stdout)
+                target_runs=Path(kwargs['env']['CLOUDBENCH_RUNS_ROOT'])
+                for name in ('admission-stopped-parent','nested-canary'):
+                    (target_runs/name/'_batch').mkdir(parents=True)
+                return 1,False,False,False
+            self.assertEqual(0,admitted.returncode,admitted.stdout+admitted.stderr)
+            self.assertEqual('1',argv[argv.index('--runs')+1])
+            self.assertEqual('0',argv[argv.index('--retry-infra')+1])
+            self.assertNotIn('--wait',argv)
+            self.assertNotIn('--strict-start',argv)
+            self.assertEqual(str(count),argv[argv.index('--concurrency')+1])
+            self.assertEqual(self.request['source']['head'],argv[argv.index('--ref')+1])
+            target_runs=Path(kwargs['env']['CLOUDBENCH_RUNS_ROOT'])
+            target_campaign=Path(kwargs['env']['RUN_BENCH_CAMPAIGN_ROOT'])/kwargs['env']['RUN_BENCH_CAMPAIGN_ID']
+            target_campaign.mkdir(parents=True)
+            for index,job in enumerate(self.summary['jobs']):
+                destination=target_runs/f'fleet-{index}'
+                shutil.copytree(self.runs/f'fleet-{index}',destination)
+                canary=target_runs/f'canary-{index}'
+                shutil.copytree(destination,canary)
+                log=target_campaign/f'job-{index}.log'
+                log.write_text(f'{self.root}/scripts/run-bench monitor {destination}\n'
+                               f'{self.root}/scripts/run-bench monitor {canary}\n')
+                job['log']=str(log)
+            self.summary['campaign_id']=target_campaign.name
+            self.seal_campaign(target_campaign)
+            return 0,False,False,False
+
+        with patch.dict(os.environ,{'CLOUDBENCH_BROWSER_PROVIDER':'tilion','CLOUDBENCH_PROVIDER_LIMITS_FILE':str(ROOT/'scripts/cloudbench-provider-limits.json')}), \
+             patch.object(self.cloud,'source',return_value=self.request['source']), \
+             patch.object(self.cloud,'run_command',side_effect=launch), \
+             patch.object(self.cloud.time,'time',return_value=1):
+            result=self.cloud.execute(self.request,self.root)
+        self.assertEqual(dict.fromkeys(self.request['checks'],'PASS'),result['cases'])
+        self.assertEqual(count,len(result['evidence']))
+        self.assertTrue(result['complete']);self.assertTrue(result['cleanup_complete'])
+        self.assertEqual(self.request['source'],result['source'])
+        for name,detail in result['evidence'].items():
+            self.assertNotIn('canary-',detail['path'])
+            self.assertEqual(self.binding,cycle.read(Path(detail['path']))['execution_provenance'])
+        self.assertEqual(1,len(commands))
+
+    def test_execute_fifteen_under_cap_uses_native_campaign_receipts_with_canaries(self):
+        self.execute_below_cap_campaign(15)
+
+    def test_execute_single_check_uses_native_campaign_receipt_with_canary(self):
+        self.execute_below_cap_campaign(1)
+
     def test_parent_cleanup_and_publication_gaps_remain_incomplete(self):
         self.test_native_failure_stays_failed_and_passing_peers_remain_passed()
         for field,value in [('shared_inventory_failed',True),
@@ -657,7 +735,7 @@ class CloudCampaign(unittest.TestCase):
             result=self.cloud.execute(self.request,self.root)
         argv=launch.call_args.args[0]
         self.assertEqual(['bash','scripts/run-bench',*self.request['checks'],'--runs','1',
-                          '--concurrency','16','--ref','a'*40],argv)
+                          '--concurrency','16','--retry-infra','0','--ref','a'*40],argv)
         self.assertNotIn('--wait',argv);self.assertTrue(result['complete'])
 
 
