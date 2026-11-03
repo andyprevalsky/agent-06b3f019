@@ -20,7 +20,9 @@
  * package so the check is hermetic; the CSP is still enforced on the real CDN
  * URL. DISPLAY_RENDER_LIVE_CDN=1 loads the real CDN instead.
  */
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { createHash, randomUUID } from 'crypto';
+import { tmpdir } from 'os';
 import { createServer } from 'http';
 import type { AddressInfo } from 'net';
 import { createRequire } from 'module';
@@ -192,6 +194,39 @@ export function fraction(png: Buffer, test: (r: number, g: number, b: number) =>
 
 export const reddish = (r: number, g: number, b: number) => r > 110 && r > g * 1.8 && r > b * 1.8;
 
+/** Preserve the bytes already measured, without replacing the pixel verdict. */
+export function retainFailedRenderSample(
+  png: Buffer,
+  measured: number,
+  minimum: number,
+  label: string,
+  artifactRoot = process.env.BLACKBOX_TEST_ARTIFACT_DIR
+): string | undefined {
+  if (measured > minimum || !artifactRoot) return;
+  try {
+    const directory = join(artifactRoot, `render-failure-${process.pid}-${randomUUID()}`);
+    mkdirSync(directory, { mode: 0o700 });
+    writeFileSync(join(directory, 'sample.png'), png, { flag: 'wx', mode: 0o600 });
+    writeFileSync(
+      join(directory, 'sample.json'),
+      JSON.stringify({
+        label,
+        measured,
+        minimum,
+        bytes: png.length,
+        sha256: createHash('sha256').update(png).digest('hex'),
+      }) + '\n',
+      { flag: 'wx', mode: 0o600 }
+    );
+    return directory;
+  } catch (error) {
+    process.stderr.write(
+      `Render sample retention failed: ${error instanceof Error ? error.name : 'unknown'}\n`
+    );
+    return;
+  }
+}
+
 /**
  * Runs inside the display frame. A string, not a function: tsx's keepNames
  * helper (__name) does not exist in the page.
@@ -215,6 +250,81 @@ export function isolationProbe(frame: Frame) {
 export function displayRenderCases(): BlackboxTest[] {
   return [
     {
+      name: 'render: failed pixel evidence preserves the measured PNG and leaves the verdict unchanged',
+      fn: async () => {
+        const directory = mkdtempSync(join(tmpdir(), 'rose-render-evidence-'));
+        try {
+          const res = await display(
+            otherA,
+            { items: [b64(Buffer.from(threeCdnPage(`evidence-${RUN}`)), 'cube.html')] },
+            { apiKeyUser: userA }
+          );
+          assert(res.status === 201 || res.status === 200, `display page ${res.status}`);
+          const url = local(items(res)[0].file_pointer.usercontent_url ?? '');
+          await withBrowser(async (page, logs, hosts) => {
+            const frame = await displayFrame(page, url, hosts.rose);
+            await waitReady(frame, logs, 'render evidence control');
+            await page.waitForTimeout(300);
+            const positive = await page.locator('#f').screenshot();
+            const positiveRed = fraction(positive, reddish);
+            assert(positiveRed > 0.04, 'positive control has real WebGL pixels');
+            assert(
+              retainFailedRenderSample(positive, positiveRed, 0.04, 'positive', directory) ===
+                undefined,
+              'healthy sample creates no failure artifact'
+            );
+            await frame.evaluate(() => {
+              const canvas = document.querySelector('canvas');
+              const gl = canvas?.getContext('webgl2') ?? canvas?.getContext('webgl');
+              if (!gl) throw new Error('real WebGL control unavailable');
+              gl.getExtension('WEBGL_lose_context')?.loseContext();
+            });
+            await frame.waitForFunction(
+              () => document.querySelector('canvas')?.getContext('webgl2')?.isContextLost(),
+              undefined,
+              { timeout: 5000 }
+            );
+            const negative = await page.locator('#f').screenshot();
+            const negativeRed = fraction(negative, reddish);
+            assert(!(negativeRed > 0.04), 'lost context still fails the original pixel predicate');
+            const retained = retainFailedRenderSample(
+              negative,
+              negativeRed,
+              0.04,
+              'context-loss control',
+              directory
+            );
+            assert(retained, 'failed sample was retained');
+            assert(
+              readFileSync(join(retained, 'sample.png')).equals(negative),
+              'retained PNG is exactly the measured buffer'
+            );
+            const receipt = JSON.parse(readFileSync(join(retained, 'sample.json'), 'utf8'));
+            assert(
+              receipt.measured === negativeRed && receipt.minimum === 0.04,
+              'original measurement and threshold retained'
+            );
+            assert(
+              receipt.sha256 === createHash('sha256').update(negative).digest('hex'),
+              'PNG receipt hashes the measured bytes'
+            );
+            assert(
+              retainFailedRenderSample(
+                negative,
+                negativeRed,
+                0.04,
+                'write-error control',
+                join(directory, 'absent', 'parent')
+              ) === undefined,
+              'retention write error does not replace the pixel verdict'
+            );
+          });
+        } finally {
+          rmSync(directory, { recursive: true, force: true });
+        }
+      },
+    },
+    {
       name: 'render: a three.js CDN page draws WebGL pixels in the sandboxed frame, isolated from Rose',
       fn: async () => {
         const res = await display(
@@ -234,7 +344,9 @@ export function displayRenderCases(): BlackboxTest[] {
           assert(features.wasm === 'ready', 'sandbox permits WebAssembly compilation');
           assert(features.margin === '0px', 'inline CSS is applied');
           await page.waitForTimeout(300);
-          const red = fraction(await page.locator('#f').screenshot(), reddish);
+          const shot = await page.locator('#f').screenshot();
+          const red = fraction(shot, reddish);
+          retainFailedRenderSample(shot, red, 0.04, 'WebGL cube');
           assert(red > 0.04, `WebGL cube pixels: ${(red * 100).toFixed(2)}% red`);
           const probe = await isolationProbe(frame);
           assert(probe.origin === 'null', `opaque origin: ${JSON.stringify(probe)}`);
@@ -261,6 +373,7 @@ export function displayRenderCases(): BlackboxTest[] {
           await page.waitForTimeout(400);
           const shot = await page.locator('#f').screenshot();
           const red = fraction(shot, reddish);
+          retainFailedRenderSample(shot, red, 0.03, 'GLB model');
           assert(red > 0.03, `model pixels: ${(red * 100).toFixed(2)}% red`);
           const model = await frame.evaluate(
             () =>

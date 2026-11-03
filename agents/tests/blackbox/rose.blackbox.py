@@ -462,7 +462,7 @@ def test_cerebras_tools_send_omittable_optionals_as_their_type():
         effort=None,
     )["tools"][0]["function"]["parameters"]["properties"]["output_schema"]
     assert sent.get("description") == field["description"], sent.get("description")
-    assert "anyOf" not in sent
+    assert {"type": "null"} in sent["anyOf"]
     assert GrepTool.model_validate({"tool": "grep", "pattern": "x"}).sources is None
 
 
@@ -1569,7 +1569,7 @@ def test_pydantic_response_model_builds_anthropic_native_tools_without_strict_by
     assert wait_schema["properties"]["check_interval_seconds"]["maximum"] == 86400
 
     spawn_agent = by_name["spawn_agent"]["input_schema"]
-    assert spawn_agent["required"] == ["type", "task_name", "goal"]
+    assert spawn_agent["required"] == ["type", "task_name", "goal", "output_schema"]
     assert "output_schema" in spawn_agent["properties"]
 
     for tool in tools:
@@ -11784,12 +11784,165 @@ async def test_truncation_retains_incoming_candidate_exclusions():
     assert all("candidatea" in excluded for excluded in seen)
 
 
+def test_spawn_schema_requires_explicit_nullable_output_across_native_adapters():
+    from pydantic import ValidationError
+    from providers.rose.cerebras import build_cerebras_body
+    from providers.rose.gpt_auth import _responses_tools
+    from providers.rose.waterfall import _openrouter_tools
+    from utils.tool_schemas import (
+        PlannerSpawnAgentRoseDesktopTool,
+        PlannerSpawnAgentTool,
+        SpawnAgentRoseDesktopTool,
+        SpawnAgentTool,
+        SpawnAgentToolNoGP,
+        SpawnExploreAgentTool,
+    )
+
+    # Shape recorded on WebDecoy root87fef157: all six valid JSON browser
+    # calls supplied start_url but omitted output_schema before any spawn.
+    missing = {
+        "tool": "spawn_agent",
+        "type": "browser",
+        "task_name": "fcaptcha_demo",
+        "goal": "Visit the public FCaptcha demo and report its visible result.",
+        "start_url": "https://webdecoy.com/product/fcaptcha-demo/",
+        "run_in_background": False,
+        "depth": None,
+    }
+    explicit = {"fields": [{"name": "result", "type": "str", "required": True}]}
+    explore = {"tool": "spawn_agent", "type": "explore", "task_name": "research", "goal": "Read public sources"}
+    models = (
+        SpawnAgentTool,
+        SpawnAgentRoseDesktopTool,
+        PlannerSpawnAgentTool,
+        PlannerSpawnAgentRoseDesktopTool,
+        SpawnAgentToolNoGP,
+    )
+    for model in models:
+        action = create_agent_action_model(["spawn_agent"], tool_registry={"spawn_agent": model})
+        (tool,) = build_anthropic_tools_from_response_model(action)
+        assert "strict" not in tool
+        schemas = [_openrouter_tools([tool])[0]["function"]["parameters"], _responses_tools([tool])[0]["parameters"]]
+        for native in (True, False):
+            body = {}
+            apply_anthropic_tool_config(body, None, native, [tool])
+            schemas.append(body["tools"][0]["input_schema"])
+        body = build_cerebras_body(
+            model="qwen-3.8-27b", messages=[{"role": "user", "content": "schema fixture"}],
+            tools=[tool], tool_choice=None, response_format=None, temperature=1, max_tokens=8192, effort=None,
+        )
+        schemas.append(body["tools"][0]["function"]["parameters"])
+        for schema in schemas:
+            assert "output_schema" in schema["required"], model.__name__
+            assert {"type": "null"} in schema["properties"]["output_schema"]["anyOf"], model.__name__
+            assert set(schema["required"]) == {"type", "task_name", "goal", "output_schema"}
+        for rejected in (missing, {**missing, "output_schema": None}):
+            try:
+                model.model_validate(rejected)
+            except ValidationError as error:
+                assert "output_schema is required" in str(error)
+            else:
+                raise AssertionError("Browser output schema omission/null became valid")
+        assert model.model_validate({**missing, "output_schema": explicit}).output_schema is not None
+        assert model.model_validate({**explore, "output_schema": None}).output_schema is None
+        assert model.model_validate(explore).output_schema is None
+
+    explore_action = create_agent_action_model(["spawn_agent"], tool_registry={"spawn_agent": SpawnExploreAgentTool})
+    (tool,) = build_anthropic_tools_from_response_model(explore_action)
+    assert "output_schema" not in tool["input_schema"]["properties"]
+    assert tool["input_schema"]["required"] == ["task_name", "goal"]
+    assert SpawnExploreAgentTool.model_validate(explore).type == "explore"
+
+
+async def test_truncation_labels_cut_off_models_without_relabeling_structured_exclusions():
+    """Cut-off recovery names its own skip reason and keeps an incoming structured-exclusion label."""
+    from providers.rose.truncation import recover_truncated
+
+    seen = []
+
+    async def attempt(**kwargs):
+        seen.append((kwargs.get("_skip_models"), kwargs.get("_skip_reasons")))
+        yield StreamChunk(kind="metadata", data={"actual_model": "candidate-b-gpt"})
+        yield StreamChunk(
+            kind="usage", data={"finish_reason": "length" if len(seen) == 1 else "stop", "completion_tokens": 1}
+        )
+        yield StreamChunk(kind="done", data={})
+
+    await _drain(
+        recover_truncated(
+            attempt,
+            {
+                "messages": [],
+                "response_model": object,
+                "max_tokens": 100,
+                "_skip_models": frozenset({"candidatea"}),
+                "_skip_reasons": {"candidatea": "structured_output_excluded"},
+            },
+        )
+    )
+    assert len(seen) == 2
+    assert seen[1][0] == frozenset({"candidatea", "candidateb"})
+    assert seen[1][1] == {"candidatea": "structured_output_excluded", "candidateb": "reply_cut_off_at_output_limit"}
+
+
+async def test_waterfall_logs_structured_exclusion_reason_separately_from_cut_off():
+    """`rose.waterfall.step_skipped` must say why a model was skipped: exclusion vs cut-off.
+
+    Deploy 12 (agent 8099ad68): kimi-k3 was skipped after two schema-invalid
+    replies, but the log said `reply_cut_off_at_output_limit`, which pointed
+    the RCA at output budgets first. The two need different repairs.
+    """
+    from providers.rose.errors import RoseAllFailed
+    from providers.rose.waterfall import (
+        SKIP_REASON_CUT_OFF,
+        SKIP_REASON_STRUCTURED_OUTPUT_EXCLUDED,
+        waterfall_complete,
+    )
+
+    pool = PoolSpec(
+        name="rose-1-oss",
+        claude_auth_model="claude-sonnet-5",
+        gpt_auth_model="gpt-5.6-luna",
+        waterfall=("moonshotai/kimi-k3", "qwen/qwen3.8-27b"),
+        direct_auth_enabled=False,
+    )
+    logged = []
+    with patch("providers.rose.waterfall.logger") as fake_logger:
+        fake_logger.warning.side_effect = lambda event, **fields: logged.append((event, fields))
+        try:
+            async for _chunk in waterfall_complete(
+                pool_spec=pool,
+                messages=[{"role": "user", "content": "both candidates already excluded"}],
+                openrouter_key="test-key",
+                request_id="test-skip-reasons",
+                skip_models=frozenset({"kimik3", "qwen3827b"}),
+                skip_reasons={"kimik3": SKIP_REASON_STRUCTURED_OUTPUT_EXCLUDED},
+            ):
+                raise AssertionError("no candidate may be served when every step is skipped")
+        except RoseAllFailed:
+            pass
+
+    reasons = {fields["model"]: fields["reason"] for event, fields in logged if event == "rose.waterfall.step_skipped"}
+    assert reasons == {
+        "moonshotai/kimi-k3": SKIP_REASON_STRUCTURED_OUTPUT_EXCLUDED,
+        "qwen/qwen3.8-27b": SKIP_REASON_CUT_OFF,
+    }, reasons
+
+
 async def run_all_tests():
     print("rose blackbox tests:")
     r = BlackboxResult()
     await r.record_async("rose_local_loopback_no_fallback", test_rose_local_loopback_and_no_fallback)
     await r.record_async(
         "truncation_preserves_candidate_exclusions", test_truncation_retains_incoming_candidate_exclusions
+    )
+    await r.record_async(
+        "truncation_labels_cut_off_without_relabeling_exclusions",
+        test_truncation_labels_cut_off_models_without_relabeling_structured_exclusions,
+    )
+    await r.record_async(
+        "waterfall_skip_reason_exclusion_vs_cut_off",
+        test_waterfall_logs_structured_exclusion_reason_separately_from_cut_off,
     )
     await r.record_async("direct_auth_candidate_exclusions", test_direct_auth_honors_candidate_exclusions)
 
@@ -11802,6 +11955,7 @@ async def run_all_tests():
     r.record("gpt_auth_from_token_builds", test_gpt_auth_from_token_builds_context)
     r.record("classify_claude_token_error", test_classify_claude_token_error_each_branch)
 
+    r.record("spawn_output_schema_required_nullable", test_spawn_schema_requires_explicit_nullable_output_across_native_adapters)
     r.record("pool_registry_lookup", test_pool_registry_lookup)
     r.record("cerebras_native_tools_enforce_shapes", test_cerebras_native_tools_enforce_representable_shapes)
     r.record("cerebras_native_tools_incompatible_visible", test_cerebras_native_tools_keep_incompatible_schemas_visible)

@@ -37,8 +37,11 @@ EXIT_DIED = 3
 EXIT_STALLED = 4
 EXIT_TIMEOUT = 124
 # An exact-input reuse (``run-deploy-stage --reuse-passed`` cache hit) records
-# ``reused``: it is a pass that executed nothing, never a failure.
-PASSING_STATUSES = frozenset({"passed", "reused"})
+# ``reused`` and a lane-scoped reuse (``--lane-scoped-reuse``, every change
+# since the pass judged inert) records ``reused-scoped``: both are passes that
+# executed nothing, never failures, and the distinct label survives into every
+# receipt so a scorecard cannot present them as fresh passes.
+PASSING_STATUSES = frozenset({"passed", "reused", "reused-scoped"})
 
 
 def _pid_alive(pid: int) -> bool:

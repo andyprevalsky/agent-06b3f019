@@ -21,23 +21,38 @@ already in MemAvailable); unphased and unobserved lanes keep the declared sum.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import inspect
+import io
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from contextlib import ExitStack
-from datetime import datetime, timezone
+from contextlib import ExitStack, redirect_stdout
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 DRIVER = ROOT / "scripts" / "run_deploy_pipeline.py"
+# What the stack lanes execute (pinned against run_deploy_stage.STACK_ENTRYPOINTS
+# in check_scoped_inert_tables; the fixture repo materializes each one).
+STACK_ENTRYPOINTS = (
+    "scripts/run-predeploy-local", "scripts/run-bench", "scripts/run.sh", "scripts/lib/seed-cache.sh",
+    "scripts/restore-seed-dump.sh", "scripts/save-seed-dump.sh", "scripts/validate-canonical-seed-dump.sh",
+    "back-end/src/bootstrap.ts", "back-end/scripts/seed-local.ts", "back-end/scripts/seed-dump-cache.ts",
+    "back-end/scripts/ensure-fast-mode-cache-schema.ts", "back-end/scripts/ensure-agent-network-grep-indexes.ts",
+    "back-end/scripts/generate-test-session.ts", "agents/worker.py", "agents/benchmarks/run_benchmark.py",
+    "front-end/src/main.tsx", "front-end/scripts/run-semantic-tests.sh",
+)
 STRUCTURAL_RUNNER = ROOT / "scripts" / "run-deploy-structural-gates.py"
 # Generic scenarios must not depend on this host's free memory or core count.
 UNBOUNDED = ["--max-parallel", "0", "--memory-budget-mb", "1048576"]
@@ -56,11 +71,24 @@ def load_module(name: str, path: Path):
     return module
 
 
-def start_timing(run_root: Path, env: dict[str, str]) -> None:
+def start_timing(run_root: Path, env: dict[str, str], cwd: Path | None = None) -> None:
+    """Start a timing run; its metadata records the branch and head of ``cwd``
+    (the real checkout unless a scenario binds the run to its fixture repo)."""
     subprocess.run(
         ["bash", str(DRIVER.parent / "run-deploy-stage"), "--start"],
+        cwd=ROOT if cwd is None else cwd, env=env, check=True, stdout=subprocess.DEVNULL,
+    )
+
+
+def finish_timing(env: dict[str, str]) -> str:
+    """Close the active timing run and return its id."""
+    run_root = Path(env["DEPLOY_RUN_ROOT"])
+    run_id = (run_root / "current").read_text().splitlines()[0].strip()
+    subprocess.run(
+        ["bash", str(DRIVER.parent / "run-deploy-stage"), "--finish"],
         cwd=ROOT, env=env, check=True, stdout=subprocess.DEVNULL,
     )
+    return run_id
 
 
 def write_plan(path: Path, lanes: list[dict], **extra: object) -> None:
@@ -123,7 +151,8 @@ def check_plan_scaling() -> None:
     # The actual structural command uses its exclusive-phase, budget-backed width.
     assert lanes["deploy-command-structural"]["command"][-2:] == ["--max-workers", "3"]
     assert lanes["deploy-command-structural"]["exclusive"] is True
-    assert lanes["deploy-command-structural"]["memory_mb"] == 1024 + 1840 * 3 <= devbox["memory_budget_mb"]
+    assert lanes["deploy-command-structural"]["memory_mb"] == pipeline.structural_lane_memory_mb(3) == 3220 \
+        <= devbox["memory_budget_mb"]
     assert [runner.default_max_workers(c) for c in (1, 2, 4, 8, 14, 32)] == [1, 1, 2, 4, 8, 8]
     assert runner.default_max_workers() <= runner.DEFAULT_MAX_WORKERS
     assert pipeline.scale_workers(1, {"cpus": 2, "mem_available_mb": 4096}) == 1
@@ -133,17 +162,26 @@ def check_plan_scaling() -> None:
 
 
 def check_structural_memory_floor() -> None:
-    # Captured largest child: 1471.98 MiB in the original 20261028-174430
-    # stage receipt. Every concurrently active suite can reach that floor.
+    """The lane's width is still sized by the 1471.98 MiB largest-child floor
+    (20261028-174430 stage receipt) so no active suite is starved, but its
+    reservation is the recorded whole-tree peak with a 1.25x margin: 19 passed
+    attempts (2026-10-30/31 devbox deploys) peaked at 2427.8-2575.4 MB at three
+    workers while 1024 + 1840 * 3 = 6544 MB was declared, which held the 4096
+    MB smoke lane behind it for ~9 min per round on a ~8 GB budget."""
+    pipeline = load_module("run_deploy_pipeline_floor", DRIVER)
     for cpus, available, expected_workers in ((1, 8000, 1), (8, 11000, 3), (14, 32768, 8)):
         plan = plan_json("--group", "3", "--host-cpus", str(cpus),
                          "--host-mem-mb", str(available))
         workers = plan["workers"]["structural"]
         assert workers == expected_workers, plan
         lane = next(lane for lane in plan["lanes"] if lane["name"] == "deploy-command-structural")
-        floor = 1024 + 1471.98 * 1.25 * workers
-        assert lane["memory_mb"] >= floor, (workers, lane["memory_mb"], floor)
-    print("structural reservations cover measured per-worker floor: ok")
+        assert lane["memory_mb"] == pipeline.structural_lane_memory_mb(workers), (workers, lane["memory_mb"])
+        assert lane["memory_mb"] >= 1.25 * 2575.4 * workers / 3, "recorded tree peak scaled to the width"
+        assert lane["memory_mb"] >= 1.25 * 1471.98, "never below one suite's recorded child peak"
+    assert pipeline.structural_lane_memory_mb(3) == 3220 < 1024 + 1840 * 3, "right-sized from 6544 MB"
+    assert pipeline.structural_lane_memory_mb(1) == 1840, "one worker keeps the per-suite floor"
+    assert [pipeline.structural_workers_within(mb, 3) for mb in (7979, 3220, 3219, 1840, 1839)] == [3, 3, 2, 1, 0]
+    print("structural reservations cover the recorded tree peak: ok")
 
 
 def check_macos_memory(tmp: Path, env: dict[str, str]) -> None:
@@ -247,17 +285,30 @@ def check_memory_admission(tmp: Path, env: dict[str, str]) -> None:
 
 
 def check_max_parallel_default(tmp: Path, env: dict[str, str]) -> None:
-    """Without --max-parallel the host default (>= 2) bounds concurrency."""
+    """Without --max-parallel the host default (>= 2) bounds concurrency.
+
+    The cap is judged on the host sample the driver recorded in its receipt,
+    not on a second sample taken here: the default is a function of live
+    MemAvailable, and on a box whose memory moves while another deploy runs
+    (2026-10-31: the budget swung 1.2 GB in 10 s beside the 4-lane threshold)
+    two samples can land on different sides of a lane boundary, which made
+    this check report 4 lanes against a cap of 3 that the driver never used.
+    The lane count covers the largest possible default so the bound is always
+    observable."""
     pipeline = load_module("run_deploy_pipeline_cap_under_test", DRIVER)
-    cap = pipeline.default_max_parallel(pipeline.host_resources())
     state = tmp / "cap"
     plan = tmp / "cap-plan.json"
-    count = cap + 2
+    count = pipeline.CEILING_CPUS // 2 + 2
     write_plan(plan, [{"name": f"lane-{i}", "command": ["sleep", "1"], "reuse_passed": False, "memory_mb": 1}
                       for i in range(count)])
     assert run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--memory-budget-mb", "1048576",
                       env=env).returncode == 0
-    lanes = json.loads((state / "receipt.json").read_text())["lanes"]
+    receipt = json.loads((state / "receipt.json").read_text())
+    cap = receipt["max_parallel"]
+    assert cap == pipeline.default_max_parallel(receipt["host"]), (
+        f"the driver's cap {cap} is not the host default of its own recorded sample {receipt['host']}")
+    assert 1 <= cap <= pipeline.CEILING_CPUS // 2 < count, (cap, count)
+    lanes = receipt["lanes"]
     events = sorted([(lane["started_epoch"], 1) for lane in lanes.values()]
                     + [(lane["finished_epoch"], -1) for lane in lanes.values()])
     peak = level = 0
@@ -329,8 +380,34 @@ def make_source_root(path: Path) -> Path:
     scripts = path / "scripts"
     scripts.mkdir()
     for name in ("run_deploy_pipeline.py", "run-deploy-stage", "run_deploy_stage.py", "deploy_stage.py",
-                 "deploy_stage_wait.py", "factory_detail.py", "factory_metadata.py"):
+                 "deploy_stage_wait.py", "factory_detail.py", "factory_metadata.py", "select_affected_tests.py",
+                 "process-identity.py"):
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+    (scripts / "test-map").mkdir()
+    shutil.copyfile(ROOT / "scripts" / "test-map" / "edges.json", scripts / "test-map" / "edges.json")
+    # A minimal multi-package tree for the lane-scoped reuse scenario: the
+    # change->test selector needs the backend manifest, one test per lane
+    # family and a docs page nothing reads.
+    for relative, text in {
+        "back-end/package.json": '{"scripts": {"test:structural": "tsx src/tests/structural/none.test.ts"}}\n',
+        "back-end/src/bootstrap.ts": "export {};\n",
+        "back-end/src/tests/blackbox/health.blackbox.ts": "export {};\n",
+        "back-end/src/tests/unit/sample.test.ts": "export {};\n",
+        "agents/tests/blackbox/sample.blackbox.py": "x = 1\n",
+        "agents/tests/unit/test_sample.py": "def test_sample():\n    pass\n",
+        "docs/guide.md": "guide v1\n",
+        # A tooling script only the backend coverage runner and one backend
+        # unit test execute: the stack lanes judge it by reach (PR-14).
+        "back-end/scripts/coverage-process-lock.py": "import json\n",
+        "back-end/scripts/run-coverage.sh": "#!/usr/bin/env bash\npython3 scripts/coverage-process-lock.py\n",
+        "back-end/src/tests/unit/coverage-process-registry.test.ts":
+            "import { execFileSync } from 'node:child_process';\n"
+            "execFileSync('python3', ['scripts/coverage-process-lock.py']);\n",
+        # Every stack entrypoint exists (a missing one fails the reach judgement closed).
+        **{entrypoint: "# fixture entrypoint\n" for entrypoint in STACK_ENTRYPOINTS},
+    }.items():
+        (path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (path / relative).write_text(text)
     # Runtime copies bind both source checks and stage-cache keys to the same
     # private checkout. Parallel authors cannot invalidate this fixture.
     # Mirror the repository's ignore rule for .context: the driver's lane
@@ -346,6 +423,27 @@ def make_source_root(path: Path) -> Path:
 
 def check_watchdog_receipts(tmp: Path, env: dict[str, str]) -> None:
     """Memory-watchdog TERMs inside the run window land in the receipt."""
+    # The window is compared against the stamp's own resolution: the watchdog
+    # floors ``at`` to the millisecond (other producers to the second), so a
+    # TERM 0.3 ms after a run started at 20.4237 is stamped 20.423 and a bare
+    # ``started_epoch <= at`` dropped it. Observed as ``watchdog_terminations
+    # == []`` at load 0.9 when the poll below landed within a millisecond of
+    # the receipt (started 1793445378.524657, stamped ...18.524Z, -0.657 ms).
+    pipeline = load_module("pipeline_watchdog_window", DRIVER)
+    second = datetime(2026, 10, 31, 9, 34, 20, tzinfo=timezone.utc).timestamp()
+    started_epoch, finished_epoch = second + 0.4237, second + 2.9237
+    rows = tmp / "watchdog-window.jsonl"
+    rows.write_text("".join(json.dumps({"pid": pid, "at": at}) + "\n" for pid, at in [
+        (1, "2026-10-31T09:34:20.423Z"),  # TERM at 20.4239, 0.2 ms after the start, floored past it
+        (2, "2026-10-31T09:34:20.422Z"),  # its whole millisecond precedes the start
+        (3, "2026-10-31T09:34:20Z"),      # second resolution: 20.9 is stamped 20
+        (4, "2026-10-31T09:34:19Z"),      # the second before the start
+        (5, "2026-10-31T09:34:22.923Z"),  # 0.7 ms before the finish
+        (6, "2026-10-31T09:34:22.924Z"),  # after the finish
+    ]))
+    inside = [row["pid"] for row in pipeline.watchdog_terminations(started_epoch, finished_epoch, log=rows)]
+    assert inside == [1, 3, 5], f"a stamp floored past the start must stay inside the window: {inside}"
+    assert pipeline.watchdog_terminations(started_epoch, finished_epoch, log=tmp / "absent.jsonl") == []
     log = tmp / "terminations.jsonl"
     state = tmp / "watchdog"
     plan = tmp / "watchdog-plan.json"
@@ -508,9 +606,21 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
         last = joiner["admission"]["deferred"]["last"]
         assert last["reserved_live_mb"] == last["reserved_declared_mb"] == 100 and last["accounting"] == "unmaterialized", last
         assert last["running"]["holder"]["observation"] == "disabled", last["running"]
-        assert last["running"]["holder"]["tree_anon_mb"] >= 50 and last["running"]["holder"]["tree_pss_mb"] >= 50, \
-            "observations are still sampled and recorded for evidence"
+        # Sampling still saw the 60 MB block (held for 4 s against the 1 Hz
+        # sampler: the peak is deterministic) and the final deferral still
+        # recorded the latest sample. That sample is the one taken before the
+        # holder's reap and may postdate its ``del block`` (the stage wrapper's
+        # teardown keeps the lane alive ~0.1-0.3 s after the command exits and
+        # the 1 Hz pass drifts into that window under load), so the record is
+        # bound to the sampled state, never to the block's size.
         assert holder["tree_peak_anon_mb"] >= 50 and holder["tree_sampled_at"], holder
+        recorded = last["running"]["holder"]
+        assert recorded["tree_anon_mb"] is not None and recorded["tree_pss_mb"] is not None, \
+            "observations are still sampled and recorded for evidence"
+        assert 0 < recorded["tree_anon_mb"] <= recorded["tree_pss_mb"], recorded
+        assert recorded["tree_anon_mb"] <= holder["tree_peak_anon_mb"] and \
+            recorded["tree_pss_mb"] <= holder["tree_peak_pss_mb"], (recorded, holder)
+        assert recorded["observed_age_s"] is not None and recorded["observed_age_s"] >= 0, recorded
         assert seen_flag[-1] == "0", seen_flag
         # Explicit "enabled" arm (DEPLOY_ADMISSION_CREDIT=1), separate from the
         # true-unset default: the credit applies and the records say enabled.
@@ -783,17 +893,21 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     print("observation validity: ok")
 
 
-def check_stack_owner_dependency(tmp: Path, env: dict[str, str]) -> None:
-    """semantic-stack's ``run.sh --benchmark`` startup runs kill-services.sh
-    against every runtime process this worktree owns, so it must never start
-    while the local smoke lane or the AgentCard lifecycle lane (their own
-    local stacks) is running. On #1640 only memory kept them apart (4096 +
-    4096 MB against an 8188 MB budget). The plan loader now appends the edge
-    (declared edges kept, receipt ``after`` shows it); with unbounded memory
-    only the dependency can hold semantic-stack back. Plans without a
-    stack-owning lane and lanes with other names are untouched, and a plan
-    that would close a cycle through the implied edge is refused."""
+def check_semantic_stack_beside_stack_owners(tmp: Path, env: dict[str, str]) -> None:
+    """Follow-up "an" (2026-10-31): semantic-stack's ``run.sh --benchmark``
+    sweeps spare every process of a live isolated run (kill-services.test.sh,
+    run-isolated-cloud-kill.test.sh), so the loader no longer appends the
+    implied ``after`` edges from semantic-stack to the stack-owning lanes
+    (``STACK_KILLER_LANES`` is empty): with unbounded memory semantic-stack
+    starts while smoke and agentcard-lifecycle are still running and the
+    receipt's ``after`` shows only its declared edge. Memory still rules: when
+    smoke + semantic-stack exceed the budget, admission defers semantic-stack
+    until smoke releases its reservation, without touching any declaration.
+    The edge mechanism itself is kept for a future stack-killing lane: with a
+    lane listed, edges are appended, never duplicated, and a plan that would
+    close a cycle through the implied edge is refused."""
     pipeline = load_module("pipeline_stack_owner", DRIVER)
+    assert pipeline.STACK_KILLER_LANES == () and pipeline.STACK_OWNER_LANES == ("smoke", "agentcard-lifecycle")
     plan = tmp / "stack-owner-plan.json"
     state = tmp / "stack-owner"
     marker = tmp / "semantic-started"
@@ -809,39 +923,69 @@ def check_stack_owner_dependency(tmp: Path, env: dict[str, str]) -> None:
     receipt = json.loads((state / "receipt.json").read_text())
     assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["status"])
     lanes = receipt["lanes"]
-    assert lanes["semantic-stack"]["started_epoch"] >= max(lanes["smoke"]["finished_epoch"],
-                                                            lanes["agentcard-lifecycle"]["finished_epoch"]), \
-        "semantic-stack started while a lane owning a worktree stack was still running"
-    assert receipt["after"]["semantic-stack"] == ["cov", "smoke", "agentcard-lifecycle"], receipt["after"]
+    assert lanes["semantic-stack"]["started_epoch"] < min(lanes["smoke"]["finished_epoch"],
+                                                           lanes["agentcard-lifecycle"]["finished_epoch"]), \
+        "semantic-stack must be admitted while the stack-owning lanes are still running"
+    assert receipt["after"]["semantic-stack"] == ["cov"], receipt["after"]
     assert receipt["after"]["smoke"] == [] and receipt["after"]["agentcard-lifecycle"] == [], receipt["after"]
     assert lanes["smoke"]["started_epoch"] < lanes["cov"]["finished_epoch"], "owners are not held back"
-    # No stack-owning lane in the plan: nothing is added; other names are untouched.
+    # Memory, not an edge, keeps them apart when both declarations do not fit:
+    # cov (25) + smoke (40) fit a 70 MB budget, semantic-stack (40) does not
+    # beside smoke, so it waits for smoke's reservation and is admitted after
+    # a recorded budget deferral. The declarations are the plan's own.
+    budget_state = tmp / "stack-owner-budget"
     write_plan(plan, [
-        {"name": "cov", "command": ["true"], "group": "3"},
-        {"name": "semantic-stack", "command": ["true"], "after": ["cov"], "group": "4"},
-        {"name": "semantic", "command": ["true"], "group": "4"},
-        {"name": "smoke-like", "command": ["true"], "group": "4", "phase": "coverage"},
-    ])
-    loaded = {lane.name: lane for lane in pipeline.load_plan_payload(plan)[0]}
-    assert loaded["semantic-stack"].after == ["cov"] and loaded["semantic"].after == [], loaded
-    # An implied edge never duplicates a declared one, and a plan that makes an
-    # owner wait for the killer is a cycle, refused before any lane starts.
-    write_plan(plan, [
-        {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage"},
-        {"name": "semantic-stack", "command": ["true"], "after": ["smoke"], "group": "4"},
-    ])
-    assert pipeline.load_plan_payload(plan)[0][1].after == ["smoke"]
-    write_plan(plan, [
-        {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage", "after": ["semantic-stack"]},
-        {"name": "semantic-stack", "command": ["true"], "group": "4"},
-    ])
-    try:
-        pipeline.load_plan_payload(plan)
-    except ValueError as error:
-        assert "cyclic" in str(error), error
-    else:
-        raise AssertionError("an owner that waits for semantic-stack must be refused as a cycle")
-    print("stack owner dependency: ok")
+        {"name": "cov", "command": ["sleep", "0.4"], "reuse_passed": False, "group": "3", "memory_mb": 25},
+        {"name": "smoke", "command": ["sleep", "1.5"], "reuse_passed": False, "group": "4", "phase": "coverage",
+         "memory_mb": 40},
+        {"name": "semantic-stack", "command": ["true"], "after": ["cov"], "reuse_passed": False, "group": "4",
+         "memory_mb": 40},
+    ], schedule={"policy": "legacy"})
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(budget_state), "--max-parallel", "0",
+                     "--memory-budget-mb", "70", env=env, timeout=120)
+    receipt = json.loads((budget_state / "receipt.json").read_text())
+    assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["status"])
+    lanes = receipt["lanes"]
+    assert receipt["after"]["semantic-stack"] == ["cov"], receipt["after"]
+    assert lanes["smoke"]["started_epoch"] < lanes["cov"]["finished_epoch"], "cov and smoke fit the budget together"
+    assert lanes["semantic-stack"]["started_epoch"] >= lanes["smoke"]["finished_epoch"], \
+        "40 + 40 MB declared must never run together under a 70 MB budget"
+    deferred = lanes["semantic-stack"]["admission"]["deferred"]
+    assert deferred and deferred["first"]["reason"] == "budget" and deferred["checks"] >= 1, deferred
+    assert deferred["first"]["reserved_declared_mb"] == 40 and deferred["first"]["memory_mb"] == 40, deferred
+    assert {lane["memory_mb"] for lane in (lanes["smoke"], lanes["semantic-stack"])} == {40}, "declarations unchanged"
+    # The implied-edge mechanism, with a killer lane listed: edges appended to
+    # the declared ones, no duplicates, other names untouched, cycles refused.
+    with patch.object(pipeline, "STACK_KILLER_LANES", ("semantic-stack",)):
+        write_plan(plan, [
+            {"name": "cov", "command": ["true"], "group": "3"},
+            {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage"},
+            {"name": "agentcard-lifecycle", "command": ["true"], "group": "4", "phase": "coverage"},
+            {"name": "semantic-stack", "command": ["true"], "after": ["cov"], "group": "4"},
+            {"name": "semantic", "command": ["true"], "group": "4"},
+            {"name": "smoke-like", "command": ["true"], "group": "4", "phase": "coverage"},
+        ])
+        loaded = {lane.name: lane for lane in pipeline.load_plan_payload(plan)[0]}
+        assert loaded["semantic-stack"].after == ["cov", "smoke", "agentcard-lifecycle"], loaded
+        assert loaded["semantic"].after == [] and loaded["smoke"].after == [], loaded
+        write_plan(plan, [
+            {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage"},
+            {"name": "semantic-stack", "command": ["true"], "after": ["smoke"], "group": "4"},
+        ])
+        assert pipeline.load_plan_payload(plan)[0][1].after == ["smoke"]
+        write_plan(plan, [
+            {"name": "smoke", "command": ["true"], "group": "4", "phase": "coverage", "after": ["semantic-stack"]},
+            {"name": "semantic-stack", "command": ["true"], "group": "4"},
+        ])
+        try:
+            pipeline.load_plan_payload(plan)
+        except ValueError as error:
+            assert "cyclic" in str(error), error
+        else:
+            raise AssertionError("an owner that waits for a listed killer lane must be refused as a cycle")
+    # Without a listed killer lane the same cycle plan is simply an edge.
+    assert pipeline.load_plan_payload(plan)[0][0].after == ["semantic-stack"]
+    print("semantic-stack beside stack owners: ok")
 
 
 def check_wait_receipt_contract(tmp: Path, pipeline=None, scenario="both") -> None:
@@ -937,23 +1081,31 @@ def check_exclusive_lane_resizes_to_free_memory(tmp: Path, env: dict[str, str]) 
     refused (PR1634 coordinator, 2026-10-29), and is still refused below one
     worker. Exact widths: the pure fitter; the driver: a real narrowed spawn."""
     pipeline = load_module("pipeline_fit_exclusive", DRIVER)
-    floor = pipeline.STRUCTURAL_WORKER_MEMORY_MB
-    lane = pipeline.Lane("deploy-command-structural", ["python3", "x.py", "--max-workers", "3"],
-                         memory_mb=1024 + floor * 3, exclusive=True)
-    fitted = pipeline.fit_exclusive_lane(lane, 1024 + floor * 2 + 50)
-    assert fitted.command[-2:] == ["--max-workers", "2"] and fitted.memory_mb == 1024 + floor * 2, fitted
-    assert pipeline.fit_exclusive_lane(lane, 1024 + floor * 9).command[-1] == "3", "never wider than planned"
-    assert pipeline.fit_exclusive_lane(lane, 1024 + floor - 1) is None, "below one worker stays a refusal"
+    declared = pipeline.structural_lane_memory_mb
+    lane = pipeline.Lane("deploy-command-structural",
+                         ["python3", "scripts/run-deploy-structural-gates.py", "--max-workers", "3"],
+                         memory_mb=declared(3), exclusive=True)
+    fitted = pipeline.fit_exclusive_lane(lane, declared(2) + 50)
+    assert fitted.command[-2:] == ["--max-workers", "2"] and fitted.memory_mb == declared(2), fitted
+    assert pipeline.fit_exclusive_lane(lane, declared(9)).command[-1] == "3", "never wider than planned"
+    assert pipeline.fit_exclusive_lane(lane, declared(1) - 1) is None, "below one worker stays a refusal"
     assert pipeline.fit_exclusive_lane(pipeline.Lane("other", ["true"], exclusive=False), 10**6) is None
     assert pipeline.fit_exclusive_lane(pipeline.Lane("no-flag", ["true"], exclusive=True), 10**6) is None
+    # CodeRabbit on #1658: the structural formula sizes only the structural
+    # runner's own command; a custom exclusive plan lane keeps its declaration.
+    custom = pipeline.Lane("custom-exclusive", ["python3", "x.py", "--max-workers", "3"], memory_mb=5000,
+                           exclusive=True)
+    assert pipeline.fit_exclusive_lane(custom, 10**6) is None and custom.memory_mb == 5000, custom
+    assert pipeline.fit_exclusive_lane(custom, 4000) is None, "never resized by the structural formula"
     state = tmp / "resize"
     plan = tmp / "resize-plan.json"
     probe = tmp / "resize-args.txt"
     write_plan(plan, [{"name": "structural", "exclusive": True, "reuse_passed": False,
-                       "memory_mb": 1024 + floor * 3,
-                       "command": ["bash", "-c", f"printf '%s\\n' \"$@\" > {probe}", "_", "--max-workers", "3"]}])
+                       "memory_mb": declared(3),
+                       "command": ["bash", "-c", f"printf '%s\\n' \"$@\" > {probe}",
+                                   "scripts/run-deploy-structural-gates.py", "--max-workers", "3"]}])
     run = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
-                     "--memory-budget-mb", str(1024 + floor * 2 + 50), env=env)
+                     "--memory-budget-mb", str(declared(2) + 50), env=env)
     assert run.returncode == 0, run.stdout + run.stderr
     receipt = json.loads((state / "receipt.json").read_text())["lanes"]["structural"]
     args = probe.read_text().split()
@@ -961,12 +1113,1037 @@ def check_exclusive_lane_resizes_to_free_memory(tmp: Path, env: dict[str, str]) 
     assert receipt["status"] == "passed" and 1 <= workers <= 2, (receipt, args)
     assert receipt["note"].startswith(f"resized: 3 -> {workers} workers") and "PIPELINE_LANE_RESIZED" in run.stdout, \
         (receipt, run.stdout)
-    assert receipt["memory_mb"] == 1024 + floor * workers, receipt
+    assert receipt["memory_mb"] == declared(workers), receipt
     run = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
                      "--memory-budget-mb", "1000", env=env)
     receipt = json.loads((state / "receipt.json").read_text())["lanes"]["structural"]
     assert run.returncode == 1 and receipt["status"] == "failed" and receipt["note"].startswith("refused: needs"), receipt
     print("exclusive lane resize: ok")
+
+
+def check_lane_scoped_reuse(tmp: Path, env: dict[str, str], source_root: Path) -> None:
+    """Plan ``lane_scoped_reuse`` passes ``--lane-scoped-reuse`` to every lane;
+    a docs-only commit then turns the scoped lanes into ``reused-scoped``
+    receipt lanes with the stage row's provenance, the run is green for
+    ``wait``/``verify`` and nothing executed; without the field (default) the
+    same commit reruns both lanes and records plain passes."""
+    state = tmp / "scoped-state"
+    counters = tmp / "scoped-counters"
+    counters.mkdir()
+    # Own stage run and duration ledger: these real lane names must not seed
+    # the phase estimates of the other scenarios with 0-second passes.
+    ledger = tmp / "scoped-lanes.json"
+    env = {**env, "DEPLOY_RUN_ROOT": str(tmp / "scoped-runs"), "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}
+    # Timing runs bound to the fixture repo: cross-run discovery compares the
+    # branch each run's metadata recorded, which must be the fixture's.
+    start_timing(tmp / "scoped-runs", env, cwd=source_root)
+    git = ["git", "-C", str(source_root), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+
+    def commit_docs(text: str) -> str:
+        (source_root / "docs" / "guide.md").write_text(text)
+        subprocess.run([*git, "add", "docs/guide.md"], check=True)
+        subprocess.run([*git, "commit", "-qm", "docs"], check=True)
+        return subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+
+    markers = {"backend-coverage-blackbox": "npm run test:coverage:sharded", "smoke": "bash scripts/run-predeploy-local",
+               "live-probes": "python3 scripts/run_deploy_live_probes.py"}
+
+    def lane(name: str, **extra: object) -> dict:
+        # $0 carries the lane's real command marker; a lane name alone is never scoped.
+        return {"name": name, "command": ["bash", "-c", f'printf run >> "{counters / name}"', markers.get(name, "_")],
+                "reuse_passed": False, "memory_mb": 1, **extra}
+
+    def runs(name: str) -> int:
+        return len((counters / name).read_text()) // 3 if (counters / name).exists() else 0
+
+    def run_and_wait(plan: Path) -> dict:
+        since = time.time()
+        ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, env=env)
+        assert ran.returncode == 0, ran.stderr + ran.stdout
+        waited = run_driver("wait", "--state-dir", str(state), "--timeout", "20", "--since", str(since), env=env)
+        assert waited.returncode == 0, waited.stdout
+        return json.loads((state / "receipt.json").read_text())
+
+    lanes = [lane("backend-coverage-blackbox", group="3"), lane("smoke", group="4", phase="coverage"),
+             lane("quick-gate", group="3"),
+             # Scoped lane whose own env carries the kill switch: it reruns while its siblings reuse.
+             lane("live-probes", group="4", env={"DEPLOY_LANE_SCOPED_REUSE": "0"})]
+    plan = tmp / "scoped-plan.json"
+    write_plan(plan, lanes, lane_scoped_reuse=True)
+    first_head = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    receipt = run_driver("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, env=env)
+    assert receipt.returncode == 0, receipt.stderr
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert receipt["lane_scoped_reuse"] is True and receipt["reused_scoped_lanes"] == []
+    assert {name: lane["status"] for name, lane in receipt["lanes"].items()} == {
+        "backend-coverage-blackbox": "passed", "smoke": "passed", "quick-gate": "passed", "live-probes": "passed"}, \
+        receipt["lanes"]
+    assert runs("backend-coverage-blackbox") == 1 and runs("smoke") == 1 and runs("quick-gate") == 1
+    assert all(lane["lane_token"].startswith(f"{name}.1.") for name, lane in receipt["lanes"].items()), receipt["lanes"]
+
+    second_head = commit_docs("guide v2\n")
+    receipt = run_and_wait(plan)
+    assert receipt["status"] == "passed", receipt["status"]
+    assert receipt["reused_scoped_lanes"] == ["backend-coverage-blackbox", "smoke"], receipt["reused_scoped_lanes"]
+    for name in ("backend-coverage-blackbox", "smoke"):
+        lane_state = receipt["lanes"][name]
+        assert lane_state["status"] == "reused-scoped", (name, lane_state)
+        assert lane_state["exit"] == 0
+        reuse = lane_state["reuse"]
+        assert reuse["kind"] == "scoped" and reuse["hit"] is True, reuse
+        assert reuse["passed_head"] == first_head and reuse["current_head"] == second_head, reuse
+        assert len(reuse["passed_fingerprint"]) == 64 and reuse["passed_run_id"], reuse
+        assert reuse["changed"] == [{"path": "docs/guide.md", "rule": "inert:docs/*",
+                                     "graph": reuse["changed"][0]["graph"]}], reuse["changed"]
+        assert reuse["changed"][0]["graph"].startswith("graph:no "), reuse["changed"][0]
+        assert runs(name) == 1, f"{name} executed despite the scoped reuse"
+    # A lane the scoped table does not list keeps today's behaviour: it reruns.
+    assert receipt["lanes"]["quick-gate"]["status"] == "passed" and runs("quick-gate") == 2
+    # The kill switch in a lane's own env reruns that lane as a plain pass.
+    assert receipt["lanes"]["live-probes"]["status"] == "passed" and runs("live-probes") == 2
+    assert "reuse" not in receipt["lanes"]["live-probes"]
+    run_dir = Path(receipt["stage_run_dir"])
+    rows = [json.loads(line) for line in (run_dir / "stages.jsonl").read_text().splitlines() if line.strip()]
+    scoped_rows = [row for row in rows if row.get("status") == "reused-scoped"]
+    assert sorted(row["stage"] for row in scoped_rows) == ["backend-coverage-blackbox", "smoke"], scoped_rows
+    assert all(row["detail"]["reuse"]["passed_head"] == first_head for row in scoped_rows)
+    verified = run_driver("verify", "--state-dir", str(state), "--expect-head", second_head, env=env)
+    assert verified.returncode == 0, verified.stdout
+    assert "reused_scoped=backend-coverage-blackbox,smoke" in verified.stdout, verified.stdout
+    # A reused-scoped lane records no duration sample: nothing was measured.
+    recorded = json.loads(ledger.read_text())["lanes"]
+    assert all(sample.get("status") != "reused-scoped" for samples in recorded.values() for sample in samples)
+    assert len(recorded["smoke"]) == 1 and len(recorded["quick-gate"]) == 2, recorded
+    assert receipt["reused_scoped_cross_run_lanes"] == [], receipt["reused_scoped_cross_run_lanes"]
+
+    # Cross-run: the green run is closed (--finish) and a test-only sync needs
+    # a new --start run. Its own passed-cache is empty, so the scoped lanes
+    # reuse the first run's records in place (same branch, ancestor head,
+    # fresh): the receipt names the source run and lists the lanes as
+    # cross-run reuse; nothing executes and no duration is recorded.
+    first_run_id = finish_timing(env)
+    first_run_dir = tmp / "scoped-runs" / first_run_id
+    start_timing(tmp / "scoped-runs", env, cwd=source_root)
+    cross_head = commit_docs("guide v2 cross-run\n")
+    receipt = run_and_wait(plan)
+    assert receipt["status"] == "passed", receipt["status"]
+    assert receipt["stage_run_dir"] != str(first_run_dir), receipt["stage_run_dir"]
+    assert receipt["reused_scoped_lanes"] == ["backend-coverage-blackbox", "smoke"], receipt["reused_scoped_lanes"]
+    assert receipt["reused_scoped_cross_run_lanes"] == ["backend-coverage-blackbox", "smoke"], \
+        receipt["reused_scoped_cross_run_lanes"]
+    for name in ("backend-coverage-blackbox", "smoke"):
+        lane_state = receipt["lanes"][name]
+        assert lane_state["status"] == "reused-scoped" and lane_state["exit"] == 0, (name, lane_state)
+        reuse = lane_state["reuse"]
+        assert reuse["kind"] == "scoped" and reuse["hit"] is True and reuse["cross_run"] is True, reuse
+        assert reuse["passed_run_id"] == first_run_id and reuse["passed_run_dir"] == str(first_run_dir), reuse
+        assert reuse["passed_head"] == first_head and reuse["current_head"] == cross_head, reuse
+        record = Path(reuse["passed_record"])
+        assert record.parent == first_run_dir / "passed-cache" / name / "scoped" and record.is_file(), reuse
+        assert reuse["considered_runs"] == [Path(receipt["stage_run_dir"]).name, first_run_id], reuse
+        assert runs(name) == 1, f"{name} executed despite the cross-run scoped reuse"
+    assert not (Path(receipt["stage_run_dir"]) / "passed-cache" / "smoke").exists(), "record copied into the new run"
+    assert receipt["lanes"]["quick-gate"]["status"] == "passed" and runs("quick-gate") == 3
+    assert receipt["lanes"]["live-probes"]["status"] == "passed" and runs("live-probes") == 3
+    verified = run_driver("verify", "--state-dir", str(state), "--expect-head", cross_head, env=env)
+    assert verified.returncode == 0, verified.stdout
+    assert "reused_scoped=backend-coverage-blackbox,smoke cross_run=backend-coverage-blackbox,smoke" in verified.stdout, \
+        verified.stdout
+    recorded = json.loads(ledger.read_text())["lanes"]
+    assert all(sample.get("status") != "reused-scoped" for samples in recorded.values() for sample in samples)
+    assert len(recorded["smoke"]) == 1 and len(recorded["quick-gate"]) == 3, recorded
+
+    # Default off: the same kind of commit reruns both lanes as plain passes.
+    write_plan(plan, lanes)
+    third_head = commit_docs("guide v3\n")
+    receipt = run_and_wait(plan)
+    assert receipt["lane_scoped_reuse"] is False and receipt["reused_scoped_lanes"] == []
+    assert {name: lane["status"] for name, lane in receipt["lanes"].items()} == {
+        "backend-coverage-blackbox": "passed", "smoke": "passed", "quick-gate": "passed", "live-probes": "passed"}, \
+        receipt["lanes"]
+    assert runs("backend-coverage-blackbox") == 2 and runs("smoke") == 2, "flag off must rerun"
+    assert "reuse" not in receipt["lanes"]["smoke"]
+    verified = run_driver("verify", "--state-dir", str(state), "--expect-head", third_head, env=env)
+    assert verified.returncode == 0 and "reused_scoped=- cross_run=-" in verified.stdout, verified.stdout
+    # The environment can never enable: the same plan with DEPLOY_LANE_SCOPED_REUSE=1 still reruns.
+    fourth_head = commit_docs("guide v4\n")
+    since = time.time()
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED,
+                     env={**env, "DEPLOY_LANE_SCOPED_REUSE": "1"})
+    assert ran.returncode == 0, ran.stderr
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert receipt["lane_scoped_reuse"] is False and receipt["reused_scoped_lanes"] == [], receipt["reused_scoped_lanes"]
+    assert runs("smoke") == 3 and receipt["lanes"]["smoke"]["status"] == "passed", receipt["lanes"]["smoke"]
+    assert receipt["source"]["head"] == fourth_head and since > 0
+
+    # Cross-deploy reuse on a tooling change (PR-14): a script only the
+    # coverage runners execute, a backend unit test and a docs page change
+    # after a green run that was closed. The stack lanes (smoke,
+    # semantic-stack) judge the script by reach and reuse the earlier run's
+    # pass in place; the coverage lanes rerun and name the paths that blocked
+    # them; each rerun lane's log starts with its own (flushed) decision.
+    tooling_counters = tmp / "scoped-tooling-counters"
+    tooling_counters.mkdir()
+    tooling_markers = {"backend-coverage-blackbox": "npm run test:coverage:sharded",
+                       "agents-coverage-blackbox": "bash scripts/run-coverage.sh",
+                       "smoke": "bash scripts/run-predeploy-local",
+                       "semantic-stack": "bash front-end/scripts/run-semantic-tests.sh"}
+
+    def tooling_lane(name: str) -> dict:
+        return {"name": name, "reuse_passed": False, "memory_mb": 1,
+                "command": ["bash", "-c", f'printf run >> "{tooling_counters / name}"; echo TOOLING-LANE-OUTPUT',
+                            tooling_markers[name]]}
+
+    def tooling_runs(name: str) -> int:
+        return len((tooling_counters / name).read_text()) // 3 if (tooling_counters / name).exists() else 0
+
+    tooling_plan = tmp / "scoped-tooling-plan.json"
+    write_plan(tooling_plan, [tooling_lane(name) for name in tooling_markers], lane_scoped_reuse=True)
+    receipt = run_and_wait(tooling_plan)
+    assert receipt["status"] == "passed" and receipt["reused_scoped_lanes"] == [], receipt
+    assert all(tooling_runs(name) == 1 for name in tooling_markers), {name: tooling_runs(name) for name in tooling_markers}
+    base_run_id = finish_timing(env)
+    base_run_dir = tmp / "scoped-runs" / base_run_id
+    script = "back-end/scripts/coverage-process-lock.py"
+    unit_test = "back-end/src/tests/unit/coverage-process-registry.test.ts"
+    (source_root / script).write_text("import json\nTIMEOUT = 2\n")
+    (source_root / unit_test).write_text((source_root / unit_test).read_text() + "// v2\n")
+    (source_root / "docs" / "guide.md").write_text("guide v5\n")
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "tooling"], check=True)
+    tooling_head = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    start_timing(tmp / "scoped-runs", env, cwd=source_root)
+    receipt = run_and_wait(tooling_plan)
+    assert receipt["status"] == "passed", receipt["status"]
+    new_run_dir = Path(receipt["stage_run_dir"])
+    assert new_run_dir != base_run_dir
+    assert receipt["reused_scoped_lanes"] == ["semantic-stack", "smoke"], receipt["reused_scoped_lanes"]
+    assert receipt["reused_scoped_cross_run_lanes"] == ["semantic-stack", "smoke"], receipt["reused_scoped_cross_run_lanes"]
+    for name in ("smoke", "semantic-stack"):
+        lane_state = receipt["lanes"][name]
+        assert lane_state["status"] == "reused-scoped" and lane_state["exit"] == 0, (name, lane_state)
+        reuse = lane_state["reuse"]
+        assert reuse["hit"] is True and reuse["cross_run"] is True, reuse
+        assert reuse["passed_run_id"] == base_run_id and reuse["passed_run_dir"] == str(base_run_dir), reuse
+        assert reuse["passed_head"] == fourth_head and reuse["current_head"] == tooling_head, reuse
+        assert reuse["passed_run_branch"] == subprocess.run(
+            [*git, "branch", "--show-current"], check=True, capture_output=True, text=True).stdout.strip(), reuse
+        changed = {entry["path"]: entry for entry in reuse["changed"]}
+        assert set(changed) == {script, unit_test, "docs/guide.md"}, changed
+        assert changed[script]["rule"] == "not in the lane's declared inert set; stack lane: judged by reach", changed
+        assert changed[script]["graph"] == "graph:no ALL fallback; unreached from the stack entrypoints", changed
+        assert changed[unit_test]["rule"] == "inert:back-end/src/tests/*", changed
+        assert changed["docs/guide.md"]["rule"] == "inert:docs/*", changed
+        assert tooling_runs(name) == 1, f"{name} executed despite the cross-deploy scoped reuse"
+        assert not (new_run_dir / "passed-cache" / name).exists(), "record copied into the new run"
+        log = Path(lane_state["log"]).read_text()
+        assert f"== reused passed deploy stage (lane-scoped): {name} " in log, log[-800:]
+    rows = [json.loads(line) for line in (new_run_dir / "stages.jsonl").read_text().splitlines() if line.strip()]
+    for name, blocked_paths in (("backend-coverage-blackbox", [script, unit_test]), ("agents-coverage-blackbox", [script])):
+        lane_state = receipt["lanes"][name]
+        assert lane_state["status"] == "passed" and tooling_runs(name) == 2, (name, lane_state, tooling_runs(name))
+        [row] = [row for row in rows if row["stage"] == name]
+        scoped = row["detail"]["reuse"]["scoped"]
+        assert scoped["miss_reason"] == f"{len(blocked_paths)} changed path(s) are not provably inert", scoped
+        assert [entry["path"] for entry in scoped["blocked"]] == blocked_paths, scoped["blocked"]
+        assert all(entry["rule"] == "not in the lane's declared inert set" for entry in scoped["blocked"]), scoped
+        # The decision line is flushed before the command starts: the lane
+        # log's last round begins with its own miss, not the previous one's.
+        log = Path(lane_state["log"]).read_text()
+        miss = f"== lane-scoped reuse unavailable for {name}: {scoped['miss_reason']} =="
+        assert miss in log, log[-800:]
+        tail = log[log.rindex(miss):]
+        assert "TOOLING-LANE-OUTPUT" in tail, f"{name}: the decision must precede the command's first output byte"
+        assert tail.index(f"== deploy stage: {name} ==") < tail.index("TOOLING-LANE-OUTPUT"), tail[:600]
+        for path in blocked_paths:
+            assert f"   rerun: {path} (not in the lane's declared inert set; graph not consulted)" in tail, tail[:600]
+    verified = run_driver("verify", "--state-dir", str(state), "--expect-head", tooling_head, env=env)
+    assert verified.returncode == 0, verified.stdout
+    assert "reused_scoped=semantic-stack,smoke cross_run=semantic-stack,smoke" in verified.stdout, verified.stdout
+
+
+def check_reconcile_reused_lane(tmp: Path) -> None:
+    """The receipt relabels a 0-exit lane from its own stage row whatever the
+    plan enabled: by the per-launch token at any start time, or (token-less,
+    older receipts) by a row that started between the lane's start and its
+    finish; a row from outside that window or another token never matches,
+    and the duration ledger skips reused-scoped rows."""
+    pipeline = load_module("reconcile_pipeline", DRIVER)
+    run_dir = tmp / "reconcile-run"
+    run_dir.mkdir()
+    base = 1_700_000_000.0
+    provenance = {"kind": "scoped", "passed_head": "a" * 40, "current_head": "b" * 40, "changed": []}
+    cross_run_provenance = {**provenance, "cross_run": True, "passed_run_id": "earlier", "passed_run_dir": "/runs/earlier"}
+
+    def row(stage: str, status: str, started: float, token: str | None) -> dict:
+        reuse = cross_run_provenance if stage == "backend-coverage-blackbox" else provenance
+        detail = {"reuse": reuse if status == "reused-scoped" else {"requested": False}}
+        if token:
+            detail["lane_token"] = token
+        return {"stage": stage, "status": status, "started_epoch": started, "finished_epoch": started + 1.0,
+                "exit_code": 0, "duration_seconds": 1.0, "detail": detail}
+
+    rows = [
+        row("smoke", "reused-scoped", base + 20.0, "smoke.1.tok"),          # token match, 20 s after spawn
+        row("backend-coverage-blackbox", "reused-scoped", base + 40.0, None),  # token-less, inside the window
+        row("live-probes", "reused-scoped", base + 200.0, None),           # token-less, after the lane finished
+        row("semantic-stack", "reused-scoped", base + 1.0, "semantic-stack.1.other"),  # another launch's token
+        row("agents-coverage-blackbox", "passed", base + 1.0, "agents.1.tok"),
+    ]
+    (run_dir / "stages.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    receipt = {"stage_run_dir": str(run_dir), "lane_scoped_reuse": False, "reused_scoped_lanes": [], "lanes": {
+        "smoke": {"status": "running", "started_epoch": base, "lane_token": "smoke.1.tok"},
+        "backend-coverage-blackbox": {"status": "running", "started_epoch": base},
+        "live-probes": {"status": "running", "started_epoch": base},
+        "semantic-stack": {"status": "running", "started_epoch": base, "lane_token": "semantic-stack.1.tok"},
+        "agents-coverage-blackbox": {"status": "running", "started_epoch": base, "lane_token": "agents.1.tok"},
+    }}
+    finished = base + 100.0
+    outcomes = {name: pipeline.reconcile_reused_lane(receipt, name, state, finished_epoch=finished)
+                for name, state in receipt["lanes"].items()}
+    assert outcomes == {"smoke": "reused-scoped", "backend-coverage-blackbox": "reused-scoped", "live-probes": "passed",
+                        "semantic-stack": "passed", "agents-coverage-blackbox": "passed"}, outcomes
+    assert receipt["lanes"]["smoke"]["reuse"] == provenance and "reuse" not in receipt["lanes"]["live-probes"]
+    assert receipt["reused_scoped_lanes"] == ["backend-coverage-blackbox", "smoke"], receipt["reused_scoped_lanes"]
+    # Only the lane whose row says cross_run is listed as a cross-run reuse.
+    assert receipt["lanes"]["backend-coverage-blackbox"]["reuse"] == cross_run_provenance
+    assert receipt["reused_scoped_cross_run_lanes"] == ["backend-coverage-blackbox"], receipt["reused_scoped_cross_run_lanes"]
+    assert pipeline.overall({"a": {"status": "reused-scoped"}, "b": {"status": "passed"}}) == "passed"
+    assert pipeline.overall({"a": {"status": "reused-scoped"}, "b": {"status": "running"}}) == "running"
+    # An older driver's receipt that still says "passed" records no sample for a reused-scoped row.
+    ledger = tmp / "reconcile-ledger.json"
+    stale = {"stage_run_dir": str(run_dir), "lanes": {
+        "smoke": {"status": "passed", "started_epoch": base, "finished_epoch": finished, "wall_s": 100.0,
+                  "lane_token": "smoke.1.tok"},
+        "agents-coverage-blackbox": {"status": "passed", "started_epoch": base, "finished_epoch": base + 2.0,
+                                     "wall_s": 2.0, "lane_token": "agents.1.tok"},
+    }}
+    recorded = pipeline.record_lane_durations(stale, ledger)
+    assert "smoke" not in recorded and len(recorded["agents-coverage-blackbox"]) == 1, recorded
+    print("reconcile reused lane: ok")
+
+
+def check_cross_run_record_guards(tmp: Path, source_root: Path) -> None:
+    """The cross-run guards, each against the real decision over the fixture
+    repo: a later-started run is not a source while an earlier run of another
+    branch is (its branch is recorded, never compared; PR-14); a record is
+    accepted only with a finite, non-future ``finished_epoch`` (future-dated
+    ones would sort first and outrank every failed head), within the bound,
+    with a passed head that is an ancestor of HEAD and carrying its own run's
+    id; and a candidate whose bytes change between the read and the hit is
+    never reused."""
+    stage = load_module("stage_guards", source_root / "scripts" / "run_deploy_stage.py")
+    git = ["git", "-C", str(source_root)]
+    head = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    branch = subprocess.run([*git, "branch", "--show-current"], check=True, capture_output=True, text=True).stdout.strip()
+    assert branch, "fixture repo must be on a branch"
+    run_root = tmp / "guard-runs"
+    now = time.time()
+
+    def run_dir(name: str, started: float, run_branch: str = branch) -> Path:
+        path = run_root / name
+        path.mkdir(parents=True)
+        (path / "metadata.json").write_text(json.dumps({"schema_version": 1, "run_id": name, "status": "completed",
+                                                          "started_epoch": started, "branch": run_branch}))
+        return path
+
+    current = run_dir("cur", now - 100)
+    earlier = run_dir("earlier", now - 200)
+    oldest = run_dir("oldest", now - 300)
+    run_dir("later", now)                      # started after the current run: never a source
+    run_dir("same-start", now - 100)           # not strictly earlier
+    other_branch = run_dir("other-branch", now - 250, "other")
+    run_dir("no-branch", now - 260, "")        # no branch recorded: still a source (guards decide)
+    (run_root / "no-metadata").mkdir()
+    (run_root / "bad-json").mkdir()
+    (run_root / "bad-json" / "metadata.json").write_text("{not-json")
+    (run_root / "current").write_text("cur\n")  # the pointer file is not a run
+    considered = stage._considered_runs(run_root, current)
+    assert [(run.run_id, run.cross_run, run.branch) for run in considered] == \
+        [("cur", False, branch), ("earlier", True, branch), ("other-branch", True, "other"),
+         ("no-branch", True, None), ("oldest", True, branch)], considered
+
+    command = ["bash", "scripts/run-predeploy-local"]
+    invocation = stage._invocation_digest(command)
+
+    def write_record(run: Path, name: str, directory: str = "scoped", **overrides: object) -> Path:
+        record = {"schema_version": 1, "stage": "smoke", "head": head, "fingerprint": "f" * 64, "run_id": run.name,
+                  "exit_code": 0, "finished_at": "2026-01-01T00:00:00Z", "finished_epoch": now - 10,
+                  "invocation": invocation, "dirty_paths": [], **overrides}
+        path = run / "passed-cache" / "smoke" / directory / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record) + "\n")
+        return path
+
+    real = write_record(earlier, "real.json")
+    write_record(earlier, "future.json", finished_epoch=now + 10 * 365 * 86400)
+    write_record(earlier, "nan.json", finished_epoch=float("nan"))
+    write_record(earlier, "old.json", finished_epoch=now - 25 * 3600)
+    write_record(earlier, "foreign.json", run_id="cur")
+    write_record(current, "in-run-future.json", finished_epoch=now + 60)
+    # Another branch with an ancestor head is a source; the same branch with a
+    # non-ancestor head is not.
+    other = write_record(other_branch, "other.json", run_id="other-branch", finished_epoch=now - 20)
+    with patch.object(stage, "_is_ancestor", lambda ancestor, descendant: ancestor != "0" * 40):
+        write_record(oldest, "sibling.json", head="0" * 40)
+        records, rejected = stage._scoped_records_across_runs(
+            considered, "smoke", invocation, failed=False, current_head=head, now=now)
+    assert rejected == {"age": 4, "not_ancestor": 1, "foreign_run_id": 1}, rejected
+    assert [record["_record_path"] for record in records] == [str(real), str(other)], records
+    assert records[0]["_source"] == {"run_id": "earlier", "run_dir": str(earlier), "cross_run": True,
+                                     "branch": branch}
+    assert records[1]["_source"] == {"run_id": "other-branch", "run_dir": str(other_branch), "cross_run": True,
+                                     "branch": "other"}
+    other.unlink()
+    # Failures are never filtered: every one of them can veto.
+    failed = write_record(earlier, "x.json", directory="scoped-failed", exit_code=1, finished_epoch=now + 60)
+    failures, _ = stage._scoped_records_across_runs(
+        considered, "smoke", invocation, failed=True, current_head=head, now=now)
+    assert [record["_record_path"] for record in failures] == [str(failed)], failures
+    failed.unlink()
+    for extra in ("future.json", "nan.json", "old.json", "foreign.json"):
+        (earlier / "passed-cache" / "smoke" / "scoped" / extra).unlink()
+    (current / "passed-cache" / "smoke" / "scoped" / "in-run-future.json").unlink()
+    (oldest / "passed-cache" / "smoke" / "scoped" / "sibling.json").unlink()
+
+    # _record_is_intact: the bytes read must still be the bytes on disk.
+    [loaded] = stage._load_scoped_records(real.parent, "smoke", invocation)
+    assert stage._record_is_intact(loaded)
+    original = real.read_bytes()
+    real.write_bytes(original + b"\n")
+    assert not stage._record_is_intact(loaded)
+    real.write_bytes(original)
+    assert stage._record_is_intact(loaded)
+    assert not stage._record_is_intact({"_record_digest": loaded["_record_digest"]})
+
+    # The real decision over the fixture repo: the cross-run record is the
+    # hit; when its bytes change after the read (inside the judge, before the
+    # hit) the decision misses and says so.
+    rules = stage._SCOPED_REUSE_LANES["smoke"]
+
+    def inert_judge(rules, changed, judge):
+        return [{"path": path, "rule": "inert:test"} for path in changed], [], judge
+
+    def mutate_then_judge(rules, changed, judge):
+        real.write_bytes(original + b"\n")
+        return inert_judge(rules, changed, judge)
+
+    with patch.object(stage, "_judge_changes", inert_judge):
+        decision = stage._scoped_reuse_decision(run_root, current, "smoke", rules, command)
+    assert decision.hit and decision.record["_record_path"] == str(real), decision.provenance()
+    assert decision.provenance()["cross_run"] is True and decision.provenance()["passed_run_dir"] == str(earlier)
+    assert decision.provenance()["passed_run_branch"] == branch, decision.provenance()
+    with patch.object(stage, "_judge_changes", mutate_then_judge):
+        decision = stage._scoped_reuse_decision(run_root, current, "smoke", rules, command)
+    assert not decision.hit, decision.provenance()
+    assert decision.miss_reason == "1 candidate record(s) changed or vanished before the hit", decision.miss_reason
+    real.write_bytes(original)
+
+    def vanish_then_judge(rules, changed, judge):
+        real.unlink()
+        return inert_judge(rules, changed, judge)
+
+    with patch.object(stage, "_judge_changes", vanish_then_judge):
+        decision = stage._scoped_reuse_decision(run_root, current, "smoke", rules, command)
+    assert not decision.hit and decision.candidates == 1, decision.provenance()
+    print("cross-run record guards: ok")
+
+
+def check_scoped_inert_tables() -> None:
+    """Pin the lane-scoped reuse tables: the exact never-inert patterns, the
+    scoped lanes with their command markers, inert sets and graph lanes, and
+    negative probes for paths the lanes are known to execute."""
+    stage = load_module("stage_tables", ROOT / "scripts" / "run_deploy_stage.py")
+    docs = ("docs/*", "README.md", "*/README.md", "research/*", "pitch-deck/*", "prompt-review/*", "claude-code-src/*")
+    agents_tests = ("agents/tests/blackbox/*", "agents/tests/unit/*", "agents/tests/demo_cache/*")
+    backend_tests, frontend_tests, mac_tests, script_tests = \
+        ("back-end/src/tests/*",), ("front-end/src/tests/*",), ("mac-app/tests/*",), ("scripts/tests/*",)
+    assert stage._NEVER_INERT == (".claude/*", "CLAUDE.md", "AGENTS.md", "*/CLAUDE.md", "*/AGENTS.md", ".github/*",
+                                  ".conductor/*", ".cursor/*"), stage._NEVER_INERT
+    expected = {
+        "backend-coverage-blackbox": ((*docs, *agents_tests, *frontend_tests, *mac_tests),
+                                      ("backend-blackbox", "backend-unit"), ("test:coverage:sharded", "run-coverage-sharded")),
+        "live-probes": ((*docs, *agents_tests, *frontend_tests, *mac_tests),
+                        ("backend-blackbox", "backend-unit"), ("run_deploy_live_probes.py",)),
+        "agents-coverage-blackbox": ((*docs, *backend_tests, *frontend_tests, *mac_tests),
+                                     ("agents-blackbox", "agents-pytest"), ("run-coverage.sh",)),
+        "smoke": ((*docs, *agents_tests, *backend_tests, *frontend_tests, *mac_tests, *script_tests), (),
+                  ("run-predeploy-local",)),
+        "semantic-stack": ((*docs, *agents_tests, *backend_tests, *frontend_tests, *mac_tests, *script_tests), (),
+                           ("run-semantic-tests.sh",)),
+    }
+    assert set(stage._SCOPED_REUSE_LANES) == set(expected), sorted(stage._SCOPED_REUSE_LANES)
+    for name, (inert, graph_lanes, markers) in expected.items():
+        rules = stage._SCOPED_REUSE_LANES[name]
+        assert rules.inert == inert, (name, rules.inert)
+        assert rules.graph_lanes == graph_lanes and rules.markers == markers, (name, rules.graph_lanes, rules.markers)
+    # The lane name alone never selects an inert set; the real command does.
+    assert stage._scoped_lane("smoke", ["bash", "scripts/tests/foo.sh"]) is None
+    assert stage._scoped_lane("smoke", ["bash", "scripts/run-predeploy-local"]) is stage._SCOPED_REUSE_LANES["smoke"]
+    assert stage._scoped_lane("backend-coverage-blackbox", ["npm", "run", "test:coverage:sharded"]) is not None
+    assert stage._scoped_lane("backend-coverage-blackbox", ["npm", "run", "test:coverage"]) is None
+    assert stage._scoped_lane("agentcard-lifecycle", ["bash", "scripts/run-bench", "--local"]) is None
+    # Paths the lanes execute are never inert: run_benchmark.py and
+    # direct_chat_latency.py import agents/tests/e2e and agents/tests/env_defaults.py;
+    # backend coverage runs scripts/tests/blackbox-backend-teardown.test.sh; the
+    # agents benchmark domain executes scripts/tests fixtures; semantic runs
+    # front-end/tests-e2e specs; prompts and skills ship as Markdown.
+    def inert(name: str, path: str) -> bool:
+        return stage._judge_declared(path, stage._SCOPED_REUSE_LANES[name])[0]
+
+    every = list(expected)
+    for path in ("agents/tests/e2e/test_helpers.py", "agents/tests/env_defaults.py", "front-end/tests-e2e/chat.spec.ts",
+                 ".claude/commands/deploy.md", ".claude/skills/x/SKILL.md", "CLAUDE.md", "agents/CLAUDE.md", "AGENTS.md",
+                 "agents/prompts/system.md", "back-end/src/prompts/router.md", "agents/benchmarks/tasks.json",
+                 "agents/benchmarks/history/task_attempts.jsonl", "back-end/prisma/schema.prisma", "package-lock.json",
+                 ".github/workflows/ci.yml", "scripts/run_deploy_stage.py"):
+        assert not any(inert(name, path) for name in every), f"{path} must not be inert for any lane"
+    for name in ("backend-coverage-blackbox", "live-probes", "agents-coverage-blackbox"):
+        assert not inert(name, "scripts/tests/blackbox-backend-teardown.test.sh"), name
+    for name in ("smoke", "semantic-stack"):
+        assert inert(name, "scripts/tests/some-gate.test.sh"), name
+    for name in every:
+        assert inert(name, "docs/rca/cases/x.md") and inert(name, "README.md") and inert(name, "agents/README.md"), name
+    # Reach judgement (PR-14): the stack entrypoints are pinned and exist; only
+    # a non-test code file under a tooling tree, outside the declared set of a
+    # stack lane, is eligible. Everything else keeps the declared-only rule.
+    assert stage.STACK_ENTRYPOINTS == STACK_ENTRYPOINTS, stage.STACK_ENTRYPOINTS
+    for entrypoint in stage.STACK_ENTRYPOINTS:
+        assert (ROOT / entrypoint).is_file(), f"stack entrypoint {entrypoint} is gone: update STACK_ENTRYPOINTS"
+    assert stage._STACK_REACH_TREES == ("scripts/*", "back-end/scripts/*", "front-end/scripts/*", "agents/scripts/*",
+                                        "mac-app/scripts/*"), stage._STACK_REACH_TREES
+
+    def eligible(name: str, path: str) -> bool:
+        return stage._reach_eligible(path, stage._SCOPED_REUSE_LANES[name])[0]
+
+    for name in ("smoke", "semantic-stack"):
+        assert eligible(name, "back-end/scripts/coverage-process-lock.py"), name
+        assert eligible(name, "scripts/run_deploy_stage.py") and eligible(name, "agents/scripts/backfill_x.py"), name
+        for path in ("back-end/src/domains/x/service.ts", "agents/tools/x.py", "front-end/src/App.tsx",
+                     "agents/tests/e2e/test_helpers.py", "agents/tests/env_defaults.py", "front-end/tests-e2e/chat.spec.ts",
+                     "agents/benchmarks/fixtures/x.json", "agents/benchmarks/tasks.json", "back-end/prisma/migrations/x/m.sql",
+                     "back-end/scripts/prisma-local-push.test.sh", "scripts/tests/x.test.py", "scripts/run-bench",
+                     "front-end/postcss.config.js", "front-end/playwright.config.ts", "package.json", "agents/prompts/x.md",
+                     "back-end/scripts/README.md", "scripts/lib/seed-cache.sh"):
+            assert not eligible(name, path) or path == "scripts/lib/seed-cache.sh", (name, path)
+    for name in ("backend-coverage-blackbox", "live-probes", "agents-coverage-blackbox"):
+        assert not eligible(name, "back-end/scripts/coverage-process-lock.py"), name
+        assert stage._reach_eligible("scripts/x.py", stage._SCOPED_REUSE_LANES[name]) == (False, "lane has graph lanes")
+    # The judge consults neither the entrypoints nor the reverse index for a
+    # declared-inert path (deploy-stage gate regression: its fixture carries
+    # no entrypoint and a docs-only commit reran smoke); an undeclared path
+    # fails closed when an entrypoint is missing from the graph.
+    class _NoSelection:
+        all_lanes, reasons, selected, full_lanes = False, [], {}, set()
+
+    class _NoEntrypointSelector:
+        config = {"run_lanes": []}
+
+        class graph:
+            fileset: set = set()
+
+        def select(self, changed):
+            return _NoSelection()
+
+        def upstream(self, changed):
+            raise AssertionError("reverse index consulted for a declared-inert path")
+
+    judge = stage._GraphJudge.__new__(stage._GraphJudge)
+    judge._module, judge._selector = stage._selector_module(), _NoEntrypointSelector()
+    smoke = stage._SCOPED_REUSE_LANES["smoke"]
+    assert judge.judge("docs/guide.md", smoke) == (True, "graph:no ALL fallback")
+    assert judge.judge("back-end/src/tests/unit/x.test.ts", smoke, declared=True) == (True, "graph:no ALL fallback")
+    assert judge.judge("back-end/scripts/x.py", smoke, declared=False) == \
+        (False, "graph:stack entrypoint missing: scripts/run-predeploy-local")
+    assert judge.judge("docs/guide.md", stage._SCOPED_REUSE_LANES["backend-coverage-blackbox"]) == \
+        (True, "graph:no backend-blackbox/backend-unit test selected")
+    assert not inert("agents-coverage-blackbox", "agents/tests/blackbox/rose.blackbox.py")
+    assert all(inert(n, "agents/tests/blackbox/rose.blackbox.py") for n in every if n != "agents-coverage-blackbox")
+    assert not inert("backend-coverage-blackbox", "back-end/src/tests/blackbox/x.blackbox.ts")
+    assert not inert("live-probes", "back-end/src/tests/unit/x.test.ts")
+    assert all(inert(n, "back-end/src/tests/blackbox/x.blackbox.ts") for n in ("agents-coverage-blackbox", "smoke", "semantic-stack"))
+    print("scoped inert tables: ok")
+
+
+# Largest ``lanes[<name>].tree_peak_pss_mb`` the pipeline receipts recorded per
+# lane (``.context/deploy-pipeline/history.jsonl`` of the 2026-10-30/31 devbox
+# deploys, 43 attempts; receipt schema: ``tree_peak_pss_mb`` / ``tree_peak_anon_mb``
+# on each lane, ``memory_mb`` its declaration). Recorded, never estimated.
+RECORDED_LANE_PEAK_PSS_MB = {
+    "deploy-command-structural": 2575.4,   # 19 samples, 3 workers
+    "smoke": 3319.4,                       # 14 samples; 20261031-115354 receipt (deploy 9 round 2)
+    "agents-coverage-blackbox": 743.1,     # 15 samples
+    "eslint": 1857.8,                      # 19 samples
+    "typescript": 1553.3,                  # 19 samples
+    "backend-structural": 285.7,           # 19 samples
+    "seed-cache-decision": 23.7,           # 19 samples
+    "canonical-seed-whatsapp-content": 58.7,  # 19 samples
+    "backend-coverage-blackbox": 4556.8,   # 15 samples
+}
+# Knowingly under-declared: backend coverage declares its width formula (1536
+# + 512 x workers: 2560 MB here, 3072 MB at the launcher width) although its
+# recorded tree peak is 3656.3 MB on run 20261031-164809-1083486 (head
+# a334edca1) and 4556.8 MB in history.jsonl. The honest 1.25x declaration
+# (5696 MB) would serialize it behind smoke (+18 min per round): on that run's
+# 8890 MB budget the three coverage-phase peaks alone sum to 8865 MB (smoke
+# 3319.4 + backend 4556.8 + agents 989.3), so no margin fits beside them. The
+# lane relies on the PR-11 live-headroom admission plus the host's measured
+# floor (mem_available_min 6452 MB on that run); the true lever is re-deriving
+# the budget from the measured floor, not relaxing declarations. Pinned here
+# so right-sizing it is a deliberate schedule decision (follow-up 13 replayed
+# the 4571/5696 alternatives: both defer a coverage lane for 18-20 min).
+KNOWN_UNDER_DECLARED_LANES = {"backend-coverage-blackbox"}
+# The devbox host the receipts recorded: 8 cores, MemAvailable 11563 MB of
+# 16007 MB, watchdog cap 14471 MB -> memory_budget_mb 7979 (20261031-115354).
+RECORDED_DEVBOX = ("--host-cpus", "8", "--host-mem-mb", "11563", "--host-total-mem-mb", "16007",
+                   "--host-watchdog-mb", "14471")
+
+
+def check_recorded_peak_reservations() -> None:
+    """Follow-up lane-memory-b (2026-10-31): every standard-plan lane with
+    recorded peak data declares at least 1.25x that peak on the recorded host,
+    except the pinned known under-declaration, which must still be under
+    (so the exception cannot silently outlive its reason)."""
+    plan = plan_json("--group", "all", "--backend", "--agents", "--smoke", "local", *RECORDED_DEVBOX)
+    assert plan["memory_budget_mb"] == 7979, plan["memory_budget_mb"]
+    lanes = {lane["name"]: lane for lane in plan["lanes"]}
+    checked = 0
+    for name, peak in RECORDED_LANE_PEAK_PSS_MB.items():
+        declared = lanes[name]["memory_mb"]
+        if name in KNOWN_UNDER_DECLARED_LANES:
+            assert declared < peak, f"{name}: {declared} MB now covers the {peak} MB peak; drop the exception"
+            continue
+        assert declared >= 1.25 * peak, f"{name}: declares {declared} MB, recorded tree peak {peak} MB (x1.25 = {1.25 * peak:.0f})"
+        checked += 1
+    assert checked == len(RECORDED_LANE_PEAK_PSS_MB) - len(KNOWN_UNDER_DECLARED_LANES)
+    structural, smoke = lanes["deploy-command-structural"], lanes["smoke"]
+    assert structural["memory_mb"] == 3220 and structural["exclusive"] is True, structural
+    assert smoke["memory_mb"] == 4150 == math.ceil(1.25 * 3319.4), smoke
+    # The under-declared lane keeps its width formula (follow-up 13 kept it
+    # after replaying the honest alternatives, see KNOWN_UNDER_DECLARED_LANES).
+    backend = lanes["backend-coverage-blackbox"]
+    width = int(backend["env"]["BLACKBOX_TEST_CONCURRENCY"]) + int(backend["env"]["BACKEND_UNIT_CONCURRENCY"])
+    assert backend["memory_mb"] == 1536 + 512 * width == 2560, (backend, width)
+    assert structural["memory_mb"] + smoke["memory_mb"] <= plan["memory_budget_mb"], \
+        "the right-sized structural lane and the smoke lane fit the recorded budget together"
+    assert structural["memory_mb"] + smoke["memory_mb"] + lanes["backend-coverage-blackbox"]["memory_mb"] \
+        > plan["memory_budget_mb"], "the coverage lanes still wait for the exclusive phase on this budget"
+    print("recorded peak reservations: ok")
+
+
+VERSIONED_TAIL_LANES = ("live-probes", "semantic-stack", "e2b-smoke")
+VERSIONED_TAIL_FLAGS = ("--live-probes", "--semantic-stack", "--e2b-smoke")
+
+
+def _without_versioned_tails(plan: dict) -> dict:
+    """``plan`` with the three flagged lanes and their schedule entries removed."""
+    stripped = json.loads(json.dumps(plan))
+    stripped["lanes"] = [lane for lane in stripped["lanes"] if lane["name"] not in VERSIONED_TAIL_LANES]
+    schedule = stripped["schedule"]
+    schedule["estimates"] = {name: value for name, value in schedule["estimates"].items()
+                             if name not in VERSIONED_TAIL_LANES}
+    schedule["phases"] = [{"phase": phase["phase"],
+                           "lanes": [name for name in phase["lanes"] if name not in VERSIONED_TAIL_LANES]}
+                          for phase in schedule["phases"]]
+    return stripped
+
+
+def check_versioned_group4_lanes(tmp: Path) -> None:
+    """Follow-up 12 (2026-10-31): the Step 4p live probes and the Steps 5/6b/6c
+    semantic stack existed only in a private launcher plan (``live-probes``
+    1536 MB after every Group 3 lane; ``semantic-stack`` 4096 MB after the
+    structural lane, backend coverage and live-probes, running UI semantics,
+    the latency ratchet AND the E2B smoke). ``plan --live-probes
+    --semantic-stack --e2b-smoke`` versions them: flag-less plans are unchanged
+    byte for byte; ``live-probes`` (963 MB = 1.25 x 769.7 recorded) still waits
+    for every other Group 3 lane and joins the coverage phase; ``semantic-stack``
+    (6108 MB = 1.25 x 4886.2, its first split-lane receipt; follow-up 13
+    re-pinned it from the 5205.2 MB launcher-lane peak) now holds UI semantics
+    + latency only and waits for the structural lane plus the agents/frontend
+    coverage lanes whose worker.py/Playwright/npm/vite children its
+    non-isolated run.sh sweeps would reap, never for backend coverage or
+    live-probes; ``e2b-smoke`` (812 MB = 1.25 x 649.1, its first receipt;
+    follow-up 13 replaced the 1536 MB estimate) runs Step 6c alone after the
+    lanes that drive run-blackbox-tests.sh against victoria_<workspace>.
+    Budget math on the recorded 7979 MB devbox: semantic-stack is deferred
+    behind backend coverage (6108 + 2560) and smoke (6108 + 4150) by memory
+    and behind agents coverage (6108 + 1152 would fit) by the sweep edge;
+    e2b-smoke (6108 + 812 = 6920) overlaps it there and on the launcher's
+    8755 MB budget. Backend coverage keeps its width formula (2560 / 3072),
+    see KNOWN_UNDER_DECLARED_LANES."""
+    pipeline = load_module("run_deploy_pipeline_group4_tails", DRIVER)
+    assert pipeline.LIVE_PROBES_RECORDED_TREE_PEAK_MB == 769.7
+    assert pipeline.SEMANTIC_STACK_RECORDED_TREE_PEAK_MB == 4886.2
+    assert pipeline.E2B_SMOKE_RECORDED_TREE_PEAK_MB == 649.1
+    assert not hasattr(pipeline, "BACKEND_COVERAGE_RECORDED_TREE_PEAK_MB"), "backend coverage keeps its width formula"
+    assert not hasattr(pipeline, "E2B_SMOKE_ESTIMATED_MEMORY_MB"), "the e2b-smoke estimate is replaced by its receipt"
+    assert pipeline.live_probes_lane_memory_mb() == 963 == math.ceil(1.25 * 769.7)
+    assert pipeline.semantic_stack_lane_memory_mb() == 6108 == math.ceil(1.25 * 4886.2)
+    assert pipeline.e2b_smoke_lane_memory_mb() == 812 == math.ceil(1.25 * 649.1)
+    assert set(VERSIONED_TAIL_LANES) <= set(pipeline.DEFAULT_LANE_SECONDS), "simulate must not call the tails UNMEASURED"
+    script = ROOT / pipeline.SEMANTIC_STACK_SCRIPT
+    assert script.is_file() and os.access(script, os.X_OK), script
+
+    base = ("--group", "all", "--backend", "--agents", "--smoke", "local", *RECORDED_DEVBOX)
+    plain = plan_json(*base)
+    full = plan_json(*base, *VERSIONED_TAIL_FLAGS)
+    plain_text = json.dumps(plain)
+    assert not set(VERSIONED_TAIL_LANES) & {lane["name"] for lane in plain["lanes"]}
+    assert "run-deploy-semantic-stack.sh" not in plain_text and "run_deploy_live_probes" not in plain_text
+    assert json.dumps(_without_versioned_tails(full), sort_keys=True) == json.dumps(plain, sort_keys=True), \
+        "the flags may only append lanes: every other byte of the plan is unchanged"
+    assert plain["memory_budget_mb"] == full["memory_budget_mb"] == 7979
+    names = [lane["name"] for lane in full["lanes"]]
+    assert names[-3:] == ["smoke", "semantic-stack", "e2b-smoke"] and names[-4] == "live-probes", names
+    lanes = {lane["name"]: lane for lane in full["lanes"]}
+    group3 = [lane["name"] for lane in full["lanes"] if lane["group"] == "3" and lane["name"] != "live-probes"]
+
+    probes = lanes["live-probes"]
+    assert probes["command"] == ["python3", "scripts/run_deploy_live_probes.py"] and probes["cwd"] == "."
+    assert probes["group"] == "3" and probes["memory_mb"] == 963 and probes["reuse_passed"] is True
+    assert probes["after"] == group3 == ["eslint", "typescript", "backend-structural", "deploy-command-structural",
+                                         "seed-cache-decision", "canonical-seed-whatsapp-content",
+                                         "backend-coverage-blackbox", "agents-coverage-blackbox"], probes["after"]
+    assert "phase" not in probes and "exclusive" not in probes, probes
+    phases = {phase["phase"]: phase["lanes"] for phase in full["schedule"]["phases"]}
+    assert "live-probes" in phases["coverage"], phases
+    assert not any(name in lanes_in for name in ("semantic-stack", "e2b-smoke") for lanes_in in phases.values()), \
+        "the Group 4 tails stay unphased"
+
+    semantic = lanes["semantic-stack"]
+    assert semantic["command"] == ["bash", "scripts/run-deploy-semantic-stack.sh"] and semantic["cwd"] == "."
+    assert semantic["group"] == "4" and semantic["memory_mb"] == 6108 and semantic["reuse_passed"] is True
+    assert semantic["after"] == ["deploy-command-structural", "agents-coverage-blackbox"], semantic["after"]
+    assert "backend-coverage-blackbox" not in semantic["after"] and "live-probes" not in semantic["after"]
+    assert "phase" not in semantic, semantic
+
+    e2b = lanes["e2b-smoke"]
+    assert e2b["command"] == ["bash", "scripts/run-deploy-semantic-stack.sh", "--e2b-smoke-only"] and e2b["cwd"] == "."
+    assert e2b["group"] == "4" and e2b["memory_mb"] == 812 and e2b["reuse_passed"] is True
+    assert e2b["after"] == ["backend-coverage-blackbox", "live-probes"], e2b["after"]
+    assert "phase" not in e2b, e2b
+
+    # Budget math the design accepts (honest declarations, no overlap forced).
+    budget = full["memory_budget_mb"]
+    assert semantic["memory_mb"] <= budget, "never refused outright"
+    assert semantic["memory_mb"] + lanes["backend-coverage-blackbox"]["memory_mb"] > budget
+    assert semantic["memory_mb"] + lanes["smoke"]["memory_mb"] > budget
+    assert semantic["memory_mb"] + lanes["agents-coverage-blackbox"]["memory_mb"] <= budget, \
+        "only the sweep edge keeps semantic-stack behind agents coverage on this budget"
+    assert lanes["backend-coverage-blackbox"]["memory_mb"] == 2560, lanes["backend-coverage-blackbox"]
+    assert semantic["memory_mb"] + e2b["memory_mb"] == 6920 <= budget, \
+        "re-pinned from their first receipts, the two Group 4 tails overlap on the recorded devbox too"
+    launcher = plan_json("--group", "all", "--backend", "--agents", "--frontend", "--smoke", "local",
+                         "--host-cpus", "8", "--host-mem-mb", "12339", "--host-total-mem-mb", "16007",
+                         "--host-watchdog-mb", "14471", *VERSIONED_TAIL_FLAGS)
+    assert launcher["memory_budget_mb"] == 8755, launcher["memory_budget_mb"]
+    launcher_lanes = {lane["name"]: lane for lane in launcher["lanes"]}
+    assert launcher_lanes["semantic-stack"]["after"] == ["deploy-command-structural", "frontend-coverage-blackbox",
+                                                         "agents-coverage-blackbox"]
+    assert launcher["workers"]["backend_blackbox"] + launcher["workers"]["backend_unit"] == 3, launcher["workers"]
+    assert launcher_lanes["backend-coverage-blackbox"]["memory_mb"] == 3072 == 1536 + 512 * 3
+    assert 6108 + launcher_lanes["backend-coverage-blackbox"]["memory_mb"] > 8755
+    assert 6108 + launcher_lanes["agents-coverage-blackbox"]["memory_mb"] <= 8755
+    assert 6108 + launcher_lanes["e2b-smoke"]["memory_mb"] <= 8755, "the two tails overlap on the launcher budget"
+    assert launcher_lanes["live-probes"]["after"][-3:] == ["backend-coverage-blackbox", "frontend-coverage-blackbox",
+                                                           "agents-coverage-blackbox"]
+
+    # Flags follow their group: no Group 3 lane means no edges to wait on.
+    group4 = plan_json("--group", "4", "--smoke", "local", *VERSIONED_TAIL_FLAGS)
+    group4_lanes = {lane["name"]: lane for lane in group4["lanes"]}
+    assert set(group4_lanes) == {"smoke", "semantic-stack", "e2b-smoke"}, set(group4_lanes)
+    assert group4_lanes["semantic-stack"]["after"] == [] and group4_lanes["e2b-smoke"]["after"] == []
+    group3_only = plan_json("--group", "3", *VERSIONED_TAIL_FLAGS)
+    assert [lane["name"] for lane in group3_only["lanes"]][-1] == "live-probes"
+    assert not {"semantic-stack", "e2b-smoke"} & {lane["name"] for lane in group3_only["lanes"]}
+
+    # The flagged plan loads through the real loader (edges valid, DAG acyclic
+    # with the implied phase edges) and simulates: the phased live-probes lane
+    # is projected from a recorded or default duration (never unknown); the
+    # unphased Group 4 tails are outside the Group 3 projection by design.
+    plan_path = tmp / "versioned-tails-plan.json"
+    plan_path.write_text(json.dumps(full))
+    simulated = run_driver("simulate", "--plan", str(plan_path), env=dict(os.environ))
+    assert simulated.returncode == 0, simulated.stderr
+    projection = json.loads(simulated.stdout)
+    assert projection["lanes"]["live-probes"]["source"] in {"default", "ledger", "stage-receipts"}, projection["lanes"]
+    assert projection["lanes"]["live-probes"]["loaded_s"] > 0
+    assert not {"semantic-stack", "e2b-smoke"} & set(projection["lanes"]), "unphased tails are not projected"
+    assert isinstance(projection["phased_union_wall_s"], (int, float))
+
+    deploy_md = (ROOT / ".claude" / "commands" / "deploy.md").read_text()
+    for needle in ("plan --live-probes --semantic-stack", "--e2b-smoke", "scripts/run-deploy-semantic-stack.sh",
+                   "--e2b-smoke-only", "`bash scripts/tests/run-deploy-semantic-stack.test.sh`"):
+        assert needle in deploy_md, f"deploy.md must document {needle}"
+    print("versioned group 4 lanes: ok")
+
+
+def check_stack_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
+    """Follow-up lane-memory-b (2026-10-31): on #1639/#1640 and the
+    speed-followup deploys the 27 min smoke lane started only when the 9-10 min
+    exclusive structural lane (declared 6544 MB, recorded tree peak <= 2575 MB)
+    released its reservation, and semantic-stack waited for smoke in turn
+    (~50 min rounds). A Group 4 lane may declare ``"phase": "stack"``: it is
+    admitted right after the quick phase, beside the exclusive lane when both
+    declarations fit the budget, no later phase waits for it, and the
+    coverage lanes still wait for the exclusive lane. Values mirror the
+    recorded plan at 1/40 scale: budget 200 = 7979, structural 80 = 3220,
+    smoke 104 = 4150, cov 64 = 2560 (80 + 104 fit; 80 + 104 + 64 do not)."""
+    def sample(wall: float, concurrent: int) -> dict:
+        return {"wall_s": wall, "status": "passed", "concurrent": concurrent, "at": "2026-10-31T00:00:00Z"}
+
+    ledger = tmp / "stack-phase-ledger.json"
+    ledger.write_text(json.dumps({"schema_version": 1, "lanes": {
+        "quick": [sample(5.0, 3)], "big": [sample(550.0, 1)], "cov": [sample(1100.0, 3)], "smoke": [sample(1600.0, 2)],
+        "probe": [sample(40.0, 3)],  # recorded, so the coverage order (longest first) is deterministic
+    }}))
+    env = {**env, "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}
+    plan = tmp / "stack-phase-plan.json"
+    state = tmp / "stack-phase"
+    write_plan(plan, [
+        {"name": "quick", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10},
+        {"name": "big", "command": ["sleep", "0.6"], "reuse_passed": False, "group": "3", "exclusive": True,
+         "memory_mb": 80},
+        {"name": "cov", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 64},
+        # Long enough that quick -> big -> cov -> probe -> semantic (five admission
+        # passes) still end inside it on a loaded host.
+        {"name": "smoke", "command": ["sleep", "4"], "reuse_passed": False, "group": "4", "memory_mb": 104,
+         "phase": "stack"},
+        {"name": "probe", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10,
+         "after": ["big", "cov"]},
+        {"name": "semantic", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "4", "memory_mb": 10,
+         "after": ["big", "cov", "probe"]},
+    ], schedule={"policy": "phased"})
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
+                     "--memory-budget-mb", "200", env=env, timeout=120)
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["status"])
+    lanes = receipt["lanes"]
+    assert all(lane["status"] == "passed" for lane in lanes.values()), lanes
+    phases = [(p["phase"], p["lanes"]) for p in receipt["schedule"]["phases"]]
+    assert phases == [("quick", ["quick"]), ("stack", ["smoke"]), ("exclusive", ["big"]), ("coverage", ["cov", "probe"])], phases
+    assert receipt["after"]["smoke"] == ["quick"], "the stack lane waits only for the quick phase"
+    assert receipt["after"]["big"] == ["quick"], "the exclusive lane does not wait for the stack lane"
+    assert receipt["after"]["cov"] == ["quick", "big"], "coverage waits for the exclusive lane, never for the stack lane"
+    assert receipt["after"]["semantic"] == ["big", "cov", "probe"], "declared edges kept, no implied edges added"
+    big, smoke, cov = lanes["big"], lanes["smoke"], lanes["cov"]
+    assert smoke["started_epoch"] >= lanes["quick"]["finished_epoch"], "the stack lane waits for the quick phase"
+    assert big["started_epoch"] < smoke["started_epoch"], "plan order: the exclusive lane is admitted first"
+    assert smoke["started_epoch"] < big["finished_epoch"], "smoke starts beside the exclusive lane"
+    assert smoke["admission"]["decision"] == "admitted" and not smoke["admission"].get("deferred"), smoke["admission"]
+    assert big["admission"].get("note") is None and lanes["big"].get("note") is None, "the exclusive lane runs at planned width"
+    assert cov["started_epoch"] >= big["finished_epoch"], "coverage waits for the exclusive lane"
+    assert cov["started_epoch"] < smoke["finished_epoch"], "coverage overlaps the smoke lane"
+    assert lanes["semantic"]["started_epoch"] < smoke["finished_epoch"], "semantic is not gated by the smoke lane"
+
+    # Too small a budget for both: the exclusive lane (first in plan order)
+    # runs at planned width and the stack lane waits for its release, which is
+    # exactly the previous coverage-phase behaviour (never smoke first).
+    tight = tmp / "stack-phase-tight"
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(tight), "--max-parallel", "0",
+                     "--memory-budget-mb", "150", env=env, timeout=120)
+    receipt = json.loads((tight / "receipt.json").read_text())
+    assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr)
+    big, smoke = receipt["lanes"]["big"], receipt["lanes"]["smoke"]
+    assert big.get("note") is None, "no resize: 80 fits 150; 80 + 104 does not"
+    assert smoke["started_epoch"] >= big["finished_epoch"], "smoke waits for the exclusive lane's release"
+    assert smoke["admission"]["deferred"]["reason"] == "budget", smoke["admission"]
+    print("stack phase lanes: ok")
+
+
+def check_exclusive_lane_defers_behind_stack_lane(tmp: Path, env: dict[str, str]) -> None:
+    """CodeRabbit on #1658 (Major): with a stack lane running, the exclusive
+    structural lane skipped the resize step and the static budget check refused
+    a lane planned wider than this attempt's budget (six workers, 6439 MB, vs a
+    6000 MB budget). It must defer with a ``budget`` waiting record and be
+    resized by fit_exclusive_lane once the running lanes release their share;
+    a lane that can never fit (not even one worker) stays refused."""
+    pipeline = load_module("pipeline_defer_exclusive", DRIVER)
+    declared = pipeline.structural_lane_memory_mb
+    assert declared(6) == 6439, declared(6)
+    probe = tmp / "defer-args.txt"
+    plan = tmp / "defer-plan.json"
+    state = tmp / "defer"
+    # ``gate`` (unphased, admitted at attempt start) holds the exclusive lane
+    # back until the stack lane is running: in plan order the exclusive lane
+    # would otherwise be admitted first and resized alone.
+    write_plan(plan, [
+        {"name": "quick", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10},
+        {"name": "gate", "command": ["sleep", "0.8"], "reuse_passed": False, "group": "4", "memory_mb": 10},
+        {"name": "big", "exclusive": True, "reuse_passed": False, "group": "3", "memory_mb": declared(6),
+         "after": ["gate"],
+         "command": ["bash", "-c", f"printf '%s\\n' \"$@\" > {probe}",
+                     "scripts/run-deploy-structural-gates.py", "--max-workers", "6"]},
+        {"name": "smoke", "command": ["sleep", "2.5"], "reuse_passed": False, "group": "4", "memory_mb": 4150,
+         "phase": "stack"},
+    ], schedule={"policy": "phased"})
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
+                     "--memory-budget-mb", "6000", env=env, timeout=120)
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["lanes"]["big"])
+    big, smoke = receipt["lanes"]["big"], receipt["lanes"]["smoke"]
+    assert smoke["status"] == "passed" and big["status"] == "passed", (smoke, big)
+    assert smoke["started_epoch"] < receipt["lanes"]["gate"]["finished_epoch"], "the stack lane ran before big was ready"
+    assert big["admission"]["deferred"]["reason"] == "budget", big["admission"]
+    assert big["admission"]["deferred"]["first"]["memory_mb"] == declared(6), big["admission"]
+    assert big["started_epoch"] >= smoke["finished_epoch"], "resized and admitted once the stack lane released"
+    args = probe.read_text().split()
+    workers = int(args[args.index("--max-workers") + 1])
+    assert 1 <= workers <= 5 and big["memory_mb"] == declared(workers) <= 6000, (workers, big)
+    assert big["note"].startswith(f"resized: 6 -> {workers} workers") and "PIPELINE_LANE_RESIZED" in ran.stdout, \
+        (big, ran.stdout)
+    # A lane that can never fit is still refused, stack lane or not.
+    never = tmp / "defer-never"
+    write_plan(plan, [
+        {"name": "big", "exclusive": True, "reuse_passed": False, "group": "3", "memory_mb": declared(6),
+         "command": ["bash", "-c", "true", "scripts/run-deploy-structural-gates.py", "--max-workers", "6"]},
+        {"name": "smoke", "command": ["sleep", "0.5"], "reuse_passed": False, "group": "4", "memory_mb": 500,
+         "phase": "stack"},
+    ], schedule={"policy": "phased"})
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(never), "--max-parallel", "0",
+                     "--memory-budget-mb", str(declared(1) - 1), env=env, timeout=120)
+    big = json.loads((never / "receipt.json").read_text())["lanes"]["big"]
+    assert ran.returncode == 1 and big["status"] == "failed" and big["note"].startswith("refused: needs"), big
+    print("exclusive lane defers behind the stack lane: ok")
+
+
+def check_static_ceiling_credits_observed_lanes(tmp: Path, env: dict[str, str]) -> None:
+    """Follow-up PR-11 (#1658 round 1, 2026-10-31): smoke 4150 + backend 3072
+    + agents 1536 = 8758 MB declared against an 8755 MB budget deferred
+    agents-coverage on reason ``budget`` for ~14 min although the live check
+    had 157 MB to spare. The static ceiling now charges a phased candidate
+    only the freshly observed running lanes' unmaterialized declarations;
+    unobserved lanes, a disabled credit and an unphased candidate keep the
+    whole declarations. Budget 150: holder (100) + joiner (60) exceed it
+    declared, but 100 - ~70 observed + 60 fit; live headroom (300) is never the
+    binding check here."""
+    if sys.platform != "linux":
+        print("static ceiling credit: skipped (Linux /proc sampling)")
+        return
+    pipeline = load_module("pipeline_static_credit", DRIVER)
+    marker = tmp / "static-holder-allocated"
+    plan = tmp / "static-credit-plan.json"
+    holder_command = [sys.executable, "-c",
+                      "import pathlib, time; block = b'x' * (60 * 1024 * 1024); "
+                      f"pathlib.Path({str(marker)!r}).touch(); time.sleep(5); del block"]
+
+    def write(group: str) -> None:
+        write_plan(plan, [
+            {"name": "gate", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 1},
+            {"name": "holder", "command": holder_command, "reuse_passed": False, "group": "3", "memory_mb": 100},
+            {"name": "joiner", "command": ["sleep", "0.2"], "after": ["gate"], "reuse_passed": False,
+             "group": group, "memory_mb": 60},
+        ], schedule={"policy": "legacy"})
+
+    def host() -> dict:
+        return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + 300}
+
+    def run(state: Path, extra_env: dict[str, str] | None = None) -> dict:
+        if marker.exists():
+            marker.unlink()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(pipeline, "host_resources", side_effect=host))
+            stack.enter_context(patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])))
+            stack.enter_context(patch.dict(os.environ, {**env, **(extra_env or {})}, clear=True))
+            result = pipeline.run(plan, state, max_parallel=0, budget_mb=150)
+        receipt = json.loads((state / "receipt.json").read_text())
+        assert result == 0 and receipt["status"] == "passed", (result, receipt["status"], receipt["lanes"])
+        assert receipt["memory_budget_mb"] == 150, receipt["memory_budget_mb"]
+        return receipt["lanes"]
+
+    write("3")
+    lanes = run(tmp / "static-credit")
+    holder, joiner = lanes["holder"], lanes["joiner"]
+    assert joiner["started_epoch"] < holder["finished_epoch"], \
+        "a phased candidate fits the budget beside the holder's unmaterialized reservation"
+    admission = joiner["admission"]
+    assert admission["decision"] == "admitted" and admission["budget_mb"] == 150, admission
+    assert admission["reserved_declared_mb"] == 100 and admission["reserved_static_mb"] < 60, admission
+    assert admission["reserved_live_mb"] < 60, "the same credit applies against live headroom"
+    deferred = admission.get("deferred")
+    if deferred:  # the holder was not yet observed when the gate finished
+        assert deferred["reason"] == "budget" and deferred["first"]["reserved_static_mb"] == 100, deferred
+        assert deferred["first"]["running"]["holder"]["observation"] in {"unknown", "stale"}, deferred
+
+    lanes = run(tmp / "static-credit-off", {"DEPLOY_ADMISSION_CREDIT": "0"})
+    holder, joiner = lanes["holder"], lanes["joiner"]
+    assert joiner["started_epoch"] >= holder["finished_epoch"], "with the credit disabled the whole declarations rule"
+    waited = joiner["admission"]["deferred"]
+    assert waited["reason"] == "budget" and waited["last"]["reserved_static_mb"] == 100, waited
+    assert waited["last"]["running"]["holder"]["observation"] == "disabled", waited
+
+    write("4")  # unphased candidate: declared-peak accounting, no credit
+    lanes = run(tmp / "static-credit-unphased")
+    assert lanes["joiner"]["started_epoch"] >= lanes["holder"]["finished_epoch"], lanes["joiner"]
+    assert lanes["joiner"]["admission"]["deferred"]["last"]["reserved_static_mb"] == 100, lanes["joiner"]["admission"]
+    print("static ceiling credit: ok")
+
+
+def check_recorded_budget_admits_coverage_beside_smoke(tmp: Path, env: dict[str, str]) -> None:
+    """The recorded #1658 round-1 shape on its 8755 MB budget: quick lanes,
+    smoke (stack, 4150) beside the exclusive structural lane (4293), then
+    backend-coverage (the generated plan's declaration at the launcher width,
+    3072) and agents-coverage (1536) must run together while smoke still
+    runs: 4150 + 3072 + 1536 = 8758 declared exceeds the budget, but smoke's
+    observed usage leaves room under both ceilings. The backend declaration
+    is read from the real plan so an honest re-pin surfaces its schedule
+    effect here (follow-up 13 replayed 4571 and 5696: each defers a coverage
+    lane 18-20 min) instead of passing on a literal."""
+    if sys.platform != "linux":
+        print("recorded budget coverage admission: skipped (Linux /proc sampling)")
+        return
+    pipeline = load_module("pipeline_recorded_budget", DRIVER)
+    launcher = plan_json("--group", "all", "--backend", "--agents", "--frontend", "--smoke", "local",
+                         "--host-cpus", "8", "--host-mem-mb", "12339", "--host-total-mem-mb", "16007",
+                         "--host-watchdog-mb", "14471")
+    backend_mb = next(lane["memory_mb"] for lane in launcher["lanes"] if lane["name"] == "backend-coverage-blackbox")
+    assert launcher["memory_budget_mb"] == 8755 and backend_mb == 3072, (launcher["memory_budget_mb"], backend_mb)
+    plan = tmp / "recorded-budget-plan.json"
+    state = tmp / "recorded-budget"
+    smoke_command = [sys.executable, "-c",
+                     "import time; block = b'x' * (60 * 1024 * 1024); time.sleep(8); del block"]
+    write_plan(plan, [
+        {"name": "quick", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10},
+        {"name": "structural", "command": ["sleep", "0.6"], "reuse_passed": False, "group": "3", "exclusive": True,
+         "memory_mb": 4293},
+        {"name": "smoke", "command": smoke_command, "reuse_passed": False, "group": "4", "memory_mb": 4150,
+         "phase": "stack"},
+        {"name": "backend", "command": ["sleep", "3"], "reuse_passed": False, "group": "3", "memory_mb": backend_mb},
+        {"name": "agents", "command": ["sleep", "0.5"], "reuse_passed": False, "group": "3", "memory_mb": 1536},
+    ], schedule={"policy": "phased"})
+    ledger = tmp / "recorded-budget-ledger.json"
+    ledger.write_text(json.dumps({"schema_version": 1, "lanes": {
+        "quick": [{"wall_s": 5.0, "status": "passed", "concurrent": 3, "at": "2026-10-31T00:00:00Z"}],
+        "structural": [{"wall_s": 486.0, "status": "passed", "concurrent": 2, "at": "2026-10-31T00:00:00Z"}],
+        "backend": [{"wall_s": 1100.0, "status": "passed", "concurrent": 3, "at": "2026-10-31T00:00:00Z"}],
+        "agents": [{"wall_s": 1400.0, "status": "passed", "concurrent": 3, "at": "2026-10-31T00:00:00Z"}],
+        "smoke": [{"wall_s": 1600.0, "status": "passed", "concurrent": 2, "at": "2026-10-31T00:00:00Z"}],
+    }}))
+
+    def host() -> dict:
+        return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + 8755}
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(pipeline, "host_resources", side_effect=host))
+        stack.enter_context(patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])))
+        stack.enter_context(patch.dict(os.environ, {**env, "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}, clear=True))
+        result = pipeline.run(plan, state, max_parallel=0, budget_mb=8755)
+    receipt = json.loads((state / "receipt.json").read_text())
+    assert result == 0 and receipt["status"] == "passed", (result, receipt["status"], receipt["lanes"])
+    assert receipt["memory_budget_mb"] == 8755, receipt["memory_budget_mb"]
+    kinds = [p["phase"] for p in receipt["schedule"]["phases"]]
+    assert kinds == ["quick", "stack", "exclusive", "coverage"], receipt["schedule"]["phases"]
+    lanes = receipt["lanes"]
+    structural, smoke, backend, agents = lanes["structural"], lanes["smoke"], lanes["backend"], lanes["agents"]
+    assert smoke["started_epoch"] < structural["finished_epoch"], "smoke runs beside the structural lane"
+    assert backend["started_epoch"] >= structural["finished_epoch"], "coverage waits for the exclusive lane"
+    assert agents["started_epoch"] < backend["finished_epoch"], "agents-coverage runs together with backend-coverage"
+    assert agents["started_epoch"] < smoke["finished_epoch"], "while the smoke stack still runs"
+    admission = agents["admission"]
+    assert admission["decision"] == "admitted" and admission["reserved_declared_mb"] == 4150 + backend_mb, admission
+    assert admission["reserved_static_mb"] + 1536 <= 8755 < admission["reserved_declared_mb"] + 1536, admission
+    assert admission["running"]["smoke"]["observation"] == "fresh", admission["running"]
+    print("recorded budget admits coverage beside smoke: ok")
 
 
 def main() -> int:
@@ -980,7 +2157,10 @@ def main() -> int:
         # it: every scenario sets the admission knobs it needs explicitly, so
         # the base environment carries none of them (in-process runs patch
         # os.environ with clear=True for the same reason).
-        env = {**{key: value for key, value in os.environ.items() if not key.startswith("DEPLOY_ADMISSION_")},
+        # A launcher exports FACTORY_METADATA_FILE for its own worktree; the
+        # telemetry scenario selects its own fixture snapshot explicitly.
+        env = {**{key: value for key, value in os.environ.items()
+                  if not key.startswith("DEPLOY_ADMISSION_") and key != "FACTORY_METADATA_FILE"},
                "DEPLOY_RUN_ROOT": str(tmp / "runs"), "DEPLOY_PIPELINE_SOURCE_ROOT": str(source_root)}
         start_timing(tmp / "runs", env)
         marker = tmp / "slow-finished"
@@ -1077,7 +2257,11 @@ def main() -> int:
         with patch.dict(os.environ, {"DEPLOY_ADMISSION_CREDIT": "0"}):
             check_materialized_reservation_credit(tmp / "inherited-flag", env)
         check_observation_validity(tmp, env)
-        check_stack_owner_dependency(tmp, env)
+        check_semantic_stack_beside_stack_owners(tmp, env)
+        check_lane_scoped_reuse(tmp, env, source_root)
+        check_reconcile_reused_lane(tmp)
+        check_scoped_inert_tables()
+        check_cross_run_record_guards(tmp, source_root)
         check_plan_scaling()
         check_structural_memory_floor()
         check_macos_memory(tmp, env)
@@ -1086,6 +2270,9 @@ def main() -> int:
         check_wait_since_and_no_row_failures(tmp, env)
         check_watchdog_receipts(tmp, env)
         check_follow_source(tmp, env)
+        check_lane_teardown(tmp, env)
+        check_owner_run_preflight(tmp, env)
+        check_attempt_refreshes_factory_snapshot(tmp, env)
         check_fix_loop_cap(tmp, env)
         check_interrupted_rounds_and_dead_supervisor_deferral()
         check_wait_follows_supersede_behind_stage_failure(tmp)
@@ -1095,11 +2282,57 @@ def main() -> int:
         check_stage_receipt_seed(tmp, env)
         check_passed_only_estimates_and_dag_phases(tmp, env)
         check_declared_phase_lanes(tmp, env)
+        check_stack_phase_lanes(tmp, env)
+        check_exclusive_lane_defers_behind_stack_lane(tmp, env)
+        check_static_ceiling_credits_observed_lanes(tmp, env)
+        check_recorded_budget_admits_coverage_beside_smoke(tmp, env)
+        check_recorded_peak_reservations()
+        check_versioned_group4_lanes(tmp)
         check_dependencies_through_unphased_lanes(tmp, env)
         check_simulate_legacy_plan_group3(tmp, env)
+        check_receipt_readers(tmp)
         check_production_fly_wait(tmp, env)
+        check_production_render(tmp, env)
+        check_production_semantic(tmp, env)
+        check_semantic_workflow_source_sha()
     print("run-deploy-pipeline: all checks passed")
     return 0
+
+
+def check_receipt_readers(tmp: Path) -> None:
+    """The driver binds one definition per module-level name (Python keeps
+    the last ``def``: a second ``_read_receipt`` added with ``production-semantic``
+    once silently replaced the deploy-lane reader for every earlier caller),
+    and the two receipt readers keep their distinct contracts: ``_read_receipt``
+    (``receipt.json``) returns a dict or None, so ``verify`` reports a non-dict
+    file as no receipt instead of crashing; ``_read_production_receipt``
+    (``production.json``) returns whatever JSON the file holds."""
+    seen: dict[str, int] = {}
+    for node in ast.parse(DRIVER.read_text()).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            assert node.name not in seen, f"{DRIVER.name} defines {node.name} twice (lines {seen[node.name]} and {node.lineno})"
+            seen[node.name] = node.lineno
+    assert {"_read_receipt", "_read_production_receipt"} <= seen.keys(), sorted(seen)
+    pipeline = load_module("pipeline_receipt_readers", DRIVER)
+    receipts = tmp / "receipt-readers"
+    receipts.mkdir()
+    (receipts / "list.json").write_text("[1, 2]\n")
+    (receipts / "dict.json").write_text('{"status": "passed"}\n')
+    (receipts / "broken.json").write_text("{\n")
+    assert pipeline._read_receipt(receipts / "list.json") is None, "receipt.json must read as a dict or nothing"
+    assert pipeline._read_production_receipt(receipts / "list.json") == [1, 2], "production.json reads as parsed"
+    assert pipeline._read_receipt(receipts / "dict.json") == {"status": "passed"}
+    assert pipeline._read_production_receipt(receipts / "dict.json") == {"status": "passed"}
+    for name in ("broken.json", "missing.json"):
+        assert pipeline._read_receipt(receipts / name) is None and pipeline._read_production_receipt(receipts / name) is None, name
+    state = receipts / "verify-state"
+    state.mkdir()
+    (state / "receipt.json").write_text("[]\n")
+    out = io.StringIO()
+    with redirect_stdout(out):
+        code = pipeline.verify(state)
+    assert code == 2 and "PIPELINE_VERIFY status=no-receipt exit=2" in out.getvalue(), (code, out.getvalue())
+    print("receipt readers: ok")
 
 
 def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
@@ -1116,7 +2349,8 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     repo.mkdir()
     scripts = repo / "scripts"
     scripts.mkdir()
-    for name in ("run_deploy_pipeline.py", "deploy_stage_wait.py", "classify-agent-runtime-changes.sh"):
+    for name in ("run_deploy_pipeline.py", "deploy_stage_wait.py", "factory_metadata.py",
+                 "classify-agent-runtime-changes.sh"):
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
     (repo / ".gitignore").write_text(".context/\n__pycache__/\n")
     git = ["git", "-C", str(repo), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
@@ -1309,6 +2543,815 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     print("production fly wait: ok")
 
 
+def check_production_render(tmp: Path, env: dict[str, str]) -> None:
+    """``production-render`` (deploy.md Step 13a step 1) serves the merged
+    backend's proof from the Render deploys API, stubbed on loopback, over a
+    fixture repo: (a) no deploy for the merged SHA, live commit an ancestor
+    with no change under the Render service paths -> source-equivalent,
+    receipt recorded, the follow-up command runs; a root package.json change
+    or (b) a back-end change since the live commit keeps waiting to the bound;
+    (c) a live commit with the identical back-end tree that is neither an
+    ancestor nor a descendant keeps waiting (only ancestry blocks); (d) a
+    deploy for the merged SHA takes the exact-SHA path (live opens,
+    build_failed blocks); (f) a live descendant with the identical backend is
+    equivalent, (g) a live descendant that changed the backend is refused;
+    (e) a Render API error or missing credentials fails closed (exit 2)
+    without the follow-up. Every blocked receipt names the observed live
+    commit. The lane never overwrites, and is never overwritten by, the Fly
+    lane's receipt of the same merged SHA."""
+    repo = tmp / "render-source"
+    repo.mkdir()
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    for name in ("run_deploy_pipeline.py", "deploy_stage_wait.py", "factory_metadata.py",
+                 "classify-agent-runtime-changes.sh"):
+        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+    (repo / ".gitignore").write_text(".context/\n__pycache__/\n")
+    git = ["git", "-C", str(repo), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+
+    def commit(message: str, files: dict[str, str]) -> str:
+        for relative, content in files.items():
+            path = repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", message], check=True)
+        return subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+
+    commit("base", {"README": "base\n"})
+    live = commit("backend v1", {"back-end/src/server.ts": "v1\n"})
+    docs_only = commit("docs only", {"docs/notes.md": "notes\n", "scripts/tool.py": "x = 1\n"})
+    backend_change = commit("backend v2", {"back-end/src/server.ts": "v2\n"})
+    docs_after = commit("docs after", {"docs/after.md": "after\n"})
+    root_manifest = commit("root manifest", {"package.json": '{"workspaces": ["back-end"]}\n'})
+    branch = subprocess.run([*git, "rev-parse", "--abbrev-ref", "HEAD"], check=True, stdout=subprocess.PIPE,
+                            text=True).stdout.strip()
+    # `side` forks from the live commit with a docs-only change: its back-end
+    # tree is identical to every main-line commit built on `live`, so only
+    # ancestry can decide.
+    subprocess.run([*git, "checkout", "-q", "-b", "side", live], check=True)
+    sibling = commit("sibling docs", {"docs/other.md": "other\n"})
+    subprocess.run([*git, "checkout", "-q", branch], check=True)
+
+    fake = tmp / "render-fake"
+    fake.mkdir()
+    requests_log = fake / "requests.log"
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args: object) -> None:  # keep the suite's output clean
+            pass
+
+        def do_GET(self) -> None:  # http.server dispatches on this exact name
+            with requests_log.open("a") as handle:
+                handle.write(f"{self.path} auth={self.headers.get('Authorization')}\n")
+            if self.path.split("?")[0] != "/services/srv-fixture/deploys":
+                self.send_error(404)
+                return
+            if self.headers.get("Authorization") != "Bearer fixture-key":
+                self.send_error(401)
+                return
+            if (fake / "fail").exists():
+                self.send_error(500, "fixture outage")
+                return
+            count = int((fake / "count").read_text()) + 1 if (fake / "count").exists() else 1
+            (fake / "count").write_text(str(count))
+            path = fake / f"deploys-{count}.json"
+            if not path.exists():
+                path = fake / "deploys-last.json"
+            body = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    driver = scripts / "run_deploy_pipeline.py"
+    render_env = {**{key: value for key, value in env.items() if not key.startswith("RENDER_")},
+                  "DEPLOY_RENDER_API_BASE": f"http://127.0.0.1:{server.server_address[1]}",
+                  "RENDER_API_KEY": "fixture-key", "RENDER_SERVICE_ID": "srv-fixture"}
+    probes = fake / "probes.log"
+    service_paths = ["back-end/", "render.yaml", "package.json", "package-lock.json"]
+
+    def deploy(commit_id: str, status: str, deploy_id: str) -> dict:
+        return {"deploy": {"id": deploy_id, "status": status, "commit": {"id": commit_id, "message": "m"}},
+                "cursor": deploy_id}
+
+    def reset(*pages: list[dict]) -> None:
+        for stale in fake.glob("deploys-*.json"):
+            stale.unlink()
+        for stale in (fake / "count", fake / "fail", requests_log, probes):
+            stale.unlink(missing_ok=True)
+        for index, page in enumerate(pages, start=1):
+            (fake / f"deploys-{index}.json").write_text(json.dumps(page))
+        (fake / "deploys-last.json").write_text(json.dumps(pages[-1]))
+
+    def run_render(merged: str, state: Path, *extra: str, env_override: dict[str, str] | None = None
+                   ) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(driver), "production-render", "--merged-sha", merged, "--state-dir", str(state),
+             "--poll-seconds", "0.05", *extra, "--", "bash", "-c", f'echo probes >> "{probes}"'],
+            env=render_env if env_override is None else env_override, cwd=repo, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, timeout=120)
+
+    def run_fly(merged: str, state: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(driver), "production", "--merged-sha", merged, "--state-dir", str(state),
+             "--poll-seconds", "0.05", "--", "true"],
+            env={**render_env, "PATH": "/usr/bin:/bin"}, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=120)
+
+    def requests() -> list[str]:
+        return requests_log.read_text().splitlines() if requests_log.exists() else []
+
+    def receipt_of(state: Path) -> dict:
+        return json.loads((state / "production.json").read_text())
+
+    def blocked(merged: str, live_commit: str, state: Path, reason: str) -> dict:
+        """Run to a short bound against a live deploy of ``live_commit``: the
+        gate must block (exit 1), never print equivalence, never run the
+        follow-up, and record the observed live commit and ``reason``."""
+        reset([deploy(live_commit, "live", "dep-live")])
+        ran = run_render(merged, state, "--timeout", "0.3")
+        assert ran.returncode == 1, ran.stdout
+        assert "RENDER_SOURCE_EQUIVALENT" not in ran.stdout and not probes.exists(), ran.stdout
+        assert f"Render did not bring {merged[:7]} live within 0s" in ran.stdout, ran.stdout
+        assert f"live commit {live_commit[:9]} is not source-equivalent ({reason})" in ran.stdout, ran.stdout
+        assert len(requests()) >= 2, "the bounded wait must keep polling the deploys API"
+        render = receipt_of(state)["render"]
+        assert render["status"] == "timeout" and render["live_commit"] is None and render["polls"] >= 2, render
+        assert render["observed_live_commit"] == live_commit and render["observed_live_deploy_id"] == "dep-live", render
+        assert render["equivalence"]["equivalent"] is False and render["equivalence"]["reason"] == reason, render
+        assert reason in render["error"], render
+        return render
+
+    try:
+        # (a) Render skipped the merge (no deploy for it); the live deploy's commit
+        #     is an ancestor and nothing under the service paths changed: equivalent.
+        reset([deploy(live, "live", "dep-live")])
+        state_a = tmp / "render-state-a"
+        ran = run_render(docs_only, state_a)
+        assert ran.returncode == 0, ran.stdout
+        assert f"RENDER_SOURCE_EQUIVALENT live={live} merged={docs_only} reason=live-ancestor-same-backend" in ran.stdout
+        assert "RENDER_LIVE " not in ran.stdout and "PIPELINE_RENDER then exit=0" in ran.stdout, ran.stdout
+        assert probes.read_text() == "probes\n", "the follow-up command must run once the live backend is proven"
+        assert requests() == ["/services/srv-fixture/deploys?limit=20 auth=Bearer fixture-key"], requests()
+        render = receipt_of(state_a)["render"]
+        assert render["provider"] == "render" and render["status"] == "source-equivalent", render
+        assert render["merged_sha"] == docs_only and render["live_commit"] == live, render
+        assert render["observed_live_commit"] == live and render["service_paths"] == service_paths, render
+        assert render["backend_diff"] == [] and render["deploy_id"] == "dep-live" and render["polls"] == 1, render
+        equivalence = render["equivalence"]
+        assert equivalence["equivalent"] is True and equivalence["relationship"] == "ancestor", equivalence
+        assert equivalence["live_is_ancestor"] is True and equivalence["live_is_descendant"] is False, equivalence
+        assert equivalence["backend_diff"] == [] and equivalence["service_paths"] == service_paths, equivalence
+        assert equivalence["reason"] == "live-ancestor-same-backend" and "Root Directory" in equivalence["detail"]
+        assert sorted(equivalence["changed_files"]) == ["docs/notes.md", "scripts/tool.py"], equivalence
+        assert render["then"] == {**render["then"], "exit": 0} and render["then"]["command"][0] == "bash", render
+        assert receipt_of(state_a)["merged_sha"] == docs_only and "wall_s" in render, receipt_of(state_a)
+        # The Fly lane of the same merged SHA carries the Render lane forward.
+        ran = run_fly(docs_only, state_a)
+        assert ran.returncode == 0, ran.stdout
+        after = receipt_of(state_a)
+        assert after["status"] == "passed" and after["fly"]["required"] is False, after
+        assert after["render"] == render, "production must not drop the Render lane of the same merged SHA"
+
+        # A merge that changes only the root workspace manifest is a backend
+        # build input (Render resolves the root workspace graph): never equivalent.
+        render = blocked(root_manifest, docs_after, tmp / "render-state-a2", "live-ancestor-backend-changed")
+        assert render["backend_diff"] == ["package.json"] and render["equivalence"]["live_is_ancestor"] is True, render
+
+        # (b) A back-end change since the live commit is never equivalent: the
+        #     exact-SHA wait runs to its bound and blocks; no follow-up.
+        render = blocked(backend_change, live, tmp / "render-state-b", "live-ancestor-backend-changed")
+        assert render["backend_diff"] == ["back-end/src/server.ts"], render
+        assert render["equivalence"]["live_is_ancestor"] is True and "back-end/" in render["equivalence"]["detail"]
+
+        # (c) The live commit is neither an ancestor nor a descendant of the
+        #     merged SHA (a sibling branch) although their back-end trees are
+        #     identical: only ancestry blocks, and it does.
+        render = blocked(docs_only, sibling, tmp / "render-state-c", "live-unrelated")
+        assert render["backend_diff"] == [] and render["equivalence"]["relationship"] == "unrelated", render
+        assert render["equivalence"]["live_is_ancestor"] is False and render["equivalence"]["live_is_descendant"] is False
+
+        # (d) Render created a deploy for the merged SHA: the exact-SHA path is
+        #     unchanged (building twice, then live); no equivalence is consulted.
+        building = [deploy(backend_change, "build_in_progress", "dep-new"), deploy(live, "live", "dep-live")]
+        reset(building, building, [deploy(backend_change, "live", "dep-new"), deploy(live, "deactivated", "dep-live")])
+        state_d = tmp / "render-state-d"
+        ran = run_render(backend_change, state_d)
+        assert ran.returncode == 0, ran.stdout
+        assert f"RENDER_LIVE commit={backend_change} deploy=dep-new" in ran.stdout, ran.stdout
+        assert "RENDER_SOURCE_EQUIVALENT" not in ran.stdout and probes.read_text() == "probes\n", ran.stdout
+        assert ran.stdout.count("Render: status=build_in_progress") == 2 and len(requests()) == 3, ran.stdout
+        render = receipt_of(state_d)["render"]
+        assert render["status"] == "live" and render["live_commit"] == backend_change, render
+        assert render["observed_live_commit"] == backend_change and render["observed_live_deploy_id"] == "dep-new"
+        assert render["deploy_id"] == "dep-new" and render["deploy_status"] == "live" and render["polls"] == 3, render
+        assert render["equivalence"] is None and render["backend_diff"] == [], render
+        # A failed deploy for the merged SHA blocks at once, as before.
+        reset([deploy(backend_change, "build_failed", "dep-bad"), deploy(live, "live", "dep-live")])
+        state_d2 = tmp / "render-state-d2"
+        ran = run_render(backend_change, state_d2)
+        assert ran.returncode == 1 and "Render deploy build_failed for" in ran.stdout and "dep-bad" in ran.stdout, ran.stdout
+        assert not probes.exists() and len(requests()) == 1, ran.stdout
+        render = receipt_of(state_d2)["render"]
+        assert render["status"] == "deploy-failed" and render["deploy_status"] == "build_failed", render
+        assert render["observed_live_commit"] == live, render
+        # The Render lane joins an existing Fly-lane receipt of the same SHA
+        # instead of replacing it.
+        state_e = tmp / "render-state-e"
+        ran = run_fly(backend_change, state_e)
+        assert ran.returncode == 0, ran.stdout
+        reset([deploy(backend_change, "live", "dep-new")])
+        ran = run_render(backend_change, state_e)
+        assert ran.returncode == 0, ran.stdout
+        joined = receipt_of(state_e)
+        assert joined["status"] == "passed" and joined["fly"]["required"] is False, joined
+        assert joined["render"]["status"] == "live" and joined["semantic_dispatch"]["exit"] == 0, joined
+
+        # (f) Another PR deployed after the merge without touching the service
+        #     paths: the live commit is a descendant with the identical backend.
+        reset([deploy(docs_after, "live", "dep-later")])
+        state_f = tmp / "render-state-f"
+        ran = run_render(backend_change, state_f)
+        assert ran.returncode == 0, ran.stdout
+        assert (f"RENDER_SOURCE_EQUIVALENT live={docs_after} merged={backend_change} "
+                "reason=live-descendant-same-backend") in ran.stdout, ran.stdout
+        assert probes.read_text() == "probes\n", ran.stdout
+        render = receipt_of(state_f)["render"]
+        assert render["status"] == "source-equivalent" and render["live_commit"] == docs_after, render
+        assert render["merged_sha"] == backend_change and render["observed_live_commit"] == docs_after, render
+        equivalence = render["equivalence"]
+        assert equivalence["relationship"] == "descendant" and equivalence["equivalent"] is True, equivalence
+        assert equivalence["live_is_ancestor"] is False and equivalence["live_is_descendant"] is True, equivalence
+        assert equivalence["live_commit"] == docs_after and equivalence["merged_sha"] == backend_change, equivalence
+        assert equivalence["backend_diff"] == [] and equivalence["changed_files"] == ["docs/after.md"], equivalence
+
+        # (g) A descendant that changed the backend: the merged backend never ran
+        #     as-is, so the gate refuses (a manual decision), never equivalence.
+        render = blocked(docs_only, backend_change, tmp / "render-state-g", "live-descendant-backend-changed")
+        assert render["backend_diff"] == ["back-end/src/server.ts"], render
+        assert render["equivalence"]["live_is_descendant"] is True and "manual decision" in render["equivalence"]["detail"]
+
+        # (e) A Render API error fails closed: exit 2, no follow-up, error
+        #     recorded; missing credentials never reach the API.
+        reset([deploy(live, "live", "dep-live")])
+        (fake / "fail").touch()
+        state_h = tmp / "render-state-h"
+        ran = run_render(docs_only, state_h)
+        assert ran.returncode == 2 and "HTTP 500" in ran.stdout and "PIPELINE_RENDER status=error exit=2" in ran.stdout, ran.stdout
+        assert "RENDER_SOURCE_EQUIVALENT" not in ran.stdout and not probes.exists(), ran.stdout
+        render = receipt_of(state_h)["render"]
+        assert render["status"] == "error" and "HTTP 500" in render["error"] and render["then"] is None, render
+        reset([deploy(live, "live", "dep-live")])
+        ran = run_render(docs_only, tmp / "render-state-i",
+                         env_override={k: v for k, v in render_env.items() if k != "RENDER_API_KEY"})
+        assert ran.returncode == 2 and "RENDER_API_KEY not set" in ran.stdout and requests() == [], ran.stdout
+        assert not probes.exists(), ran.stdout
+        assert receipt_of(tmp / "render-state-i")["render"]["status"] == "error", receipt_of(tmp / "render-state-i")
+    finally:
+        server.shutdown()
+        server.server_close()
+    print("production render wait: ok")
+
+
+def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
+    """``production-semantic`` (deploy.md Step 13b) dispatches the production
+    semantic workflow with ``source_sha=<merged SHA>``, binds to the newest run
+    created after the dispatch whose title names that SHA (an older run, even
+    one titled with the same SHA, a newer run of another SHA and a decoy whose
+    headSha is the merged SHA but carries no title are never adopted), polls
+    it, records the run under ``semantic`` in production.json, exits non-zero
+    unless the run succeeded, reruns only failed jobs exactly once with
+    ``--retry-failed-once`` and refuses a second retry. Re-running the Fly
+    gate (``production``) for the same SHA carries the semantic lane forward,
+    and a run left ``in_progress`` by a CLI-side timeout is resumed, never
+    re-dispatched. A dispatch gh confirmed but whose run was never adopted (a
+    failed ``gh run list`` or a discovery timeout) is recorded as
+    ``dispatched`` and resumed by the next call, which adopts its run without
+    a second ``workflow run``; only a confirmed dispatch older than the resume
+    window with still no run is abandoned and dispatched anew. gh is a fake
+    executable on PATH; the receipt the Fly gate writes is required first."""
+    repo = tmp / "semantic-source"
+    repo.mkdir()
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    for name in ("run_deploy_pipeline.py", "deploy_stage_wait.py", "factory_metadata.py",
+                 "classify-agent-runtime-changes.sh"):
+        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+    (repo / ".gitignore").write_text(".context/\n__pycache__/\n")
+    git = ["git", "-C", str(repo), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    for message, files in (("base", {"README": "base\n"}), ("backend only", {"back-end/src/x.ts": "y\n"})):
+        for relative, content in files.items():
+            (repo / relative).parent.mkdir(parents=True, exist_ok=True)
+            (repo / relative).write_text(content)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", message], check=True)
+    merged = subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+    other_head = "2" * 40
+    driver = scripts / "run_deploy_pipeline.py"
+    fake = tmp / "semantic-fake"
+    fake.mkdir()
+    bin_dir = fake / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "$*" >> "$FAKE_GH_DIR/calls.log"\n'
+        'case "$1 $2" in\n'
+        '  "workflow run") [ -f "$FAKE_GH_DIR/dispatch-fail" ] && { echo "HTTP 422: Unexpected inputs provided" >&2; exit 1; }; exit 0 ;;\n'
+        '  "run list") [ -f "$FAKE_GH_DIR/list-fail" ] && { echo "HTTP 502: Bad Gateway" >&2; exit 1; }\n'
+        '    n=$(cat "$FAKE_GH_DIR/list-count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE_GH_DIR/list-count"\n'
+        '    f="$FAKE_GH_DIR/list-$n.json"; [ -f "$f" ] || f="$FAKE_GH_DIR/list-last.json"; cat "$f" ;;\n'
+        '  "run rerun") [ -f "$FAKE_GH_DIR/rerun-fail" ] && { echo "HTTP 403: Resource not accessible by integration" >&2; exit 1; }\n'
+        '    touch "$FAKE_GH_DIR/rerun-done"; exit 0 ;;\n'
+        '  "run view") prefix=view; [ -f "$FAKE_GH_DIR/rerun-done" ] && prefix=rerun-view\n'
+        '    n=$(cat "$FAKE_GH_DIR/$prefix-count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE_GH_DIR/$prefix-count"\n'
+        '    f="$FAKE_GH_DIR/$prefix-$n.json"; [ -f "$f" ] || f="$FAKE_GH_DIR/$prefix-last.json"; cat "$f" ;;\n'
+        '  *) echo "unexpected gh $*" >&2; exit 1 ;;\n'
+        "esac\n")
+    (bin_dir / "gh").chmod(0o755)
+    sem_env = {**env, "PATH": f"{bin_dir}:{env.get('PATH', os.environ.get('PATH', ''))}", "FAKE_GH_DIR": str(fake)}
+    sem_env.pop("DEPLOY_GH_BIN", None)
+    calls = fake / "calls.log"
+    past = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    later = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def row(run_id: int, created: str, sha: str | None, head: str, status: str = "in_progress") -> dict:
+        title = f"Production semantic gate source_sha={sha}" if sha else "Production semantic gate deployment=77"
+        return {"databaseId": run_id, "createdAt": created, "headSha": head, "status": status, "conclusion": None,
+                "event": "workflow_dispatch", "url": f"https://github.com/acme/rose/actions/runs/{run_id}",
+                "displayTitle": title}
+
+    # An older run titled with the same SHA (yesterday's deploy of it), an older
+    # run of another SHA, the run this dispatch creates (headSha = main's later
+    # head, title = merged SHA), a newer run of another SHA and a decoy whose
+    # headSha is the merged SHA but whose title names no source commit.
+    old_same = row(100, past, merged, merged, "completed")
+    old_other = row(101, past, "3" * 40, "3" * 40, "completed")
+    ours = row(200, future, merged, other_head)
+    newer_other = row(300, later, "4" * 40, "4" * 40)
+    decoy = row(400, later, None, merged)
+
+    def job(name: str, conclusion: str | None, status: str = "completed") -> dict:
+        return {"name": name, "status": status, "conclusion": conclusion, "url": f"https://github.com/acme/rose/actions/runs/200/job/{abs(hash(name)) % 1000}"}
+
+    lifecycle = [f"Chat full-lifecycle latency ratchet ({path})" for path in ("direct_answer", "web_search", "agent_plan", "agent_execute")]
+    all_success = [job("Semantic frontend flows", "success"), *[job(name, "success") for name in lifecycle]]
+    semantic_failed = [job("Semantic frontend flows", "failure"), *[job(name, "success") for name in lifecycle]]
+    running_jobs = [job("Semantic frontend flows", None, "in_progress")]
+
+    def view(status: str, conclusion: str | None, attempt: int, jobs: list[dict]) -> dict:
+        return {"status": status, "conclusion": conclusion, "attempt": attempt, "url": ours["url"], "headSha": other_head,
+                "displayTitle": ours["displayTitle"], "createdAt": future, "updatedAt": later, "jobs": jobs}
+
+    def reset(lists: list[list[dict]], views: list[dict], rerun_views: list[dict] | None = None) -> None:
+        for stale in list(fake.glob("list-*")) + list(fake.glob("view-*")) + list(fake.glob("rerun-*")):
+            stale.unlink()
+        calls.unlink(missing_ok=True)
+        (fake / "dispatch-fail").unlink(missing_ok=True)
+        for index, rows in enumerate(lists, start=1):
+            (fake / f"list-{index}.json").write_text(json.dumps(rows))
+        (fake / "list-last.json").write_text(json.dumps(lists[-1]))
+        for index, payload in enumerate(views, start=1):
+            (fake / f"view-{index}.json").write_text(json.dumps(payload))
+        (fake / "view-last.json").write_text(json.dumps(views[-1]))
+        for index, payload in enumerate(rerun_views or [], start=1):
+            (fake / f"rerun-view-{index}.json").write_text(json.dumps(payload))
+        if rerun_views:
+            (fake / "rerun-view-last.json").write_text(json.dumps(rerun_views[-1]))
+
+    def run_gate(state: Path) -> dict:
+        """The real Fly gate for a merge without agent runtime changes: it opens
+        without any gh call and writes the receipt the semantic lane requires."""
+        calls.unlink(missing_ok=True)
+        ran = subprocess.run([sys.executable, str(driver), "production", "--merged-sha", merged, "--state-dir", str(state),
+                              "--expected-hash", "feedface"], env=sem_env, cwd=repo, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, timeout=120)
+        assert ran.returncode == 0 and not calls.exists(), ran.stdout
+        return receipt_of(state)
+
+    def write_gate(state: Path, sha: str, status: str) -> None:
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "production.json").write_text(json.dumps({"schema_version": 1, "merged_sha": sha, "status": status,
+                                                            "github_waits": [], "fly": {"required": False}}))
+
+    def run_semantic(state: Path, *extra: str, env_override: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(driver), "production-semantic", "--merged-sha", merged, "--state-dir", str(state),
+             "--poll-seconds", "0.05", "--start-timeout", "0.5", *extra],
+            env=env_override or sem_env, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+
+    def call_lines() -> list[str]:
+        return calls.read_text().splitlines() if calls.exists() else []
+
+    def receipt_of(state: Path) -> dict:
+        return json.loads((state / "production.json").read_text())
+
+    def semantic_waits(receipt: dict) -> list[dict]:
+        return [w for w in receipt["github_waits"] if w["workflow"] == "chat-lifecycle-ratchet.yml"]
+
+    # 1. Success: the run is not listed on the first poll; then it is picked
+    #    among older, newer and decoy runs; three views until completed/success.
+    state = tmp / "semantic-state"
+    gate = run_gate(state)
+    assert gate["status"] == "passed" and gate["fly"]["required"] is False and "semantic" not in gate, gate
+    reset([[old_other, old_same, decoy], [newer_other, decoy, ours, old_other, old_same]],
+          [view("queued", None, 1, []), view("in_progress", None, 1, running_jobs), view("completed", "success", 1, all_success)])
+    ran = run_semantic(state, "--frontend-url", "https://preview.roselabs.ai", "--backend-url", "https://api.roselabs.ai")
+    assert ran.returncode == 0, ran.stdout
+    lines = call_lines()
+    assert lines[0] == ("workflow run chat-lifecycle-ratchet.yml --ref main -f source_sha=" + merged +
+                        " -f frontend_url=https://preview.roselabs.ai -f backend_url=https://api.roselabs.ai"), lines
+    list_calls = [line for line in lines if line.startswith("run list")]
+    assert len(list_calls) == 2 and "--workflow chat-lifecycle-ratchet.yml" in list_calls[0], list_calls
+    assert "--event workflow_dispatch" in list_calls[0] and "--branch main" in list_calls[0], list_calls
+    view_calls = [line for line in lines if line.startswith("run view")]
+    assert len(view_calls) == 3 and all(line.startswith("run view 200 --json") for line in view_calls), lines
+    assert not any(f" {decoy_id} " in f" {line} " for line in lines for decoy_id in (100, 101, 300, 400)), lines
+    assert not any(line.startswith("run rerun") for line in lines), lines
+    assert "SEMANTIC_RUN_ID=200" in ran.stdout and "SEMANTIC_LANE_END " in ran.stdout, ran.stdout
+    assert ran.stdout.index("SEMANTIC_RUN_ID=200") < ran.stdout.index("SEMANTIC_LANE_END"), ran.stdout
+    assert "PIPELINE_SEMANTIC status=passed exit=0 run=200" in ran.stdout, ran.stdout
+    receipt = receipt_of(state)
+    assert receipt["status"] == "passed" and receipt["merged_sha"] == merged, receipt  # the Fly decision is untouched
+    entry = receipt["semantic"]
+    assert entry["outcome"] == "passed" and entry["run_id"] == "200" and entry["url"] == ours["url"], entry
+    assert entry["head_sha"] == other_head and entry["source_sha"] == merged, entry
+    assert entry["display_title"] == ours["displayTitle"] and entry["created_at"] == future, entry
+    assert entry["completed_at"] == later and entry["conclusion"] == "success" and entry["attempt"] == 1, entry
+    assert entry["status"] == "completed" and entry["retry"] is None, entry
+    assert entry["dispatch"]["ref"] == "main" and entry["dispatch"]["at"], entry["dispatch"]
+    assert entry["dispatch"]["inputs"] == {"source_sha": merged, "frontend_url": "https://preview.roselabs.ai",
+                                           "backend_url": "https://api.roselabs.ai"}, entry["dispatch"]
+    assert [(j["name"], j["conclusion"]) for j in entry["jobs"]] == [(j["name"], "success") for j in all_success], entry["jobs"]
+    waits = semantic_waits(receipt)
+    assert [w["kind"] for w in waits] == ["run-start", "run-complete"], waits
+    assert waits[0] == {**waits[0], "run_id": "200", "polls": 2, "outcome": "found", "head": merged}
+    assert waits[1] == {**waits[1], "run_id": "200", "polls": 3, "conclusion": "success", "attempt": 1}
+
+    # 2. Failure without the retry flag: exit 1, no rerun, the earlier passed
+    #    entry is kept in semantic_history. The default URLs are the production ones.
+    reset([[ours, old_same]], [view("completed", "failure", 1, semantic_failed)])
+    ran = run_semantic(state)
+    assert ran.returncode == 1, ran.stdout
+    assert call_lines()[0].endswith("-f frontend_url=https://www.roselabs.ai -f backend_url=https://navi-j9a9.onrender.com"), call_lines()
+    assert "PIPELINE_SEMANTIC status=failed exit=1 run=200" in ran.stdout and "conclusion=failure" in ran.stdout, ran.stdout
+    assert "Semantic frontend flows=failure" in ran.stdout and "SEMANTIC_LANE_END " in ran.stdout, ran.stdout
+    assert 'retry=available (--retry-failed-once "<justification>")' in ran.stdout, ran.stdout
+    assert not any(line.startswith("run rerun") for line in call_lines()), call_lines()
+    receipt = receipt_of(state)
+    assert receipt["semantic"]["outcome"] == "failed" and receipt["semantic"]["conclusion"] == "failure", receipt["semantic"]
+    assert receipt["semantic"]["error"] == "run 200 concluded failure", receipt["semantic"]
+    assert [h["outcome"] for h in receipt["semantic_history"]] == ["passed"], receipt["semantic_history"]
+    assert receipt["status"] == "passed", "the Fly gate decision must not be rewritten by the semantic lane"
+    assert len(semantic_waits(receipt)) == 4, semantic_waits(receipt)
+
+    # 2b. The Step 13b block is re-run: `production` for the same SHA carries the
+    #     semantic lane (run, history, waits) forward instead of forgetting it.
+    gate = run_gate(state)
+    assert gate["status"] == "passed" and gate["started_at"], gate
+    assert gate["semantic"] == receipt["semantic"] and gate["semantic_history"] == receipt["semantic_history"], gate
+    assert semantic_waits(gate) == semantic_waits(receipt) and not [w for w in gate["github_waits"] if w["workflow"] != "chat-lifecycle-ratchet.yml"], gate["github_waits"]
+
+    # 3. One retry of that recorded failed run: no new dispatch, `gh run rerun
+    #    200 --failed`, the stale completed attempt-1 view is not accepted, the
+    #    attempt-2 success is; the justification is recorded.
+    reset([[ours]], [view("completed", "failure", 1, semantic_failed)],
+          rerun_views=[view("completed", "failure", 1, semantic_failed), view("in_progress", None, 2, semantic_failed),
+                       view("completed", "success", 2, all_success)])
+    ran = run_semantic(state, "--retry-failed-once", "provider outage: Kernel 502 in the semantic job")
+    assert ran.returncode == 0, ran.stdout
+    lines = call_lines()
+    assert lines[0] == "run rerun 200 --failed", lines
+    assert not any(line.startswith("workflow run") or line.startswith("run list") for line in lines), lines
+    assert len([line for line in lines if line.startswith("run view 200")]) == 3, lines
+    assert "SEMANTIC_RUN_ID=200" in ran.stdout and "retry=failed-jobs run=200" in ran.stdout, ran.stdout
+    entry = receipt_of(state)["semantic"]
+    assert entry["outcome"] == "passed" and entry["conclusion"] == "success" and entry["attempt"] == 2, entry
+    retry = entry["retry"]
+    assert retry["justification"] == "provider outage: Kernel 502 in the semantic job", retry
+    assert retry["previous_attempt"] == 1 and retry["previous_conclusion"] == "failure" and retry["attempt"] == 2, retry
+    assert retry["failed_jobs"] == ["Semantic frontend flows"], retry
+
+    # 4. A second retry is refused without any gh call, also after the Fly gate
+    #    re-ran; the receipt keeps the first.
+    run_gate(state)
+    reset([[ours]], [view("completed", "success", 2, all_success)])
+    ran = run_semantic(state, "--retry-failed-once", "again")
+    assert ran.returncode == 2 and "already used its one --retry-failed-once" in ran.stdout, ran.stdout
+    assert call_lines() == [], call_lines()
+    assert receipt_of(state)["semantic"]["retry"]["justification"].startswith("provider outage"), receipt_of(state)["semantic"]
+
+    # 5. Flag on a fresh dispatch: dispatch, fail, rerun failed jobs once, fail
+    #    again -> exit 1 with the retry recorded; a further flagged call is refused.
+    state5 = tmp / "semantic-state-5"
+    run_gate(state5)
+    reset([[ours]], [view("completed", "failure", 1, semantic_failed)],
+          rerun_views=[view("completed", "failure", 2, semantic_failed)])
+    ran = run_semantic(state5, "--retry-failed-once", "flaky runner")
+    assert ran.returncode == 1 and "retry=used" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert lines[0].startswith("workflow run chat-lifecycle-ratchet.yml") and lines.count("run rerun 200 --failed") == 1, lines
+    entry = receipt_of(state5)["semantic"]
+    assert entry["outcome"] == "failed" and entry["attempt"] == 2 and entry["retry"]["attempt"] == 2, entry
+    calls.unlink()
+    ran = run_semantic(state5, "--retry-failed-once", "once more")
+    assert ran.returncode == 2 and call_lines() == [], (ran.stdout, call_lines())
+
+    # 5b. A rejected rerun (403) does not consume the single retry: the next
+    #     flagged call reruns the recorded run.
+    state5b = tmp / "semantic-state-5b"
+    run_gate(state5b)
+    reset([[ours]], [view("completed", "failure", 1, semantic_failed)])
+    (fake / "rerun-fail").touch()
+    ran = run_semantic(state5b, "--retry-failed-once", "token lacked actions:write")
+    assert ran.returncode == 1 and "Resource not accessible by integration" in ran.stdout, ran.stdout
+    entry = receipt_of(state5b)["semantic"]
+    assert entry["retry"] is None and entry["run_id"] == "200" and entry["status"] == "completed", entry
+    reset([[ours]], [view("completed", "failure", 1, semantic_failed)],
+          rerun_views=[view("completed", "success", 2, all_success)])
+    ran = run_semantic(state5b, "--retry-failed-once", "token fixed")
+    assert ran.returncode == 0 and call_lines()[0] == "run rerun 200 --failed", (ran.stdout, call_lines())
+    entry = receipt_of(state5b)["semantic"]
+    assert entry["retry"]["justification"] == "token fixed" and entry["retry"]["attempt"] == 2 and entry["outcome"] == "passed", entry
+
+    # 6. No passed Fly-gate receipt for this SHA: refused before any gh call.
+    for state6, sha, status in ((tmp / "semantic-state-6a", merged, "failed"), (tmp / "semantic-state-6b", other_head, "passed")):
+        write_gate(state6, sha, status)
+        reset([[ours]], [view("completed", "success", 1, all_success)])
+        ran = run_semantic(state6)
+        assert ran.returncode == 2 and "Fly lane gate is not open" in ran.stdout and call_lines() == [], ran.stdout
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(tmp / "semantic-state-6c")
+    assert ran.returncode == 2 and "no receipt" in ran.stdout and call_lines() == [], ran.stdout
+
+    # 7. Only older runs (one titled with the same SHA) and the decoy ever
+    #    appear: the dispatch is unconfirmed, nothing is adopted or polled, exit 1.
+    state7 = tmp / "semantic-state-7"
+    run_gate(state7)
+    reset([[old_same, old_other, decoy]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state7)
+    assert ran.returncode == 1 and "an older run is never adopted" in ran.stdout and "host clock" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert lines[0].startswith("workflow run") and not any(line.startswith("run view") for line in lines), lines
+    assert len([line for line in lines if line.startswith("run list")]) >= 2, lines
+    receipt = receipt_of(state7)
+    assert receipt["semantic"]["outcome"] == "failed" and receipt["semantic"]["run_id"] is None, receipt["semantic"]
+    assert receipt["semantic"]["status"] == "dispatched", "gh confirmed the dispatch: it must be recorded"
+    assert receipt["github_waits"][-1] == {**receipt["github_waits"][-1], "kind": "run-start", "outcome": "timeout",
+                                           "workflow": "chat-lifecycle-ratchet.yml"}, receipt["github_waits"]
+    assert "it resumes this dispatch for 900s before dispatching again" in ran.stdout, ran.stdout
+    # The confirmed dispatch is resumed: the next call looks for its run and
+    # adopts it without a second `workflow run` (the gate would run twice).
+    dispatch7 = receipt["semantic"]["dispatch"]
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state7)
+    assert ran.returncode == 0 and f"PIPELINE_SEMANTIC resume dispatch at={dispatch7['at']}" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert lines[0].startswith("run list") and not any(line.startswith("workflow run") for line in lines), lines
+    receipt = receipt_of(state7)
+    assert receipt["semantic"]["run_id"] == "200" and receipt["semantic"]["outcome"] == "passed", receipt["semantic"]
+    assert receipt["semantic"]["dispatch"] == dispatch7 and "semantic_history" not in receipt, receipt
+
+    # 8. The dispatch itself fails (e.g. main's workflow lacks the input): exit 1
+    #    with gh's message, no discovery.
+    state8 = tmp / "semantic-state-8"
+    run_gate(state8)
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    (fake / "dispatch-fail").touch()
+    ran = run_semantic(state8)
+    assert ran.returncode == 1 and "Unexpected inputs provided" in ran.stdout, ran.stdout
+    assert [line.split()[0:2] for line in call_lines()] == [["workflow", "run"]], call_lines()
+
+    # 9. A malformed SHA is a usage error before anything runs.
+    ran = subprocess.run([sys.executable, str(driver), "production-semantic", "--merged-sha", "main", "--state-dir", str(state)],
+                         env=sem_env, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+    assert ran.returncode == 2 and "full 40-hex commit SHA" in ran.stdout, ran.stdout
+
+    # 10. DEPLOY_GH_BIN selects the gh binary (boxes.dev's PATH wrapper swaps
+    #     the token); with it set, the PATH gh is never consulted.
+    (bin_dir / "gh-real").write_text("#!/usr/bin/env bash\n"
+                                     'echo "$*" >> "$FAKE_GH_DIR/real-calls.log"\n'
+                                     'exec "$(dirname "$0")/gh" "$@"\n')
+    (bin_dir / "gh-real").chmod(0o755)
+    state10 = tmp / "semantic-state-10"
+    run_gate(state10)
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state10, env_override={**sem_env, "PATH": "/usr/bin:/bin", "DEPLOY_GH_BIN": str(bin_dir / "gh-real")})
+    assert ran.returncode == 0, ran.stdout
+    real_calls = (fake / "real-calls.log").read_text().splitlines()
+    assert len(real_calls) == len(call_lines()) == 3 and real_calls[0].startswith("workflow run"), (real_calls, call_lines())
+
+    # 11. A CLI-side timeout leaves the run in_progress; the next call resumes
+    #     that run (no dispatch, no discovery) and goes green.
+    state11 = tmp / "semantic-state-11"
+    run_gate(state11)
+    reset([[ours]], [view("in_progress", None, 1, running_jobs)])
+    ran = run_semantic(state11, "--timeout", "0.2")
+    assert ran.returncode == 1 and "is still in_progress after 0s" in ran.stdout, ran.stdout
+    entry = receipt_of(state11)["semantic"]
+    assert entry["run_id"] == "200" and entry["status"] == "in_progress" and entry["outcome"] == "failed", entry
+    assert semantic_waits(receipt_of(state11))[-1] == {**semantic_waits(receipt_of(state11))[-1], "kind": "run-complete", "outcome": "timeout"}
+    reset([[ours]], [view("in_progress", None, 1, running_jobs), view("completed", "success", 1, all_success)])
+    ran = run_semantic(state11)
+    assert ran.returncode == 0 and "PIPELINE_SEMANTIC resume run=200 status=in_progress" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert lines and all(line.startswith("run view 200") for line in lines) and len(lines) == 2, lines
+    entry = receipt_of(state11)["semantic"]
+    assert entry["outcome"] == "passed" and entry["conclusion"] == "success" and entry["retry"] is None, entry
+    assert entry["dispatch"]["at"] and entry["run_id"] == "200", entry
+
+    # 12. Timeout, then a flagged resume: the run concluded failure meanwhile,
+    #     failed jobs are rerun once in the same call; a timeout during the
+    #     retry watch resumes at the retry attempt; a later flag is refused.
+    state12 = tmp / "semantic-state-12"
+    run_gate(state12)
+    reset([[ours]], [view("in_progress", None, 1, running_jobs)])
+    ran = run_semantic(state12, "--timeout", "0.2")
+    assert ran.returncode == 1 and receipt_of(state12)["semantic"]["status"] == "in_progress", ran.stdout
+    reset([[ours]], [view("completed", "failure", 1, semantic_failed)],
+          rerun_views=[view("completed", "failure", 1, semantic_failed), view("in_progress", None, 2, running_jobs)])
+    ran = run_semantic(state12, "--retry-failed-once", "runner lost the browser", "--timeout", "0.3")
+    assert ran.returncode == 1 and "resume run=200" in ran.stdout and "retry=failed-jobs run=200" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert not any(line.startswith("workflow run") or line.startswith("run list") for line in lines), lines
+    assert lines.count("run rerun 200 --failed") == 1, lines
+    entry = receipt_of(state12)["semantic"]
+    assert entry["retry"]["justification"] == "runner lost the browser" and entry["retry"]["attempt"] is None, entry
+    assert entry["status"] == "in_progress" and entry["attempt"] == 2, entry
+    reset([[ours]], [view("completed", "failure", 1, semantic_failed)],
+          rerun_views=[view("completed", "success", 2, all_success)])
+    (fake / "rerun-done").touch()  # the rerun already happened on GitHub
+    ran = run_semantic(state12)
+    assert ran.returncode == 0 and "resume run=200 status=in_progress" in ran.stdout, ran.stdout
+    assert call_lines() == ["run view 200 --json " + "status,conclusion,attempt,url,headSha,displayTitle,createdAt,updatedAt,jobs"], call_lines()
+    entry = receipt_of(state12)["semantic"]
+    assert entry["outcome"] == "passed" and entry["attempt"] == 2 and entry["retry"]["attempt"] == 2, entry
+    calls.unlink()
+    ran = run_semantic(state12, "--retry-failed-once", "again")
+    assert ran.returncode == 2 and call_lines() == [], (ran.stdout, call_lines())
+
+    # 13. `gh run list` fails right after a confirmed dispatch: exit 1 with the
+    #     dispatch recorded (status dispatched, run_id null, inputs); the next
+    #     call adopts that dispatch's run without a second `workflow run`.
+    state13 = tmp / "semantic-state-13"
+    run_gate(state13)
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    (fake / "list-fail").touch()
+    ran = run_semantic(state13)
+    assert ran.returncode == 1 and "Bad Gateway" in ran.stdout and "SEMANTIC_LANE_END " in ran.stdout, ran.stdout
+    assert [line.split()[0:2] for line in call_lines()] == [["workflow", "run"], ["run", "list"]], call_lines()
+    entry = receipt_of(state13)["semantic"]
+    assert entry["status"] == "dispatched" and entry["run_id"] is None and entry["outcome"] == "failed", entry
+    assert entry["dispatch"]["at"] and entry["dispatch"]["inputs"] == {
+        "source_sha": merged, "frontend_url": "https://www.roselabs.ai", "backend_url": "https://navi-j9a9.onrender.com"}, entry
+    dispatch13 = entry["dispatch"]
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state13)
+    assert ran.returncode == 0 and f"PIPELINE_SEMANTIC resume dispatch at={dispatch13['at']}" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert lines[0].startswith("run list") and not any(line.startswith("workflow run") for line in lines), lines
+    assert "SEMANTIC_RUN_ID=200" in ran.stdout and "PIPELINE_SEMANTIC status=passed exit=0 run=200" in ran.stdout, ran.stdout
+    receipt = receipt_of(state13)
+    entry = receipt["semantic"]
+    assert entry["outcome"] == "passed" and entry["run_id"] == "200" and entry["status"] == "completed", entry
+    assert entry["dispatch"] == dispatch13 and "semantic_history" not in receipt, receipt
+    assert [(w["kind"], w["outcome"]) for w in semantic_waits(receipt)] == [("run-start", "found"), ("run-complete", "completed")], semantic_waits(receipt)
+
+    # 14. A confirmed dispatch older than the resume window gets one more
+    #     query: its run, when listed, is adopted (14a); with no run it is
+    #     abandoned to semantic_history and the gate is dispatched anew (14b).
+    stale_at = (datetime.now(timezone.utc) - timedelta(minutes=16)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def stale_dispatch(state: Path) -> None:
+        run_gate(state)
+        reset([[ours]], [view("completed", "success", 1, all_success)])
+        (fake / "list-fail").touch()
+        assert run_semantic(state).returncode == 1
+        receipt = receipt_of(state)
+        assert receipt["semantic"]["status"] == "dispatched", receipt["semantic"]
+        receipt["semantic"]["dispatch"]["at"] = stale_at
+        (state / "production.json").write_text(json.dumps(receipt))
+
+    state14a = tmp / "semantic-state-14a"
+    stale_dispatch(state14a)
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state14a)
+    assert ran.returncode == 0 and f"resume dispatch at={stale_at}" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert lines[0].startswith("run list") and not any(line.startswith("workflow run") for line in lines), lines
+    receipt = receipt_of(state14a)
+    assert receipt["semantic"]["run_id"] == "200" and receipt["semantic"]["dispatch"]["at"] == stale_at, receipt["semantic"]
+    assert "semantic_history" not in receipt and "abandoning" not in ran.stdout, (receipt, ran.stdout)
+
+    state14b = tmp / "semantic-state-14b"
+    stale_dispatch(state14b)
+    reset([[old_same, decoy], [ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state14b)
+    assert ran.returncode == 0 and f"dispatch at={stale_at} is older than 900s with no run: abandoning it and dispatching again" in ran.stdout, ran.stdout
+    lines = call_lines()
+    assert [line.split()[0:2] for line in lines[:3]] == [["run", "list"], ["workflow", "run"], ["run", "list"]], lines
+    assert len([line for line in lines if line.startswith("workflow run")]) == 1, lines
+    receipt = receipt_of(state14b)
+    entry = receipt["semantic"]
+    assert entry["run_id"] == "200" and entry["outcome"] == "passed" and entry["dispatch"]["at"] != stale_at, entry
+    history = receipt["semantic_history"]
+    assert len(history) == 1 and history[0]["status"] == "dispatched" and history[0]["run_id"] is None, history
+    assert history[0]["dispatch"]["at"] == stale_at and history[0]["outcome"] == "abandoned", history
+    assert [w["outcome"] for w in semantic_waits(receipt) if w["kind"] == "run-start"][-2:] == ["abandoned", "found"], semantic_waits(receipt)
+
+    # Selection rule in-process: newest matching only, by createdAt then id.
+    pipeline = load_module("pipeline_semantic_select", DRIVER)
+    # A pending dispatch is exactly: this SHA, status dispatched, no run, a dispatch clock.
+    pending_entry = {"merged_sha": merged, "status": "dispatched", "run_id": None, "dispatch": {"at": "2026-10-31T12:00:00Z"}}
+    assert pipeline.semantic_pending_dispatch(pending_entry, merged) == datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc)
+    assert pipeline.semantic_pending_dispatch({**pending_entry, "run_id": "200"}, merged) is None
+    assert pipeline.semantic_pending_dispatch({**pending_entry, "status": None}, merged) is None
+    assert pipeline.semantic_pending_dispatch({**pending_entry, "merged_sha": other_head}, merged) is None
+    assert pipeline.semantic_pending_dispatch({**pending_entry, "dispatch": {"at": None}}, merged) is None
+    assert pipeline.semantic_pending_dispatch(None, merged) is None
+    assert pipeline.SEMANTIC_DISPATCH_RESUME_WINDOW_S == 900.0
+    dispatched = datetime(2026, 10, 31, 12, 0, 0, tzinfo=timezone.utc)
+    rows = [
+        {"databaseId": 1, "createdAt": "2026-10-31T11:59:54Z", "displayTitle": f"x source_sha={merged}"},  # 6 s early: older
+        {"databaseId": 2, "createdAt": "2026-10-31T11:59:56Z", "displayTitle": f"x source_sha={merged}"},  # within skew
+        {"databaseId": 3, "createdAt": "2026-10-31T12:00:10Z", "displayTitle": f"x source_sha={other_head}"},
+        {"databaseId": 4, "createdAt": "2026-10-31T12:00:05Z", "displayTitle": f"x source_sha={merged}", "event": "push"},
+        {"databaseId": 5, "createdAt": "2026-10-31T12:00:05Z", "displayTitle": f"x source_sha={merged}"},
+        {"databaseId": 6, "createdAt": "2026-10-31T12:00:05Z", "displayTitle": f"x source_sha={merged}"},
+        {"databaseId": 7, "createdAt": "not a time", "displayTitle": f"x source_sha={merged}"},
+        {"databaseId": 8, "createdAt": "2026-10-31T12:00:30Z", "displayTitle": "x deployment=1", "headSha": merged},  # decoy
+        "junk",
+    ]
+    assert pipeline.semantic_select_run(rows, merged, dispatched)["databaseId"] == 6, "newest match, id breaks the tie"
+    assert pipeline.semantic_select_run(rows[:2], merged, dispatched)["databaseId"] == 2
+    assert pipeline.semantic_select_run(rows[:1] + rows[2:4] + rows[7:], merged, dispatched) is None
+    assert pipeline.semantic_select_run(None, merged, dispatched) is None
+    print("production semantic: ok")
+
+
+def check_semantic_workflow_source_sha() -> None:
+    """The production semantic workflow accepts ``source_sha`` and every
+    checkout in both jobs uses it: a dispatch checks out exactly that commit
+    (validated as a full SHA and verified to be on the default branch before
+    any checkout) or the dispatched ref's head, a deployment event still
+    checks out the trusted default branch, the effective commit is recorded in
+    job outputs and the step summary, and the run title carries the exact
+    marker the CLI watcher parses."""
+    try:
+        import yaml  # transitive dependency of agents/venv (huggingface_hub); the gate runs with that venv active
+    except ImportError as error:  # pragma: no cover - environment defect, never a silent skip
+        raise AssertionError("PyYAML is required to validate .github/workflows/chat-lifecycle-ratchet.yml: "
+                             "run this gate with agents/venv activated") from error
+    path = ROOT / ".github" / "workflows" / "chat-lifecycle-ratchet.yml"
+    workflow = yaml.safe_load(path.read_text())
+    triggers = workflow.get("on", workflow.get(True))
+    inputs = triggers["workflow_dispatch"]["inputs"]
+    assert "source_sha" in inputs and inputs["source_sha"].get("required") is False, inputs
+    assert inputs["source_sha"].get("default", "") == "", "source_sha must default to the dispatched ref's head"
+    run_name = workflow["run-name"]
+    assert "github.event_name == 'workflow_dispatch'" in run_name, "deployment runs must not claim a source_sha"
+    marker = re.search(r"format\('([a-z_]+=)\{0\}', inputs\.source_sha \|\| github\.sha\)", run_name)
+    assert marker, f"run-name must format the source commit marker from inputs.source_sha || github.sha: {run_name}"
+    pipeline = load_module("pipeline_semantic_marker", DRIVER)
+    assert pipeline.SEMANTIC_TITLE_PATTERN.pattern == marker.group(1) + "([0-9a-f]{40})", (
+        f"CLI marker {pipeline.SEMANTIC_TITLE_PATTERN.pattern!r} must match the workflow run-name marker {marker.group(1)!r}")
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"semantic", "lifecycle"}, list(jobs)
+    for name, job in jobs.items():
+        steps = job["steps"]
+        checkouts = [i for i, step in enumerate(steps) if str(step.get("uses", "")).startswith("actions/checkout")]
+        assert len(checkouts) == 1, f"{name}: exactly one checkout, found {len(checkouts)}"
+        index = checkouts[0]
+        ref = steps[index]["with"]["ref"]
+        assert "inputs.source_sha ||" in ref, f"{name}: checkout must prefer inputs.source_sha: {ref}"
+        assert "github.event_name == 'workflow_dispatch' && github.sha" in ref, f"{name}: dispatch default is the ref head: {ref}"
+        assert ref.rstrip().endswith("github.event.repository.default_branch }}"), f"{name}: deployment events keep the trusted default branch: {ref}"
+        assert steps[index]["with"].get("filter") == "blob:none", f"{name}: blob-filtered checkout retained"
+        before = steps[:index]
+        assert len(before) == 1 and "uses" not in before[0], f"{name}: only the source_sha verification precedes the checkout"
+        verify = before[0]
+        assert verify.get("if") == "inputs.source_sha != ''", f"{name}: verification runs only for an explicit source_sha: {verify.get('if')}"
+        script = verify["run"]
+        assert '[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||' in script, f"{name}: validate the SHA before calling GitHub: {script}"
+        assert script.index("=~ ^[0-9a-f]{40}$") < script.index("gh api"), f"{name}: SHA validation must precede gh api"
+        assert "compare/${DEFAULT_BRANCH}...${SOURCE_SHA}" in script, script
+        labels = re.findall(r"^\s*([a-z|]+)\)", script, re.MULTILINE)
+        assert labels == ["identical|behind"], f"{name}: only identical|behind may pass, found case labels {labels}: {script}"
+        assert re.search(r"^\s*\*\).*exit 1", script, re.MULTILINE), f"{name}: any other compare status fails closed"
+        assert verify["env"]["SOURCE_SHA"] == "${{ inputs.source_sha }}" and verify["env"]["GH_TOKEN"] == "${{ github.token }}", verify["env"]
+        record = steps[index + 1]
+        assert record.get("id") == "source" and "git rev-parse HEAD" in record["run"], f"{name}: record the effective commit right after checkout"
+        assert "GITHUB_OUTPUT" in record["run"] and "GITHUB_STEP_SUMMARY" in record["run"], record["run"]
+        assert job["outputs"] == {"source_sha": "${{ steps.source.outputs.sha }}"}, job.get("outputs")
+    print("semantic workflow source_sha: ok")
+
+
 def check_follow_source(tmp: Path, env: dict[str, str]) -> None:
     """A settled source change supersedes the attempt in flight: the lanes bound
     to the old digest are terminated and discarded, the new attempt starts at
@@ -1397,6 +3440,704 @@ def check_follow_source(tmp: Path, env: dict[str, str]) -> None:
     assert ledger_before == ledger_after, "speculative gates must never touch the review-cycle ledger"
     # Without --follow-source the same edit is still a stale run, never a pass.
     assert "superseded" not in json.dumps(json.loads((tmp / "state" / "receipt.json").read_text())["status"])
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return stat[stat.rindex(")") + 2:].split()[0] not in ("Z", "X")
+
+
+def check_lane_teardown(tmp: Path, env: dict[str, str]) -> None:
+    """A superseded lane is signalled as a process group, but the smoke lane's
+    chain starts its isolated stack in a session of its own (``run.sh
+    --benchmark`` under benchmarks/local.py), so the group TERM never reaches
+    it: on #1640 two such stacks outlived their superseded smoke lanes, kept
+    live owner records under .context/benchmarks and blocked the semantic
+    latency gate (3600 s wait) until a human TERMed them. The supervisor now
+    waits (bounded) for every owner record the lane's own processes wrote,
+    TERMs the run's live controller (never a wrapper above it, never the stack
+    while the controller lives), lets a controller that keeps publishing
+    cleanup progress drain past the wait bound, SIGKILLs only a run that shows
+    no progress after the controller's shutdown budget, writes a receipt and
+    reports it; a record whose pid the lane never started (another run) is
+    reported and left alone."""
+    pipeline = load_module("pipeline_teardown", DRIVER)
+    source_root = Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])
+    context_root = source_root / ".context" / "benchmarks"
+    context_root.mkdir(parents=True, exist_ok=True)
+    probe = source_root / ".pipeline-teardown-probe.tmp"
+    probe.unlink(missing_ok=True)
+    scripts = tmp / "teardown-scripts"
+    scripts.mkdir()
+    # The "stack": records its own pid like local.py's local-stack-owner.json,
+    # then idles. "stubborn" ignores TERM like a stack hung in its teardown.
+    (scripts / "stack.sh").write_text(
+        "#!/bin/bash\n"
+        "mkdir -p \"$1\"\n"
+        "[ \"$2\" = stubborn ] && trap '' TERM\n"
+        "printf '{\"version\":1,\"run_id\":\"%s\",\"pid\":%d,\"token\":\"fixture\","
+        "\"native_identity\":\"fixture\",\"birth\":\"fixture\"}\\n' \"$(basename \"$1\")\" \"$$\" "
+        "> \"$1/local-stack-owner.json.tmp\"\n"
+        "mv \"$1/local-stack-owner.json.tmp\" \"$1/local-stack-owner.json\"\n"
+        "exec sleep 300\n"
+    )
+    # The "controller": like benchmarks/local.py it runs in its own session under
+    # a generated run id that embeds its pid, starts the stack with a scrubbed
+    # environment (owned only through the parent chain) and, on TERM, drains for
+    # longer than the wait bound while publishing cleanup-status progress.
+    (scripts / "controller.sh").write_text(
+        "#!/bin/bash\n"
+        "run_dir=\"$1/$(date +%s)-$$-7\"\n"
+        "mkdir -p \"$run_dir\"\n"
+        "env -i /bin/sleep 300 </dev/null >/dev/null 2>&1 &\n"
+        "stack=$!\n"
+        "printf '{\"version\":1,\"run_id\":\"%s\",\"pid\":%d,\"token\":\"fixture\","
+        "\"native_identity\":\"fixture\",\"birth\":\"fixture\"}\\n' \"$(basename \"$run_dir\")\" \"$stack\" "
+        "> \"$run_dir/local-stack-owner.json.tmp\"\n"
+        "mv \"$run_dir/local-stack-owner.json.tmp\" \"$run_dir/local-stack-owner.json\"\n"
+        "printf '%s\\n' \"$run_dir\" > \"$2\"\n"
+        "drain() {\n"
+        "  trap '' TERM\n"
+        "  for step in 1 2 3 4 5 6; do\n"
+        "    printf 'version=2\\nstate=pending\\nstep=%s\\n' \"$step\" > \"$run_dir/local-stack-cleanup.status.tmp\"\n"
+        "    mv -f \"$run_dir/local-stack-cleanup.status.tmp\" \"$run_dir/local-stack-cleanup.status\"\n"
+        "    sleep 0.5\n"
+        "  done\n"
+        "  kill \"$stack\" 2>/dev/null\n"
+        "  wait \"$stack\" 2>/dev/null\n"
+        "  printf 'version=2\\nstate=clean\\n' > \"$run_dir/local-stack-cleanup.status.tmp\"\n"
+        "  mv -f \"$run_dir/local-stack-cleanup.status.tmp\" \"$run_dir/local-stack-cleanup.status\"\n"
+        "  exit 0\n"
+        "}\n"
+        "trap drain TERM\n"
+        "while kill -0 \"$stack\" 2>/dev/null; do wait \"$stack\"; done\n"
+    )
+    # The lane: like run-predeploy-local -> local.py it starts its stack or
+    # controller in a new session with its own service log (never the stage
+    # wrapper's output pipe) and waits on its work; once the fix (probe) exists
+    # it passes at once.
+    (scripts / "lane.sh").write_text(
+        "#!/bin/bash\n"
+        "[ -f \"$3\" ] && exit 0\n"
+        "if [ \"$2\" = controller ]; then\n"
+        "  setsid bash \"$(dirname \"$0\")/controller.sh\" \"$1\" \"$4\" >/dev/null 2>&1 </dev/null &\n"
+        "else\n"
+        "  setsid bash \"$(dirname \"$0\")/stack.sh\" \"$1\" \"$2\" >/dev/null 2>&1 </dev/null &\n"
+        "fi\n"
+        "sleep 60\n"
+    )
+    run_dirs = {name: context_root / f"teardown-{name}" for name in ("stack", "stubborn")}
+    marker = tmp / "controller-run-dir"
+    plan = tmp / "teardown-plan.json"
+    state = tmp / "teardown-state"
+    lane = str(scripts / "lane.sh")
+    write_plan(plan, [
+        {"name": "controller", "reuse_passed": False,
+         "command": ["bash", lane, str(context_root), "controller", str(probe), str(marker)]},
+        {"name": "stack", "reuse_passed": False,
+         "command": ["bash", lane, str(run_dirs["stack"]), "plain", str(probe), "-"]},
+        {"name": "stubborn", "reuse_passed": False,
+         "command": ["bash", lane, str(run_dirs["stubborn"]), "stubborn", str(probe), "-"]},
+    ])
+    # A run dir older than the lanes (a dead controller's record): never a candidate.
+    old = context_root / "1700000000-1-1"
+    old.mkdir()
+    (old / "local-stack-owner.json").write_text(json.dumps({"version": 1, "run_id": old.name, "pid": 1}))
+    stale = time.time() - 600
+    os.utime(old / "local-stack-owner.json", (stale, stale))
+    os.utime(old, (stale, stale))
+    # Another run's live owner: a pid the lanes never started carries no lane token.
+    foreign = subprocess.Popen(["sleep", "300"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+    foreign_dir = context_root / "teardown-foreign"
+    # wait bound 1 s; the last resort may run 6 s after the TERM, and only
+    # when nothing progressed for a whole wait bound.
+    scenario_env = {**env, "DEPLOY_PIPELINE_TEARDOWN_WAIT_SECONDS": "1",
+                    "DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS": "6"}
+    supervisor = subprocess.Popen(
+        [sys.executable, str(DRIVER), "run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED,
+         "--follow-source", "--settle-seconds", "0.5", "--poll-seconds", "0.2", "--fix-loop-cap", "0"],
+        env=scenario_env, stdout=subprocess.PIPE, text=True,
+    )
+    owners: dict[str, int] = {}
+    controller_pid = 0
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not (marker.exists() and all(
+                (d / "local-stack-owner.json").exists() for d in run_dirs.values())):
+            time.sleep(0.1)
+        controller_dir = Path(marker.read_text().strip())
+        controller_pid = int(controller_dir.name.split("-")[1])
+        run_dirs["controller"] = controller_dir
+        for name, run_dir in run_dirs.items():
+            owners[name] = json.loads((run_dir / "local-stack-owner.json").read_text())["pid"]
+        foreign_dir.mkdir()
+        (foreign_dir / "local-stack-owner.json").write_text(json.dumps(
+            {"version": 1, "run_id": foreign_dir.name, "pid": foreign.pid, "token": "x",
+             "native_identity": "x", "birth": "x"}))
+        probe.write_text("fixed\n")
+        out, _ = supervisor.communicate(timeout=120)
+        assert supervisor.returncode == 0, (supervisor.returncode, out)
+        receipt = json.loads((state / "receipt.json").read_text())
+        assert receipt["status"] == "passed" and receipt["attempt"] == 2, receipt["status"]
+        history = [json.loads(line) for line in (state / "history.jsonl").read_text().splitlines()]
+        superseded = history[-1]
+        assert superseded["status"] == "superseded"
+        assert sorted(superseded["superseded_lanes"]) == ["controller", "stack", "stubborn"]
+        expectations = {"controller": "terminated", "stack": "terminated", "stubborn": "killed"}
+        details: dict[str, dict] = {}
+        for name, expected in expectations.items():
+            lane_state = superseded["lanes"][name]
+            assert lane_state["status"] == "superseded" and lane_state["lane_token"].startswith(f"{name}.1."), lane_state
+            summary = lane_state["teardown"]
+            assert summary["outcome"] == expected, (name, summary)
+            assert summary["survivors"] == [] and summary["eperm"] == [], (name, summary)
+            assert not _process_alive(owners[name]), f"{name}'s stack outlived its teardown"
+            detail_path = Path(summary["receipt"])
+            assert detail_path == state / "teardown" / f"attempt-1-{name}.json", detail_path
+            detail = json.loads(detail_path.read_text())
+            details[name] = detail
+            assert detail["older_run_dirs"] == 1 and all(r["run_id"] != old.name for r in detail["records"])
+            assert detail["wait_seconds"] == 1.0 and detail["kill_after_seconds"] == 6.0, detail
+            assert detail["kill_after_source"] == "DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS", detail
+            assert detail["lingering"] == [], detail["lingering"]
+            assert f"PIPELINE_LANE_TEARDOWN attempt=1 lane={name} outcome={expected} owned=" in out, out
+            assert f"receipt={detail_path}" in out, out
+        # Plain stack, no controller left: the exact owner pid is TERMed and exits.
+        stack = superseded["lanes"]["stack"]["teardown"]
+        assert stack["owned_pids"] == [owners["stack"]] and stack["escalated"] == [owners["stack"]], stack
+        assert stack["killed"] == [] and [p["phase"] for p in details["stack"]["phases"]] == ["wait", "term"]
+        assert [(r["pid"], r["path"]) for r in details["stack"]["owned"]] == \
+            [(owners["stack"], str(run_dirs["stack"] / "local-stack-owner.json"))], details["stack"]["owned"]
+        # Live controller: it alone is TERMed (never its stack, never a wrapper),
+        # its stack is owned through the parent chain despite a scrubbed
+        # environment, and its 3 s drain with progress receipts outlives the 1 s
+        # wait bound without being killed; the receipt ends with its clean status.
+        controller = superseded["lanes"]["controller"]["teardown"]
+        assert controller["escalated"] == [controller_pid], controller
+        assert controller["owned_pids"] == sorted([controller_pid, owners["controller"]]), controller
+        assert controller["killed"] == [] and [p["phase"] for p in details["controller"]["phases"]] == ["wait", "term"]
+        term = details["controller"]["phases"][1]
+        assert term["seconds"] >= 2.5 and term["stall"] is None, term
+        owned_kinds = {(r["pid"], r["kind"]) for r in details["controller"]["owned"]}
+        assert owned_kinds == {(controller_pid, "run-id-controller"), (owners["controller"], "local-stack-owner.json")}, owned_kinds
+        cleanup = [r for r in details["controller"]["records"] if r["kind"] == "local-stack-cleanup.status"]
+        assert cleanup and cleanup[0]["status"] == "receipt" and cleanup[0]["state"] == "clean", cleanup
+        assert not _process_alive(controller_pid), "the controller outlived its drain"
+        # TERM-ignoring stack: the last resort runs only after the kill-after
+        # bound passed with no progress for a whole wait bound.
+        stubborn = superseded["lanes"]["stubborn"]["teardown"]
+        assert stubborn["escalated"] == [owners["stubborn"]] and stubborn["killed"] == [owners["stubborn"]], stubborn
+        phases = details["stubborn"]["phases"]
+        assert [p["phase"] for p in phases] == ["wait", "term", "kill"], phases
+        assert phases[1]["seconds"] >= 6.0 and phases[1]["stall"].startswith("no progress"), phases[1]
+        assert phases[1]["last_progress_age_s"] >= 1.0, phases[1]
+        assert phases[2]["note"].startswith("last resort"), phases[2]
+        # Token scoping: each teardown saw the other lanes' live stacks as foreign
+        # and left them for their own teardown; nothing ever touched the other run.
+        assert controller["foreign_pids"] == sorted([foreign.pid, owners["stack"], owners["stubborn"]]), controller
+        assert stack["foreign_pids"] == sorted([foreign.pid, owners["stubborn"]]), stack
+        assert stubborn["foreign_pids"] == [foreign.pid], stubborn
+        assert _process_alive(foreign.pid), "a foreign owner record's process must never be signalled"
+        assert f"foreign={foreign.pid}" in out.split("lane=stubborn")[1].split("\n")[0], out
+        # Lanes that passed were never signalled: no teardown, no receipt.
+        assert "teardown" not in receipt["lanes"]["stack"] and not list((state / "teardown").glob("attempt-2-*"))
+        # Both bounds are validated before any lane starts.
+        for variable in ("DEPLOY_PIPELINE_TEARDOWN_WAIT_SECONDS", "DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS"):
+            bad = run_driver("run", "--plan", str(plan), "--state-dir", str(tmp / "teardown-bad"), *UNBOUNDED,
+                             env={**env, variable: "soon"})
+            assert bad.returncode == 2 and variable in bad.stderr, (variable, bad.returncode, bad.stderr)
+            assert not (tmp / "teardown-bad" / "receipt.json").exists()
+    finally:
+        probe.unlink(missing_ok=True)
+        if supervisor.poll() is None:
+            supervisor.kill()
+            supervisor.wait()
+        for pid in (*owners.values(), foreign.pid, controller_pid):
+            if pid:
+                try:
+                    os.kill(pid, 9)
+                except ProcessLookupError:
+                    pass
+        foreign.wait()
+        shutil.rmtree(context_root, ignore_errors=True)
+    # Without the override the last resort waits for the controller's published
+    # shutdown budget plus the margin; this fixture has no agents/ producer, so
+    # the documented default applies, and the real checkout asks the producer.
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS", None)
+        assert pipeline.teardown_kill_after_seconds() == (2175.0 + 120.0, "default + 120s margin")
+        real = load_module("pipeline_teardown_real", ROOT / "scripts" / "run_deploy_pipeline.py")
+        published = int(subprocess.run(
+            [sys.executable, str(ROOT / "agents/scripts/local_worker_supervisor.py"), "--shutdown-timeout"],
+            cwd=ROOT / "agents", check=True, stdout=subprocess.PIPE, text=True).stdout)
+        assert real.teardown_kill_after_seconds() == (
+            published + 120.0, "local_worker_supervisor.py --shutdown-timeout + 120s margin")
+    # Ownership through the parent chain when a child's environment cannot be
+    # read (a root child), zombies never count, and a lane-owned pid the
+    # supervisor may not signal is recorded as eperm instead of aborting.
+    fake = tmp / "teardown-fake-proc"
+    stat_tail = "0 0 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 {start} 0 0 0 0"
+    for pid, comm, state_char, ppid, start in ((100, "ctrl", "S", 1, 5000), (101, "sudo", "S", 100, 5001),
+                                               (102, "other", "S", 1, 5002), (103, "gone", "Z", 100, 5003)):
+        (fake / str(pid)).mkdir(parents=True)
+        (fake / str(pid) / "stat").write_text(f"{pid} ({comm}) {state_char} {ppid} " + stat_tail.format(start=start) + "\n")
+    (fake / "100" / "environ").write_bytes(b"HOME=/x\0DEPLOY_PIPELINE_LANE_TOKEN=tok\0")
+    (fake / "101" / "environ").write_bytes(b"secret\0")
+    (fake / "101" / "environ").chmod(0)
+    (fake / "102" / "environ").write_bytes(b"DEPLOY_PIPELINE_LANE_TOKEN=other\0")
+    try:
+        owned, processes = pipeline.lane_owned_processes("tok", proc=fake)
+    finally:
+        (fake / "101" / "environ").chmod(0o600)
+    assert sorted(owned) == [100, 101] and owned[100]["token"] is True and owned[101]["token"] is False, owned
+    assert 103 not in processes and 102 in processes, sorted(processes)
+    with patch.object(pipeline.os, "kill", side_effect=PermissionError):
+        assert pipeline._signal_pids([4242], {4242: {"comm": "sudo"}}, pipeline.signal.SIGKILL) == [
+            {"pid": 4242, "comm": "sudo", "signal": "SIGKILL", "error": "eperm"}]
+    with patch.object(pipeline.os, "kill", side_effect=ProcessLookupError):
+        assert pipeline._signal_pids([4242], {}, pipeline.signal.SIGTERM) == []
+    records = [{"run_id": "1-77-1", "kind": "run-id-controller", "pid": 77, "status": "owned"},
+               {"run_id": "1-77-1", "kind": "local-stack-owner.json", "pid": 88, "status": "owned"},
+               {"run_id": "custom", "kind": "local-stack-owner.json", "pid": 99, "status": "owned"},
+               {"run_id": "1-66-1", "kind": "run-id-controller", "pid": 66, "status": "exited"},
+               {"run_id": "1-66-1", "kind": "services.json", "pid": 55, "status": "owned"}]
+    assert pipeline._escalation_targets(records, [88, 99, 55, 77]) == [77, 99, 55]
+    print("lane teardown: ok")
+
+
+def _fake_process(proc: Path, pid: int, comm: str, *, ppid: int = 1, start: int = 5000, environ: bytes = b"",
+                  cmdline: str = "") -> None:
+    stat_tail = "0 0 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 {start} 0 0 0 0"
+    (proc / str(pid)).mkdir(parents=True)
+    (proc / str(pid) / "stat").write_text(f"{pid} ({comm}) S {ppid} " + stat_tail.format(start=start) + "\n")
+    (proc / str(pid) / "environ").write_bytes(environ)
+    (proc / str(pid) / "cmdline").write_bytes(cmdline.replace(" ", "\0").encode() + b"\0")
+
+
+def _owner_run_dir(context_root: Path, run_id: str, *, age_s: float, benchmark: dict | None = None,
+                   stack: dict | None = None, manifest: dict | None = None, cleanup: str | None = None) -> Path:
+    run_dir = context_root / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "logs").mkdir()
+    (run_dir / "logs" / "frontend.log").write_text("evidence\n")
+    for name, payload in (("local-benchmark-owner.json", benchmark), ("local-stack-owner.json", stack),
+                          ("services.json", manifest)):
+        if payload is not None:
+            (run_dir / name).write_text(json.dumps(payload))
+    if cleanup is not None:
+        (run_dir / "local-stack-cleanup.status").write_text(cleanup)
+    stamp = time.time() - age_s
+    for path in (run_dir / "logs" / "frontend.log", run_dir / "logs", *run_dir.iterdir(), run_dir):
+        os.utime(path, (stamp, stamp))
+    return run_dir
+
+
+# A pid above the kernel's default pid_max can never be alive on the host.
+DEAD_PID = 4194309
+
+
+def check_owner_run_preflight(tmp: Path, env: dict[str, str]) -> None:
+    """2026-10-31 (deploy-5 round 1, PR #1655 round 2): an isolated run stopped
+    before its controller bound a pid leaves ``local-benchmark-owner.json``
+    with ``state: not_started, pid: null`` (and/or a pid-less stack owner); the
+    launch preflight refused the deploy on it until a human moved the run to
+    ``_aborted/``. One shared classification (live / finished / aborted /
+    stranded / bootstrapping / unknown) now serves the launch preflight and the
+    lane teardown: this deploy's own aborted run is set aside (renamed,
+    evidence intact) and the launch proceeds; a run inside the bootstrap grace
+    (newest file under it) is protected and waited out; a pid-less run whose
+    run id a live process carries (environment, ``--run-id`` argv, or a
+    command line naming it when the environment is unreadable) is live and
+    never set aside; a run that left a manifest without a clean cleanup
+    receipt is stranded and left for --reconcile-cleanup; another session's
+    runs are reported, never renamed and never waited on; an unreadable
+    record, a symlinked context root or an unavailable process table refuses
+    the launch (fail closed)."""
+    pipeline = load_module("pipeline_owner_runs", DRIVER)
+    source_root = Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])
+    context_root = source_root / ".context" / "benchmarks"
+    shutil.rmtree(context_root, ignore_errors=True)
+    not_started = {"version": 1, "run_id": "", "state": "not_started", "pid": None, "native_identity": "",
+                   "token": "", "receipt": "", "signal": None}
+    stopped_manifest = {"status": "stopped", "run_sh_pid": DEAD_PID, "services": []}
+    clean = "version=2\nstate=clean\n"
+
+    # ── Unit: the classification itself, on a fake /proc ───────────────────
+    fake = tmp / "owner-runs-fake-proc"
+    _fake_process(fake, 100, "python3", cmdline="python3 benchmarks/local.py --port 1")
+    _fake_process(fake, 101, "bash", cmdline="bash scripts/run.sh --benchmark",
+                  environ=b"BENCHMARK_RUN_ID=carried-run\0")
+    _fake_process(fake, 102, "sleep", cmdline="sleep 300")
+    # Environment unreadable (EACCES): only its command line names the run.
+    _fake_process(fake, 103, "cloudflared", environ=b"secret\0",
+                  cmdline="cloudflared tunnel --logfile /x/.context/benchmarks/eacces-run/cloudflared.log")
+    (fake / "103" / "environ").chmod(0)
+    # A controller with a custom run id (run-predeploy-local's YYYYMMDD-HHMMSS-$$):
+    # the id embeds no pid and a runtime environ write never reaches /proc.
+    _fake_process(fake, 104, "python3", cmdline="python3 benchmarks/local.py --run-id 20261031-064512-555 --port 2")
+    unit_root = tmp / "owner-runs-unit"
+    identities = {102: "linux:boot:5002"}
+    now = time.time()
+
+    def unit(run_id: str, age_s: float, **records: object) -> Path:
+        bench = records.pop("benchmark", None)
+        if bench == "not_started":
+            bench = {**not_started, "run_id": run_id}
+        return _owner_run_dir(unit_root, run_id, age_s=age_s, benchmark=bench, **records)
+
+    unit("1700000000-999-1", 600, benchmark="not_started")
+    unit("1700000000-998-1", 5, benchmark="not_started")
+    unit("carried-run", 600, benchmark="not_started")
+    unit("1700000000-100-1", 600, benchmark="not_started")
+    unit("manifest-live", 600, stack={"version": 1, "run_id": "manifest-live", "pid": None},
+         manifest={"status": "running", "run_sh_pid": 101})
+    unit("stack-live", 600, stack={"version": 1, "run_id": "stack-live", "pid": 102, "native_identity": "linux:boot:5002"})
+    unit("stack-reused-pid", 600,
+         stack={"version": 1, "run_id": "stack-reused-pid", "pid": 102, "native_identity": "linux:boot:1"})
+    unit("stack-exited", 600, stack={"version": 1, "run_id": "stack-exited", "pid": 7777, "native_identity": "linux:boot:7"},
+         cleanup=clean)
+    unit("young-but-stopped", 5, benchmark="not_started", manifest=stopped_manifest, cleanup=clean)
+    unit("young-manifest-no-pid", 5, benchmark="not_started", manifest={"status": "starting", "services": []})
+    unit("stranded-pending", 600, benchmark="not_started", manifest={"status": "running", "run_sh_pid": 7777},
+         cleanup="version=2\nstate=pending\n")
+    unit("stranded-no-receipt", 600, benchmark="not_started", manifest=stopped_manifest)
+    young_log = unit("young-log", 600, benchmark="not_started")
+    (young_log / "logs" / "services.log").write_text("still bootstrapping\n")
+    unit("eacces-run", 600, benchmark="not_started")
+    unit("20261031-064512-555", 600, benchmark="not_started")
+    broken = unit("broken", 600)
+    (broken / "local-benchmark-owner.json").write_text("{not json")
+    (unit_root / "seed-cache").mkdir()
+    (unit_root / "_aborted" / "1600000000-1-1").mkdir(parents=True)
+    (unit_root / "_aborted" / "1600000000-1-1" / "local-benchmark-owner.json").write_text(json.dumps(not_started))
+    try:
+        runs = pipeline.classify_owner_runs(unit_root, proc=fake, identity_of=lambda pid: identities.get(pid, ""),
+                                            now=now, grace_seconds=90)
+    finally:
+        (fake / "103" / "environ").chmod(0o600)
+    classes = {run["run_id"]: run["classification"] for run in runs}
+    expected = {
+        "1700000000-999-1": "aborted", "1700000000-998-1": "bootstrapping", "carried-run": "live",
+        "1700000000-100-1": "live", "manifest-live": "live", "stack-live": "live", "stack-reused-pid": "finished",
+        "stack-exited": "finished", "young-but-stopped": "aborted", "young-manifest-no-pid": "stranded",
+        "stranded-pending": "stranded", "stranded-no-receipt": "stranded", "young-log": "bootstrapping",
+        "eacces-run": "live", "20261031-064512-555": "live", "broken": "unknown",
+    }
+    assert classes == expected, classes
+    by_id = {run["run_id"]: run for run in runs}
+    assert by_id["carried-run"]["pids"] == [101] and "carried by live process" in by_id["carried-run"]["reason"]
+    assert by_id["1700000000-100-1"]["pids"] == [100] and by_id["manifest-live"]["pids"] == [101]
+    assert by_id["stack-live"]["pids"] == [102] and "matching identity" in by_id["stack-live"]["reason"]
+    assert by_id["eacces-run"]["pids"] == [103] and by_id["20261031-064512-555"]["pids"] == [104], by_id
+    assert "unreadable" in by_id["broken"]["reason"], by_id["broken"]
+    assert "grace" in by_id["1700000000-998-1"]["reason"] and "bootstrap ended" in by_id["young-but-stopped"]["reason"]
+    assert by_id["young-log"]["age_s"] < 5, by_id["young-log"]
+    for run_id in ("stranded-pending", "stranded-no-receipt", "young-manifest-no-pid"):
+        assert f"--run-id {run_id} --reconcile-cleanup" in by_id[run_id]["reason"], by_id[run_id]
+    # The same record is bootstrapping now and aborted once the grace passed.
+    later = pipeline.classify_owner_runs(unit_root, proc=fake, identity_of=lambda pid: "", now=now + 100,
+                                         grace_seconds=90, run_ids={"1700000000-998-1"})
+    assert [run["classification"] for run in later] == ["aborted"], later
+    # No process table (another platform, /proc unlistable): every run unknown,
+    # a reconcile refuses and renames nothing; a symlinked root likewise.
+    missing = pipeline.classify_owner_runs(unit_root, proc=tmp / "owner-runs-missing-proc", identity_of=lambda pid: "",
+                                           now=now, grace_seconds=90)
+    assert {run["run_id"] for run in missing} == set(expected), missing
+    assert all(run["classification"] == "unknown" for run in missing), missing
+    assert all("process table" in run["reason"] for run in missing if run["run_id"] != "broken"), missing
+    unavailable = pipeline.reconcile_owner_runs(unit_root, tmp / "owner-runs-unavailable-state", stage="unit",
+                                                proc=tmp / "owner-runs-missing-proc", identity_of=lambda pid: "",
+                                                grace_seconds=90)
+    assert unavailable["set_aside"] == [] and len(unavailable["refused"]) == len(expected), unavailable["refused"]
+    link = tmp / "owner-runs-linked-root"
+    link.symlink_to(unit_root)
+    linked = pipeline.reconcile_owner_runs(link, tmp / "owner-runs-linked-state", stage="unit", proc=fake,
+                                           identity_of=lambda pid: "", grace_seconds=90)
+    assert linked["set_aside"] == [] and [r["classification"] for r in linked["refused"]] == ["unknown"], linked
+    assert "symlink" in linked["refused"][0]["reason"], linked["refused"]
+    assert (unit_root / "1700000000-999-1").is_dir() and not (unit_root / "_aborted" / "1700000000-999-1").exists()
+    # A run directory removed by a concurrent cleanup after ``is_dir()``
+    # succeeded (PR #1656 review, 2026-10-31): the FileNotFoundError from its
+    # newest-mtime stat or from a record read made the run ``unknown`` and the
+    # preflight refused the whole attempt. A confirmed-vanished run is
+    # ``finished`` (reported, never refused, never renamed); the same error
+    # while the directory still exists stays ``unknown`` (fail closed).
+    vanishing = unit("1700000000-997-1", 600, benchmark="not_started")
+    original_newest_mtime = pipeline._newest_mtime
+
+    def vanish_before_stat(run_dir: Path) -> float:
+        if run_dir == vanishing:
+            shutil.rmtree(run_dir)
+        return original_newest_mtime(run_dir)
+
+    with patch.object(pipeline, "_newest_mtime", vanish_before_stat):
+        gone = pipeline.reconcile_owner_runs(unit_root, tmp / "owner-runs-vanished-state", stage="unit", proc=fake,
+                                             identity_of=lambda pid: "", grace_seconds=90,
+                                             run_ids={vanishing.name, "stack-exited"})
+    assert gone["refused"] == [] and gone["set_aside"] == [], gone
+    assert gone["counts"]["finished"] == 2 and gone["counts"]["unknown"] == 0, gone["counts"]
+    row = next(run for run in gone["runs"] if run["run_id"] == vanishing.name)
+    assert row["classification"] == "finished" and "vanished" in row["reason"] and row["action"] == "left", row
+    assert not vanishing.exists() and not (unit_root / "_aborted" / vanishing.name).exists()
+    assert vanishing.name in (tmp / "owner-runs-vanished-state" / "owner-runs.jsonl").read_text()
+    # The same race on an owner-record read (the directory goes between is_file() and read_text()).
+    vanishing = unit("1700000000-997-1", 600, benchmark="not_started")
+    original_read_text = Path.read_text
+
+    def vanish_before_read(self: Path, *args, **kwargs):
+        if self.parent == vanishing:
+            shutil.rmtree(vanishing)
+        return original_read_text(self, *args, **kwargs)
+
+    with patch.object(Path, "read_text", vanish_before_read):
+        gone = pipeline.classify_owner_runs(unit_root, proc=fake, identity_of=lambda pid: "", now=now,
+                                            grace_seconds=90, run_ids={vanishing.name})
+    assert [run["classification"] for run in gone] == ["finished"] and "vanished" in gone[0]["reason"], gone
+    assert not vanishing.exists()
+    # Control: a FileNotFoundError while the run directory still exists is not a vanished run.
+    present = unit("1700000000-996-1", 600, benchmark="not_started")
+
+    def phantom_missing(run_dir: Path) -> float:
+        raise FileNotFoundError(f"phantom {run_dir}")
+
+    with patch.object(pipeline, "_newest_mtime", phantom_missing):
+        kept = pipeline.classify_owner_runs(unit_root, proc=fake, identity_of=lambda pid: "", now=now,
+                                            grace_seconds=90, run_ids={present.name})
+    assert [run["classification"] for run in kept] == ["unknown"], kept
+    assert kept[0]["reason"] == "run dir unreadable (FileNotFoundError)" and present.is_dir(), kept
+    # Grace comes from the same variable run.sh / kill-services.sh honour.
+    with patch.dict(os.environ, {"BENCHMARK_STARTUP_GRACE_SECONDS": "7"}):
+        assert pipeline.bootstrap_grace_seconds() == 7.0
+    with patch.dict(os.environ, {"BENCHMARK_STARTUP_GRACE_SECONDS": "soon"}):
+        assert pipeline.bootstrap_grace_seconds() == 90.0
+    # benchmarks/local.py exports the run id before it writes not_started, so
+    # every later child of a custom-id controller carries it.
+    local_py = (ROOT / "agents" / "benchmarks" / "local.py").read_text()
+    export = 'os.environ["BENCHMARK_RUN_ID"] = stack.run_id'
+    assert local_py.count(export) == 1 and local_py.index(export) < local_py.index('benchmark_owner.record("not_started")')
+
+    # ── Driver: the launch preflight on the real /proc ─────────────────────
+    plan = tmp / "owner-runs-plan.json"
+    write_plan(plan, [{"name": "quick", "command": ["true"], "reuse_passed": False}])
+    aborted_id = "1793428424-669285-80519"  # the record that blocked deploy-5 round 1
+    aborted = _owner_run_dir(context_root, aborted_id, age_s=600,
+                             benchmark={**not_started, "run_id": aborted_id},
+                             stack={"version": 1, "run_id": aborted_id, "pid": DEAD_PID, "token": "t",
+                                    "native_identity": "linux:gone:1", "birth": "x"},
+                             manifest=stopped_manifest, cleanup=clean)
+    carrier = subprocess.Popen(["sleep", "300"], env={**os.environ, "BENCHMARK_RUN_ID": "1793428424-1-2"},
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    protected = _owner_run_dir(context_root, "1793428424-1-2", age_s=600,
+                               benchmark={**not_started, "run_id": "1793428424-1-2"})
+    young = _owner_run_dir(context_root, "1793428424-1-3", age_s=0, benchmark={**not_started, "run_id": "1793428424-1-3"})
+    stranded = _owner_run_dir(context_root, "1793428424-1-5", age_s=600,
+                              benchmark={**not_started, "run_id": "1793428424-1-5"},
+                              manifest={"status": "running", "run_sh_pid": DEAD_PID, "services": []},
+                              cleanup="version=2\nstate=pending\n")
+    # Another session's run under this checkout: identical record, not named
+    # by any of this state dir's teardowns.
+    foreign = _owner_run_dir(context_root, "1793428424-1-6", age_s=600, benchmark={**not_started, "run_id": "1793428424-1-6"})
+    state = tmp / "owner-runs-state"
+    (state / "teardown").mkdir(parents=True)
+    (state / "teardown" / "attempt-0-smoke.json").write_text(json.dumps({
+        "records": [{"run_id": aborted_id}, {"run_id": young.name}, {"run_id": stranded.name}]}))
+    scenario_env = {**env, "BENCHMARK_STARTUP_GRACE_SECONDS": "2"}
+    try:
+        started = time.monotonic()
+        ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, env=scenario_env)
+        waited = time.monotonic() - started
+        assert ran.returncode == 0, (ran.returncode, ran.stdout, ran.stderr)
+        receipt = json.loads((state / "receipt.json").read_text())
+        assert receipt["status"] == "passed", receipt["status"]
+        summary = receipt["owner_runs"]
+        assert summary["stage"] == "attempt-1-preflight" and summary["refused"] == [], summary
+        # The young own record was protected until its grace passed, then set aside too.
+        assert summary["waited_s"] >= 2.0 and waited >= 2.0, (summary, waited)
+        assert summary["counts"] == {"live": 1, "finished": 0, "aborted": 3, "stranded": 1, "bootstrapping": 0,
+                                     "unknown": 0}, summary
+        assert sorted(run["run_id"] for run in summary["set_aside"]) == sorted([aborted_id, young.name]), summary
+        # The carrier-protected run is another session's too: reported, left.
+        assert sorted(summary["foreign"]) == sorted([protected.name, foreign.name]), summary
+        line = next(l for l in ran.stdout.splitlines() if l.startswith("PIPELINE_OWNER_RUNS "))
+        assert ("attempt=1 stage=attempt-1-preflight live=1 finished=0 aborted=3 stranded=1 bootstrapping=0 "
+                "unknown=0 foreign=2 set_aside=") in line and "refused=-" in line, line
+        # Set aside, never deleted: the evidence moved intact with the classification beside it.
+        for run_dir in (aborted, young):
+            assert not run_dir.exists(), run_dir
+            moved = context_root / "_aborted" / run_dir.name
+            assert (moved / "logs" / "frontend.log").read_text() == "evidence\n", moved
+            assert json.loads((moved / "local-benchmark-owner.json").read_text())["state"] == "not_started"
+            mark = json.loads((moved / "aborted-by-deploy-pipeline.json").read_text())
+            assert mark["classification"] == "aborted" and mark["original_path"] == str(run_dir), mark
+        assert (context_root / "_aborted" / aborted_id / "services.json").exists()
+        # _aborted/ itself stays as old as its oldest run (the young run sorts
+        # first and would otherwise stamp it with "now"): the shell readers'
+        # young-directory bootstrap heuristics must not see a fresh bootstrap.
+        assert time.time() - (context_root / "_aborted").stat().st_mtime >= 500, (context_root / "_aborted").stat()
+        # Stranded (manifest without a clean receipt) and foreign runs stay put.
+        assert stranded.exists() and foreign.exists(), (stranded.exists(), foreign.exists())
+        # A pid-less record whose run id a live process carries is live: untouched.
+        assert protected.exists() and _process_alive(carrier.pid)
+        assert json.loads((protected / "local-benchmark-owner.json").read_text())["pid"] is None
+        rows = {r["run_id"]: r for r in map(json.loads, (state / "owner-runs.jsonl").read_text().splitlines())}
+        assert rows[protected.name]["classification"] == "live" and rows[protected.name]["pids"] == [carrier.pid]
+        assert rows[protected.name]["action"].startswith("left") and "carried by live process" in rows[protected.name]["reason"]
+        assert rows[stranded.name]["classification"] == "stranded" and rows[stranded.name]["action"] == "left"
+        assert rows[foreign.name]["classification"] == "aborted" and rows[foreign.name]["own"] is False
+        assert rows[foreign.name]["action"] == "left (not this deploy's run)", rows[foreign.name]
+        assert {rows[r]["action"] for r in (aborted_id, young.name)} == {"set-aside"}, rows
+
+        # Unreadable record (any session's): unknown, the launch is refused, nothing moved or signalled.
+        broken = _owner_run_dir(context_root, "1793428424-1-4", age_s=600)
+        (broken / "local-stack-owner.json").write_text("{\"pid\": ")
+        since = time.time()
+        refused = run_driver("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, env=scenario_env)
+        assert refused.returncode == 1, (refused.returncode, refused.stdout, refused.stderr)
+        assert "PIPELINE_OWNER_RUNS_REFUSED attempt=1 1793428424-1-4: unknown" in refused.stderr, refused.stderr
+        receipt = json.loads((state / "receipt.json").read_text())
+        assert receipt["status"] == "failed" and receipt["refused"][0]["run_id"] == broken.name, receipt
+        assert receipt["lanes"]["quick"]["status"] == "failed", receipt["lanes"]
+        assert receipt["lanes"]["quick"]["note"].startswith("refused: owner-run preflight"), receipt["lanes"]
+        assert broken.exists() and protected.exists() and foreign.exists() and _process_alive(carrier.pid)
+        assert not (context_root / "_aborted" / broken.name).exists()
+        woke = run_driver("wait", "--state-dir", str(state), "--timeout", "10", "--since", str(since), env=scenario_env)
+        assert woke.returncode == 1, (woke.returncode, woke.stdout)
+        # A refused launch is not a completed failed round for the fix-loop cap.
+        history = [json.loads(l) for l in (state / "history.jsonl").read_text().splitlines()] + [receipt]
+        assert pipeline.fix_loop_state(history, 1)["failed_rounds"] == 0 and not pipeline.fix_loop_state(history, 1)["capped"]
+        shutil.rmtree(broken)
+        # Another session's run still bootstrapping: reported, never waited on.
+        foreign_young = _owner_run_dir(context_root, "1793428424-1-7", age_s=0,
+                                       benchmark={**not_started, "run_id": "1793428424-1-7"})
+        again = run_driver("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, env=scenario_env)
+        assert again.returncode == 0, (again.returncode, again.stderr)
+        summary = json.loads((state / "receipt.json").read_text())["owner_runs"]
+        assert summary["waited_s"] < 1.0 and summary["counts"]["bootstrapping"] == 1, summary
+        assert foreign_young.exists() and foreign.exists() and summary["set_aside"] == [], summary
+        assert sorted(summary["foreign"]) == sorted([protected.name, foreign.name, foreign_young.name]), summary
+    finally:
+        carrier.kill()
+        carrier.wait()
+        shutil.rmtree(context_root, ignore_errors=True)
+
+    # ── Teardown: a superseded lane's not_started run is set aside by the lane teardown ──
+    scripts = tmp / "owner-runs-scripts"
+    scripts.mkdir()
+    probe = source_root / ".owner-runs-probe.tmp"
+    probe.unlink(missing_ok=True)
+    # The lane: like local.py it records not_started under a generated run id
+    # that embeds the controller pid, then (the controller being stopped before
+    # it bound a benchmark child) idles until the lane is superseded.
+    (scripts / "lane.sh").write_text(
+        "#!/bin/bash\n"
+        "[ -f \"$2\" ] && exit 0\n"
+        "run_dir=\"$1/$(date +%s)-$$-9\"\n"
+        "mkdir -p \"$run_dir\"\n"
+        "printf '{\"version\":1,\"run_id\":\"%s\",\"state\":\"not_started\",\"pid\":null,\"native_identity\":\"\","
+        "\"token\":\"\",\"receipt\":\"\",\"signal\":null}\\n' \"$(basename \"$run_dir\")\" > \"$run_dir/local-benchmark-owner.json\"\n"
+        "printf '%s\\n' \"$run_dir\" > \"$3\"\n"
+        "sleep 60\n"
+    )
+    marker = tmp / "owner-runs-lane-run-dir"
+    plan = tmp / "owner-runs-teardown-plan.json"
+    write_plan(plan, [{"name": "smoke", "reuse_passed": False,
+                       "command": ["bash", str(scripts / "lane.sh"), str(context_root), str(probe), str(marker)]}])
+    state = tmp / "owner-runs-teardown-state"
+    supervisor = subprocess.Popen(
+        [sys.executable, str(DRIVER), "run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED,
+         "--follow-source", "--settle-seconds", "0.5", "--poll-seconds", "0.2", "--fix-loop-cap", "0"],
+        env={**env, "DEPLOY_PIPELINE_TEARDOWN_WAIT_SECONDS": "1", "DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS": "2",
+             "BENCHMARK_STARTUP_GRACE_SECONDS": "0"},
+        stdout=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not marker.exists():
+            time.sleep(0.1)
+        lane_run_dir = Path(marker.read_text().strip())
+        probe.write_text("fixed\n")
+        out, _ = supervisor.communicate(timeout=120)
+        assert supervisor.returncode == 0, (supervisor.returncode, out)
+        history = [json.loads(line) for line in (state / "history.jsonl").read_text().splitlines()]
+        superseded = history[-1]
+        assert superseded["status"] == "superseded" and superseded["superseded_lanes"] == ["smoke"], superseded
+        teardown = superseded["lanes"]["smoke"]["teardown"]
+        assert teardown["set_aside"] == [lane_run_dir.name], teardown
+        assert teardown["owner_runs"] == {lane_run_dir.name: "aborted"}, teardown
+        detail = json.loads(Path(teardown["receipt"]).read_text())
+        assert detail["owner_runs"]["stage"] == "attempt-1-teardown-smoke" and detail["owner_runs"]["waited_s"] < 1, detail["owner_runs"]
+        assert not lane_run_dir.exists() and (context_root / "_aborted" / lane_run_dir.name / "local-benchmark-owner.json").exists()
+        assert f"lane=smoke outcome=clean owned=- foreign=- escalated=- killed=- eperm=- survivors=- set_aside={lane_run_dir.name} " in out, out
+        # The second attempt's preflight knows that run as its own and found nothing left to set aside.
+        receipt = json.loads((state / "receipt.json").read_text())
+        assert receipt["attempt"] == 2 and receipt["owner_runs"]["set_aside"] == [] and receipt["owner_runs"]["refused"] == []
+        assert pipeline.own_run_ids_from_state(state) == {lane_run_dir.name}, pipeline.own_run_ids_from_state(state)
+    finally:
+        probe.unlink(missing_ok=True)
+        if supervisor.poll() is None:
+            supervisor.kill()
+            supervisor.wait()
+        shutil.rmtree(context_root, ignore_errors=True)
+    print("owner-run preflight and teardown: ok")
+
+def check_attempt_refreshes_factory_snapshot(tmp: Path, env: dict[str, str]) -> None:
+    """Every attempt re-stamps the selected factory telemetry snapshot with the
+    head it freezes (observed_at + validation.source_sha and its evidence), so a
+    superseding attempt's stage rows carry the launched head; nothing else in
+    the snapshot changes. A snapshot that is not this checkout's own .context/
+    file (a sibling deploy's file inherited through the environment) is reported
+    and left alone, a retrospective keeps its observation, and a snapshot with
+    keys outside the allowlist is rejected unchanged."""
+    source_root = Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])
+    snapshot = source_root / ".context" / "factory-metadata.json"
+    snapshot.parent.mkdir(exist_ok=True)
+    sample = {"schema_version": 1, "observed_at": "2026-10-28T02:35:09+00:00", "record_type": "snapshot",
+              "execution": {"model": "test-model"}, "validation": {"source_sha": "0" * 40},
+              "evidence": {"execution.model": "fixture receipt", "validation.source_sha": "stale fixture head"}}
+    snapshot.write_text(json.dumps(sample))
+    head = subprocess.run(["git", "-C", str(source_root), "rev-parse", "HEAD"], check=True,
+                          stdout=subprocess.PIPE, text=True).stdout.strip()
+    plan = tmp / "telemetry-plan.json"
+    write_plan(plan, [{"name": "telemetry-lane", "command": ["true"], "reuse_passed": False}])
+    selected = {**env, "FACTORY_METADATA_FILE": str(snapshot)}
+    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(tmp / "telemetry-state"), *UNBOUNDED, env=selected)
+    assert ran.returncode == 0, (ran.returncode, ran.stderr)
+    assert f"PIPELINE_TELEMETRY factory metadata: refreshed {snapshot}" in ran.stdout and head in ran.stdout, ran.stdout
+    refreshed = json.loads(snapshot.read_text())
+    assert refreshed["validation"]["source_sha"] == head and refreshed["observed_at"] != sample["observed_at"]
+    assert refreshed["execution"] == sample["execution"] and refreshed["evidence"]["execution.model"] == "fixture receipt"
+    assert "run_deploy_pipeline attempt 1" in refreshed["evidence"]["validation.source_sha"]
+    assert head in refreshed["evidence"]["validation.source_sha"], refreshed["evidence"]
+    receipt = json.loads((tmp / "telemetry-state" / "receipt.json").read_text())
+    rows = [json.loads(line) for line in (Path(receipt["stage_run_dir"]) / "stages.jsonl").read_text().splitlines()]
+    row = [r for r in rows if r.get("stage") == "telemetry-lane"][-1]
+    assert row["telemetry"]["validation"]["source_sha"] == head, row["telemetry"]
+    elsewhere = tmp / "elsewhere-factory-metadata.json"
+    elsewhere.write_text(json.dumps(sample))
+    before = elsewhere.read_bytes()
+    outside = run_driver("run", "--plan", str(plan), "--state-dir", str(tmp / "telemetry-outside"), *UNBOUNDED,
+                         env={**env, "FACTORY_METADATA_FILE": str(elsewhere)})
+    assert outside.returncode == 0 and "factory metadata: not refreshed" in outside.stdout, outside.stdout
+    assert "is not this checkout's" in outside.stdout, outside.stdout
+    assert elsewhere.read_bytes() == before, "a snapshot outside the checkout must never be re-stamped"
+    snapshot.write_text(json.dumps({**sample, "record_type": "retrospective"}))
+    before = snapshot.read_bytes()
+    retro = run_driver("run", "--plan", str(plan), "--state-dir", str(tmp / "telemetry-retro"), *UNBOUNDED,
+                       env=selected)
+    assert retro.returncode == 0 and "retrospective" in retro.stdout and "not refreshed" in retro.stdout, retro.stdout
+    assert snapshot.read_bytes() == before, "a retrospective keeps its original observation"
+    snapshot.write_text(json.dumps({**sample, "api_key": "must-not-leak"}))
+    before = snapshot.read_bytes()
+    rejected = run_driver("run", "--plan", str(plan), "--state-dir", str(tmp / "telemetry-rejected"), *UNBOUNDED,
+                          env=selected)
+    assert rejected.returncode != 0 and "PIPELINE_TELEMETRY factory metadata: rejected" in rejected.stderr, rejected.stderr
+    assert "must-not-leak" not in rejected.stdout + rejected.stderr
+    assert snapshot.read_bytes() == before, "an invalid snapshot must be left exactly as found"
+    snapshot.unlink()
+    print("attempt factory snapshot refresh: ok")
 
 
 def check_fix_loop_cap(tmp: Path, env: dict[str, str]) -> None:
@@ -1769,18 +4510,21 @@ def check_declared_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
     assert lanes["semantic"]["started_epoch"] < smoke["finished_epoch"], "semantic is not gated by the smoke lane"
     assert lanes["g4-free"]["started_epoch"] < lanes["quick"]["finished_epoch"], "undeclared Group 4 stays unphased"
 
-    # The standard plan declares the phase for the local smoke lane and the
-    # AgentCard lifecycle lane; the cloud smoke lane stays unphased.
+    # The standard plan declares the stack phase for the local smoke lane and
+    # the AgentCard lifecycle lane (check_stack_phase_lanes); the cloud smoke
+    # lane stays unphased.
     local = {lane["name"]: lane for lane in plan_json("--group", "4", "--smoke", "local", "--agentcard")["lanes"]}
-    assert local["smoke"]["phase"] == "coverage" and local["smoke"]["memory_mb"] == 4096, local["smoke"]
-    assert local["agentcard-lifecycle"]["phase"] == "coverage", local["agentcard-lifecycle"]
+    assert local["smoke"]["phase"] == "stack" and local["smoke"]["memory_mb"] == 4150, local["smoke"]
+    assert local["agentcard-lifecycle"]["phase"] == "stack" and local["agentcard-lifecycle"]["memory_mb"] == 4150, \
+        local["agentcard-lifecycle"]
     cloud = {lane["name"]: lane for lane in plan_json("--group", "4", "--smoke", "cloud")["lanes"]}
     assert not cloud["smoke"].get("phase"), cloud["smoke"]
     phased_plan = plan_json("--group", "all", "--backend", "--smoke", "local", "--schedule", "phased")
-    coverage = [p for p in phased_plan["schedule"]["phases"] if p["phase"] == "coverage"]
-    assert coverage and "smoke" in coverage[-1]["lanes"] and "backend-coverage-blackbox" in coverage[-1]["lanes"], \
-        phased_plan["schedule"]["phases"]
-    assert phased_plan["schedule"]["phases"][0]["phase"] == "quick" and "smoke" not in phased_plan["schedule"]["phases"][0]["lanes"]
+    kinds = [p["phase"] for p in phased_plan["schedule"]["phases"]]
+    assert kinds == ["quick", "stack", "exclusive", "coverage"], phased_plan["schedule"]["phases"]
+    assert phased_plan["schedule"]["phases"][1]["lanes"] == ["smoke"], phased_plan["schedule"]["phases"]
+    assert "backend-coverage-blackbox" in phased_plan["schedule"]["phases"][3]["lanes"], phased_plan["schedule"]["phases"]
+    assert "smoke" not in phased_plan["schedule"]["phases"][0]["lanes"]
     assert "smoke" in phased_plan["schedule"]["estimates"], "the smoke lane has a default estimate"
 
     # simulate projects the declared lane beside Group 3 and reports the Group 3-only wall separately.

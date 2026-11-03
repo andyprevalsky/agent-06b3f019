@@ -480,7 +480,7 @@ def load_fleet(run_dir: Path) -> dict:
         rows.append({
             "job_id": name, "task": name,
             "status": ("cancelled" if cancelled else ("passed" if verdict else "failed")) if finished
-            else stage_status.get(task.get("lifecycle_stage"), "queued"),
+            else stage_status.get(task.get("lifecycle_stage") or (status if local else None), "queued"),
             "task_status": verdict, "infra_failure": False if verdict else None,
             "exec_s": task.get("duration_s"), "cost_usd": task.get("cost_usd"),
             "agent_id": task.get("agent_id") or local_task.get("agent_id") or agent_id_of(task.get("agent_url")),

@@ -6853,6 +6853,7 @@ async def _refresh_browser_archive_snapshot(
     ownership_before: dict | None = None,
 ) -> dict:
     """Refresh the entire tree at the final archive boundary; incomplete evidence fails closed."""
+    observed_snapshots: dict[str, dict] = {}
     async with asyncio.timeout(timeout_seconds):
         deadline = time.monotonic() + timeout_seconds
         while True:
@@ -6861,6 +6862,7 @@ async def _refresh_browser_archive_snapshot(
                 "ready": False,
                 "phase": "tree_fetch",
                 "completed_agent_ids": [],
+                "snapshots": dict(observed_snapshots),
             }
             logs["browser_archive_observation"] = observation
             tree_agents = await get_agent_tree(base_url, agent_id)
@@ -6878,6 +6880,8 @@ async def _refresh_browser_archive_snapshot(
             async def fetch_snapshot(aid):
                 async with read_slots:
                     snapshot = await get_agent(base_url, aid)
+                    observed_snapshots[aid] = snapshot
+                    observation["snapshots"][aid] = snapshot
                     observation["completed_agent_ids"].append(aid)
                     return snapshot
 

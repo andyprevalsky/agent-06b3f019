@@ -18,6 +18,8 @@ import { isAgentAuthoredRow, withCredentialProvenance } from './credentialContex
 import * as repo from './repo';
 import { withActiveBrowserSessionShareLock } from './repoBrowserTargetedMessages';
 import { readTaskInboxMessages } from './agentToAgentService';
+import { buildUserMessageSignalValue } from './agentMessageSignal';
+export { buildUserMessageSignalValue } from './agentMessageSignal';
 import { broadcastChatReactivation } from './agentMessageReactivation';
 
 /**
@@ -64,6 +66,15 @@ export function buildUserMessageSignalValue(
     });
   }
   return messageText;
+}
+
+/** USER rows written by agents rather than people (metadata flags, never text). */
+function isAgentAuthoredRow(metadata: PostMessageBody['metadata']): boolean {
+  return (
+    metadata?.agentNotification === true ||
+    metadata?.agentMessage === true ||
+    metadata?.environmentContext === true
+  );
 }
 
 /** Handle user message routing — signal workflow or run chat handler. */

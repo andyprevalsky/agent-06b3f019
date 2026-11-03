@@ -306,8 +306,9 @@ test('dark mobile agents use robots and retain one-layer disclosure', async ({ p
   await expect(drawer.getByTestId('rose-agent-row-research')).toHaveCount(0);
 });
 for (const width of [320, 390, 1280]) {
-  // Attach sits flush bottom-left with the model name immediately to its right (8f4715813).
-  test(`attach then model picker sit flush bottom left at ${width}px`, async ({ page }) => {
+  test(`composer controls are flush bottom left with attach before the model at ${width}px`, async ({
+    page,
+  }) => {
     await openSidebarPreview(page, width);
     await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
     const chip = page.getByTestId('query-model-selector').filter({ visible: true }).last();
@@ -316,15 +317,20 @@ for (const width of [320, 390, 1280]) {
       const shell = el.closest('[data-testid="query-input-surface"]')!;
       const attach = el.previousElementSibling!;
       const s = shell.getBoundingClientRect(),
-        a = attach.getBoundingClientRect(),
-        c = el.getBoundingClientRect();
+        c = el.getBoundingClientRect(),
+        a = attach.getBoundingClientRect();
       const row = shell
           .querySelector('[data-testid="query-input-controls"]')!
           .getBoundingClientRect(),
         css = getComputedStyle(shell);
       return {
-        attachIsPaperclip: attach.querySelector('svg.lucide-paperclip') !== null,
         left: a.left - s.left,
+        attachBeforeModel:
+          attach.matches('button') &&
+          Boolean(attach.querySelector('svg.lucide-paperclip')) &&
+          attach.nextElementSibling === el,
+        modelGap: c.left - a.right,
+        expectedGap: parseFloat(getComputedStyle(el.parentElement!).columnGap),
         inset: parseFloat(css.paddingLeft) + parseFloat(css.borderLeftWidth),
         gap: c.left - a.right,
         rowGap: parseFloat(getComputedStyle(el.parentElement!).columnGap),
@@ -333,7 +339,8 @@ for (const width of [320, 390, 1280]) {
         bottomInset: parseFloat(css.paddingBottom) + parseFloat(css.borderBottomWidth),
       };
     });
-    expect(m.attachIsPaperclip).toBe(true);
+    expect(m.attachBeforeModel).toBe(true);
+    expect(Math.abs(m.modelGap - m.expectedGap)).toBeLessThan(1);
     expect(Math.abs(m.left - m.inset)).toBeLessThan(1);
     expect(Math.abs(m.gap - m.rowGap)).toBeLessThan(1);
     expect(Math.abs(m.bottom)).toBeLessThan(1);

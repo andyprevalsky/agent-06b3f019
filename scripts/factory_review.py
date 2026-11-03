@@ -120,6 +120,7 @@ STATIC_VERIFY_GATES = {
     "credential-health",
 }
 COVERAGE_GATES = {
+    "coverage-report",
     "backend-coverage",
     "frontend-coverage",
     "agents-coverage",
@@ -839,6 +840,7 @@ def classify_deploy_gates(invocation: Invocation) -> set[str]:
         "backend-structural": "structural",
         "deploy-command-structural": "structural",
         "backend-coverage": "backend-coverage",
+        "backend-coverage-report": "coverage-report",
         "backend-coverage-blackbox": "backend-coverage",
         "frontend-coverage": "frontend-coverage",
         "frontend-coverage-blackbox": "frontend-coverage",
@@ -1612,7 +1614,9 @@ def load_ledger_rows(
         if not diagnostics.valid_ledger_row(row):
             rejected += 1
             continue
-        rows.setdefault(module.row_key(row), row)
+        key = module.row_key(row)
+        if key not in rows or module.is_identity_enrichment(rows[key], row):
+            rows[key] = row
 
     class LedgerRows(list):
         pass
@@ -1696,6 +1700,21 @@ def _ledger_deploy_groups(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]
             continue
         epoch = float(row["recorded_epoch"])
         branch = str(row.get("branch") or "")
+        explicit_run = row.get("run_id")
+        if explicit_run:
+            owner = runs.get(str(explicit_run))
+            if owner is None:
+                # Preserve the evidence gap; do not attach to a different run
+                # merely because its branch or timestamp happens to match.
+                key = f"uncollected:{explicit_run}"
+                owner = open_orphan.get(key)
+                if owner is None:
+                    owner = {"key": key, "branch": branch, "stages": [], "events": [],
+                             "start": epoch, "uncollected_run": True}
+                    open_orphan[key] = owner
+                    orphans.append(owner)
+            owner["events"].append(row)
+            continue
         owner = None
         for run in by_branch.get(branch, []):
             if run["start"] <= epoch:
@@ -1736,8 +1755,8 @@ def ledger_deploy_turns(rows: Sequence[dict[str, Any]]) -> list[Turn]:
                 stage.get("status") != "passed",
             )
             for index, stage in enumerate(group["stages"])
-            # An exact-input reuse executed nothing; diagnostics count it.
-            if stage.get("status") != "reused"
+            # An exact-input or lane-scoped reuse executed nothing; diagnostics count it.
+            if stage.get("status") not in ("reused", "reused-scoped")
         ]
         invocations.extend(
             _ledger_event_invocation(f"ledger-event-{group['key']}-{index}", event, origin)
@@ -1756,7 +1775,8 @@ def ledger_deploy_turns(rows: Sequence[dict[str, Any]]) -> list[Turn]:
                 turn_id=group["key"],
                 started_at=started_at,
                 duration=finish - origin,
-                status=classify_status("deploy", "", invocations),
+                status=("incomplete" if group.get("uncollected_run")
+                        else classify_status("deploy", "", invocations)),
                 final_text="",
                 invocations=tuple(invocations),
                 approval_durations=tuple(event.duration for event in approvals),

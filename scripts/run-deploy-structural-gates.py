@@ -315,6 +315,13 @@ GATES = (
     Gate("benchmark-scorecard", ("python3", "scripts/tests/cloudbench-scorecard.test.py")),
     Gate("sharded-waves", ("python3", "scripts/tests/run-bench-sharded-waves.test.py")),
     Gate("sharded-coordinator", ("python3", "scripts/tests/cloudbench-shard-coordinator.test.py")),
+
+
+    # Linux pidfd fixtures select a capable runtime or the offline controller image.
+    Gate(
+        "cloudbench-export-recovery",
+        ("bash", "scripts/tests/cloudbench-export-recovery.test.sh"),
+    ),
     Gate(
         "original600-portable-operator",
         ("python3", "scripts/tests/original600-portable-operator.test.py"), expected_seconds=134
@@ -383,6 +390,7 @@ GATES = (
         ("bash", "scripts/tests/agent-surface-hash.test.sh"),
     ),
     Gate("factory-metadata", ("python3", "scripts/tests/factory-metadata.test.py")),
+    Gate("predeploy-receipts", ("python3", "scripts/tests/predeploy-receipts.test.py")),
     Gate("final-review-script-regressions", ("python3", "scripts/tests/final-review-script-regressions.test.py")),
     Gate("factory-review", ("python3", "scripts/tests/factory-review.test.py")),
     Gate("biz-review", ("python3", "scripts/biz_review.py", "self-test")),
@@ -423,10 +431,6 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-maintenance-env.test.py"),
     ),
     Gate(
-        "cloudbench-resume-controller-export",
-        ("python3", "scripts/tests/cloudbench-resume-controller-export.test.py"),
-    ),
-    Gate(
         "cloudbench-shard-coordinator",
         ("python3", "scripts/tests/cloudbench-shard-coordinator.test.py"),
     ),
@@ -460,6 +464,10 @@ GATES = (
         ("python3", "scripts/tests/wait-for-code-review.test.py"),
     ),
     Gate(
+        "claude-review-fallback",
+        ("bash", "scripts/tests/claude-review-fallback.test.sh"),
+    ),
+    Gate(
         "claude-review-fallback-diagnose",
         ("python3", "scripts/tests/claude-review-fallback-diagnose.test.py"),
     ),
@@ -469,6 +477,9 @@ GATES = (
     ),
     Gate(
         "deploy-review-cycle", ("python3", "scripts/tests/deploy-review-cycle.test.py")
+    ),
+    Gate(
+        "deploy-failure-policy", ("python3", "scripts/tests/deploy-failure-policy.test.py")
     ),
     Gate("deploy-stage", ("bash", "scripts/tests/run-deploy-stage.test.sh")),
     Gate("deploy-stage-wait", ("python3", "scripts/tests/deploy-stage-wait.test.py")),
@@ -481,6 +492,7 @@ GATES = (
         ("bash", "scripts/tests/prebuild-agents-image.test.sh"),
     ),
     Gate("deploy-pipeline", ("python3", "scripts/tests/run-deploy-pipeline.test.py")),
+    Gate("deploy-semantic-stack", ("bash", "scripts/tests/run-deploy-semantic-stack.test.sh")),
     Gate("backend-coverage-sharded", ("bash", "scripts/tests/backend-coverage-sharded.test.sh")),
     Gate(
         "deploy-structural-runner",

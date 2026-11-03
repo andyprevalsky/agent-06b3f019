@@ -799,19 +799,13 @@ proof_completion_invalid=0
 proof_completion_buffer=""
 while :; do
   forward_proof_cancellation
-  IFS= read -r -n 4 -t .1 -u "$proof_completion_reader" proof_completion_line
+  proof_completion_line=""
+  IFS= read -r -N 1 -t .1 -u "$proof_completion_reader" proof_completion_line
   completion_read_rc=$?
-  # Timed/signal-interrupted reads can consume part of the frame. Preserve
-  # those bytes until the delimiter, while bounding all retained protocol data.
-  if [ "$proof_completion_invalid" = 0 ]; then
-    if [ "$((${#proof_completion_buffer} + ${#proof_completion_line}))" -gt 3 ]; then
-      proof_completion_invalid=1
-      proof_completion_buffer=""
-    else
-      proof_completion_buffer+="$proof_completion_line"
-    fi
-  fi
-  if [ "$completion_read_rc" = 0 ]; then
+  # Bash can consume the delimiter and then time out before returning. Keep
+  # each wire byte, including newline, rather than infer framing from read's
+  # status. A timeout/signal may still have delivered the final byte.
+  if [ "$proof_completion_line" = $'\n' ]; then
     if [ "$proof_completion_invalid" = 0 ] \
       && [[ "$proof_completion_buffer" =~ ^[0-9]{1,3}$ ]] \
       && [ "$proof_completion_buffer" -le 255 ] && [ -z "$proof_body_rc" ]; then
@@ -820,7 +814,15 @@ while :; do
       proof_completion_invalid=1
     fi
     proof_completion_buffer=""
-  elif [ "$completion_read_rc" = 1 ]; then
+  elif [ "$proof_completion_invalid" = 0 ]; then
+    if [ "$((${#proof_completion_buffer} + ${#proof_completion_line}))" -gt 3 ]; then
+      proof_completion_invalid=1
+      proof_completion_buffer=""
+    else
+      proof_completion_buffer+="$proof_completion_line"
+    fi
+  fi
+  if [ "$completion_read_rc" = 1 ]; then
     [ -z "$proof_completion_buffer" ] || proof_completion_invalid=1
     break
   fi

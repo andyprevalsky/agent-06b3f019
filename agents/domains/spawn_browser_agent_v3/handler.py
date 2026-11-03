@@ -541,6 +541,7 @@ async def _await_bounded_browser_cleanup(
     timeout_s: float,
     timeout_message: str,
     failure_message: str,
+    propagate_control_errors: bool = False,
 ) -> bool:
     """Run cleanup under a hard deadline that does not await cancellation.
 
@@ -552,9 +553,24 @@ async def _await_bounded_browser_cleanup(
     retrieval; the worker's bounded terminal-I/O shutdown owns its final drain.
     """
     task = asyncio.create_task(coro, name=_EXPIRED_OPTIONAL_CDP_TASK_NAME)
-    done, _pending = await asyncio.wait({task}, timeout=timeout_s)
+    def _discard(done_task: asyncio.Task) -> None:
+        _background_browser_cleanup_tasks.discard(done_task)
+        with contextlib.suppress(BaseException):
+            done_task.result()
+
+    try:
+        done, _pending = await asyncio.wait({task}, timeout=timeout_s)
+    except asyncio.CancelledError:
+        task.cancel()
+        _background_browser_cleanup_tasks.add(task)
+        task.add_done_callback(_discard)
+        raise
     if task in done:
+        if task.cancelled() and propagate_control_errors:
+            raise asyncio.CancelledError()
         exc = None if task.cancelled() else task.exception()
+        if propagate_control_errors and isinstance(exc, WorkflowGenerationSealed):
+            raise exc
         if exc is not None:
             logger.warning(failure_message, error=extract_error_message(exc))
         return not task.cancelled() and exc is None
@@ -563,11 +579,6 @@ async def _await_bounded_browser_cleanup(
     # non-CancelledError from session.stop() is not logged as "Task exception
     # was never retrieved" after we abandon the deadline.
     _background_browser_cleanup_tasks.add(task)
-
-    def _discard(done_task: asyncio.Task) -> None:
-        _background_browser_cleanup_tasks.discard(done_task)
-        with contextlib.suppress(BaseException):
-            done_task.result()
 
     task.add_done_callback(_discard)
     logger.warning(timeout_message, timeout_s=timeout_s)
@@ -3386,7 +3397,9 @@ async def _observe_step_page(dom_service: Any, *, needs_dom: bool) -> Dict[str, 
     return await dom_service.get_page_identity()
 
 
-async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
+async def _wait_for_browser_user_control(
+    config: Any, task_id: str, dom_service: Any = None, session_id: str | None = None,
+) -> bool:
     """Yield browser ownership until the user explicitly hands it back.
 
     Returns whether ownership changed, allowing callers to discard any DOM
@@ -3406,6 +3419,12 @@ async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
                 logger.warning("Unable to acknowledge browser user control", error=str(exc))
         if state == "user":
             yielded = True
+            if dom_service is not None and session_id is not None:
+                from .navigation import consume_navigation
+                try:
+                    await consume_navigation(config, task_id, session_id, dom_service)
+                except Exception as exc:
+                    logger.warning("Browser user navigation failed", error=str(exc))
         browser_activity_checkpoint("Waiting for user to hand browser control back")
         await trace_foreground_await("control_yield", asyncio.sleep(0.5))
         try:
@@ -8770,15 +8789,34 @@ async def _spawn_browser_agent_activity_v3_real(
                         task_id=task_id,
                         session_id=exact_session_id,
                     )
+            replay_stopped = False
             if pause and exact_session_id == session_id and dom_service is not None:
-                # Tilion admits one CDP client. The backend must connect to take
-                # its logical checkpoint before releasing the native session.
-                # Keep the passkey readback above this detach.
-                if not await _disconnect_browser(dom_service):
+                if getattr(dom_service, "single_cdp_client", False) is True:
+                    # Capture the recording before releasing Tilion's one CDP slot.
+                    await _stop_kernel_replay_before_session_close(browser_recorder)
+                    replay_stopped = True
+                    if browser_recorder is not None:
+                        await _await_bounded_browser_cleanup(
+                            browser_recorder.close(include_steel_media=False, archive_artifacts=False),
+                            timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+                            timeout_message="Checkpoint recorder close timed out",
+                            failure_message="Checkpoint recorder close failed",
+                            propagate_control_errors=True,
+                        )
+                    if not await _await_bounded_browser_cleanup(
+                        dom_service.cdp_multiplexer.disconnect_confirmed(dom_service.disconnect),
+                        timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+                        timeout_message="Checkpoint CDP release timed out",
+                        failure_message="Checkpoint CDP release failed",
+                    ):
+                        raise BrowserSessionCloseError(exact_session_id, pause)
+                elif not await _disconnect_browser(dom_service):
                     raise BrowserSessionCloseError(exact_session_id, pause)
+                # Bank the departed native once, before clearing the live reference.
                 _tilion_leave_session()
                 dom_service = None
-            await _stop_kernel_replay_before_session_close(browser_recorder)
+            if not replay_stopped:
+                await _stop_kernel_replay_before_session_close(browser_recorder)
             options: Dict[str, Any] = {"pause": pause}
             if current_url:
                 options["current_url"] = current_url
@@ -10472,7 +10510,7 @@ async def _spawn_browser_agent_activity_v3_real(
             foreground_trace = ForegroundAwaitTrace(
                 agent_id=agent_id, task_id=task_id, session_id=session_id, step=iteration,
             )
-            if await foreground_trace.run("user_control", _wait_for_browser_user_control(config, task_id)):
+            if await foreground_trace.run("user_control", _wait_for_browser_user_control(config, task_id, dom_service, session_id)):
                 await action_batch.discard("Batch remainder skipped after user control.")
                 tab_focus_cache.foreground = None
                 state_prefetch.discard()
@@ -11032,7 +11070,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
             _rose_request_id = llm_result.get("request_id", "unknown")
 
-            if await _wait_for_browser_user_control(config, task_id):
+            if await _wait_for_browser_user_control(config, task_id, dom_service, session_id):
                 await action_batch.discard("Batch remainder skipped after user control.")
                 # Never execute an action planned against the pre-handoff DOM.
                 tab_focus_cache.foreground = None
@@ -15372,6 +15410,11 @@ async def spawn_browser_agent(workflow_instance: Any, tool_call: Dict[str, Any],
                 event.data["usage"],
                 tool_name="spawn_browser_agent",
                 call_site="browser_agent",
+                browser_completed=(
+                    event.status == MessageStatus.FINISHED
+                    and (event.metadata or {}).get("action_type") == "task_complete"
+                    and (event.metadata or {}).get("success") is True
+                ),
             )
 
     return last_status

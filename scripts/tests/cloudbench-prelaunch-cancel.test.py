@@ -81,7 +81,7 @@ class PrelaunchCancel(unittest.TestCase):
             CLOUDBENCH_STATUS_PORT=str(self.port),
             CLOUDBENCH_RUN_SCRIPT=str(driver),
             CLOUDBENCH_FETCH_REF_SCRIPT=str(fetch),
-            CLOUDBENCH_STATUS_SERVER_SCRIPT=str(SCRIPTS / "cloudbench-status-server.py"),
+            CLOUDBENCH_STATUS_SERVER_SCRIPT=str(self.status_server_script()),
             CLOUDBENCH_BARRIER_TOKEN=self.secret,
             FLY_MACHINE_ID=MACHINE,
             HOME=str(self.root),
@@ -94,6 +94,9 @@ class PrelaunchCancel(unittest.TestCase):
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         self.addCleanup(self.cleanup)
+
+    def status_server_script(self) -> Path:
+        return SCRIPTS / "cloudbench-status-server.py"
 
     def cleanup(self) -> None:
         try:
@@ -229,11 +232,33 @@ class PrelaunchCancel(unittest.TestCase):
             self.wait_for_bootstrap()
             os.kill(int(self.fetch_pid.read_text()), signal.SIGTERM)
         deadline = time.monotonic() + 20
-        while time.monotonic() < deadline and (self.data / "cloudbench-driver.state").read_text().strip() != "exited":
+        while time.monotonic() < deadline:
+            if (self.data / "cloudbench-driver.state").read_text().strip() == "exited":
+                try:
+                    self.assertEqual(self.call("GET", "/driver-health"), 410)
+                    break
+                except urllib.error.URLError as error:
+                    if not isinstance(error.reason, ConnectionRefusedError):
+                        raise
             time.sleep(0.1)
+        else:
+            self.fail("status server did not observe driver exit within the startup deadline")
         self.assertTrue((self.root / "driver-launched").exists())
         self.assertFalse(list(self.data.glob("cloudbench-prelaunch-*")))
         self.assertEqual(self.call("GET", "/runtime-evidence"), 409)
+
+
+class DelayedStatusServer(PrelaunchCancel):
+    """The driver can exit before its independently scheduled server binds."""
+
+    def status_server_script(self) -> Path:
+        script = self.root / "delayed-status-server.py"
+        script.write_text(
+            "import os, sys, time\n"
+            "time.sleep(0.8)\n"
+            f"os.execv(sys.executable, [sys.executable, {str(SCRIPTS / 'cloudbench-status-server.py')!r}, *sys.argv[1:]])\n"
+        )
+        return script
 
 
 OWNER = TOKEN.rsplit("-", 1)[0]

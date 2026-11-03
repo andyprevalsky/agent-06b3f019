@@ -341,3 +341,15 @@ logs can be incomplete; timing coverage is per observed request, not all calls.
 For all /descend scorecards, publish the interactive HTML embedding only. Do
 not send, attach, or display raster images/screenshots. Private DOM inspection
 for counts, layout and overflow is permitted; do not emit screenshot output.
+
+## Deploy-specific exceptions
+
+Every deploy scorecard follows `.claude/shared/deploy-failure-policy.md`.
+Keep a cumulative DELEGATED list of failure descriptions and repair-agent links;
+no attribution column or acknowledgement state. These repairs do not block
+the originating deploy. Preserve entries across refreshes and resume.
+At the very end, after the completion line and all other sections, show each
+unresolved **🚨🚨 EXTERNAL PROVIDER FAILURE — <provider>: <reason> — NEEDS FIXING**
+with affected checks and evidence. Outages and exhausted credits are
+non-blocking and create no repair agent. Waived or failed checks never become
+PASS; preserve original measurements and native outcomes.

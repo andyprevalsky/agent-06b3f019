@@ -21,6 +21,14 @@ export const decodeEncoded = (record: Record<string, unknown>) =>
     text: string;
     metadata: unknown;
   };
+
+export type WireMessage = {
+  topic: string;
+  event: string;
+  payload: { record: Record<string, unknown> & { id?: string } };
+};
+export const bodyMessages = (init?: RequestInit): WireMessage[] =>
+  (JSON.parse(String(init?.body)) as { messages: WireMessage[] }).messages;
 /** An in-progress browser tool row (the ordinary committed message shape). */
 export const message = (id: string) => ({
   id,

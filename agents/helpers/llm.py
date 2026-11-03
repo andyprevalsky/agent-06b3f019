@@ -10,6 +10,7 @@ import re
 import sys
 import time  # Import at module level for Temporal workflow sandbox compatibility
 import uuid
+from bisect import bisect_left
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, Type, TypeVar
@@ -96,6 +97,7 @@ from providers.rose.schema import (
 from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.transforms import reconstruct_agent_response
 from providers.rose.truncation import model_key
+from providers.rose.waterfall import SKIP_REASON_STRUCTURED_OUTPUT_EXCLUDED
 from utils.error_utils import error_chain_has_type, extract_error_message
 from utils.response_schema_constraints import (
     bounds_from_entries,
@@ -117,7 +119,28 @@ CLOUD_AGENT_TOOL_NAME = "cloud_agent"
 
 
 class LLMStructuredOutputError(ValueError):
-    """The provider completed, but its structured output violated our contract."""
+    """The provider completed, but its structured output violated our contract.
+
+    ``excluded_models`` names the candidates the bounded in-call re-generation
+    already excluded after two invalid replies (``model_key`` form). The agent
+    loop carries them into its next attempt's ``_skip_models`` so the outer retry
+    does not hand the same context back to a model that just failed it twice.
+    """
+
+    def __init__(self, message: str, *, excluded_models: frozenset[str] = frozenset()) -> None:
+        super().__init__(message)
+        self.excluded_models = frozenset(excluded_models)
+
+
+class StructuredReplyShapeError(ValueError):
+    """The provider completed, but its reply held no JSON object to validate.
+
+    Reasoning-only replies (no content, no tool call) and non-object JSON (an
+    array or scalar) are structured-output failures of the model that produced
+    them, exactly like a schema-invalid object: the bounded re-generation must
+    count them toward excluding that candidate, or two such replies leave the
+    model eligible and the next attempt selects it again.
+    """
 
 
 # A malformed / schema-invalid structured output is non-deterministic (the model
@@ -2690,6 +2713,10 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
     # fake placeholder).
     emitted_results: set[str] = set()
     pulled_forward: set[int] = set()
+    result_positions: Dict[str, List[int]] = {}
+    for position, message in enumerate(messages):
+        if message.get("role") == "tool" and message.get("tool_call_id"):
+            result_positions.setdefault(message["tool_call_id"], []).append(position)
     result: List[Dict[str, Any]] = []
     declared_at_or_before: set[str] = set()
     i = 0
@@ -2745,16 +2772,9 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
             for tc_id in tc_ids:
                 if tc_id in emitted_results:
                     continue
-                straggler = next(
-                    (
-                        later
-                        for later in messages[j:]
-                        if later.get("role") == "tool"
-                        and later.get("tool_call_id") == tc_id
-                        and id(later) not in pulled_forward
-                    ),
-                    None,
-                )
+                positions = result_positions.get(tc_id, [])
+                candidate = bisect_left(positions, j)
+                straggler = messages[positions[candidate]] if candidate < len(positions) else None
                 if straggler is not None:
                     repaired = True
                     emitted_results.add(tc_id)
@@ -3064,6 +3084,9 @@ async def call_llm_structured_streaming(
         rose_kwargs: Dict[str, Any] = {}
         if _skip_models:
             rose_kwargs["_skip_models"] = _skip_models
+            # Every model this path skips was excluded for invalid structured
+            # output, never for an output-limit cut-off; label the skip so.
+            rose_kwargs["_skip_reasons"] = {model: SKIP_REASON_STRUCTURED_OUTPUT_EXCLUDED for model in _skip_models}
         if deadline_s is not None:
             rose_kwargs["deadline_s"] = deadline_s
         if ttft_timeout_s is not None:
@@ -3436,7 +3459,8 @@ async def call_llm_structured_streaming(
                 # Validation excluded the remaining candidate. Preserve the typed
                 # output failure without retrying or changing pool eligibility.
                 raise LLMStructuredOutputError(
-                    f"No eligible Rose candidate remains after invalid {response_model.__name__} output"
+                    f"No eligible Rose candidate remains after invalid {response_model.__name__} output",
+                    excluded_models=_skip_models,
                 ) from exc
             raise ValueError(f"Rose streaming failed: {exc}") from exc
         finally:
@@ -3636,7 +3660,9 @@ async def call_llm_structured_streaming(
                     actual_model=actual_model,
                     pool_name=pool_name,
                 )
-                raise ValueError(f"No JSON content received in response (chunks={chunk_count}, model={actual_model})")
+                raise StructuredReplyShapeError(
+                    f"No JSON content received in response (chunks={chunk_count}, model={actual_model})"
+                )
 
             # Extract JSON from markdown code block if present
             # Look for ```json ... ``` pattern, or just raw JSON
@@ -3685,6 +3711,11 @@ async def call_llm_structured_streaming(
                         logger.info(f"📦 Extracted raw JSON, explanation={len(explanation_text)} chars")
 
             parsed_content = json.loads(json_content)
+            if not isinstance(parsed_content, dict):
+                raise StructuredReplyShapeError(
+                    f"Structured reply must be a JSON object, got {type(parsed_content).__name__} "
+                    f"(model={actual_model})"
+                )
 
             # Defensive recovery path: malformed upstream streams can sometimes wrap
             # another agent JSON payload inside response text. If outer tool_calls are
@@ -3770,6 +3801,19 @@ async def call_llm_structured_streaming(
             # retry above (recursive, capped, time-guarded so we keep deadline
             # headroom for another streaming call).
             parse_elapsed = (_safe_time() - request_start_time) if request_start_time else 0
+            failed_model = (
+                model_key(actual_model)
+                if isinstance(e, (json.JSONDecodeError, ValidationError, StructuredReplyShapeError))
+                and actual_model
+                and actual_model
+                not in {"unknown", "fast-cache", "fast-mode-soft-complete", "fast-mode-scrape-passthrough"}
+                and not (stream_usage or {}).get("from_fast_cache")
+                else None
+            )
+            failed_count = _parse_failed_count + 1 if failed_model and failed_model == _parse_failed_model else 1
+            retry_exclusions = _skip_models
+            if failed_model and failed_count >= 2:
+                retry_exclusions = _skip_models | {failed_model}
             if _parse_retry_attempt < MAX_STRUCTURED_PARSE_RETRIES and parse_elapsed < 180:
                 logger.warning(
                     f"⚠️ [{call_site}] Failed to parse Rose response as "
@@ -3777,19 +3821,7 @@ async def call_llm_structured_streaming(
                     f"{_parse_retry_attempt + 1}/{MAX_STRUCTURED_PARSE_RETRIES + 1}); "
                     f"re-generating. error={error_message}",
                 )
-                failed_model = (
-                    model_key(actual_model)
-                    if isinstance(e, (json.JSONDecodeError, ValidationError))
-                    and actual_model
-                    and actual_model
-                    not in {"unknown", "fast-cache", "fast-mode-soft-complete", "fast-mode-scrape-passthrough"}
-                    and not (stream_usage or {}).get("from_fast_cache")
-                    else None
-                )
-                failed_count = _parse_failed_count + 1 if failed_model and failed_model == _parse_failed_model else 1
-                retry_exclusions = _skip_models
                 if failed_model and failed_count >= 2:
-                    retry_exclusions = _skip_models | {failed_model}
                     logger.warning(
                         "llm.structured_candidate_excluded",
                         actual_model=actual_model,
@@ -3853,7 +3885,8 @@ async def call_llm_structured_streaming(
                 error=error_message,
             )
             raise LLMStructuredOutputError(
-                f"Failed to parse streaming Rose response as {response_model.__name__}: {error_message}"
+                f"Failed to parse streaming Rose response as {response_model.__name__}: {error_message}",
+                excluded_models=retry_exclusions,
             ) from e
 
         # Use captured stream usage if available, otherwise fall back to estimates
@@ -6615,6 +6648,7 @@ async def call_llm_activity(
     max_context_tokens: int = _DEFAULT_CONTEXT_WINDOW,
     require_inline_attachments: bool = False,
     user_tools: Optional[List[Dict[str, Any]]] = None,
+    skip_models: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -6928,6 +6962,9 @@ async def call_llm_activity(
                 # every retry goes back to the model that just refused, so one refusal becomes a
                 # guaranteed 3-strikes kill instead of a provider switch.
                 _exclude_anthropic_family=exclude_anthropic_family,
+                # Same boundary for structured-output exclusions: a model that gave two
+                # invalid replies in the previous attempt stays excluded for this one.
+                _skip_models=frozenset(skip_models or ()),
             )
         finally:
             # Guarantee the background drainer never leaks if streaming raises.
@@ -6998,6 +7035,7 @@ async def call_llm_activity(
             # model again, but Temporal must not multiply that semantic retry.
             raise ApplicationError(
                 str(e),
+                {"excluded_models": sorted(e.excluded_models)},
                 type="LLMStructuredOutputError",
                 non_retryable=True,
             ) from e

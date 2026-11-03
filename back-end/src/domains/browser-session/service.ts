@@ -1,4 +1,5 @@
 import { buildBrowserSessionMetadata, logicalHasPrivateState } from './service.metadata';
+export { buildBrowserSessionMetadata } from './service.metadata';
 import { initLegacySession } from './service.init-legacy';
 import { closeBrowserSession } from './service.close';
 import { resumeOwnedBrowserSession } from './service.control';
@@ -50,7 +51,6 @@ export {
 export { injectLocalStorage, SessionNotFoundError, SessionNoUserError };
 export { InvalidSessionFilePathError } from './service.file-path';
 export { CdpInjectionError, SessionNoWsUrlError } from './types';
-export { buildBrowserSessionMetadata } from './service.metadata';
 
 // ---------------------------------------------------------------------------
 // Helpers

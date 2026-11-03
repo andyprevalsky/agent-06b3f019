@@ -1680,6 +1680,40 @@ if(finishAgeLabel(9000,8200)!=='T-UNRECORDED')throw Error('future finish');
         self.assertIn(url, html)
         self.valid(data)
 
+    def test_local_active_card_uses_native_status_without_lifecycle_stage(self):
+        # The local producer writes status directly, unlike fleet lifecycle stages.
+        for stage_fields in ({}, {"lifecycle_stage": None}):
+            with self.subTest(stage_fields=stage_fields):
+                run = self.tmp / "1793039377-local-active"
+                agent = "d2113af0-ed93-4048-ad9f-6cd1b6c74fe1"
+                write(run / "report-card.json", {
+                    "run_id": "local-active", "started_at": T0,
+                    "tasks": {"total": 3, "running": 1, "completed": 1, "queued": 1},
+                    "per_task": [
+                        {"name": "active", "status": "running", "agent_id": agent, **stage_fields},
+                        {"name": "done", "status": "passed", **stage_fields},
+                        # An agent identifier alone must not promote queued work.
+                        {"name": "waiting", "status": "queued", "agent_id": agent, **stage_fields}],
+                })
+                data = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)
+                exp = data["experiment"]
+                self.assertEqual(exp["progress"], {"queued": 1, "in_progress": 1,
+                                                   "completed": 1, "unobserved": 0})
+                self.assertEqual([(t["task"], t["outcome"]) for t in exp["task_links"]],
+                                 [("active", "RUNNING"), ("done", "PASS"), ("waiting", "QUEUED")])
+                self.assertEqual(exp["state"], "RUNNING")
+                self.assertIn("RUNNING active", CARD["render_text"](data))
+                self.valid(data)
+
+    def test_fleet_explicit_lifecycle_stage_keeps_precedence_over_status(self):
+        run = self.tmp / "fleet-stage-control"
+        write(run / "_batch/report-card.json", card(run.name, [
+            task("waiting", "running", stage="queued"),
+            task("active", "queued", stage="running")]))
+        exp = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)["experiment"]
+        self.assertEqual(exp["progress"], {"queued": 1, "in_progress": 1,
+                                           "completed": 0, "unobserved": 0})
+
     def test_assembled_local_card_needs_every_lane_stack_receipt(self):
         # run_captcha_probe.py --assemble: one run context from several lanes' stacks, each
         # stack's own cleanup receipts copied under sources/<lane>/<stack>.

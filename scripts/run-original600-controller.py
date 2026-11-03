@@ -2781,10 +2781,15 @@ def main():
             argv = runner['campaign_argv'](json.loads(runner['read'](args.tasks)), first['group_started_at'], first)
             check.update(shard_campaign_options=argv[2:argv.index('--e2e-started-at')], shard_bindings=shard_bindings(args, runner))
             # Each controller's volume placement: fresh-only unless it runs a snapshot-backed simulate task.
-            check.update(shard_placement=[
-                dict(index=item['index'], simulate_tasks=runner['shard_simulate_tasks'](root, dict(item, **shard_bindings(args, runner))),
-                     **runner['shard_placement_env'](root, dict(item, **shard_bindings(args, runner))))
-                for item in plan['shards']])
+            bindings = shard_bindings(args, runner)
+            placement_tasks = list(dict.fromkeys(task for item in plan['shards'] for task in item['tasks']))
+            simulate_tasks = set(runner['shard_simulate_tasks'](root, dict(tasks=placement_tasks, **bindings)))
+            placements = []
+            for item in plan['shards']:
+                simulate = [task for task in item['tasks'] if task in simulate_tasks]
+                placements.append(dict(index=item['index'], simulate_tasks=simulate,
+                                       **({} if simulate else runner['FRESH_ONLY_PLACEMENT'])))
+            check.update(shard_placement=placements)
             check.update(controllers=plan['controllers'], copies=plan['copies'],
                          copies_per_controller_bound=plan['copies_per_controller_bound'],
                          native_slots_required=runpy.run_path(str(root/'scripts/cloudbench-shard-coordinator.py'))['capacity_demand'](

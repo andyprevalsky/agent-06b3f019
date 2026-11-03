@@ -102,7 +102,8 @@ model Agent {
   /// Migration defers the FK check until both project-deletion cascades settle.
   folderId                         String?
   folder                           ProjectFolder?              @relation(fields: [folderId], references: [id], onDelete: SetNull)
-  /// Owning project; null = Home. Validated on create/update, inherited by children.
+  /// Owning Project (left-bar grouping, code-session workspace). Null = Home.
+  /// Set on create (owner-validated) or inherited from the parent agent.
   projectId                        String?
   project                          Project?                    @relation(fields: [projectId], references: [id], onDelete: SetNull)
   parent                           Agent?                      @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
@@ -643,6 +644,8 @@ model BrowserSession {
   injectedOrigins        Json?
   controlState           BrowserControlState  @default(AGENT)
   controlLeaseExpiresAt  DateTime?
+  // Session-bound, single-flight browser history command and completion receipt.
+  navigationCommand      Json?
   // Model-driven IP rotation (rotate_ip tool). Count + current tier are keyed to
   // this stable row id (the browser sub-agent run), surviving session recycles so
   // the cap is authoritative across rotations. proxyTier: null → original session,

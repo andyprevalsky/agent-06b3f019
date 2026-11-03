@@ -109,6 +109,29 @@ reviewer also audited original PR1648 and the follow-up, with no remaining
 code finding; PF-ORDER-ZOD-2 grounds only the new relative-move input schema.
 Golden reference: not applicable (no approval-gated cache repair hunk).
 
+
+### November 2, 2026 recurrence — comment-only schema key
+
+Release 6ff4bcae6d0da979e8c6feb24c011f2698935108 changed the raw schema key from
+main a3c4929f3's a7c48e4f351c50bc4e00b11ffe55a7b104230d8b to
+049dc6b64d546bc8969fc864fcaf891ca82568d0 through projectId documentation alone.
+The complete datamodel was identical after removing full-line comments, and the
+actual Prisma migrate diff was empty. Both smoke and AgentCard native startups
+failed before task creation; target cache HEAD returned 3 and GET NoSuchKey,
+while the reviewed main fixture was present. Gate: INTRODUCED against main;
+6ff itself shares the same key with its a959 parent.
+
+The reviewed main archive SHA256
+67d45c14e5fc949b76f44cd28bee9fa7ef494562cd73c1d6f1c2d710451a8d8e
+was restored twice in exact-owned PostgreSQL16 databases. Both native content
+validations passed, all97 table counts matched, and only the definitely absent
+new immutable key was published. The identical failed canonical consumer then
+passed and returned byte-identical data. Both databases were dropped. Evidence:
+.context/deploy-boxes-default-20261102/seed-rca/{report.md,operational-recovery.log}.
+Independent review found and corrected cleanup ownership/publication ordering
+before execution. This repairs the prerequisite, not yet the pending complete
+smoke or AgentCard outcomes; no cold sync, migration, timeout or benchmark edit.
+
 ## Human feedback
 
 The user challenged the smoke skip, asked exactly which failures had been

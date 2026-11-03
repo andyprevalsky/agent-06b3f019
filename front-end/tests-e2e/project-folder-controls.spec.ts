@@ -1,4 +1,5 @@
-import { expect, test } from '@playwright/test';
+import { expect } from '@playwright/test';
+import { test } from './folder-profile';
 import { FRONTEND_URL } from './helpers';
 
 for (const width of [1280, 390]) {

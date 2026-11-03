@@ -112,6 +112,22 @@ Review follow-ups (deploy takeover, 2026-10-26):
   parity. Fencing R2 overwrites would need a lease generation carried into
   every storage write; that is tracked as a follow-up.
 
+### Recurrence 2026-10-27: the connection probe did not attribute transactions to its subject
+
+The same `manifest lock held a pooled connection in an open transaction during storage I/O` assertion failed again on source `8b1c38ff451f00d1cacb1c4f5fa8c05acc448e2c`, after the lease-row change. The archived native backend gate passed 226 domains and failed 2; the archive domain took 24,700 ms. Its connection case reported PIDs 707565 and 707628 with transaction starts 01:19:05.100Z and 01:19:06.336Z. **Those historical rows do not identify the client, process, application, or owning operation. Their ownership remains unproved. This recurrence does not establish that the lease implementation held either transaction.** The separate browser-session failure belongs to another RCA lane.
+
+The newly reproduced first-bad boundary is the test observer in `archive-run-cost.helper.ts`. Its query selected every other idle transaction in the current database with `xact_start <= operationStart`. Intersecting two samples by PID and transaction start proves persistence, but does not attribute either transaction to the manifest test. The earlier regression assumed database-wide exclusivity while the native full-suite runner shares one fixture database across parallel domain processes.
+
+Causal native proof used a separate local database, `victoria_archive_rca_20261027`, and an owned local backend. The unchanged `bash back-end/scripts/run-blackbox-tests.sh archive` passed all 13 cases without foreign transactions. Holding two identified foreign Prisma transactions made that same suite fail 12/13 and report exactly the injected PIDs 1205062 and 1205077. The assertion took 1,248 ms; the archive domain took 3,530 ms. Both transactions were released and both clients joined after the run.
+
+The applied correction stamps every native test-child connection with a unique PostgreSQL `application_name` when the pool is created. The probe verifies its live PostgreSQL owner identity, observes that owner's transactions, and includes owner identity in failure output. Stamping at pool creation includes transactions older than the storage callback; it does not hide old transactions by comparing to a newly captured PID list. The two original 600 ms waits and the zero-pinned-owned-transactions assertion remain unchanged. No production manifest code, polling deadline, concurrency setting, or expected result is changed.
+
+The corrected native case includes an old-owned-transaction positive control and a foreign-transaction negative control. The foreign connection is verified idle before and after storage observation, then rolled back and disconnected. With only the owner predicate removed, the stronger native suite failed 12/13, reporting all three actual foreign owners. With the predicate restored, the final exact proposal passed 13/13: archive 3,747 ms, owning case 1,328 ms, whole command 14.649 seconds including setup. An additional direct invocation of the same exported native probe failed on old owned PID 1216666 and passed after its rollback. Touched-file ESLint passed.
+
+Scratch proposal SHA256: `8f5c4602cb22b1be1e0dd8843b8bc0b8c34f3cb391d578c3de210b6d45d49134`. Full commands, before/after output, ownership receipts, source hashes, and exact patch are retained in `.context/archive-connection-rca-20261027/`. The local fixture database was dropped after checking zero other sessions, port 47350 was verified closed, and owned control/backend processes were joined. Freedom and unrelated source changes were preserved.
+
+The exact reviewed patch was applied to the shared source with both file hashes matching the native-tested snapshot. The complete combined-source backend gate remains pending; this is not deployment proof. The coordinator owns archive/index updates and full acceptance. Retain the historical-PID ownership gap even if the corrected combined gate passes.
+
 ## Human feedback
 
 None recorded.
@@ -119,3 +135,8 @@ None recorded.
 ## Reusable lesson
 
 Never hold a pooled transaction across external I/O for mutual exclusion; use a lease row (owner + expiry, single-statement acquire, check and release) so neither holders nor waiters pin connections.
+
+
+## Corrected full owning-domain receipt on October 27
+
+The corrected archive owning domain passed in33,520ms on46bfbfb5 in the canonical228-domain backend batch. The historical reported PID ownership remains unknown. The batch failed two different domains, so global coverage/deploy acceptance remains pending.
