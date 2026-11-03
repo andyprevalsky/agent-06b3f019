@@ -4,6 +4,9 @@
  *  - useTerminalManager: owns the xterm.js Terminal + FitAddon lifecycle
  *  - useClaudeCodeWebSocket: owns the WS connection with retry/backoff
  *  - useSavedOutputFetch: fetches persisted output on first post-completion expand
+ *
+ *  mount -> terminal + observer + fit frame -> cleanup disposes all three
+ *  socket -> natural close -> bounded retry; switch/complete/unmount -> disposed
  */
 
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react';
@@ -29,11 +32,12 @@ export type { TerminalManager } from './claudeCodeChip.terminal.types';
 export function useTerminalManager(): TerminalTypes.TerminalManager {
   const terminalRef = useRef<XTermTerminal | null>(null);
   const outputBufferRef = useRef<string>('');
+  const cleanupRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => () => cleanupRef.current?.(), []);
 
   const mount = useCallback((container: HTMLDivElement) => {
-    if (terminalRef.current) {
-      terminalRef.current.dispose();
-    }
+    cleanupRef.current?.();
 
     const terminal = new XTermTerminal({
       theme: TERMINAL_THEME,
@@ -51,7 +55,10 @@ export function useTerminalManager(): TerminalTypes.TerminalManager {
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(container);
-    requestAnimationFrame(() => fit.fit());
+    let disposed = false;
+    const frame = requestAnimationFrame(() => {
+      if (!disposed) fit.fit();
+    });
 
     terminalRef.current = terminal;
 
@@ -59,9 +66,21 @@ export function useTerminalManager(): TerminalTypes.TerminalManager {
       terminal.write(outputBufferRef.current);
     }
 
-    const observer = new ResizeObserver(() => fit.fit());
+    const observer = new ResizeObserver(() => {
+      if (!disposed) fit.fit();
+    });
     observer.observe(container);
-    return () => observer.disconnect();
+    const cleanup = () => {
+      if (disposed) return;
+      disposed = true;
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      terminal.dispose();
+      if (terminalRef.current === terminal) terminalRef.current = null;
+      if (cleanupRef.current === cleanup) cleanupRef.current = null;
+    };
+    cleanupRef.current = cleanup;
+    return cleanup;
   }, []);
 
   return { terminalRef, outputBufferRef, mount };
@@ -143,22 +162,28 @@ export function useClaudeCodeWebSocket({
   onStateChange,
   bufferOutput = true,
 }: TerminalTypes.UseWebSocketArgs): void {
-  const wsRef = useRef<WebSocket | null>(null);
   // Status only (bufferOutput false): output goes to a sink that keeps nothing.
   const [sink] = useState(() => new DiscardingOutput());
   const terminalRef = bufferOutput ? displayRef : sink.terminal;
   const outputBufferRef = bufferOutput ? bufferRef : sink.buffer;
 
-  const connect = useCallback(
-    (attempt: number) => {
-      if (!wsUrl || isCompletedRef.current) return;
+  useEffect(() => {
+    if (!wsUrl || shouldClose || isCompletedRef.current) return;
+    let disposed = false;
+    let socket: WebSocket | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const connect = (attempt: number) => {
+      if (disposed || isCompletedRef.current) return;
 
       const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
+      socket = ws;
 
-      ws.onopen = () => onStateChange('live');
+      ws.onopen = () => {
+        if (!disposed && socket === ws) onStateChange('live');
+      };
 
       ws.onmessage = (event) => {
+        if (disposed || socket !== ws) return;
         try {
           const msg = JSON.parse(event.data) as WsMessage;
           applyWsMessage(msg, terminalRef, outputBufferRef, isCompletedRef, onStateChange);
@@ -171,33 +196,31 @@ export function useClaudeCodeWebSocket({
       };
 
       ws.onclose = () => {
+        if (disposed || socket !== ws) return;
+        socket = null;
         // Retry with fixed delays only while incomplete. Natural close on
         // completion is expected; DB realtime drives state in that case.
         if (attempt < CLAUDE_CODE_WS_MAX_RETRIES - 1 && !isCompletedRef.current) {
           const delay =
             CLAUDE_CODE_WS_RETRY_DELAYS[attempt] ??
             CLAUDE_CODE_WS_RETRY_DELAYS[CLAUDE_CODE_WS_RETRY_DELAYS.length - 1];
-          setTimeout(() => connect(attempt + 1), delay);
+          retryTimer = setTimeout(() => connect(attempt + 1), delay);
         }
       };
-    },
-    [wsUrl, terminalRef, outputBufferRef, isCompletedRef, onStateChange],
-  );
-
-  useEffect(() => {
-    if (wsUrl && !isCompletedRef.current) {
-      connect(0);
-    }
-    return () => {
-      wsRef.current?.close();
     };
-  }, [wsUrl, connect, isCompletedRef]);
-
-  useEffect(() => {
-    if (shouldClose && wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.close();
-    }
-  }, [shouldClose]);
+    connect(0);
+    return () => {
+      disposed = true;
+      clearTimeout(retryTimer);
+      if (socket) {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onclose = null;
+        socket.close();
+        socket = null;
+      }
+    };
+  }, [wsUrl, shouldClose, terminalRef, outputBufferRef, isCompletedRef, onStateChange]);
 }
 
 export function useSavedOutputFetch({

@@ -96,6 +96,7 @@ describe('grid energy pill performance budget', () => {
   });
 
   it('draws mobile energy motion through canvas animation frames', () => {
+    const visibility = vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
     setViewport(390, 844);
     Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 3 });
     document.documentElement.classList.add('dark');
@@ -124,7 +125,9 @@ describe('grid energy pill performance budget', () => {
     });
     vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
 
-    render(<MobileGridEnergyPillsCanvas patternOffset={{ x: 0, y: 0 }} selectedAgentId={null} />);
+    const { unmount } = render(
+      <MobileGridEnergyPillsCanvas patternOffset={{ x: 0, y: 0 }} selectedAgentId={null} />,
+    );
 
     act(() => {
       frameCallback?.(1000);
@@ -135,5 +138,19 @@ describe('grid energy pill performance budget', () => {
     expect(ctx.createLinearGradient).toHaveBeenCalledTimes(8);
     expect(ctx.fill).toHaveBeenCalledTimes(8);
     expect(gradient.addColorStop).toHaveBeenCalledWith(0.52, 'rgba(255, 255, 255, 1)');
+    visibility.mockReturnValue(true);
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    const requestsWhileHidden = vi.mocked(window.requestAnimationFrame).mock.calls.length;
+    act(() => frameCallback?.(2000));
+    expect(ctx.fill).toHaveBeenCalledTimes(8);
+    expect(window.requestAnimationFrame).toHaveBeenCalledTimes(requestsWhileHidden);
+    visibility.mockReturnValue(false);
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    act(() => frameCallback?.(3000));
+    expect(ctx.fill).toHaveBeenCalledTimes(16);
+    unmount();
+    const requestsAfterUnmount = vi.mocked(window.requestAnimationFrame).mock.calls.length;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(window.requestAnimationFrame).toHaveBeenCalledTimes(requestsAfterUnmount);
   });
 });

@@ -8,8 +8,8 @@
  *
  * SEGMENT LIST CHANGE (a later part arrives while open):
  *   keep the selected segment (by key) and every loaded part; revoke only Blob
- *   URLs whose segment left the list. Unmount revokes all; an in-flight load
- *   that lands after unmount/removal revokes its own Blob URL.
+ *   URLs whose segment left the list. Removal, agent switch and unmount abort
+ *   pending downloads; only the request still owning a segment may publish.
  */
 import { useEffect, useRef, useState } from 'react';
 import { getAttachmentUrl } from '@/lib/api/messages';
@@ -34,31 +34,35 @@ export function useRecordingSegmentLoads(
   const setSegmentIndex = (index: number) => setSelectedKey(segments[index]?.key ?? null);
   // Stable identity of the segment list (keys are URLs / storage paths).
   const recordingKey = segments.map((segment) => segment.key).join('\n');
-  // Pin the default selection once the viewer opens the recording, so a part
-  // that arrives later and sorts in front of it cannot take over playback.
-  useEffect(() => {
-    if (opened && selectedIndex < 0 && currentSegment) setSelectedKey(currentSegment.key);
-  }, [opened, selectedIndex, currentSegment]);
-  const liveKeysRef = useRef<Set<string>>(new Set());
   const blobUrlsRef = useRef<Map<string, string>>(new Map());
-  const inFlightKeysRef = useRef<Set<string>>(new Set());
-  const mountedRef = useRef(true);
+  const requestsRef = useRef<Map<string, AbortController>>(new Map());
   useEffect(() => {
-    mountedRef.current = true;
     const blobUrls = blobUrlsRef.current;
+    const requests = requestsRef.current;
+    setSegmentLoads({});
+    setSelectedKey(null);
     return () => {
-      // In-flight loads see this and revoke their own Blob URL on arrival.
-      mountedRef.current = false;
+      for (const request of requests.values()) request.abort();
+      requests.clear();
       for (const blobUrl of blobUrls.values()) URL.revokeObjectURL(blobUrl);
       blobUrls.clear();
     };
-  }, []);
+  }, [agentId]);
+  // Pin after resetting ownership, so an appended earlier part cannot take
+  // over the default selection on the viewer's first open.
+  useEffect(() => {
+    if (opened && selectedIndex < 0 && currentSegment) setSelectedKey(currentSegment.key);
+  }, [opened, selectedIndex, currentSegment]);
   // A later part arriving while the chip is open keeps every loaded part; only
   // segments that disappeared are released.
   useEffect(() => {
     const keys = recordingKey ? recordingKey.split('\n') : [];
     const live = new Set(keys);
-    liveKeysRef.current = live;
+    for (const [key, request] of requestsRef.current) {
+      if (live.has(key)) continue;
+      request.abort();
+      requestsRef.current.delete(key);
+    }
     for (const [key, blobUrl] of blobUrlsRef.current) {
       if (live.has(key)) continue;
       URL.revokeObjectURL(blobUrl);
@@ -70,6 +74,17 @@ export function useRecordingSegmentLoads(
         : Object.fromEntries(Object.entries(loads).filter(([key]) => live.has(key))),
     );
   }, [recordingKey]);
+  // Keep ready parts cached, but a collapsed/hidden recording owns no download.
+  useEffect(() => {
+    if (opened) return;
+    for (const request of requestsRef.current.values()) request.abort();
+    requestsRef.current.clear();
+    setSegmentLoads((loads) =>
+      Object.values(loads).some((load) => load.state === 'loading')
+        ? Object.fromEntries(Object.entries(loads).filter(([, load]) => load.state !== 'loading'))
+        : loads,
+    );
+  }, [opened]);
 
   const currentLoad =
     currentSegment && currentSegment.kind !== 'view' ? segmentLoads[currentSegment.key] : undefined;
@@ -77,36 +92,33 @@ export function useRecordingSegmentLoads(
     if (!opened || !agentId || !currentSegment) return;
     if (currentSegment.kind === 'view' || currentLoad) return;
     const segment = currentSegment;
-    if (inFlightKeysRef.current.has(segment.key)) return;
-    inFlightKeysRef.current.add(segment.key);
+    if (requestsRef.current.has(segment.key)) return;
+    const controller = new AbortController();
+    requestsRef.current.set(segment.key, controller);
     setSegmentLoads((loads) => ({ ...loads, [segment.key]: { state: 'loading' } }));
-    const isCurrent = () => mountedRef.current && liveKeysRef.current.has(segment.key);
+    const isCurrent = () =>
+      !controller.signal.aborted && requestsRef.current.get(segment.key) === controller;
     void (async () => {
       try {
         const url = await getAttachmentUrl(
           agentId,
           segment.pointer.id,
           segment.pointer.storage_path,
+          { signal: controller.signal },
         );
+        if (!isCurrent()) return;
         // Supabase serves stored files as text/plain + nosniff (XSS safety), so a
         // direct <video>/<iframe> src won't play/render. Fetch the bytes and load
         // them via a typed Blob URL: video/mp4 for the stitched replay, text/html
         // for the screenshot player.
-        const res = await fetch(url);
+        const res = await fetch(url, { signal: controller.signal });
         if (!res.ok) throw new Error(`recording fetch ${res.status}`);
-        const blob =
-          segment.kind === 'video'
-            ? new Blob([await res.arrayBuffer()], {
-                type: segment.pointer.mime_type || 'video/mp4',
-              })
-            : new Blob([await res.text()], { type: 'text/html' });
+        const bytes = segment.kind === 'video' ? await res.arrayBuffer() : await res.text();
+        if (!isCurrent()) return;
+        const blob = new Blob([bytes], {
+          type: segment.kind === 'video' ? segment.pointer.mime_type || 'video/mp4' : 'text/html',
+        });
         const blobUrl = URL.createObjectURL(blob);
-        // The chip unmounted or the segment left the list while this load was in
-        // flight — release the Blob URL instead of storing it.
-        if (!isCurrent()) {
-          URL.revokeObjectURL(blobUrl);
-          return;
-        }
         blobUrlsRef.current.set(segment.key, blobUrl);
         setSegmentLoads((loads) => ({ ...loads, [segment.key]: { state: 'ready', url: blobUrl } }));
       } catch (err) {
@@ -120,7 +132,9 @@ export function useRecordingSegmentLoads(
           : 'Failed to load recording.';
         setSegmentLoads((loads) => ({ ...loads, [segment.key]: { state: 'error', error } }));
       } finally {
-        inFlightKeysRef.current.delete(segment.key);
+        if (requestsRef.current.get(segment.key) === controller) {
+          requestsRef.current.delete(segment.key);
+        }
       }
     })();
   }, [opened, agentId, currentSegment, currentLoad]);

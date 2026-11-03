@@ -29,6 +29,7 @@ import {
   type FilteredStreamingState,
 } from './useMessageFiltering';
 import { useThinkingVisibility } from './useThinkingVisibility';
+import { useTrajectoryToolRows } from './trajectoryLiveMessages';
 import {
   EMPTY_WEB_SEARCH_GROUPING,
   groupWebSearchTurns,
@@ -77,6 +78,18 @@ function shouldAnimateTool(next: Message): boolean {
   return (status === 'FINISHED' || status === 'ERROR') && messageText.trim().length > 0;
 }
 
+interface AnimationQueueEntry {
+  message: Message;
+  next: AnimationQueueEntry | null;
+}
+function emptyAnimationQueue() {
+  return {
+    head: null as AnimationQueueEntry | null,
+    tail: null as AnimationQueueEntry | null,
+    ids: new Set<string>(),
+  };
+}
+
 export function useMessageAnimationBuffer({
   selectedAgentId,
   subAgentId,
@@ -84,70 +97,79 @@ export function useMessageAnimationBuffer({
   streamedTextsRef,
   assistantInsertedRef,
 }: UseMessageAnimationBufferOptions): MessageAnimationState {
-  const [messageBuffer, setMessageBuffer] = useState<Message[]>([]);
-  const [isAnimating, setIsAnimating] = useState(false);
+  const queueRef = useRef(emptyAnimationQueue());
+  const animationEpochRef = useRef(0);
+  const [queueRevision, setQueueRevision] = useState(0);
   const [currentAnimatingId, setCurrentAnimatingId] = useState<string | null>(null);
-  const isInitialLoadRef = useRef(true);
   const selectedAgentIdRef = useRef(selectedAgentId);
   const subAgentIdRef = useRef(subAgentId);
   selectedAgentIdRef.current = selectedAgentId;
   subAgentIdRef.current = subAgentId;
 
   useLayoutEffect(() => {
-    setMessageBuffer([]);
-    setIsAnimating(false);
+    queueRef.current = emptyAnimationQueue();
+    animationEpochRef.current++;
+    setQueueRevision((revision) => revision + 1);
     setCurrentAnimatingId(null);
-    isInitialLoadRef.current = true;
     assistantInsertedRef.current = false;
   }, [assistantInsertedRef, selectedAgentId, subAgentId]);
 
   useEffect(() => {
-    const ownerAgentId = selectedAgentId;
-    const ownerSubAgentId = subAgentId;
+    let active = true;
     const unregister = registerMessageHandler(subAgentId ?? null, (message) => {
-      setMessageBuffer((prev) => {
-        if (
-          selectedAgentIdRef.current !== ownerAgentId ||
-          subAgentIdRef.current !== ownerSubAgentId
-        ) {
-          return prev;
-        }
-        if (prev.some((m) => m.message_id === message.message_id)) return prev;
-        return [...prev, message];
-      });
+      if (
+        !active ||
+        selectedAgentIdRef.current !== selectedAgentId ||
+        subAgentIdRef.current !== subAgentId
+      )
+        return;
+      const queue = queueRef.current;
+      if (queue.ids.has(message.message_id)) return;
+      const entry: AnimationQueueEntry = { message, next: null };
+      if (queue.tail) queue.tail.next = entry;
+      else queue.head = entry;
+      queue.tail = entry;
+      queue.ids.add(message.message_id);
+      setQueueRevision((revision) => revision + 1);
     });
-    requestAnimationFrame(() => {
-      isInitialLoadRef.current = false;
-    });
-    return () => unregister();
+    return () => {
+      active = false;
+      unregister();
+    };
   }, [selectedAgentId, subAgentId, registerMessageHandler]);
 
   useEffect(() => {
-    if (messageBuffer.length === 0 || isAnimating) return;
-    const next = messageBuffer[0];
-    setMessageBuffer((prev) => prev.slice(1));
-
-    let shouldAnimate = false;
-    if (next.role === 'ASSISTANT') {
-      shouldAnimate = shouldAnimateAssistant(next, streamedTextsRef, assistantInsertedRef);
-    } else if (next.role === 'TOOL') {
-      shouldAnimate = shouldAnimateTool(next);
+    if (currentAnimatingId !== null) return;
+    const queue = queueRef.current;
+    if (!queue.head) return;
+    // Drain receipts without a visual animation together; enqueue/dequeue never copy history.
+    while (queue.head) {
+      const next = queue.head.message;
+      queue.head = queue.head.next;
+      if (!queue.head) queue.tail = null;
+      queue.ids.delete(next.message_id);
+      const shouldAnimate =
+        next.role === 'ASSISTANT'
+          ? shouldAnimateAssistant(next, streamedTextsRef, assistantInsertedRef)
+          : next.role === 'TOOL' && shouldAnimateTool(next);
+      if (shouldAnimate) {
+        animationEpochRef.current++;
+        setCurrentAnimatingId(next.message_id);
+        break;
+      }
     }
+    setQueueRevision((revision) => revision + 1);
+  }, [queueRevision, currentAnimatingId, streamedTextsRef, assistantInsertedRef]);
 
-    if (shouldAnimate) {
-      setIsAnimating(true);
-      setCurrentAnimatingId(next.message_id);
-    }
-  }, [messageBuffer, isAnimating, streamedTextsRef, assistantInsertedRef]);
-
+  const animationEpoch = animationEpochRef.current;
+  const handleAnimationComplete = useCallback(() => {
+    if (animationEpochRef.current === animationEpoch) setCurrentAnimatingId(null);
+  }, [animationEpoch]);
   return {
-    isAnimating,
+    isAnimating: currentAnimatingId !== null,
     currentAnimatingId,
-    messageBufferLength: messageBuffer.length,
-    handleAnimationComplete: () => {
-      setIsAnimating(false);
-      setCurrentAnimatingId(null);
-    },
+    messageBufferLength: queueRef.current.ids.size,
+    handleAnimationComplete,
   };
 }
 
@@ -159,19 +181,25 @@ export function useStreamingAutoScroll(
   streamingBubblesSize: number,
   messageCount: number,
 ): void {
+  const previous = useRef<{
+    subAgentId: string | undefined;
+    scrollEndRef: typeof scrollEndRef;
+    streamingBubblesSize: number;
+    messageCount: number;
+  }>();
   useLayoutEffect(() => {
+    const last = previous.current;
+    previous.current = { subAgentId, scrollEndRef, streamingBubblesSize, messageCount };
     if (subAgentId === undefined) return;
-    if (streamingBubblesSize > 0 && scrollEndRef.current) {
-      scrollEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
-    }
-  }, [subAgentId, streamingBubblesSize, scrollEndRef]);
-
-  useLayoutEffect(() => {
-    if (subAgentId === undefined) return;
-    if (messageCount > 0 && scrollEndRef.current) {
-      scrollEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
-    }
-  }, [subAgentId, messageCount, scrollEndRef]);
+    const changedPanel =
+      !last || last.subAgentId !== subAgentId || last.scrollEndRef !== scrollEndRef;
+    const newStream =
+      (changedPanel || last.streamingBubblesSize !== streamingBubblesSize) &&
+      streamingBubblesSize > 0;
+    const newMessages = (changedPanel || last.messageCount !== messageCount) && messageCount > 0;
+    if (newStream || newMessages)
+      scrollEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [subAgentId, streamingBubblesSize, messageCount, scrollEndRef]);
 }
 
 // ─── Composite: everything MessageList needs in one call ─────────────────
@@ -216,9 +244,9 @@ export function useMessageListState({
     streamingTools: ctx.streamingTools,
   });
 
-  const streamingMetricsBySubAgentId = buildStreamingMetricsBySubAgentId(
-    ctx.streamingBubbles,
-    ctx.streamingTools,
+  const streamingMetricsBySubAgentId = useMemo(
+    () => buildStreamingMetricsBySubAgentId(ctx.streamingBubbles, ctx.streamingTools),
+    [ctx.streamingBubbles, ctx.streamingTools],
   );
   const targetStreamingKey = subAgentId ?? '';
   const targetCharCount = streamingMetricsBySubAgentId.get(targetStreamingKey)?.charCount ?? 0;
@@ -251,17 +279,19 @@ export function useMessageListState({
   useStreamingAutoScroll(subAgentId, scrollEndRef, streaming.bubbles.size, filteredMessages.length);
 
   // Sub-agent panels keep one row per search; the main list groups each turn.
+  const streamingRows = useTrajectoryToolRows(streaming.tools);
   const webSearchGrouping = useMemo(
     () =>
       subAgentId === undefined
-        ? groupWebSearchTurns(filteredMessages, [...streaming.tools.values()])
+        ? groupWebSearchTurns(filteredMessages, streamingRows)
         : EMPTY_WEB_SEARCH_GROUPING,
-    [subAgentId, filteredMessages, streaming.tools],
+    [subAgentId, filteredMessages, streamingRows],
   );
 
+  const sendMessage = ctx.sendMessage;
   const handleSendMessage = useCallback(
-    (text: string): Promise<void> => ctx.sendMessage(text),
-    [ctx],
+    (text: string): Promise<void> => sendMessage(text),
+    [sendMessage],
   );
 
   return {

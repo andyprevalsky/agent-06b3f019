@@ -163,7 +163,9 @@ describe('BrowserAgentChip multi-part recording', () => {
     await waitFor(() =>
       expect(screen.getByTitle('Browser recording').getAttribute('src')).toBe('blob:part-1'),
     );
-    expect(getAttachmentUrl).toHaveBeenLastCalledWith('agent-1', part1.id, part1.storage_path);
+    expect(getAttachmentUrl).toHaveBeenLastCalledWith('agent-1', part1.id, part1.storage_path, {
+      signal: expect.any(AbortSignal),
+    });
     expect(screen.getByTestId('recording-segments')).toBeInTheDocument();
 
     // Every later part stays reachable from the same player.
@@ -171,7 +173,9 @@ describe('BrowserAgentChip multi-part recording', () => {
     await waitFor(() =>
       expect(screen.getByTitle('Browser recording').getAttribute('src')).toBe('blob:part-2'),
     );
-    expect(getAttachmentUrl).toHaveBeenLastCalledWith('agent-1', part2.id, part2.storage_path);
+    expect(getAttachmentUrl).toHaveBeenLastCalledWith('agent-1', part2.id, part2.storage_path, {
+      signal: expect.any(AbortSignal),
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Play recording part 1 of 2' }));
     await waitFor(() =>
       expect(screen.getByTitle('Browser recording').getAttribute('src')).toBe('blob:part-1'),
@@ -430,7 +434,7 @@ describe('BrowserAgentChip multi-part recording', () => {
     downloads.restore();
   });
 
-  it('releases a recording download that lands after the chip closes', async () => {
+  it('never starts a recording download when signing lands after the chip closes', async () => {
     const downloads = stubDownloads();
     let sign: (url: string) => void = () => {};
     vi.mocked(getAttachmentUrl).mockImplementationOnce(
@@ -447,7 +451,9 @@ describe('BrowserAgentChip multi-part recording', () => {
     await waitFor(() => expect(getAttachmentUrl).toHaveBeenCalledTimes(1));
     unmount();
     await act(async () => sign('https://signed.example/late'));
-    await waitFor(() => expect(downloads.revokeSpy).toHaveBeenCalledWith('blob:late'));
+    expect(downloads.fetchSpy).not.toHaveBeenCalled();
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+    expect(downloads.revokeSpy).not.toHaveBeenCalled();
     downloads.restore();
   });
 });

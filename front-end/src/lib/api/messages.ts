@@ -97,12 +97,13 @@ export async function getAttachmentUrl(
   agentId: string,
   fileId: string,
   storagePath: string,
+  options?: { signal?: AbortSignal },
 ): Promise<string> {
   const headers = getAuthHeaders();
 
   const response = await fetch(
     `${API_BASE_WITH_PATH}/agents/${agentId}/attachments/${fileId}/url?storage_path=${encodeURIComponent(storagePath)}`,
-    { headers },
+    { headers, signal: options?.signal },
   );
 
   if (!response.ok) {
