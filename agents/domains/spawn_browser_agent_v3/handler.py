@@ -3188,7 +3188,9 @@ async def _observe_step_page(dom_service: Any, *, needs_dom: bool) -> Dict[str, 
     return await dom_service.get_page_identity()
 
 
-async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
+async def _wait_for_browser_user_control(
+    config: Any, task_id: str, dom_service: Any = None, session_id: str | None = None,
+) -> bool:
     """Yield browser ownership until the user explicitly hands it back.
 
     Returns whether ownership changed, allowing callers to discard any DOM
@@ -3208,6 +3210,12 @@ async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
                 logger.warning("Unable to acknowledge browser user control", error=str(exc))
         if state == "user":
             yielded = True
+            if dom_service is not None and session_id is not None:
+                from .navigation import consume_navigation
+                try:
+                    await consume_navigation(config, task_id, session_id, dom_service)
+                except Exception as exc:
+                    logger.warning("Browser user navigation failed", error=str(exc))
         browser_activity_checkpoint("Waiting for user to hand browser control back")
         await asyncio.sleep(0.5)
         try:
@@ -10140,7 +10148,7 @@ async def _spawn_browser_agent_activity_v3_real(
             iteration += 1
             step_timer.start_step(iteration)
             browser_activity_checkpoint(f"Step {iteration}")
-            if await _wait_for_browser_user_control(config, task_id):
+            if await _wait_for_browser_user_control(config, task_id, dom_service, session_id):
                 tab_focus_cache.foreground = None
                 state_prefetch.discard()
             step_timer.mark("user_control_wait")
@@ -10582,7 +10590,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
             _rose_request_id = llm_result.get("request_id", "unknown")
 
-            if await _wait_for_browser_user_control(config, task_id):
+            if await _wait_for_browser_user_control(config, task_id, dom_service, session_id):
                 # Never execute an action planned against the pre-handoff DOM.
                 tab_focus_cache.foreground = None
                 state_prefetch.discard()
@@ -14819,6 +14827,11 @@ async def spawn_browser_agent(workflow_instance: Any, tool_call: Dict[str, Any],
                 event.data["usage"],
                 tool_name="spawn_browser_agent",
                 call_site="browser_agent",
+                browser_completed=(
+                    event.status == MessageStatus.FINISHED
+                    and (event.metadata or {}).get("action_type") == "task_complete"
+                    and (event.metadata or {}).get("success") is True
+                ),
             )
 
     return last_status

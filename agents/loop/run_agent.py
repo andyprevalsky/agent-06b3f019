@@ -202,6 +202,8 @@ async def run_agent(
     is_inside_temporal_activity: bool = False,
     # Callbacks - abstract workflow vs activity differences
     check_paused: Optional[Callable[[], bool]] = None,
+    check_paused_before_turn: Optional[Callable[[], Awaitable[bool]]] = None,
+    on_unaccepted_turn_retry: Optional[Callable[[], None]] = None,
     check_aborted: Optional[Callable[[], Awaitable[bool]]] = None,
     wait_for_messages: Optional[Callable[[], Awaitable[bool]]] = None,
     on_context_overflow: Optional[Callable[[List[Dict]], Awaitable[None]]] = None,
@@ -1129,6 +1131,12 @@ async def run_agent(
                     limit=MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES,
                 )
 
+        # Admit a browser completion turn only after handoff and compaction
+        # boundaries. A continue-as-new before a model call must preserve it.
+        if check_paused_before_turn and await check_paused_before_turn():
+            iteration -= 1
+            continue
+
         # Schema and message preparation share the existing pre-acceptance
         # retry owner; no provider response or productive turn exists yet.
         llm_response_accepted = False
@@ -1793,6 +1801,8 @@ async def run_agent(
             # so a later accounting/broadcast error must not refund it.
             if not llm_response_accepted:
                 iteration -= 1
+                if on_unaccepted_turn_retry:
+                    on_unaccepted_turn_retry()
             if error_chain_has_type(e, "LLMStructuredOutputError"):
                 # call_llm_activity marks schema/required-tool violations
                 # non-retryable so Temporal does not multiply requests. The
