@@ -7133,6 +7133,13 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         and r.stop_metadata.get("runner") == "sms"
         and r.stop_metadata.get("owned_cleanup_verified") is True
     ]
+    rootless_credentials = [r for r in results if any(r is proof for proof in never_admitted_results)
+        and not r.agent_id and not getattr(r, "owned_roots", None) and not getattr(r, "logs", None)
+        and not live_ids.get(r.name) and r.status == r.benchmark_status == "SKIPPED" and r.passed is False
+        and _is_permitted_claude_code_skip(r)
+        and getattr(r, "graded_root_creation_outcome", None) == "not_started"
+        and getattr(r, "stop_metadata", None) == {"runner": "benchmark_preflight", "admission": "not_started",
+                                                  "reason": "claude_credential_unavailable"}]
     rootless_queued = [r for r in results if any(r is proof for proof in never_admitted_results)
         and not r.agent_id and not getattr(r, "owned_roots", None) and not getattr(r, "logs", None)
         and r.status == r.benchmark_status == "CANCELLED" and r.passed is False
@@ -7140,7 +7147,7 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         and isinstance(meta := getattr(r, "stop_metadata", None), dict)
         and meta == {"runner": "benchmark_coordinator", "admission": "not_started", "occurrence_index": meta.get("occurrence_index")}
         and type(meta.get("occurrence_index")) is int and meta["occurrence_index"] >= 0]
-    if len(rootless_queued) != len(never_admitted_results):
+    if len(rootless_queued) + len(rootless_credentials) != len(never_admitted_results):
         failures.append("invalid coordinator nonadmission proof")
     if any(not r.agent_id and r.status != "SKIPPED" and r not in rootless_sms and not any(r is proof for proof in rootless_queued)
            and not (getattr(r, "graded_root_creation_outcome", None) == "not_started"
@@ -7148,7 +7155,8 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                         getattr(r, "graded_root_creation_outcome", None) == "unknown" for r in results):
         failures.append("owned cloud execution has an unknown root creation outcome")
     if not owned:
-        if failures or not (rootless_sms or rootless_queued):
+        rootless = [*rootless_sms, *rootless_queued, *rootless_credentials]
+        if failures or not rootless or any(not any(r is proof for proof in rootless) for r in results):
             raise RuntimeError("; ".join(failures) or "owned cloud execution has no proven root allocation")
         return
     snapshots = {}
@@ -17412,8 +17420,12 @@ async def main_async(args):
             print(f"  ⚠ Worker memory sampling unavailable before smoke: {memory_before.get('reason')}")
 
     # Record skipped Claude Code tasks in results
-    for t in skipped_claude_tasks:
-        run.task_results.append(_claude_code_credential_skip_result(t))
+    initial_credential_skips = tuple(_claude_code_credential_skip_result(t) for t in skipped_claude_tasks)
+    for result in initial_credential_skips:
+        result.graded_root_creation_outcome = "not_started"
+        result.stop_metadata = {"runner": "benchmark_preflight", "admission": "not_started",
+                                "reason": "claude_credential_unavailable"}
+    run.task_results.extend(initial_credential_skips)
 
     # Live report card: a standardized progress snapshot emitted to stdout + the run's
     # context dir once per second (and once, forced, at the end). Purely observational —
@@ -17533,7 +17545,7 @@ async def main_async(args):
     # distinct without treating pending scheduler waiters as active executors.
 
     _entered_task_futures: set[asyncio.Task] = set()
-    _never_admitted_results: list[TaskResult] = []
+    _never_admitted_results: list[TaskResult] = list(initial_credential_skips)
 
     async def _run_reported_task(task: BenchmarkTask, **kwargs) -> TaskResult:
         # Before admission: nothing is created yet if the batch is cancelled here.
