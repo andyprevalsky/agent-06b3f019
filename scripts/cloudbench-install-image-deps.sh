@@ -167,12 +167,19 @@ try {
 NODE
 }
 
+check_backend_dependencies() {
+    # Exercise the backend's own module resolution before publishing this graph.
+    # A successful npm install can still leave a transitive runtime import broken.
+    node --eval "require(require.resolve('@temporalio/client', { paths: [require('node:path').resolve('back-end')] })); console.log('Verified backend Temporal client import');"
+}
+
 install_javascript() {
     npm config set fetch-retries 5
     npm config set fetch-retry-mintimeout 20000
     npm config set fetch-retry-maxtimeout 120000
     npm config set fetch-timeout 600000
     npm install --include=dev --legacy-peer-deps --no-audit --no-fund
+    check_backend_dependencies
     check_frontend_dependencies repair
     (cd back-end && npx prisma generate)
 }

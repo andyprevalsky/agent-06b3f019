@@ -38,7 +38,7 @@ if tool=='npm':
             f.write(args[2]+'='+args[3]+'\n')
     elif args==['config','get','cache']:
         print(fixture/'home/.npm')
-    elif args==['install','--no-audit','--no-fund']:
+    elif args==['install','--include=dev','--legacy-peer-deps','--no-audit','--no-fund']:
         meet_peer('javascript')
         (cwd/'node_modules').mkdir(exist_ok=True)
         (cwd/'node_modules/installed.js').write_text('installed dependency')
@@ -58,6 +58,13 @@ if tool=='npm':
                     metadata=json.loads(package.read_text())
                     metadata['version']='0.0.0'
                     package.write_text(json.dumps(metadata))
+        client=cwd/'node_modules/@temporalio/client'
+        client.parent.mkdir(parents=True,exist_ok=True)
+        if os.environ.get('IMAGE_INSTALL_BACKEND_STATE')=='broken':
+            client.mkdir()
+            (client/'index.js').write_text("require('protobufjs/ext/protojson');")
+        else:
+            client.symlink_to(os.environ['IMAGE_INSTALL_REAL_TEMPORAL_CLIENT'],target_is_directory=True)
         (fixture/'javascript.finished').touch()
         raise SystemExit(int(os.environ['IMAGE_INSTALL_JS_STATUS']))
     elif args[:6]==['install','--ignore-scripts','--no-save','--package-lock=false','--no-audit','--no-fund']:
@@ -78,6 +85,8 @@ elif tool=='npx':
     assert args==['prisma','generate'] and cwd.name=='back-end'
     (cwd/'prisma-generated').touch()
 elif tool=='node':
+    if args[:1]==['--eval']:
+        raise SystemExit(subprocess.call([os.environ['IMAGE_INSTALL_REAL_NODE'],*args]))
     assert args in (['-'],['-','repair'],['-','verify'])
 elif tool=='python3':
     assert args==['-m','venv','agents/venv']
@@ -101,8 +110,8 @@ else:
 """
 
 
-@pytest.mark.parametrize("javascript,python", [(0, 0), (37, 0), (0, 41), (37, 41)])
-def test_cloudbench_image_build_joined_installer_keeps_artifacts_and_waits_both(tmp_path, javascript, python):
+@pytest.mark.parametrize("javascript,python,backend", [(0, 0, "present"), (37, 0, "present"), (0, 41, "present"), (37, 41, "present"), (0, 0, "broken")])
+def test_cloudbench_image_build_joined_installer_keeps_artifacts_and_waits_both(tmp_path, javascript, python, backend):
     work = tmp_path / "checkout"
     (work / "back-end").mkdir(parents=True)
     (work / "agents").mkdir()
@@ -132,13 +141,16 @@ def test_cloudbench_image_build_joined_installer_keeps_artifacts_and_waits_both(
             "IMAGE_INSTALL_FIXTURE_ROOT": str(tmp_path),
             "IMAGE_INSTALL_JS_STATUS": str(javascript),
             "IMAGE_INSTALL_PY_STATUS": str(python),
+            "IMAGE_INSTALL_BACKEND_STATE": backend,
+            "IMAGE_INSTALL_REAL_NODE": shutil.which("node"),
+            "IMAGE_INSTALL_REAL_TEMPORAL_CLIENT": str(ROOT / "node_modules/@temporalio/client"),
         },
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
     stdout, stderr = process.communicate(timeout=30)
-    assert process.returncode == (0 if javascript == python == 0 else 1), stdout + stderr
+    assert process.returncode == (0 if javascript == python == 0 and backend == "present" else 1), stdout + stderr
     for kind in ("javascript", "python"):
         assert (tmp_path / f"{kind}.started").exists()
         assert (tmp_path / f"{kind}.finished").exists()
@@ -147,7 +159,10 @@ def test_cloudbench_image_build_joined_installer_keeps_artifacts_and_waits_both(
         pid = int((tmp_path / f"{kind}.started").read_text())
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
-    if javascript or python:
+    if backend == "broken":
+        assert "Cannot find module 'protobufjs/ext/protojson'" in stderr
+        assert not (work / "back-end/prisma-generated").exists()
+    if javascript or python or backend == "broken":
         assert not (work / "back-end/node_modules/.hoisted-to-root").exists()
         return
     assert (work / "node_modules/installed.js").read_text() == "installed dependency"
@@ -166,7 +181,7 @@ def test_cloudbench_image_build_joined_installer_keeps_artifacts_and_waits_both(
         "fetch-timeout=600000",
     ]
     commands = [json.loads(line) for line in (tmp_path / "commands.jsonl").read_text().splitlines()]
-    assert ["npm", "install", "--no-audit", "--no-fund"] in commands
+    assert ["npm", "install", "--include=dev", "--legacy-peer-deps", "--no-audit", "--no-fund"] in commands
     assert ["npx", "prisma", "generate"] in commands
     assert ["pip", "install", "--upgrade", "pip"] in commands
     assert ["pip", "install", "-r", "agents/requirements.txt"] in commands
@@ -385,6 +400,7 @@ def test_cloudbench_image_build_loads_actual_frontend_compilers_without_version_
         "IMAGE_INSTALL_GRAPH_METADATA": str(graph_file),
         "IMAGE_INSTALL_NATIVE_STATE": state,
         "IMAGE_INSTALL_REAL_NPM": npm,
+        "IMAGE_INSTALL_REAL_TEMPORAL_CLIENT": str(ROOT / "node_modules/@temporalio/client"),
         "NPM_CONFIG_USERCONFIG": str(home / ".npmrc"),
         "NPM_CONFIG_CACHE": str(home / ".npm"),
         "NPM_CONFIG_OFFLINE": "true",
