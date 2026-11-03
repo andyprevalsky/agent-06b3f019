@@ -195,6 +195,9 @@ function codexUsageLimit() {
 }
 
 const wss = new WebSocketServer({ port: PORT });
+wss.on("listening", () => {
+  log("info", "Server listening", { port: wss.address().port });
+});
 
 function broadcast(type, data) {
   const message = JSON.stringify({ type, data });
@@ -575,8 +578,6 @@ wss.on("connection", (ws, req) => {
 
 process.on("SIGINT", () => shutdown(exitCode ?? 0));
 process.on("SIGTERM", () => shutdown(exitCode ?? 0));
-
-log("info", "Server listening", { port: PORT });
 
 const home = homedir();
 const codexHome = join(home, ".codex");
