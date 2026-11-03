@@ -152,10 +152,10 @@ grep -q 'running the fps probe alone' "$TMP/out1" || fail "the serial probe pass
 # 9. The report step raises node's heap ceiling itself (the in-memory c8 merge
 #    of the full sweep died at the default heap, 2026-10-30), keeping any
 #    NODE_OPTIONS the caller set; the unsharded script uses the same helper.
-grep -q '^NODE_OPTIONS=--max-old-space-size=6144$' "$TMP/rec/npx.log" || fail "merged c8 report must run with the raised heap: $(cat "$TMP/rec/npx.log")"
+grep -Fqx "NODE_OPTIONS=${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=6144" "$TMP/rec/npx.log" || fail "merged c8 report must run with the raised heap: $(cat "$TMP/rec/npx.log")"
 records
-NODE_OPTIONS="--trace-warnings" BACKEND_COVERAGE_REPORT_HEAP_MB=4096 bash "$RUNNER" 2 >"$TMP/out9" 2>&1 || fail "heap override run failed: $(cat "$TMP/out9")"
-grep -q '^NODE_OPTIONS=--trace-warnings --max-old-space-size=4096$' "$TMP/rec/npx.log" || fail "the heap option must append to the caller's NODE_OPTIONS and honour the override: $(cat "$TMP/rec/npx.log")"
+NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--trace-warnings" BACKEND_COVERAGE_REPORT_HEAP_MB=4096 bash "$RUNNER" 2 >"$TMP/out9" 2>&1 || fail "heap override run failed: $(cat "$TMP/out9")"
+grep -Fqx "NODE_OPTIONS=${NODE_OPTIONS:+$NODE_OPTIONS }--trace-warnings --max-old-space-size=4096" "$TMP/rec/npx.log" || fail "the heap option must append to the caller's NODE_OPTIONS and honour the override: $(cat "$TMP/rec/npx.log")"
 records
 BACKEND_COVERAGE_REPORT_HEAP_MB=lots bash "$RUNNER" 2 >"$TMP/out9b" 2>&1 && fail "a malformed heap override must be refused"
 [[ ! -e "$TMP/rec/shard-1.env" ]] || fail "a malformed heap override must be refused before any shard runs"
