@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -93,6 +94,34 @@ def default_event_log() -> Path:
     return base / ".context" / "factory-events.jsonl"
 
 
+def active_deploy_run_id() -> str | None:
+    """Use the timing lifecycle's identity even after Git changes branches."""
+    root = Path(git_value("rev-parse", "--show-toplevel") or Path.cwd())
+    run_root = Path(os.environ.get("DEPLOY_RUN_ROOT", str(root / ".context/deploy-runs")))
+    for pointer in ("factory-current", "current"):
+        try:
+            run_id = (run_root / pointer).read_text().splitlines()[0]
+            if run_id in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9._-]+", run_id):
+                continue
+            run = json.loads((run_root / run_id / "metadata.json").read_text())
+            allowed = {"active", "finishing", "completed"} if pointer == "factory-current" else {"active", "finishing"}
+            if run.get("run_id") == run_id and run.get("status") in allowed:
+                return run_id
+        except (OSError, ValueError, IndexError, AttributeError):
+            continue
+    return None
+
+
+def finish_deploy_context(run_id: str) -> None:
+    root = Path(git_value("rev-parse", "--show-toplevel") or Path.cwd())
+    run_root = Path(os.environ.get("DEPLOY_RUN_ROOT", str(root / ".context/deploy-runs")))
+    with (run_root / ".lifecycle.lock").open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        pointer = run_root / "factory-current"
+        if pointer.exists() and pointer.read_text().strip() == run_id:
+            pointer.unlink()
+
+
 def append_event(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = (json.dumps(payload, separators=(",", ":")) + "\n").encode()
@@ -162,6 +191,8 @@ def factory_event_payload(
         "git_sha": git_value("rev-parse", "HEAD"),
         "branch": git_value("branch", "--show-current"),
     }
+    if workflow == "deploy" and (run_id := active_deploy_run_id()) is not None:
+        payload["run_id"] = run_id
     for key, metadata_value in (metadata or {}).items():
         if key in payload:
             raise ValueError(f"metadata cannot override canonical field {key!r}")
@@ -209,6 +240,9 @@ def main() -> int:
         os.environ.get("FACTORY_EVENT_LOG", str(default_event_log()))
     ).expanduser()
     append_event(event_log, payload)
+    if (args.workflow == "deploy" and args.event == "outcome" and args.value == "completed"
+            and payload.get("run_id")):
+        finish_deploy_context(str(payload["run_id"]))
     print("FACTORY_EVENT " + json.dumps(payload, separators=(",", ":")))
     return 0
 

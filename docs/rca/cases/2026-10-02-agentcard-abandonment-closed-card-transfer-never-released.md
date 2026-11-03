@@ -624,3 +624,21 @@ is not PASS, native release or a refund; the $1 allocation remains a recorded
 liability. The underlying provider release cause remains open. At 10,000 agents
 this policy adds only local validation of the existing per-root snapshot, no
 new provider calls, polling loops, shared subscriptions or production writes.
+
+### October 26 sandbox recurrence under the standing exception
+
+Final integrated source 646ee1bab18145f519306376014282bcfadea99d produced
+three passed tasks and one warning SKIP in run
+33f845e4-8b57-4250-8fea-315d48a213e5, ending at 21:52:30.417Z.
+The skipped abandonment root was 6f79b389-9a82-41a9-9de8-751ccb4e72aa.
+Native evidence records its card CLOSED with balance0, purchase HELD, funding
+RECLAIMING and exact sandbox transfer consumed/transferred4396/released0.
+The $43.96 sandbox allocation remains unreleased; financial reconciliation is
+pending. This receipt does not prove a release or refund and is not PASS.
+
+The existing October 15 policy classified this known condition automatically;
+no second allocation or retry was created to seek a passing result. All four
+roots completed separate execution/provider cleanup, and the local owner
+receipt reached cleanup_verified. Physical cleanup does not settle the
+financial liability. Original native snapshots, warning, run bundle and owner
+receipt remain in .context/benchmarks/1793050320-4012092-89922.

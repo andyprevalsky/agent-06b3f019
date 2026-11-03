@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_PROCESS = runpy.run_path(str(ROOT / "scripts/tests/fixture_process.py"))
+NATIVE_COMPLETION = runpy.run_path(str(ROOT / "scripts/tests/native_completion_schedule.py"))
 BASH = shutil.which("bash") or "bash"
 if Path("/opt/homebrew/bin/bash").exists():
     BASH = "/opt/homebrew/bin/bash"
@@ -163,20 +164,43 @@ class FleetFailureCleanup(unittest.TestCase):
         shutil.move(str(self.root), str(retained / "fixture"))
         print(f"Retained failed fleet fixture: {retained}", file=sys.stderr)
 
-    def run_completion_proof(self, command, *, timeout_seconds=60):
+    def wait_for_proof(self, process, timeout_seconds, native_schedule=None):
+        if native_schedule is None:
+            return process.wait(timeout=timeout_seconds)
+        primary_error = None
+        try:
+            return native_schedule.wait(process, timeout_seconds)
+        except BaseException as error:
+            primary_error = error
+            raise
+        finally:
+            try:
+                (self.root / "native-completion-reads.json").write_text(json.dumps({
+                    "expected_frame_hex": native_schedule.expected_frame.hex(),
+                    "hold_seconds": native_schedule.hold_seconds,
+                    "triggered": native_schedule.triggered,
+                    "reads": native_schedule.reads,
+                }, indent=2) + "\n")
+            except OSError as metadata_error:
+                if primary_error is None:
+                    raise
+                primary_error.add_note(f"Native scheduling metadata capture failed: {metadata_error!r}")
+
+    def run_completion_proof(self, command, *, timeout_seconds=60, native_schedule=None):
         log_path = self.root / "output.log"
         metadata_path = self.root / "command.json"
         metadata = {"command": command, "timeout_seconds": timeout_seconds, "status": "starting"}
         metadata_path.write_text(json.dumps(metadata))
         with log_path.open("w") as log:
-            process = subprocess.Popen(
-                command, cwd=self.root, env=self.env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
+            launch = subprocess.Popen if native_schedule is None else native_schedule.launch
+            process = launch(
+                command, cwd=self.root, env=self.env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
             )
             primary_error = None
             try:
                 metadata.update(pid=process.pid, status="running")
                 metadata_path.write_text(json.dumps(metadata))
-                result = process.wait(timeout=timeout_seconds)
+                result = self.wait_for_proof(process, timeout_seconds, native_schedule)
             except BaseException as error:
                 primary_error = error
                 metadata["status"] = "timeout" if isinstance(error, subprocess.TimeoutExpired) else "error"
@@ -202,6 +226,130 @@ class FleetFailureCleanup(unittest.TestCase):
                         raise
                     primary_error.add_note(f"Fixture metadata capture failed: {metadata_error!r}")
         return subprocess.CompletedProcess(command, result, log_path.read_text(), "")
+
+    def finish_native_error_control(self, process):
+        # A failing before-code poll may have cached a ptrace stop as exit.
+        # Reap only this newly created child using native terminal statuses.
+        try:
+            waited, status = os.waitpid(process.pid, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if waited and (os.WIFEXITED(status) or os.WIFSIGNALED(status)):
+            process.returncode = os.waitstatus_to_exitcode(status)
+            return
+        try:
+            os.kill(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                waited, status = os.waitpid(process.pid, os.WNOHANG)
+            except ChildProcessError:
+                return
+            if waited:
+                if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+                    process.returncode = os.waitstatus_to_exitcode(status)
+                    return
+                if os.WIFSTOPPED(status):
+                    try:
+                        NATIVE_COMPLETION["ptrace"](7, process.pid, 0, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            time.sleep(.001)
+        self.fail("native error-control root did not reach a terminal reap")
+
+    def native_error_control(self, *, during_metadata):
+        ready = self.root / "native-child-ready.json"
+        script = r"""
+import json, pathlib, runpy, subprocess, sys, time
+identity = runpy.run_path(sys.argv[1])
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'], start_new_session=True)
+ready = pathlib.Path(sys.argv[2]); pending = ready.with_suffix('.tmp')
+pending.write_text(json.dumps({'pid': child.pid, 'identity': identity['current_identity'](child.pid)})); pending.replace(ready)
+while True: time.sleep(1)
+"""
+        command = [sys.executable, "-c", script, str(ROOT / "scripts/process-identity.py"), str(ready)]
+        schedule = NATIVE_COMPLETION["CompletionReadSchedule"]()
+        native_globals = schedule.wait.__func__.__globals__
+        real_ptrace = native_globals["ptrace"]
+        real_popen = subprocess.Popen
+        real_write = Path.write_text
+        fault = OSError("injected native metadata failure" if during_metadata else "injected scheduler failure")
+        created = []
+        foreign = real_popen([sys.executable, "-c", "import time; time.sleep(600)"])
+
+        def launch(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            if kwargs.get("preexec_fn") is not None:
+                created.append(process)
+            return process
+
+        def write_metadata(path, value, *args, **kwargs):
+            if during_metadata and path == self.root / "command.json" and json.loads(value)["status"] == "running":
+                raise fault
+            return real_write(path, value, *args, **kwargs)
+
+        def native_operation(request, pid, address=0, data=0):
+            if not during_metadata and ready.exists():
+                if request == 24:
+                    raise fault
+                if request == 17:
+                    raise OSError("injected detach failure")
+            return real_ptrace(request, pid, address, data)
+
+        try:
+            with (
+                patch.object(subprocess, "Popen", side_effect=launch),
+                patch.object(Path, "write_text", write_metadata),
+                patch.dict(native_globals, {"ptrace": native_operation}),
+                self.assertRaises(OSError) as raised,
+            ):
+                self.run_completion_proof(command, native_schedule=schedule)
+            self.assertEqual(len(created), 1, "scheduler traced more than its exact root")
+            self.assertIs(raised.exception, fault, "trace cleanup replaced the initiating exception")
+            self.assertIsNotNone(created[0].returncode, "native root has no observed terminal status")
+            with self.assertRaises(ChildProcessError, msg="native root was not actually reaped"):
+                os.waitpid(created[0].pid, os.WNOHANG)
+            if not during_metadata:
+                self.assertTrue(ready.exists(), "scheduler failure did not reach a real detached child")
+                child = json.loads(ready.read_text())
+                observed = subprocess.run(["ps", "-p", str(child["pid"]), "-o", "stat="], capture_output=True, text=True)
+                self.assertTrue(not observed.stdout.strip() or observed.stdout.strip().startswith("Z"),
+                                "native scheduler failure left its detached child alive")
+            self.assertIsNone(foreign.poll(), "native trace cleanup signalled an unrelated control")
+        finally:
+            for process in created:
+                self.finish_native_error_control(process)
+            if ready.exists():
+                child = json.loads(ready.read_text())
+                FIXTURE_PROCESS["load_process_identity"]().main([
+                    "process-identity.py", "--expect", child["identity"], "--signal", "KILL", str(child["pid"]),
+                ])
+            foreign.terminate()
+            foreign.wait(timeout=2)
+
+    @unittest.skipUnless(NATIVE_COMPLETION["SUPPORTED"], "native syscall schedule requires Linux x86_64")
+    def test_native_metadata_failure_reaps_stopped_root(self):
+        self.native_error_control(during_metadata=True)
+
+    @unittest.skipUnless(NATIVE_COMPLETION["SUPPORTED"], "native syscall schedule requires Linux x86_64")
+    def test_native_scheduler_failure_reaps_root_and_detached_child(self):
+        self.native_error_control(during_metadata=False)
+
+    @unittest.skipUnless(NATIVE_COMPLETION["SUPPORTED"], "native syscall schedule requires Linux x86_64")
+    def test_native_initial_terminal_status_is_retained(self):
+        schedule = NATIVE_COMPLETION["CompletionReadSchedule"]()
+        process = schedule.launch([sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True)
+        try:
+            os.kill(process.pid, signal.SIGKILL)
+            time.sleep(.02)
+            self.assertEqual(schedule.wait(process, 2), -signal.SIGKILL)
+            self.assertEqual(process.poll(), -signal.SIGKILL)
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(process.pid, os.WNOHANG)
+        finally:
+            self.finish_native_error_control(process)
 
     def test_timeout_reaps_detached_child_and_retains_output(self):
         identity = FIXTURE_PROCESS["load_process_identity"]()
@@ -368,6 +516,7 @@ printf() {
         log_fault="",
         publication_failure=False,
         partial_completion=False,
+        native_schedule=None,
     ):
         env = dict(
             self.env,
@@ -443,8 +592,9 @@ exec "$FIXTURE_REAL_TEE" "$@"
             "300",
         ]
         with (self.root / "output.log").open("w") as log:
-            process = subprocess.Popen(
-                command, cwd=self.root, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
+            launch = subprocess.Popen if native_schedule is None else native_schedule.launch
+            process = launch(
+                command, cwd=self.root, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
             )
             try:
                 if cancel:
@@ -454,7 +604,7 @@ exec "$FIXTURE_REAL_TEE" "$@"
                     self.assertTrue((self.root / "ready").exists(), (self.root / "output.log").read_text())
                     process.send_signal(signal.SIGTERM)
                 try:
-                    result = process.wait(timeout=60)
+                    result = self.wait_for_proof(process, 60, native_schedule)
                 except subprocess.TimeoutExpired:
                     self.fail(
                         "proof supervisor did not finish its owned cleanup\n" + (self.root / "output.log").read_text()
@@ -564,14 +714,14 @@ read -r proof_completion_line || second_result=$?
     def test_interrupted_completion_read_preserves_original_failure(self):
         self.run_case(fleet_exit=137, partial_completion=True)
 
-    def run_successful_completion_case(self, *, frame=None):
+    def run_successful_completion_case(self, *, frame=None, native_schedule=None):
         self.root = self.root.resolve()
         source = (ROOT / "scripts/tests/fleet-infra-stability-proof.test.sh").read_text()
         fake = source.split("cat >\"$tmp/fake-fleet\" <<'SH'\n", 1)[1].split("\nSH\n", 1)[0]
         (self.root / "fake-fleet").write_text(fake)
-        if frame is None:
+        if frame is None and native_schedule is None:
             self.inject_partial_completion_read()
-        else:
+        elif frame is not None:
             self.env["FIXTURE_COMPLETION_FRAME"] = frame
             with (self.root / "scripts/lib/cloudbench-env.sh").open("a") as handle:
                 handle.write(r"""
@@ -595,16 +745,42 @@ printf() {
         result = self.run_completion_proof(
             [BASH, str(self.root / "scripts/run-fleet-infra-stability-proof"),
              "--capability", "--runs", "1", "--width", "1", "--timeout", "300"],
+            native_schedule=native_schedule,
         )
         output = result.stdout + result.stderr
         summary = json.loads(next((self.root / "proofs").glob("*/summary.json")).read_text())
-        if frame is None:
+        if frame is None and native_schedule is None:
             self.assertIn("fixture consumed completion byte: 0", output)
         self.assertEqual(summary["status"], "passed", output)
         self.assertEqual(summary["passed_slices"], 1, output)
         self.assertEqual(summary["cleanup_status"], "verified", output)
         self.assertNotIn("fixture observed oversized completion read", output)
         self.assertEqual(result.returncode, 0 if frame is None else 1, output)
+
+    def native_optional_artifact_completion(self, hold_seconds):
+        broken_artifacts = self.root / "broken-artifacts"
+        broken_artifacts.symlink_to(self.root / "unavailable/artifacts", target_is_directory=True)
+        self.env["FLEET_INFRA_PROOF_ARTIFACT_DIR"] = str(broken_artifacts)
+        schedule = NATIVE_COMPLETION["CompletionReadSchedule"](hold_seconds=hold_seconds)
+        self.run_successful_completion_case(native_schedule=schedule)
+        self.assertTrue(schedule.triggered, "native delimiter scheduling boundary was not exercised")
+        self.assertEqual(next((self.root / "proofs").glob("*/controller.exit")).read_bytes(), b"0\n")
+        self.assertIn("optional artifact directory unavailable", (self.root / "output.log").read_text())
+
+    @unittest.skipUnless(NATIVE_COMPLETION["SUPPORTED"], "native syscall schedule requires Linux x86_64")
+    def test_native_delimiter_control_preserves_optional_artifact_success(self):
+        self.native_optional_artifact_completion(0)
+
+    @unittest.skipUnless(NATIVE_COMPLETION["SUPPORTED"], "native syscall schedule requires Linux x86_64")
+    def test_native_delimiter_timeout_preserves_optional_artifact_success(self):
+        self.native_optional_artifact_completion(.15)
+
+    @unittest.skipUnless(NATIVE_COMPLETION["SUPPORTED"], "native syscall schedule requires Linux x86_64")
+    def test_native_delimiter_timeout_preserves_original_failure(self):
+        schedule = NATIVE_COMPLETION["CompletionReadSchedule"](expected_frame=b"137\n")
+        self.run_case(fleet_exit=137, native_schedule=schedule)
+        self.assertTrue(schedule.triggered, "native delimiter scheduling boundary was not exercised")
+        self.assertEqual(next((self.root / "proofs").glob("*/controller.exit")).read_bytes(), b"137\n")
 
     def test_interrupted_completion_read_preserves_success(self):
         self.run_successful_completion_case()

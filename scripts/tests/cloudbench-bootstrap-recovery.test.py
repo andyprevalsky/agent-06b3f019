@@ -3188,7 +3188,7 @@ second="$(claim_pool_machine)" || exit 95
         self.assertTrue((self.source/'cloudbench-cold-handoffs/outgoing'/MACHINE).exists())
 
 class BillingStopRetainTests(unittest.TestCase):
-    """Real helper/files/locks/timers; only provider transport and PID query mocked."""
+    """Real helper/files/locks/timers; transport/PID mocked, deadline-only fsync isolated."""
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -3516,8 +3516,35 @@ class BillingStopRetainTests(unittest.TestCase):
 
 
     def test_durable_final_pair_and_all_receipt_links_match_actual_bytes(self):
-        result=self.call()['results'][0]
+        synced=[]
+        real_fsync=os.fsync
+        def record_sync(fd):
+            real_fsync(fd)
+            info=os.fstat(fd)
+            synced.append(('sync',info.st_dev,info.st_ino))
+        real_rename=self.ns['rename_noreplace']
+        def record_rename(source,target):
+            info=source.stat()
+            self.assertIn(('sync',info.st_dev,info.st_ino),synced,str(target))
+            real_rename(source,target)
+            synced.append(('rename',info.st_dev,info.st_ino))
+        def require_durable(path):
+            info=path.stat()
+            published=synced.index(('rename',info.st_dev,info.st_ino))
+            parent=path.parent.stat()
+            self.assertIn(('sync',parent.st_dev,parent.st_ino),synced[published+1:],str(path.parent))
+        raw_guest=self.fly.machine_exec_json
+        def durable_guest(*args,**kwargs):
+            for name in ('owner-snapshot.private.json','intent.private.json','native-before.private.json'):
+                require_durable(self.receipts/self.mid/name)
+            return raw_guest(*args,**kwargs)
+        self.fly.machine_exec_json=durable_guest
+        with patch.object(os,'fsync',side_effect=record_sync), patch.dict(
+                self.ns['publish_bytes'].__globals__,rename_noreplace=record_rename):
+            result=self.call()['results'][0]
         folder=self.receipts/self.mid
+        for path in folder.iterdir():
+            require_durable(path)
         saved=json.loads((folder/'result.private.json').read_bytes())
         self.assertEqual(saved,result)
         for filename,key in [('native-final.private.json','native_final_sha256'),
@@ -3660,7 +3687,10 @@ class BillingStopRetainTests(unittest.TestCase):
         signal.setitimer(signal.ITIMER_REAL,1.5)
         started=time.monotonic()
         try:
-            with patch.dict(self.ns['billing_stop_retained_owned'].__globals__,publish_bytes=delayed_publish):
+            # Real writes, renames, locks and alarms exercise deadline accounting.
+            # Disk flush latency has its own real-sync ordering test above; it
+            # must not consume the subsecond dispatch margin in this fixture.
+            with patch.object(os,'fsync',return_value=None), patch.dict(self.ns['billing_stop_retained_owned'].__globals__,publish_bytes=delayed_publish):
                 result=self.call()
             elapsed=time.monotonic()-started
         finally:

@@ -1702,7 +1702,13 @@ async def spawn_agent(workflow_instance, tool_call: Dict, tool_call_id: str):
             # Track usage from events
             if isinstance(event, ToolEvent) and event.data and event.data.get("usage"):
                 await workflow_instance._track_usage(
-                    event.data["usage"], tool_name="spawn_agent", call_site="explore_agent"
+                    event.data["usage"], tool_name="spawn_agent", call_site="explore_agent",
+                    browser_completed=(
+                        agent_type == "browser"
+                        and event.status == MessageStatus.FINISHED
+                        and (event.metadata or {}).get("action_type") == "task_complete"
+                        and (event.metadata or {}).get("success") is True
+                    ),
                 )
     except GenerationHandoffRequested as exc:
         # A parked tool keeps its chip open for the next generation to finish.

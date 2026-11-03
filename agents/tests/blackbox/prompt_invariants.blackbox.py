@@ -564,6 +564,17 @@ def test_root_agent_routes_video_requests_to_a_code_agent():
         planner = get_planner_tools_description(rose_desktop=rose_desktop)
         assert planner.count(rule) == 1, f"planner (rose_desktop={rose_desktop}) states the video rule once"
 
+    # Prod 2026-10-28 (root 74c5b166): with the rule only on the spawn_agent code line,
+    # an un-hinted "make a video" goal went to browser agents on Replicate. The root
+    # system prompt's tool section must route video to a code agent in both phases.
+    from utils.prompts import build_system_prompt
+
+    root_rule = 'Video: to make or edit a video, use spawn_agent(type="code").'
+    for phase in ("PLAN", "EXECUTE"):
+        prompt = build_system_prompt(phase, [])
+        assert prompt.count(root_rule) == 1, f"root {phase} prompt states the video routing rule once"
+        assert "do not use a browser on third-party video sites" in prompt
+
 
 def test_planner_spawn_aliases_documented_in_prompt():
     """Spawn planner aliases are documented by the planner prompt, not prompt files."""

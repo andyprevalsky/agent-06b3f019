@@ -291,6 +291,16 @@ def guest_inventory_includes_optional_wmh_log():
             raise AssertionError("a linked WMH log was admitted as runtime evidence")
 
 
+def _rca_capture(name, value):
+    try:
+        directory = os.environ.get("CPU_RCA_DIR")
+        if directory:
+            Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
+            Path(directory, name).write_text(json.dumps(value()))
+    except Exception:
+        pass  # Diagnostics must not change the fixture outcome or cleanup.
+
+
 def guest_diagnostics_sampler_and_inventory():
     """The bounded sampler writes CPU, pool and pg_stat_activity samples that the
     guest inventory seals as optional runtime evidence."""
@@ -350,10 +360,35 @@ def guest_diagnostics_sampler_and_inventory():
             "user": 30.0, "system": 25.0, "iowait": 5.0, "steal": 20.0,
         }, sampler["cpu_mode_pct"](before, after)
         assert sampler["cpu_mode_pct"](before, before) is None
+        # Exercise the real /proc parser and interval arithmetic across comm
+        # renames and PID reuse without relying on the host scheduler.
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        def process_sample(comm, used, born):
+            fields = ["0"] * 20
+            fields[11], fields[19] = str(used), str(born)
+            stat = "123 (" + comm + ") " + " ".join(fields)
+            globals_ = sampler["process_ticks"].__globals__
+            with patch.dict(globals_, {
+                "os": SimpleNamespace(scandir=lambda _: [SimpleNamespace(name="123", path="unused")]),
+                "Path": lambda *args: SimpleNamespace(read_text=lambda: stat),
+            }):
+                return sampler["process_ticks"]()
+
+        renamed = sampler["top_processes"](
+            process_sample("worker-old", 10000, 77), process_sample("worker-new", 10001, 77), 1.0
+        )
+        assert renamed == [{"pid": 123, "comm": "worker-new", "cpu_pct": round(100 / sampler["CLOCK_TICKS"], 1)}]
+        assert sampler["top_processes"](
+            process_sample("worker", 10000, 77), process_sample("worker", 20000, 88), 1.0
+        ) == []
+        assert sampler["top_processes"]({}, process_sample("worker", 20000, 88), 1.0) == []
+
         ticks = sampler["CLOCK_TICKS"]
         assert sampler["top_processes"](
-            {10: ("python", 100), 12: ("old", 100)},
-            {10: ("python", 100 + ticks), 11: ("kworker", 100000), 12: ("new", 100000)},
+            {10: ("python", 100, 1), 12: ("old", 100, 2)},
+            {10: ("python", 100 + ticks, 1), 11: ("kworker", 100000, 3), 12: ("new", 100000, 4)},
             1.0,
         ) == [{"pid": 10, "comm": "python", "cpu_pct": 100.0}]
         for sample in samples:
@@ -366,6 +401,12 @@ def guest_diagnostics_sampler_and_inventory():
         burner = subprocess.Popen(
             [sys.executable, "-c", "import sys\nwhile True: pass", "--password=secret-arg"],
         )
+        prior_cpu_rca_pid = os.environ.get("CPU_RCA_BURNER_PID")
+        prior_cpu_rca_dir = os.environ.get("CPU_RCA_DIR")
+        if prior_cpu_rca_dir:
+            os.environ["CPU_RCA_DIR"] = str(Path(prior_cpu_rca_dir, f"burner-{burner.pid}"))
+            os.environ["CPU_RCA_BURNER_PID"] = str(burner.pid)
+            _rca_capture("burner-start.json", lambda: {"pid": burner.pid, "wall": time.time(), "monotonic": time.monotonic(), "stat": Path(f"/proc/{burner.pid}/stat").read_text()})
         try:
             attributed = Path(directory) / "attributed.jsonl"
             result = subprocess.run(
@@ -375,8 +416,21 @@ def guest_diagnostics_sampler_and_inventory():
                 capture_output=True, text=True, timeout=30, check=False,
             )
         finally:
-            burner.kill()
-            burner.wait()
+            _rca_capture("burner-final.json", lambda: {"pid": burner.pid, "wall": time.time(), "monotonic": time.monotonic(), "stat": Path(f"/proc/{burner.pid}/stat").read_text()})
+            _rca_capture("attributed.json", lambda: [json.loads(line) for line in attributed.read_text().splitlines()])
+            try:
+                burner.kill()
+                burner.wait()
+            finally:
+                _rca_capture("burner-joined.json", lambda: {"pid": burner.pid, "returncode": burner.returncode, "monotonic": time.monotonic()})
+                if prior_cpu_rca_pid is None:
+                    os.environ.pop("CPU_RCA_BURNER_PID", None)
+                else:
+                    os.environ["CPU_RCA_BURNER_PID"] = prior_cpu_rca_pid
+                if prior_cpu_rca_dir is None:
+                    os.environ.pop("CPU_RCA_DIR", None)
+                else:
+                    os.environ["CPU_RCA_DIR"] = prior_cpu_rca_dir
         assert result.returncode == 0, result.stderr
         samples = [json.loads(line) for line in attributed.read_text().splitlines()]
         assert len(samples) == 2, samples

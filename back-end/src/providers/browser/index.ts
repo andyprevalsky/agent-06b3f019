@@ -414,6 +414,11 @@ export class ProxyRotationUnsupportedError extends Error {
 }
 
 export interface BrowserProxyRotationResult extends BrowserProviderResumeSession {
+  ipRotation?: {
+    rotated: boolean;
+    freshAllocation: boolean;
+    region: string | null;
+  };
   previousProvider: BrowserProviderName;
   recoveryAction: RotationRecoveryAction;
   proxyType: KernelProxyType;

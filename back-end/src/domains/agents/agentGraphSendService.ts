@@ -1,3 +1,5 @@
+import { formatInboundAgentMessage, type GraphMessageKind } from './agentGraphMessageFormat';
+export { formatInboundAgentMessage, type GraphMessageKind } from './agentGraphMessageFormat';
 /**
  * Agent graph send: one A2A message from a Rose agent or a code agent to any
  * agent / code agent of the same tree (scope rules in agentGraphService).
@@ -31,8 +33,6 @@ import {
 } from './agentGraphService';
 
 const log = createLogger('AgentGraph');
-
-export type GraphMessageKind = 'message' | 'question';
 
 export interface SendInput {
   to: string;
@@ -86,36 +86,15 @@ function senderMetadata(caller: GraphCaller): Record<string, unknown> {
     : { id: caller.self.id, kind: 'agent' };
 }
 
-/**
- * LLM-visible framing of an inbound agent message (prompt-scoped text): who
- * sent it and how to answer from the recipient's own tool surface.
- */
-export function formatInboundAgentMessage(args: {
-  senderLabel: string;
-  senderId: string;
-  recipientKind: 'agent' | 'code';
-  kind: GraphMessageKind;
-  text: string;
-}): string {
-  const what = args.kind === 'question' ? 'Question' : 'Message';
-  const reply =
-    args.recipientKind === 'code'
-      ? `Reply with: rose-agents send ${args.senderId} "<message>"`
-      : args.kind === 'question'
-        ? 'Answer with send_message_to_agent; if you cannot, ask your parent the same way (agent_id "parent")'
-        : 'Reply with send_message_to_agent if a reply is needed';
-  return `[${what} from ${args.senderLabel}, agent_id ${args.senderId}. ${reply}]\n\n${args.text}`;
-}
-
 /** ws-server turn ids are bounded; derive a stable short id from the key. */
 function codeTurnId(key: string): string {
   return `a2a-${createHash('sha256').update(key).digest('hex').slice(0, 40)}`;
 }
 
-async function resolveTarget(caller: GraphCaller, to: string): Promise<Target> {
+async function resolveTarget(caller: GraphCaller, to: string, account: boolean): Promise<Target> {
   const agent = await graphRepo.findGraphAgent(to);
   if (agent !== null) {
-    if (agent.userId !== caller.userId || !(await inCallerTree(caller, agent.id))) {
+    if (agent.userId !== caller.userId || (!account && !(await inCallerTree(caller, agent.id)))) {
       throw new AgentGraphError(404, NOT_FOUND);
     }
     return {
@@ -126,7 +105,12 @@ async function resolveTarget(caller: GraphCaller, to: string): Promise<Target> {
     };
   }
   const session = await graphRepo.findGraphCodeSession(to);
-  if (session !== null && (await inCallerTree(caller, session.agentId))) {
+  const sessionOwner = session === null ? null : await graphRepo.findGraphAgent(session.agentId);
+  if (
+    session !== null &&
+    sessionOwner?.userId === caller.userId &&
+    (account || (await inCallerTree(caller, session.agentId)))
+  ) {
     const chip = await graphRepo.findCodeSessionChip(session.agentId, session.id);
     return {
       kind: 'code',
@@ -293,11 +277,14 @@ async function deliverToCodeAgent(args: {
 export async function sendGraphMessage(
   caller: GraphCaller,
   input: SendInput,
-  kind: GraphMessageKind = 'message'
+  kind: GraphMessageKind = 'message',
+  account = false
 ): Promise<SendResult> {
+  if (account && caller.accountAccess !== true)
+    throw new AgentGraphError(403, 'This session has no account-agent access');
   const to = await resolveAlias(caller, input.to);
   if (to === caller.self.id) throw new AgentGraphError(400, 'Cannot message yourself');
-  const target = await resolveTarget(caller, to);
+  const target = await resolveTarget(caller, to, account);
   // Keyed by sender so two agents can never collide on a client-chosen id.
   const key = `a2a:${caller.self.id}:${input.message_id}`;
   const fromLabel = selfLabel(caller);
@@ -314,6 +301,7 @@ export async function sendGraphMessage(
     senderLabel: fromLabel,
     senderId: caller.self.id,
     recipientKind: target.kind,
+    account,
     kind,
     text: input.text,
   });

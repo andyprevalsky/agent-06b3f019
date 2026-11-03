@@ -52,12 +52,14 @@ function optionalAgentCreateFields(params: {
   originDeviceId?: string;
   projectId?: string | null;
   folderId?: string | null;
+  title?: string;
   taskPath?: string | null;
 }): Partial<Prisma.AgentUncheckedCreateInput> {
   return {
     ...(params.folderId !== undefined && params.folderId !== null
       ? { folderId: params.folderId }
       : {}),
+    ...(params.title !== undefined ? { title: params.title } : {}),
     ...(params.projectId !== undefined && params.projectId !== null
       ? { projectId: params.projectId }
       : {}),
@@ -151,6 +153,8 @@ export interface CreateAgentParams {
   originDeviceId?: string;
   projectId?: string | null;
   folderId?: string | null;
+  title?: string;
+  graphSpawnHash?: string;
   taskPath?: string | null;
 }
 
@@ -190,7 +194,7 @@ export async function createAgentTransaction(params: CreateAgentParams) {
         proxyCountry: params.proxyCountry,
         proxyState: params.proxyState,
         proxyCity: params.proxyCity,
-        temporalWorkflowStartPending: tracksDescendantStart,
+        temporalWorkflowStartPending: tracksDescendantStart || params.graphSpawnHash !== undefined,
         ...optionalAgentCreateFields(params),
       },
     });
@@ -210,6 +214,9 @@ export async function createAgentTransaction(params: CreateAgentParams) {
         text: params.goal,
         role: 'USER',
         timestamp: new Date(),
+        ...(params.graphSpawnHash === undefined
+          ? {}
+          : { metadata: { graph_spawn_hash: params.graphSpawnHash } }),
       },
     });
 

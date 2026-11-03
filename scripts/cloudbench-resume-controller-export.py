@@ -5,6 +5,7 @@ import argparse
 import base64
 import fcntl
 import gzip
+import hashlib
 import json
 import math
 import os
@@ -199,8 +200,28 @@ def obj(path):
 
 
 def file_sha(path):
-    scope = runpy.run_path(str(HERE / "cloudbench-controller-export.py"))
-    return scope["sealed_bytes"](Path(path))[0]
+    # Hash payload bytes directly without re-executing mutable collector code.
+    path = Path(path).absolute()
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        resolved = None
+    need(resolved == path, "continuation source path is redirected")
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as source:
+        before = os.fstat(source.fileno())
+        need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1, "unsafe continuation source")
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: source.read(1048576), b""):
+            digest.update(chunk)
+        after = os.fstat(source.fileno())
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    need(
+        identity(before) == identity(after) == identity(path.lstat()),
+        "continuation source changed",
+    )
+    return digest.hexdigest()
 
 
 def relay_intent_path(original, pins):
@@ -1124,32 +1145,36 @@ def remote(fly, value, journal, action, *, allow_pending=False):
     return result
 
 
-def read_source(path):
-    """Read a checked-in source file, which keeps its normal checkout mode.
-
-    The private-input reader (owner-only mode, single link) is for private
-    receipts; a collector checked out under umask 022 is 0644 and is instead
-    bound by the physical path and the launch record's collector SHA-256.
-    Group- or world-writable files are refused: another writer could swap the
-    bytes between the hash check and use. Callers execute the returned bytes,
-    never the path.
-    """
+def read_collector_source(path):
+    # Pinned code may be readable by others; private records still use read().
     path = Path(path).absolute()
     need(path.resolve(strict=True) == path, "physical collector source required")
-    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as handle:
-        info = os.fstat(handle.fileno())
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+        before = os.fstat(stream.fileno())
         need(
-            stat.S_ISREG(info.st_mode)
-            and info.st_uid == os.geteuid()
-            and not info.st_mode & 0o022
-            and info.st_size < 16 * 1024 * 1024,
+            stat.S_ISREG(before.st_mode) and before.st_uid == os.geteuid()
+            and before.st_nlink == 1 and not before.st_mode & 0o022
+            and 0 < before.st_size < 16 * 1024 * 1024,
             "regular current-owner collector source required",
         )
-        return handle.read(info.st_size + 1)
+        def identity(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink,
+                    info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        raw = stream.read(before.st_size + 1)
+        need(
+            len(raw) == before.st_size and identity(os.fstat(stream.fileno())) == identity(before)
+            and path.resolve(strict=True) == path and identity(path.lstat()) == identity(before),
+            "collector source changed while reading",
+        )
+    return raw
+
+
+# Keep the checked-in-source API with the stronger single-link/stable-read policy.
+read_source = read_collector_source
 
 
 def verify_stage(value, stage):
-    raw = read_source(value["collector_path"])
+    raw = read_collector_source(value["collector_path"])
     namespace = {
         "__name__": "original_export_verify",
         "__file__": value["collector_path"],
@@ -1160,9 +1185,9 @@ def verify_stage(value, stage):
         sha(raw) == value["record"]["collector_sha256"],
         "original verify collector differs",
     )
-    exec(compile(raw, value["collector_path"], "exec"), namespace)  # the hashed bytes, never a re-read
+    exec(compile(raw, value["collector_path"], "exec"), namespace)
     need(
-        read_source(value["collector_path"]) == raw,
+        read_collector_source(value["collector_path"]) == raw,
         "collector changed during verification setup",
     )
     expected = {name: file_sha(stage / name) for name in ("launch.json", "manifest.json", "originals.tar.gz")}
