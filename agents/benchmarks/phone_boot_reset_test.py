@@ -158,3 +158,26 @@ def test_prepare_observes_uncertain_reset_instead_of_aborting_or_resubmitting(tm
                                      sleep=sleep, allow_google_exception=True))
     assert data['phase'] == 'ready'
     assert calls.count('reset') == 1
+
+
+def test_prepare_waits_fifteen_minutes_without_resubmitting_reset(tmp_path, monkeypatch):
+    clock = iter([0, 600, 899, 900])
+    from types import SimpleNamespace
+    monkeypatch.setattr(reset, 'time', SimpleNamespace(
+        monotonic=lambda: next(clock), time=reset.time.time))
+    calls, sleeps = [], []
+
+    async def provider(action, device):
+        calls.append(action)
+        if action == 'reset':
+            return {'accepted': True}
+        return {'state': 'available' if len(calls) == 1 else 'resetting'}
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+
+    with pytest.raises(reset.ResetBlocked, match='Reset completion unconfirmed'):
+        asyncio.run(reset.prepare(tmp_path / 'reset.json', 'device', 'owner',
+                                  'device', 'run', call=provider, sleep=sleep))
+    assert sleeps == [5, 5]
+    assert calls.count('reset') == 1

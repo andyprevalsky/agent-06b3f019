@@ -168,7 +168,7 @@ async def prepare(path, device, owner, confirmation, run_id, *, call=provider,
         data = load(path)
         if data['deviceId'] != device or data['userId'] != owner or data['claimedBy'] not in (None, run_id):
             raise ResetBlocked('Reset journal belongs to another owner/device/run')
-        deadline = time.monotonic() + 600
+        deadline = time.monotonic() + 900
         while data['availableAt'] is None:
             data = await observe(path, call=call)
             if data['availableAt'] is not None:
