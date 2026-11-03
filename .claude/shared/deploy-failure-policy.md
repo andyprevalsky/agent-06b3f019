@@ -13,6 +13,17 @@ another contributor's intended feature from the release.
 
 ## Attribution and ownership
 
+**Assigned repairs stay owned regardless of attribution.** If the task or
+`/goal` is to fix a specific issue or failed test, that failure remains the
+agent's responsibility even when `/RCA` returns `Gate: NOT_INTRODUCED`.
+The gate describes whether the compared changes caused the failure, not
+whether the assigned repair is optional or complete. Fix the assigned issue,
+prove its original acceptance test passes and finish the deploy/scorecard
+required by the assignment. Do not waive or re-delegate that failure, qualify
+it as pending post-merge delegation, or report the goal complete because it
+predates the repair. The NOT INTRODUCED delegation path below applies only
+to additional failures outside the assigned repair.
+
 Diagnose every test/gate failure with `/RCA` before deciding ownership or an
 exception. Use its evidence-backed `Gate: INTRODUCED` or
 `Gate: NOT_INTRODUCED` response; do not classify independently of that diagnosis.
@@ -28,8 +39,9 @@ to retroactively justify the delegation.
 - **INTRODUCED:** evidence links the failure to this deploying agent's changes,
   including its repairs or integration work. The deploy owner owns it; it
   blocks deployment and cannot receive a delegation waiver.
-- **NOT INTRODUCED:** evidence establishes that the failure was not introduced
-  by those changes. Read relevant existing repair agents before editing a fix.
+- **NOT INTRODUCED:** for an additional failure outside the assigned repair,
+  evidence establishes that the failure was not introduced by those changes.
+  Read relevant existing repair agents before editing a fix.
   If uncertain about a match, exchange distinguishing evidence with the owner.
   Before merge, retain the failed-test handoff packet in the existing deploy
   report and continue toward merge with that exact failure qualified as pending
@@ -55,7 +67,13 @@ ownership leases, acknowledgement protocol or mandatory status labels.
 ## Post-merge autonomous repair goal
 
 Create repair delegates only after the originating PR is confirmed merged.
-Use a new devbox from current `origin/main`, and verify that it contains the
+The repair agent, its active `/goal` and its deployment coordinator MUST run
+on a different devbox from the originating deploy, automatically filed in
+that project's **Bugs** folder. Use `--target new-devbox`, never
+`--target current-devbox` or another thread on the originating box. A local
+coordinator that forwards work to a remote worker does not satisfy this rule:
+the independent repair must continue when the originating box is closed.
+Use current `origin/main` on the new devbox, and verify that it contains the
 originating merge before beginning the repair. Never fork the deploying
 agent's pre-merge branch or uncommitted workspace. Existing matched repair
 owners must also bring their work onto current main containing that merge.
@@ -78,9 +96,14 @@ Exact error: <verbatim native test failure>
 Failure evidence: <accessible original log/artifacts>
 Failed source: <revision that produced the failure>
 Originating merge: <confirmed main merge revision>
+Originating devbox: <deploy owner's devbox ID; this repair must run elsewhere>
 
 Read CLAUDE.md and follow /RCA. Work autonomously from current main;
-do not ask questions or depend on human replies. Resolve implementation
+before repair work, verify this is a different devbox and its project-folder
+membership is Bugs using the boxes-devbox-folders skill. Keep this /goal and
+all deployment coordination here; never depend on the originating box staying
+open. Retain every needed artifact here or in accessible durable storage.
+Do not ask questions or depend on human replies. Resolve implementation
 choices using the existing instructions and evidence. Prove the assigned
 test passes, then carry the fix through /deploy to its completed scorecard.
 An OPEN diagnosis, observability report, draft PR or stopped investigation
@@ -139,8 +162,21 @@ dvb-onbox threads list --scope project --json
 dvb-onbox threads read --scope project --thread <thread-id> --turns 10 --json
 dvb-onbox threads send --thread <thread-id> --prompt-file evidence.md --idempotency-key <discovery-key> --json
 dvb-onbox threads options --agent codex --json
+dvb-onbox devboxes folders list --json
 dvb-onbox threads start --target new-devbox --agent codex --model <verified-parent-model> --reasoning-effort high --speed standard --muted --prompt-file handoff.md --idempotency-key <handoff-key> --json
+dvb-onbox devboxes folders get --devbox <returned-devbox-id> --json
+dvb-onbox devboxes folders move --devbox <returned-devbox-id> --folder <Bugs-folder-id-from-list> --expected-revision <membership.folderRevision-from-get> --idempotency-key <placement-key> --json
+dvb-onbox devboxes folders get --devbox <returned-devbox-id> --json
 ```
+
+Resolve the existing **Bugs** folder from the current project listing; the Rose
+account folder ID below is not a boxes.dev folder ID. Place the newly created
+devbox immediately and verify the final membership. Record its devbox ID and
+folder receipt beside the repair link. If only the child can move its devbox,
+it must use the same list/get/move/get sequence with `--devbox current` before
+repair work. Re-read membership after a revision conflict. An unavailable
+placement command is a named handoff blocker, never permission to fall back
+to the originating box or silently leave the repair unfiled.
 
 Follow returned pagination cursors with `--cursor`; read the actual work before
 matching. Use the deploy owner's harness/model and this policy's explicit high
@@ -184,6 +220,43 @@ authorize it. This `/deploy` keeps `rose-agent-spawn: false` until migration.
 The CLI requires `--instruction-file` pointing at that instruction's explicit
 `rose-agent-spawn: true` declaration. Tool discovery, general autonomy and an
 agent's own desire to delegate do not authorize independent spawning.
+
+## Scorecard freshness: latest merge from this workspace
+
+Every scorecard publication or refresh describes the most recent source or
+instruction change merged to `main` **from this workspace**, including `/push`,
+small rule changes and reporting-only updates. Capture the exact merge SHA
+when this workspace merges; fetch `origin/main` and verify that it contains
+that SHA before publishing. Do not substitute another workspace's newer merge
+or an automatic factory-history/data-only commit.
+
+Maintain one ignored workspace pointer at
+`.context/deploy-scorecard-latest.json` under the canonical source workspace
+(`ROSE_DEPLOY_SOURCE_WORKSPACE` when set, otherwise the Git root), so prepared
+deploy checkouts and later pushes share one pointer: merge SHA, change scope, delivery mode
+(`/deploy` or `/push`), matching run/report and timing references, and latest
+published card URL. Update its merge binding immediately after this workspace
+merges. After publishing, update the URL and matching completion receipt
+together. Keep older run receipts and cards as history.
+
+When the merge binding changes, mark the previous card historical until the
+replacement is published; never advertise its old URL as the new merge's card.
+Before publishing, require the card's merge binding to equal that workspace
+pointer's latest merge. If this workspace has merged another change, rebuild
+the title, deployed summary, elapsed time, per-stage bars and current outcomes
+from the newer change's own receipts. Never present an older completed release
+as the current update or copy its elapsed time, gates or exceptions into an
+unrelated newer update. Preserve unresolved obligations with their original
+scope and evidence. An active pre-merge attempt stays explicitly in progress;
+it does not replace a completed card with a false SHIPPED claim.
+
+Keep the actual clock for the matching update; rendering does not restart it.
+Use recorded intervals, retain retries and show parallel overlap without
+adding concurrent durations. Missing timing stays unrecorded. Distinguish
+rules/tooling merged to main and HTML publication from a production-service
+rollout; do not imply that a full deploy ran for a reporting-only change.
+Store SHA and provenance internally without restoring hash noise to the card.
+Human-approval and prompt-edit safeguards are unchanged.
 
 ## Deploy report and scorecard
 

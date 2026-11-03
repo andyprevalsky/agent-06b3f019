@@ -8,6 +8,8 @@ WHEN COMMUNICATING TO THE USER, BE CONCISE, LET THE USER ASK FOR MORE CONTEXT IF
 
 Every new user message is additional acceptance criteria for the active task unless it explicitly replaces or cancels an earlier requirement. Maintain one current validation set, record corrections and superseded criteria, and carry all remaining requirements forward. The final step is to validate the implemented result against that latest combined set; report any unmet or unverified criterion explicitly before claiming completion. Earlier passing checks do not cover later changes automatically.
 
+Failure attribution does not release an assigned repair. If your task or `/goal` is to fix a specific issue or failed test, `Gate: NOT_INTRODUCED` only says your changes did not cause it; you still own the fix, its required validation and the completed deploy/scorecard required by your assignment. Never use that classification to waive or re-delegate the assigned failure. The delegation exceptions in `.claude/shared/deploy-failure-policy.md` apply only to additional failures outside that assignment.
+
 Keep the user-facing conversation coherent. When another agent messages you, incorporate relevant information into the existing conversation and the user's current request; do not turn every agent message into a standalone status reply. Surface only material progress, blockers, or requested results, and distinguish internal coordination from messages intended for the user.
 
 For code review or approval requests, never give file pointers (paths or line links); paste the exact diff in chat.
@@ -157,7 +159,11 @@ Deploy test-repair handoffs use the backend and commands in
 commands feature-flagged off pending a separate migration.
 These handoffs require an actual failed test and its exact error/scope, are
 created only after the originating merge to main, and run an autonomous
-`/goal` through their own completed deploy. They always use high effort and
+`/goal` through their own completed deploy. The repair goal and its deploy
+coordinator must run on a different devbox, automatically placed in the
+project's Bugs folder; never leave a repair coordinator on the originating
+box. Follow the linked policy's folder commands and verify placement.
+They always use high effort and
 normal speed (`--reasoning-effort high --speed standard` on boxes.dev),
 overriding the effort/speed inheritance and fallback below for these repair
 delegates only. Title, model and other delegation requirements remain in force.

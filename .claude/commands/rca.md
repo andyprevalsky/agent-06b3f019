@@ -16,11 +16,17 @@ evidence identifying the compared revisions and the failure boundary:
 - `Gate: INTRODUCED` — the change introduced the failure.
 - `Gate: NOT_INTRODUCED` — evidence establishes the change did not introduce it.
 
+These labels describe causation, not completion or permission to drop the task.
+If fixing this issue or failed test is your assignment, you still own its fix,
+original acceptance-test pass and required completed deploy/scorecard under
+either gate. Do not waive or re-delegate the assigned failure as NOT_INTRODUCED.
+
 If the evidence cannot establish attribution, report the missing evidence and
 leave attribution unresolved; do not invent a gate. An unrelated filename or
 missing baseline does not establish `NOT_INTRODUCED`.
 
-For a test failure encountered by `/deploy`, return this diagnosis to the deploy
+For an additional failure outside the assigned repair encountered by `/deploy`,
+return this diagnosis to the deploy
 owner before starting a separate repair or deployment. This attribution phase
 takes precedence over the delegation and autonomous fix-and-deploy defaults
 below. The deploy owner applies `.claude/shared/deploy-failure-policy.md` to the
@@ -28,7 +34,8 @@ gate: own introduced repairs, hand off qualifying non-introduced repairs, and
 report evidenced external-provider outages or exhausted credits without any
 handoff. Unresolved attribution remains blocking.
 
-This gate determines ownership; it does not claim a completed repair or waive
+This gate informs routing of additional failures; it does not release an
+assigned repair, claim a completed repair or waive
 the causal proof required for a root-cause or fix claim. An independent repair
 agent receiving the handoff follows the full RCA workflow below.
 
@@ -76,7 +83,10 @@ your own completed `/deploy` scorecard. Work autonomously without questions
 or expected human replies. An OPEN diagnosis, observability gap or draft PR
 does not complete this repair goal. Do not waive or re-delegate the assigned
 test. The originating deploy does not monitor or wait for your result.
-Work from current main containing its merge, in your own devbox and branch;
+Work from current main containing its merge, in a different devbox from the
+originating deploy, automatically placed in the project's Bugs folder.
+Verify that placement before repair work. Keep the active goal and deployment
+coordinator there so the originating box can close. Use your own branch;
 coordinate concrete production overlaps with existing release work while
 carrying your deployment to completion. New occurrences should join existing
 work through evidence and discussion. The policy's external-provider
