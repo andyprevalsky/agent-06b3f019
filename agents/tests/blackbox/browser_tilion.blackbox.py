@@ -317,6 +317,36 @@ async def test_tilion_cdp_url_detection_and_redaction():
 
 
 
+async def test_tilion_live_view_native_session_identity():
+    from domains.spawn_browser_agent_v3.cdp_urls import tilion_live_view_session_id
+
+    session = "sess_" + "a1" * 16
+    suffix = f"/v1/session/{session}/live-view"
+    with patch.dict(os.environ, {"TILION_BASE_URL": "https://custom-gateway.example:8443"}):
+        for host in ("back.tilion.dev", "east.back.tilion.dev", "OREGON.BACK.TILION.DEV",
+                     "custom-gateway.example:8443", "sub.custom-gateway.example:8443"):
+            for query in ("", "?token=REDACTED", "?token=rotated&extra=1"):
+                assert tilion_live_view_session_id("https://" + host + suffix + query) == session
+        for url in ("https://evilback.tilion.dev" + suffix,
+                    "https://back.tilion.dev.evil.example" + suffix,
+                    "https://back.tilion.dev@evil.example" + suffix,
+                    "https://user@back.tilion.dev" + suffix,
+                    "https://custom-gateway.example.evil.example:8443" + suffix,
+                    "http://back.tilion.dev" + suffix,
+                    "wss://back.tilion.dev" + suffix,
+                    "https://back.tilion.dev:8443" + suffix,
+                    "https://back.tilion.dev:invalid" + suffix,
+                    "https://[invalid" + suffix,
+                    "https://back.tilion.dev" + suffix + "/",
+                    "https://back.tilion.dev" + suffix + "#fragment",
+                    "https://back.tilion.dev" + suffix.replace("live-view", "cdp"),
+                    "https://back.tilion.dev" + suffix.replace(session, "sess_short"),
+                    "https://back.tilion.dev" + suffix.replace("sess_", "%73ess_"),
+                    "https://back.tilion.dev" + suffix.replace("sess_", "sess_%2f"),
+                    "https://back.tilion.dev" + suffix + "\n"):
+            assert tilion_live_view_session_id(url) is None, url
+
+
 async def test_tilion_regional_worker_attach_uses_one_upstream_socket():
     """The canonical API returns regional CDP hosts; both worker clients still share one socket."""
     import browser_tools.cdp_multiplexer as mux_module
@@ -3611,6 +3641,7 @@ async def run_all_tests():
         ("tilion_worker_attach_uses_one_upstream_socket", test_tilion_worker_attach_uses_one_upstream_socket),
         ("tilion_regional_worker_attach_uses_one_upstream_socket", test_tilion_regional_worker_attach_uses_one_upstream_socket),
         ("tilion_regional_authorities_and_url_privacy", test_tilion_regional_authorities_and_url_privacy),
+        ("tilion_live_view_native_session_identity", test_tilion_live_view_native_session_identity),
         ("multiplexer_releases_and_reattaches", test_multiplexer_releases_upstream_when_clients_leave_and_reattaches),
         ("multiplexer_propagates_provider_close_code", test_multiplexer_propagates_provider_close_code),
         ("tilion_cdp_url_detection_and_redaction", test_tilion_cdp_url_detection_and_redaction),

@@ -1001,7 +1001,108 @@ def check_fenced_recording_episode_provenance():
             agent, complete + prefix + [b_start, b_terminal, b_saved, b_fenced]) == []
 
 
+def check_tilion_recording_episode_provenance():
+    from copy import deepcopy
+
+    sessions = ["sess_" + digit * 32 for digit in ("a", "b")]
+
+    def episode(session, call):
+        identity = dict(toolName="spawn_browser_agent", task_id="tilion-task",
+                        workflowGeneration="tilion-generation",
+                        browser_session_metadata={"provider": "tilion"},
+                        browser_url=f"https://back.tilion.dev/v1/session/{session}/live-view?token=REDACTED")
+        start = msg(**identity, action_type="recording", toolStatus="IN_PROGRESS",
+                    toolCallId=call, recording_path="/same/path/index.html")
+        saved = msg(**identity, action_type="recording", toolStatus="FINISHED",
+                    recording_view_url=f"https://ok/{call}")
+        terminal = msg(**identity, action_type="task_complete", toolStatus="FINISHED")
+        fenced = msg(**identity, action_type="recording", toolStatus="FINISHED",
+                     toolCallId=call, recording_path="/same/path/index.html",
+                     error=True, errorCode="DEPLOY_INTERRUPTED", deploymentFenced=True)
+        return start, saved, terminal, fenced
+
+    a, b = episode(sessions[0], "a-start"), episode(sessions[1], "b-start")
+    complete = [*a[:3], *b[:3], a[3], b[3]]
+    original = deepcopy(complete)
+    assert mod.validate_browser_agents_terminated_with_recording(agent, complete) == [], (
+        "Tilion native session URLs must distinguish saved episodes sharing a local path")
+    assert complete == original, "validation must preserve every raw message"
+
+    # URL tokens rotate; an explicit native handle and the URL name the same session.
+    mixed = deepcopy(complete)
+    for index, row in enumerate(mixed):
+        meta = row["metadata"]
+        session = sessions[0] if index in (0, 1, 2, 6) else sessions[1]
+        meta["browser_url"] = meta["browser_url"].replace("REDACTED", f"rotated-{index}")
+        if index % 2:
+            meta["browser_session_metadata"]["session_id"] = session
+            meta.pop("browser_url")
+    assert mod.validate_browser_agents_terminated_with_recording(agent, mixed) == []
+
+    unknown = deepcopy(mixed)
+    for index, row in enumerate(unknown):
+        meta = row["metadata"]
+        meta["browser_session_metadata"] = {
+            "provider": "unknown-provider", "session_id": sessions[0] if index in (0, 1, 2, 6) else sessions[1],
+        }
+        meta.pop("browser_url", None)
+    assert mod.validate_browser_agents_terminated_with_recording(agent, unknown), "unknown explicit provider"
+
+    bad = deepcopy(complete)
+    bad[2]["metadata"].pop("browser_url")
+    bad[2]["metadata"]["provider"] = "kernel"
+    assert mod.validate_browser_agents_terminated_with_recording(agent, bad), "conflicting task-only terminal provider"
+
+    for malformed in ({}, 0, False, ""):
+        for index in (1, 2):
+            bad = deepcopy(complete)
+            bad[index]["metadata"]["session_id"] = malformed
+            assert mod.validate_browser_agents_terminated_with_recording(agent, bad), "malformed explicit identity"
+
+    for field, value in (("task_id", "foreign-task"), ("workflowGeneration", "foreign-generation"),
+                         ("toolCallId", "unrelated-start"), ("recording_path", "/other/path"),
+                         ("deploymentFenced", False), ("errorCode", "OTHER_ERROR"),
+                         ("browser_url", f"https://back.tilion.dev/v1/session/{sessions[1]}/live-view")):
+        bad = deepcopy(complete)
+        bad[6]["metadata"][field] = value
+        assert mod.validate_browser_agents_terminated_with_recording(agent, bad), field
+
+    for transform in ("no-start", "no-close", "missing-first-media", "unreachable-first-media",
+                      "unknown-episode", "conflicting-session", "conflicting-alias", "wrong-provider",
+                      "conflicting-provider"):
+        bad = deepcopy(complete)
+        if transform == "no-start": bad.pop(0)
+        elif transform == "no-close": bad.pop(2)
+        elif transform == "missing-first-media": bad[1]["metadata"].pop("recording_view_url")
+        elif transform == "unreachable-first-media": bad[1]["metadata"]["recording_view_url"] = "https://bad/media"
+        elif transform == "unknown-episode":
+            extra = episode("sess_" + "c" * 32, "unknown-start")[0]
+            bad.append(extra)
+        elif transform == "conflicting-session":
+            bad[1]["metadata"]["browser_session_metadata"]["session_id"] = sessions[1]
+        elif transform == "conflicting-alias":
+            bad[1]["metadata"]["browser_session_metadata"].update(
+                session_id=sessions[0], browser_session_id=sessions[1])
+        elif transform == "conflicting-provider": bad[1]["metadata"]["provider"] = "kernel"
+        else: bad[1]["metadata"]["browser_session_metadata"]["provider"] = "kernel"
+        assert mod.validate_browser_agents_terminated_with_recording(agent, bad), transform
+
+    suffix = f"/v1/session/{sessions[0]}/live-view"
+    for url in ("https://evilback.tilion.dev" + suffix,
+                "https://back.tilion.dev.evil.example" + suffix,
+                "https://back.tilion.dev@evil.example" + suffix,
+                "https://user@back.tilion.dev" + suffix,
+                "http://back.tilion.dev" + suffix,
+                "https://back.tilion.dev:444" + suffix,
+                "https://back.tilion.dev/v1/session/malformed/live-view",
+                "https://back.tilion.dev" + suffix + "/extra"):
+        bad = deepcopy(complete)
+        for index in (0, 1, 2, 6): bad[index]["metadata"]["browser_url"] = url
+        assert mod.validate_browser_agents_terminated_with_recording(agent, bad), url
+
+
 with patch.object(mod, "_probe_recording_view_url", lambda url, timeout=20.0: url.startswith("https://ok/")):
     check_fenced_recording_episode_provenance()
+    check_tilion_recording_episode_provenance()
 print("publish_evidence_links browser validation checks passed")
 PY
