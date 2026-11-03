@@ -15043,7 +15043,7 @@ async def _run_single_task_as_run_user(
         device_id()
         if _interrupt_cleanup_contract() is None:
             raise RuntimeError("Live phone benchmark requires owned --local cleanup retention contract")
-        if _is_simulate_mode() or task.fast_cache != "off":
+        if _is_simulate_mode() or task.demo_cache != "off":
             raise RuntimeError("Live iPhone benchmark forbids simulation/demo cache")
 
     grep_fixture_manifest: Optional[dict] = None
@@ -15294,7 +15294,7 @@ async def _run_single_task_as_run_user(
             preflight_daily(task.name, base_url, _current_benchmark_user_id())
         if task.name in PHONE_BENCH_TASK_NAMES:
             from benchmarks.phone_connectivity import apply_fixture
-            if _is_simulate_mode() or task.fast_cache != "off":
+            if _is_simulate_mode() or task.demo_cache != "off":
                 raise RuntimeError("Live iPhone benchmark forbids simulation/demo cache")
             if task.name in PHONE_DAILY_TASKS:
                 await apply_daily_fixture(task.name, base_url, _current_benchmark_user_id(), API_KEY, _local_victoria_database_url())

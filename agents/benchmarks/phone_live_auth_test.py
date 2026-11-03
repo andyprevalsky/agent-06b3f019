@@ -9,7 +9,7 @@ def test_live_auth_catalog_requires_real_phone_and_authenticated_target():
     task = get_task_by_name('browser-auth-doordash-cloud-iphone')
     assert task is not None
     assert {'auth', 'daily', 'LIVE'} <= set(task.tags)
-    assert task.group == 'daily' and task.fast_cache == 'off'
+    assert task.group == 'daily' and task.demo_cache == 'off'
     assert task.browser_profile_mode == 'fresh'
     assert task.environment['fresh_auth_realms'] == ['doordash.com', 'google.com']
     assert task.enforce_declared_evaluators

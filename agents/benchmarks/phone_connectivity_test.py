@@ -21,7 +21,7 @@ def test_catalog_is_explicit_only():
     from benchmarks.run_benchmark import resolve_tasks
 
     task = get_task_by_name(phone.TASK_NAME)
-    assert task.status == "incomplete" and task.fast_cache == "off"
+    assert task.status == "incomplete" and task.demo_cache == "off"
     assert task.environment["mode"] == "live"
     assert "PHONE_HARNESS_API_KEY" in task.environment["secrets"]
     args = Namespace(task=None, tasks=None, suite="all", prod=False, exclude_task=[])
@@ -698,7 +698,7 @@ def test_critical_attention_catalog_and_explicit_registration():
     from benchmarks.benchmark_tasks import get_task_by_name
     task = get_task_by_name(critical.TASK_NAME)
     assert task.approval_handling == "ignore" and task.expected_attention_kind == "auth_assistance"
-    assert task.timeout_seconds == 300 and task.price_limit_cents == 100 and task.fast_cache == "off"
+    assert task.timeout_seconds == 300 and task.price_limit_cents == 100 and task.demo_cache == "off"
     assert task.status == "incomplete"
     import inspect
 
