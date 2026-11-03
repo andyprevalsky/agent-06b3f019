@@ -48,6 +48,216 @@ class Cycle(unittest.TestCase):
         self.workers.cleanup()
         self.temp.cleanup()
 
+    def local_rebind_fixture(self):
+        import contextlib, io
+        old = copy.deepcopy(self.plan)
+        gate = old['gates'][1]
+        remote = '/prepared/remote-api'
+        env = {'CONDUCTOR_WORKSPACE_NAME': 'remote-api', 'CONDUCTOR_PORT': '4000',
+               'DEPLOY_RUN_ROOT': remote + '/.context/deploy-runs', 'DEPLOY_CYCLE_FRESH': '1'}
+        recipe = {'cases': {check: {'command': ['bash', remote + '/scripts/case.sh', check],
+                   'env': dict(env), 'timeout_seconds': 14400} for check in gate['checks']},
+                  'setup': {'command': ['true'], 'env': dict(env)},
+                  'cleanup': {'command': ['true'], 'env': dict(env)}, 'services': True}
+        gate.update(worker_transport='boxes-thread', worker_host='host-api', worker_thread='thread-api',
+                    coordinator_thread='parent', worker_root=remote, remote_python=remote + '/agents/venv/bin/python',
+                    cwd=str(self.root), env=env, case_protocol=True, result_transport='file',
+                    timeout_seconds=14400, worker_recipe=recipe,
+                    command=[sys.executable, str(self.root / 'scripts/deploy_test_boxes.py'), '--thread',
+                             'thread-api', '--host', 'host-api', '--worker-root', remote, '--python',
+                             remote + '/agents/venv/bin/python', '--coordinator-thread', 'parent',
+                             '--deadline-seconds', '14400'])
+        target = Path(self.workers.name) / 'new-api'
+        subprocess.run(['git', 'clone', '-q', '--local', str(self.root), str(target)], check=True)
+        new = copy.deepcopy(old)
+        new['gates'][1] = c.local_worker_gate(gate, self.root, str(target), 'local-api', '12000')
+        state = c.initialize(old, self.root)
+        state.update(phase='ready', ready=True, carried_passes={'api': {'old': 'native evidence'}},
+                     reconciled_owners={'historical-owner': {'obligation': 'retained'}},
+                     pending_post_merge=[{'packet': 'original immutable post-merge obligation'}])
+        native = dict(gate='api', source=state['source'], cases={'a': 'PASS', 'b': 'PASS'},
+                      status='PASS', complete=True, executed=True, command=gate['command'], native_exit=0)
+        state['attempts'].append({'phase': 'initial', 'results': [native]})
+        original = self.directory / 'original.json'; local = self.directory / 'local.json'
+        c.write(original, old); c.write(local, new); c.write(self.directory / 'cycle.json', state)
+        def call():
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return c.main(['rebind-local', '--plan', str(local), '--input', str(original),
+                               '--state-dir', str(self.directory), '--root', str(self.root)])
+        return old, new, state, target, local, call
+
+    def test_local_rebind_cli_preserves_native_history_and_requires_fresh_full_gate(self):
+        old, new, state, target, local, call = self.local_rebind_fixture()
+        with self.assertRaisesRegex(ValueError, 'execution contract'):
+            c.refresh(copy.deepcopy(state), old, new, self.root)
+        self.assertEqual(0, call())
+        after = c.read(self.directory / 'cycle.json')
+        for key in ('source', 'attempts', 'failures', 'reconciled_owners', 'pending_post_merge', 'skips', 'round'):
+            self.assertEqual(state[key], after[key])
+        self.assertFalse(after['ready']); self.assertEqual('quick', after['phase'])
+        self.assertEqual('initial', after['next_after_quick']); self.assertNotIn('api', after['carried_passes'])
+        self.assertEqual(old, after['worker_rebind_history'][0]['from_plan'])
+        self.assertFalse(after['worker_rebind_history'][0]['credit_granted'])
+        after['phase'] = 'initial'
+        self.assertIn('api', [g['name'] for g in c.records(new, after)])
+        gate = new['gates'][1]
+        self.assertEqual(['a', 'b'], gate['checks'])
+        self.assertEqual(14400, gate['timeout_seconds'])
+        self.assertEqual(str(target / '.context/deploy-runs'), gate['worker_recipe']['cleanup']['env']['DEPLOY_RUN_ROOT'])
+        self.assertEqual('local-api', gate['worker_recipe']['setup']['env']['CONDUCTOR_WORKSPACE_NAME'])
+
+    def test_local_rebind_refuses_workload_collision_and_unprepared_source_atomically(self):
+        old, new, state, target, path, call = self.local_rebind_fixture()
+        changed = []
+        for mutate in (
+                lambda p: p['gates'][1]['checks'].pop(),
+                lambda p: p['gates'][1].update(timeout_seconds=14401),
+                lambda p: p['gates'][1]['worker_recipe']['cases']['a']['command'].append('--waive'),
+                lambda p: p['gates'][1]['worker_recipe']['cleanup'].update(command=['false']),
+                lambda p: p['gates'][1]['env'].update(DEPLOY_CYCLE_FRESH='0'),
+                lambda p: p['gates'][1]['env'].update(CONDUCTOR_PORT='24000'),
+                lambda p: p['gates'].pop(),
+                lambda p: p.update(source={'head': 'wrong', 'digest': 'wrong'})):
+            candidate = copy.deepcopy(new); mutate(candidate); changed.append(candidate)
+        original = (self.directory / 'cycle.json').read_bytes()
+        for candidate in changed:
+            with self.subTest(candidate=candidate['gates'][1]):
+                c.write(path, candidate); self.assertEqual(2, call())
+                self.assertEqual(original, (self.directory / 'cycle.json').read_bytes())
+        c.write(path, new); (target / 'code').write_text('not frozen')
+        self.assertEqual(2, call())
+        self.assertEqual(original, (self.directory / 'cycle.json').read_bytes())
+        (target / 'code').write_text('original')
+        with (target / '.git/info/exclude').open('a') as stream:
+            stream.write('\n.env\n')
+        (target / '.env').write_text('different ignored runtime configuration')
+        self.assertEqual(c.source(self.root), c.source(target))
+        self.assertEqual(2, call())
+        self.assertEqual(original, (self.directory / 'cycle.json').read_bytes())
+
+    def test_local_rebind_refuses_pending_running_owner_and_concurrent_coordinator(self):
+        old, new, state, target, path, call = self.local_rebind_fixture()
+        state_path = self.directory / 'cycle.json'
+        for update in ({'pending': ['unresolved']}, {'live_failures': []}, {'resume_phase': 'initial'}, {'running': True},
+                       {'phase': 'initial'}, {'attempts': [{'phase': 'initial', 'results': [
+                           dict(gate='api', lingering_group=True, cleanup_owner={'request_token': 'old'})]}]}):
+            candidate = {**copy.deepcopy(state), **update}; c.write(state_path, candidate)
+            original = state_path.read_bytes(); self.assertEqual(2, call())
+            self.assertEqual(original, state_path.read_bytes())
+        c.write(state_path, state); original = state_path.read_bytes()
+        with c.exclusive(self.directory):
+            self.assertEqual(2, call())
+        self.assertEqual(original, state_path.read_bytes())
+
+    def test_native_local_host_slot_serializes_once_and_preserves_original_deadlines(self):
+        import time
+        gate = {'command': ['fixture'], 'worker_transport': 'local-isolated', 'case_protocol': True}
+        active = peak = calls = 0
+        guard = threading.Lock()
+        admissions = [{}, {}]
+        def launch(_argv, **kwargs):
+            nonlocal active, peak, calls
+            with guard:
+                active += 1; peak = max(peak, active); calls += 1
+            self.assertGreater(kwargs['timeout'], 0); self.assertLessEqual(kwargs['timeout'], 1)
+            time.sleep(.08)
+            with guard:
+                active -= 1
+            return 0, False, False, False
+        with patch.object(c, 'run_command', side_effect=launch), ThreadPoolExecutor(2) as pool:
+            futures = [pool.submit(c.run_with_local_slot, gate, self.root, a, timeout=1) for a in admissions]
+            self.assertEqual([(0, False, False, False)] * 2, [f.result() for f in futures])
+        self.assertEqual((1, 2), (peak, calls))
+        self.assertTrue(all(a['started'] for a in admissions))
+        lock = self.root / '.context/native-worker-admission.lock'
+        with lock.open('a') as held:
+            c.fcntl.flock(held, c.fcntl.LOCK_EX | c.fcntl.LOCK_NB)
+            with patch.object(c, 'run_command') as launch:
+                admission = {}; start = time.monotonic()
+                self.assertEqual((None, True, False, False),
+                                 c.run_with_local_slot(gate, self.root, admission, timeout=.08))
+                self.assertLess(time.monotonic() - start, .3)
+                self.assertFalse(admission['started']); launch.assert_not_called()
+                c.CANCEL.set(); admission = {}
+                self.assertEqual((None, False, True, False),
+                                 c.run_with_local_slot(gate, self.root, admission, timeout=1))
+                self.assertFalse(admission['started']); launch.assert_not_called()
+                c.CANCEL.clear()
+                card = dict(name='card', checks=['card'], command=['must-not-launch'], case_protocol=True,
+                            category='agentcard-lifecycle', worker_transport='local-isolated', timeout_seconds=.05)
+                result = c.execute(card, self.state, self.directory, self.root)
+                self.assertEqual({'card': 'UNVERIFIED'}, result['cases'])
+                self.assertFalse(result['executed']); self.assertFalse(result['complete'])
+                self.assertTrue(result['timed_out']); self.assertIsNone(result['native_exit'])
+                self.assertFalse(result['lingering_group']); self.assertNotIn('cleanup_owner', result)
+                launch.assert_not_called()
+
+    def test_local_slot_holds_through_native_cleanup_validation_without_cancelling_cloud(self):
+        import time
+        started = self.root / '.context/first-native-started'
+        forbidden = self.root / '.context/queued-native-started'
+        script = ("import json,os,time;from pathlib import Path;"
+                  "r=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text());"
+                  f"Path({str(started)!r}).touch();time.sleep(.15);"
+                  "r.update(cases={c:'PASS' for c in r['checks']},complete=True,cleanup_complete=False,reused=False);"
+                  "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(r))")
+        first = dict(name='card', category='agentcard-lifecycle', worker_transport='local-isolated',
+                     case_protocol=True, checks=['card'], timeout_seconds=2, command=[sys.executable, '-c', script])
+        second = dict(name='queued', category='generic', worker_transport='local-isolated',
+                      case_protocol=True, checks=['queued'], timeout_seconds=2,
+                      command=[sys.executable, '-c', f'from pathlib import Path;Path({str(forbidden)!r}).touch()'])
+        self.state['phase'] = 'initial'; failed = threading.Event()
+        with ThreadPoolExecutor(2) as pool:
+            one = pool.submit(c.execute, first, self.state, self.directory, self.root, local_failure=failed)
+            end = time.monotonic() + 1
+            while not started.exists() and time.monotonic() < end:
+                time.sleep(.005)
+            self.assertTrue(started.exists())
+            two = pool.submit(c.execute, second, self.state, self.directory, self.root, local_failure=failed)
+            a, b = one.result(), two.result()
+        self.assertEqual(0, a['native_exit']); self.assertTrue(a['lingering_group'])
+        self.assertIn('cleanup_owner', a); self.assertTrue(failed.is_set())
+        self.assertEqual({'queued': 'UNVERIFIED'}, b['cases'])
+        self.assertFalse(b['executed']); self.assertFalse(b['complete']); self.assertFalse(forbidden.exists())
+        cloud_script = ("import json,os;from pathlib import Path;"
+                        "r=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text());"
+                        "r.update(cases={c:'PASS' for c in r['checks']},complete=True,cleanup_complete=True,reused=False);"
+                        "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(r))")
+        cloud = dict(name='cloud', native_cloud=True, case_protocol=True, checks=['cloud'], timeout_seconds=2,
+                     worker_transport='benchmark-cloud-cli', command=[sys.executable, '-c', cloud_script])
+        result = c.execute(cloud, self.state, self.directory, self.root, local_failure=failed)
+        self.assertEqual('PASS', result['status']); self.assertTrue(result['executed'])
+        self.assertFalse(result['cancelled']); self.assertFalse(c.CANCEL.is_set())
+
+    def test_lingering_native_supervisor_blocks_queued_local(self):
+        import time
+        started = self.root / '.context/owned-native-started'
+        forbidden = self.root / '.context/owned-queued-started'
+        script = ("import json,os,subprocess,sys,time;from pathlib import Path;"
+                  "r=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text());"
+                  f"Path({str(started)!r}).touch();time.sleep(.1);"
+                  "subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],start_new_session=True);"
+                  "r.update(cases={c:'PASS' for c in r['checks']},complete=True,cleanup_complete=True,reused=False);"
+                  "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(r))")
+        first = dict(name='owned', category='generic', worker_transport='local-isolated',
+                     case_protocol=True, checks=['owned'], timeout_seconds=2, command=[sys.executable, '-c', script])
+        second = dict(first, name='queued', checks=['queued'],
+                      command=[sys.executable, '-c', f'from pathlib import Path;Path({str(forbidden)!r}).touch()'])
+        self.state['phase'] = 'initial'; failed = threading.Event()
+        with ThreadPoolExecutor(2) as pool:
+            one = pool.submit(c.execute, first, self.state, self.directory, self.root, local_failure=failed)
+            end = time.monotonic() + 1
+            while not started.exists() and time.monotonic() < end:
+                time.sleep(.005)
+            self.assertTrue(started.exists())
+            two = pool.submit(c.execute, second, self.state, self.directory, self.root, local_failure=failed)
+            a, b = one.result(), two.result()
+        self.assertEqual(0, a['native_exit']); self.assertTrue(a['lingering_group'])
+        process = c.read(Path(a['log'] + '.process.json'))
+        self.assertTrue(process['orphaned_children']); self.assertTrue(process['quiescent'])
+        self.assertEqual([], process['remaining'])
+        self.assertTrue(failed.is_set()); self.assertFalse(b['executed']); self.assertFalse(forbidden.exists())
+
     def result(self, gate='api', **cases):
         return {'gate': gate, 'status': 'FAIL' if 'FAIL' in cases.values() else 'PASS',
                 'cases': cases, 'complete': True, 'source': self.state['source'],

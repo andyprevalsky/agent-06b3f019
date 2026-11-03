@@ -23,6 +23,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 
@@ -312,7 +313,63 @@ def records(plan: dict, state: dict) -> list[dict]:
     raise ValueError(f"phase {phase} is not executable")
 
 
-def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
+def run_with_local_slot(gate: dict, root: Path, admission: dict, *, operation=None, local_failure=None, **kwargs):
+    """One prepared local worker at a time; queueing consumes its existing deadline."""
+    if gate.get('worker_transport') != 'local-isolated' or not gate.get('case_protocol'):
+        return run_command(gate['command'], **kwargs)
+    timeout = kwargs.pop('timeout')
+    if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
+        raise OSError('native local admission requires the existing finite gate deadline')
+    local_failure = local_failure if local_failure is not None else threading.Event()
+    queued = time.monotonic()
+    deadline = None if timeout is None else queued + timeout
+    lock_path = root / '.context/native-worker-admission.lock'
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    admission.update(lock=str(lock_path), original_budget_seconds=timeout, started=False)
+    with lock_path.open('a') as lock:
+        while True:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            expired = remaining is not None and remaining <= 0
+            if CANCEL.is_set() or expired or local_failure.is_set():
+                admission.update(queued_seconds=time.monotonic() - queued,
+                                 reason='cancelled before local worker launch' if CANCEL.is_set()
+                                 else 'prior local worker retained or unverified cleanup' if local_failure.is_set()
+                                 else 'existing deadline exhausted in local host admission',
+                                 timed_out=expired, cancelled=CANCEL.is_set())
+                return operation(None) if operation is not None else (None, expired, CANCEL.is_set(), False)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                CANCEL.wait(.05 if remaining is None else min(.05, remaining))
+                continue
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if CANCEL.is_set() or local_failure.is_set() or remaining is not None and remaining <= 0:
+                continue  # The next iteration returns without starting a worker.
+            admission.update(started=True, queued_seconds=time.monotonic() - queued)
+            # The retained lock spans setup/cases/cleanup and the existing owned drain.
+            try:
+                result = (operation(remaining) if operation is not None else
+                          run_command(gate['command'], timeout=remaining, **kwargs))
+            except BaseException:
+                local_failure.set()
+                raise
+            if (isinstance(result, dict) and (result.get('lingering_group') or result.get('cleanup_owner')
+                    or result.get('executed') is not False and result.get('complete') is not True)
+                    or isinstance(result, tuple) and result[3]):
+                local_failure.set()  # Still under flock: queued locals cannot cross this ownership fence.
+            return result
+
+
+def execute(gate: dict, state: dict, directory: Path, root: Path, *, local_failure=None) -> dict:
+    if gate.get('worker_transport') != 'local-isolated' or not gate.get('case_protocol'):
+        return _execute(gate, state, directory, root)
+    admission = {}
+    return run_with_local_slot(gate, root, admission, local_failure=local_failure,
+        timeout=gate.get('timeout_seconds'), operation=lambda remaining: _execute(
+            gate, state, directory, root, host_admission=admission, host_timeout=remaining))
+
+
+def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admission=None, host_timeout=None) -> dict:
     name, phase = gate["name"], state["phase"]
     revalidate_standing_skips(state)
     token = uuid.uuid4().hex
@@ -361,10 +418,15 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
     lifecycle = "native-producer" if native_producer else "owned"
     native_cleanup_reference = None
     worker_cleanup_owner = None
+    host_admission = {} if host_admission is None else host_admission
     with (folder / "output.log").open("wb") as output, (folder / 'stderr.log').open('wb') as stderr:
         try:
-            code, timed_out, cancelled, lingering = run_command(gate["command"],
-                cwd=root / gate.get("cwd", "."), env=env, output=output, timeout=timeout,
+            if host_admission.get('started') is False:
+                code, timed_out, cancelled, lingering = (None, host_admission.get('timed_out', False),
+                                                       host_admission.get('cancelled', False), False)
+            else:
+                code, timed_out, cancelled, lingering = run_command(gate['command'],
+                cwd=root / gate.get("cwd", "."), env=env, output=output, timeout=host_timeout if host_admission else timeout,
                 input_path=folder / 'request.json' if gate.get('result_transport') == 'stdout' else None,
                 stderr_output=stderr if gate.get('result_transport') == 'stdout' else None,
                 owned_lifecycle=lifecycle == "owned")
@@ -420,7 +482,7 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
         valid = False
         complete = False
         reason = reason or 'worker reported a retained remote cleanup owner'
-    if native_producer and (not valid or not complete):
+    if native_producer and host_admission.get('started') is not False and (not valid or not complete):
         # Native producers can intentionally retain recovery resources. Unknown
         # native cleanup must be reconciled before another attempt can resume.
         lingering = True
@@ -430,7 +492,8 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
         cases.update({c: "UNVERIFIED" for c in active})
     status = "PASS" if all(v in TERMINAL_OK for v in cases.values()) else "FAIL"
     result = {"gate": name, "status": status, "cases": cases, "native_exit": code,
-              "executed": True, "complete": valid and complete, "reason": reason, "timed_out": timed_out,
+              "executed": host_admission.get('started', True), "complete": valid and complete,
+              "reason": host_admission.get('reason', reason), "timed_out": timed_out,
               "case_complete": {c: valid and v != 'UNVERIFIED' for c, v in cases.items()},
               "cancelled": cancelled, "lingering_group": lingering,
               "source": state["source"], "started_at": started, "finished_at": time.time(),
@@ -439,12 +502,13 @@ def execute(gate: dict, state: dict, directory: Path, root: Path) -> dict:
     result['execution_binding'] = {'input_fingerprint': state['input_fingerprints'].get(name),
                                    'contract_digest': digest(gate), 'environment': state['environment']}
     result['isolated_validation'] = admission
+    result['host_admission'] = host_admission
     result['lifecycle'] = lifecycle
     result['native_cleanup_reference'] = native_cleanup_reference
     if worker_cleanup_owner is not None:
         result['cleanup_owner'] = {'request_token': token, 'worker_cleanup_owner': worker_cleanup_owner,
                                    'native_cleanup_reference': native_cleanup_reference}
-    elif native_producer and (timed_out or cancelled or lingering):
+    elif native_producer and host_admission.get('started') is not False and (timed_out or cancelled or lingering):
         result['cleanup_owner'] = {'request_token': token, 'worker_root': str(root / gate.get('cwd', '.')),
                                    'native_cleanup_reference': native_cleanup_reference}
     result['worker_evidence'] = worker_evidence
@@ -1103,9 +1167,10 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
     state["live_failures"] = []
     results = []
     launched = []
+    local_failure = threading.Event()
     with ThreadPoolExecutor(max_workers=max(1, len(selected))) as rc_pool:
         with ThreadPoolExecutor(max_workers=max(1, len(selected))) as pool:
-            futures = {pool.submit(execute, gate, state, directory, root): gate for gate in selected}
+            futures = {pool.submit(execute, gate, state, directory, root, local_failure=local_failure): gate for gate in selected}
             for future in as_completed(futures):
                 gate = futures[future]
                 try:
@@ -1215,6 +1280,96 @@ def triage_quick(plan: dict, state: dict, directory: Path, root: Path) -> None:
     state['attempts'].append({'phase': 'quick', 'source': plan['source'], 'results': results,
                               'triage_refresh': True, 'plan_digest': digest(plan)})
     # No source/plan/round/pending/owner rebinding and no advance() or readiness credit.
+
+
+def local_worker_gate(gate: dict, root: Path, worker_root: str, workspace: str, port: str) -> dict:
+    """Construct the sole allowed boxes-to-native relocation; no workload substitutions."""
+    old_root = gate.get('worker_root')
+    if (gate.get('worker_transport') != 'boxes-thread' or not gate.get('worker_recipe')
+            or not isinstance(old_root, str) or not Path(old_root).is_absolute()
+            or not isinstance(worker_root, str) or not Path(worker_root).is_absolute()
+            or str(Path(worker_root)) != worker_root or not isinstance(workspace, str) or not workspace
+            or not isinstance(port, str) or not port.isdigit()):
+        raise ValueError('local rebind requires an explicit boxes recipe and absolute local root/identity')
+    python = Path(gate['remote_python'])
+    if Path(old_root) not in python.parents:
+        raise ValueError('original worker Python is outside its checkout')
+    def relocate(value):
+        if isinstance(value, str):
+            return worker_root + value[len(old_root):] if value == old_root or value.startswith(old_root + '/') else value
+        if isinstance(value, list):
+            return [relocate(item) for item in value]
+        if isinstance(value, dict):
+            return {key: (workspace if key == 'CONDUCTOR_WORKSPACE_NAME' else
+                          port if key == 'CONDUCTOR_PORT' else relocate(item))
+                    for key, item in value.items()}
+        return value
+    result = relocate(gate)
+    for key in ('worker_host', 'worker_thread', 'remote_python', 'coordinator_thread'):
+        result.pop(key, None)
+    result.update(worker=gate['worker'] + '-native-local', worker_root=worker_root, cwd=worker_root,
+                  worker_transport='local-isolated', result_transport='stdout')
+    result['command'] = [str(Path(worker_root) / python.relative_to(old_root)),
+                         str(Path(worker_root) / 'scripts/deploy_test_worker.py'), '--root', worker_root, '--stdio']
+    if gate.get('native_backend'):
+        result.update(command=[gate['command'][0], str(root / 'scripts/deploy_test_backend.py'),
+                               '--root', worker_root], result_transport='file')
+    return result
+
+
+def rebind_local(state: dict, old: dict, new: dict, root: Path) -> None:
+    """Explicit same-source native fallback. Ordinary refresh remains contract-strict."""
+    if (CANCEL.is_set() or state.get('pending') or 'live_failures' in state or state.get('resume_phase') or state.get('running')
+            or state.get('phase') not in {'ready', 'needs-focused-plan', 'failed-gates', 'triage', 'stale'}):
+        raise ValueError('local rebind requires quiescent adjudicated state')
+    if (old != state['plan'] or digest(old) != state['plan_digest']
+            or state['source'] != source(root) or new.get('source') != state['source']
+            or state['environment'] != environment_digest()
+            or state['input_fingerprints'] != input_fingerprints(old, root)):
+        raise ValueError('local rebind requires the exact frozen source, plan, inputs and environment')
+    if ({k: v for k, v in old.items() if k != 'gates'} != {k: v for k, v in new.items() if k != 'gates'}
+            or [g['name'] for g in old['gates']] != [g['name'] for g in new.get('gates', [])]):
+        raise ValueError('local rebind must preserve the complete plan inventory and provenance')
+    validate_plan(old, root)
+    validate_plan(new, root)  # Includes all roots, database/workspace identities and listener footprints.
+    if retained_owners(state, [g['name'] for g in old['gates']]):
+        raise ValueError('reconcile existing execution owners before local rebind')
+    changed = []
+    for before, after in zip(old['gates'], new['gates']):
+        if before == after:
+            continue
+        expected = local_worker_gate(before, root, after.get('worker_root', ''),
+                                     after.get('env', {}).get('CONDUCTOR_WORKSPACE_NAME', ''),
+                                     after.get('env', {}).get('CONDUCTOR_PORT', ''))
+        if after != expected:
+            raise ValueError('local rebind changed a check, recipe, deadline or non-identity setting')
+        name = before['name']
+        if (any(key.startswith(name + '/') for key in state['skips'])
+                or any(w.get('gate') == name for w in state.get('resource_warnings', []))):
+            raise ValueError('qualified cases require their existing policy renewal, not a transport rebind')
+        if source(Path(after['worker_root'])) != state['source']:
+            raise ValueError('local worker checkout is not prepared at the exact frozen source')
+        for rel in ('.env', 'env.sh', 'back-end/.env', 'agents/.env', 'agents/.env.benchmark-temporal',
+                    'front-end/.env', 'front-end/.env.local'):
+            origin, destination = root / rel, Path(after['worker_root']) / rel
+            if (origin.is_file() != destination.is_file()
+                    or origin.is_file() and sha_file(origin) != sha_file(destination)):
+                raise ValueError('local worker runtime configuration differs from the frozen inputs')
+        changed.append(name)
+    if not changed:
+        raise ValueError('local rebind requires at least one boxes-to-local migration')
+    fingerprints = input_fingerprints(new, root)
+    if source(root) != state['source'] or environment_digest() != state['environment']:
+        raise ValueError('source/environment changed during local rebind')
+    # Commit only after every binding and obligation validates. No old native record is rewritten.
+    state.setdefault('worker_rebind_history', []).append({
+        'source': state['source'], 'from_plan': copy.deepcopy(old), 'to_plan_digest': digest(new),
+        'from_phase': state['phase'], 'from_focused': copy.deepcopy(state.get('focused', {})),
+        'gates': changed, 'at': time.time(), 'credit_granted': False})
+    state['carried_passes'] = {name: entry for name, entry in state.get('carried_passes', {}).items()
+                              if name not in changed}
+    state.update(plan=new, plan_digest=digest(new), input_fingerprints=fingerprints,
+                 phase='quick', next_after_quick='initial', focused={}, ready=False)
 
 
 def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
@@ -1369,7 +1524,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "triage-quick", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip"])
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
     parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
     parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")
@@ -1414,6 +1569,10 @@ def main(argv: list[str] | None = None) -> int:
                 if args.input is None:
                     raise ValueError("--input previous plan required")
                 refresh(state, read(args.input), plan, args.root)
+            elif args.action == 'rebind-local':
+                if args.input is None:
+                    raise ValueError('--input previous frozen plan required')
+                rebind_local(state, read(args.input), plan, args.root)
             elif args.action == "rca":
                 requests = rca_requests(state, directory)
                 if state["phase"] != "triage" or not requests or not args.rca_launcher:
