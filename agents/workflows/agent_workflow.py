@@ -3709,6 +3709,15 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             await self._check_cost_limit()
         return self.is_paused
 
+    def _refund_unaccepted_browser_wrapup_turn(self) -> None:
+        """Keep the loop's bounded pre-response retry on the same allowance.
+
+        Accepted responses never call this hook; every provider attempt still
+        uses the normal accounting owner, and genuine pauses remain untouched.
+        """
+        if self._cost_limit_wrapup_pending and not self._is_finished:
+            self._cost_limit_wrapup_consumed = False
+
     async def _check_orphaned(self) -> bool:
         """Terminal abort signal for run_agent. True once this child has been
         orphaned (parent workflow gone) — set by _check_parent_state during the
@@ -3826,6 +3835,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 }
             run_agent_kwargs["get_requirement_revision"] = lambda: self._response_schema_revision
             run_agent_kwargs["check_paused_before_turn"] = self._check_paused_before_turn
+            run_agent_kwargs["on_unaccepted_turn_retry"] = self._refund_unaccepted_browser_wrapup_turn
             run_agent_kwargs.setdefault("user_tools", declared_user_tools(self))
             # Read the latest known schema without waiting for async schema regeneration.
             run_agent_kwargs["get_jev_response_schema"] = lambda: self.output_schema

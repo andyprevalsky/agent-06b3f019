@@ -115,8 +115,8 @@ state and admission remain constant per workflow; ordinary idempotent usage
 writes and bounded status persistence retain their existing ownership.
 
 Golden references inspected: Hermes agent/turn_finalizer.py:130–164 preserves
-an explicitly pending verified answer or requests a bounded iteration-budget
-summary; agent/chat_completion_helpers.py:2232–2266 discards summary tool calls.
+an explicitly retained candidate withheld by stop/verification gates or
+requests a bounded iteration-budget summary; agent/chat_completion_helpers.py:2232–2266 discards summary tool calls.
 The separate turn_iteration_prep.py:408 fallback grace flag does not enforce a
 toolless finalizer and is not evidence for that claim. OpenClaw
 packages/agent-core/src/agent-loop.ts:299–348 settles tool results before stop
@@ -139,7 +139,12 @@ and arms synchronously before persistence can yield. Additional controls cover
 compaction, a real continuation snapshot restored through normal completion,
 and an unrelated cost stop arriving during pricing, which must stay stopped.
 An explicit user pause during persistence still blocks admission and cannot
-consume the allowance. No original evaluator or assertion is relaxed.
+consume the allowance. A further pre-acceptance schema-failure control showed
+that native bounded preparation retries also need to retain the unused
+allowance: the loop's existing iteration-refund owner now refunds that same
+pending allowance, never an accepted response and never a real pause. The
+accepted-response bookkeeping failure control proves no refund occurs after
+acceptance. No original evaluator or assertion is relaxed.
 
 Fresh changed-snapshot adversarial review and full original invocation/
 deployment verification remain pending; this case stays open until those
