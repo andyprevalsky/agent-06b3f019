@@ -83,6 +83,8 @@ import { SubAgentBreadcrumb } from './SubAgentBreadcrumb';
 import { SystemMessagesPanel } from './SystemMessagesPanel';
 import { composerCanSubmit } from './composerCanSubmit';
 import { TerminalLegalFooter } from './TerminalLegalFooter';
+import { ComposerAgentProvider } from './ComposerAgentProvider';
+import { useComposerAgent, useComposerActions } from './composerAgentContext';
 
 interface AgentChatAreaProps {
   agents: AgentSlice;
@@ -183,15 +185,16 @@ function ChatColumn({
       {readOnlyMessage !== null ? (
         <ReadOnlyNotice>{readOnlyMessage}</ReadOnlyNotice>
       ) : (
-        <InputArea
-          agents={a}
-          drip={drip}
-          models={models}
-          modelsLoading={modelsLoading}
-          pendingApproval={pendingApproval}
-          pendingGates={pendingGates}
-          canSubmit={canSubmit}
-        />
+        <ComposerAgentProvider agents={a}>
+          <InputArea
+            drip={drip}
+            models={models}
+            modelsLoading={modelsLoading}
+            pendingApproval={pendingApproval}
+            pendingGates={pendingGates}
+            canSubmit={canSubmit}
+          />
+        </ComposerAgentProvider>
       )}
 
       {!roseDesktop && <TerminalLegalFooter />}
@@ -217,7 +220,6 @@ function ReadOnlyNotice({ children }: { children: ReactNode }) {
 }
 
 interface InputAreaProps {
-  agents: AgentSlice;
   drip: DripSlice;
   models: Model[];
   modelsLoading: boolean;
@@ -227,7 +229,6 @@ interface InputAreaProps {
 }
 
 function InputArea({
-  agents: a,
   drip,
   models,
   modelsLoading,
@@ -235,6 +236,8 @@ function InputArea({
   pendingGates,
   canSubmit,
 }: InputAreaProps) {
+  const a = useComposerAgent();
+  const actions = useComposerActions();
   // shrink-0: this row is a flex sibling of the flex-1 chat scroll area inside
   // an `overflow-hidden` column. Without it, a tall child (an approval card
   // with a multi-item receipt) is the one that gets squeezed and clipped
@@ -261,9 +264,7 @@ function InputArea({
       <GateStack
         pendingGates={pendingGates}
         agentId={a.selectedAgentId}
-        onGateHandled={() => {
-          if (a.selectedAgentId) void a.refreshAgentDetail(a.selectedAgentId);
-        }}
+        onGateHandled={actions.onAgentUpdate}
       />
 
       {roseDesktop && !a.selectedAgentId && a.newAgentProjectId && (
@@ -273,15 +274,9 @@ function InputArea({
       {a.selectedAgentId && <PinnedQuestionMount />}
 
       {pendingApproval ? (
-        <ApprovalChip
-          pendingApproval={pendingApproval}
-          onApprovalHandled={() => {
-            if (a.selectedAgentId) void a.refreshAgentDetail(a.selectedAgentId);
-          }}
-        />
+        <ApprovalChip pendingApproval={pendingApproval} onApprovalHandled={actions.onAgentUpdate} />
       ) : (
         <ChatQueryInputBox
-          agents={a}
           drip={drip}
           models={models}
           modelsLoading={modelsLoading}
@@ -293,45 +288,31 @@ function InputArea({
 }
 
 interface ChatQueryInputBoxProps {
-  agents: AgentSlice;
   drip: DripSlice;
   models: Model[];
   modelsLoading: boolean;
   canSubmit: boolean;
 }
 
-function ChatQueryInputBox({
-  agents: a,
-  drip,
-  models,
-  modelsLoading,
-  canSubmit,
-}: ChatQueryInputBoxProps) {
+function ChatQueryInputBox({ drip, models, modelsLoading, canSubmit }: ChatQueryInputBoxProps) {
+  const a = useComposerAgent();
+  const actions = useComposerActions();
   return (
     <div className="relative z-10">
       <QueryInput
         liftAboveApps
-        topAttachment={
-          <BackgroundAgentsBanner
-            key={a.selectedAgentId ?? 'no-agent'}
-            selectedAgentId={a.selectedAgentId}
-            messages={a.messages}
-            onNavigate={(agentId) => a.handleSelectAgent(agentId)}
-          />
-        }
+        topAttachment={<ComposerBackgroundAgents />}
         value={a.messageInput}
-        onChange={a.setMessageInput}
-        onSubmit={(attachments, target) => {
-          void a.handleSendMessage(attachments, target);
-        }}
+        onChange={actions.onChange}
+        onSubmit={actions.onSubmit}
         disabled={a.isSendingMessage}
         placeholder={a.selectedAgentId ? 'Type your message...' : 'Enter any goal'}
         selectedModel={a.selectedModel}
-        onModelChange={a.setSelectedModel}
+        onModelChange={actions.onModelChange}
         fastMode={a.fastMode}
-        onFastModeChange={a.setFastMode}
+        onFastModeChange={actions.onFastModeChange}
         simulatorMode={a.simulatorMode}
-        onSimulatorModeChange={a.setSimulatorMode}
+        onSimulatorModeChange={actions.onSimulatorModeChange}
         availableModels={models.filter(
           (m) =>
             m.id === 'rose-labs/rose-1-flash' ||
@@ -352,22 +333,28 @@ function ChatQueryInputBox({
         dripStyles={drip.dripStyles}
         drippiness={drip.blur}
         agentDetail={a.agentDetail}
-        onAgentUpdate={() => {
-          if (a.selectedAgentId) void a.refreshAgentDetail(a.selectedAgentId);
-        }}
-        onAgentDelete={() => {
-          a.cleanupAgentState();
-          void a.loadAgents();
-        }}
+        onAgentUpdate={actions.onAgentUpdate}
+        onAgentDelete={actions.onAgentDelete}
         canSubmit={canSubmit}
-        onPause={() => {
-          void a.handlePauseAgent();
-        }}
+        onPause={actions.onPause}
         isPausing={a.isPausing}
         agentId={a.selectedAgentId || undefined}
         pendingPriceLimitCents={a.pendingPriceLimitCents}
-        onPendingPriceLimitChange={a.setPendingPriceLimitCents}
+        onPendingPriceLimitChange={actions.onPendingPriceLimitChange}
       />
     </div>
+  );
+}
+
+function ComposerBackgroundAgents() {
+  const a = useComposerAgent();
+  const actions = useComposerActions();
+  return (
+    <BackgroundAgentsBanner
+      key={a.selectedAgentId ?? 'no-agent'}
+      selectedAgentId={a.selectedAgentId}
+      messages={a.messages}
+      onNavigate={actions.onNavigate}
+    />
   );
 }

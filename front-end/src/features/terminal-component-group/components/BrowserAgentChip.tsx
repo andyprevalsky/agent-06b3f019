@@ -23,7 +23,7 @@
  * per-session replays expand in place. (none => [UNAVAILABLE])
  *   [SEGMENT 0] --video ended | click part i--> [SEGMENT i]
  *
- * SEGMENT LOAD (lazy, only once the RECORDING tab has been opened):
+ * SEGMENT LOAD (lazy, while the RECORDING tab is visible; ready parts cached):
  *   view (Kernel replay URL):          [READY] (streamed by <video> directly)
  *   video/html (Supabase FilePointer): [IDLE] --select--> [LOADING] --ok--> [READY]
  *                                                                   \--err-> [ERROR]
@@ -67,6 +67,7 @@ import {
   type SyntheticEvent,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { useMediaElementResource } from '@/hooks/useMediaElementResource';
 import { ChevronDown, Clapperboard, FileText, Globe } from 'lucide-react';
 import { useAgentContext } from '../hooks';
 import type { Message, OutputSchema } from '@/lib/api';
@@ -99,15 +100,14 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
   const { messages, selectedAgentId } = useAgentContext();
   const [expanded, setExpanded] = useState(false);
   const [tab, setTab] = useState<Tab>('result');
-  // Segments load lazily, only after the Recording tab has been opened once.
-  const [recordingOpened, setRecordingOpened] = useState(false);
   // Wall-clock-aligned playhead (seconds from recording start). Driven by the
   // video element so scrubbing / playback updates the live trajectory side panel.
   const [playheadSec, setPlayheadSec] = useState(0);
   // Known <video> durations by segment key (they survive appended parts).
   const segmentDurationsRef = useRef<Map<string, number>>(new Map());
   // Shared across stitched + multi-URL players so trajectory clicks can seek.
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const { mediaRef: videoRef, setMediaRef: setVideoRef } =
+    useMediaElementResource<HTMLVideoElement>();
   // A trajectory click into another segment seeks once that segment's video loads.
   const pendingSeekRef = useRef<{ key: string; timeSec: number } | null>(null);
 
@@ -189,7 +189,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     recordingState,
     recordingUrl,
     recordingError,
-  } = useRecordingSegmentLoads(recordingSegments, recordingOpened, selectedAgentId);
+  } = useRecordingSegmentLoads(recordingSegments, expanded && tab === 'recording', selectedAgentId);
 
   const recordingStartMs = useMemo(
     () =>
@@ -286,7 +286,6 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
 
   function openRecording() {
     setTab('recording');
-    setRecordingOpened(true);
   }
 
   function selectSegment(index: number) {
@@ -390,7 +389,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                     onStepClick={seekRecordingToOffset}
                   >
                     <video
-                      ref={videoRef}
+                      ref={setVideoRef}
                       key={recordingUrl}
                       title="Browser recording"
                       src={recordingUrl}

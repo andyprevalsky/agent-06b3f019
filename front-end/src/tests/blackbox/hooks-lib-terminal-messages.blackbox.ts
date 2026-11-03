@@ -7,6 +7,41 @@ type TerminalMessages = Parameters<typeof useTerminalMessages>[0];
 type WritableEndRef = { current: HTMLDivElement | null };
 
 describe('useTerminalMessages', () => {
+  it('checks long completed trajectories in linear work and still scrolls near the bottom', () => {
+    const viewport = document.createElement('div');
+    viewport.setAttribute('data-radix-scroll-area-viewport', 'true');
+    Object.defineProperty(viewport, 'scrollHeight', { configurable: true, value: 1000 });
+    Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 500 });
+    viewport.scrollTop = 499;
+    const end = document.createElement('div');
+    viewport.appendChild(end);
+    let metadataReads = 0;
+    const messages: TerminalMessages = Array.from({ length: 2000 }, (_, index) => ({
+      message_id: `message-${index}`,
+      timestamp: '2026-11-02T00:00:00Z',
+      role: 'TOOL',
+      text: '',
+      get metadata() {
+        metadataReads += 1;
+        return {
+          task_id: `task-${Math.floor(index / 2)}`,
+          action_type: index % 2 ? ('task_complete' as const) : ('wait' as const),
+        };
+      },
+    }));
+    const { result, rerender, unmount } = renderHook(
+      ({ m }: { m: TerminalMessages }) => useTerminalMessages(m, 'agent-a', () => {}),
+      { initialProps: { m: [] } },
+    );
+    try {
+      (result.current.messagesEndRef as WritableEndRef).current = end;
+      rerender({ m: messages });
+      expect(viewport.scrollTop).toBe(1000);
+      expect(metadataReads).toBeLessThan(messages.length * 5);
+    } finally {
+      unmount();
+    }
+  });
   it('wires visibility + focus listeners, attached/detached around mount', () => {
     const addSpy = vi.spyOn(document, 'addEventListener');
     const removeSpy = vi.spyOn(document, 'removeEventListener');

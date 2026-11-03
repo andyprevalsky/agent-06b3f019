@@ -12,6 +12,7 @@
  */
 
 import { useCallback, useSyncExternalStore } from 'react';
+import { createTaskSnapshotStore } from './taskSnapshotStore';
 
 export interface ByteUsage {
   used_bytes: number;
@@ -71,31 +72,20 @@ export function parseCodeResourcesEvent(
   return resources ? { taskId: r.taskId, resources } : null;
 }
 
-const samples = new Map<string, CodeResourceSample>();
-const listeners = new Map<string, Set<() => void>>();
+const samples = createTaskSnapshotStore<CodeResourceSample>(
+  (current, next) => Date.parse(current.sampled_at) < Date.parse(next.sampled_at),
+);
 
 export function publishCodeResources(taskId: string, sample: CodeResourceSample): void {
-  const current = samples.get(taskId);
-  if (current && Date.parse(current.sampled_at) >= Date.parse(sample.sampled_at)) return;
-  samples.set(taskId, sample);
-  listeners.get(taskId)?.forEach((listener) => listener());
+  samples.publish(taskId, sample);
 }
 
 export function getCodeResources(taskId: string): CodeResourceSample | null {
-  return samples.get(taskId) ?? null;
+  return samples.get(taskId);
 }
 
 function subscribe(taskId: string, listener: () => void): () => void {
-  let set = listeners.get(taskId);
-  if (!set) {
-    set = new Set();
-    listeners.set(taskId, set);
-  }
-  set.add(listener);
-  return () => {
-    set.delete(listener);
-    if (set.size === 0) listeners.delete(taskId);
-  };
+  return samples.subscribe(taskId, listener);
 }
 
 export function useCodeResources(taskId: string): CodeResourceSample | null {
@@ -109,9 +99,7 @@ export function useCodeResources(taskId: string): CodeResourceSample | null {
 
 /** Test isolation: forget every sample (listeners stay attached). */
 export function clearCodeResources(): void {
-  const taskIds = [...samples.keys()];
   samples.clear();
-  taskIds.forEach((taskId) => listeners.get(taskId)?.forEach((listener) => listener()));
 }
 
 // ── display ──
