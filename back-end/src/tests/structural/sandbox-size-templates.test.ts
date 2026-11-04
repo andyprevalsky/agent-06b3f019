@@ -440,4 +440,57 @@ check('a single-provider verification withholds the complete-grid go-ahead', () 
   assert.doesNotMatch(run.stdout, /Set E2B_SANDBOX_TEMPLATES=grid/);
 });
 
-console.log(`\nsandbox-size-templates: ${checks} checks passed`);
+async function checkAsync(name: string, fn: () => Promise<void>): Promise<void> {
+  checks += 1;
+  await fn();
+  console.log(`  PASS ${name}`);
+}
+
+async function main(): Promise<void> {
+  await checkAsync(
+    'a sized Claude spawn with no template of its size never gets the 2x4 image',
+    async () => {
+      const { Sandbox } = await import('e2b');
+      const { acquireCodeSandbox } = await import('../../providers/e2bCodeSessionSandbox');
+      const keys = [
+        'E2B_SANDBOX_TEMPLATES',
+        'CODE_SANDBOX_DEFAULT_CPU',
+        'CODE_SANDBOX_DEFAULT_MEMORY_GB',
+      ];
+      const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+      const original = Sandbox.create.bind(Sandbox);
+      const creates: string[] = [];
+      (Sandbox as unknown as { create: (id: string) => Promise<never> }).create = (id) => {
+        creates.push(id);
+        return Promise.reject(new Error(`unexpected create ${id}`));
+      };
+      delete process.env.E2B_SANDBOX_TEMPLATES;
+      process.env.CODE_SANDBOX_DEFAULT_CPU = '8';
+      process.env.CODE_SANDBOX_DEFAULT_MEMORY_GB = '8';
+      try {
+        await assert.rejects(
+          acquireCodeSandbox(null, DEFAULT_CLAUDE_CODE_TEMPLATE_ID, {}, 'Claude Code', {
+            provider: 'claude',
+          }),
+          /No Claude Code sandbox template is built for 8 vCPU \/ 8 GB/
+        );
+        assert.deepStrictEqual(creates, [], 'no sandbox of the wrong size is created');
+      } finally {
+        (Sandbox as unknown as { create: unknown }).create = original;
+        for (const key of keys) {
+          if (saved[key] === undefined) delete process.env[key];
+          else process.env[key] = saved[key];
+        }
+      }
+    }
+  );
+  console.log(`\nsandbox-size-templates: ${checks} checks passed`);
+}
+
+main().then(
+  () => process.exit(0),
+  (error: unknown) => {
+    console.error(error);
+    process.exit(1);
+  }
+);
