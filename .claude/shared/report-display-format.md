@@ -125,6 +125,46 @@ ends after 15 minutes of comparable history; never reuse cached rates.
 After publishing, atomically update the existing latest-card URL and fixed
 checkpoint fields together; do not create competing URL aliases.
 
+## Stable deploy scorecard template: deploy-summary-v1
+
+For every current and future deploy update/final report, populate the stable
+`.claude/shared/deploy-scorecard-template.html` template (`deploy-summary-v1`).
+Preserve its CSS/layout from the exact user-approved visual
+https://boxes.dev/visuals/vis_1997f1fd05813cc9be440f44d5700ffe:
+
+1. Title with actual colored **SHIPPED / NOT SHIPPED** status.
+2. Elapsed time immediately below.
+3. One **WHAT DEPLOYED** box.
+4. One cumulative **DELEGATED** box.
+5. One **EXTERNAL PROVIDER FAILURES** box.
+6. One **FOLLOWUPS** box only if any follow-ups exist.
+7. Lastly, concise colored per-stage bars on **one shared elapsed-time axis**.
+
+Do not replace these boxes with a lane table or add production/validation
+hashes, observed/producer noise or a secondary deploy-owner-complete line.
+Keep the required provenance in underlying evidence. This deploy-specific
+layout supersedes older section/alert placement rules. Evidence-backed values,
+applicable stage rows and attempt intervals may update; no ad hoc redesign.
+A layout change requires an explicit user request and a new documented version.
+
+The timeline's origin is the original durable deploy start. Plot every stage
+and attempt from actual start/end instants using the same labeled ticks and
+scale for all rows, so concurrency, retries and gaps remain visible. Do not
+normalize rows separately, reset clocks at retries or replace bars with duration
+totals alone. Keep live intervals and unknown/missing boundaries explicit
+without inventing timestamps. Retain this visible timeline in progress and
+final cards.
+
+An explicit user/operator AgentCard election shows **SKIPPED — <reason>** for
+the elected local and/or production gate. Preserve original failures, cleanup
+obligations and unsettled funds; SKIPPED supplies no PASS, cleanup or financial
+settlement and skips no other gate. Keep the elected gate visible even when
+the staged planner uses `--skip-agentcard "<reason>"` (legacy: omit `--agentcard`).
+
+A benchmark scorecard may be linked as supporting evidence, but must never
+replace this deploy card or its timeline. The benchmark template below
+continues to apply to benchmark reports only.
+
 ## Standard CLI benchmark scorecard
 
 This is the default for every future CLI benchmark run (cloud, local, eval,
@@ -231,8 +271,8 @@ Every deploy scorecard follows `.claude/shared/deploy-failure-policy.md`.
 Keep a cumulative DELEGATED list of failure descriptions and repair-agent links;
 no attribution column or acknowledgement state. These repairs do not block
 the originating deploy. Preserve entries across refreshes and resume.
-At the very end, after the completion line and all other sections, show each
+In the fixed **EXTERNAL PROVIDER FAILURES** box, show each
 unresolved **🚨🚨 EXTERNAL PROVIDER FAILURE — <provider>: <reason> — NEEDS FIXING**
-with affected checks and evidence. Outages and exhausted credits are
-non-blocking and create no repair agent. Waived or failed checks never become
+with affected checks and evidence. Keep the shared-axis stage timeline last.
+Outages and exhausted credits are non-blocking and create no repair agent. Waived or failed checks never become
 PASS; preserve original measurements and native outcomes.
