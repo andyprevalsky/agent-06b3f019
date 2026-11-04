@@ -29,6 +29,17 @@ export const handlers = [
   // Rose Desktop Integrations icon reads integration health; nothing connected by default.
   http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations: [] })),
   http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.json({ items: [] })),
+  http.get(`${API_BASE}/integrations/granola`, () =>
+    HttpResponse.json({
+      connected: false,
+      status: 'NOT_CONNECTED',
+      accountEmail: null,
+      backfillDone: false,
+      lastSuccessfulSyncAt: null,
+      lastError: null,
+      documents: {},
+    }),
+  ),
   // L-INTEG-CORE cheap progress poll: nothing changed unless a test overrides.
   http.get(`${API_BASE}/integrations/progress`, () =>
     HttpResponse.json({ cursor: '2026-10-20T00:00:00.000Z', changed: false }),

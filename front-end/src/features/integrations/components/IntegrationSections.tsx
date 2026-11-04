@@ -3,6 +3,8 @@
  *
  * [MOUNTED] --> renders each section card delegating to domain hooks.
  *
+ * Granola: GranolaSection over the page's useGranola (API key, sync, disconnect).
+ *
  * File System is a FE-only stub: website shows Download for Mac; Mac app
  * shows the plus and stays [MOUNTED] on click (no hook, no backend).
  */
@@ -16,6 +18,7 @@ import type { useMessagesSync } from '../hooks/useMessagesSync';
 import type { useGmailConnect } from '../hooks/useGmailConnect';
 import type { useIntegrationActions } from '../hooks/useIntegrationActions';
 import type { usePlaidIntegration } from '../hooks/usePlaidIntegration';
+import type { useGranola } from '../hooks/useGranola';
 
 import BrowserCookiesSection from './BrowserCookiesSection';
 import PasswordsSection from './PasswordsSection';
@@ -24,6 +27,7 @@ import ComputeSection from './ComputeSection';
 import SocialsSection from './SocialsSection';
 import PlaidSection from './PlaidSection';
 import FileSystemSection from './FileSystemSection';
+import GranolaSection from './GranolaSection';
 
 interface IntegrationSectionsProps {
   isBrowserCookiesAvailable: boolean;
@@ -43,6 +47,7 @@ interface IntegrationSectionsProps {
   gmail: ReturnType<typeof useGmailConnect>;
   actions: ReturnType<typeof useIntegrationActions>;
   plaid: ReturnType<typeof usePlaidIntegration>;
+  granola: ReturnType<typeof useGranola>;
 }
 
 function PlaidIntegrationSection({ plaid }: Pick<IntegrationSectionsProps, 'plaid'>) {
@@ -146,6 +151,7 @@ export default function IntegrationSections({
   gmail,
   actions,
   plaid,
+  granola,
 }: IntegrationSectionsProps) {
   return (
     <>
@@ -196,6 +202,8 @@ export default function IntegrationSections({
       )}
 
       {isFullySignedIn && <PlaidIntegrationSection plaid={plaid} />}
+
+      {isFullySignedIn && <GranolaSection granola={granola} />}
 
       <SocialsSection
         expanded={accordion.socialsExpanded}
